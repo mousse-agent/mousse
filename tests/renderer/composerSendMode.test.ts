@@ -57,6 +57,8 @@ interface Options {
   loading?: boolean
   thread?: string
   sendLabel?: string
+  onSteerQueued?: () => boolean
+  stoppable?: boolean
 }
 
 function render(options: Options = {}) {
@@ -73,6 +75,8 @@ function render(options: Options = {}) {
       enabledSkills: [],
       loading: options.loading ?? true,
       onSend,
+      ...(options.onSteerQueued ? { onSteerQueued: options.onSteerQueued } : {}),
+      ...(options.stoppable !== undefined ? { stoppable: options.stoppable } : {}),
       ...(options.sendLabel ? { sendLabel: options.sendLabel } : {}),
       ...('thread' in options ? (options.thread ? { sendModeThreadId: options.thread } : {}) : { sendModeThreadId: 'thread-a' })
     }
@@ -162,6 +166,40 @@ describe('send mode keys', () => {
     forgetSteerKey()
     press()
     expect(steerKeyRecently()).toBe(true)
+  })
+
+  it('the chord in an empty composer sends the next queued message now, in either mode', () => {
+    const onSteerQueued = vi.fn(() => true)
+    const { onSend } = render({ input: '', onSteerQueued })
+    press({ ctrlKey: true })
+    expect(onSteerQueued).toHaveBeenCalledTimes(1)
+    expect(steerKeyRecently()).toBe(true)
+    setThreadSendMode(PROFILE, 'thread-a', 'steer')
+    rerender({ input: '', onSteerQueued })
+    press({ ctrlKey: true })
+    expect(onSteerQueued).toHaveBeenCalledTimes(2)
+    // Plain Enter with nothing typed sends nothing, as before.
+    press()
+    expect(onSteerQueued).toHaveBeenCalledTimes(2)
+    expect(onSend).not.toHaveBeenCalled()
+  })
+
+  it('the chord in an empty composer also sends the next queued message while an approved command runs', () => {
+    const onSteerQueued = vi.fn(() => true)
+    render({ input: '', loading: false, stoppable: true, onSteerQueued })
+    press({ ctrlKey: true })
+    expect(onSteerQueued).toHaveBeenCalledTimes(1)
+  })
+
+  it('the chord with text typed steers that text, not a queued message, and with no run it does nothing to the queue', () => {
+    const onSteerQueued = vi.fn(() => true)
+    let { onSend } = render({ onSteerQueued })
+    press({ ctrlKey: true })
+    expect(onSend.mock.lastCall).toEqual(steer)
+    expect(onSteerQueued).not.toHaveBeenCalled()
+    ;({ onSend } = rerender({ input: '', loading: false, onSteerQueued }))
+    press({ ctrlKey: true })
+    expect(onSteerQueued).not.toHaveBeenCalled()
   })
 
   it('sends every Enter as a plain send with no run going, whatever the mode', () => {

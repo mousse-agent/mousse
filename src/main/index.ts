@@ -13,6 +13,7 @@ import { canonicalizeHome, SERVICE_STOP_TIMEOUT_MS } from '../cli/mmsRuntime'
 import { MousseConfigStore } from '../mms/config/MousseConfigStore'
 import { SettingsStore } from '../mms/settings/SettingsStore'
 import { GuiMmsController } from './mms/GuiMmsController'
+import { GuiConnectionLog } from './mms/guiConnectionLog'
 import { PresentationState } from './mms/PresentationState'
 import {
   attachWindowListeners,
@@ -145,6 +146,7 @@ function startGuiApp(): void {
   configureLinuxVsync(app, process.platform, process.env)
   let mainWindow: BrowserWindow | null = null
   let guiMms: GuiMmsController | null = null
+  let connectionLog: GuiConnectionLog | undefined
   let attachedBrowserHost: AttachedBrowserHost | undefined
   let settings: SettingsStore | null = null
   let isQuitting = false
@@ -327,8 +329,14 @@ function startGuiApp(): void {
         settings.set({ appearance: readStartupAppearance(homeDir, settings.get().appearance) })
       }
 
+      connectionLog ??= new GuiConnectionLog(homeDir)
       if (!guiMms || !attachedBrowserHost) {
         const controller = new GuiMmsController({ homeDir })
+        controller.setConnectionLog(connectionLog)
+        // A start after an update shows as a new version here; the restart itself has no other trace in main.
+        connectionLog.write('app.start', { version: app.getVersion(), packaged: app.isPackaged, pid: process.pid })
+        const startedLog = connectionLog
+        app.once('will-quit', () => startedLog.flushSync())
         controller.on('error', (error: Error) => {
           console.error('MMS connection failed:', error.message)
         })
@@ -351,7 +359,10 @@ function startGuiApp(): void {
             browserView,
             attachedBrowserHost,
             repoRoot,
-            requestAppRestart: () => coordinatedRestart()
+            requestAppRestart: () => coordinatedRestart(),
+            connectionLog,
+            // Development only: see `createDevTurnEndDropper`. An installed build never reads the variable.
+            devDropTurnEnd: !app.isPackaged && process.env.MOUSSE_DEV_DROP_TURN_END === '1'
           },
           () => mainWindow
         )

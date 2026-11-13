@@ -266,6 +266,23 @@ function turnDurationMs(
   return Math.max(0, end - start);
 }
 
+/**
+ * When a finished turn's work really ended, from what its messages saved: the newest end among them, once its newest
+ * message has saved one (`completedAt`). Null while that message has none yet (still streaming, or not saved).
+ */
+function savedWorkEndedAt(assistants: UIMessage[]): number | null {
+  const work = assistants.filter((message) => !isThreadNotice(message) && !isCompactionRow(message));
+  const newest = work.at(-1);
+  const raw = newest ? (newest as { completedAt?: string }).completedAt : undefined;
+  if (!raw || !Number.isFinite(Date.parse(raw))) return null;
+  let end: number | null = null;
+  for (const message of work) {
+    const at = readEndedAt(message);
+    if (at != null && (end == null || at > end)) end = at;
+  }
+  return end;
+}
+
 function TurnWorkStatus({
   active,
   startedAt,
@@ -1822,7 +1839,11 @@ export const MessageList = memo(function MessageList({
     }
     const clock = workClockRef.current;
     if (clock && clock.turnId === turnId && clock.endedAt == null) {
-      const endedAt = Date.now();
+      // A window that learns of the end late (it caught up with the service, #1042) shows when the work really ended,
+      // which the reply saved, not when the window heard of it.
+      const saved = savedWorkEndedAt(turns[turns.length - 1]?.assistantMsgs ?? []);
+      const now = Date.now();
+      const endedAt = saved != null && saved >= clock.startedAt && saved <= now ? saved : now;
       clock.endedAt = endedAt;
       const durationMs = Math.max(0, endedAt - clock.startedAt);
       setSettledWork((current) =>
@@ -1831,7 +1852,7 @@ export const MessageList = memo(function MessageList({
           : { ...current, [turnId]: durationMs },
       );
     }
-  }, [replyActive, lastUserMessageId, normalizedMessages]);
+  }, [replyActive, lastUserMessageId, normalizedMessages, turns]);
 
   const lastUserMessageIdRef = useRef(lastUserMessageId);
   // The last turn ended with messages still queued: the next prompt to arrive is the queue's next turn.

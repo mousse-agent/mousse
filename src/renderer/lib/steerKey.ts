@@ -1,7 +1,8 @@
 /**
  * While a run is going, Enter in a thread's composer follows the thread's send mode (`SendMode`), and Ctrl+Enter
  * (Cmd+Enter on macOS) does the other one: in Queue mode the chord sends the text into the running reply, in Steer
- * mode it queues it. On a focused queued message the chord sends that message now. The global `approval.allow`
+ * mode it queues it. In an empty composer, and on a focused queued message, the chord sends a queued message now (the
+ * next one, or the focused one). The global `approval.allow`
  * shares the chord only while the composer is empty, and never on a queued message.
  */
 export const STEER_BINDING = 'CommandOrControl+Enter'

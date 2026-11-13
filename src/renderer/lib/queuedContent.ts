@@ -40,6 +40,15 @@ const MARKER_START = /\[(?:Attached files: |Voice message \(|Selected browser el
 
 export const isOptimisticQueueItem = (item: QueuedMessage): boolean => item.id.startsWith('optimistic:')
 
+/**
+ * The queued message the steer chord sends now from an empty composer: the first one that waits and can be sent
+ * now. Messages still on their way, being sent, or fixed steer items (a subagent result, another process's steer) are
+ * skipped, as their Send now is.
+ */
+export function nextSteerableQueueItem(items: readonly QueuedMessage[], busyIds: Readonly<Record<string, boolean>>): QueuedMessage | undefined {
+  return items.find((item) => !isOptimisticQueueItem(item) && item.state === 'pending' && item.intent !== 'steer' && !busyIds[item.id])
+}
+
 /** A queued message's content split into the text a person typed and the composer markers after it. */
 export function splitQueuedContent(content: string): { text: string; markers: string } {
   const at = content.search(MARKER_START)

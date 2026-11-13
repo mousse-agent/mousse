@@ -32,13 +32,15 @@ export interface FakeBots {
   calls: Array<[string, ...unknown[]]>
   emit: {
     changed(botId: string): void
+    /** The window's service connection was opened again (`bots:changed` with `reread`). */
+    reread(): void
     message(botId: string, message: BotChatMessage): void
     activity(botId: string, chip: BotChip | null, activationId?: string): void
   }
 }
 
 export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, BotChatMessage[]>; details?: Record<string, BotDetail>; memory?: Record<string, BotMemoryEntry[]> } = {}): FakeBots {
-  const listeners = { changed: new Set<(e: { botId?: string }) => void>(), message: new Set<(e: { botId: string; message: BotChatMessage }) => void>(), activity: new Set<(e: { botId: string; activationId: string; chip: BotChip | null }) => void>() }
+  const listeners = { changed: new Set<(e: { botId?: string; reread?: boolean }) => void>(), message: new Set<(e: { botId: string; message: BotChatMessage }) => void>(), activity: new Set<(e: { botId: string; activationId: string; chip: BotChip | null }) => void>() }
   const fake: FakeBots = {
     bots: [...(initial.bots ?? [])],
     chats: { ...(initial.chats ?? {}) },
@@ -56,6 +58,7 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
     },
     emit: {
       changed: (botId) => { for (const cb of listeners.changed) cb({ botId }) },
+      reread: () => { for (const cb of listeners.changed) cb({ reread: true }) },
       message: (botId, row) => { for (const cb of listeners.message) cb({ botId, message: row }) },
       activity: (botId, chip, activationId = 'act1') => { for (const cb of listeners.activity) cb({ botId, activationId, chip }) }
     }

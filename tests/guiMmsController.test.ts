@@ -167,9 +167,9 @@ describe('GuiMmsController lifecycle', () => {
       const client = internals.windowSessions.get(sender.id)!.client
       expect(client.requiresResnapshot).toBe(true)
       // A read for a window with a thread open leaves the gap to that thread's snapshot.
-      expect(await gui.activityForSender(sender.id)).toMatchObject({ [thread.thread.id]: 'completed' })
+      expect((await gui.activityForSender(sender.id)).activity).toMatchObject({ [thread.thread.id]: 'completed' })
       expect(client.requiresResnapshot).toBe(true)
-      expect(await gui.activityForSender(sender.id, true)).toMatchObject({ [thread.thread.id]: 'completed' })
+      expect((await gui.activityForSender(sender.id, true)).activity).toMatchObject({ [thread.thread.id]: 'completed' })
       expect(client.requiresResnapshot).toBe(false)
 
       // A failed read keeps the gap.

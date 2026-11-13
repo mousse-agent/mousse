@@ -632,6 +632,12 @@ export class LocalMmsClient implements MmsClient {
 
       if (result.gap) this.needsResnapshot = true
 
+      // A subscription from 0 starts on its audience's own numbering: a new window connection, or one just bound to
+      // another profile. The cursor the hello or the previous profile left belongs to another counter; kept, a higher
+      // one made this audience's next live events look stale, and they were dropped without a gap (#1042).
+      const fresh = afterSequence === 0
+      if (fresh) this.lastSequence = 0
+
       // Deliver replay before any newer live events from the same receive batch.
       const replay = Array.isArray(result.replay) ? result.replay : []
       for (const ev of replay) {
@@ -642,7 +648,7 @@ export class LocalMmsClient implements MmsClient {
       }
 
       // Never lower lastSequence after a live event; floor at response boundary.
-      this.lastSequence = Math.max(this.lastSequence, result.sequence)
+      this.lastSequence = fresh ? result.sequence : Math.max(this.lastSequence, result.sequence)
 
       // Flush live events buffered while subscribe was in flight (seq > boundary only).
       const buffered = this.subscribeEventBuffer
@@ -761,7 +767,9 @@ export class LocalMmsClient implements MmsClient {
   ): void {
     if (!Number.isFinite(event.sequence) || event.sequence < 0) return
 
-    if (this.lastSequence > 0 && event.sequence > this.lastSequence + 1) {
+    // A replay skips numbers the ring replaced with a newer copy of the same state; whether it lost any is the
+    // subscribe answer's `gap`.
+    if (!opts?.fromReplay && this.lastSequence > 0 && event.sequence > this.lastSequence + 1) {
       this.needsResnapshot = true
     }
 
