@@ -17,7 +17,8 @@ import { WatchedBrowser, actsOrLoads } from './WatchedBrowser'
  * A thread's agent drives a managed browser when its turn has no app window to use: a turn sent from
  * the command line, a custom agent run from the command line, another computer, a schedule or a phone
  * (`resolveTarget` in `MousseMainService`). Each `browser_open` opens a new session on the thread. The
- * view follows the one that is open (the newest, kept while it lasts) and says when there is none.
+ * view follows the newest open one (the agent's latest browser), stays on the one a person holds while they
+ * hold it, and says when none is open.
  *
  * - Watching, holds and input are the general viewer's (`WatchedBrowser`), under the same rules as a
  *   bot's browser: a hold belongs to one window and its connection, lasts while the window says it is
@@ -214,8 +215,9 @@ export class ThreadBrowsers {
   // -- the session the view follows
 
   /**
-   * The thread's open session the view follows: the one it follows while it stays open (and the one the
-   * person holds), else the newest one a thread agent opened that is open.
+   * The thread's open session the view follows: the one the person holds while they hold it, else the
+   * newest one a thread agent opened that is open (sessions stay open across turns, and the agent uses
+   * its latest).
    */
   private sync(state: ThreadBrowserState): void {
     const browser = this.options.browser()
@@ -224,8 +226,8 @@ export class ThreadBrowsers {
     // A session that closed is forgotten.
     for (const [sessionId, threadId] of this.opened) if (threadId === state.threadId && !listed.some((record) => record.id === sessionId)) this.opened.delete(sessionId)
     const open = listed.filter((record) => record.backend === 'managed-chromium' && LIVE.has(record.lifecycle) && this.opened.get(record.id) === state.threadId)
-    const kept = state.sessionId && open.some((record) => record.id === state.sessionId) ? state.sessionId : undefined
-    const next = kept ?? open.sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]?.id
+    const held = state.viewer.held && state.sessionId && open.some((record) => record.id === state.sessionId) ? state.sessionId : undefined
+    const next = held ?? open.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id))[0]?.id
     if (next === state.sessionId) return
     if (state.sessionId) state.viewer.closed()
     state.sessionId = next

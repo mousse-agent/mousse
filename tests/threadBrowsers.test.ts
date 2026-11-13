@@ -6,8 +6,8 @@
  * - The person watches it, takes it over, and a sentence typed with Enter lands whole.
  * - While they hold it, the agent's act, open and new tab are refused in the user's terms; reads go on;
  *   after Give back the agent acts again. Taking over mid-action tells the agent whether it took effect.
- * - The view follows the thread's open session (the one it follows while it lasts, then the newest) and
- *   says when there is none; another thread's view never reaches it.
+ * - The view follows the thread's newest open session, stays on the one a person holds while they hold
+ *   it, and says when none is open; another thread's view never reaches it.
  * - A hold lasts while its window says it is there, and ends when it stops, as a bot's does.
  * - Nothing is captured while nobody watches.
  */
@@ -194,32 +194,35 @@ describe.skipIf(!chrome.ok)('a thread agent\'s browser without a window, from th
     expect(result.action.message).toMatch(/^The user took over the browser before this action ran: it was not applied\. .* Wait for them to give the browser back, or carry on without it\.$/)
   }, 60_000)
 
-  it('follows the thread\'s open session and says when there is none; another thread\'s view never reaches it', async () => {
+  it('follows the thread\'s newest open session, stays on the one a person holds, and says when there is none; another thread\'s view never reaches it', async () => {
     const { browser, agent, lifecycle, origin } = await fixture()
+    const holding = (): string[] => browser.sessions.listThreadSessions({ profileId, threadId: THREAD }).filter((record) => lifecycle(record.id) === 'human-controlled').map((record) => record.id)
+    const take = async (): Promise<string> => (await browser.views.hold(THREAD, VIEW, { op: 'take', platform: PLATFORM }, 'c1')).hold!.id
+    const giveBack = (holdId: string) => browser.views.hold(THREAD, VIEW, { op: 'release', holdId }, 'c1')
     const first = ((await agent('browser_open', { url: `${origin}/form.html` })).json as Opened).session.id
+    let hold = await take()
+    expect(holding()).toEqual([first])
+    // A browser the agent opens while the person holds one is refused; once given back, the view follows the newest.
+    expect((await agent('browser_open', { url: `${origin}/nav-a.html` })).isError).toBe(true)
+    await giveBack(hold)
     const second = ((await agent('browser_open', { url: `${origin}/nav-a.html` })).json as Opened).session.id
     expect(second).not.toBe(first)
-    const takeAndGiveBack = async (): Promise<string> => {
-      const { hold } = await browser.views.hold(THREAD, VIEW, { op: 'take', platform: PLATFORM }, 'c1')
-      const held = [first, second].filter((id) => browser.sessions.listThreadSessions({ profileId, threadId: THREAD }).some((record) => record.id === id) && lifecycle(id) === 'human-controlled')
-      await browser.views.hold(THREAD, VIEW, { op: 'release', holdId: hold!.id }, 'c1')
-      expect(held).toHaveLength(1)
-      return held[0]!
-    }
-    // The view kept the session it followed first, while it is open.
-    expect(await browser.views.view(THREAD)).toMatchObject({ open: true })
-    expect(await takeAndGiveBack()).toBe(first)
+    hold = await take()
+    expect(holding()).toEqual([second])
+    await giveBack(hold)
 
     // Another thread's view shows nothing and holds nothing of it.
     expect(await browser.views.view(OTHER, { viewId: VIEW, connectionId: 'c1' })).toMatchObject({ open: false })
     await expect(browser.views.hold(OTHER, VIEW, { op: 'take', force: true, platform: PLATFORM }, 'c1')).rejects.toMatchObject({ code: 'session_closed' })
-    expect([lifecycle(first), lifecycle(second)]).not.toContain('human-controlled')
+    expect(holding()).toEqual([])
 
-    // The first closes: the view follows the one still open.
-    await closeSession(browser, first)
-    expect(await takeAndGiveBack()).toBe(second)
-    // None is open: the view says so, and there is nothing to take.
+    // The newest closes: the view follows the one still open.
     await closeSession(browser, second)
+    hold = await take()
+    expect(holding()).toEqual([first])
+    await giveBack(hold)
+    // None is open: the view says so, and there is nothing to take.
+    await closeSession(browser, first)
     expect(await browser.views.view(THREAD, { viewId: VIEW, connectionId: 'c1' })).toMatchObject({ open: false })
     await expect(browser.views.hold(THREAD, VIEW, { op: 'take', platform: PLATFORM }, 'c1')).rejects.toMatchObject({ code: 'session_closed', message: 'No browser is open for this thread.' })
   }, 90_000)
