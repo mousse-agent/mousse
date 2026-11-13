@@ -142,8 +142,10 @@ interface BotBrowserState {
   tabProblem?: BrowserProblem
   /** What the bot's last page ran into, wherever it was. */
   botProblem?: BrowserProblem
-  /** The followed tab and its address when that was noted. */
-  botProblemAt?: { tab?: string; url?: string }
+  /** The followed tab, its address and its page (document) when that was noted. */
+  botProblemAt?: { tab?: string; url?: string; page?: string }
+  /** The followed tab's page (its main document) as the worker last told it. */
+  page?: string
   /** Why pictures cannot reach the views now (the followed tab closed, the worker does not answer), until they can again. */
   stalled?: string
   /** When a picture was last taken for `view` (an older app asks each time). */
@@ -781,14 +783,17 @@ export class BotBrowsers implements BotBrowserHost {
     if (update.picture) state.picture = { ...update.picture, viewport: update.viewport }
     else if (state.picture) state.picture = { ...state.picture, viewport: update.viewport }
     state.tab = { url: update.url, title: update.title }
+    state.page = update.page
     state.cursor = update.cursor
     state.behind = update.behind
     state.loading = update.loading === true
     state.tabProblem = update.problem
     // What the bot's last page ran into (in a tab that closed again) holds only until the followed tab
-    // moves on: another tab, or another address (the bot or the owner carried on).
+    // moves on: another tab, another address, or another page at the same address (the bot or the owner
+    // carried on, or the page replaced itself: a redirect or reload once a check was passed).
     const at = state.botProblemAt
-    if (state.botProblem && at && ((at.tab !== undefined && at.tab !== update.tabId) || (at.url !== undefined && at.url !== update.url))) {
+    const moved = (at?.tab !== undefined && at.tab !== update.tabId) || (at?.url !== undefined && at.url !== update.url) || (at?.page !== undefined && update.page !== undefined && at.page !== update.page)
+    if (state.botProblem && at && moved) {
       state.botProblem = undefined
       state.botProblemAt = undefined
     }
@@ -818,7 +823,7 @@ export class BotBrowsers implements BotBrowserHost {
   private noteBotProblem(state: BotBrowserState, problem: BrowserProblem | undefined): void {
     state.botProblem = problem
     // It stands while the view stays on the same tab at the same address; once that moves on, the tab's own state is shown.
-    state.botProblemAt = problem ? { ...(state.follow ? { tab: state.follow } : {}), ...(state.tab ? { url: state.tab.url } : {}) } : undefined
+    state.botProblemAt = problem ? { ...(state.follow ? { tab: state.follow } : {}), ...(state.tab ? { url: state.tab.url } : {}), ...(state.page ? { page: state.page } : {}) } : undefined
     const shown = state.tabProblem ?? problem
     if (JSON.stringify(shown ?? null) === JSON.stringify(state.problem ?? null)) return
     state.problem = shown

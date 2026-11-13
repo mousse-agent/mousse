@@ -103,6 +103,19 @@ export async function startFixtureSite(): Promise<{ origin: string; close: () =>
       res.end(url.searchParams.get('body') === '1' ? `<!doctype html><title>HTTP ${status}</title><h1>The site says ${status}</h1>` : '')
       return
     }
+    // A challenge page served with an error status (?code=403 or 503), until it was passed (its cookie): then the site's own page.
+    if (req.method === 'GET' && url.pathname === '/challenge') {
+      res.setHeader('content-type', 'text/html; charset=utf-8')
+      res.setHeader('cache-control', 'no-store')
+      if (/(?:^|;\s*)mousse_check_passed=1/.test(req.headers.cookie ?? '')) {
+        res.statusCode = 200
+        res.end('<!doctype html><title>Shop</title><main><h1>Welcome to the shop</h1><p>Every part, every price.</p><a href="/nav-a.html">Deals</a></main>')
+        return
+      }
+      res.statusCode = Number(url.searchParams.get('code') ?? 403)
+      res.end(readFileSync(join(SITE_DIR, 'signs-challenge-late.html')))
+      return
+    }
     // A sign-in wall: 401 and a password field.
     if (req.method === 'GET' && url.pathname === '/sign-in.html') {
       res.statusCode = 401

@@ -67,6 +67,8 @@ export interface ViewerTabInfo {
   tabId: string
   url: string
   title: string
+  /** The tab's main document now: it changes with each page the tab shows. */
+  page?: string
 }
 
 export interface ViewerPicture {
@@ -320,10 +322,10 @@ export class ViewerCaptures {
   }
 
   /** A new page committed in a tab: its screencast starts again (Chromium may stop sending after a commit), and its size is read again. */
-  committed(cdpSessionId: string, url: string): void {
+  committed(cdpSessionId: string, url: string, page?: string): void {
     const capture = this.captures.get(cdpSessionId)
     if (!capture) return
-    capture.info = { ...capture.info, url }
+    capture.info = { ...capture.info, url, ...(page ? { page } : {}) }
     capture.lastCast = undefined
     capture.viewportRead = false
     capture.stateSeq = this.bump()
@@ -419,7 +421,7 @@ export class ViewerCaptures {
 
   /** The tab's address and title as the session knows them (it follows every commit and title). */
   private describe(capture: TabCapture, info: ViewerTabInfo): void {
-    if (capture.info.url === info.url && capture.info.title === info.title && capture.info.tabId === info.tabId) return
+    if (capture.info.url === info.url && capture.info.title === info.title && capture.info.tabId === info.tabId && capture.info.page === info.page) return
     capture.info = { ...info }
     capture.stateSeq = this.bump()
   }
@@ -837,6 +839,7 @@ export class ViewerCaptures {
       tabId: capture.info.tabId,
       url: capture.info.url,
       title: capture.info.title,
+      ...(capture.info.page ? { page: capture.info.page } : {}),
       viewport: { ...capture.viewport },
       behind: capture.behind,
       loading: capture.loading,

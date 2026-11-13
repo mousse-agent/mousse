@@ -526,16 +526,74 @@ async function documentReadyState(cdp: CdpTransport, cdpSessionId: string, frame
  */
 export async function readPageSigns(cdp: CdpTransport, cdpSessionId: string, frameId: string): Promise<BrowserPageSigns | undefined> {
   const world = await cdp.send<{ executionContextId?: number }>('Page.createIsolatedWorld', { frameId, worldName: 'mousse-page-signs' }, { sessionId: cdpSessionId, timeoutMs: 2_000 })
-  if (!world.executionContextId) return undefined
-  const read = await cdp.send<{ result?: { value?: BrowserPageSigns } }>('Runtime.evaluate', {
-    contextId: world.executionContextId,
-    returnByValue: true,
-    expression: PAGE_SIGNS_SCRIPT
-  }, { sessionId: cdpSessionId, timeoutMs: 2_000 })
-  return read.result?.value
+  const contextId = world.executionContextId
+  if (!contextId) return undefined
+  const read = async (frames: string[]) => (await cdp.send<{ result?: { value?: BrowserPageSigns } }>('Runtime.callFunctionOn', {
+    executionContextId: contextId,
+    functionDeclaration: PAGE_SIGNS_FUNCTION,
+    arguments: frames.map((objectId) => ({ objectId })),
+    returnByValue: true
+  }, { sessionId: cdpSessionId, timeoutMs: 2_000 })).result?.value
+  let signs = await read([])
+  // A challenge page builds its check inside a closed shadow root, which the page's own reading can't
+  // enter: on a page that answered an error status, its check frames are found through the browser.
+  if (signs && (signs.status ?? 0) >= 400 && signs.humanCheck !== 'page') {
+    const hidden = await shadowCheckFrames(cdp, cdpSessionId, contextId).catch(() => [])
+    if (hidden.length) signs = (await read(hidden)) ?? signs
+  }
+  return signs
 }
 
-const PAGE_SIGNS_SCRIPT = `(() => {
+/**
+ * How long a page that answered an error status and runs scripts is given for a human check to
+ * appear (a challenge page shows its check a moment after it loads, and may pass by itself).
+ */
+export const CHECK_APPEARS_MS = 5_000
+
+/**
+ * What a page that opened shows (`readPageSigns`), waiting on a page that answered an error status
+ * with scripts of its own until a human check or a wall appears, or `CHECK_APPEARS_MS` pass: such a
+ * page is read for what a person can do about it, never by its status alone. A page with no
+ * scripts (a plain refusal) is read at once.
+ */
+export async function readOpenedPageSigns(cdp: CdpTransport, cdpSessionId: string, frameId: string, waitMs = CHECK_APPEARS_MS): Promise<BrowserPageSigns | undefined> {
+  const until = Date.now() + waitMs
+  for (;;) {
+    const signs = await readPageSigns(cdp, cdpSessionId, frameId)
+    const waiting = signs && (signs.status ?? 0) >= 400 && signs.scripted && signs.humanCheck !== 'page' && signs.consent !== 'wall'
+    if (!waiting || Date.now() >= until) return signs
+    await new Promise((resolve) => setTimeout(resolve, 400))
+  }
+}
+
+const CHECK_FRAME_SOURCES = /challenges\.cloudflare\.com|google\.com\/recaptcha|recaptcha\.net|hcaptcha\.com|arkoselabs\.com/i
+
+/** The check frames inside the page's shadow roots (closed ones too), as objects of the given world. */
+async function shadowCheckFrames(cdp: CdpTransport, cdpSessionId: string, contextId: number): Promise<string[]> {
+  interface DomNode { nodeName?: string; backendNodeId?: number; attributes?: string[]; children?: DomNode[]; shadowRoots?: DomNode[] }
+  const { root } = await cdp.send<{ root: DomNode }>('DOM.getDocument', { depth: -1, pierce: true }, { sessionId: cdpSessionId, timeoutMs: 2_000 })
+  const found: number[] = []
+  // The page's own tree and its shadow roots, never the documents of its frames.
+  const walk = (node: DomNode, inShadow: boolean) => {
+    if (found.length >= 8) return
+    if (inShadow && node.nodeName === 'IFRAME' && node.backendNodeId !== undefined) {
+      const attributes = node.attributes ?? []
+      const src = attributes[attributes.indexOf('src') + 1]
+      if (attributes.includes('src') && src && CHECK_FRAME_SOURCES.test(src)) found.push(node.backendNodeId)
+    }
+    for (const child of node.children ?? []) walk(child, inShadow)
+    for (const shadow of node.shadowRoots ?? []) walk(shadow, true)
+  }
+  walk(root, false)
+  const objects: string[] = []
+  for (const backendNodeId of found) {
+    const resolved = await cdp.send<{ object?: { objectId?: string } }>('DOM.resolveNode', { backendNodeId, executionContextId: contextId }, { sessionId: cdpSessionId, timeoutMs: 2_000 }).catch(() => undefined)
+    if (resolved?.object?.objectId) objects.push(resolved.object.objectId)
+  }
+  return objects
+}
+
+const PAGE_SIGNS_FUNCTION = `function (...shadowFrames) {
   const vw = innerWidth || 1, vh = innerHeight || 1
   const nav = performance.getEntriesByType('navigation')[0]
   const status = nav && typeof nav.responseStatus === 'number' ? nav.responseStatus : 0
@@ -565,13 +623,23 @@ const PAGE_SIGNS_SCRIPT = `(() => {
     }
     return undefined
   }
+  /** Whether a point's element is el or holds it (a point in a shadow root lands on its host). */
+  const within = (el, hit) => {
+    for (let node = el; node;) {
+      if (node === hit || node.contains(hit)) return true
+      const root = node.getRootNode()
+      node = root && root.host ? root.host : null
+    }
+    return false
+  }
   /** Every point sampled across the viewport lands in it, or in its backdrop: the page behind can't be reached. */
   const covers = (el) => [[0.5, 0.5], [0.15, 0.15], [0.85, 0.15], [0.15, 0.85], [0.85, 0.85]].every(([x, y]) => {
     const hit = document.elementFromPoint(vw * x, vh * y)
-    return !!hit && (el.contains(hit) || !!backdropOf(hit, el))
+    return !!hit && (within(el, hit) || !!backdropOf(hit, el))
   })
   const CHECK_FRAMES = /challenges\\.cloudflare\\.com|google\\.com\\/recaptcha|recaptcha\\.net|hcaptcha\\.com|arkoselabs\\.com/i
-  const checkFrames = [...document.querySelectorAll('iframe')].filter((frame) => CHECK_FRAMES.test(frame.src || '') && !/[?&]size=invisible/i.test(frame.src || '') && !frame.closest('.grecaptcha-badge'))
+  // The page's own frames, and those found inside its shadow roots (passed in: the page can't reach a closed one).
+  const checkFrames = [...document.querySelectorAll('iframe'), ...shadowFrames].filter((frame) => CHECK_FRAMES.test(frame.src || '') && !/[?&]size=invisible/i.test(frame.src || '') && !frame.closest('.grecaptcha-badge'))
   const checkBoxes = [...document.querySelectorAll('#challenge-form, #challenge-running, #cf-challenge-running, #challenge-stage, .cf-turnstile, .g-recaptcha, .h-captcha')]
     .filter((el) => !el.closest('.grecaptcha-badge'))
   const checks = [...checkFrames, ...checkBoxes].filter((el) => seen(el, 100, 40))
@@ -588,8 +656,10 @@ const PAGE_SIGNS_SCRIPT = `(() => {
   if (consentBoxes.length) consent = consentBoxes.some(covers) ? 'wall' : 'banner'
   else if (/^consent\\./i.test(location.hostname) && document.querySelector('form')) consent = 'wall'
   const signInForm = [...document.querySelectorAll('input[type=password]')].some((el) => seen(el, 20, 8))
-  return { status, title: document.title, url: location.href, ...(humanCheck ? { humanCheck } : {}), ...(consent ? { consent } : {}), ...(signInForm ? { signInForm } : {}) }
-})()`
+  // A page with scripts of its own may still show a check (a challenge page builds it a moment after it loads).
+  const scripted = document.scripts.length > 0
+  return { status, title: document.title, url: location.href, ...(humanCheck ? { humanCheck } : {}), ...(consent ? { consent } : {}), ...(signInForm ? { signInForm } : {}), ...(scripted ? { scripted } : {}) }
+}`
 
 export async function waitForLoad(cdp: CdpTransport, cdpSessionId: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {
   await cdp.send('Page.setLifecycleEventsEnabled', { enabled: true }, { sessionId: cdpSessionId })

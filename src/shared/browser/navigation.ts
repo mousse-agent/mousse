@@ -151,11 +151,14 @@ export interface BrowserPageSigns {
   signInForm?: boolean
   /** A consent dialog: a `banner` the page can be used beside, or a `wall` that covers and blocks it. */
   consent?: 'banner' | 'wall'
+  /** The page runs scripts of its own, so a check may still appear (a challenge page builds it after it loads). */
+  scripted?: boolean
 }
 
 /**
  * What a page that opened is: a failure only when it is nothing but a human check or a consent
- * wall (or the site refused it: 403, 451; or asks for an HTTP sign-in: 401 without a form). Else
+ * wall, whatever status it came with (a person can get past it: never a refusal), or the site
+ * refused it with nothing to get past (403, 451), or asks for an HTTP sign-in (401 without a form). Else
  * notes: a sign-in form, a cookie banner, a human check that is part of the page, an error status
  * the page can be read with (404, 410, 429, 5xx). The page's title and classes alone decide nothing.
  */
@@ -195,7 +198,7 @@ const NEEDS = { 'sign-in': 'a sign-in', consent: 'a consent choice', 'human-chec
  * nothing but a human check or consent wall, and a site that refused this browser, are never tried
  * again: trying won't change them.
  */
-export function browserProblemForAgent(problem: BrowserProblem): string {
+export function browserProblemForAgent(problem: BrowserProblem, reader: BrowserNoteReader = 'agent'): string {
   const site = problem.host ?? 'The site'
   const details = problem.code ? ` (${problem.code})` : ''
   switch (problem.kind) {
@@ -203,9 +206,13 @@ export function browserProblemForAgent(problem: BrowserProblem): string {
       return `Can't reach ${problem.host ?? 'the site'}${details}. Check the address; if it is right, the site or the connection is down: try once more later, or carry on without it.`
     case 'blocked':
       return `${site} refused this browser${details}. Don't retry it: try another site, or ask the person to open it.`
-    case 'needs-you':
+    case 'needs-you': {
       if (problem.reason === 'sign-in') return `${site} asks for a sign-in this browser can't show${details}. Ask the person to open it, or carry on without it.`
-      return `${site} shows nothing but ${problem.reason === 'consent' ? 'a consent wall' : 'a human check'}${details}. Don't retry it or try to get around it: ask the person to get past it (browser_request_human, or say so in your reply), then carry on.`
+      const what = problem.reason === 'consent' ? 'a consent wall' : 'a human check'
+      // A person can get past it (whatever status the site answered with): it is theirs to do, never a refusal.
+      if (reader === 'bot') return `${site} shows ${what} that covers the page${details}. A person can get past it: ask your owner to take over your browser and do it (say so in your reply), then carry on. Don't retry it or try to get around it yourself.`
+      return `${site} shows ${what} that covers the page${details}. A person can get past it: don't retry it or try to get around it, ask the person to (browser_request_human, or say so in your reply), then carry on.`
+    }
     case 'browser-refused':
       if (problem.reason === 'certificate') return `${site}'s certificate is not trusted${details}, so this browser won't open it. Check the address; don't try to get around it. If it is the address you need, say so.`
       if (problem.reason === 'unsafe-port') return `This browser won't open that address: its port is one browsers refuse${details}. Use the address's usual port, or another address.`

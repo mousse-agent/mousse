@@ -31,7 +31,7 @@ import { collectStructuredObservation, MAX_OBSERVATION_ELEMENTS, type CollectedO
 import { captureViewportScreenshot } from '../observation/screenshot'
 import { MAX_WAIT_MS, SCREENCAST_MAX_HEIGHT, ViewerCaptures, type ViewerTabInfo } from '../observation/screencast'
 import { prepareActionableTarget, readControlValue, type ActionableTarget } from '../action/actionability'
-import { dispatchAction, dispatchHumanInput, navigateHistory, navigateTab, navigationPace, readPageSigns, type NavigationOptions } from '../action/dispatch'
+import { dispatchAction, dispatchHumanInput, navigateHistory, navigateTab, navigationPace, readOpenedPageSigns, readPageSigns, type NavigationOptions } from '../action/dispatch'
 import { BROWSER_PROBLEM_CODES, browserNoteForPerson, browserProblemMessage, classifyOpenedPage, hostOf, type BrowserNavigation, type BrowserProblem } from '../../shared/browser/navigation'
 import { ScopedActionJournal } from '../action/journal'
 import { CdpDisconnectedError } from '../cdp/connection'
@@ -156,6 +156,8 @@ export class ManagedSession {
   private readonly tabProblems = new Map<string, BrowserProblem>()
   /** A tab's page to be read again for what it needs (`recheckPage`), by CDP session. */
   private readonly pageRechecks = new Map<string, ReturnType<typeof setTimeout>>()
+  /** Tabs with a navigation under way that reads its page (watchNavigation), and how many, by CDP session. */
+  private readonly readingTabs = new Map<string, number>()
   /** How the session's first page went (`start` with a URL): a slow or failed page never fails the session. */
   firstNavigation: BrowserNavigation | undefined
   /** Pages and frames carrying the automation mark (`markAutomation`), by CDP session. */
@@ -311,16 +313,19 @@ export class ManagedSession {
       if (!navigated) return
       navigated.loaderId = frame.loaderId ?? navigated.loaderId
       navigated.frameId = frame.id ?? navigated.frameId
-      navigated.url = sanitizeUrl(frame.url ?? navigated.url)
+      // Chromium's error page is at `chrome-error://`: the tab is where it tried to go, so the person can correct it.
+      navigated.url = sanitizeUrl(frame.unreachableUrl || frame.url || navigated.url)
       navigated.documentId = 'doc_' + randomUUID()
       // Chromium may send no more screencast pictures once a new page commits: a watched tab's starts again.
-      this.viewers?.committed(navigated.cdpSessionId, navigated.url)
+      this.viewers?.committed(navigated.cdpSessionId, navigated.url, navigated.documentId)
       // A person watching sees a page that could not be loaded as such (Chromium's error page has no code to show).
       const unreachable = frame.unreachableUrl ? hostOf(frame.unreachableUrl) : undefined
       const known = this.tabProblems.get(navigated.cdpSessionId)
       // The navigation's own answer (with Chromium's code) may have come first: it stands.
       if (!frame.unreachableUrl || known?.kind !== 'unreachable' || known.host !== unreachable)
         this.tabProblem(navigated.cdpSessionId, frame.unreachableUrl ? { kind: 'unreachable', ...(unreachable ? { host: unreachable } : {}) } : undefined)
+      // A new page no navigation reads (a redirect, the page's own reload, the person's navigation): it is read itself.
+      if (!frame.unreachableUrl && !this.readingTabs.has(navigated.cdpSessionId)) this.readCommitted(navigated)
       this.refs.invalidateTab(navigated.publicId)
       this.touch()
     })
@@ -993,7 +998,7 @@ export class ManagedSession {
   }
 
   private viewerTab(tab: TabState): ViewerTabInfo {
-    return { cdpSessionId: tab.cdpSessionId, tabId: tab.publicId, url: tab.url, title: this.viewerTitles.get(tab.targetId) ?? boundText(tab.title, 512) }
+    return { cdpSessionId: tab.cdpSessionId, tabId: tab.publicId, url: tab.url, title: this.viewerTitles.get(tab.targetId) ?? boundText(tab.title, 512), page: tab.documentId }
   }
 
   private liveCursor(tab: TabState): BrowserAgentCursor | undefined {
@@ -1090,19 +1095,21 @@ export class ManagedSession {
    * for anyone watching (a problem it ran into, or what an opened page needs).
    */
   private async navigateTabOf(tab: TabState, url: string, options: NavigationOptions): Promise<BrowserNavigation> {
-    return this.watchNavigation(tab, navigateTab(this.requireChrome().cdp, tab.cdpSessionId, url, this.navigationOptions(tab, options)))
+    return this.watchNavigation(tab, navigateTab(this.requireChrome().cdp, tab.cdpSessionId, url, this.navigationOptions(tab, options)), !options.untilCommit)
   }
 
   private async navigateHistoryOf(tab: TabState, kind: 'back' | 'forward' | 'reload', options: NavigationOptions): Promise<BrowserNavigation> {
-    return this.watchNavigation(tab, navigateHistory(this.requireChrome().cdp, tab.cdpSessionId, kind, tab.url, this.navigationOptions(tab, options)))
+    return this.watchNavigation(tab, navigateHistory(this.requireChrome().cdp, tab.cdpSessionId, kind, tab.url, this.navigationOptions(tab, options)), !options.untilCommit)
   }
 
   private navigationOptions(tab: TabState, options: NavigationOptions): NavigationOptions {
     const cdp = this.requireChrome().cdp
-    return { ...options, ...(options.untilCommit ? {} : { signs: (frameId: string) => readPageSigns(cdp, tab.cdpSessionId, frameId) }) }
+    return { ...options, ...(options.untilCommit ? {} : { signs: (frameId: string) => readOpenedPageSigns(cdp, tab.cdpSessionId, frameId) }) }
   }
 
-  private async watchNavigation(tab: TabState, navigation: Promise<BrowserNavigation>): Promise<BrowserNavigation> {
+  private async watchNavigation(tab: TabState, navigation: Promise<BrowserNavigation>, reads: boolean): Promise<BrowserNavigation> {
+    // While a navigation that reads its page runs, that read says what the tab's page is (`readCommitted` waits).
+    if (reads) this.readingTabs.set(tab.cdpSessionId, (this.readingTabs.get(tab.cdpSessionId) ?? 0) + 1)
     try {
       const outcome = await navigation
       // A person watching is told of a failure, or of a sign-in or check on the page that is theirs to do.
@@ -1111,7 +1118,40 @@ export class ManagedSession {
     } catch (error) {
       if (isBrowserWorkerError(error) && error.problem) this.tabProblem(tab.cdpSessionId, error.problem)
       throw error
+    } finally {
+      if (reads) {
+        const left = (this.readingTabs.get(tab.cdpSessionId) ?? 1) - 1
+        if (left > 0) this.readingTabs.set(tab.cdpSessionId, left)
+        else this.readingTabs.delete(tab.cdpSessionId)
+      }
     }
+  }
+
+  /**
+   * A tab's main document changed with no navigation reading it (a redirect, a reload the page does
+   * itself, the person's own navigation): what the view says follows the page the tab shows now. The
+   * old problem was dropped at the commit; the new page is read once its document has had a moment.
+   */
+  private readCommitted(tab: TabState, delayMs = 700): void {
+    const documentId = tab.documentId
+    const pending = this.pageRechecks.get(tab.cdpSessionId)
+    if (pending) clearTimeout(pending)
+    const current = () => !this.closed && !this.closing && !this.ended && this.tabs.get(tab.publicId) === tab && tab.documentId === documentId && !this.readingTabs.has(tab.cdpSessionId)
+    const timer = setTimeout(() => {
+      this.pageRechecks.delete(tab.cdpSessionId)
+      if (!current()) return
+      void (async () => {
+        const cdp = this.requireChrome().cdp
+        const frameId = tab.frameId || (await cdp.send<{ frameTree?: { frame?: { id?: string } } }>('Page.getFrameTree', {}, { sessionId: tab.cdpSessionId, timeoutMs: 5_000 })).frameTree?.frame?.id
+        if (!frameId) return
+        const signs = await readOpenedPageSigns(cdp, tab.cdpSessionId, frameId)
+        if (!signs || !current()) return
+        const opened = classifyOpenedPage({ ...signs, url: signs.url ?? tab.url })
+        this.tabProblem(tab.cdpSessionId, opened.problem ?? browserNoteForPerson(opened.notes, hostOf(signs.url ?? tab.url)))
+      })().catch(() => undefined)
+    }, delayMs)
+    timer.unref?.()
+    this.pageRechecks.set(tab.cdpSessionId, timer)
   }
 
   /**
