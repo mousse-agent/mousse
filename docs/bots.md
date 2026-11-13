@@ -36,6 +36,26 @@ Each bot has two lanes. The chat lane runs one activation at a time; the run lan
 - **The bot chat's composer** is the thread composer (`ChatComposer`) without a thread's run settings: no model picker, reasoning level, permission mode, context ring, `/` commands or skills, since a bot picks its own model. It keeps the same box, attach (the button, dropping files and pasting images), dictation, Up for the last message, and Send or Stop.
 - **Attached files** are copied into the bot's files folder, under `attachments/<date>/`, and the message and the bot's input name the copies (`copyBotAttachments`). The starter grant reads them, so the bot never needs the folder the owner keeps them in, and its edits never touch the originals. A pasted file has no path: it waits in a temporary folder until it is copied. At most 10 files of 50 MB each per message. Images reach the bot as files it reads, not as pictures in the message.
 
+## What a bot's chat shows
+
+A bot's chat shows a reply as a thread's transcript does, through the same components; what is kept from bots is kept for a reason of their own, named here.
+
+| A thread's reply | A bot's chat |
+|---|---|
+| Markdown (`agent-elements/markdown.tsx`): tables in their own scroller, code with Copy and Wrap, math, Mermaid diagrams, alerts, task lists, links | Same component (`Markdown` with `images`) |
+| Pictures inline, in the conversation's preview with Previous and Next | Same preview. Kept stricter: a web picture is a link, never loaded, and SVG never shows (a reply can be shaped by what the bot read on the web, and a picture's address could carry what it knows) |
+| Applets: the card under the reply, its own view, the sandbox | Same card (`AppletCard`) and panel (`AppletPanelView`), opened beside the chat; same sandbox |
+| Pictures a tool returned | Shown under the bot's next message, from its files folder |
+| Copy, Read aloud | Same buttons |
+| Reply to a message | The bot's chat has it; a thread doesn't yet (#1049) |
+| Tool rows, diffs and changed files, thinking, plans, questions, model names and token counts | Kept from bots: the chat shows chips, a status line and ask cards instead, and never names a model (above) |
+| Edit, Retry and Fork of a prompt | Kept from bots: the chat is one conversation kept with the bot's memory, with no branches |
+| Find in the conversation; opening a linked file (the Files panel); revising an applet in a later turn; a picture from the bot's browser shared on purpose; voice clips and thread references in the composer | Not yet |
+
+- **Markdown.** The chat's messages are the thread's `Markdown` with the chat's image rule (`MarkdownImages`, `BotMarkdownImage`): every picture, written in Markdown or as HTML, reaches the rule with its `src` as written, and a `<picture>`'s sources are dropped. Blocks parsed under the rule are cached apart from a thread's (`MarkdownSetupContext`), so the same text never reuses a thread's parse. Raw HTML is sanitized as in a thread (Streamdown's sanitizer and URL hardening); links go through the thread's `classifyLink` and `routeLink` (in Chats a web link opens in the person's own browser).
+- **Applets.** A bot's main turns, chat and work, have `publish_applet` (`BOT_APPLET_TOOL`), always on and never grantable, like memory: making an applet needs no power the grant controls. A consult and a subagent never have it. The bot's instructions carry the same applet guidance as a thread's agent. Its turn publishes as a thread's does: the thread's reply keeps the applet as a presentation part, and the bot's chat row keeps a reference to it (`replyApplets`, matched by source, `BotChatApplet`), never the source; the journal names it ("[Applet: Budget]"). The reference rides in the row's attachments after its files (with `applet` and an empty path), so a file's index never moves and `bots.db` keeps its version; an older build shows it as its title. The app runs it from the bot's thread exactly as a thread's: `applets.get` serves only an applet a shown reply of that thread carries, and the guest is the same sandboxed view (no network, storage, app bridge or other applets). Its Add to conversation and Ask to fix go to the bot's composer, never sent by themselves.
+- **Pictures from tools.** An image an MCP tool hands a bot's turn is saved in its files folder, under `images/<date>/` like the pictures it makes (`saveBotPicture`: never through a link out of the folder), and the activation's next message carries it as a file (`keepToolImages`, at most 6 a message; PNG, JPEG, GIF or WebP by their first bytes). The bot is told its owner sees it. A picture the bot makes, or any picture in its files folder it names in its reply, shows the same way.
+
 ## The chat and its work
 
 A person who works for you keeps talking to you while they work. A bot does the same (`docs/plans/bot-always-free.md`):
@@ -348,6 +368,7 @@ The owner's phones and other computers see and use the bots of a computer they r
 - **Lists.** `bridge.lists.open` pushes `bots` beside `chats` (`ListsBot` in `src/mms/bridge/remote/MmsListsSource.ts`): each bot's summary as the Bots list has it, plus `activity`, the live chip of its chat activation (gone when the chip clears). The stream pushes again, debounced, on `bots.changed`, `bots.message` and `bots.activity`. Bots are listed whether or not there are chats; a computer whose bots can't be read lists none. `version` stays 1.
 - **Methods** (`src/mms/bridge/remote/RemoteBots.ts`, deny-default, exact keys). Read: `bots.get`, `bots.chat.list`, `bots.chat.attachment`, `bots.memory.list`. Chat: `bots.chat.send`, `bots.chat.stop`, `bots.work.stop`, `bots.chat.markRead`, `bots.asks.answer`. Write: `bots.personal.pause`, `bots.personal.resume`, `bots.create`, `bots.update`, `bots.reminders.cancel`, `bots.schedules.remove`, `bots.permissions.revoke`, `bots.memory.forget`. Each calls the same `BotChatService` method as the desktop, with the same params and results. Delete, the model and computer pickers, new schedules and memory export stay on the computer.
 - **Images.** A message's files keep their name and type (`{ name, mime, image? }`). `bots.chat.attachment` reads an image (PNG, JPEG, GIF or WebP, checked by its first bytes; never SVG) of up to 1.5 MiB from the bot's files folder only, in parts of 40 KiB (`offset`), so each part fits one reply.
+- **Applets** run only on the computer: another device gets a line naming each one ("Applet: Budget. It opens on the computer."), never its reference.
 - **What another device does not get.** No model, no instance id (an error's action keeps its kind and label; Sign in happens on the computer), no paths. It can't attach files, and a memory export ask is refused because it needs a folder picker on the computer.
 - **Sizes.** A message from another device is at most 32 KiB. A chat page is cut to the newest messages that fit one reply; the device pages back with `beforeSeq`.
 - **Refusals.** An unknown bot; an ask that is gone, answered or not ready yet; a memory export ask; and a reminder, schedule, permission or memory that is no longer there: all are checked before anything changes, so they are plain errors and never an uncertain outcome. A message to a working bot queues as on the desktop; stopping work the bot no longer has returns `{ stopped: false }`. An error's own words stay on the computer (only its code crosses the wire).
@@ -397,6 +418,7 @@ Mousse keeps an append-only **bot journal** in `bots.db` of everything it sees a
 | What bots may do here (each computer's ceiling) | `src/shared/bots/personal/computerLimit.ts`, `settings.bots` in `src/shared/settings.ts`, Settings → Agents (`src/renderer/components/settings/AgentsSettings.tsx`) |
 | Model choice | `src/mms/bots/model/` |
 | Pictures (`make_image`, the Images row) | `src/mms/bots/images/BotImageMaker.ts`, `src/mms/harness/drivers/pi/images.ts`, `HarnessGateway.generateImage` |
+| What a reply shows: applets, pictures from tools, the thread's Markdown | `src/mms/bots/chat/replyApplets.ts`, `src/mms/bots/chat/toolImages.ts`, `src/mms/bots/images/pictures.ts`, `src/renderer/components/bots/BotApplets.tsx`, `MarkdownImages` in `src/renderer/chat/components/agent-elements/markdown.tsx` |
 | Schedules (in the shared scheduler) | `src/mms/scheduled/botJobs.ts`, `BotEngine.runScheduledOccurrence` |
 | Supervisor | `src/mms/bots/supervisor/`, `src/cli/fastpath/botSupervisorMain.ts` |
 | Chips | `src/shared/bots/personal/chips.ts`, `src/mms/bots/activity/BotActivitySink.ts` |

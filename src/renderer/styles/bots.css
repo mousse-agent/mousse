@@ -32,8 +32,9 @@
    height and the bot's with a reply's; names, times, labels and day lines at the thread's small meta size
    ("Worked for"). */
 .bot-conversation { --bot-text: 1rem; --bot-meta: 12.5px; }
-.bot-conversation .chat-message-markdown.chat-markdown { font-size: var(--bot-text); line-height: 1.65; }
-.bot-conversation .bot-you-bubble.chat-markdown { line-height: 1.5; }
+/* Messages are the thread's own Markdown (.an-markdown sets a reply's rhythm); the owner's bubble keeps a prompt's. */
+.bot-conversation .bot-markdown { font-size: var(--bot-text); }
+.bot-conversation .bot-you-bubble.bot-markdown { line-height: 1.5; }
 .bot-conversation .chat-message-meta { font-size: var(--bot-meta); line-height: 18px; margin-bottom: 4px; }
 .bot-conversation .chat-run-status { font-size: var(--bot-meta); }
 .bot-conversation .chat-transcript { padding: 12px 0 20px; scrollbar-gutter: stable both-edges; }
@@ -92,13 +93,28 @@
 .bot-reply-quote:disabled > span { font-style: italic; color: var(--text-secondary); }
 .bot-reply-button { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 6px; color: var(--text-secondary); opacity: 0; transition: opacity .12s; }
 .chat-participant-message:hover .bot-reply-button, .bot-reply-button:focus-visible { opacity: 1; }
+/* Copy and Read aloud, as under a thread's reply: shown on hover or keyboard focus. */
+.bot-you-actions { display: flex; align-items: center; gap: 2px; }
+.bot-message-actions { display: flex; align-items: center; gap: 2px; margin-top: 4px; }
+.bot-you-actions > button:not(.bot-reply-button), .bot-message-actions { opacity: 0; transition: opacity .12s; }
+.chat-participant-message:hover :is(.bot-you-actions > button, .bot-message-actions), .bot-message-actions:focus-within, .bot-you-actions > button:focus-visible { opacity: 1; }
+.bot-message-actions:has([data-read-aloud='loading'], [data-read-aloud='playing'], [data-read-aloud='paused']) { opacity: 1; }
+/* A reply's applets: the thread's card, under its words. */
+.bot-message-applets { display: flex; flex-direction: column; gap: 12px; margin-top: 10px; }
+/* An applet opened beside the chat: the thread's panel, filling the pane. */
+.bot-applet-pane { flex: 1 1 0; min-width: 320px; display: flex; flex-direction: column; border-left: 1px solid rgba(var(--accent-pale-rgb), .12); }
+.bot-applet-pane > .document-panel { flex: 1; min-height: 0; }
+.bot-applet-pane-title { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; font-size: 12.5px; font-weight: 600; }
+.bot-applet-pane-title > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bot-applet-pane-title > button { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 7px; color: var(--text-secondary); }
+.bot-applet-pane-title > button:hover { background: color-mix(in srgb, var(--text-secondary) 12%, transparent); color: var(--text-primary); }
 .bot-reply-button:hover { background: color-mix(in srgb, var(--text-secondary) 12%, transparent); color: var(--text-primary); }
 .chat-participant-message.is-shown { animation: bot-message-shown 1.4s ease-out; border-radius: 12px; }
 @keyframes bot-message-shown { from { background: rgba(var(--accent-rgb), .16); } to { background: transparent; } }
 .bot-replying { margin: 0 4px 6px; padding: 3px 3px 3px 10px; border-radius: 10px; }
 .bot-replying button { flex-shrink: 0; display: grid; place-items: center; width: 24px; height: 24px; border-radius: 7px; color: var(--text-secondary); }
 .bot-replying button:hover { background: var(--quote-bg-hover); color: var(--text-primary); }
-@media (prefers-reduced-motion: reduce) { .chat-participant-message.is-shown { animation: none; } .bot-reply-button { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .chat-participant-message.is-shown { animation: none; } .bot-reply-button, .bot-you-actions > button, .bot-message-actions { transition: none; } }
 .bot-you-files { display: flex; flex-wrap: wrap; gap: 6px; }
 .bot-file-pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 8px; font-size: var(--bot-meta, 12.5px); line-height: 18px; color: var(--text-secondary); background: color-mix(in srgb, var(--text-secondary) 9%, transparent); }
 /* Pictures (BotImages.tsx), as a messaging app shows them: rounded thumbnails in fixed boxes, so nothing moves when one

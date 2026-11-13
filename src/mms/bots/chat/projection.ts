@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { askText } from '../../../shared/bots/personal/askText'
-import type { BotAskCard, BotAskStatus, BotChatMessage, BotChatQuote, BotWorkItem, BotChip, BotDetail, BotError, BotMessageKind, BotPermissionItem, BotReminderItem, BotRunItem, BotSummary } from '../../../shared/bots/personal/chat'
+import type { BotAskCard, BotAskStatus, BotChatApplet, BotChatMessage, BotChatQuote, BotWorkItem, BotChip, BotDetail, BotError, BotMessageKind, BotPermissionItem, BotReminderItem, BotRunItem, BotSummary } from '../../../shared/bots/personal/chat'
 import { BOT_MODEL_SLOT_KEYS, type BotDefinition, type BotLane, type BotManifest } from '../../../shared/bots/personal/definition'
 import { isPinned, limitOnPick, slotsOf, stuckRowsOf } from '../../../shared/bots/personal/modelSlots'
 import { askFingerprint, filesAsk, filesAskOf, isSpecialAsk, mcpAskTools, type BotAskRequest, type BotEscalationStatus, type BotPermissionRequest } from '../../../shared/bots/personal/escalation'
@@ -13,6 +13,9 @@ import { workModelDetail } from '../../../shared/bots/personal/chips'
 import type { BotJournal } from '../seams'
 import type { BotMcpWhere } from '../mcp/BotMcp'
 import { workWaits, type BotActivationRow, type BotEscalationRow, type BotMessageRow, type BotStore } from '../store/BotStore'
+import { replyApplets } from './replyApplets'
+import { takeToolImages } from './toolImages'
+import type { AppletReference } from '../../../shared/applets'
 
 /**
  * The Bot UI's view of `bots.db` (Bot Phase 1 §5.1.1, §5.7): the chat rows (`bot_messages`), each
@@ -94,8 +97,27 @@ export interface PostInput {
   hidden?: true
 }
 
+/**
+ * What a bot's message shows beside its words, read from where its turn made it (`setReplyParts`): the applets its
+ * thread published (newest first), so the reply shows them as a thread's reply does.
+ */
+export interface BotReplyParts {
+  published(threadId: string): readonly AppletReference[]
+}
+
+/** A row's files and its applets, apart (`BotMessageRow.attachments` keeps both, the files first). */
+function filesOf(row: Pick<BotMessageRow, 'attachments'>): Array<{ name: string; path: string }> {
+  return (row.attachments ?? []).filter((file) => !file.applet).map((file) => ({ name: file.name, path: file.path }))
+}
+
+function appletsOf(row: Pick<BotMessageRow, 'attachments'>): BotChatApplet[] {
+  return (row.attachments ?? []).flatMap((file) => (file.applet ? [file.applet] : []))
+}
+
 /** The chat rows of every bot of a profile, and the summaries built from `bots.db`. */
 export class BotChatProjection {
+  private replyParts: BotReplyParts | undefined
+
   constructor(private readonly options: {
     store: BotStore
     journal?: BotJournal
@@ -116,6 +138,30 @@ export class BotChatProjection {
     return this.options.store
   }
 
+  /** Where a bot's replies find the applets their turns published (the profile's threads). */
+  setReplyParts(parts: BotReplyParts | undefined): void {
+    this.replyParts = parts
+  }
+
+  /**
+   * A bot's message as it is kept: its turn's applet fences as references to what its thread published, and the
+   * pictures a tool handed the activation since its last message, as files. Its journal keeps the words with each applet
+   * named, never an applet's source. Anything else is kept as given.
+   */
+  private shown(input: PostInput): { text: string; journal: string; attachments: NonNullable<BotMessageRow['attachments']> } {
+    const files = input.attachments ?? []
+    if (input.author !== 'bot' || input.kind === 'error' || input.hidden) return { text: input.text, journal: input.text, attachments: [...files] }
+    const parts = this.replyParts
+    const made = input.threadId && parts ? replyApplets(input.text, input.threadId, () => parts.published(input.threadId!)) : undefined
+    // A message of a dispatch (its thread is named) shows what that activation's tools handed it.
+    const images = input.threadId ? takeToolImages(input.activationId) : []
+    return {
+      text: made?.text ?? input.text,
+      journal: made?.journal ?? input.text,
+      attachments: [...files, ...images, ...(made?.applets ?? []).map((applet) => ({ name: applet.reference.title, path: '', applet }))]
+    }
+  }
+
   /**
    * Writes a chat row and its journal row in one transaction (joining the caller's, if any), then
    * emits `bots.message`. A row whose id or request id exists already is returned as it was.
@@ -126,18 +172,19 @@ export class BotChatProjection {
       const existing = this.store.message(id) ?? (input.clientRequestId ? this.store.messageByRequest(input.clientRequestId) : undefined)
       if (existing) return { row: existing, inserted: false }
       const at = this.store.now()
+      const shown = this.shown(input)
       this.store.insertMessage({
         id,
         botId: input.botId,
         at,
         author: input.author,
         kind: input.kind,
-        text: input.text,
+        text: shown.text,
         chips: input.chips ?? [],
         askId: input.askId ?? null,
         error: input.error ?? null,
         activationId: input.activationId ?? null,
-        attachments: input.attachments?.length ? input.attachments : null,
+        attachments: shown.attachments.length ? shown.attachments : null,
         clientRequestId: input.clientRequestId ?? null,
         replyTo: input.replyTo ?? null
       })
@@ -151,13 +198,13 @@ export class BotChatProjection {
         ...(input.threadId ? { threadId: input.threadId } : {}),
         sourceKey: `bm:${id}`,
         who: input.author === 'owner' ? 'owner' : input.kind === 'error' ? 'mousse' : 'bot',
-        text: input.text || (input.error?.text ?? ''),
+        text: shown.journal || (input.error?.text ?? ''),
         json: {
           v: 1,
           kind: input.kind,
           ...(input.askId ? { askId: input.askId } : {}),
           ...(input.chips?.length ? { chips: input.chips } : {}),
-          ...(input.attachments?.length ? { attachments: input.attachments } : {}),
+          ...(filesOf(shown).length ? { attachments: filesOf(shown) } : {}),
           ...(input.error ? { error: input.error } : {}),
           ...(input.replyTo ? { replyTo: input.replyTo } : {})
         }
@@ -200,7 +247,8 @@ export class BotChatProjection {
       ...(escalation ? { ask: this.card(escalation) } : {}),
       ...(row.error ? { error: row.error } : {}),
       ...(row.activationId ? { activationId: row.activationId } : {}),
-      ...(row.attachments?.length ? { attachments: row.attachments } : {}),
+      ...(filesOf(row).length ? { attachments: filesOf(row) } : {}),
+      ...(appletsOf(row).length ? { applets: appletsOf(row) } : {}),
       ...(row.replyTo ? { replyTo: this.quoteOf(row.replyTo) } : {}),
       ...(row.author === 'owner' && row.clientRequestId ? { clientRequestId: row.clientRequestId } : {})
     }
@@ -210,6 +258,7 @@ export class BotChatProjection {
   private quoteOf(messageId: string): BotChatQuote {
     const quoted = this.store.message(messageId)
     if (!quoted) return { id: messageId, author: 'owner', text: '', gone: true }
+    // A message with no words is quoted by its files' and applets' names.
     const text = oneLine(quoted.text || quoted.error?.text || (quoted.attachments?.length ? quoted.attachments.map((file) => file.name).join(', ') : ''), 160)
     return { id: quoted.id, author: quoted.author, text }
   }
@@ -355,7 +404,7 @@ export class BotChatProjection {
       stateText,
       ...(offline ? { waiting: 'internet' as const } : {}),
       ...(error ? { error } : {}),
-      ...(last ? { last: { text: oneLine(last.text || last.error?.text || '', 200), at: last.at, author: last.author } } : {}),
+      ...(last ? { last: { text: oneLine(last.text || last.error?.text || last.attachments?.map((file) => file.name).join(', ') || '', 200), at: last.at, author: last.author } } : {}),
       ...(ended ? { lastOutcome: ended.status === 'done' ? 'ok' as const : ended.status === 'failed' ? 'failed' as const : 'stopped' as const } : {}),
       unread: this.store.unread(definition.id, registry?.readSeq ?? 0),
       createdAt: registry?.createdAt ?? new Date(now).toISOString(),

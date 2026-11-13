@@ -1,10 +1,12 @@
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { ArrowDown, CircleAlert, Loader2, Reply, Shield, X } from '../../lib/icons'
-import type { BotChatMessage, BotChatQuote, BotChip, BotError, BotSummary, BotWorkItem } from '../../../shared/bots/personal/chat'
+import type { BotChatApplet, BotChatMessage, BotChatQuote, BotChip, BotError, BotSummary, BotWorkItem } from '../../../shared/bots/personal/chat'
 import { BOT_COLOUR_HEX, normalizeBotLook } from '../../../shared/bots/personal/look'
 import { botFaceState, useBotsStore } from '../../stores/botsStore'
 import { openProvider, openSettingsSection } from '../../lib/settingsNavigation'
-import { MarkdownPreview } from '../editors/MarkdownPreview'
+import { Markdown, type MarkdownImages } from '../../chat/components/agent-elements/markdown'
+import { CopyButton } from '../../chat/components/agent-elements/copy-button'
+import { ReadAloudButton } from '../../readAloud/ReadAloudButton'
 import { BotFace } from './face/BotFace'
 import { BotChips, BotChipView } from './BotChips'
 import { BotAsk } from '../asks/AskCard'
@@ -18,6 +20,7 @@ import { botFullTime, botGroupTime, botMessageLabel, placeMessages } from './mes
 import { ImageGalleryProvider } from '../../chat/components/agent-elements/image-gallery'
 import { BotImageFiles, BotMarkdownImage, BotOtherFiles, botFileImageUrl } from './BotImages'
 import { botChatImages } from './imageSources'
+import { BotAppletPane, BotMessageApplets } from './BotApplets'
 
 const EMPTY: BotChatMessage[] = []
 const NO_FILES: AttachedFile[] = []
@@ -27,6 +30,11 @@ const NO_WORK: BotWorkItem[] = []
 /** The chat's turn waits for the internet (its work, if any, says so on its own line). */
 const OFFLINE_TEXT = 'Waiting for internet'
 const ignore = () => {}
+/**
+ * A bot's messages are drawn by the thread's own Markdown (tables, code with Copy and Wrap, math, diagrams, links), with
+ * the chat's image rule: a reply can be shaped by what the bot read on the web, so a web picture never loads.
+ */
+const BOT_IMAGES: MarkdownImages = { Image: BotMarkdownImage }
 
 /** The one red line of a bot's error, with its one way out (bot-ui §4.9). */
 export function BotErrorLine({ error, onAction }: { error: BotError; onAction(action: NonNullable<BotError['action']>): void }) {
@@ -165,11 +173,14 @@ const OwnerMessage = memo(function OwnerMessage({ botId, message, pending, botNa
   return <article className={`chat-participant-message from-person bot-you${starts ? ' is-group-start' : ''}${quoted ? ' is-quoted' : ''}${pending ? ' is-pending' : ''}`} data-message-id={message.id} title={pending ? undefined : botFullTime(message.at)}>
     {quoted && <BotReplyQuote botId={botId} quote={message.replyTo!} botName={botName} />}
     <div className="bot-you-line">
-      {!pending && onReply && <ReplyButton onReply={() => onReply(message)} />}
+      {!pending && onReply && <span className="bot-you-actions">
+        {message.text && <CopyButton text={message.text} />}
+        <ReplyButton onReply={() => onReply(message)} />
+      </span>}
       {/* As in a messaging app: the pictures first, the words under them, then any other files. */}
       <div className="bot-you-content">
         {!!message.attachments?.length && <BotImageFiles files={message.attachments} />}
-        {message.text && <MarkdownPreview value={message.text} className="bot-you-bubble chat-message-markdown chat-markdown" renderImage={BotMarkdownImage} />}
+        {message.text && <Markdown content={message.text} className="bot-you-bubble bot-markdown" images={BOT_IMAGES} />}
         {!!message.attachments?.length && <BotOtherFiles files={message.attachments} />}
       </div>
     </div>
@@ -185,7 +196,7 @@ function GroupTime({ message, pending }: { message: BotChatMessage; pending: boo
 
 /** A bot message uses only the bot's id, name and look, so a change of its state does not render it again. */
 const sameBotMessage = (a: BotMessageProps, b: BotMessageProps) => a.message === b.message && a.onAction === b.onAction && a.browser === b.browser &&
-  a.quote === b.quote && a.starts === b.starts && a.onReply === b.onReply &&
+  a.quote === b.quote && a.starts === b.starts && a.onReply === b.onReply && a.onApplet === b.onApplet &&
   a.bot.id === b.bot.id && a.bot.name === b.bot.name && a.bot.look.colour === b.bot.look.colour && a.bot.look.accessory === b.bot.look.accessory
 
 /**
@@ -193,9 +204,9 @@ const sameBotMessage = (a: BotMessageProps, b: BotMessageProps) => a.message ===
  * message this one answers (it is not the one right above). `starts`: the first of its group, with the face and name;
  * the rest of the group leave the face's place empty, with Reply in it on hover.
  */
-interface BotMessageProps { bot: BotSummary; message: BotChatMessage; onAction(action: NonNullable<BotError['action']>): void; browser?: ReactNode; quote: boolean; starts: boolean; onReply(message: BotChatMessage): void }
+interface BotMessageProps { bot: BotSummary; message: BotChatMessage; onAction(action: NonNullable<BotError['action']>): void; browser?: ReactNode; quote: boolean; starts: boolean; onReply(message: BotChatMessage): void; onApplet(applet: BotChatApplet): void }
 
-const BotMessage = memo(function BotMessage({ bot, message, onAction, browser, quote, starts, onReply }: BotMessageProps) {
+const BotMessage = memo(function BotMessage({ bot, message, onAction, browser, quote, starts, onReply, onApplet }: BotMessageProps) {
   const store = useBotsStore.getState
   const quoted = quote && message.replyTo
   const label = botMessageLabel(message)
@@ -208,9 +219,15 @@ const BotMessage = memo(function BotMessage({ bot, message, onAction, browser, q
       {starts && <div className="chat-message-meta"><strong>{bot.name}</strong>{label && <span className="bot-message-label">{label}</span>}<ReplyButton onReply={() => onReply(message)} /></div>}
       {!starts && label && <span className="bot-message-label is-own-line">{label}</span>}
       {quoted && <BotReplyQuote botId={bot.id} quote={message.replyTo!} botName={bot.name} />}
-      {message.text && <MarkdownPreview value={message.text} className="chat-message-markdown chat-markdown" renderImage={BotMarkdownImage} />}
+      {message.text && <Markdown content={message.text} className="bot-markdown" images={BOT_IMAGES} />}
+      {!!message.applets?.length && <BotMessageApplets botId={bot.id} applets={message.applets} onOpen={onApplet} />}
       {!!message.attachments?.length && <div className="bot-message-files"><BotImageFiles files={message.attachments} /><BotOtherFiles files={message.attachments} /></div>}
       <BotChips chips={message.chips} />
+      {/* As under a thread's reply: read it aloud, copy it as written. */}
+      {message.text && <div className="bot-message-actions">
+        <ReadAloudButton speechKey={`bot:${message.id}`} markdown={message.text} />
+        <CopyButton text={message.text} />
+      </div>}
       {browser}
       {message.ask && <BotAsk botName={bot.name} ask={message.ask} fromRun={message.kind === 'notice'}
         onAnswer={(answer) => store().answer(bot.id, message.ask!.askId, answer)}
@@ -236,6 +253,9 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   const attachments = useBotsStore((s) => s.attachments[bot.id])
   const replying = useBotsStore((s) => s.replyingTo[bot.id])
   const aboutOpen = useBotsStore((s) => s.aboutOpen)
+  // An applet opened beside the chat, from its name.
+  const [appletOpen, setAppletOpen] = useState<BotChatApplet | null>(null)
+  useEffect(() => { setAppletOpen(null) }, [bot.id])
   // Another bot's error stays with that bot's chat.
   const error = useBotsStore((s) => (s.errorBotId === bot.id ? s.error : null))
   const store = useBotsStore.getState
@@ -329,7 +349,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
 
   return <ImageGalleryProvider images={chatImages}>
     {/* The bot's colour tints the quotes of its messages. */}
-    <section className="chat-conversation bot-conversation" style={{ '--bot-colour': BOT_COLOUR_HEX[normalizeBotLook(bot.look).colour] } as CSSProperties}>
+    <section className="chat-conversation bot-conversation" data-applet-conversation style={{ '--bot-colour': BOT_COLOUR_HEX[normalizeBotLook(bot.look).colour] } as CSSProperties}>
       <header className="chat-conversation-header">
         <button type="button" className="bot-header-about" aria-label={`About ${bot.name}`} onClick={() => useBotsStore.setState({ aboutOpen: !aboutOpen })}>
           <BotFace look={bot.look} state={botFaceState(bot, happy)} size={32} view="head" />
@@ -337,7 +357,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
         </button>
         <BotMenu bot={bot} />
       </header>
-      <div className="chat-transcript" ref={transcript} role="log" aria-label={`${bot.name} messages`} onScroll={(event) => {
+      <div className="chat-transcript" data-applet-scroller ref={transcript} role="log" aria-label={`${bot.name} messages`} onScroll={(event) => {
         const element = event.currentTarget
         anchor.current.atEnd = element.scrollHeight - element.scrollTop - element.clientHeight < 40
         anchor.current.height = element.scrollHeight
@@ -360,7 +380,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
             {place.day && <div className="bot-day" role="separator" aria-label={place.day}><span>{place.day}</span></div>}
             {message.author === 'owner'
               ? <OwnerMessage botId={bot.id} message={message} pending={sending} botName={bot.name} quote={quote} starts={place.starts} onReply={sending ? undefined : reply} />
-              : <BotMessage bot={bot} message={message} onAction={act} browser={message.id === previewOn ? preview : undefined} quote={quote} starts={place.starts} onReply={reply} />}
+              : <BotMessage bot={bot} message={message} onAction={act} browser={message.id === previewOn ? preview : undefined} quote={quote} starts={place.starts} onReply={reply} onApplet={setAppletOpen} />}
             {place.ends && <GroupTime message={message} pending={sending} />}
           </Fragment>
         })}
@@ -371,7 +391,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
         {preview && !previewOn && <div className="bot-browser-live">{preview}</div>}
         {bot.state === 'paused' && <p className="bot-paused-line" role="status">{bot.stateText.startsWith('Paused') ? bot.stateText : 'Paused'}. <button type="button" onClick={() => void store().resume(bot.id)}>Resume</button></p>}
       </div>
-      <div className="chat-input-area bot-input-area">
+      <div className="chat-input-area bot-input-area" data-applet-composer>
         {unseen && <button type="button" className="bot-jump" onClick={toEnd}><ArrowDown size={14} aria-hidden />New message</button>}
         {!!pinnedOff.length && <div className="bot-pins" role="status" aria-label="Waiting on you">{pinnedOff.map((item) => <PinnedLine key={item.kind} botId={bot.id} item={item} />)}</div>}
         <ComposerNoticeProvider>
@@ -404,6 +424,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
       </div>
     </section>
     {paneOpen && browser && <BotBrowserPane bot={bot} view={browser} />}
+    {appletOpen && <BotAppletPane botId={bot.id} applet={appletOpen} onClose={() => setAppletOpen(null)} />}
     {aboutOpen && <BotAboutPanel bot={bot} />}
   </ImageGalleryProvider>
 }

@@ -1,13 +1,11 @@
 import { createContext, useContext, type ComponentType, type ReactNode } from "react";
 import {
-  ClipboardList,
-  FilePlus,
-  FileText,
-  FolderSearch,
-  Globe,
-  Pencil,
-  Plug,
-  Search,
+  Eye,
+  RowEdit,
+  RowSearch,
+  RowSubagent,
+  RowTodo,
+  RowWeb,
   Terminal,
   Wrench,
 } from "../../../../lib/icons";
@@ -33,17 +31,20 @@ export type ToolIconState = "running" | "done" | "failed";
 const TOOL_ICONS: Record<string, IconType> = {
   "tool-Bash": Terminal,
   "tool-BashOutput": Terminal,
-  "tool-Read": FileText,
-  "tool-Edit": Pencil,
-  "tool-MultiEdit": Pencil,
-  "tool-NotebookEdit": Pencil,
-  "tool-Write": FilePlus,
-  "tool-Grep": Search,
-  "tool-Glob": FolderSearch,
-  "tool-WebFetch": Globe,
-  "tool-WebSearch": Globe,
-  "tool-TodoWrite": ClipboardList,
-  "tool-ToolSearch": Plug,
+  "tool-Read": Eye,
+  "tool-Edit": RowEdit,
+  "tool-MultiEdit": RowEdit,
+  "tool-NotebookEdit": RowEdit,
+  "tool-Write": RowEdit,
+  "tool-Grep": RowSearch,
+  "tool-Glob": RowSearch,
+  "tool-WebFetch": RowWeb,
+  "tool-WebSearch": RowWeb,
+  "tool-TodoWrite": RowTodo,
+  "tool-ToolSearch": Wrench,
+  "tool-Task": RowSubagent,
+  "tool-Agent": RowSubagent,
+  "tool-Subagent": RowSubagent,
 };
 
 /** The icon for a tool part's type (`tool-Bash`, `tool-mcp__server__name`). */
@@ -51,7 +52,7 @@ export function toolIconFor(type: string | undefined): IconType {
   if (!type) return Wrench;
   const own = TOOL_ICONS[type];
   if (own) return own;
-  if (parseMcpToolType(type)) return Plug;
+  if (parseMcpToolType(type)) return Wrench;
   return toolRegistry[type]?.icon ?? Wrench;
 }
 

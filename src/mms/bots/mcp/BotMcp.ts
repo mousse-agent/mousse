@@ -10,6 +10,7 @@ import { logWarn } from '../../log/diag'
 import { userMcpOutcome } from '../../run/mcp/appTools/registry'
 import type { ToolOutcome } from '../../run/mcp/appTools/types'
 import type { RelayCatalog } from '../../run/mcp/relay/catalog'
+import { keepToolImages } from '../chat/toolImages'
 
 /**
  * A personal bot's use of its owner's MCP servers (docs/bots.md, "Use your MCP tools"). Every call a bot makes goes
@@ -332,7 +333,7 @@ export class BotMcp implements BotMcpHost {
    * sign-in, and its result is framed as data from the server (`images`: the turn's model can see images). A failure is
    * a plain result, never a throw; its raw text goes to the owner's log only.
    */
-  async call(tool: BotMcpTool, args: Record<string, unknown>, signal: AbortSignal, options: { images?: boolean } = {}): Promise<ToolOutcome> {
+  async call(tool: BotMcpTool, args: Record<string, unknown>, signal: AbortSignal, options: { images?: boolean; keepImages?: (images: NonNullable<ToolOutcome['images']>) => string | undefined } = {}): Promise<ToolOutcome> {
     if (signal.aborted) return { text: `The call to ${tool.serverName} was stopped.`, isError: true }
     if (!this.deps.enabled()) return { text: `MCP is turned off in Mousse's Settings now, so ${tool.serverName}'s tools can't be used. Carry on without it, and say so in your report.`, isError: true }
     const callMs = this.deps.callMs ?? BOT_MCP_CALL_MS
@@ -349,7 +350,12 @@ export class BotMcp implements BotMcpHost {
           .then(resolve, reject)
           .finally(() => both.removeEventListener('abort', stop))
       })
-      return framedResult(tool.serverName, tool.tool, userMcpOutcome(result), options)
+      const outcome = userMcpOutcome(result)
+      // Its pictures are the owner's to see too, whatever the bot's model sees (`keepToolImages`).
+      const kept = outcome.images?.length ? options.keepImages?.(outcome.images) : undefined
+      const framed = framedResult(tool.serverName, tool.tool, outcome, options)
+      return kept ? { ...framed, text: `${framed.text}
+${kept}` } : framed
     } catch (error) {
       const failure = timeout.signal.aborted && !signal.aborted ? timeout.signal.reason : error
       if (!signal.aborted) logWarn('BotMcp', `A bot's call of ${tool.tool} on "${tool.serverName}" failed: ${redactSensitiveText(failure instanceof Error ? failure.message : String(failure)).slice(0, 2000)}`)
@@ -427,7 +433,8 @@ export function mcpAskFor(servers: readonly BotMcpServer[], named: { serverId?: 
  * granted pair the turn lacks is checked, so the owner is asked as for any permission.
  */
 export async function callForBot(input: {
-  bot: Pick<BotAuthority, 'check' | 'mcpTools' | 'time'>
+  /** `activationId` and `workspace`: where a result's pictures are kept for the owner (`keepToolImages`); absent: nowhere. */
+  bot: Pick<BotAuthority, 'check' | 'mcpTools' | 'time'> & Partial<Pick<BotAuthority, 'activationId' | 'workspace'>>
   /** The name the runtime called: the relay's on Claude Code and Codex, the provider name on Pi. */
   name: string
   args: Record<string, unknown>
@@ -444,5 +451,9 @@ export async function callForBot(input: {
   const decided = input.bot.check({ kind: 'mcp', server: target.server, tool: target.tool, serverName: target.serverName, args: input.args })
   if (!decided.ok) return { text: checkMessage(decided), isError: true }
   if (!offered) return { text: `${target.serverName}'s tools are allowed now, but this turn started without them: you get them when it ends.`, isError: true }
-  return input.mcp.call(offered, input.args, AbortSignal.any([input.signal, input.bot.time.signal]), { images: input.images === true })
+  const { activationId, workspace } = input.bot
+  return input.mcp.call(offered, input.args, AbortSignal.any([input.signal, input.bot.time.signal]), {
+    images: input.images === true,
+    keepImages: (images) => keepToolImages({ activationId, filesFolder: workspace?.files, source: `${offered.serverName}-${offered.tool}`, images })
+  })
 }
