@@ -1,5 +1,4 @@
-import { MAX_BOT_BROWSER_SENT, type BotBrowserAck, type BotBrowserInput, type BotBrowserSent } from '../../shared/bots/personal/browser'
-import { botBrowserInputProblem } from '../../shared/bots/personal/browserInput'
+import { MAX_WATCHED_BROWSER_SENT, watchedBrowserInputProblem, type WatchedBrowserAck, type WatchedBrowserInput, type WatchedBrowserSent } from '../../shared/browser/watched'
 
 /**
  * A view's end of its hold's input channel: every input the person makes gets the next number and the
@@ -29,13 +28,18 @@ import { botBrowserInputProblem } from '../../shared/bots/personal/browserInput'
 
 export type ChannelHealth = 'ok' | 'sending' | 'unreachable'
 
+/** Whether this window runs on a Mac: its Command key is the page's Control key elsewhere. */
+export function viewerPlatform(): 'mac' | 'other' {
+  return typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent) ? 'mac' : 'other'
+}
+
 export interface ChannelOptions {
   /** Sends a batch; resolves with the host's answers. */
-  send(inputs: BotBrowserSent[]): Promise<{ acks: BotBrowserAck[]; lastSeq: number }>
+  send(inputs: WatchedBrowserSent[]): Promise<{ acks: WatchedBrowserAck[]; lastSeq: number }>
   /** The health changed. */
   health?(health: ChannelHealth): void
   /** An input was answered (its seq, the answer, and the input as sent). */
-  answered?(ack: BotBrowserAck, input: BotBrowserInput): void
+  answered?(ack: WatchedBrowserAck, input: WatchedBrowserInput): void
   /** The host's last number (a hold picked up again): the count goes on after it. */
   lastSeq?: number
   now?(): number
@@ -64,7 +68,7 @@ interface Entry {
   seq: number
   picture?: number
   /** The person's input; none for a number only skipped (a gap the host reported). */
-  input?: BotBrowserInput
+  input?: WatchedBrowserInput
   /** Goes as a skip: given up on, or a hole to fill. */
   skip?: boolean
   /** When the person made it. */
@@ -78,8 +82,8 @@ interface Entry {
   backoff: number
   /** The person was told already (it was dropped): only its skip waits for the host. */
   settled?: boolean
-  resolve(ack: BotBrowserAck): void
-  done: Promise<BotBrowserAck>
+  resolve(ack: WatchedBrowserAck): void
+  done: Promise<WatchedBrowserAck>
 }
 
 const browserTimer = (fn: () => void, ms: number): { clear(): void } => {
@@ -88,35 +92,35 @@ const browserTimer = (fn: () => void, ms: number): { clear(): void } => {
 }
 
 /** Whether `next` can merge into `last` (both unsent): a move into a move with the same buttons, a wheel turn into a wheel turn. */
-function mergeable(last: BotBrowserInput, next: BotBrowserInput): boolean {
+function mergeable(last: WatchedBrowserInput, next: WatchedBrowserInput): boolean {
   if (last.kind === 'pointer' && next.kind === 'pointer') return last.type === 'move' && next.type === 'move' && last.buttons === next.buttons && (last.modifiers ?? 0) === (next.modifiers ?? 0)
   if (last.kind === 'scroll' && next.kind === 'scroll') return (last.modifiers ?? 0) === (next.modifiers ?? 0)
   if (last.kind === 'compose' && next.kind === 'compose') return true
   return false
 }
 
-function merged(last: BotBrowserInput, next: BotBrowserInput): BotBrowserInput {
+function merged(last: WatchedBrowserInput, next: WatchedBrowserInput): WatchedBrowserInput {
   // Wheel turns add up, never dropped; a move or a composition is the latest.
   if (last.kind === 'scroll' && next.kind === 'scroll') return { ...next, deltaX: last.deltaX + next.deltaX, deltaY: last.deltaY + next.deltaY }
   return next
 }
 
 /** What lets go of something held, or answers the page: never held back. */
-function lettingGo(input: BotBrowserInput): boolean {
+function lettingGo(input: WatchedBrowserInput): boolean {
   if (input.kind === 'pointer') return input.type === 'up'
   if (input.kind === 'keys') return input.type === 'up'
   return input.kind === 'release' || input.kind === 'dialog' || input.kind === 'files' || (input.kind === 'compose' && !input.text)
 }
 
 /** What went down (a key, a button), so its going up can be matched. */
-function heldKey(input: BotBrowserInput): string | undefined {
+function heldKey(input: WatchedBrowserInput): string | undefined {
   if (input.kind === 'keys') return `key:${input.code || input.key}`
   if (input.kind === 'pointer' && input.type !== 'move') return `button:${input.button}`
   return undefined
 }
 
 /** A refusal that did not use its number: the input goes again. */
-const unused = (ack: BotBrowserAck) => ack.status === 'refused' && (ack.reason === 'gap' || ack.reason === 'busy')
+const unused = (ack: WatchedBrowserAck) => ack.status === 'refused' && (ack.reason === 'gap' || ack.reason === 'busy')
 
 /** The service will never take this call as it is (malformed or too large), as opposed to not reaching it. */
 function neverTaken(cause: unknown): boolean {
@@ -124,7 +128,7 @@ function neverTaken(cause: unknown): boolean {
   return ['invalid_params', 'invalid_action', 'platform_invalid_params', 'platform_params_too_large', 'unknown_field'].includes(code)
 }
 
-export class BotBrowserChannel {
+export class BrowserInputChannel {
   private next: number
   private readonly entries: Entry[] = []
   private flushTimer: { clear(): void } | undefined
@@ -158,10 +162,10 @@ export class BotBrowserChannel {
   }
 
   /** The person's input, made on picture `picture`: numbered (or merged into the one before it), and on its way; or refused here. */
-  push(input: BotBrowserInput, picture?: number): { seq: number; done: Promise<BotBrowserAck> } {
+  push(input: WatchedBrowserInput, picture?: number): { seq: number; done: Promise<WatchedBrowserAck> } {
     if (this.closed) return this.refuseHere(input, { status: 'refused', reason: 'not-held', text: 'You don\'t hold the browser now' }, false)
     // What the service never takes never gets a number, so it never holds up what comes after it.
-    const problem = botBrowserInputProblem(input)
+    const problem = watchedBrowserInputProblem(input)
     if (problem) return this.refuseHere(input, { status: 'refused', reason: 'invalid', text: problem })
     const held = heldKey(input)
     if (lettingGo(input)) {
@@ -225,15 +229,15 @@ export class BotBrowserChannel {
     this.setHealth('ok')
   }
 
-  private entry(seq: number, input: BotBrowserInput | undefined, picture?: number): Entry {
-    let resolve!: (ack: BotBrowserAck) => void
-    const done = new Promise<BotBrowserAck>((settle) => { resolve = settle })
+  private entry(seq: number, input: WatchedBrowserInput | undefined, picture?: number): Entry {
+    let resolve!: (ack: WatchedBrowserAck) => void
+    const done = new Promise<WatchedBrowserAck>((settle) => { resolve = settle })
     return { seq, at: this.now(), sent: false, notBefore: 0, backoff: 0, resolve, done, ...(input ? { input } : { skip: true, settled: true }), ...(picture !== undefined ? { picture } : {}) }
   }
 
   /** An input refused here, before it got a number: answered at once (`tell`: the person hears of it). */
-  private refuseHere(input: BotBrowserInput, answer: Omit<BotBrowserAck, 'seq'>, tell = true): { seq: number; done: Promise<BotBrowserAck> } {
-    const ack: BotBrowserAck = { seq: --this.localSeq, ...answer }
+  private refuseHere(input: WatchedBrowserInput, answer: Omit<WatchedBrowserAck, 'seq'>, tell = true): { seq: number; done: Promise<WatchedBrowserAck> } {
+    const ack: WatchedBrowserAck = { seq: --this.localSeq, ...answer }
     if (tell) this.options.answered?.(ack, input)
     return { seq: ack.seq, done: Promise.resolve(ack) }
   }
@@ -244,7 +248,7 @@ export class BotBrowserChannel {
   }
 
   /** The person hears what became of their input, once. */
-  private settle(entry: Entry, ack: BotBrowserAck): void {
+  private settle(entry: Entry, ack: WatchedBrowserAck): void {
     if (entry.settled || !entry.input) return
     entry.settled = true
     entry.resolve(ack)
@@ -252,13 +256,13 @@ export class BotBrowserChannel {
   }
 
   /** Gives up on an input the host has not taken: the person hears it, and its number goes as a skip. */
-  private dropToSkip(entry: Entry, ack: BotBrowserAck): void {
+  private dropToSkip(entry: Entry, ack: WatchedBrowserAck): void {
     this.settle(entry, ack)
     entry.skip = true
     entry.sent = false
   }
 
-  private schedule(input: BotBrowserInput): void {
+  private schedule(input: WatchedBrowserInput): void {
     const waits = (input.kind === 'pointer' && input.type === 'move') || input.kind === 'scroll'
     if (this.flushTimer && waits) return
     this.flushTimer?.clear()
@@ -308,7 +312,7 @@ export class BotBrowserChannel {
         continue
       }
       batch.push(entry)
-      if (batch.length >= MAX_BOT_BROWSER_SENT) go()
+      if (batch.length >= MAX_WATCHED_BROWSER_SENT) go()
     }
     go()
   }
@@ -318,7 +322,7 @@ export class BotBrowserChannel {
     this.inFlight.add(id)
     this.lastCallAt = this.now()
     for (const entry of batch) entry.sent = true
-    const sent: BotBrowserSent[] = batch.map((entry) => entry.skip || !entry.input
+    const sent: WatchedBrowserSent[] = batch.map((entry) => entry.skip || !entry.input
       ? { seq: entry.seq, skip: true }
       : { seq: entry.seq, ...(entry.picture !== undefined ? { picture: entry.picture } : {}), input: entry.input })
     void this.options.send(sent).then(({ acks, lastSeq }) => {

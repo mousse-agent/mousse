@@ -1,8 +1,8 @@
-import type { BotBrowserAck, BotBrowserRefusal } from '../../../shared/bots/personal/browser'
+import type { WatchedBrowserAck, WatchedBrowserRefusal } from '../../../shared/browser/watched'
 
 /**
  * One hold's input channel on the host: each numbered input is applied once, in number order, one at
- * a time, and answered (`BotBrowserAck`), as a remote terminal's typing is (docs/net/threat-model.md,
+ * a time, and answered (`WatchedBrowserAck`), as a remote terminal's typing is (docs/net/threat-model.md,
  * "Terminals").
  *
  * - **In order.** An input that comes before the one ahead of it waits for it, at most `gapWaitMs`
@@ -21,7 +21,7 @@ import type { BotBrowserAck, BotBrowserRefusal } from '../../../shared/bots/pers
  */
 export interface InputSequencerOptions<T> {
   /** Applies one input; a rejection is answered as `failed`. */
-  apply(item: T, seq: number): Promise<Omit<BotBrowserAck, 'seq'>>
+  apply(item: T, seq: number): Promise<Omit<WatchedBrowserAck, 'seq'>>
   /** The number taken last (a channel picked up again goes on from there). */
   lastSeq?: number
   gapWaitMs?: number
@@ -32,8 +32,8 @@ export interface InputSequencerOptions<T> {
 }
 
 interface Waiting {
-  promise: Promise<BotBrowserAck>
-  resolve(ack: BotBrowserAck): void
+  promise: Promise<WatchedBrowserAck>
+  resolve(ack: WatchedBrowserAck): void
 }
 
 export const GAP_WAIT_MS = 250
@@ -48,10 +48,10 @@ export class InputSequencer<T> {
   /** The number taken last: applied, refused, or being applied. */
   private last: number
   private readonly waiting = new Map<number, Waiting & { item: T }>()
-  private readonly answers = new Map<number, BotBrowserAck>()
-  private current: { seq: number; promise: Promise<BotBrowserAck> } | undefined
+  private readonly answers = new Map<number, WatchedBrowserAck>()
+  private current: { seq: number; promise: Promise<WatchedBrowserAck> } | undefined
   private gap: { clear(): void } | undefined
-  private closed: { reason: BotBrowserRefusal; text?: string } | undefined
+  private closed: { reason: WatchedBrowserRefusal; text?: string } | undefined
   private readonly gapWaitMs: number
   private readonly remember: number
   private readonly maxWaiting: number
@@ -71,15 +71,15 @@ export class InputSequencer<T> {
   }
 
   /** Takes input `seq`; answers once it is applied or refused, or at once for a duplicate. */
-  submit(seq: number, item: T): Promise<BotBrowserAck> {
+  submit(seq: number, item: T): Promise<WatchedBrowserAck> {
     if (this.current?.seq === seq) return this.current.promise
     if (seq <= this.last) return Promise.resolve(this.duplicate(seq))
     const known = this.waiting.get(seq)
     if (known) return known.promise
     if (this.closed) return Promise.resolve({ seq, status: 'refused', reason: this.closed.reason, ...(this.closed.text ? { text: this.closed.text } : {}) })
     if (this.waiting.size >= this.maxWaiting) return Promise.resolve({ seq, status: 'refused', reason: 'busy', text: 'Too much at once' })
-    let resolve!: (ack: BotBrowserAck) => void
-    const promise = new Promise<BotBrowserAck>((done) => { resolve = done })
+    let resolve!: (ack: WatchedBrowserAck) => void
+    const promise = new Promise<WatchedBrowserAck>((done) => { resolve = done })
     this.waiting.set(seq, { item, promise, resolve })
     this.pump()
     return promise
@@ -89,7 +89,7 @@ export class InputSequencer<T> {
    * The hold ended: what waits, and what comes later, is refused with `reason`. Resolves once the input
    * being applied (if any) is done, so nothing of this hold reaches the page after.
    */
-  async close(reason: BotBrowserRefusal, text?: string): Promise<void> {
+  async close(reason: WatchedBrowserRefusal, text?: string): Promise<void> {
     this.closed = { reason, ...(text ? { text } : {}) }
     this.gap?.clear()
     this.gap = undefined
@@ -105,7 +105,7 @@ export class InputSequencer<T> {
     while (this.current) await this.current.promise
   }
 
-  private duplicate(seq: number): BotBrowserAck {
+  private duplicate(seq: number): WatchedBrowserAck {
     const answered = this.answers.get(seq)
     // What it was answered first, so a resend after a lost answer learns it; a refusal keeps its reason.
     return answered?.status === 'refused'
@@ -126,8 +126,8 @@ export class InputSequencer<T> {
     this.waiting.delete(seq)
     this.last = seq
     const promise = this.options.apply(next.item, seq).then(
-      (ack): BotBrowserAck => ({ ...ack, seq }),
-      (error: unknown): BotBrowserAck => ({ seq, status: 'refused', reason: 'failed', text: error instanceof Error ? error.message : String(error) })
+      (ack): WatchedBrowserAck => ({ ...ack, seq }),
+      (error: unknown): WatchedBrowserAck => ({ seq, status: 'refused', reason: 'failed', text: error instanceof Error ? error.message : String(error) })
     )
     this.current = { seq, promise }
     void promise.then((ack) => {

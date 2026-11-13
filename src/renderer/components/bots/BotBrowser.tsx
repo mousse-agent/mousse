@@ -1,14 +1,14 @@
-import { useEffect, useRef, useState, type MouseEvent, type PointerEvent } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ArrowLeft, ArrowRight, Globe, Maximize, RefreshCw, X } from '../../lib/icons'
 import type { BotSummary } from '../../../shared/bots/personal/chat'
 import { BOT_BROWSER_PANE_WATCH, BOT_BROWSER_PREVIEW_WATCH, type BotBrowserDialog, type BotBrowserInput, type BotBrowserView } from '../../../shared/bots/personal/browser'
 import { browserProblemForPerson } from '../../../shared/browser/navigation'
 import { useBotBrowserStore, useBotBrowserStream, useBotBrowserWatch, type BotBrowserStream } from '../../stores/botBrowserStore'
-import type { ChannelHealth } from '../../stores/botBrowserChannel'
+import type { ChannelHealth } from '../../stores/browserInputChannel'
 import { useAppStore } from '../../stores/appStore'
 import { localDeviceName } from '../sideCard/deviceMenu'
-import { AgentCursor } from '../browser/AgentCursor'
-import { useBotBrowserInput } from './useBotBrowserInput'
+import { WatchedBrowserFrame } from '../browser/WatchedBrowserFrame'
+import { useBrowserInput } from '../browser/useBrowserInput'
 import './botBrowser.css'
 
 /**
@@ -80,36 +80,6 @@ function hostOf(url: string | undefined): string {
   }
 }
 
-function frameSrc(view: BotBrowserView): string | undefined {
-  return view.frame ? `data:${view.frame.mimeType};base64,${view.frame.data}` : undefined
-}
-
-/** The picture of the bot's tab at its page's shape, with the agent cursor over it. */
-function BrowserFrame({ bot, view, children, className, ...handlers }: {
-  bot: BotSummary
-  view: BotBrowserView
-  children?: React.ReactNode
-  className?: string
-  onPointerDown?(event: PointerEvent<HTMLDivElement>): void
-  onPointerMove?(event: PointerEvent<HTMLDivElement>): void
-  onPointerUp?(event: PointerEvent<HTMLDivElement>): void
-  onPointerCancel?(event: PointerEvent<HTMLDivElement>): void
-  onContextMenu?(event: MouseEvent<HTMLDivElement>): void
-  frameRef?: React.Ref<HTMLDivElement>
-}) {
-  const src = frameSrc(view)
-  const viewport = view.frame?.viewport ?? { width: 16, height: 10 }
-  const { frameRef, ...events } = handlers
-  return <div ref={frameRef} className={`bot-browser-frame${className ? ` ${className}` : ''}`} style={{ aspectRatio: `${viewport.width} / ${viewport.height}` }} {...events}>
-    {src
-      ? <img src={src} alt={view.tab?.title || `${bot.name}'s browser`} draggable={false} />
-      : <div className="bot-browser-frame-empty">{!view.setup && <Globe size={22} aria-hidden />}</div>}
-    {view.open && <AgentCursor cursor={view.cursor} />}
-    {view.setup && <div className="bot-browser-closed" role="status"><p>Setting up the browser on this computer{view.setup.percent !== undefined ? ` · ${view.setup.percent}%` : '…'}</p></div>}
-    {children}
-  </div>
-}
-
 /** The small live preview in a reply; hovering shows Expand, which opens the split view. Watched only while on screen. */
 export function BotBrowserPreview({ bot, view }: { bot: BotSummary; view: BotBrowserView }) {
   const host = hostOf(view.tab?.url)
@@ -121,10 +91,10 @@ export function BotBrowserPreview({ bot, view }: { bot: BotSummary; view: BotBro
   const now = useNow(Boolean(view.open && stream && !stream.live))
   const status = browserStatus(view, stream, bot.name, now)
   return <figure ref={figure} className={`bot-browser-preview${status.live && !status.attention ? ' is-live' : ''}${view.open && status.attention ? ' is-stale' : ''}`} aria-label={`${bot.name}'s browser`}>
-    <BrowserFrame bot={bot} view={view}>
+    <WatchedBrowserFrame label={`${bot.name}'s browser`} view={view}>
       <button type="button" className="bot-browser-expand" aria-label={`Expand ${bot.name}'s browser`} title="Expand"
         onClick={() => useBotBrowserStore.getState().openPane(bot.id)}><Maximize size={14} /></button>
-    </BrowserFrame>
+    </WatchedBrowserFrame>
     <figcaption>
       <span className="bot-browser-dot" aria-hidden />
       <span className="bot-browser-title">{view.tab?.title || host || 'Browser'}</span>
@@ -238,7 +208,11 @@ export function BotBrowserPane({ bot, view }: { bot: BotSummary; view: BotBrowse
   const now = useNow(Boolean(view.open && stream && !stream.live) || fresh)
   const status = browserStatus(view, stream, bot.name, now)
   const quiet = view.open && !status.live && Boolean(status.detail)
-  const input = useBotBrowserInput({ botId: bot.id, owner, view, frame, keys })
+  const input = useBrowserInput({
+    owner, view, frame, keys,
+    send: (entry, picture) => store().send(bot.id, entry, picture),
+    note: (text) => useBotBrowserStore.setState((state) => ({ inputNote: { ...state.inputNote, [bot.id]: { text, at: Date.now() } } }))
+  })
   // The browser runs on this computer: it is named as the app names this computer everywhere.
   const computer = useAppStore((state) => localDeviceName(state.appInfo?.deviceName))
   const said = owner ? inputLine(health, note, computer, now) : undefined
@@ -270,7 +244,7 @@ export function BotBrowserPane({ bot, view }: { bot: BotSummary; view: BotBrowse
       <button type="button" aria-label="Close the browser view" title="Close" onClick={() => store().closePane()}><X size={15} /></button>
     </header>
     <div className="bot-browser-stage" ref={stage}>
-      <BrowserFrame bot={bot} view={view} frameRef={frame} className={owner ? 'is-held' : undefined} {...input.frameHandlers}>
+      <WatchedBrowserFrame label={`${bot.name}'s browser`} view={view} frameRef={frame} className={owner ? 'is-held' : undefined} {...input.frameHandlers}>
         {input.marks.map((mark) => <span key={mark.seq} className={`bot-browser-mark is-${mark.state}`} style={{ left: `${mark.left}%`, top: `${mark.top}%` }} aria-hidden />)}
         {owner && <textarea ref={keys} className="bot-browser-keys" aria-label={`Type into ${bot.name}'s browser`} autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false}
           {...input.keyHandlers} />}
@@ -282,7 +256,7 @@ export function BotBrowserPane({ bot, view }: { bot: BotSummary; view: BotBrowse
           <p>{view.stopped ? 'The browser stopped.' : `${bot.name}'s browser is closed.`}</p>
           <button type="button" disabled={busy} onClick={() => void store().open(bot.id, /^https?:\/\//i.test(address.trim()) ? address.trim() : undefined)}>Open it</button>
         </div>}
-      </BrowserFrame>
+      </WatchedBrowserFrame>
     </div>
     {said
       ? <p className="bot-browser-note is-input" role="status" title={said.detail}>
