@@ -45,7 +45,8 @@ describe('a turn right after sending', () => {
 
   it('streams the thought in its own row, which is the live line: no second one under it', () => {
     const html = render([user, thought('t1', 'Looking for the start script', 'input-available')], 'streaming')
-    expect(text(html)).toContain('Thinking Looking for the start script')
+    expect(text(html)).toContain('Looking for the start script')
+    expect(text(html)).not.toContain('Thinking Looking')
     expect(html).not.toContain('data-turn-progress')
   })
 })

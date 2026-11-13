@@ -1823,7 +1823,11 @@ export const MessageList = memo(function MessageList({
     if (!turnId) return;
     if (replyActive) {
       const clock = workClockRef.current;
-      if (clock?.turnId !== turnId) {
+      if (clock && clock.turnId !== turnId && clock.endedAt == null) {
+        // The same reply, still running, under a new prompt id: the service's saved copy of the prompt took the place of
+        // the one shown on send (a later time, another id), or a steer joined the reply. Its time keeps its start.
+        clock.turnId = turnId;
+      } else if (clock?.turnId !== turnId) {
         const user = normalizedMessages.find((message) => message.id === turnId);
         workClockRef.current = {
           turnId,
@@ -2075,10 +2079,12 @@ export const MessageList = memo(function MessageList({
   }, [dispatchFollow]);
 
   const showJumpButton = !isPinned && normalizedMessages.length > 0;
-  // When the reply in progress started, as the work clock saw it (the clock is set in an effect).
+  // When the reply in progress started, as the work clock saw it (the clock is set in an effect). A clock still running
+  // is the reply's even before the effect moves it to a new prompt id (see above), so the time never jumps back.
+  const workClock = workClockRef.current;
   const liveStartedAt =
-    lastUserMessageId != null && workClockRef.current?.turnId === lastUserMessageId
-      ? workClockRef.current.startedAt
+    lastUserMessageId != null && workClock && (workClock.turnId === lastUserMessageId || (workClock.endedAt == null && replyActive))
+      ? workClock.startedAt
       : null;
   // Tick position and active-turn state live in PromptMarkersOverlay so
   // scrolling never re-renders the conversation to update the rail.
