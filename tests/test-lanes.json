@@ -131,6 +131,8 @@
     "tests/resourceLifecycleQualificationPurgeDaemon.test.ts"
   ],
   "browser": [
+    "tests/botBrowserClipboard.test.ts",
+    "tests/botBrowserInput.test.ts",
     "tests/chatUndoFullShell.test.ts",
     "tests/errorElectronBridge.test.ts",
     "tests/gitFoundationFullShell.test.ts",

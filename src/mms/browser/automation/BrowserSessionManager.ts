@@ -340,10 +340,10 @@ export class BrowserSessionManager {
   }
 
   /**
-   * A person's inputs in order, each answered on its own (`BrowserHumanInputResult`): one made on a
-   * picture names where that picture was taken (`spot`), or that it is no longer known (`stale`).
+   * A person's inputs in order, each answered on its own (`BrowserHumanInputResult`): one made at a
+   * point of a picture names where that picture was taken (`spot`); the worker refuses one without.
    */
-  async humanInputs(context: BrowserToolContext, input: { sessionId: string; tabId: string; inputs: Array<{ input: BrowserHumanInput; spot?: BrowserPictureSpot; stale?: true }> }): Promise<BrowserHumanInputResult[]> {
+  async humanInputs(context: BrowserToolContext, input: { sessionId: string; tabId: string; inputs: Array<{ input: BrowserHumanInput; spot?: BrowserPictureSpot }> }): Promise<BrowserHumanInputResult[]> {
     this.authorize(context, undefined, 'browser.action', 'external', { sessionId: input.sessionId, tabId: input.tabId })
     const entry = this.requireOwned(input.sessionId, context.execution)
     if (entry.record.lifecycle !== 'human-controlled' || !entry.record.controlLeaseId) throw new BrowserAutomationError({ code: 'human_controlled', message: 'Take control of the browser first' })

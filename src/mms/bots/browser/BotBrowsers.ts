@@ -1,11 +1,16 @@
 import { randomUUID } from 'node:crypto'
-import { rm } from 'node:fs/promises'
+import { rm, stat } from 'node:fs/promises'
 import { hostname } from 'node:os'
+import { basename, isAbsolute } from 'node:path'
 import {
+  BOT_BROWSER_FILES_LIMIT_TEXT,
   BOT_BROWSER_HOLD_LEASE_MS,
   BOT_BROWSER_PANE_WATCH,
   BOT_BROWSER_WATCH_RENEW_MS,
+  MAX_BOT_BROWSER_FILES,
+  MAX_BOT_BROWSER_FILES_BYTES,
   type BotBrowserAck,
+  type BotBrowserChooser,
   type BotBrowserDialog,
   type BotBrowserFrame,
   type BotBrowserFrameEvent,
@@ -17,7 +22,7 @@ import {
   type BotBrowserSent,
   type BotBrowserView
 } from '../../../shared/bots/personal/browser'
-import { BROWSER_MODIFIERS, browserTakeoverMessage, type BrowserEditCommand, type BrowserPictureSpot } from '../../../shared/browser/types'
+import { BROWSER_MODIFIERS, browserTakeoverMessage, type BrowserEditCommand, type BrowserHumanInput, type BrowserPictureSpot } from '../../../shared/browser/types'
 import { InputSequencer } from './InputSequencer'
 import type { BotLane } from '../../../shared/bots/personal/definition'
 import { BOT_BROWSER_TOOLS, MAX_BOT_ACTIVE_MS } from '../../../shared/bots/personal/manifest'
@@ -113,16 +118,27 @@ interface PictureRecord {
   id: number
   tabId?: string
   spot?: BrowserPictureSpot
+  /** When it was sent (this host's clock): pictures are remembered by time as well as by count. */
+  at: number
 }
 
 /**
- * A view's hold of the bot's browser: the view that took it (Take over), the tab it took, and its
- * input channel. It lasts while the view says it is there (`beat`); the view that holds it alone sends
- * input, and only to that tab.
+ * A view's hold of the bot's browser: the view that took it (Take over), the connection it took it on,
+ * the tab it took, and its input channel. It lasts while the view says it is there (`beat`); the view
+ * that holds it alone sends input, on that connection, and only to that tab.
  */
 interface OwnerHold {
   id: string
   viewId: string
+  /**
+   * The connection that took it: a call on another one is not this hold's. A window that comes back on
+   * a new connection (its old one dropped) presents the hold there and it moves, once: a connection it
+   * moved away from never has it back (`retired`).
+   */
+  connectionId: string
+  retired: Set<string>
+  /** Files this computer's file dialog answered for the page's picker, by one-time token (`chooseFiles`). */
+  files: Map<string, string[]>
   /** The tab the person took: their input goes to it alone, wherever the bot's runs are. */
   tabId?: string
   /** Whether the view runs on a Mac: its Command is the page's Control when the page is not on one. */
@@ -218,12 +234,12 @@ interface BotBrowserState {
   hold?: OwnerHold
   /** Changes of who holds it, one at a time. */
   holding: Promise<unknown>
-  /** The pictures sent last, by number (bounded): what an input made on one meant. */
+  /** The pictures sent lately, by number (bounded by count and time): what an input made on one meant. */
   pictures: PictureRecord[]
   pictureSerial: number
   /** The followed tab's open dialog and file picker. */
   dialog?: BotBrowserDialog
-  chooser?: { multiple: boolean }
+  chooser?: BotBrowserChooser
 }
 
 interface OpenedSession {
@@ -261,8 +277,14 @@ const MIN_VIEW_WIDTH = 160
 const MAX_USED = 50
 const LIVE_LIFECYCLES: ReadonlySet<BrowserSessionRecord['lifecycle']> = new Set(['ready', 'agent-controlled', 'human-controlled', 'waiting-approval'])
 
-/** Pictures remembered per bot for the input made on them: a view shows one of its last few. */
-const MAX_PICTURES = 32
+/**
+ * Pictures remembered per bot for the input made on them: always the last `MIN_PICTURES` (a still page
+ * sends few), and every one sent in the last `PICTURE_KEEP_MS` (five seconds at 30 a second is 150),
+ * never more than `MAX_PICTURES`. Input made on a picture older than that is refused, not guessed at.
+ */
+const MIN_PICTURES = 32
+const PICTURE_KEEP_MS = 5_000
+const MAX_PICTURES = 256
 /** The line in the bot's chat when the browser comes back to it because the view that held it went away. */
 export const HOLD_EXPIRED_NOTICE = 'I have my browser back: the window you took it over in went away.'
 
@@ -273,6 +295,14 @@ function ownerHolds(): BrowserAutomationError {
 
 /** An older app's window, as a view: its connection (it names no view of its own). */
 const legacyView = (connectionId: string): string => `app-${connectionId}`
+
+/** Why a hold ends: given back, or `replaced` (the same view took the browser over again: a fresh channel, and nothing to tell). */
+type HoldEndReason = BotBrowserHoldEnd | 'given-back' | 'replaced'
+
+/** Another view holds the browser: this one takes it over only on an explicit Take over. */
+function heldElsewhere(): BrowserAutomationError {
+  return new BrowserAutomationError({ code: 'held_elsewhere', message: 'Held in another window.' })
+}
 
 /** A view tries to use a hold it no longer has (given back, ended, or taken in another window). */
 function holdEnded(): BrowserAutomationError {
@@ -285,28 +315,37 @@ const PAGE_CHANGED = 'Page changed · click again'
 const TAB_CLOSED = 'The tab you took over has closed. Give the browser back, then take it over again.'
 
 /** Input made at a point of a picture: it lands on what the picture showed. */
-function located(input: BotBrowserInput): input is Extract<BotBrowserInput, { x: number; y: number }> {
+function located(input: BrowserHumanInput): input is Extract<BrowserHumanInput, { x: number; y: number }> {
   return input.kind === 'click' || input.kind === 'scroll' || input.kind === 'pointer'
 }
 
 /** Input that a click refused just before was meant to go with (typing into what was clicked). */
-function followsClick(input: BotBrowserInput): boolean {
+function followsClick(input: BrowserHumanInput): boolean {
   return input.kind === 'keys' ? input.type === 'down' : input.kind === 'type' || input.kind === 'key' || input.kind === 'paste' || input.kind === 'compose'
 }
 
 /** A press, a click or a wheel turn: a refusal of one on a stale picture is worth telling (a hover's is not). */
-function pressLike(input: BotBrowserInput): boolean {
+function pressLike(input: BrowserHumanInput): boolean {
   return input.kind === 'click' || input.kind === 'scroll' || (input.kind === 'pointer' && input.type === 'down')
 }
 
-/** The editing command a shortcut stands for on the page's platform (`primary`: Command on a Mac, else Control). */
-function editCommand(input: Extract<BotBrowserInput, { kind: 'keys' }>, primary: number): BrowserEditCommand | undefined {
+/** A press or a click: what was under it is what the person meant. */
+function press(input: BrowserHumanInput): boolean {
+  return input.kind === 'click' || (input.kind === 'pointer' && input.type === 'down')
+}
+
+type PageInput = Exclude<BotBrowserInput, { kind: 'files' }>
+
+/**
+ * The editing command a shortcut stands for on the page's platform (`primary`: Command on a Mac, else
+ * Control). Copy and cut have none: the view sends the person's copy as `copy`, read from the page,
+ * never through the browser's own clipboard.
+ */
+function editCommand(input: Extract<PageInput, { kind: 'keys' }>, primary: number): BrowserEditCommand | undefined {
   if (input.type !== 'down' || (input.modifiers & (BROWSER_MODIFIERS.ctrl | BROWSER_MODIFIERS.meta)) !== primary || input.modifiers & BROWSER_MODIFIERS.alt) return undefined
   const shift = Boolean(input.modifiers & BROWSER_MODIFIERS.shift)
   switch (input.code || `Key${input.key.toUpperCase()}`) {
     case 'KeyA': return shift ? undefined : 'selectAll'
-    case 'KeyC': return shift ? undefined : 'copy'
-    case 'KeyX': return shift ? undefined : 'cut'
     case 'KeyZ': return shift ? 'redo' : 'undo'
     case 'KeyY': return primary === BROWSER_MODIFIERS.ctrl && !shift ? 'redo' : undefined
     default: return undefined
@@ -318,7 +357,7 @@ function editCommand(input: Extract<BotBrowserInput, { kind: 'keys' }>, primary:
  * page is not on a Mac (and the other way round), so the usual shortcuts work; an editing shortcut
  * carries its command.
  */
-export function inputForPage(input: BotBrowserInput, viewer: 'mac' | 'other', pageMac = process.platform === 'darwin'): BotBrowserInput {
+export function inputForPage(input: PageInput, viewer: 'mac' | 'other', pageMac = process.platform === 'darwin'): PageInput {
   if (!('modifiers' in input) || input.modifiers === undefined) return input
   let modifiers = input.modifiers
   if ((viewer === 'mac') !== pageMac) {
@@ -455,7 +494,7 @@ export class BotBrowsers implements BotBrowserHost {
    * The owner's view of a bot's browser. `frame` takes a fresh picture of the followed tab (an older
    * app asks this way); `last` adds the latest picture known, taking none.
    */
-  async view(botId: string, options: { frame?: boolean; last?: boolean; viewId?: string } = {}): Promise<BotBrowserView> {
+  async view(botId: string, options: { frame?: boolean; last?: boolean; viewId?: string; connectionId?: string } = {}): Promise<BotBrowserView> {
     const state = this.stateFor(botId)
     if (options.frame) state.lastViewedAt = this.now()
     const record = this.record(state)
@@ -466,7 +505,8 @@ export class BotBrowsers implements BotBrowserHost {
     const activationId = live.reverse().find((id) => state.used.includes(id))
     const frame: BotBrowserFrame | undefined = last ? { data: last.data, mimeType: 'image/jpeg', width: last.width, height: last.height, viewport: last.viewport, at: last.at, ...(last.id !== undefined ? { id: last.id } : {}) } : undefined
     const holder = open && options.viewId ? this.holderFor(state, options.viewId) : undefined
-    const hold = holder === 'this-view' && state.hold ? this.holdAnswer(state.hold) : undefined
+    // The hold itself is told only on the connection that has it (a window that reloaded keeps its connection).
+    const hold = holder === 'this-view' && state.hold && (options.connectionId === undefined || options.connectionId === state.hold.connectionId) ? this.holdAnswer(state.hold) : undefined
     return {
       open,
       control: record?.lifecycle === 'human-controlled' ? 'owner' : 'bot',
@@ -527,7 +567,7 @@ export class BotBrowsers implements BotBrowserHost {
     this.runCapture(state)
     this.refreshCapture(state)
     state.capture?.wake?.()
-    const view = await this.view(botId, { last: !hadPicture, ...(viewer.viewId ? { viewId: viewer.viewId } : {}) })
+    const view = await this.view(botId, { last: !hadPicture, connectionId: input.connectionId, ...(viewer.viewId ? { viewId: viewer.viewId } : {}) })
     // The answer told it who holds the browser and what the page asks: only changes are pushed from here.
     viewer.sent.holder = `${view.control}:${view.holder ?? ''}`
     viewer.sent.dialog = JSON.stringify(view.dialog ?? null)
@@ -548,43 +588,61 @@ export class BotBrowsers implements BotBrowserHost {
    * view of the bot hears it at once (`holder`):
    *
    * - `take`: the view takes the browser over; the bot's actions wait. The tab the views follow is the
-   *   one it takes: it comes to the front and the person's input goes to it alone. A view that holds it
-   *   already picks its hold up again (a window that reloaded or reconnected), at the host's last input
-   *   number. Another view's hold is refused (`held_elsewhere`) unless `force`: then that hold ends, what
-   *   it left pressed is let go of, and this view holds the browser.
+   *   one it takes: it comes to the front and the person's input goes to it alone. The hold is bound to
+   *   the connection that took it. A view that takes it again gets a fresh hold (a new id, numbered
+   *   from 1): whatever its channel was waiting on is dropped cleanly. A window that reloaded keeps its
+   *   connection and picks its hold up from `view` instead, at the host's last input number. Another
+   *   view's hold is refused (`held_elsewhere`) unless `force`: then that hold ends, what it left pressed
+   *   is let go of, and this view holds the browser.
    * - `renew`: the view is still there. A hold not renewed for two minutes ends: what the person left
-   *   pressed is let go of, the browser goes back to the bot, and its chat says so in one line.
+   *   pressed is let go of, the browser goes back to the bot, and its chat says so in one line. A window
+   *   back on a new connection renews there, and the hold moves to it (`claim`).
    * - `release`: Give back. Pressed keys and buttons go up, a composition is dropped, and the bot has it.
    */
-  async hold(botId: string, viewId: string, request: { op: 'take'; force?: boolean; platform?: 'mac' | 'other' } | { op: 'renew' | 'release'; holdId: string }): Promise<{ browser: BotBrowserView; hold?: BotBrowserHold }> {
+  async hold(botId: string, viewId: string, request: { op: 'take'; force?: boolean; platform?: 'mac' | 'other' } | { op: 'renew' | 'release'; holdId: string }, connectionId = 'local'): Promise<{ browser: BotBrowserView; hold?: BotBrowserHold }> {
     const state = this.stateFor(botId)
     if (request.op === 'take') {
-      const hold = await this.takeHold(state, viewId, { ...(request.force ? { force: true } : {}), platform: request.platform ?? 'other' })
-      return { browser: await this.viewAfterChange(state, viewId), hold: this.holdAnswer(hold) }
+      const hold = await this.takeHold(state, viewId, connectionId, { ...(request.force ? { force: true } : {}), platform: request.platform ?? 'other' })
+      return { browser: await this.viewAfterChange(state, viewId, connectionId), hold: this.holdAnswer(hold) }
     }
     if (request.op === 'renew') {
       const hold = state.hold
-      if (!hold || hold.id !== request.holdId || hold.viewId !== viewId) throw holdEnded()
+      if (!hold || !this.claim(hold, viewId, request.holdId, connectionId)) throw holdEnded()
       this.beat(state, hold)
-      return { browser: await this.view(botId, { viewId }), hold: this.holdAnswer(hold) }
+      return { browser: await this.view(botId, { viewId, connectionId }), hold: this.holdAnswer(hold) }
     }
     await this.inTurn(state, async () => {
       const hold = state.hold
       // A hold that already ended is given back already.
-      if (hold && hold.id === request.holdId && hold.viewId === viewId) await this.endHold(state, hold, 'given-back')
+      if (hold && this.claim(hold, viewId, request.holdId, connectionId)) await this.endHold(state, hold, 'given-back')
     })
-    return { browser: await this.viewAfterChange(state, viewId) }
+    return { browser: await this.viewAfterChange(state, viewId, connectionId) }
+  }
+
+  /**
+   * Whether a call is the hold's: its view, its id, and its connection. A call on another connection
+   * with the right view and id is the window back on a new connection (its old one dropped): the hold
+   * moves to it, once, and the old connection is never the hold's again.
+   */
+  private claim(hold: OwnerHold | undefined, viewId: string, holdId: string, connectionId: string): boolean {
+    if (!hold || hold.id !== holdId || hold.viewId !== viewId) return false
+    if (hold.connectionId === connectionId) return true
+    if (hold.retired.has(connectionId)) return false
+    hold.retired.add(hold.connectionId)
+    hold.connectionId = connectionId
+    return true
   }
 
   /**
    * Numbered inputs of a view's hold (`bots.browser.send`): each is applied once, in number order, to
-   * the tab the view took, and answered. A view that does not hold the browser has each refused.
+   * the tab the view took, and answered. A view that does not hold the browser, or a connection that
+   * is not the hold's, has each refused.
    */
-  async send(botId: string, viewId: string, holdId: string, inputs: BotBrowserSent[]): Promise<{ acks: BotBrowserAck[]; lastSeq: number }> {
+  async send(botId: string, viewId: string, holdId: string, inputs: BotBrowserSent[], connectionId = 'local'): Promise<{ acks: BotBrowserAck[]; lastSeq: number }> {
     const state = this.stateFor(botId)
     const hold = state.hold
-    if (!hold || hold.id !== holdId || hold.viewId !== viewId) {
-      const text = hold ? 'Held in another window' : 'You don\'t hold the browser now'
+    if (!hold || !this.claim(hold, viewId, holdId, connectionId)) {
+      const text = hold && hold.viewId !== viewId ? 'Held in another window' : 'You don\'t hold the browser now'
       return { acks: inputs.map((sent) => ({ seq: sent.seq, status: 'refused', reason: 'not-held', text })), lastSeq: 0 }
     }
     // Input is a sign of life too.
@@ -593,11 +651,41 @@ export class BotBrowsers implements BotBrowserHost {
     return { acks, lastSeq: hold.channel.lastSeq }
   }
 
+  /**
+   * The files the person chose in this computer's own file dialog for the page's file picker
+   * (`bots.browser.files`, called by the app's main process alone): checked against the hold, the picker
+   * open on its tab, and the limits (at most `MAX_BOT_BROWSER_FILES` files, `MAX_BOT_BROWSER_FILES_BYTES`
+   * in all, each a file). Answers a one-time token the view sends as its `files` input; only the
+   * latest one counts, and none outlives the hold. The paths are never logged.
+   */
+  async chooseFiles(botId: string, viewId: string, holdId: string, paths: string[], connectionId = 'local'): Promise<{ token: string; count: number }> {
+    const state = this.stateFor(botId)
+    const hold = state.hold
+    if (!hold || !this.claim(hold, viewId, holdId, connectionId)) throw holdEnded()
+    const chooser = state.chooser
+    if (!chooser || state.follow !== hold.tabId) throw new BrowserAutomationError({ code: 'not_actionable', message: 'The page is not asking for a file now.' })
+    if (paths.length > 1 && !chooser.multiple) throw new BrowserAutomationError({ code: 'too_large', message: 'The page takes one file here.' })
+    if (!paths.length || paths.length > MAX_BOT_BROWSER_FILES) throw new BrowserAutomationError({ code: 'too_large', message: BOT_BROWSER_FILES_LIMIT_TEXT })
+    let total = 0
+    for (const path of paths) {
+      if (!isAbsolute(path) || path.includes('\0')) throw new BrowserAutomationError({ code: 'invalid_action', message: 'A chosen file has no place on this computer.' })
+      const info = await stat(path).catch(() => undefined)
+      if (!info?.isFile()) throw new BrowserAutomationError({ code: 'not_actionable', message: `${basename(path)} is not a file Mousse can read.` })
+      total += info.size
+    }
+    if (total > MAX_BOT_BROWSER_FILES_BYTES) throw new BrowserAutomationError({ code: 'too_large', message: BOT_BROWSER_FILES_LIMIT_TEXT })
+    const token = `files_${randomUUID()}`
+    // One picker, one answer: a token chosen before no longer counts.
+    hold.files.clear()
+    hold.files.set(token, [...paths])
+    return { token, count: paths.length }
+  }
+
   /** An older app's Take over (`owner`) or Give back (`bot`): a hold of that window's connection. */
   async control(botId: string, control: 'owner' | 'bot', connectionId = 'local'): Promise<BotBrowserView> {
     const state = this.stateFor(botId)
     const viewId = legacyView(connectionId)
-    if (control === 'owner') await this.takeHold(state, viewId, { force: true, platform: process.platform === 'darwin' ? 'mac' : 'other', legacy: true })
+    if (control === 'owner') await this.takeHold(state, viewId, connectionId, { force: true, keep: true, platform: process.platform === 'darwin' ? 'mac' : 'other', legacy: true })
     else await this.inTurn(state, async () => {
       if (state.hold) await this.endHold(state, state.hold, 'given-back')
       else if (this.record(state)?.lifecycle === 'human-controlled') await this.ownerCall(state, (context) => this.service().sessions.control(context, this.requireLive(state), 'agent'))
@@ -606,7 +694,7 @@ export class BotBrowsers implements BotBrowserHost {
   }
 
   /** An older app's click, scroll, typing or navigation, while its window holds the browser (`control`). */
-  async input(botId: string, input: BotBrowserInput, connectionId = 'local'): Promise<BotBrowserView> {
+  async input(botId: string, input: PageInput, connectionId = 'local'): Promise<BotBrowserView> {
     const state = this.stateFor(botId)
     this.requireLive(state)
     const hold = state.hold
@@ -624,27 +712,31 @@ export class BotBrowsers implements BotBrowserHost {
   }
 
   /** After the owner changed something: a watching view gets the new picture pushed; an older one takes a fresh frame. */
-  private viewAfterChange(state: BotBrowserState, viewId?: string): Promise<BotBrowserView> {
-    if (state.viewers.size) return this.view(state.botId, { last: true, ...(viewId ? { viewId } : {}) })
+  private viewAfterChange(state: BotBrowserState, viewId?: string, connectionId?: string): Promise<BotBrowserView> {
+    const asked = { ...(viewId ? { viewId } : {}), ...(connectionId ? { connectionId } : {}) }
+    if (state.viewers.size) return this.view(state.botId, { last: true, ...asked })
     state.frameAt = undefined
-    return this.view(state.botId, { frame: true, ...(viewId ? { viewId } : {}) })
+    return this.view(state.botId, { frame: true, ...asked })
   }
 
   /**
    * Opens the bot's browser for its owner, under their control: to sign in to a site for the bot. It
-   * is the view's hold (`viewId`; an older app's window when absent). An open browser is handed to the
-   * owner as it is, on `url` when one is given. A closed one opens blank and is the owner's before it
-   * loads anything, so `url` loads as the owner's page.
+   * is the view's hold (`viewId`; an older app's window when absent), bound to its connection. An open
+   * browser is handed to the owner as it is, on `url` when one is given; one another view holds is
+   * refused ("Held in another window": only Take over takes it from there). A closed one opens blank
+   * and is the owner's before it loads anything, so `url` loads as the owner's page.
    */
   async open(botId: string, url?: string, view: { viewId?: string; platform?: 'mac' | 'other'; connectionId?: string } = {}): Promise<{ browser: BotBrowserView; hold?: BotBrowserHold }> {
     const state = this.stateFor(botId)
-    const viewId = view.viewId ?? legacyView(view.connectionId ?? 'local')
+    const connectionId = view.connectionId ?? 'local'
+    const viewId = view.viewId ?? legacyView(connectionId)
     const hold = await this.inTurn(state, async () => {
+      if (state.hold && state.hold.viewId !== viewId) throw heldElsewhere()
       await this.ownerCall(state, async (context) => {
         const opened = await this.ensureSession(state, context, undefined)
         if (this.record(state)?.lifecycle !== 'human-controlled') await this.service().sessions.control(context, opened.sessionId, 'human', { ...(state.follow ? { tabId: state.follow } : {}), chooser: true })
       })
-      const held = await this.holdFor(state, viewId, { force: true, platform: view.platform ?? 'other', ...(view.viewId ? {} : { legacy: true }) })
+      const held = await this.holdFor(state, viewId, connectionId, { keep: true, platform: view.platform ?? 'other', ...(view.viewId ? {} : { legacy: true }) })
       if (url) {
         const sessionId = this.requireLive(state)
         await this.ownerInput(state, (context) => this.service().sessions.humanInput(context, { sessionId, input: { kind: 'navigate', url }, ...(held.tabId ? { tabId: held.tabId } : {}) }))
@@ -655,7 +747,7 @@ export class BotBrowsers implements BotBrowserHost {
     if (![...state.activations.values()].some((entry) => !entry.ended)) this.armIdle(state)
     this.runCapture(state)
     this.refreshCapture(state)
-    return { browser: await this.viewAfterChange(state, viewId), ...(view.viewId ? { hold: this.holdAnswer(hold) } : {}) }
+    return { browser: await this.viewAfterChange(state, viewId, connectionId), ...(view.viewId ? { hold: this.holdAnswer(hold) } : {}) }
   }
 
   /** Who holds the browser, as the view `viewId` sees it. */
@@ -676,38 +768,40 @@ export class BotBrowsers implements BotBrowserHost {
   }
 
   /** `take`: the bot's browser becomes the view's (see `hold`). */
-  private takeHold(state: BotBrowserState, viewId: string, options: { force?: boolean; platform: 'mac' | 'other'; legacy?: boolean }): Promise<OwnerHold> {
+  private takeHold(state: BotBrowserState, viewId: string, connectionId: string, options: { force?: boolean; keep?: boolean; platform: 'mac' | 'other'; legacy?: boolean }): Promise<OwnerHold> {
     return this.inTurn(state, async () => {
       const sessionId = this.requireLive(state)
       const current = state.hold
-      if (current?.viewId === viewId) {
-        this.beat(state, current)
-        return current
-      }
-      if (current && !options.force) throw new BrowserAutomationError({ code: 'held_elsewhere', message: 'Held in another window.' })
+      if (current && current.viewId !== viewId && !options.force) throw heldElsewhere()
       // The owner takes the tab they see: it comes to the front, so Chromium paints what they do, and
       // its file picker is answered in their view.
       if (!current && this.record(state)?.lifecycle !== 'human-controlled') {
         await this.ownerCall(state, (context) => this.service().sessions.control(context, sessionId, 'human', { ...(state.follow ? { tabId: state.follow } : {}), chooser: true }))
       }
-      const hold = await this.holdFor(state, viewId, options)
+      const hold = await this.holdFor(state, viewId, connectionId, options)
       // Up to 30 pictures a second while the owner holds it, back to 15 when the bot has it again.
       this.refreshCapture(state)
       return hold
     })
   }
 
-  /** The view's hold of a browser the owner has: theirs already, or taken from another view (in turn). */
-  private async holdFor(state: BotBrowserState, viewId: string, options: { force?: boolean; platform: 'mac' | 'other'; legacy?: boolean }): Promise<OwnerHold> {
+  /**
+   * The view's hold of a browser the owner has (in turn): its own, kept (`keep`, on the same
+   * connection), or a fresh one, which ends the hold before it, this view's own or another's.
+   */
+  private async holdFor(state: BotBrowserState, viewId: string, connectionId: string, options: { keep?: boolean; platform: 'mac' | 'other'; legacy?: boolean }): Promise<OwnerHold> {
     const current = state.hold
-    if (current?.viewId === viewId) {
+    if (current?.viewId === viewId && current.connectionId === connectionId && options.keep) {
       this.beat(state, current)
       return current
     }
-    if (current) await this.endHold(state, current, 'taken', { keepControl: true })
+    if (current) await this.endHold(state, current, current.viewId === viewId ? 'replaced' : 'taken', { keepControl: true })
     const hold: OwnerHold = {
       id: `hold_${randomUUID()}`,
       viewId,
+      connectionId,
+      retired: new Set(),
+      files: new Map(),
       ...(state.follow ? { tabId: state.follow } : {}),
       platform: options.platform,
       beatAt: this.now(),
@@ -750,12 +844,13 @@ export class BotBrowsers implements BotBrowserHost {
    * browser goes back to the bot. The view that held it hears why, unless it gave it back itself; a
    * hold that ran out says so in the bot's chat.
    */
-  private async endHold(state: BotBrowserState, hold: OwnerHold, end: BotBrowserHoldEnd | 'given-back', options: { keepControl?: boolean } = {}): Promise<void> {
+  private async endHold(state: BotBrowserState, hold: OwnerHold, end: HoldEndReason, options: { keepControl?: boolean } = {}): Promise<void> {
     if (state.hold !== hold) return
     state.hold = undefined
     hold.lease?.clear()
     hold.lease = undefined
-    await hold.channel.close('not-held', end === 'taken' ? 'Held in another window' : 'You gave the browser back')
+    hold.files.clear()
+    await hold.channel.close('not-held', end === 'taken' ? 'Held in another window' : end === 'replaced' ? 'You took the browser over again' : 'You gave the browser back')
     const sessionId = this.liveSession(state)
     if (sessionId) {
       if (options.keepControl) {
@@ -767,7 +862,7 @@ export class BotBrowsers implements BotBrowserHost {
         })
       }
     }
-    if (end !== 'given-back') {
+    if (end !== 'given-back' && end !== 'replaced') {
       for (const viewer of state.viewers.values()) {
         if (viewer.viewId !== hold.viewId) continue
         viewer.slot = { ...viewer.slot, holdEnded: end }
@@ -776,7 +871,8 @@ export class BotBrowsers implements BotBrowserHost {
     }
     if (end === 'expired') this.notice?.(state.botId, HOLD_EXPIRED_NOTICE)
     this.refreshCapture(state)
-    this.notifyHolder(state)
+    // A hold another one replaces at once (`keepControl`): the views hear of the new one instead.
+    if (!options.keepControl) this.notifyHolder(state)
   }
 
   /** A hold ends with its browser (closed, the bot removed): nothing to give back. */
@@ -786,6 +882,7 @@ export class BotBrowsers implements BotBrowserHost {
     state.hold = undefined
     hold.lease?.clear()
     hold.lease = undefined
+    hold.files.clear()
     void hold.channel.close('not-held', 'The browser closed')
   }
 
@@ -802,29 +899,54 @@ export class BotBrowsers implements BotBrowserHost {
   }
 
   /**
-   * Applies one numbered input of a hold, to the tab the view took: a point on a picture lands on what
-   * that picture showed (the worker moves it by the scroll since, or refuses it on another page or
-   * tab); typing that followed a click refused that way is refused too. Never logged: what the person
-   * types goes to the page only.
+   * Where a picture the person acted on was taken, when this host can say: one of the pictures it
+   * remembers, of the tab the view took, with its document and scroll. An older app names no picture:
+   * its input is placed on the latest picture of that tab (the one it asked for last).
+   */
+  private place(state: BotBrowserState, hold: OwnerHold, picture: number | undefined): BrowserPictureSpot | undefined {
+    const record = picture !== undefined
+      ? state.pictures.find((entry) => entry.id === picture)
+      : hold.legacy ? [...state.pictures].reverse().find((entry) => entry.tabId === hold.tabId) : undefined
+    return record?.spot && record.tabId === hold.tabId ? record.spot : undefined
+  }
+
+  /**
+   * Applies one numbered input of a hold, to the tab the view took (a skip applies nothing). A point
+   * on a picture lands on what that picture showed: the worker moves it by the scroll since, and
+   * refuses it on another page, out of view, or where what was under it has changed. A press on a
+   * picture this host cannot place (too old, of another tab, or none) is refused here and never
+   * reaches the page, and so is a key made on one; typing that followed a refused click is refused
+   * too. A button the person lets go of is always let go of. Files go as the paths this computer's
+   * own file dialog answered for this hold (`chooseFiles`). Never logged: what the person types goes
+   * to the page only.
    */
   private async applyInput(state: BotBrowserState, hold: OwnerHold, sent: BotBrowserSent): Promise<Omit<BotBrowserAck, 'seq'>> {
+    if ('skip' in sent) return refused('skipped', 'Skipped')
     const sessionId = this.liveSession(state)
     if (!sessionId || state.hold !== hold) return refused('not-held', 'You gave the browser back')
     const tabId = hold.tabId
     if (!tabId) return refused('tab-closed', TAB_CLOSED)
-    const input = inputForPage(sent.input, hold.platform)
-    let spot: BrowserPictureSpot | undefined
-    let stale = false
-    if (sent.picture !== undefined && located(input)) {
-      const picture = state.pictures.find((entry) => entry.id === sent.picture)
-      if (picture?.spot && picture.tabId === tabId) spot = picture.spot
-      else stale = true
-    } else if (sent.picture !== undefined && sent.picture <= hold.staleThrough && followsClick(input)) {
+    let input: BrowserHumanInput
+    if (sent.input.kind === 'files') {
+      const token = sent.input.token
+      const paths = token ? hold.files.get(token) : []
+      if (token) hold.files.delete(token)
+      if (!paths) return refused('failed', 'Choose the file again')
+      input = { kind: 'files', paths }
+    } else input = inputForPage(sent.input, hold.platform)
+    const spot = this.place(state, hold, sent.picture)
+    if (located(input)) {
+      // A button let go of goes without a place: the worker lets it go where the pointer is.
+      if (!spot && !(input.kind === 'pointer' && input.type === 'up')) {
+        if (pressLike(input) && sent.picture !== undefined) hold.staleThrough = Math.max(hold.staleThrough, sent.picture)
+        return refused('page-changed', PAGE_CHANGED)
+      }
+    } else if (sent.picture !== undefined && followsClick(input) && (sent.picture <= hold.staleThrough || !spot)) {
       return refused('page-changed', PAGE_CHANGED)
     }
     const navigates = input.kind === 'navigate' || input.kind === 'back' || input.kind === 'forward' || input.kind === 'reload'
     try {
-      const [result] = await this.ownerInput(state, (context) => this.service().sessions.humanInputs(context, { sessionId, tabId, inputs: [{ input, ...(spot ? { spot } : {}), ...(stale ? { stale: true as const } : {}) }] }))
+      const [result] = await this.ownerInput(state, (context) => this.service().sessions.humanInputs(context, { sessionId, tabId, inputs: [{ input, ...(spot && located(input) ? { spot } : {}) }] }))
       if (!result) return refused('failed', 'The browser did not answer')
       if (!result.applied) {
         if (result.code === 'page_changed') {
@@ -835,6 +957,8 @@ export class BotBrowsers implements BotBrowserHost {
         if (result.code === 'too_large') return refused('too-large', result.message)
         return refused('failed', result.message)
       }
+      // A press on this picture landed: typing made on it is the person's again.
+      if (press(input) && sent.picture !== undefined && hold.staleThrough >= sent.picture) hold.staleThrough = sent.picture - 1
       // The owner's own page replaces what the bot's last page ran into.
       if (navigates) this.noteBotProblem(state, result.navigation?.problem)
       return { status: 'applied', ...(result.copied !== undefined ? { copied: result.copied } : {}) }
@@ -1086,9 +1210,8 @@ export class BotBrowsers implements BotBrowserHost {
     const frame = await this.ownerCall(state, (context) => this.service().sessions.frame(context, { sessionId, ...(state.follow ? { tabId: state.follow } : {}), maxWidth: 960 }))
     state.frameAt = this.now()
     const id = ++state.pictureSerial
-    state.pictures.push({ id, tabId: frame.tabId, ...(frame.spot ? { spot: frame.spot } : {}) })
-    if (state.pictures.length > MAX_PICTURES) state.pictures.splice(0, state.pictures.length - MAX_PICTURES)
-    state.picture = { data: frame.data, width: frame.width, height: frame.height, viewport: frame.viewport, at: Date.parse(frame.capturedAt) || this.now(), id }
+    this.rememberPicture(state, { id, tabId: frame.tabId, ...(frame.spot ? { spot: frame.spot } : {}), at: this.now() })
+    state.picture ={ data: frame.data, width: frame.width, height: frame.height, viewport: frame.viewport, at: Date.parse(frame.capturedAt) || this.now(), id }
     state.tab = { url: frame.url, title: frame.title }
     state.cursor = frame.cursor
   }
@@ -1203,8 +1326,7 @@ export class BotBrowsers implements BotBrowserHost {
       // Each picture has a number, and what it showed is kept a while: input made on it lands on that.
       const { spot, ...picture } = update.picture
       const id = ++state.pictureSerial
-      state.pictures.push({ id, tabId: update.tabId, ...(spot ? { spot } : {}) })
-      if (state.pictures.length > MAX_PICTURES) state.pictures.splice(0, state.pictures.length - MAX_PICTURES)
+      this.rememberPicture(state, { id, tabId: update.tabId, ...(spot ? { spot } : {}), at: now })
       state.picture = { ...picture, viewport: update.viewport, id }
     } else if (state.picture) state.picture = { ...state.picture, viewport: update.viewport }
     state.dialog = update.dialog
@@ -1232,7 +1354,7 @@ export class BotBrowsers implements BotBrowserHost {
       if ((viewer.sent.dialog ?? 'null') !== dialog) next.dialog = update.dialog ?? null
       // A file picker is answered by the view that holds the browser alone.
       const chooser = JSON.stringify(viewer.viewId && state.hold?.viewId === viewer.viewId ? update.chooser ?? null : null)
-      if ((viewer.sent.chooser ?? 'null') !== chooser) next.chooser = JSON.parse(chooser) as { multiple: boolean } | null
+      if ((viewer.sent.chooser ?? 'null') !== chooser) next.chooser = JSON.parse(chooser) as BotBrowserChooser | null
       const viewport = JSON.stringify(update.viewport)
       if (viewer.sent.viewport !== viewport) next.viewport = update.viewport
       if (viewer.sent.tab !== JSON.stringify(state.tab)) next.tab = { ...state.tab }
@@ -1243,6 +1365,18 @@ export class BotBrowsers implements BotBrowserHost {
       viewer.slot = next
       this.deliver(state, viewer)
     }
+  }
+
+  /**
+   * Keeps what a picture sent to the views showed: the last `MIN_PICTURES` always, any sent in the last
+   * `PICTURE_KEEP_MS`, at most `MAX_PICTURES`. The oldest go first.
+   */
+  private rememberPicture(state: BotBrowserState, record: PictureRecord): void {
+    const pictures = state.pictures
+    pictures.push(record)
+    let drop = Math.max(0, pictures.length - MAX_PICTURES)
+    while (drop < pictures.length - MIN_PICTURES && record.at - pictures[drop]!.at > PICTURE_KEEP_MS) drop += 1
+    if (drop) pictures.splice(0, drop)
   }
 
   /**

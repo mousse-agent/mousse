@@ -86,6 +86,8 @@ import { appearanceSurfaceBase } from '../../shared/themeSurfaces'
 import { showCopyMenu } from '../contextMenu'
 import { pickExecutable } from './pickExecutable'
 import { stageBotAttachment } from './botAttachments'
+import { chooseBotBrowserFiles } from './botBrowserFiles'
+import { stat } from 'node:fs/promises'
 import { openExternalSafely } from '../safeExternalUrl'
 import { dispatchMcpAuthBrowser } from '../mcpAuthBrowser'
 import { MousseIdCallbacks, runtimeMousseIdOrigin } from '../mousseIdCallback'
@@ -3096,6 +3098,16 @@ export function registerGuiIpc(
   registerHandler('bots:stageAttachment', async (_event, name: unknown, bytes: unknown) =>
     stageBotAttachment(app.getPath('temp'), name, bytes)
   )
+  // A page in a bot's browser asks for files: this computer's own dialog picks them, and the window's
+  // renderer gets a one-time token for them, never the paths.
+  registerHandler('bots:chooseBrowserFiles', async (event, request: unknown) => {
+    const win = BrowserWindow.fromWebContents(event.sender) ?? getWindow()
+    return chooseBotBrowserFiles(request, {
+      showOpenDialog: (options) => (win ? dialog.showOpenDialog(win, options) : dialog.showOpenDialog(options)),
+      stat: (path) => stat(path),
+      request: (method, params) => guiMms.request(method, params)
+    })
+  })
   registerHandler('dialog:pickExecutable', async (event, request: unknown) => {
     const win = BrowserWindow.fromWebContents(event.sender) ?? getWindow()
     return pickExecutable((options) => (win ? dialog.showOpenDialog(win, options) : dialog.showOpenDialog(options)), request)

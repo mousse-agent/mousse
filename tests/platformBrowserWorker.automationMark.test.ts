@@ -40,6 +40,12 @@ async function markFixture() {
   const page = (name: string, options: Record<string, string> = {}, origin = site.parentOrigin) =>
     `${origin}/automation-page.html?${new URLSearchParams({ name, ...options }).toString()}`
   const open = (url: string) => ok<{ session: BrowserSessionRecord; observation: BrowserObservation }>('session.open', { url })
+  /** A person's click, made on a picture of the tab (it names where that picture was taken, as a view's click does). */
+  const personClick = async (session: BrowserSessionRecord, controlLeaseId: string, tabId: string, x: number, y: number) => {
+    const { spot } = await ok<{ spot?: unknown }>('frame', { sessionId: session.id, tabId })
+    const { results } = await ok<{ results: Array<{ applied: boolean }> }>('human.input', { sessionId: session.id, controlLeaseId, tabId, inputs: [{ input: { kind: 'click', x, y }, spot }] })
+    expect(results[0]).toMatchObject({ applied: true })
+  }
   const observe = (session: BrowserSessionRecord, tabId: string) => ok<BrowserObservation>('observe', { sessionId: session.id, tabId })
   /** Waits until the tab's page and frames show every value (they print what they read on a timer). */
   const shows = async (session: BrowserSessionRecord, tabId: string, expected: string[]): Promise<BrowserObservation> => {
@@ -63,7 +69,7 @@ async function markFixture() {
     await broker.close()
     await site.close()
   }
-  return { site, call, ok, page, open, observe, shows, reported, take, giveBack, close }
+  return { site, call, ok, page, open, observe, shows, reported, take, giveBack, close, personClick }
 }
 
 function act(session: BrowserSessionRecord, observation: BrowserObservation, action: Record<string, unknown>, lease: { controlLeaseId?: string; generation: number } = session) {
@@ -182,7 +188,7 @@ describe.skipIf(!chrome.ok)('what pages see of who drives the browser', () => {
   }, 120_000)
 
   it('lets the agent open and load nothing while a person holds the browser, and marks what the person opens as theirs', async () => {
-    const { site, call, ok, page, open, observe, shows, take, giveBack, reported, close } = await markFixture()
+    const { site, call, ok, page, open, observe, shows, take, giveBack, reported, close, personClick } = await markFixture()
     try {
       const { session, observation } = await open(page('held', { popup: page('person-popup', { beacon: '1' }) }))
       const lease = await take(session)
@@ -201,7 +207,7 @@ describe.skipIf(!chrome.ok)('what pages see of who drives the browser', () => {
 
       // The person opens a page from theirs: it is theirs, and reads false from its first script.
       const button = named(seen, 'Open popup').bounds!
-      await ok('human.input', { sessionId: session.id, controlLeaseId: lease.controlLeaseId, tabId: observation.tabId, input: { kind: 'click', x: button.x + button.width / 2, y: button.y + button.height / 2 } })
+      await personClick(session, lease.controlLeaseId, observation.tabId, button.x + button.width / 2, button.y + button.height / 2)
       expect(await reported('person-popup')).toEqual(['false'])
       // Given back, the agent has it: that page reads true now, and the agent's new tab opens as before.
       await giveBack(session)
@@ -315,7 +321,7 @@ describe.skipIf(!chrome.ok)('what pages see of who drives the browser', () => {
   }, 120_000)
 
   it('clicks as a mouse does on a real page: no button held as the pointer arrives, the button down, then up', async () => {
-    const { ok, page, open, observe, shows, take, close } = await markFixture()
+    const { ok, page, open, observe, shows, take, close, personClick } = await markFixture()
     try {
       const { session, observation } = await open(page('mouse', { mouse: '1' }))
       const seen = await observe(session, observation.tabId)
@@ -324,7 +330,7 @@ describe.skipIf(!chrome.ok)('what pages see of who drives the browser', () => {
       await shows(session, observation.tabId, ['mouse:mousemove=0,mousedown=1,mouseup=0,click=0'])
       // The person's click reads the same.
       const lease = await take(session)
-      await ok('human.input', { sessionId: session.id, controlLeaseId: lease.controlLeaseId, tabId: observation.tabId, input: { kind: 'click', x: press.bounds!.x + 10, y: press.bounds!.y + 10 } })
+      await personClick(session, lease.controlLeaseId, observation.tabId, press.bounds!.x + 10, press.bounds!.y + 10)
       const after = textOf(await shows(session, observation.tabId, ['click=0,']))
       expect(after).toMatch(/mouse:mousemove=0,mousedown=1,mouseup=0,click=0(,mousemove=0)*,mousedown=1,mouseup=0,click=0/)
       expect(after).not.toMatch(/mousemove=[1-9]/)

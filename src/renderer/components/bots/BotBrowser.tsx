@@ -5,6 +5,8 @@ import { BOT_BROWSER_PANE_WATCH, BOT_BROWSER_PREVIEW_WATCH, type BotBrowserDialo
 import { browserProblemForPerson } from '../../../shared/browser/navigation'
 import { useBotBrowserStore, useBotBrowserStream, useBotBrowserWatch, type BotBrowserStream } from '../../stores/botBrowserStore'
 import type { ChannelHealth } from '../../stores/botBrowserChannel'
+import { useAppStore } from '../../stores/appStore'
+import { localDeviceName } from '../sideCard/deviceMenu'
 import { AgentCursor } from '../browser/AgentCursor'
 import { useBotBrowserInput } from './useBotBrowserInput'
 import './botBrowser.css'
@@ -168,7 +170,7 @@ function PageDialog({ dialog, canAnswer, answer }: { dialog: BotBrowserDialog; c
   return <div className="bot-browser-dialog" role="alertdialog" aria-label="The page asks">
     <div className="bot-browser-dialog-card">
       <p className="bot-browser-dialog-message">{leaving ? 'Leave this page? Changes you made may not be saved.' : dialog.message || 'The page asks you to continue.'}</p>
-      {dialog.type === 'prompt' && <input aria-label="Your answer" value={text} disabled={!canAnswer} onChange={(event) => setText(event.target.value)}
+      {dialog.type === 'prompt' && <input aria-label="Your answer" value={text} maxLength={4096} disabled={!canAnswer} onChange={(event) => setText(event.target.value)}
         onKeyDown={(event) => { if (event.key === 'Enter') answer(true, text) }} />}
       {canAnswer
         ? <div className="bot-browser-dialog-actions">
@@ -180,21 +182,26 @@ function PageDialog({ dialog, canAnswer, answer }: { dialog: BotBrowserDialog; c
   </div>
 }
 
-/** The page asks for files: the person picks them with this computer's own file dialog, and they go to the page alone. */
-function FileRequest({ multiple, choose, cancel }: { multiple: boolean; choose(files: File[]): void; cancel(): void }) {
-  const picker = useRef<HTMLInputElement>(null)
-  return <div className="bot-browser-dialog" role="dialog" aria-label="The page asks for a file">
+/** What the file request says: "example.com asks for a file", or "for files" when it takes several. */
+export function filesAskText(chooser: { multiple: boolean; site?: string }): string {
+  return `${chooser.site ?? 'The page'} asks for ${chooser.multiple ? 'files' : 'a file'}`
+}
+
+/**
+ * The page asks for files: the card names the site and whether it takes one or several, and Choose…
+ * opens this computer's own file dialog (the app's, not the page's). Only what the person chooses
+ * there goes to the page; nothing goes until they do.
+ */
+function FileRequest({ chooser, choose, cancel }: { chooser: { multiple: boolean; site?: string }; choose(): void; cancel(): void }) {
+  const asks = filesAskText(chooser)
+  return <div className="bot-browser-dialog" role="dialog" aria-label={asks}>
     <div className="bot-browser-dialog-card">
-      <p className="bot-browser-dialog-message">{multiple ? 'The page asks for files.' : 'The page asks for a file.'}</p>
+      <p className="bot-browser-dialog-message">{asks}.</p>
+      <p className="bot-browser-dialog-hint">Only what you choose goes to the page.</p>
       <div className="bot-browser-dialog-actions">
         <button type="button" onClick={cancel}>Cancel</button>
-        <button type="button" className="is-primary" onClick={() => picker.current?.click()}>Choose…</button>
+        <button type="button" className="is-primary" onClick={choose}>Choose…</button>
       </div>
-      <input ref={picker} type="file" hidden multiple={multiple} onChange={(event) => {
-        const files = [...(event.target.files ?? [])]
-        event.target.value = ''
-        if (files.length) choose(files)
-      }} />
     </div>
   </div>
 }
@@ -232,7 +239,9 @@ export function BotBrowserPane({ bot, view }: { bot: BotSummary; view: BotBrowse
   const status = browserStatus(view, stream, bot.name, now)
   const quiet = view.open && !status.live && Boolean(status.detail)
   const input = useBotBrowserInput({ botId: bot.id, owner, view, frame, keys })
-  const said = owner ? inputLine(health, note, hold?.computer ?? 'this computer', now) : undefined
+  // The browser runs on this computer: it is named as the app names this computer everywhere.
+  const computer = useAppStore((state) => localDeviceName(state.appInfo?.deviceName))
+  const said = owner ? inputLine(health, note, computer, now) : undefined
   const send = (entry: BotBrowserInput) => { input.send(entry) }
 
   const go = () => {
@@ -242,12 +251,6 @@ export function BotBrowserPane({ bot, view }: { bot: BotSummary; view: BotBrowse
     const target = /^https?:\/\//i.test(text) ? text : `https://${text}`
     if (owner) send({ kind: 'navigate', url: target })
     else if (!view.open) void store().open(bot.id, target)
-  }
-  const chooseFiles = async (files: File[]) => {
-    const pathOf = window.mousse?.personalBots?.attachmentPath
-    if (!pathOf) return
-    const paths = await Promise.all(files.map((file) => pathOf(file)))
-    send({ kind: 'files', paths })
   }
 
   return <aside className="bot-browser-pane" aria-label={`${bot.name}'s browser`}>
@@ -273,8 +276,8 @@ export function BotBrowserPane({ bot, view }: { bot: BotSummary; view: BotBrowse
           {...input.keyHandlers} />}
         {view.open && view.dialog && <PageDialog key={`${view.dialog.type}:${view.dialog.message}`} dialog={view.dialog} canAnswer={owner}
           answer={(accept, text) => send({ kind: 'dialog', accept, ...(text !== undefined ? { text } : {}) })} />}
-        {owner && !view.dialog && view.chooser && <FileRequest multiple={view.chooser.multiple}
-          choose={(files) => void chooseFiles(files)} cancel={() => send({ kind: 'files', paths: [] })} />}
+        {owner && !view.dialog && view.chooser && <FileRequest chooser={view.chooser}
+          choose={() => void store().chooseFiles(bot.id, view.chooser!)} cancel={() => send({ kind: 'files' })} />}
         {!view.open && !view.setup && <div className="bot-browser-closed">
           <p>{bot.name}'s browser is closed.</p>
           <button type="button" disabled={busy} onClick={() => void store().open(bot.id, /^https?:\/\//i.test(address.trim()) ? address.trim() : undefined)}>Open it</button>

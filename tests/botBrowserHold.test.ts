@@ -7,6 +7,9 @@
  * second window takes it over only on purpose; a click on a picture the page no longer shows is
  * refused, and so is the typing that followed it; a Mac view's Command is the page's Control elsewhere.
  */
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { InputSequencer } from '../src/mms/bots/browser/InputSequencer'
 import { BotBrowsers, HOLD_EXPIRED_NOTICE, inputForPage, type BotBrowserService } from '../src/mms/bots/browser/BotBrowsers'
@@ -89,6 +92,36 @@ describe('the hold\'s input channel', () => {
     expect(applied).toEqual(['a', 'b', 'c'])
   })
 
+  it('too much waiting is refused as busy without using its number: sent again, it goes in order', async () => {
+    const applied: string[] = []
+    let open!: () => void
+    const blocked = new Promise<void>((resolve) => { open = resolve })
+    const channel = new InputSequencer<string>({
+      apply: async (item) => {
+        if (item === 'a') await blocked
+        applied.push(item)
+        return { status: 'applied' }
+      },
+      maxWaiting: 1,
+      setTimer: manualTimers().setTimer
+    })
+    const first = channel.submit(1, 'a')
+    const second = channel.submit(2, 'b')
+    expect(await channel.submit(3, 'c')).toEqual({ seq: 3, status: 'refused', reason: 'busy', text: 'Too much at once' })
+    open()
+    await Promise.all([first, second])
+    expect(channel.lastSeq).toBe(2)
+    expect(await channel.submit(3, 'c')).toEqual({ seq: 3, status: 'applied' })
+    expect(applied).toEqual(['a', 'b', 'c'])
+  })
+
+  it('remembers the outcome of a copy for a duplicate, never the text it read', async () => {
+    const channel = new InputSequencer<string>({ apply: async () => ({ status: 'applied', copied: 'secret words' }), setTimer: manualTimers().setTimer })
+    expect(await channel.submit(1, 'copy')).toEqual({ seq: 1, status: 'applied', copied: 'secret words' })
+    expect(await channel.submit(1, 'copy')).toEqual({ seq: 1, status: 'duplicate' })
+    expect(JSON.stringify(channel)).not.toContain('secret words')
+  })
+
   it('a hold picked up again goes on after the host\'s last number; a closed one refuses what waits and what comes', async () => {
     const { channel, applied } = sequencer({ lastSeq: 7 })
     expect(await channel.submit(7, 'old')).toMatchObject({ status: 'duplicate' })
@@ -115,8 +148,8 @@ describe('a view\'s Command and Control on the page\'s platform', () => {
   })
 })
 
-/** The bot's browser as the host sees it, with a worker that answers as the test says. */
-function host(options: { results?: (input: BrowserHumanInput, entry: { spot?: BrowserPictureSpot; stale?: true }) => BrowserHumanInputResult; update?: BrowserViewerUpdate } = {}) {
+/** The bot's browser as the host sees it, with a worker that answers as the test says (and sends `updates`, one a call, then waits). */
+function host(options: { results?: (input: BrowserHumanInput, entry: { spot?: BrowserPictureSpot }) => BrowserHumanInputResult; update?: BrowserViewerUpdate; updates?: () => Promise<BrowserViewerUpdate | undefined> } = {}) {
   let now = 1_000_000
   const lease = manualTimers()
   const record: BrowserSessionRecord = { id: 'sess_1', profileId: 'p', threadId: 'home', persistent: true, backend: 'managed-chromium', browserVersion: '1', generation: 1, lifecycle: 'agent-controlled', createdAt: '', updatedAt: '' }
@@ -135,7 +168,7 @@ function host(options: { results?: (input: BrowserHumanInput, entry: { spot?: Br
         worker.push({ method: 'humanInput', args: input.input })
         return {}
       },
-      humanInputs: async (_context: unknown, input: { inputs: Array<{ input: BrowserHumanInput; spot?: BrowserPictureSpot; stale?: true }> }) => {
+      humanInputs: async (_context: unknown, input: { inputs: Array<{ input: BrowserHumanInput; spot?: BrowserPictureSpot }> }) => {
         worker.push({ method: 'humanInputs', args: input.inputs })
         return input.inputs.map((entry) => options.results?.(entry.input, entry) ?? { applied: true })
       },
@@ -144,6 +177,8 @@ function host(options: { results?: (input: BrowserHumanInput, entry: { spot?: Br
           gave = true
           return options.update
         }
+        const next = await options.updates?.()
+        if (next) return next
         return new Promise(() => undefined)
       },
       viewerStop: async () => undefined,
@@ -214,16 +249,66 @@ describe('the owner\'s hold of a bot\'s browser', () => {
     await expect(bots.hold('bot-hold', 'one', { op: 'renew', holdId: hold!.id })).rejects.toBeInstanceOf(BrowserAutomationError)
   })
 
-  it('a view that reconnects picks its hold up again at the host\'s last number: what it sends again is not applied twice', async () => {
+  it('a window that reloads keeps its connection and picks its hold up from the view at the host\'s last number: nothing is applied twice', async () => {
+    const { bots, worker } = host()
+    const { hold } = await bots.open('bot-hold', undefined, { viewId: 'one', connectionId: 'c1' })
+    const typed = (text: string, seq: number): BotBrowserSent => ({ seq, input: { kind: 'type', text } })
+    await bots.send('bot-hold', 'one', hold!.id, [typed('a', 1), typed('b', 2), typed('c', 3)], 'c1')
+    // The reloaded page asks what it holds, on its own connection: the hold, at the host's last number.
+    expect((await bots.view('bot-hold', { viewId: 'one', connectionId: 'c1' })).hold).toEqual({ id: hold!.id, lastSeq: 3, computer: 'Desk' })
+    // Another connection that names the same view is not told the hold.
+    expect((await bots.view('bot-hold', { viewId: 'one', connectionId: 'c9' })).hold).toBeUndefined()
+    const acks = (await bots.send('bot-hold', 'one', hold!.id, [typed('c', 3), typed('d', 4)], 'c1')).acks
+    expect(acks.map((ack: BotBrowserAck) => ack.status)).toEqual(['duplicate', 'applied'])
+    expect(inputs(worker).map((input) => (input as { text: string }).text)).toEqual(['a', 'b', 'c', 'd'])
+  })
+
+  it('is bound to the connection that took it: a window back on a new connection presents it there and it moves, once; the old connection never has it again', async () => {
+    const { bots, worker } = host()
+    const { hold } = await bots.open('bot-hold', undefined, { viewId: 'one', connectionId: 'c1' })
+    const typed = (text: string, seq: number): BotBrowserSent => ({ seq, input: { kind: 'type', text } })
+    expect((await bots.send('bot-hold', 'one', hold!.id, [typed('a', 1)], 'c1')).acks[0]!.status).toBe('applied')
+    // The window's connection dropped; it renews on its new one with the hold it has: the hold moves there.
+    expect((await bots.hold('bot-hold', 'one', { op: 'renew', holdId: hold!.id }, 'c2')).hold).toMatchObject({ id: hold!.id, lastSeq: 1 })
+    expect((await bots.send('bot-hold', 'one', hold!.id, [typed('b', 2)], 'c2')).acks[0]!.status).toBe('applied')
+    // The old connection is refused, and cannot take it back by naming it.
+    expect((await bots.send('bot-hold', 'one', hold!.id, [typed('x', 3)], 'c1')).acks[0]).toMatchObject({ status: 'refused', reason: 'not-held' })
+    await expect(bots.hold('bot-hold', 'one', { op: 'renew', holdId: hold!.id }, 'c1')).rejects.toMatchObject({ code: 'hold_ended' })
+    await bots.hold('bot-hold', 'one', { op: 'release', holdId: hold!.id }, 'c1')
+    expect((await bots.send('bot-hold', 'one', hold!.id, [typed('c', 3)], 'c2')).acks[0]!.status).toBe('applied')
+    expect(inputs(worker).map((input) => (input as { text: string }).text)).toEqual(['a', 'b', 'c'])
+  })
+
+  it('a repeated Take over from the same window gives a fresh hold: what the old channel waited on is dropped, and the count starts again', async () => {
     const { bots, worker } = host()
     const { hold } = await bots.open('bot-hold', undefined, { viewId: 'one' })
     const typed = (text: string, seq: number): BotBrowserSent => ({ seq, input: { kind: 'type', text } })
-    await bots.send('bot-hold', 'one', hold!.id, [typed('a', 1), typed('b', 2), typed('c', 3)])
+    await bots.send('bot-hold', 'one', hold!.id, [typed('a', 1)])
+    // A hole the old channel would wait on: number 2 never came, 3 waits for it.
+    const stuck = bots.send('bot-hold', 'one', hold!.id, [typed('c', 3)])
     const again = await bots.hold('bot-hold', 'one', { op: 'take' })
-    expect(again.hold).toEqual({ id: hold!.id, lastSeq: 3, computer: 'Desk' })
-    const acks = (await bots.send('bot-hold', 'one', hold!.id, [typed('c', 3), typed('d', 4)])).acks
-    expect(acks.map((ack: BotBrowserAck) => ack.status)).toEqual(['duplicate', 'applied'])
-    expect(inputs(worker).map((input) => (input as { text: string }).text)).toEqual(['a', 'b', 'c', 'd'])
+    expect(again.hold!.id).not.toBe(hold!.id)
+    expect(again.hold!.lastSeq).toBe(0)
+    expect((await stuck).acks[0]).toMatchObject({ status: 'refused', reason: 'not-held', text: 'You took the browser over again' })
+    expect((await bots.send('bot-hold', 'one', again.hold!.id, [typed('d', 1)])).acks[0]!.status).toBe('applied')
+    expect(inputs(worker).map((input) => (input as { text: string }).text)).toEqual(['a', 'd'])
+    // The browser stayed the owner's throughout.
+    expect(worker.filter((call) => call.method === 'control').map((call) => (call.args as { owner: string }).owner)).toEqual(['human'])
+  })
+
+  it('open from a second window does not take the browser: "Held in another window"', async () => {
+    const { bots } = host()
+    const { hold } = await bots.open('bot-hold', undefined, { viewId: 'one' })
+    await expect(bots.open('bot-hold', 'https://b.test/', { viewId: 'two', connectionId: 'c2' })).rejects.toMatchObject({ code: 'held_elsewhere', message: 'Held in another window.' })
+    expect((await bots.hold('bot-hold', 'one', { op: 'renew', holdId: hold!.id })).hold!.id).toBe(hold!.id)
+  })
+
+  it('a skip uses its number and applies nothing, so what follows goes on', async () => {
+    const { bots, worker } = host()
+    const { hold } = await bots.open('bot-hold', undefined, { viewId: 'one' })
+    const acks = (await bots.send('bot-hold', 'one', hold!.id, [{ seq: 1, skip: true }, { seq: 2, input: { kind: 'type', text: 'b' } }])).acks
+    expect(acks).toEqual([{ seq: 1, status: 'refused', reason: 'skipped', text: 'Skipped' }, { seq: 2, status: 'applied' }])
+    expect(inputs(worker)).toEqual([{ kind: 'type', text: 'b' }])
   })
 
   it('gives back: the browser is the bot\'s, with no line in its chat', async () => {
@@ -234,23 +319,99 @@ describe('the owner\'s hold of a bot\'s browser', () => {
     expect(notices).toEqual([])
   })
 
-  it('sends a point with where its picture was taken; refuses one on a picture it no longer knows, and the typing that followed it', async () => {
+  it('sends a point with where its picture was taken; a press or a key on a picture it cannot place is refused here and never reaches the page', async () => {
     const spot = { documentId: 'doc_page-a', scrollX: 0, scrollY: 120 }
     const update: BrowserViewerUpdate = { tabId: 'tab_1', url: 'https://a.test/', title: 'A', viewport: { width: 1280, height: 720 }, behind: false, frameSeq: 1, stateSeq: 1, picture: { data: '/9j/', width: 960, height: 540, at: 1, sharp: false, spot } }
-    const { bots, worker, window } = host({ update, results: (_input, entry) => entry.stale ? { applied: false, code: 'page_changed', message: 'The page changed since that picture' } : { applied: true } })
+    // A worker that applies whatever it is given: the host alone keeps the unplaced input from the page.
+    const { bots, worker, window } = host({ update })
     const events = await window('one')
     const { hold } = await bots.open('bot-hold', undefined, { viewId: 'one' })
     await expect.poll(() => events.some((event) => event.frame?.id === 1)).toBe(true)
-    const down = (picture: number, seq: number): BotBrowserSent => ({ seq, picture, input: { kind: 'pointer', type: 'down', x: 10, y: 10, button: 'left', buttons: 1, clicks: 1 } })
+    const down = (picture: number | undefined, seq: number): BotBrowserSent => ({ seq, ...(picture !== undefined ? { picture } : {}), input: { kind: 'pointer', type: 'down', x: 10, y: 10, button: 'left', buttons: 1, clicks: 1 } })
     const key = (picture: number, seq: number): BotBrowserSent => ({ seq, picture, input: { kind: 'keys', type: 'down', key: 'h', code: 'KeyH', keyCode: 72, modifiers: 0, text: 'h' } })
     expect((await bots.send('bot-hold', 'one', hold!.id, [down(1, 1)])).acks[0]!.status).toBe('applied')
     const sent = worker.filter((call) => call.method === 'humanInputs').at(-1)!.args as Array<{ spot?: BrowserPictureSpot }>
     expect(sent[0]!.spot).toEqual(spot)
-    // A picture the host never sent (or long gone): refused, and the keys typed after it on that picture too.
-    const acks = (await bots.send('bot-hold', 'one', hold!.id, [down(9, 2), key(9, 3), key(9, 4)])).acks
-    expect(acks.map((ack) => [ack.status, ack.reason])).toEqual([['refused', 'page-changed'], ['refused', 'page-changed'], ['refused', 'page-changed']])
-    expect(acks[0]!.text).toBe('Page changed · click again')
-    // The keys never reached the page.
-    expect(inputs(worker).filter((input) => input.kind === 'keys')).toEqual([])
+    const before = inputs(worker).length
+    // A picture the host never sent (or long gone), and a press with no picture at all: refused, and the keys typed after them too.
+    const acks = (await bots.send('bot-hold', 'one', hold!.id, [down(9, 2), key(9, 3), key(9, 4), down(undefined, 5)])).acks
+    expect(acks.map((ack) => [ack.status, ack.reason, ack.text])).toEqual(Array(4).fill(['refused', 'page-changed', 'Page changed · click again']))
+    // None of them reached the worker.
+    expect(inputs(worker)).toHaveLength(before)
+    // A button let go of still goes (without a place): the worker lets it go where the pointer is.
+    expect((await bots.send('bot-hold', 'one', hold!.id, [{ seq: 6, picture: 9, input: { kind: 'pointer', type: 'up', x: 10, y: 10, button: 'left', buttons: 0, clicks: 1 } }])).acks[0]!.status).toBe('applied')
+    expect(worker.filter((call) => call.method === 'humanInputs').at(-1)!.args).toEqual([{ input: { kind: 'pointer', type: 'up', x: 10, y: 10, button: 'left', buttons: 0, clicks: 1 } }])
+  })
+
+  it('remembers pictures by time as well as by count: one sent 100 pictures ago within five seconds is still placed; one older than that is not', async () => {
+    let next = 0
+    const picture = (): BrowserViewerUpdate => ({ tabId: 'tab_1', url: 'https://a.test/', title: 'A', viewport: { width: 1280, height: 720 }, behind: false, frameSeq: ++next, stateSeq: 1, picture: { data: `/9j/${next}`, width: 960, height: 540, at: next, sharp: false, spot: { documentId: 'doc_page-a', scrollX: 0, scrollY: next } } })
+    // The page paints 100 pictures, 30 ms apart; later 40 more.
+    let sending = 100
+    let more: (() => void) | undefined
+    const { bots, worker, window, advance } = host({ updates: async () => {
+      if (!sending) await new Promise<void>((resolve) => { more = resolve })
+      sending -= 1
+      advance(30)
+      return picture()
+    } })
+    const events = await window('one')
+    const { hold } = await bots.open('bot-hold', undefined, { viewId: 'one' })
+    await expect.poll(() => Math.max(0, ...events.map((event) => event.frame?.id ?? 0))).toBe(100)
+    const press = (seq: number, at: number): BotBrowserSent => ({ seq, picture: at, input: { kind: 'pointer', type: 'down', x: 10, y: 10, button: 'left', buttons: 1, clicks: 1 } })
+    // 100 pictures in three seconds: the first is still placed.
+    expect((await bots.send('bot-hold', 'one', hold!.id, [press(1, 1)])).acks[0]!.status).toBe('applied')
+    expect((worker.filter((call) => call.method === 'humanInputs').at(-1)!.args as Array<{ spot?: BrowserPictureSpot }>)[0]!.spot!.scrollY).toBe(1)
+    // Ten seconds and 40 more pictures later, it is gone (the last 32 and the last five seconds are kept).
+    advance(10_000)
+    sending = 40
+    more?.()
+    await expect.poll(() => Math.max(0, ...events.map((event) => event.frame?.id ?? 0))).toBe(140)
+    expect((await bots.send('bot-hold', 'one', hold!.id, [press(2, 1)])).acks[0]).toMatchObject({ status: 'refused', reason: 'page-changed' })
+    expect((await bots.send('bot-hold', 'one', hold!.id, [press(3, 140 - 31)])).acks[0]!.status).toBe('applied')
+  })
+
+  it('typing on a picture whose click was refused is refused, until a later click on that picture lands', async () => {
+    const spot = { documentId: 'doc_page-a', scrollX: 0, scrollY: 0 }
+    const update: BrowserViewerUpdate = { tabId: 'tab_1', url: 'https://a.test/', title: 'A', viewport: { width: 1280, height: 720 }, behind: false, frameSeq: 1, stateSeq: 1, picture: { data: '/9j/', width: 960, height: 540, at: 1, sharp: false, spot } }
+    let refuse = true
+    const { bots, window } = host({ update, results: (input) => refuse && input.kind === 'pointer' && input.type === 'down' ? { applied: false, code: 'page_changed', message: 'What that picture showed there has scrolled out of view' } : { applied: true } })
+    const events = await window('one')
+    const { hold } = await bots.open('bot-hold', undefined, { viewId: 'one' })
+    await expect.poll(() => events.some((event) => event.frame?.id === 1)).toBe(true)
+    const down = (seq: number): BotBrowserSent => ({ seq, picture: 1, input: { kind: 'pointer', type: 'down', x: 10, y: 10, button: 'left', buttons: 1, clicks: 1 } })
+    const key = (seq: number): BotBrowserSent => ({ seq, picture: 1, input: { kind: 'keys', type: 'down', key: 'h', code: 'KeyH', keyCode: 72, modifiers: 0, text: 'h' } })
+    expect((await bots.send('bot-hold', 'one', hold!.id, [down(1), key(2)])).acks.map((ack) => ack.status)).toEqual(['refused', 'refused'])
+    refuse = false
+    expect((await bots.send('bot-hold', 'one', hold!.id, [down(3), key(4)])).acks.map((ack) => ack.status)).toEqual(['applied', 'applied'])
+  })
+
+  it('gives a page\'s file picker only the files this computer\'s dialog answered, by a one-time token, within the limits', async () => {
+    const folder = await mkdtemp(join(tmpdir(), 'mousse-hold-files-'))
+    const chosen = join(folder, 'note.txt')
+    await writeFile(chosen, 'twelve bytes')
+    const update: BrowserViewerUpdate = { tabId: 'tab_1', url: 'https://a.test/', title: 'A', viewport: { width: 1280, height: 720 }, behind: false, frameSeq: 1, stateSeq: 1, chooser: { multiple: false, site: 'a.test' } }
+    const { bots, worker, window } = host({ update })
+    await window('one')
+    const { hold } = await bots.open('bot-hold', undefined, { viewId: 'one' })
+    // The view that holds the browser is told which site asks.
+    await expect.poll(async () => (await bots.view('bot-hold', { viewId: 'one', connectionId: 'local' })).chooser).toEqual({ multiple: false, site: 'a.test' })
+    // Another window, or a connection that is not the hold's, is not this hold.
+    await expect(bots.chooseFiles('bot-hold', 'two', hold!.id, [chosen])).rejects.toMatchObject({ code: 'hold_ended' })
+    // One file here; never a folder or a path that is not a file.
+    await expect(bots.chooseFiles('bot-hold', 'one', hold!.id, [chosen, chosen])).rejects.toMatchObject({ message: 'The page takes one file here.' })
+    await expect(bots.chooseFiles('bot-hold', 'one', hold!.id, [folder])).rejects.toMatchObject({ code: 'not_actionable' })
+    await expect(bots.chooseFiles('bot-hold', 'one', hold!.id, ['relative/note.txt'])).rejects.toMatchObject({ code: 'invalid_action' })
+    const { token, count } = await bots.chooseFiles('bot-hold', 'one', hold!.id, [chosen])
+    expect(count).toBe(1)
+    expect(token).toMatch(/^files_/)
+    expect((await bots.send('bot-hold', 'one', hold!.id, [{ seq: 1, input: { kind: 'files', token } }])).acks[0]!.status).toBe('applied')
+    expect(inputs(worker)).toEqual([{ kind: 'files', paths: [chosen] }])
+    // Used once: a second time gives the page nothing.
+    expect((await bots.send('bot-hold', 'one', hold!.id, [{ seq: 2, input: { kind: 'files', token } }])).acks[0]).toMatchObject({ status: 'refused', text: 'Choose the file again' })
+    // Cancel: the picker is answered with none.
+    expect((await bots.send('bot-hold', 'one', hold!.id, [{ seq: 3, input: { kind: 'files' } }])).acks[0]!.status).toBe('applied')
+    expect(inputs(worker).at(-1)).toEqual({ kind: 'files', paths: [] })
+    await rm(folder, { recursive: true, force: true })
   })
 })

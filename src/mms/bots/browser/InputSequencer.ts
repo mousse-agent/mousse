@@ -8,11 +8,14 @@ import type { BotBrowserAck, BotBrowserRefusal } from '../../../shared/bots/pers
  * - **In order.** An input that comes before the one ahead of it waits for it, at most `gapWaitMs`
  *   (250 ms). A gap that does not fill in that time refuses what waits behind it as `gap`, without using
  *   up its number: the sender sends the missing one and those after it again.
- * - **Once.** A number at or below the last one taken is a duplicate: answered as one (with what the
- *   original answer said, while it is remembered), never applied again. A resend of an input that is
- *   waiting or being applied gets that input's own answer.
- * - **Used up.** A number taken is used up whether it was applied or refused (the page changed, the
- *   tab closed): the sender never resends it as new.
+ * - **Once.** A number at or below the last one taken is a duplicate: answered as one (with the outcome
+ *   of the original answer, while it is remembered), never applied again. A resend of an input that is
+ *   waiting or being applied gets that input's own answer. What a copy read is not remembered: a
+ *   duplicate of a copy carries no text.
+ * - **Used up.** A number taken is used up whether it was applied, refused (the page changed, the
+ *   tab closed) or skipped (the sender gave up on it): the sender never resends it as new.
+ * - **Never a hole.** A refusal that does not use its number (`gap`, `busy`) is sent again by the
+ *   sender while the hold lasts; one it gives up on comes as a skip, which uses the number.
  * - **Bounded.** At most `maxWaiting` inputs wait; more are refused as `busy`. Closing the channel (the
  *   hold ended) refuses what waits and what comes after; the one being applied finishes.
  */
@@ -107,7 +110,7 @@ export class InputSequencer<T> {
     // What it was answered first, so a resend after a lost answer learns it; a refusal keeps its reason.
     return answered?.status === 'refused'
       ? { seq, status: 'duplicate', reason: answered.reason!, ...(answered.text ? { text: answered.text } : {}), ...(answered.detail ? { detail: answered.detail } : {}) }
-      : { seq, status: 'duplicate', ...(answered?.copied !== undefined ? { copied: answered.copied } : {}) }
+      : { seq, status: 'duplicate' }
   }
 
   private pump(): void {
@@ -128,7 +131,9 @@ export class InputSequencer<T> {
     )
     this.current = { seq, promise }
     void promise.then((ack) => {
-      this.answers.set(seq, ack)
+      // The outcome alone is kept for a duplicate: never what a copy read.
+      const { copied: _copied, ...outcome } = ack
+      this.answers.set(seq, outcome)
       if (this.answers.size > this.remember) this.answers.delete(this.answers.keys().next().value!)
       this.current = undefined
       next.resolve(ack)

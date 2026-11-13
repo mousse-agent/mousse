@@ -3,7 +3,6 @@ import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { ensureWindowsBrowserSandboxAccess } from '../../shared/browser/windowsSandboxPermissions.mjs'
 import {
-  BROWSER_MODIFIERS,
   type BrowserActionRequest,
   type BrowserAction,
   type BrowserTarget,
@@ -15,6 +14,7 @@ import {
   type BrowserMouseButton,
   type BrowserObservation,
   type BrowserPageDialog,
+  type BrowserPictureHits,
   type BrowserPictureSpot,
   type BrowserSessionRecord,
   type BrowserTab,
@@ -181,12 +181,18 @@ export class ManagedSession {
   private readonly openingTabs = new Set<{ abort: AbortController; pageSessionId?: string }>()
   /** Each tab's open dialog (alert, confirm, prompt, leave page), by CDP session: the page waits for its answer. */
   private readonly tabDialogs = new Map<string, BrowserPageDialog>()
-  /** Each tab's file picker waiting for the person, by CDP session. */
-  private readonly tabChoosers = new Map<string, { mode: 'selectSingle' | 'selectMultiple'; backendNodeId: number }>()
+  /** Each tab's file picker waiting for the person, and the site that asks, by CDP session. */
+  private readonly tabChoosers = new Map<string, PageChooser>()
   /** A person's input waiting on a tab that may open a dialog (`untilDialog`), by CDP session. */
   private readonly dialogWaiters = new Map<string, Set<() => void>>()
   /** What the person holds down now, so it is let go of when they leave (`releaseHuman`). */
-  private humanPressed: { keys: Map<string, { key: string; code: string; keyCode: number }>; buttons: Set<BrowserMouseButton>; point?: { x: number; y: number }; composing: boolean; tabSessionId?: string } = { keys: new Map(), buttons: new Set(), composing: false }
+  private humanPressed: HumanPressed = { keys: new Map(), buttons: new Set(), composing: false }
+  /** What the person held when they left while the page showed a dialog: let go of once it is answered, by CDP session. */
+  private readonly owedRelease = new Map<string, HumanPressed>()
+  /** Each tab's own world for reading what is under a point (`readHits`), by CDP session, for its current page. */
+  private readonly hitWorlds = new Map<string, { page: string; contextId: Promise<number> }>()
+  /** Whether pages are refused the clipboard now (a person holds the browser: `guardClipboard`). */
+  private clipboardGuarded = false
 
   constructor(private readonly config: SessionConfig, options: { persistent: boolean; workspaceId?: string; runId?: string; threadId?: string }) {
     this.id = 'sess_' + randomUUID()
@@ -384,12 +390,17 @@ export class ManagedSession {
     this.chrome.cdp.on('Page.javascriptDialogClosed', (_params: unknown, sessionId?: string) => {
       if (sessionId && this.tabDialogs.has(sessionId)) this.pageDialog(sessionId, undefined)
     })
-    // The page asks for files while a person holds the browser (`interceptChooser`): their view answers it.
+    // The page asks for files while a person holds the browser (`interceptChooser`): their view answers
+    // it, and names the site that asks (the frame's own, which may be another site's inside the page).
     this.chrome.cdp.on('Page.fileChooserOpened', (params: unknown, sessionId?: string) => {
       if (!sessionId || this.closed || this.closing || this.controlOwner !== 'human') return
-      const opened = params as { mode?: string; backendNodeId?: number }
+      const opened = params as { mode?: string; backendNodeId?: number; frameId?: string }
       if (typeof opened.backendNodeId !== 'number') return
-      this.pageChooser(sessionId, { mode: opened.mode === 'selectMultiple' ? 'selectMultiple' : 'selectSingle', backendNodeId: opened.backendNodeId })
+      const chooser: PageChooser = { mode: opened.mode === 'selectMultiple' ? 'selectMultiple' : 'selectSingle', backendNodeId: opened.backendNodeId }
+      void this.chooserSite(sessionId, opened.frameId).then((site) => {
+        if (this.closed || this.closing || this.controlOwner !== 'human') return
+        this.pageChooser(sessionId, { ...chooser, ...(site ? { site } : {}) })
+      })
     })
     // Chromium does not always report a page's own title as it changes: a watched page's is read once it has loaded.
     this.chrome.cdp.on('Page.lifecycleEvent', (params: unknown, sessionId?: string) => {
@@ -421,6 +432,8 @@ export class ManagedSession {
         this.tabProblems.delete(detached.cdpSessionId)
         this.tabDialogs.delete(detached.cdpSessionId)
         this.tabChoosers.delete(detached.cdpSessionId)
+        this.owedRelease.delete(detached.cdpSessionId)
+        this.hitWorlds.delete(detached.cdpSessionId)
         this.viewers?.forget(detached.cdpSessionId)
         this.refs.invalidateTab(detached.publicId)
         this.tabs.delete(detached.publicId)
@@ -464,6 +477,8 @@ export class ManagedSession {
     this.tabProblems.clear()
     this.tabDialogs.clear()
     this.tabChoosers.clear()
+    this.owedRelease.clear()
+    this.hitWorlds.clear()
     for (const timer of this.pageRechecks.values()) clearTimeout(timer)
     this.pageRechecks.clear()
     const chrome = this.chrome
@@ -1019,8 +1034,9 @@ export class ManagedSession {
       dialog: (cdpSessionId) => this.tabDialogs.get(cdpSessionId),
       chooser: (cdpSessionId) => {
         const chooser = this.tabChoosers.get(cdpSessionId)
-        return chooser ? { multiple: chooser.mode === 'selectMultiple' } : undefined
+        return chooser ? { multiple: chooser.mode === 'selectMultiple', ...(chooser.site ? { site: chooser.site } : {}) } : undefined
       },
+      hits: (cdpSessionId) => this.readHits(cdpSessionId),
       now: () => this.clock().getTime()
     })
     return this.viewers
@@ -1100,7 +1116,8 @@ export class ManagedSession {
       format: 'jpeg', quality: 60, fromSurface: true, captureBeyondViewport: false,
       clip: { x: metrics.cssVisualViewport?.pageX ?? 0, y: metrics.cssVisualViewport?.pageY ?? 0, width: viewport.width, height: viewport.height, scale }
     }, { sessionId: tab.cdpSessionId, timeoutMs: 10_000 })
-    const spot = { documentId: tab.page, scrollX: metrics.cssVisualViewport?.pageX ?? 0, scrollY: metrics.cssVisualViewport?.pageY ?? 0 }
+    const hits = await this.readHits(tab.cdpSessionId)
+    const spot = { documentId: tab.page, scrollX: metrics.cssVisualViewport?.pageX ?? 0, scrollY: metrics.cssVisualViewport?.pageY ?? 0, ...(hits ? { hits } : {}) }
     const taken = { data: shot.data, width: Math.round(viewport.width * scale), height: Math.round(viewport.height * scale), at: this.clock().getTime(), sharp: false, spot }
     viewers.keep(tab.cdpSessionId, taken)
     return { ...picture, data: taken.data, width: taken.width, height: taken.height, capturedAt: nowIso(this.clock), spot }
@@ -1121,6 +1138,7 @@ export class ManagedSession {
     const batch = Array.isArray(params.inputs)
     const entries = (batch ? params.inputs as unknown[] : [{ input: params.input }]).slice(0, 64).map((entry) => {
       const record = entry && typeof entry === 'object' ? entry as Record<string, unknown> : {}
+      // A positioned input names the picture it was made on (`spot`); one without is refused below.
       return { input: validateBrowserHumanInput(record.input), spot: pictureSpot(record.spot) }
     })
     // What the person's input changes reaches the view at once, even a picture the page showed before.
@@ -1181,15 +1199,11 @@ export class ManagedSession {
         return { applied: true }
       }
       case 'copy': {
+        // The selection is read as plain text for the person's clipboard alone. The browser's own copy
+        // never runs: its clipboard never holds what the person copied, for a page or the bot to read
+        // back, and the page hears no copy. Cut then deletes the selection in an editable field.
         const frameId = tab.frameId || (await cdp.send<{ frameTree?: { frame?: { id?: string } } }>('Page.getFrameTree', {}, { sessionId: tab.cdpSessionId, signal, timeoutMs: 5_000 })).frameTree?.frame?.id
-        const copied = frameId ? await readSelectedText(cdp, tab.cdpSessionId, frameId, signal) : ''
-        // The page's own copy or cut runs too (a page may listen for it); cut removes the selection.
-        const primary = process.platform === 'darwin' ? BROWSER_MODIFIERS.meta : BROWSER_MODIFIERS.ctrl
-        const key = input.cut ? { key: 'x', code: 'KeyX', keyCode: 88 } : { key: 'c', code: 'KeyC', keyCode: 67 }
-        await this.untilDialog(tab, (async () => {
-          await dispatchHumanInput(cdp, tab.cdpSessionId, { kind: 'keys', type: 'down', ...key, modifiers: primary, command: input.cut ? 'cut' : 'copy' }, signal)
-          await dispatchHumanInput(cdp, tab.cdpSessionId, { kind: 'keys', type: 'up', ...key, modifiers: primary }, signal)
-        })())
+        const copied = frameId ? await readSelectedText(cdp, tab.cdpSessionId, frameId, signal, input.cut === true) : ''
         return { applied: true, copied }
       }
       default:
@@ -1197,12 +1211,16 @@ export class ManagedSession {
     }
     let sent: DispatchedHumanInput = input
     let shifted: { x: number; y: number } | undefined
-    const located = 'x' in input && 'y' in input
-    if (located && spot) {
-      const fenced = await this.fencePoint(tab, input, spot, signal, input.kind === 'scroll')
+    if ('x' in input && 'y' in input) {
+      // A button the person holds is let go of where the pointer is, whatever the picture: nothing is left pressed.
+      const letGo = input.kind === 'pointer' && input.type === 'up' && pressed.buttons.has(input.button as BrowserMouseButton)
+      const fenced = spot
+        ? await this.untilDialog(tab, this.fencePoint(tab, input, spot, signal, { wheel: input.kind === 'scroll', press: input.kind === 'click' || (input.kind === 'pointer' && input.type === 'down') }))
+        : { ok: false as const, message: 'No picture places this input' }
+      // A dialog opened while the point was checked: its answer goes first.
+      if (!fenced) return { applied: false, code: 'dialog_open', message: 'Answer the page\'s dialog first' }
       if (!fenced.ok) {
-        // A button or key the person holds is still let go of where it is: nothing is left pressed.
-        if (!(input.kind === 'pointer' && input.type === 'up' && pressed.buttons.has(input.button as BrowserMouseButton))) return { applied: false, code: 'page_changed', message: fenced.message }
+        if (!letGo) return { applied: false, code: 'page_changed', message: fenced.message }
         const last = pressed.point ?? { x: input.x, y: input.y }
         sent = { ...input, x: last.x, y: last.y }
       } else if (fenced.dx || fenced.dy) {
@@ -1242,23 +1260,97 @@ export class ManagedSession {
 
   /**
    * Checks a point the person picked on a picture against the page as it is now: the same document,
-   * and how far it has scrolled since (the point moves with it, so it lands on what they saw).
+   * and how far it has scrolled since (the point moves with it, so it lands on what they saw). For a
+   * press, what was on top at the picture's grid points around it must still be there, where it was
+   * on the page (`pressChanged`): a modal, a shift of the layout or an inner scroll since is refused.
    */
-  private async fencePoint(tab: TabState, input: { x: number; y: number }, spot: BrowserPictureSpot, signal?: AbortSignal, wheel = false): Promise<{ ok: true; dx: number; dy: number } | { ok: false; message: string }> {
+  private async fencePoint(tab: TabState, input: { x: number; y: number }, spot: BrowserPictureSpot, signal: AbortSignal | undefined, options: { wheel: boolean; press: boolean }): Promise<{ ok: true; dx: number; dy: number } | { ok: false; message: string }> {
     if (spot.documentId !== tab.page) return { ok: false, message: 'The page changed since that picture' }
     const metrics = await this.requireChrome().cdp.send<{ cssVisualViewport?: { pageX?: number; pageY?: number; clientWidth?: number; clientHeight?: number } }>('Page.getLayoutMetrics', {}, { sessionId: tab.cdpSessionId, signal, timeoutMs: 5_000 })
     const visual = metrics.cssVisualViewport ?? {}
     const dx = Math.round((spot.scrollX - (visual.pageX ?? 0)) * 100) / 100
     const dy = Math.round((spot.scrollY - (visual.pageY ?? 0)) * 100) / 100
-    if (!dx && !dy) return { ok: true, dx: 0, dy: 0 }
+    const width = visual.clientWidth ?? Number.POSITIVE_INFINITY
+    const height = visual.clientHeight ?? Number.POSITIVE_INFINITY
     const x = input.x + dx
     const y = input.y + dy
-    if (x < 0 || y < 0 || x > (visual.clientWidth ?? Number.POSITIVE_INFINITY) || y > (visual.clientHeight ?? Number.POSITIVE_INFINITY)) {
+    if ((dx || dy) && (x < 0 || y < 0 || x > width || y > height)) {
       // A wheel turn is never lost to a scroll it helped make: it turns where the person pointed.
-      if (wheel) return { ok: true, dx: 0, dy: 0 }
+      if (options.wheel) return { ok: true, dx: 0, dy: 0 }
       return { ok: false, message: 'What that picture showed there has scrolled out of view' }
     }
+    if (options.press && spot.hits && await this.pressChanged(tab, input, spot.hits, dx, dy, { width, height }, signal)) {
+      return { ok: false, message: 'What was there has changed since that picture' }
+    }
     return { ok: true, dx, dy }
+  }
+
+  /**
+   * Whether what was on top around a press, as the picture's grid read it, has changed: at each of the
+   * (up to four) grid points around it that are still in view, the element on top now must be the same
+   * one, where it was on the page (within `HIT_SLACK_PX`). Unknown (another reading world, a page that
+   * does not answer) counts as unchanged: the scroll check alone stands then.
+   */
+  private async pressChanged(tab: TabState, point: { x: number; y: number }, hits: BrowserPictureHits, dx: number, dy: number, view: { width: number; height: number }, signal?: AbortSignal): Promise<boolean> {
+    const { cols, rows, width, height, samples } = hits
+    const column = Math.min(Math.max(0, Math.floor(point.x * cols / width - 0.5)), Math.max(0, cols - 2))
+    const row = Math.min(Math.max(0, Math.floor(point.y * rows / height - 0.5)), Math.max(0, rows - 2))
+    const around: Array<{ at: [number, number]; was: [number, number, number] }> = []
+    for (const r of [row, Math.min(rows - 1, row + 1)]) {
+      for (const c of [column, Math.min(cols - 1, column + 1)]) {
+        const index = (r * cols + c) * 3
+        const at: [number, number] = [(c + 0.5) * width / cols + dx, (r + 0.5) * height / rows + dy]
+        if (at[0] < 0 || at[1] < 0 || at[0] >= view.width || at[1] >= view.height) continue
+        if (!around.some((entry) => entry.at[0] === at[0] && entry.at[1] === at[1])) around.push({ at, was: [samples[index]!, samples[index + 1]!, samples[index + 2]!] })
+      }
+    }
+    if (!around.length) return false
+    const now = await this.inHitWorld(tab, `(${READ_HITS})(${JSON.stringify(around.map((entry) => entry.at))})`, signal).catch(() => undefined) as { world?: string; samples?: number[] } | undefined
+    if (!now || now.world !== hits.world || !Array.isArray(now.samples) || now.samples.length !== around.length * 3) return false
+    return around.some((entry, index) => {
+      const [id, left, top] = now.samples!.slice(index * 3, index * 3 + 3) as [number, number, number]
+      return id !== entry.was[0] || Math.abs(left - entry.was[1]) > HIT_SLACK_PX || Math.abs(top - entry.was[2]) > HIT_SLACK_PX
+    })
+  }
+
+  /**
+   * What is on top at a grid of points of a tab's page now (`BrowserPictureHits`), read with each
+   * picture while a person holds the browser, in the tab's own isolated world (the page's scripts never
+   * see it). Undefined while the agent has it, or when the page does not answer within a moment.
+   */
+  private async readHits(cdpSessionId: string): Promise<BrowserPictureHits | undefined> {
+    if (this.controlOwner !== 'human' || this.closed || this.closing) return undefined
+    const tab = [...this.tabs.values()].find((entry) => entry.cdpSessionId === cdpSessionId)
+    if (!tab) return undefined
+    const read = await this.inHitWorld(tab, `(${READ_HITS})(null, ${HIT_COLS}, ${HIT_ROWS})`, undefined, 2_000).catch(() => undefined) as Partial<BrowserPictureHits> | undefined
+    if (!read || typeof read.world !== 'string' || !Array.isArray(read.samples) || read.samples.length !== HIT_COLS * HIT_ROWS * 3 || !(Number(read.width) > 0) || !(Number(read.height) > 0)) return undefined
+    return { world: read.world, width: Number(read.width), height: Number(read.height), cols: HIT_COLS, rows: HIT_ROWS, samples: read.samples.map((value) => Number(value) || 0) }
+  }
+
+  /** Runs `expression` in the tab's own isolated world for its current page (made once a page, and again if it went). */
+  private async inHitWorld(tab: TabState, expression: string, signal?: AbortSignal, timeoutMs = 5_000): Promise<unknown> {
+    const cdp = this.requireChrome().cdp
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      let world = this.hitWorlds.get(tab.cdpSessionId)
+      if (!world || world.page !== tab.page) {
+        const contextId = cdp.send<{ executionContextId: number }>('Page.createIsolatedWorld', { frameId: tab.frameId || tab.targetId, worldName: 'mousse-hits', grantUniveralAccess: false }, { sessionId: tab.cdpSessionId, signal, timeoutMs })
+          .then((made) => made.executionContextId)
+        world = { page: tab.page, contextId }
+        this.hitWorlds.set(tab.cdpSessionId, world)
+        contextId.catch(() => { if (this.hitWorlds.get(tab.cdpSessionId) === world) this.hitWorlds.delete(tab.cdpSessionId) })
+      }
+      try {
+        const read = await cdp.send<{ result?: { value?: unknown }; exceptionDetails?: unknown }>('Runtime.evaluate', { contextId: await world.contextId, expression, returnByValue: true }, { sessionId: tab.cdpSessionId, signal, timeoutMs })
+        if (read.exceptionDetails) throw new Error('the reading failed')
+        return read.result?.value
+      } catch (error) {
+        // A page that does not answer in time keeps its world; one Chromium says is gone is made again, once.
+        const gone = (error as { cdpCode?: unknown } | null)?.cdpCode !== undefined
+        if (gone && this.hitWorlds.get(tab.cdpSessionId) === world) this.hitWorlds.delete(tab.cdpSessionId)
+        if (attempt || !gone || signal?.aborted) throw error
+      }
+    }
+    return undefined
   }
 
   /** Keeps what the person holds down (keys, buttons, a composition), so it is let go of when they leave. */
@@ -1278,36 +1370,93 @@ export class ManagedSession {
 
   /**
    * Lets go of everything the person left down: each key goes up, each button is released where the
-   * pointer was, and a composition under way is dropped. Bounded: a page that does not answer (a
-   * dialog) does not hold the browser up.
+   * pointer was, and a composition under way is dropped. Bounded: a page that does not answer does not
+   * hold the browser up. A page that shows a dialog takes no input until it is answered: what was held
+   * then is let go of as soon as the dialog closes (`owedRelease`), never forgotten.
    */
   private async releaseHuman(tab?: TabState): Promise<void> {
     const pressed = this.humanPressed
     this.humanPressed = { keys: new Map(), buttons: new Set(), composing: false }
     const sessionId = tab?.cdpSessionId ?? pressed.tabSessionId
-    const cdp = this.chrome?.cdp
-    if (!sessionId || !cdp || this.tabDialogs.has(sessionId)) return
+    if (!sessionId || !this.chrome?.cdp) return
     if (!pressed.keys.size && !pressed.buttons.size && !pressed.composing) return
+    if (this.tabDialogs.has(sessionId)) {
+      const owed = this.owedRelease.get(sessionId)
+      this.owedRelease.set(sessionId, owed ? {
+        keys: new Map([...owed.keys, ...pressed.keys]),
+        buttons: new Set([...owed.buttons, ...pressed.buttons]),
+        composing: owed.composing || pressed.composing,
+        ...(pressed.point ?? owed.point ? { point: pressed.point ?? owed.point } : {})
+      } : pressed)
+      return
+    }
+    await this.sendRelease(sessionId, pressed)
+  }
+
+  /** Sends the key ups, button releases and the end of a composition for what was held. */
+  private async sendRelease(sessionId: string, pressed: HumanPressed): Promise<void> {
+    const cdp = this.chrome?.cdp
+    if (!cdp) return
     const send = (method: string, params: Record<string, unknown>) => cdp.send(method, params, { sessionId, timeoutMs: MARK_ANSWER_MS }).catch(() => undefined)
-    for (const key of pressed.keys.values()) await send('Input.dispatchKeyEvent', { type: 'keyUp', key: key.key, code: key.code, windowsVirtualKeyCode: key.keyCode, nativeVirtualKeyCode: key.keyCode })
+    for (const key of pressed.keys.values()) await send('Input.dispatchKeyEvent', { type: 'keyUp', key: key.key, code: key.code, windowsVirtualKeyCode: key.keyCode })
     const at = pressed.point ?? { x: 0, y: 0 }
     for (const button of pressed.buttons) await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: at.x, y: at.y, button, buttons: 0, clickCount: 1 })
     if (pressed.composing) await send('Input.imeSetComposition', { text: '', selectionStart: 0, selectionEnd: 0 })
   }
 
-  /** The page opened a dialog, or it was answered: kept per tab, for the person watching. */
+  /** The page opened a dialog, or it was answered: kept per tab, for the person watching. Once answered, what was owed is let go of. */
   private pageDialog(cdpSessionId: string, dialog: BrowserPageDialog | undefined): void {
     if (dialog) this.tabDialogs.set(cdpSessionId, dialog)
     else this.tabDialogs.delete(cdpSessionId)
     this.viewers?.dialog(cdpSessionId, dialog)
     if (dialog) for (const wake of [...this.dialogWaiters.get(cdpSessionId) ?? []]) wake()
+    const owed = dialog ? undefined : this.owedRelease.get(cdpSessionId)
+    if (owed) {
+      this.owedRelease.delete(cdpSessionId)
+      void this.sendRelease(cdpSessionId, owed)
+    }
   }
 
   /** The page asks for files (while a person holds the browser), or was answered. */
-  private pageChooser(cdpSessionId: string, chooser: { mode: 'selectSingle' | 'selectMultiple'; backendNodeId: number } | undefined): void {
+  private pageChooser(cdpSessionId: string, chooser: PageChooser | undefined): void {
     if (chooser) this.tabChoosers.set(cdpSessionId, chooser)
     else this.tabChoosers.delete(cdpSessionId)
-    this.viewers?.chooser(cdpSessionId, chooser ? { multiple: chooser.mode === 'selectMultiple' } : undefined)
+    this.viewers?.chooser(cdpSessionId, chooser ? { multiple: chooser.mode === 'selectMultiple', ...(chooser.site ? { site: chooser.site } : {}) } : undefined)
+  }
+
+  /** The site whose frame asks for files: the frame's own address, else the tab's. */
+  private async chooserSite(cdpSessionId: string, frameId: string | undefined): Promise<string | undefined> {
+    const tab = [...this.tabs.values()].find((entry) => entry.cdpSessionId === cdpSessionId)
+    try {
+      type Tree = { frame?: { id?: string; url?: string }; childFrames?: Tree[] }
+      const { frameTree } = await this.requireChrome().cdp.send<{ frameTree?: Tree }>('Page.getFrameTree', {}, { sessionId: cdpSessionId, timeoutMs: 2_000 })
+      const find = (tree: Tree | undefined): string | undefined => {
+        if (!tree) return undefined
+        if (tree.frame?.id === frameId) return tree.frame?.url
+        for (const child of tree.childFrames ?? []) {
+          const url = find(child)
+          if (url) return url
+        }
+        return undefined
+      }
+      return hostOf((frameId ? find(frameTree) : undefined) ?? frameTree?.frame?.url ?? tab?.url)
+    } catch {
+      return hostOf(tab?.url)
+    }
+  }
+
+  /**
+   * While a person holds the browser, no page may read or write a clipboard (`navigator.clipboard`):
+   * the person's copy reaches their clipboard through their view alone. When the agent has it again
+   * the browser's own defaults stand (its clipboard is its own, never this computer's).
+   */
+  private async guardClipboard(held: boolean): Promise<void> {
+    const cdp = this.chrome?.cdp
+    if (!cdp || this.clipboardGuarded === held) return
+    this.clipboardGuarded = held
+    if (held) {
+      for (const name of ['clipboard-read', 'clipboard-write']) await cdp.send('Browser.setPermission', { permission: { name }, setting: 'denied' }, { timeoutMs: MARK_ANSWER_MS }).catch(() => undefined)
+    } else await cdp.send('Browser.resetPermissions', {}, { timeoutMs: MARK_ANSWER_MS }).catch(() => undefined)
   }
 
   /**
@@ -1417,7 +1566,8 @@ export class ManagedSession {
           const taken = this.takeControl(owner)
           // The tab a person takes comes to the front: Chromium paints only that one, so they see what they do.
           const held = owner === 'human' && typeof params.tabId === 'string' ? this.tabs.get(params.tabId) : undefined
-          return this.afterControlMoved(loadingForAgent)
+          return this.guardClipboard(owner === 'human')
+            .then(() => this.afterControlMoved(loadingForAgent))
             .then(() => held && this.tabs.has(held.publicId) ? this.toFront(held).catch(() => undefined) : undefined)
             // Its file picker is answered in the person's view (`chooser`), when that view can.
             .then(() => held && params.chooser === true ? this.interceptChooser(held, true) : undefined)
@@ -1427,7 +1577,7 @@ export class ManagedSession {
       case 'control.release':
         return this.releaseHuman().then(() => this.interceptChooser(undefined, false)).then(() => {
           this.releaseControl(requiredId(params.controlLeaseId))
-          return this.afterControlMoved().then(() => ({ ok: true, lifecycle: this.lifecycle }))
+          return this.guardClipboard(false).then(() => this.afterControlMoved()).then(() => ({ ok: true, lifecycle: this.lifecycle }))
         })
       default:
         fail('unsupported', 'Unsupported method')
@@ -1922,13 +2072,67 @@ function mediaTypeForName(name: string): string {
 /** What `untilDialog` races the input against. */
 const DIALOG_OPENED = Symbol('dialog opened')
 
-/** The document and scroll of the picture a person acted on, when the daemon sent them. */
+/** What the person holds down (keys, buttons, a composition), and where the pointer was. */
+interface HumanPressed {
+  keys: Map<string, { key: string; code: string; keyCode: number }>
+  buttons: Set<BrowserMouseButton>
+  point?: { x: number; y: number }
+  composing: boolean
+  tabSessionId?: string
+}
+
+/** A page's file picker waiting for the person, and the site whose frame asks. */
+interface PageChooser {
+  mode: 'selectSingle' | 'selectMultiple'
+  backendNodeId: number
+  site?: string
+}
+
+/** The grid read with each picture while a person holds the browser: 16 by 9 points (80 px apart on a 1280 by 720 page). */
+const HIT_COLS = 16
+const HIT_ROWS = 9
+/** How far, in CSS pixels, an element under a press may have moved on the page and still count as where it was. */
+const HIT_SLACK_PX = 6
+
+/**
+ * Run in a tab's own isolated world: the element on top at each point (`points`, or the grid's
+ * centres), as an id this world gives each element it meets (kept while the element lives), with its
+ * left and top on the page. The world's name tells ids of another world apart. Nothing the page can see.
+ */
+const READ_HITS = `function (points, cols, rows) {
+  const g = globalThis
+  g.__mousseHitIds = g.__mousseHitIds || new WeakMap()
+  g.__mousseHitWorld = g.__mousseHitWorld || Math.random().toString(36).slice(2, 12)
+  g.__mousseHitNext = g.__mousseHitNext || 1
+  const width = innerWidth
+  const height = innerHeight
+  const at = points || []
+  if (!points) for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) at.push([(c + 0.5) * width / cols, (r + 0.5) * height / rows])
+  const samples = []
+  for (const [x, y] of at) {
+    const element = document.elementFromPoint(x, y)
+    if (!element) { samples.push(0, 0, 0); continue }
+    let id = g.__mousseHitIds.get(element)
+    if (!id) { id = g.__mousseHitNext++; g.__mousseHitIds.set(element, id) }
+    const box = element.getBoundingClientRect()
+    samples.push(id, Math.round(box.left + scrollX), Math.round(box.top + scrollY))
+  }
+  return { world: g.__mousseHitWorld, width, height, samples }
+}`
+
+/** The document and scroll of the picture a person acted on, and its grid when it has one, as the daemon sent them. */
 function pictureSpot(value: unknown): BrowserPictureSpot | undefined {
   if (!value || typeof value !== 'object') return undefined
   const spot = value as Record<string, unknown>
   const finite = (entry: unknown) => typeof entry === 'number' && Number.isFinite(entry) && Math.abs(entry) <= 10_000_000
   if (typeof spot.documentId !== 'string' || !/^doc_[A-Za-z0-9-]{1,64}$/.test(spot.documentId) || !finite(spot.scrollX) || !finite(spot.scrollY)) return undefined
-  return { documentId: spot.documentId, scrollX: spot.scrollX as number, scrollY: spot.scrollY as number }
+  const hits = spot.hits as Record<string, unknown> | undefined
+  const grid = hits && typeof hits === 'object' && typeof hits.world === 'string' && hits.world.length <= 32
+    && hits.cols === HIT_COLS && hits.rows === HIT_ROWS && finite(hits.width) && (hits.width as number) > 0 && finite(hits.height) && (hits.height as number) > 0
+    && Array.isArray(hits.samples) && hits.samples.length === HIT_COLS * HIT_ROWS * 3 && hits.samples.every(finite)
+    ? { world: hits.world as string, width: hits.width as number, height: hits.height as number, cols: HIT_COLS, rows: HIT_ROWS, samples: hits.samples as number[] }
+    : undefined
+  return { documentId: spot.documentId, scrollX: spot.scrollX as number, scrollY: spot.scrollY as number, ...(grid ? { hits: grid } : {}) }
 }
 
 export function mapImagePoint(observation: BrowserObservation, point: { x: number; y: number }): { x: number; y: number } {

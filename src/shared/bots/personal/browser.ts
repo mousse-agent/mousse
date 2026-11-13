@@ -43,13 +43,20 @@ export type BotBrowserRefusal =
   | 'tab-closed'
   /** This view does not hold the browser (it was given back, ended, or taken in another window). */
   | 'not-held'
-  /** An earlier input did not arrive: send it, and this one again. */
+  /** An earlier input did not arrive: send it, and this one again. Its number is not used. */
   | 'gap'
   /** The page waits for its dialog to be answered. */
   | 'dialog'
   | 'too-large'
+  /** Too much waits at the host now: send it again a little later. Its number is not used. */
   | 'busy'
   | 'failed'
+  /** The host was told to skip this number (`BotBrowserSent.skip`): nothing was applied. */
+  | 'skipped'
+  /** The service never takes this input (too long, malformed): the view drops it, and skips its number. */
+  | 'invalid'
+  /** It waited too long to be taken (the page did not answer): the view dropped it, and skips its number. */
+  | 'dropped'
 
 /** The host's answer to one numbered input of a hold. */
 export interface BotBrowserAck {
@@ -64,14 +71,21 @@ export interface BotBrowserAck {
   copied?: string
 }
 
-/** One numbered input of a hold (`bots.browser.send`). */
-export interface BotBrowserSent {
-  /** The hold's own count, from 1. */
-  seq: number
-  /** The picture (`BotBrowserFrame.id`) the person acted on. */
-  picture?: number
-  input: BotBrowserInput
-}
+/**
+ * One numbered input of a hold (`bots.browser.send`), or a number to skip (`skip`). Every number the
+ * view gives out reaches the host as one or the other, so the host's count never waits on a hole: an
+ * input the host refused without using its number (`gap`, `busy`) is sent again while the hold lasts,
+ * and one the view gives up on (it waited too long, or the service never takes it) is sent as a skip.
+ */
+export type BotBrowserSent =
+  | {
+    /** The hold's own count, from 1. */
+    seq: number
+    /** The picture (`BotBrowserFrame.id`) the person acted on. */
+    picture?: number
+    input: BotBrowserInput
+  }
+  | { seq: number; skip: true }
 
 /** A view's hold of the bot's browser, as the host answers it to that view. */
 export interface BotBrowserHold {
@@ -119,12 +133,21 @@ export interface BotBrowserView {
   hold?: BotBrowserHold
   /** The page's open dialog, waiting for an answer. */
   dialog?: BotBrowserDialog
-  /** The page asks the person for files (`multiple`: more than one). */
-  chooser?: { multiple: boolean }
+  /** The page asks the person for files (`multiple`: more than one), and the site that asks. */
+  chooser?: BotBrowserChooser
 }
 
-/** A person's input in the split view, at the page's CSS pixels. */
-export type BotBrowserInput = BrowserHumanInput
+/** A page's request for files, as the view that holds the browser is told it: one or several, and which site asks. */
+export interface BotBrowserChooser {
+  multiple: boolean
+  site?: string
+}
+
+/**
+ * A person's input in the split view, at the page's CSS pixels. Files go as the one-time token this
+ * computer's own file dialog was answered with (`bots.browser.files`), never as paths; none cancels.
+ */
+export type BotBrowserInput = Exclude<BrowserHumanInput, { kind: 'files' }> | { kind: 'files'; token?: string }
 
 /**
  * What a view that watches a bot's browser is sent (`bots.browser.frame`, on its own connection
@@ -143,7 +166,7 @@ export interface BotBrowserFrameEvent {
   /** The page's dialog opened; null: it was answered. */
   dialog?: BotBrowserDialog | null
   /** The page asks for files; null: answered. */
-  chooser?: { multiple: boolean } | null
+  chooser?: BotBrowserChooser | null
   /** The page's size in CSS pixels, when it changed (and with the first picture). */
   viewport?: { width: number; height: number }
   tab?: { url: string; title: string }
@@ -185,6 +208,23 @@ export const BOT_BROWSER_HOLD_LEASE_MS = 2 * 60_000
 export const MAX_BOT_BROWSER_SENT = 64
 /** The capability under which `hold` and `send` are offered: a daemon without it takes `control` and `input`. */
 export const BOTS_BROWSER_HOLD_CAPABILITY = 'bots.browser.hold.v1'
+
+/**
+ * The files the person chose for a page's file picker, from this computer's own file dialog: the app's
+ * main process opens the dialog and alone calls this (it is not one of the renderer's methods), on
+ * the window's own connection. The daemon checks the hold and the open picker, and the files (at most
+ * `MAX_BOT_BROWSER_FILES`, `MAX_BOT_BROWSER_FILES_BYTES` in all, each a file), and answers a one-time
+ * token the view sends as its `files` input.
+ */
+export const BOT_BROWSER_FILES_METHOD = 'bots.browser.files'
+export const MAX_BOT_BROWSER_FILES = 16
+export const MAX_BOT_BROWSER_FILES_BYTES = 512 * 1024 * 1024
+/** What the app says when the chosen files are over the limits. */
+export const BOT_BROWSER_FILES_LIMIT_TEXT = `Choose at most ${MAX_BOT_BROWSER_FILES} files, ${MAX_BOT_BROWSER_FILES_BYTES / 1024 / 1024} MB in all.`
+export interface BotBrowserFilesApi {
+  params: { botId: string; viewId: string; holdId: string; paths: string[] }
+  result: { token: string; count: number }
+}
 
 /** The bot-browser methods (`bots.browser.*`), apart from the required Bot UI set: an older daemon lacks them. */
 export const BOTS_BROWSER_METHODS = ['bots.browser.get', 'bots.browser.control', 'bots.browser.input', 'bots.browser.open', 'bots.browser.close', 'bots.browser.watch', 'bots.browser.unwatch', 'bots.browser.hold', 'bots.browser.send'] as const

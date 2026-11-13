@@ -31,6 +31,7 @@ const { ChatWorkspace } = await import('../../src/renderer/components/chats/Chat
 const { useChatsStore } = await import('../../src/renderer/stores/chatsStore')
 const { setBotsClient, useBotsStore } = await import('../../src/renderer/stores/botsStore')
 const { setBotBrowserTransport, useBotBrowserStore, useBotBrowserWatch, BOT_BROWSER_FRAME_MS, STOP_GRACE_MS } = await import('../../src/renderer/stores/botBrowserStore')
+const { useAppStore } = await import('../../src/renderer/stores/appStore')
 
 let root: Root
 let host: HTMLElement
@@ -466,11 +467,14 @@ describe('the person\'s input in the split view', () => {
     }) as never, (listener) => { pushes.add(listener); return () => pushes.delete(listener) })
     // The transport changed: this window picks its hold up again from the daemon's answer.
     await act(async () => useBotBrowserStore.getState().load('noobesh', false))
+    // The browser runs on this computer: it is named as the app names this computer, not by its network name.
+    act(() => useAppStore.setState({ appInfo: { platform: 'darwin', repoRoot: '/', llmProvider: 'claude', deviceName: 'Studio Desk' } }))
     await type('a', 'KeyA', 65)
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 600)) })
     expect(note().textContent).toBe('Sending…')
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 2_600)) })
-    expect(note().textContent).toContain('Not reaching Mac mini')
+    expect(note().textContent).toContain('Not reaching Studio Desk')
+    expect(note().textContent).not.toContain('Mac mini')
     await click(button('Retry'))
     const sends = calls.filter(([method]) => method === 'bots.browser.send').map(([, params]) => (params as BotsBrowserApi['bots.browser.send']['params']).inputs.map((sent) => sent.seq))
     expect(sends.at(-1)).toEqual(sends[0])
@@ -520,6 +524,53 @@ describe('the person\'s input in the split view', () => {
     await click([...dialog.querySelectorAll('button')].find((entry) => entry.textContent === 'OK'))
     await settle()
     expect(sentInputs().map((sent) => sent.input)).toEqual([{ kind: 'dialog', accept: true }])
+  })
+
+  it('a page\'s file request names the site; only what this computer\'s own dialog answered goes, by its token, never a path', async () => {
+    const choose = vi.fn(async () => ({ token: 'files_0123456789ab', count: 1 }))
+    ;(fake.events as Record<string, unknown>).chooseBrowserFiles = choose
+    const pane = await held({ chooser: { multiple: false, site: 'upload.example.com' } })
+    const card = pane.querySelector('.bot-browser-dialog')!
+    expect(card.textContent).toContain('upload.example.com asks for a file.')
+    // Nothing goes to the page until the person chooses.
+    expect(sentInputs()).toEqual([])
+    await click([...card.querySelectorAll('button')].find((entry) => entry.textContent === 'Choose…'))
+    await settle()
+    expect(choose).toHaveBeenCalledWith({ botId: 'noobesh', viewId: expect.any(String), holdId: 'hold_1', multiple: false, site: 'upload.example.com' })
+    expect(sentInputs().map((sent) => sent.input)).toEqual([{ kind: 'files', token: 'files_0123456789ab' }])
+  })
+
+  it('a page\'s request for several files says so; Cancel answers it with none', async () => {
+    const pane = await held({ chooser: { multiple: true, site: 'upload.example.com' } })
+    const card = pane.querySelector('.bot-browser-dialog')!
+    expect(card.textContent).toContain('upload.example.com asks for files.')
+    await click([...card.querySelectorAll('button')].find((entry) => entry.textContent === 'Cancel'))
+    await settle()
+    expect(sentInputs().map((sent) => sent.input)).toEqual([{ kind: 'files' }])
+  })
+
+  it('a window shown again asks at once whether it still holds the browser, and says so when it no longer does', async () => {
+    await held()
+    setBotBrowserTransport((async (method: BotsBrowserMethod, params: Record<string, unknown>) => {
+      calls.push([method, params])
+      if (method === 'bots.browser.hold' && (params as { request: { op: string } }).request.op === 'renew') {
+        // The hold ran out while the window was hidden: the bot has its browser back.
+        browser = { ...browser, control: 'bot', holder: 'bot' }
+        delete browser.hold
+        throw { code: 'hold_ended', message: 'You don\'t hold this browser now.' }
+      }
+      if (method === 'bots.browser.unwatch') return { ok: true }
+      return { browser }
+    }) as never, (listener) => { pushes.add(listener); return () => pushes.delete(listener) })
+    await act(async () => useBotBrowserStore.getState().load('noobesh', false))
+    const renews = () => calls.filter(([method, params]) => method === 'bots.browser.hold' && (params as { request: { op: string } }).request.op === 'renew').length
+    const before = renews()
+    // Shown again: no wait for the next beat.
+    await act(async () => { document.dispatchEvent(new Event('visibilitychange')) })
+    await settle()
+    expect(renews()).toBe(before + 1)
+    expect(useBotBrowserStore.getState().holds.noobesh).toBeUndefined()
+    expect(host.querySelector('.bot-browser-pane .bot-browser-note')!.textContent).toContain('You no longer hold this browser')
   })
 })
 

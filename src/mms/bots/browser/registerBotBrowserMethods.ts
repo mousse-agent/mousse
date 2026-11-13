@@ -1,16 +1,19 @@
 import {
+  BOT_BROWSER_FILES_METHOD,
   BOT_BROWSER_FRAME_EVENT,
   BOTS_BROWSER_HOLD_CAPABILITY,
   BOTS_BROWSER_METHODS,
   BOTS_BROWSER_STREAM_CAPABILITY,
+  MAX_BOT_BROWSER_FILES,
   MAX_BOT_BROWSER_SENT,
   type BotBrowserFrameEvent,
   type BotBrowserHoldRequest,
   type BotBrowserSent,
   type BotsBrowserMethod
 } from '../../../shared/bots/personal/browser'
+import { validateBotBrowserInput } from '../../../shared/bots/personal/browserInput'
 import { BOTS_PERSONAL_V2_CAPABILITY } from '../../../shared/bots/personal/methods'
-import { validateBrowserHumanInput, browserNavigationUrl } from '../../../shared/browser/validation'
+import { browserNavigationUrl } from '../../../shared/browser/validation'
 import { BrowserAutomationError } from '../../browser/automation/BrowserSessionManager'
 import type { HandlerContext } from '../../protocol/handlers'
 import { DomainHandlerRegistry, DomainRpcError, domainObject } from '../../protocol/domainRegistry'
@@ -22,7 +25,9 @@ import type { BotBrowsers } from './BotBrowsers'
  * Profile-bound like the Bot UI's methods, exact keys, and none returns a session id or a path.
  * `watch` pushes pictures on the calling connection only (`bots.browser.frame`), and only to the
  * desktop app on this computer. Taking the browser over, and every input, is the desktop app's on
- * this computer alone too (`hold`, `send`, and an older app's `control`, `input` and `open`).
+ * this computer alone too (`hold`, `send`, and an older app's `control`, `input` and `open`), and so
+ * are a fresh picture (`get` with `frame`) and closing the browser. A hold is bound to the connection
+ * that took it. `bots.browser.files` is the app's main process's alone: the renderer cannot call it.
  */
 
 const KEYS: Record<BotsBrowserMethod, readonly string[]> = {
@@ -66,11 +71,26 @@ function holdRequest(value: unknown): BotBrowserHoldRequest {
 
 function sentInputs(value: unknown): BotBrowserSent[] {
   if (!Array.isArray(value) || !value.length || value.length > MAX_BOT_BROWSER_SENT) throw new DomainRpcError('invalid_params', `inputs must hold 1 to ${MAX_BOT_BROWSER_SENT} inputs`)
-  return value.map((entry) => {
+  return value.map((entry): BotBrowserSent => {
+    // A number the view gives up on comes as a skip, so the count never waits on a hole.
+    if (entry && typeof entry === 'object' && 'skip' in entry) {
+      const skip = domainObject(entry, ['seq', 'skip'])
+      if (!isSeq(skip.seq) || skip.skip !== true) throw new DomainRpcError('invalid_params', 'A skip names its seq')
+      return { seq: skip.seq, skip: true }
+    }
     const sent = domainObject(entry, ['seq', 'picture', 'input'])
     if (!isSeq(sent.seq)) throw new DomainRpcError('invalid_params', 'seq must be a whole number from 1')
     if (sent.picture !== undefined && !(typeof sent.picture === 'number' && Number.isSafeInteger(sent.picture) && sent.picture >= 0)) throw new DomainRpcError('invalid_params', 'picture must be a picture number')
-    return { seq: sent.seq, ...(sent.picture !== undefined ? { picture: sent.picture as number } : {}), input: validateBrowserHumanInput(sent.input) }
+    return { seq: sent.seq, ...(sent.picture !== undefined ? { picture: sent.picture as number } : {}), input: validateBotBrowserInput(sent.input) }
+  })
+}
+
+/** The files this computer's own file dialog answered: absolute paths, at most `MAX_BOT_BROWSER_FILES`. */
+function chosenPaths(value: unknown): string[] {
+  if (!Array.isArray(value) || !value.length || value.length > MAX_BOT_BROWSER_FILES) throw new DomainRpcError('invalid_params', `paths must hold 1 to ${MAX_BOT_BROWSER_FILES} files`)
+  return value.map((path) => {
+    if (typeof path !== 'string' || !path || path.length > 4096 || path.includes('\0')) throw new DomainRpcError('invalid_params', 'Each path must be a file on this computer')
+    return path
   })
 }
 
@@ -87,7 +107,9 @@ function validate(method: BotsBrowserMethod, value: unknown): Record<string, unk
         if (p.control !== 'owner' && p.control !== 'bot') throw new DomainRpcError('invalid_params', 'control must be owner or bot')
         break
       case 'bots.browser.input':
-        p.input = validateBrowserHumanInput(p.input)
+        // An older app's input: files never come this way.
+        p.input = validateBotBrowserInput(p.input)
+        if ((p.input as { kind: string }).kind === 'files') throw new DomainRpcError('invalid_params', 'Files go through the hold\'s channel')
         break
       case 'bots.browser.open':
         if (p.url !== undefined) p.url = browserNavigationUrl(p.url)
@@ -132,20 +154,24 @@ function handle(context: HandlerContext, method: BotsBrowserMethod, p: Record<st
   const botId = p.botId as string
   const view = (pending: Promise<Awaited<ReturnType<BotBrowsers['view']>>>) => pending.then((browser) => ({ browser }))
   switch (method) {
-    case 'bots.browser.get': return view(browsers.view(botId, { frame: p.frame === true, ...(p.viewId ? { viewId: p.viewId as string } : {}) }))
+    case 'bots.browser.get': {
+      // A fresh picture is the desktop app's alone; the state is anyone's in the profile who may read the bot.
+      const connectionId = p.frame === true ? ownerConnection(context, 'watch').id : context.connection?.id
+      return view(browsers.view(botId, { frame: p.frame === true, ...(p.viewId ? { viewId: p.viewId as string } : {}), ...(connectionId ? { connectionId } : {}) }))
+    }
     case 'bots.browser.control': return view(browsers.control(botId, p.control as 'owner' | 'bot', ownerConnection(context, 'take over').id))
     case 'bots.browser.input': return view(browsers.input(botId, p.input as Parameters<BotBrowsers['input']>[1], ownerConnection(context, 'use').id))
     case 'bots.browser.open': {
       const connection = ownerConnection(context, 'open')
       return browsers.open(botId, p.url as string | undefined, { connectionId: connection.id, ...(p.viewId ? { viewId: p.viewId as string } : {}), ...(p.platform ? { platform: p.platform as 'mac' | 'other' } : {}) })
     }
-    case 'bots.browser.close': return view(browsers.close(botId))
+    case 'bots.browser.close':
+      ownerConnection(context, 'close')
+      return view(browsers.close(botId))
     case 'bots.browser.hold':
-      ownerConnection(context, 'take over')
-      return browsers.hold(botId, p.viewId as string, p.request as BotBrowserHoldRequest)
+      return browsers.hold(botId, p.viewId as string, p.request as BotBrowserHoldRequest, ownerConnection(context, 'take over').id)
     case 'bots.browser.send':
-      ownerConnection(context, 'use')
-      return browsers.send(botId, p.viewId as string, p.holdId as string, p.inputs as BotBrowserSent[])
+      return browsers.send(botId, p.viewId as string, p.holdId as string, p.inputs as BotBrowserSent[], ownerConnection(context, 'use').id)
     case 'bots.browser.watch': {
       const connection = ownerConnection(context, 'watch')
       const emit = connection.emitConnectionEvent
@@ -173,6 +199,12 @@ function capabilityOf(method: BotsBrowserMethod): string {
   return BOTS_PERSONAL_V2_CAPABILITY
 }
 
+/** The browser's own refusals keep their code and plain message, and a failed page its class and Chromium's code. */
+function asDomainError(error: unknown): unknown {
+  if (error instanceof BrowserAutomationError) return new DomainRpcError(error.code, error.message, error.details?.problem ? { problem: error.details.problem } : undefined)
+  return error
+}
+
 /** Bind once before server seal. The browsers come from the daemon's admitted profile, never a client path. */
 export function registerBotBrowserMethods(domains: DomainHandlerRegistry, browsersForProfile: (profileId: string) => BotBrowsers | null | undefined | Promise<BotBrowsers | null | undefined>): void {
   for (const method of BOTS_BROWSER_METHODS) {
@@ -187,11 +219,33 @@ export function registerBotBrowserMethods(domains: DomainHandlerRegistry, browse
         try {
           return await handle(context, method, params, browsers)
         } catch (error) {
-          // The browser's own refusals keep their code and plain message, and a failed page its class and Chromium's code.
-          if (error instanceof BrowserAutomationError) throw new DomainRpcError(error.code, error.message, error.details?.problem ? { problem: error.details.problem } : undefined)
-          throw error
+          throw asDomainError(error)
         }
       }
     })
   }
+  // The files the person chose in this computer's own file dialog, from the app's main process (the
+  // renderer's request bridge does not offer this method): a one-time token for the hold's `files` input.
+  domains.register({
+    method: BOT_BROWSER_FILES_METHOD,
+    scope: 'profile',
+    capability: BOTS_BROWSER_HOLD_CAPABILITY,
+    validate: (params): Record<string, unknown> => {
+      const p = domainObject(params ?? {}, ['profileId', 'botId', 'viewId', 'holdId', 'paths'])
+      if (!isBotId(p.botId)) throw new DomainRpcError('invalid_params', 'A bot id is required')
+      if (!isWatchId(p.viewId)) throw new DomainRpcError('invalid_params', 'A view id is required')
+      if (!isHoldId(p.holdId)) throw new DomainRpcError('invalid_params', 'A hold id is required')
+      return { ...p, paths: chosenPaths(p.paths) }
+    },
+    async handle(context, params, binding) {
+      const browsers = await browsersForProfile(binding!.profileId)
+      if (!browsers) throw new DomainRpcError('bots_unavailable', 'Bots are unavailable in this profile.')
+      const connection = ownerConnection(context, 'give files to')
+      try {
+        return await browsers.chooseFiles(params.botId as string, params.viewId as string, params.holdId as string, params.paths as string[], connection.id)
+      } catch (error) {
+        throw asDomainError(error)
+      }
+    }
+  })
 }

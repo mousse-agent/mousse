@@ -246,7 +246,8 @@ export async function dispatchHumanInput(cdp: CdpTransport, cdpSessionId: string
     case 'key': {
       const known = HUMAN_KEYS[input.key]
       const text = known?.text ?? (input.key.length === 1 ? input.key : undefined)
-      const codes = known ? { code: known.code, windowsVirtualKeyCode: known.keyCode, nativeVirtualKeyCode: known.keyCode } : {}
+      // No native key code: it is the platform's own (on a Mac 73 is Volume Down), never the Windows one.
+      const codes = known ? { code: known.code, windowsVirtualKeyCode: known.keyCode } : {}
       await send('Input.dispatchKeyEvent', { type: text ? 'keyDown' : 'rawKeyDown', key: input.key, ...codes, ...(text ? { text } : {}) })
       await send('Input.dispatchKeyEvent', { type: 'keyUp', key: input.key, ...codes })
       return
@@ -272,8 +273,10 @@ export async function dispatchHumanInput(cdp: CdpTransport, cdpSessionId: string
         type: input.type === 'up' ? 'keyUp' : text ? 'keyDown' : 'rawKeyDown',
         key: input.key,
         code: input.code || known?.code || '',
+        // The key code is the Windows one, as a browser's key events carry it. No native key code: on a
+        // Mac those are other numbers (73 is Volume Down there), and Chromium would press that key
+        // instead, and repeat it.
         windowsVirtualKeyCode: keyCode,
-        nativeVirtualKeyCode: keyCode,
         modifiers: input.modifiers,
         ...(text ? { text, unmodifiedText: text } : {}),
         ...(input.repeat ? { autoRepeat: true } : {}),
@@ -288,21 +291,30 @@ export async function dispatchHumanInput(cdp: CdpTransport, cdpSessionId: string
 }
 
 /**
- * The text a person selected on the page (in a field, or anywhere on it), read in an isolated world
- * so the page's scripts never see it asked; bounded.
+ * The text a person selected on the page (in a field, or anywhere on it), as plain text, read in an
+ * isolated world so the page's scripts never see it asked; bounded. No clipboard is touched. With
+ * `cut`, a selection in an editable field (or editable content) is then deleted there, as a cut
+ * removes it; anywhere else nothing changes.
  */
-export async function readSelectedText(cdp: CdpTransport, cdpSessionId: string, frameId: string, signal?: AbortSignal): Promise<string> {
+export async function readSelectedText(cdp: CdpTransport, cdpSessionId: string, frameId: string, signal?: AbortSignal, cut = false): Promise<string> {
   const world = await cdp.send<{ executionContextId: number }>('Page.createIsolatedWorld', { frameId, worldName: 'mousse-selection', grantUniveralAccess: false }, { sessionId: cdpSessionId, signal })
   const read = await cdp.send<{ result?: { value?: unknown } }>('Runtime.evaluate', {
     contextId: world.executionContextId,
     returnByValue: true,
-    expression: `(() => {
+    expression: `((cut) => {
       const field = document.activeElement
       if (field && (field instanceof HTMLTextAreaElement || (field instanceof HTMLInputElement && /^(text|search|url|tel|email|number)$/i.test(field.type))) && field.selectionStart !== null && field.selectionEnd !== null) {
-        return field.value.slice(field.selectionStart, field.selectionEnd)
+        const text = field.value.slice(field.selectionStart, field.selectionEnd)
+        if (cut && text && !field.readOnly && !field.disabled) document.execCommand('delete')
+        return text
       }
-      return String(document.getSelection() || '')
-    })()`
+      const selection = document.getSelection()
+      const text = String(selection || '')
+      const node = selection && selection.anchorNode
+      const editable = node && (node.nodeType === 1 ? node : node.parentElement)
+      if (cut && text && editable && editable.isContentEditable) document.execCommand('delete')
+      return text
+    })(${cut ? 'true' : 'false'})`
   }, { sessionId: cdpSessionId, signal })
   const value = read.result?.value
   return typeof value === 'string' ? value.slice(0, MAX_BROWSER_PASTE_CHARS) : ''

@@ -148,8 +148,12 @@ export interface BrowserResolvedArtifact {
 export type BrowserMouseButton = 'left' | 'middle' | 'right'
 /** Modifier keys held, as CDP counts them: Alt 1, Ctrl 2, Meta (Command) 4, Shift 8. */
 export const BROWSER_MODIFIERS = { alt: 1, ctrl: 2, meta: 4, shift: 8 } as const
-/** The editing commands a shortcut runs in the page (a browser without a window has no menu to run them). */
-export type BrowserEditCommand = 'selectAll' | 'copy' | 'cut' | 'undo' | 'redo'
+/**
+ * The editing commands a shortcut runs in the page (a browser without a window has no menu to run
+ * them). Copy and cut are not among them: the person's copy reads the selection (`copy`), and never
+ * puts it on the browser's own clipboard.
+ */
+export type BrowserEditCommand = 'selectAll' | 'undo' | 'redo'
 /** The most text one paste puts into a page. */
 export const MAX_BROWSER_PASTE_CHARS = 64_000
 
@@ -163,10 +167,13 @@ export const MAX_BROWSER_PASTE_CHARS = 64_000
  * - `keys` is one key going down or up, with the modifiers held, the key's code, and the text it types;
  *   `command` runs the editing command its shortcut stands for.
  * - `compose` is IME composition text (and a dead key's mark) as it stands; `type` commits text.
- * - `paste` puts the person's clipboard text into the page; `copy` answers the page's selected text
- *   (and `cut` removes it), for the person's clipboard only.
+ * - `paste` puts the person's clipboard text into the page; `copy` reads the page's selected text as
+ *   plain text (and `cut` then deletes it in an editable field), for the person's clipboard only: the
+ *   browser's own clipboard never holds it, and the page hears no copy.
  * - `dialog` answers the page's alert, confirm, prompt or leave-page question; `files` answers its
- *   file picker with files the person chose (none: cancelled).
+ *   file picker with files the person chose in this computer's own file dialog (none: cancelled).
+ * - A positioned input (`click`, `scroll`, `pointer`) needs the spot of the picture it was made on;
+ *   without one it is refused (a button the person holds is still let go of).
  * - `release` lets go of every key and button the person left down, and any composition.
  */
 export type BrowserHumanInput =
@@ -187,11 +194,32 @@ export type BrowserHumanInput =
   | { kind: 'forward' }
   | { kind: 'reload' }
 
-/** Where a picture the person acted on was taken: its document and scroll (`human.input`'s fence). */
+/**
+ * Where a picture the person acted on was taken: its document and scroll (`human.input`'s fence), and,
+ * while a person holds the browser, what was on top at a grid of points of it (`hits`).
+ */
 export interface BrowserPictureSpot {
   documentId: string
   scrollX: number
   scrollY: number
+  hits?: BrowserPictureHits
+}
+
+/**
+ * The element on top at each point of a grid over a picture, read as it was taken: a press on an
+ * older picture is checked against the same points now (the element under them, and where it sits on
+ * the page), so a modal, a shift of the layout or an inner scroll since is not clicked through.
+ * `samples` holds three numbers a point, row by row: the element's id in the reading world (0 for
+ * none), and its left and top on the page in CSS pixels. `world` names the reading world: ids from
+ * another one mean nothing.
+ */
+export interface BrowserPictureHits {
+  world: string
+  width: number
+  height: number
+  cols: number
+  rows: number
+  samples: number[]
 }
 
 /** A page's open alert, confirm, prompt or leave-page question, for the person watching. */
@@ -203,16 +231,18 @@ export interface BrowserPageDialog {
   defaultPrompt?: string
 }
 
-/** A page's file picker waiting for the person (`Page.fileChooserOpened` while they hold the browser). */
+/** A page's file picker waiting for the person (`Page.fileChooserOpened` while they hold the browser), and the site that asks. */
 export interface BrowserFileChooser {
   multiple: boolean
+  site?: string
 }
 
 /**
  * What became of one input in `human.input`: applied (with what a copy read, how far a point moved
  * because the page scrolled since its picture, or how a navigation went), or refused with a code:
- * `page_changed` (the picture was of another page, or of what has scrolled out of view), `dialog_open`
- * (the page waits for its dialog), `not_pressed` (nothing to let go of), `no_chooser`, `too_large`.
+ * `page_changed` (the picture was of another page, of what has scrolled out of view, or what was under
+ * the press has changed; or the input came with no picture to place it), `dialog_open` (the page waits
+ * for its dialog), `no_chooser`, `too_large`.
  */
 export type BrowserHumanInputResult =
   | { applied: true; copied?: string; shifted?: { x: number; y: number }; navigation?: import('./navigation').BrowserNavigation }

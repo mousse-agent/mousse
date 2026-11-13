@@ -84,6 +84,11 @@ interface BotBrowserState {
   /** Sends what has no answer yet again. */
   retry(botId: string): void
   open(botId: string, url?: string): Promise<void>
+  /**
+   * The page asks for files: this computer's own file dialog (opened by the app, not the page) picks
+   * them, and the page gets only those, by a one-time token; the paths never pass through here.
+   */
+  chooseFiles(botId: string, chooser: { multiple: boolean; site?: string }): Promise<void>
 }
 
 type Call = <M extends BotsBrowserMethod>(method: M, params: BotsBrowserApi[M]['params']) => Promise<BotsBrowserApi[M]['result']>
@@ -193,7 +198,24 @@ export const useBotBrowserStore = create<BotBrowserState>((set, get) => {
       return channel.push(input, picture)
     },
     retry: (botId) => channels.get(botId)?.retry(),
-    open: (botId, url) => act(botId, () => call('bots.browser.open', { botId, ...(url ? { url } : {}), ...(legacyDaemon ? {} : { viewId: viewId(), platform: viewerPlatform() }) }))
+    open: (botId, url) => act(botId, () => call('bots.browser.open', { botId, ...(url ? { url } : {}), ...(legacyDaemon ? {} : { viewId: viewId(), platform: viewerPlatform() }) })),
+    async chooseFiles(botId, chooser) {
+      const hold = get().holds[botId]
+      const choose = window.mousse?.personalBots?.chooseBrowserFiles
+      if (!hold || hold.id === LEGACY_HOLD || !choose) return
+      try {
+        const answer = await choose({ botId, viewId: viewId(), holdId: hold.id, multiple: chooser.multiple, ...(chooser.site ? { site: chooser.site } : {}) })
+        // Cancelled in the dialog: the card stays, and the page waits.
+        if (answer.cancelled) return
+        if (answer.refused) {
+          setInput(botId, { note: answer.refused })
+          return
+        }
+        if (answer.token) get().send(botId, { kind: 'files', token: answer.token })
+      } catch (cause) {
+        setInput(botId, { note: errorText(cause) })
+      }
+    }
   }
 })
 
@@ -230,13 +252,21 @@ export function viewerPlatform(): 'mac' | 'other' {
 }
 
 const channels = new Map<string, BotBrowserChannel>()
-const beats = new Map<string, ReturnType<typeof setInterval>>()
+const beats = new Map<string, { timer: ReturnType<typeof setInterval>; stop(): void }>()
 
 /** Inputs whose refusal is worth a line (a hover's is not). */
 function worthSaying(input: BotBrowserInput): boolean {
   if (input.kind === 'pointer') return input.type === 'down'
   if (input.kind === 'keys') return input.type === 'down'
   return input.kind !== 'compose' && input.kind !== 'release'
+}
+
+/**
+ * Refusals the view says in a line, once. Not a gap (it goes again by itself) and not one held back
+ * while the page does not answer (the view already says "Not reaching …").
+ */
+function sayRefusal(ack: BotBrowserAck): boolean {
+  return Boolean(ack.reason) && ack.status !== 'applied' && ack.reason !== 'gap' && ack.reason !== 'busy' && ack.reason !== 'skipped'
 }
 
 /** The person's clipboard gets what they copied from the page; nothing else ever writes it. */
@@ -287,7 +317,7 @@ function adoptHold(botId: string, hold: BotBrowserHold): void {
     answered: (ack, input) => {
       if (ack.copied !== undefined && input.kind === 'copy') void writeClipboard(ack.copied)
       // A duplicate of one refused before says why it was.
-      if (ack.reason && ack.reason !== 'gap' && ack.status !== 'applied' && worthSaying(input)) setInput(botId, { note: ack.text ?? 'That did not reach the page', ...(ack.detail ? { detail: ack.detail } : {}) })
+      if (sayRefusal(ack) && worthSaying(input)) setInput(botId, { note: ack.text ?? 'That did not reach the page', ...(ack.detail ? { detail: ack.detail } : {}) })
     }
   })
   channels.set(botId, channel)
@@ -295,23 +325,32 @@ function adoptHold(botId: string, hold: BotBrowserHold): void {
   if (legacy) return
   // Said every 5 seconds while this window holds it, whatever is on screen: a window that goes away lets it go after 2 minutes.
   let unanswered = false
-  beats.set(botId, setInterval(() => {
+  const beat = () => {
     void call('bots.browser.hold', { botId, viewId: viewId(), request: { op: 'renew', holdId: hold.id } }).then((answer) => {
       // The service answers again after it did not: the hold goes on at its last number, and what has no answer goes again.
       if (unanswered && answer.hold) channels.get(botId)?.resume(answer.hold.lastSeq)
       unanswered = false
       put(botId, answer.browser)
     }, (cause) => {
-      if (String((cause as { code?: unknown } | null)?.code ?? '') === 'hold_ended' || /don't hold this browser/i.test(errorText(cause))) dropHold(botId, 'You don\'t hold the browser now')
-      else unanswered = true
+      if (String((cause as { code?: unknown } | null)?.code ?? '') === 'hold_ended' || /don't hold this browser/i.test(errorText(cause))) {
+        dropHold(botId, 'You don\'t hold the browser now')
+        useBotBrowserStore.setState({ error: 'You no longer hold this browser: it went back while this window was away. Take over to use it again.', errorDetail: null })
+      } else unanswered = true
     })
-  }, BOT_BROWSER_HOLD_BEAT_MS))
+  }
+  // A window shown again asks at once: a hold that ended while it was hidden is said now, not at the next beat.
+  const shown = () => { if (typeof document === 'undefined' || document.visibilityState === 'visible') beat() }
+  if (typeof document !== 'undefined') document.addEventListener('visibilitychange', shown)
+  beats.set(botId, { timer: setInterval(beat, BOT_BROWSER_HOLD_BEAT_MS), stop: () => { if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', shown) } })
 }
 
 /** This window no longer holds the bot's browser: what it sent with no answer is refused here. */
 function dropHold(botId: string, why?: string): void {
   const beat = beats.get(botId)
-  if (beat) clearInterval(beat)
+  if (beat) {
+    clearInterval(beat.timer)
+    beat.stop()
+  }
   beats.delete(botId)
   channels.get(botId)?.close(why)
   channels.delete(botId)
@@ -328,6 +367,11 @@ function dropHold(botId: string, why?: string): void {
 async function sendOneByOne(botId: string, inputs: Parameters<NonNullable<ConstructorParameters<typeof BotBrowserChannel>[0]>['send']>[0]): Promise<{ acks: BotBrowserAck[]; lastSeq: number }> {
   const acks: BotBrowserAck[] = []
   for (const sent of inputs) {
+    // An older daemon counts nothing: a skip is answered here.
+    if ('skip' in sent) {
+      acks.push({ seq: sent.seq, status: 'refused', reason: 'skipped' })
+      continue
+    }
     try {
       put(botId, (await call('bots.browser.input', { botId, input: sent.input })).browser)
       acks.push({ seq: sent.seq, status: 'applied' })

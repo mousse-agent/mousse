@@ -121,7 +121,7 @@ export function validateBrowserActionRequest(value: unknown): BrowserActionReque
 
 /** A person's input to a managed tab (`BrowserHumanInput`), checked like an action. */
 const MOUSE_BUTTONS = ['left', 'middle', 'right'] as const
-const EDIT_COMMANDS = ['selectAll', 'copy', 'cut', 'undo', 'redo'] as const
+const EDIT_COMMANDS = ['selectAll', 'undo', 'redo'] as const
 
 function modifiers(value: unknown): number {
   const result = number(value, 0, 15)
