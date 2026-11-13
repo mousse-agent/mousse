@@ -348,9 +348,12 @@ describe('the transcript', () => {
       for (const [label, action] of [['Save as…', 'saveCopy'], ['Show in folder', 'showInFolder'], ['Copy image', 'copyImage']] as const) {
         await contextMenu(second)
         expect(menuItems().map((item) => item.textContent)).toEqual(['Open', 'Save as…', 'Show in folder', 'Copy image'])
+        // The tools beside the bubble (reactions, Read aloud, Copy, Reply) step aside while the menu is open.
+        expect(article('b1').classList.contains('is-menu-open')).toBe(true)
         await click(menuItems().find((item) => item.textContent === label))
         expect(localFiles[action]).toHaveBeenCalledWith(picture('b.png'))
         expect(document.querySelector('.bot-picture-menu')).toBeNull()
+        expect(article('b1').classList.contains('is-menu-open')).toBe(false)
       }
       await contextMenu(second)
       await click(menuItems()[0])
@@ -421,6 +424,37 @@ describe('the transcript', () => {
     await settle()
     expect(badge()).toBeNull()
     expect(composerError()?.textContent).toBe('This bot has no such message.')
+  })
+
+  it('two quick picks the service refuses end where they started, and a service without reactions shows no bar', async () => {
+    fake.chats.inbox = [message(1, { id: 'b1', text: 'Here are three SSDs.', reaction: '❤️' })]
+    await open()
+    const reply = () => transcript().querySelector<HTMLElement>('[data-message-id="b1"]')!
+    const bar = () => reply().querySelector<HTMLElement>('[role="toolbar"]')
+    const badge = () => reply().querySelector<HTMLButtonElement>('.bot-bubble > .bot-reaction')
+    expect(badge()?.textContent).toBe('❤️')
+
+    // Two picks on their way at once, each refused in turn: the first refusal leaves the newest pick shown, the
+    // second puts back the reaction the service last confirmed, not the first pick.
+    const refusals: Array<(error: Error) => void> = []
+    const onTheWay = () => new Promise<never>((_, reject) => { refusals.push(reject) })
+    vi.mocked(fake.client.react).mockImplementationOnce(onTheWay).mockImplementationOnce(onTheWay)
+    await click(button('React 👍', bar()!))
+    await click(button('React 😂', bar()!))
+    expect(badge()?.textContent).toBe('😂')
+    await act(async () => { refusals[0]!(new Error('Busy.')) })
+    expect(badge()?.textContent).toBe('😂')
+    await act(async () => { refusals[1]!(new Error('Busy.')) })
+    expect(badge()?.textContent).toBe('❤️')
+
+    // An older service has no reactions: the pick is put back, the bar goes, and nothing is shown as an error.
+    await act(async () => { useBotsStore.setState({ error: null, errorBotId: null }) })
+    vi.mocked(fake.client.react).mockRejectedValueOnce(Object.assign(new Error('Domain method is unavailable'), { code: 'method_not_available' }))
+    await click(button('React 👍', bar()!))
+    await settle()
+    expect(badge()?.textContent).toBe('❤️')
+    expect(bar()).toBeNull()
+    expect(composerError()).toBeNull()
   })
 
   it('a list of keys and values reads as a small card', async () => {

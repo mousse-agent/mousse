@@ -87,7 +87,8 @@ describe('bots.chat.react', () => {
     await expect(call('bots.chat.react', { botId, messageId: own.id, emoji: '❤️' })).rejects.toMatchObject({ code: 'not_reactable' })
     await expect(call('bots.chat.react', { botId, messageId: otherReply.id, emoji: '❤️' })).rejects.toMatchObject({ code: 'message_not_found' })
     await expect(call('bots.chat.react', { botId, messageId: 'bm_nope', emoji: '❤️' })).rejects.toMatchObject({ code: 'message_not_found' })
-    for (const emoji of ['', 'hi', '1', '#', '❤️ and more', 'a❤️', 42, undefined]) {
+    // Two emoji, eight of one (sixteen code points), digits before one: more than one character.
+    for (const emoji of ['', 'hi', '1', '#', '❤️ and more', 'a❤️', '❤️👍', '❤️'.repeat(8), '12👍', 42, undefined]) {
       await expect(call('bots.chat.react', { botId, messageId: reply.id, ...(emoji === undefined ? {} : { emoji }) }), String(emoji)).rejects.toMatchObject({ code: 'invalid_params' })
     }
     await expect(call('bots.chat.react', { botId, messageId: reply.id, emoji: '❤️', extra: 1 })).rejects.toMatchObject({ code: 'unknown_field' })

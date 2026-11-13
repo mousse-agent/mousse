@@ -940,8 +940,11 @@ function defaultRedactMessage(tx: BotStoreTx, botId: string, messageId: string, 
   if (!has('bot_messages')) return
   tx.statement('UPDATE bot_messages SET text = ? WHERE id = ? AND bot_id = ?').run(text, messageId, botId)
   // A forgotten message keeps no reaction, so the bot is never told of one on it.
-  if (tx.statement("SELECT 1 FROM pragma_table_info('bot_messages') WHERE name = 'owner_reaction'").get())
-    tx.statement('UPDATE bot_messages SET owner_reaction = NULL, owner_reaction_at = NULL WHERE id = ? AND bot_id = ?').run(messageId, botId)
+  const reactions = Boolean(tx.statement("SELECT 1 FROM pragma_table_info('bot_messages') WHERE name = 'owner_reaction'").get())
+  const clearReaction = (id: string) => {
+    if (reactions) tx.statement('UPDATE bot_messages SET owner_reaction = NULL, owner_reaction_at = NULL WHERE id = ? AND bot_id = ?').run(id, botId)
+  }
+  clearReaction(messageId)
   // What the forgotten message asked for keeps no copy of its words (docs/plans/bot-always-free.md): a reminder it set
   // is cancelled and its text removed, and work it started keeps neither its brief nor the notes passed to it.
   const redactJournal = (sourceKey: string) => {
@@ -953,6 +956,7 @@ function defaultRedactMessage(tx: BotStoreTx, botId: string, messageId: string, 
     const said = tx.statement('SELECT message_id FROM bot_reminders WHERE bot_id = ? AND reply_to = ? AND message_id IS NOT NULL').all(botId, messageId) as Array<{ message_id: string }>
     for (const row of said) {
       tx.statement('UPDATE bot_messages SET text = ? WHERE id = ? AND bot_id = ?').run(text, row.message_id, botId)
+      clearReaction(row.message_id)
       redactJournal(`bm:${row.message_id}`)
     }
   }

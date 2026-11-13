@@ -173,11 +173,16 @@ function Carousel({ images, menuOpen = false, children }: { images: readonly Rep
   </div>
 }
 
-/** A reply's pictures, above its words: one alone, or several in a carousel. */
-export function BotReplyMedia({ images }: { images: readonly ReplyImage[] }) {
+/**
+ * A reply's pictures, above its words: one alone, or several in a carousel. `onMenuOpen`: a picture's menu opened or
+ * closed, so what sits beside the bubble steps aside for it.
+ */
+export function BotReplyMedia({ images, onMenuOpen }: { images: readonly ReplyImage[]; onMenuOpen?: (open: boolean) => void }) {
   const [menu, setMenu] = useState<MenuAt | null>(null)
   const gallery = useImageGallery()
   const closeMenu = useCallback(() => setMenu(null), [])
+  const menuOpen = menu !== null
+  useEffect(() => { onMenuOpen?.(menuOpen) }, [menuOpen, onMenuOpen])
   if (!images.length) return null
   const openFromMenu = () => {
     if (!menu || !gallery) return
@@ -187,7 +192,7 @@ export function BotReplyMedia({ images }: { images: readonly ReplyImage[] }) {
   }
   const pictures = images.map((image) => <Picture key={image.key} image={image} images={images} single={images.length === 1} onMenu={setMenu} />)
   return <div className="bot-reply-media">
-    {images.length === 1 ? pictures : <Carousel images={images} menuOpen={menu !== null}>{pictures}</Carousel>}
+    {images.length === 1 ? pictures : <Carousel images={images} menuOpen={menuOpen}>{pictures}</Carousel>}
     {menu && <PictureMenu at={menu} onOpen={openFromMenu} onClose={closeMenu} />}
   </div>
 }

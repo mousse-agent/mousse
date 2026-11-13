@@ -314,7 +314,7 @@ CREATE INDEX bot_work_notes_pending ON bot_work_notes(activation_id, applied_at)
   },
   {
     // The owner's reaction on a bot's message (one per message, an emoji) and when it was set: the bot's next chat turn
-    // is told the reactions set since its last one. An older build reads the table and never sees the columns.
+    // is told the reactions set since its last one. An older build refuses this bots.db (downgrade_unsupported).
     version: 7,
     sql: `
 ALTER TABLE bot_messages ADD COLUMN owner_reaction TEXT;
@@ -1364,12 +1364,15 @@ export class BotStore {
     return this.run('UPDATE bot_messages SET owner_reaction = ?, owner_reaction_at = ? WHERE id = ?', emoji, emoji === null ? null : at, messageId) > 0
   }
 
-  /** The bot's messages the owner reacted to after `since` (all without it), oldest reaction first, at most `limit`: the newest. */
+  /**
+   * The bot's messages the owner reacted to after `since` (all without it), oldest reaction first, at most `limit`: the
+   * oldest, so the reactions one turn could not take are the next turn's.
+   */
   reactionsSince(botId: string, since: string | undefined, limit: number): BotMessageRow[] {
     const rows = since === undefined
-      ? this.all('SELECT * FROM bot_messages WHERE bot_id = ? AND owner_reaction IS NOT NULL ORDER BY owner_reaction_at DESC, seq DESC LIMIT ?', botId, limit)
-      : this.all('SELECT * FROM bot_messages WHERE bot_id = ? AND owner_reaction IS NOT NULL AND owner_reaction_at > ? ORDER BY owner_reaction_at DESC, seq DESC LIMIT ?', botId, since, limit)
-    return rows.map(messageOf).reverse()
+      ? this.all('SELECT * FROM bot_messages WHERE bot_id = ? AND owner_reaction IS NOT NULL ORDER BY owner_reaction_at, seq LIMIT ?', botId, limit)
+      : this.all('SELECT * FROM bot_messages WHERE bot_id = ? AND owner_reaction IS NOT NULL AND owner_reaction_at > ? ORDER BY owner_reaction_at, seq LIMIT ?', botId, since, limit)
+    return rows.map(messageOf)
   }
 
   messageByRequest(clientRequestId: string): BotMessageRow | undefined {

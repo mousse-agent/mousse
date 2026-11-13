@@ -51,10 +51,19 @@ const ASK_ID = /^esc_[0-9a-f-]{36}$/
 const SCHEDULE_ID = /^[a-z0-9][a-z0-9-]{0,31}$/
 const MAX_CHAT_TEXT = 64 * 1024
 /**
- * One emoji: pictographs, with their joiners, variation selectors, skin tones and keycaps, at most 16 code points, and
- * at least one pictograph, flag letter or keycap (a digit or `#` alone is no emoji).
+ * Emoji code points: pictographs, with their joiners, variation selectors, skin tones and keycaps, at most 16 code points,
+ * and at least one pictograph, flag letter or keycap (a digit or `#` alone is no emoji). `isReaction` adds: one character.
  */
 export const REACTION = /^(?=.{1,16}$)(?=.*(?:\p{Extended_Pictographic}|\p{Regional_Indicator}|\u20e3))(?:\p{Extended_Pictographic}|\p{Regional_Indicator}|[\u200d\ufe0f\u20e3#*0-9]|\p{Emoji_Modifier})+$/u
+
+const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+/** One emoji, one character on screen: a flag, a family or a keycap is one; `❤️👍` or `12👍` is not. */
+export function isReaction(value: unknown): value is string {
+  if (typeof value !== 'string' || !REACTION.test(value)) return false
+  let count = 0
+  for (const _ of GRAPHEMES.segment(value)) if (++count > 1) return false
+  return count === 1
+}
 
 const text = (value: unknown, max: number): value is string => typeof value === 'string' && value.trim().length > 0 && value.length <= max
 const whole = (value: unknown, min: number): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= min
@@ -146,7 +155,7 @@ function validate(method: BotsPersonalV2Method, value: unknown): Params {
     case 'bots.chat.react':
       if (!text(p.messageId, 200)) throw new DomainRpcError('invalid_params', 'A message id is required')
       // One emoji (a flag or a family is several code points), or null to remove it.
-      if (p.emoji !== null && (typeof p.emoji !== 'string' || !REACTION.test(p.emoji))) throw new DomainRpcError('invalid_params', 'The reaction is one emoji, or null')
+      if (p.emoji !== null && !isReaction(p.emoji)) throw new DomainRpcError('invalid_params', 'The reaction is one emoji, or null')
       break
     case 'bots.asks.answer':
       if (typeof p.askId !== 'string' || !ASK_ID.test(p.askId)) throw new DomainRpcError('invalid_params', 'An ask id is required')

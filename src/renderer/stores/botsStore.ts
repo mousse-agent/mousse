@@ -102,6 +102,8 @@ interface BotsState {
   attachments: Record<string, AttachedFile[]>
   /** The message each bot's composer replies to (Reply on a message), shown above the box until sent or dismissed. */
   replyingTo: Record<string, BotChatQuote>
+  /** The service has no `bots.chat.react` (an older one): messages show no reaction bar. */
+  reactionsMissing: boolean
   error: string | null
   /** The bot `error` is about; null when it is about none (a new bot). Only that bot's chat shows it. */
   errorBotId: string | null
@@ -182,6 +184,15 @@ const created = new Set<string>()
 const readSeq = new Map<string, number>()
 /** Bots deleted in this profile: a list that was on its way when one was deleted never brings it back. */
 const removed = new Set<string>()
+/**
+ * Each message's reactions on their way (`botId:messageId`): the reaction the service last confirmed, and the newest
+ * pick's number. A refused pick puts back the confirmed one, never another pick's, and only the newest pick is shown.
+ */
+const reactions = new Map<string, { confirmed: string | undefined; latest: number }>()
+let reactionPicks = 0
+/** The service does not know the method (an older one), by its code or, over IPC, its message. */
+const missingMethod = (cause: unknown) => ['method_not_available', 'method_not_found', 'unknown_method', 'platform_method_not_allowed'].includes(String((cause as { code?: unknown } | null)?.code ?? ''))
+  || /method[ _]not[ _](?:allowed|found|available)|unknown[ _]method|domain method is unavailable|not allowlisted/i.test(cause instanceof Error ? cause.message : String(cause))
 const happyTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
 const bySeq = (a: BotChatMessage, b: BotChatMessage) => a.seq - b.seq
@@ -269,7 +280,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
 
   return {
     profileId: null, bots: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, replyingTo: {},
-    error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null,
+    reactionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null,
 
     activate(profileId) {
       if (get().profileId === profileId) return
@@ -282,8 +293,9 @@ export const useBotsStore = create<BotsState>((set, get) => {
       created.clear()
       readSeq.clear()
       removed.clear()
+      reactions.clear()
       set({ profileId, bots: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, replyingTo: {},
-        error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null })
+        reactionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null })
       subscribe()
     },
 
@@ -476,17 +488,33 @@ export const useBotsStore = create<BotsState>((set, get) => {
       const owner = epoch
       const before = get().chats[botId]?.messages.find((message) => message.id === messageId)
       if (!before) return
-      const { reaction: _old, ...rest } = before
-      putMessages(botId, [emoji === null ? rest : { ...rest, reaction: emoji }])
+      const key = `${botId}:${messageId}`
+      const pick = ++reactionPicks
+      const entry = reactions.get(key) ?? { confirmed: before.reaction, latest: pick }
+      entry.latest = pick
+      reactions.set(key, entry)
+      const shown = (reaction: string | undefined) => {
+        const now = get().chats[botId]?.messages.find((message) => message.id === messageId)
+        if (!now) return
+        const { reaction: _old, ...rest } = now
+        putMessages(botId, [reaction === undefined ? rest : { ...rest, reaction }])
+      }
+      shown(emoji ?? undefined)
       set({ error: null })
       try {
         const message = await bots().react(botId, messageId, emoji)
         if (owner !== epoch) return
+        entry.confirmed = message.reaction
+        if (entry.latest !== pick) return
+        reactions.delete(key)
         putMessages(botId, [message])
       } catch (cause) {
-        if (owner !== epoch) return
-        putMessages(botId, [before])
-        fail(owner, cause, botId)
+        if (owner !== epoch || entry.latest !== pick) return
+        reactions.delete(key)
+        shown(entry.confirmed)
+        // An older service has no reactions: the bar goes, with nothing to read.
+        if (missingMethod(cause)) set({ reactionsMissing: true })
+        else fail(owner, cause, botId)
       }
     },
 

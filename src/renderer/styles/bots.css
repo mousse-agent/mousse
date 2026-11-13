@@ -68,7 +68,9 @@
 /* The bot's messages: bubbles on the left, the time in each one's corner. */
 .chat-participant-message.bot-message { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding-right: 14%; }
 .bot-message-line { position: relative; display: flex; align-items: flex-end; width: fit-content; min-width: 0; max-width: 100%; }
-.bot-message-tools { position: absolute; left: 100%; bottom: 0; display: flex; align-items: center; gap: 4px; padding-left: 6px; white-space: nowrap; }
+.bot-message-tools { position: absolute; left: 100%; bottom: 0; display: flex; align-items: center; gap: 4px; padding-left: 6px; white-space: nowrap; translate: var(--bot-tools-shift, 0) 0; }
+/* While a picture's menu is open, the menu is what the owner looks at: the tools step aside, as the carousel's arrows do. */
+.bot-message.is-menu-open .bot-message-tools { visibility: hidden; }
 .bot-bubble { position: relative; min-width: 0; max-width: 100%; padding: 9px 12px 7px; border-radius: 16px 16px 16px 5px; color: var(--text-primary); background: color-mix(in srgb, var(--text-primary) 7%, var(--bg-primary, transparent)); }
 .bot-message:not(.is-group-start) .bot-bubble { border-top-left-radius: 6px; }
 /* The thread's Markdown (an-md-*), at the bubble's size. Inline code keeps a short piece whole: it moves to the next line
@@ -434,7 +436,7 @@ html[data-theme='high-contrast'] .bot-conversation .chat-input-area.bot-input-ar
 /* On the bot's bubble: its lower right corner, inside its width, half over its bottom edge as a messenger's; only a
    message with a reaction keeps the space for its lower half, so a group without reactions stays tight. */
 .bot-bubble > .bot-reaction { left: auto; right: 12px; bottom: -10px; }
-.bot-message.has-reaction { margin-bottom: 14px; }
+.bot-message.has-reaction { margin-bottom: 16px; }
 /* After a pick the bar goes until the pointer leaves the message; the bubble takes the focus, with no ring for it. */
 .chat-participant-message.is-react-quiet .bot-react-bar { opacity: 0; pointer-events: none; }
 .bot-bubble:focus { outline: none; }
