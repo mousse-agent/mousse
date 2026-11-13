@@ -68,6 +68,14 @@ describe('bots.create', () => {
     expect(f.bots.definitionOf(byUsage.id).main.model).toEqual({ mode: 'auto', depth: 'normal' })
   })
 
+  it('Runs on names this computer by the name it is given, and "This computer" without one', async () => {
+    const options = (f.bots.service as unknown as { options: { computerName?: () => string } }).options
+    options.computerName = () => 'Ada’s Mac mini'
+    expect((await f.bots.service.modelChoices()).computers[0]).toEqual({ id: 'this_computer', name: 'Ada’s Mac mini' })
+    options.computerName = () => ''
+    expect((await f.bots.service.modelChoices()).computers[0]).toEqual({ id: 'this_computer', name: 'This computer' })
+  })
+
   it('naming falls back to the description\'s first meaningful words on a failure or after 5 seconds', async () => {
     f.oneShot.fail = true
     const failed = await createBot(f, { description: 'Please summarise the AI news for me every day' })
