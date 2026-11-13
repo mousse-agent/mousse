@@ -647,18 +647,27 @@ describe('the bot\'s browser in a real window', () => {
     await pane()
     await click(button('Open in a window'))
     await settle()
-    // The window closed by itself: the daemon gave the browser back, and the hold has ended.
+    let ended = false
     setBotBrowserTransport((async (method: BotsBrowserMethod, params: Record<string, unknown>) => {
       calls.push([method, params])
-      if (method === 'bots.browser.hold' && (params as { request: { op: string } }).request.op === 'renew') throw { code: 'hold_ended', message: 'You don\'t hold this browser now.' }
+      if (method === 'bots.browser.hold' && (params as { request: { op: string } }).request.op === 'renew' && ended) throw { code: 'hold_ended', message: "You don't hold this browser now." }
+      if (method === 'bots.browser.hold') return { browser, hold: HOLD }
       if (method === 'bots.browser.unwatch') return { ok: true }
       return { browser }
     }) as never, (listener) => { pushes.add(listener); return () => pushes.delete(listener) })
+    // This window reads its view again (as after a reload): the browser is in a window, held here.
+    await act(async () => useBotBrowserStore.getState().load('noobesh', false))
+    expect(useBotBrowserStore.getState().holds.noobesh).toBeDefined()
+    // The person closes the window: the daemon gives the browser back, and the hold has ended.
+    ended = true
     browser = { ...browser, control: 'bot', holder: 'bot' }
     delete browser.windowed
     delete browser.hold
+    // The view is read again before the heartbeat hears the hold ended: it no longer says it is in a window.
+    await act(async () => useBotBrowserStore.getState().load('noobesh', false))
     await act(async () => { document.dispatchEvent(new Event('visibilitychange')) })
     await settle()
+    expect(calls.some(([method, params]) => method === 'bots.browser.hold' && (params as { request: { op: string } }).request.op === 'renew')).toBe(true)
     expect(useBotBrowserStore.getState().holds.noobesh).toBeUndefined()
     expect(host.querySelector('.watched-browser-pane .watched-browser-note')!.textContent).not.toContain('You no longer hold this browser')
     expect(button('Take over')).toBeDefined()
