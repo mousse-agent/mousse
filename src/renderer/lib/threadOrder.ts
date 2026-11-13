@@ -31,3 +31,28 @@ export function orderedThreadIds(input: {
     ...listed.filter((thread) => !thread.projectId)
   ].map((thread) => thread.id)
 }
+
+/**
+ * The thread to open when `threadId`, the open one, is archived: the next one in its project group as the sidebar
+ * lists it, or the one before it when it was the last. Threads without a project count as one group. Null when it
+ * was the group's only thread.
+ */
+export function threadAfterArchive(input: {
+  projects: readonly Pick<Project, 'id' | 'node' | 'sameAs'>[]
+  threads: readonly Thread[]
+  threadId: string
+  excluded?: ReadonlySet<string>
+}): string | null {
+  const { groupOf } = groupProjects(input.projects)
+  const byId = new Map(input.threads.map((thread) => [thread.id, thread]))
+  const groupKey = (id: string) => {
+    const projectId = byId.get(id)?.projectId
+    return projectId ? groupOf.get(projectId) ?? projectId : null
+  }
+  const target = groupKey(input.threadId)
+  const ids = orderedThreadIds({ projects: input.projects, threads: input.threads, view: 'projects', excluded: input.excluded })
+    .filter((id) => groupKey(id) === target)
+  const index = ids.indexOf(input.threadId)
+  if (index === -1) return null
+  return ids[index + 1] ?? ids[index - 1] ?? null
+}
