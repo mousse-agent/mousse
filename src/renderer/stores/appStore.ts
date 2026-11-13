@@ -33,6 +33,7 @@ import { savedMainAreaWidth } from '../lib/panelSplit'
 import type { ShortcutOverrides } from '../../shared/commands'
 import { parseCursor } from '../../shared/pageCursor'
 import { isThreadStarted } from '../../shared/threadTitle'
+import { tabAgreement, type SidebarTab, type ThreadListTab, type WorkspaceMode } from './sidebarTabAgreement'
 
 /** What the command palette leads with when it opens. */
 export type PaletteMode = 'all' | 'messages'
@@ -239,13 +240,17 @@ interface AppState {
   /** What the palette leads with: `messages` puts message hits first (Search threads opens it so). Kept on close. */
   paletteMode: PaletteMode
   setPaletteOpen: (open: boolean, mode?: PaletteMode) => void
-  threadsSidebarView: 'projects' | 'threads' | 'chats'
-  setThreadsSidebarView: (view: 'projects' | 'threads' | 'chats') => void
+  /** The sidebar's tab. It and `sidebarMode` always agree (`agreeWithTab`): setting either moves the other. */
+  threadsSidebarView: SidebarTab
+  setThreadsSidebarView: (view: SidebarTab) => void
+  /** Projects or Threads, whichever the sidebar showed last: where it goes when something opens a thread from Chats. */
+  lastThreadListView: ThreadListTab
   /** The order the Threads tab's rows were last dragged into (thread ids, top first); see `sortThreadFeed`. */
   threadFeedOrder: string[]
   setThreadFeedOrder: (ids: string[]) => void
-  sidebarMode: 'projects' | 'chats'
-  setSidebarMode: (sidebarMode: 'projects' | 'chats') => void
+  /** The workspace beside the sidebar: the thread workspace, or `ChatWorkspace` under the Chats tab. */
+  sidebarMode: WorkspaceMode
+  setSidebarMode: (sidebarMode: WorkspaceMode) => void
   threadsSidebarOpen: boolean
   mainAreaOpen: boolean
   /** Thread side card preference. On at every launch; deliberately kept out of the per-profile workspace. */
@@ -348,8 +353,10 @@ interface AppState {
    * Optimistic thread switch in one store update: highlight immediately and restore a
    * cached transcript when available so the chat does not flash empty on re-visits.
    * Without one, `transcriptPending` holds back the empty page until the thread's view arrives.
+   * It shows the thread workspace, which moves the sidebar off Chats (`agreeWithTab`), unless `keepWorkspace`:
+   * the main process's echo of a selection (and the thread it restores at launch) is not a request to open it.
    */
-  switchToThread: (id: string) => void
+  switchToThread: (id: string, options?: { keepWorkspace?: boolean }) => void
   /** Apply daemon snapshot for the selected thread in a single paint. */
   applyThreadView: (view: ThreadViewSnapshot) => void
   setProjects: (projects: Project[]) => void
@@ -518,7 +525,7 @@ const personalWorkspaceKeys = [
   'browserActiveTabByThread', 'browserElementAttachmentsByThread', 'mainView',
   'sidebarMode', 'mainAreaWidth', 'threadsSidebarWidth', 'threadsSidebarOpen', 'mainAreaOpen', 'chatMode',
   'openedSurfaceKinds', 'sideCardCollapsed',
-  'composerDrafts', 'composerReferences', 'composerWorkspaceDrafts', 'threadsSidebarView', 'threadFeedOrder',
+  'composerDrafts', 'composerReferences', 'composerWorkspaceDrafts', 'threadsSidebarView', 'lastThreadListView', 'threadFeedOrder',
   'reviewIgnoreWhitespace', 'queueEditDrafts'
 ] as const
 let profileActivated = false
@@ -563,7 +570,7 @@ function savePersonalWorkspace(state: AppState): void {
  */
 export const browserTabsOpenedThisSession = new Set<string>()
 
-export const useAppStore = create<AppState>()(persist((set, get) => ({
+export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) => ({
   profileId: 'default',
   profileReady: false,
   workspaceReady: false,
@@ -635,6 +642,7 @@ export const useAppStore = create<AppState>()(persist((set, get) => ({
   setReviewIgnoreWhitespace: (reviewIgnoreWhitespace) => set({ reviewIgnoreWhitespace }),
   threadsSidebarView: 'projects',
   setThreadsSidebarView: (threadsSidebarView) => set({ threadsSidebarView }),
+  lastThreadListView: 'projects',
   threadFeedOrder: [],
   setThreadFeedOrder: (threadFeedOrder) => set({ threadFeedOrder }),
   composerWorkspaceDrafts: {},
@@ -825,9 +833,10 @@ export const useAppStore = create<AppState>()(persist((set, get) => ({
     return { stopRequests, turnStates: { ...s.turnStates, [threadId]: request.daemon } }
   }),
   setActiveThreadId: (activeThreadId) => set({ activeThreadId }),
-  switchToThread: (id) =>
+  switchToThread: (id, options) =>
     set((s) => {
-      if (s.activeThreadId === id) return { sidebarMode: 'projects' }
+      const workspace = options?.keepWorkspace ? {} : { sidebarMode: 'projects' as const }
+      if (s.activeThreadId === id) return options?.keepWorkspace ? s : workspace
       if (s.activeThreadId && s.messages.length > 0) {
         rememberMessages(s.activeThreadId, s.messages)
       }
@@ -835,7 +844,7 @@ export const useAppStore = create<AppState>()(persist((set, get) => ({
       // Nothing cached: a thread that never started is known to be empty; any other one waits for its view.
       const target = s.threads.find((thread) => thread.id === id)
       return {
-        sidebarMode: 'projects',
+        ...workspace,
         activeThreadId: id,
         messages: cached ?? [],
         transcriptPending: !cached && !(target && !isThreadStarted(target)),
@@ -1009,14 +1018,16 @@ export const useAppStore = create<AppState>()(persist((set, get) => ({
       browserTabs: [],
       browserActiveTabByThread: {},
       browserElementAttachmentsByThread: {},
-      threadsSidebarView: 'projects' as 'projects' | 'threads' | 'chats',
+      // A saved tab and workspace that disagree are repaired as this update is applied: the workspace follows the tab.
+      threadsSidebarView: 'projects' as SidebarTab,
+      lastThreadListView: 'projects' as ThreadListTab,
       threadFeedOrder: [] as string[],
       composerWorkspaceDrafts: {},
       composerDrafts: {},
       composerReferences: {},
       queueEditDrafts: {} as Record<string, QueueEditDraft>,
       reviewIgnoreWhitespace: false,
-      sidebarMode: 'projects' as 'projects' | 'chats',
+      sidebarMode: 'projects' as WorkspaceMode,
       mainView: DEFAULT_MAIN_VIEW as MainView,
       openedSurfaceKinds: [] as MainView[],
       mainAreaWidth: null as number | null,
@@ -1227,7 +1238,7 @@ export const useAppStore = create<AppState>()(persist((set, get) => ({
       delete composerReferences[key]
       return { composerReferences }
     })
-}), {
+})), {
   name: 'mousse-workspace-state',
   version: 1,
   storage: workspaceStorage,

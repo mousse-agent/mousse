@@ -114,7 +114,6 @@ export const useChatsStore = create<ChatsState>((set, get) => ({
     if (chatId !== get().activeChatId && !await confirmNavigation()) return
     const owner = epoch
     useAppStore.getState().setThreadsSidebarView('chats')
-    useAppStore.getState().setSidebarMode('chats')
     set({ activeChatId: chatId, activeBotId: null, conversation: null, error: null, errorSource: null, loading: true })
     try {
       const conversation = await window.mousse.platformRequest.request<ChatConversation>('chats.get', { chatId })
@@ -124,7 +123,6 @@ export const useChatsStore = create<ChatsState>((set, get) => ({
   async openBot(botId) {
     if (botId !== get().activeBotId && !await confirmNavigation()) return
     useAppStore.getState().setThreadsSidebarView('chats')
-    useAppStore.getState().setSidebarMode('chats')
     if (botId !== get().activeBotId) useBotsStore.setState({ aboutOpen: false, error: null })
     set({ activeBotId: botId, activeChatId: null, conversation: null, error: null, errorSource: null, loading: false })
     await useBotsStore.getState().loadChat(botId)
@@ -138,7 +136,6 @@ export const useChatsStore = create<ChatsState>((set, get) => ({
       if (owner !== epoch) return
       set({ conversation, activeChatId: conversation.id, activeBotId: null, newChatOpen: false, loading: false })
       useAppStore.getState().setThreadsSidebarView('chats')
-      useAppStore.getState().setSidebarMode('chats')
       await get().refresh()
     } catch (error) { if (owner === epoch && get().activeChatId === from) set({ loading: false, ...actionError(error) }) }
   },
