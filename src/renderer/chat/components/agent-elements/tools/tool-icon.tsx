@@ -13,11 +13,12 @@ import { parseMcpToolType, toolRegistry } from "./tool-registry";
 import "./tool-icon.css";
 
 /**
- * What a tool row knows about its call beyond its own part: when it started (`at`, for the time on hover) and whether
- * the agent got past its failure (`recovered`). The tool renderer provides it per call; a row's panel resets it, so a
- * row nested inside another reads its own.
+ * What a tool row knows about its call beyond its own part: when it started (`at`, for the time on hover), whether
+ * the agent got past its failure (`recovered`), and the key its open state is kept under (`openKey`, the call's id:
+ * tool-open-state.ts). The tool renderer provides it per call; a row's panel resets it, so a row nested inside another
+ * reads its own.
  */
-export type ToolRowInfo = { at?: string | number | Date; recovered?: boolean };
+export type ToolRowInfo = { at?: string | number | Date; recovered?: boolean; openKey?: string };
 export const ToolRowContext = createContext<ToolRowInfo>({});
 export const NO_ROW_INFO: ToolRowInfo = {};
 export const useToolRowInfo = () => useContext(ToolRowContext);

@@ -3,6 +3,7 @@ import type { FileContents } from "@pierre/diffs/react";
 import { TextShimmer } from "../text-shimmer";
 import type { TimelineStep } from "../types/timeline";
 import { File, GitCompare, IconChevronRight, RowEdit } from "../../../../lib/icons";
+import { useRowOpenState } from "./tool-open-state";
 import { Collapse } from "../../../../components/ui/Collapse";
 import { diffAsPatch, diffSides, type ActivityFileChange } from "../../../../../shared/agentActivity";
 import {
@@ -358,7 +359,7 @@ function EditLine({
 
 /** Open, collapsed by default; a failure opens it once, when it happens. */
 function useRowOpen(failed: boolean): [boolean, () => void] {
-  const [open, setOpen] = React.useState(failed);
+  const [open, setOpen] = useRowOpenState(failed);
   const wasFailed = React.useRef(failed);
   React.useEffect(() => {
     if (failed && !wasFailed.current) setOpen(true);
