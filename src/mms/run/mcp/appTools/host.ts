@@ -276,7 +276,7 @@ export interface AppToolHost extends DelegationToolsHost {
    * The transcript row that shows an `agent.action` event the engine already wrote in its own transaction
    * ("Changed by an agent in thread …"). Never writes the event; only the call that made the change adds it.
    */
-  showAgentAction?(target: { threadId: string }, actor: AgentActor, summary: string): void
+  showAgentAction?(target: { threadId: string }, actor: AgentActor, summary: string, options?: { notice?: boolean }): void
   /**
    * Sends `content` to another thread as `actor`'s message (`thread_send`): labelled as an agent's, run under
    * the caller's permission mode when that is stricter than the thread's, queued behind a running turn, never

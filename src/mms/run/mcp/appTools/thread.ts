@@ -557,9 +557,9 @@ function chosenStandingRule(request: ApprovalRequestInfo, answers: UserQuestionA
 }
 
 /** The transcript row of a change the call made; the `agent.action` event is the record, so a row that fails to write is not an error. */
-function showAction(host: AppToolHost, threadId: string, actor: AgentActor, summary: string): void {
+function showAction(host: AppToolHost, threadId: string, actor: AgentActor, summary: string, options?: { notice?: boolean }): void {
   try {
-    host.showAgentAction?.({ threadId }, actor, summary)
+    host.showAgentAction?.({ threadId }, actor, summary, ...(options ? [options] : []))
   } catch (error) {
     console.warn('the transcript row of an agent action could not be written', { threadId, error: error instanceof Error ? error.message : String(error) })
   }
@@ -1104,7 +1104,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         const actor = actorOf(ctx)
         const result = acceptedRunCommand(await host.stopRun(threadId, runId, { clientRequestId: `thread_interrupt:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`, actor }), runId)
         // The thread says who stopped its turn: a bot's line names the bot (`showAgentAction`).
-        if (!result.replayed) showAction(host, threadId, actor, bot ? 'stopped the turn that was running' : `stopped run ${runId}`)
+        if (!result.replayed) showAction(host, threadId, actor, bot ? 'stopped the turn that was running' : `stopped run ${runId}`, ...(bot ? [{ notice: true }] : []))
         if (bot && !result.replayed) botChip(bot, 'thread_interrupt', threadId, titleOf(threadId))
         return json({ threadId, ...result })
       }

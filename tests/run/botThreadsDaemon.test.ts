@@ -71,7 +71,7 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
       createThreadAsAgent(input: Record<string, unknown>, options: Record<string, unknown>): Promise<AgentCreatedThread>
       sendToThreadAsAgent(threadId: string, input: { content: string; mode: 'agent' | 'plan' }, options: Record<string, unknown>): Promise<{ runId: string }>
       stopRunAsAgent(threadId: string, runId: string, options: Record<string, unknown>): Promise<unknown>
-      showAgentAction(threadId: string, actor: AgentActor, summary: string): void
+      showAgentAction(threadId: string, actor: AgentActor, summary: string, options?: { notice?: boolean }): void
       questions: { requestAnswers(questions: unknown, threadId: string, options: unknown): Promise<unknown>; listPendingForThread(threadId: string): unknown[] }
     }
     // A bot's requests name its chat turn, as the thread tools make them (`botRequestPrefix`).
@@ -236,6 +236,10 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     const owner = await w.d.orch.send('Work on this.', false, { threadId: target.id, clientRequestId: 'owner-busy', awaitMode: 'ack' })
     await waitFor(() => w.d.engine.getRun(owner.runId!)?.status === 'running', 'the owner\'s turn running')
     expect(await w.stop(target.id, owner.runId!, 'x3')).toMatchObject({ status: 'accepted', runId: owner.runId })
+    // The line the tool writes for it is shown in the thread, naming the bot.
+    w.orch.showAgentAction(target.id, w.actor, 'stopped the turn that was running', { notice: true })
+    expect(w.d.orch.getMessages(target.id).filter((entry) => entry.role === 'system' && entry.kind === 'warning').map((entry) => entry.content))
+      .toContain('By alpha, your bot: stopped the turn that was running')
     release()
     await w.settled(owner.runId!)
     expect(w.d.engine.getRun(owner.runId!)!.status).not.toBe('completed')
@@ -254,7 +258,8 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     const queued = await w.send(target.id, 'q1')
     expect(queued).toMatchObject({ queued: true })
     expect(w.d.orch.withdrawBotThreadMessages({ homeThreadId: w.chat.id, name: 'alpha' })).toBe(1)
-    expect(w.d.orch.getMessages(target.id).filter((entry) => entry.role === 'system').map((entry) => entry.content))
+    // Shown in the thread as Mousse's own line (a `warning` row is drawn; Mousse's other system rows are not).
+    expect(w.d.orch.getMessages(target.id).filter((entry) => entry.role === 'system' && entry.kind === 'warning').map((entry) => entry.content))
       .toContain('Withdrawn: a message from alpha, your bot, that had not started. It no longer has "Use your threads".')
     release()
     await w.settled(owner.runId!)

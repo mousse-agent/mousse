@@ -232,7 +232,7 @@ describe('a bot\'s thread tools ("use your threads")', () => {
   it('a Stop of a running turn leaves a line naming the bot, and every start and message is a chip with what it sent', async () => {
     const { text, host, onAppResult } = await world({ threads: 'all' })
     expect((await text('thread_interrupt', { threadId: 'mine', runId: 'run-x' })).error).toBe(false)
-    expect(host.showAgentAction).toHaveBeenCalledWith({ threadId: 'mine' }, expect.objectContaining({ threadId: 'home' }), 'stopped the turn that was running')
+    expect(host.showAgentAction).toHaveBeenCalledWith({ threadId: 'mine' }, expect.objectContaining({ threadId: 'home' }), 'stopped the turn that was running', { notice: true })
     expect(onAppResult).toHaveBeenCalledWith(expect.anything(), 'thread_interrupt', { threadId: 'mine', title: 'Fix the login page' })
     expect((await text('thread_send', { threadId: 'mine', content: '\n  Please also check the signup page.\nThen the footer.' })).error).toBe(false)
     expect(onAppResult).toHaveBeenCalledWith(expect.anything(), 'thread_send', { threadId: 'mine', title: 'Fix the login page', sent: 'Please also check the signup page.' })

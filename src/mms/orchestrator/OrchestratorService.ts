@@ -3895,7 +3895,7 @@ export class OrchestratorService extends EventEmitter {
       threadMessages: (threadId) => this.visibleMessagesWithoutLoading(threadId),
       threadActivity: (threadId) => this.threadActivity(threadId),
       recordAgentAction: (target, actor, action, details) => this.recordAgentAction(target, actor, action, details),
-      showAgentAction: (target, actor, summary) => this.showAgentAction(target.threadId, actor, summary),
+      showAgentAction: (target, actor, summary, options) => this.showAgentAction(target.threadId, actor, summary, options),
       sendToThread: (threadId, input, options) => this.sendToThreadAsAgent(threadId, input, options),
       earlierSend: (threadId, clientRequestId) => this.earlierAgentSend(threadId, clientRequestId),
       createThread: (input, options) => this.createThreadAsAgent(input, options),
@@ -4516,12 +4516,13 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /** The transcript row of a change an agent made (its `agent.action` event is the record; this is the projection). */
-  private showAgentAction(threadId: string, actor: AgentActor, summary: string): void {
+  private showAgentAction(threadId: string, actor: AgentActor, summary: string, options: { notice?: boolean } = {}): void {
     const session = this.getOrCreateSession(threadId)
     // The owner's bot is named as itself, never as "an agent in" its chat thread.
     const bot = this.botThreads?.botOf?.(actor.threadId)
     const text = bot ? `By ${bot.name}, your bot: ${summary}` : `Changed by an agent in thread «${this.titleOf(actor.threadId) ?? actor.threadId}» (${actor.threadId}): ${summary}`
-    this.sessionAls.run(session, () => this.addSystemMessage(text))
+    // A bot's line the owner should see in the thread (its Stop) shows as Mousse's own quiet line there.
+    this.sessionAls.run(session, () => this.addSystemMessage(text, undefined, bot && options.notice ? 'warning' : undefined))
   }
 
   /**
@@ -4635,7 +4636,8 @@ export class OrchestratorService extends EventEmitter {
       const text = withdrawn === 1
         ? `Withdrawn: a message from ${bot.name}, your bot, that had not started. It no longer has "Use your threads".`
         : `Withdrawn: ${withdrawn} messages from ${bot.name}, your bot, that had not started. It no longer has "Use your threads".`
-      this.sessionAls.run(session, () => this.addSystemMessage(text))
+      // Shown in the thread, as Mousse's own quiet line.
+      this.sessionAls.run(session, () => this.addSystemMessage(text, undefined, 'warning'))
     }
     return total
   }
@@ -9703,10 +9705,12 @@ export class OrchestratorService extends EventEmitter {
     return session
   }
 
-  private addSystemMessage(content: string, end?: { turnId?: string; turnEnd: TurnEnd }): void {
+  /** `kind` `warning`: a line the thread shows, quiet, as Mousse's own (`ThreadNotice`); others are not shown. */
+  private addSystemMessage(content: string, end?: { turnId?: string; turnEnd: TurnEnd }, kind?: 'warning'): void {
     const msg: ChatMessage = {
       id: uuidv4(),
       role: 'system',
+      ...(kind ? { kind } : {}),
       content,
       timestamp: new Date().toISOString(),
       ...(end?.turnId ? { turnId: end.turnId } : {}),
