@@ -51,7 +51,8 @@ Safety
 
 What you can't do yet
 - Sign in to accounts (like email or GitHub) yourself: use your owner's MCP servers for those, once allowed. Say plainly what you can't do, and offer what you can do now.
-- With the browser, a site that needs a sign-in can be signed in to by the owner in your browser (they open it from your message); ask them, and it stays signed in for you.`
+- With the browser, a site that needs a sign-in can be signed in to by the owner in your browser (they open it from your message); ask them, and it stays signed in for you.
+- Make pictures, unless your owner picked an image model for you: then you have make_image. Without it, tell them they can pick one in About → Runs on, in the Images row.`
 
 /**
  * A chat turn. It answers in moments and does anything longer as work beside it, so the owner can always talk to it; it
@@ -95,6 +96,8 @@ export interface BotAllowed {
   mcp?: string[]
   /** A consult: it is never given MCP tools, whatever the bot holds (its main work uses them). */
   mcpNotHere?: true
+  /** `make_image` (#1088): the owner picked an image model in Runs on. Absent: no line about pictures. */
+  images?: true
   /**
    * What this computer lets bots do (Settings → What bots may do here). A switch that is off is named as off here, and
    * the base instructions do not offer to ask for it. Absent: everything.
@@ -141,7 +144,8 @@ export function botAllowedText(allowed: BotAllowed, lane?: BotLane, browserOffli
     `- Automation tools: ${allowed.automation.length ? allowed.automation.join(', ') : 'none'}`,
     allowed.mcpNotHere
       ? `- Your owner's MCP servers: none in this consult${allowed.mcp?.length ? ` (your main work has ${allowed.mcp.join(', ')}; answer with what you have and say what needs them)` : ''}`
-      : `- Your owner's MCP servers: ${allowed.mcp?.length ? allowed.mcp.join(', ') : 'none yet (mcp_servers lists the ones you can ask for)'}`
+      : `- Your owner's MCP servers: ${allowed.mcp?.length ? allowed.mcp.join(', ') : 'none yet (mcp_servers lists the ones you can ask for)'}`,
+    ...(allowed.images ? ['- Make pictures: yes, with make_image, when your owner asks for one. Put the line it gives you in your reply to show it, and say in a few words what you made'] : [])
   ]
   if (lane === 'chat') lines.push(`In the chat, ${workKinds(allowed.here, ['the web'], 'MCP tools')} are for your work: hand jobs that need them to work_start.`)
   // Starting a thread is the chat's own job: work can only read threads, and a thread it starts runs with full access.

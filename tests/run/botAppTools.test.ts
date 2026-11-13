@@ -317,7 +317,7 @@ describe('set_profile', () => {
 describe('registration', () => {
   it('lists the bot tools in the bots family, and WP6\'s memory tools beside them', () => {
     const { families } = createAppToolRegistry({ host: fakeAppToolHost().host, bots: () => undefined })
-    expect(families.bots).toEqual(['escalate', 'consult', 'bot_schedule_add', 'bot_schedule_remove', 'bot_schedule_list', 'mcp_servers', 'set_profile', 'set_depth', 'work_start', 'work_models', 'work_list', 'work_stop', 'work_note', 'remind', 'reminder_list', 'reminder_cancel', 'use_model'])
+    expect(families.bots).toEqual(['escalate', 'consult', 'bot_schedule_add', 'bot_schedule_remove', 'bot_schedule_list', 'mcp_servers', 'set_profile', 'set_depth', 'work_start', 'work_models', 'work_list', 'work_stop', 'work_note', 'remind', 'reminder_list', 'reminder_cancel', 'make_image', 'use_model'])
     // With `botMemory`, WP6's memory tools follow them in the same family.
     const withMemory = createAppToolRegistry({ host: fakeAppToolHost().host, botMemory: { activationOf: () => undefined } })
     expect(withMemory.families.bots.slice(0, families.bots.length)).toEqual(families.bots)

@@ -99,13 +99,47 @@ export function slotsOf(spec: Pick<BotThreadSpec, 'model' | 'slots'>): BotModelS
  * `model` alone says the same (every row Mousse choosing, or one model by name). Rows a later build added are kept.
  */
 export function withSlots<T extends Pick<BotThreadSpec, 'model' | 'slots'>>(spec: T, slots: BotModelSlots): T {
+  return storedRows(spec, slots, laterRows(spec))
+}
+
+/** The keys of `spec.slots` beside the four model rows (the Images row, a later build's rows), while the rows are live. */
+function laterRows(spec: Pick<BotThreadSpec, 'model' | 'slots'>): Record<string, unknown> {
+  if (!liveSlots(spec)) return {}
+  return Object.fromEntries(Object.entries(spec.slots as object).filter(([key]) => !(BOT_MODEL_SLOT_KEYS as readonly string[]).includes(key)))
+}
+
+/** `spec` with `slots` and `later` written: `slots` is left out only when `model` alone says the same and nothing is beside it. */
+function storedRows<T extends Pick<BotThreadSpec, 'model' | 'slots'>>(spec: T, slots: BotModelSlots, later: Record<string, unknown>): T {
   const model = mirrorOf(slots, spec.model.depth)
-  const { slots: old, ...rest } = spec
+  const { slots: _old, ...rest } = spec
   const pinned = BOT_MODEL_SLOT_KEYS.some((key) => isPinned(slots[key]))
-  const plain = !pinned && BOT_MODEL_SLOT_KEYS.every((key) => samePick(slots[key], slots.talk)) && !slots.talk?.effort
+  const beside = Object.values(later).some((value) => value !== undefined && value !== null)
+  const plain = !pinned && !beside && BOT_MODEL_SLOT_KEYS.every((key) => samePick(slots[key], slots.talk)) && !slots.talk?.effort
   if (plain) return { ...rest, model } as T
-  const later = liveSlots(spec) ? Object.fromEntries(Object.entries(old as object).filter(([key]) => !(BOT_MODEL_SLOT_KEYS as readonly string[]).includes(key))) : {}
   return { ...rest, model, slots: { ...later, ...copySlots(slots) } } as T
+}
+
+/**
+ * The Images row (#1088): the model `make_image` runs on, or null when the owner picked none. Read only while the rows
+ * are live: once an older build rewrote `main.model`, every row is dropped, this one too. A pick that is unreadable or
+ * not on an entry is none.
+ */
+export function imagePickOf(spec: Pick<BotThreadSpec, 'model' | 'slots'>): (BotModelPick & { instanceId: string }) | null {
+  if (!liveSlots(spec)) return null
+  const raw = (spec.slots as Record<string, unknown> | undefined)?.image
+  if (raw === undefined || raw === null || modelPickProblem(raw)) return null
+  const { effort: _effort, ...pick } = copyPick(raw as BotModelPick)
+  return isPinned(pick) ? pick : null
+}
+
+/** `spec` with the Images row set to `pick`, or taken away (null); the model rows stay as they are. */
+export function withImagePick<T extends Pick<BotThreadSpec, 'model' | 'slots'>>(spec: T, pick: BotModelPick | null): T {
+  const later = { ...laterRows(spec) }
+  if (pick) {
+    const { effort: _effort, ...kept } = copyPick(pick)
+    later.image = kept
+  } else delete later.image
+  return storedRows(spec, slotsOf(spec), later)
 }
 
 /** A pick with only the fields this build knows. */
