@@ -11,7 +11,7 @@ import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { launchManagedChrome, type LaunchedChrome } from '../src/browser-worker/cdp/launch'
 import { resolveCertifiedBrowser } from '../src/browser-worker/binary/resolver'
-import { navigateTab, readPageSigns } from '../src/browser-worker/action/dispatch'
+import { navigateTab, readOpenedPageSigns } from '../src/browser-worker/action/dispatch'
 import { ensureManagedChrome, MANAGED_BROWSER_ROOT, startFixtureSite } from './fixtures/browser/harness'
 
 const chrome = await ensureManagedChrome()
@@ -37,7 +37,7 @@ describe.skipIf(!chrome.ok)('what a page that opened is, on real Chromium', () =
     await site?.close()
     if (userDataDir) await rm(userDataDir, { recursive: true, force: true })
   })
-  const go = (path: string) => navigateTab(launched.cdp, sessionId, `${site.origin}${path}`, { ceilingMs: 15_000, signs: (frameId) => readPageSigns(launched.cdp, sessionId, frameId) }).catch((error: unknown) => error)
+  const go = (path: string) => navigateTab(launched.cdp, sessionId, `${site.origin}${path}`, { ceilingMs: 15_000, signs: (frameId) => readOpenedPageSigns(launched.cdp, sessionId, frameId) }).catch((error: unknown) => error)
 
   it('a page is a failure only when it is nothing but a human check or a consent wall; what else it shows is a note', async () => {
     // A contact form with a visible check: the page is usable, the check is a note.
@@ -70,5 +70,15 @@ describe.skipIf(!chrome.ok)('what a page that opened is, on real Chromium', () =
     expect(await go('/report.csv')).toEqual({ url: `${site.origin}/nav-a.html`, state: 'ready', download: { name: 'report.csv' } })
     // 300 frames with their own events: the page's own load still counts.
     expect(await go('/many-frames.html')).toEqual({ url: `${site.origin}/many-frames.html`, state: 'ready' })
+  }, 90_000)
+
+  it('a challenge page is read for the check a person can pass, whatever status it came with; a plain refusal is still refused', async () => {
+    // As a challenge arrives: an error status, its check built a moment later inside a closed shadow root.
+    expect(await go('/challenge?code=403')).toMatchObject({ state: 'failed', problem: { kind: 'needs-you', reason: 'human-check', code: 'HTTP 403', host: '127.0.0.1' } })
+    expect(await go('/challenge?code=503')).toMatchObject({ state: 'failed', problem: { kind: 'needs-you', reason: 'human-check', code: 'HTTP 503' } })
+    // A refusal with a page and nothing a person could get past. It runs no scripts that could still show a check: it is read at once.
+    const startedAt = Date.now()
+    expect(await go('/status?code=403&body=1')).toMatchObject({ state: 'failed', problem: { kind: 'blocked', code: 'HTTP 403' } })
+    expect(Date.now() - startedAt).toBeLessThan(4_000)
   }, 90_000)
 })

@@ -4,7 +4,8 @@
  * agent cursor is held for the owner's view (a frame) and never put into the page; the owner can
  * take the browser over and give it back; an idle browser closes and its sign-ins stay.
  */
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
+import { processRecordPath } from '../src/browser-worker/lifecycle/paths'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -391,6 +392,28 @@ describe.skipIf(!chrome.ok)('watching a bot\'s browser', () => {
     expect(methods.filter((method) => method === 'frame.next')).toEqual([])
   }, 60_000)
 
+  it('when the browser\'s process ends, a watching view says so within seconds, and the next use starts it again on the same profile', async () => {
+    const { browser, bots, turn, call, origin } = await fixture()
+    const bot = turn(BOT_A, 'act-1')
+    expect((await call(bot, 'browser_open', { url: `${origin}/nav-a.html` })).error).toBeUndefined()
+    const view = viewer()
+    await bots.watch(BOT_A, 'w1', { width: 480, fps: 5, connectionId: 'c1', lifetime: view.lifetime, emit: view.emit })
+    await expect.poll(() => view.frames().length, { timeout: 5_000 }).toBeGreaterThan(0)
+    const { pid } = JSON.parse(await readFile(processRecordPath(browser.workspaceDataDir(botBrowserWorkspace(BOT_A))), 'utf8')) as { pid: number }
+    process.kill(pid, 'SIGKILL')
+    await expect.poll(() => view.events.find((event) => event.stalled)?.stalled, { timeout: 5_000 }).toBe('The browser stopped.')
+    await expect.poll(async () => (await bots.view(BOT_A)).stopped, { timeout: 5_000 }).toBe(true)
+    expect((await bots.view(BOT_A)).open).toBe(false)
+    // The bot's next use starts it again on the same profile, without restarting anything.
+    const again = await call(bot, 'browser_open', { url: `${origin}/nav-b.html` })
+    expect(again.error).toBeUndefined()
+    expect(again.observation?.url).toContain('/nav-b.html')
+    const reopened = await bots.view(BOT_A)
+    expect(reopened.open).toBe(true)
+    expect(reopened.stopped).toBeUndefined()
+    bots.unwatch(BOT_A, 'w1', 'c1')
+  }, 60_000)
+
   it('Take over brings the tab the owner takes to the front: their typing lands and shows, and the view never says "on another tab"', async () => {
     const { bots, turn, call, origin } = await fixture()
     const bot = turn(BOT_A, 'act-1')
@@ -689,6 +712,35 @@ describe.skipIf(!chrome.ok)('a slow page is not a failed page', () => {
     expect((await call(bot, 'browser_act', { tabId: seen.tabId, generation: seen.generation, observationId: seen.observationId, controlLeaseId: opened.session!.controlLeaseId, action: { type: 'click', target: { kind: 'ref', ref: link.ref } } })).error).toBeUndefined()
     await expect.poll(async () => (await bots.view(BOT_A)).problem, { timeout: 5_000 }).toBeUndefined()
     expect((await bots.view(BOT_A)).tab?.url).toBe(`${origin}/nav-b.html`)
+    bots.unwatch(BOT_A, 'w1', 'c1')
+  }, 60_000)
+
+  it('a challenge served with 403 tells the bot to ask its owner; once the page replaces itself the view\'s line clears; a failed address stays in the address field', async () => {
+    const { bots, turn, call, origin } = await fixture()
+    const bot = turn(BOT_A, 'act-1')
+    const first = modelResult(await call(bot, 'browser_open', { url: `${origin}/nav-a.html` }))
+    const view = viewer()
+    await bots.watch(BOT_A, 'w1', { width: 480, fps: 5, connectionId: 'c1', emit: view.emit })
+    await expect.poll(() => view.frames().length, { timeout: 5_000 }).toBeGreaterThan(0)
+    // A challenge that arrives with 403 and shows its check a moment later: a person can pass it.
+    const challenge = `${origin}/challenge?code=403&after=7000`
+    const challenged = await call(bot, 'browser_open', { url: challenge })
+    expect(challenged.error).toMatch(/needs_person/)
+    expect(challenged.error).toMatch(/ask your owner to take over your browser/)
+    expect(challenged.error).not.toMatch(/site_blocked|refused/)
+    await expect.poll(async () => (await bots.view(BOT_A)).problem, { timeout: 5_000 }).toMatchObject({ kind: 'needs-you', reason: 'human-check', code: 'HTTP 403' })
+    // It passes by itself and reloads the same address, which the site now answers with its page: the line clears.
+    await expect.poll(async () => (await bots.view(BOT_A)).problem, { timeout: 15_000 }).toBeUndefined()
+    expect((await bots.view(BOT_A)).tab?.url).toBe(challenge)
+    expect((await call(bot, 'browser_extract', {})).extraction!.text).toMatch(/Welcome to the shop/)
+    // An address nothing answers on, in the tab the view follows: the address field keeps it, so the owner can correct it.
+    const nowhere = await closedAddress()
+    const seen = modelResult(await call(bot, 'browser_observe', {}))
+    const leaseId = first.session!.controlLeaseId
+    expect((await call(bot, 'browser_act', { tabId: seen.observation!.tabId, generation: seen.observation!.generation, observationId: seen.observation!.observationId, controlLeaseId: leaseId, action: { type: 'navigate', url: nowhere } })).error).toMatch(/^site_unreachable/)
+    await expect.poll(async () => (await bots.view(BOT_A)).problem?.kind, { timeout: 5_000 }).toBe('unreachable')
+    await expect.poll(() => view.events.filter((event) => event.tab).at(-1)?.tab?.url, { timeout: 5_000 }).toBe(nowhere)
+    expect(view.events.some((event) => event.tab?.url.startsWith('chrome-error:'))).toBe(false)
     bots.unwatch(BOT_A, 'w1', 'c1')
   }, 60_000)
 

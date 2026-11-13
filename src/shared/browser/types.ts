@@ -278,6 +278,8 @@ export interface BrowserViewerUpdate {
   tabId: string
   url: string
   title: string
+  /** The tab's main document: it changes with each page the tab shows (a navigation, a redirect, a reload). */
+  page?: string
   /** The page's viewport in CSS pixels, which a picture shows whole. */
   viewport: { width: number; height: number }
   /** The tab is not the one in front: Chromium does not paint it, so its picture is a still. */

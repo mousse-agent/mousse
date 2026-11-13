@@ -135,6 +135,8 @@ export interface BotBrowserView {
   dialog?: BotBrowserDialog
   /** The page asks the person for files (`multiple`: more than one), and the site that asks. */
   chooser?: BotBrowserChooser
+  /** It is not open because its process ended by itself (a crash, the system): the next use starts it again. */
+  stopped?: true
 }
 
 /** A page's request for files, as the view that holds the browser is told it: one or several, and which site asks. */

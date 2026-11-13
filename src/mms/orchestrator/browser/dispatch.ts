@@ -6,7 +6,7 @@ import type {
 } from '../../../shared/browser/automation'
 import type { BrowserRuntimePort } from '../../../shared/browser/runtime'
 import type { ExecutionContext } from '../../../shared/execution/types'
-import { BROWSER_PROBLEM_CODES, browserNoteForAgent, browserProblemForAgent, type BrowserNavigation, type BrowserNoteReader } from '../../../shared/browser/navigation'
+import { BROWSER_PROBLEM_CODES, browserNoteForAgent, browserProblemForAgent, type BrowserNavigation, type BrowserNoteReader, type BrowserProblem } from '../../../shared/browser/navigation'
 import { ExecutionPolicyService } from '../../execution/ExecutionPolicyService'
 import {
   type BrowserExecutionBinding,
@@ -148,11 +148,11 @@ export async function dispatchBrowserTool(input: {
     vision: input.binding.vision === true,
     target: resolved.target
   }
+  // A bot has no sign-in of its own: a page's sign-in form, or a check a person can pass, is its owner's to do.
+  const actor = input.binding.execution.actor
+  const reader: BrowserNoteReader = actor.kind === 'agent' && actor.definitionId?.startsWith('bot:') ? 'bot' : 'agent'
   try {
     const output = await input.port.dispatch(context, input.name, args)
-    // A bot has no sign-in of its own: a page's sign-in form is its owner's to fill.
-    const actor = input.binding.execution.actor
-    const reader: BrowserNoteReader = actor.kind === 'agent' && actor.definitionId?.startsWith('bot:') ? 'bot' : 'agent'
     const result = formatBrowserToolOutput(output, reader)
     const screenshot = output.observation?.screenshot
     if (input.name === 'browser_screenshot') {
@@ -163,7 +163,12 @@ export async function dispatchBrowserTool(input: {
     }
     return userAllowed ? { ...result, text: accessNotice + result.text } : result
   } catch (error) {
-    return { text: accessNotice + formatBrowserError(error, 'Browser tool dispatch failed.'), isError: true, dispatched: true }
+    // A page that failed in its class: a bot hears what to do next in its owner's terms.
+    const problem = (error as { details?: { problem?: BrowserProblem } } | undefined)?.details?.problem
+    const text = problem && reader === 'bot' && BROWSER_PROBLEM_CODES[problem.kind]
+      ? `${BROWSER_PROBLEM_CODES[problem.kind]}: ${browserProblemForAgent(problem, reader)}`
+      : formatBrowserError(error, 'Browser tool dispatch failed.')
+    return { text: accessNotice + text, isError: true, dispatched: true }
   }
 }
 
@@ -186,7 +191,7 @@ function navigationForModel(navigation: BrowserNavigation | undefined, reader: B
     ...(navigation.download ? { download: navigation.download.name } : {}),
     ...(navigation.notes?.length ? { shows: navigation.notes.map((note) => note.kind === 'http-status' ? `http-${note.status}` : note.kind) } : {}),
     ...(notes.length ? { note: notes.join(' ') } : {}),
-    ...(navigation.problem ? { problem: BROWSER_PROBLEM_CODES[navigation.problem.kind], ...(navigation.problem.reason ? { reason: navigation.problem.reason } : {}), next: browserProblemForAgent(navigation.problem) } : {})
+    ...(navigation.problem ? { problem: BROWSER_PROBLEM_CODES[navigation.problem.kind], ...(navigation.problem.reason ? { reason: navigation.problem.reason } : {}), next: browserProblemForAgent(navigation.problem, reader) } : {})
   }
 }
 

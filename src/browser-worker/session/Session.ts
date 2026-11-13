@@ -39,7 +39,7 @@ import { collectStructuredObservation, MAX_OBSERVATION_ELEMENTS, type CollectedO
 import { captureViewportScreenshot } from '../observation/screenshot'
 import { MAX_WAIT_MS, SCREENCAST_MAX_HEIGHT, ViewerCaptures, type ViewerTabInfo } from '../observation/screencast'
 import { prepareActionableTarget, readControlValue, type ActionableTarget } from '../action/actionability'
-import { dispatchAction, dispatchHumanInput, navigateHistory, navigateTab, navigationPace, readPageSigns, readSelectedText, type DispatchedHumanInput, type NavigationOptions } from '../action/dispatch'
+import { dispatchAction, dispatchHumanInput, navigateHistory, navigateTab, navigationPace, readOpenedPageSigns, readPageSigns, readSelectedText, type DispatchedHumanInput, type NavigationOptions } from '../action/dispatch'
 import { BROWSER_PROBLEM_CODES, browserNoteForPerson, browserProblemMessage, classifyOpenedPage, hostOf, type BrowserNavigation, type BrowserProblem } from '../../shared/browser/navigation'
 import { ScopedActionJournal } from '../action/journal'
 import { CdpDisconnectedError } from '../cdp/connection'
@@ -99,6 +99,8 @@ type Settled<T> = { ok: true; value: T } | { ok: false; error: unknown }
 const MAX_ATTACHED_FRAMES_PER_OBSERVATION = 32
 /** An observation's warning while its page is still loading (`browser_wait` `document-ready` waits it out). */
 export const PAGE_STILL_LOADING = 'page-still-loading'
+/** What every use of a session hears once its Chromium went away by itself. */
+const BROWSER_STOPPED = 'The browser stopped'
 /** How long a new page or frame is held for its mark before it is let go. A page a site opens without an opener has no renderer yet: it answers only once it runs. */
 const MARK_BEFORE_RUN_MS = 1_000
 /** How long after that its mark may still take before the page is closed: it never runs on unmarked. */
@@ -134,6 +136,8 @@ export class ManagedSession {
   private readonly clock: () => Date
   private closed = false
   private closing = false
+  /** Chromium went away by itself (`browserEnded`). */
+  private ended = false
   private closeWork: Promise<void> | null = null
   private readonly sessionAbort = new AbortController()
   private readonly ops = new Set<Promise<unknown>>()
@@ -165,6 +169,8 @@ export class ManagedSession {
   private readonly tabProblems = new Map<string, BrowserProblem>()
   /** A tab's page to be read again for what it needs (`recheckPage`), by CDP session. */
   private readonly pageRechecks = new Map<string, ReturnType<typeof setTimeout>>()
+  /** Tabs with a navigation under way that reads its page (watchNavigation), and how many, by CDP session. */
+  private readonly readingTabs = new Map<string, number>()
   /** How the session's first page went (`start` with a URL): a slow or failed page never fails the session. */
   firstNavigation: BrowserNavigation | undefined
   /** Pages and frames carrying the automation mark (`markAutomation`), by CDP session. */
@@ -264,7 +270,10 @@ export class ManagedSession {
     })
     this.throwIfUnavailable(signal)
     this.chrome.cdp.on('disconnect', () => {
-      if (!this.closed && !this.closing) this.lifecycle = 'disconnected'
+      if (!this.closed && !this.closing) {
+        this.lifecycle = 'disconnected'
+        this.browserEnded()
+      }
     })
     // Every target Chromium attaches on its own (the session's tabs too) waits until `onAttached` marks it and lets it run.
     this.chrome.cdp.on('Target.attachedToTarget', (params: unknown, parentSessionId?: string) => { this.onAttached(params, parentSessionId) })
@@ -332,19 +341,22 @@ export class ManagedSession {
       if (!navigated) return
       navigated.loaderId = frame.loaderId ?? navigated.loaderId
       navigated.frameId = frame.id ?? navigated.frameId
-      navigated.url = sanitizeUrl(frame.url ?? navigated.url)
+      // Chromium's error page is at `chrome-error://`: the tab is where it tried to go, so the person can correct it.
+      navigated.url = sanitizeUrl(frame.unreachableUrl || frame.url || navigated.url)
       navigated.documentId = 'doc_' + randomUUID()
       navigated.page = 'doc_' + randomUUID()
       // A file picker of the page before is no longer waiting.
       if (this.tabChoosers.has(navigated.cdpSessionId)) this.pageChooser(navigated.cdpSessionId, undefined)
       // Chromium may send no more screencast pictures once a new page commits: a watched tab's starts again.
-      this.viewers?.committed(navigated.cdpSessionId, navigated.url)
+      this.viewers?.committed(navigated.cdpSessionId, navigated.url, navigated.documentId)
       // A person watching sees a page that could not be loaded as such (Chromium's error page has no code to show).
       const unreachable = frame.unreachableUrl ? hostOf(frame.unreachableUrl) : undefined
       const known = this.tabProblems.get(navigated.cdpSessionId)
       // The navigation's own answer (with Chromium's code) may have come first: it stands.
       if (!frame.unreachableUrl || known?.kind !== 'unreachable' || known.host !== unreachable)
         this.tabProblem(navigated.cdpSessionId, frame.unreachableUrl ? { kind: 'unreachable', ...(unreachable ? { host: unreachable } : {}) } : undefined)
+      // A new page no navigation reads (a redirect, the page's own reload, the person's navigation): it is read itself.
+      if (!frame.unreachableUrl && !this.readingTabs.has(navigated.cdpSessionId)) this.readCommitted(navigated)
       this.refs.invalidateTab(navigated.publicId)
       this.touch()
     })
@@ -464,6 +476,34 @@ export class ManagedSession {
     return this.closeWork
   }
 
+  /**
+   * Chromium went away by itself (it crashed, or the system or someone ended it): whoever waits on
+   * it hears so now (`worker_disconnected`, "The browser stopped"), and once its process is gone the
+   * session lets go of everything it held, the profile's lock too, so the next use starts it again.
+   */
+  private browserEnded(): void {
+    if (this.ended) return
+    this.ended = true
+    this.viewers?.dispose()
+    this.viewers = null
+    const chrome = this.chrome
+    void (async () => {
+      const child = chrome?.process
+      if (child && child.exitCode === null && child.signalCode === null) {
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, 5_000)
+          child.once('exit', () => { clearTimeout(timer); resolve() })
+        })
+      }
+      await this.close()
+    })().catch((error: unknown) => console.warn('a browser that stopped could not be closed', { sessionId: this.id, error: error instanceof Error ? error.message : String(error) }))
+  }
+
+  /** Whether Chromium went away by itself (`browserEnded`). */
+  get browserGone(): boolean {
+    return this.ended
+  }
+
   private async closeOwned(): Promise<void> {
     this.fenceInFlight('cancelled')
     if (!this.sessionAbort.signal.aborted) {
@@ -487,7 +527,7 @@ export class ManagedSession {
     } catch (error) {
       throw error instanceof Error ? error : new Error(String(error))
     }
-    if (chrome && chrome.process.exitCode === null) {
+    if (chrome && chrome.process.exitCode === null && chrome.process.signalCode === null) {
       throw new Error(`Managed Chromium still alive after stop (pid ${chrome.pid})`)
     }
     if (chrome && isProcessAlive(chrome.pid)) {
@@ -1056,7 +1096,7 @@ export class ManagedSession {
   }
 
   private viewerTab(tab: TabState): ViewerTabInfo {
-    return { cdpSessionId: tab.cdpSessionId, tabId: tab.publicId, url: tab.url, title: this.viewerTitles.get(tab.targetId) ?? boundText(tab.title, 512) }
+    return { cdpSessionId: tab.cdpSessionId, tabId: tab.publicId, url: tab.url, title: this.viewerTitles.get(tab.targetId) ?? boundText(tab.title, 512), page: tab.documentId }
   }
 
   private liveCursor(tab: TabState): BrowserAgentCursor | undefined {
@@ -1084,6 +1124,8 @@ export class ManagedSession {
       waitMs: count(params.waitMs, 0, MAX_WAIT_MS, 20_000),
       signal
     })
+    // The browser stopped while this waited: the watcher hears that, not that nothing changed.
+    if (this.ended) fail('worker_disconnected', BROWSER_STOPPED)
     const cursor = this.tabs.has(tab.publicId) ? this.liveCursor(tab) : undefined
     return { ...update, ...(cursor ? { cursor } : {}) }
   }
@@ -1479,19 +1521,21 @@ export class ManagedSession {
    * for anyone watching (a problem it ran into, or what an opened page needs).
    */
   private async navigateTabOf(tab: TabState, url: string, options: NavigationOptions): Promise<BrowserNavigation> {
-    return this.watchNavigation(tab, navigateTab(this.requireChrome().cdp, tab.cdpSessionId, url, this.navigationOptions(tab, options)))
+    return this.watchNavigation(tab, navigateTab(this.requireChrome().cdp, tab.cdpSessionId, url, this.navigationOptions(tab, options)), !options.untilCommit)
   }
 
   private async navigateHistoryOf(tab: TabState, kind: 'back' | 'forward' | 'reload', options: NavigationOptions): Promise<BrowserNavigation> {
-    return this.watchNavigation(tab, navigateHistory(this.requireChrome().cdp, tab.cdpSessionId, kind, tab.url, this.navigationOptions(tab, options)))
+    return this.watchNavigation(tab, navigateHistory(this.requireChrome().cdp, tab.cdpSessionId, kind, tab.url, this.navigationOptions(tab, options)), !options.untilCommit)
   }
 
   private navigationOptions(tab: TabState, options: NavigationOptions): NavigationOptions {
     const cdp = this.requireChrome().cdp
-    return { ...options, ...(options.untilCommit ? {} : { signs: (frameId: string) => readPageSigns(cdp, tab.cdpSessionId, frameId) }) }
+    return { ...options, ...(options.untilCommit ? {} : { signs: (frameId: string) => readOpenedPageSigns(cdp, tab.cdpSessionId, frameId) }) }
   }
 
-  private async watchNavigation(tab: TabState, navigation: Promise<BrowserNavigation>): Promise<BrowserNavigation> {
+  private async watchNavigation(tab: TabState, navigation: Promise<BrowserNavigation>, reads: boolean): Promise<BrowserNavigation> {
+    // While a navigation that reads its page runs, that read says what the tab's page is (`readCommitted` waits).
+    if (reads) this.readingTabs.set(tab.cdpSessionId, (this.readingTabs.get(tab.cdpSessionId) ?? 0) + 1)
     try {
       const outcome = await navigation
       // A person watching is told of a failure, or of a sign-in or check on the page that is theirs to do.
@@ -1500,7 +1544,40 @@ export class ManagedSession {
     } catch (error) {
       if (isBrowserWorkerError(error) && error.problem) this.tabProblem(tab.cdpSessionId, error.problem)
       throw error
+    } finally {
+      if (reads) {
+        const left = (this.readingTabs.get(tab.cdpSessionId) ?? 1) - 1
+        if (left > 0) this.readingTabs.set(tab.cdpSessionId, left)
+        else this.readingTabs.delete(tab.cdpSessionId)
+      }
     }
+  }
+
+  /**
+   * A tab's main document changed with no navigation reading it (a redirect, a reload the page does
+   * itself, the person's own navigation): what the view says follows the page the tab shows now. The
+   * old problem was dropped at the commit; the new page is read once its document has had a moment.
+   */
+  private readCommitted(tab: TabState, delayMs = 700): void {
+    const documentId = tab.documentId
+    const pending = this.pageRechecks.get(tab.cdpSessionId)
+    if (pending) clearTimeout(pending)
+    const current = () => !this.closed && !this.closing && !this.ended && this.tabs.get(tab.publicId) === tab && tab.documentId === documentId && !this.readingTabs.has(tab.cdpSessionId)
+    const timer = setTimeout(() => {
+      this.pageRechecks.delete(tab.cdpSessionId)
+      if (!current()) return
+      void (async () => {
+        const cdp = this.requireChrome().cdp
+        const frameId = tab.frameId || (await cdp.send<{ frameTree?: { frame?: { id?: string } } }>('Page.getFrameTree', {}, { sessionId: tab.cdpSessionId, timeoutMs: 5_000 })).frameTree?.frame?.id
+        if (!frameId) return
+        const signs = await readOpenedPageSigns(cdp, tab.cdpSessionId, frameId)
+        if (!signs || !current()) return
+        const opened = classifyOpenedPage({ ...signs, url: signs.url ?? tab.url })
+        this.tabProblem(tab.cdpSessionId, opened.problem ?? browserNoteForPerson(opened.notes, hostOf(signs.url ?? tab.url)))
+      })().catch(() => undefined)
+    }, delayMs)
+    timer.unref?.()
+    this.pageRechecks.set(tab.cdpSessionId, timer)
   }
 
   /**
@@ -1537,6 +1614,8 @@ export class ManagedSession {
   }
 
   handle(method: BrowserWorkerRequest['method'], params: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> | unknown {
+    // A browser that stopped by itself answers every use with that until it is closed (then the next use starts it again).
+    if (this.ended && method !== 'session.close' && method !== 'frame.stop') fail('worker_disconnected', BROWSER_STOPPED)
     switch (method) {
       case 'session.close': return this.close()
       case 'tabs.list': return { tabs: this.listTabs(), activeTabId: this.activeTabId }
@@ -1970,6 +2049,7 @@ export class ManagedSession {
   }
 
   private requireChrome(): LaunchedChrome {
+    if (this.ended) fail('worker_disconnected', BROWSER_STOPPED)
     if (!this.chrome || this.closed || this.closing || this.lifecycle === 'closed') fail('session_closed', 'Browser session is closed')
     if (this.lifecycle === 'disconnected') fail('worker_disconnected', 'Chromium disconnected')
     return this.chrome
