@@ -326,11 +326,21 @@ const OWNER_INPUT_WAIT_MS = 30_000
  * owner's view says "Sending…".
  */
 export const OWNER_CUT_IN_MS = 150
+/**
+ * How long the browser stays the owner's after each of their inputs: their next input goes at once, and the runs' calls
+ * wait. So a person typing gets the page's pace (each key would otherwise wait out a cut-in), and the runs read in
+ * their pauses.
+ */
+export const OWNER_KEEP_MS = 1_000
 
-/** The call that holds a bot's browser now: its tab, whether it gives way to the owner's input, and how to stop it. */
+/**
+ * The call that holds a bot's browser now: its tab, whether it gives way to the owner's input, and how to stop it.
+ * `kept` is no call: the moment after an owner's input, when only their next input may take the browser.
+ */
 interface TurnHolder {
   tab?: string
   yields?: boolean
+  kept?: boolean
   stop?(reason: Error): void
 }
 
@@ -344,6 +354,7 @@ interface TurnHolder {
  */
 export class BrowserTurns {
   private holder: TurnHolder | undefined
+  private keptUntil: ReturnType<typeof setTimeout> | undefined
   private readonly waiting: Array<{ go(): void; holder: TurnHolder }> = []
 
   /** The tab the call that holds the browser works on, when it named one. */
@@ -360,11 +371,17 @@ export class BrowserTurns {
    * at most `holdMs`: then its signal ends it and it fails with a timeout, and the next waiter goes.
    *
    * A call that `yields` (a run's) gives way to one that cuts in (`cutIn`, the owner's input): the owner's input waits
-   * for it `cutIn.afterMs` at most, then that call is stopped with `cutIn.reason()` and the input goes.
+   * for it `cutIn.afterMs` at most, then that call is stopped with `cutIn.reason()` and the input goes. A call that
+   * `keeps` (the owner's input) holds the browser that long after it ends, for the next call that goes `first` alone.
    */
-  async run<T>(work: (held: AbortSignal) => Promise<T>, options: { signal?: AbortSignal; tab?: string; waitMs?: number; holdMs?: number; busy?: () => Error; first?: boolean; yields?: boolean; cutIn?: { afterMs: number; reason: () => Error } } = {}): Promise<T> {
+  async run<T>(work: (held: AbortSignal) => Promise<T>, options: { signal?: AbortSignal; tab?: string; waitMs?: number; holdMs?: number; busy?: () => Error; first?: boolean; yields?: boolean; cutIn?: { afterMs: number; reason: () => Error }; keepMs?: number } = {}): Promise<T> {
     const holder: TurnHolder = { ...(options.tab ? { tab: options.tab } : {}), ...(options.yields ? { yields: true } : {}) }
-    if (this.holder || this.waiting.length) {
+    if (this.holder?.kept && options.first) {
+      // The owner's next input while the browser is still theirs: it goes at once.
+      clearTimeout(this.keptUntil)
+      this.keptUntil = undefined
+      this.holder = undefined
+    } else if (this.holder || this.waiting.length) {
       const busy = options.busy ?? (() => new BrowserAutomationError({ code: 'timeout', message: 'Your browser is busy with your other work right now. Try this again in a moment, or carry on without it.' }))
       if (this.waiting.length >= MAX_BROWSER_WAITERS) throw busy()
       await new Promise<void>((resolve, reject) => {
@@ -409,13 +426,27 @@ export class BrowserTurns {
       return await Promise.race([work(hold.signal), abandoned])
     } finally {
       clearTimeout(ceiling)
-      this.holder = undefined
-      // The next in line goes; it takes the browser before anything that comes later.
-      const next = this.waiting.shift()
-      if (next) {
-        this.holder = next.holder
-        next.go()
-      }
+      if (options.keepMs && this.holder === holder) {
+        // The owner's: theirs a moment longer, for their next input; then the next in line goes.
+        const kept: TurnHolder = { ...(options.tab ? { tab: options.tab } : {}), kept: true }
+        this.holder = kept
+        this.keptUntil = setTimeout(() => {
+          if (this.holder !== kept) return
+          this.keptUntil = undefined
+          this.handOn()
+        }, options.keepMs)
+        this.keptUntil.unref?.()
+      } else this.handOn()
+    }
+  }
+
+  /** The browser is free: the next in line goes; it takes the browser before anything that comes later. */
+  private handOn(): void {
+    this.holder = undefined
+    const next = this.waiting.shift()
+    if (next) {
+      this.holder = next.holder
+      next.go()
     }
   }
 }
@@ -1158,8 +1189,9 @@ export class BotBrowsers implements BotBrowserHost {
    * One input of the owner's to the worker, in the browser's turn (`BrowserTurns`), so it never lands beside a run's
    * call: ahead of the runs' calls that wait, and cutting into a run's call under way once `OWNER_CUT_IN_MS` has passed
    * (that call is refused to its run as an owner who uses the browser now, as acting is during a hold), so it never
-   * waits out a run's long call either. It resolves once the worker applied it, so the view's acknowledgement says
-   * the input reached the page, not that it was queued.
+   * waits out a run's long call either. The browser stays theirs `OWNER_KEEP_MS` after it, so typing goes at the
+   * page's pace and the runs read in the pauses. It resolves once the worker applied it, so the view's acknowledgement
+   * says the input reached the page, not that it was queued.
    */
   private ownerInput<T>(state: BotBrowserState, call: (context: BrowserToolContext) => Promise<T>, tabId?: string): Promise<T> {
     return state.turns.run((held) => this.ownerCall(state, call, held), {
@@ -1167,6 +1199,7 @@ export class BotBrowsers implements BotBrowserHost {
       waitMs: OWNER_INPUT_WAIT_MS,
       busy: ownerInputBusy,
       cutIn: { afterMs: OWNER_CUT_IN_MS, reason: ownerHolds },
+      keepMs: OWNER_KEEP_MS,
       ...(tabId ? { tab: tabId } : {})
     })
   }

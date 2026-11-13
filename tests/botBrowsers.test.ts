@@ -14,7 +14,7 @@ import { MmsBrowserService } from '../src/mms/browser/MmsBrowserService'
 import { BrowserArtifactService } from '../src/mms/browser/BrowserArtifactService'
 import { createAllowHttpPolicy } from '../src/mms/browser/defaultPorts'
 import { ExecutionPolicyService } from '../src/mms/execution/ExecutionPolicyService'
-import { BOT_BROWSER_KEEPER, BROWSER_TURN_HOLD_MS, BotBrowsers, BrowserTurns, MAX_BROWSER_WAITERS, OWNER_CUT_IN_MS, botBrowserWorkspace } from '../src/mms/bots/browser/BotBrowsers'
+import { BOT_BROWSER_KEEPER, BROWSER_TURN_HOLD_MS, BotBrowsers, BrowserTurns, MAX_BROWSER_WAITERS, OWNER_CUT_IN_MS, OWNER_KEEP_MS, botBrowserWorkspace } from '../src/mms/bots/browser/BotBrowsers'
 import type { BotTurnBrowser } from '../src/mms/bots/activation/dispatcher'
 import { dispatchBrowserTool } from '../src/mms/orchestrator/browser/dispatch'
 import { snapshotBrowserExecutionBinding } from '../src/mms/orchestrator/browser/binding'
@@ -174,6 +174,23 @@ describe('turns on a bot\'s browser (BrowserTurns)', () => {
     release()
     await Promise.all([side, after])
     expect(went).toBe(true)
+  })
+
+  it("the browser stays the owner's a moment after each input: their next input goes at once, a run's call after the moment", async () => {
+    expect(OWNER_KEEP_MS).toBeGreaterThanOrEqual(500)
+    const turns = new BrowserTurns()
+    const order: string[] = []
+    await turns.run(async () => { order.push('key 1') }, { first: true, keepMs: 80 })
+    // A run's call that comes now waits for the moment to pass.
+    const run = turns.run(async () => { order.push('run') }, { yields: true })
+    await sleep(20)
+    expect(order).toEqual(['key 1'])
+    // The owner's next input within the moment goes at once, ahead of the waiting run, and keeps it again.
+    await turns.run(async () => { order.push('key 2') }, { first: true, keepMs: 80 })
+    expect(order).toEqual(['key 1', 'key 2'])
+    await run
+    expect(order).toEqual(['key 1', 'key 2', 'run'])
+    expect(turns.busy).toBe(false)
   })
 
   it('a holder that never returns is stopped at its limit: its call fails, its signal ends, and the next call goes', async () => {
@@ -471,10 +488,11 @@ describe.skipIf(!chrome.ok)('a bot\'s own browser', () => {
     const shot = await bots.view(BOT_A, { frame: true, viewId: 'view-a' })
     const field = one.observation!.elements.find((element) => element.role === 'textbox' && element.name?.trim() === 'Name')!
     expect((await bots.send(BOT_A, 'view-a', holdId, [{ seq: 1, input: { kind: 'click', x: field.bounds!.x + 5, y: field.bounds!.y + 5 }, picture: shot.frame!.id! }])).acks[0]!.status).toBe('applied')
-    // The other run holds the browser's turn with a long read of its own page (reading is allowed during a hold).
+    // The other run holds the browser's turn with a long read of its own page (reading is allowed during a hold), once
+    // the moment the click kept the browser for its owner has passed.
     const startedWait = Date.now()
     const waiting = call(second, 'browser_wait', { sessionId: two.session!.id, tabId: two.observation!.tabId, condition: { type: 'text', text: 'never-present', present: true }, timeoutMs: 20_000 })
-    await sleep(300)
+    await sleep(OWNER_KEEP_MS + 400)
     const sentAt = Date.now()
     let answeredAt: number | undefined
     const sending = bots.send(BOT_A, 'view-a', holdId, [
@@ -496,6 +514,25 @@ describe.skipIf(!chrome.ok)('a bot\'s own browser', () => {
     // A stopped call is not a lost browser: the browser stays open, and the run still reads its own tab.
     expect((await bots.view(BOT_A, { viewId: 'view-a' })).open).toBe(true)
     expect((await call(second, 'browser_tabs', { operation: 'list' })).tabs).toEqual([expect.objectContaining({ id: two.observation!.tabId })])
+    // A person typing fast while the run keeps reading: each key goes at the page's pace, not one cut-in at a time
+    // (24 keys would take over 3.6 s), and the run reads in the pauses.
+    const pageId = (await bots.view(BOT_A, { frame: true, viewId: 'view-a' })).frame!.id!
+    expect((await bots.send(BOT_A, 'view-a', holdId, [{ seq: 4, input: { kind: 'click', x: field.bounds!.x + 5, y: field.bounds!.y + 5 }, picture: pageId }])).acks[0]!.status).toBe('applied')
+    let reading = true
+    const reads = (async () => { let count = 0; while (reading) { await call(second, 'browser_wait', { sessionId: two.session!.id, tabId: two.observation!.tabId, condition: { type: 'text', text: 'never-present', present: true }, timeoutMs: 400 }); count += 1 } return count })()
+    await sleep(200)
+    const burstAt = Date.now()
+    const keys = [...'abcdefghijklmnopqrstuvwx'].map((char, index) => ({ seq: 5 + index, input: { kind: 'type' as const, text: char }, picture: pageId }))
+    const burst = await bots.send(BOT_A, 'view-a', holdId, keys)
+    const burstMs = Date.now() - burstAt
+    expect(burst.acks.every((ack) => ack.status === 'applied')).toBe(true)
+    expect(burstMs).toBeLessThan(24 * OWNER_CUT_IN_MS)
+    await sleep(OWNER_KEEP_MS + 600)
+    reading = false
+    expect(await reads).toBeGreaterThan(0)
+    expect((await bots.send(BOT_A, 'view-a', holdId, [{ seq: 29, input: { kind: 'key', key: 'Enter' }, picture: pageId }])).acks[0]!.status).toBe('applied')
+    // Whole and in order (the click put the caret before what the field held).
+    expect((await call(first, 'browser_extract', {})).extraction!.text).toMatch(/saved:[^:\n]*abcdefghijklmnopqrstuvwx[^:\n]*:pwlen=0/)
     await bots.hold(BOT_A, 'view-a', { op: 'release', holdId })
   }, 60_000)
 
