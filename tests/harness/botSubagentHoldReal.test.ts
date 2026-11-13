@@ -1,9 +1,10 @@
 /**
  * The hold rule for a bot's subagents on the real binaries (docs/bots.md, "How each runtime holds a subagent"): on Linux,
- * work on Claude Code (in its sandbox) and a subagent on Codex, or the other way round, without file access: the rule
+ * work on Claude Code (in its sandbox) and a subagent on Codex, without file access: the rule
  * keeps the subagent's commands, and the subagent's own runtime holds them as tightly as the work's, so a command reads
  * nothing of the home folder outside the bot's folders. With file access, a subagent on Codex under work on Claude Code
- * runs with no command tool at all (Codex's sandbox would then read Mousse's own data).
+ * runs with no command tool at all (Codex's sandbox would then read Mousse's own data). In the reverse direction without
+ * file access, commands are withheld because Claude Code opens /tmp, which Codex closes.
  *
  * The subagent's turn is compiled by the real engine (`BotEngine`, on a real `bots.db`) with each runtime's tool names
  * and what its driver says about how it holds a bot here; the turn then runs on the real Codex (`CodexProviderService`)
