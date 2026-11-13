@@ -345,21 +345,6 @@ html.platform-darwin .titlebar-left {
   color: white;
 }
 
-/* Functional progress indicators must keep spinning even when Windows
-   reports prefers-reduced-motion (global baseline short-circuits animation). */
-.icon-spin {
-  animation: spin 1s steps(12) infinite !important;
-}
-
-@keyframes spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
-}
-
 /* The conversation takes what the panel area leaves, at least 280px; the panel area's minimum keeps it
    within 60% of the workspace (lib/panelSplit.ts). */
 .sidebar {
@@ -2488,14 +2473,6 @@ html[data-chat-width='full'] .chat {
   color: var(--text-secondary);
 }
 
-.composer-transcribing-spin {
-  animation: composer-transcribing-spin 0.9s linear infinite;
-}
-
-@keyframes composer-transcribing-spin {
-  to { transform: rotate(360deg); }
-}
-
 .composer-attachment-remove {
   display: inline-flex;
   align-items: center;
@@ -3471,16 +3448,6 @@ html[data-theme='high-contrast'] {
   font-size: 12px;
   color: var(--danger);
   background: rgba(248, 81, 73, 0.1);
-}
-
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-.spin {
-  animation: spin 0.8s steps(12) infinite;
 }
 
 .project-terminal-panel .terminal-container {

@@ -46,7 +46,6 @@
 .chat-start-hint { padding: 30px 0; color: var(--text-secondary); font-size: 13px; line-height: 1.7; }
 .chat-start-hint h2 { font-size: 19px; color: var(--text-primary); font-weight: 500; }
 .chat-run-status { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-secondary); }
-.chat-spin { animation: chat-spin 1s steps(12) infinite; } @keyframes chat-spin { to { transform: rotate(360deg); } }
 .agent-chat-composer { margin: 10px 20px 20px; padding: 12px; border: 1px solid rgba(var(--accent-pale-rgb), .2); border-radius: 14px; background: rgba(var(--surface-strong-rgb), .35); }
 .agent-chat-composer textarea { display: block; background: transparent; border: 0; outline: 0; resize: vertical; color: var(--text-primary); font: inherit; font-size: 13px; width: 100%; min-height: 56px; max-height: 240px; }
 .agent-chat-composer-controls { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
