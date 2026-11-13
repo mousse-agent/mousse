@@ -128,6 +128,8 @@ export interface McpToolDescriptor {
   configRevision?: string
   profileId?: string
   schemaError?: string
+  /** The server's own `readOnlyHint` for the tool, when it gives one: a hint, never a guarantee. */
+  readOnlyHint?: boolean
 }
 
 export interface McpToolCallLog {

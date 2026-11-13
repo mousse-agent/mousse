@@ -4,14 +4,14 @@ import { homedir } from 'node:os'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { Options, SandboxSettings, SpawnedProcess, SpawnOptions } from '@anthropic-ai/claude-agent-sdk'
 import type { ToolCall } from '@earendil-works/pi-ai'
-import type { BotAuthority } from '../../../shared/bots/personal/authority'
+import type { BotAuthority, BotMcpTool } from '../../../shared/bots/personal/authority'
 import { botAppToolRefusal, checkBuiltinCall, checkMessage, wallMessage } from '../../../shared/bots/personal/walls'
 import { runtimeExpandedPath } from '../../bots/authority/botAuthority'
 import { entriesBeside } from '../../bots/grants/compile'
 import { neutralToolIdempotent, neutralToolsOf, type NativeToolTable, type NeutralTool } from '../../../shared/harness/tools'
 import type { HarnessCaps } from '../../../shared/harness/types'
 import { withoutTransportFields } from '../../agentDefinitions/definitionGate'
-import { CLAUDE_MOUSSE_TOOL_PREFIX } from '../../run/mcp/attachment'
+import { CLAUDE_MOUSSE_TOOL_PREFIX, CLAUDE_RELAY_TOOL_PREFIX } from '../../run/mcp/attachment'
 import type { ToolLedger } from '../../run/mcp/appTools/types'
 import { CLAUDE_LOCKED_TOOLS_ITEMS, hasContainmentEvidence, type ContainmentEvidence } from '../compatibility'
 import { CLAUDE_TURN_EXTRA_ARGS } from '../vendors/claude/turnFrames'
@@ -26,7 +26,8 @@ import { trackChildProcess } from '../../diagnostics/liveCounts'
  *   turns, in the locked environment, with its process group under the bot supervisor.
  * Every interactive turn keeps the user's own setup, untouched.
  *
- * A locked turn loads no settings, plugins or MCP servers but Mousse's own, runs in the activation's
+ * A locked turn loads no settings, plugins or MCP servers but Mousse's own (its server, and its relay of the owner's
+ * MCP tools the bot's work was granted, which the gate checks by name: `ClaudeLockedGate`), runs in the activation's
  * private scratch folder, offers exactly the granted built-ins (`tools`) and turns every other one
  * off (`disallowedTools`). Mousse's `PreToolUse` hook is the grant gate: it holds each call to the
  * bot's authority and never allows a call itself, so `canUseTool` checks it again, by default
@@ -312,8 +313,9 @@ export function claudeLockedOptions(turn: ClaudeLockedTurn, input: {
     plugins: [],
     // Only Mousse's own launch arguments; none of the user's.
     extraArgs: { ...CLAUDE_TURN_EXTRA_ARGS },
-    // None on the command line, where any local process reads them: Mousse's own server, the only one a locked turn
-    // has, is registered over Claude Code's input once it starts (`registerClaudeMcpServers`, #358).
+    // None on the command line, where any local process reads them: Mousse's own servers, the only ones a locked turn
+    // has (its server, and its relay when the bot's work holds the owner's MCP tools), are registered over Claude
+    // Code's input once it starts (`registerClaudeMcpServers`, #358).
     mcpServers: {},
     tools,
     disallowedTools,
@@ -337,6 +339,8 @@ type Decision = { ok: true } | { ok: false; reason: string }
 type Classified =
   | { kind: 'builtin'; neutral: NeutralTool[] }
   | { kind: 'app'; tool: string }
+  /** One of the owner's MCP tools the turn was offered, through Mousse's relay (`mcp__mousse-relay__<server>__<tool>`). */
+  | { kind: 'mcp'; tool: BotMcpTool }
   | { kind: 'tool_search' }
   | { kind: 'unknown' }
 
@@ -397,6 +401,12 @@ export class ClaudeLockedGate {
 
   private classify(toolName: string): Classified {
     if (this.mcp && toolName.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX)) return { kind: 'app', tool: toolName.slice(CLAUDE_MOUSSE_TOOL_PREFIX.length) }
+    // The relay lists only the granted tools the turn was offered: any other name of it is no call of this bot's.
+    if (this.mcp && toolName.startsWith(CLAUDE_RELAY_TOOL_PREFIX)) {
+      const relayed = toolName.slice(CLAUDE_RELAY_TOOL_PREFIX.length)
+      const tool = this.turn.authority.mcpTools?.find((offered) => offered.name === relayed)
+      return tool ? { kind: 'mcp', tool } : { kind: 'unknown' }
+    }
     if (this.mcp && toolName === 'ToolSearch') return { kind: 'tool_search' }
     const neutral = neutralToolsOf(CLAUDE_NATIVE_TOOLS, toolName)
     return neutral.length ? { kind: 'builtin', neutral } : { kind: 'unknown' }
@@ -425,6 +435,12 @@ export class ClaudeLockedGate {
       case 'app': {
         const refusal = botAppToolRefusal(authority, classified.tool, withoutTransportFields(args))
         return refusal ? { ok: false, reason: refusal } : { ok: true, classified }
+      }
+      // Held to the grant here and again by the relay, which runs it on the owner's connection and writes its row.
+      case 'mcp': {
+        const { tool } = classified
+        const decided = authority.check({ kind: 'mcp', server: tool.server, tool: tool.tool, serverName: tool.serverName, args })
+        return decided.ok ? { ok: true, classified } : { ok: false, reason: checkMessage(decided) }
       }
       case 'tool_search': {
         // It only loads tool schemas, but nothing runs once the activation waits or ended.
@@ -487,7 +503,7 @@ export class ClaudeLockedGate {
     const decided = this.decide(toolName, args)
     if (!decided.ok) return decided
     const classified = decided.classified!
-    if (classified.kind === 'app') return { ok: true }
+    if (classified.kind === 'app' || classified.kind === 'mcp') return { ok: true }
     const idempotent = classified.kind === 'tool_search' || (classified.kind === 'builtin' && classified.neutral.every(neutralToolIdempotent))
     const row = this.turn.ledger?.start({ type: 'toolCall', id: toolUseId, name: toolName, arguments: args } as ToolCall, { idempotent })
     if (!row) return { ok: false, reason: 'This call could not be recorded, so it does not run.' }

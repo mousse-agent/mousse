@@ -40,7 +40,7 @@ import { mcpAttachable, type ChildPreflightContext, type SubagentRefusal } from 
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
 import type { TurnSettlement } from '../run/mcp/McpCredentials'
 import type { ModeCeiling, ProviderRef } from '../run/types'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { InstanceBinary, InstanceConfigView, NextStep, PromptCacheHour, UpdateAffordance } from '../../shared/harness/status'
@@ -736,6 +736,11 @@ interface Operation {
   prompts: number
   progress?: InstallProgress
   cancel(): boolean
+}
+
+/** A bot turn's relay revision: the names of the MCP tools it was offered, so a changed set opens a new listing. */
+function botRelayRevision(bot: BotAuthority): string {
+  return createHash('sha256').update(JSON.stringify((bot.mcpTools ?? []).map((tool) => tool.name).sort())).digest('hex').slice(0, 12)
 }
 
 function errorText(error: unknown): string {
@@ -1929,9 +1934,12 @@ export class Harness implements HarnessGateway {
     if (!app) return undefined
     const { binding, input } = spec
     const caps = this.recordCaps(record)
-    // The MCP relay, when the driver can attach it and the user left it on for this runtime. A bot or
-    // definition turn never attaches it, whatever its context says.
-    const relayGrant = app.relay && record.driver.relay && app.relay.runtimes[record.driver.kind as McpRelayRuntime] === true && !app.bot && !app.definition && binding.policy.authority?.kind !== 'bot'
+    // The MCP relay, when the driver can attach it and the user left it on for this runtime. A definition turn never
+    // attaches it. A bot's turn attaches it only when its work was offered the owner's MCP tools (its grant holds
+    // them): the relay then lists just those and holds every call to the bot's grant, whatever the relay settings of
+    // the owner's own threads; nobody is asked.
+    const botRelay = Boolean(app.bot?.mcpTools?.length) && binding.policy.authority?.kind === 'bot' && !app.definition
+    const relayGrant = record.driver.relay && (botRelay || (app.relay && app.relay.runtimes[record.driver.kind as McpRelayRuntime] === true && !app.bot && !app.definition && binding.policy.authority?.kind !== 'bot'))
       ? { approvals: record.driver.relay.approvals }
       : undefined
     let attachment: { url: string; token: string; tokenHash: string; relayUrl: string } | null = null
@@ -1959,7 +1967,10 @@ export class Harness implements HarnessGateway {
       }
     }
     const mcp = this.mcp
-    const relay = attachment && relayGrant && app.relay ? { url: attachment.relayUrl, revision: app.relay.revision } : undefined
+    // A bot's relay lists the tools its turn was offered: their names are its revision.
+    const relay = attachment && relayGrant && (app.relay || botRelay)
+      ? { url: attachment.relayUrl, revision: botRelay ? botRelayRevision(app.bot!) : app.relay!.revision }
+      : undefined
     const texts = app.instructions(attachment !== null, relay !== undefined)
     // What the server's tool list depends on, apart from the bearer: a runtime that keeps its process for a bearer
     // renewed in place starts a new one when this changes, since it would keep offering a tool the list dropped.

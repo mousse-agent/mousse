@@ -3,12 +3,13 @@ import { askText } from '../../../shared/bots/personal/askText'
 import type { BotAskCard, BotAskStatus, BotChatMessage, BotChatQuote, BotWorkItem, BotChip, BotDetail, BotError, BotMessageKind, BotPermissionItem, BotReminderItem, BotRunItem, BotSummary } from '../../../shared/bots/personal/chat'
 import { BOT_MODEL_SLOT_KEYS, type BotDefinition, type BotLane, type BotManifest } from '../../../shared/bots/personal/definition'
 import { isPinned, limitOnPick, slotsOf, stuckRowsOf } from '../../../shared/bots/personal/modelSlots'
-import { askFingerprint, filesAsk, filesAskOf, isSpecialAsk, type BotAskRequest, type BotEscalationStatus, type BotPermissionRequest } from '../../../shared/bots/personal/escalation'
+import { askFingerprint, filesAsk, filesAskOf, isSpecialAsk, mcpAskTools, type BotAskRequest, type BotEscalationStatus, type BotPermissionRequest } from '../../../shared/bots/personal/escalation'
 import { botStarterManifest, canonicalManifest, isOwnBotAppTool } from '../../../shared/bots/personal/manifest'
 import type { BotJournalKind } from '../../../shared/bots/personal/memory'
 import { botState } from '../../../shared/bots/personal/state'
 import { normalizeBotLook } from '../../../shared/bots/personal/look'
 import type { BotJournal } from '../seams'
+import type { BotMcpWhere } from '../mcp/BotMcp'
 import { workWaits, type BotActivationRow, type BotEscalationRow, type BotMessageRow, type BotStore } from '../store/BotStore'
 
 /**
@@ -100,6 +101,11 @@ export class BotChatProjection {
     emit(event: { botId: string; message: BotChatMessage }): void
     /** A bot's schedules, from the shared store (`BotEngine.listSchedules`), for About → Runs. */
     schedules?(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string }>
+    /**
+     * Where a granted MCP server stands now (`BotMcp.where`), for About → Can use; undefined while the servers were not
+     * read yet (nothing is shown gone then).
+     */
+    mcpWhere?(serverId: string): BotMcpWhere | undefined
   }) {}
 
   private get store(): BotStore {
@@ -206,12 +212,19 @@ export class BotChatProjection {
 
   card(escalation: BotEscalationRow): BotAskCard {
     const text = escalation.title !== null ? { title: escalation.title, note: escalation.note ?? '' } : askText(escalation.permission)
+    // An MCP ask lists the tools Allow grants, by name, on a line the owner can open, with how many a bot can't use. One
+    // whose server has not listed its tools yet has none: Allow stays off until they are filled in.
+    const mcp = 'mcp' in escalation.permission ? escalation.permission.mcp : undefined
+    const tools = mcp ? mcpAskTools(mcp) : []
+    const more = mcp?.unusable ? `${mcp.unusable} more of ${mcp.name ? `${mcp.name}'s` : 'its'} tools can't be used by a bot.` : undefined
     return {
       askId: escalation.id,
       title: text.title,
       note: text.note,
       status: cardStatus(escalation.status),
       kind: isSpecialAsk(escalation.permission) ? 'export_memory' : 'permission',
+      ...(tools.length ? { details: { summary: `${tools.length} ${mcp?.added ? 'new ' : ''}tool${tools.length === 1 ? '' : 's'}`, items: tools, ...(more ? { more } : {}) } } : {}),
+      ...(mcp && !tools.length && escalation.status === 'open' ? { loading: true as const } : {}),
       ...this.limitOutcome(escalation),
       ...this.permissionOutcome(escalation)
     }
@@ -359,12 +372,33 @@ export class BotChatProjection {
     }
   }
 
-  /** Each permission of `manifest` beyond the starter grant, as About → Can use lists it. */
+  /**
+   * Each permission of `manifest` beyond the starter grant, as About → Can use lists it. The owner's MCP tools are one
+   * line per server ("Use your GitHub tools"). One that gives nothing now says what is true (gone from Mousse, switched
+   * off, changed since it was allowed, or MCP turned off) and is marked so; Remove is there as an option, not as the fix.
+   */
   permissionItems(botId: string, manifest: BotManifest, approvedAt: string): BotPermissionItem[] {
     return grantedPermissions(manifest).map((permission) => {
       const id = permissionId(permission)
+      const allowed = this.store.allowedAsk(botId, id)
+      const grantedAt = allowed?.answeredAt ?? approvedAt
+      if ('mcp' in permission) {
+        const where = this.options.mcpWhere?.(permission.mcp.serverId)
+        const live = where?.state === 'on' || where?.state === 'changed' ? where.server : undefined
+        const asked = allowed && 'mcp' in allowed.permission ? allowed.permission.mcp.name : undefined
+        const name = live?.name ?? (where?.state === 'off' ? where.name : undefined) ?? asked ?? 'an MCP server'
+        const title = `use your ${name} tools`
+        const tools = mcpAskTools(permission.mcp)
+        if (where?.state === 'gone') return { id, title, note: `${name} isn't set up in Mousse any more, so this gives nothing now. You can remove it.`, grantedAt, gone: true as const, mark: 'Gone from Mousse' }
+        if (where?.state === 'off') return { id, title, note: `${name} is switched off in Settings → Skills & MCP, so this gives nothing while it is. Switch it on there to use it again, or remove it.`, grantedAt, mark: 'Switched off' }
+        if (where?.state === 'mcp_off') return { id, title, note: `MCP is turned off in Settings → Skills & MCP, so this gives nothing while it is. Turn it on there to use it again, or remove it.`, grantedAt, mark: 'MCP is off' }
+        if (where?.state === 'changed') return { id, title, note: `${name} was changed since you allowed it (it runs from another address or command now), so this gives nothing until ${name} is allowed again. The bot asks when it needs it; you can also remove it.`, grantedAt, mark: 'Changed' }
+        const shown = tools.slice(0, 6).join(', ')
+        const unusable = live?.unusable.length ? ` (${live.unusable.length} more of its tools can't be used by a bot)` : ''
+        return { id, title, note: `${tools.length} tool${tools.length === 1 ? '' : 's'}: ${shown}${tools.length > 6 ? ', …' : ''}${unusable}`, grantedAt }
+      }
       const text = askText(permission, { budget: starterManifest().budget })
-      return { id, title: text.title, note: text.note, grantedAt: this.store.allowedAsk(botId, id)?.answeredAt ?? approvedAt }
+      return { id, title: text.title, note: text.note, grantedAt }
     })
   }
 }
@@ -392,7 +426,10 @@ export function grantedPermissions(manifest: BotManifest): BotPermissionRequest[
   // The bot's own tools are never permissions: About never lists them.
   for (const tool of manifest.appTools) if (!starter.appTools.includes(tool) && !isOwnBotAppTool(tool)) items.push({ tool })
   for (const skill of manifest.skills) items.push({ skill })
-  for (const pair of manifest.mcp) items.push({ mcp: { serverId: pair.serverId, tool: pair.tool } })
+  // The owner's MCP tools: one permission per server, whose tools the grant keeps one by one.
+  const servers = new Map<string, string[]>()
+  for (const pair of manifest.mcp) servers.set(pair.serverId, [...(servers.get(pair.serverId) ?? []), pair.tool])
+  for (const [serverId, tools] of servers) items.push({ mcp: { serverId, tools: [...tools].sort() } })
   for (const key of ['maxActiveMs', 'maxTurns', 'maxToolCalls', 'maxInputTokens', 'maxOutputTokens', 'maxUsd'] as const) {
     const held = manifest.budget[key]
     const base = starter.budget[key]
@@ -413,7 +450,8 @@ export function withoutPermission(manifest: BotManifest, permission: BotPermissi
     next.tools = next.tools.filter((tool) => tool !== permission.tool)
     next.appTools = next.appTools.filter((tool) => tool !== permission.tool)
   } else if ('skill' in permission) next.skills = next.skills.filter((skill) => skill !== permission.skill)
-  else if ('mcp' in permission) next.mcp = next.mcp.filter((pair) => pair.serverId !== permission.mcp.serverId || pair.tool !== permission.mcp.tool)
+  // A server's tools go together: it is one permission.
+  else if ('mcp' in permission) next.mcp = next.mcp.filter((pair) => pair.serverId !== permission.mcp.serverId)
   else {
     const key = permission.budget.key
     if (starter.budget[key] === undefined) delete next.budget[key]

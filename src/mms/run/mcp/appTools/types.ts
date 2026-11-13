@@ -137,6 +137,8 @@ export interface AppToolTurn {
    * skills are only the granted ones.
    */
   bot?: BotAuthority
+  /** The turn's model takes images in tool results (`toolImages`): an MCP result's images reach it, within limits. */
+  toolImages?: boolean
   /**
    * The run refuses everything that would wait for the user (`RunPolicy.approvals: 'never'`):
    * tools that ask for approval or put a question to the user are refused at call time.

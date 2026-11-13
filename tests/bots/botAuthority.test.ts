@@ -124,10 +124,21 @@ describe('compileBotThread', () => {
     expect(computerRoots('linux')).toEqual(['/'])
   })
 
-  it('refuses delegation and thread tools, and user MCP tools, even in a stored grant', () => {
+  it('refuses delegation and thread tools, even in a stored grant', () => {
     for (const tool of ['delegate_task', 'thread_fork', 'queue_enqueue', 'create_subagent', 'ask_user'])
       expect(compile({ grant: manifest({ appTools: [tool] }) }), tool).toMatchObject({ ok: false, error: { code: 'policy_unenforceable', reason: expect.stringContaining(tool) } })
-    expect(compile({ grant: manifest({ mcp: [{ serverId: 'github', tool: 'create_issue' }] }) })).toMatchObject({ ok: false, error: { missing: ['mcp'], reason: 'Your MCP tools are not available to bots yet.' } })
+  })
+
+  it('compiles the owner\'s MCP tools for work, and none for a chat turn', () => {
+    const grant = manifest({ mcp: [{ serverId: 'srv-1', tool: 'create_issue' }, { serverId: 'srv-1', tool: 'list_issues' }] })
+    const work = compile({ grant })
+    if (!work.ok) throw new Error(work.error.message)
+    expect(work.permissions.mcp).toEqual(['srv-1::create_issue', 'srv-1::list_issues'])
+    const chat = compile({ grant, botTools: { escalate: true, consult: false, memory: true, frontDesk: true } })
+    if (!chat.ok) throw new Error(chat.error.message)
+    expect(chat.permissions.mcp).toEqual([])
+    // The listing of the owner's servers is always on, in both lanes, and never in the grant.
+    expect(chat.permissions.appTools).toContain('mcp_servers')
   })
 
   it('compiles the published revision held inside the grant: a narrower revision really narrows', () => {

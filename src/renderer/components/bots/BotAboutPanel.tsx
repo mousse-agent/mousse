@@ -161,7 +161,7 @@ export function BotAboutPanel({ bot }: { bot: BotSummary }) {
     <h3>CAN USE</h3>
     {detail?.permissions.length
       ? detail.permissions.map((item) => <div className="bot-about-row" key={item.id}>
-        <Shield size={14} aria-hidden /><span title={item.note || undefined}>{item.title.charAt(0).toUpperCase() + item.title.slice(1)}</span>
+        <Shield size={14} aria-hidden /><span title={item.note || undefined}>{item.title.charAt(0).toUpperCase() + item.title.slice(1)}{(item.mark || item.gone) && <small className="bot-about-next" data-testid="bot-about-gone">{item.mark ?? 'Gone from Mousse'}</small>}</span>
         <button type="button" aria-label={`Remove ${item.title}`} onClick={() => void store().revokePermission(bot.id, item.id)}>Remove</button>
       </div>)
       : <p className="bot-about-empty">{detail ? 'Nothing yet. It asks in the chat the first time it needs something.' : 'Loading…'}</p>}

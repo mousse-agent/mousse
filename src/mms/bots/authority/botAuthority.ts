@@ -96,7 +96,9 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
         return skills.has(call.skill) ? { ok: true } : { ok: false, wall: { kind: 'skill', skill: call.skill } }
       case 'mcp':
         // Granted parts never hold `:`, so a call whose parts do can never match another pair.
-        return !call.server.includes(':') && !call.tool.includes(':') && mcp.has(`${call.server}::${call.tool}`) ? { ok: true } : { ok: false, wall: { kind: 'mcp', server: call.server, tool: call.tool } }
+        return !call.server.includes(':') && !call.tool.includes(':') && mcp.has(`${call.server}::${call.tool}`)
+          ? { ok: true }
+          : { ok: false, wall: { kind: 'mcp', server: call.server, tool: call.tool, ...(call.serverName ? { serverName: call.serverName } : {}) } }
       case 'app':
         return appTools.has(call.tool) ? { ok: true } : { ok: false, wall: { kind: 'tool', tool: call.tool } }
       case 'builtin':
