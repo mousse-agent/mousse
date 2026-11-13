@@ -566,7 +566,10 @@ function showAction(host: AppToolHost, threadId: string, actor: AgentActor, summ
 }
 
 /** How a `thread_wait` ended before its result was read. */
-type WaitEnd = { kind: 'finished' } | { kind: 'timeout' } | { kind: 'caller_ended' }
+type WaitEnd = { kind: 'finished' } | { kind: 'timeout' } | { kind: 'caller_ended' } | { kind: 'refused'; text: string }
+
+/** How often a personal bot's wait checks that its turn still holds "use your threads" (Remove, the switch off). */
+export const BOT_WAIT_CHECK_MS = 1_000
 
 /**
  * `thread_read`, `thread_list`, `thread_search`, the queue tools, `thread_fork`, `thread_merge_back` and the
@@ -1010,6 +1013,14 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           if (run.runId === target && answered(run)) settle({ kind: 'finished' })
         })
         const timer = setTimeout(() => settle({ kind: 'timeout' }), timeoutMs)
+        // A bot's wait ends at once when its turn no longer holds "use your threads" (Remove, or this computer switched
+        // it off): it returns the refusal and nothing of the thread.
+        const held = bot?.stillHolds
+          ? setInterval(() => {
+            const refusal = bot.stillHolds!('thread_wait')
+            if (refusal) settle({ kind: 'refused', text: refusal })
+          }, BOT_WAIT_CHECK_MS)
+          : undefined
         const onAbort = (): void => settle({ kind: 'caller_ended' })
         ctx.signal.addEventListener('abort', onAbort, { once: true })
         try {
@@ -1028,6 +1039,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           if (answered(run) || (seenTerminal.has(run.runId) && answered(engine.getRun(run.runId) ?? run))) settle({ kind: 'finished' })
           const end = await ended
           if (end.kind === 'caller_ended') return json({ status: 'caller_ended', threadId })
+          if (end.kind === 'refused') return { text: end.text, isError: true }
           // A bot's wait that ends after its owner removed "use your threads", or this computer switched it off, or the
           // thread went out of its reach, returns the refusal and nothing of the thread.
           if (bot) {
@@ -1070,6 +1082,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           return json({ status: 'finished', threadId, run: reported, ...(resultText !== undefined ? { resultText } : {}) })
         } finally {
           clearTimeout(timer)
+          if (held) clearInterval(held)
           unsubscribe()
           ctx.signal.removeEventListener('abort', onAbort)
         }

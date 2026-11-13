@@ -197,4 +197,19 @@ describe('"use your threads" in the bot engine', () => {
     expect(authority.stillHolds?.('thread_wait')).toEqual(expect.any(String))
     await finish(f, running.payload, 'completed', { text: 'Stopped.' })
   })
+
+  it('switching "Use your threads" off on this computer withdraws every bot\'s waiting messages; another switch does not', () => {
+    const withdrawn = vi.fn()
+    f.host.threadsWithdrawn = withdrawn
+    f.bots.computerLimitChanged()
+    limit = { ...BOT_COMPUTER_OPEN, browser: false }
+    f.bots.computerLimitChanged()
+    expect(withdrawn).not.toHaveBeenCalled()
+    limit = { ...BOT_COMPUTER_OPEN, browser: false, threads: false }
+    f.bots.computerLimitChanged()
+    expect(withdrawn).toHaveBeenCalledWith({ botId, homeThreadId: f.store.registry(botId)!.homeThreadId, name: 'Alpha' })
+    // Saved again with it still off: nothing more to withdraw.
+    f.bots.computerLimitChanged()
+    expect(withdrawn).toHaveBeenCalledTimes(1)
+  })
 })

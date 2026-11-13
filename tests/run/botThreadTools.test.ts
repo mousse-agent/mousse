@@ -247,12 +247,23 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     let held: string | undefined
     const { text } = await world({ threads: 'read', stillHolds: () => held })
     const target = await fx!.runningRun('mine')
-    const waiting = text('thread_wait', { threadId: 'mine', runId: target.runId, timeoutMs: 5_000 })
-    // Removed (or switched off) while it waited; then the run finishes with text.
+    const waiting = text('thread_wait', { threadId: 'mine', runId: target.runId, timeoutMs: 60_000 })
+    // Removed (or switched off) while it waited: the wait ends at once, the run still going, with the refusal only.
     held = 'Your owner removed "use your threads".'
-    fx!.finish(target.runId, 'Secret result text.')
+    const started = Date.now()
     const outcome = await waiting
     expect(outcome).toEqual({ error: true, text: 'Your owner removed "use your threads".' })
+    expect(Date.now() - started).toBeLessThan(5_000)
+    expect(fx!.engine.getRun(target.runId)!.status).toBe('running')
+    fx!.finish(target.runId, 'Done.')
+    // A wait that ends as the run finishes is checked again before it answers.
+    const late = await fx!.runningRun('mine')
+    held = undefined
+    const lateWait = text('thread_wait', { threadId: 'mine', runId: late.runId, timeoutMs: 60_000 })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    held = 'Not on this computer.'
+    fx!.finish(late.runId, 'Secret result text.')
+    expect(await lateWait).toEqual({ error: true, text: 'Not on this computer.' })
     // Held: the same wait returns the answer, framed as data.
     held = undefined
     const again = await fx!.runningRun('mine')

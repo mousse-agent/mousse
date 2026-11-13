@@ -605,18 +605,22 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * (it marks what is off here). A turn running now that started with commands or file access, and this computer has
    * just switched that off, stops at once (`cutForLimit`): a runtime opens them once for the whole turn (Codex runs the
    * commands it trusts without asking, and a command already running runs on), so a refusal at the next call is not
-   * enough. Everything else is read at every dispatch and call.
+   * enough. Everything else is read at every dispatch and call. "Use your threads" switched off: its tools are refused
+   * at the next call (and a wait in flight ends with the refusal), and every bot's messages still queued in its owner's
+   * threads are withdrawn (`withdrawThreadMessages`).
    */
   computerLimitChanged(): void {
     const now = this.limit()
     const before = this.lastLimit
     this.lastLimit = now
-    if (before && before.shell === now.shell && before.files === now.files && before.browser === now.browser) return
+    if (before && before.shell === now.shell && before.files === now.files && before.browser === now.browser && before.threads === now.threads) return
     const turnedOff = (['shell', 'files'] as const).filter((which) => (before?.[which] ?? true) && !now[which])
     if (turnedOff.length) for (const [activationId, live] of this.live) {
       const cut = turnedOff.filter((which) => live.powers[which])
       if (cut.length && !live.controller.signal.aborted) this.cutForLimit(activationId, live, cut)
     }
+    if ((before?.threads ?? true) && !now.threads)
+      for (const botId of this.host.definitions.ids()) if (!this.store.registry(botId)?.deletedAt) this.withdrawThreadMessages(botId)
     for (const botId of this.host.definitions.ids()) if (!this.store.registry(botId)?.deletedAt) this.changed({ botId })
   }
 

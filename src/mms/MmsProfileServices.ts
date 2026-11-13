@@ -848,16 +848,7 @@ export class MmsProfileServices {
     const personalBots = this.personalBots
     if (personalBots) this.orchestrator.setBotThreads(personalBots)
     // A switch of What bots may do here changed: every bot's About reads again (it marks what is off here).
-    if (personalBots) {
-      // "Use your threads" switched off here: every bot's messages still waiting in this profile's threads are withdrawn.
-      let threadsHere = this.botThreadsHere()
-      this.platform.onDispose(onSettingsSaved(() => {
-        personalBots.computerLimitChanged()
-        const now = this.botThreadsHere()
-        if (threadsHere && !now) for (const bot of personalBots.list()) personalBots.withdrawThreadMessages(bot.id)
-        threadsHere = now
-      }))
-    }
+    if (personalBots) this.platform.onDispose(onSettingsSaved(() => personalBots.computerLimitChanged()))
     // The switches are the installation's: when any profile, window or the CLI changes them, every window of this
     // profile hears it too, with this profile's own settings, so a Settings page already open shows them as they are.
     let botsHere = JSON.stringify(this.config.botSettings())
@@ -1778,15 +1769,6 @@ export class MmsProfileServices {
   /** Saved keys (#595, the automation part): names in the profile's secret store; values are written, never read back out. */
   automationKeys!: { list(): string[]; set(name: string, value: string): void; has(name: string): boolean }
   automationDrafts!: AutomationDrafts
-
-  /** Whether this computer lets bots use their owners' threads now (What bots may do here); off when it can't be read. */
-  private botThreadsHere(): boolean {
-    try {
-      return this.config.botSettings().here.threads === true
-    } catch {
-      return false
-    }
-  }
 
   /** The project the composer picked for the manager's next turns (see `automationManagerWorkspace`). */
   private automationManagerProjectId: string | undefined
