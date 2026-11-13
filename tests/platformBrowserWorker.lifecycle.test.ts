@@ -138,6 +138,24 @@ describe.skipIf(!chrome.ok)('managed Chromium lifecycle', () => {
     await broker.close()
   }, 120_000)
 
+  it('opens every tab in one window, so a tab behind is hidden and only the tab in front is painted', async () => {
+    const { broker } = await createInProcessBroker()
+    // Started and given its first tab at once: on Windows a tab made before Chromium's own window is up got a window of its own.
+    const opened = await broker.call(workerRequest('profile_window', 'session.open', { url: `${origin}/moving.html?tab=first` }))
+    expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
+    const { session, observation } = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
+    const second = await broker.call(workerRequest('profile_window', 'tabs.new', { sessionId: session.id, url: `${origin}/moving.html?tab=second` }))
+    expect(second.ok, JSON.stringify(second.error)).toBe(true)
+    const text = async (tabId: string) => {
+      const extracted = await broker.call(workerRequest('profile_window', 'extract', { sessionId: session.id, tabId }))
+      expect(extracted.ok, JSON.stringify(extracted.error)).toBe(true)
+      return (extracted.result as { text: string }).text
+    }
+    expect(await text((second.result as { id: string }).id)).toMatch(/StaticText visible/)
+    expect(await text(observation.tabId)).toMatch(/StaticText hidden/)
+    await broker.close()
+  }, 120_000)
+
   it('removes ephemeral user data only after owned Chrome exits and retains persistent workspace data for reopen', async () => {
     const ephemeral = await createInProcessBroker()
     const opened = await ephemeral.broker.call(workerRequest('profile_cleanup', 'session.open', { url: `${origin}/form.html` }))
