@@ -131,6 +131,34 @@ describe('a bot the device may not reach answers as a bot that is not there', ()
     expect(chatOf(f, hidden).some((message) => message.author === 'owner' && message.text === 'Hi')).toBe(false)
   })
 
+  it('a saved result of an earlier call is not handed back to a device that has lost the bot since', async () => {
+    const botId = (await createBot(f, { name: 'Server keeper', reply: 'Ready.' })).botId
+    const { reach, switchOff } = reachOver(store)
+    const methods = remoteBotMethods({ bots: () => f.bots.service, reach, deviceLimit: () => 'full' })
+    const pause = methods.find((entry) => entry.method === 'bots.personal.pause')!
+    // The call runs while the phone reaches the bot; the dispatcher keeps its result under this execution.
+    await pause.handle({ botId }, { ...as(PHONE), execution: 'exec-1' } as RpcContext)
+    const saved = (execution: string, node: string): string => {
+      try {
+        pause.authorizeResult!(execution as never, as(node).caller)
+        return 'ok'
+      } catch (error) {
+        return (error as NetError).code
+      }
+    }
+    expect(saved('exec-1', PHONE)).toBe('ok')
+    // Taken off the bot: the saved result answers as a bot that is not there, like the call itself would.
+    store.set(botId, { mode: 'chosen', nodes: [LAPTOP] })
+    expect(saved('exec-1', PHONE)).toBe('stream_unknown')
+    // A result whose bot is not known here (the service restarted since) goes only to a device no bot is held from.
+    expect(saved('exec-from-before-a-restart', PHONE)).toBe('outcome_uncertain')
+    expect(saved('exec-from-before-a-restart', LAPTOP)).toBe('ok')
+    // Its switch off: refused as every bot call is.
+    store.set(botId, { mode: 'all' })
+    switchOff(PHONE)
+    expect(saved('exec-1', PHONE)).toBe('forbidden')
+  })
+
   it('a device on a bot\'s list may not reach another bot through the first one\'s ids', async () => {
     const mine = (await createBot(f, { name: 'Notes', reply: 'Hi.' })).botId
     const theirs = (await createBot(f, { name: 'Server keeper', reply: 'Ready.' })).botId

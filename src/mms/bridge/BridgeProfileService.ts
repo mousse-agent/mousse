@@ -157,7 +157,12 @@ export class BridgeProfileService {
     // A message from a device that lost the bot, still waiting for its turn, is not delivered.
     const offWithdraw = reach.onChange(() => {
       const chat = services.personalBots?.service
-      if (chat) void this.track(chat.withdrawQueued((botId, node) => !reach.canReach(botId, node))).catch(() => undefined)
+      if (!chat) return
+      // A device that left the account, or is blocked here, reaches no bot whatever each bot's choice says. When the
+      // account's devices can't be read, only the two settings decide: a message is not dropped on a guess.
+      const present = accountDevices(rt.identity)?.filter((node) => !rt.policy.isBlocked(node))
+      const left = (node: string): boolean => present !== undefined && !present.includes(node as NodeId)
+      void this.track(chat.withdrawQueued((botId, node) => left(node) || !reach.canReach(botId, node))).catch(() => undefined)
     })
     this.disposers.add(() => {
       offRoster()

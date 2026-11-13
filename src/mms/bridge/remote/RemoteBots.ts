@@ -386,7 +386,7 @@ export function remoteBotMethods(options: {
    * Which bots the calling device reaches (`BotReachPort`): its switch for bots here, and each bot's Devices choice.
    * Absent (tests of other things only): every device reaches every bot, as before the setting existed.
    */
-  reach?: Pick<BotReachPort, 'canReach' | 'deviceOn'>
+  reach?: Pick<BotReachPort, 'canReach' | 'deviceOn'> & Partial<Pick<BotReachPort, 'hiddenFor'>>
   /**
    * A bot a device just made: it is kept within reach of that device (its choice gains the device), so the device is not
    * locked out of what it made. No other bot changes.
@@ -422,6 +422,30 @@ export function remoteBotMethods(options: {
   const reachable = (botId: string, context: RpcContext): void => {
     if (options.reach && !options.reach.canReach(botId, context.caller.node)) absent()
   }
+  /**
+   * The bot each kept call named, by execution: a saved result is asked for by request id alone (`rpc.result.get`), with
+   * no parameters to check. Kept in memory, the newest few thousand; a result whose bot is no longer known here (this
+   * service restarted since) goes only to a device that no bot is held from.
+   */
+  const named = new Map<string, string>()
+  const remember = (execution: string | undefined, botId: string): void => {
+    if (!execution) return
+    named.delete(execution)
+    named.set(execution, botId)
+    if (named.size > 4096) named.delete(named.keys().next().value as string)
+  }
+  /** Before a saved result of a bot call is handed back: the device must still reach the bot it named. */
+  const savedResult = (execution: string, caller: RpcContext['caller']): void => {
+    shared(caller.node)
+    if (!options.reach) return
+    const botId = named.get(execution)
+    if (botId !== undefined) {
+      if (!options.reach.canReach(botId, caller.node)) absent()
+      return
+    }
+    const hidden = options.reach.hiddenFor
+    if (!hidden || hidden(caller.node) !== undefined) throw new NetError('outcome_uncertain')
+  }
   /** A bot the call names must be there, and within the device's reach; checked before the call is admitted. */
   const known = (params: unknown, context: RpcContext): void => {
     const botId = (params as { botId?: unknown }).botId
@@ -442,12 +466,16 @@ export function remoteBotMethods(options: {
     ...(REMOTE_BOT_METHODS[name].mutating ? {} : { ephemeral: true }),
     validate: (value) => validateRemoteBotParams(name, value),
     authorize: (value, context) => known(value, context),
+    authorizeResult: (execution, caller) => savedResult(execution, caller),
     ...extra,
     handle: async (value, context) => {
       const p = value as Record<string, unknown>
       const port = bots(context)
       // Read again as the call runs: a device taken off the bot meanwhile gets nothing.
-      if (typeof p.botId === 'string') reachable(p.botId, context)
+      if (typeof p.botId === 'string') {
+        reachable(p.botId, context)
+        remember(context.execution, p.botId)
+      }
       // A read refuses plainly whatever happens; a change refused after it started is reported as it is.
       if (!REMOTE_BOT_METHODS[name].mutating) {
         try {
@@ -533,6 +561,7 @@ export function remoteBotMethods(options: {
         description: p.description as string,
         clientRequestId: p.clientRequestId as string
       })
+      remember(context.execution, bot.id)
       // The device that made it keeps it within reach; a request id that names a bot made before is answered only if the
       // device reaches that bot, and never widens it.
       if (before.has(bot.id)) reachable(bot.id, context)
