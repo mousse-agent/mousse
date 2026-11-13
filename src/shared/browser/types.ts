@@ -203,6 +203,12 @@ export interface BrowserPictureSpot {
   scrollX: number
   scrollY: number
   hits?: BrowserPictureHits
+  /**
+   * The page's size when it was taken, as the session counts its resizes (`page.resize`; 0 before the
+   * first): a press on a picture of a size the page no longer has is refused, never placed. -1: the
+   * picture shows a size the page had already left when it arrived.
+   */
+  sizeSeq?: number
 }
 
 /**
@@ -296,9 +302,10 @@ export interface BrowserViewerUpdate {
   stateSeq: number
   /**
    * A JPEG in base64; `sharp` when taken at full quality once the page was still. `spot`: the
-   * document and scroll it shows, so a person's input on it lands on what they saw.
+   * document and scroll it shows, so a person's input on it lands on what they saw. `viewport`: the
+   * page's size it shows (it may differ from the tab's now, just after a resize).
    */
-  picture?: { data: string; width: number; height: number; at: number; sharp: boolean; spot?: BrowserPictureSpot }
+  picture?: { data: string; width: number; height: number; at: number; sharp: boolean; spot?: BrowserPictureSpot; viewport?: { width: number; height: number } }
   /** Where the agent last acted in this tab, while it is recent. */
   cursor?: import('./agentCursor').BrowserAgentCursor
   /** Nothing changed within the wait. */
@@ -313,7 +320,7 @@ export interface BrowserWorkerRequest {
   version: 1
   id: string
   profileId: string
-  method: 'session.open' | 'session.close' | 'tabs.list' | 'tabs.new' | 'tabs.close' | 'tabs.switch' | 'observe' | 'find' | 'act' | 'human.act' | 'wait' | 'extract' | 'control.take' | 'control.release' | 'frame' | 'frame.next' | 'frame.stop' | 'human.input' | 'window.open' | 'window.close' | 'window.wait'
+  method: 'session.open' | 'session.close' | 'tabs.list' | 'tabs.new' | 'tabs.close' | 'tabs.switch' | 'observe' | 'find' | 'act' | 'human.act' | 'wait' | 'extract' | 'control.take' | 'control.release' | 'frame' | 'frame.next' | 'frame.stop' | 'human.input' | 'window.open' | 'window.close' | 'window.wait' | 'page.resize'
   params: Record<string, unknown>
 }
 export interface BrowserWorkerResponse {

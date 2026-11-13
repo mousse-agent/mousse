@@ -2120,7 +2120,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // A chat turn is the bot's front desk: it hands what takes long to work (docs/plans/bot-always-free.md).
       // The owner's threads: reading in every lane; starting, messaging and stopping only in a chat turn the owner's own
       // message started (`chat:`), never in work, a reminder's work, a schedule or the bot's first message.
-      botTools: { escalate: true, consult: definition.context.length > 0, memory: true, frontDesk: row.lane === 'chat', threads: ownerChatTurn(row) ? 'all' : 'read', images: this.imagePick(row.botId) !== null },
+      botTools: { escalate: true, consult: definition.context.length > 0, memory: true, frontDesk: row.lane === 'chat', threads: ownerChatTurn(row) ? 'all' : 'read', images: this.imagePick(row.botId) !== null, applets: true },
       limit
     })
     if (!compiled.ok) return this.block(row, 'policy_unenforceable', compiled.error.reason ?? compiled.error.message)

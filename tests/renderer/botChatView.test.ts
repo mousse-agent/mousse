@@ -22,9 +22,10 @@ vi.mock('../../src/renderer/components/ComposerQuestionModal', () => ({ Composer
 // The composer's microphone pulls in audio worklets jsdom does not have; these tests never record.
 vi.mock('../../src/renderer/dictation/microphone', () => ({}))
 const markdown = vi.hoisted(() => ({ renders: 0 }))
-vi.mock('../../src/renderer/components/editors/MarkdownPreview', async () => {
+// The bot chat draws its messages with the thread's Markdown: each draw is counted.
+vi.mock('../../src/renderer/chat/components/agent-elements/markdown', async (importOriginal) => {
   const { createElement: h } = await import('react')
-  return { MarkdownPreview: ({ value, className }: { value: string; className?: string }) => { markdown.renders++; return h('div', { className }, value) } }
+  return { ...(await importOriginal<object>()), Markdown: ({ content, className }: { content: string; className?: string }) => { markdown.renders++; return h('div', { className }, content) } }
 })
 // The bot's messages are drawn by the thread's Markdown, counted here as it draws.
 vi.mock('../../src/renderer/chat/components/agent-elements/markdown', async (importOriginal) => {
@@ -106,7 +107,7 @@ describe('the transcript', () => {
     await open()
     const [owner, reply, error] = [...transcript().querySelectorAll('article')]
     expect(owner!.classList.contains('bot-you')).toBe(true)
-    expect(owner!.querySelector('.bot-you-bubble .chat-markdown')?.textContent).toBe('Send the one to the Lisbon host.')
+    expect(owner!.querySelector('.bot-you-bubble .bot-markdown')?.textContent).toBe('Send the one to the Lisbon host.')
     // A one-to-one chat: the header says who it is, so the bot's bubbles carry no face or name.
     expect(transcript().querySelector('.bot-face, .chat-message-meta')).toBeNull()
     expect(reply!.querySelector('.bot-bubble .bot-markdown')?.textContent).toBe('Sent.')
@@ -118,10 +119,12 @@ describe('the transcript', () => {
     expect([...reply!.querySelectorAll('.bot-steps li')].map((step) => step.textContent)).toEqual(['Read 2 pages · example.com', 'Remembered · vegetarian'])
     // A message with no work has no such line.
     expect(error!.querySelector('.bot-worked')).toBeNull()
-    // Work whose time isn't known (a reply to no message) shows no line: never a bare "Worked".
+    // Work whose time isn't known (a reply to no message): "Steps", never a bare "Worked", and its steps still open.
     await act(async () => fake.emit.message('inbox', message(9, { id: 'b9', text: 'Here are four takes.', chips: [{ icon: 'think', text: 'made 4 pictures' }] })))
-    expect(transcript().querySelector('[data-message-id="b9"] .bot-worked')).toBeNull()
-    expect(transcript().querySelector('[data-message-id="b9"] .bot-bubble-time')).not.toBeNull()
+    const steps = transcript().querySelector<HTMLButtonElement>('[data-message-id="b9"] .bot-worked')!
+    expect(steps.textContent).toBe('Steps')
+    await click(steps)
+    expect(transcript().querySelector('[data-message-id="b9"] .bot-steps')?.textContent).toBe('Made 4 pictures')
     expect(error!.querySelector('.bot-error span')?.textContent).toBe('Set up a provider so I can work.')
     await click(button('Set up', error!))
     expect(useAppStore.getState().settingsOpen).toBe(true)
@@ -147,26 +150,34 @@ describe('the transcript', () => {
     expect(answered.nextElementSibling?.textContent).toBe('You let Inbox helper use the browser')
   })
 
-  it('work it handed off is a 👍 on the owner’s message and a quiet line, and a note passed on is a receipt under it', async () => {
+  it('work it started is a 👍 and a quiet line, a note a "Noted" receipt; what their chips said stays on them, and in the steps', async () => {
+    const opus = 'Opus 5.5 on Claude Code, high reasoning, for this work only'
     fake.chats.inbox = [
       message(1, { id: 'o1', author: 'owner', text: 'run some command pls' }),
-      message(2, { id: 'b1', text: 'On it, I’ll text you when it’s done.', replyTo: { id: 'o1', author: 'owner', text: 'run some command pls' }, chips: [{ icon: 'think', text: 'started', highlight: 'System check' }] }),
+      message(2, { id: 'b1', text: 'On it, I’ll text you when it’s done.', replyTo: { id: 'o1', author: 'owner', text: 'run some command pls' }, chips: [{ icon: 'think', text: 'started', highlight: 'System check · Opus 5.5', title: opus }] }),
       message(3, { id: 'o2', author: 'owner', text: 'Use PC Part Picker' }),
-      message(4, { id: 'b2', text: 'Your note’s with it now.', chips: [{ icon: 'think', text: 'passed on your note' }] }),
+      message(4, { id: 'b2', text: 'I’ll use PC Part Picker from here on.', chips: [{ icon: 'think', text: 'noted', title: 'For SSD search' }] }),
       message(5, { id: 'o3', author: 'owner', text: 'And the weather?' }),
-      // A reply that says more stays a message, with the line for its work before it.
-      message(6, { id: 'b3', text: 'Rain at 4. I also started a forecast check:\n\nit runs hourly.', chips: [{ icon: 'think', text: 'started', highlight: 'Forecast' }] })
+      // A reply that says more stays a message, with the line for its work before it, and its chip in its steps.
+      message(6, { id: 'b3', text: 'Rain at 4. I also started a forecast check:\n\nit runs hourly.', replyTo: { id: 'o3', author: 'owner', text: 'And the weather?' }, chips: [{ icon: 'think', text: 'started', highlight: 'Forecast' }] })
     ]
     await open()
     const log = transcript()
     expect(log.querySelector('[data-message-id="b1"], [data-message-id="b2"]')).toBeNull()
     expect(log.querySelector('[data-message-id="o1"] .bot-reaction')?.textContent).toBe('👍')
-    expect(log.querySelector('[data-message-id="o1"] .bot-reaction')?.getAttribute('title')).toBe('On it, I’ll text you when it’s done.')
-    expect(log.querySelector('[data-message-id="o2"] .bot-receipt')?.textContent).toBe('Passed on')
+    // The reply's words and the model the work runs on stay on the mark and the line, on hover.
+    expect(log.querySelector('[data-message-id="o1"] .bot-reaction')?.getAttribute('title')).toBe(`On it, I’ll text you when it’s done.\n${opus}`)
+    expect(log.querySelector('[data-message-id="o2"] .bot-receipt')?.textContent).toBe('Noted')
+    expect(log.querySelector('[data-message-id="o2"] .bot-receipt')?.getAttribute('title')).toBe('I’ll use PC Part Picker from here on.\nFor SSD search')
     expect(log.querySelector('[data-message-id="o2"] .bot-reaction')).toBeNull()
-    expect([...log.querySelectorAll('.bot-system-line')].map((line) => line.textContent)).toEqual(['Inbox helper started System check', 'Inbox helper started Forecast'])
+    const lines = [...log.querySelectorAll('.bot-system-line')]
+    expect(lines.map((line) => line.textContent)).toEqual(['Inbox helper started System check', 'Inbox helper started Forecast'])
+    expect(lines[0]!.getAttribute('title')).toBe(`On it, I’ll text you when it’s done.\n${opus}`)
+    // No plumbing words on what stands in for the chips.
+    expect(log.textContent).not.toMatch(/passed to work|the run|Passed on/)
     expect(log.querySelector('[data-message-id="o3"] .bot-reaction')?.textContent).toBe('👍')
-    expect(log.querySelector('[data-message-id="b3"] .bot-worked')).toBeNull()
+    await click(log.querySelector('[data-message-id="b3"] .bot-worked'))
+    expect(log.querySelector('[data-message-id="b3"] .bot-steps')?.textContent).toBe('Started · Forecast')
   })
 
   it('a path in a reply is a chip with the file’s name: a click opens it in the Files pane, and Show in folder selects it', async () => {

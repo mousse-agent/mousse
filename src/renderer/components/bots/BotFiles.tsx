@@ -1,7 +1,7 @@
 import { Children, createContext, isValidElement, useContext, useEffect, useState, type ReactElement, type ReactNode } from 'react'
 import type { Components } from 'streamdown'
 import { FileText, FolderOpen, Image as ImageIcon, X } from '../../lib/icons'
-import { Markdown } from '../../chat/components/agent-elements/markdown'
+import { Markdown, type MarkdownImages } from '../../chat/components/agent-elements/markdown'
 import { LinkLabel } from '../../chat/components/agent-elements/link-label-view'
 import { classifyLink, routeLink } from '../../utils/chatLinks'
 import { fileLocation, isAbsolutePath } from '../../utils/filesBrowse'
@@ -93,8 +93,16 @@ function linkedPath(href: string | undefined): string | undefined {
 }
 
 /**
- * A bot message's Markdown elements that differ from a thread's: a file link is the file's chip, and images follow
- * the bot chat's rules (BotMarkdownImage: a web image is never loaded). Kept for the module's life (see `Markdown`).
+ * The bot chat's image rule, on every Markdown of a bot's chat (the owner's messages included): a reply can be shaped by
+ * what the bot read on the web, so a web picture is a link and never loads, SVG never shows, a `<picture>`'s sources are
+ * dropped, and its blocks are cached apart from a thread's (`MarkdownImages`, `BotMarkdownImage`).
+ */
+export const BOT_IMAGES: MarkdownImages = { Image: BotMarkdownImage }
+
+/**
+ * A bot message's Markdown elements that differ from a thread's: a file link is the file's chip, a list of keys and
+ * values a card, and short inline code stays whole. Its images follow `BOT_IMAGES`, which no element here replaces.
+ * Kept for the module's life (see `Markdown`).
  */
 const botMarkdownComponents: Partial<Components> = {
   a: ({ href, children, ...props }) => {
@@ -105,7 +113,6 @@ const botMarkdownComponents: Partial<Components> = {
       <LinkLabel href={href}>{children}</LinkLabel>
     </a>
   },
-  img: ({ src, alt }) => <BotMarkdownImage src={typeof src === 'string' ? src : undefined} alt={alt} />,
   // Inline code stays inline, so the punctuation after it stays with it. A short piece without spaces never breaks
   // inside (a file name or a flag reads whole); a longer one wraps anywhere. Inline math is drawn as a thread draws it.
   inlineCode: ({ children, node: _node, ...props }) => {
@@ -121,7 +128,7 @@ const botMarkdownComponents: Partial<Components> = {
 
 /** A bot message's text, drawn as a thread's reply is (headings, lists, tables, code), with its paths as chips. */
 export function BotMarkdown({ text, className }: { text: string; className?: string }) {
-  return <Markdown content={linkBotPaths(text)} className={className} components={botMarkdownComponents} />
+  return <Markdown content={linkBotPaths(text)} className={className} images={BOT_IMAGES} components={botMarkdownComponents} />
 }
 
 /** The language a file's code block is highlighted as, from its name. */

@@ -1,4 +1,5 @@
 import { Type, type Tool } from '@earendil-works/pi-ai'
+import { BOT_APPLET_TOOL } from '../../../../shared/bots/personal/manifest'
 import { plainSchema, type MousseTool } from './types'
 
 /** `publish_applet`: stages an offline HTML/CSS/JS applet for the response (SPEC: applets). */
@@ -21,7 +22,8 @@ export const PUBLISH_APPLET_TOOL: Tool = {
 
 /**
  * The turn stages applets (`AppToolTurn.onPublishApplet`): the main agent's turns when applets are
- * on, whatever runtime runs them. Subagents never publish.
+ * on, whatever runtime runs them. Subagents never publish. A personal bot's turn publishes as a thread's does when it
+ * holds the tool (its main turns, never a consult: `compileBotThread`); its chat shows them (`replyApplets`).
  */
 export function appletTools(): MousseTool[] {
   return [{
@@ -31,8 +33,9 @@ export function appletTools(): MousseTool[] {
     definition: () => PUBLISH_APPLET_TOOL,
     access: 'actsAsCaller',
     class: 'read',
-    available: (turn) => (turn.onPublishApplet && !turn.subagent ? true : 'Applets are off for this turn.'),
-    offered: (turn) => Boolean(turn.onPublishApplet) && !turn.subagent,
+    listed: (listing) => !listing.botRole || (listing.botRole === 'activation' && Boolean(listing.botTurnTools?.has(BOT_APPLET_TOOL))),
+    available: (turn) => (turn.onPublishApplet && !turn.subagent && (!turn.bot || turn.bot.appTools.has(BOT_APPLET_TOOL)) ? true : 'Applets are off for this turn.'),
+    offered: (turn) => Boolean(turn.onPublishApplet) && !turn.subagent && (!turn.bot || turn.bot.appTools.has(BOT_APPLET_TOOL)),
     describe: (args) => `Publish applet${typeof args.title === 'string' ? ` ${args.title}` : ''}`,
     handler: (args, ctx) => {
       const publish = ctx.turn.onPublishApplet

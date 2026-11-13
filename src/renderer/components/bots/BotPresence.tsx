@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState } from 'react'
+import { Fragment, memo, useEffect, useRef, useState, type ReactNode } from 'react'
 import { Activity, AppWindow, Brain, ChevronDown, Clock, FileText, Globe, Pause, Pencil, Search, TerminalSquare, X } from '../../lib/icons'
 import type { BotChip, BotSummary, BotWorkItem } from '../../../shared/bots/personal/chat'
 import { useBotsStore } from '../../stores/botsStore'
@@ -29,9 +29,16 @@ const WorkLine = memo(function WorkLine({ botId, item }: { botId: string; item: 
     return () => window.clearInterval(timer)
   }, [])
   const running = item.status === 'running'
+  // What the row says after its title, each part after a dot: what it does, the model of work on a model of its own (its
+  // details on hover), how long it has run. A part with more to say (such as its subagents) goes in this list, after the model.
+  const details: ReactNode[] = [
+    workDoing(item, chip),
+    ...(item.model ? [<span className="bot-work-model" title={item.model.detail}>{item.model.name}</span>] : []),
+    ...(item.status === 'queued' ? [] : [workElapsed(item.startedAt, now)])
+  ]
   return <li className={`bot-work-line${running ? ' is-running' : ''}`}>
     <span className="bot-work-title">{item.title}</span>
-    <span className="bot-work-doing">{workDoing(item, chip)}{item.model && <> · <span className="bot-work-model" title={item.model.detail}>{item.model.name}</span></>}{item.status === 'queued' ? '' : ` · ${workElapsed(item.startedAt, now)}`}</span>
+    <span className="bot-work-doing">{details.map((part, index) => <Fragment key={index}>{index > 0 && ' · '}{part}</Fragment>)}</span>
     <button type="button" aria-label={`Stop ${item.title}`} title="Stop" onClick={() => void useBotsStore.getState().stopWork(botId, item.id)}><X size={13} aria-hidden /></button>
   </li>
 })

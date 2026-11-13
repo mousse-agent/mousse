@@ -189,8 +189,48 @@ export interface WatchedBrowserUpdate {
   live?: true
 }
 
-/** A large view: up to 960 px wide, at most 15 pictures a second, 30 while the person holds the browser. */
-export const WATCHED_BROWSER_PANE = { maxWidth: 960, fps: 15, heldFps: 30 } as const
+/**
+ * A large view: its picture up to 1920 px wide (the page's width at the screen's pixel ratio, when the
+ * view sizes the page), at most 15 pictures a second, 30 while the person holds the browser.
+ */
+export const WATCHED_BROWSER_PANE = { maxWidth: 1920, fps: 15, heldFps: 30 } as const
+
+/**
+ * The page's size, in CSS pixels, and its pixel ratio (`scale`): the default, and the bounds of the
+ * size a large view asks for while it shows the browser (its own size, as a window would be). A
+ * picture is never more than `maxPicture` pixels across: the ratio comes down first, never below 1.
+ */
+export const WATCHED_BROWSER_PAGE = {
+  default: { width: 1280, height: 720, scale: 1 },
+  min: { width: 320, height: 240 },
+  max: { width: 1920, height: 2160 },
+  maxScale: 2,
+  maxPicture: { width: 1920, height: 2160 }
+} as const
+
+/** The size a large view asks the page to have: its own, in CSS pixels, and the screen's pixel ratio. */
+export interface WatchedBrowserPageSize {
+  width: number
+  height: number
+  scale: number
+}
+
+/** The page size a view asked for, within the bounds (`WATCHED_BROWSER_PAGE`); the default for anything else. */
+export function watchedBrowserPageSize(asked: { width?: unknown; height?: unknown; scale?: unknown } | undefined): WatchedBrowserPageSize {
+  const page = WATCHED_BROWSER_PAGE
+  const number = (value: unknown): number | undefined => typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined
+  const width = number(asked?.width)
+  const height = number(asked?.height)
+  if (width === undefined || height === undefined) return { ...page.default }
+  const w = Math.round(Math.min(page.max.width, Math.max(page.min.width, width)))
+  const h = Math.round(Math.min(page.max.height, Math.max(page.min.height, height)))
+  const ratio = Math.min(number(asked?.scale) ?? 1, page.maxScale, page.maxPicture.width / w, page.maxPicture.height / h)
+  // In quarters, so a ratio of 1.2499 and 1.25 are one size, and never below 1.
+  return { width: w, height: h, scale: Math.max(1, Math.floor(ratio * 4) / 4) }
+}
+
+export const sameWatchedBrowserPageSize = (a: WatchedBrowserPageSize | undefined, b: WatchedBrowserPageSize | undefined): boolean =>
+  a === b || Boolean(a && b && a.width === b.width && a.height === b.height && a.scale === b.scale)
 /**
  * How often a view renews its watch; the host drops one not renewed for three times this. A
  * renewal answers whether pictures can reach the view now, and no picture once it has had one.

@@ -24,12 +24,14 @@ function workTitle(chip: BotChip): string {
 }
 
 /**
- * What a bot's message did with work, which the chat shows without chips: the work it started (a 👍 on the owner's
- * message and a quiet line, "alpha started System check"), whether it passed a note on ("Passed on" under the owner's
- * message), and `only`: the reply says nothing more than that ("On it.", "Your note's with it now."), one short
- * paragraph with nothing else on the message, so it shows no bubble. Null for a message that did neither.
+ * What a bot's message did with work, which the chat also shows outside its steps: the work it started (a 👍 on the
+ * owner's message and a quiet line, "alpha started System check"), whether it noted something for work ("Noted" under
+ * the owner's message), and `only`: the reply says nothing more than that ("On it.", "I'll use that tab from here on."),
+ * one short paragraph with nothing else on the message, so it shows no bubble. `details`: those chips' own hover text
+ * (the model of work on a model of its own, the job a note is for), kept on what stands in for them. Null for a message
+ * that did neither.
  */
-export function workSignalsOf(message: BotChatMessage): { titles: string[]; queued: boolean; noted: boolean; only: boolean } | null {
+export function workSignalsOf(message: BotChatMessage): { titles: string[]; queued: boolean; noted: boolean; only: boolean; details: string[] } | null {
   if (message.author !== 'bot') return null
   const starts = message.chips.filter(isWorkStart)
   const noted = message.chips.some(isNotePassed)
@@ -38,12 +40,8 @@ export function workSignalsOf(message: BotChatMessage): { titles: string[]; queu
   const only = message.kind === 'text' && !message.ask && !message.error && !message.attachments?.length &&
     message.chips.every((chip) => isWorkStart(chip) || isNotePassed(chip)) &&
     text.length < HANDOFF_TEXT_MAX && !/\n\s*\n|```|^\s*[#|>-]/m.test(text)
-  return { titles: starts.map(workTitle), queued: starts.length > 0 && starts.every((chip) => chip.text === 'will start'), noted, only }
-}
-
-/** The chips a reply's "Worked for" line folds: everything but the work it started and notes it passed on, which show otherwise. */
-export function stepChips(chips: readonly BotChip[]): BotChip[] {
-  return chips.filter((chip) => !isWorkStart(chip) && !isNotePassed(chip))
+  const details = message.chips.filter((chip) => isWorkStart(chip) || isNotePassed(chip)).flatMap((chip) => (chip.title ? [chip.title] : []))
+  return { titles: starts.map(workTitle), queued: starts.length > 0 && starts.every((chip) => chip.text === 'will start'), noted, only, details }
 }
 
 /** One row of the transcript: a message, or a quiet centred line between messages. */
@@ -51,7 +49,7 @@ export type BotChatRow =
   | { kind: 'message'; message: BotChatMessage }
   | { kind: 'system'; id: string; at: string; text: string; title?: string }
 
-/** What a bot's handling left on an owner's message: a 👍 for work it started, "Passed on" for a note. */
+/** What a bot's handling left on an owner's message: a 👍 for work it started, "Noted" for a note; `title`: its hover text. */
 export interface OwnerMarks { reaction?: string; passedOn?: boolean; title?: string }
 
 /** "alpha started System check", "alpha started A and B". */
@@ -71,8 +69,9 @@ export function askAnsweredLine(botName: string, ask: Pick<BotAskCard, 'title' |
 /**
  * The transcript's rows: each message, with the work a reply started as its own quiet line before it (the reply's
  * bubble left out when it said nothing more), and each answered ask followed by its line. `marks` holds what replies
- * left on the owner's messages: the 👍 of started work and "Passed on" of a note, on the message the reply answers,
- * else the owner's last message before it; `title` is the words of a reply left out, for the mark's tooltip.
+ * left on the owner's messages: the 👍 of started work and "Noted" of a note, on the message the reply answers, else the
+ * owner's last message before it. A line's and a mark's hover text is the reply's words when its bubble was left out, and
+ * the chips' own hover text (the model of the work, the job a note is for), so nothing a chip said is lost.
  */
 export function chatRows(messages: readonly BotChatMessage[], botName: string, answerTip?: (message: BotChatMessage) => string | undefined): { rows: BotChatRow[]; marks: Map<string, OwnerMarks> } {
   const rows: BotChatRow[] = []
@@ -84,14 +83,15 @@ export function chatRows(messages: readonly BotChatMessage[], botName: string, a
     if (signals) {
       const target = message.replyTo?.author === 'owner' ? message.replyTo.id : lastOwner
       const words = message.text.trim()
+      const tip = [...(signals.only && words ? [words] : []), ...signals.details].join('\n')
       if (target) {
         const mark = { ...marks.get(target) }
         if (signals.titles.length) mark.reaction = '👍'
         if (signals.noted) mark.passedOn = true
-        if (signals.only && words) mark.title = words
+        if (tip) mark.title = tip
         marks.set(target, mark)
       }
-      if (signals.titles.length) rows.push({ kind: 'system', id: `${message.id}:started`, at: message.at, text: startedLine(botName, signals.titles, signals.queued), ...(signals.only && words ? { title: words } : {}) })
+      if (signals.titles.length) rows.push({ kind: 'system', id: `${message.id}:started`, at: message.at, text: startedLine(botName, signals.titles, signals.queued), ...(tip ? { title: tip } : {}) })
       if (signals.only) continue
     }
     rows.push({ kind: 'message', message })

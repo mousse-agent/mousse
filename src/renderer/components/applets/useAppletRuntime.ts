@@ -3,6 +3,7 @@ import type { AppletReference } from '../../../shared/applets'
 import { readAppletAppearance, subscribeAppletAppearance } from './appearance'
 import { subscribeAppletScroll } from './scrollPresentation'
 import { appletHostBlocked, appletHostShown, appletUncoveredClip, subscribeAppletHostVisibility } from './hostVisibility'
+import { appletHeightKey, rememberAppletHeight, rememberedAppletHeight } from './appletHeights'
 
 /**
  * Where a preview sits. In the transcript it scrolls with the chat and stays above the composer; in the side panel
@@ -31,7 +32,10 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
   const [error, setError] = useState<string | null>(null)
   const [ready, setReady] = useState(false)
   const [scrollImage, setScrollImage] = useState<string | null>(null)
-  const [height, setHeight] = useState<number | null>(null)
+  // In the transcript a card starts at the height this revision last measured; the side panel fills its stage.
+  const heightKey = host === 'transcript' ? appletHeightKey(profileId, threadId, reference.revisionId) : null
+  const [measured, setMeasured] = useState<{ key: string | null; height: number } | null>(null)
+  const height = measured && measured.key === heightKey ? measured.height : heightKey ? rememberedAppletHeight(heightKey) : null
   const [conversationInput, setConversationInput] = useState<string | null>(null)
 
   useEffect(() => {
@@ -43,7 +47,8 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
     if (!threadId || !preview.current || !enabled) return
     const node = preview.current
     const api = window.mousse.applets
-    const scroller = host === 'transcript' ? node.closest<HTMLElement>('.an-message-list') : null
+    // A thread's transcript, or another conversation that shows applets (a bot's chat marks its own).
+    const scroller = host === 'transcript' ? node.closest<HTMLElement>('.an-message-list, [data-applet-scroller]') : null
     // The panel stage does not scroll; it is the clip itself.
     const clipHost = host === 'transcript' ? scroller : node.parentElement
     let disposed = false
@@ -57,6 +62,7 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
     let appearance = readAppletAppearance()
     let lastGeometry = ''
     let resizeTimer: ReturnType<typeof setTimeout> | undefined
+    let sized = false
     setReady(false)
     const remove = () => {
       const id = runtime.current
@@ -113,8 +119,10 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
       if (scrollPaused) return
       const rect = node.getBoundingClientRect()
       const viewport = clipHost?.getBoundingClientRect()
+      // The composer of the conversation the applet is in: a hidden one elsewhere (the thread's, behind a bot's chat)
+      // has no place on screen.
       const composer = host === 'transcript'
-        ? node.closest('.mousse-chat-shell')?.querySelector('.chat-composer-stack') ??
+        ? node.closest('.mousse-chat-shell, [data-applet-conversation]')?.querySelector('.chat-composer-stack, [data-applet-composer]') ??
           document.querySelector('.chat-composer-stack')
         : null
       const composerTop = composer?.getBoundingClientRect().top ?? window.innerHeight
@@ -259,10 +267,17 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
         remove()
       }
       if (event.type === 'resize' && Number.isFinite(event.height)) {
+        const next = event.height!
+        if (heightKey) rememberAppletHeight(heightKey, next)
         clearTimeout(resizeTimer)
-        resizeTimer = setTimeout(() => {
-          if (!disposed) setHeight(event.height!)
-        }, 80)
+        // The first report sizes the frame at once; later ones settle first so a burst moves it once.
+        if (!sized) {
+          sized = true
+          setMeasured({ key: heightKey, height: next })
+        } else
+          resizeTimer = setTimeout(() => {
+            if (!disposed) setMeasured({ key: heightKey, height: next })
+          }, 80)
       }
       if (event.type === 'ready') { setReady(true); refreshSnapshot() }
       if (event.type === 'state-changed' || event.type === 'visual-changed') {

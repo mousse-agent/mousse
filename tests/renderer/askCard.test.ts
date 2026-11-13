@@ -158,6 +158,22 @@ describe('in the chat', () => {
     expect(pickFolder).not.toHaveBeenCalled()
     expect(fake.calls).toContainEqual(['answer', 'b1', 'k1', 'not_now'])
   })
+
+  it('keeps Allow off, with why, once the service refuses it ("Use your threads" from a device below Full access); Not now still works', async () => {
+    vi.mocked(fake.client.answer).mockRejectedValueOnce(new Error('Allow this on the computer.'))
+    await show(ask({ title: 'use your threads' }))
+    await click(button('Allow'))
+    expect(button('Allow')?.disabled).toBe(true)
+    expect(button('Allow')?.title).toBe('Allow this on the computer.')
+    await click(button('Not now'))
+    expect(fake.calls).toContainEqual(['answer', 'b1', 'k1', 'not_now'])
+  })
+
+  it('keeps Allow off while an MCP ask’s tools are still loading', async () => {
+    await show(ask({ loading: true }))
+    expect(button('Allow')?.disabled).toBe(true)
+    expect(button('Allow')?.title).toBe('Its tools are still loading')
+  })
 })
 
 describe('in Needs you', () => {

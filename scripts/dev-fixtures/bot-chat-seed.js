@@ -103,11 +103,11 @@
         '',
         `Sources: [PC Part Picker](https://pcpartpicker.com/products/internal-hard-drive/). The price chart: ${picture}`
       ].join('\n'), [{ icon: 'search', text: 'searched the web', highlight: '3' }, { icon: 'web', text: 'read 4 pages', highlight: 'pcpartpicker.com +1' }], { replyTo: quote(ids.compareAsk, 'Compare three 2 TB SSDs for me, under £150.') }),
-      // Work handed off ("on it"), then a note passed on to it.
+      // Work started ("on it"), then a note for it.
       owner(ids.commandAsk, today(21, 50), 'run some command pls'),
       bot(ids.handoff, today(21, 50), "On it, I'll text you when it's done.", [{ icon: 'think', text: 'started', highlight: 'System check' }], { replyTo: quote(ids.commandAsk, 'run some command pls') }),
       owner(ids.note, today(21, 51), 'Use PC Part Picker for the prices too'),
-      bot(ids.noteReply, today(21, 51), 'Your note is with it now.', [{ icon: 'think', text: 'passed on your note' }], { replyTo: quote(ids.note, 'Use PC Part Picker for the prices too') }),
+      bot(ids.noteReply, today(21, 51), "I'll use PC Part Picker for the prices from here on.", [{ icon: 'think', text: 'noted', title: 'For SSD search' }], { replyTo: quote(ids.note, 'Use PC Part Picker for the prices too') }),
       // The run report: it quotes the request; its facts are a list of keys and values.
       bot(ids.report, today(21, 53), [
         'Done. I ran a few commands that only read info, and nothing was changed.',

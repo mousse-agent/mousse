@@ -100,7 +100,8 @@ describe('the owner’s attached images', () => {
     expect(readAsset.mock.calls.map((call) => [call[0], call[3]])).toEqual([['beach.png', FOLDER], ['harbour.jpg', FOLDER], ['old-town.webp', FOLDER]])
     // Pictures first, then the words, then any other file.
     const content = owner.querySelector('.bot-you-content')!
-    expect([...content.children].map((child) => child.className.split(' ')[0])).toEqual(['bot-images', 'bot-you-bubble', 'bot-you-files'])
+    const parts = ['bot-images', 'bot-you-bubble', 'bot-you-files']
+    expect([...content.children].map((child) => parts.find((name) => child.classList.contains(name)))).toEqual(parts)
     expect([...owner.querySelectorAll('.bot-file-pill')].map((pill) => pill.textContent)).toEqual(['tickets.pdf'])
 
     await click(tiles[1])
@@ -137,11 +138,12 @@ describe('the owner’s attached images', () => {
 })
 
 describe('images in the bot’s replies', () => {
-  it('shows a data:image/png and an image file from its work, with the alt text on hover', async () => {
+  it('shows a data:image/png and an image file from its work as the reply’s pictures, named by their alt text', async () => {
     fake.chats.trip = [message(1, { text: `Sketch:\n\n![Day 1 sketch](${PNG})\n\nRoute:\n\n![Route map](/home/me/.mousse/bots/files/trip/route.png)` })]
     await open()
-    const tiles = [...transcript().querySelectorAll<HTMLButtonElement>('.from-agent button.bot-image')]
-    expect(tiles.map((tile) => [tile.title, tile.querySelector('img')!.getAttribute('src')])).toEqual([['Day 1 sketch', PNG], ['Route map', 'blob:image-1']])
+    // Above the words, as a messenger's picture message: the name is the alt text and the label, never a tooltip.
+    const tiles = [...transcript().querySelectorAll<HTMLButtonElement>('.from-agent .bot-reply-media button.bot-picture')]
+    expect(tiles.map((tile) => [tile.querySelector('img')!.getAttribute('alt'), tile.querySelector('img')!.getAttribute('src')])).toEqual([['Day 1 sketch', PNG], ['Route map', 'blob:image-1']])
     await click(tiles[0])
     expect(shown()).toEqual({ label: 'Day 1 sketch', counter: '1 / 2' })
   })
@@ -171,11 +173,11 @@ describe('images in the bot’s replies', () => {
     opened.mockRestore()
   })
 
-  it('shows files the bot sends: images as thumbnails, the rest as pills', async () => {
+  it('shows files the bot sends: images as its pictures, the rest as pills', async () => {
     fake.chats.trip = [message(1, { text: 'Done.', attachments: [{ name: 'plan.pdf', path: '/home/me/plan.pdf' }, { name: 'map.gif', path: '/home/me/map.gif' }] })]
     await open()
     const reply = transcript().querySelector('.from-agent')!
-    expect([...reply.querySelectorAll('button.bot-image')].map((tile) => tile.getAttribute('title'))).toEqual(['map.gif'])
+    expect([...reply.querySelectorAll('.bot-reply-media button.bot-picture')].map((tile) => tile.getAttribute('aria-label'))).toEqual(['Open picture: map.gif'])
     expect([...reply.querySelectorAll('.bot-file-pill')].map((pill) => pill.textContent)).toEqual(['plan.pdf'])
   })
 })

@@ -4,6 +4,7 @@ import { TextShimmer } from "../text-shimmer";
 import { IconChevronRight } from "../../../../lib/icons";
 import { cn } from "../utils/cn";
 import { NO_ROW_INFO, RecoveredFailureMark, ToolRowContext, ToolRowTime, ToolStateIcon, useToolRowInfo } from "./tool-icon";
+import { useToolOpen } from "./tool-open-state";
 
 /** How often a thought being written is read out to a screen reader. */
 const ANNOUNCE_MS = 5000;
@@ -93,11 +94,13 @@ export function ToolRowBase({
   children,
 }: ToolRowBaseProps) {
   const isComplete = !isAnimating;
-  // Uncontrolled rows (no `expanded`) keep their own open state, seeded by `defaultOpen`.
+  const { at, recovered = false, openKey } = useToolRowInfo();
+  // Uncontrolled rows (no `expanded`) keep their open state, seeded by `defaultOpen`: under the call's id when they
+  // have one (tool-open-state.ts), so a row the list rebuilds stays as the person left it.
   const [ownOpen, setOwnOpen] = useState(defaultOpen);
-  const isExpanded = expanded ?? ownOpen;
+  const kept = useToolOpen(expanded === undefined ? openKey : undefined, defaultOpen);
+  const isExpanded = expanded ?? (kept ? kept[0] : ownOpen);
   const canToggle = expandable && (isComplete || isExpanded || isAnimating);
-  const { at, recovered = false } = useToolRowInfo();
   const loudFailure = failed && !isAnimating && !recovered;
   const quietFailure = failed && !isAnimating && recovered;
   // A thought being written is the row itself: its words in place of the label, up to four lines.
@@ -183,7 +186,10 @@ export function ToolRowBase({
   }
 
   const toggle = () => {
-    if (expanded === undefined) setOwnOpen((open) => !open);
+    if (expanded === undefined) {
+      if (kept) kept[1](!kept[0]);
+      else setOwnOpen((open) => !open);
+    }
     else onToggleExpand?.();
   };
 

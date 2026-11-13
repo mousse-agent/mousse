@@ -4,7 +4,7 @@ import { BROWSER_PROBLEM_CODES, type BrowserProblem } from './navigation'
 const METHODS: readonly BrowserWorkerRequest['method'][] = [
   'session.open', 'session.close', 'tabs.list', 'tabs.new', 'tabs.close', 'tabs.switch',
   'observe', 'find', 'act', 'human.act', 'wait', 'extract', 'control.take', 'control.release', 'frame', 'frame.next', 'frame.stop', 'human.input',
-  'window.open', 'window.close', 'window.wait'
+  'window.open', 'window.close', 'window.wait', 'page.resize'
 ]
 
 function object(value: unknown, keys: readonly string[]): Record<string, unknown> {

@@ -7,7 +7,7 @@ import type {
   BotBrowserSent,
   BotBrowserView
 } from '../../../shared/bots/personal/browser'
-import type { WatchedBrowserView } from '../../../shared/browser/watched'
+import type { WatchedBrowserPageSize, WatchedBrowserView } from '../../../shared/browser/watched'
 import { browserTakeoverMessage } from '../../../shared/browser/types'
 import type { BotLane } from '../../../shared/bots/personal/definition'
 import { BOT_BROWSER_TOOLS, MAX_BOT_ACTIVE_MS } from '../../../shared/bots/personal/manifest'
@@ -291,7 +291,7 @@ export class BotBrowsers implements BotBrowserHost {
    * A view starts (or renews, or resizes) watching a bot's browser (`WatchedBrowser.watch`): its
    * pictures are pushed as `bots.browser.frame` events, which name the bot.
    */
-  async watch(botId: string, watchId: string, input: { width: number; fps: number; connectionId: string; viewId?: string } & BotBrowserViewer): Promise<BotBrowserView> {
+  async watch(botId: string, watchId: string, input: { width: number; fps: number; connectionId: string; viewId?: string; page?: WatchedBrowserPageSize } & BotBrowserViewer): Promise<BotBrowserView> {
     const state = this.stateFor(botId)
     const { emit, ...watcher } = input
     return this.botView(state, await state.viewer.watch(watchId, { ...watcher, emit: (update) => emit({ botId, ...update }) }))
@@ -724,6 +724,8 @@ export class BotBrowsers implements BotBrowserHost {
       browser: () => this.options.browser(),
       call: (call, signal) => this.ownerCall(state, call, signal),
       input: (call, tabId) => this.ownerInput(state, call, tabId),
+      // The split view's size: in the owner's turn, after the bot's step under way (never stopping it).
+      resize: (call) => state.turns.personCall((held) => this.ownerCall(state, call, held), { busy: ownerInputBusy }),
       // The bot has its browser again: the view follows a run's tab again.
       givenBack: () => this.refollow(state),
       expired: () => this.notice?.(botId, HOLD_EXPIRED_NOTICE),
