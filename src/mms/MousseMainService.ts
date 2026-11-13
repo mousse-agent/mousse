@@ -35,6 +35,7 @@ import { registerWorkflowRunMethods } from './workflows/registerRunMethods'
 import { registerIntegrationMethods, type IntegrationDomainRegistration } from './integrations/registerMethods'
 import { ConnectionCommandRouter } from './protocol/connectionCommands'
 import { registerBrowserMethods, type BrowserDomainRegistration } from './browser/registerBrowserMethods'
+import { registerBrowserViewMethods } from './browser/viewer/registerBrowserViewMethods'
 import type { BrowserRuntimePort } from '../shared/browser/runtime'
 import { BrowserAutomationError } from './browser/automation/BrowserSessionManager'
 import { mainBrowserBinding } from './platform/mainBrowserBinding'
@@ -285,6 +286,8 @@ export class MousseMainService extends MmsProfileServices {
       (await profile(profileId)).platform.workflowRuns)
     this.browserDomains = registerBrowserMethods(this.domains, async (profileId) =>
       (await profile(profileId)).platform.browser)
+    // A thread agent's browser without a window, as the person sees it from the thread (`browser.view.*`).
+    registerBrowserViewMethods(this.domains, async (profileId) => (await profile(profileId)).platform.browser)
     this.integrationDomains = registerIntegrationMethods(this.domains, async (profileId) => {
       const services = await profile(profileId)
       return {

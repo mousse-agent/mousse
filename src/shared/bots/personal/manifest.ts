@@ -29,7 +29,7 @@ export const BOT_OWN_APP_TOOLS: readonly string[] = [
  * keeps one-off reminders. Like memory they are always on and never grantable, so bots made before them have them too;
  * only a chat turn gets them, so work never starts work.
  */
-export const BOT_WORK_TOOLS: readonly string[] = ['work_start', 'work_list', 'work_stop', 'work_note', 'remind', 'reminder_list', 'reminder_cancel']
+export const BOT_WORK_TOOLS: readonly string[] = ['work_start', 'work_models', 'work_list', 'work_stop', 'work_note', 'remind', 'reminder_list', 'reminder_cancel']
 
 /**
  * What a chat turn never does itself, though the grant may hold it: it can take long (the web, the browser, running

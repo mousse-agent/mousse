@@ -9,6 +9,7 @@ import { BOT_OFF_HERE_MARK, offHereNote, switchedOff, type BotComputerLimit } fr
 import type { BotJournalKind } from '../../../shared/bots/personal/memory'
 import { botState } from '../../../shared/bots/personal/state'
 import { normalizeBotLook } from '../../../shared/bots/personal/look'
+import { workModelDetail } from '../../../shared/bots/personal/chips'
 import type { BotJournal } from '../seams'
 import type { BotMcpWhere } from '../mcp/BotMcp'
 import { workWaits, type BotActivationRow, type BotEscalationRow, type BotMessageRow, type BotStore } from '../store/BotStore'
@@ -327,7 +328,9 @@ export class BotChatProjection {
         title: row.trigger.kind === 'work' ? row.trigger.title : oneLine(row.trigger.input, 60),
         status: row.status === 'queued' || row.endReason === 'room_allowed' ? 'queued' as const : row.status === 'paused' || row.status === 'blocked' ? 'paused' as const : row.offline ? 'waiting_for_internet' as const : 'running' as const,
         startedAt: row.createdAt,
-        ...(row.trigger.kind === 'schedule' ? { scheduled: true as const } : {})
+        ...(row.trigger.kind === 'schedule' ? { scheduled: true as const } : {}),
+        // A model the owner asked for this work alone, not the bot's usual one: named on its line.
+        ...(row.trigger.kind === 'work' && row.trigger.model?.name ? { model: { name: row.trigger.model.name, detail: workModelDetail(row.trigger.model) } } : {})
       }))
     const state = botState({ paused, ...(error ? { error } : {}), openAsks: asks.length, liveActivations: live })
     // Working, but every running activation waits for the internet.

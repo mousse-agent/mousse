@@ -61,7 +61,9 @@ import { definitionToolGranted, type DefinitionAuthority } from '../agentDefinit
 import { DefinitionTurnRecord, definitionActor } from '../agentDefinitions/definitionTurnRecord'
 import type { AgentExecutionLimit, AgentExecutionRequest, AgentExecutionResult } from '../../shared/agents/execution'
 import type { EffectiveAgentGrants } from '../../shared/agents/types'
-import { upgradeSelection } from '../../shared/modelSelection'
+import { agentModelId, upgradeSelection } from '../../shared/modelSelection'
+import { agentModelEntries, agentModelRefusal, type AgentModelEntry } from './agentModelOptions'
+import type { InstanceSnapshot } from '../../shared/harness/status'
 import { modelChoiceOf } from '../../shared/modelChoice'
 import { EventEmitter } from 'events'
 import { nativeAgentAssistantMessage, nativeAgentHistory } from '../providers/nativeAgentHistory'
@@ -4204,7 +4206,19 @@ export class OrchestratorService extends EventEmitter {
     const key = options.clientRequestId
     // Whether the project is a Git repository, read ahead without blocking, so the receipt is looked up, planned and
     // recorded below with nothing awaited in between. Only for a request not seen before.
-    const gitBacked = engine.store.getReceipt(key) ? false : await this.projectGitBacked(input.projectId)
+    const fresh = !engine.store.getReceipt(key)
+    // A model the agent named is one the picker offers in that project, on an entry that can run now; else nothing is made.
+    if (fresh && input.model) {
+      let target = input.instanceId
+      try {
+        target ??= this.harness.instanceMap.instanceIdOf(this.harness.instanceMap.migrate(this.getOrCreateSession(options.actor.threadId).modelOverride ?? this.threadStore.getThread(options.actor.threadId)?.modelOverride) ?? this.defaultAgentModel())
+      } catch {
+        target = undefined
+      }
+      const refusal = target ? await this.localModelRefusal({ kind: 'project', projectId: input.projectId }, { instanceId: target, model: input.model, ...(input.effort ? { effort: input.effort } : {}) }) : undefined
+      if (refusal) throw new Error(refusal.message.replace('Nothing was started.', 'No thread was created.'))
+    }
+    const gitBacked = fresh ? await this.projectGitBacked(input.projectId) : false
     const stored = engine.store.getReceipt(key)
     let intent: AgentThreadIntent
     if (stored) {
@@ -4315,7 +4329,7 @@ export class OrchestratorService extends EventEmitter {
     }
     const instanceId = input.instanceId ?? this.harness.instanceMap.instanceIdOf(inherited ?? this.defaultAgentModel())
     // An unknown or disabled instance, a hidden model and an instance the project turned off are refused here.
-    const override = this.harness.instanceMap.overrideFor({ instanceId, model: input.model })
+    const override = this.harness.instanceMap.overrideFor({ instanceId, model: input.model, ...(input.effort ? { effort: input.effort } : {}) })
     this.harness.resolveStored(override, { purpose: 'composer', scope })
     return override
   }
@@ -4417,7 +4431,7 @@ export class OrchestratorService extends EventEmitter {
       // What actually happens: a Git project's editing turn gets a worktree of its own, whichever workspace was asked for;
       // any other project's thread works in the project folder.
       runsIn: intent.gitBacked ? 'own_worktree' : 'project_folder',
-      model: override ? { instanceId: override.instanceId ?? this.harness.instanceMap.instanceIdOf(override), model: override.model } : null,
+      model: override ? { instanceId: override.instanceId ?? this.harness.instanceMap.instanceIdOf(override), model: override.model, ...(override.effort ? { effort: override.effort } : {}) } : null,
       permissionMode: intent.permissionMode,
       ...(firstMessage ? { firstMessage } : {}),
       replayed
@@ -6471,6 +6485,7 @@ export class OrchestratorService extends EventEmitter {
       listDelegations,
       listSubagents: () => this.listSubagents(parentThreadId),
       listComputers: () => this.listComputers(parentThreadId),
+      listModels: (input) => this.listModels(parentThreadId, input),
       reportResult,
       named: {
         create: async (request, call) => ({ name: request.name, ...(await delegateTask(named(request), call)) }),
@@ -6515,15 +6530,28 @@ export class OrchestratorService extends EventEmitter {
     // SPEC §13.8: the child names an instance; an older `provider` name is mapped to one. An unknown
     // or disabled instance fails the tool call here, before any thread is created.
     const requested = input.instanceId?.trim() || input.provider?.trim()
-    const instanceId = requested
+    const resolved = requested
       ? this.harness.resolveStored(
           { instanceId: input.instanceId?.trim() || this.harness.instanceMap.instanceIdForLegacyProvider(requested), llmProvider: '', model: input.model?.trim() ?? '' },
           { purpose: 'delegate_task', scope: this.threadScope(parentThreadId) }
-        ).instanceId
+        )
       : undefined
+    const instanceId = resolved?.instanceId
     // A read-only subagent may start subagents, but only read-only ones: authority only narrows down the tree.
     if (input.workspace !== 'shared' && this.isReadOnlyChild(parentThreadId))
       return { started: false as const, code: 'read_only_caller_requires_shared' as const, message: 'You are a read-only subagent, so your own subagents must be read-only too: start them with workspace "shared" and role "research" or "review".' }
+    // A model the agent named is one the picker offers, on an entry that can run now; else nothing starts.
+    const model = input.model?.trim() || undefined
+    if (requested || model) {
+      let target: string | undefined = instanceId
+      try {
+        target ??= this.resolvedForThread(parentThreadId).instanceId
+      } catch {
+        target = undefined
+      }
+      const choice = target ? await this.localModelRefusal(this.threadScope(parentThreadId), { instanceId: target, ...(model ? { model: resolved?.model || model } : {}), ...(input.effort ? { effort: input.effort } : {}) }) : undefined
+      if (choice) return { started: false as const, ...choice }
+    }
     const refusal = await this.delegationRefusal(parentThreadId, instanceId, input.workspace)
     if (refusal) return refusal
     const title = input.title?.trim() || undefined
@@ -6535,7 +6563,8 @@ export class OrchestratorService extends EventEmitter {
         clientRequestId: delegationRequestKey(parentThreadId, parentRunId, call.toolCallId),
         prompt: input.prompt,
         instanceId,
-        model: input.model?.trim() || undefined,
+        // A reasoning level travels packed with the model, the form a stored selection is upgraded from.
+        model: model ? agentModelId(model, input.effort) : undefined,
         role,
         workspace: input.workspace,
         wake: input.wake ?? 'always',
@@ -6605,6 +6634,15 @@ export class OrchestratorService extends EventEmitter {
       if (!computer.online) return refuse('computer_offline', `${computer.name} is offline.`)
       if (Boolean(input.model?.trim()) !== Boolean(input.instanceId?.trim() || input.provider?.trim()))
         return refuse('selection_incomplete', `On another computer an agent is named with its model: pass both instanceId and model, or leave both out to use ${computer.name}'s default.`)
+      // The model is one that computer offers on an entry that can run there now. A listing that cannot be read
+      // leaves the check to that computer, which refuses a model it does not have when the thread is set up.
+      if (input.model?.trim()) {
+        const listed = await this.remoteModelEntries(computer)
+        const choice = listed.ok
+          ? agentModelRefusal(listed.entries, { instanceId: (input.instanceId?.trim() || input.provider?.trim())!, model: input.model.trim(), ...(input.effort ? { effort: input.effort } : {}) }, computer.name, { unlisted: 'refuse' })
+          : undefined
+        if (choice) return refuse(choice.code, choice.message)
+      }
     }
     const projectId = this.threadStore?.getThread(parentThreadId)?.projectId
     const projectPath = projectId ? this.projectManager?.getProject(projectId)?.path : undefined
@@ -6624,6 +6662,8 @@ export class OrchestratorService extends EventEmitter {
     }
     // Never looser than the run that asks, never Full access; the other computer narrows it to its own limit for this one.
     const permissionMode = narrowPermissionMode(this.requestedPermissionMode(parentThreadId), this.runPermissionMode(parentRunId), 'accept_edits') as Exclude<PermissionMode, 'full'>
+    // That computer's `threads.setModel` reads a level packed with the model, as every computer does.
+    const remoteModel = input.model?.trim() ? agentModelId(input.model.trim(), input.effort) : undefined
     const minutes = input.maxMinutes ?? DEFAULT_REMOTE_MINUTES
     const title = input.title?.trim() || undefined
     let accepted: Awaited<ReturnType<RunEngine['requestDelegation']>>
@@ -6634,7 +6674,7 @@ export class OrchestratorService extends EventEmitter {
         clientRequestId: requestKey,
         prompt: input.prompt,
         instanceId: input.instanceId?.trim() || input.provider?.trim() || undefined,
-        model: input.model?.trim() || undefined,
+        model: remoteModel,
         role: policy.role,
         workspace: input.workspace,
         wake: input.wake ?? 'always',
@@ -6650,7 +6690,7 @@ export class OrchestratorService extends EventEmitter {
           worktree: input.workspace === 'isolated',
           projectId: farProjectId,
           instanceId: input.instanceId?.trim() || input.provider?.trim() || null,
-          model: input.model?.trim() || null,
+          model: remoteModel ?? null,
           deadlineAt: new Date(Date.now() + Math.min(minutes, MAX_REMOTE_MINUTES) * 60_000).toISOString()
         }
       })
@@ -6695,6 +6735,65 @@ export class OrchestratorService extends EventEmitter {
     if (!access.computers.includes(node))
       return { code: 'computer_not_allowed', message: `The user has not allowed agents to start subagents on ${name}. They can allow it in Settings → Agents → Agent access.` }
     return undefined
+  }
+
+  /**
+   * `list_models`: what `delegate_task` and `thread_create` may name, read as the model picker reads it
+   * (`providers.snapshots`) in this thread's project; with `computer`, that computer's, through the same
+   * routed read its windows make, and only once the checks that let a subagent start there pass.
+   */
+  private async listModels(parentThreadId: string, input: { computer?: string }) {
+    if (input.computer === undefined) {
+      let current: { instanceId: string; model: string; effort?: string } | undefined
+      try {
+        const own = this.resolvedForThread(parentThreadId)
+        current = { instanceId: own.instanceId, model: own.model, ...(own.effort ? { effort: own.effort } : {}) }
+      } catch {
+        current = undefined
+      }
+      const entries = agentModelEntries(await this.harness.instances.snapshots(this.threadScope(parentThreadId)))
+      return { computer: 'this computer', ...(current ? { current } : {}), entries }
+    }
+    if (this.isLocalOnly(parentThreadId)) return { listed: false, code: 'private_thread', message: PRIVATE_THREAD_REMOTE_REFUSAL }
+    const parent = this.threadStore?.getThread(parentThreadId)
+    const root = parent?.lineage ? this.threadStore?.getThread(parent.lineage.rootThreadId) : parent
+    if (root?.startedFrom) return { listed: false, code: 'remote_from_remote', message: 'A thread another device started cannot start subagents on other computers.' }
+    if (!this.remoteSubagents || !this.remoteComputers)
+      return { listed: false, code: 'remote_unavailable', message: 'Subagents on other computers need Mousse to be connected to your other computers (Settings → Devices).' }
+    const found = this.findComputer(input.computer)
+    if (!found.ok) return { listed: false, code: found.code, message: found.message, ...found.extra }
+    const denied = this.remoteSubagentDenial(found.computer.node, found.computer.name)
+    if (denied) return { listed: false, ...denied }
+    if (!found.computer.online) return { listed: false, code: 'computer_offline', message: `${found.computer.name} is offline.` }
+    const listed = await this.remoteModelEntries(found.computer)
+    if (!listed.ok) return { listed: false, code: listed.code, message: listed.message }
+    return { computer: found.computer.name, entries: listed.entries, note: 'Without instanceId and model, a subagent there runs on that computer\'s default.' }
+  }
+
+  /** The entries another computer offers, read with its `providers.snapshots` (a routed read its windows make). */
+  private async remoteModelEntries(computer: { node: string; name: string }): Promise<{ ok: true; entries: AgentModelEntry[] } | { ok: false; code: string; message: string }> {
+    let reply: unknown
+    try {
+      reply = await this.remoteComputers!.call(computer.node, 'providers.snapshots', { scope: { kind: 'device' } }, { signal: AbortSignal.timeout(20_000) })
+    } catch (error) {
+      return { ok: false, code: error instanceof DomainRpcError ? error.code : 'computer_unreachable', message: `${computer.name} did not list its models: ${error instanceof Error ? error.message : String(error)}` }
+    }
+    const snapshots = reply && typeof reply === 'object' ? (reply as { snapshots?: unknown }).snapshots : undefined
+    try {
+      if (!Array.isArray(snapshots)) throw new Error('no snapshots')
+      return { ok: true, entries: agentModelEntries(snapshots as InstanceSnapshot[]) }
+    } catch {
+      return { ok: false, code: 'bad_reply', message: `${computer.name} did not list its models in a form this computer reads.` }
+    }
+  }
+
+  /**
+   * Why the model an agent named for a subagent or thread cannot start here, with nothing started instead
+   * (`agentModelRefusal`); undefined when the picker offers it, or when the entry cannot be resolved (the
+   * caller's own resolution then fails with its reason).
+   */
+  private async localModelRefusal(scope: ProviderScope, choice: { instanceId: string; model?: string; effort?: string }) {
+    return agentModelRefusal(agentModelEntries(await this.harness.instances.snapshots(scope)), choice, 'this computer')
   }
 
   /** The computer `ref` names among the user's other computers: its id, or its name (any case). */

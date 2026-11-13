@@ -14,8 +14,7 @@ import {
   MAX_BROWSER_ATTACHMENTS_PER_CONNECTION,
   type BrowserArtifactReadResult,
   type BrowserAttachmentRegisterResult,
-  type BrowserSessionListResult,
-  type BrowserSessionSnapshotResult
+  type BrowserSessionPublicRecord
 } from '../src/shared/browser/host'
 import { PROFILES_V1_CAPABILITY } from '../src/shared/profiles/types'
 import { AttachedBrowserConnectionBackend } from '../src/mms/browser/AttachedBrowserConnectionBackend'
@@ -214,18 +213,11 @@ describe('browser daemon composition', () => {
     const nativeSessionId = nativeOpened.value.session!.id
     expect(nativeSessionId).not.toBe(sessionId)
 
-    const listed = await alice.request<BrowserSessionListResult>('browser.sessions.list', { threadId: thread.id })
-    expect(listed.sessions.map((row) => row.id).sort()).toEqual([nativeSessionId, sessionId].sort())
-    expect(listed.selected).toEqual({ backend: 'electron-attached', uiTabId: 'window1:tab_live' })
-    expect(JSON.stringify(listed)).not.toContain(registered.artifactRoot)
-    expect(JSON.stringify(listed)).not.toContain(info.connectionId)
-    expect(listed.sessions.every((row) => !('controlLeaseId' in row))).toBe(true)
-
-    const observed = await alice.request<BrowserSessionSnapshotResult>('browser.sessions.observe', { threadId: thread.id, sessionId })
-    expect(observed.observation?.sessionId).toBe(sessionId)
-    expect(observed.observation?.screenshot?.artifactId).not.toMatch(/^art_/)
-    expect(observed.artifacts).toHaveLength(1)
-    const artifactId = observed.artifacts[0].id
+    // A screenshot an agent took of the in-app tab: its window reads the bytes, never a path.
+    const observed = await browser.dispatch(context(h.alice.id, thread.id), 'browser_observe', { sessionId, includeScreenshot: true })
+    if (!observed.ok) throw new Error('observe failed')
+    const artifactId = observed.value.observation!.screenshot!.artifactId
+    expect(artifactId).not.toMatch(/^art_/)
     const png = await alice.request<BrowserArtifactReadResult>('browser.artifacts.read', {
       threadId: thread.id,
       sessionId,
@@ -235,42 +227,15 @@ describe('browser daemon composition', () => {
     expect(png.artifact).not.toHaveProperty('path')
     expect(JSON.stringify(png)).not.toContain(registered.artifactRoot)
 
-    const nativeObserved = await alice.request<BrowserSessionSnapshotResult>('browser.sessions.observe', {
-      threadId: thread.id,
-      sessionId: nativeSessionId
-    })
-    expect(nativeObserved.run?.runId).toBe(nativeRun)
-    expect(nativeObserved.session?.runId).toBe(nativeRun)
-
-    for (let index = 0; index < 110; index += 1) {
-      const polled = await alice.request<BrowserSessionSnapshotResult>('browser.sessions.get', { threadId: thread.id, sessionId })
-      expect(polled.observation?.sessionId).toBe(sessionId)
-    }
-
-    const taken = await alice.request<BrowserSessionSnapshotResult>('browser.sessions.takeControl', { threadId: thread.id, sessionId })
-    expect(taken.controlOwner).toBe('human')
-    const generation = taken.session!.generation
-    const observationId = (await alice.request<BrowserSessionSnapshotResult>('browser.sessions.observe', { threadId: thread.id, sessionId })).observation!.observationId
-    const acted = await alice.request<BrowserSessionSnapshotResult>('browser.sessions.humanAction', {
-      threadId: thread.id,
-      sessionId,
-      tabId: taken.observation?.tabs[0]?.id ?? observed.observation!.tabId,
-      generation,
-      observationId,
-      action: { type: 'click', target: { kind: 'ref', ref: 'e1' } }
-    })
-    expect(acted.observation?.generation).toBe(generation)
-    const resumed = await alice.request<BrowserSessionSnapshotResult>('browser.sessions.resume', { threadId: thread.id, sessionId })
-    expect(resumed.controlOwner).toBe('agent')
-    expect(resumed.session!.generation).toBeGreaterThan(generation)
-    await expect(alice.request('browser.sessions.humanAction', {
-      threadId: thread.id,
-      sessionId,
-      tabId: observed.observation!.tabId,
-      generation,
-      observationId,
-      action: { type: 'click', target: { kind: 'ref', ref: 'e1' } }
-    })).rejects.toMatchObject({ code: expect.stringMatching(/stale_generation|human_controlled/) })
+    // Take control and Resume belong to the in-app tab, and never show its control lease.
+    const taken = await alice.request<{ session: BrowserSessionPublicRecord }>('browser.sessions.takeControl', { threadId: thread.id, sessionId })
+    expect(taken.session.lifecycle).toBe('human-controlled')
+    expect(taken.session).not.toHaveProperty('controlLeaseId')
+    const generation = taken.session.generation
+    const resumed = await alice.request<{ session: BrowserSessionPublicRecord }>('browser.sessions.resume', { threadId: thread.id, sessionId })
+    expect(resumed.session.lifecycle).not.toBe('human-controlled')
+    expect(resumed.session.generation).toBeGreaterThan(generation)
+    expect(nativeSessionId).not.toBe(sessionId)
 
     const sibling = guiClient(h.home, h.endpoint)
     sibling.setAttachedBrowserCommandHandler(async (command) => ({
@@ -286,8 +251,6 @@ describe('browser daemon composition', () => {
       uiTabId: 'window1:tab_live'
     })).rejects.toMatchObject({ code: 'policy_denied' })
     await expect(sibling.request('browser.attachments.select', { uiTabId: 'window1:tab_live', threadId: thread.id }))
-      .rejects.toMatchObject({ code: 'policy_denied' })
-    await expect(sibling.request('browser.sessions.observe', { threadId: thread.id, sessionId }))
       .rejects.toMatchObject({ code: 'policy_denied' })
     await expect(sibling.request('browser.sessions.takeControl', { threadId: thread.id, sessionId }))
       .rejects.toMatchObject({ code: 'policy_denied' })
@@ -306,9 +269,9 @@ describe('browser daemon composition', () => {
     h.clients.push(bobGui)
     await bobGui.connect()
     await bobGui.request('profiles.bind', { profile: h.bob.id })
-    await expect(bobGui.request('browser.sessions.observe', { threadId: thread.id, sessionId, profileId: h.alice.id }))
+    await expect(bobGui.request('browser.sessions.takeControl', { threadId: thread.id, sessionId, profileId: h.alice.id }))
       .rejects.toMatchObject({ code: 'profile_mismatch' })
-    await expect(bobGui.request('browser.sessions.observe', { threadId: bobThread.id, sessionId }))
+    await expect(bobGui.request('browser.sessions.takeControl', { threadId: bobThread.id, sessionId }))
       .rejects.toMatchObject({ code: expect.stringMatching(/session_closed|invalid_action/) })
     await expect(bobGui.request('browser.artifacts.read', { threadId: bobThread.id, sessionId, artifactId }))
       .rejects.toMatchObject({ code: expect.stringMatching(/session_closed|invalid_action|artifact_denied/) })

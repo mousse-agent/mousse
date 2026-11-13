@@ -56,6 +56,7 @@ import {
 import { envelopeFrames } from './envelopeChunks'
 import { maxConnectionEventBytes, PROTOCOL_CONNECTION_EVENT_TYPES } from './types'
 import { BOTS_BROWSER_STREAM_CAPABILITY } from '../../shared/bots/personal/browser'
+import { BROWSER_VIEW_CAPABILITY } from '../../shared/browser/threadView'
 import { subagentAncestorsOf, subagentParentsOfEvent } from '../run/delegation/subagentEvents'
 import type { ThreadEvent } from '../run/types'
 
@@ -1465,7 +1466,7 @@ export class MmsProtocolServer {
     const valid = (): boolean =>
       !session.closed &&
       session.authenticated &&
-      session.capabilities.has(type === 'mcp.auth-url' ? INTEGRATION_CAPABILITY : type === 'git.operation' ? GIT_OPERATIONS_CAPABILITY : type === 'bots.browser.frame' ? BOTS_BROWSER_STREAM_CAPABILITY : NET_LOCAL_CAPABILITY) &&
+      session.capabilities.has(type === 'mcp.auth-url' ? INTEGRATION_CAPABILITY : type === 'git.operation' ? GIT_OPERATIONS_CAPABILITY : type === 'bots.browser.frame' ? BOTS_BROWSER_STREAM_CAPABILITY : type === 'browser.view.frame' ? BROWSER_VIEW_CAPABILITY : NET_LOCAL_CAPABILITY) &&
       !!binding &&
       session.binding?.profileId === binding.profileId &&
       session.binding.epoch === binding.epoch &&

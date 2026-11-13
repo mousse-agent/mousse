@@ -29,16 +29,17 @@ import { execFileSync, spawn as nodeSpawn } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import type { AddressInfo, Socket } from 'node:net'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import type { Options, SDKUserMessage, SpawnedProcess, SpawnOptions } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
+import { systemTempDirs } from '../../src/mms/bots/grants/compile'
 import type { ClaudeLockedTurn } from '../../src/mms/harness/claude/locked'
 import { lockedEnv } from '../../src/mms/harness/env'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { ClaudeSubscriptionProviderService, type ClaudeSubscriptionChatInput } from '../../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
-import type { ClaudeStartupChannel } from '../../src/mms/harness/vendors/claude/mcpRegistration'
+import { CLAUDE_MCP_START_FOLDER, type ClaudeStartupChannel } from '../../src/mms/harness/vendors/claude/mcpRegistration'
 import type { ToolLedger } from '../../src/mms/run/mcp/appTools/types'
 
 const PACKAGE = join(process.cwd(), 'node_modules', '@anthropic-ai')
@@ -51,6 +52,15 @@ const hasBinary = existsSync(BINARY)
 /** Said in every test's name when it is skipped, so a missing binary never passes as a run. */
 const NO_BINARY = hasBinary ? '' : ` [skipped: no Claude Code binary at ${BINARY}; install the SDK's platform package or set MOUSSE_CLAUDE_EVIDENCE_BINARY]`
 const POSIX = process.platform !== 'win32'
+const onPath = (name: string) => (process.env.PATH ?? '').split(':').some((dir) => dir && existsSync(join(dir, name)))
+const runtimeDir = process.env.XDG_RUNTIME_DIR
+/**
+ * Claude Code's sandbox runs (Linux, bubblewrap and socat on PATH) and the user's runtime folder is under `/run`, where a
+ * bot's turn keeps its own temporary files: the sandbox's reach can be checked.
+ */
+const SANDBOX = process.platform === 'linux' && onPath('bwrap') && onPath('socat') && Boolean(runtimeDir?.startsWith('/run/')) && existsSync(runtimeDir!) &&
+  tmpdir().startsWith(`${homedir()}/`)
+const NO_SANDBOX = SANDBOX ? '' : ' [skipped: needs Linux with bubblewrap and socat on PATH, XDG_RUNTIME_DIR under /run, and TMPDIR under the home folder, where Mousse\'s data is in an install]'
 /** Said in the name of a test that needs a POSIX shell (`sleep`, `env`, a `sh` wrapper), skipped on Windows. */
 const NO_POSIX = POSIX ? '' : ' [skipped on Windows: needs a POSIX shell]'
 /**
@@ -494,7 +504,8 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
   }
 
   it.skipIf(!hasBinary || CHANNELS.length === 0).each(CHANNELS)(`a person's turn (startup channel: %s): the servers work, none is on the command line or in the environment, neither a command nor another process reads one, no file keeps one, and a new token reaches the running process${NO_BINARY}`, async (channel) => {
-    const fifoRoot = tmpdir()
+    // Where the named pipe is made: the entry's own folder in Mousse's data, never the shared temporary folder.
+    let fifoRoot = ''
     const plans = {
       first: [
         { name: 'ToolSearch', input: { query: 'select:mcp__mousse__ping,mcp__web__ping,mcp__files__secret_seen', max_results: 5 } },
@@ -508,6 +519,9 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
       second: [{ name: 'mcp__mousse__ping', input: {} }]
     }
     const run = await rig(plans, { channel })
+    fifoRoot = join(run.state, 'providers', 'claude-subscription', CLAUDE_MCP_START_FOLDER)
+    // Made before Claude Code starts, so the reader can look in it even when no pipe is left.
+    mkdirSync(fifoRoot, { recursive: true, mode: 0o700 })
     plans.first[plans.first.length - 1] = readsCommand(run.reader, fifoRoot)
     const turn = async (prompt: string, token: string) => {
       const text = await personTurn(run, prompt, token)
@@ -527,6 +541,11 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
     clean(run.started[0]!)
     const config = run.started[0]!.args[run.started[0]!.args.indexOf('--mcp-config') + 1]!
     expect(config).toMatch(channel === 'descriptor' ? /^\/dev\/fd\/3$/ : /\/mousse-mcp-[^/]+\/servers$/)
+    // The pipe was in Mousse's own data, out of a bot's commands' reach, never in the shared temporary folder.
+    if (channel === 'fifo') {
+      expect(relative(fifoRoot, config).startsWith('mousse-mcp-')).toBe(true)
+      expect(relative(tmpdir(), config).startsWith('mousse-mcp-')).toBe(false)
+    }
     // What the command read: nothing of the channel. Its fourth stream, if it has one, holds no byte; Claude Code's own
     // (Linux, `/proc/<pid>/fd/3`) holds no server; and the named pipe and its folder are gone.
     const read = run.anthropic.results('first').join('\n')
@@ -884,6 +903,50 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
     expect(results).toContain('pong from /mcp')
     expect(results).toContain('CLAUDE_CONFIG_DIR=')
     expect(found(results)).toEqual([])
+    expect(run.leftBehind()).toEqual([])
+  }, 120_000)
+
+  it.skipIf(!hasBinary || !SANDBOX)(`a bot without file access, its commands in Claude Code's sandbox on Linux: they read no removable drive or runtime folder under /run, no other session's command output, nothing of Mousse's start-up pipe, and they still run${NO_BINARY}${NO_SANDBOX}`, async () => {
+    const plans: Record<string, Json[]> = { reach: [{ name: 'Bash', input: { command: 'READS', description: 'Try what a bot may not read' } }] }
+    const run = await rig(plans)
+    const uid = process.getuid!()
+    const marker = `reach-${Date.now()}`
+    // What the bot must not reach: a file in the user's runtime folder, another session's saved command output in Claude
+    // Code's shared temporary folder, and the folder where Mousse makes the start-up pipe of the owner's MCP servers.
+    const runtime = process.env.XDG_RUNTIME_DIR!
+    const inRuntime = join(runtime, `${marker}.txt`)
+    const otherSession = join('/tmp', `claude-${uid}`, `-${marker}-owner`, 'session', 'tasks')
+    const pipeFolder = join(run.state, 'providers', 'claude-subscription', CLAUDE_MCP_START_FOLDER)
+    mkdirSync(otherSession, { recursive: true })
+    mkdirSync(pipeFolder, { recursive: true, mode: 0o700 })
+    writeFileSync(inRuntime, 'secret\n')
+    writeFileSync(join(otherSession, 'b1.output'), 'secret\n')
+    writeFileSync(join(pipeFolder, 'marker'), 'secret\n')
+    cleanups.push(() => { rmSync(inRuntime, { force: true }); rmSync(join('/tmp', `claude-${uid}`, `-${marker}-owner`), { recursive: true, force: true }) })
+    const tries = [inRuntime, join(otherSession, 'b1.output'), join(pipeFolder, 'marker'), '/etc/hostname']
+    const command = [
+      ...tries.map((path) => `if cat ${JSON.stringify(path)} >/dev/null 2>&1; then echo "read ${path}"; else echo "denied ${path}"; fi`),
+      `if echo x > ${JSON.stringify(join(otherSession, 'b2.output'))} 2>/dev/null; then echo "wrote other"; else echo "denied write"; fi`,
+      'python3 -c "print(6 * 7)"',
+      'echo own > own.txt && echo "wrote own"'
+    ].join('; ')
+    plans.reach[0] = { name: 'Bash', input: { command, description: 'Try what a bot may not read' } }
+    const authority = createBotAuthority({
+      activationId: 'act-1', role: 'activation',
+      permissions: { tools: ['read', 'shell'], appTools: [], mcp: [], skills: [], workspace: { roots: [], access: 'read', writeRoots: [run.dirs.files], scratch: run.dirs.scratch, files: run.dirs.files } },
+      waiting: () => false, counters: { charge: vi.fn(() => ({ ok: true as const, count: 1 })) as never },
+      time: { deadline: () => Number.MAX_SAFE_INTEGER, signal: new AbortController().signal }, spend: null
+    })
+    const locked: ClaudeLockedTurn = { authority, ownerEntry: true, ledger: run.ledger, cwd: run.dirs.files, shellContained: true, temps: systemTempDirs(), systemPrompt: 'You are a test bot.' }
+    const text = await run.service.chat({ threadId: 'bot-thread', cwd: run.dirs.files, model: 'claude-sonnet-4-5', prompt: 'PLAN:reach', permissionMode: 'ask', locked, mcp: null, onText: () => undefined })
+    expect(text).toContain('done')
+    const said = run.anthropic.results('reach').join('\n')
+    for (const path of tries.slice(0, 3)) expect(said).toContain(`denied ${path}`)
+    expect(said).toContain('read /etc/hostname')
+    expect(said).toContain('denied write')
+    expect(said).toContain('42')
+    expect(said).toContain('wrote own')
+    expect(existsSync(join(otherSession, 'b2.output'))).toBe(false)
     expect(run.leftBehind()).toEqual([])
   }, 120_000)
 

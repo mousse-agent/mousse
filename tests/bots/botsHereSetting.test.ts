@@ -2,7 +2,9 @@
  * What bots may do here, as the service stores and reads it: one setting for the whole installation (its own
  * `mousse.conf`), the same for every profile's bots and Settings. A setting never written is all on (first start, an
  * update); one that is malformed, or lost with a settings file that could not be read, is all off and marked so until
- * the owner sets it again. A write is exactly the four switches or nothing changes. Another computer can't route to it.
+ * the owner sets it again. A write names one or more switches, each on or off, and the service puts them over the
+ * switches it holds; anything else changes nothing. An update is saved whole or not at all, and every profile's open
+ * windows hear of a change. Another computer can't route to it.
  */
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -17,6 +19,16 @@ import { SettingsStore } from '../../src/mms/settings/SettingsStore'
 import { botManifestDigest } from '../../src/mms/bots/grants/compile'
 import { BOT_COMPUTER_OPEN, BOT_COMPUTER_SHUT, BOT_OFF_HERE_MARK, type BotComputerLimit } from '../../src/shared/bots/personal/computerLimit'
 import type { BotDefinition } from '../../src/shared/bots/personal/definition'
+import { parseArgs } from '../../src/cli/parseArgs'
+import { runConfig } from '../../src/cli/commands/config'
+import { onSettingsSaved } from '../../src/mms/settings/SettingsStore'
+
+/** `mousse config set …` reaches the service through this, in the test: the CLI's own parsing, the service's own handler. */
+const cli = vi.hoisted(() => ({ request: undefined as undefined | ((method: string, params: unknown) => Promise<unknown>) }))
+vi.mock('../../src/cli/mmsContext', () => ({
+  openMms: async () => ({ client: { request: (method: string, params: unknown) => cli.request!(method, params) } }),
+  closeMmsContext: async () => undefined
+}))
 
 const cleanup: Array<() => unknown> = []
 afterEach(async () => {
@@ -163,12 +175,103 @@ describe('one setting for every profile of this computer, through the real servi
     const later = await main.getProfileServices(manager.create({ displayName: 'Later', slug: 'later' }).id)
     expect(later.settings.get().bots).toEqual({ here: { ...BOT_COMPUTER_OPEN, shell: false } })
 
-    // Anything but exactly the four switches is refused (three, from before Use your threads, too), nothing in the same update is saved, and nothing is reset.
+    // Anything but one or more known switches, each a boolean, is refused, nothing in the same update is saved, and
+    // nothing is reset.
     const theme = other.settings.get().appearance.theme
-    for (const bots of [null, false, 'on', [], {}, { here: null }, { here: { shell: true } }, { here: { shell: true, files: true, browser: true } }, { here: { shell: 'true', files: true, browser: true, threads: true } }, { here: { ...BOT_COMPUTER_OPEN, camera: true } }, { here: BOT_COMPUTER_OPEN, unreadable: true }, { here: BOT_COMPUTER_OPEN, more: 1 }])
+    for (const bots of [null, false, 'on', [], {}, { here: null }, { here: {} }, { here: [] }, { here: { shell: 'true' } }, { here: { shell: null } }, { here: { camera: true } }, { here: { ...BOT_COMPUTER_OPEN, camera: true } }, { here: BOT_COMPUTER_OPEN, unreadable: true }, { here: BOT_COMPUTER_OPEN, more: 1 }])
       await expect(set(other, { bots, appearance: { theme: theme === 'dark' ? 'light' : 'dark' } }), JSON.stringify(bots)).rejects.toThrow(/What bots may do here/)
     expect(main.settings.get().bots).toEqual({ here: { ...BOT_COMPUTER_OPEN, shell: false } })
     expect(other.settings.get().appearance.theme).toBe(theme)
     expect(existsSync(conf(home))).toBe(true)
   }, 120_000)
+
+  it('two windows, each with its own copy: one switch changed in each, the CLI too, and none turns back another\'s; every profile\'s windows hear each change', async () => {
+    vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
+    const root = tempHome()
+    const home = join(root, 'home')
+    const main = await MousseMainService.create({ homeDir: home, repoRoot: root, requireOwnership: false, headless: true })
+    cleanup.push(() => main.stop())
+    const other = await main.getProfileServices(main.getInstallationHost()!.manager.create({ displayName: 'Other', slug: 'other' }).id)
+    // What each profile's open windows are told (the protocol server pushes these to that profile's windows).
+    const told = new Map<string, Array<BotComputerLimit>>()
+    for (const services of [main, other]) {
+      told.set(services.profileId, [])
+      services.events.on('protocol:event', (event) => {
+        const { type, data } = event as { type: string; data: { settings: { bots: { here: BotComputerLimit } } } }
+        if (type === 'settings.changed') told.get(services.profileId)!.push(data.settings.bots.here)
+      })
+    }
+    // Two Settings windows opened while every switch was on: each keeps that copy.
+    const windowA = main.settings.get().bots.here
+    const windowB = other.settings.get().bots.here
+    expect([windowA, windowB]).toEqual([BOT_COMPUTER_OPEN, BOT_COMPUTER_OPEN])
+
+    // Window B (the other profile) switches commands off: it sends that switch alone.
+    await set(other, { bots: { here: { shell: false } } })
+    // Window A, whose copy still says commands are on, switches the browser off: commands stay off.
+    await set(main, { bots: { here: { browser: false } } })
+    expect(main.settings.get().bots).toEqual({ here: { shell: false, files: true, browser: false } })
+    // The CLI, as the owner types it.
+    cli.request = (method, params) => dispatchMethod({ mms: main, connection: { id: 'cli', binding: { profileId: main.profileId, epoch: 1 }, capabilities: new Set() } } as never, method, params)
+    vi.spyOn(process.stdout, 'write').mockReturnValue(true)
+    await runConfig(parseArgs(['config', 'set', 'bots.here.files', 'false']))
+    expect(stored(conf(home)).bots).toEqual({ here: { shell: false, files: false, browser: false } })
+    await runConfig(parseArgs(['config', 'set', 'bots.here.shell', 'true']))
+    expect(other.settings.get().bots).toEqual({ here: { shell: true, files: false, browser: false } })
+
+    // Every profile's windows were told of each change with that profile's own settings, whichever profile made it.
+    const steps = [{ shell: false, files: true, browser: true }, { shell: false, files: true, browser: false }, { shell: false, files: false, browser: false }, { shell: true, files: false, browser: false }]
+    for (const services of [main, other]) expect(told.get(services.profileId)!.filter((here, index, all) => index === 0 || JSON.stringify(here) !== JSON.stringify(all[index - 1])), services.profileId).toEqual(steps)
+
+    // The control: a window that sends its whole old copy, as the first version did, turns back what others changed.
+    await set(main, { bots: { here: { ...windowA, browser: false } } })
+    expect(main.settings.get().bots.here).toEqual({ shell: true, files: true, browser: false })
+  }, 120_000)
+})
+
+describe('an update is saved whole or not at all', () => {
+  /** An installation and a profile, with a settings store over the profile, as each profile's service has. */
+  function stores() {
+    const home = tempHome()
+    const installation = MousseConfigStore.loadInstallation(home)
+    const profileRoot = join(home, 'profiles', 'p1')
+    const settings = new SettingsStore(MousseConfigStore.loadProfile(profileRoot, installation))
+    const saved = vi.fn()
+    cleanup.push(onSettingsSaved(saved))
+    return { home, profileRoot, settings, saved }
+  }
+  /** A settings file that can no longer be written: a folder (with a file in it) where the file was. */
+  const unwritable = (path: string) => {
+    rmSync(path, { force: true })
+    mkdirSync(path)
+    writeFileSync(join(path, 'keep'), '')
+  }
+
+  it('the rest of the update fails: the switches are not saved and nobody is told', () => {
+    const { home, profileRoot, settings, saved } = stores()
+    const theme = settings.get().appearance.theme
+    unwritable(conf(profileRoot))
+    expect(() => settings.set({ bots: { here: { shell: false } }, appearance: { theme: theme === 'dark' ? 'light' : 'dark' } } as never)).toThrow()
+    expect(settings.get().bots).toEqual(open)
+    expect(settings.get().appearance.theme).toBe(theme)
+    expect(stored(conf(home))).not.toHaveProperty('bots')
+    expect(saved).not.toHaveBeenCalled()
+  })
+
+  it('the switches fail: the rest of the update is put back, in the profile and in its file', () => {
+    const { home, profileRoot, settings, saved } = stores()
+    const theme = settings.get().appearance.theme
+    const next = theme === 'dark' ? 'light' : 'dark'
+    unwritable(conf(home))
+    expect(() => settings.set({ bots: { here: { shell: false } }, appearance: { theme: next } } as never)).toThrow()
+    expect(settings.get().appearance.theme).toBe(theme)
+    expect((stored(conf(profileRoot)).settings as { appearance: { theme: string } }).appearance.theme).toBe(theme)
+    expect(settings.get().bots).toEqual(open)
+    expect(saved).not.toHaveBeenCalled()
+    // The control: with both files writable, the same update saves both.
+    rmSync(conf(home), { recursive: true, force: true })
+    settings.set({ bots: { here: { shell: false } }, appearance: { theme: next } } as never)
+    expect(settings.get().appearance.theme).toBe(next)
+    expect(stored(conf(home)).bots).toEqual({ here: { ...BOT_COMPUTER_OPEN, shell: false } })
+  })
 })

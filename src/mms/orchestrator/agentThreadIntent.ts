@@ -55,7 +55,9 @@ export function agentThreadFingerprint(request: AgentThreadRequest): string {
     request.instanceId ?? null,
     request.model ?? null,
     request.firstMessage ?? null,
-    request.firstMessage === undefined ? null : request.mode ?? 'agent'
+    request.firstMessage === undefined ? null : request.mode ?? 'agent',
+    // Only when set, so a creation stored before levels existed keeps its fingerprint.
+    ...(request.effort ? [request.effort] : [])
   ])
 }
 

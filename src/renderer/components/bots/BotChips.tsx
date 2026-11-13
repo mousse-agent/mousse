@@ -30,7 +30,8 @@ const CHIP_ICONS: Record<BotChipIcon, typeof Search> = {
 export function BotChipView({ chip }: { chip: BotChip }) {
   const Icon = CHIP_ICONS[chip.icon] ?? Sparkles
   const thread = chip.thread
-  return <span className={`bot-chip${chip.live ? ' is-live' : ''}`} title={chip.said ? `Sent: ${chip.said}` : undefined}>
+  const tip = chip.said ? `Sent: ${chip.said}` : chip.title
+  return <span className={`bot-chip${chip.live ? ' is-live' : ''}`} {...(tip ? { title: tip } : {})}>
     <Icon size={13} aria-hidden />{chip.text}{chip.highlight && <>{thread ? ' · ' : ' '}<b>{chip.highlight}</b></>}
     {thread && <button type="button" className="bot-chip-open" title="Open this thread" onClick={() => openThread(thread)}>Open</button>}
   </span>

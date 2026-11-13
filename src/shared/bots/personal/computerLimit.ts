@@ -63,6 +63,26 @@ export function notOnThisComputerText(off: BotComputerSwitch): string {
   return `Not on this computer: "${BOT_COMPUTER_SWITCH_TITLES[off]}" is switched off here, so you can't use it or ask for it. Don't ask the owner for it. Carry on without it and say what you skipped.`
 }
 
+/** The switches' titles as a list in quotes: `"run commands" and "use files on this computer"`. */
+function quotedTitles(switches: readonly BotComputerSwitch[]): string {
+  const titles = switches.map((which) => `"${BOT_COMPUTER_SWITCH_TITLES[which]}"`)
+  return titles.length > 1 ? `${titles.slice(0, -1).join(', ')} and ${titles.at(-1)}` : titles[0] ?? ''
+}
+
+/**
+ * The bot's chat line when a turn that started with what this computer has just switched off (`switches`) is stopped
+ * (`BotEngine.cutForLimit`). The work goes on in a new turn without it.
+ */
+export function stoppedForLimitText(switches: readonly BotComputerSwitch[]): string {
+  const these = switches.length > 1 ? 'them' : 'it'
+  return `Stopped: ${quotedTitles(switches)} ${switches.length > 1 ? 'were' : 'was'} switched off on this computer. I carry on without ${these}.`
+}
+
+/** What the turn that goes on after such a stop is told first. */
+export function limitCutLead(switches: readonly BotComputerSwitch[]): string {
+  return `${quotedTitles(switches)} ${switches.length > 1 ? 'were' : 'was'} switched off on this computer while you worked, so Mousse stopped your turn; you no longer have ${switches.length > 1 ? 'them' : 'it'} here. Don't ask the owner for ${switches.length > 1 ? 'them' : 'it'}.`
+}
+
 /**
  * The switch a permission falls under: file access (any folder) is `files`, commands `shell`, the browser or any one of
  * its tools `browser`. Undefined for everything else (the web, skills, MCP tools, limits), which no switch covers.

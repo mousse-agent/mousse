@@ -858,6 +858,15 @@ export class MmsProfileServices {
         threadsHere = now
       }))
     }
+    // The switches are the installation's: when any profile, window or the CLI changes them, every window of this
+    // profile hears it too, with this profile's own settings, so a Settings page already open shows them as they are.
+    let botsHere = JSON.stringify(this.config.botSettings())
+    this.platform.onDispose(onSettingsSaved(() => {
+      const now = JSON.stringify(this.config.botSettings())
+      if (now === botsHere) return
+      botsHere = now
+      this.events.emit({ channel: 'protocol:event', data: { type: 'settings.changed', data: { settings: this.settings.get() } } })
+    }))
     // The bots' own app tools (schedules, profile, depth) and memory tools, through the engine.
     if (personalBots && botMemory) {
       const memory = botMemory

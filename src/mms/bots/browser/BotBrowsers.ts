@@ -19,7 +19,8 @@ import type { BrowserNavigation, BrowserProblem } from '../../../shared/browser/
 import type { ExecutionContext, ExecutionPolicySnapshot } from '../../../shared/execution/types'
 import { BrowserAutomationError, defineBrowserSessionKeeper } from '../../browser/automation/BrowserSessionManager'
 import type { MmsBrowserService } from '../../browser/MmsBrowserService'
-import { BROWSER_SIDE_CALL_MS, WatchedBrowser, legacyView, type PageInput } from '../../browser/viewer/WatchedBrowser'
+import { BROWSER_SIDE_CALL_MS, WatchedBrowser, actsOrLoads, legacyView, type PageInput } from '../../browser/viewer/WatchedBrowser'
+import { BROWSER_TURN_HOLD_MS, BROWSER_TURN_WAIT_MS, BrowserTurns, MAX_BROWSER_WAITERS, OWNER_CUT_IN_MS, OWNER_KEEP_MS, type BrowserTurnsText } from '../../browser/viewer/BrowserTurns'
 import { ExecutionPolicyService } from '../../execution/ExecutionPolicyService'
 import { snapshotBrowserExecutionBinding } from '../../orchestrator/browser/binding'
 import { browserToolCapability } from '../../orchestrator/browser/tools'
@@ -142,149 +143,15 @@ export const BOT_BROWSER_KEEPER = defineBrowserSessionKeeper({
 
 /** Activations remembered per bot for its previews. */
 const MAX_USED = 50
-/** Calls that may wait their turn on one bot's browser at once; one more is refused as busy. */
-export const MAX_BROWSER_WAITERS = 24
-/** The longest one call waits for its turn on the bot's browser before it is refused as busy. */
-export const BROWSER_TURN_WAIT_MS = 5 * 60_000
-/**
- * The longest one call may hold the bot's browser. The worker broker ends each request at 60 seconds, and the longest
- * call makes four (a new tab listed, opened and listed again, then observed): a little above that, a call that still
- * has not returned is abandoned with an error to its run, and the next one in line goes.
- */
-export const BROWSER_TURN_HOLD_MS = 5 * 60_000
 /** The limit on the owner's picture of a tab, and on closing an ended activation's tab: both are quick or broken. */
 export { BROWSER_SIDE_CALL_MS }
-/** How long the owner's input waits for the call under way before it is refused as busy. */
-const OWNER_INPUT_WAIT_MS = 30_000
-/**
- * How long the owner's input waits for a run's call under way before it stops that call and goes: a moment, so a run's
- * action that Take over already ended can answer how far it got, and well under the half second after which the
- * owner's view says "Sending…".
- */
-export const OWNER_CUT_IN_MS = 150
-/**
- * How long the browser stays the owner's after each of their inputs: their next input goes at once, and the runs' calls
- * wait. So a person typing gets the page's pace (each key would otherwise wait out a cut-in), and the runs read in
- * their pauses.
- */
-export const OWNER_KEEP_MS = 1_000
+/** One call at a time on a bot's browser (the general `BrowserTurns`), and its limits. */
+export { BROWSER_TURN_HOLD_MS, BROWSER_TURN_WAIT_MS, BrowserTurns, MAX_BROWSER_WAITERS, OWNER_CUT_IN_MS, OWNER_KEEP_MS }
 
-/**
- * The call that holds a bot's browser now: its tab, whether it gives way to the owner's input, and how to stop it.
- * `kept` is no call: the moment after an owner's input, when only their next input may take the browser.
- */
-interface TurnHolder {
-  tab?: string
-  yields?: boolean
-  kept?: boolean
-  stop?(reason: Error): void
-}
-
-/**
- * One call at a time on a bot's browser, in the order the calls came, across all its activations. A browser without a
- * window paints only its front tab, and both an action and a picture bring their tab to the front; the session also
- * takes one action at a time. So when several activations browse at once, each call waits for the one before it to end
- * instead of failing or pulling the other's tab away mid-action. The queue is bounded (`MAX_BROWSER_WAITERS`), each
- * wait too (`BROWSER_TURN_WAIT_MS`), and a stopped turn leaves it at once. The holder is bounded as well
- * (`BROWSER_TURN_HOLD_MS`): `work` gets a signal that ends its call there, and the turn passes on even if it ignores it.
- */
-export class BrowserTurns {
-  private holder: TurnHolder | undefined
-  private keptUntil: ReturnType<typeof setTimeout> | undefined
-  private readonly waiting: Array<{ go(): void; holder: TurnHolder }> = []
-
-  /** The tab the call that holds the browser works on, when it named one. */
-  get holderTab(): string | undefined {
-    return this.holder?.tab
-  }
-
-  get busy(): boolean {
-    return this.holder !== undefined
-  }
-
-  /**
-   * Runs `work` when its turn comes; a wait longer than `waitMs`, a full queue or `signal` refuses it. It holds the turn
-   * at most `holdMs`: then its signal ends it and it fails with a timeout, and the next waiter goes.
-   *
-   * A call that `yields` (a run's) gives way to one that cuts in (`cutIn`, the owner's input): the owner's input waits
-   * for it `cutIn.afterMs` at most, then that call is stopped with `cutIn.reason()` and the input goes. A call that
-   * `keeps` (the owner's input) holds the browser that long after it ends, for the next call that goes `first` alone.
-   */
-  async run<T>(work: (held: AbortSignal) => Promise<T>, options: { signal?: AbortSignal; tab?: string; waitMs?: number; holdMs?: number; busy?: () => Error; first?: boolean; yields?: boolean; cutIn?: { afterMs: number; reason: () => Error }; keepMs?: number } = {}): Promise<T> {
-    const holder: TurnHolder = { ...(options.tab ? { tab: options.tab } : {}), ...(options.yields ? { yields: true } : {}) }
-    if (this.holder?.kept && options.first) {
-      // The owner's next input while the browser is still theirs: it goes at once.
-      clearTimeout(this.keptUntil)
-      this.keptUntil = undefined
-      this.holder = undefined
-    } else if (this.holder || this.waiting.length) {
-      const busy = options.busy ?? (() => new BrowserAutomationError({ code: 'timeout', message: 'Your browser is busy with your other work right now. Try this again in a moment, or carry on without it.' }))
-      if (this.waiting.length >= MAX_BROWSER_WAITERS) throw busy()
-      await new Promise<void>((resolve, reject) => {
-        const entry = { go: () => { cleanup(); resolve() }, holder }
-        const leave = (error: Error): void => {
-          const at = this.waiting.indexOf(entry)
-          if (at < 0) return
-          this.waiting.splice(at, 1)
-          cleanup()
-          reject(error)
-        }
-        const timer = setTimeout(() => leave(busy()), options.waitMs ?? BROWSER_TURN_WAIT_MS)
-        timer.unref?.()
-        let cut: ReturnType<typeof setTimeout> | undefined
-        const onAbort = (): void => leave(new BrowserAutomationError({ code: 'cancelled', message: 'This run of the bot has ended.' }))
-        const cleanup = (): void => {
-          clearTimeout(timer)
-          clearTimeout(cut)
-          options.signal?.removeEventListener('abort', onAbort)
-        }
-        if (options.signal?.aborted) return onAbort()
-        options.signal?.addEventListener('abort', onAbort, { once: true })
-        // The owner's input goes ahead of the calls that wait: it waits only for the one under way.
-        if (options.first) this.waiting.unshift(entry)
-        else this.waiting.push(entry)
-        // And it cuts into a run's call under way that has not ended after a moment.
-        const under = this.holder
-        if (options.cutIn && under?.yields) {
-          const { afterMs, reason } = options.cutIn
-          cut = setTimeout(() => { if (this.holder === under) under.stop?.(reason()) }, afterMs)
-          cut.unref?.()
-        }
-      })
-    }
-    this.holder = holder
-    const hold = new AbortController()
-    holder.stop = (reason) => hold.abort(reason)
-    const ceiling = setTimeout(() => hold.abort(new BrowserAutomationError({ code: 'timeout', message: 'The browser did not answer in time, so this call stopped. Try it again, or carry on without it.' })), options.holdMs ?? BROWSER_TURN_HOLD_MS)
-    ceiling.unref?.()
-    const abandoned = new Promise<never>((_resolve, reject) => hold.signal.addEventListener('abort', () => reject(hold.signal.reason), { once: true }))
-    try {
-      return await Promise.race([work(hold.signal), abandoned])
-    } finally {
-      clearTimeout(ceiling)
-      if (options.keepMs && this.holder === holder) {
-        // The owner's: theirs a moment longer, for their next input; then the next in line goes.
-        const kept: TurnHolder = { ...(options.tab ? { tab: options.tab } : {}), kept: true }
-        this.holder = kept
-        this.keptUntil = setTimeout(() => {
-          if (this.holder !== kept) return
-          this.keptUntil = undefined
-          this.handOn()
-        }, options.keepMs)
-        this.keptUntil.unref?.()
-      } else this.handOn()
-    }
-  }
-
-  /** The browser is free: the next in line goes; it takes the browser before anything that comes later. */
-  private handOn(): void {
-    this.holder = undefined
-    const next = this.waiting.shift()
-    if (next) {
-      this.holder = next.holder
-      next.go()
-    }
-  }
+/** What a bot's browser turns say, in the bot's words. */
+const BOT_TURN_TEXT: BrowserTurnsText = {
+  busy: () => new BrowserAutomationError({ code: 'timeout', message: 'Your browser is busy with your other work right now. Try this again in a moment, or carry on without it.' }),
+  ended: () => new BrowserAutomationError({ code: 'cancelled', message: 'This run of the bot has ended.' })
 }
 
 /** The line in the bot's chat when the browser comes back to it because the view that held it went away. */
@@ -295,14 +162,9 @@ function ownerHolds(): BrowserAutomationError {
   return new BrowserAutomationError({ code: 'human_controlled', message: 'Your owner is using your browser now. Wait for them to give it back, or carry on without it.' })
 }
 
-/** The owner's input waited past `OWNER_INPUT_WAIT_MS` for the call under way. */
+/** The owner's input waited too long for the call under way. */
 function ownerInputBusy(): BrowserAutomationError {
   return new BrowserAutomationError({ code: 'timeout', message: 'The bot\'s browser is busy finishing a step of its work. Try again in a moment.' })
-}
-
-/** A call that acts on a page, opens a tab or loads a page: refused while the owner holds the browser. */
-function actsOrLoads(name: BrowserAutomationTool, params: Record<string, unknown>): boolean {
-  return name === 'browser_act' || name === 'browser_open' || (name === 'browser_tabs' && params.operation === 'new')
 }
 
 const defaultTimer = (fn: () => void, ms: number): { clear(): void } => {
@@ -510,14 +372,7 @@ export class BotBrowsers implements BotBrowserHost {
    * says the input reached the page, not that it was queued.
    */
   private ownerInput<T>(state: BotBrowserState, call: (context: BrowserToolContext) => Promise<T>, tabId?: string): Promise<T> {
-    return state.turns.run((held) => this.ownerCall(state, call, held), {
-      first: true,
-      waitMs: OWNER_INPUT_WAIT_MS,
-      busy: ownerInputBusy,
-      cutIn: { afterMs: OWNER_CUT_IN_MS, reason: ownerHolds },
-      keepMs: OWNER_KEEP_MS,
-      ...(tabId ? { tab: tabId } : {})
-    })
+    return state.turns.personInput((held) => this.ownerCall(state, call, held), { holds: ownerHolds, busy: ownerInputBusy, ...(tabId ? { tab: tabId } : {}) })
   }
 
   async close(botId: string): Promise<BotBrowserView> {
@@ -839,7 +694,7 @@ export class BotBrowsers implements BotBrowserHost {
   private state(botId: string, homeThreadId: string): BotBrowserState {
     const known = this.bots.get(botId)
     if (known && known.homeThreadId === homeThreadId) return known
-    const state = { botId, homeThreadId, activations: new Map(), turns: new BrowserTurns(), used: [] } as Omit<BotBrowserState, 'viewer'> as BotBrowserState
+    const state = { botId, homeThreadId, activations: new Map(), turns: new BrowserTurns(BOT_TURN_TEXT), used: [] } as Omit<BotBrowserState, 'viewer'> as BotBrowserState
     // The owner's views of it, through the bot's own scope (`ownerCall`) and turn (`ownerInput`).
     state.viewer = new WatchedBrowser({
       profileId: this.options.profileId,

@@ -100,8 +100,9 @@ function BotsHereGroup({ settings, updateSettings }: { settings: MousseSettings;
               id={anchor}
               label={title}
               checked={here[key]}
-              // Always the whole limit, so a partial write never leaves a switch to its default.
-              onChange={(on) => void updateSettings({ bots: { here: { ...here, [key]: on } } })}
+              // Only the switch that changed: the service puts it over the switches it holds, so a page whose copy is
+              // older never turns back a switch changed elsewhere (another window, profile or the CLI).
+              onChange={(on) => void updateSettings({ bots: { here: { [key]: on } as Partial<BotComputerLimit> } } as MousseSettingsUpdate)}
             />
           }
         />

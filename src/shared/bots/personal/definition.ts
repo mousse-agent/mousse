@@ -274,9 +274,18 @@ export type BotActivationTrigger =
   /**
    * Work the chat handed off (`work_start`) or a reminder started (docs/plans/bot-always-free.md): a run beside the
    * chat, whose report answers `replyTo`, the owner's message that asked for it. `from`: the chat activation or
-   * reminder that started it. `level`: how hard the bot judged it (#673); absent, the bot's standing level.
+   * reminder that started it. `level`: how hard the bot judged it (#673); absent, the bot's standing level. `model`: the
+   * model the owner asked for this work alone, as the work line names it, when it is not the bot's usual one for that
+   * level; the pick itself is the activation's own (`BotActivationRow.modelOverride`).
    */
-  | { kind: 'work'; input: string; title: string; replyTo?: string; from: string; level?: BotWorkLevel }
+  | { kind: 'work'; input: string; title: string; replyTo?: string; from: string; level?: BotWorkLevel; model?: BotWorkModelName }
+
+/** The model one piece of work was asked to run on, for the work line: its name, its entry's, and a reasoning level. */
+export interface BotWorkModelName {
+  name: string
+  entry: string
+  effort?: string
+}
 
 /** The default active time of one activation: an hour. */
 export const DEFAULT_BOT_ACTIVE_MS = 60 * 60_000

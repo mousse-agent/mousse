@@ -412,6 +412,65 @@ describe('a bot on this computer', () => {
     await finish(f, again.payload, 'completed', { text: 'Hi.' })
   })
 
+  it('commands or file access switched off: a turn that started with it stops at once, its chat says why, and the work goes on in a new turn without it', async () => {
+    await allowAll()
+    const work = await run('w1')
+    const chatTurn = await chat('Hello', 'm1')
+    const stopped = () => work.prepared.authority.time.signal.aborted
+    // The browser is checked at every call of every runtime: switching it off stops nothing.
+    limit = { ...limit, browser: false }
+    f.bots.computerLimitChanged()
+    expect(stopped()).toBe(false)
+    // A command is running when the switch goes off: the stop cuts it off, its effect unknown.
+    f.runs.tools.start({ invocationId: 'inv-bash', runId: work.payload.runId, attemptId: f.runs.getRun(work.payload.runId)!.activeAttemptId!, tool: 'bash', argsDigest: 'd', now: 'n', idempotent: false })
+    // Commands off: the work started with them, so it stops now; the chat turn never holds commands and goes on.
+    limit = { ...limit, shell: false }
+    f.bots.computerLimitChanged()
+    expect(stopped()).toBe(true)
+    expect(chatTurn.prepared.authority.time.signal.aborted).toBe(false)
+    expect(chatOf(f, botId).filter((message) => message.kind === 'notice').at(-1)).toMatchObject({ text: 'Stopped: "run commands" was switched off on this computer. I carry on without it.' })
+    // The runtime ends the turn as it does at a wall; the work goes on in its next turn, without commands. The command
+    // the switch cut off holds nothing up: the next turn is told it was interrupted.
+    await finish(f, work.payload, 'interrupted', { outcome: { interruptedBy: 'bot_wall' } })
+    expect(f.store.activation(work.id)!.status).toBe('running')
+    const next = await start(f, work.id, 2)
+    expect(next.prepared.prompt).toMatch(/^\[Mousse\] "run commands" was switched off on this computer while you worked, so Mousse stopped your turn; you no longer have it here\. .*Continue where you left off, without it\. Interrupted tool calls .*bash/s)
+    expect(next.prepared.policy.tools!.allow).not.toContain('bash')
+    // File access off: the new turn started with it (a sandbox over every folder), so it stops too.
+    limit = { ...limit, files: false }
+    f.bots.computerLimitChanged()
+    expect(next.prepared.authority.time.signal.aborted).toBe(true)
+    await finish(f, next.payload, 'interrupted', { outcome: { interruptedBy: 'bot_wall' } })
+    const third = await start(f, work.id, 3)
+    expect(third.prepared.authority.workspace?.computer).toBeUndefined()
+    // Switched off again while nothing holds it: nothing more stops.
+    f.bots.computerLimitChanged()
+    expect(third.prepared.authority.time.signal.aborted).toBe(false)
+    await finish(f, third.payload, 'completed', { text: 'Done without them.' })
+    expect(f.store.activation(work.id)!.status).toBe('done')
+    await finish(f, chatTurn.payload, 'completed', { text: 'Hi.' })
+  })
+
+  it('a call of another power the stop cut off still holds the work for the owner, as after any interruption', async () => {
+    await allowAll()
+    const work = await run('w1')
+    f.runs.tools.start({ invocationId: 'inv-edit', runId: work.payload.runId, attemptId: f.runs.getRun(work.payload.runId)!.activeAttemptId!, tool: 'edit', argsDigest: 'd', now: 'n', idempotent: false })
+    limit = { ...limit, shell: false }
+    f.bots.computerLimitChanged()
+    await finish(f, work.payload, 'interrupted', { outcome: { interruptedBy: 'bot_wall' } })
+    expect(f.store.activation(work.id)).toMatchObject({ status: 'paused', endReason: 'unknown_calls' })
+  })
+
+  it('a turn that finished before the stop reached it is done, with nothing carried on', async () => {
+    await allowAll()
+    const work = await run('w1')
+    limit = { ...limit, shell: false }
+    f.bots.computerLimitChanged()
+    await finish(f, work.payload, 'completed', { text: 'Done first.' })
+    expect(f.store.activation(work.id)!.status).toBe('done')
+    expect(f.store.dispatches(work.id).filter((dispatch) => dispatch.kind !== 'consult')).toHaveLength(1)
+  })
+
   it('About reads again when a switch changes, and not on other saves', () => {
     const changed = vi.fn()
     f.host.changed = changed

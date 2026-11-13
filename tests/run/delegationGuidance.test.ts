@@ -26,6 +26,7 @@ describe('subagent guidance', () => {
       - Continue the same subagent (continue_subagent, by title) when the next step builds on what it already read or did: fixing its findings, re-checking its own change, answering its question, the next iteration of the same work. It keeps its context, so this is faster and cheaper than starting over.
       - Start a new subagent (delegate_task) for independent work, a deliberately fresh or independent review, a different workspace, provider or model, or when the old subagent's context is wrong or too long. A title is unique among your subagents; delegate_task returns title_taken when one already exists, and then you continue it or choose another title.
       - The user cannot create subagents. When the user names one ("ask the API reviewer to ..."), use continue_subagent with that title.
+      - When the user asks for a model ("use <model> for the review"), call list_models, match the name to a model id there and pass instanceId, model and, when asked, effort. If it is not offered or not ready, tell the user why; never start it on another model instead.
       - Pick workspace "isolated" for work that edits, builds or tests; "shared" only for read-only roles (role "research" or "review").
       - After delegating or continuing, end your turn. Mousse sends you a notice with the result, so do not poll; call task_status only when the notice says the result was cut off.
       - Mousse never merges a subagent's work into your files. The notice of a finished task says where it worked, its base and result snapshots (SHAs kept under refs/mousse/) and the Git state it left (branch, HEAD, commits). Bring the work in yourself with git, for example \`git diff --binary <base> <result> | git apply --3way\` or \`git cherry-pick\` of its commits, and check the result.
@@ -87,7 +88,7 @@ describe('the delegation tools models are offered', () => {
     }))).toMatchInlineSnapshot(`
       [
         {
-          "description": "Start a new subagent on its own thread and return at once with its delegationId. Mousse sends you a notice with the result when it finishes. title is a short role-like name ("API reviewer"), unique among your subagents: it is how you address the subagent later (continue_subagent, task_status, task_cancel); when it is taken the call returns title_taken and starts nothing. workspace isolated gives the subagent its own worktree; shared is only for read-only roles (research, review). Mousse never merges a subagent's files into yours: the notice gives the base and result snapshots (pinned under refs/mousse/), where it worked and the Git state it left, and you bring the work in with git. instanceId (the agent to run, such as "claude" or "pi:openai") and model default to yours; provider is the older name form of instanceId. computer runs the subagent on another of the user's computers (a name from list_computers), in its copy of this repository and under its own agents; there instanceId and model default to that computer's, and maxMinutes (default 360) stops it if it runs longer. Its result names the branch its work is on there.",
+          "description": "Start a new subagent on its own thread and return at once with its delegationId. Mousse sends you a notice with the result when it finishes. title is a short role-like name ("API reviewer"), unique among your subagents: it is how you address the subagent later (continue_subagent, task_status, task_cancel); when it is taken the call returns title_taken and starts nothing. workspace isolated gives the subagent its own worktree; shared is only for read-only roles (research, review). Mousse never merges a subagent's files into yours: the notice gives the base and result snapshots (pinned under refs/mousse/), where it worked and the Git state it left, and you bring the work in with git. instanceId (the agent to run, such as "claude" or "pi:openai"), model and effort (its reasoning level) default to yours; take them from list_models, and pass effort only with model. A model or agent that is not offered, or is signed out, is refused with the reason and nothing starts: tell the user, never pick another yourself. provider is the older name form of instanceId. computer runs the subagent on another of the user's computers (a name from list_computers), in its copy of this repository and under its own agents; there instanceId and model default to that computer's, and maxMinutes (default 360) stops it if it runs longer. Its result names the branch its work is on there.",
           "name": "delegate_task",
           "parameters": [
             "prompt",
@@ -95,6 +96,7 @@ describe('the delegation tools models are offered', () => {
             "instanceId",
             "provider",
             "model",
+            "effort",
             "role",
             "workspace",
             "wake",
@@ -163,6 +165,14 @@ describe('the delegation tools models are offered', () => {
           "parameters": [],
           "required": [],
         },
+        {
+          "description": "List the agents and models you can start a subagent (delegate_task) or a thread (thread_create) on, as the model picker offers them: each entry's instanceId and name, whether it is ready (else why not), whether it can run subagents, and its models with their reasoning levels (effort). current is what you run on. Match the model the user names to a model id here; never guess ids. computer (a name from list_computers) lists that computer's instead, for delegate_task computer. Starts nothing.",
+          "name": "list_models",
+          "parameters": [
+            "computer",
+          ],
+          "required": [],
+        },
       ]
     `)
   })
@@ -189,7 +199,7 @@ describe('the delegation tools models are offered', () => {
         const mcpProperties = Object.keys((served.inputSchema as { properties: Record<string, unknown> }).properties)
         // The MCP server adds only what its callers need on top: a retry key, and a ceiling for delegate_task.
         expect(mcpProperties.filter((name) => !piProperties.includes(name)).sort()).toEqual(
-          tool.name === 'delegate_task' ? ['clientRequestId', 'modeCeiling'] : tool.name === 'list_subagents' || tool.name === 'list_computers' || tool.name === 'task_status' || tool.name === 'task_cancel' ? [] : ['clientRequestId']
+          tool.name === 'delegate_task' ? ['clientRequestId', 'modeCeiling'] : tool.name === 'list_subagents' || tool.name === 'list_computers' || tool.name === 'list_models' || tool.name === 'task_status' || tool.name === 'task_cancel' ? [] : ['clientRequestId']
         )
         expect(piProperties.every((name) => mcpProperties.includes(name))).toBe(true)
       }

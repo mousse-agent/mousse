@@ -175,12 +175,11 @@ export class SettingsStore {
   }
 
   set(update: MousseSettingsUpdate): MousseSettings {
-    // What bots may do on this computer is the installation's, written whole and checked before anything else is
-    // written: a value that is not exactly the three switches is refused, and nothing in the update is saved.
+    // What bots may do on this computer is the installation's: the switches the update names, checked before anything
+    // is written (anything else is refused and nothing in the update is saved), and put over the switches held now.
     const { bots, ...partial } = update as MousseSettingsUpdate & { bots?: unknown }
     const botsHere = Object.hasOwn(update, 'bots') ? botSettingsWrite(bots) : undefined
     if (Object.hasOwn(update, 'bots') && !botsHere) throw new Error(BOTS_HERE_SHAPE)
-    if (botsHere) this.config.setBotsHere(botsHere)
     const current = this.get()
     const merged = deepMerge(
       current as unknown as Record<string, unknown>,
@@ -217,7 +216,11 @@ export class SettingsStore {
       for (const [skillId, update] of skillModels) if (model[skillId] && update) model[skillId] = cleared(model[skillId]!, update)
       normalized.integrations = { ...normalized.integrations, skills: { ...normalized.integrations.skills, model } }
     }
-    this.config.applySettingsPatch(normalized)
+    // Saved whole or not at all: the switches go last, and a failure anywhere puts back what was already written.
+    this.config.atomically(() => {
+      if (!botsHere || Object.keys(partial).length) this.config.applySettingsPatch(normalized)
+      if (botsHere) this.config.setBotsHere(botsHere)
+    })
     for (const listener of savedListeners) {
       try { listener() } catch (error) { console.warn('[SettingsStore] a settings listener failed', error) }
     }

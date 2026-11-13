@@ -592,7 +592,8 @@ describe('a routed call runs as a person on another computer', () => {
     for (const method of [
       'files.writeDirect',
       'files.root',
-      'browser.sessions.list'
+      'browser.view.get',
+      'browser.view.hold'
     ])
       await expect(
         f

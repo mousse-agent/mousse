@@ -9,7 +9,7 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BOT_ASK_REFUSED_TEXT } from '../../src/mms/bots/activation/BotEngine'
-import { ClaudeLockedGate, claudeLockedSandbox, claudeLockedTools, claudeOwnStorage, claudeProjectName, type ClaudeLockedTurn } from '../../src/mms/harness/claude/locked'
+import { CLAUDE_TOPS_UNLISTED, claudeBotTemp, claudeCommandsRefusal, ClaudeLockedGate, claudeLockedOptions, claudeLockedSandbox, claudeLockedTools, claudeOwnStorage, claudeProjectName, type ClaudeLockedTurn } from '../../src/mms/harness/claude/locked'
 import { filesAsk } from '../../src/shared/bots/personal/escalation'
 import { CODEX_BOT_UNSANDBOXED_REFUSAL, codexBotCommand, codexBotFileChange } from '../../src/mms/harness/vendors/codex/botApprovals'
 import { CODEX_BOT_PROFILE, codexBotSandbox, codexBotSandboxConfig, codexTurnPolicy } from '../../src/mms/harness/vendors/codex/childPolicy'
@@ -196,7 +196,8 @@ describe('What bots may do here, at each runtime\'s own gate (the owner\'s Claud
     limit = { ...limit, shell: false }
     const { prepared, payload } = await run('r1')
     expect(claudeLockedTools({ authority: prepared.authority, shellContained: true }, false).tools).not.toContain('Bash')
-    expect(codexBotSandboxConfig(codexBotSandbox(prepared.authority))).toEqual({ 'features.shell_tool': false, 'features.unified_exec': false })
+    // Nor a tool that opens a file by its path without asking (what else Codex offers: codexBotTools.test.ts).
+    expect(codexBotSandboxConfig(codexBotSandbox(prepared.authority))).toMatchObject({ 'features.shell_tool': false, 'features.unified_exec': false, 'features.view_image': false })
     await finish(f, payload, 'completed', { text: 'Done.' })
   })
 
@@ -224,19 +225,66 @@ describe('What bots may do here, at each runtime\'s own gate (the owner\'s Claud
     // Codex on Linux and macOS: Mousse's permission profile, reading `:minimal`, writing only the bot's folders.
     const codex = codexBotSandbox(prepared.authority, '/opt/codex', 'linux')
     expect(codexTurnPolicy('default', undefined, 'ask', codex)).toEqual({ approvalPolicy: 'untrusted', permissions: CODEX_BOT_PROFILE })
-    expect(codexBotSandboxConfig(codex)).toEqual({
+    expect(codexBotSandboxConfig(codex)).toMatchObject({
       [`permissions.${CODEX_BOT_PROFILE}`]: { filesystem: { ':minimal': 'read', '/opt/codex': 'read', ...Object.fromEntries(mine.map((root) => [root, 'write'])) }, network: { enabled: false } }
     })
     // On Windows Codex keeps its workspace-write sandbox, which reads every file.
     expect(codexBotSandbox(prepared.authority, '/opt/codex', 'win32').confined).toBeUndefined()
-    // Claude Code on Linux: every top folder but the system's own is unreadable, and the home folder; the bot's folders are not.
+    // Claude Code on Linux: every top folder but the system's own is unreadable (`/run`, with removable drives and the
+    // user's runtime folder, included), and the home folder; the bot's folders are not. Claude Code's shared temporary
+    // folders, when the turn keeps its own elsewhere, are closed read and write.
     const tops = ['bin', 'boot', 'dev', 'etc', 'home', 'lib', 'lib64', 'media', 'mnt', 'opt', 'proc', 'root', 'run', 'sbin', 'snap', 'srv', 'sys', 'tmp', 'usr', 'var']
-    const linux = claudeLockedSandbox({ workspace, temps: ['/tmp'], home: '/home/owner', platform: 'linux', tops: () => tops }).filesystem!
-    expect([...linux.denyRead!].sort()).toEqual(['/boot', '/home', '/home/owner', '/media', '/mnt', '/opt', '/root', '/snap', '/srv', '/var'])
+    const linux = claudeLockedSandbox({ workspace, temps: ['/tmp'], home: '/home/owner', platform: 'linux', tops: () => tops, sharedTemp: ['/tmp/claude-1000'] }).filesystem!
+    expect([...linux.denyRead!].sort()).toEqual(['/boot', '/home', '/home/owner', '/media', '/mnt', '/opt', '/root', '/run', '/snap', '/srv', '/tmp/claude-1000', '/var'])
+    expect(linux.denyWrite).toEqual(expect.arrayContaining(['/tmp', '/tmp/claude-1000']))
     expect(linux.allowRead).toEqual(expect.arrayContaining(mine))
     expect(linux.allowWrite).toEqual(expect.arrayContaining(mine))
+    // `/` can't be listed: no sandbox is built with fewer folders closed; it throws instead (and the gate refuses, below).
+    expect(() => claudeLockedSandbox({ workspace, temps: ['/tmp'], home: '/home/owner', platform: 'linux', tops: () => { throw new Error('EACCES') } })).toThrow()
     // On macOS, the home folder only.
     expect(claudeLockedSandbox({ workspace, temps: [], home: '/Users/owner', platform: 'darwin', tops: () => tops }).filesystem!.denyRead).toEqual(['/Users/owner'])
+    await finish(f, payload, 'completed', { text: 'Done.' })
+  })
+
+  it('Claude Code on Linux when `/` can\'t be listed: every command is refused with a plain reason, and none runs with only the home folder closed', async () => {
+    limit = { ...limit, files: false }
+    const { prepared, payload } = await run('r1')
+    const unlisted = () => { throw new Error('EACCES') }
+    const reason = claudeCommandsRefusal(prepared.authority, 'linux', unlisted)
+    expect(reason).toBe(CLAUDE_TOPS_UNLISTED)
+    const turn: ClaudeLockedTurn = { authority: prepared.authority, ledger, cwd: prepared.authority.workspace!.files!, shellContained: true, temps: [], systemPrompt: '', commandsRefused: reason }
+    const gate = new ClaudeLockedGate(turn, true)
+    expect(gate.preToolUse('Bash', { command: 'ls' })).toEqual({ ok: false, reason: CLAUDE_TOPS_UNLISTED })
+    expect(gate.canUse('Bash', { command: 'ls' }, 'tu-1')).toEqual({ ok: false, reason: CLAUDE_TOPS_UNLISTED })
+    // The turn is still offered Bash, so the bot hears why; no sandbox is built for it.
+    const options = claudeLockedOptions(turn, { env: {}, mousseTools: false })
+    expect(options.tools).toContain('Bash')
+    expect(options.sandbox).toBeUndefined()
+    // Not refused where it doesn't apply: listable, another platform, or file access (whose sandbox closes Mousse's data only).
+    expect(claudeCommandsRefusal(prepared.authority, 'linux', () => ['usr'])).toBeUndefined()
+    expect(claudeCommandsRefusal(prepared.authority, 'darwin', unlisted)).toBeUndefined()
+    await finish(f, payload, 'completed', { text: 'Done.' })
+  })
+
+  it('Claude Code on Linux keeps a bot\'s own temporary files private only in a runtime folder under /run, which its sandbox closes; elsewhere the turn keeps Claude Code\'s shared one', async () => {
+    limit = { ...limit, files: false }
+    const { prepared, payload } = await run('r1')
+    const cwd = prepared.authority.workspace!.files!
+    // A runtime folder in the shared temporary folder is open to every bot: no private folder there.
+    expect(claudeBotTemp(prepared.authority, {}, cwd, 'linux', '/tmp/runtime-1000')).toBeUndefined()
+    expect(claudeBotTemp(prepared.authority, {}, cwd, 'linux', '')).toBeUndefined()
+    expect(claudeBotTemp(prepared.authority, {}, cwd, 'darwin', '/run/user/1000')).toBeUndefined()
+    // Where it is real (Linux with one), the folder is its own, short enough for Claude Code to give its commands, and
+    // the shared folders are the ones the sandbox closes (the real program: claudeMcpCommandLine.test.ts).
+    const runtime = process.platform === 'linux' ? process.env.XDG_RUNTIME_DIR : undefined
+    if (runtime?.startsWith('/run/')) {
+      const temp = claudeBotTemp(prepared.authority, { TMPDIR: '/var/tmp/x' }, cwd, 'linux', runtime)
+      if (temp) {
+        expect(temp.dir.startsWith(`${runtime}/mb`)).toBe(true)
+        expect(Buffer.byteLength(temp.dir)).toBeLessThanOrEqual(30)
+        expect(temp.shared).toEqual([`/tmp/claude-${process.getuid!()}`, `/var/tmp/x/claude-${process.getuid!()}`])
+      }
+    }
     await finish(f, payload, 'completed', { text: 'Done.' })
   })
 })

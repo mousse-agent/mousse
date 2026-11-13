@@ -54,6 +54,8 @@ export interface AgentThreadRequest {
   /** Both together name the thread's model; neither: the caller's own selection. */
   instanceId?: string
   model?: string
+  /** The model's reasoning level; needs `model`. Absent: its default. */
+  effort?: string
   firstMessage?: string
   /** Mode of the first message; defaults to agent. */
   mode?: 'agent' | 'plan'
@@ -72,7 +74,7 @@ export interface AgentCreatedThread {
    */
   runsIn: 'own_worktree' | 'project_folder'
   /** The model the thread runs; null: the profile's default. */
-  model: { instanceId: string; model: string } | null
+  model: { instanceId: string; model: string; effort?: string } | null
   /** The mode the thread's turns run in: no wider than the creator's. */
   permissionMode: PermissionMode
   /** The first message: what became of it. Absent when none was asked for. */

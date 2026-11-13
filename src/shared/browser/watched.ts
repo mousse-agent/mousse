@@ -110,6 +110,12 @@ export interface WatchedBrowserHold {
 }
 
 /** Why a view's hold ended without its Give back. */
+/** What a view asks of its hold: take it (`force`: from another view), say it is still there, or give it back. */
+export type WatchedBrowserHoldRequest =
+  | { op: 'take'; force?: boolean; platform?: 'mac' | 'other' }
+  | { op: 'renew'; holdId: string }
+  | { op: 'release'; holdId: string }
+
 export type WatchedBrowserHoldEnd = 'expired' | 'taken' | 'closed' | 'tab-closed'
 
 /** What one view is told of the browser: whether it is open, who holds it, and the followed tab. */

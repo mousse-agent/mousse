@@ -30,6 +30,8 @@ export interface BotChip {
   thread?: string
   /** The first line of what the bot sent to that thread, shown on the chip's hover. */
   said?: string
+  /** Details on hover: the model, entry and reasoning level of work on a model of its own. */
+  title?: string
 }
 
 export type BotAskStatus = 'open' | 'allowed' | 'not_now' | 'withdrawn'
@@ -131,6 +133,11 @@ export interface BotWorkItem {
   startedAt: string
   /** A scheduled run rather than work the chat started. */
   scheduled?: true
+  /**
+   * The model the owner asked for this work alone, when it is not the bot's usual one: `name` on the line ("Opus 5.5"),
+   * `detail` on hover ("Opus 5.5 on Claude Code, high reasoning, for this work only").
+   */
+  model?: { name: string; detail: string }
 }
 
 /** One thing a bot may use, in About → Can use. `id` is the permission's fingerprint. */

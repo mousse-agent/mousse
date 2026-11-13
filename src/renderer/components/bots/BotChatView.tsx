@@ -113,7 +113,7 @@ const WorkLine = memo(function WorkLine({ botId, item }: { botId: string; item: 
   return <li className={`bot-work-line${running ? ' is-running' : ''}`}>
     {running ? <Loader2 size={13} className="chat-spin" aria-hidden /> : <span className="bot-work-dot" aria-hidden />}
     <span className="bot-work-title">{item.title}</span>
-    <span className="bot-work-doing">{workDoing(item, chip)} · {workElapsed(item.startedAt, now)}</span>
+    <span className="bot-work-doing">{workDoing(item, chip)}{item.model && <> · <span className="bot-work-model" title={item.model.detail}>{item.model.name}</span></>} · {workElapsed(item.startedAt, now)}</span>
     <button type="button" aria-label={`Stop ${item.title}`} title="Stop" onClick={() => void useBotsStore.getState().stopWork(botId, item.id)}><X size={13} aria-hidden /></button>
   </li>
 })
@@ -258,7 +258,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   // The bot's own browser: the reply of the run whose tab it shows has a live preview, and Expand opens the split view.
   // Each watches the browser's pictures only while it is on screen.
   const browser = useBotBrowser(bot.id)
-  const paneOpen = useBotBrowserStore((s) => s.paneBotId === bot.id)
+  const paneOpen = useBotBrowserStore((s) => s.pane === bot.id)
   const browserRun = browser?.activationId ?? browser?.activations.at(-1)
   const previewOn = browserRun ? messages.filter((message) => message.author === 'bot' && message.activationId === browserRun).at(-1)?.id : undefined
   const preview = browser && browserRun ? <BotBrowserPreview bot={bot} view={browser} /> : null

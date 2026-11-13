@@ -13,6 +13,7 @@ import {
   type WatchedBrowserFrame,
   type WatchedBrowserHold,
   type WatchedBrowserHoldEnd,
+  type WatchedBrowserHoldRequest,
   type WatchedBrowserHolder,
   type WatchedBrowserInput,
   type WatchedBrowserRefusal,
@@ -100,10 +101,7 @@ export const BOTS_BROWSER_METHODS = ['bots.browser.get', 'bots.browser.control',
 export type BotsBrowserMethod = (typeof BOTS_BROWSER_METHODS)[number]
 
 /** What a view asks of its hold: take it (`force`: from another view), say it is still there, or give it back. */
-export type BotBrowserHoldRequest =
-  | { op: 'take'; force?: boolean; platform?: 'mac' | 'other' }
-  | { op: 'renew'; holdId: string }
-  | { op: 'release'; holdId: string }
+export type BotBrowserHoldRequest = WatchedBrowserHoldRequest
 
 export interface BotsBrowserApi {
   /** The browser's state; `frame: true` adds a fresh picture (kept for views that do not watch). `viewId`: who holds it, as this view sees it. */
