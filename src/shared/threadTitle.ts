@@ -1,8 +1,9 @@
-const DEFAULT_THREAD_NAMES = new Set(['New Thread', 'New Chat'])
+/** Lower case: phone builds up to 2026-11-13 created threads named "New thread". */
+const DEFAULT_THREAD_NAMES = new Set(['new thread', 'new chat'])
 
-/** True when the thread still has the auto-created empty-thread label. */
+/** True when the thread still has the auto-created empty-thread label, in any letter case. */
 export function isDefaultThreadName(name: string): boolean {
-  return DEFAULT_THREAD_NAMES.has(name.trim())
+  return DEFAULT_THREAD_NAMES.has(name.trim().toLowerCase())
 }
 
 /**
