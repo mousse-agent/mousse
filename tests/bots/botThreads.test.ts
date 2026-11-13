@@ -70,7 +70,10 @@ describe('"use your threads" in the bot engine', () => {
     expect(threadTools(owner.prepared.policy.tools!.allow)).toEqual(['thread_create', 'thread_interrupt', 'thread_list', 'thread_read', 'thread_search', 'thread_send', 'thread_wait'])
     expect(line(owner.prepared.instructions)).toMatch(/: yes: .*start, message or stop one when your owner's message asks for it/)
     expect(owner.prepared.instructions).toMatch(/A thread you start runs with full access/)
+    // The chip of the thread it started keeps that thread in the posted message, for its Open.
+    f.chips.set(f.store.dispatch(owner.activation.id, 1)!.clientRequestId, [{ icon: 'think', text: 'started thread', highlight: 'Fix the login page', thread: 't-new' }])
     await finish(f, owner.payload, 'completed', { text: 'Started it.' })
+    expect(chatOf(f, botId).at(-1)!.chips).toEqual([{ icon: 'think', text: 'started thread', highlight: 'Fix the login page', thread: 't-new' }])
 
     const work = await run('w1')
     expect(threadTools(work.prepared.policy.tools!.allow)).toEqual(['thread_list', 'thread_read', 'thread_search', 'thread_wait'])
