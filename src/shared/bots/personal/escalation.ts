@@ -1,7 +1,7 @@
 import { isNeutralTool } from '../../harness/tools'
 import { stableStringify } from '../../workflows/canonical'
 import { foldersOf, workspaceOf, type BotManifest } from './definition'
-import { BOT_BROWSER_PERMISSION, botGrantTool, isAbsolutePath } from './manifest'
+import { BOT_BROWSER_PERMISSION, BOT_THREADS_PERMISSION, botGrantTool, isAbsolutePath } from './manifest'
 
 /**
  * Walls and escalations of personal bots (PR 6 §5). A wall ends the dispatch and asks the owner:
@@ -189,6 +189,7 @@ export function filesAskOf<T extends BotAskRequest>(request: T): T {
 /** A permission request in plain words. */
 export function permissionText(permission: BotPermissionRequest): string {
   if ('tool' in permission && botGrantTool(permission.tool) === BOT_BROWSER_PERMISSION) return 'Use the browser'
+  if ('tool' in permission && botGrantTool(permission.tool) === BOT_THREADS_PERMISSION) return 'Use your threads'
   if ('tool' in permission) return `Use the tool \`${permission.tool}\``
   if ('path' in permission) return 'Use files on this computer'
   if ('skill' in permission) return `Use the skill *${permission.skill}*`

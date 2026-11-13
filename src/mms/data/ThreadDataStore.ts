@@ -90,6 +90,8 @@ interface ThreadMeta {
   lineage?: ThreadLineage
   /** The thread whose agent launched this one with `thread_create`; not a subagent relation. */
   createdByThreadId?: string
+  /** See `Thread.startedByBot`. */
+  startedByBot?: { botId: string; name: string }
   startedFrom?: ThreadStartedFrom
   /** See `Thread.sentFrom`. */
   sentFrom?: ThreadSentFrom
@@ -1204,6 +1206,8 @@ export class ThreadDataStore extends EventEmitter {
       ownerThreadId?: string
       /** Never `ownerThreadId`: a launched thread is neither nested under nor deleted with its creator. */
       createdByThreadId?: string
+      /** See `Thread.startedByBot`. */
+      startedByBot?: { botId: string; name: string }
       /** See `Thread.accessCeiling`. */
       accessCeiling?: AgentAccessLevel
       scheduledJobId?: string
@@ -1236,6 +1240,7 @@ export class ThreadDataStore extends EventEmitter {
     if (typeof opts?.worktreeEnabled === 'boolean') meta.worktreeEnabled = opts.worktreeEnabled
     if (opts?.lineage) meta.lineage = structuredClone(opts.lineage)
     if (opts?.createdByThreadId) meta.createdByThreadId = opts.createdByThreadId
+    if (opts?.startedByBot) meta.startedByBot = { botId: opts.startedByBot.botId, name: opts.startedByBot.name }
     if (isAgentAccessLevel(opts?.accessCeiling)) meta.accessCeiling = opts.accessCeiling
     if (opts?.modelOverride) meta.modelOverride = structuredClone(opts.modelOverride)
     if (opts?.permissionMode) meta.permissionMode = opts.permissionMode

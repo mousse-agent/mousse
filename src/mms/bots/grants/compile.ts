@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
 import { existsSync, readdirSync, realpathSync } from 'node:fs'
 import { foldersOf, type BotManifest, type BotThreadSpec } from '../../../shared/bots/personal/definition'
-import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest } from '../../../shared/bots/personal/manifest'
 import { BOT_MEMORY_TOOLS } from '../../../shared/bots/personal/memory'
 import { withinComputerLimit, type BotComputerLimit } from '../../../shared/bots/personal/computerLimit'
 import type { NeutralTool } from '../../../shared/harness/tools'
@@ -46,6 +46,8 @@ export interface BotPermissions {
   workspace: { roots: string[]; access: 'read' | 'write'; writeRoots?: string[]; scratch: string; files?: string; computer?: { closed: string } } | null
   /** "Use the browser": `appTools` holds the browser tools, on the bot's own browser. */
   browser?: true
+  /** "Use your threads": `appTools` holds the thread tools of this turn, to read (`read`) or also to start, message and stop (`all`). */
+  threads?: 'read' | 'all'
 }
 
 export interface CompileInput {
@@ -81,7 +83,18 @@ export interface CompileInput {
    * (`BOT_WORK_ONLY_TOOLS`, the browser, the owner's MCP tools), which its work runs with instead. The grant and its
    * digest stay the same: only what this turn is offered narrows.
    */
-  botTools?: { escalate: boolean; consult: boolean; memory?: boolean; frontDesk?: boolean }
+  botTools?: {
+    escalate: boolean
+    consult: boolean
+    memory?: boolean
+    frontDesk?: boolean
+    /**
+     * What "use your threads" gives this turn, when the grant holds it: `read` (list, search, read, wait: work, a
+     * reminder's work, a schedule, a chat turn the owner's message did not start), or `all`, which adds starting,
+     * messaging and stopping, only for a chat turn the owner's own message started. Absent: nothing (a consult).
+     */
+    threads?: 'read' | 'all'
+  }
   /**
    * What this computer lets bots do (Settings → What bots may do here): what it has switched off is taken out of the
    * thread's permissions before anything is compiled, whatever the grant holds. Absent: everything.
@@ -193,11 +206,15 @@ export function compileBotThread(input: CompileInput): CompileResult {
   const budget: NonNullable<BindPolicy['budget']> = { maxWallMs: deadlineMs }
   for (const key of ['maxTurns', 'maxToolCalls', 'maxInputTokens', 'maxOutputTokens', 'maxUsd'] as const)
     if (counts[key] !== undefined) budget[key] = counts[key]
-  // Granted skills come with the skill tools that list and load them; the browser is its tools.
+  // Granted skills come with the skill tools that list and load them; the browser is its tools, and the owner's threads
+  // are the thread tools this turn may use (none unless the caller says which).
   const browser = manifest.appTools.includes(BOT_BROWSER_PERMISSION)
+  const threads = manifest.appTools.includes(BOT_THREADS_PERMISSION) ? input.botTools?.threads : undefined
   const appTools = [...new Set([
-    ...manifest.appTools.filter((tool) => tool !== BOT_BROWSER_PERMISSION),
+    ...manifest.appTools.filter((tool) => tool !== BOT_BROWSER_PERMISSION && tool !== BOT_THREADS_PERMISSION),
     ...(browser ? BOT_BROWSER_TOOLS : []),
+    ...(threads ? BOT_THREAD_READ_TOOLS : []),
+    ...(threads === 'all' ? BOT_THREAD_ACT_TOOLS : []),
     ...(manifest.skills.length ? ['list_skills', 'load_skill'] : []),
     ...(input.botTools?.escalate ? ['escalate'] : []),
     ...(input.botTools?.consult ? ['consult'] : []),
@@ -222,6 +239,7 @@ export function compileBotThread(input: CompileInput): CompileResult {
       mcp,
       skills: [...new Set(manifest.skills)].sort(),
       ...(browser ? { browser: true as const } : {}),
+      ...(threads ? { threads } : {}),
       workspace: computer || files !== undefined
         ? {
             roots: computer ?? [],

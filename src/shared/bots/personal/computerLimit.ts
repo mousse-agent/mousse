@@ -1,7 +1,7 @@
 import type { BotComputerLimit } from '../../settings'
 import type { BotManifest } from './definition'
 import type { BotAskRequest } from './escalation'
-import { BOT_BROWSER_PERMISSION, botGrantTool } from './manifest'
+import { BOT_BROWSER_PERMISSION, BOT_THREADS_PERMISSION, botGrantTool } from './manifest'
 
 /**
  * What bots may do on this computer (Settings → Agents → What bots may do here, `settings.bots.here`, kept once for the
@@ -12,20 +12,24 @@ import { BOT_BROWSER_PERMISSION, botGrantTool } from './manifest'
 
 export type { BotComputerLimit }
 
-/** One switch: "Run commands" (`shell`), "Use files on this computer" (`files`), "Use the browser" (`browser`). */
+/**
+ * One switch: "Run commands" (`shell`), "Use files on this computer" (`files`), "Use the browser" (`browser`), "Use your
+ * threads" (`threads`).
+ */
 export type BotComputerSwitch = keyof BotComputerLimit
 
 /** Every switch on: what a computer allows until its owner changes it. */
-export const BOT_COMPUTER_OPEN: Readonly<BotComputerLimit> = Object.freeze({ shell: true, files: true, browser: true })
+export const BOT_COMPUTER_OPEN: Readonly<BotComputerLimit> = Object.freeze({ shell: true, files: true, browser: true, threads: true })
 
 /** Every switch off: what a bot gets here when the setting can't be read. */
-export const BOT_COMPUTER_SHUT: Readonly<BotComputerLimit> = Object.freeze({ shell: false, files: false, browser: false })
+export const BOT_COMPUTER_SHUT: Readonly<BotComputerLimit> = Object.freeze({ shell: false, files: false, browser: false, threads: false })
 
 /** Each switch in the owner's words, as an ask card and About name the permission. */
 export const BOT_COMPUTER_SWITCH_TITLES: Readonly<Record<BotComputerSwitch, string>> = Object.freeze({
   shell: 'run commands',
   files: 'use files on this computer',
-  browser: 'use the browser'
+  browser: 'use the browser',
+  threads: 'use your threads'
 })
 
 /** The short mark About shows beside a permission the bot holds that this computer has switched off. */
@@ -89,6 +93,7 @@ export function computerSwitchOf(permission: BotAskRequest | { tool: string }): 
   const tool = botGrantTool(permission.tool)
   if (tool === 'shell') return 'shell'
   if (tool === BOT_BROWSER_PERMISSION) return 'browser'
+  if (tool === BOT_THREADS_PERMISSION) return 'threads'
   return undefined
 }
 
@@ -100,14 +105,15 @@ export function switchedOff(limit: BotComputerLimit, permission: BotAskRequest |
 
 /**
  * `manifest` with what this computer has switched off taken out: commands (`shell`, wherever the grant keeps it),
- * file access (the workspace; the bot's files folder and scratch are not file access and stay), and the browser (the
- * permission and any of its tools). The same object when every switch is on.
+ * file access (the workspace; the bot's files folder and scratch are not file access and stay), the browser (the
+ * permission and any of its tools) and the owner's threads (the permission and any of their tools). The same object when
+ * every switch is on.
  */
 export function withinComputerLimit(manifest: BotManifest, limit: BotComputerLimit): BotManifest {
-  if (limit.shell && limit.files && limit.browser) return manifest
+  if (limit.shell && limit.files && limit.browser && limit.threads) return manifest
   const kept = (tool: string) => {
     const grant = botGrantTool(tool)
-    return !(grant === 'shell' && !limit.shell) && !(grant === BOT_BROWSER_PERMISSION && !limit.browser)
+    return !(grant === 'shell' && !limit.shell) && !(grant === BOT_BROWSER_PERMISSION && !limit.browser) && !(grant === BOT_THREADS_PERMISSION && !limit.threads)
   }
   return {
     ...manifest,

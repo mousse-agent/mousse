@@ -42,6 +42,7 @@ import { OrchestratorService } from './orchestrator/OrchestratorService'
 import { ProfileDatabase } from './run/db/ProfileDatabase'
 import { McpCredentials } from './run/mcp/McpCredentials'
 import { MousseMcpServer } from './run/mcp/MousseMcpServer'
+import { isPersonMessage } from './run/mcp/appTools/agentMessage'
 import { EffectWorker, type EffectWorkerFibres } from './run/EffectWorker'
 import { TERMINAL_RUN_STATUSES, type RunRecord, type ThreadEvent } from './run/types'
 import { Reconciler } from './run/Reconciler'
@@ -776,6 +777,8 @@ export class MmsProfileServices {
       // What bots may do on this computer (Settings → Agents): the installation's setting, the same for every profile,
       // read at every dispatch and call, never taken from a caller or another computer.
       computerLimit: () => this.config.botSettings().here,
+      // "Use your threads" removed: what the bot sent that has not started leaves its owner's threads.
+      threadsWithdrawn: (bot) => { this.orchestrator.withdrawBotThreadMessages(bot) },
       // The owner's MCP servers set up for the whole profile, through Mousse (`BotMcp`).
       ...(this.orchestrator.botMcp() ? { mcp: this.orchestrator.botMcp()! } : {})
     }, ({ store }) => {
@@ -1064,7 +1067,8 @@ export class MmsProfileServices {
     this.orchestrator.setAutomationTools({
       drafts: this.automationDrafts,
       isManagerThread: (threadId) => this.threads.getThread(threadId)?.automationManager === true,
-      personRequest: (threadId) => [...this.orchestrator.getMessages(threadId)].reverse().find((message) => message.role === 'user')?.content,
+      // The person's own latest message: never one an agent or a bot sent there.
+      personRequest: (threadId) => [...this.orchestrator.getMessages(threadId)].reverse().find((message) => isPersonMessage(message))?.content,
       managerWorkspace: () => automationManagerWorkspace(this.homeDir, this.automationManagerProjectId ? this.projects.getProject(this.automationManagerProjectId)?.path : undefined),
       botOf: (threadId) => this.personalBots?.tools.activationOf(threadId)?.botId,
       activationOf: (threadId) => this.personalBots?.tools.activationOf(threadId)?.activationId,

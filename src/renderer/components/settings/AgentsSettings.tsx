@@ -1,7 +1,7 @@
 import { findListedModel, modelLabel } from '../../../shared/modelChoice'
 import { resolveModelChoice } from '../../lib/modelChoice'
 import type { BotComputerLimit, IdleCompactionSetting, MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../../../shared/settings'
-import { BOTS_SHELL_TIP, BOTS_UNREADABLE_LINE, normalizeBotSettings, normalizeContextSettings, normalizeExperimentalSettings, oneShotProviderOptions } from '../../../shared/settings'
+import { BOTS_SHELL_TIP, BOTS_THREADS_TIP, BOTS_UNREADABLE_LINE, normalizeBotSettings, normalizeContextSettings, normalizeExperimentalSettings, oneShotProviderOptions } from '../../../shared/settings'
 import { Select, type SelectOption } from '../ui/Select'
 import type { Project } from '../../../shared/types'
 import type { InstanceSnapshot } from '../../../shared/harness/status'
@@ -70,7 +70,8 @@ function CacheTimeRow() {
 const BOT_SWITCHES: ReadonlyArray<{ key: keyof BotComputerLimit; title: string; anchor: string; tip?: string }> = [
   { key: 'shell', title: 'Run commands', anchor: 'agents-bots-shell', tip: BOTS_SHELL_TIP },
   { key: 'files', title: 'Use files on this computer', anchor: 'agents-bots-files' },
-  { key: 'browser', title: 'Use the browser', anchor: 'agents-bots-browser' }
+  { key: 'browser', title: 'Use the browser', anchor: 'agents-bots-browser' },
+  { key: 'threads', title: 'Use your threads', anchor: 'agents-bots-threads', tip: BOTS_THREADS_TIP }
 ]
 
 /**

@@ -320,6 +320,13 @@ export interface AgentAccessSettings {
    * chosen here.
    */
   computers: string[]
+  /**
+   * The stored project list was present but could not be read. Ordinary agents fall back to `lineage` (which reaches no
+   * other thread); a bot with "use your threads", which the level does not hold, reaches no project at all. Kept on
+   * every later write, so a save of something else never turns the empty list into "every project"; cleared (written
+   * as false, which reads as absent) when the owner chooses other projects (`SettingsStore.set`). Only true counts.
+   */
+  projectsUnreadable?: boolean
 }
 
 const AGENT_ACCESS_LEVELS: readonly AgentAccessLevel[] = ['lineage', 'read', 'manage']
@@ -352,13 +359,15 @@ export function normalizeAgentAccessSettings(raw?: Partial<AgentAccessSettings> 
   const nodes: unknown = raw?.computers
   const computers = Array.isArray(nodes) && nodes.every((node) => typeof node === 'string' && node.length > 0) ? [...new Set(nodes as string[])] : []
   const remoteSubagents = raw?.remoteSubagents === true
-  if (malformed) return { level: 'lineage', projectIds: [], answerApprovals: false, remoteSubagents, computers }
+  if (malformed) return { level: 'lineage', projectIds: [], answerApprovals: false, remoteSubagents, computers, projectsUnreadable: true }
   const level = isAgentAccessLevel(raw?.level) ? raw.level : 'lineage'
   return {
     level,
     projectIds: Array.isArray(ids) ? [...new Set(ids as string[])] : [],
     remoteSubagents,
     computers,
+    // Once unreadable, still unreadable for bots until the owner chooses the projects again.
+    ...(raw?.projectsUnreadable === true ? { projectsUnreadable: true as const } : {}),
     // Answering approvals is part of Manage. Below it the switch reads, and is saved, as off, whoever wrote the
     // level (the Settings screen, a partial update from another client, a hand edit), so raising the level
     // again never brings the permission back by itself.
@@ -441,6 +450,12 @@ export interface BotComputerLimit {
   files: boolean
   /** "Use the browser" (the bot's own browser). */
   browser: boolean
+  /**
+   * "Use your threads": a bot may read the owner's threads, start threads (which run in Full access) and message them.
+   * Off, no bot here holds it whatever its grant says, which is what keeps a computer where bots must not run commands
+   * that way: a thread a bot starts runs commands without asking.
+   */
+  threads: boolean
 }
 
 export interface BotSettings {
@@ -452,8 +467,18 @@ export interface BotSettings {
   unreadable?: true
 }
 
-/** Every switch of What bots may do here: what a stored value must hold, and the only keys a write may name. */
-const BOT_SWITCH_KEYS: ReadonlyArray<keyof BotComputerLimit> = ['shell', 'files', 'browser']
+/** Every switch of What bots may do here, in the order Settings shows them: what a stored value must hold, and the only keys a write may name. */
+export const BOT_SWITCH_KEYS: ReadonlyArray<keyof BotComputerLimit> = ['shell', 'files', 'browser', 'threads']
+
+/**
+ * Switches added after the setting was first saved: a stored value without one of them was written before it existed,
+ * so it reads as on (its default), never as unreadable. Present and not a boolean still fails closed.
+ */
+const BOT_SWITCHES_ADDED_LATER: ReadonlySet<keyof BotComputerLimit> = new Set(['threads'])
+
+/** The Use your threads switch's tooltip: what a bot can do through a thread, whatever the other switches say. */
+export const BOTS_THREADS_TIP =
+  'A thread a bot starts runs with full access, so it can run commands and change files even with Run commands and Use files off. Switch this off to keep bots from that here.'
 
 /** Settings' one line beside the switches while the stored setting can't be read (`BotSettings.unreadable`). */
 export const BOTS_UNREADABLE_LINE = "All off: the saved setting couldn't be read. Switch on what bots may use."
@@ -485,23 +510,29 @@ export function botSettingsWrite(value: unknown): Partial<BotComputerLimit> | un
   return Object.fromEntries(named) as Partial<BotComputerLimit>
 }
 
-/** The three switches, when `value` is exactly an object holding each as a boolean; undefined otherwise. */
+/**
+ * The switches, when `value` is an object holding each as a boolean; undefined otherwise. A switch added after the
+ * setting was first saved (`threads`) reads as on when it is missing, since the value was written before it existed.
+ */
 export function botComputerLimitOf(value: unknown): BotComputerLimit | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
   const here = value as Record<string, unknown>
-  if (!BOT_SWITCH_KEYS.every((key) => typeof here[key] === 'boolean')) return undefined
-  return Object.fromEntries(BOT_SWITCH_KEYS.map((key) => [key, here[key]])) as unknown as BotComputerLimit
+  const read = (key: keyof BotComputerLimit): boolean | undefined =>
+    typeof here[key] === 'boolean' ? here[key] as boolean : here[key] === undefined && BOT_SWITCHES_ADDED_LATER.has(key) ? true : undefined
+  const switches = Object.fromEntries(BOT_SWITCH_KEYS.map((key) => [key, read(key)])) as Record<keyof BotComputerLimit, boolean | undefined>
+  if (BOT_SWITCH_KEYS.some((key) => switches[key] === undefined)) return undefined
+  return switches as BotComputerLimit
 }
 
 /**
  * The stored setting (the raw top-level `bots` value) as the daemon reads it. Missing (an install that never set it):
- * every switch on, so existing installs keep what they had. Present but not `{ here: { shell, files, browser } }` with
- * three booleans, or marked unreadable (written after an unreadable settings file was replaced): every switch off. A
- * ceiling that can't be read fails closed.
+ * every switch on, so existing installs keep what they had. Present but not `{ here: { shell, files, browser, threads } }`
+ * with booleans (`threads` may be missing: it was added later), or marked unreadable (written after an unreadable settings
+ * file was replaced): every switch off. A ceiling that can't be read fails closed.
  */
 export function normalizeBotSettings(raw: unknown): BotSettings {
-  if (raw === undefined) return { here: { shell: true, files: true, browser: true } }
-  const shut: BotSettings = { here: { shell: false, files: false, browser: false }, unreadable: true }
+  if (raw === undefined) return { here: { shell: true, files: true, browser: true, threads: true } }
+  const shut: BotSettings = { here: { shell: false, files: false, browser: false, threads: false }, unreadable: true }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return shut
   const stored = raw as Record<string, unknown>
   if (stored.unreadable !== undefined) return shut

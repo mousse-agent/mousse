@@ -439,6 +439,25 @@ export class RunStore {
       .map(toReceipt)
   }
 
+  /**
+   * How many receipts of `commandKind` have a request id that starts with `prefix` (a range over the primary key): a
+   * bot's starts and messages of one chat turn, whose request ids name the turn.
+   */
+  countReceipts(prefix: string, commandKind: string): number {
+    const row = this.db
+      .statement('SELECT COUNT(*) AS n FROM receipts WHERE client_request_id >= ? AND client_request_id < ? AND command_kind = ?')
+      .get(prefix, `${prefix}￿`, commandKind) as { n?: number } | undefined
+    return Number(row?.n ?? 0)
+  }
+
+  /** The threads the receipts of `commandKind` whose request id starts with `prefix` were made in, oldest first. */
+  receiptThreads(prefix: string, commandKind: string): string[] {
+    return this.db
+      .statement('SELECT thread_id FROM receipts WHERE client_request_id >= ? AND client_request_id < ? AND command_kind = ? GROUP BY thread_id ORDER BY MIN(created_at)')
+      .all(prefix, `${prefix}￿`, commandKind)
+      .map((row) => String((row as { thread_id: unknown }).thread_id))
+  }
+
   /** The thread has an `agent.action` event of this action (the completion marker of a thread an agent created). */
   hasAgentAction(threadId: string, action: string): boolean {
     return Boolean(

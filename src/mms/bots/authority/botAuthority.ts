@@ -3,7 +3,7 @@ import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { ActiveTimeScope, BotAllowedObserver, BotAuthority, BotThreadRole, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
 import { BOT_COMPUTER_OPEN, type BotComputerLimit } from '../../../shared/bots/personal/computerLimit'
-import { BOT_BROWSER_PERMISSION, botGrantTool } from '../../../shared/bots/personal/manifest'
+import { BOT_BROWSER_PERMISSION, BOT_THREADS_PERMISSION, botGrantTool } from '../../../shared/bots/personal/manifest'
 import type { CounterScope } from '../../../shared/harness/counters'
 import type { SpendScope } from '../../../shared/harness/spend'
 import type { NeutralTool } from '../../../shared/harness/tools'
@@ -113,6 +113,8 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
       case 'app':
         // The browser switched off on this computer: none of its tools runs, whatever the grant holds.
         if (!limit.browser && botGrantTool(call.tool) === BOT_BROWSER_PERMISSION) return { ok: false, wall: { kind: 'computer', tool: call.tool, off: 'browser' } }
+        // The owner's threads switched off on this computer: no thread tool runs, whatever the grant or this turn holds.
+        if (!limit.threads && botGrantTool(call.tool) === BOT_THREADS_PERMISSION) return { ok: false, wall: { kind: 'computer', tool: call.tool, off: 'threads' } }
         return appTools.has(call.tool) ? { ok: true } : { ok: false, wall: { kind: 'tool', tool: call.tool } }
       case 'builtin':
         return checkBuiltin(call.tool, call.nativeName, call.args, limit, call.own)

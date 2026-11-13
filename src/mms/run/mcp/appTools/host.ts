@@ -258,6 +258,11 @@ export interface AppToolHost extends DelegationToolsHost {
   /** The profile's projects. */
   listProjects?(): Array<{ id: string; name: string }>
   /**
+   * The models a thread can run on now, by provider entry (what the composer's picker lists for this computer), for a
+   * bot that starts a thread ("use your threads"): it names one with `instanceId` and `model`.
+   */
+  threadModels?(): Array<{ instanceId: string; entry: string; model: string; name: string }>
+  /**
    * Matches over thread names, project names and messages; subagent threads are not searched. `allow`
    * (which threads the caller may see) and `titlesOnly` are applied before the limit and before any
    * transcript is read.
@@ -273,7 +278,7 @@ export interface AppToolHost extends DelegationToolsHost {
    * The transcript row that shows an `agent.action` event the engine already wrote in its own transaction
    * ("Changed by an agent in thread …"). Never writes the event; only the call that made the change adds it.
    */
-  showAgentAction?(target: { threadId: string }, actor: AgentActor, summary: string): void
+  showAgentAction?(target: { threadId: string }, actor: AgentActor, summary: string, options?: { notice?: boolean }): void
   /**
    * Sends `content` to another thread as `actor`'s message (`thread_send`): labelled as an agent's, run under
    * the caller's permission mode when that is stricter than the thread's, queued behind a running turn, never

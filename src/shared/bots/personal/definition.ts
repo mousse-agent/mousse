@@ -2,6 +2,7 @@ import type { NeutralTool } from '../../harness/tools'
 import type { ProviderSelection } from '../../harness/types'
 import type { BotEscalationSummary } from './escalation'
 import type { BotLook } from './look'
+import type { PermissionMode } from '../../permissionMode'
 
 /**
  * A personal bot (PR 6 §4): a role, the thread it works in on each activation, and the permissions
@@ -258,8 +259,17 @@ export const MAX_BOT_SCHEDULES = 8
  * What started an activation: the Bots tab or a schedule occurrence. Activations saved by older
  * builds may carry other kinds (the removed Channels feature); they are read like these, by `input`.
  */
+/**
+ * Where the owner wrote from in a chat turn ("use your threads"): `limit`, the narrowest permission limit of another
+ * device whose message started or continued the turn (a phone or computer held below Full access). What the bot starts
+ * or messages in that turn is held to it. Absent: the owner wrote in this computer's own window. Older builds ignore it.
+ */
+export interface BotOwnerTurn {
+  limit?: PermissionMode
+}
+
 export type BotActivationTrigger =
-  | { kind: 'manual'; input: string }
+  | { kind: 'manual'; input: string; owner?: BotOwnerTurn }
   | { kind: 'schedule'; input: string; scheduleId: string; occurrenceAt: string }
   /**
    * Work the chat handed off (`work_start`) or a reminder started (docs/plans/bot-always-free.md): a run beside the

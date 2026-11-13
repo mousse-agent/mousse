@@ -33,7 +33,8 @@ export const AGENT_ACCESS_LEVELS: ReadonlyArray<{ value: AgentAccessLevel; label
 /** Threads whose level stays lower than the setting, whatever it says (SPEC §15.1, static ceiling). */
 export const CAPPED_THREADS: ReadonlyArray<{ id: string; label: string; cap: string }> = [
   { id: 'remote', label: 'Threads driven by a remote send, such as from a linked phone', cap: 'Lineage only' },
-  { id: 'bots', label: 'Bot threads', cap: 'Lineage only' },
+  // A bot reaches the owner's threads only through its own permission, "Use your threads", never through this setting.
+  { id: 'bots', label: 'Bot threads, unless allowed "Use your threads"', cap: 'Lineage only' },
   { id: 'plan', label: 'Turns in Plan mode, and read-only subagents', cap: 'Read at most' }
 ]
 
@@ -65,20 +66,24 @@ export function AgentAccessSettings({
   const toggleComputer = (node: string) =>
     save({ computers: access.computers.includes(node) ? access.computers.filter((entry) => entry !== node) : [...access.computers, node] })
 
-  // Always the whole setting: a partial write must not drop the project list or the approvals switch.
-  const save = (next: Partial<typeof access>) => void updateSettings({ agentAccess: { ...access, ...next } })
+  // Always the whole setting: a partial write must not drop the project list or the approvals switch. The mark of an
+  // unreadable list is the daemon's: only choosing projects here clears it.
+  const { projectsUnreadable, ...stored } = access
+  const save = (next: Partial<typeof access>) => void updateSettings({ agentAccess: { ...stored, ...next } })
+  const chooseProjects = (projectIds: string[]) => save({ projectIds, ...(projectsUnreadable ? { projectsUnreadable: false } : {}) })
 
-  const everyProject = access.projectIds.length === 0
+  // A list that could not be read is no project, not every project.
+  const everyProject = access.projectIds.length === 0 && !projectsUnreadable
   const known = new Set(projects.map((project) => project.id))
   // Listed projects that no longer exist stay visible so the person can remove them.
   const removed = access.projectIds.filter((id) => !known.has(id))
 
   const toggleProject = (id: string) => {
-    if (everyProject) return save({ projectIds: [id] })
-    if (!access.projectIds.includes(id)) return save({ projectIds: [...access.projectIds, id] })
+    if (everyProject) return chooseProjects([id])
+    if (!access.projectIds.includes(id)) return chooseProjects([...access.projectIds, id])
     // The last project stays: an empty list would widen the limit to every project.
     if (access.projectIds.length === 1) return
-    save({ projectIds: access.projectIds.filter((entry) => entry !== id) })
+    chooseProjects(access.projectIds.filter((entry) => entry !== id))
   }
 
   /** One project or computer: its name and a switch, under the row it refines. */
@@ -122,16 +127,19 @@ export function AgentAccessSettings({
             />
           }
         />
-        {access.level !== 'lineage' && (
+        {/* Shown at any level while the saved list can't be read: bots with "Use your threads" follow it at every level. */}
+        {(access.level !== 'lineage' || projectsUnreadable) && (
           <>
             <SettingsRow
               title="Projects"
-              description={everyProject
-                ? 'Every project, including threads without a project. Turn on a project to limit this.'
-                : `Only the projects turned on. New projects are not added. ${lastProject}`}
+              description={projectsUnreadable
+                ? "Couldn't read the saved list. Bots reach no project until you turn one on."
+                : everyProject
+                  ? 'Every project, including threads without a project. Turn on a project to limit this.'
+                  : `Only the projects turned on. New projects are not added. ${lastProject}`}
             />
             {/* Every project is widened to by its own switch; it is turned off by turning on a project. */}
-            {choiceRow('project', '*', 'All projects', everyProject, () => { if (!everyProject) save({ projectIds: [] }) },
+            {choiceRow('project', '*', 'All projects', everyProject, () => { if (!everyProject) chooseProjects([]) },
               everyProject ? 'Turn on a project to limit access to it.' : undefined)}
             {projects.map((project) =>
               choiceRow('project', project.id, project.name, !everyProject && access.projectIds.includes(project.id), () => toggleProject(project.id),

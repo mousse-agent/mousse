@@ -16,7 +16,7 @@ import { compileBotThread, botManifestDigest } from '../../src/mms/bots/grants/c
 import { askFingerprintOf } from '../../src/mms/bots/chat/projection'
 import { ToolRegistry } from '../../src/mms/run/mcp/appTools/registry'
 import type { MousseTool } from '../../src/mms/run/mcp/appTools/types'
-import { BOT_APP_TOOLS, BOT_AUTOMATION_APP_TOOLS, BOT_BROWSER_TOOLS, BOT_WORK_TOOLS, botMayBeOffered, botStarterManifest } from '../../src/shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_AUTOMATION_APP_TOOLS, BOT_BROWSER_TOOLS, BOT_THREAD_TOOLS, BOT_WORK_TOOLS, botMayBeOffered, botStarterManifest } from '../../src/shared/bots/personal/manifest'
 import { withPermission } from '../../src/shared/bots/personal/escalation'
 import type { BotManifest } from '../../src/shared/bots/personal/definition'
 import { botFixture, createBot, finish, start, type BotFixture } from './botFixture'
@@ -158,20 +158,21 @@ describe('the stated permissions match the tools a run is given', () => {
     })
 
   it('the text says yes or no for each permission, in plain words', () => {
-    const text = botAllowedText({ files: false, shell: true, browser: true, web: true, skills: [], automation: [] }, 'run', true)
+    const text = botAllowedText({ files: false, shell: true, browser: true, threads: false, web: true, skills: [], automation: [] }, 'run', true)
     expect(text.split('\n')).toEqual([
       'What your owner allows now (current; it replaces anything said earlier in this chat)',
       '- Search the web and read pages: yes',
       '- Use files on this computer: no, only your files folder',
       '- Run commands: yes',
       "- Use the browser (your own): yes, but it can't open on this run",
+      "- Use your owner's threads: no",
       '- Skills: none',
       '- Automation tools: none',
       "- Your owner's MCP servers: none yet (mcp_servers lists the ones you can ask for)",
       'Use what is allowed without asking. Ask with escalate only for something marked no.'
     ])
     // The servers it holds tools of, by name; the chat is told they are its work's.
-    const chat = botAllowedText({ files: false, shell: false, browser: false, web: true, skills: [], automation: [], mcp: ['GitHub', 'Notes'] }, 'chat')
+    const chat = botAllowedText({ files: false, shell: false, browser: false, threads: false, web: true, skills: [], automation: [], mcp: ['GitHub', 'Notes'] }, 'chat')
     expect(chat).toContain("- Your owner's MCP servers: GitHub, Notes")
     expect(chat).toContain('In the chat, the web, the browser, commands and MCP tools are for your work: hand jobs that need them to work_start.')
   })
@@ -211,9 +212,10 @@ describe("a bot's thread lists only tools a bot can hold", () => {
   const tool = (name: string): MousseTool => ({ name, description: name, inputSchema: { type: 'object', properties: {} }, access: 'reads', class: 'read', handler: async () => ({ text: '' }) }) as unknown as MousseTool
   const names = ['delegate_task', 'thread_read', 'queue_enqueue', 'browser_open', 'browser_request_human', 'web_fetch', 'work_start', 'escalate']
 
-  it('lists no delegation or thread tools on a bot thread, and every tool on any other', () => {
+  it('lists no delegation or queue tools on a bot thread, only the thread tools "use your threads" gives, and every tool on any other', () => {
     const registry = new ToolRegistry({ activeRunId: () => null, botRole: (threadId) => (threadId === 'bot-home' ? 'activation' : undefined) })
     for (const name of names) registry.register(tool(name))
+    // The thread tools only for a turn that holds them (tests/run/botThreadTools.test.ts): with no turn here, none.
     expect(registry.listForThread('bot-home').map((entry) => entry.name).sort()).toEqual(['browser_open', 'escalate', 'web_fetch', 'work_start'])
     expect(registry.listForThread('other').map((entry) => entry.name).sort()).toEqual([...names].sort())
     expect(registry.isBotThread('bot-home')).toBe(true)
@@ -247,8 +249,9 @@ describe("a bot's thread lists only tools a bot can hold", () => {
   })
 
   it('a bot can hold every grantable tool, the browser tools and the work tools', () => {
-    for (const name of [...BOT_APP_TOOLS].filter((name) => name !== 'browser')) expect(botMayBeOffered(name), name).toBe(true)
-    for (const name of [...BOT_BROWSER_TOOLS, ...BOT_WORK_TOOLS, 'consult', 'list_skills', 'load_skill']) expect(botMayBeOffered(name), name).toBe(true)
-    for (const name of ['delegate_task', 'thread_read', 'browser_request_human', 'browser']) expect(botMayBeOffered(name), name).toBe(false)
+    for (const name of [...BOT_APP_TOOLS].filter((name) => name !== 'browser' && name !== 'threads')) expect(botMayBeOffered(name), name).toBe(true)
+    for (const name of [...BOT_BROWSER_TOOLS, ...BOT_THREAD_TOOLS, ...BOT_WORK_TOOLS, 'consult', 'list_skills', 'load_skill']) expect(botMayBeOffered(name), name).toBe(true)
+    // A permission's name is no tool, and nothing a bot could steer, queue or answer with is offered.
+    for (const name of ['delegate_task', 'thread_steer', 'approval_respond', 'queue_enqueue', 'thread_fork', 'browser_request_human', 'browser', 'threads']) expect(botMayBeOffered(name), name).toBe(false)
   })
 })

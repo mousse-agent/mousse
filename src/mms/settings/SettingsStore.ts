@@ -192,6 +192,11 @@ export class SettingsStore {
     if (namesModel(partial.provider))
       merged.provider = { ...merged.provider, effort: partial.provider!.effort || undefined, name: partial.provider!.name || undefined }
     const normalized = normalizeSettings(merged)
+    // A project list that could not be read stays marked until the owner chooses the projects again (Settings sends
+    // `projectsUnreadable: false` with that choice): any other save, a change of level included, keeps the mark. Written
+    // as false, since a key left out is never removed on disk.
+    if (partial.agentAccess?.projectsUnreadable === false && current.agentAccess.projectsUnreadable === true)
+      normalized.agentAccess = { ...normalized.agentAccess, projectsUnreadable: false }
     // The providers section is replaced key by key on disk: a cleared level or name is written as
     // an absent key, so it must be there to overwrite the stored one.
     if (namesModel(partial.provider)) normalized.provider = { ...normalized.provider, effort: normalized.provider.effort, name: normalized.provider.name }

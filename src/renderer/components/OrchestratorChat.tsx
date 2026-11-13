@@ -78,6 +78,7 @@ import { localProjectsOf } from '../hooks/useLocalProjects'
 import { localDeviceName, runOnLabel } from './sideCard/deviceMenu'
 import { ComputerNotice } from './ComputerNotice'
 import { ThreadComputerBar } from './ThreadComputerBar'
+import { ThreadStartedByBar } from './ThreadStartedByBar'
 import { ThreadModeBar } from './ThreadModeBar'
 import { EarlierMessagesBar } from './EarlierMessagesBar'
 import { forgetMessageImageRequests, hydrateMessageImages } from '../lib/messageImages'
@@ -1698,6 +1699,7 @@ export function OrchestratorChat() {
       {emptyThread && <AmbientGlow />}
       <SubagentParentBar />
       <ThreadComputerBar />
+      <ThreadStartedByBar />
       <ThreadModeBar />
       <EarlierMessagesBar />
       <ThreadMoveBanner instanceId={selectedInstanceId ?? providers.find((entry) => entry.id === selectedProviderId)?.instanceId} snapshots={providerSnapshots} />

@@ -5,7 +5,8 @@ import { MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS } from '../../../shared/b
 import type { BotLook } from '../../../shared/bots/personal/look'
 import type { BotMemoryForgetResult, BotMemoryListing } from '../../../shared/bots/personal/memory'
 import { MAX_BOT_CHAT_ATTACHMENTS, MAX_BOT_CHAT_PAGE, type BotsPersonalV2Api } from '../../../shared/bots/personal/methods'
-import type { RpcMethod } from '../../net/contracts'
+import type { RpcContext, RpcMethod } from '../../net/contracts'
+import type { PermissionMode } from '../../../shared/permissionMode'
 import { canonicalJson } from '../../net/sync/codec'
 import { isBotId } from '../../bots/definitions/BotDefinitionStore'
 
@@ -41,11 +42,11 @@ export type RemoteBotMethod = keyof typeof REMOTE_BOT_METHODS
 export interface RemoteBotsPort {
   get(botId: string): BotDetail
   chatList(botId: string, page?: { beforeSeq?: number; limit?: number }): BotsPersonalV2Api['bots.chat.list']['result']
-  chatSend(input: { botId: string; text: string; clientRequestId: string; replyTo?: string }): Promise<{ message: BotChatMessage }>
+  chatSend(input: { botId: string; text: string; clientRequestId: string; replyTo?: string; from?: { limit: PermissionMode } }): Promise<{ message: BotChatMessage }>
   chatStop(botId: string): Promise<Record<string, never>>
   workStop(botId: string, workId: string): Promise<{ stopped: boolean }>
   markRead(botId: string, seq: number): Record<string, never>
-  askKind(botId: string, askId: string): 'permission' | 'export_memory'
+  askKind(botId: string, askId: string): 'permission' | 'export_memory' | 'threads'
   answer(botId: string, askId: string, answer: 'allow' | 'not_now'): Promise<{ message: BotChatMessage }>
   pause(botId: string): { bot: BotSummary }
   resume(botId: string): Promise<{ bot: BotSummary }>
@@ -355,7 +356,20 @@ export function remoteBotMethods(options: {
    * words never cross the wire).
    */
   refusal?(): string | undefined
+  /**
+   * The most this computer lets the calling device run a turn in (Settings, Devices). A message from it holds what the
+   * bot starts or messages in that chat turn to it, and its Allow of "use your threads" needs Full access. Absent: the
+   * strictest, Ask.
+   */
+  deviceLimit?(node: string): PermissionMode
 }): RpcMethod[] {
+  const limitOf = (context: RpcContext): PermissionMode => {
+    try {
+      return options.deviceLimit?.(context.caller.node) ?? 'ask'
+    } catch {
+      return 'ask'
+    }
+  }
   const shared = (): void => {
     const words = options.refusal?.()
     if (words) throw new NetError('forbidden', words, { details: { reason: 'setting_off' } })
@@ -374,7 +388,7 @@ export function remoteBotMethods(options: {
   }
   const method = (
     name: RemoteBotMethod,
-    handle: (p: Record<string, unknown>, port: RemoteBotsPort) => Promise<unknown>,
+    handle: (p: Record<string, unknown>, port: RemoteBotsPort, context: RpcContext) => Promise<unknown>,
     extra: Partial<RpcMethod> = {}
   ): RpcMethod => ({
     method: name,
@@ -385,25 +399,25 @@ export function remoteBotMethods(options: {
     validate: (value) => validateRemoteBotParams(name, value),
     authorize: (value) => known(value),
     ...extra,
-    handle: async (value) => {
+    handle: async (value, context) => {
       const p = value as Record<string, unknown>
       const port = bots()
       // A read refuses plainly whatever happens; a change refused after it started is reported as it is.
       if (!REMOTE_BOT_METHODS[name].mutating) {
         try {
-          return await handle(p, port)
+          return await handle(p, port, context)
         } catch (error) {
           refusal(error)
         }
       }
-      return handle(p, port)
+      return handle(p, port, context)
     }
   })
   /** For a new call only (a retry of one that went through gets its saved result): `check` refuses plainly. */
-  const first = (check: (p: Record<string, unknown>, port: RemoteBotsPort) => void): Partial<RpcMethod> => ({
-    authorizeNew: (value) => {
+  const first = (check: (p: Record<string, unknown>, port: RemoteBotsPort, context: RpcContext) => void): Partial<RpcMethod> => ({
+    authorizeNew: (value, context) => {
       const p = value as Record<string, unknown>
-      refusing(() => check(p, bots()))
+      refusing(() => check(p, bots(), context))
     }
   })
   const gone = (what: string): never => {
@@ -424,13 +438,14 @@ export function remoteBotMethods(options: {
       imagePart(port.attachmentFile(botId(p), p.messageId as string, p.index as number), (p.offset as number | undefined) ?? 0)
     ),
     method('bots.memory.list', async (p, port) => port.memoryList(botId(p))),
-    method('bots.chat.send', async (p, port) => {
+    method('bots.chat.send', async (p, port, context) => {
       // A retry with the same `clientRequestId` returns the first message and adds no second one.
       const { message } = await port.chatSend({
         botId: botId(p),
         text: p.text as string,
         clientRequestId: p.clientRequestId as string,
-        ...(typeof p.replyTo === 'string' ? { replyTo: p.replyTo } : {})
+        ...(typeof p.replyTo === 'string' ? { replyTo: p.replyTo } : {}),
+        from: { limit: limitOf(context) }
       })
       return { message: fitted(remoteBotMessage(message)) }
     }),
@@ -451,10 +466,14 @@ export function remoteBotMethods(options: {
         const { message } = await port.answer(botId(p), p.askId as string, p.answer as 'allow' | 'not_now')
         return { message: fitted(remoteBotMessage(message)) }
       },
-      first((p, port) => {
+      first((p, port, context) => {
+        const kind = port.askKind(botId(p), p.askId as string)
         // A memory export asks for a folder on this computer.
-        if (port.askKind(botId(p), p.askId as string) === 'export_memory')
-          throw new NetError('forbidden', 'Answer this on the computer.')
+        if (kind === 'export_memory') throw new NetError('forbidden', 'Answer this on the computer.')
+        // "Use your threads" starts threads that run with full access: only a device this computer lets run Full access
+        // may allow it. Not now works from any device.
+        if (kind === 'threads' && p.answer === 'allow' && limitOf(context) !== 'full')
+          throw new NetError('forbidden', 'Allow this on the computer.')
       })
     ),
     method('bots.personal.pause', async (p, port) => ({ bot: remoteBotSummary(port.pause(botId(p)).bot) })),

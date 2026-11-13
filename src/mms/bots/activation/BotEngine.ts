@@ -6,6 +6,7 @@ import { askText } from '../../../shared/bots/personal/askText'
 import { lookFields } from '../../../shared/bots/personal/look'
 import type { BotAuthority, BotCheck, BotCheckDenied, BotMcpTool, BotThreadRole, BotThreads, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
 import type { BotChatMessage, BotChip, BotError } from '../../../shared/bots/personal/chat'
+import type { PermissionMode } from '../../../shared/permissionMode'
 import {
   BOT_ASK_DENY_COOLDOWN_MS,
   MAX_BOT_WALLS,
@@ -26,7 +27,7 @@ import {
   grantRequestOf
 } from '../../../shared/bots/personal/escalation'
 import { findServer, installationOf, mcpAskFor, type BotMcpHost, type BotMcpServer } from '../mcp/BotMcp'
-import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_WORK_ONLY_TOOLS, botGrantTool, isAbsolutePath, manifestProblem } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, botGrantTool, isAbsolutePath, manifestProblem } from '../../../shared/bots/personal/manifest'
 import { checkMessage, wallMessage } from '../../../shared/bots/personal/walls'
 import type { ChargeResult, CountKind, CounterScope } from '../../../shared/harness/counters'
 import type { ReserveResult, SpendLimits, SpendRequest, SpendScope } from '../../../shared/harness/spend'
@@ -44,6 +45,7 @@ import {
   type BotAcknowledgement,
   type BotActivationSummary,
   type BotActivationTrigger,
+  type BotOwnerTurn,
   type BotDefinition,
   type BotLane,
   type BotManifest,
@@ -207,6 +209,11 @@ export interface BotEngineHost {
    * every bot's grant, read when each dispatch is prepared and on every call. Absent: everything.
    */
   computerLimit?(): BotComputerLimit
+  /**
+   * "Use your threads" no longer holds for this bot (Remove in About; the computer's switch is the service's to watch):
+   * the messages it sent that have not started yet are withdrawn from the owner's threads. Must not throw.
+   */
+  threadsWithdrawn?(bot: { botId: string; homeThreadId: string; name: string }): void
   /**
    * Whether the internet is there for the bot's provider (`createBotConnectivity`): checked before
    * a dispatch is sent, while one makes no progress, and while an activation waits for it. Absent:
@@ -598,18 +605,22 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * (it marks what is off here). A turn running now that started with commands or file access, and this computer has
    * just switched that off, stops at once (`cutForLimit`): a runtime opens them once for the whole turn (Codex runs the
    * commands it trusts without asking, and a command already running runs on), so a refusal at the next call is not
-   * enough. Everything else is read at every dispatch and call.
+   * enough. Everything else is read at every dispatch and call. "Use your threads" switched off: its tools are refused
+   * at the next call (and a wait in flight ends with the refusal), and every bot's messages still queued in its owner's
+   * threads are withdrawn (`withdrawThreadMessages`).
    */
   computerLimitChanged(): void {
     const now = this.limit()
     const before = this.lastLimit
     this.lastLimit = now
-    if (before && before.shell === now.shell && before.files === now.files && before.browser === now.browser) return
+    if (before && before.shell === now.shell && before.files === now.files && before.browser === now.browser && before.threads === now.threads) return
     const turnedOff = (['shell', 'files'] as const).filter((which) => (before?.[which] ?? true) && !now[which])
     if (turnedOff.length) for (const [activationId, live] of this.live) {
       const cut = turnedOff.filter((which) => live.powers[which])
       if (cut.length && !live.controller.signal.aborted) this.cutForLimit(activationId, live, cut)
     }
+    if ((before?.threads ?? true) && !now.threads)
+      for (const botId of this.host.definitions.ids()) if (!this.store.registry(botId)?.deletedAt) this.withdrawThreadMessages(botId)
     for (const botId of this.host.definitions.ids()) if (!this.store.registry(botId)?.deletedAt) this.changed({ botId })
   }
 
@@ -1022,8 +1033,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * A chat activation (Bot Phase 1 §5.3.2): it runs on the bot's home thread, beside any run. A
    * repeat of `key` returns the same activation; messages in the chat lane run in order.
    */
-  async enqueueChat(botId: string, key: string, input: string, activationId?: string): Promise<BotActivationSummary> {
-    return this.enqueue(botId, key, { kind: 'manual', input }, 'chat', activationId)
+  async enqueueChat(botId: string, key: string, input: string, activationId?: string, owner?: BotOwnerTurn): Promise<BotActivationSummary> {
+    return this.enqueue(botId, key, { kind: 'manual', input, ...(owner?.limit ? { owner: { limit: owner.limit } } : {}) }, 'chat', activationId)
   }
 
   /**
@@ -1097,7 +1108,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * Why the bot cannot run is returned, not thrown, so the message is still kept; `startQueuedChat`
    * starts the activation after the commit.
    */
-  queueChatInTx(botId: string, key: string, input: string, activationId: string): BotEngineError | undefined {
+  queueChatInTx(botId: string, key: string, input: string, activationId: string, owner?: BotOwnerTurn): BotEngineError | undefined {
     if (this.store.activationByKey(key)) return undefined
     let admitted: ReturnType<BotEngine['admissible']>
     try {
@@ -1107,7 +1118,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (error instanceof BotEngineError) return error
       throw error
     }
-    if (this.insertQueued(botId, activationId, key, { kind: 'manual', input }, 'chat', admitted)) this.store.db.afterCommit(() => this.changed({ botId }))
+    // A message from another device holds what the turn starts or messages to that device's limit (`BotOwnerTurn`).
+    const trigger: BotActivationTrigger = { kind: 'manual', input, ...(owner?.limit ? { owner: { limit: owner.limit } } : {}) }
+    if (this.insertQueued(botId, activationId, key, trigger, 'chat', admitted)) this.store.db.afterCommit(() => this.changed({ botId }))
     return undefined
   }
 
@@ -2071,7 +2084,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       remaining: { ...limitsOf(effective), deadlineMs: remainingMs },
       filesFolder: this.filesFolder(row.botId),
       // A chat turn is the bot's front desk: it hands what takes long to work (docs/plans/bot-always-free.md).
-      botTools: { escalate: true, consult: definition.context.length > 0, memory: true, frontDesk: row.lane === 'chat' },
+      // The owner's threads: reading in every lane; starting, messaging and stopping only in a chat turn the owner's own
+      // message started (`chat:`), never in work, a reminder's work, a schedule or the bot's first message.
+      botTools: { escalate: true, consult: definition.context.length > 0, memory: true, frontDesk: row.lane === 'chat', threads: ownerChatTurn(row) ? 'all' : 'read' },
       limit
     })
     if (!compiled.ok) return this.block(row, 'policy_unenforceable', compiled.error.reason ?? compiled.error.message)
@@ -2744,9 +2759,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       }
       return { ok: false, wall: this.raiseWall(row.id, { dispatchN: input.mainN, kind: 'gate', permission, reason: wallMessage(decided.wall) }) }
     }
+    const readOnly = threadsReadOnlyOf(row)
     const authority: BotAuthority = {
       ...base,
       ...(input.mcpTools?.length ? { mcpTools: input.mcpTools } : {}),
+      // Why a start, message or Stop of the owner's threads is refused in this turn, in its own words.
+      ...(readOnly ? { threadsReadOnly: readOnly } : {}),
+      // Whether the turn still holds an app tool now, asking nobody and showing no chip (a wait that ended after Remove).
+      stillHolds: (tool) => {
+        const decided = base.check({ kind: 'app', tool, args: {} })
+        return decided.ok ? undefined : checkMessage(decided)
+      },
       check,
       held: (asked) => {
         this.progress(row.id)
@@ -3809,7 +3832,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * the walled dispatch continues with the owner's message as its next input. False when the chat
    * was not waiting.
    */
-  async continueChatWith(botId: string, text: string): Promise<boolean> {
+  async continueChatWith(botId: string, text: string, owner?: BotOwnerTurn): Promise<boolean> {
     const walls = this.openChatWalls(botId)
     if (!walls.length) return false
     const activationId = walls[0]!.activationId
@@ -3826,6 +3849,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           if ('budget' in wall.permission) settled.push(this.settleRoomInTx(botId, wall.permission.budget.key, false, waiting!))
           any = true
         }
+      // A message from another device continues the turn: the rest of it is held to that device's limit too ("use your
+      // threads"). One re-admitted after a restart carries no device and leaves the turn as it was.
+      if (any && !limit && owner?.limit) this.store.narrowOwnerLimit(activationId, owner.limit)
       return any
     })
     if (!answered) return false
@@ -4803,7 +4829,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (sink) {
       try {
         const chips = sink.drain(dispatchId)
-        if (chips.length) this.drained.set(key, chips.map((chip) => ({ icon: chip.icon, text: chip.text, ...(chip.highlight ? { highlight: chip.highlight } : {}) })))
+        // A chip of a thread the bot started, messaged or stopped keeps that thread, which its Open shows.
+        if (chips.length) this.drained.set(key, chips.map((chip) => ({ icon: chip.icon, text: chip.text, ...(chip.highlight ? { highlight: chip.highlight } : {}), ...(chip.thread ? { thread: chip.thread } : {}), ...(chip.said ? { said: chip.said } : {}) })))
       } catch {
         // No chips; the message still posts.
       }
@@ -5358,6 +5385,54 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     // The home thread runs the chat lane's turns: as bot turns, like an activation thread's.
     return role === 'home' ? 'activation' : role === 'activation' || role === 'context' ? role : undefined
+  }
+
+  /** The bot `threadId` belongs to, with its name now (`BotThreads.botOf`). Never throws. */
+  botOf(threadId: string): { botId: string; name: string } | undefined {
+    let botId: string | undefined
+    try {
+      botId = this.store.threadBot(threadId)
+    } catch {
+      botId = this.known.get(threadId)?.botId
+    }
+    if (!botId) return undefined
+    return { botId, name: this.ownerOf(threadId) ?? botId }
+  }
+
+  /**
+   * "Use your threads" was removed (About → Remove) or switched off on this computer: the bot's messages still waiting
+   * in its owner's threads are withdrawn (`BotEngineHost.threadsWithdrawn`). A bot with no chat thread yet sent none.
+   */
+  withdrawThreadMessages(botId: string): void {
+    const homeThreadId = this.store.registry(botId)?.homeThreadId
+    if (!homeThreadId || !this.host.threadsWithdrawn) return
+    let name = botId
+    try {
+      name = this.definitionOf(botId).name
+    } catch {
+      // A bot without its definition still has its messages withdrawn, under its id.
+    }
+    try {
+      this.host.threadsWithdrawn({ botId, homeThreadId, name })
+    } catch (error) {
+      console.warn('a bot\'s waiting thread messages could not be withdrawn', { botId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /**
+   * The chat turn `activationId` when its owner's own message started it (`BotThreads.ownerTurn`), with the
+   * limit of the other device that message came from; undefined for any other turn, or when it can't be read.
+   */
+  ownerTurn(activationId: string): { limit?: PermissionMode } | undefined {
+    let row: BotActivationRow | undefined
+    try {
+      row = this.store.activation(activationId)
+    } catch {
+      return undefined
+    }
+    if (!row || !ownerChatTurn(row)) return undefined
+    const limit = row.trigger.kind === 'manual' ? row.trigger.owner?.limit : undefined
+    return limit ? { limit } : {}
   }
 
   /** Never throws: a failed read answers from the threads this process knows of. */
@@ -6247,8 +6322,9 @@ function heldAlready(authority: Pick<BotAuthority, 'tools' | 'appTools' | 'skill
   if ('tool' in asked) {
     // The web tools are neutral tools that a grant keeps with the app tools (the starter grant does): either holds them.
     if (isNeutralTool(asked.tool)) return authority.tools.has(asked.tool) || authority.appTools.has(asked.tool)
-    // The browser is held as its tools.
-    return asked.tool === BOT_BROWSER_PERMISSION ? authority.appTools.has('browser_open') : authority.appTools.has(asked.tool)
+    // The browser is held as its tools, and the owner's threads as theirs (reading them, in every lane that has them).
+    if (asked.tool === BOT_BROWSER_PERMISSION) return authority.appTools.has('browser_open')
+    return asked.tool === BOT_THREADS_PERMISSION ? authority.appTools.has('thread_list') : authority.appTools.has(asked.tool)
   }
   if ('skill' in asked) return authority.skills.has(asked.skill)
   if ('mcp' in asked) {
@@ -6256,6 +6332,21 @@ function heldAlready(authority: Pick<BotAuthority, 'tools' | 'appTools' | 'skill
     return tools.length > 0 && tools.every((tool) => authority.mcp.has(`${asked.mcp.serverId}::${tool}`))
   }
   return false
+}
+
+/**
+ * Whether the activation is a chat turn its owner's own message started (`bots.chat.send`, keyed `chat:`): the only
+ * turn that may start, message or stop the owner's threads. The bot's first message (`create:`) is not one. It never
+ * waits at a wall the owner's reply continues (it asks for nothing, and at a limit the reply starts a turn of its own).
+ */
+export function ownerChatTurn(row: Pick<BotActivationRow, 'lane' | 'idempotencyKey'>): boolean {
+  return row.lane === 'chat' && row.idempotencyKey.startsWith('chat:')
+}
+
+/** Why a turn holds the owner's threads to reading only (`BotAuthority.threadsReadOnly`); undefined when it may act. */
+export function threadsReadOnlyOf(row: Pick<BotActivationRow, 'lane' | 'idempotencyKey'>): 'work' | 'not_owner' | undefined {
+  if (ownerChatTurn(row)) return undefined
+  return row.lane === 'chat' ? 'not_owner' : 'work'
 }
 
 /** What a gate refusal asks the owner for. */
