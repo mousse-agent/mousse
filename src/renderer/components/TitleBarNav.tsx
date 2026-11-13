@@ -15,7 +15,7 @@ import {
   stepTarget,
   useThreadHistoryStore
 } from '../lib/threadHistory'
-import { hiddenSegmentCount, siblingThreads, threadPath, type PathSegment } from '../lib/threadPath'
+import { hiddenSegmentCount, siblingThreads, threadPath, withProjectLead, type PathSegment } from '../lib/threadPath'
 import { useThreadPathInTitleBar } from '../lib/threadPathSetting'
 import { useAppStore } from '../stores/appStore'
 import { useChatsStore } from '../stores/chatsStore'
@@ -254,6 +254,16 @@ export function ThreadPathView({ segments, hidden, squeezed = false, openMenu = 
             </span>
           )
         }
+        if (segment.kind === 'project' && segment.none) {
+          return (
+            <span key="project:none" className="titlebar-path-anchor is-no-project" data-segment="project">
+              <span className="titlebar-path-seg" title="This thread is not in a project">
+                <span className="titlebar-path-name">{segment.name}</span>
+              </span>
+              <span className="titlebar-path-sep" aria-hidden="true"><span className="titlebar-path-slash">/</span></span>
+            </span>
+          )
+        }
         const open = segment.kind === 'thread' && openMenu?.kind === 'siblings' && openMenu.threadId === segment.id
         return (
           <span key={`${segment.kind}:${segment.id}`} className={`titlebar-path-anchor${open ? ' is-open' : ''}`} data-segment={segment.kind}>
@@ -299,12 +309,12 @@ export function ThreadPath() {
   const chats = useChatsStore((s) => s.snapshot.chats)
   const chatThreadIds = useMemo(() => new Set(chats.flatMap((chat) => (chat.threadId ? [chat.threadId] : []))), [chats])
   const segments = useMemo(
-    () => (shown && activeThreadId && !chatThreadIds.has(activeThreadId) ? threadPath(activeThreadId, threads, projects) : []),
+    () => (shown && activeThreadId && !chatThreadIds.has(activeThreadId) ? withProjectLead(threadPath(activeThreadId, threads, projects)) : []),
     [shown, activeThreadId, chatThreadIds, threads, projects]
   )
   const slotRef = useRef<HTMLDivElement>(null)
   const measureRef = useRef<HTMLDivElement>(null)
-  const [fit, setFit] = useState({ hidden: 0, squeezed: false })
+  const [fit, setFit] = useState({ hidden: 0, squeezed: false, offset: 0 })
   const [menu, setMenu] = useState<OpenMenu>(null)
   const menuAnchor = useRef<HTMLElement | null>(null)
   const closeMenu = useCallback(() => setMenu(null), [])
@@ -325,19 +335,34 @@ export function ThreadPath() {
       const hidden = hiddenSegmentCount(widths, moreWidth, available)
       const last = widths.length - 1
       const squeezed = last >= 0 && hidden === last && (hidden > 0 ? moreWidth : 0) + widths[last]! > available
-      setFit((previous) => (previous.hidden === hidden && previous.squeezed === squeezed ? previous : { hidden, squeezed }))
+      // Centred on the window, not on the space between the buttons, and moved aside only as far as
+      // it must to stay clear of them.
+      const shownWidth = Math.min(available, (hidden > 0 ? moreWidth : 0) + widths.slice(hidden).reduce((sum, width) => sum + width, 0))
+      const slotLeft = slot.getBoundingClientRect().left
+      const centred = window.innerWidth / 2 - shownWidth / 2 - slotLeft
+      const offset = Math.round(Math.max(0, Math.min(available - shownWidth, centred)))
+      setFit((previous) => (previous.hidden === hidden && previous.squeezed === squeezed && previous.offset === offset ? previous : { hidden, squeezed, offset }))
     }
     update()
-    if (typeof ResizeObserver === 'undefined') return
+    // The slot's own size can stay the same while it moves (the sidebar opening), so the window's
+    // size and the bar's are watched too.
+    window.addEventListener('resize', update)
+    if (typeof ResizeObserver === 'undefined') return () => window.removeEventListener('resize', update)
     const observer = new ResizeObserver(update)
     observer.observe(slot)
     observer.observe(row)
-    return () => observer.disconnect()
+    if (slot.parentElement) observer.observe(slot.parentElement)
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', update)
+    }
   }, [segmentsKey])
 
   const openSegment = (segment: PathSegment) => {
     setMenu(null)
-    if (segment.kind === 'project') showProjectInSidebar(segment.id)
+    if (segment.kind === 'project') {
+      if (!segment.none) showProjectInSidebar(segment.id)
+    }
     else void selectThread(segment.id).catch(logFailure('Opening a thread'))
   }
 
@@ -359,7 +384,7 @@ export function ThreadPath() {
       onSelect: () => void selectThread(thread.id).catch(logFailure('Opening a thread'))
     }))
   } else if (menu?.kind === 'hidden') {
-    const hiddenSegments = segments.slice(0, fit.hidden)
+    const hiddenSegments = segments.slice(0, fit.hidden).filter((segment) => !(segment.kind === 'project' && segment.none))
     const projectFirst = hiddenSegments[0]?.kind === 'project'
     rows = hiddenSegments.map((segment) => ({
       key: `${segment.kind}:${segment.id}`,
@@ -371,7 +396,7 @@ export function ThreadPath() {
   }
 
   return (
-    <div ref={slotRef} className="titlebar-path-slot">
+    <div ref={slotRef} className="titlebar-path-slot" style={{ paddingLeft: fit.offset }}>
       {segments.length > 0 && (
         <>
           <ThreadPathView
