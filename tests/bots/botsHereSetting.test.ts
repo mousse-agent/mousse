@@ -210,22 +210,25 @@ describe('one setting for every profile of this computer, through the real servi
     await set(other, { bots: { here: { shell: false } } })
     // Window A, whose copy still says commands are on, switches the browser off: commands stay off.
     await set(main, { bots: { here: { browser: false } } })
-    expect(main.settings.get().bots).toEqual({ here: { shell: false, files: true, browser: false } })
+    expect(main.settings.get().bots).toEqual({ here: { shell: false, files: true, browser: false, threads: true } })
     // The CLI, as the owner types it.
     cli.request = (method, params) => dispatchMethod({ mms: main, connection: { id: 'cli', binding: { profileId: main.profileId, epoch: 1 }, capabilities: new Set() } } as never, method, params)
     vi.spyOn(process.stdout, 'write').mockReturnValue(true)
     await runConfig(parseArgs(['config', 'set', 'bots.here.files', 'false']))
-    expect(stored(conf(home)).bots).toEqual({ here: { shell: false, files: false, browser: false } })
+    expect(stored(conf(home)).bots).toEqual({ here: { shell: false, files: false, browser: false, threads: true } })
     await runConfig(parseArgs(['config', 'set', 'bots.here.shell', 'true']))
-    expect(other.settings.get().bots).toEqual({ here: { shell: true, files: false, browser: false } })
+    expect(other.settings.get().bots).toEqual({ here: { shell: true, files: false, browser: false, threads: true } })
+    // The fourth switch is written the same way, alone.
+    await runConfig(parseArgs(['config', 'set', 'bots.here.threads', 'false']))
+    expect(stored(conf(home)).bots).toEqual({ here: { shell: true, files: false, browser: false, threads: false } })
 
     // Every profile's windows were told of each change with that profile's own settings, whichever profile made it.
-    const steps = [{ shell: false, files: true, browser: true }, { shell: false, files: true, browser: false }, { shell: false, files: false, browser: false }, { shell: true, files: false, browser: false }]
+    const steps = [{ shell: false, files: true, browser: true, threads: true }, { shell: false, files: true, browser: false, threads: true }, { shell: false, files: false, browser: false, threads: true }, { shell: true, files: false, browser: false, threads: true }, { shell: true, files: false, browser: false, threads: false }]
     for (const services of [main, other]) expect(told.get(services.profileId)!.filter((here, index, all) => index === 0 || JSON.stringify(here) !== JSON.stringify(all[index - 1])), services.profileId).toEqual(steps)
 
     // The control: a window that sends its whole old copy, as the first version did, turns back what others changed.
     await set(main, { bots: { here: { ...windowA, browser: false } } })
-    expect(main.settings.get().bots.here).toEqual({ shell: true, files: true, browser: false })
+    expect(main.settings.get().bots.here).toEqual({ shell: true, files: true, browser: false, threads: true })
   }, 120_000)
 })
 
