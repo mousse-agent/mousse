@@ -1386,6 +1386,16 @@ export function registerGuiIpc(
         }
         return
       }
+      if (answersGap) {
+        // Every thread's status is small to read: after a gap the sidebar's marks are the service's again.
+        try {
+          const tracker = activityTrackerFor(binding.profileId)
+          tracker.reconcileSnapshot(await guiMms.activityForSender(senderId, false))
+          if (!win.isDestroyed()) win.webContents.send('threads:activity', tracker.getSnapshot())
+        } catch (error) {
+          linkLog.write('check.failed', { window: senderId, reasons, read: 'activity', error: describeLinkError(error) })
+        }
+      }
       const status = await guiMms.turnStatusForSender(senderId, activeId, answersGap)
       const held = turnStateMapFor(binding.profileId).get(activeId)
       const shownActive = isTurnStoppable(held) || isThreadActivityActive(activityTrackerFor(binding.profileId).getState(activeId))
