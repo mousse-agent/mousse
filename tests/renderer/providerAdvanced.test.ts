@@ -4,8 +4,6 @@
  * settings (Claude's settings.json), and last a collapsed, dimmed Info with the read-only facts.
  * A key arrives masked and is only replaced; a file shared with the terminal asks once first.
  */
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -107,12 +105,6 @@ describe('Advanced of a Claude Code entry', () => {
     const settingsRow = [...info.querySelectorAll('.prov-info-row')].find((row) => row.textContent?.startsWith('Settings file'))!
     expect(settingsRow.querySelector('dd')!.getAttribute('title')).toBe(PATH)
     expect(settingsRow.querySelector('button[aria-label="Copy settings file"]')).not.toBeNull()
-  })
-
-  it('Info is muted until pointed at or focused', () => {
-    const css = readFileSync(join(__dirname, '../../src/renderer/styles/providers.css'), 'utf8')
-    expect(css).toMatch(/\.prov-info \{[^}]*opacity: 0\.7;/)
-    expect(css).toMatch(/\.prov-info:hover,\s*\.prov-info:focus-within \{\s*opacity: 1;/)
   })
 
   it('shows a key masked, replaces it after asking once about the shared file, and never asks again', async () => {

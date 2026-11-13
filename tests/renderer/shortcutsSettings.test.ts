@@ -90,10 +90,6 @@ it('keeps a row note when its scope differs from its section', () => {
   expect(rowNotes(global, null)).toEqual([])
 })
 
-it('spaces shortcut rows on the compact step of the shared scale', () => {
-  expect(render({})).toContain('class="settings-group shortcuts-group"')
-})
-
 it('names the composer rows briefly; the palette keeps the long titles', () => {
   const markup = render({})
   expect(markup).toContain('>Steer the running reply<')

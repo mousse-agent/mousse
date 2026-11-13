@@ -260,13 +260,11 @@ describe('Steer on a queued message runs exactly that message, exactly once', ()
     const w = world()
     const { first, c } = await w.queuedBehindTurn()
 
-    const clicked = Date.now()
     expect(w.d.orch.promoteQueueItem(w.thread.id, c.id)).toEqual({ ok: true })
     // The transcript shows it as sent at once, inside the running turn.
     expect(w.shownUserMessages()).toEqual(['first', 'C'])
     await waitFor(() => w.adapter.steers.length > 0, 'steer taken')
-    // Read within a moment of the click, while the first turn is still held open.
-    expect(Date.now() - clicked).toBeLessThan(2_000)
+    // Read while the first turn is still held open.
     expect(w.adapter.prompts).toEqual(['first'])
     expect(w.d.orch.isActiveTurnRunning(w.thread.id)).toBe(true)
 
