@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type RefObject } from 'react'
 import type { AppletReference } from '../../../shared/applets'
 import { readAppletAppearance, subscribeAppletAppearance } from './appearance'
 import { subscribeAppletScroll } from './scrollPresentation'
-import { appletHostBlocked, appletHostShown, subscribeAppletHostVisibility } from './hostVisibility'
+import { appletHostBlocked, appletHostShown, appletUncoveredClip, subscribeAppletHostVisibility } from './hostVisibility'
 
 /**
  * Where a preview sits. In the transcript it scrolls with the chat and stays above the composer; in the side panel
@@ -118,7 +118,9 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
           document.querySelector('.chat-composer-stack')
         : null
       const composerTop = composer?.getBoundingClientRect().top ?? window.innerHeight
-      const clip = {
+      // Floating app UI drawn over the host (a hover label, a popover) is cut out of the clip, so it is not hidden
+      // behind the view (on macOS the view hides while it is there).
+      const clip = appletUncoveredClip(node, {
         x: Math.max(0, viewport?.left ?? 0),
         y: Math.max(0, viewport?.top ?? 0),
         width:
@@ -127,7 +129,7 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
         height:
           Math.min(window.innerHeight, composerTop, viewport?.bottom ?? window.innerHeight) -
           Math.max(0, viewport?.top ?? 0)
-      }
+      })
       const area = {
         x: Math.max(rect.left, clip.x),
         y: Math.max(rect.top, clip.y),
