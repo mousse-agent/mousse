@@ -4,9 +4,15 @@ import type { BotChip, BotChipIcon } from './chat'
  * Activity chips (Bot Phase 1 §5.8, bot-ui C3). Mousse makes them from the calls the authority
  * allowed, never from model text: a live chip is worded as an attempt ("searching the web"), and the
  * calls of one dispatch roll up into settled chips when it ends ("searched the web · 3"). App tools,
- * whose results pass through Mousse, may give outcome chips ("every weekday · 09:00"). No chip ever
- * names a model. Browser-safe.
+ * whose results pass through Mousse, may give outcome chips ("every weekday · 09:00"). No chip names a model, except
+ * work the owner asked to run on a model that is not the bot's usual one ("started Vacuum comparison · Opus 5.5").
+ * Browser-safe.
  */
+
+/** The tooltip of work on a model of its own: "Opus 5.5 on Claude Code, high reasoning, for this work only". */
+export function workModelDetail(model: { name: string; entry: string; effort?: string }): string {
+  return `${model.name}${model.entry ? ` on ${model.entry}` : ''}${model.effort ? `, ${model.effort} reasoning` : ''}, for this work only`
+}
 
 /** Where a call happened, for highlights: the bot's files folder, its scratch folder and the owner's home (`~`). */
 export interface BotChipContext {
@@ -170,6 +176,7 @@ function classify(tool: string, input: unknown, ctx: BotChipContext): Classified
     case 'work_stop': return { kind: 'work_stop', icon: 'think', live: 'stopping work' }
     case 'work_note': return { kind: 'work_note', icon: 'think', live: 'passing it on' }
     case 'work_list': return { kind: 'work_look', icon: 'think', live: 'checking on its work' }
+    case 'work_models': return { kind: 'work_look', icon: 'think', live: 'looking at your models' }
     case 'remind': return { kind: 'remind', icon: 'schedule', live: 'setting a reminder' }
     case 'reminder_cancel': return { kind: 'unremind', icon: 'schedule', live: 'cancelling a reminder' }
     case 'reminder_list': return { kind: 'schedules', icon: 'schedule', live: 'checking its reminders' }
@@ -218,7 +225,17 @@ function outcomeChip(kind: ChipKind, call: BotChipCall): BotChip | null {
     case 'forget': return { icon: 'memory', text: 'forgot something you asked me to' }
     case 'work': {
       const title = str(input.title)
-      return { icon: 'think', text: result.status === 'queued' ? 'will start' : 'started', ...(title ? { highlight: shortChipText(title, 40) } : {}) }
+      // Work the owner asked to run on a model that is not the bot's usual one names it, with the details on hover.
+      const model = record(result.model)
+      const name = str(model.name)
+      const highlight = [title ? shortChipText(title, 40) : undefined, name ? shortChipText(name, 24) : undefined].filter(Boolean).join(' · ')
+      const effort = str(model.effort)
+      return {
+        icon: 'think',
+        text: result.status === 'queued' ? 'will start' : 'started',
+        ...(highlight ? { highlight } : {}),
+        ...(name ? { title: workModelDetail({ name, entry: str(model.entry) ?? '', ...(effort ? { effort } : {}) }) } : {})
+      }
     }
     case 'work_stop': return result.result === 'stopped' ? { icon: 'think', text: 'stopped work' } : null
     case 'work_note': return result.result === 'noted' ? { icon: 'think', text: 'passed on your note' } : null

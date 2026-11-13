@@ -1,5 +1,5 @@
 import type { BotDepth, BotModelPick } from '../../../shared/bots/personal/definition'
-import type { BotModelOption } from '../../../shared/bots/personal/methods'
+import type { BotModelOption, BotWorkChoices } from '../../../shared/bots/personal/methods'
 import { isPinned, plainLabel } from '../../../shared/bots/personal/modelSlots'
 import type { InstanceSnapshot } from '../../../shared/harness/status'
 import type { InstanceModel, ProviderSelection, RunPolicy } from '../../../shared/harness/types'
@@ -156,6 +156,21 @@ export class BotModelChooser implements BotModelResolver {
     return this.candidatesOf(snapshots).map((candidate) => this.optionOf(candidate, entries))
   }
 
+  /**
+   * What one piece of work may be asked to run on (`work_models`): the same choices as `pickable`, read once, and each
+   * other entry of the owner's with why a bot's work can't run there. An entry with no model that can hold a bot is one
+   * that can't hold one at all, unless it is off, signed out or not ready.
+   */
+  async workChoices(): Promise<BotWorkChoices> {
+    const snapshots = await this.freshSnapshots()
+    const entries = new Map(snapshots.map((snapshot) => [snapshot.instanceId, snapshot.displayName]))
+    const candidates = this.candidatesOf(snapshots)
+    const unavailable = snapshots
+      .filter((snapshot) => !candidates.some((candidate) => candidate.instanceId === snapshot.instanceId))
+      .map((snapshot) => ({ instanceId: snapshot.instanceId, entry: plainLabel(snapshot.displayName || snapshot.instanceId, 40), reason: entryReason(snapshot) }))
+    return { options: candidates.map((candidate) => this.optionOf(candidate, entries)), unavailable }
+  }
+
   private optionOf(candidate: BotModelCandidate, entries: ReadonlyMap<string, string>): BotModelOption {
     const credential = candidate.credential === 'unknown' ? undefined : candidate.credential
     return {
@@ -224,6 +239,14 @@ export class BotModelChooser implements BotModelResolver {
   private now(): Date {
     return this.deps.now ? this.deps.now() : new Date()
   }
+}
+
+/** Why an entry with no choice for a bot has none: it is off, signed out or not ready, else it can't hold a bot. */
+function entryReason(snapshot: InstanceSnapshot): BotPickReason {
+  if (!snapshot.enabled.effective) return 'off'
+  if (snapshot.auth.state === 'signed_out' || snapshot.auth.state === 'expired') return 'signed_out'
+  if (!instanceReady(snapshot)) return 'not_ready'
+  return 'cant_hold'
 }
 
 /** A pick's selection: its reasoning level while the model offers it, else the model's own default. */

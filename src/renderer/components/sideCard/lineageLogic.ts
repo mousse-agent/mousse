@@ -1,3 +1,4 @@
+import { modelChoiceOf, modelLabel } from '../../../shared/modelChoice'
 import { isRunningSubagent, type SubagentSummary } from '../../../shared/subagents'
 import { formatAgo } from '../../lib/formatAgo'
 import type { SubagentCardModel } from '../../chat/adapters/subagentCards'
@@ -140,7 +141,9 @@ export function lineageSubagentName(subagent: Pick<SubagentSummary, 'title'>): s
 
 /** Provider and model a subagent was asked to run on, or null when it inherited its parent's. */
 export function lineageModelLabel(subagent: Pick<SubagentSummary, 'provider' | 'model'>): string | null {
-  const label = [subagent.provider, subagent.model].filter(Boolean).join(' · ')
+  // The model by its name, with a reasoning level the agent chose ("GPT-5 · High"), never a stored id like `gpt-5:high`.
+  const model = subagent.model ? modelLabel(modelChoiceOf({ provider: subagent.provider ?? '', model: subagent.model })) : null
+  const label = [subagent.provider, model].filter(Boolean).join(' · ')
   return label || null
 }
 

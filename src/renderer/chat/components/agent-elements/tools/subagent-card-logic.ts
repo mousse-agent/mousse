@@ -55,9 +55,10 @@ export function cardTitle(card: Pick<SubagentCardModel, "title">): string {
   return lineageSubagentName(card);
 }
 
-/** "provider · model", or null when the subagent inherited its parent's. */
-export function cardModelLabel(card: Pick<SubagentCardModel, "provider" | "model">): string | null {
-  return lineageModelLabel(card);
+/** "provider · model", then "on <computer>" for a remote subagent; null when it inherited its parent's model here. */
+export function cardModelLabel(card: Pick<SubagentCardModel, "provider" | "model" | "computer">): string | null {
+  const label = [lineageModelLabel(card), card.computer ? `on ${card.computer}` : null].filter(Boolean).join(" · ");
+  return label || null;
 }
 
 /**

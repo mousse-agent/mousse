@@ -250,9 +250,14 @@ const PICK_REASON_TEXT: Record<BotPickReason, string> = {
   account_changed: 'it\'s signed in to another account now'
 }
 
+/** Why a pick can't run, in a few plain words after "I can't use …:". */
+export function pickReasonText(reason: BotPickReason): string {
+  return PICK_REASON_TEXT[reason] ?? 'it isn\'t available'
+}
+
 /** The chat's one line for a pick that can't run; its action is Pick a model. */
 export function pickProblemText(miss: BotPickMiss): string {
-  return `I can't use ${miss.label}: ${PICK_REASON_TEXT[miss.reason] ?? 'it isn\'t available'}.`
+  return `I can't use ${miss.label}: ${pickReasonText(miss.reason)}.`
 }
 
 /**

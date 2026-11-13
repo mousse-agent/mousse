@@ -1,5 +1,5 @@
 import type { BotChip } from '../../shared/bots/personal/chat'
-import type { BotDepth, BotLane, BotModelPick, BotModelSlotKey, BotModelSlots, BotSchedule, BotWorkLevel } from '../../shared/bots/personal/definition'
+import type { BotDepth, BotLane, BotModelPick, BotModelSlotKey, BotModelSlots, BotSchedule, BotWorkLevel, BotWorkModelName } from '../../shared/bots/personal/definition'
 import type { BotModelRows, BotPickMiss } from '../../shared/bots/personal/modelSlots'
 import type { BotJournalKind, BotJournalWho, BotMemoryForgetResult, BotMemoryListing } from '../../shared/bots/personal/memory'
 import type { Enforceability, ProviderSelection, RunPolicy } from '../../shared/harness/types'
@@ -89,9 +89,11 @@ export interface BotToolHost {
   /**
    * The chat's work (docs/plans/bot-always-free.md): runs beside the chat that report back. `from` is the chat
    * activation that hands it off; `key` makes a repeated call start nothing new; `level` is how hard the job is (#673).
+   * `model`: the model the owner asked for this work alone, one of the Runs on choices, kept with the work as its own
+   * pick (`BotWorkModel`); the bot's rows stay as they are.
    */
   work: {
-    start(botId: string, from: string, input: { title: string; brief: string; key: string; level?: BotWorkLevel }): Promise<BotWorkStarted>
+    start(botId: string, from: string, input: { title: string; brief: string; key: string; level?: BotWorkLevel; model?: BotWorkModel }): Promise<BotWorkStarted>
     list(botId: string): BotWorkList
     stop(botId: string, workId: string): Promise<'stopped' | 'ended' | 'not_found'>
     /** `from`: the chat activation that passes it on (its owner's message is the note's source). */
@@ -133,11 +135,22 @@ export type BotModelChange =
   | { pick: BotModelPick & { instanceId: string }; rows?: BotModelRows }
   | { slots: Partial<Record<BotModelSlotKey, BotModelPick & { instanceId: string }>> }
 
+/**
+ * A model one piece of work was asked to run on: the pick (an entry, its model and a reasoning level, with the entry's
+ * sign-in now) and its names for the work line.
+ */
+export interface BotWorkModel {
+  pick: BotModelPick & { instanceId: string }
+  name: BotWorkModelName
+}
+
 /** `work_start`'s answer: the work's id, and whether it runs now or waits behind others (their titles). */
 export interface BotWorkStarted {
   workId: string
   status: 'started' | 'queued' | 'ended'
   ahead: string[]
+  /** The model the work line names: one the owner asked for this work alone, when it is not the bot's usual one. */
+  model?: BotWorkModelName
 }
 
 /** `work_list`'s answer: what runs or waits now, and the last few that ended. */

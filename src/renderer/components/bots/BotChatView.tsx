@@ -113,7 +113,7 @@ const WorkLine = memo(function WorkLine({ botId, item }: { botId: string; item: 
   return <li className={`bot-work-line${running ? ' is-running' : ''}`}>
     {running ? <Loader2 size={13} className="chat-spin" aria-hidden /> : <span className="bot-work-dot" aria-hidden />}
     <span className="bot-work-title">{item.title}</span>
-    <span className="bot-work-doing">{workDoing(item, chip)} · {workElapsed(item.startedAt, now)}</span>
+    <span className="bot-work-doing">{workDoing(item, chip)}{item.model && <> · <span className="bot-work-model" title={item.model.detail}>{item.model.name}</span></>} · {workElapsed(item.startedAt, now)}</span>
     <button type="button" aria-label={`Stop ${item.title}`} title="Stop" onClick={() => void useBotsStore.getState().stopWork(botId, item.id)}><X size={13} aria-hidden /></button>
   </li>
 })

@@ -17,7 +17,7 @@ const CHIP_ICONS: Record<BotChipIcon, typeof Search> = {
 /** One activity chip (C3): an icon, a few words and the highlighted part. A live chip's icon spins. */
 export function BotChipView({ chip }: { chip: BotChip }) {
   const Icon = CHIP_ICONS[chip.icon] ?? Sparkles
-  return <span className={`bot-chip${chip.live ? ' is-live' : ''}`}>
+  return <span className={`bot-chip${chip.live ? ' is-live' : ''}`} {...(chip.title ? { title: chip.title } : {})}>
     <Icon size={13} aria-hidden />{chip.text}{chip.highlight && <> <b>{chip.highlight}</b></>}
   </span>
 }

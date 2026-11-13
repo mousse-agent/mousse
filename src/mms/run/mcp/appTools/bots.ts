@@ -1,13 +1,13 @@
 import { randomUUID } from 'node:crypto'
 import { Type, type Tool } from '@earendil-works/pi-ai'
-import { BOT_DEPTHS, BOT_WORK_LEVELS, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, MAX_BOT_SCHEDULES, type BotDepth, type BotLane, type BotModelSlotKey, type BotModelSlots, type BotSchedule } from '../../../../shared/bots/personal/definition'
-import { entriesOf, modelsNamedBy, namedOn, ownerNamesModel, workLevelOf, type BotModelRows, type NamedModel } from '../../../../shared/bots/personal/modelSlots'
-import type { BotModelOption } from '../../../../shared/bots/personal/methods'
+import { BOT_DEPTHS, BOT_WORK_LEVELS, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, MAX_BOT_SCHEDULES, type BotDepth, type BotLane, type BotModelPick, type BotModelSlotKey, type BotModelSlots, type BotSchedule } from '../../../../shared/bots/personal/definition'
+import { entriesOf, modelsNamedBy, namedOn, ownerNamesModel, pickReasonText, plainLabel, workLevelOf, type BotModelRows, type NamedModel } from '../../../../shared/bots/personal/modelSlots'
+import type { BotModelOption, BotWorkChoices } from '../../../../shared/bots/personal/methods'
 import { BOT_MCP_LIST_TOOL } from '../../../../shared/bots/personal/manifest'
 import { shortModelName } from '../../../../shared/modelNames'
 import { botScheduleLabel } from '../../../../shared/scheduleLabel'
 import { botScheduleProblem } from '../../../scheduled/botJobs'
-import type { BotActivityContext, BotActivitySink, BotToolHost } from '../../../bots/seams'
+import type { BotActivityContext, BotActivitySink, BotToolHost, BotWorkModel } from '../../../bots/seams'
 import { json, plainSchema, truncateForModel, type MousseTool, type ToolCallContext, type ToolOutcome } from './types'
 
 /**
@@ -126,8 +126,18 @@ export const BOT_TOOLS: Tool[] = [
     parameters: Type.Object({
       title: Type.String({ description: 'A few words the owner will recognise, like "Vacuum comparison".' }),
       brief: Type.String({ description: 'The whole task, standing on its own.' }),
-      level: Type.Optional(Type.Union(BOT_WORK_LEVELS.map((level) => Type.Literal(level)), { description: 'How hard it is: light for a quick lookup or a small routine job, medium for most work, hard for research, a long or difficult problem, or when the owner asks you to think harder. Left out: your usual level.' }))
+      level: Type.Optional(Type.Union(BOT_WORK_LEVELS.map((level) => Type.Literal(level)), { description: 'How hard it is: light for a quick lookup or a small routine job, medium for most work, hard for research, a long or difficult problem, or when the owner asks you to think harder. Left out: your usual level.' })),
+      model: Type.Optional(Type.Object({
+        instanceId: Type.String({ description: 'The entry\'s instanceId from work_models.' }),
+        model: Type.String({ description: 'The model\'s id from work_models.' }),
+        effort: Type.Optional(Type.String({ description: 'One of that model\'s reasoning levels from work_models, when the owner asked for one. Left out: the model\'s default.' }))
+      }, { description: 'Only when the owner, in their message, asked for this work to run on a particular model: that model, from work_models. It is for this work only; never pick one yourself. Left out: your usual model for the level.' }))
     })
+  },
+  {
+    name: 'work_models',
+    description: 'The models your owner has that work can run on, by provider entry, with each model\'s reasoning levels; the entries your work can\'t run on, and why; and the models your work usually runs on. Use it when the owner asks for a piece of work on a particular model ("do this one with Opus"), to find the one they mean, then pass it to work_start as model. If you can\'t tell which one they mean, ask them.',
+    parameters: Type.Object({})
   },
   {
     name: 'work_list',
@@ -185,8 +195,90 @@ export interface BotAppToolDeps {
    * `use_model`: the same choices the picker offers (`BotModelChooser.pickable`), each with its entry's sign-in now,
    * which the pick keeps.
    */
-  models?: { pickable(): Promise<BotModelOption[]> }
+  models?: {
+    pickable(): Promise<BotModelOption[]>
+    /** `work_models` and `work_start` with a model: the same choices, and the entries a bot's work can't run on. */
+    workChoices?(): Promise<BotWorkChoices>
+  }
 }
+
+/** What work may be asked to run on: every choice and why other entries are left out, or the choices alone. */
+async function workChoicesOf(deps: BotAppToolDeps): Promise<BotWorkChoices> {
+  const models = deps.models
+  if (!models) return { options: [], unavailable: [] }
+  if (models.workChoices) return models.workChoices()
+  return { options: await models.pickable(), unavailable: [] }
+}
+
+/** A model as the bot and the owner name it: "Opus 5.5". */
+const modelName = (option: BotModelOption) => plainLabel(shortModelName(option.label)) || plainLabel(option.model)
+
+/** Other words that name a model (a family word, a catalog id), beyond its name and id: a few, for matching what the owner said. */
+function otherNames(option: BotModelOption): string[] {
+  const own = new Set([option.model.toLowerCase(), option.label.toLowerCase(), modelName(option).toLowerCase()])
+  return [...new Set(option.names ?? [])].filter((name) => !own.has(name)).slice(0, 4).map((name) => plainLabel(name, 60))
+}
+
+/**
+ * `work_models`' answer: each entry the bot's work can run on, its models and their reasoning levels, in the order Runs
+ * on lists them; the owner's other entries with why work can't run there; and the bot's Work rows by name.
+ */
+export function workModelListing(choices: BotWorkChoices, rows: BotModelSlots): Record<string, unknown> {
+  const entries = new Map<string, { entry: string; instanceId: string; models: Array<Record<string, unknown>> }>()
+  for (const option of choices.options) {
+    const entry = entries.get(option.instanceId) ?? { entry: plainLabel(option.entry, 40), instanceId: option.instanceId, models: [] }
+    const also = otherNames(option)
+    entry.models.push({ model: option.model, name: modelName(option), ...(option.efforts.length ? { efforts: option.efforts } : {}), ...(also.length ? { also } : {}) })
+    entries.set(option.instanceId, entry)
+  }
+  const named = (pick: BotModelPick | null) => {
+    if (!pick) return 'chosen by Mousse'
+    const option = choices.options.find((candidate) => candidate.instanceId === pick.instanceId && candidate.model === pick.model)
+    const name = option ? `${modelName(option)} on ${plainLabel(option.entry, 40)}` : plainLabel(pick.model)
+    return pick.effort ? `${name}, ${pick.effort} reasoning` : name
+  }
+  return {
+    entries: [...entries.values()],
+    ...(choices.unavailable.length ? { cantRunWork: choices.unavailable.map((entry) => ({ entry: entry.entry, instanceId: entry.instanceId, why: pickReasonText(entry.reason) })) } : {}),
+    usualWork: { light: named(rows.light), medium: named(rows.medium), hard: named(rows.hard) },
+    note: entries.size
+      ? 'Use one only when the owner asks for it for a piece of work: pass its instanceId, model and (if they asked for one) effort to work_start as model. It is for that work only. If the owner names an entry under cantRunWork, tell them plainly why it can\'t run your work.'
+      : 'Your owner has no model your work can run on here other than through Runs on. Tell them plainly.'
+  }
+}
+
+/** Why work can't start on a model, after which nothing starts: a sentence the bot passes on to the owner. */
+const NOTHING_STARTED = 'Nothing was started. Tell the owner plainly, and ask what they want.'
+
+/**
+ * The model `work_start` was given (an entry and a model from `work_models`, and maybe a reasoning level), among the
+ * choices now, or why not: an entry that can't run a bot says why, and a model or reasoning level the entry doesn't
+ * offer is refused. Nothing else is ever chosen in its place.
+ */
+export function workModelChoice(choices: BotWorkChoices, asked: unknown): { option: BotModelOption; effort?: string } | { refused: string } {
+  const value = asked && typeof asked === 'object' && !Array.isArray(asked) ? asked as Record<string, unknown> : undefined
+  const instanceId = typeof value?.instanceId === 'string' ? value.instanceId.trim() : ''
+  const model = typeof value?.model === 'string' ? value.model.trim() : ''
+  if (!instanceId || !model || (value?.effort !== undefined && typeof value.effort !== 'string'))
+    return { refused: 'model is an instanceId and a model from work_models, and maybe one of its reasoning levels.' }
+  const effort = typeof value?.effort === 'string' && value.effort.trim() ? value.effort.trim() : undefined
+  const option = choices.options.find((candidate) => candidate.instanceId === instanceId && candidate.model === model)
+  if (!option) {
+    const out = choices.unavailable.find((entry) => entry.instanceId === instanceId)
+    if (out) return { refused: `Work can't run on ${out.entry}: ${pickReasonText(out.reason)}. ${NOTHING_STARTED}` }
+    const there = choices.options.find((candidate) => candidate.instanceId === instanceId)
+    if (there) return { refused: `${plainLabel(there.entry, 40)} doesn't offer that model for your work now (see work_models). ${NOTHING_STARTED}` }
+    return { refused: `None of the owner's entries your work can run on is "${plainLabel(instanceId, 60)}" (see work_models). ${NOTHING_STARTED}` }
+  }
+  if (effort && !option.efforts.includes(effort))
+    return { refused: option.efforts.length
+      ? `${modelName(option)} offers these reasoning levels: ${option.efforts.join(', ')}. ${NOTHING_STARTED}`
+      : `${modelName(option)} has no reasoning levels to pick; leave effort out. ${NOTHING_STARTED}` }
+  return { option, ...(effort ? { effort } : {}) }
+}
+
+/** `work_start` with a model from a turn the owner's own message didn't start (a first greeting): refused. */
+const OWNER_MODEL_ONLY = 'Only the owner can ask for a model for a piece of work, in their own message. Start it without model, on your usual model.'
 
 /** `use_model`'s one line when nothing changes. */
 export const USE_MODEL_REFUSED = 'Nothing changed. Ask the owner to pick the model in About → Runs on.'
@@ -445,14 +537,40 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         const title = typeof args.title === 'string' ? args.title : ''
         const level = workLevelOf(args.level)
         if (args.level !== undefined && !level) return error('level is light, medium or hard.')
+        // A model for this work alone: only in a chat turn the owner's own message started, and only one of the choices
+        // now. A reminder, a schedule and work itself never get here (they have no chat turn), so text read elsewhere
+        // never moves work to another model.
+        let model: BotWorkModel | undefined
+        if (args.model !== undefined && args.model !== null) {
+          if (!call.deps.host.ownerWords(call.botId, call.activationId).trim()) return error(OWNER_MODEL_ONLY)
+          const chosen = workModelChoice(await workChoicesOf(call.deps).catch(() => ({ options: [], unavailable: [] })), args.model)
+          if ('refused' in chosen) return error(chosen.refused)
+          const { option, effort } = chosen
+          model = {
+            pick: { instanceId: option.instanceId, model: option.model, ...(effort ? { effort } : {}), ...(option.credential ? { credential: option.credential } : {}), ...(option.account ? { account: option.account } : {}) },
+            name: { name: modelName(option), entry: plainLabel(option.entry, 40), ...(effort ? { effort } : {}) }
+          }
+        }
         try {
-          const started = await call.deps.host.work.start(call.botId, call.activationId, { title, brief, key: `${call.activationId}:${ctx.toolCallId ?? randomUUID()}`, ...(level ? { level } : {}) })
-          const result = { ...started, note: started.status === 'queued' ? `It starts when there is room, after: ${started.ahead.join('; ')}. Tell the owner it waits its turn.` : started.status === 'ended' ? 'This work already ran and ended; see work_list for its report.' : 'It is running, beside anything else you are working on. Tell the owner you are on it; its report reaches them by itself.' }
+          const started = await call.deps.host.work.start(call.botId, call.activationId, { title, brief, key: `${call.activationId}:${ctx.toolCallId ?? randomUUID()}`, ...(level ? { level } : {}), ...(model ? { model } : {}) })
+          const where = model ? ` It runs on ${model.name.name} on ${model.name.entry}${model.name.effort ? `, ${model.name.effort} reasoning` : ''}, for this work only.` : ''
+          const result = { ...started, note: (started.status === 'queued' ? `It starts when there is room, after: ${started.ahead.join('; ')}. Tell the owner it waits its turn.` : started.status === 'ended' ? 'This work already ran and ended; see work_list for its report.' : 'It is running, beside anything else you are working on. Tell the owner you are on it; its report reaches them by itself.') + where }
           call.deps.activity?.onAppResult(call.activity, 'work_start', started)
           return json(result)
         } catch (failure) {
           return error(failure instanceof Error ? failure.message : String(failure))
         }
+      }
+    }),
+    ownTool(byName.get('work_models')!, deps, {
+      class: 'read',
+      describe: () => 'List models for work',
+      handler: async (_args, ctx) => {
+        const call = botCall(deps, ctx)
+        if (isOutcome(call)) return call
+        if (call.lane !== 'chat') return error(CHAT_ONLY)
+        const choices = await workChoicesOf(call.deps).catch(() => ({ options: [], unavailable: [] }))
+        return json(workModelListing(choices, call.deps.host.rows(call.botId)))
       }
     }),
     ownTool(byName.get('work_list')!, deps, {

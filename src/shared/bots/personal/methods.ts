@@ -1,6 +1,7 @@
 import type { BotModelPick, BotModelSlotKey, BotModelSlots, BotPickCredential, BotSchedule } from './definition'
 import type { BotChatMessage, BotChip, BotDetail, BotSummary } from './chat'
 import type { BotLook } from './look'
+import type { BotPickReason } from './modelSlots'
 import type { BotMemoryForgetResult, BotMemoryListing } from './memory'
 import type { LlmProviderOption } from '../../settings'
 
@@ -31,6 +32,16 @@ export interface BotModelOption {
   account?: string
   /** Other words that name it (catalog id and names, family word), lower case: `use_model` checks the owner said one. */
   names?: string[]
+}
+
+/**
+ * What one piece of work may be asked to run on (`work_models`): the Runs on choices (`options`), and each of the
+ * owner's other entries with why a bot's work can't run there (turned off, signed out, not ready, or a runtime that
+ * can't hold a bot to its permissions).
+ */
+export interface BotWorkChoices {
+  options: BotModelOption[]
+  unavailable: Array<{ instanceId: string; entry: string; reason: BotPickReason }>
 }
 
 /** What a bot can run on (#673): the ready models that can hold a bot here, and the computers, this one first. */
