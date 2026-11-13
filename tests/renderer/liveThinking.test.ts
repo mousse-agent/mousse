@@ -298,9 +298,9 @@ describe('the end of a thought', () => {
     expect(hasLiveText('th')).toBe(false)
     expect(useAppStore.getState().messages.find((m) => m.id === 'th')!.thinking!.content).toContain('Running the tests')
     expect(useAppStore.getState().messages.at(-1)!.id).toBe('tool-2')
-    // The group is titled with what its calls did; opened, its thought row holds the stored text in full.
-    const group = [...host.querySelectorAll<HTMLButtonElement>('.turn-answer button[aria-expanded]')].find((button) => button.textContent!.startsWith('Read '))!
-    expect(group.textContent).not.toContain('Running the tests')
+    // The group is titled with its thought, then what its calls did; opened, its thought row holds the stored text in full.
+    const group = [...host.querySelectorAll<HTMLButtonElement>('.turn-answer button[aria-expanded]')].find((button) => button.textContent!.includes('· Read '))!
+    expect(group.textContent).toContain('Running the tests')
     act(() => group.click())
     act(() => host.querySelector<HTMLButtonElement>('.an-tool-group-rows button[aria-expanded]:has(svg.thinking-icon)')!.click())
     expect(answerText()).toContain('Running the tests')

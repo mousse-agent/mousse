@@ -421,6 +421,24 @@ export function workGroupTitle(items: AssistantToolItem[]): string {
 }
 
 /**
+ * A group's header: the latest thought written before one of its calls, with a short tag of what the calls did after
+ * it (`summary`: "Ran 1 command", or "8 actions" for a mix); otherwise what the calls did (`workGroupTitle`) and no summary. That thought says why
+ * the calls ran, which a count does not. A thought after the group's last call is about what comes next, so it does
+ * not title the calls.
+ */
+export function workGroupHeading(items: AssistantToolItem[]): { title: string; summary?: string } {
+  const title = workGroupTitle(items);
+  let lastCall = -1;
+  items.forEach((item, index) => { if (workKindOf(item.part.type) !== "thought") lastCall = index; });
+  const thought = lastCall > 0 ? latestThoughtTitle(items.slice(0, lastCall)) : "";
+  if (!thought) return { title };
+  // Short beside a thought: one kind keeps its phrase ("Ran 3 commands"), a mix is counted ("8 actions").
+  const work = tallyKinds(items).filter((tally) => tally.kind !== "thought");
+  const summary = work.length === 1 ? title : plural(work.reduce((sum, tally) => sum + tally.calls, 0), "action");
+  return { title: thought, summary };
+}
+
+/**
  * The part type whose icon stands for a group: its calls' type when they are all of one kind ("tool-Thinking" when
  * it holds only thoughts), undefined for a mix.
  */

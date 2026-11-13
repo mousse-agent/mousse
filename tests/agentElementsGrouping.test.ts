@@ -12,6 +12,7 @@ import {
   foldTurnWork,
   partitionTurnSegments,
   settleFinishedTurn,
+  workGroupHeading,
   workGroupIconType,
   workGroupTitle,
 } from '../src/renderer/chat/components/agent-elements/utils/assistant-blocks'
@@ -366,5 +367,24 @@ describe('settleFinishedTurn', () => {
   it('still ends a stopped turn on text written after its work', () => {
     const turn = settle([said('n1', 'Checking.'), step('c1'), said('a1', 'Half an ans')], true)
     expect(turn.order).toEqual(['n1', 'c1', 'a1'])
+  })
+})
+
+describe('workGroupHeading', () => {
+  const item = (type: string, input: Record<string, unknown> = {}, id = Math.random().toString(36)) => ({ part: tool(type, id, { input }) })
+  const run = (command = 'ls') => item('tool-Bash', { command })
+  const read = (path: string) => item('tool-Read', { file_path: path })
+  const thought = (text: string) => item('tool-Thinking', { thought: text })
+  const long = `I need to find where the open-pencil MCP server is configured, so I will look in the Claude settings ${'and more '.repeat(10)}`.trim()
+
+  it.each([
+    ['a thought before the calls titles them, what they did follows', [thought('Find the config'), run()], { title: 'Find the config', summary: 'Ran 1 command' }],
+    ['the latest thought before a call wins', [thought('Look around'), read('a.ts'), thought('Run the tests'), run()], { title: 'Run the tests', summary: '2 actions' }],
+    ['a thought after the last call is about what comes next: the count stays the title', [run(), thought('Now the fix')], { title: 'Ran 1 command' }],
+    ['no thought: the count is the title', [run(), run()], { title: 'Ran 2 commands' }],
+    ['thoughts alone: the latest one, no count', [thought('Look around'), thought('Check the order')], { title: 'Check the order' }],
+    ['a long thought is whole: the row cuts it at its width', [thought(long), run()], { title: long, summary: 'Ran 1 command' }],
+  ] as const)('%s', (_name, items, expected) => {
+    expect(workGroupHeading([...items])).toEqual(expected)
   })
 })
