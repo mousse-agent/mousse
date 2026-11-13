@@ -44,8 +44,8 @@ export const DEFAULT_APPLET_APPEARANCE: AppletAppearance = {
 /** Host rules follow source CSS. Scrollbars are enforced for every nested scroller. */
 export const APPLET_HOST_STYLES = `
 :root{--theme-spacing-xs:2px;--theme-spacing-sm:4px;--theme-spacing-md:6px;--theme-spacing-lg:8px;--theme-spacing-xl:12px;--theme-spacing-2xl:16px;--theme-spacing-3xl:24px;--theme-radius-sm:4px;--theme-radius-md:6px;--theme-radius-lg:8px;--theme-radius-xl:12px;--theme-radius-2xl:14px;color-scheme:var(--mousse-color-scheme)}
-html{margin:0;min-height:100%;background:var(--surface-base,var(--bg-primary))!important;color:var(--text-primary);font-family:var(--mousse-font-family)!important;font-size:var(--mousse-font-size)!important}
-body{margin:0;min-height:100vh;background:var(--surface-base,var(--bg-primary))!important;color:var(--text-primary);font-family:inherit;font-size:inherit}*,*::before,*::after{box-sizing:border-box}button,input,textarea,select{font:inherit}
+html{margin:0;background:var(--surface-base,var(--bg-primary))!important;color:var(--text-primary);font-family:var(--mousse-font-family)!important;font-size:var(--mousse-font-size)!important}
+body{margin:0;background:var(--surface-base,var(--bg-primary))!important;color:var(--text-primary);font-family:inherit;font-size:inherit}*,*::before,*::after{box-sizing:border-box}button,input,textarea,select{font:inherit}
 :where(button){display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:var(--theme-btn-padding,6px 14px);border-radius:var(--theme-btn-radius,6px);border:0;font-size:13px;font-weight:500;line-height:1.4;background:rgba(var(--accent-rgb),.12);color:var(--text-secondary);transition:background .15s,opacity .15s,color .15s}:where(button:hover:not(:disabled)){background:rgba(var(--accent-pale-rgb),.2);color:var(--text-primary)}
 button{cursor:pointer}button:disabled,input:disabled,select:disabled,textarea:disabled{opacity:.5;cursor:not-allowed}a{color:var(--vscode-textLink-foreground,var(--accent))}a:hover{text-decoration:underline}
 :focus-visible{outline:2px solid var(--vscode-focusBorder,var(--accent));outline-offset:2px}
