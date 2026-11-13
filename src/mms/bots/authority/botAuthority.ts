@@ -9,6 +9,7 @@ import type { SpendScope } from '../../../shared/harness/spend'
 import type { NeutralTool } from '../../../shared/harness/tools'
 import { assertInsideRoots } from '../../agents/WorkspaceAccessPolicy'
 import { touchesGitMetadata } from '../../agents/gitMetadata'
+import { localPathOf } from '../../data/closedPlaces'
 import type { BotPermissions } from '../grants/compile'
 
 /**
@@ -93,6 +94,15 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
         }
       }
       return decided
+    },
+    closedBelow(path: string): boolean {
+      if (!computer || !workspace) return false
+      const local = localArguments({ path })
+      if ('refused' in local) return true
+      const root = resolve(workspace.scratch, String(local.args.path))
+      // A place that holds the bot's own folders (a test's home in the temporary folder) doesn't count.
+      const places = [computer.closed, ...(computer.outside ?? []).filter((place) => !ownInClosed.some((folder) => insideFolder(place, folder)))]
+      return [root, realPathOf(root)].some((at) => places.some((place) => insideFolder(at, place)))
     }
   }
   return authority
@@ -142,6 +152,10 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
     // permission would let the bot use it as written.
     const expanded = PATH_ARGUMENTS.map((key) => args[key]).find((value): value is string => typeof value === 'string' && runtimeExpandedPath(value))
     if (expanded !== undefined) return { ok: false, wall: pathFormWall(nativeName, expanded) }
+    // A network path to this computer is checked as the local path it means; one that can't be turned into it is refused.
+    const local = localArguments(args)
+    if ('refused' in local) return { ok: false, wall: { kind: 'network_path', tool: nativeName, path: local.refused } }
+    args = local.args
     // Without file access the bot has no folder at all, not even its scratch folder.
     if (!workspace) return { ok: false, wall: limit.files ? { kind: 'path', tool: nativeName, path: String(firstPath(args) ?? '.'), access } : { kind: 'computer', tool: nativeName, off: 'files' } }
     const scratch = workspace.scratch
@@ -212,6 +226,23 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
     }
     return { ok: true }
   }
+}
+
+/**
+ * A call's path arguments with every network path to this computer turned into the local path it means (Windows,
+ * `localPathOf`), or the first that can't be turned into one with certainty. Elsewhere, as they are.
+ */
+function localArguments(args: Record<string, unknown>, platform: NodeJS.Platform = process.platform): { args: Record<string, unknown> } | { refused: string } {
+  if (platform !== 'win32') return { args }
+  let out = args
+  for (const key of PATH_ARGUMENTS) {
+    const value = args[key]
+    if (typeof value !== 'string') continue
+    const local = localPathOf(value)
+    if (local.kind === 'refused') return { refused: value }
+    if (local.kind === 'local') out = { ...out, [key]: local.path }
+  }
+  return { args: out }
 }
 
 /** `path` with every link in the part that exists followed; the rest (not created yet) as named. */

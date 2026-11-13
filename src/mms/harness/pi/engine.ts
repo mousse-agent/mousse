@@ -51,7 +51,7 @@ import { piCredentialHandler, piOAuthCredential, piOAuthHandle, writePiAuth, typ
 import type { PiRpcEvent, PiRpcExit, PiRpcRequest } from './rpcClient'
 import { preparePiHome, type PiSettingsInput } from './settings'
 import { PI_NATIVE_TOOLS } from './nativeTools'
-import { botAppToolRefusal, checkBuiltinCall, checkMessage } from '../../../shared/bots/personal/walls'
+import { botAppToolRefusal, checkBuiltinCall, checkMessage, wallMessage } from '../../../shared/bots/personal/walls'
 import { neutralToolIdempotent, neutralToolsOf } from '../../../shared/harness/tools'
 
 /**
@@ -82,6 +82,8 @@ const BUILTIN_CLASSES: Record<string, PiToolClass> = {
   edit: 'mutation', write: 'mutation', bash: 'mutation', powershell: 'mutation'
 }
 export const PI_READ_ONLY_BUILTINS: readonly string[] = ['read', 'grep', 'find', 'ls']
+/** Pi's tools that walk down from a folder (`ls` lists one folder's names only). */
+const PI_WALKING_TOOLS: ReadonlySet<string> = new Set(['grep', 'find'])
 export const PI_ALL_BUILTINS: readonly string[] = ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls']
 /** How long the writer waits for a dead process's tree and its sweep (the Windows sweep alone can take 20 s). */
 export const CLEANUP_DEADLINE_MS = 30_000
@@ -1287,6 +1289,10 @@ export class PiRpcEngine implements ProviderAdapter {
     if (bot && builtin) {
       const decided = checkBuiltinCall(bot, PI_NATIVE_TOOLS, request.toolName, input)
       if (!decided.ok) return { allow: false, reason: checkMessage(decided) }
+      // Pi's `grep` and `find` walk down from their folder and read hidden files, and take no exclusions Mousse could
+      // add (one `glob` of the bot's own): a walk over a folder that holds a place closed to bots is refused.
+      const walked = PI_WALKING_TOOLS.has(request.toolName) ? input[PI_PATH_ARGUMENTS[request.toolName]!.key] : undefined
+      if (typeof walked === 'string' && bot.closedBelow?.(walked)) return { allow: false, reason: wallMessage({ kind: 'search_closed', tool: request.toolName, path: walked }) }
     }
     // A bot's app tool, or one of its owner's MCP tools the turn was offered (by its proxied name), is checked here too
     // (the registry checks it again when it runs), so a refused call never costs a tool call. An MCP tool is checked as

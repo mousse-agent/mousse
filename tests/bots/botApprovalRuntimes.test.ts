@@ -5,7 +5,7 @@
  * with an ask, and the run carries on; anything that can't be asked for is just refused. Nobody is
  * shown a normal approval prompt.
  */
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -77,6 +77,31 @@ describe('Claude Code\'s own storage never asks (bot-architecture.md §3.7)', ()
       await finish(f, payload, lane === 'run' ? 'completed' : 'interrupted', { text: 'Done.', ...(lane === 'chat' ? { outcome: { interruptedBy: 'bot_wall' } } : {}) })
       for (const ask of f.store.openAsks(botId)) f.store.answerEscalation(ask.id, 'withdrawn')
     }
+  })
+
+  it('a link put in its storage is checked where it leads: one to a folder (a junction on Windows) or a file outside it needs file access, as that path would', async () => {
+    const home = join(f.base, 'claude-home')
+    const { prepared, payload } = await run('r1')
+    const gate = gateWithOwn(prepared.authority, home)
+    const session = join(home, 'projects', claudeProjectName(prepared.authority.workspace!.files!), 's1', 'tool-results')
+    mkdirSync(session, { recursive: true })
+    const outside = join(f.base, 'elsewhere')
+    mkdirSync(outside)
+    writeFileSync(join(outside, 'secret.txt'), 'x')
+    symlinkSync(outside, join(session, 'folder-link'), 'junction')
+    expect(gate.canUse('Read', { file_path: join(session, 'folder-link', 'secret.txt') }, 'tu-1')).toMatchObject({ ok: false })
+    expect(gate.canUse('Grep', { pattern: 'x', path: join(session, 'folder-link') }, 'tu-2')).toMatchObject({ ok: false })
+    let fileLinked = true
+    try {
+      symlinkSync(join(outside, 'secret.txt'), join(session, 'file-link.txt'), 'file')
+    } catch {
+      fileLinked = false // Windows without the privilege to make a file link
+    }
+    if (fileLinked) expect(gate.canUse('Read', { file_path: join(session, 'file-link.txt') }, 'tu-3')).toMatchObject({ ok: false })
+    // The storage itself still needs nothing.
+    writeFileSync(join(session, 'toolu_1.txt'), 'saved')
+    expect(gate.canUse('Read', { file_path: join(session, 'toolu_1.txt') }, 'tu-4')).toEqual({ ok: true })
+    await finish(f, payload, 'completed', { text: 'Done.' })
   })
 
   it('names project folders as Claude Code does, and matches a cut name by its cut part', () => {

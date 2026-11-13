@@ -86,6 +86,10 @@ export type WallReason =
    * `home`: the owner's home folder, for a `~` or variable path; `full`: the path it stands for.
    */
   | { kind: 'path_form'; tool: string; path: string; home?: string; full?: string }
+  /** A network path to this computer that can't be turned into the local path it means with certainty: never an ask. */
+  | { kind: 'network_path'; tool: string; path: string }
+  /** A search or listing over a folder that holds a place closed to bots, on a runtime that can't skip it: never an ask. */
+  | { kind: 'search_closed'; tool: string; path: string }
   | { kind: 'skill'; skill: string }
   | { kind: 'mcp'; server: string; tool: string; serverName?: string }
   | { kind: 'waiting' }
@@ -173,6 +177,11 @@ export interface BotAuthority {
    * them passes. Decided without side effects, so a wall or an ask is raised once, only when all are refused.
    */
   checkAny?(calls: readonly NormalisedCall[]): BotCheck
+  /**
+   * With file access: whether a search or listing that walks down from `path` (on its real path) would reach a place
+   * closed to bots, other than the bot's own folders. A runtime that can't make the walk skip them refuses it.
+   */
+  closedBelow?(path: string): boolean
   /** The activation's request and tool-call counts: one atomic row, shared by its main run and consults. */
   counters: CounterScope
   time: ActiveTimeScope

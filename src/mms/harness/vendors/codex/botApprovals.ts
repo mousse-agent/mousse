@@ -41,11 +41,10 @@ export type CodexBotDecision = { decision: 'accept' } | { decision: 'decline'; r
 const decided = (check: BotCheck): CodexBotDecision => (check.ok ? { decision: 'accept' } : { decision: 'decline', reason: checkMessage(check) })
 
 /**
- * Why a bot's command never runs outside Codex's sandbox, and what the bot can do instead: on Linux and macOS a command
- * can't change a file directly in a folder on the way to Mousse's data (the home folder) or under a folder only the
- * system may change (`writableFolder`), and `apply_patch`, which Mousse's check answers, can.
+ * Why a bot's command never runs outside Codex's sandbox. What a Linux bot's commands can't change is said in its
+ * instructions (`codexBotInstructionsNote`): that refusal is the system's own, which Codex doesn't offer to retry.
  */
-export const CODEX_BOT_UNSANDBOXED_REFUSAL = 'Commands run only in this bot\'s sandbox, with no network, where some files can\'t be changed (one directly in the home folder, or under /usr, /mnt or /media). Change such a file with apply_patch, which Mousse checks, or try another way.'
+export const CODEX_BOT_UNSANDBOXED_REFUSAL = 'This bot\'s commands run only in its sandbox. Try another way.'
 
 /**
  * A command Codex asks to run (`item/commandExecution/requestApproval`): a `shell` call in its

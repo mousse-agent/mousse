@@ -92,6 +92,7 @@ import {
 } from './codexActivity'
 import { NativeHelpers, type StrayThread } from './nativeHelpers'
 import { readCodexUserSetup, type CodexUserSetup } from './userSetup'
+import { isMousseTempEntry } from '../../../data/closedPlaces'
 import { CODEX_ONE_SHOT_ITEMS, codexOneShotConfig, codexOneShotRunsOn } from './oneShot'
 import type { BotAuthority } from '../../../../shared/bots/personal/authority'
 import { CODEX_BOT_USER_MCP_UNREADABLE, codexBotCommand, codexBotFileChange, codexBotMcpOverrides } from './botApprovals'
@@ -2846,10 +2847,12 @@ export class CodexProviderService {
     const { baseId } = parseThinkingSuffixFromModelId(input.model)
     const permissionMode = input.bot ? 'ask' : normalizePermissionMode(input.permissionMode)
     const policy = codexTurnPolicy(input.mode ?? 'default', input.bot ? undefined : input.child, permissionMode, botSandbox)
+    // Mousse's short-lived folders in the temporary folder are left out of it: one that comes and goes doesn't reopen the
+    // thread, and one made after the thread opened stays open to its commands until it reopens (docs/bots.md).
     // The policy a loaded thread was opened with: a change of child policy, permission mode, compaction
     // threshold or a bot's writable folders reopens it (Codex applies thread overrides when it loads a thread
     // and ignores them on a loaded one).
-    const childKey = `${input.child ? (input.child.readOnly ? 'read-only' : 'child') : ''}|${policy.approvalPolicy}|${policy.permissions ?? policy.sandbox}|${compactLimit ?? ''}${botOverrides ? `|bot:${Object.keys(botOverrides).sort().join(',')}` : ''}${botSandbox?.shell ? `|write:${botSandbox.writableRoots.join('\u0000')}` : ''}${botSandbox?.profile ? `|${botSandbox.profile.base}|read:${botSandbox.profile.readable.join('\u0000')}|deny:${botSandbox.profile.closed.join('\u0000')}` : ''}`
+    const childKey = `${input.child ? (input.child.readOnly ? 'read-only' : 'child') : ''}|${policy.approvalPolicy}|${policy.permissions ?? policy.sandbox}|${compactLimit ?? ''}${botOverrides ? `|bot:${Object.keys(botOverrides).sort().join(',')}` : ''}${botSandbox?.shell ? `|write:${botSandbox.writableRoots.join('\u0000')}` : ''}${botSandbox?.profile ? `|${botSandbox.profile.base}|read:${botSandbox.profile.readable.join('\u0000')}|deny:${botSandbox.profile.closed.filter((place) => !isMousseTempEntry(place)).join('\u0000')}` : ''}`
     const params = {
       cwd,
       approvalPolicy: policy.approvalPolicy,

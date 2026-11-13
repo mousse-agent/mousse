@@ -9,7 +9,7 @@ import { withinComputerLimit, type BotComputerLimit } from '../../../shared/bots
 import type { NeutralTool } from '../../../shared/harness/tools'
 import type { BindPolicy, HarnessCaps, HarnessError } from '../../../shared/harness/types'
 import { stableStringify } from '../../run/json'
-import { botClosedPlaces } from '../../data/closedPlaces'
+import { botClosedPlaces, ClosedPlacesUnknown } from '../../data/closedPlaces'
 
 /**
  * A bot thread's grant, compiled for one dispatch (PR 6 §4). Pure: the caller supplies the native
@@ -147,9 +147,17 @@ export function mousseDataFolder(profileHome: string): string {
   return basename(profiles) === 'profiles' ? dirname(profiles) : profileHome
 }
 
-/** What file access leaves closed: the Mousse home `closed`, and every place `botClosedPlaces` lists outside it. */
-function closedTo(closed: string): { closed: string; outside: string[] } {
-  return { closed, outside: botClosedPlaces({ mousseHome: closed }) }
+/**
+ * What file access leaves closed: the Mousse home `closed`, and every place `botClosedPlaces` lists outside it, with the
+ * homes the profile's own CLI entries are set to use. Undefined when those entries can't be read.
+ */
+function closedTo(closed: string, profileHome: string): { closed: string; outside: string[] } | undefined {
+  try {
+    return { closed, outside: botClosedPlaces({ mousseHome: closed, profileHome }) }
+  } catch (error) {
+    if (error instanceof ClosedPlacesUnknown) return undefined
+    throw error
+  }
 }
 
 /**
@@ -236,6 +244,8 @@ export function compileBotThread(input: CompileInput): CompileResult {
     ...(input.botTools?.applets ? [BOT_APPLET_TOOL] : [])
   ])].sort()
   const mcp = [...new Set(manifest.mcp.map((pair) => `${pair.serverId}::${pair.tool}` as const))].sort()
+  const closed = computer ? closedTo(real(mousseDataFolder(input.profileHome)), input.profileHome) : undefined
+  if (computer && !closed) return unenforceable('Mousse couldn\'t read this profile\'s provider settings, so it can\'t tell which sign-ins to keep closed to this bot.', ['containment'])
   return {
     ok: true,
     policy: {
@@ -260,7 +270,7 @@ export function compileBotThread(input: CompileInput): CompileResult {
             writeRoots: computer ?? [],
             scratch,
             ...(files !== undefined ? { files } : {}),
-            ...(computer ? { computer: closedTo(real(mousseDataFolder(input.profileHome))) } : {})
+            ...(closed ? { computer: closed } : {})
           }
         : null
     }

@@ -1,7 +1,8 @@
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
+import { botClosedPlaces } from '../../src/mms/data/closedPlaces'
 import { RunCounters, TurnBudget } from '../../src/mms/harness/budget'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 import type { NeutralTool } from '../../src/shared/harness/tools'
@@ -222,6 +223,56 @@ describe('What bots may do here, at Pi\'s gate (real child)', () => {
     expect(String(results[2]!.response)).toContain('own-file')
     expect(existsSync(join(files, 'made.txt'))).toBe(false)
     expect(existsSync(join(root, 'made.txt'))).toBe(false)
+  }, 120_000)
+})
+
+describe('a search with file access over a folder that holds a place closed to bots (real child)', () => {
+  // Pi's grep and find walk down from their folder, hidden files included, and take one glob of the bot's own: Mousse
+  // can't add exclusions, so a walk that would reach a closed place is refused, and a narrower one runs.
+  it('is refused, the place several levels down, in the folder searched, or behind the link searched; a narrower search runs and doesn\'t follow a link into one', async () => {
+    const { engine, recorder, project } = await setup(cleanups, supervised)
+    const root = realpathSync(project)
+    const scratch = join(root, '..', 'scratch')
+    mkdirSync(scratch, { recursive: true })
+    const mark = `closedmark${Date.now()}`
+    // The owner's home several levels below the folder searched, with Codex's sign-in in it; the Mousse home in the
+    // folder searched; an ordinary folder beside them with a link into Codex's home.
+    const home = join(root, 'deep', 'a', 'b', 'home')
+    const mousseHome = join(root, 'mousse-home')
+    const codexAuth = join(home, '.codex', 'auth.json')
+    const notes = join(root, 'notes')
+    for (const dir of [join(home, '.codex'), mousseHome, notes]) mkdirSync(dir, { recursive: true })
+    for (const file of [codexAuth, join(mousseHome, 'auth.json')]) writeFileSync(file, `secret ${mark}\n`)
+    writeFileSync(join(notes, 'plain.txt'), `ordinary ${mark}\n`)
+    symlinkSync(join(home, '.codex'), join(notes, 'codex-link'), 'junction')
+    const homeLink = join(root, 'home-link')
+    symlinkSync(home, homeLink, 'junction')
+    const outside = botClosedPlaces({ mousseHome, env: {}, userHome: home, temps: [], entryEnvs: [] })
+    const authority = createBotAuthority({
+      activationId: 'act-1', role: 'activation',
+      permissions: { tools: ['read', 'search', 'list'], appTools: [], mcp: [], skills: [], workspace: { roots: [root], access: 'read', scratch, computer: { closed: mousseHome, outside } } },
+      waiting: () => false, counters: new RunCounters(),
+      time: { deadline: () => Number.MAX_SAFE_INTEGER, signal: new AbortController().signal }, spend: null
+    })
+    recorder.respond(script([
+      { tool: { name: 'grep', args: { pattern: mark, path: root } } },
+      { tool: { name: 'find', args: { pattern: '*.json', path: root } } },
+      { tool: { name: 'grep', args: { pattern: mark, path: join(root, 'deep', 'a') } } },
+      { tool: { name: 'grep', args: { pattern: mark, path: homeLink } } },
+      { tool: { name: 'grep', args: { pattern: mark, path: '.' } } },
+      { tool: { name: 'grep', args: { pattern: mark, path: notes } } },
+      { tool: { name: 'ls', args: { path: root } } },
+      { text: 'done' }
+    ]))
+    const turn = harness(root, {}, { bot: authority, tools: { toolLedger: { start: () => 'row', commit: () => {}, failed: () => {} } } })
+    const result = await engine.startTurn(turn.input, turn.sink, turn.ctl, turn.host)
+    expect(result.text).toBe('done')
+    const results = turn.events.filter((event) => event.kind === 'tool' && event.phase === 'complete')
+    expect(results.map(refused)).toEqual([true, true, true, true, true, false, false])
+    for (const event of results.slice(0, 5)) expect(String(event.response)).toMatch(/holds Mousse's own data or a sign-in, so (grep|find) can't search all of it here\. Search a narrower folder/)
+    for (const event of results) expect(String(event.response)).not.toContain(`secret ${mark}`)
+    expect(String(results[5]!.response)).toContain(`ordinary ${mark}`)
+    expect(String(results[6]!.response)).toContain('notes')
   }, 120_000)
 })
 

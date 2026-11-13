@@ -24,10 +24,10 @@ import { CodexProviderService, codexEnvironment } from '../../src/mms/harness/ve
 import type { CodexConnection } from '../../src/mms/harness/vendors/codex/CodexAppServerClient'
 import type { CodexModel } from '../../src/mms/harness/vendors/codex/protocol'
 import { CodexInstallation } from '../../src/mms/harness/vendors/codex/installation'
-import { CODEX_BOT_WRITE_LIMIT_TEXT, codexPackageOf } from '../../src/mms/harness/vendors/codex/childPolicy'
+import { codexPackageOf } from '../../src/mms/harness/vendors/codex/childPolicy'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
-import { botClosedPlaces } from '../../src/mms/data/closedPlaces'
+import { botClosedPlaces, CODEX_COMMAND_WRITE_LIMIT_TEXT } from '../../src/mms/data/closedPlaces'
 import type { NeutralTool } from '../../src/shared/harness/tools'
 
 const pinned = new CodexInstallation({ installationHome: resolve(__dirname, '..', '..', '.cache', 'codex-pin') }).installed()
@@ -277,7 +277,7 @@ for (const BINARY of BINARIES) for (const entry of ENTRIES) describe.skipIf(!BIN
     ['its own file', `cat ${join(at.files, 'own.txt')}`, `OWN-${MARK}`]
   ]
 
-  it.skipIf(!LINUX)('with file access and "run commands": no command reads or changes Mousse\'s data, a link and a program included; an ordinary file and its own folder are read and written', async () => {
+  it.skipIf(!LINUX)('with file access and "run commands": no command reads or changes Mousse\'s data, a link and a program included, nor moves a closed place away; an ordinary file, a file in the home folder and its own folder are read and written; a system folder is not, and the bot is told so', async () => {
     const { bot } = botOf(['read', 'list', 'search', 'edit', 'write', 'shell'], true)
     const probes = reads()
     const changes: Array<[string, string]> = [
@@ -289,7 +289,10 @@ for (const BINARY of BINARIES) for (const entry of ENTRIES) describe.skipIf(!BIN
       ['the service\'s socket', `python3 -c "import socket; s=socket.socket(socket.AF_UNIX); s.connect('${at.socket}'); print(s.recv(64).decode())"`],
       ['an ordinary folder', `sh -c 'echo x > ${join(at.elsewhere, 'made.txt')}'`],
       ['its own folder', `sh -c 'echo x > ${join(at.files, 'made.txt')}'`],
-      ['a file directly in the home folder', `sh -c 'echo x >> ${at.bashrc}'`]
+      ['the folder of a sign-in moved away', `mv ${join(at.home, '.claude')} ${join(at.home, '.claude-moved')}`],
+      ['the home folder moved away', `mv ${at.home} ${join(root, 'home-moved')}`],
+      ['a file directly in the home folder', `sh -c 'echo x >> ${at.bashrc}'`],
+      ['a system folder', `sh -c 'echo x > /etc/mousse-bot-test'`]
     ]
     // The same file changed with the file tool, which asks Mousse's check instead of running in the sandbox.
     const bashrcPatch = patch(`*** Begin Patch\n*** Update File: ${at.bashrc}\n@@\n-before\n+after\n*** End Patch`)
@@ -305,11 +308,20 @@ for (const BINARY of BINARIES) for (const entry of ENTRIES) describe.skipIf(!BIN
     for (const made of [join(at.mousse, 'new.txt'), join(at.elsewhere, 'copy.json'), join(at.elsewhere, 'hard.json')]) expect(existsSync(made), made).toBe(false)
     expect(holding(at.elsewhere, SECRETS())).toEqual([])
     for (const made of [join(at.elsewhere, 'made.txt'), join(at.files, 'made.txt')]) expect(existsSync(made), made).toBe(true)
-    // A file directly in the home folder: the command can't change it (the system's own refusal, which Codex doesn't offer
-    // to retry), the turn's instructions say so and what to use instead, and the file tool can (when Codex offers it).
-    expect(outputs[probes.length + changes.length - 1], 'a file directly in the home folder').toContain('Read-only file system')
-    expect(seen).toContain(JSON.stringify(CODEX_BOT_WRITE_LIMIT_TEXT).slice(1, -1))
-    if (offered.includes('apply_patch')) expect(readFileSync(at.bashrc, 'utf8')).toBe('after\n')
+    // A folder a closed place is in, or one above it, can't be moved (each is a mount of its own in the sandbox), so the
+    // next command's sandbox still finds the closed place by its name.
+    for (const moved of [join(at.home, '.claude-moved'), join(root, 'home-moved')]) expect(existsSync(moved), moved).toBe(false)
+    expect(readFileSync(at.claudeCredentials, 'utf8')).toContain(`CLAUDECRED-${MARK}`)
+    // A file directly in the home folder: the command changes it, and the file tool too (when Codex offers it). A system
+    // folder: the command can't (the system's own refusal, which Codex doesn't offer to retry), and the turn's
+    // instructions say so and what to use instead.
+    expect(outputs[probes.length + changes.length - 1], 'a system folder').toMatch(/Read-only file system|Permission denied/)
+    expect(existsSync('/etc/mousse-bot-test')).toBe(false)
+    expect(seen).toContain(JSON.stringify(CODEX_COMMAND_WRITE_LIMIT_TEXT).slice(1, -1))
+    expect(readFileSync(at.bashrc, 'utf8')).toBe(offered.includes('apply_patch') ? 'after\nx\n' : 'before\nx\n')
+    // Nothing left where a closed place doesn't exist (Grok's sign-in, Claude Code's device keys), and none of the folders
+    // Codex keeps read-only at the top of a writable folder while a command runs.
+    for (const left of [join(at.home, '.grok'), join(at.home, '.claude', '.device-keys.json'), ...['.git', '.agents', '.aws'].map((name) => join(at.home, name))]) expect(existsSync(left), left).toBe(false)
     // The entry's own Codex signed in with its own sign-in for every model request, closed to the bot as it was.
     expect(bearers.length).toBeGreaterThan(0)
     expect(new Set(bearers)).toEqual(new Set([codexHome === join(at.home, '.codex') ? `Bearer sk-fake-CODEXAUTH-${MARK}` : `Bearer sk-fake-managed-${MARK}`]))
