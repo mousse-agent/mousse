@@ -58,6 +58,8 @@ export interface InjectedMcpClient {
       description?: string
       inputSchema?: Record<string, unknown>
       outputSchema?: Record<string, unknown>
+      /** The server's own hints (MCP `ToolAnnotations`); only `readOnlyHint` is read. */
+      annotations?: { readOnlyHint?: boolean }
     }>
     nextCursor?: string
   }>
@@ -86,6 +88,11 @@ export interface McpToolExecutionPin {
 export interface McpCallOptions {
   /** How long the call may run (default 20 s); drives both Mousse's timer and the SDK request's. */
   timeoutMs?: number
+  /**
+   * `false`: the call never starts a sign-in (a bot's). An OAuth server without a session refuses it at once, and a
+   * session that cannot be renewed fails it (`auth-required`) instead of opening a sign-in page.
+   */
+  signIn?: false
 }
 
 /** One enabled server's tools (`getEnabledToolsByServer`). */
@@ -282,7 +289,8 @@ export class McpManager {
    */
   async getEnabledToolsByServer(
     projectPath?: string,
-    actor: IntegrationActor = defaultIntegrationActor(false)
+    actor: IntegrationActor = defaultIntegrationActor(false),
+    options: { signIn?: false } = {}
   ): Promise<McpServerTools[]> {
     this.owned.assertAccepting()
     const settings = this.settingsStore.get().integrations.mcp
@@ -294,13 +302,19 @@ export class McpManager {
     }).filter((server) => server.status !== 'missing-env' && server.status !== 'failed')
 
     const listed = await Promise.allSettled(
-      eligibleServers.map((server) =>
-        withAbortTimeout(
-          (signal) => this.listToolsForServer(server, projectPath, signal),
-          SERVER_TOOLS_TIMEOUT_MS,
-          `Timed out listing tools for ${server.name}`
-        )
-      )
+      eligibleServers.map(async (server) => {
+        // A listing that must not start a sign-in (`signIn: false`) holds each server's sign-in while it lists.
+        const release = options.signIn === false ? await this.holdSignIn(server) : undefined
+        try {
+          return await withAbortTimeout(
+            (signal) => this.listToolsForServer(server, projectPath, signal),
+            SERVER_TOOLS_TIMEOUT_MS,
+            `Timed out listing tools for ${server.name}`
+          )
+        } finally {
+          release?.()
+        }
+      })
     )
     return eligibleServers.map((server, index) => {
       const result = listed[index]!
@@ -476,6 +490,40 @@ export class McpManager {
       throw new Error(`MCP server is no longer configured: ${descriptor.serverId}`)
     }
 
+    // A call that must not start a sign-in holds the server's sign-in for as long as it runs.
+    const release = options?.signIn === false ? await this.holdSignIn(server) : undefined
+    try {
+      return await this.callConnected(server, descriptor, args, projectPath, signal, actor, expected, options, providerName)
+    } finally {
+      release?.()
+    }
+  }
+
+  /**
+   * Holds an OAuth server's sign-in (`FileMcpOAuthProvider.holdSignIn`) for a call that must not start one; refuses at
+   * once when there is no session to use. Nothing to hold for a server that does not sign in with OAuth.
+   */
+  private async holdSignIn(server: McpServerConfig): Promise<(() => void) | undefined> {
+    if (inferMcpAuthMode(server) !== 'oauth' || !server.url || !shouldAttachOAuthProvider(server)) return undefined
+    // Throws `auth-required` when the owner never signed in, or signed out.
+    await this.prepareOAuthProvider(server)
+    return this.oauthProviders.get(mcpInstallationId(server))?.holdSignIn()
+  }
+
+  private async callConnected(
+    server: McpServerConfig,
+    descriptor: McpToolDescriptor,
+    args: Record<string, unknown>,
+    projectPath: string | undefined,
+    signal: AbortSignal | undefined,
+    actor: IntegrationActor,
+    expected: McpToolExecutionPin | undefined,
+    options: McpCallOptions | undefined,
+    providerName: string
+  ): Promise<McpToolCallResult> {
+    const assertPin = (tool: McpToolDescriptor | undefined): void => {
+      if (expected && (!tool || (tool.installationId ?? tool.serverId) !== expected.installationId || tool.configRevision !== expected.configRevision || tool.toolName !== expected.toolName)) throw Object.assign(new Error('MCP dependency changed since admission.'), { category: 'disabled', code: 'stale_revision' })
+    }
     const connection = await this.connect(server, projectPath, signal)
     if (expected && (mcpInstallationId(connection.config) !== expected.installationId || connection.config.configRevision !== expected.configRevision)) throw Object.assign(new Error('MCP connection does not match the admitted revision.'), { category: 'disabled', code: 'stale_revision' })
     if (expected) {
@@ -825,7 +873,8 @@ export class McpManager {
           installationId,
           configRevision: server.configRevision,
           profileId: this.context.profileId,
-          schemaError
+          schemaError,
+          ...(typeof tool.annotations?.readOnlyHint === 'boolean' ? { readOnlyHint: tool.annotations.readOnlyHint } : {})
         }
         tools.push(descriptor)
       }

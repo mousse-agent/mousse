@@ -24,8 +24,11 @@ export interface RelayServerTools {
 
 /** What the relay catalogue needs of `McpManager` (structural, so the manager satisfies it as it grows). */
 export interface RelayCatalogManager {
-  /** Each enabled server's tools for the actor, one server's failure never failing the rest. */
-  getEnabledToolsByServer(projectPath?: string, actor?: IntegrationActor): Promise<RelayServerTools[]>
+  /**
+   * Each enabled server's tools for the actor, one server's failure never failing the rest. `signIn: false`: no listing
+   * starts a sign-in (one that needs it fails instead).
+   */
+  getEnabledToolsByServer(projectPath?: string, actor?: IntegrationActor, options?: { signIn?: false }): Promise<RelayServerTools[]>
   /** Called when the manager's discovery cache is invalidated; returns the unsubscribe. */
   onDiscoveryInvalidated(listener: () => void): () => void
   /** The configured servers of the scope, from the manager's cached discovery. */

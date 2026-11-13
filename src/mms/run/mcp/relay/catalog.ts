@@ -18,12 +18,19 @@ export interface RelayCatalogDeps {
   manager: RelayCatalogManager
   settings: () => MousseIntegrationsSettings['mcp']
   now?: () => number
+  /**
+   * Whether the profile's own servers (the scope with no project) are listed even while no runtime has the relay on:
+   * personal bots reach them through Mousse whatever the relay settings of the owner's threads (`BotMcp`).
+   */
+  listProfile?: () => boolean
 }
 
 /** One project scope's catalogue. */
 interface Scope {
   /** Each enabled installation's last good tools. */
   servers: Map<string, RelayServerTools>
+  /** Installations whose last listing failed (their last good tools are kept). */
+  failing: Set<string>
   listing: RelayTool[]
   byName: Map<string, RelayTool>
   /** The listing before the last change, so a name a runtime still holds resolves for one generation more. */
@@ -68,18 +75,31 @@ export class RelayCatalog {
     return this.scopes.get(scopeKey(projectPath))?.listing ?? []
   }
 
+  /**
+   * Each enabled installation of the scope with its last good tools, and whether its last listing failed (it is down,
+   * signed out or slow). Empty while the scope is cold.
+   */
+  servers(projectPath?: string): Array<RelayServerTools & { failing: boolean }> {
+    const scope = this.scopes.get(scopeKey(projectPath))
+    if (!scope) return []
+    return [...scope.servers.values()].map((entry) => ({ ...entry, failing: scope.failing.has(entry.installationId) }))
+  }
+
   /** The tool a relayed name resolves to, in the current or previous good listing of the scope. */
   resolve(projectPath: string | undefined, name: string): RelayTool | undefined {
     const scope = this.scopes.get(scopeKey(projectPath))
     return scope?.byName.get(name) ?? scope?.previous.get(name)
   }
 
-  /** A warm scope returns at once (a stale one refreshes in the background); a cold one waits up to the budget. Never throws. */
-  async ensure(projectPath?: string, budgetMs: number = RELAY_WARMUP_BUDGET_MS): Promise<void> {
+  /**
+   * A warm scope returns at once (a stale one refreshes in the background); a cold one waits up to the budget. Never
+   * throws. `signIn: false`: a refresh this starts never starts a sign-in (a bot's).
+   */
+  async ensure(projectPath?: string, budgetMs: number = RELAY_WARMUP_BUDGET_MS, options: { signIn?: false } = {}): Promise<void> {
     if (this.disposed) return
     const scope = this.scope(projectPath)
     if (scope.refreshedAt === undefined) {
-      const refresh = this.refresh(projectPath)
+      const refresh = this.refresh(projectPath, options)
       let timer: ReturnType<typeof setTimeout> | undefined
       const budget = new Promise<void>((resolve) => {
         timer = setTimeout(resolve, Math.max(0, budgetMs))
@@ -89,14 +109,14 @@ export class RelayCatalog {
       clearTimeout(timer)
       return
     }
-    if (this.stale(scope)) void this.refresh(projectPath)
+    if (this.stale(scope)) void this.refresh(projectPath, options)
   }
 
   /** Re-reads the scope (one at a time per scope); a server that fails keeps its last good tools. */
-  refresh(projectPath?: string): Promise<void> {
+  refresh(projectPath?: string, options: { signIn?: false } = {}): Promise<void> {
     if (this.disposed) return Promise.resolve()
     const scope = this.scope(projectPath)
-    scope.refreshing ??= this.read(projectPath, scope).finally(() => {
+    scope.refreshing ??= this.read(projectPath, scope, options).finally(() => {
       scope.refreshing = undefined
     })
     return scope.refreshing
@@ -117,7 +137,7 @@ export class RelayCatalog {
     const key = scopeKey(projectPath)
     let scope = this.scopes.get(key)
     if (!scope) {
-      scope = { servers: new Map(), listing: [], byName: new Map(), previous: new Map(), revision: '', seen: -1 }
+      scope = { servers: new Map(), failing: new Set(), listing: [], byName: new Map(), previous: new Map(), revision: '', seen: -1 }
       this.scopes.set(key, scope)
     }
     return scope
@@ -131,27 +151,33 @@ export class RelayCatalog {
   }
 
   /** One refresh of the scope. Nothing changes unless it succeeds; never throws. */
-  private async read(projectPath: string | undefined, scope: Scope): Promise<void> {
+  private async read(projectPath: string | undefined, scope: Scope, options: { signIn?: false } = {}): Promise<void> {
     const settings = this.deps.settings()
     const seen = this.invalidations
     try {
       let eligible: McpServerConfig[] = []
       let listed: RelayServerTools[] = []
-      // No runtime has the relay: nothing is listed and no server is started for it.
-      if (anyRuntime(settings)) {
+      // No runtime has the relay (and no bot needs the profile's servers): nothing is listed and no server is started.
+      if (anyRuntime(settings) || (projectPath === undefined && settings.enabled && this.deps.listProfile?.() === true)) {
         const actor = defaultIntegrationActor(false)
         const servers = await this.deps.manager.listConfiguredServers(projectPath)
         eligible = resolveEffectiveMcpServers({ servers, settings, actor })
           .filter((server) => server.status !== 'missing-env' && server.status !== 'failed')
-        listed = eligible.length ? await this.deps.manager.getEnabledToolsByServer(projectPath, actor) : []
+        listed = eligible.length ? await this.deps.manager.getEnabledToolsByServer(projectPath, actor, options) : []
       }
       if (this.disposed) return
       const servers = new Map<string, RelayServerTools>()
+      const failing = new Set<string>()
       for (const entry of listed) {
-        const kept = entry.error ? scope.servers.get(entry.installationId) : entry
-        if (entry.error) logWarn('McpRelay', `Listing MCP server "${entry.serverName}" failed; its last good tools are kept: ${redactSensitiveText(entry.error)}`)
-        if (kept) servers.set(entry.installationId, kept)
+        // A server that fails keeps its last good tools; one that never listed is kept with none, as failing.
+        const kept = entry.error ? scope.servers.get(entry.installationId) ?? { installationId: entry.installationId, serverName: entry.serverName, tools: [] } : entry
+        if (entry.error) {
+          failing.add(entry.installationId)
+          logWarn('McpRelay', `Listing MCP server "${entry.serverName}" failed; its last good tools are kept: ${redactSensitiveText(entry.error)}`)
+        }
+        servers.set(entry.installationId, kept)
       }
+      scope.failing = failing
       const { tools, dropped } = allocateRelayTools([...servers.values()].flatMap((entry) => entry.tools))
       const digest = relayListingDigest(tools)
       const changed = digest !== relayListingDigest(scope.listing)
