@@ -125,6 +125,11 @@ export interface ThreadStreamOptions {
   /** Threads that never count against a caller's quota, such as the shared lists stream. */
   unmetered?(threadId: string): boolean
   /**
+   * The one device that may read the stream stored under `threadId` (a phone's own lists, `mousse:lists:<node>`), and
+   * the thread id its records carry instead of the key. Undefined for a stream every device of the user may read.
+   */
+  boundReader?(threadId: string): { reader: NodeId; subject: string } | undefined
+  /**
    * Whether a session (of `holder`, when given) is being served the stream. Without it, no stream
    * is ever released for being idle.
    */
@@ -194,6 +199,8 @@ function omittedIds(data: unknown): Record<string, string> {
 export class ThreadStreamAdapter {
   readonly store: StreamStore
   private readonly active = new Map<StreamId, ActiveThread>()
+  /** Which streams one device alone reads (`boundReader`), by stream, kept so a read is not a query. */
+  private readonly readerBindings = new Map<StreamId, NodeId | undefined>()
   /** Which streams are private to a reader, kept so the check that runs for every record is not a query. */
   private readonly privateBindings = new Map<
     StreamId,
@@ -297,6 +304,24 @@ export class ThreadStreamAdapter {
     }
     const bound = this.privateBindings.get(stream)
     return bound && { ...bound, open: false }
+  }
+
+  /**
+   * The one device that may read `stream`, when it is bound to one that is not a private stream (a phone's own lists,
+   * `ThreadStreamOptions.boundReader`). Read for every subscription, so a guessed stream id reads nothing.
+   */
+  boundReader(stream: StreamId): NodeId | undefined {
+    if (!this.options.boundReader) return undefined
+    if (!this.readerBindings.has(stream)) {
+      const live = this.active.get(stream)
+      const key = live
+        ? live.threadId
+        : (this.options.db.database.prepare('SELECT thread_id FROM bridge_thread_streams WHERE stream=?').get(stream)?.thread_id as string | undefined)
+      // A stream this computer never made reads nothing anyway, and is not remembered.
+      if (key === undefined) return undefined
+      this.readerBindings.set(stream, this.options.boundReader(String(key))?.reader)
+    }
+    return this.readerBindings.get(stream)
   }
 
   /** The computers that have a private stream open. */
@@ -447,7 +472,7 @@ export class ThreadStreamAdapter {
     const terminal = spec?.kind === 'terminal'
     const thread: ActiveThread = {
       threadId,
-      subject: spec ? privateRecordSubject(spec) : threadId,
+      subject: spec ? privateRecordSubject(spec) : (this.options.boundReader?.(threadId)?.subject ?? threadId),
       ...(spec ? { spec } : {}),
       ...(terminal
         ? { maxRows: PRIVATE_TERMINAL_RING_ROWS, maxBytes: PRIVATE_TERMINAL_RING_BYTES }

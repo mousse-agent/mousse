@@ -250,7 +250,8 @@ export class BotChatProjection {
       ...(filesOf(row).length ? { attachments: filesOf(row) } : {}),
       ...(appletsOf(row).length ? { applets: appletsOf(row) } : {}),
       ...(row.replyTo ? { replyTo: this.quoteOf(row.replyTo) } : {}),
-      ...(row.author === 'owner' && row.clientRequestId ? { clientRequestId: row.clientRequestId } : {})
+      ...(row.author === 'owner' && row.clientRequestId ? { clientRequestId: row.clientRequestId } : {}),
+      ...(row.author === 'bot' && row.ownerReaction ? { reaction: row.ownerReaction.emoji } : {})
     }
   }
 

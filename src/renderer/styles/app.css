@@ -345,21 +345,6 @@ html.platform-darwin .titlebar-left {
   color: white;
 }
 
-/* Functional progress indicators must keep spinning even when Windows
-   reports prefers-reduced-motion (global baseline short-circuits animation). */
-.icon-spin {
-  animation: spin 1s steps(12) infinite !important;
-}
-
-@keyframes spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
-}
-
 /* The conversation takes what the panel area leaves, at least 280px; the panel area's minimum keeps it
    within 60% of the workspace (lib/panelSplit.ts). */
 .sidebar {
@@ -2444,10 +2429,10 @@ html[data-chat-width='full'] .chat {
   /* Match the wrap cap directly — % max-height is unreliable while height is auto. */
   max-height: var(--theme-composer-input-max-height, min(60vh, 640px));
   overflow: hidden;
-  padding: 11px 14px 6px;
+  padding: var(--theme-composer-input-padding, 11px 14px 6px);
   font-size: 14px;
   line-height: 1.5;
-  color: transparent;
+  color: var(--text-primary);
   white-space: pre-wrap;
   overflow-wrap: break-word;
   pointer-events: none;
@@ -2455,11 +2440,162 @@ html[data-chat-width='full'] .chat {
   -webkit-user-select: none;
 }
 
+/* Light Markdown in the draft. The textarea's own glyphs are hidden (caret, selection, spellcheck
+ * and IME stay native) and the backdrop paints the text with these styles. None of them may change
+ * a character's width, or the caret would drift: bold is a stroke, not a heavier face, italic is a
+ * tint, and code keeps the prose font. */
+.composer-input.composer-input-mirrored {
+  -webkit-text-fill-color: transparent;
+}
+
+.composer-input.composer-input-mirrored::placeholder {
+  -webkit-text-fill-color: currentColor;
+}
+
+.composer-input.composer-input-mirrored::selection {
+  background: rgba(var(--accent-rgb), 0.28);
+}
+
+.composer-input-wrap:has(.composer-input:disabled) .composer-input-backdrop {
+  opacity: 0.5;
+}
+
+.composer-md-marker {
+  color: color-mix(in srgb, var(--text-secondary) 80%, transparent);
+}
+
+.composer-md-bold:not(.composer-md-marker),
+.composer-md-heading:not(.composer-md-marker) {
+  -webkit-text-stroke: 0.04em currentColor;
+}
+
+/* Geist's italic face has slightly different widths, so italic is a tint, not a slant. */
+.composer-md-italic:not(.composer-md-marker) {
+  color: color-mix(in srgb, var(--text-primary) 75%, var(--accent));
+}
+
+.composer-md-strike:not(.composer-md-marker) {
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, currentColor 60%, transparent);
+}
+
+.composer-md-code:not(.composer-md-marker) {
+  color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.12);
+  border-radius: 4px;
+  padding: 1px 2px;
+  margin: 0 -2px;
+}
+
+.composer-md-codeblock {
+  color: var(--text-secondary);
+}
+
+.composer-md-quote:not(.composer-md-marker) {
+  color: var(--text-secondary);
+}
+
+.composer-md-list,
+.composer-md-link:not(.composer-md-marker) {
+  color: var(--accent);
+}
+
 .composer-token-chip {
   background: rgba(var(--accent-rgb), 0.16);
   border-radius: 6px;
   padding: 1px 5px;
   margin: 0 -5px;
+}
+
+/* A Reply pill: text quoted from the conversation (lib/composerQuotes.ts). */
+.composer-quote-chip {
+  padding: 1px 2px;
+  margin: 0 -2px;
+  background: rgba(var(--accent-rgb), 0.12);
+  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.35);
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+/* The pill's first slot is blank in the text box: its reply icon is drawn there. */
+.composer-quote-tag {
+  position: relative;
+}
+
+.composer-quote-icon {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: var(--accent);
+}
+
+/* A quote in a sent message: the reply icon and the quoted words, on a line of their own. */
+.sent-quote-pill {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 2px 0 8px;
+  padding: 4px 9px;
+  border-radius: 8px;
+  background: rgba(var(--accent-rgb), 0.12);
+  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.3);
+  font-size: 0.92em;
+  line-height: 1.45;
+  white-space: normal;
+}
+
+.sent-quote-pill:first-child {
+  margin-top: 0;
+}
+
+.sent-quote-pill:last-child {
+  margin-bottom: 0;
+}
+
+.sent-quote-icon {
+  flex-shrink: 0;
+  margin-top: 0.2em;
+  color: var(--accent);
+}
+
+.sent-quote-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  opacity: 0.9;
+}
+
+/* The Reply button beside text selected in a conversation. */
+.selection-reply-button {
+  position: fixed;
+  z-index: 1000;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--ui-raised, var(--surface-raised, #1c1c1c));
+  color: var(--text-primary);
+  font-size: 12.5px;
+  font-weight: 500;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+  cursor: pointer;
+}
+
+.selection-reply-button:hover {
+  background: rgba(var(--accent-rgb), 0.12);
+  border-color: rgba(var(--accent-rgb), 0.45);
+}
+
+.selection-reply-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .browser-element-pill-tag {
@@ -2486,14 +2622,6 @@ html[data-chat-width='full'] .chat {
 
 .composer-attachment-pill-transcribing {
   color: var(--text-secondary);
-}
-
-.composer-transcribing-spin {
-  animation: composer-transcribing-spin 0.9s linear infinite;
-}
-
-@keyframes composer-transcribing-spin {
-  to { transform: rotate(360deg); }
 }
 
 .composer-attachment-remove {
@@ -3471,16 +3599,6 @@ html[data-theme='high-contrast'] {
   font-size: 12px;
   color: var(--danger);
   background: rgba(248, 81, 73, 0.1);
-}
-
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-.spin {
-  animation: spin 0.8s steps(12) infinite;
 }
 
 .project-terminal-panel .terminal-container {

@@ -28,6 +28,8 @@ import { registerBotMethods } from './bots/space/registerMethods'
 import { BotLocalService } from './bots/space/BotLocalService'
 import { registerAgentDefinitionMethods } from './agentDefinitions/registerMethods'
 import { registerPersonalBotMethods } from './bots/registerMethods'
+import { registerBotDeviceMethods } from './bots/deviceMethods'
+import { BotDefinitionError } from './bots/definitions/BotDefinitionStore'
 import { registerBotBrowserMethods } from './bots/browser/registerBotBrowserMethods'
 import { registerAutomationMethods } from './automations/registerMethods'
 import { registerWorkflowDefinitionMethods } from './workflows/registerDefinitionMethods'
@@ -242,6 +244,19 @@ export class MousseMainService extends MmsProfileServices {
     this.domainCleanupSubscriptions.push(() => chatResourceDomains.dispose())
     // The Bot UI's methods (`bots.personal.v2`): the profile's bot engine answers them.
     registerPersonalBotMethods(this.domains, async (profileId) => (await profile(profileId)).personalBots?.service)
+    // About → Devices: which of the owner's devices reach each bot, kept and set on this computer only.
+    registerBotDeviceMethods(this.domains, async (profileId) => {
+      const services = await profile(profileId)
+      const engine = services.personalBots
+      if (!engine) return null
+      return {
+        assertBot: (botId) => {
+          if (!engine.botIds().includes(botId)) throw new BotDefinitionError('bot_not_found', 'This bot is gone.')
+        },
+        store: services.botDeviceAccess,
+        devices: async () => services.botReach?.devices()
+      }
+    })
     // Each bot's own browser, as its owner sees it (`bots.browser.*`).
     registerBotBrowserMethods(this.domains, async (profileId) => {
       const services = await profile(profileId)

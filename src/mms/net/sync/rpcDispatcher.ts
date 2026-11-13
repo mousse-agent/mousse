@@ -308,6 +308,8 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
     const alias = this.alias(id, peer)
     if (!alias) throw new NetError('outcome_uncertain')
     this.authorize(alias.method, peer, alias.capability)
+    // The method's own test of who may still have the result: the parameters it checked at the call are not kept.
+    this.registry.get(alias.method)?.authorizeResult?.(alias.execution as ExecutionRecord['id'], peer)
     const record = this.options.executions.get(alias.execution as ExecutionRecord['id'])
     if (!record) throw new NetError('outcome_uncertain')
     return this.terminal(record)

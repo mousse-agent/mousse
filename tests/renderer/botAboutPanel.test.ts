@@ -75,7 +75,7 @@ describe('About this bot', () => {
   it('with an older service (no rows): one Model picker, by usage until the owner picks a model by hand, on this computer (#673)', async () => {
     await show()
     // One computer: no Computer row (computer names show only with two or more).
-    expect(rows('RUNS ON')).toEqual(['Model'])
+    expect(rows('RUNS ON')).toEqual(['Model', 'Devices'])
     expect(host.querySelector('[data-testid="bot-about-model"]')?.textContent).toContain('By usage')
     await click(host.querySelector('[aria-label="Inbox helper\'s model"]') ?? undefined)
     const sonnet = [...document.querySelectorAll('[role="option"]')].find((option) => option.textContent?.includes('Claude · sonnet'))
@@ -192,7 +192,7 @@ describe('About this bot', () => {
   it('lists the person’s other computers in Computer, greyed: a bot runs on the computer that holds it', async () => {
     vi.mocked(fake.client.model).mockImplementationOnce(async () => ({ model: null, models: [], computer: 'this_computer', computers: [{ id: 'this_computer', name: 'Desk' }, { id: 'nod_laptop', name: 'Laptop', offline: true, unavailable: 'Laptop is offline.' }] }))
     await show()
-    expect(rows('RUNS ON')).toEqual(['Model', 'Computer'])
+    expect(rows('RUNS ON')).toEqual(['Model', 'Computer', 'Devices'])
     expect(host.querySelector('[data-testid="bot-about-computer"]')?.textContent).toContain('Desk')
     await click(host.querySelector('[aria-label="Inbox helper\'s computer"]') ?? undefined)
     const laptop = [...document.querySelectorAll('[role="option"]')].find((option) => option.textContent?.includes('Laptop · offline'))

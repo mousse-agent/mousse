@@ -1311,6 +1311,24 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   --sidebar-icon-fade: var(--sidebar-row-dim);
 }
 
+/* A row whose spinner turns (Turning, lib/turning.tsx) fades its parts instead of itself. An opacity on the row
+   groups the turning spinner with the rest of the row, so the compositor would draw the whole row offscreen on every
+   frame of the turn: about four times the GPU work of the turn itself (measured on an M4). The parts do not overlap,
+   so it looks the same; filter: opacity() keeps each part's own opacity, and the spinner takes the fade as its own
+   opacity, which needs no offscreen pass. */
+:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container:not(:has(:is(.threads-sidebar-status-icon--question, .threads-sidebar-card-status-input))) > .threads-sidebar-thread:has(> .threads-sidebar-thread-trailing > .turning) {
+  opacity: 1;
+}
+
+:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container > .threads-sidebar-thread:has(> .threads-sidebar-thread-trailing > .turning) > :not(.threads-sidebar-thread-trailing),
+:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container > .threads-sidebar-thread:has(> .threads-sidebar-thread-trailing > .turning) > .threads-sidebar-thread-trailing > :not(.turning) {
+  filter: opacity(var(--sidebar-row-dim));
+}
+
+:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container > .threads-sidebar-thread:has(> .threads-sidebar-thread-trailing > .turning) > .threads-sidebar-thread-trailing > .turning {
+  opacity: var(--sidebar-row-dim);
+}
+
 /* A row that needs the person fades everything but its status. */
 :where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container:has(:is(.threads-sidebar-status-icon--question, .threads-sidebar-card-status-input)) :is(
   .threads-sidebar-thread:not(.threads-sidebar-card) > :not(.threads-sidebar-thread-trailing),

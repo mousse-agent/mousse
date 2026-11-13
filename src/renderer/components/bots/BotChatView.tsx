@@ -7,11 +7,13 @@ import { openProvider, openSettingsSection } from '../../lib/settingsNavigation'
 import { Markdown } from '../../chat/components/agent-elements/markdown'
 import { CopyButton } from '../../chat/components/agent-elements/copy-button'
 import { ReadAloudButton } from '../../readAloud/ReadAloudButton'
+import { useMotionScale } from '../../lib/motion'
 import { BotFace } from './face/BotFace'
 import { BotSteps } from './BotSteps'
 import { BOT_IMAGES, BotFilePane, BotFilesProvider, BotMarkdown, BotPathChip } from './BotFiles'
 import { BotAppletPane, BotMessageApplets } from './BotApplets'
 import { BotPictureActions, BotReplyMedia } from './BotReplyMedia'
+import { BotReactionBadge, BotReactionBar } from './BotReactions'
 import { replyImages } from './botReplyImages'
 import { BotEmojiButton } from './BotEmoji'
 import { BotAskReplies } from './BotAskReplies'
@@ -26,6 +28,7 @@ import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from
 import { botGroupTime, placeMessages } from './messageGroups'
 import { chatRows, type BotChatRow, type OwnerMarks } from './botChatShape'
 import { formatDurationLong, formatWorkedFor } from '../../utils/responseTimeline'
+import { WithSentQuotes } from '../QuotePill'
 import { ImageGalleryProvider } from '../../chat/components/agent-elements/image-gallery'
 import type { LightboxImage } from '../../chat/components/agent-elements/image-lightbox'
 import { BotImageFiles, BotOtherFiles, botFileImageUrl, useFailedFileImages } from './BotImages'
@@ -175,7 +178,7 @@ const OwnerMessage = memo(function OwnerMessage({ botId, message, pending, botNa
       <div className="bot-you-content">
         {!!message.attachments?.length && <BotImageFiles files={message.attachments} />}
         {message.text && <div className="bot-you-bubble">
-          <Markdown content={message.text} className="bot-markdown" images={BOT_IMAGES} />
+          <WithSentQuotes text={message.text} render={(part) => <Markdown content={part} className="bot-markdown" images={BOT_IMAGES} />} />
           <BubbleTime message={message} pending={pending} />
           {marks?.reaction && <span className="bot-reaction" role="img" aria-label={`${botName} reacted ${marks.reaction}`} title={marks.title}>{marks.reaction}</span>}
         </div>}
@@ -222,11 +225,35 @@ const BotMessage = memo(function BotMessage({ bot, message, onAction, browser, q
   const pictures = shownImages.length > 0
   // The steps behind one quiet line: "Worked for 32s" when it is known how long it took, else "Steps", never dropped.
   const ms = workedMs(message, asked)
-  return <article className={`chat-participant-message from-agent bot-message${starts ? ' is-group-start' : ''}`} data-message-id={message.id}>
+  // The owner's reaction: one per message, set, replaced or removed here; the bot is told on its next chat turn.
+  const react = (emoji: string | null) => void store().react(bot.id, message.id, emoji)
+  // After a pick the bar goes, and stays gone while the pointer stays on the message; the focus goes to the bubble.
+  const [reacted, setReacted] = useState(false)
+  const bubble = useRef<HTMLDivElement>(null)
+  const picked = () => {
+    setReacted(true)
+    bubble.current?.focus({ preventScroll: true })
+  }
+  // A service without reactions (an older one) shows no bar.
+  const canReact = useBotsStore((s) => !s.reactionsMissing)
+  // While a picture's menu is open, the tools beside the bubble step aside for it.
+  const [menuOpen, setMenuOpen] = useState(false)
+  // The tools hang off the bubble's right edge: beside a wide bubble they move left, inside the transcript.
+  const tools = useRef<HTMLSpanElement>(null)
+  const clampTools = () => {
+    const element = tools.current
+    const lane = element?.closest('.chat-transcript')
+    if (!element || !lane || !lane.clientWidth) return
+    element.style.removeProperty('--bot-tools-shift')
+    const over = element.getBoundingClientRect().right - (lane.getBoundingClientRect().left + lane.clientWidth - 8)
+    if (over > 0) element.style.setProperty('--bot-tools-shift', `${-Math.ceil(over)}px`)
+  }
+  return <article className={`chat-participant-message from-agent bot-message${starts ? ' is-group-start' : ''}${reacted ? ' is-react-quiet' : ''}${message.reaction ? ' has-reaction' : ''}${menuOpen ? ' is-menu-open' : ''}`} data-message-id={message.id}
+    onMouseEnter={clampTools} onFocus={clampTools} onMouseLeave={reacted ? () => setReacted(false) : undefined}>
     <div className="bot-message-line">
-      <div className={`bot-bubble${pictures ? ' has-media' : ''}${pictures && !media.text && !lostChips.length ? ' is-media-only' : ''}`}>
+      <div ref={bubble} tabIndex={-1} className={`bot-bubble${pictures ? ' has-media' : ''}${pictures && !media.text && !lostChips.length ? ' is-media-only' : ''}`}>
         {quoted && <BotReplyQuote botId={bot.id} quote={message.replyTo!} botName={bot.name} />}
-        <BotReplyMedia images={shownImages} />
+        <BotReplyMedia images={shownImages} onMenuOpen={setMenuOpen} />
         {media.text && <BotMarkdown text={media.text} className="bot-markdown" />}
         {lostChips.length > 0 && <p className="bot-picture-chips">{lostChips.map((image) => <BotPathChip key={image.key} path={image.path!} />)}</p>}
         {openAsk && <p className="bot-bubble-ask"><Shield size={14} aria-hidden /><span>Wants to <strong>{openAsk.title}</strong></span></p>}
@@ -237,10 +264,12 @@ const BotMessage = memo(function BotMessage({ bot, message, onAction, browser, q
           {steps.length > 0 && <WorkedToggle ms={ms} open={stepsOpen} onToggle={() => setStepsOpen((open) => !open)} />}
           <BubbleTime message={message} />
         </div>
+        {message.reaction && <BotReactionBadge emoji={message.reaction} onRemove={() => react(null)} />}
       </div>
       {/* As beside a thread's reply: read it aloud, copy it as written, reply to it. Anchored to the bubble's lower
           right edge and taking no width of its own, so the bubble is as wide with them as without. */}
-      <span className="bot-message-tools">
+      <span ref={tools} className="bot-message-tools">
+        {canReact && <BotReactionBar current={message.reaction} onReact={react} onPicked={picked} onFocus={() => setReacted(false)} />}
         <span className="bot-message-actions">
           {message.text && <ReadAloudButton speechKey={`bot:${message.id}`} markdown={message.text} />}
           {message.text && <CopyButton text={message.text} />}
@@ -275,9 +304,37 @@ function BotTyping({ bot, starts, offline }: { bot: BotSummary; starts: boolean;
     <div className="bot-message-line">
       {offline
         ? <p className="bot-bubble bot-status-line">{OFFLINE_TEXT}</p>
-        : <span className="bot-bubble bot-typing-bubble" aria-hidden><i /><i /><i /></span>}
+        : <TypingDots />}
     </div>
   </article>
+}
+
+/** One dot's rise and fade; each dot starts 150 ms after the one before it. */
+const TYPING_DOT: Keyframe[] = [
+  { offset: 0, opacity: 0.35, transform: 'none', easing: 'ease-in-out' },
+  { offset: 0.3, opacity: 0.9, transform: 'translateY(-2px)', easing: 'ease-in-out' },
+  { offset: 0.6, opacity: 0.35, transform: 'none', easing: 'ease-in-out' },
+  { offset: 1, opacity: 0.35, transform: 'none' },
+]
+
+/**
+ * The typing dots move smoothly, every frame, on the compositor (opacity and transform only). They are Web Animations
+ * rather than a CSS loop for the reason Turning gives (lib/turning.tsx): a repeating CSS animation wakes the main thread
+ * at every iteration because React listens for `animationiteration`. With Animation speed Off or reduced motion they
+ * stay still.
+ */
+function TypingDots() {
+  const bubble = useRef<HTMLSpanElement>(null)
+  const still = useMotionScale() === 0
+  useLayoutEffect(() => {
+    const dots = Array.from(bubble.current?.children ?? [])
+    if (still) return
+    const animations = dots.flatMap((dot, at) => typeof dot.animate === 'function'
+      ? [dot.animate(TYPING_DOT, { duration: 1200, delay: at * 150, iterations: Infinity })]
+      : [])
+    return () => animations.forEach((animation) => animation.cancel())
+  }, [still])
+  return <span ref={bubble} className={`bot-bubble bot-typing-bubble${still ? ' is-still' : ''}`} aria-hidden><i /><i /><i /></span>
 }
 
 /**
@@ -426,7 +483,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
         </div>
         <BotMenu bot={bot} />
       </header>
-      <div className="chat-transcript" data-applet-scroller ref={transcript} role="log" aria-label={`${bot.name} messages`} onScroll={(event) => {
+      <div className="chat-transcript" data-applet-scroller data-quote-source ref={transcript} role="log" aria-label={`${bot.name} messages`} onScroll={(event) => {
         const element = event.currentTarget
         anchor.current.atEnd = element.scrollHeight - element.scrollTop - element.clientHeight < 40
         anchor.current.height = element.scrollHeight

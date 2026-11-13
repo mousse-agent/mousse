@@ -18,6 +18,8 @@ import { decodeEnvelope } from './codec'
  */
 export interface PrivateStreamBinding {
   privateAccess(stream: StreamId): { reader: NodeId; open: boolean } | undefined
+  /** The one device that may read a stream that is not private but is still that device's alone (a phone's own lists). */
+  boundReader?(stream: StreamId): NodeId | undefined
 }
 
 /** Same-user Bridge scope. Spaces require their independent meta authorization service. */
@@ -51,6 +53,9 @@ export class NodeStreamAuthority implements StreamAuthority {
             delegation.caps.includes('read') &&
             delegation.caps.includes('settings')
           )
+        // A stream that is one device's own (a phone's lists, which carry only the bots it reaches) is read by it alone.
+        const reader = this.privateStreams?.boundReader?.(stream)
+        if (reader !== undefined && reader !== peer.node) return false
         return delegation.caps.includes('read')
       }
       // Artifact scopes also require the durable request-alias registry (P3).

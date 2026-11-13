@@ -147,12 +147,26 @@
   const ACTIVITY = { 'seed-act-work-1': { icon: 'web', text: 'using the browser', highlight: 'pcpartpicker.com', live: true } }
 
   let scenario = 'free'
+  /** The owner's reactions on the bot's messages, by message id: kept across states, as `bots.db` keeps them. */
+  const reactions = new Map()
+  const withReaction = (row) => {
+    const { reaction: _none, ...rest } = row
+    return row.author === 'bot' && reactions.has(row.id) ? { ...rest, reaction: reactions.get(row.id) } : rest
+  }
   const client = {
     list: async () => [summary(scenario)],
     messages: async (botId, page = {}) => {
-      const all = botId === BOT ? conversation(scenario) : []
+      const all = botId === BOT ? conversation(scenario).map(withReaction) : []
       const before = page.beforeSeq === undefined ? all : all.filter((row) => row.seq < page.beforeSeq)
       return { messages: before.slice(-(page.limit ?? 50)) }
+    },
+    // `bots.chat.react` (an app with reactions): one per bot message, an emoji or null; the message as it is now.
+    react: async (botId, messageId, emoji) => {
+      const row = conversation(scenario).find((entry) => entry.id === messageId)
+      if (!row || row.author !== 'bot') throw new Error("Only the bot's messages take a reaction.")
+      if (emoji === null) reactions.delete(messageId)
+      else reactions.set(messageId, emoji)
+      return withReaction(row)
     },
     markRead: async () => undefined,
     get: async () => ({ summary: summary(scenario), permissions: [], runs: [] }),

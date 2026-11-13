@@ -7,12 +7,23 @@ import { MAX_DISPLAY_JSON_NODES } from '../../net/sync/codec'
 import { mmsJson } from './jsonOutput'
 import { remoteBotSummary } from './RemoteBots'
 import type { BotsSharingPort } from '../../protocol/botsSharingPort'
+import type { BotReachPort } from '../../protocol/botReachPort'
 
 /**
  * The reserved display "thread" that carries a computer's sidebar lists. Real thread ids never
  * contain a colon, so this id cannot name a real thread.
  */
 export const LISTS_STREAM_THREAD_ID = 'mousse:lists'
+/**
+ * The lists stream of one device (a phone), which only that device reads: `mousse:lists:<node>`. `bridge.lists.open`
+ * opens it for the caller, so the bots in it are the ones that device reaches. Its records carry
+ * `LISTS_STREAM_THREAD_ID` as their thread, as the shared stream's do.
+ */
+const READER_LISTS_PREFIX = `${LISTS_STREAM_THREAD_ID}:`
+export const readerListsKey = (node: string): string => `${READER_LISTS_PREFIX}${node}`
+/** The device whose own lists stream `key` is, if it is one. */
+export const readerOfListsKey = (key: string): string | undefined =>
+  key.startsWith(READER_LISTS_PREFIX) && key.length > READER_LISTS_PREFIX.length ? key.slice(READER_LISTS_PREFIX.length) : undefined
 const LISTS_VERSION = 1
 /** Coalesces bursts (a send renames, reorders and starts a turn) into one published snapshot. */
 const SETTLE_MS = 40
@@ -112,6 +123,8 @@ export type ListsServices = Pick<
   personalBots?: ListsBotsPort | null
   /** "Share bots with other devices": while it refuses, the lists carry no bots. */
   botsSharing?: BotsSharingPort
+  /** Which devices reach which bot: the lists of one device carry only the bots it reaches. */
+  botReach?: BotReachPort
 }
 
 interface Emitter {
@@ -217,7 +230,14 @@ export class MmsListsSource {
      * rows and each thread's `lineage`, say what each thread runs with and where it came from, and
      * report every state a row can show. The phone's lists stay as they were.
      */
-    private readonly options: { private?: boolean } = {}
+    private readonly options: {
+      private?: boolean
+      /**
+       * The one device that reads these lists (another computer's private lists, a phone's own lists): only the bots it
+       * reaches. Absent, lists any device may read (the phones' shared stream): only the bots every device reaches.
+       */
+      reader?: string
+    } = {}
   ) {}
 
   private chats: ListsChat[] | undefined
@@ -249,7 +269,10 @@ export class MmsListsSource {
       const engine = this.services.personalBots
       try {
         // Off: "Share bots with other devices" is off on this computer.
-        this.bots = engine && !this.services.botsSharing?.refusal() ? engine.service.list().bots.map((bot) => botOf(bot, engine.liveActivity(bot.id))) : []
+        const hidden = this.services.botReach?.hiddenFor(this.options.reader)
+        this.bots = engine && !this.services.botsSharing?.refusal()
+          ? engine.service.list().bots.filter((bot) => !hidden?.(bot.id)).map((bot) => botOf(bot, engine.liveActivity(bot.id)))
+          : []
       } catch {
         // A profile whose bots cannot be read still lists everything else.
         this.bots = []
@@ -446,6 +469,9 @@ export class MmsListsSource {
       }
     const sharing = s.botsSharing
     if (sharing) disposers.push(sharing.onChange(botsChanged))
+    // A bot's Devices choice, a device's switch for bots, or the devices on the account changed.
+    const reach = s.botReach
+    if (reach) disposers.push(reach.onChange(botsChanged))
     const reconcile = this.timers.setInterval(() => {
       this.botsStale = true
       chatsChanged()

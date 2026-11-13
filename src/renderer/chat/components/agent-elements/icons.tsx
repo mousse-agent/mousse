@@ -1,19 +1,19 @@
 import React from "react";
+import { turnable } from "../../../lib/turning";
 
 type IconProps = React.SVGProps<SVGSVGElement> & {
   className?: string;
 };
 
 export function IconSpinner({ className, ...rest }: IconProps) {
-  return (
+  // The spin turns a wrapper span, not the svg (lib/turning.tsx).
+  return turnable(className ?? "animate-spin text-muted-foreground", (svgClass) => (
     <svg
       viewBox="0 0 24 24"
       width="16"
       height="16"
       fill="none"
-      className={
-        className ?? "animate-spin will-change-transform text-muted-foreground"
-      }
+      className={svgClass || undefined}
       {...rest}
     >
       <circle
@@ -34,7 +34,7 @@ export function IconSpinner({ className, ...rest }: IconProps) {
         fill="none"
       />
     </svg>
-  );
+  ));
 }
 
 export function CheckIcon(props: IconProps) {

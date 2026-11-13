@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'rea
 import { ArrowUp, Check, CircleAlert, CircleCheck, Copy, Download, Info, Loader2, Mic, RotateCcw, Settings, VolumeHigh, X, type LucideIcon } from '../../lib/icons'
 import { FloatingPortal, useFloatingPosition, type FloatingPlacement } from '../../lib/floatingLayer'
 import { ProviderIcon } from '../../lib/providerIcons'
+import { turnable } from '../../lib/turning'
 import { openSettingsSection } from '../../lib/settingsNavigation'
 import {
   downloadsActions,
@@ -34,13 +35,14 @@ const RING_C = 2 * Math.PI * RING_R
 /** Accent progress ring; spins while the size or progress is not known yet. */
 export function ProgressRing({ percent }: { percent?: number }) {
   const known = percent !== undefined && percent > 0
-  return (
-    <svg className={`downloads-ring${known ? '' : ' indeterminate'}`} viewBox="0 0 24 24" aria-hidden="true">
+  // The ring's span turns, not its svg (lib/turning.tsx).
+  return turnable(`downloads-ring${known ? '' : ' downloads-ring-spin'}`, (className) => (
+    <svg className={className || undefined} viewBox="0 0 24 24" aria-hidden="true">
       <circle className="downloads-ring-track" cx="12" cy="12" r={RING_R} />
       <circle className="downloads-ring-fill" cx="12" cy="12" r={RING_R}
         strokeDasharray={RING_C} strokeDashoffset={RING_C * (1 - (known ? percent : 25) / 100)} />
     </svg>
-  )
+  ))
 }
 
 /** The indicator's icon for the most urgent state. */

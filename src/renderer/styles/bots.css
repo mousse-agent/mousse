@@ -68,7 +68,9 @@
 /* The bot's messages: bubbles on the left, the time in each one's corner. */
 .chat-participant-message.bot-message { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding-right: 14%; }
 .bot-message-line { position: relative; display: flex; align-items: flex-end; width: fit-content; min-width: 0; max-width: 100%; }
-.bot-message-tools { position: absolute; left: 100%; bottom: 0; display: flex; align-items: center; gap: 4px; padding-left: 6px; white-space: nowrap; }
+.bot-message-tools { position: absolute; left: 100%; bottom: 0; display: flex; align-items: center; gap: 4px; padding-left: 6px; white-space: nowrap; translate: var(--bot-tools-shift, 0) 0; }
+/* While a picture's menu is open, the menu is what the owner looks at: the tools step aside, as the carousel's arrows do. */
+.bot-message.is-menu-open .bot-message-tools { visibility: hidden; }
 .bot-bubble { position: relative; min-width: 0; max-width: 100%; padding: 9px 12px 7px; border-radius: 16px 16px 16px 5px; color: var(--text-primary); background: color-mix(in srgb, var(--text-primary) 7%, var(--bg-primary, transparent)); }
 .bot-message:not(.is-group-start) .bot-bubble { border-top-left-radius: 6px; }
 /* The thread's Markdown (an-md-*), at the bubble's size. Inline code keeps a short piece whole: it moves to the next line
@@ -93,14 +95,13 @@
 .bot-steps li { display: flex; align-items: center; gap: 8px; }
 .bot-step-open { padding: 0 7px; border-radius: 6px; font-size: 12px; line-height: 18px; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
 .bot-step-open:hover { background: color-mix(in srgb, var(--accent) 20%, transparent); }
-/* While the chat's turn runs: three dots in a bubble, the only thing that moves. */
+/* While the chat's turn runs: three dots in a bubble, the only thing that moves (TypingDots in BotChatView.tsx moves
+   them; with Animation speed Off or reduced motion they hold still a little brighter). */
 .bot-typing-bubble { display: inline-flex; align-items: center; gap: 4px; padding: 11px 14px; }
-.bot-typing-bubble > i { width: 6px; height: 6px; border-radius: 50%; background: var(--text-secondary); opacity: .35; animation: bot-typing 1.2s ease-in-out infinite; }
-.bot-typing-bubble > i:nth-child(2) { animation-delay: .15s; }
-.bot-typing-bubble > i:nth-child(3) { animation-delay: .3s; }
-@keyframes bot-typing { 0%, 60%, 100% { opacity: .35; transform: none; } 30% { opacity: .9; transform: translateY(-2px); } }
+.bot-typing-bubble > i { width: 6px; height: 6px; border-radius: 50%; background: var(--text-secondary); opacity: .35; }
+.bot-typing-bubble.is-still > i { opacity: .6; }
 .bot-status-line { margin: 0; padding: 7px 13px; font-size: var(--bot-meta); color: var(--text-secondary); }
-@media (prefers-reduced-motion: reduce) { .bot-typing-bubble > i { animation: none; opacity: .6; } .bot-worked-chevron { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .bot-worked-chevron { transition: none; } }
 /* An open ask: quick replies under the bubble, the details on demand. */
 .bot-ask-replies { display: flex; flex-direction: column; gap: 6px; max-width: 520px; }
 .bot-ask-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -237,19 +238,21 @@ button.bot-image:focus-visible > img { opacity: 0.82; }
 .bot-carousel .bot-picture { height: 220px; scroll-snap-align: start; }
 .bot-carousel .bot-picture > img { height: 100%; width: auto; max-width: 340px; min-width: 120px; object-fit: cover; }
 .bot-carousel .bot-picture.is-empty { width: 220px; }
-.bot-picture:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent); outline-offset: 2px; }
+.bot-picture:focus-visible > img { opacity: 0.82; }
 .bot-carousel { max-width: 100%; border-radius: 12px; outline: none; }
 .bot-carousel-strip { position: relative; }
 .bot-carousel-strip.fades-after .bot-carousel-track { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent); }
 .bot-carousel-strip.fades-before .bot-carousel-track { -webkit-mask-image: linear-gradient(to right, transparent, #000 40px); mask-image: linear-gradient(to right, transparent, #000 40px); }
 .bot-carousel-strip.fades-before.fades-after .bot-carousel-track { -webkit-mask-image: linear-gradient(to right, transparent, #000 40px, #000 calc(100% - 40px), transparent); mask-image: linear-gradient(to right, transparent, #000 40px, #000 calc(100% - 40px), transparent); }
-.bot-carousel:focus-visible { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 60%, transparent); }
+.bot-carousel:focus-visible .bot-picture > img { opacity: 0.82; }
 .bot-carousel-track { position: relative; display: flex; gap: 6px; overflow-x: auto; scroll-snap-type: x mandatory; scroll-behavior: smooth; scrollbar-width: none; overscroll-behavior-x: contain; }
 .bot-carousel-track::-webkit-scrollbar { display: none; }
 .bot-carousel-arrow { position: absolute; top: 50%; transform: translateY(-50%); display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; color: #fff; background: rgba(0, 0, 0, .5); opacity: 0; transition: opacity .15s; }
 .bot-carousel-arrow.is-previous { left: 8px; }
 .bot-carousel-arrow.is-next { right: 8px; }
 .bot-carousel:hover .bot-carousel-arrow, .bot-carousel:focus-within .bot-carousel-arrow { opacity: 1; }
+/* While a picture's menu is open, the menu is what the owner looks at: no arrow beside it. */
+.bot-carousel.is-menu-open .bot-carousel-arrow { opacity: 0; pointer-events: none; }
 .bot-carousel-arrow:hover { background: rgba(0, 0, 0, .7); }
 .bot-carousel-count { display: block; margin-top: 6px; text-align: right; font-size: 11.5px; line-height: 16px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 @media (prefers-reduced-motion: reduce) { .bot-carousel-track { scroll-behavior: auto; } .bot-carousel-arrow { transition: none; } }
@@ -418,3 +421,31 @@ html[data-theme='high-contrast'] .bot-conversation .chat-input-area.bot-input-ar
 .bot-emoji-grid { position: absolute; z-index: 30; right: -4px; bottom: calc(100% + 10px); display: grid; grid-template-columns: repeat(8, 32px); gap: 2px; padding: 6px; border-radius: 12px; border: 1px solid rgba(var(--accent-pale-rgb), .15); background: var(--bg-secondary, #201d23); box-shadow: 0 18px 50px #0006; }
 .bot-emoji-grid button { width: 32px; height: 32px; border-radius: 8px; font-size: 18px; line-height: 32px; text-align: center; }
 .bot-emoji-grid button:hover, .bot-emoji-grid button:focus-visible { background: color-mix(in srgb, var(--text-secondary) 14%, transparent); outline: none; }
+
+/* The owner's reaction on a bot's message: six quick emoji and "+" beside the bubble on hover or focus, and the badge
+   on the bubble's lower right corner (the bot's own reaction sits on the owner's lower left). */
+.bot-react-bar { position: relative; display: flex; align-items: center; gap: 1px; padding: 2px; border-radius: 999px; background: var(--bg-secondary, #201d23); border: 1px solid rgba(var(--accent-pale-rgb), .12); opacity: 0; pointer-events: none; transition: opacity .12s; }
+.chat-participant-message:hover .bot-react-bar, .bot-react-bar:focus-within, .bot-react-bar.is-open { opacity: 1; pointer-events: auto; }
+.bot-react-quick { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; font-size: 15px; line-height: 1; }
+.bot-react-quick:hover, .bot-react-quick:focus-visible { background: color-mix(in srgb, var(--text-secondary) 14%, transparent); outline: none; }
+.bot-react-quick[aria-pressed='true'] { background: rgba(var(--accent-rgb), .22); }
+.bot-react-more { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; color: var(--text-secondary); }
+.bot-react-more:hover, .bot-react-more:focus-visible, .bot-react-more[aria-expanded='true'] { color: var(--text-primary); background: color-mix(in srgb, var(--text-secondary) 14%, transparent); outline: none; }
+.bot-emoji-grid.bot-react-grid { left: 0; right: auto; bottom: auto; top: calc(100% + 6px); }
+/* On the bot's bubble: its lower right corner, inside its width, half over its bottom edge as a messenger's; only a
+   message with a reaction keeps the space for its lower half, so a group without reactions stays tight. */
+.bot-bubble > .bot-reaction { left: auto; right: 12px; bottom: -10px; }
+.bot-message.has-reaction { margin-bottom: 16px; }
+/* After a pick the bar goes until the pointer leaves the message; the bubble takes the focus, with no ring for it. */
+.chat-participant-message.is-react-quiet .bot-react-bar { opacity: 0; pointer-events: none; }
+.bot-bubble:focus { outline: none; }
+button.bot-reaction { cursor: pointer; }
+button.bot-reaction:hover, button.bot-reaction:focus-visible { background: color-mix(in srgb, var(--text-secondary) 22%, var(--surface-elevated, #2e2f38)); outline: none; }
+.bot-emoji-grid [aria-checked='true'] { background: rgba(var(--accent-rgb), .22); }
+@media (prefers-reduced-motion: reduce) { .bot-react-bar { transition: none; } }
+
+/* A message's words can be selected, to copy them or to reply to that part (SelectionReplyButton). */
+.bot-conversation .bot-markdown {
+  user-select: text;
+  -webkit-user-select: text;
+}

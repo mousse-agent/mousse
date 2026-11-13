@@ -97,7 +97,7 @@ export const BRIDGE_HELP = `Usage:
   mousse-cli bridge block <node-id>
   mousse-cli bridge unblock <node-id>
   mousse-cli bridge limits <node-id> [--max-mode ask|accept_edits|auto|full] [--terminal on|off]
-    [--editor on|off]
+    [--editor on|off] [--bots on|off]
   mousse-cli bridge caps <node-id> --caps read,chat,write,settings
   mousse-cli bridge kind <node-id> computer|phone
   mousse-cli bridge threads [on|off]
@@ -115,7 +115,8 @@ list and use this computer's personal bots; without an argument it shows the set
 default and only changes this computer.
 Only the current authority can invite, revoke or rename nodes, change capabilities or set a
 device's kind. block, unblock and limits act on this computer only, on any computer: a blocked
-device is refused every Bridge call and stream here until unblocked.
+device is refused every Bridge call and stream here until unblocked. limits --bots off keeps
+one device from every personal bot on this computer.
 caps settings is "works on threads"; it is refused for a device not known to be a computer.
 revoke and rename require the nod_ identifier shown by bridge nodes.
 An invite without --caps is for another computer: read, chat, write and settings
@@ -353,7 +354,7 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
     'bridge.rename': [],
     'bridge.setCaps': ['caps'],
     'bridge.setKind': [],
-    'bridge.policy': args.subcommand === 'limits' ? ['max-mode', 'terminal', 'editor'] : [],
+    'bridge.policy': args.subcommand === 'limits' ? ['max-mode', 'terminal', 'editor', 'bots'] : [],
     'bridge.workOnThreads': [],
     'bridge.shareBots': [],
     'bridge.editorServer': []
@@ -623,10 +624,11 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
     else {
       const mode = stringFlag(args, 'max-mode'),
         terminal = stringFlag(args, 'terminal'),
-        editor = stringFlag(args, 'editor')
-      if (mode === undefined && terminal === undefined && editor === undefined)
+        editor = stringFlag(args, 'editor'),
+        bots = stringFlag(args, 'bots')
+      if (mode === undefined && terminal === undefined && editor === undefined && bots === undefined)
         invalid(
-          'bridge limits requires --max-mode ask|accept_edits|auto|full, --terminal on|off and/or --editor on|off.'
+          'bridge limits requires --max-mode ask|accept_edits|auto|full, --terminal on|off, --editor on|off and/or --bots on|off.'
         )
       if (mode !== undefined) {
         if (!isPermissionMode(mode)) invalid('--max-mode requires ask, accept_edits, auto or full.')
@@ -639,6 +641,10 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
       if (editor !== undefined) {
         if (editor !== 'on' && editor !== 'off') invalid('--editor requires on or off.')
         params.editor = editor === 'on'
+      }
+      if (bots !== undefined) {
+        if (bots !== 'on' && bots !== 'off') invalid('--bots requires on or off.')
+        params.bots = bots === 'on'
       }
     }
   }

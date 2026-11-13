@@ -770,7 +770,7 @@ describe('queued messages while a compaction runs', () => {
     expect(host.querySelectorAll('.queued-message-state')).toHaveLength(1)
     expect(state().textContent).toBe('Queued')
     expect(state().title).toBe('Sends after compacting')
-    expect(state().querySelector('svg.animate-spin')).not.toBeNull()
+    expect(state().querySelector('.animate-spin svg')).not.toBeNull()
   })
 
   it('has no spinner once nothing holds the queue', async () => {

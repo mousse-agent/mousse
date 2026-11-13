@@ -10,6 +10,7 @@ import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fakeBots, installPreload, message, summary, type FakeBots } from './fakeBotsClient'
+import { setAnimationSpeed } from '../../src/renderer/lib/motion'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -38,6 +39,7 @@ const { ChatWorkspace } = await import('../../src/renderer/components/chats/Chat
 const { useChatsStore } = await import('../../src/renderer/stores/chatsStore')
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
 const { setBotsClient, useBotsStore } = await import('../../src/renderer/stores/botsStore')
+const { SelectionReplyButton } = await import('../../src/renderer/components/SelectionReplyButton')
 
 let root: Root
 let host: HTMLElement
@@ -348,9 +350,12 @@ describe('the transcript', () => {
       for (const [label, action] of [['Save as…', 'saveCopy'], ['Show in folder', 'showInFolder'], ['Copy image', 'copyImage']] as const) {
         await contextMenu(second)
         expect(menuItems().map((item) => item.textContent)).toEqual(['Open', 'Save as…', 'Show in folder', 'Copy image'])
+        // The tools beside the bubble (reactions, Read aloud, Copy, Reply) step aside while the menu is open.
+        expect(article('b1').classList.contains('is-menu-open')).toBe(true)
         await click(menuItems().find((item) => item.textContent === label))
         expect(localFiles[action]).toHaveBeenCalledWith(picture('b.png'))
         expect(document.querySelector('.bot-picture-menu')).toBeNull()
+        expect(article('b1').classList.contains('is-menu-open')).toBe(false)
       }
       await contextMenu(second)
       await click(menuItems()[0])
@@ -369,6 +374,89 @@ describe('the transcript', () => {
     const codes = [...transcript().querySelectorAll<HTMLElement>('[data-message-id="b1"] code.an-md-code')]
     // Which pieces keep whole is decided here; how a line wraps is checked in screenshots.
     expect(codes.map((code) => [code.textContent, code.classList.contains('is-whole')])).toEqual([['ssd-shortlist.md', true], ['Get-PhysicalDisk | Select-Object FriendlyName, MediaType, Size', false]])
+  })
+
+  it('the owner reacts to a bot message: six quick emoji and +, one reaction shown on the bubble, the same again or its badge removes it', async () => {
+    fake.chats.inbox = [message(1, { id: 'b1', text: 'Here are three SSDs.' }), message(2, { id: 'o1', author: 'owner', text: 'Thanks' })]
+    await open()
+    const reply = () => transcript().querySelector<HTMLElement>('[data-message-id="b1"]')!
+    const bar = () => reply().querySelector<HTMLElement>('[role="toolbar"]')!
+    const badge = () => reply().querySelector<HTMLButtonElement>('.bot-bubble > .bot-reaction')
+    expect(bar().getAttribute('aria-label')).toBe('React to this message')
+    expect([...bar().querySelectorAll('button')].map((choice) => choice.getAttribute('aria-label'))).toEqual(['React 👍', 'React ❤️', 'React 😂', 'React 😮', 'React 😢', 'React 🙏', 'More reactions'])
+    // The owner's own messages take none.
+    expect(transcript().querySelector('[data-message-id="o1"] [role="toolbar"]')).toBeNull()
+
+    await click(button('React ❤️', bar()))
+    expect(fake.calls).toContainEqual(['react', 'inbox', 'b1', '❤️'])
+    expect(badge()?.textContent).toBe('❤️')
+    // A pick puts the bar away: the focus is on the bubble, not on a button that would hold the bar open, and the bar
+    // stays away while the pointer stays; leaving the message, or tabbing back into the bar, brings it back.
+    expect(document.activeElement).toBe(reply().querySelector('.bot-bubble'))
+    expect(reply().classList.contains('is-react-quiet')).toBe(true)
+    await act(async () => { reply().dispatchEvent(new MouseEvent('mouseout', { bubbles: true, relatedTarget: document.body })) })
+    expect(reply().classList.contains('is-react-quiet')).toBe(false)
+    await click(button('React 😂', bar()))
+    expect(reply().classList.contains('is-react-quiet')).toBe(true)
+    await act(async () => { button('React 👍', bar())!.focus() })
+    expect(reply().classList.contains('is-react-quiet')).toBe(false)
+    await click(button('React ❤️', bar()))
+    expect(button('Remove your reaction ❤️', bar())?.getAttribute('aria-pressed')).toBe('true')
+    // Another replaces it: one reaction.
+    await click(button('React 👍', bar()))
+    expect(reply().querySelectorAll('.bot-reaction')).toHaveLength(1)
+    expect(badge()?.textContent).toBe('👍')
+    // The same one again removes it.
+    await click(button('Remove your reaction 👍', bar()))
+    expect(fake.calls.at(-1)).toEqual(['react', 'inbox', 'b1', null])
+    expect(badge()).toBeNull()
+
+    // + opens the composer's grid; a pick sets it, and the badge takes it away again.
+    await click(button('More reactions', bar()))
+    await click(button('🔥', reply().querySelector('.bot-react-grid')!))
+    expect(badge()?.textContent).toBe('🔥')
+    expect(reply().querySelector('.bot-react-grid')).toBeNull()
+    await click(badge())
+    expect(fake.calls.at(-1)).toEqual(['react', 'inbox', 'b1', null])
+    expect(badge()).toBeNull()
+
+    // Refused by the service: shown at once, then put back as it was, with why above the composer.
+    vi.mocked(fake.client.react).mockRejectedValueOnce(new Error('This bot has no such message.'))
+    await click(button('React 😮', bar()))
+    await settle()
+    expect(badge()).toBeNull()
+    expect(composerError()?.textContent).toBe('This bot has no such message.')
+  })
+
+  it('two quick picks the service refuses end where they started, and a service without reactions shows no bar', async () => {
+    fake.chats.inbox = [message(1, { id: 'b1', text: 'Here are three SSDs.', reaction: '❤️' })]
+    await open()
+    const reply = () => transcript().querySelector<HTMLElement>('[data-message-id="b1"]')!
+    const bar = () => reply().querySelector<HTMLElement>('[role="toolbar"]')
+    const badge = () => reply().querySelector<HTMLButtonElement>('.bot-bubble > .bot-reaction')
+    expect(badge()?.textContent).toBe('❤️')
+
+    // Two picks on their way at once, each refused in turn: the first refusal leaves the newest pick shown, the
+    // second puts back the reaction the service last confirmed, not the first pick.
+    const refusals: Array<(error: Error) => void> = []
+    const onTheWay = () => new Promise<never>((_, reject) => { refusals.push(reject) })
+    vi.mocked(fake.client.react).mockImplementationOnce(onTheWay).mockImplementationOnce(onTheWay)
+    await click(button('React 👍', bar()!))
+    await click(button('React 😂', bar()!))
+    expect(badge()?.textContent).toBe('😂')
+    await act(async () => { refusals[0]!(new Error('Busy.')) })
+    expect(badge()?.textContent).toBe('😂')
+    await act(async () => { refusals[1]!(new Error('Busy.')) })
+    expect(badge()?.textContent).toBe('❤️')
+
+    // An older service has no reactions: the pick is put back, the bar goes, and nothing is shown as an error.
+    await act(async () => { useBotsStore.setState({ error: null, errorBotId: null }) })
+    vi.mocked(fake.client.react).mockRejectedValueOnce(Object.assign(new Error('Domain method is unavailable'), { code: 'method_not_available' }))
+    await click(button('React 👍', bar()!))
+    await settle()
+    expect(badge()?.textContent).toBe('❤️')
+    expect(bar()).toBeNull()
+    expect(composerError()).toBeNull()
   })
 
   it('a list of keys and values reads as a small card', async () => {
@@ -527,6 +615,31 @@ describe('while it works', () => {
     expect(button('Send message')?.disabled).toBe(false)
   })
 
+  it('moves the typing dots one after another while motion is on, and holds them still with Animation speed Off', async () => {
+    // jsdom has no Web Animations, so element.animate is recorded here; that the dots run on the compositor with no
+    // main-thread frames is checked in a trace of the app.
+    const started: Array<{ element: Element; options: KeyframeAnimationOptions; cancelled: boolean }> = []
+    ;(HTMLElement.prototype as { animate?: unknown }).animate = function (this: Element, _keyframes: Keyframe[], options: KeyframeAnimationOptions) {
+      const record = { element: this, options, cancelled: false }
+      started.push(record)
+      return { cancel: () => { record.cancelled = true } }
+    }
+    try {
+      await open({ ...inbox, state: 'working', stateText: 'Working…' })
+      const dots = [...transcript().querySelectorAll('.bot-typing-bubble i')]
+      const running = () => started.filter((record) => !record.cancelled)
+      expect(running().map((record) => [dots.indexOf(record.element), record.options.delay, record.options.iterations]))
+        .toEqual([[0, 0, Infinity], [1, 150, Infinity], [2, 300, Infinity]])
+      act(() => setAnimationSpeed('off'))
+      expect(running()).toEqual([])
+      act(() => setAnimationSpeed('normal'))
+      expect(running()).toHaveLength(3)
+    } finally {
+      delete (HTMLElement.prototype as { animate?: unknown }).animate
+      setAnimationSpeed('normal')
+    }
+  })
+
   it('says Waiting for internet where it would type, with nothing moving, and still offers Stop', async () => {
     await open({ ...inbox, state: 'working', stateText: 'Waiting for internet', waiting: 'internet' })
     expect(transcript().querySelector('.bot-typing')?.textContent).toBe('Waiting for internet')
@@ -611,6 +724,49 @@ describe('the composer', () => {
     // Up in the empty box brings the message back, as in a thread.
     await press('ArrowUp')
     expect(box().value).toBe('Do this every weekday at 9.')
+  })
+
+  it('Reply on text selected in a bot message puts a pill in the box at the caret; the bot gets it in quotes in its own paragraph', async () => {
+    fake.chats.inbox = [message(1, { id: 'b1', text: 'Your flight leaves at 9:40 from gate 12.' })]
+    await act(async () => { createRoot(document.body.appendChild(document.createElement('div'))).render(createElement(SelectionReplyButton)) })
+    await open()
+    // jsdom has no layout: the selection is given a place on screen.
+    Range.prototype.getClientRects = () => [{ top: 10, bottom: 30, left: 10, right: 80 }] as unknown as DOMRectList
+    transcript().getBoundingClientRect = () => ({ top: 0, bottom: 500, left: 0, right: 500 }) as DOMRect
+    await type(box(), 'Which gate? ')
+    // Selects "gate 12" in the bot's message, as a drag would, and lets the button find it.
+    const frame = () => act(async () => { await new Promise((resolve) => requestAnimationFrame(() => resolve(undefined))) })
+    const select = async () => {
+      // The box takes the focus a frame after an edit, which would end a selection made before it.
+      await frame()
+      const walker = document.createTreeWalker(transcript().querySelector('.bot-bubble')!, NodeFilter.SHOW_TEXT)
+      let textNode = walker.nextNode()
+      while (textNode && !textNode.textContent!.includes('gate 12')) textNode = walker.nextNode()
+      const at = textNode!.textContent!.indexOf('gate 12')
+      const range = document.createRange()
+      range.setStart(textNode!, at)
+      range.setEnd(textNode!, at + 'gate 12'.length)
+      window.getSelection()!.removeAllRanges()
+      window.getSelection()!.addRange(range)
+      document.dispatchEvent(new Event('selectionchange'))
+      await frame()
+    }
+    await select()
+    await click(document.querySelector('.selection-reply-button'))
+    expect(box().value).toMatch(/^Which gate\? \u2068\u2003\u00a0“gate\u00a012”\u2069 $/)
+    // The pill goes like one character.
+    box().setSelectionRange(box().value.length - 1, box().value.length - 1)
+    await press('Backspace')
+    expect(box().value).toBe('Which gate?  ')
+    await select()
+    await click(document.querySelector('.selection-reply-button'))
+    await press('Enter')
+    expect(vi.mocked(fake.client.send).mock.calls.at(-1)?.[1]).toBe('Which gate?\n\n"gate 12"')
+    // The bubble shows the quote as a pill, not the quote marks and blank lines the bot got.
+    await settle()
+    const bubble = [...transcript().querySelectorAll('.bot-you-bubble')].at(-1)!
+    expect(bubble.querySelector('.sent-quote-pill')?.textContent).toBe('Replying to: gate 12')
+    expect(bubble.textContent).not.toContain('"gate 12"')
   })
 
   it('two identical messages on their way are two bubbles, and each confirmation clears only its own', async () => {

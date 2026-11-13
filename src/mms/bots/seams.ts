@@ -193,8 +193,9 @@ export interface BotContextProvider {
    * After every dispatch, including one ended by a wall or a reload. It runs capture for the dispatch's
    * thread and moves the chat window and summary. If it throws `bot_journal_failed`, the engine fails
    * the activation and sets the stuck error "I can't save my work. Free some disk space."
+   * `consult`: the dispatch was a consult of the turn, not the turn itself.
    */
-  afterDispatch(e: { botId: string; activationId: string; dispatchId: string; lane: BotLane; threadId: string; endedBy: BotDispatchEnd }): Promise<void>
+  afterDispatch(e: { botId: string; activationId: string; dispatchId: string; lane: BotLane; threadId: string; endedBy: BotDispatchEnd; consult?: true }): Promise<void>
 }
 
 /** One journal row to write. `kind` follows bot-context.md §3. */

@@ -31,6 +31,8 @@
 .ui-loader-ring {
   position: absolute;
   inset: 0;
+  width: 100%;
+  height: 100%;
   border-radius: 50%;
   background: conic-gradient(
     from 0deg,
@@ -42,7 +44,7 @@
   );
   -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - var(--ui-loader-stroke)), #000 calc(100% - var(--ui-loader-stroke) + 0.5px));
   mask: radial-gradient(farthest-side, transparent calc(100% - var(--ui-loader-stroke)), #000 calc(100% - var(--ui-loader-stroke) + 0.5px));
-  /* Turned by .icon-spin, which keeps functional progress moving under reduced motion. */
+  /* Turned by Turning (.icon-spin), which keeps functional progress moving with motion off. */
 }
 
 .ui-loader-core {

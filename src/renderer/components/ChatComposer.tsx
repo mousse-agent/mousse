@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ComponentProps, ReactNode } from 'react'
-import { Loader2, Mic, RefreshCw, X } from '../lib/icons'
+import { Loader2, Mic, RefreshCw, Reply, X } from '../lib/icons'
 import { SpeechWave } from '../speech/SpeechWave'
 import type {
   BrowserElementAttachment,
@@ -45,6 +45,19 @@ import { useAppStore } from '../stores/appStore'
 import { openSettingsSection } from '../lib/settingsNavigation'
 import { COMPOSER_SEND_EVENT } from '../lib/composerEvents'
 import { useComposerNotice } from './ComposerNotice'
+import { composerMarkdownSpans, listContinuation, type MarkdownKind } from '../lib/composerMarkdown'
+import {
+  COMPOSER_QUOTE_EVENT,
+  QUOTE_TAG_LENGTH,
+  deleteQuoteTokenAt,
+  expandComposerQuotes,
+  findQuoteTokens,
+  insertQuoteToken,
+  quoteRegistry,
+  quoteTokenAround,
+  registerQuote,
+  type ComposerQuoteDetail
+} from '../lib/composerQuotes'
 
 export interface AttachedFile {
   id: string
@@ -207,6 +220,7 @@ export function ChatComposer({
   const recalledRef = useRef<string | null>(null)
   // Two composers can be mounted at once (the local thread behind a remote one): the shown one answers.
   useCommand('composer.focus', () => composerInputRef.current?.focus(), () => !disabled && isShown(composerInputRef.current))
+  const backdropRef = useRef<HTMLDivElement>(null)
   const resizeDraft = useCallback(() => {
     const inputElement = composerInputRef.current
     if (!inputElement) return
@@ -214,6 +228,13 @@ export function ChatComposer({
     const height = Math.max(64, Math.min(200, inputElement.scrollHeight))
     inputElement.style.removeProperty('height')
     inputElement.style.setProperty('--draft-input-height', `${height}px`)
+    // The backdrop paints the visible text: it wraps at the textarea's width, scrollbar excluded,
+    // and follows its scroll.
+    const backdrop = backdropRef.current
+    if (backdrop) {
+      backdrop.style.marginRight = `${inputElement.offsetWidth - inputElement.clientWidth}px`
+      backdrop.scrollTop = inputElement.scrollTop
+    }
   }, [])
   useLayoutEffect(() => { resizeDraft() }, [input, resizeDraft])
   useEffect(() => {
@@ -298,7 +319,8 @@ export function ChatComposer({
   const skillToken = skillsPickerDisabled
     ? null
     : findInlineSkillToken(input, enabledSkills)
-  const backdropRef = useRef<HTMLDivElement>(null)
+  // Reply pills: text quoted from the conversation, at their place in the typed text (`lib/composerQuotes.ts`).
+  const quoteSpans = useMemo(() => findQuoteTokens(input, quoteRegistry()), [input])
 
   const hasAttachments = attachedFiles.length > 0 || voiceMessages.length > 0 || browserElements.length > 0 || references.length > 0
   const trimmedInput = removeInlineSkillToken(input, skillsPickerDisabled ? [] : enabledSkills).trim()
@@ -585,24 +607,56 @@ export function ChatComposer({
     return () => window.removeEventListener(COMPOSER_SEND_EVENT, onRequest)
   }, [])
 
+  // Reply on text selected in the conversation: its pill goes in at the caret (or over the selected text).
+  const quoteRef = useRef<(text: string) => void>(() => undefined)
+  quoteRef.current = (text: string) => {
+    const node = composerInputRef.current
+    if (!node || disabled) return
+    const current = node.value
+    commitEdit(insertQuoteToken(current, node.selectionStart ?? current.length, node.selectionEnd ?? current.length, registerQuote(text)))
+  }
+  useEffect(() => {
+    const onQuote = (event: Event) => {
+      const detail = (event as CustomEvent<ComposerQuoteDetail>).detail
+      if (detail?.target === composerInputRef.current) quoteRef.current(detail.text)
+    }
+    window.addEventListener(COMPOSER_QUOTE_EVENT, onQuote)
+    return () => window.removeEventListener(COMPOSER_QUOTE_EVENT, onQuote)
+  }, [])
+
   const handleInputScroll = (e: React.UIEvent<HTMLTextAreaElement>) => {
     // The token backdrop paints behind the textarea: keep it scroll-locked.
     if (backdropRef.current) backdropRef.current.scrollTop = e.currentTarget.scrollTop
   }
 
+  // Skill and quote tokens are painted as pills behind the text that spells them.
   const renderInputBackdrop = () => {
-    if (!skillToken) return input.endsWith('\n') ? <>{input}{ '\u200B'}</> : input
-    const before = input.slice(0, skillToken.index)
-    const tokenText = input.slice(skillToken.index, skillToken.index + skillToken.length)
-    const after = input.slice(skillToken.index + skillToken.length)
+    const chip = skillToken ? { start: skillToken.index, end: skillToken.index + skillToken.length } : null
+    const quotes = quoteSpans.map((span) => ({ start: span.index, end: span.index + span.length }))
     return (
       <>
-        {before}
-        <span className="composer-token-chip">{tokenText}</span>
-        {after}
+        {renderMarkdownBackdrop(input, chip, quotes)}
         {input.endsWith('\n') ? '\u200B' : null}
       </>
     )
+  }
+
+  // Shift+Enter (or a picker-free new line) on a list item starts the next item, as the textarea's own
+  // typing would: through insertText, so undo and the input event stay native.
+  const continueList = (target: HTMLTextAreaElement): boolean => {
+    const edit = listContinuation(target.value, target.selectionStart, target.selectionEnd)
+    if (!edit) return false
+    target.setSelectionRange(edit.start, edit.end)
+    const inserted = edit.text
+      ? document.execCommand?.('insertText', false, edit.text)
+      : document.execCommand?.('delete')
+    if (!inserted) {
+      commitEdit({
+        value: target.value.slice(0, edit.start) + edit.text + target.value.slice(edit.end),
+        caret: edit.start + edit.text.length
+      })
+    }
+    return true
   }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -659,6 +713,18 @@ export function ChatComposer({
         return
       }
     }
+    // A Reply pill goes as one character would: Backspace after it or Delete before it removes all of it.
+    if ((e.key === 'Backspace' || e.key === 'Delete') && quoteSpans.length > 0) {
+      const node = e.currentTarget
+      if (node.selectionStart === node.selectionEnd) {
+        const edit = deleteQuoteTokenAt(input, quoteSpans, node.selectionStart, e.key)
+        if (edit) {
+          e.preventDefault()
+          commitEdit(edit)
+          return
+        }
+      }
+    }
     if (e.key === 'Backspace' && input.length === 0 && references.length > 0) {
       e.preventDefault()
       onRemoveReference(references[references.length - 1].id)
@@ -686,6 +752,10 @@ export function ChatComposer({
       recalledRef.current = null
       onInputChange('')
       setCaret(0)
+      return
+    }
+    if (e.key === 'Enter' && e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
+      if (continueList(e.currentTarget)) e.preventDefault()
       return
     }
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -807,7 +877,7 @@ export function ChatComposer({
         </div>
         <textarea
           ref={composerInputRef}
-          className="composer-input"
+          className="composer-input composer-input-mirrored"
           value={input}
           onChange={(e) => {
             setSuggestionsDismissed(false)
@@ -815,7 +885,17 @@ export function ChatComposer({
             setCaret(readCaret(e.target))
             onInputChange(e.target.value)
           }}
-          onSelect={(e) => setCaret(readCaret(e.currentTarget))}
+          onSelect={(e) => {
+            // The caret never rests inside a Reply pill, so typing can't split one.
+            const node = e.currentTarget
+            const inside = node.selectionStart === node.selectionEnd ? quoteTokenAround(quoteSpans, node.selectionStart) : undefined
+            if (inside) {
+              const end = inside.index + inside.length
+              const next = node.selectionStart - inside.index < end - node.selectionStart ? inside.index : end
+              node.setSelectionRange(next, next)
+            }
+            setCaret(readCaret(node))
+          }}
           onKeyUp={(e) => setCaret(readCaret(e.currentTarget))}
           onCompositionStart={() => { composingRef.current = true }}
           onCompositionEnd={(e) => {
@@ -965,7 +1045,8 @@ export function buildComposerMessageContent(
   references: ChatReference[] = []
 ): string {
   const parts: string[] = []
-  if (input.trim()) parts.push(input.trim())
+  const typed = expandComposerQuotes(input).trim()
+  if (typed) parts.push(typed)
 
   // Images travel as separate vision payloads — only list non-image files here so
   // auto-generated paste names (paste-*.png) never pollute queue/transcript text.
@@ -990,4 +1071,56 @@ export function buildComposerMessageContent(
   if (references.length) parts.push(formatChatReferences(references))
 
   return parts.join('\n\n')
+}
+
+const MARKDOWN_CLASS: Record<MarkdownKind, string> = {
+  marker: 'composer-md-marker',
+  bold: 'composer-md-bold',
+  italic: 'composer-md-italic',
+  strike: 'composer-md-strike',
+  code: 'composer-md-code',
+  codeblock: 'composer-md-codeblock',
+  heading: 'composer-md-heading',
+  quote: 'composer-md-quote',
+  list: 'composer-md-list',
+  link: 'composer-md-link'
+}
+
+/**
+ * The draft as the backdrop paints it: Markdown spans, with the inline `@skill` token's pill on top.
+ * Every character stays the width the textarea gives it, so the caret sits on the painted text.
+ */
+function renderMarkdownBackdrop(
+  text: string,
+  chip: { start: number; end: number } | null,
+  quotes: Array<{ start: number; end: number }> = []
+): ReactNode[] {
+  const cuts = [...(chip ? [chip.start, chip.end] : []), ...quotes.flatMap((quote) => [quote.start, quote.end])]
+  const nodes: ReactNode[] = []
+  for (const span of composerMarkdownSpans(text)) {
+    const bounds = [...new Set([span.start, ...cuts.filter((cut) => cut > span.start && cut < span.end), span.end])].sort((a, b) => a - b)
+    for (let i = 0; i < bounds.length - 1; i += 1) {
+      const start = bounds[i]
+      const end = bounds[i + 1]
+      // A Reply pill is drawn whole, without Markdown: its reply icon in the token's blank first slot, then the preview.
+      const quote = quotes.find((item) => start >= item.start && end <= item.end)
+      if (quote) {
+        if (start === quote.start) {
+          const token = text.slice(quote.start, quote.end)
+          nodes.push(
+            <span key={start} className="composer-token-chip composer-quote-chip">
+              <span className="composer-quote-tag">{token.slice(0, QUOTE_TAG_LENGTH)}<Reply size={13} strokeWidth={2.2} className="composer-quote-icon" aria-hidden /></span>
+              {token.slice(QUOTE_TAG_LENGTH)}
+            </span>
+          )
+        }
+        continue
+      }
+      const classes = span.kinds.map((kind) => MARKDOWN_CLASS[kind])
+      if (chip && start >= chip.start && end <= chip.end) classes.push('composer-token-chip')
+      const piece = text.slice(start, end)
+      nodes.push(classes.length ? <span key={start} className={classes.join(' ')}>{piece}</span> : piece)
+    }
+  }
+  return nodes
 }

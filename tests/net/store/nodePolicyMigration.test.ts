@@ -192,3 +192,53 @@ describe('the editor switch in net_node_policy', () => {
     expect(policy.get(fresh).editor).toBe(false)
   })
 })
+
+describe('the bots switch in net_node_policy', () => {
+  it('adds the column with every device on, as before the switch, and leaves the schema version', () => {
+    const dir = profile()
+    const blocked = newId('node'),
+      plain = newId('node')
+    writeOldDatabase(dir, [
+      [blocked, 1, 'full', 1],
+      [plain, 0, 'ask', 0]
+    ])
+    const db = new NetDatabase({ profileDir: dir })
+    cleanups.push(() => db.close())
+    const policy = new SqliteNodePolicy(db, systemClock)
+    expect(columns(db).find((column) => column.name === 'bots')).toMatchObject({ notnull: 1, dflt_value: '1' })
+    expect(policy.get(blocked)).toMatchObject({ blocked: true, maxPermissionMode: 'full', terminal: true, bots: true })
+    expect(policy.get(plain)).toMatchObject({ blocked: false, maxPermissionMode: 'ask', terminal: false, bots: true })
+    // A device with no row at all is on too.
+    expect(policy.get(newId('node')).bots).toBe(true)
+    expect(userVersion(db)).toBe(1)
+  })
+
+  it('turned off for one device, is kept across a restart, touches no other switch, and reads off for anything but 1', () => {
+    const dir = profile()
+    const node = newId('node'),
+      other = newId('node')
+    writeOldDatabase(dir, [[node, 0, 'full', 1], [other, 0, 'ask', 0]])
+    let db = new NetDatabase({ profileDir: dir })
+    const seen: Array<[boolean, boolean]> = []
+    const first = new SqliteNodePolicy(db, systemClock)
+    first.onChange((event) => seen.push([event.before.bots, event.after.bots]))
+    expect(first.set(node, { bots: false })).toMatchObject({ bots: false, terminal: true, maxPermissionMode: 'full', editor: false })
+    expect(seen).toEqual([[true, false]])
+    db.close()
+    db = new NetDatabase({ profileDir: dir })
+    cleanups.push(() => db.close())
+    const policy = new SqliteNodePolicy(db, systemClock)
+    expect(policy.get(node).bots).toBe(false)
+    expect(policy.get(other).bots).toBe(true)
+    // An earlier build's write leaves the switch as it is.
+    db.database
+      .prepare(
+        'INSERT INTO net_node_policy(node,blocked,max_permission_mode,terminal,editor,created_at) VALUES(?,?,?,?,?,?) ' +
+          'ON CONFLICT(node) DO UPDATE SET blocked=excluded.blocked,max_permission_mode=excluded.max_permission_mode,terminal=excluded.terminal,editor=excluded.editor'
+      )
+      .run(node, 0, 'ask', 0, 1, 5)
+    expect(new SqliteNodePolicy(db, systemClock).get(node)).toMatchObject({ bots: false, editor: true, maxPermissionMode: 'ask' })
+    expect(() => db.database.prepare('UPDATE net_node_policy SET bots=2 WHERE node=?').run(node)).toThrow()
+    expect(() => policy.set(node, { bots: 'no' as never })).toThrow()
+  })
+})

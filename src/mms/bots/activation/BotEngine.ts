@@ -1109,7 +1109,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * repeat of `key` returns the same activation; messages in the chat lane run in order.
    */
   async enqueueChat(botId: string, key: string, input: string, activationId?: string, owner?: BotOwnerTurn): Promise<BotActivationSummary> {
-    return this.enqueue(botId, key, { kind: 'manual', input, ...(owner?.limit ? { owner: { limit: owner.limit } } : {}) }, 'chat', activationId)
+    return this.enqueue(botId, key, { kind: 'manual', input, ...(owner?.limit ? { owner: { limit: owner.limit, ...(owner.node ? { node: owner.node } : {}) } } : {}) }, 'chat', activationId)
   }
 
   /**
@@ -1194,7 +1194,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       throw error
     }
     // A message from another device holds what the turn starts or messages to that device's limit (`BotOwnerTurn`).
-    const trigger: BotActivationTrigger = { kind: 'manual', input, ...(owner?.limit ? { owner: { limit: owner.limit } } : {}) }
+    const trigger: BotActivationTrigger = { kind: 'manual', input, ...(owner?.limit ? { owner: { limit: owner.limit, ...(owner.node ? { node: owner.node } : {}) } } : {}) }
     if (this.insertQueued(botId, activationId, key, trigger, 'chat', admitted)) this.store.db.afterCommit(() => this.changed({ botId }))
     return undefined
   }
@@ -5652,9 +5652,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * before anything else of the activation happens. A journal that cannot be written makes the bot
    * stuck; false then, and nothing more runs.
    */
-  private async afterDispatch(row: BotActivationRow, threadId: string, dispatchId: string, endedBy: BotDispatchEnd): Promise<boolean> {
+  private async afterDispatch(row: BotActivationRow, threadId: string, dispatchId: string, endedBy: BotDispatchEnd, consult = false): Promise<boolean> {
     try {
-      await this.host.context?.afterDispatch({ botId: row.botId, activationId: row.id, dispatchId, lane: row.lane, threadId, endedBy })
+      await this.host.context?.afterDispatch({ botId: row.botId, activationId: row.id, dispatchId, lane: row.lane, threadId, endedBy, ...(consult ? { consult: true as const } : {}) })
       return true
     } catch (error) {
       console.warn('a bot dispatch could not be recorded', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
@@ -5720,7 +5720,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     waiter?.resolve(run.status === 'completed' ? outcome.text ?? '' : `The consult ended without an answer (${run.status}).`)
     this.settleProcesses(dispatch)
     if (!fromExecutor && this.host.journal) this.needsSync.set(dispatch.threadId, { botId: row.botId, threadId: dispatch.threadId, lane: row.lane, activationId: row.id })
-    if (this.host.context) void this.afterDispatch(row, dispatch.threadId, dispatch.clientRequestId, run.status === 'completed' ? 'settled' : run.status === 'failed' ? 'failed' : 'stopped').catch(() => false)
+    if (this.host.context) void this.afterDispatch(row, dispatch.threadId, dispatch.clientRequestId, run.status === 'completed' ? 'settled' : run.status === 'failed' ? 'failed' : 'stopped', true).catch(() => false)
     void this.advance(row.id).catch(() => {})
   }
 
