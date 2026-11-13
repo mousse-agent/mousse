@@ -2594,8 +2594,7 @@ html[data-chat-width='full'] .chat {
 }
 
 .selection-reply-button:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
+  background-image: var(--ui-focus-layer);
 }
 
 .browser-element-pill-tag {
