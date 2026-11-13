@@ -51,7 +51,9 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
     previousHome = process.env.MOUSSE_HOME
     process.env.MOUSSE_HOME = home
     const binary = join(home, 'claude')
-    writeFileSync(binary, 'fixture')
+    // `delegate_task` starts only an entry the picker lists as ready, and the picker's check runs
+    // `claude --version`; turns themselves run on `FakeClaudeCli`.
+    writeFileSync(binary, "#!/bin/sh\necho '2.1.291 (Claude Code)'\n")
     chmodSync(binary, 0o755)
     mkdirSync(join(home, 'providers', 'claude-subscription'), { recursive: true })
     writeFileSync(join(home, 'providers', 'claude-subscription', 'settings.json'), JSON.stringify({ loginPolicy: 'cli', binaryPath: binary, models: [{ id: 'sonnet', label: 'Sonnet' }] }))
