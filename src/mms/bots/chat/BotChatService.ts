@@ -116,6 +116,9 @@ function shownRows(slots: BotModelSlots): BotShownRows {
 /** How long naming a new bot may take before the description names it (§5.3.1). */
 export const BOT_NAMING_TIMEOUT_MS = 5_000
 
+/** The line a message from another device gets when that device lost the bot before the message was answered. */
+export const NOT_DELIVERED_TEXT = 'Not delivered: the device it came from can no longer reach me.'
+
 /** Words a name is never made of. */
 const FILLER = new Set([
   'a', 'an', 'the', 'to', 'for', 'of', 'and', 'or', 'me', 'my', 'i', 'you', 'your', 'it', 'its', 'in', 'on', 'at', 'by', 'with', 'from',
@@ -329,7 +332,7 @@ export class BotChatService {
    * transaction) starts behind the lane. Sending the same request again answers a wall the first
    * one never reached.
    */
-  async chatSend(input: { botId: string; text: string; attachments?: BotChatAttachment[]; clientRequestId: string; replyTo?: string; from?: { limit: PermissionMode } }): Promise<{ message: BotChatMessage }> {
+  async chatSend(input: { botId: string; text: string; attachments?: BotChatAttachment[]; clientRequestId: string; replyTo?: string; from?: { limit: PermissionMode; node?: string } }): Promise<{ message: BotChatMessage }> {
     const definition = this.engine.definitionOf(input.botId)
     const text = input.text.trim()
     if (!text && !input.attachments?.length) throw new BotEngineError('invalid_params', 'The message is empty.')
@@ -351,7 +354,7 @@ export class BotChatService {
     const key = `chat:${input.clientRequestId}`
     // The owner wrote this: the turn it starts or continues may start, message and stop their threads, held to the
     // limit of the device it came from (`BotOwnerTurn`; absent: this computer's own window).
-    const owner: BotOwnerTurn = input.from ? { limit: input.from.limit } : {}
+    const owner: BotOwnerTurn = input.from ? { limit: input.from.limit, ...(input.from.node ? { node: input.from.node } : {}) } : {}
     let message: BotChatMessage
     let refused: BotEngineError | undefined
     try {
@@ -397,6 +400,25 @@ export class BotChatService {
       this.engine.chatError(input.botId, error.code)
     }
     return { message }
+  }
+
+  /**
+   * Messages from another device whose chat turn has not started, from a device that can no longer reach the bot
+   * (`lost`, read now): none is delivered. Its turn is cancelled and the chat says so in one line. A turn already running
+   * carries on, and so does the bot's work: they are the owner's, not the device's.
+   */
+  async withdrawQueued(lost: (botId: string, node: string) => boolean): Promise<number> {
+    let withdrawn = 0
+    for (const botId of this.engine.botIds())
+      for (const row of this.store.laneActivations(botId, 'chat', ['queued'])) {
+        const node = row.trigger.kind === 'manual' ? row.trigger.owner?.node : undefined
+        if (!node || !lost(botId, node)) continue
+        await this.engine.stop(row.id)
+        if (this.store.activation(row.id)?.status !== 'cancelled') continue
+        this.engine.chat.post({ botId, author: 'bot', kind: 'notice', text: NOT_DELIVERED_TEXT, activationId: row.id, lane: 'chat', id: `bm_${row.id}_withdrawn` })
+        withdrawn += 1
+      }
+    return withdrawn
   }
 
   /** `bots.chat.stop`: the chat lane's activation stops. */

@@ -148,7 +148,8 @@ const policyView = (policy: NodePolicy): BridgeNodePolicy => ({
   blocked: policy.blocked,
   maxPermissionMode: policy.maxPermissionMode,
   terminal: policy.terminal,
-  editor: policy.editor
+  editor: policy.editor,
+  bots: policy.bots
 })
 
 interface NetConfiguration {
@@ -1031,7 +1032,8 @@ export class NetService {
               ? {}
               : { maxPermissionMode: params.maxPermissionMode as PermissionMode }),
             ...(params.terminal === undefined ? {} : { terminal: params.terminal as boolean }),
-            ...(params.editor === undefined ? {} : { editor: params.editor as boolean })
+            ...(params.editor === undefined ? {} : { editor: params.editor as boolean }),
+            ...(params.bots === undefined ? {} : { bots: params.bots as boolean })
           })
           this.emit()
           return { policy: policyView(policy) }

@@ -15,6 +15,7 @@ import { mousseIdAvailable, useMousseIdAvailable, useMousseIdStore } from '../st
 import { DeviceLimitsDialog } from './devices/DeviceLimitsDialog'
 import { DeviceActivityRows } from './devices/DeviceActivityRows'
 import { DeviceAccessRows } from './devices/DeviceAccessRows'
+import { DeviceBotsRow } from './devices/DeviceBotsRow'
 import { pendingEditorAsk, useEditorAskStore } from '../stores/editorAskStore'
 import { netErrorWords, bindSettings, workOnThreadsDisclosure, canWorkOnThreads, deviceLine, isComputer, isIncompatible, listedDevices, readDevices, routeDetails, serveSettings, sshRecordFor, updateInstructions, worksOnThreads, WORKS_ON_THREADS, type Device } from '../lib/netDevices'
 import type { NetDoctor, NetStatus } from '../../shared/net'
@@ -476,6 +477,8 @@ export function NetDevicesSection() {
                 onChanged={reloadQuietly}
               />
             ),
+            // Whether it reaches this computer's bots at all, for phones and computers alike.
+            device.policy && !device.policy.blocked && <DeviceBotsRow key={`${device.node}-bots`} device={device} onChanged={reloadQuietly} />,
             // What it did here, with its Block and limits beside it. A phone has none of this: it keeps the phone API.
             device.policy && isComputer(device) && (
               <DeviceActivityRows

@@ -1068,7 +1068,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * repeat of `key` returns the same activation; messages in the chat lane run in order.
    */
   async enqueueChat(botId: string, key: string, input: string, activationId?: string, owner?: BotOwnerTurn): Promise<BotActivationSummary> {
-    return this.enqueue(botId, key, { kind: 'manual', input, ...(owner?.limit ? { owner: { limit: owner.limit } } : {}) }, 'chat', activationId)
+    return this.enqueue(botId, key, { kind: 'manual', input, ...(owner?.limit ? { owner: { limit: owner.limit, ...(owner.node ? { node: owner.node } : {}) } } : {}) }, 'chat', activationId)
   }
 
   /**
@@ -1153,7 +1153,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       throw error
     }
     // A message from another device holds what the turn starts or messages to that device's limit (`BotOwnerTurn`).
-    const trigger: BotActivationTrigger = { kind: 'manual', input, ...(owner?.limit ? { owner: { limit: owner.limit } } : {}) }
+    const trigger: BotActivationTrigger = { kind: 'manual', input, ...(owner?.limit ? { owner: { limit: owner.limit, ...(owner.node ? { node: owner.node } : {}) } } : {}) }
     if (this.insertQueued(botId, activationId, key, trigger, 'chat', admitted)) this.store.db.afterCommit(() => this.changed({ botId }))
     return undefined
   }
