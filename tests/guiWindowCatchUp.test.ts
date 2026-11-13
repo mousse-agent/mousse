@@ -75,25 +75,30 @@ const snapshot = () => ({
 
 const listeners = new Map<string, Array<(payload: unknown) => void>>()
 let binding: { profileId: string; epoch: number } | null = { profileId: PROFILE, epoch: 1 }
+let profileChanging = false
 let eventsReceived = 10
+// The window's lists as the service has them.
+const lists = { projects: [{ id: 'p1', name: 'Project' }], threads: [{ id: 't1', name: 'Thread' }] }
 const guiMms = {
   on: (event: string, listener: (payload: unknown) => void) => {
     listeners.set(event, [...(listeners.get(event) ?? []), listener])
   },
-  request: vi.fn(async () => ({})),
+  request: vi.fn(async (method: string) => method === 'projects.list' ? { projects: lists.projects } : method === 'threads.list' ? { threads: lists.threads } : {}),
   snapshotThread: vi.fn(async () => snapshot()),
   snapshotThreadForSender: vi.fn(async () => snapshot()),
-  activityForSender: vi.fn(async () => ({ ...service.activity })),
+  // Every answer says the event number at which the service read (`revision`).
+  activityForSender: vi.fn(async () => ({ activity: { ...service.activity }, revision: service.revision })),
   turnStatusForSender: vi.fn(async () => ({
     turnState: service.turn,
     activeTurn: snapshot().activeTurn,
     activity: service.activity.t1 ?? 'idle',
-    behind: service.revision > eventsReceived
+    revision: service.revision
   })),
   prepareWindow: vi.fn(async () => binding),
   runWithSender: (_sender: unknown, run: () => unknown) => run(),
   getCurrentSenderId: () => WINDOW,
   getWindowBindingForSender: () => binding,
+  isProfileChanging: () => profileChanging,
   getBaseBinding: () => undefined,
   // The base connection's own resnapshot is not what these tests follow.
   connected: false
@@ -168,6 +173,7 @@ beforeEach(async () => {
   service.activity = {}
   service.messages = service.messages.slice(0, 2)
   binding = { profileId: PROFILE, epoch: 1 }
+  profileChanging = false
   push('activity', { state: 'idle' })
   push('turn.state', idle)
   service.revision = eventsReceived
@@ -207,7 +213,7 @@ describe('a window that missed the end of a turn', () => {
     await vi.advanceTimersByTimeAsync(30_000)
     await vi.waitFor(() => expect(logLines.some((line) => line.event === 'catch-up')).toBe(true))
     expect(logLines.find((line) => line.event === 'check.behind')?.fields).toMatchObject({ window: WINDOW, thread: 't1', reasons: ['quiet'] })
-    expect(logLines.find((line) => line.event === 'check.behind')?.fields.found).toEqual(expect.arrayContaining(['events-missed', 'turn-differs']))
+    expect(logLines.find((line) => line.event === 'check.behind')?.fields.found).toEqual(['turn-differs', 'ended'])
     expect(logLines.find((line) => line.event === 'catch-up')?.fields).toMatchObject({
       window: WINDOW,
       thread: 't1',
@@ -261,13 +267,34 @@ describe('a window that missed the end of a turn', () => {
     expect((guiMms.turnStatusForSender as ReturnType<typeof vi.fn>).mock.calls.length).toBeLessThanOrEqual(2)
   })
 
-  it("a window whose own connection was opened again reads its thread", async () => {
+  it("a window whose own connection was opened again reads its thread, and its lists and bot chats again", async () => {
     startTurn()
     finishTurnSilently()
     for (const listener of listeners.get('window-session-reopened') ?? []) listener({ senderId: WINDOW })
     await vi.waitFor(() => expect(views()).toHaveLength(1))
     expect(lastTurn()?.phase).toBe('completed')
-    expect(logLines.find((line) => line.event === 'catch-up')?.fields.reasons).toEqual(['reconnected'])
+    await vi.waitFor(() => expect(logLines.find((line) => line.event === 'catch-up')?.fields.reasons).toEqual(['reconnected']))
+    // A restarted service replays only what it sent since it started: the sidebar and the bot chats read again.
+    expect(ofChannel('projects:updated').at(-1)).toEqual(lists.projects)
+    expect(ofChannel('threads:updated').at(-1)).toEqual(lists.threads)
+    expect(ofChannel('bots:changed').at(-1)).toEqual({ reread: true })
+    expect(ofChannel('chats:changed')).toHaveLength(1)
+    expect(logLines.find((line) => line.event === 'catch-up')?.fields.changed).toEqual(expect.arrayContaining(['lists']))
+  })
+
+  it('a catch-up asked while the window\'s connection is down waits for its reopening and never opens it itself', async () => {
+    startTurn()
+    finishTurnSilently()
+    binding = null
+    for (const listener of listeners.get('window-resnapshot') ?? []) listener({ senderId: WINDOW, subscribed: true })
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(guiMms.prepareWindow).not.toHaveBeenCalled()
+    expect(views()).toEqual([])
+    expect(logLines.filter((line) => line.event === 'catch-up.waiting')).toHaveLength(1)
+    binding = { profileId: PROFILE, epoch: 1 }
+    for (const listener of listeners.get('window-session-reopened') ?? []) listener({ senderId: WINDOW })
+    await vi.waitFor(() => expect(lastTurn()?.phase).toBe('completed'))
+    await vi.waitFor(() => expect(logLines.find((line) => line.event === 'catch-up')?.fields.reasons).toEqual(['gap', 'reconnected']))
   })
 
   it('an update main could not hand over (the connection changing) is logged and followed by a catch-up', async () => {
@@ -280,6 +307,63 @@ describe('a window that missed the end of a turn', () => {
     await vi.advanceTimersByTimeAsync(1_000)
     await vi.waitFor(() => expect(lastTurn()?.phase).toBe('completed'))
     expect(logLines.find((line) => line.event === 'catch-up')?.fields.reasons).toEqual(['undelivered'])
+  })
+
+  it('a profile switch is not a fault: the new profile\'s replay is neither logged as undelivered nor caught up', async () => {
+    binding = null
+    profileChanging = true
+    push('threads.updated', { threads: [] }, undefined)
+    push('activity', { state: 'idle' })
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(undelivered).toEqual([])
+    expect(guiMms.activityForSender).not.toHaveBeenCalled()
+    expect(guiMms.snapshotThreadForSender).not.toHaveBeenCalled()
+    expect(logLines).toEqual([])
+  })
+})
+
+describe('an answer older than an update the window already has', () => {
+  it('a "turn finished" update that arrived before an older status answer is not undone by it, nor read in full', async () => {
+    startTurn()
+    // The service read the turn while it ran (event 1 of the answer), then the turn ended and its update arrived first.
+    const readAt = eventsReceived
+    service.turn = { threadId: 't1', turnId: 'run:2', phase: 'completed', startedAt: at(2), updatedAt: at(4) }
+    push('turn.state', service.turn)
+    push('activity', { state: 'completed' })
+    const running = { threadId: 't1', turnId: 'run:2', phase: 'thinking', startedAt: at(2), updatedAt: at(2) } as TurnState
+    guiMms.turnStatusForSender.mockResolvedValueOnce({ turnState: running, activeTurn: { active: true, running: true }, activity: 'processing', revision: readAt })
+    sent.length = 0
+    win.emit('responsive')
+    await vi.waitFor(() => expect(guiMms.turnStatusForSender).toHaveBeenCalled())
+    await vi.advanceTimersByTimeAsync(0)
+    expect(guiMms.snapshotThreadForSender).not.toHaveBeenCalled()
+    expect(ofChannel('orchestrator:turn-state')).toEqual([])
+    expect(logLines.filter((line) => line.event === 'check.behind')).toEqual([])
+  })
+
+  it('a full read whose answer is older keeps the turns the window already has, for its thread and for others', async () => {
+    startTurn()
+    push('turn.state', { threadId: 't2', turnId: 'run:9', phase: 'thinking', startedAt: at(2), updatedAt: at(2) }, 't2')
+    const readAt = eventsReceived
+    // Both turns end after the service read; their updates arrive before its answer.
+    push('turn.state', { threadId: 't1', turnId: 'run:2', phase: 'completed', startedAt: at(2), updatedAt: at(4) })
+    push('turn.state', { threadId: 't2', turnId: 'run:9', phase: 'completed', startedAt: at(2), updatedAt: at(4) }, 't2')
+    const stale = {
+      ...snapshot(),
+      turnState: { threadId: 't1', turnId: 'run:2', phase: 'thinking', startedAt: at(2), updatedAt: at(2) },
+      activeTurn: { active: true, running: true },
+      turnSnapshot: { t2: { threadId: 't2', turnId: 'run:9', phase: 'thinking', startedAt: at(2), updatedAt: at(2) } },
+      revision: readAt
+    }
+    guiMms.snapshotThreadForSender.mockResolvedValueOnce(stale)
+    for (const listener of listeners.get('window-session-reopened') ?? []) listener({ senderId: WINDOW })
+    await vi.waitFor(() => expect(views()).toHaveLength(1))
+    await vi.waitFor(() => expect(logLines.some((line) => line.event === 'catch-up')).toBe(true))
+    expect(lastTurn()).toMatchObject({ threadId: 't1', phase: 'completed' })
+    const map = ofChannel<Record<string, TurnState>>('turns:state').at(-1)!
+    expect(map.t1?.phase).toBe('completed')
+    expect(map.t2?.phase).toBe('completed')
+    expect(logLines.find((line) => line.event === 'catch-up')?.fields.kept).toEqual(['turn'])
   })
 })
 

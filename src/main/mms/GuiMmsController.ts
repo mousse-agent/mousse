@@ -59,17 +59,39 @@ const GUI_SNAPSHOT_NEWEST = 200
 export const WINDOW_REOPEN_BASE_MS = 500
 export const WINDOW_REOPEN_MAX_MS = 30_000
 
+/**
+ * Where an answer to a read stands among the service's updates (#1042): the service that answered (`instance`) and its
+ * event number, for the reader's profile, when it read the state (`revision`). An update numbered above the revision
+ * was sent after the read and is newer than the answer, even when it arrives first.
+ */
+export interface ReadOrder {
+  instance?: string
+  revision?: number
+}
+
 /** What the service says about one thread's turn, read without its transcript (`turnStatusForSender`). */
-export interface WindowTurnStatus {
+export interface WindowTurnStatus extends ReadOrder {
   turnState?: TurnState
   activeTurn: { active: boolean; running: boolean }
   activity?: string
-  /**
-   * The service has sent this window's connection events it never received: the service's event number when it
-   * answered is past the last one the connection got. Only for this computer's threads; another computer's answer
-   * carries that computer's numbering.
-   */
-  behind: boolean
+}
+
+/** Every thread's status through one window's connection (`activityForSender`). */
+export interface WindowActivity extends ReadOrder {
+  activity: ThreadActivitySnapshot
+}
+
+/** An error about the service connection, with a code the connection log keeps (its text is never logged). */
+function linkError(code: string, message: string): Error {
+  return Object.assign(new Error(message), { code })
+}
+
+/** An answer's order. A thread of another computer is answered there, in that computer's numbering: no revision. */
+function readOrder(instance: string | undefined, threadId: string | undefined, revision: unknown): ReadOrder {
+  return {
+    ...(instance ? { instance } : {}),
+    ...(typeof revision === 'number' && Number.isFinite(revision) && !(threadId && isQualifiedId(threadId)) ? { revision } : {})
+  }
 }
 
 export type GuiMmsConnectionState =
@@ -132,11 +154,21 @@ interface WindowSession {
   client: LocalMmsClient
   binding: TrustedProfileBinding | null
   closing?: Promise<void>
+  /** Stops the window's `destroyed` listener for this connection, so connections opened again do not pile them up. */
+  detachDestroyed?: () => void
 }
 
 interface WindowReopen {
+  sender: WebContents
   timer: ReturnType<typeof setTimeout> | null
   attempts: number
+  /**
+   * Waits for the main connection: the service went away with it, or the main connection gave up. Opened again when
+   * the main connection's reconnect brings it back (`reopenWindowsAfterService`), never on its own.
+   */
+  waiting: boolean
+  /** The reopen itself is opening the connection (not a request of the window). */
+  opening?: boolean
 }
 
 export interface GuiAttachedBrowserHost {
@@ -201,6 +233,13 @@ export class GuiMmsController extends EventEmitter {
   private linkLog: GuiConnectionLogSink | null = null
   /** Windows whose own connection closed without main closing it, waiting to be opened again. */
   private readonly windowReopens = new Map<number, WindowReopen>()
+  /**
+   * The profile each window was last bound to. A connection opened again for the window (after a service restart or a
+   * dropped connection) is bound to it, not to the default: the window still shows that profile (#1042).
+   */
+  private readonly windowProfiles = new Map<number, string>()
+  private readonly reopenWatched = new WeakSet<WebContents>()
+  private disconnectUnsub: (() => void) | null = null
 
   constructor(opts: GuiMmsControllerOptions = {}) {
     super()
@@ -253,7 +292,7 @@ export class GuiMmsController extends EventEmitter {
     if (this.ownerTokenOverride) return this.ownerTokenOverride
     const owner = readOwnerRecord(this.homeDir)
     if (!owner?.token) {
-      throw new Error('MMS owner token unavailable; daemon is not ready')
+      throw linkError('owner_token_unavailable', 'MMS owner token unavailable; daemon is not ready')
     }
     return owner.token
   }
@@ -277,6 +316,10 @@ export class GuiMmsController extends EventEmitter {
   async start(): Promise<ProtocolHelloOk> {
     this.assertMayConnect()
     if (this.connected && this.lastHello) return this.lastHello
+    // Connected before in this run, so the service went away: connecting again is the reconnect's work, which is what
+    // tells the windows the service restarted and reads their lists again (#1042). A start here waits for it, or asks
+    // for it when nothing has noticed the loss yet; it never connects around it.
+    if (this.lastHello) return this.restoreService('request')
     if (this.startPromise) return this.startPromise
     // Renderer bootstrap requests and main's eager start share one discovery,
     // daemon spawn and base handshake. Window sessions keep their own fences.
@@ -350,8 +393,8 @@ export class GuiMmsController extends EventEmitter {
   }
 
   private assertMayConnect(): void {
-    if (this.installing) throw new Error('Mousse is installing an update')
-    if (this.quitting) throw new Error('GuiMmsController is stopped')
+    if (this.installing) throw linkError('installing', 'Mousse is installing an update')
+    if (this.quitting) throw linkError('stopped', 'GuiMmsController is stopped')
   }
 
   /** Clear reconnect/disconnect monitors and event unsub (all failure/stop paths). */
@@ -363,8 +406,59 @@ export class GuiMmsController extends EventEmitter {
   private enterFailed(err?: Error): void {
     this.clearAllTimersAndListeners()
     this.setState('failed')
-    this.log('service.failed', { error: err ? describeLinkError(err) : undefined, attempts: this.reconnectAttempts })
-    if (err) this.emit('error', err)
+    this.log('service.failed', { error: err ? describeLinkError(err) : undefined, attempts: this.reconnectAttempts, gaveUp: this.gaveUp })
+    if (err) this.reportError(err)
+    // The main connection gave up: windows stop trying with it, and try again when it does (a request, or a reconnect).
+    if (this.gaveUp) this.parkWindowReopens()
+  }
+
+  /**
+   * A failed start or reconnect, for whoever listens (main logs it). Unheard, an `error` event throws, and a reconnect
+   * attempt that failed while the service was still down became an unhandled rejection instead of the next attempt.
+   */
+  private reportError(err: Error): void {
+    if (this.listenerCount('error') > 0) this.emit('error', err)
+  }
+
+  /**
+   * The main connection stopped trying: its reconnects ran out, or a test controller that never reconnects failed.
+   * Only a request (the person doing something in a window) tries again, once.
+   */
+  private get gaveUp(): boolean {
+    return this.state === 'failed' && !this.reconnecting && !this.reconnectTimer &&
+      (this.reconnectAttempts >= this.maxReconnect || (this.disableAutoStart && !this.managedDaemon))
+  }
+
+  /**
+   * The one way a lost main connection is acted on (#1042). The connection's own close, its one-second check, a
+   * window whose connection dropped with it and a request all come here, whichever notices first; the reconnect it
+   * schedules is the only thing that connects again. That reconnect tells the windows the service restarted, reads
+   * their lists again and opens their connections again (`attemptReconnect`), so none of it can be skipped.
+   */
+  private mainConnectionLost(noticedBy: string): void {
+    if (this.quitting || this.installing) return
+    const client = this.client
+    if (this.state !== 'ready' || !client || client.connected) return
+    this.log('service.lost', { noticedBy, lastSequence: client.lastKnownSequence })
+    this.scheduleReconnect('disconnect')
+  }
+
+  /**
+   * A request needs the main connection after it was lost: it waits for the reconnect, asks for one when nothing has
+   * noticed the loss yet, and after the reconnect gave up tries once more (the person asked).
+   */
+  private async restoreService(noticedBy: string): Promise<ProtocolHelloOk> {
+    if (this.state === 'ready' && this.client && !this.client.connected) this.mainConnectionLost(noticedBy)
+    if (this.gaveUp) {
+      this.log('service.retry', { by: noticedBy })
+      await this.reconnect('retry')
+      if (!this.connected || !this.lastHello) throw linkError('reconnect_unavailable', 'MMS reconnect is unavailable')
+      return this.lastHello
+    }
+    if (!this.connected && !this.reconnectTimer && !this.reconnecting) this.scheduleReconnect('disconnect')
+    await this.waitForConnection()
+    if (!this.lastHello) throw linkError('not_connected', 'MMS client not connected')
+    return this.lastHello
   }
 
   /** Request against the live client; throws if not connected. */
@@ -402,6 +496,7 @@ export class GuiMmsController extends EventEmitter {
         const bound = result as unknown as {profile?:{id?:string};epoch?:number}
         if (session && bound?.profile?.id && typeof bound.epoch === 'number' && Number.isSafeInteger(bound.epoch)) {
           session.binding = {profileId:bound.profile.id,epoch:bound.epoch}
+          this.rememberWindowProfile(sender, bound.profile.id)
           const subscribed = await session.client.subscribe(0)
           this.afterWindowSubscribe(sender.id, session.client, subscribed, 'profile-bound')
           await this.attachedBrowserHost?.acknowledgeClosed(sender)
@@ -443,6 +538,24 @@ export class GuiMmsController extends EventEmitter {
     return !this.profileTransitions.has(senderId) && !session?.closing && session?.client.connected ? session.binding : null
   }
 
+  /**
+   * The window is switching profiles: what its connection hears meanwhile (the new profile's replay) is not for the
+   * profile it shows, and the window reads the new profile in full when the switch ends. Nothing was lost.
+   */
+  isProfileChanging(senderId: number): boolean {
+    return this.profileTransitions.has(senderId)
+  }
+
+  /** The service a window's connection talks to: answers and updates are numbered per service instance. */
+  instanceForSender(senderId: number): string | undefined {
+    return this.windowSessions.get(senderId)?.client.hello?.instanceId
+  }
+
+  private rememberWindowProfile(sender: WebContents, profileId: string): void {
+    if (!this.windowProfiles.has(sender.id)) sender.once('destroyed', () => this.windowProfiles.delete(sender.id))
+    this.windowProfiles.set(sender.id, profileId)
+  }
+
   /** Private host requests never reconnect or change the owning window connection. */
   async requestAttachedBrowser<T>(sender: WebContents, method: string, params: unknown): Promise<T> {
     const session = this.windowSessions.get(sender.id)
@@ -458,23 +571,26 @@ export class GuiMmsController extends EventEmitter {
     const sender = this.senderAls.getStore()
     if (!sender) {
       if (!this.client || !this.client.connected) {
-        if (this.installing) throw new Error('Mousse is installing an update')
+        if (this.installing) throw linkError('installing', 'Mousse is installing an update')
         if (this.quitting || this.state === 'stopped') {
-          throw new Error('MMS client not connected')
+          throw linkError('not_connected', 'MMS client not connected')
         }
+        this.mainConnectionLost('request')
         const connection = this.waitForConnection()
         this.scheduleReconnect('request_while_disconnected')
         await connection
       }
       if (!this.client || !this.client.connected) {
-        throw new Error('MMS client not connected')
+        throw linkError('not_connected', 'MMS client not connected')
       }
       return this.client
     }
-    if (this.installing) throw new Error('Mousse is installing an update')
-    if (this.quitting || sender.isDestroyed()) throw new Error('Window MMS session is closing')
+    if (this.installing) throw linkError('installing', 'Mousse is installing an update')
+    if (this.quitting || sender.isDestroyed()) throw linkError('window_closing', 'Window MMS session is closing')
     let session = this.windowSessions.get(sender.id)
     if (session && !session.client.connected) {
+      // A lost connection, whether or not its close was seen yet: the one that replaces it catches the window up.
+      if (!session.closing) this.reopenFor(sender)
       await this.closeWindowSession(sender.id, session)
       session = undefined
     }
@@ -522,21 +638,15 @@ export class GuiMmsController extends EventEmitter {
       windowClient.setAttachedBrowserCommandHandler((command, { signal }) => this.attachedBrowserHost!.handleCommand(sender, command, signal))
     }
     await connectGuiClient(windowClient, this.homeDir)
-    const bound = await windowClient.request<{ profile: { id: string }; epoch: number }>('profiles.bind', {
-      profile: 'default'
-    }).catch(async () => {
-      const listed = await windowClient.request<{ defaultProfileId: string }>('profiles.status')
-      const retry = await windowClient.request<{ profile: { id: string }; epoch: number }>('profiles.bind', {
-        profile: listed.defaultProfileId
-      })
-      return retry
-    })
+    const bound = await this.bindWindowClient(sender, windowClient)
     const session: WindowSession = {
       sender,
       client: windowClient,
-      binding: { profileId: bound.profile.id, epoch: bound.epoch }
+      binding: { profileId: bound.profile.id, epoch: bound.epoch },
+      detachDestroyed: () => sender.off('destroyed', onDestroyed)
     }
     openedSession = session
+    this.rememberWindowProfile(sender, bound.profile.id)
     if (this.quitting || this.installing || destroyed || sender.isDestroyed()) {
       await this.closeWindowSession(sender.id, session)
       throw new Error('Window MMS session closed while opening')
@@ -544,7 +654,7 @@ export class GuiMmsController extends EventEmitter {
     this.windowSessions.set(sender.id, session)
     const unsubscribe = windowClient.onEvent((event, delivery) => {
       if (sender.isDestroyed()) return
-      this.emit('window-event', { senderId: sender.id, event, replay: delivery?.replay === true })
+      this.emit('window-event', { senderId: sender.id, event, replay: delivery?.replay === true, instance: windowClient.hello?.instanceId })
       if (windowClient.requiresResnapshot) this.emit('window-resnapshot', { senderId: sender.id })
     })
     const unsubscribeConnection = windowClient.onConnectionEvent(event => {
@@ -564,6 +674,15 @@ export class GuiMmsController extends EventEmitter {
     // Threads of other computers are focused through their router when they are selected.
     const shown = this.shownThreadOf?.(sender.id)
     if (shown && !isQualifiedId(shown)) void windowClient.request('threads.focus', { threadId: shown, focused: true }).catch(() => undefined)
+    // This connection replaces a lost one: the window is caught up, once, whether its reopen or one of its requests
+    // (the person doing something) opened it.
+    const replaced = this.windowReopens.get(sender.id)
+    if (replaced) {
+      if (replaced.timer) clearTimeout(replaced.timer)
+      this.windowReopens.delete(sender.id)
+      this.log('window.reopened', { window: sender.id, attempts: replaced.attempts, byRequest: !replaced.opening })
+      queueMicrotask(() => this.emit('window-session-reopened', { senderId: sender.id }))
+    }
     return session
     } catch (error) {
       if (!destroyed) sender.off('destroyed', onDestroyed)
@@ -590,8 +709,31 @@ export class GuiMmsController extends EventEmitter {
       replayed: Array.isArray(subscribed.replay) ? subscribed.replay.length : 0,
       gap: client.requiresResnapshot
     })
+    // Where the profile's counter stands: one lower than numbers already applied was started again (#1042).
+    const profileId = this.windowSessions.get(senderId)?.binding?.profileId
+    if (profileId) this.emit('window-subscribed', { senderId, profileId, instance: client.hello?.instanceId, sequence: subscribed.sequence })
     // `subscribed`: the replay itself lost events (the service no longer holds them), unlike a gap in live events.
     if (client.requiresResnapshot) this.emit('window-resnapshot', { senderId, subscribed: true })
+  }
+
+  /**
+   * Binds a new window connection to the profile the window shows: the one it was last bound to, or the default for a
+   * window that was never bound. A remembered profile that cannot be bound any more (it was removed) falls back to the
+   * default, as a new window would.
+   */
+  private async bindWindowClient(sender: WebContents, client: LocalMmsClient): Promise<{ profile: { id: string }; epoch: number }> {
+    const remembered = this.windowProfiles.get(sender.id)
+    if (remembered) {
+      try {
+        return await client.request<{ profile: { id: string }; epoch: number }>('profiles.bind', { profile: remembered })
+      } catch (error) {
+        this.log('window.profile-unavailable', { window: sender.id, error: describeLinkError(error) })
+      }
+    }
+    return client.request<{ profile: { id: string }; epoch: number }>('profiles.bind', { profile: 'default' }).catch(async () => {
+      const listed = await client.request<{ defaultProfileId: string }>('profiles.status')
+      return client.request<{ profile: { id: string }; epoch: number }>('profiles.bind', { profile: listed.defaultProfileId })
+    })
   }
 
   /** A window's own connection closed. Main's own closes (`closeWindowSession`, `stop`) are not losses. */
@@ -599,33 +741,86 @@ export class GuiMmsController extends EventEmitter {
     if (session.closing || this.quitting || this.installing || sender.isDestroyed()) return
     if (this.windowSessions.get(sender.id) !== session) return
     this.log('window.lost', { window: sender.id, error: describeLinkError(error), lastSequence: session.client.lastKnownSequence })
+    // A service restart closes this connection and the main one together. When the window notices first, it hands the
+    // loss to the main connection's path rather than connecting around it.
+    this.mainConnectionLost('window')
     this.scheduleWindowReopen(sender)
   }
 
+  private reopenFor(sender: WebContents): WindowReopen {
+    let reopen = this.windowReopens.get(sender.id)
+    if (!reopen) {
+      reopen = { sender, timer: null, attempts: 0, waiting: false }
+      this.windowReopens.set(sender.id, reopen)
+      // Once per window, however often its connection is opened again.
+      if (!this.reopenWatched.has(sender)) {
+        this.reopenWatched.add(sender)
+        sender.once('destroyed', () => {
+          const pending = this.windowReopens.get(sender.id)
+          if (pending?.timer) clearTimeout(pending.timer)
+          this.windowReopens.delete(sender.id)
+        })
+      }
+    }
+    return reopen
+  }
+
+  /**
+   * Opens a window's lost connection again, after a short wait that doubles. It follows the main connection: while that
+   * is down the window waits for its reconnect (which opens every waiting window), and it never starts the service or
+   * connects the main connection itself. A window whose connection cannot be opened while the service is up stops
+   * after as many tries as the main connection makes, and waits like the others.
+   */
   private scheduleWindowReopen(sender: WebContents): void {
     if (this.quitting || this.installing || sender.isDestroyed()) {
       this.windowReopens.delete(sender.id)
       return
     }
-    let reopen = this.windowReopens.get(sender.id)
-    if (!reopen) {
-      reopen = { timer: null, attempts: 0 }
-      this.windowReopens.set(sender.id, reopen)
-      sender.once('destroyed', () => {
-        const pending = this.windowReopens.get(sender.id)
-        if (pending?.timer) clearTimeout(pending.timer)
-        this.windowReopens.delete(sender.id)
-      })
+    const reopen = this.reopenFor(sender)
+    if (reopen.timer || reopen.waiting) return
+    if (!this.connected || reopen.attempts >= this.maxReconnect) {
+      this.waitForService(reopen)
+      return
     }
-    if (reopen.timer) return
     const delay = Math.min(WINDOW_REOPEN_MAX_MS, WINDOW_REOPEN_BASE_MS * 2 ** reopen.attempts)
-    const pending = reopen
-    pending.attempts += 1
-    pending.timer = setTimeout(() => {
-      pending.timer = null
-      void this.reopenWindow(sender, pending)
+    reopen.attempts += 1
+    reopen.timer = setTimeout(() => {
+      reopen.timer = null
+      void this.reopenWindow(sender, reopen)
     }, delay)
-    ;(pending.timer as { unref?: () => void }).unref?.()
+    ;(reopen.timer as { unref?: () => void }).unref?.()
+  }
+
+  private waitForService(reopen: WindowReopen): void {
+    if (reopen.timer) clearTimeout(reopen.timer)
+    reopen.timer = null
+    if (reopen.waiting) return
+    reopen.waiting = true
+    this.log('window.waiting', { window: reopen.sender.id, service: this.state, attempts: reopen.attempts })
+  }
+
+  /** The main connection gave up: windows stop trying too, until a request or a reconnect brings the service back. */
+  private parkWindowReopens(): void {
+    for (const reopen of this.windowReopens.values()) this.waitForService(reopen)
+  }
+
+  /**
+   * The main connection is back after a reconnect: every window whose connection was lost is opened again now, each
+   * then caught up (`window-session-reopened`). A window that did not notice its loss yet is found here too.
+   */
+  private reopenWindowsAfterService(): void {
+    for (const [senderId, session] of this.windowSessions) {
+      if (!session.client.connected && !session.closing && !session.sender.isDestroyed() && !this.windowReopens.has(senderId)) {
+        this.reopenFor(session.sender)
+      }
+    }
+    for (const reopen of [...this.windowReopens.values()]) {
+      if (reopen.timer) clearTimeout(reopen.timer)
+      reopen.timer = null
+      reopen.waiting = false
+      reopen.attempts = 0
+      void this.reopenWindow(reopen.sender, reopen)
+    }
   }
 
   private async reopenWindow(sender: WebContents, reopen: WindowReopen): Promise<void> {
@@ -634,15 +829,25 @@ export class GuiMmsController extends EventEmitter {
       this.windowReopens.delete(sender.id)
       return
     }
+    if (!this.connected) {
+      // The service went away with the main connection: its reconnect opens this window again.
+      this.mainConnectionLost('window')
+      this.waitForService(reopen)
+      return
+    }
     const current = this.windowSessions.get(sender.id)
-    // A request of the window opened a replacement first: it still needs catching up.
+    // The connection is open again already (a request opened it, or the drop was never real): it still needs catching
+    // up. Otherwise opening it catches the window up (`openWindowSession`).
     const alreadyOpen = Boolean(current?.client.connected && !current.closing)
     try {
+      reopen.opening = true
       if (!alreadyOpen) await this.prepareWindow(sender)
+      if (this.windowReopens.get(sender.id) !== reopen) return
       this.windowReopens.delete(sender.id)
       this.log('window.reopened', { window: sender.id, attempts: reopen.attempts, byRequest: alreadyOpen })
       this.emit('window-session-reopened', { senderId: sender.id })
     } catch (error) {
+      reopen.opening = false
       if (this.windowReopens.get(sender.id) !== reopen) return
       this.log('window.reopen-failed', { window: sender.id, attempts: reopen.attempts, error: describeLinkError(error) })
       this.scheduleWindowReopen(sender)
@@ -651,16 +856,16 @@ export class GuiMmsController extends EventEmitter {
 
   /**
    * What the service says about a thread's turn, read through the window's own connection without the transcript: the
-   * cheap check behind the catch-up (#1042). `behind` compares the service's event number when it answered with the
-   * last one this connection received; an answer is written after every event numbered before it, so a lower count
-   * means events were lost on the way, not still in flight. With `clearsGap` the read answers the connection's gap flag
-   * (cleared when it starts, restored if it fails), like `snapshotThreadForSender`.
+   * cheap check behind the catch-up (#1042). The answer carries where it stands among the window's updates
+   * (`ReadOrder`), so the caller can tell an answer older than an update it already applied. With `clearsGap` the read
+   * answers the connection's gap flag (cleared when it starts, restored if it fails), like `snapshotThreadForSender`.
    */
   async turnStatusForSender(senderId: number, threadId: string, clearsGap = false): Promise<WindowTurnStatus> {
     const session = this.windowSessions.get(senderId)
-    if (!session || !session.client.connected) throw new Error('Window MMS session is not connected')
+    if (!session || !session.client.connected) throw linkError('window_not_connected', 'Window MMS session is not connected')
     const needed = clearsGap && session.client.requiresResnapshot
     if (clearsGap) session.client.clearResnapshotFlag()
+    const instance = session.client.hello?.instanceId
     let status: { turnState?: TurnState; activeTurn?: { active?: boolean; running?: boolean }; activity?: string; revision?: number }
     try {
       status = await session.client.request('thread.snapshot', { threadId, transcript: false })
@@ -668,12 +873,11 @@ export class GuiMmsController extends EventEmitter {
       if (needed) session.client.markResnapshotNeeded()
       throw error
     }
-    const revision = typeof status?.revision === 'number' ? status.revision : undefined
     return {
       ...(status?.turnState && typeof status.turnState === 'object' ? { turnState: status.turnState } : {}),
       activeTurn: { active: Boolean(status?.activeTurn?.active), running: Boolean(status?.activeTurn?.running) },
       ...(typeof status?.activity === 'string' ? { activity: status.activity } : {}),
-      behind: !isQualifiedId(threadId) && revision !== undefined && revision > session.client.lastKnownSequence
+      ...readOrder(instance, threadId, status?.revision)
     }
   }
 
@@ -687,6 +891,7 @@ export class GuiMmsController extends EventEmitter {
       this.windowEventUnsubs.get(senderId)?.()
       this.windowEventUnsubs.delete(senderId)
       if (this.windowSessions.get(senderId) === session) this.windowSessions.delete(senderId)
+      if (!session.sender.isDestroyed()) session.detachDestroyed?.()
     })()
     session.closing = operation
     void operation.catch(() => { if (session.closing === operation) session.closing = undefined })
@@ -700,23 +905,23 @@ export class GuiMmsController extends EventEmitter {
       (this.reconnectAttempts >= this.maxReconnect ||
         (this.disableAutoStart && !this.managedDaemon))
     ) {
-      return Promise.reject(new Error('MMS reconnect is unavailable'))
+      return Promise.reject(linkError('reconnect_unavailable', 'MMS reconnect is unavailable'))
     }
     const timeoutMs = Math.max(this.requestTimeoutMs ?? 0, SERVICE_START_TIMEOUT_MS)
     return new Promise<void>((resolve, reject) => {
       const onState = (state: GuiMmsConnectionState): void => {
         if (state === 'ready' && this.connected) finish()
-        else if (state === 'stopped') finish(new Error('GuiMmsController is stopped'))
+        else if (state === 'stopped') finish(linkError('stopped', 'GuiMmsController is stopped'))
         else if (
           state === 'failed' &&
           (this.reconnectAttempts >= this.maxReconnect ||
             (this.disableAutoStart && !this.managedDaemon))
         ) {
-          finish(new Error('MMS reconnect failed'))
+          finish(linkError('reconnect_failed', 'MMS reconnect failed'))
         }
       }
       const timer = setTimeout(() => {
-        finish(new Error(`MMS reconnect timed out after ${timeoutMs}ms`))
+        finish(linkError('reconnect_timeout', `MMS reconnect timed out after ${timeoutMs}ms`))
       }, timeoutMs)
       const finish = (error?: Error): void => {
         clearTimeout(timer)
@@ -749,7 +954,7 @@ export class GuiMmsController extends EventEmitter {
   /** Snapshot through one window's profile-bound session after an event gap; clears the flag like `snapshotThread`. */
   async snapshotThreadForSender(senderId: number, threadId: string): Promise<ThreadSnapshotResult> {
     const session = this.windowSessions.get(senderId)
-    if (!session || !session.client.connected) throw new Error('Window MMS session is not connected')
+    if (!session || !session.client.connected) throw linkError('window_not_connected', 'Window MMS session is not connected')
     const needed = session.client.requiresResnapshot
     session.client.clearResnapshotFlag()
     try {
@@ -761,19 +966,21 @@ export class GuiMmsController extends EventEmitter {
   }
 
   /**
-   * What every thread is doing, through one window's profile-bound session. With `clearsGap` this read is
-   * the window's whole resnapshot (no thread is open), so it clears the gap flag like `snapshotThreadForSender`.
+   * What every thread is doing, through one window's profile-bound session, with where the answer stands among the
+   * window's updates (`ReadOrder`). With `clearsGap` this read is the window's whole resnapshot (no thread is open), so
+   * it clears the gap flag like `snapshotThreadForSender`.
    */
-  async activityForSender(senderId: number, clearsGap = false): Promise<ThreadActivitySnapshot> {
+  async activityForSender(senderId: number, clearsGap = false): Promise<WindowActivity> {
     const session = this.windowSessions.get(senderId)
-    if (!session || !session.client.connected) throw new Error('Window MMS session is not connected')
+    if (!session || !session.client.connected) throw linkError('window_not_connected', 'Window MMS session is not connected')
     const needed = clearsGap && session.client.requiresResnapshot
     if (clearsGap) session.client.clearResnapshotFlag()
+    const instance = session.client.hello?.instanceId
     try {
-      const result = await session.client.request<{ activity?: ThreadActivitySnapshot }>('activity.snapshot')
+      const result = await session.client.request<{ activity?: ThreadActivitySnapshot; revision?: number }>('activity.snapshot')
       const activity = result?.activity
       if (!activity || typeof activity !== 'object' || Array.isArray(activity)) throw new Error('activity.snapshot returned no activity')
-      return activity
+      return { activity, ...readOrder(instance, undefined, result?.revision) }
     } catch (error) {
       if (needed) session.client.markResnapshotNeeded()
       throw error
@@ -799,14 +1006,14 @@ export class GuiMmsController extends EventEmitter {
         intervalMs: SERVICE_POLL_INTERVAL_MS
       })
       if (record) return record
-      throw new Error(
+      throw linkError('service_not_ready',
         formatOwnerBusyMessage(owner.record, owner.heldUnreadable) +
           ' (owner live but runtime readiness not published)'
       )
     }
 
     if (owner.heldUnreadable) {
-      throw new Error(formatOwnerBusyMessage(null, true))
+      throw linkError('owner_unreadable', formatOwnerBusyMessage(null, true))
     }
 
     // Dev script / tests own the daemon: poll until ready, never spawn a second process.
@@ -817,7 +1024,7 @@ export class GuiMmsController extends EventEmitter {
         intervalMs: SERVICE_POLL_INTERVAL_MS
       })
       if (record) return record
-      throw new Error(
+      throw linkError(this.managedDaemon ? 'service_not_ready' : 'service_not_running',
         this.managedDaemon
           ? `MMS daemon is not ready (managed by npm run dev). Waited ${SERVICE_START_TIMEOUT_MS}ms.`
           : 'MMS daemon is not running and auto-start is disabled'
@@ -829,7 +1036,7 @@ export class GuiMmsController extends EventEmitter {
     const child = await this.spawnDaemon()
     const record = await this.waitForSpawnedDaemon(child)
     if (!record) {
-      throw new Error(
+      throw linkError('service_start_timeout',
         `MMS daemon failed to become ready within ${GUI_DAEMON_START_TIMEOUT_MS}ms. ` +
           `Startup details were written to ${join(this.homeDir, 'mms-startup.log')}`
       )
@@ -904,7 +1111,7 @@ export class GuiMmsController extends EventEmitter {
         } catch {
           /* best effort diagnostics */
         }
-        throw new Error(
+        throw linkError('service_exited',
           `MMS daemon exited before readiness (code ${child.exitCode ?? 'none'}, ` +
             `signal ${child.signalCode ?? 'none'}).${detail}`
         )
@@ -920,7 +1127,7 @@ export class GuiMmsController extends EventEmitter {
 
     const owner = readOwnerRecord(this.homeDir)
     if (!owner) {
-      throw new Error('MMS owner record missing after readiness')
+      throw linkError('owner_record_missing', 'MMS owner record missing after readiness')
     }
     const token = this.ownerTokenOverride ?? owner.token
     const endpoint = this.resolveEndpoint(owner)
@@ -1006,12 +1213,14 @@ export class GuiMmsController extends EventEmitter {
       clearInterval(this.disconnectTimer)
       this.disconnectTimer = null
     }
+    this.disconnectUnsub?.()
+    // The close is acted on at once; the one-second check stays for a close that raised nothing.
+    this.disconnectUnsub = client.onConnectionClosed(() => {
+      if (this.client === client) this.mainConnectionLost('closed')
+    })
     this.disconnectTimer = setInterval(() => {
       if (this.quitting || this.installing || this.client !== client) return
-      if (!client.connected && this.state === 'ready') {
-        this.log('service.lost', { lastSequence: client.lastKnownSequence })
-        this.scheduleReconnect('disconnect')
-      }
+      this.mainConnectionLost('check')
     }, 1000)
   }
 
@@ -1019,7 +1228,7 @@ export class GuiMmsController extends EventEmitter {
     if (this.quitting || this.installing) return
     if (this.reconnectTimer || this.reconnecting) return
     if (this.reconnectAttempts >= this.maxReconnect) {
-      this.enterFailed(new Error(`MMS reconnect exhausted after ${reason}`))
+      this.enterFailed(linkError('reconnect_exhausted', `MMS reconnect exhausted after ${reason}`))
       return
     }
     this.setState('reconnecting')
@@ -1049,6 +1258,7 @@ export class GuiMmsController extends EventEmitter {
       if (this.reconnecting === attempt) this.reconnecting = null
     }
     if (retry) this.scheduleReconnect('reconnect_failed')
+    else if (this.gaveUp) this.parkWindowReopens()
   }
 
   /** One reconnect attempt. Resolves true when another attempt should be scheduled. */
@@ -1068,7 +1278,11 @@ export class GuiMmsController extends EventEmitter {
         await this.ensureDaemonReady()
       }
       const hello = await this.connectOnce()
+      this.log('service.restored', { reason, instance: hello.instanceId, windows: this.windowSessions.size })
+      // Everything a restart needs happens here, on every reconnect: the windows are told the service restarted and
+      // their lists are read again (`resnapshot`), and every window whose connection was lost is opened again.
       this.emit('resnapshot', { reason: `reconnect:${reason}`, hello })
+      this.reopenWindowsAfterService()
       return false
     } catch (err) {
       if (this.quitting || this.installing) return false
@@ -1078,7 +1292,7 @@ export class GuiMmsController extends EventEmitter {
         this.enterFailed(err instanceof Error ? err : new Error(String(err)))
         return false
       }
-      this.emit('error', err instanceof Error ? err : new Error(String(err)))
+      this.reportError(err instanceof Error ? err : new Error(String(err)))
       return true
     }
   }
@@ -1095,6 +1309,8 @@ export class GuiMmsController extends EventEmitter {
       clearInterval(this.disconnectTimer)
       this.disconnectTimer = null
     }
+    this.disconnectUnsub?.()
+    this.disconnectUnsub = null
     if (this.eventUnsub) {
       try {
         this.eventUnsub()

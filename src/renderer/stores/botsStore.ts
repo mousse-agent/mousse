@@ -245,6 +245,9 @@ export const useBotsStore = create<BotsState>((set, get) => {
       events.onChanged?.((event) => {
         void get().refresh()
         if (event?.botId && get().aboutOpen && get().details[event.botId]) void get().loadDetail(event.botId)
+        // The window's service connection was opened again: a chat it holds reads its newest rows, which also fills
+        // any it missed (#1042).
+        if (event?.reread) for (const botId of Object.keys(get().chats)) void get().loadChat(botId)
       }),
       events.onMessage?.((event) => { if (event?.botId && event.message) putMessages(event.botId, [event.message]) }),
       events.onActivity?.((event) => {

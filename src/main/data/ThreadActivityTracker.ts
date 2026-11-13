@@ -31,11 +31,17 @@ export class ThreadActivityTracker {
     }
   }
 
-  /** Reconcile the authoritative runtime states, including completed turns. */
-  reconcileSnapshot(snapshot: ThreadActivitySnapshot): void {
+  /**
+   * Reconcile the authoritative runtime states, including completed turns. Threads `keep` names hold what they have:
+   * main already applied an update about them newer than this snapshot (#1042).
+   */
+  reconcileSnapshot(snapshot: ThreadActivitySnapshot, keep?: (threadId: string) => boolean): void {
     const next = new Map<string, ThreadActivityState>()
     for (const [threadId, state] of Object.entries(snapshot)) {
-      if (state !== 'idle') next.set(threadId, state)
+      if (state !== 'idle' && !keep?.(threadId)) next.set(threadId, state)
+    }
+    if (keep) {
+      for (const [threadId, state] of this.activity) if (keep(threadId)) next.set(threadId, state)
     }
     this.activity = next
   }

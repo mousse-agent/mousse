@@ -763,8 +763,8 @@ const api = {
   },
   /** Personal bots (the Bots section): change, chat-row and live-chip events; requests go through `platformRequest`. */
   personalBots: {
-    onChanged: (cb: (event: { botId?: string; activationId?: string }) => void): (() => void) => {
-      const handler = (_: Electron.IpcRendererEvent, event: { botId?: string; activationId?: string }) => cb(event ?? {})
+    onChanged: (cb: (event: { botId?: string; activationId?: string; reread?: boolean }) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, event: { botId?: string; activationId?: string; reread?: boolean }) => cb(event ?? {})
       ipcRenderer.on('bots:changed', handler)
       return () => ipcRenderer.removeListener('bots:changed', handler)
     },

@@ -3176,7 +3176,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const activity = withoutLocalOnlyKeys(ctx, bots.size ? Object.fromEntries(Object.entries(all).filter(([threadId]) => !bots.has(threadId))) : all)
       // A window also gets what the threads of the other computers are doing.
       const remote = ctx.connection?.clientType === 'gui' ? ctx.mms.remoteLists?.activity() : undefined
-      return { activity: remote ? { ...activity, ...remote } : activity }
+      // The event number when the statuses were read: a status update numbered after it is newer than this answer,
+      // even when it reaches the reader first (#1042).
+      return { activity: remote ? { ...activity, ...remote } : activity, revision: ctx.globalSequence() }
     }
     case 'stats.usage':
       return ctx.mms.lineEditStats.getUsageSnapshot()

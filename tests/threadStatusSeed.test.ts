@@ -45,14 +45,14 @@ const guiMms = Object.assign(new EventEmitter(), {
     }
     return {}
   }),
-  activityForSender: vi.fn(async (senderId: number, clearsGap?: boolean): Promise<ThreadActivitySnapshot> => {
+  activityForSender: vi.fn(async (senderId: number, clearsGap?: boolean): Promise<{ activity: ThreadActivitySnapshot }> => {
     activityReads.push({ senderId, clearsGap })
-    return { ...serviceActivity }
+    return { activity: { ...serviceActivity } }
   }),
   snapshotThread: vi.fn(async () => ({ messages: [], queue: [], claimed: [], activeTurn: { active: false, running: false }, connectionFailed: false })),
   snapshotThreadForSender: vi.fn(async () => ({ messages: [], queue: [], claimed: [], activeTurn: { active: false, running: false }, connectionFailed: false })),
   // The open thread's turn, read without its transcript after a gap in live events.
-  turnStatusForSender: vi.fn(async () => ({ activeTurn: { active: false, running: false }, behind: false })),
+  turnStatusForSender: vi.fn(async () => ({ activeTurn: { active: false, running: false } })),
   runWithSender: (_sender: unknown, run: () => unknown) => run(),
   getCurrentSenderId: () => currentSender,
   getWindowBindingForSender: (senderId: number) => (senderId === WINDOW || senderId === OPEN_WINDOW ? { profileId: 'default', epoch: 1 } : undefined),

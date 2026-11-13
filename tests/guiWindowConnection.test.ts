@@ -1,7 +1,8 @@
 /**
  * A window's own connection to the service (#1042): it carries every update of the window's threads, so main notices
- * when it drops and opens it again without waiting for the window's next request, acts on a gap found while
- * subscribing, numbers its events the way the service sends them, and can tell that events never arrived.
+ * when it drops and opens it again without waiting for the window's next request, on the profile the window shows; acts
+ * on a gap found while subscribing; numbers its events the way the service sends them; says where an answer stands
+ * among those events; and follows the main connection when that gives up.
  */
 import { mkdtempSync, rmSync } from 'fs'
 import { EventEmitter } from 'node:events'
@@ -126,18 +127,79 @@ describe("a window's own service connection", () => {
     expect((gui as unknown as Internals).windowSessions.get(905)!.client.requiresResnapshot).toBe(false)
   })
 
-  it("tells when the service sent the window events it never received", async () => {
+  it('says where a status answer stands among the window\'s updates: the service, and its event number at the read', async () => {
     const sender = windowSender(906)
     await gui.prepareWindow(sender)
     const { thread } = await gui.runWithSender(sender, () => gui.request<{ thread: { id: string } }>('threads.create', { name: 'Status' }))
-    await vi.waitFor(async () => expect((await gui.turnStatusForSender(906, thread.id)).behind).toBe(false))
+    const client = (gui as unknown as Internals).windowSessions.get(906)!.client
     const status = await gui.turnStatusForSender(906, thread.id)
     expect(status.activeTurn).toEqual({ active: false, running: false })
-
-    // An event the service numbered but the window never got (pushed to the ring without being sent).
-    ringOf(mms.profileId).push('turn.state', { threadId: thread.id, turnId: null, phase: 'idle', updatedAt: new Date().toISOString() }, thread.id, mms.profileId)
-    expect((await gui.turnStatusForSender(906, thread.id)).behind).toBe(true)
+    expect(status.instance).toBe(client.hello?.instanceId)
+    expect(status.revision).toBe(ringOf(mms.profileId).currentSequence)
+    const statuses = await gui.activityForSender(906)
+    expect(statuses).toMatchObject({ instance: client.hello?.instanceId, revision: ringOf(mms.profileId).currentSequence })
   })
+
+  it('a connection opened again is bound to the profile the window shows, not the default', async () => {
+    const host = mms.getInstallationHost()!
+    const alice = host.manager.create({ displayName: 'Alice', slug: 'alice' })
+    await (await mms.getProfileServices(alice.id)).start()
+    const sender = windowSender(908)
+    await gui.prepareWindow(sender)
+    await gui.runWithSender(sender, () => gui.request('profiles.bind', { profile: alice.id }))
+    expect(gui.getWindowBindingForSender(908)?.profileId).toBe(alice.id)
+    const reopened = vi.fn()
+    gui.on('window-session-reopened', reopened)
+
+    ;((gui as unknown as Internals).windowSessions.get(908)!.client as unknown as { socket: { destroy: () => void } }).socket.destroy()
+    await vi.waitFor(() => expect(reopened).toHaveBeenCalledWith({ senderId: 908 }), { timeout: 5_000 })
+    expect(gui.getWindowBindingForSender(908)?.profileId).toBe(alice.id)
+
+    // What the window hears from then on is Alice's.
+    const events: ProtocolEvent[] = []
+    gui.on('window-event', ({ senderId, event }: { senderId: number; event: ProtocolEvent }) => { if (senderId === 908) events.push(event) })
+    await gui.runWithSender(sender, () => gui.request('threads.create', { name: 'Alice thread' }))
+    await vi.waitFor(() => expect(events.some((event) => event.type === 'threads.updated')).toBe(true))
+    expect(events.filter((event) => event.profileId).every((event) => event.profileId === alice.id)).toBe(true)
+  })
+
+  it('stops opening a window again once the main connection gives up, and both come back when the person asks', async () => {
+    gui.on('error', () => undefined)
+    const limited = new GuiMmsController({ homeDir: home, managedDaemon: true, endpointOverride: endpoint, ownerTokenOverride: ownerToken, maxReconnectAttempts: 3, reconnectBaseMs: 20 })
+    const lines: Array<{ event: string; fields: Record<string, unknown> }> = []
+    limited.setConnectionLog({ write: (event, fields = {}) => void lines.push({ event, fields }) })
+    limited.on('error', () => undefined)
+    try {
+      await limited.start()
+      const sender = windowSender(909)
+      await limited.prepareWindow(sender)
+      const restored = vi.fn()
+      limited.on('resnapshot', restored)
+      const reopened = vi.fn()
+      limited.on('window-session-reopened', reopened)
+
+      // The service goes away and cannot be reached again.
+      await server.stop()
+      await vi.waitFor(() => expect(limited.connectionState).toBe('failed'), { timeout: 10_000 })
+      const atGiveUp = lines.length
+      expect(lines.some((line) => line.event === 'window.waiting')).toBe(true)
+      await new Promise((resolve) => setTimeout(resolve, 2_500))
+      // Nothing tries again by itself: no window reopen, no reconnect, and the log stays as it was.
+      expect(lines.slice(atGiveUp)).toEqual([])
+      expect(lines.filter((line) => line.event === 'window.reopen-failed')).toEqual([])
+      expect(atGiveUp).toBeLessThan(20)
+
+      // The service is back and the person does something in the window: one try, and the window is opened again.
+      server = new MmsProtocolServer({ mms, ownerToken, version: 'test' })
+      await server.start()
+      await limited.runWithSender(sender, () => limited.request('threads.list'))
+      expect(restored).toHaveBeenCalledWith(expect.objectContaining({ reason: 'reconnect:retry' }))
+      await vi.waitFor(() => expect(reopened).toHaveBeenCalledWith({ senderId: 909 }))
+      expect(limited.getWindowBindingForSender(909)).not.toBeNull()
+    } finally {
+      await limited.stop()
+    }
+  }, 30_000)
 })
 
 describe("the service's hello", () => {

@@ -31,7 +31,8 @@ import { daemonGitParams } from './daemonGitParams'
 import { PROJECT_ICON_EXTENSIONS, type ProjectIconChoice, type ProjectIconImage } from '../../shared/projectIcon'
 import { getComputerName } from '../../mms/computerName'
 import { randomUUID } from 'node:crypto'
-import type { GuiMmsController, ThreadSnapshotResult } from '../mms/GuiMmsController'
+import type { GuiMmsController, ReadOrder, ThreadSnapshotResult } from '../mms/GuiMmsController'
+import { updateOrders, type UpdateKind } from '../mms/updateOrder'
 import { PresentationState } from '../mms/PresentationState'
 import { bootstrapPresentation } from '../mms/bootstrapPresentation'
 import { coalescedRunner } from '../mms/coalescedRunner'
@@ -820,21 +821,45 @@ export function registerGuiIpc(
   }
   const getTurnSnapshot = (): TurnStateSnapshot => Object.fromEntries(turnStateMapFor())
 
+  // Each profile's updates, in the order main applied them: an answer to a read never puts back state older than one
+  // of them (#1042, `UpdateOrder`).
+  const orderFor = updateOrders()
+  /** Whether an answer read at `order` may replace this thread's state in the profile. */
+  const answerApplies = (profileId: string, kind: UpdateKind, order: ReadOrder | undefined, threadId: string): boolean =>
+    !order || orderFor(profileId).mayApply(kind, order, threadId)
+  /** The answer's order: the revision the service read at, on the connection the read went through. */
+  const orderOfAnswer = (answer: unknown, instance: string | undefined, threadId?: string): ReadOrder => {
+    const revision = (answer as { revision?: unknown } | null)?.revision
+    return {
+      ...(instance ? { instance } : {}),
+      ...(typeof revision === 'number' && Number.isFinite(revision) && !(threadId && isQualifiedId(threadId)) ? { revision } : {})
+    }
+  }
+  /** The order of an answer read in the current window's context (an IPC handler). */
+  const orderInWindow = (answer: unknown, threadId?: string): ReadOrder | undefined => {
+    const senderId = guiMms.getCurrentSenderId()
+    return senderId === null ? orderOfAnswer(answer, guiMms.hello?.instanceId, threadId) : orderOfAnswer(answer, guiMms.instanceForSender?.(senderId), threadId)
+  }
+
   /** Update per-profile live state for a window session before bridging it. */
   const routeWindowState = (
     event: ProtocolEvent,
     profileId: string,
-    target: (channel: string, data: unknown) => void
+    target: (channel: string, data: unknown) => void,
+    instance?: string
   ): void => {
     const tracker = activityTrackerFor(profileId)
+    const order = orderFor(profileId)
     if (event.type === 'activity' || event.type === 'activity.snapshot') {
       const data = event.data as { state?: ThreadActivityState; activity?: ThreadActivitySnapshot } | null
       if (event.type === 'activity' && event.threadId && data?.state) {
         tracker.setState(event.threadId, data.state)
+        order.noteUpdate('activity', instance, event.sequence, event.threadId)
         target('threads:activity', tracker.getSnapshot())
       }
       if (data?.activity && typeof data.activity === 'object' && !Array.isArray(data.activity)) {
         tracker.reconcileSnapshot(data.activity)
+        order.noteUpdate('activity', instance, event.sequence)
         target('threads:activity', tracker.getSnapshot())
       }
     }
@@ -843,11 +868,15 @@ export function registerGuiIpc(
       const state = raw?.state ?? raw
       const snapshot = raw?.snapshot ?? raw?.turns ?? (event.type === 'turn.state' ? undefined : raw as unknown as TurnStateSnapshot)
       const map = turnStateMapFor(profileId)
-      if (state && typeof state === 'object' && 'threadId' in state) map.set(state.threadId, state as TurnState)
+      if (state && typeof state === 'object' && 'threadId' in state) {
+        map.set(state.threadId, state as TurnState)
+        order.noteUpdate('turn', instance, event.sequence, (state as TurnState).threadId)
+      }
       if (snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot)) {
         for (const [threadId, value] of Object.entries(snapshot)) {
           if (value && typeof value === 'object' && 'threadId' in value) map.set(threadId, value as TurnState)
         }
+        order.noteUpdate('turn', instance, event.sequence)
       }
       target('turns:state', Object.fromEntries(map))
       if (state && typeof state === 'object' && 'threadId' in state) target('orchestrator:turn-state', state)
@@ -869,8 +898,11 @@ export function registerGuiIpc(
       turnState?: TurnState
       turnSnapshot?: TurnStateSnapshot
     } | null
+    const profileId = currentProfileKey()
     const single = full?.turnState
-    if (single && typeof single === 'object' && single.threadId) {
+    // Only threads with no newer update applied take the answer's turn (#1042).
+    const order = orderInWindow(snap, single?.threadId)
+    if (single && typeof single === 'object' && single.threadId && answerApplies(profileId, 'turn', order, single.threadId)) {
       turnStateMapFor().set(single.threadId, single)
       broadcast('orchestrator:turn-state', single)
     }
@@ -878,7 +910,7 @@ export function registerGuiIpc(
     if (multi && typeof multi === 'object' && !Array.isArray(multi)) {
       let has = false
       for (const [k, v] of Object.entries(multi)) {
-        if (v && typeof v === 'object' && 'threadId' in (v as object)) {
+        if (v && typeof v === 'object' && 'threadId' in (v as object) && answerApplies(profileId, 'turn', order, k)) {
           turnStateMapFor().set(k, v as TurnState)
           has = true
         }
@@ -1064,13 +1096,16 @@ export function registerGuiIpc(
     // Live output of a Git action: the daemon sent it on this window's own connection, so only this window gets it.
     if (event.type === 'git.operation') win.webContents.send('git:operation', (event.data as { event?: unknown } | null)?.event)
   })
-  guiMms.on('window-event', ({ senderId, event, replay }: { senderId: number; event: ProtocolEvent; replay?: boolean }) => {
+  guiMms.on('window-event', ({ senderId, event, replay, instance }: { senderId: number; event: ProtocolEvent; replay?: boolean; instance?: string }) => {
     const win = BrowserWindow.getAllWindows().find((candidate) => candidate.webContents.id === senderId)
     if (!win || win.isDestroyed()) return
     const binding = guiMms.getWindowBindingForSender(senderId)
     if (!binding && event.profileId) {
-      // The window's connection is being replaced or its profile is changing: this update is not shown. The window
-      // reads what it missed once the connection is back (#1042).
+      // A profile switch: the new profile's replay arrives while it is in progress, and the window reads that profile
+      // in full once it ends. Nothing is lost, so nothing is logged or caught up.
+      if (guiMms.isProfileChanging?.(senderId)) return
+      // The window's connection is being replaced: this update is not shown. The window reads what it missed once the
+      // connection is back (#1042).
       linkLog.undeliverable(senderId, 'connection-changing', event.type, event.threadId)
       requestCatchUp(senderId, 'undelivered', UNDELIVERED_CATCH_UP_DELAY_MS)
       return
@@ -1093,7 +1128,7 @@ export function registerGuiIpc(
     const previousActivity = event.type === 'activity' && event.threadId
       ? tracker.getState(event.threadId)
       : undefined
-    routeWindowState(event, binding.profileId, target)
+    routeWindowState(event, binding.profileId, target, instance)
     // A thread that finishes while a focused window shows it was seen as it finished.
     if (event.type === 'activity' || event.type === 'activity.snapshot') reportSeenIfDone(win)
     if (event.type === 'threads.updated') notificationThreads.note(binding.profileId, event.data)
@@ -1166,7 +1201,7 @@ export function registerGuiIpc(
   const showThreadSnapshot = (
     threadId: string,
     snap: ThreadSnapshotResult,
-    out: { send: (channel: string, data: unknown) => void; presentation: PresentationState; profileId?: string }
+    out: { send: (channel: string, data: unknown) => void; presentation: PresentationState; profileId?: string; order?: ReadOrder }
   ): TurnState => {
     const full = snap as {
       agents?: unknown[]
@@ -1174,14 +1209,19 @@ export function registerGuiIpc(
       pendingQuestions?: Array<{ requestId: string; questions: unknown; approval?: unknown }>
       turnSnapshot?: TurnStateSnapshot
     }
-    const map = turnStateMapFor(out.profileId)
+    const profileId = out.profileId ?? currentProfileKey()
+    const map = turnStateMapFor(profileId)
+    // The service read the turns, then loaded the thread before answering; an update it sent meanwhile may already be
+    // here, and it is newer than this answer. Only threads with nothing newer take the answer's turn (#1042).
+    const applies = (id: string): boolean => answerApplies(profileId, 'turn', out.order, id)
     // The snapshot carries every thread's turn: one that ended while this window missed it ends here too.
     if (full.turnSnapshot && typeof full.turnSnapshot === 'object' && !Array.isArray(full.turnSnapshot)) {
       for (const [id, value] of Object.entries(full.turnSnapshot)) {
-        if (id !== threadId && value && typeof value === 'object' && 'threadId' in (value as object)) map.set(id, value as TurnState)
+        if (id !== threadId && value && typeof value === 'object' && 'threadId' in (value as object) && applies(id)) map.set(id, value as TurnState)
       }
     }
-    const turn = resnapshotTurnState(threadId, snap, map.get(threadId))
+    const held = map.get(threadId)
+    const turn = held && !applies(threadId) ? held : resnapshotTurnState(threadId, snap, held)
     map.set(threadId, turn)
     broadcastThreadSnapshot(
       threadId,
@@ -1238,32 +1278,79 @@ export function registerGuiIpc(
     return reasons.length ? reasons : ['unspecified']
   }
 
+  /**
+   * Every thread's status from the service, through the window's connection. A thread main applied a newer status
+   * update about (sent after the service read, arrived before its answer) keeps it (#1042). Returns how many moved.
+   */
+  const readStatuses = async (senderId: number, profileId: string, clearsGap: boolean): Promise<number> => {
+    const tracker = activityTrackerFor(profileId)
+    const before = tracker.getSnapshot()
+    const answer = await guiMms.activityForSender(senderId, clearsGap)
+    tracker.reconcileSnapshot(answer.activity, (threadId) => !answerApplies(profileId, 'activity', answer, threadId))
+    const after = tracker.getSnapshot()
+    return new Set([...Object.keys(before), ...Object.keys(after)].filter((id) => before[id] !== after[id])).size
+  }
+
+  /** Reasons after which updates other than the shown thread's may be missing: a reopened connection, a lost replay. */
+  const LIST_REREAD_REASONS = new Set(['reconnected', 'gap', 'undelivered'])
+  /**
+   * The window's lists read again through its own connection: projects and threads for the sidebar, and its bot chats
+   * and chat list (`bots:changed` with `reread`, `chats:changed`), which read themselves. A service that restarted
+   * replays only what it sent since it started, so these would otherwise wait for their next change.
+   */
+  const rereadLists = async (win: BrowserWindow, profileId: string, target: (channel: string, data: unknown) => void): Promise<string | undefined> => {
+    const senderId = win.webContents.id
+    const stillBound = (): boolean => guiMms.getWindowBindingForSender(senderId)?.profileId === profileId
+    let failed: string | undefined
+    try {
+      const [projects, threads] = await guiMms.runWithSender(win.webContents, () => Promise.all([
+        guiMms.request<{ projects?: unknown[] }>('projects.list'),
+        guiMms.request<{ threads?: unknown[] }>('threads.list')
+      ]))
+      if (stillBound()) {
+        if (Array.isArray(projects?.projects)) {
+          notificationThreads.noteProjects(profileId, projects.projects)
+          target('projects:updated', projects.projects)
+        }
+        if (Array.isArray(threads?.threads)) {
+          const payload = threadListPayload(threads)
+          notificationThreads.note(profileId, payload)
+          target('threads:updated', payload)
+        }
+      }
+    } catch (error) {
+      failed = describeLinkError(error)
+    }
+    if (stillBound()) {
+      target('bots:changed', { reread: true })
+      target('chats:changed', null)
+    }
+    return failed
+  }
+
   const catchUpReasons = new Map<number, Set<string>>()
-  const catchUpRetries = new Map<number, number>()
+  /** Windows whose catch-up waits for their connection to be opened again, logged once each time. */
+  const catchUpWaiting = new Set<number>()
   // A window asks for this on every event while its gap flag is set, which is a burst during streaming. One read runs
   // at a time per window (and one more if asked meanwhile); one per event filled the connection's request limit.
   const catchUpWindow = coalescedRunner(async (senderId: number) => {
     const reasons = takeReasons(catchUpReasons, senderId)
     const win = windowBySender(senderId)
     if (!win) return
-    let binding = guiMms.getWindowBindingForSender(senderId)
+    const binding = guiMms.getWindowBindingForSender(senderId)
     if (!binding) {
-      // The connection is closed or being replaced: open it (as the window's next request would), then read.
-      try {
-        await guiMms.prepareWindow(win.webContents)
-      } catch (error) {
-        linkLog.write('catch-up.waiting', { window: senderId, reasons, error: describeLinkError(error) })
+      // A profile switch reads the new profile in full when it ends: nothing to catch up.
+      if (guiMms.isProfileChanging?.(senderId)) return
+      // The connection is closed or being opened again. Its reopening (`window-session-reopened`) runs this catch-up
+      // with these reasons. The catch-up never opens it: only the controller's reopen does, after the main connection.
+      for (const reason of reasons) addCatchUpReason(senderId, reason)
+      if (!catchUpWaiting.has(senderId)) {
+        catchUpWaiting.add(senderId)
+        linkLog.write('catch-up.waiting', { window: senderId, reasons })
       }
-      binding = guiMms.getWindowBindingForSender(senderId)
-      if (!binding) {
-        const tries = (catchUpRetries.get(senderId) ?? 0) + 1
-        catchUpRetries.set(senderId, tries)
-        // The connection's own reopening asks again when it is back; this only covers a profile change in progress.
-        if (tries <= 5) for (const reason of reasons) requestCatchUp(senderId, reason, 1_000 * tries)
-        return
-      }
+      return
     }
-    catchUpRetries.delete(senderId)
+    catchUpWaiting.delete(senderId)
     const profileId = binding.profileId
     const presentation = presentationForSender(senderId)
     const activeId = presentation.getActiveThreadId()
@@ -1274,16 +1361,14 @@ export function registerGuiIpc(
     const activityBefore = activeId ? tracker.getState(activeId) ?? 'idle' : undefined
     const turnBefore = activeId ? turnStateMapFor(profileId).get(activeId) : undefined
     const changed: string[] = []
+    const kept: string[] = []
     let failed: string | undefined
     // The missed events may have changed any thread's status (a turn ended, the service restarted): read them all
     // again, so the sidebar's Working and Done marks are the service's.
     try {
-      const before = tracker.getSnapshot()
-      tracker.reconcileSnapshot(await guiMms.activityForSender(senderId, !activeId))
-      const after = tracker.getSnapshot()
-      const moved = new Set([...Object.keys(before), ...Object.keys(after)].filter((id) => before[id] !== after[id]))
-      if (moved.size) changed.push(`activity:${moved.size}`)
-      target('threads:activity', after)
+      const moved = await readStatuses(senderId, profileId, !activeId)
+      if (moved) changed.push(`activity:${moved}`)
+      target('threads:activity', tracker.getSnapshot())
     } catch (error) {
       failed = describeLinkError(error)
       console.error('window thread statuses could not be read again:', failed)
@@ -1292,10 +1377,13 @@ export function registerGuiIpc(
     let messages: number | undefined
     if (activeId) {
       try {
+        const instance = guiMms.instanceForSender?.(senderId)
         const snap = await guiMms.snapshotThreadForSender(senderId, activeId)
         // The window moved to another thread meanwhile; opening that one read it.
         if (!win.isDestroyed() && presentation.getActiveThreadId() === activeId) {
-          turnAfter = showThreadSnapshot(activeId, snap, { send: target, presentation, profileId })
+          const order = orderOfAnswer(snap, instance, activeId)
+          if (!answerApplies(profileId, 'turn', order, activeId)) kept.push('turn')
+          turnAfter = showThreadSnapshot(activeId, snap, { send: target, presentation, profileId, order })
           messages = Array.isArray(snap.messages) ? snap.messages.length : undefined
           if (turnBefore?.phase !== turnAfter.phase || turnBefore?.turnId !== turnAfter.turnId) changed.push('turn')
         }
@@ -1303,6 +1391,11 @@ export function registerGuiIpc(
         failed = describeLinkError(error)
         console.error('window thread could not be read again:', failed)
       }
+    }
+    if (reasons.some((reason) => LIST_REREAD_REASONS.has(reason))) {
+      const listsFailed = await rereadLists(win, profileId, target)
+      if (listsFailed) failed ??= listsFailed
+      else changed.push('lists')
     }
     // A thread that finished while a focused window showed it was seen as it finished.
     reportSeenIfDone(win)
@@ -1313,6 +1406,8 @@ export function registerGuiIpc(
       turn: activeId ? `${turnBefore?.phase ?? 'none'}→${turnAfter?.phase ?? turnBefore?.phase ?? 'none'}` : undefined,
       activity: activeId ? `${activityBefore}→${tracker.getState(activeId) ?? 'idle'}` : undefined,
       changed,
+      // The answer was older than an update already applied: the update stays.
+      kept: kept.length ? kept : undefined,
       messages,
       error: failed
     })
@@ -1359,8 +1454,10 @@ export function registerGuiIpc(
   const checkReasons = new Map<number, Set<string>>()
   /**
    * The cheap check: the service's turn for the window's thread, read without its transcript, against what the window
-   * was told. Only a difference, or events the connection never received, leads to the full read; a turn that is
-   * really running is left alone: nothing is sent to the window.
+   * was told. The window missed something only when the service's state, as of its read, differs from what main applied
+   * and main applied nothing about the thread newer than that read (#1042): numbers merely skipped (a streamed update
+   * replaced by its newer copy, which arrives after this answer) are not a loss. Only a difference leads to the full
+   * read; a turn that is really running is left alone: nothing is sent to the window.
    */
   const checkWindow = coalescedRunner(async (senderId: number) => {
     const reasons = takeReasons(checkReasons, senderId)
@@ -1389,9 +1486,8 @@ export function registerGuiIpc(
       if (answersGap) {
         // Every thread's status is small to read: after a gap the sidebar's marks are the service's again.
         try {
-          const tracker = activityTrackerFor(binding.profileId)
-          tracker.reconcileSnapshot(await guiMms.activityForSender(senderId, false))
-          if (!win.isDestroyed()) win.webContents.send('threads:activity', tracker.getSnapshot())
+          await readStatuses(senderId, binding.profileId, false)
+          if (!win.isDestroyed()) win.webContents.send('threads:activity', activityTrackerFor(binding.profileId).getSnapshot())
         } catch (error) {
           linkLog.write('check.failed', { window: senderId, reasons, read: 'activity', error: describeLinkError(error) })
         }
@@ -1402,12 +1498,14 @@ export function registerGuiIpc(
       const serviceActive = status.turnState
         ? isTurnStoppable(status.turnState)
         : status.activeTurn.active || status.activeTurn.running
+      // What main applied after the service read wins over the answer: the window is not behind on it.
+      const turnCurrent = !answerApplies(binding.profileId, 'turn', status, activeId)
+      const statusCurrent = !answerApplies(binding.profileId, 'activity', status, activeId)
       const behind: string[] = []
-      if (status.behind) behind.push('events-missed')
-      if (status.turnState ? turnBehind(held, status.turnState) : isTurnStoppable(held) !== serviceActive) behind.push('turn-differs')
-      if (shownActive && !serviceActive && status.activity !== undefined && !isThreadActivityActive(status.activity as ThreadActivityState)) behind.push('ended')
+      if (!turnCurrent && (status.turnState ? turnBehind(held, status.turnState) : isTurnStoppable(held) !== serviceActive)) behind.push('turn-differs')
+      if (!turnCurrent && !statusCurrent && shownActive && !serviceActive && status.activity !== undefined && !isThreadActivityActive(status.activity as ThreadActivityState)) behind.push('ended')
       if (!behind.length) {
-        if (reasons.includes('quiet')) linkLog.write('check.running', { window: senderId, thread: activeId, reasons, phase: status.turnState?.phase ?? null })
+        if (reasons.includes('quiet')) linkLog.write('check.running', { window: senderId, thread: activeId, reasons, phase: status.turnState?.phase ?? null, newer: turnCurrent || undefined })
         return
       }
       linkLog.write('check.behind', { window: senderId, thread: activeId, reasons, found: behind, shown: held?.phase ?? null, service: status.turnState?.phase ?? null })
@@ -1450,6 +1548,10 @@ export function registerGuiIpc(
   guiMms.on('window-session-reopened', ({ senderId }: { senderId: number }) => {
     requestCatchUp(senderId, 'reconnected')
   })
+  // A window subscribed to its profile's updates: a counter that started again voids the numbers held for it.
+  guiMms.on('window-subscribed', ({ profileId, instance, sequence }: { profileId: string; instance?: string; sequence: number }) => {
+    orderFor(profileId).subscribed(instance, sequence)
+  })
 
   // Windows becoming visible again, and their renderer or graphics process being replaced.
   const VISIBLE_CHECK_MIN_MS = 5_000
@@ -1491,6 +1593,8 @@ export function registerGuiIpc(
       const timer = catchUpTimers.get(senderId)
       if (timer) clearTimeout(timer)
       catchUpTimers.delete(senderId)
+      catchUpReasons.delete(senderId)
+      catchUpWaiting.delete(senderId)
     })
   }
   for (const win of BrowserWindow.getAllWindows()) watchWindow(win)
@@ -1985,10 +2089,14 @@ export function registerGuiIpc(
   // are the service's last 512 (less when they are large), so after a long reply they hold no status at all, and the
   // sidebar showed no Done, Working or Input icon until some thread's status changed.
   registerHandler('threads:activity', async () => {
-    const tracker = activityTrackerFor()
+    const profileId = currentProfileKey()
+    const tracker = activityTrackerFor(profileId)
     try {
-      const result = await guiMms.request<{ activity?: ThreadActivitySnapshot }>('activity.snapshot')
-      if (result?.activity && typeof result.activity === 'object' && !Array.isArray(result.activity)) tracker.reconcileSnapshot(result.activity)
+      const result = await guiMms.request<{ activity?: ThreadActivitySnapshot; revision?: number }>('activity.snapshot')
+      const order = orderInWindow(result)
+      if (result?.activity && typeof result.activity === 'object' && !Array.isArray(result.activity)) {
+        tracker.reconcileSnapshot(result.activity, (threadId) => !answerApplies(profileId, 'activity', order, threadId))
+      }
     } catch (error) {
       console.warn('thread statuses could not be read; showing the last ones received', error)
     }
@@ -2086,8 +2194,9 @@ export function registerGuiIpc(
       setThreadActivity(threadId, activity)
     }
     // The window's own selection, which `threads:select` just set (see `resnapshotBase`). The same path a catch-up
-    // takes, so reopening a thread and catching up cannot disagree.
-    showThreadSnapshot(threadId, snap, { send: broadcast, presentation: currentPresentation() })
+    // takes, so reopening a thread and catching up cannot disagree; a turn update that arrived while the service
+    // loaded the thread is newer than this answer and stays (#1042).
+    showThreadSnapshot(threadId, snap, { send: broadcast, presentation: currentPresentation(), order: orderInWindow(snap, threadId) })
     const senderId = guiMms.getCurrentSenderId()
     if (senderId !== null) noteShown(senderId)
     // Selecting a thread does not mutate the thread list — skip threads.list

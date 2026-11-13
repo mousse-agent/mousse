@@ -44,9 +44,8 @@ const guiMms = {
     messages: [], queue: [], claimed: [], activeTurn: running, connectionFailed: false,
     ...(snapshotTurnState ? { turnState: snapshotTurnState } : {})
   })),
-  activityForSender: vi.fn(async () => ({})),
-  // The gap lost events the window never received: the status read sends it to the full read.
-  turnStatusForSender: vi.fn(async () => ({ activeTurn: running, behind: true })),
+  activityForSender: vi.fn(async () => ({ activity: {} })),
+  turnStatusForSender: vi.fn(async () => ({ activeTurn: running })),
   runWithSender: (_sender: unknown, run: () => unknown) => run(),
   getCurrentSenderId: () => 7,
   getWindowBindingForSender: () => ({ profileId: 'profile-1' }),
@@ -58,7 +57,8 @@ const turnStatesSent = () => sentToWindow.filter((sent) => sent.channel === 'orc
 
 async function resnapshot(): Promise<TurnState | undefined> {
   sentToWindow.length = 0
-  for (const listener of listeners.get('window-resnapshot') ?? []) listener({ senderId: 7 })
+  // The service's replay no longer held what the window missed: it reads its thread in full.
+  for (const listener of listeners.get('window-resnapshot') ?? []) listener({ senderId: 7, subscribed: true })
   await vi.waitFor(() => expect(turnStatesSent().length).toBeGreaterThan(0))
   return turnStatesSent().at(-1)
 }
