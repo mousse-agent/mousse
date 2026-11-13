@@ -21,6 +21,7 @@ import type { RemoteBackendPort, RemoteChatExtras } from './RemoteApi'
 import { mmsJson } from './jsonOutput'
 import type { BridgeOrdinaryMethod } from './capabilities'
 import { COMPOSER_COMMANDS } from '../../../shared/composerCommands'
+import { withHiddenBots } from './botReach'
 import { resolveThreadProjectPath } from '../../data/resolveActiveProjectPath'
 import type { OrchestratorSendRequest, QueuedMessage, Thread } from '../../../shared/types'
 import { defaultIntegrationActor } from '../../../shared/integrations/actor'
@@ -143,6 +144,31 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     return thread && !thread.botOwned && !isLocalOnlyThread(thread, inventory) ? thread : undefined
   }
   async execute(method: BridgeOrdinaryMethod, params: Record<string, unknown>, caller?: { node: NodeId }): Promise<unknown> {
+    const result = await this.executeFor(method, params, caller)
+    // A thread a bot started names that bot only to a device that reaches it ("Started by a bot" otherwise).
+    const shown = withHiddenBots(result, this.services.botReach?.hiddenFor(caller?.node))
+    return method === 'storage.usage' ? this.withoutBotThreadNames(shown) : shown
+  }
+  /**
+   * Disk usage as another device sees it: a personal bot's threads are its chat, never listed to a device, and are
+   * named after the bot and its work, so their space is counted without a thread (as a private thread's is).
+   */
+  private withoutBotThreadNames(usage: unknown): unknown {
+    const value = usage as { entries?: Array<{ threadId?: string }>; names?: { threads?: Record<string, string> } } | null
+    if (!value || !Array.isArray(value.entries)) return usage
+    const bots = new Set(this.services.threads.listAllThreads().filter((thread) => thread.botOwned).map((thread) => thread.id))
+    if (!bots.size) return usage
+    return {
+      ...value,
+      entries: value.entries.map((entry) => {
+        if (!entry.threadId || !bots.has(entry.threadId)) return entry
+        const { threadId: _bot, ...unattributed } = entry
+        return unattributed
+      }),
+      ...(value.names ? { names: { ...value.names, threads: Object.fromEntries(Object.entries(value.names.threads ?? {}).filter(([id]) => !bots.has(id))) } } : {})
+    }
+  }
+  private async executeFor(method: BridgeOrdinaryMethod, params: Record<string, unknown>, caller?: { node: NodeId }): Promise<unknown> {
     if (typeof params.threadId === 'string' && !this.remoteThread(params.threadId))
       throw new NetError('stream_unknown', 'Thread is outside this profile inventory.')
     if (
@@ -457,10 +483,13 @@ export class MmsRemoteBackend implements RemoteBackendPort {
   snapshot(
     threadId: string,
     maximumBytes = 25 * 1024 * 1024,
-    options: { newestOnly?: boolean; deviceLimit?: PermissionMode } = {}
+    options: { newestOnly?: boolean; deviceLimit?: PermissionMode; reader?: string } = {}
   ): unknown {
     const s = this.services,
-      thread = this.remoteThread(threadId)
+      found = this.remoteThread(threadId)
+    // A thread a bot started names that bot to a reader that reaches it; with no reader (a stream any device may read),
+    // only when every device does.
+    const thread = found && withHiddenBots(found, s.botReach?.hiddenFor(options.reader))
     if (!thread) throw new NetError('stream_unknown', 'Thread not found.')
     const pause = s.orchestrator.getTurnState(threadId).pause
     const shown = withImageBudget(s.orchestrator.getMessages(threadId))

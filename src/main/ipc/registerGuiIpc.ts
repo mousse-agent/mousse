@@ -14,6 +14,7 @@ import { BRIDGE_ACTIVITY_METHODS } from '../../shared/bridge/deviceActivity'
 import { SPACES_LOCAL_METHODS } from '../../shared/spaces/local'
 import { BOTS_LOCAL_METHODS } from '../../shared/bots/space/local'
 import { BOTS_PERSONAL_V2_METHODS, BOTS_WORK_METHODS } from '../../shared/bots/personal/methods'
+import { BOT_DEVICE_METHODS } from '../../shared/bots/personal/deviceAccess'
 import { BOTS_BROWSER_METHODS } from '../../shared/bots/personal/browser'
 import type { BotChatMessage } from '../../shared/bots/personal/chat'
 import { AUTOMATIONS_METHODS, type ScheduledRunEnded } from '../../shared/automations'
@@ -240,6 +241,7 @@ export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new 
   ...BOTS_LOCAL_METHODS,
   ...BOTS_PERSONAL_V2_METHODS,
   ...BOTS_WORK_METHODS,
+  ...BOT_DEVICE_METHODS,
   ...BOTS_BROWSER_METHODS,
   ...AUTOMATIONS_METHODS,
   ...SPACE_ARCHIVE_METHODS,

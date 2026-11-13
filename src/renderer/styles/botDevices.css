@@ -1,0 +1,3 @@
+/* About → Devices: one row per device under Chosen devices, ticked to let it reach the bot. */
+.bot-device-pick { cursor: pointer; padding-left: 2px; }
+.bot-device-pick input { margin: 0; accent-color: var(--accent); flex-shrink: 0; }

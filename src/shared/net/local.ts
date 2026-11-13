@@ -126,6 +126,11 @@ export interface BridgeNodePolicy {
    * server, carried over Mousse Net. Shell access as the user, like a terminal. Off until the owner turns it on.
    */
   editor: boolean
+  /**
+   * The device may reach this computer's personal bots, each within its own Devices choice. On until the owner turns
+   * it off. Absent from a service from before the switch.
+   */
+  bots?: boolean
 }
 export interface NetStatus {
   enabled: boolean
