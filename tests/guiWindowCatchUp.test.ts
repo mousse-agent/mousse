@@ -73,10 +73,18 @@ const snapshot = () => ({
   revision: service.revision
 })
 
+// Like the controller, a read that answers the gap clears the window connection's gap flag as it starts.
+async function statusAnswer(_senderId: number, _threadId: string, clearsGap?: boolean) {
+  if (clearsGap) gapFlag = false
+  return { turnState: service.turn, activeTurn: snapshot().activeTurn, activity: service.activity.t1 ?? 'idle', revision: service.revision }
+}
+
 const listeners = new Map<string, Array<(payload: unknown) => void>>()
 let binding: { profileId: string; epoch: number } | null = { profileId: PROFILE, epoch: 1 }
 let profileChanging = false
 let eventsReceived = 10
+// The window connection's gap flag: while it is set, the controller reports a gap on every update it receives.
+let gapFlag = false
 // The window's lists as the service has them.
 const lists = { projects: [{ id: 'p1', name: 'Project' }], threads: [{ id: 't1', name: 'Thread' }] }
 const guiMms = {
@@ -88,12 +96,7 @@ const guiMms = {
   snapshotThreadForSender: vi.fn(async () => snapshot()),
   // Every answer says the event number at which the service read (`revision`).
   activityForSender: vi.fn(async () => ({ activity: { ...service.activity }, revision: service.revision })),
-  turnStatusForSender: vi.fn(async () => ({
-    turnState: service.turn,
-    activeTurn: snapshot().activeTurn,
-    activity: service.activity.t1 ?? 'idle',
-    revision: service.revision
-  })),
+  turnStatusForSender: vi.fn(statusAnswer),
   prepareWindow: vi.fn(async () => binding),
   runWithSender: (_sender: unknown, run: () => unknown) => run(),
   getCurrentSenderId: () => WINDOW,
@@ -118,12 +121,19 @@ function push(type: string, data: unknown, threadId: string | undefined = 't1'):
   service.revision = Math.max(service.revision, eventsReceived)
   const event = { kind: 'event', sequence: eventsReceived, type, threadId, profileId: PROFILE, data, ts: at(0) } as ProtocolEvent
   for (const listener of listeners.get('window-event') ?? []) listener({ senderId: WINDOW, event })
+  if (gapFlag) liveGap()
+}
+/** The controller reports a gap in live events (a waiting update was replaced by its newer copy). */
+function liveGap(): void {
+  gapFlag = true
+  for (const listener of listeners.get('window-resnapshot') ?? []) listener({ senderId: WINDOW })
 }
 /** The service changes without the window hearing of it: the update is dropped on purpose. */
 function dropped(): void {
   service.revision += 1
 }
 const ofChannel = <T,>(channel: string): T[] => sent.filter((entry) => entry.channel === channel).map((entry) => entry.data as T)
+const listReads = () => guiMms.request.mock.calls.map(([method]) => method).filter((method) => method === 'projects.list' || method === 'threads.list')
 const views = () => ofChannel<{ threadId: string; messages: ChatMessage[] }>('thread:view')
 const lastTurn = () => ofChannel<TurnState>('orchestrator:turn-state').at(-1)
 const lastActivity = () => ofChannel<ThreadActivitySnapshot>('threads:activity').at(-1)
@@ -175,6 +185,7 @@ beforeEach(async () => {
   service.messages = service.messages.slice(0, 2)
   binding = { profileId: PROFILE, epoch: 1 }
   profileChanging = false
+  gapFlag = false
   push('activity', { state: 'idle' })
   push('turn.state', idle)
   service.revision = eventsReceived
@@ -250,6 +261,30 @@ describe('a window that missed the end of a turn', () => {
     expect(views()[0].messages.at(-1)?.content).toBe(REPLY_TEXT)
     expect(lastTurn()?.phase).toBe('completed')
     expect(logLines.find((line) => line.event === 'check.behind')?.fields.reasons).toEqual(['gap'])
+    // A live gap only replaced updates with their newer copies: the lists lost nothing and are not read again.
+    await vi.waitFor(() => expect(logLines.some((line) => line.event === 'catch-up')).toBe(true))
+    expect(listReads()).toEqual([])
+    expect(ofChannel('projects:updated')).toEqual([])
+    expect(ofChannel('threads:updated')).toEqual([])
+    expect(ofChannel('bots:changed')).toEqual([])
+    expect(ofChannel('chats:changed')).toEqual([])
+  })
+
+  it('a live gap is checked once, though updates keep arriving while the statuses are read', async () => {
+    startTurn()
+    let release!: () => void
+    guiMms.activityForSender.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => { release = resolve })
+      return { activity: { ...service.activity }, revision: service.revision }
+    })
+    liveGap()
+    await vi.waitFor(() => expect(guiMms.activityForSender).toHaveBeenCalled())
+    for (let i = 0; i < 3; i += 1) push('thread.message-updated', { message: message('a2', 'assistant', `partial ${i}`, 3) })
+    release()
+    await vi.waitFor(() => expect(guiMms.turnStatusForSender).toHaveBeenCalled())
+    await vi.advanceTimersByTimeAsync(0)
+    expect(guiMms.turnStatusForSender).toHaveBeenCalledTimes(1)
+    expect(guiMms.activityForSender).toHaveBeenCalledTimes(1)
   })
 
   it('a gap in live events that lost nothing (a streamed update replaced by its newer copy) sends nothing and reads no transcript', async () => {
@@ -427,6 +462,57 @@ describe('the same check on other occasions', () => {
     await vi.waitFor(() => expect(guiMms.turnStatusForSender).toHaveBeenCalledTimes(1))
     await vi.advanceTimersByTimeAsync(0)
     expect(sent).toEqual([])
+  })
+})
+
+describe('a thread with no turn that the window shows idle', () => {
+  // The service holds no turn for the thread and stamps its idle with the time of each read (services before #1086):
+  // that idle always looked newer than the one the window holds.
+  const idleNow = (): TurnState => ({ threadId: 't1', turnId: null, phase: 'idle', updatedAt: new Date().toISOString() })
+  beforeEach(async () => {
+    service.turn = idleNow()
+    push('turn.state', service.turn)
+    service.revision = eventsReceived
+    await vi.advanceTimersByTimeAsync(10_000)
+    guiMms.turnStatusForSender.mockImplementation(async (_senderId: number, _threadId: string, clearsGap?: boolean) => {
+      if (clearsGap) gapFlag = false
+      return { turnState: idleNow(), turnHeld: false, activeTurn: { active: false, running: false }, activity: 'idle', revision: service.revision }
+    })
+    sent.length = 0
+    logLines.length = 0
+  })
+  afterAll(() => {
+    guiMms.turnStatusForSender.mockImplementation(statusAnswer)
+  })
+
+  const occasions: Array<[string, () => void]> = [
+    ['the window is focused again', () => win.emit('focus')],
+    ['the window is restored', () => win.emit('restore')],
+    ['a live gap', () => liveGap()]
+  ]
+  for (const [occasion, raise] of occasions) {
+    it(`${occasion}: is not behind, so neither its transcript nor the lists are read again`, async () => {
+      await vi.advanceTimersByTimeAsync(10_000)
+      raise()
+      await vi.waitFor(() => expect(guiMms.turnStatusForSender).toHaveBeenCalled())
+      await vi.advanceTimersByTimeAsync(0)
+      expect(guiMms.snapshotThreadForSender).not.toHaveBeenCalled()
+      expect(listReads()).toEqual([])
+      expect(views()).toEqual([])
+      expect(ofChannel('projects:updated')).toEqual([])
+      expect(logLines.filter((line) => line.event === 'check.behind' || line.event === 'catch-up')).toEqual([])
+    })
+  }
+
+  it('a turn that started and ended while the window missed it is still caught', async () => {
+    service.messages.push(message('u2', 'user', 'second question', 2), message('a2', 'assistant', REPLY_TEXT, 4))
+    service.turn = { threadId: 't1', turnId: 'run:2', phase: 'completed', startedAt: at(2), updatedAt: new Date().toISOString() }
+    dropped()
+    guiMms.turnStatusForSender.mockImplementation(async () => ({ turnState: service.turn, activeTurn: { active: false, running: false }, activity: 'completed', revision: service.revision }))
+    win.emit('focus')
+    await vi.waitFor(() => expect(views()).toHaveLength(1))
+    expect(views()[0].messages.at(-1)?.content).toBe(REPLY_TEXT)
+    expect(lastTurn()).toMatchObject({ phase: 'completed', turnId: 'run:2' })
   })
 })
 

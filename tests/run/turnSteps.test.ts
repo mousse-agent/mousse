@@ -144,6 +144,14 @@ describe('a running turn reports its step', () => {
     expect(emitted.at(-1)!.step).toBeUndefined()
     expect(orch.getTurnState(thread.id).step).toBeUndefined()
   })
+
+  it('a thread with no turn reads as the same idle state each time, so a window holding it is not behind', async () => {
+    const thread = store.createThread('no turn')
+    const first = orch.getTurnState(thread.id)
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    expect(orch.getTurnState(thread.id)).toEqual(first)
+    expect(first).toMatchObject({ phase: 'idle', turnId: null })
+  })
 })
 
 describe("Claude's frames", () => {

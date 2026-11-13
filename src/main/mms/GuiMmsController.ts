@@ -76,6 +76,12 @@ export interface WindowTurnStatus extends ReadOrder {
   turnState?: TurnState
   activeTurn: { active: boolean; running: boolean }
   activity?: string
+  /**
+   * Whether the service holds a turn state for the thread (it is in the answer's `turnSnapshot`). An idle `turnState`
+   * the service does not hold is made up for the read: no turn ran since it started. Unknown when the answer has no
+   * `turnSnapshot`.
+   */
+  turnHeld?: boolean
 }
 
 /** Every thread's status through one window's connection (`activityForSender`). */
@@ -890,7 +896,7 @@ export class GuiMmsController extends EventEmitter {
     const needed = clearsGap && session.client.requiresResnapshot
     if (clearsGap) session.client.clearResnapshotFlag()
     const instance = session.client.hello?.instanceId
-    let status: { turnState?: TurnState; activeTurn?: { active?: boolean; running?: boolean }; activity?: string; revision?: number }
+    let status: { turnState?: TurnState; turnSnapshot?: unknown; activeTurn?: { active?: boolean; running?: boolean }; activity?: string; revision?: number }
     try {
       status = await session.client.request('thread.snapshot', { threadId, transcript: false })
     } catch (error) {
@@ -901,6 +907,9 @@ export class GuiMmsController extends EventEmitter {
       ...(status?.turnState && typeof status.turnState === 'object' ? { turnState: status.turnState } : {}),
       activeTurn: { active: Boolean(status?.activeTurn?.active), running: Boolean(status?.activeTurn?.running) },
       ...(typeof status?.activity === 'string' ? { activity: status.activity } : {}),
+      ...(status?.turnSnapshot && typeof status.turnSnapshot === 'object' && !Array.isArray(status.turnSnapshot)
+        ? { turnHeld: Object.prototype.hasOwnProperty.call(status.turnSnapshot, threadId) }
+        : {}),
       ...readOrder(instance, threadId, status?.revision)
     }
   }
