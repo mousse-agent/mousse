@@ -1,5 +1,5 @@
 import { mkdtemp } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -9,6 +9,7 @@ import { createAllowHttpPolicy } from '../src/mms/browser/defaultPorts'
 import { createInProcessBroker, ensureManagedChrome, startFixtureSite, workerRequest } from './fixtures/browser/harness'
 import { chromeLaunchArgs, windowedChromeUserAgent } from '../src/browser-worker/cdp/launch'
 import { ManagedSession } from '../src/browser-worker/session/Session'
+import { processRecordPath, workspaceUserDataDir } from '../src/browser-worker/lifecycle/paths'
 
 const chrome = await ensureManagedChrome()
 
@@ -137,6 +138,24 @@ describe.skipIf(!chrome.ok)('managed Chromium lifecycle', () => {
     await broker.close()
   }, 120_000)
 
+  it('opens every tab in one window, so a tab behind is hidden and only the tab in front is painted', async () => {
+    const { broker } = await createInProcessBroker()
+    // Started and given its first tab at once: on Windows a tab made before Chromium's own window is up got a window of its own.
+    const opened = await broker.call(workerRequest('profile_window', 'session.open', { url: `${origin}/moving.html?tab=first` }))
+    expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
+    const { session, observation } = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
+    const second = await broker.call(workerRequest('profile_window', 'tabs.new', { sessionId: session.id, url: `${origin}/moving.html?tab=second` }))
+    expect(second.ok, JSON.stringify(second.error)).toBe(true)
+    const text = async (tabId: string) => {
+      const extracted = await broker.call(workerRequest('profile_window', 'extract', { sessionId: session.id, tabId }))
+      expect(extracted.ok, JSON.stringify(extracted.error)).toBe(true)
+      return (extracted.result as { text: string }).text
+    }
+    expect(await text((second.result as { id: string }).id)).toMatch(/StaticText visible/)
+    expect(await text(observation.tabId)).toMatch(/StaticText hidden/)
+    await broker.close()
+  }, 120_000)
+
   it('removes ephemeral user data only after owned Chrome exits and retains persistent workspace data for reopen', async () => {
     const ephemeral = await createInProcessBroker()
     const opened = await ephemeral.broker.call(workerRequest('profile_cleanup', 'session.open', { url: `${origin}/form.html` }))
@@ -185,5 +204,39 @@ describe.skipIf(!chrome.ok)('managed Chromium lifecycle', () => {
     expect(conflict.error?.code).toBe('policy_denied')
     await second.broker.close()
     await first.broker.close()
+  }, 120_000)
+
+  it('a browser whose process ends answers a watcher at once, and its profile opens again without a restart', async () => {
+    const { broker, roots } = await createInProcessBroker()
+    const workspaceId = `ws_ended_${Date.now().toString(36)}`
+    try {
+      const opened = await broker.call(workerRequest('profile_ended', 'session.open', { persistent: true, workspaceId, url: `${origin}/form.html` }))
+      expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
+      const { session, observation } = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
+      const watch = { sessionId: session.id, tabId: observation.tabId, watchKey: 'watch_ended', waitMs: 20_000 }
+      const first = await broker.call(workerRequest('profile_ended', 'frame.next', watch))
+      expect(first.ok, JSON.stringify(first.error)).toBe(true)
+      const seen = first.result as { frameSeq: number; stateSeq: number }
+      // A watcher waits for the next picture; the browser's process is ended under it (a crash, the system, a kill).
+      const waiting = broker.call(workerRequest('profile_ended', 'frame.next', { ...watch, afterFrame: seen.frameSeq, afterState: seen.stateSeq }))
+      const record = JSON.parse(readFileSync(processRecordPath(workspaceUserDataDir(roots.browserRoot, 'profile_ended', workspaceId)), 'utf8')) as { pid: number }
+      const endedAt = Date.now()
+      process.kill(record.pid, 'SIGKILL')
+      const answered = await waiting
+      expect(Date.now() - endedAt).toBeLessThan(5_000)
+      expect(answered.ok).toBe(false)
+      expect(answered.error?.code).toBe('worker_disconnected')
+      // Every later use hears the same, not a session that seems to be there.
+      const observed = await broker.call(workerRequest('profile_ended', 'observe', { sessionId: session.id, tabId: observation.tabId }))
+      expect(observed.error?.code).toBe('worker_disconnected')
+      // The next use starts the browser again on the same profile, in the same service.
+      const again = await broker.call(workerRequest('profile_ended', 'session.open', { persistent: true, workspaceId, url: `${origin}/form.html` }))
+      expect(again.ok, JSON.stringify(again.error)).toBe(true)
+      expect((again.result as { observation: BrowserObservation }).observation.url).toContain('/form.html')
+      const closedOld = await broker.call(workerRequest('profile_ended', 'session.close', { sessionId: session.id }))
+      expect(closedOld.ok, JSON.stringify(closedOld.error)).toBe(true)
+    } finally {
+      await broker.close()
+    }
   }, 120_000)
 })

@@ -1046,6 +1046,8 @@ export function registerGuiIpc(
     }
     // Live output of a Git action: the daemon sent it on this window's own connection, so only this window gets it.
     if (event.type === 'git.operation') win.webContents.send('git:operation', (event.data as { event?: unknown } | null)?.event)
+    // A picture of a bot's browser this window watches, on its own connection too.
+    if (event.type === 'bots.browser.frame') win.webContents.send('bots:browserFrame', event.data)
   })
   guiMms.on('window-event', ({ senderId, event, replay }: { senderId: number; event: ProtocolEvent; replay?: boolean }) => {
     const win = BrowserWindow.getAllWindows().find((candidate) => candidate.webContents.id === senderId)

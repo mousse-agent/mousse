@@ -163,6 +163,28 @@ export interface BrowserViewerFrame {
   cursor?: import('./agentCursor').BrowserAgentCursor
 }
 
+/**
+ * A watcher's next update of a managed tab (`frame.next`): the tab's state each time, and its latest
+ * picture when the watcher has not had it. Pass `frameSeq` and `stateSeq` back to wait for the next.
+ */
+export interface BrowserViewerUpdate {
+  tabId: string
+  url: string
+  title: string
+  /** The page's viewport in CSS pixels, which a picture shows whole. */
+  viewport: { width: number; height: number }
+  /** The tab is not the one in front: Chromium does not paint it, so its picture is a still. */
+  behind: boolean
+  frameSeq: number
+  stateSeq: number
+  /** A JPEG in base64; `sharp` when taken at full quality once the page was still. */
+  picture?: { data: string; width: number; height: number; at: number; sharp: boolean }
+  /** Where the agent last acted in this tab, while it is recent. */
+  cursor?: import('./agentCursor').BrowserAgentCursor
+  /** Nothing changed within the wait. */
+  idle?: true
+}
+
 export type BrowserErrorCode = 'setup_required' | 'profile_mismatch' | 'session_closed' | 'stale_generation' | 'stale_observation' | 'stale_ref' | 'invalid_geometry' | 'not_actionable' | 'policy_denied' | 'approval_required' | 'human_controlled' | 'timeout' | 'cancelled' | 'worker_disconnected' | 'unsupported' | 'invalid_action' | 'no_progress' | 'download_failed' | 'artifact_denied'
 
 /** Private broker envelope: validated by MMS; never exposed to page or model JS. */
@@ -170,7 +192,7 @@ export interface BrowserWorkerRequest {
   version: 1
   id: string
   profileId: string
-  method: 'session.open' | 'session.close' | 'tabs.list' | 'tabs.new' | 'tabs.close' | 'tabs.switch' | 'observe' | 'find' | 'act' | 'human.act' | 'wait' | 'extract' | 'control.take' | 'control.release' | 'frame' | 'human.input'
+  method: 'session.open' | 'session.close' | 'tabs.list' | 'tabs.new' | 'tabs.close' | 'tabs.switch' | 'observe' | 'find' | 'act' | 'human.act' | 'wait' | 'extract' | 'control.take' | 'control.release' | 'frame' | 'frame.next' | 'frame.stop' | 'human.input'
   params: Record<string, unknown>
 }
 export interface BrowserWorkerResponse {

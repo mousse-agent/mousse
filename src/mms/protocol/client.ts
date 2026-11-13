@@ -8,6 +8,7 @@ import { randomBytes } from 'crypto'
 import { EnvelopeAssembler } from './envelopeChunks'
 import { FrameDecoder, encodeFrame, FrameDecodeError, FrameTooLargeError } from './framing'
 import { parseEnvelope } from './validators'
+import { BOTS_BROWSER_STREAM_CAPABILITY } from '../../shared/bots/personal/browser'
 import {
   GIT_OPERATIONS_CAPABILITY,
   MMS_PROTOCOL_CHUNK_CAPABILITY,
@@ -76,6 +77,7 @@ export function requestTimeoutFor(method: string): number {
 /** The capability a daemon must have advertised for a connection event type to be believed. */
 function connectionEventCapability(type: ProtocolConnectionEvent['type']): string {
   if (type === 'mcp.auth-url') return 'integrations.lifecycle.v1'
+  if (type === 'bots.browser.frame') return BOTS_BROWSER_STREAM_CAPABILITY
   return type === 'git.operation' ? GIT_OPERATIONS_CAPABILITY : 'net.v1'
 }
 

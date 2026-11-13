@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Closes itself</title>
+  <style>body { margin: 0; font: 32px sans-serif; }</style>
+</head>
+<body>
+  <!-- Closes its own tab after ?after=ms (a tab with one page in its history may). -->
+  <p>This tab closes itself.</p>
+  <script>
+    setTimeout(() => window.close(), Number(new URLSearchParams(location.search).get('after') || 1500))
+  </script>
+</body>
+</html>

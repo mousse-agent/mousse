@@ -1,12 +1,13 @@
+import { randomUUID } from 'node:crypto'
 import { rm } from 'node:fs/promises'
-import type { BotBrowserFrame, BotBrowserInput, BotBrowserView } from '../../../shared/bots/personal/browser'
+import { BOT_BROWSER_PANE_WATCH, BOT_BROWSER_WATCH_RENEW_MS, type BotBrowserFrame, type BotBrowserFrameEvent, type BotBrowserInput, type BotBrowserView } from '../../../shared/bots/personal/browser'
 import type { BotLane } from '../../../shared/bots/personal/definition'
 import { BOT_BROWSER_TOOLS, MAX_BOT_ACTIVE_MS } from '../../../shared/bots/personal/manifest'
-import { agentCursorLive } from '../../../shared/browser/agentCursor'
+import { agentCursorLive, type BrowserAgentCursor } from '../../../shared/browser/agentCursor'
 import type { BrowserAutomationTool, BrowserToolContext, BrowserToolOutput } from '../../../shared/browser/automation'
 import type { BrowserRuntimePort } from '../../../shared/browser/runtime'
 import type { BrowserSetupStatus } from '../../../shared/browser/setup'
-import type { BrowserSessionRecord, BrowserTab, BrowserViewerFrame } from '../../../shared/browser/types'
+import type { BrowserSessionRecord, BrowserTab, BrowserViewerUpdate } from '../../../shared/browser/types'
 import type { ExecutionContext, ExecutionPolicySnapshot } from '../../../shared/execution/types'
 import { BrowserAutomationError } from '../../browser/automation/BrowserSessionManager'
 import type { MmsBrowserService } from '../../browser/MmsBrowserService'
@@ -26,7 +27,10 @@ import type { BotBrowserHost, BotTurnBrowser } from '../activation/dispatcher'
  *   lanes share it; the owner's view uses the same scope.
  * - When an activation ends its tabs close; when the last one ends the browser closes after it has
  *   been idle a while, unless the owner watches it or holds it.
- * - The owner watches it through `view` (a frame and the agent cursor) and can take it over.
+ * - The owner watches it through `watch`: pictures are pushed to each watching view as the page
+ *   paints (one capture shared by every view, each view with its own latest-wins slot and cap), and
+ *   nothing is sent while nothing changes. `view` answers the state (and, for an older app, a frame).
+ *   The owner can take it over.
  */
 
 /** The browser surface `BotBrowsers` uses: the profile's sessions, tool dispatcher and artifacts. */
@@ -63,6 +67,58 @@ interface ActivationTabs {
   ended: boolean
 }
 
+/** The latest picture of the followed tab, and what it shows. */
+interface Picture {
+  data: string
+  width: number
+  height: number
+  viewport: { width: number; height: number }
+  /** When it was painted (ms since the epoch). */
+  at: number
+  sharp?: boolean
+}
+
+/** One view that watches a bot's browser, on one connection. */
+export interface BotBrowserViewer {
+  /** Sends one update; resolves once the connection has taken it. */
+  emit(event: BotBrowserFrameEvent): Promise<void>
+  /** Ends when the connection closes. */
+  lifetime?: AbortSignal
+}
+
+interface Viewer extends BotBrowserViewer {
+  key: string
+  /** The connection it watches on. */
+  connectionId: string
+  watchId: string
+  width: number
+  fps: number
+  /** Dropped when not renewed by then. */
+  until: number
+  /** The update waiting for the one being delivered: newer fields replace older ones (latest wins). */
+  slot?: Omit<BotBrowserFrameEvent, 'botId' | 'watchId'>
+  delivering: boolean
+  lastPictureAt: number
+  timer?: { clear(): void }
+  /** What it was last sent, so only changes go. */
+  sent: { viewport?: string; tab?: string; cursorAt?: number | null; behind?: boolean; stalled?: boolean }
+  /** Updates its connection refused one after another as busy. */
+  busy: number
+  release?: () => void
+}
+
+/** The loop that asks the worker for the followed tab's next update while views watch. */
+interface Capture {
+  key: string
+  tabId?: string
+  /** The size and rate it asked the worker for last. */
+  requested?: { width: number; fps: number }
+  afterFrame: number
+  afterState: number
+  /** Wakes the loop when a view's slot frees, or the views change. */
+  wake?: () => void
+}
+
 interface BotBrowserState {
   botId: string
   homeThreadId: string
@@ -80,9 +136,21 @@ interface BotBrowserState {
   follow?: string
   /** The activation whose tab the view follows: its reply shows the preview. It changes only when it ends. */
   followed?: string
-  lastFrame?: { frame: BrowserViewerFrame; at: number }
+  /** The followed tab's latest picture and state, for `view` and a view that starts watching. */
+  picture?: Picture
+  /** The tab the latest picture shows: the one Take over holds when no tab is followed. */
+  pictureTab?: string
+  tab?: { url: string; title: string }
+  cursor?: BrowserAgentCursor
+  behind?: boolean
+  /** Why pictures cannot reach the views now (the followed tab closed, the worker does not answer), until they can again. */
+  stalled?: string
+  /** When a picture was last taken for `view` (an older app asks each time). */
+  frameAt?: number
   lastViewedAt: number
   idle?: { clear(): void }
+  viewers: Map<string, Viewer>
+  capture?: Capture
 }
 
 interface OpenedSession {
@@ -103,15 +171,30 @@ export function botBrowserWorkspace(botId: string): string {
 const FRAME_REUSE_MS = 30
 /** The owner counts as watching for this long after their view last asked for a frame. */
 const WATCHING_MS = 30_000
+/** How long the worker holds a request for the next picture before answering that nothing changed. */
+const CAPTURE_WAIT_MS = 20_000
+/** A view not renewed for this long is dropped. */
+const VIEWER_LEASE_MS = 3 * BOT_BROWSER_WATCH_RENEW_MS
+/** The most views that watch one bot's browser at once (each app window watches it once). */
+export const MAX_BOT_BROWSER_VIEWERS = 8
+/** The largest update pushed to a view, with room under the connection event's 1 MB. */
+const MAX_UPDATE_CHARS = 1_000_000
+/** A view whose connection refuses this many updates in a row as busy is dropped. */
+const MAX_BUSY_UPDATES = 40
+/** How long a view waits after its connection refused an update as busy before the latest is tried again. */
+const BUSY_RETRY_MS = 250
+const MIN_VIEW_WIDTH = 160
 /** Activations remembered per bot for its previews. */
 const MAX_USED = 50
 const LIVE_LIFECYCLES: ReadonlySet<BrowserSessionRecord['lifecycle']> = new Set(['ready', 'agent-controlled', 'human-controlled', 'waiting-approval'])
+/** What the views say once the browser's process ended by itself. */
+const BROWSER_STOPPED = 'The browser stopped.'
+/** What the views say when the tab the owner took over has closed: they keep its last picture, never another tab. */
+const HELD_TAB_CLOSED = 'The tab you took over has closed.'
 /** Calls that may wait their turn on one bot's browser at once; one more is refused as busy. */
 export const MAX_BROWSER_WAITERS = 24
 /** The longest one call waits for its turn on the bot's browser before it is refused as busy. */
 export const BROWSER_TURN_WAIT_MS = 5 * 60_000
-/** How long the owner's view waits for a turn to take a fresh picture of another tab; past it, the last one shows. */
-const FRAME_TURN_WAIT_MS = 2_000
 /**
  * The longest one call may hold the bot's browser. The worker broker ends each request at 60 seconds, and the longest
  * call makes four (a new tab listed, opened and listed again, then observed): a little above that, a call that still
@@ -210,6 +293,21 @@ function actsOrLoads(name: BrowserAutomationTool, params: Record<string, unknown
   return name === 'browser_act' || name === 'browser_open' || (name === 'browser_tabs' && params.operation === 'new')
 }
 
+/**
+ * Why a view's connection refused an update: `gone` (it closed, or its profile changed), `busy` (too
+ * many updates waiting on it, or its writes are backed up: the latest goes again shortly) or
+ * `too_large` (the update is over the connection event limit: its picture is dropped).
+ */
+function refusal(error: unknown, viewer: BotBrowserViewer): 'gone' | 'busy' | 'too_large' {
+  if (viewer.lifetime?.aborted) return 'gone'
+  if (error instanceof Error && error.name === 'FrameTooLargeError') return 'too_large'
+  const code = (error as { code?: unknown } | null)?.code
+  if (code === 'resource_limit') return 'busy'
+  // A write backlog reads as closed, but the connection still lives while its lifetime does.
+  if (code === 'connection_closed' && viewer.lifetime) return 'busy'
+  return 'gone'
+}
+
 const defaultTimer = (fn: () => void, ms: number): { clear(): void } => {
   const timer = setTimeout(fn, ms)
   timer.unref?.()
@@ -285,7 +383,7 @@ export class BotBrowsers implements BotBrowserHost {
         for (const tabId of tabs) {
           await state.turns.run((held) => this.ownerCall(state, (context) => this.service().sessions.tabs(context, sessionId, { operation: 'close', tabId }), AbortSignal.any([held, AbortSignal.timeout(BROWSER_SIDE_CALL_MS)])), { holdMs: BROWSER_SIDE_CALL_MS }).catch(() => undefined)
           // The tab the owner holds closed with its run: their input is refused from now on, never sent elsewhere.
-          if (state.follow === tabId) state.follow = undefined
+          if (state.follow === tabId) this.followTab(state, undefined)
         }
       })()
       return
@@ -298,6 +396,7 @@ export class BotBrowsers implements BotBrowserHost {
     const state = this.bots.get(botId)
     if (state) {
       state.idle?.clear()
+      for (const key of [...state.viewers.keys()]) this.dropViewer(state, key)
       await this.closeSession(state).catch(() => undefined)
       this.bots.delete(botId)
     }
@@ -306,38 +405,97 @@ export class BotBrowsers implements BotBrowserHost {
     if (browser) await rm(browser.workspaceDataDir(botBrowserWorkspace(botId)), { recursive: true, force: true })
   }
 
-  /** The owner's view of a bot's browser; `frame` takes a fresh picture of the followed tab. */
-  async view(botId: string, options: { frame?: boolean } = {}): Promise<BotBrowserView> {
+  /**
+   * The owner's view of a bot's browser. `frame` takes a fresh picture of the followed tab (an older
+   * app asks this way); `last` adds the latest picture known, taking none.
+   */
+  async view(botId: string, options: { frame?: boolean; last?: boolean } = {}): Promise<BotBrowserView> {
     const state = this.stateFor(botId)
     if (options.frame) state.lastViewedAt = this.now()
     const record = this.record(state)
     const open = Boolean(record && LIVE_LIFECYCLES.has(record.lifecycle))
-    if (open && options.frame && (!state.lastFrame || this.now() - state.lastFrame.at > FRAME_REUSE_MS)) await this.takeFrame(state).catch(() => undefined)
-    const last = state.lastFrame?.frame
+    if (open && options.frame && (!state.frameAt || this.now() - state.frameAt > FRAME_REUSE_MS)) await this.takeFrame(state).catch(() => undefined)
+    const last = state.picture
     // The preview sits on the reply of the activation whose tab it shows.
     const activationId = state.followed
-    const frame: BotBrowserFrame | undefined = last ? { data: last.data, mimeType: 'image/jpeg', width: last.width, height: last.height, viewport: last.viewport, at: Date.parse(last.capturedAt) || state.lastFrame!.at } : undefined
+    const frame: BotBrowserFrame | undefined = last ? { data: last.data, mimeType: 'image/jpeg', width: last.width, height: last.height, viewport: last.viewport, at: last.at } : undefined
     return {
       open,
       control: record?.lifecycle === 'human-controlled' ? 'owner' : 'bot',
-      ...(last ? { tab: { url: last.url, title: last.title } } : {}),
+      ...(state.tab ? { tab: { ...state.tab } } : {}),
       activations: [...state.used],
       ...(activationId ? { activationId } : {}),
-      ...(frame && (options.frame || !open) ? { frame } : {}),
-      ...(open && last?.cursor && agentCursorLive(last.cursor, this.now()) ? { cursor: last.cursor } : {}),
+      ...(frame && (options.frame || options.last || !open) ? { frame } : {}),
+      ...(open && state.cursor && agentCursorLive(state.cursor, this.now()) ? { cursor: state.cursor } : {}),
+      ...(open && state.behind ? { behind: true } : {}),
+      ...(open && state.stalled ? { stalled: state.stalled } : {}),
+      ...(!open && this.stopped(state) ? { stopped: true as const } : {}),
       ...(this.installing && !open ? { setup: { ...this.installing } } : {})
     }
+  }
+
+  /**
+   * A view starts (or renews, or resizes) watching a bot's browser: while the browser is open, the
+   * followed tab's pictures are pushed to it as the page paints, at most `fps` a second and `width`
+   * wide (capped: 960, 15 a second, 30 while the owner holds the browser). One capture is shared by
+   * every view; each has its own slot, so a slow one drops pictures and never queues them. It ends
+   * with `unwatch`, its connection, or when it is not renewed. A connection watches a bot once: a new
+   * watch on it replaces the one before (an app window that reloaded). At most
+   * `MAX_BOT_BROWSER_VIEWERS` watch one bot. Answers the state, with whether pictures can reach the
+   * view now (`stalled` when not), and the last picture unless the view has had one.
+   */
+  async watch(botId: string, watchId: string, input: { width: number; fps: number; connectionId: string } & BotBrowserViewer): Promise<BotBrowserView> {
+    const state = this.stateFor(botId)
+    const key = `${input.connectionId}\u0000${watchId}`
+    let viewer = state.viewers.get(key)
+    if (!viewer) {
+      for (const other of [...state.viewers.values()]) if (other.connectionId === input.connectionId) this.dropViewer(state, other.key)
+      if (state.viewers.size >= MAX_BOT_BROWSER_VIEWERS) throw new BrowserAutomationError({ code: 'timeout', message: 'Too many views are watching this bot\'s browser. Close one, then try again.' })
+      viewer = { key, connectionId: input.connectionId, watchId, emit: input.emit, ...(input.lifetime ? { lifetime: input.lifetime } : {}), width: 0, fps: 0, until: 0, delivering: false, lastPictureAt: 0, sent: {}, busy: 0 }
+      state.viewers.set(key, viewer)
+      if (input.lifetime) {
+        const lifetime = input.lifetime
+        const end = () => this.dropViewer(state, key)
+        lifetime.addEventListener('abort', end, { once: true })
+        viewer.release = () => lifetime.removeEventListener('abort', end)
+        if (lifetime.aborted) end()
+      }
+    }
+    viewer.width = Math.max(MIN_VIEW_WIDTH, Math.min(BOT_BROWSER_PANE_WATCH.maxWidth, Math.floor(input.width)))
+    viewer.fps = Math.max(1, Math.min(BOT_BROWSER_PANE_WATCH.heldFps, Math.floor(input.fps)))
+    viewer.until = this.now() + VIEWER_LEASE_MS
+    // Everything it has not seen goes with its first update.
+    const hadPicture = viewer.lastPictureAt > 0
+    if (!hadPicture) viewer.sent = {}
+    // The answer says whether pictures can reach it now; a stall it heard of stays told.
+    if (state.stalled) viewer.sent.stalled = true
+    this.runCapture(state)
+    this.refreshCapture(state)
+    state.capture?.wake?.()
+    return this.view(botId, { last: !hadPicture })
+  }
+
+  /** A view stops watching. When none is left, the worker stops the tab's screencast. */
+  unwatch(botId: string, watchId: string, connectionId: string): void {
+    const state = this.bots.get(botId)
+    if (state) this.dropViewer(state, `${connectionId}\u0000${watchId}`)
   }
 
   /** The owner takes the browser over (`owner`: the bot's actions wait) or gives it back (`bot`). */
   async control(botId: string, control: 'owner' | 'bot'): Promise<BotBrowserView> {
     const state = this.stateFor(botId)
     const sessionId = this.requireLive(state)
-    // The owner takes the tab they see: the view and their input stay on it until they give the browser back.
-    if (control === 'owner') state.follow ??= state.lastFrame?.frame.tabId
-    await this.ownerCall(state, (context) => this.service().sessions.control(context, sessionId, control === 'owner' ? 'human' : 'agent'))
-    state.lastFrame = undefined
-    return this.view(botId, { frame: true })
+    // The owner takes the tab they see: the view and their input stay on it until they give the browser back. It comes to
+    // the front, so Chromium paints what they do.
+    if (control === 'owner' && !state.follow && state.pictureTab) this.followTab(state, state.pictureTab)
+    await this.ownerCall(state, (context) => this.service().sessions.control(context, sessionId, control === 'owner' ? 'human' : 'agent', control === 'owner' && state.follow ? { tabId: state.follow } : {}))
+    // Given back, the view follows a run's tab again.
+    if (control === 'bot') this.refollow(state)
+    // Up to 30 pictures a second while the owner holds it, back to 15 when the bot has it again.
+    this.refreshCapture(state)
+    this.runCapture(state)
+    state.capture?.wake?.()
+    return this.viewAfterChange(state)
   }
 
   /**
@@ -358,8 +516,14 @@ export class BotBrowsers implements BotBrowserHost {
     ).catch((error: unknown) => {
       throw error instanceof BrowserAutomationError && error.code === 'stale_ref' ? gone() : error
     })
-    state.lastFrame = undefined
-    return this.view(botId, { frame: true })
+    return this.viewAfterChange(state)
+  }
+
+  /** After the owner changed something: a watching view gets the new picture pushed; an older one takes a fresh frame. */
+  private viewAfterChange(state: BotBrowserState): Promise<BotBrowserView> {
+    if (state.viewers.size) return this.view(state.botId, { last: true })
+    state.frameAt = undefined
+    return this.view(state.botId, { frame: true })
   }
 
   /**
@@ -369,10 +533,10 @@ export class BotBrowsers implements BotBrowserHost {
    */
   async open(botId: string, url?: string): Promise<BotBrowserView> {
     const state = this.stateFor(botId)
-    state.follow ??= state.lastFrame?.frame.tabId
+    if (!state.follow && state.pictureTab) this.followTab(state, state.pictureTab)
     const sessionId = await this.ownerCall(state, async (context) => {
       const opened = await this.ensureSession(state, context, undefined)
-      if (this.record(state)?.lifecycle !== 'human-controlled') await this.service().sessions.control(context, opened.sessionId, 'human')
+      if (this.record(state)?.lifecycle !== 'human-controlled') await this.service().sessions.control(context, opened.sessionId, 'human', state.follow ? { tabId: state.follow } : {})
       return opened.sessionId
     })
     // The page loads as the owner's input: in the next turn, so it never lands beside a run's call.
@@ -385,8 +549,8 @@ export class BotBrowsers implements BotBrowserHost {
     }
     state.lastViewedAt = this.now()
     if (![...state.activations.values()].some((entry) => !entry.ended)) this.armIdle(state)
-    state.lastFrame = undefined
-    return this.view(botId, { frame: true })
+    this.runCapture(state)
+    return this.viewAfterChange(state)
   }
 
   async close(botId: string): Promise<BotBrowserView> {
@@ -400,6 +564,7 @@ export class BotBrowsers implements BotBrowserHost {
   async dispose(): Promise<void> {
     await Promise.allSettled([...this.bots.values()].map(async (state) => {
       state.idle?.clear()
+      for (const key of [...state.viewers.keys()]) this.dropViewer(state, key)
       await this.closeSession(state)
     }))
     this.bots.clear()
@@ -442,14 +607,21 @@ export class BotBrowsers implements BotBrowserHost {
     // Checked again in the call's turn: the owner may have taken the browser over while it waited.
     if (actsOrLoads(name, params) && this.held(state)) throw ownerHolds()
     if (opened) {
-      let tabId: string | undefined
-      if (opened.opened) tabId = opened.opened.observation?.tabId
-      else if (url || !activation.current) tabId = await this.newTab(context, opened.sessionId, url)
-      else tabId = activation.current
-      if (tabId) this.useTab(state, activation, tabId)
-      const observed = await this.invoke(context, 'browser_observe', { sessionId: opened.sessionId, ...(tabId ? { tabId } : {}) })
-      const session = this.record(state)
-      result = { ...observed, ...(session ? { session, capabilities: session.capabilities } : {}) }
+      const open = async (session: OpenedSession): Promise<BrowserToolOutput> => {
+        let tabId: string | undefined
+        if (session.opened) tabId = session.opened.observation?.tabId
+        else if (url || !activation.current) tabId = await this.newTab(context, session.sessionId, url)
+        else tabId = activation.current
+        if (tabId) this.useTab(state, activation, tabId)
+        const observed = await this.invoke(context, 'browser_observe', { sessionId: session.sessionId, ...(tabId ? { tabId } : {}) })
+        const record = this.record(state)
+        return { ...observed, ...(record ? { session: record, capabilities: record.capabilities } : {}) }
+      }
+      // The browser stopped by itself since its last use (nothing was done in it): it starts again, once.
+      result = await open(opened).catch(async (error: unknown) => {
+        if (!(error instanceof BrowserAutomationError && error.code === 'worker_disconnected') || !this.stopped(state)) throw error
+        return open(await this.ensureSession(state, context, url))
+      })
     } else {
       const sessionId = this.liveSession(state)
       if (!sessionId) throw new BrowserAutomationError({ code: 'session_closed', message: 'Your browser is closed. Open a page with browser_open first.' })
@@ -483,7 +655,7 @@ export class BotBrowsers implements BotBrowserHost {
       else {
         activation.tabs.delete(params.tabId)
         if (activation.current === params.tabId) activation.current = [...activation.tabs].pop()
-        if (state.follow === params.tabId) state.follow = undefined
+        if (state.follow === params.tabId) this.followTab(state, undefined)
         this.refollow(state)
       }
     } else if (operation !== 'list') throw new BrowserAutomationError({ code: 'invalid_action', message: 'Invalid browser operation' })
@@ -496,6 +668,19 @@ export class BotBrowsers implements BotBrowserHost {
     activation.tabs.add(tabId)
     activation.current = tabId
     this.refollow(state)
+  }
+
+  /** The view follows another tab (or none): a capture of the previous one ends and starts on this one. */
+  private followTab(state: BotBrowserState, tabId: string | undefined): void {
+    if (state.follow === tabId) {
+      this.runCapture(state)
+      return
+    }
+    state.follow = tabId
+    const capture = state.capture
+    if (capture?.tabId && capture.tabId !== tabId) this.stopWorkerWatch(state, capture.key)
+    this.runCapture(state)
+    capture?.wake?.()
   }
 
   /**
@@ -514,7 +699,7 @@ export class BotBrowsers implements BotBrowserHost {
         followed = state.activations.get(next)
       }
     }
-    if (followed?.current) state.follow = followed.current
+    if (followed?.current) this.followTab(state, followed.current)
   }
 
   /** The owner holds the bot's browser (Take over, or opened for them). */
@@ -555,7 +740,8 @@ export class BotBrowsers implements BotBrowserHost {
       const opened = await this.invoke(context, 'browser_open', { ...(url ? { url } : {}), persistent: true, workspaceId: botBrowserWorkspace(state.botId) })
       if (!opened.session) throw new BrowserAutomationError({ code: 'worker_disconnected', message: 'The browser did not open' })
       state.sessionId = opened.session.id
-      state.follow = opened.observation?.tabId
+      state.behind = false
+      this.followTab(state, opened.observation?.tabId)
       return { sessionId: opened.session.id, opened }
     })()
     state.opening = opening
@@ -601,6 +787,7 @@ export class BotBrowsers implements BotBrowserHost {
     if (!sessionId) return
     state.sessionId = undefined
     state.follow = undefined
+    state.behind = false
     for (const activation of state.activations.values()) {
       activation.tabs.clear()
       activation.current = undefined
@@ -610,22 +797,262 @@ export class BotBrowsers implements BotBrowserHost {
   }
 
   /**
-   * A fresh picture of the followed tab. While a call of the bot works on that same tab, the picture is taken beside it
-   * (the tab is in front already). Of another tab, it waits its turn briefly, so it never pulls that call's tab away;
-   * past the wait the view keeps the last picture.
+   * A picture for a view that asks each time (an older app): the worker answers from the tab's capture and never brings
+   * a tab forward for it, so it needs no turn and never pulls a run's tab away. It has 15 seconds at most.
    */
   private async takeFrame(state: BotBrowserState): Promise<void> {
     const sessionId = this.liveSession(state)
     if (!sessionId) return
     // The tab the owner holds has gone: the view keeps its last picture, never another run's tab.
     if (!state.follow && this.held(state)) return
-    const take = async (held?: AbortSignal): Promise<void> => {
-      const limit = AbortSignal.timeout(BROWSER_SIDE_CALL_MS)
-      const frame = await this.ownerCall(state, (context) => this.service().sessions.frame(context, { sessionId, ...(state.follow ? { tabId: state.follow } : {}), maxWidth: 960 }), held ? AbortSignal.any([held, limit]) : limit)
-      state.lastFrame = { frame, at: this.now() }
+    const frame = await this.ownerCall(state, (context) => this.service().sessions.frame(context, { sessionId, ...(state.follow ? { tabId: state.follow } : {}), maxWidth: 960 }), AbortSignal.timeout(BROWSER_SIDE_CALL_MS))
+    state.frameAt = this.now()
+    state.picture = { data: frame.data, width: frame.width, height: frame.height, viewport: frame.viewport, at: Date.parse(frame.capturedAt) || this.now() }
+    state.pictureTab = frame.tabId
+    state.tab = { url: frame.url, title: frame.title }
+    state.cursor = frame.cursor
+  }
+
+  // -- watching views
+
+  /**
+   * While views watch and the browser is open, asks the worker for the followed tab's next update
+   * (a long-poll it answers when the page paints or the tab changes) and hands it to each view. The
+   * next is asked for only once a view is free to take it, so while every view is still busy
+   * delivering, Chromium is asked for nothing.
+   */
+  private runCapture(state: BotBrowserState): void {
+    if (state.capture || !state.viewers.size || !this.liveSession(state)) return
+    const capture: Capture = { key: `view_${randomUUID()}`, afterFrame: 0, afterState: 0 }
+    state.capture = capture
+    void (async () => {
+      let failures = 0
+      try {
+        for (;;) {
+          this.expireViewers(state)
+          if (!state.viewers.size || state.capture !== capture) return
+          const sessionId = this.liveSession(state)
+          if (!sessionId) {
+            this.stall(state, this.stopped(state) ? BROWSER_STOPPED : 'The browser closed.')
+            return
+          }
+          await this.viewerFree(state, capture)
+          if (!state.viewers.size || state.capture !== capture) return
+          const tabId = state.follow
+          // The tab the owner holds has closed: the views keep its last picture, never another run's tab, until the
+          // view follows a tab again (Give back) or the views change.
+          if (!tabId && this.held(state)) {
+            this.stall(state, HELD_TAB_CLOSED)
+            await new Promise<void>((resolve) => { capture.wake = () => { capture.wake = undefined; resolve() } })
+            continue
+          }
+          const moved = capture.tabId !== tabId
+          const wanted = this.captureParams(state)
+          capture.requested = wanted
+          let update: BrowserViewerUpdate
+          try {
+            update = await this.ownerCall(state, (context) => this.service().sessions.viewerNext(context, {
+              sessionId,
+              ...(tabId ? { tabId } : {}),
+              watchKey: capture.key,
+              maxWidth: wanted.width,
+              maxFps: wanted.fps,
+              afterFrame: moved ? 0 : capture.afterFrame,
+              afterState: moved ? 0 : capture.afterState,
+              waitMs: CAPTURE_WAIT_MS
+            }))
+          } catch (error) {
+            // The browser stopped by itself (its process ended): the views hear it now, not after retries.
+            if (this.stopped(state)) {
+              this.stall(state, BROWSER_STOPPED)
+              return
+            }
+            failures += 1
+            if (failures >= 2) this.stall(state, error instanceof Error ? error.message : String(error))
+            await new Promise((resolve) => setTimeout(resolve, Math.min(5_000, 250 * 2 ** failures)))
+            continue
+          }
+          failures = 0
+          // The worker answers again: pictures can reach the views, even while the page stays still.
+          this.unstall(state)
+          // The view moved to another tab while this was asked: the answer is about the one it left.
+          if (state.follow !== tabId && update.tabId !== state.follow) continue
+          capture.tabId = update.tabId
+          capture.afterFrame = update.frameSeq
+          capture.afterState = update.stateSeq
+          if (update.idle) continue
+          this.distribute(state, update)
+        }
+      } finally {
+        if (state.capture === capture) state.capture = undefined
+        this.stopWorkerWatch(state, capture.key)
+        // A view that came while this one ended starts the next.
+        if (state.viewers.size && this.liveSession(state)) this.runCapture(state)
+      }
+    })()
+  }
+
+  /** The capture's size and rate: the widest view, and the fastest within the cap (higher while the owner holds the browser). */
+  private captureParams(state: BotBrowserState): { width: number; fps: number } {
+    const viewers = [...state.viewers.values()]
+    const cap = this.record(state)?.lifecycle === 'human-controlled' ? BOT_BROWSER_PANE_WATCH.heldFps : BOT_BROWSER_PANE_WATCH.fps
+    return {
+      width: Math.max(MIN_VIEW_WIDTH, ...viewers.map((viewer) => viewer.width)),
+      fps: Math.max(1, ...viewers.map((viewer) => Math.min(viewer.fps, cap)))
     }
-    if (state.turns.busy && state.follow !== undefined && state.turns.holderTab === state.follow) return take()
-    await state.turns.run(take, { waitMs: FRAME_TURN_WAIT_MS, holdMs: BROWSER_SIDE_CALL_MS, ...(state.follow ? { tab: state.follow } : {}) })
+  }
+
+  /** The views or the cap changed: the worker's wait ends, and the next is asked for at the new size and rate. */
+  private refreshCapture(state: BotBrowserState): void {
+    const capture = state.capture
+    if (!capture?.requested || !state.viewers.size) return
+    const wanted = this.captureParams(state)
+    if (wanted.width !== capture.requested.width || wanted.fps !== capture.requested.fps) this.stopWorkerWatch(state, capture.key)
+  }
+
+  /** Waits until some view is free to take a new picture (none is free while every one is delivering). */
+  private viewerFree(state: BotBrowserState, capture: Capture): Promise<void> {
+    if ([...state.viewers.values()].some((viewer) => !viewer.delivering)) return Promise.resolve()
+    return new Promise((resolve) => {
+      capture.wake = () => {
+        capture.wake = undefined
+        resolve()
+      }
+    })
+  }
+
+  /** Ends the worker's wait for this capture (and its screencast, when nobody else watches the tab). */
+  private stopWorkerWatch(state: BotBrowserState, watchKey: string): void {
+    const sessionId = this.liveSession(state)
+    if (!sessionId) return
+    void this.ownerCall(state, (context) => this.service().sessions.viewerStop(context, { sessionId, watchKey })).catch(() => undefined)
+  }
+
+  /** Hands a worker update to each view: its picture into the view's slot, and what changed of the rest. */
+  private distribute(state: BotBrowserState, update: BrowserViewerUpdate): void {
+    const now = this.now()
+    if (update.picture) state.picture = { ...update.picture, viewport: update.viewport }
+    else if (state.picture) state.picture = { ...state.picture, viewport: update.viewport }
+    state.pictureTab = update.tabId
+    state.tab = { url: update.url, title: update.title }
+    state.cursor = update.cursor
+    state.behind = update.behind
+    const cursor = update.cursor && agentCursorLive(update.cursor, now) ? update.cursor : null
+    for (const viewer of state.viewers.values()) {
+      const next: NonNullable<Viewer['slot']> = { ...viewer.slot }
+      if (update.picture) next.frame = { data: update.picture.data, mimeType: 'image/jpeg', width: update.picture.width, height: update.picture.height, at: update.picture.at, ...(update.picture.sharp ? { sharp: true } : {}) }
+      const viewport = JSON.stringify(update.viewport)
+      if (viewer.sent.viewport !== viewport) next.viewport = update.viewport
+      if (viewer.sent.tab !== JSON.stringify(state.tab)) next.tab = { ...state.tab }
+      if ((viewer.sent.cursorAt ?? null) !== (cursor?.at ?? null)) next.cursor = cursor
+      if (viewer.sent.behind !== update.behind) next.behind = update.behind
+      viewer.slot = next
+      this.deliver(state, viewer)
+    }
+  }
+
+  /**
+   * Sends a view's waiting update once the one before it is delivered: a picture at most `fps` a
+   * second (the rest goes at once), always the latest.
+   */
+  private deliver(state: BotBrowserState, viewer: Viewer): void {
+    if (viewer.delivering || !viewer.slot || state.viewers.get(viewer.key) !== viewer) return
+    const now = this.now()
+    const slot = viewer.slot
+    // Nothing this view has not seen.
+    if (!Object.keys(slot).length) {
+      viewer.slot = undefined
+      return
+    }
+    const wait = slot.frame ? viewer.lastPictureAt + 1_000 / viewer.fps - now : 0
+    let send = slot
+    if (wait > 0) {
+      const { frame, viewport, ...rest } = slot
+      viewer.timer?.clear()
+      viewer.timer = defaultTimer(() => { viewer.timer = undefined; this.deliver(state, viewer) }, Math.ceil(wait))
+      if (!Object.keys(rest).length) return
+      send = rest
+      viewer.slot = { frame, ...(viewport ? { viewport } : {}) }
+    } else viewer.slot = undefined
+    // A picture too large for one connection event is never sent: the next one is (the worker keeps them under the limit).
+    if (send.frame && send.frame.data.length > MAX_UPDATE_CHARS) {
+      const { frame: _tooLarge, ...rest } = send
+      send = rest
+      if (!Object.keys(send).length) return
+    }
+    const sent = { ...viewer.sent }
+    if (send.frame) viewer.lastPictureAt = now
+    if (send.viewport) viewer.sent.viewport = JSON.stringify(send.viewport)
+    if (send.tab) viewer.sent.tab = JSON.stringify(send.tab)
+    if (send.cursor !== undefined) viewer.sent.cursorAt = send.cursor?.at ?? null
+    if (send.behind !== undefined) viewer.sent.behind = send.behind
+    if (send.live) viewer.sent.stalled = false
+    if (send.stalled) viewer.sent.stalled = true
+    viewer.delivering = true
+    const update = send
+    void viewer.emit({ botId: state.botId, watchId: viewer.watchId, ...update })
+      .then(() => {
+        viewer.delivering = false
+        viewer.busy = 0
+        this.deliver(state, viewer)
+      }, (error: unknown) => {
+        viewer.delivering = false
+        const refused = refusal(error, viewer)
+        if (refused === 'gone' || (refused === 'busy' && ++viewer.busy >= MAX_BUSY_UPDATES)) {
+          this.dropViewer(state, viewer.key)
+          return
+        }
+        // Not delivered: what it carried goes again, under anything newer, except a picture too large to go at all.
+        viewer.sent = sent
+        const { frame, ...rest } = update
+        viewer.slot = { ...rest, ...(refused === 'busy' && frame ? { frame } : {}), ...viewer.slot }
+        if (refused === 'too_large') {
+          this.deliver(state, viewer)
+          return
+        }
+        viewer.timer?.clear()
+        viewer.timer = defaultTimer(() => { viewer.timer = undefined; this.deliver(state, viewer) }, BUSY_RETRY_MS)
+      })
+      .finally(() => state.capture?.wake?.())
+  }
+
+  /** Pictures stopped: each view hears it once, so it says it is not updating, and a renewal says so too. */
+  private stall(state: BotBrowserState, reason: string): void {
+    state.stalled = reason
+    for (const viewer of state.viewers.values()) {
+      if (viewer.sent.stalled) continue
+      viewer.slot = { ...viewer.slot, stalled: reason }
+      delete viewer.slot.live
+      this.deliver(state, viewer)
+    }
+  }
+
+  /** Pictures can reach the views again: each that heard of a stall hears it is live. */
+  private unstall(state: BotBrowserState): void {
+    state.stalled = undefined
+    for (const viewer of state.viewers.values()) {
+      if (!viewer.sent.stalled && !viewer.slot?.stalled) continue
+      viewer.slot = { ...viewer.slot, live: true }
+      delete viewer.slot.stalled
+      this.deliver(state, viewer)
+    }
+  }
+
+  private expireViewers(state: BotBrowserState): void {
+    const now = this.now()
+    for (const viewer of [...state.viewers.values()]) if (viewer.until < now) this.dropViewer(state, viewer.key)
+  }
+
+  private dropViewer(state: BotBrowserState, key: string): void {
+    const viewer = state.viewers.get(key)
+    if (!viewer) return
+    state.viewers.delete(key)
+    viewer.timer?.clear()
+    viewer.release?.()
+    // The last view left: the worker's wait ends now and the screencast stops. Otherwise it may shrink.
+    if (!state.viewers.size && state.capture) this.stopWorkerWatch(state, state.capture.key)
+    else this.refreshCapture(state)
+    state.capture?.wake?.()
   }
 
   /** After the last activation, the browser closes once nobody has watched or held it for a while. */
@@ -634,7 +1061,7 @@ export class BotBrowsers implements BotBrowserHost {
     state.idle = this.setTimer(() => {
       state.idle = undefined
       if ([...state.activations.values()].some((entry) => !entry.ended)) return
-      const watched = this.now() - state.lastViewedAt < WATCHING_MS
+      const watched = state.viewers.size > 0 || this.now() - state.lastViewedAt < WATCHING_MS
       const held = this.record(state)?.lifecycle === 'human-controlled'
       if (watched || held) {
         this.armIdle(state)
@@ -698,6 +1125,11 @@ export class BotBrowsers implements BotBrowserHost {
     return record && LIVE_LIFECYCLES.has(record.lifecycle) ? record.id : undefined
   }
 
+  /** The bot's browser stopped by itself (its process ended): the next use starts it again. */
+  private stopped(state: BotBrowserState): boolean {
+    return this.record(state)?.lifecycle === 'disconnected'
+  }
+
   private requireLive(state: BotBrowserState): string {
     const sessionId = this.liveSession(state)
     if (!sessionId) throw new BrowserAutomationError({ code: 'session_closed', message: 'The bot\'s browser is closed.' })
@@ -713,7 +1145,7 @@ export class BotBrowsers implements BotBrowserHost {
   private state(botId: string, homeThreadId: string): BotBrowserState {
     const known = this.bots.get(botId)
     if (known && known.homeThreadId === homeThreadId) return known
-    const state: BotBrowserState = { botId, homeThreadId, activations: new Map(), turns: new BrowserTurns(), used: [], lastViewedAt: 0 }
+    const state: BotBrowserState = { botId, homeThreadId, activations: new Map(), turns: new BrowserTurns(), used: [], lastViewedAt: 0, viewers: new Map() }
     this.bots.set(botId, state)
     return state
   }

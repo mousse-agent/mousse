@@ -4,7 +4,8 @@
  * agent cursor is held for the owner's view (a frame) and never put into the page; the owner can
  * take the browser over and give it back; an idle browser closes and its sign-ins stay.
  */
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
+import { processRecordPath } from '../src/browser-worker/lifecycle/paths'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -18,6 +19,7 @@ import type { BotTurnBrowser } from '../src/mms/bots/activation/dispatcher'
 import { dispatchBrowserTool } from '../src/mms/orchestrator/browser/dispatch'
 import { BROWSER_AUTOMATION_TOOLS, type BrowserToolContext } from '../src/shared/browser/automation'
 import type { BrowserObservation, BrowserSessionRecord } from '../src/shared/browser/types'
+import type { BotBrowserFrameEvent } from '../src/shared/bots/personal/browser'
 import { MANAGED_BROWSER_ROOT, ensureManagedChrome, startFixtureSite } from './fixtures/browser/harness'
 
 const chrome = await ensureManagedChrome()
@@ -65,8 +67,35 @@ async function fixture() {
     if (result.isError) return { error: result.text }
     return JSON.parse(result.text) as Parsed
   }
-  return { browser, bots, turn, call, idle, origin: site.origin }
+  /** The worker methods called from now on (the view's `frame`, `frame.next` and `frame.stop` among them). */
+  const workerCalls = () => {
+    const methods: string[] = []
+    const original = broker.call.bind(broker)
+    broker.call = (request, options) => {
+      methods.push(request.method)
+      return original(request, options)
+    }
+    return methods
+  }
+  return { browser, bots, turn, call, idle, origin: site.origin, workerCalls }
 }
+
+/** A view watching a bot's browser: what it was sent, and how long each delivery takes. */
+function viewer(deliveryMs = 0) {
+  const events: Array<BotBrowserFrameEvent & { receivedAt: number }> = []
+  const connection = new AbortController()
+  return {
+    events,
+    frames: () => events.filter((event) => event.frame),
+    close: () => connection.abort(),
+    lifetime: connection.signal,
+    emit: async (event: BotBrowserFrameEvent) => {
+      events.push({ ...event, receivedAt: Date.now() })
+      if (deliveryMs) await new Promise((resolve) => setTimeout(resolve, deliveryMs))
+    }
+  }
+}
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 describe('turns on a bot\'s browser (BrowserTurns)', () => {
   it('runs one call at a time, in the order they came; a stopped wait leaves at once; the queue is bounded', async () => {
@@ -371,5 +400,299 @@ describe.skipIf(!chrome.ok)('a bot\'s own browser', () => {
     const again = await Promise.all(runs.map((run) => call(run, 'browser_observe', {})))
     expect(again.every((entry) => !entry.error)).toBe(true)
     expect((await viewing).open).toBe(true)
+  }, 60_000)
+})
+
+describe.skipIf(!chrome.ok)('watching a bot\'s browser', () => {
+  it('captures nothing until a view watches; then pushes pictures as the page paints, nothing for a still page, and stops when the view goes', async () => {
+    const { bots, turn, call, origin, workerCalls } = await fixture()
+    const methods = workerCalls()
+    const bot = turn(BOT_A, 'act-1')
+    expect((await call(bot, 'browser_open', { url: `${origin}/nav-a.html` })).error).toBeUndefined()
+    await sleep(1_000)
+    // Nobody watches: the worker is never asked for a picture.
+    expect(methods.filter((method) => method.startsWith('frame'))).toEqual([])
+
+    const view = viewer()
+    const answered = await bots.watch(BOT_A, 'w1', { width: 960, fps: 15, connectionId: 'c1', lifetime: view.lifetime, emit: view.emit })
+    expect(answered).toMatchObject({ open: true, control: 'bot' })
+    await expect.poll(() => view.frames().length, { timeout: 5_000 }).toBeGreaterThan(0)
+    const first = view.events.find((event) => event.frame)!
+    expect(view.events.find((event) => event.viewport)!.viewport).toEqual({ width: 1280, height: 720 })
+    expect(view.events.find((event) => event.tab)!.tab).toMatchObject({ url: `${origin}/nav-a.html` })
+    // The page's own title follows as soon as the page sets it.
+    await expect.poll(() => view.events.some((event) => event.tab?.title === 'Nav A'), { timeout: 5_000 }).toBe(true)
+    expect(first.frame).toMatchObject({ mimeType: 'image/jpeg', width: 960, height: 540 })
+    expect(Buffer.from(first.frame!.data, 'base64').subarray(0, 3)).toEqual(Buffer.from([0xff, 0xd8, 0xff]))
+    // A still page: a sharp picture once it settles, and then nothing at all.
+    await expect.poll(() => view.frames().at(-1)!.frame!.sharp === true, { timeout: 5_000 }).toBe(true)
+    const settled = view.events.length
+    await sleep(2_000)
+    expect(view.events.length).toBe(settled)
+    // The viewport went once; pictures after the first carry none.
+    expect(view.events.filter((event) => event.viewport)).toHaveLength(1)
+
+    // The bot opens another page: the view follows it.
+    expect((await call(bot, 'browser_open', { url: `${origin}/nav-b.html` })).error).toBeUndefined()
+    await expect.poll(() => view.events.some((event) => event.tab?.url === `${origin}/nav-b.html`), { timeout: 5_000 }).toBe(true)
+    await expect.poll(() => view.events.slice(settled).some((event) => event.frame), { timeout: 5_000 }).toBe(true)
+
+    // The view goes: the worker's wait ends, and it is asked for nothing more.
+    bots.unwatch(BOT_A, 'w1', 'c1')
+    await expect.poll(() => methods.includes('frame.stop'), { timeout: 2_000 }).toBe(true)
+    await sleep(500)
+    const asked = methods.filter((method) => method === 'frame.next').length
+    const sent = view.events.length
+    await sleep(1_500)
+    expect(methods.filter((method) => method === 'frame.next').length).toBe(asked)
+    expect(view.events.length).toBe(sent)
+  }, 60_000)
+
+  it('keeps each view to its size and rate, and a slow view gets the latest picture without queueing', async () => {
+    const { bots, turn, call, origin } = await fixture()
+    const bot = turn(BOT_A, 'act-1')
+    expect((await call(bot, 'browser_open', { url: `${origin}/moving.html?stopAfter=8000` })).error).toBeUndefined()
+    const preview = viewer()
+    await bots.watch(BOT_A, 'preview', { width: 480, fps: 5, connectionId: 'c1', emit: preview.emit })
+    await expect.poll(() => preview.frames().length, { timeout: 5_000 }).toBeGreaterThan(0)
+    const from = Date.now()
+    await sleep(2_000)
+    const previewFrames = preview.frames().filter((event) => event.receivedAt >= from)
+    expect(previewFrames.length).toBeLessThanOrEqual(11)
+    expect(previewFrames.length).toBeGreaterThanOrEqual(5)
+    expect(previewFrames.every((event) => event.frame!.width === 480)).toBe(true)
+    const gaps = previewFrames.slice(1).map((event, index) => event.receivedAt - previewFrames[index]!.receivedAt)
+    expect(Math.min(...gaps)).toBeGreaterThanOrEqual(180)
+
+    // The split view opens beside it (in another window: a window watches a bot once), and takes 300 ms
+    // to take each picture: it drops pictures, never queues them.
+    const pane = viewer(300)
+    await bots.watch(BOT_A, 'pane', { width: 960, fps: 15, connectionId: 'c2', emit: pane.emit })
+    await expect.poll(() => pane.frames().some((event) => event.frame!.width === 960), { timeout: 5_000 }).toBe(true)
+    const paneFrom = Date.now()
+    await sleep(2_000)
+    const paneFrames = pane.frames().filter((event) => event.receivedAt >= paneFrom)
+    expect(paneFrames.length).toBeLessThanOrEqual(8)
+    expect(paneFrames.length).toBeGreaterThanOrEqual(3)
+    // The page stops moving: each view's last picture is the sharp one taken after it stopped.
+    await expect.poll(() => pane.frames().at(-1)!.frame!.sharp === true && preview.frames().at(-1)!.frame!.sharp === true, { timeout: 10_000 }).toBe(true)
+    expect(pane.frames().at(-1)!.frame!.width).toBe(960)
+    bots.unwatch(BOT_A, 'preview', 'c1')
+    bots.unwatch(BOT_A, 'pane', 'c2')
+  }, 60_000)
+
+  it('never brings a tab to the front for the view: a tab behind shows a still and says so', async () => {
+    const { bots, turn, call, origin, workerCalls } = await fixture()
+    const bot = turn(BOT_A, 'act-1')
+    const opened = await call(bot, 'browser_open', { url: `${origin}/moving.html?tab=first` })
+    const first = opened.observation!.tabId
+    const view = viewer()
+    await bots.watch(BOT_A, 'w1', { width: 480, fps: 5, connectionId: 'c1', emit: view.emit })
+    await expect.poll(() => view.frames().length, { timeout: 5_000 }).toBeGreaterThan(0)
+    // The bot opens a second tab (it comes to the front), then switches back to the first without acting on it.
+    expect((await call(bot, 'browser_tabs', { operation: 'new', url: `${origin}/moving.html?tab=second` })).error).toBeUndefined()
+    const methods = workerCalls()
+    expect((await call(bot, 'browser_tabs', { operation: 'switch', tabId: first })).error).toBeUndefined()
+    await expect.poll(() => view.events.some((event) => event.behind === true), { timeout: 5_000 }).toBe(true)
+    const behindAt = view.events.findIndex((event) => event.behind === true)
+    // One still picture of the tab behind, then nothing while it stays behind.
+    await expect.poll(() => view.events.slice(behindAt).some((event) => event.frame?.sharp), { timeout: 5_000 }).toBe(true)
+    await sleep(500)
+    const quiet = view.events.length
+    await sleep(1_500)
+    expect(view.events.length).toBe(quiet)
+    // The second tab is still the one Chromium paints: watching the first did not pull it forward.
+    const tabs = (await call(bot, 'browser_tabs', { operation: 'list' })).tabs!
+    const second = tabs.find((tab) => tab.id !== first)!.id
+    expect((await call(bot, 'browser_extract', { tabId: second })).extraction!.text).toMatch(/StaticText visible/)
+    expect((await call(bot, 'browser_extract', { tabId: first })).extraction!.text).toMatch(/StaticText hidden/)
+    expect(methods).not.toContain('frame')
+    // The bot acts on the first tab: it comes to the front and pictures flow again.
+    const seen = (await call(bot, 'browser_observe', { tabId: first })).observation!
+    const scrolled = await call(bot, 'browser_act', { tabId: first, generation: seen.generation, observationId: seen.observationId,
+      controlLeaseId: opened.session!.controlLeaseId, action: { type: 'scroll', deltaX: 0, deltaY: 40 } })
+    expect(scrolled.error).toBeUndefined()
+    await expect.poll(() => view.events.some((event, index) => index > behindAt && event.behind === false), { timeout: 5_000 }).toBe(true)
+    const back = view.events.length
+    await expect.poll(() => view.events.slice(back).filter((event) => event.frame).length, { timeout: 5_000 }).toBeGreaterThan(1)
+    bots.unwatch(BOT_A, 'w1', 'c1')
+  }, 60_000)
+
+  it('tells a watching view when pictures stop, and a view whose connection closed is dropped', async () => {
+    const { bots, turn, call, origin, workerCalls } = await fixture()
+    const bot = turn(BOT_A, 'act-1')
+    expect((await call(bot, 'browser_open', { url: `${origin}/nav-a.html` })).error).toBeUndefined()
+    const gone = viewer()
+    await bots.watch(BOT_A, 'w-gone', { width: 480, fps: 5, connectionId: 'c-gone', lifetime: gone.lifetime, emit: gone.emit })
+    const view = viewer()
+    await bots.watch(BOT_A, 'w1', { width: 480, fps: 5, connectionId: 'c1', lifetime: view.lifetime, emit: view.emit })
+    await expect.poll(() => view.frames().length && gone.frames().length, { timeout: 5_000 }).toBeTruthy()
+    gone.close()
+    const methods = workerCalls()
+    await bots.close(BOT_A)
+    await expect.poll(() => view.events.some((event) => event.stalled), { timeout: 5_000 }).toBe(true)
+    expect(gone.events.some((event) => event.stalled)).toBe(false)
+    expect((await bots.view(BOT_A)).open).toBe(false)
+    // Closed: the worker is asked for nothing more.
+    await sleep(1_000)
+    expect(methods.filter((method) => method === 'frame.next')).toEqual([])
+  }, 60_000)
+
+  it('when the browser\'s process ends, a watching view says so within seconds, and the next use starts it again on the same profile', async () => {
+    const { browser, bots, turn, call, origin } = await fixture()
+    const bot = turn(BOT_A, 'act-1')
+    expect((await call(bot, 'browser_open', { url: `${origin}/nav-a.html` })).error).toBeUndefined()
+    const view = viewer()
+    await bots.watch(BOT_A, 'w1', { width: 480, fps: 5, connectionId: 'c1', lifetime: view.lifetime, emit: view.emit })
+    await expect.poll(() => view.frames().length, { timeout: 5_000 }).toBeGreaterThan(0)
+    const { pid } = JSON.parse(await readFile(processRecordPath(browser.workspaceDataDir(botBrowserWorkspace(BOT_A))), 'utf8')) as { pid: number }
+    process.kill(pid, 'SIGKILL')
+    await expect.poll(() => view.events.find((event) => event.stalled)?.stalled, { timeout: 5_000 }).toBe('The browser stopped.')
+    await expect.poll(async () => (await bots.view(BOT_A)).stopped, { timeout: 5_000 }).toBe(true)
+    expect((await bots.view(BOT_A)).open).toBe(false)
+    // The bot's next use starts it again on the same profile, without restarting anything.
+    const again = await call(bot, 'browser_open', { url: `${origin}/nav-b.html` })
+    expect(again.error).toBeUndefined()
+    expect(again.observation?.url).toContain('/nav-b.html')
+    const reopened = await bots.view(BOT_A)
+    expect(reopened.open).toBe(true)
+    expect(reopened.stopped).toBeUndefined()
+    bots.unwatch(BOT_A, 'w1', 'c1')
+  }, 60_000)
+
+  it('Take over brings the tab the owner takes to the front: their typing lands and shows, and the view never says "on another tab"', async () => {
+    const { bots, turn, call, origin } = await fixture()
+    const bot = turn(BOT_A, 'act-1')
+    const opened = await call(bot, 'browser_open', { url: `${origin}/owner-input.html` })
+    const first = opened.observation!.tabId
+    // The bot opens a second tab (it comes to the front), then looks at its first again without acting on it.
+    expect((await call(bot, 'browser_tabs', { operation: 'new', url: `${origin}/moving.html?tab=second` })).error).toBeUndefined()
+    expect((await call(bot, 'browser_observe', { tabId: first })).error).toBeUndefined()
+    const view = viewer()
+    await bots.watch(BOT_A, 'w1', { width: 960, fps: 15, connectionId: 'c1', lifetime: view.lifetime, emit: view.emit })
+    await expect.poll(() => view.events.some((event) => event.behind === true), { timeout: 5_000 }).toBe(true)
+    const behindAt = view.events.findIndex((event) => event.behind === true)
+    // The owner takes over the tab they see: it comes to the front.
+    expect((await bots.control(BOT_A, 'owner')).control).toBe('owner')
+    await expect.poll(() => view.events.some((event, index) => index > behindAt && event.behind === false), { timeout: 5_000 }).toBe(true)
+    expect((await call(bot, 'browser_extract', { tabId: first })).extraction!.text).toMatch(/StaticText visible/)
+    // Their click and typing land on it, and the view shows them as they are painted.
+    const typedFrom = view.events.length
+    await bots.input(BOT_A, { kind: 'click', x: 240, y: 100 })
+    await bots.input(BOT_A, { kind: 'type', text: 'hello' })
+    await expect.poll(() => view.events.slice(typedFrom).some((event) => event.frame), { timeout: 5_000 }).toBe(true)
+    const typed = (await call(bot, 'browser_extract', { tabId: first })).extraction!.text
+    expect(typed).toMatch(/StaticText visible/)
+    expect(typed).toMatch(/StaticText hello/)
+    expect((await bots.view(BOT_A)).behind).toBeUndefined()
+    await bots.control(BOT_A, 'bot')
+    bots.unwatch(BOT_A, 'w1', 'c1')
+  }, 60_000)
+
+  it('when the tab in front closes, the bot\'s tab in front before it comes back, and the view says truly which is behind', async () => {
+    const { bots, turn, call, origin } = await fixture()
+    const bot = turn(BOT_A, 'act-1')
+    const opened = await call(bot, 'browser_open', { url: `${origin}/moving.html?tab=one` })
+    const one = opened.observation!.tabId
+    const two = (await call(bot, 'browser_tabs', { operation: 'new', url: `${origin}/moving.html?tab=two` })).tabs!.find((tab) => tab.id !== one)!.id
+    const three = (await call(bot, 'browser_tabs', { operation: 'new', url: `${origin}/moving.html?tab=three` })).tabs!.find((tab) => tab.id !== one && tab.id !== two)!.id
+    // The bot acts on the first tab, then on the third: the first was in front just before the third.
+    const scroll = async (tabId: string) => {
+      const seen = (await call(bot, 'browser_observe', { tabId })).observation!
+      expect((await call(bot, 'browser_act', { tabId, generation: seen.generation, observationId: seen.observationId, controlLeaseId: opened.session!.controlLeaseId, action: { type: 'scroll', deltaX: 0, deltaY: 40 } })).error).toBeUndefined()
+    }
+    await scroll(one)
+    await scroll(three)
+    // The view follows the first tab, behind the third.
+    expect((await call(bot, 'browser_observe', { tabId: one })).error).toBeUndefined()
+    const view = viewer()
+    await bots.watch(BOT_A, 'w1', { width: 480, fps: 5, connectionId: 'c1', lifetime: view.lifetime, emit: view.emit })
+    await expect.poll(() => view.events.some((event) => event.behind === true), { timeout: 5_000 }).toBe(true)
+    // The third closes. Chromium would put the second (next to it) in front; the first comes back instead.
+    expect((await call(bot, 'browser_tabs', { operation: 'close', tabId: three })).error).toBeUndefined()
+    await expect.poll(() => view.events.at(-1)?.behind === false || view.events.filter((event) => event.behind !== undefined).at(-1)?.behind === false, { timeout: 5_000 }).toBe(true)
+    expect((await call(bot, 'browser_extract', { tabId: one })).extraction!.text).toMatch(/StaticText visible/)
+    expect((await call(bot, 'browser_extract', { tabId: two })).extraction!.text).toMatch(/StaticText hidden/)
+    // Pictures flow for it: Chromium paints it.
+    const from = view.events.length
+    await expect.poll(() => view.events.slice(from).filter((event) => event.frame).length, { timeout: 5_000 }).toBeGreaterThan(2)
+    bots.unwatch(BOT_A, 'w1', 'c1')
+  }, 60_000)
+
+  it('a tab a site opens does not take the front from the bot\'s tab', async () => {
+    const { bots, turn, call, origin } = await fixture()
+    const bot = turn(BOT_A, 'act-1')
+    const opened = await call(bot, 'browser_open', { url: `${origin}/opens-tab.html` })
+    const tabId = opened.observation!.tabId
+    const view = viewer()
+    await bots.watch(BOT_A, 'w1', { width: 480, fps: 5, connectionId: 'c1', lifetime: view.lifetime, emit: view.emit })
+    await expect.poll(() => view.frames().length, { timeout: 5_000 }).toBeGreaterThan(0)
+    const seen = (await call(bot, 'browser_observe', {})).observation!
+    const link = seen.elements.find((element) => element.role === 'link')!
+    expect((await call(bot, 'browser_act', { tabId, generation: seen.generation, observationId: seen.observationId, controlLeaseId: opened.session!.controlLeaseId,
+      action: { type: 'click', target: { kind: 'ref', ref: link.ref } } })).error).toBeUndefined()
+    // The site's tab opened (it is the site's, not the bot's: the bot's list does not show it), and the bot's tab is still painted.
+    await sleep(6_000)
+    expect((await call(bot, 'browser_tabs', { operation: 'list' })).tabs!.map((tab) => tab.id)).toEqual([tabId])
+    expect((await call(bot, 'browser_extract', { tabId })).extraction!.text).toMatch(/StaticText visible/)
+    expect(view.events.some((event) => event.behind === true)).toBe(false)
+    bots.unwatch(BOT_A, 'w1', 'c1')
+  }, 60_000)
+
+  it('a followed tab that closes itself: the view hears pictures stopped, and each renewal keeps saying so', async () => {
+    const { bots, turn, call, origin } = await fixture()
+    const bot = turn(BOT_A, 'act-1')
+    expect((await call(bot, 'browser_open', { url: `${origin}/nav-a.html` })).error).toBeUndefined()
+    // A tab with one page in its history may close itself.
+    expect((await call(bot, 'browser_tabs', { operation: 'new', url: `${origin}/closes-itself.html?after=2000` })).error).toBeUndefined()
+    const view = viewer()
+    const answered = await bots.watch(BOT_A, 'w1', { width: 480, fps: 5, connectionId: 'c1', lifetime: view.lifetime, emit: view.emit })
+    expect(answered.stalled).toBeUndefined()
+    await expect.poll(() => view.events.some((event) => event.stalled), { timeout: 15_000 }).toBe(true)
+    const stalledAt = view.events.findIndex((event) => event.stalled)
+    // Renewals (every 5 s in the app) answer that pictures still cannot arrive, and nothing says live.
+    for (let renewal = 0; renewal < 3; renewal += 1) {
+      await sleep(1_500)
+      expect((await bots.watch(BOT_A, 'w1', { width: 480, fps: 5, connectionId: 'c1', lifetime: view.lifetime, emit: view.emit })).stalled).toBeTruthy()
+    }
+    expect(view.events.slice(stalledAt).some((event) => event.live)).toBe(false)
+    expect((await bots.view(BOT_A)).stalled).toBeTruthy()
+    bots.unwatch(BOT_A, 'w1', 'c1')
+  }, 60_000)
+
+  it('keeps a view whose connection is busy or refuses a picture too large, drops one that is gone, and caps the views', async () => {
+    const { bots, turn, call, origin } = await fixture()
+    const bot = turn(BOT_A, 'act-1')
+    expect((await call(bot, 'browser_open', { url: `${origin}/moving.html?stopAfter=20000` })).error).toBeUndefined()
+    // Its first two updates are refused as busy, the third as too large: it stays, and pictures keep coming.
+    const busy = viewer()
+    let refusals = 0
+    const connection = new AbortController()
+    await bots.watch(BOT_A, 'w-busy', { width: 480, fps: 5, connectionId: 'c-busy', lifetime: connection.signal, emit: async (event) => {
+      refusals += 1
+      if (refusals <= 2) throw Object.assign(new Error('Too many pending display frames'), { code: 'resource_limit' })
+      if (refusals === 3) throw Object.assign(new Error('Frame size 2000000 exceeds max 1048576'), { name: 'FrameTooLargeError' })
+      await busy.emit(event)
+    } })
+    await expect.poll(() => busy.frames().length, { timeout: 10_000 }).toBeGreaterThan(2)
+    // A window that reloaded watches again on the same connection: the watch before it ends.
+    const old = viewer()
+    await bots.watch(BOT_A, 'w-old', { width: 480, fps: 5, connectionId: 'c-reload', emit: old.emit })
+    await expect.poll(() => old.frames().length, { timeout: 5_000 }).toBeGreaterThan(0)
+    const fresh = viewer()
+    await bots.watch(BOT_A, 'w-new', { width: 480, fps: 5, connectionId: 'c-reload', emit: fresh.emit })
+    await sleep(300)
+    const oldCount = old.events.length
+    await expect.poll(() => fresh.frames().length, { timeout: 5_000 }).toBeGreaterThan(1)
+    expect(old.events.length).toBe(oldCount)
+    // At most eight views watch one bot.
+    for (let index = 0; index < 6; index += 1) await bots.watch(BOT_A, `w${index}`, { width: 480, fps: 5, connectionId: `c${index}`, emit: viewer().emit })
+    await expect(bots.watch(BOT_A, 'w-ninth', { width: 480, fps: 5, connectionId: 'c-ninth', emit: viewer().emit })).rejects.toThrow(/Too many views/)
+    // A connection that closed: its view is dropped at its next update.
+    connection.abort()
+    const count = busy.events.length
+    await sleep(1_500)
+    expect(busy.events.length).toBe(count)
+    expect(bots.watch(BOT_A, 'w-ninth', { width: 480, fps: 5, connectionId: 'c-ninth', emit: viewer().emit })).resolves.toBeDefined()
   }, 60_000)
 })
