@@ -232,7 +232,7 @@ const BotMessage = memo(function BotMessage({ bot, message, onAction, browser, q
     setReacted(true)
     bubble.current?.focus({ preventScroll: true })
   }
-  return <article className={`chat-participant-message from-agent bot-message${starts ? ' is-group-start' : ''}${reacted ? ' is-react-quiet' : ''}`} data-message-id={message.id}
+  return <article className={`chat-participant-message from-agent bot-message${starts ? ' is-group-start' : ''}${reacted ? ' is-react-quiet' : ''}${message.reaction ? ' has-reaction' : ''}`} data-message-id={message.id}
     onMouseLeave={reacted ? () => setReacted(false) : undefined}>
     <div className="bot-message-line">
       <div ref={bubble} tabIndex={-1} className={`bot-bubble${pictures ? ' has-media' : ''}${pictures && !media.text && !lostChips.length ? ' is-media-only' : ''}`}>

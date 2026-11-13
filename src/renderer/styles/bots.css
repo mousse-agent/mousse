@@ -429,10 +429,10 @@ html[data-theme='high-contrast'] .bot-conversation .chat-input-area.bot-input-ar
 .bot-react-more { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; color: var(--text-secondary); }
 .bot-react-more:hover, .bot-react-more:focus-visible, .bot-react-more[aria-expanded='true'] { color: var(--text-primary); background: color-mix(in srgb, var(--text-secondary) 14%, transparent); outline: none; }
 .bot-emoji-grid.bot-react-grid { left: 0; right: auto; bottom: auto; top: calc(100% + 6px); }
-/* On the bot's bubble: inside its width, in the space kept under every bubble that takes a reaction, so a reaction
-   appearing moves nothing. */
-.bot-message:not(.bot-typing) > .bot-message-line { padding-bottom: 10px; }
+/* On the bot's bubble: its lower right corner, inside its width, half over its bottom edge as a messenger's; only a
+   message with a reaction keeps the space for its lower half, so a group without reactions stays tight. */
 .bot-bubble > .bot-reaction { left: auto; right: 12px; bottom: -10px; }
+.bot-message.has-reaction { margin-bottom: 10px; }
 /* After a pick the bar goes until the pointer leaves the message; the bubble takes the focus, with no ring for it. */
 .chat-participant-message.is-react-quiet .bot-react-bar { opacity: 0; pointer-events: none; }
 .bot-bubble:focus { outline: none; }
