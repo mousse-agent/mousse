@@ -451,6 +451,8 @@ export class AutomationDrafts {
   private editRefusal(job: ScheduledJob, editor: AutomationEditor): string | undefined {
     if ('botId' in editor) return job.draft?.botId === editor.botId ? undefined : 'A bot changes only the drafts it wrote; its own schedules change with its schedule tools.'
     if (job.draft && job.draft.managerThreadId === editor.managerThreadId) return undefined
+    // The request is the person's own message that started this turn: a turn an agent's or a bot's message started has none.
+    if (!editor.request) return `The person's own message did not start this turn, so ${job.name} can't be changed now. Ask them to use "Change it…" on ${job.name}, or to name it in a message of their own.`
     return namedIn(editor.request, job) ? undefined : `Ask the person to name it first: use "Change it…" on ${job.name}, or have them say its name.`
   }
 

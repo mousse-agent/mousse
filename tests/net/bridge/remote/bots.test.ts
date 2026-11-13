@@ -7,9 +7,13 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { NetError } from '../../../../src/shared/net'
+import { NetError, newId } from '../../../../src/shared/net'
 import type { RpcContext, RpcMethod } from '../../../../src/mms/net/contracts'
+import { systemClock } from '../../../../src/mms/net/clock'
+import { NetDatabase } from '../../../../src/mms/net/store/database'
+import { SqliteNodePolicy } from '../../../../src/mms/net/store/nodePolicy'
 import {
+  botDeviceLimitFrom,
   REMOTE_BOT_METHODS,
   remoteBotMessage,
   remoteBotMethods,
@@ -244,7 +248,26 @@ describe('bot methods on a real bot', () => {
     expect(f.store.activeGrant(botId)!.manifest.appTools).toContain('threads')
   })
 
-  it('"use your threads": Not now works from any device, and a computer that says nothing of a device holds it to Ask', async () => {
+  it('"use your threads": a device with no limit on record is held to Accept edits, the device settings\' default, as the service wires it', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bots-device-limit-'))
+    const db = new NetDatabase({ profileDir: dir })
+    try {
+      const policy = new SqliteNodePolicy(db, systemClock)
+      methods = remoteBotMethods({ bots: () => f.bots.service, deviceLimit: botDeviceLimitFrom(policy) })
+      await call(methods, 'bots.chat.send', { botId, text: 'Start a thread', clientRequestId: 'phone-t3' })
+      const activation = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+      expect(f.bots.ownerTurn(activation.id)).toEqual({ limit: 'accept_edits' })
+      // A device whose limit is on record is held to it.
+      const phone = newId('node')
+      policy.set(phone, { maxPermissionMode: 'ask' })
+      expect(botDeviceLimitFrom(policy)(phone)).toBe('ask')
+    } finally {
+      db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('"use your threads": Not now works from any device, and with no device settings wired at all a device is held to Ask', async () => {
     methods = remoteBotMethods({ bots: () => f.bots.service })
     await call(methods, 'bots.chat.send', { botId, text: 'Start a thread', clientRequestId: 'phone-t2' })
     const activation = f.store.laneActivations(botId, 'chat', ['running'])[0]!

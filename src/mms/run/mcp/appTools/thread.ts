@@ -1,4 +1,5 @@
 import { ALWAYS_OPTION_ID, PERMISSION_KEYS } from '../../../../shared/permissionKeys'
+import type { PermissionMode } from '../../../../shared/permissionMode'
 import { isLocalOnlyThread, visibleThreads } from '../../../../shared/threadLineage'
 import type { QueuedMessage, Thread, UserQuestionAnswers } from '../../../../shared/types'
 import { describeApprovalRefusal } from '../../approvalRights'
@@ -183,6 +184,28 @@ function botThreadHidden(host: AppToolHost, engine: RunEngine, thread: Thread, i
   if (isBotThread(host, thread.id, thread)) return true
   if (thread.lineage?.relationship === 'subagent' || engine.delegations.getLineage(thread.id)?.relationship === 'subagent') return true
   return isLocalOnlyThread(thread, thread.lineage?.rootThreadId ? inventory() : undefined)
+}
+
+/**
+ * What a bot is told of the mode a thread it started runs in: Full access, or the narrower mode of the device whose
+ * message started its turn.
+ */
+export function botThreadModeText(mode: PermissionMode): string {
+  switch (mode) {
+    case 'full': return 'It runs with full access: it runs commands and changes files without asking.'
+    case 'auto': return 'It runs in Auto, as the device your owner wrote from allows: some of what it does waits for your owner to approve.'
+    case 'accept_edits': return 'It runs in Accept edits, as the device your owner wrote from allows: it changes files without asking, and asks your owner before it runs a command.'
+    case 'ask': return 'It runs in Ask, as the device your owner wrote from allows: it asks your owner before it changes a file or runs a command.'
+  }
+}
+
+/**
+ * Why a bot may not message a thread it started (`launched` reach): its project is not one the bot may use now. The
+ * thread can still be read, waited on and stopped.
+ */
+function botProjectNotNowText(host: AppToolHost, threadId: string): string {
+  const unreadable = botProjectsOf(host).kind === 'unreadable'
+  return `Thread ${threadId} is in a project you may not use now${unreadable ? " (your owner's project list in Settings → Agents could not be read)" : ' (Settings → Agents)'}, so you can't message it. You can still read it, wait on it and stop it. Tell your owner if it needs a message.`
 }
 
 /** `botThreadReach` for a handler: the scope, or the refusal thrown as a scope error. */
@@ -918,7 +941,10 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         if (mode === 'agent' && ctx.caller.modeCeiling === 'plan') throw new McpToolError('mousse_ceiling_exceeded', 'A plan-ceiling caller can only send plan turns.')
         // A personal bot reaches only what it may (`botThreadReach`: never a subagent, a bot's, a private thread or the
         // Automation manager's).
-        if (ctx.turn.bot) requireBotReach(host, engine, ctx.caller.threadId, threadId)
+        // A thread it started in a project it may not use now (removed from the list, or a list that can't be read) is
+        // read, waited on and stopped, never messaged, as for ordinary agents: a message would run in that project's folder.
+        if (ctx.turn.bot && requireBotReach(host, engine, ctx.caller.threadId, threadId) === 'launched')
+          throw new McpToolError('mousse_scope_denied', botProjectNotNowText(host, threadId))
         // A subagent is reached through its parent: a message sent to it directly would run untracked.
         if (engine.delegations.getLineage(threadId)?.relationship === 'subagent')
           throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is a subagent; its parent reaches it with continue_subagent, and a message from here would run without its parent hearing the result.`)
@@ -1328,7 +1354,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
             permissionMode: created.permissionMode,
             ...(created.firstMessage ? { firstMessage: created.firstMessage } : {}),
             ...(created.replayed ? { replayed: true } : {}),
-            note: 'It runs with full access and shows in your owner\'s sidebar, started by you. Its approvals and questions are your owner\'s. Tell your owner in one line what you started.'
+            note: `${botThreadModeText(created.permissionMode)} It shows in your owner's sidebar, started by you. Its approvals and questions are your owner's. Tell your owner in one line what you started.`
           })
         }
         if (!created.replayed) {

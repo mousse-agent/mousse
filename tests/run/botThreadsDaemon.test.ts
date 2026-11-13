@@ -205,13 +205,17 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     await expect(w.create('b0', { title: 'B0', ...bare })).resolves.toMatchObject({ replayed: false })
 
     w.turnRun('act-3')
+    // Messages that were refused are not counted, nor reported: a thread waiting on a question refuses three.
+    const waiting = w.d.store.createThread('Waiting', w.project.id)
+    void w.orch.questions.requestAnswers([{ id: 'q', prompt: 'Which?', options: [{ id: 'a', label: 'A' }] }], waiting.id, {})
+    for (let index = 0; index < 3; index += 1) await expect(w.send(waiting.id, `refused-${index}`)).rejects.toMatchObject({ code: 'questions_pending' })
     const targets = Array.from({ length: THREAD_SEND_MAX_PER_RUN + 1 }, (_, index) => w.d.store.createThread(`Target ${index}`, w.project.id))
     const sent: string[] = []
     for (let index = 0; index < THREAD_SEND_MAX_PER_RUN; index += 1) {
       if (index === THREAD_SEND_MAX_PER_RUN / 2) w.turnRun('act-3')
       sent.push((await w.send(targets[index]!.id, `m${index}`)).runId)
     }
-    await expect(w.send(targets[THREAD_SEND_MAX_PER_RUN]!.id, 'm-over')).rejects.toMatchObject({ code: 'mousse_conflict', message: expect.stringMatching(/the most one turn may send/) })
+    await expect(w.send(targets[THREAD_SEND_MAX_PER_RUN]!.id, 'm-over')).rejects.toMatchObject({ code: 'mousse_conflict', message: expect.stringMatching(new RegExp(`You sent ${THREAD_SEND_MAX_PER_RUN} messages to threads in this chat turn, the most one turn may send`)) })
     // Twenty turns run before the daemon stops; on a busy machine they take a while.
     await waitFor(() => sent.every((runId) => ['completed', 'failed', 'cancelled', 'interrupted'].includes(w.d.engine.getRun(runId)?.status ?? '')), 'the twenty runs', 120_000)
   }, 180_000)
@@ -231,6 +235,12 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     const internals = w.d.orch as unknown as { sessionAls: { run(session: unknown, fn: () => void): void }; getOrCreateSession(id: string): unknown; presentPlanCard(payload: { title: string; markdown: string }, threadId: string): void }
     internals.sessionAls.run(internals.getOrCreateSession(planned.id), () => internals.presentPlanCard({ title: 'Plan', markdown: '1. Do it.' }, planned.id))
     expect(await w.stop(planned.id, 'run-y', 'x2')).toEqual({ status: 'rejected', reason: 'plan_review_pending' })
+    // A subagent of the thread waiting on an approval: refused, and the approval still waits (a Stop would cancel it).
+    const parent = w.d.store.createThread('Parent', w.project.id)
+    const child = w.d.store.createThread('Child', w.project.id, undefined, { lineage: { parentThreadId: parent.id, rootThreadId: parent.id, relationship: 'subagent' } })
+    w.d.engine.approvals.create({ requestId: 'child-approval', threadId: child.id, instanceId: 'pi', provider: 'pi', action: 'command', permissionKey: 'pi:command', questions: [{ id: 'permission', prompt: 'Run it?', options: [{ id: 'allow', label: 'Allow once', decision: 'allow', scope: 'once' }, { id: 'reject', label: 'Reject', decision: 'reject' }] }] } as never)
+    expect(await w.stop(parent.id, 'run-z', 'x2b')).toEqual({ status: 'rejected', reason: 'questions_pending' })
+    expect(w.d.engine.approvals.listPending().map((row) => row.requestId)).toContain('child-approval')
     // A turn simply running: stopped.
     const target = w.d.store.createThread('Busy', w.project.id)
     busy = target.id
@@ -256,9 +266,15 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     busy = target.id
     const owner = await w.d.orch.send('Work on this.', false, { threadId: target.id, clientRequestId: 'owner-busy', awaitMode: 'ack' })
     await waitFor(() => w.d.engine.getRun(owner.runId!)?.status === 'running', 'the owner\'s turn running')
+    // A thread its message already ran in: nothing waits there, and the withdrawal never reads its queue.
+    const done = w.d.store.createThread('Done', w.project.id)
+    await w.settled((await w.send(done.id, 'd1')).runId)
     const queued = await w.send(target.id, 'q1')
     expect(queued).toMatchObject({ queued: true })
+    const queues = vi.spyOn(w.d.orch as unknown as { mutateQueue: (threadId: string, change: unknown) => unknown }, 'mutateQueue')
     expect(w.d.orch.withdrawBotThreadMessages({ homeThreadId: w.chat.id, name: 'alpha' })).toBe(1)
+    expect(queues.mock.calls.map(([threadId]) => threadId)).toEqual([target.id])
+    queues.mockRestore()
     // Shown in the thread as Mousse's own line (a `warning` row is drawn; Mousse's other system rows are not).
     expect(w.d.orch.getMessages(target.id).filter((entry) => entry.role === 'system' && entry.kind === 'warning').map((entry) => entry.content))
       .toContain('Withdrawn: a message from alpha, your bot, that had not started. It no longer has "Use your threads".')

@@ -13,8 +13,11 @@ export interface AutomationToolHost {
   managerWorkspace?(): string
   /** The bot whose thread this is, on a bot's turn. */
   botOf(threadId: string): string | undefined
-  /** The person's latest message on a thread (the manager's): the request an automation must be named in to change. */
-  personRequest?(threadId: string): string | undefined
+  /**
+   * The person's request in the manager's turn `runId`: their own message that started that turn, which an automation
+   * must be named in to change. Undefined when an agent's or a bot's message started it.
+   */
+  personRequest?(threadId: string, runId: string): string | undefined
   /** The bot activation a thread belongs to, for a bot's scheduled run. */
   activationOf?(threadId: string): string | undefined
   /**
@@ -80,13 +83,13 @@ export function automationTools(host: AppToolHost): MousseTool[] {
     if (botId) return { botId }
     return tools.isManagerThread(ctx.caller.threadId) ? { managerThreadId: ctx.caller.threadId } : { originThreadId: ctx.caller.threadId }
   }
-  /** Who edits: a bot, or the manager with the person's current request. */
+  /** Who edits: a bot, or the manager with the person's request in its current turn (none when no person started it). */
   const editor = (tools: AutomationToolHost, ctx: ToolCallContext): AutomationEditor => {
     const botId = tools.botOf(ctx.caller.threadId)
     if (botId) return { botId }
     let request: string | undefined
     try {
-      request = tools.personRequest?.(ctx.caller.threadId)
+      request = tools.personRequest?.(ctx.caller.threadId, ctx.caller.runId)
     } catch {
       request = undefined
     }
