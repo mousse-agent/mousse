@@ -74,8 +74,8 @@ import { isUsageLimitInfo, isUsageLimitText, resetFromSnapshot, trimResetCredits
 import { readUsageLimit, usageLimitError } from '../../../orchestrator/providerErrors'
 import { normalizePermissionMode, permissionModeAllows, type PermissionMode } from '../../../../shared/permissionMode'
 import { PERMISSION_KEYS } from '../../../../shared/permissionKeys'
-import { CODEX_BOT_CHECKED_VERSIONS, CODEX_BOT_FEATURES_REFUSED, type CodexBotSandbox, codexBotSandbox, codexBotSandboxConfig, codexPackageOf, codexTurnPolicy } from './childPolicy'
-import { CODEX_BOT_COMMANDS_UNHELD_TEXT, CODEX_BOT_SETUP_UNREADABLE_TEXT, codexBotSettingText, codexBotVersionRefusal, codexVersionOf } from '../../../../shared/harness/codexBotVersion'
+import { CODEX_BOT_CHECKED_VERSIONS, CODEX_BOT_FEATURES_REFUSED, type CodexBotSandbox, codexBotInstructionsNote, codexBotSandbox, codexBotSandboxConfig, codexPackageOf, codexTurnPolicy } from './childPolicy'
+import { CODEX_BOT_SETUP_UNREADABLE_TEXT, codexBotSettingText, codexBotVersionRefusal, codexVersionOf } from '../../../../shared/harness/codexBotVersion'
 import { STOP_GRACE_MS, listProcesses, stopCommandProcesses } from '../../stopProcesses'
 import { DEFAULT_TREE_TIMING, HelperTree, RpcRefused, ThreadStatuses, TreeOff, isWakeUp, type TreePorts, type TreeTiming } from './helperTree'
 import {
@@ -2826,8 +2826,6 @@ export class CodexProviderService {
       // doesn't know, so a tool a newer one added would reach the bot. The owner's own threads run on any version.
       const unchecked = codexBotVersionRefusal(this.versions.get(conn), CODEX_BOT_CHECKED_VERSIONS)
       if (unchecked) throw refuse(unchecked)
-      // Commands this platform's Codex can't keep away from Mousse's own data (Windows): the bot's turn doesn't run.
-      if (botSandbox?.unheld) throw refuse(CODEX_BOT_COMMANDS_UNHELD_TEXT)
       const setup = await readCodexUserSetup(conn, cwd)
       signal.throwIfAborted()
       // The owner's own Codex config can't be read: neither its MCP servers nor its process-wide features can be checked.
@@ -2924,7 +2922,10 @@ export class CodexProviderService {
     return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false, botSandbox }
   }
 
-  async chat(input: CodexChatInput): Promise<CodexChatResult> {
+  async chat(given: CodexChatInput): Promise<CodexChatResult> {
+    // A bot whose commands can't change some files is told so, and what to use instead (`codexBotInstructionsNote`).
+    const note = codexBotInstructionsNote(given.bot)
+    const input: CodexChatInput = note ? { ...given, developerInstructions: given.developerInstructions ? `${given.developerInstructions}\n\n${note}` : note } : given
     if (input.mcp?.token) this.secrets.add(input.mcp.token)
     input.signal?.throwIfAborted()
     if (this.activeThreads.has(input.threadId)) throw new Error('A Codex turn is already running for this thread')

@@ -59,6 +59,7 @@ import { fail } from '../run/db/RunStoreError'
 import { hidesModel, modelsWithPrefs, ModelNamesService, ModelPrefsService, visibleProviderOption, type ModelNamesStore, type ModelPrefsStore } from './catalog'
 import { privateHomeRule, type AuthReading, type DriverRuntime, type GeneratedImage, type HarnessDriver, type ImageModelFacts, type ImageRequestSpec, type RetiredPrompt, type InstallProgress, type InstanceConfig, type LiveProcessHost, type NativeCompactRequest, type OneShotTask } from './driver'
 import { DEFAULT_HOME_ID, findOnPath, instanceEnv, ownedLaunchEnv, reservedEnvName, reservedLaunchKeys, type InstanceEnv } from './env'
+import { noteCliEntryEnvironment } from '../data/closedPlaces'
 import { ClaudeSettingsError, claudeSettingsPath, readClaudeSettingsFile, writeClaudeSetting } from './vendors/claude/claudeSettingsFile'
 import { SharedSettingsConsentStore } from './sharedSettingsConsent'
 import type { SetVendorSettingInput, VendorSettingsView } from '../../shared/harness/vendorSettings'
@@ -2162,6 +2163,8 @@ export class Harness implements HarnessGateway {
     const home = alwaysPrivate(driver, config) || (config.home === 'private' && !builtIn) ? join(stateDir, 'home') : undefined
     // The entry's telemetry switch: set last on every process it starts (Settings → Providers).
     const enforced = telemetryEnforced(driver, config, home)
+    // Where the owner's own Codex or Claude Code keeps its sign-in, if this entry's variables move it: closed to bots.
+    if (entry.driver === 'codex' || entry.driver === 'claude') noteCliEntryEnvironment(instanceId, home ? undefined : config.env)
     const env = instanceEnv({
       instanceId,
       driver: entry.driver,

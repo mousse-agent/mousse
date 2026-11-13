@@ -484,11 +484,11 @@ export const BOTS_THREADS_TIP =
 export const BOTS_UNREADABLE_LINE = "All off: the saved setting couldn't be read. Switch on what bots may use."
 
 /**
- * The Run commands switch's tooltip: a command is not held to Use files everywhere (docs/bots.md, What bots may do
- * here), so the switch says so.
+ * The Run commands switch's tooltip: where a bot's commands run without a sandbox they are held to nothing (docs/bots.md,
+ * Run commands), so the switch says so, and that it is what closes that on this computer.
  */
 export const BOTS_SHELL_TIP =
-  'Commands can read files on this computer even with Use files off. Only Claude Code’s sandbox on Linux and Codex on Linux and macOS hold them to the bot’s own folders and the system’s (/usr, /etc, and /tmp with Claude Code).'
+  'Where a bot’s commands run without a sandbox (on Windows, with Pi, and with Claude Code on Linux without bubblewrap and socat), a bot that may run commands can read and change anything your account can, Mousse’s own data included. Switch this off to close that here.'
 
 /** Why a write of What bots may do here was refused: it names one or more of the switches, each on or off. */
 export const BOTS_HERE_SHAPE = `What bots may do here takes { here: { … } } naming one or more of ${BOT_SWITCH_KEYS.join(', ')}, each true or false. Nothing was changed.`

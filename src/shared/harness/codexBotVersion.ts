@@ -21,23 +21,14 @@ export function codexBotSettingText(features: readonly string[]): string {
  */
 export const CODEX_BOT_SETUP_UNREADABLE_TEXT = 'Mousse couldn\'t read Codex\'s own settings, so my work can\'t run on it now.'
 
-/**
- * What a bot's chat says when it may run commands and its turn does not run because Codex can't keep commands out of
- * Mousse's own data on this computer (Windows: its sandbox there reads every file).
- */
-export const CODEX_BOT_COMMANDS_UNHELD_TEXT = 'Codex on Windows can\'t keep my commands out of Mousse\'s own data, so my work can\'t run on it while I may run commands.'
-
 /** Whether a bot's run failed with one of these texts, which its chat shows as they are. */
 export function isCodexBotRefusal(reason: string): boolean {
   return reason === CODEX_BOT_VERSION_TEXT || reason === CODEX_BOT_VERSION_UNKNOWN_TEXT || reason === CODEX_BOT_SETUP_UNREADABLE_TEXT ||
-    reason === CODEX_BOT_COMMANDS_UNHELD_TEXT || /^Codex's own setting ".+" is on, and my work can't run with it\./.test(reason)
+    /^Codex's own setting ".+" is on, and my work can't run with it\./.test(reason)
 }
 
 /** What Runs on says, once, when a row is picked on such an entry: before any work is sent. */
 export const CODEX_BOT_RUNS_ON_TEXT = 'Bots\' work won\'t run on this version of Codex: it hasn\'t been checked for bots yet.'
-
-/** What Runs on says for a Codex entry on Windows, where a bot that may run commands doesn't run (`CODEX_BOT_COMMANDS_UNHELD_TEXT`). */
-export const CODEX_BOT_WINDOWS_RUNS_ON_TEXT = 'Bots that may run commands won\'t run on Codex on Windows: it can\'t keep commands out of Mousse\'s own data.'
 
 /**
  * The version in the user agent Codex's app-server reports at `initialize` (`<originator>/<version> (<system>) …`).
@@ -59,13 +50,9 @@ export function codexBotVersionRefusal(version: string | undefined, checked: rea
 
 /**
  * Runs on's line for a Codex entry whose installed `version` (as its check read it) is not one of `checked`, with the
- * versions in its tooltip; else, on Windows (`platform`), the line that a bot that may run commands doesn't run there.
- * Undefined otherwise. A version not known yet gets no version line: the turn itself decides then.
+ * versions in its tooltip. Undefined when it is checked, or not known yet: the turn itself decides then.
  */
-export function codexBotRunsOnNote(version: string | undefined, checked: readonly string[], platform?: string): { text: string; title: string } | undefined {
-  if (version !== undefined && !checked.includes(version))
-    return { text: CODEX_BOT_RUNS_ON_TEXT, title: `Codex ${version} is installed here. Checked for bots: ${checked.join(', ')}.` }
-  if (platform === 'win32')
-    return { text: CODEX_BOT_WINDOWS_RUNS_ON_TEXT, title: 'Codex\'s sandbox on Windows reads every file. Bots without "run commands" run here as usual.' }
-  return undefined
+export function codexBotRunsOnNote(version: string | undefined, checked: readonly string[]): { text: string; title: string } | undefined {
+  if (version === undefined || checked.includes(version)) return undefined
+  return { text: CODEX_BOT_RUNS_ON_TEXT, title: `Codex ${version} is installed here. Checked for bots: ${checked.join(', ')}.` }
 }

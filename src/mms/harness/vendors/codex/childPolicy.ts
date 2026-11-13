@@ -1,8 +1,8 @@
-import { accessSync, constants, lstatSync, realpathSync } from 'node:fs'
+import { realpathSync } from 'node:fs'
 import { dirname, isAbsolute, relative, sep } from 'node:path'
 import type { BotAuthority } from '../../../../shared/bots/personal/authority'
-import { entriesBeside, systemTempDirs } from '../../../bots/grants/compile'
-import { mousseTempEntries } from '../../../data/mousseTemp'
+import { entriesBeside } from '../../../bots/grants/compile'
+import { writableFolder } from '../../../data/closedPlaces'
 import type { PermissionMode } from '../../../../shared/permissionMode'
 import type { ChildTurnPolicy } from '../../adapter'
 import type { AskForApproval, SandboxMode, SandboxPolicy } from './protocol'
@@ -33,9 +33,9 @@ export type CodexTurnPolicy =
  *   Without "run commands" it has no command tool at all (`CODEX_COMMAND_FEATURES` off) in the read-only sandbox. With
  *   it, on Linux and macOS, its commands run under Mousse's permission profile (`CODEX_BOT_PROFILE`): without file
  *   access they read only the system's own programs and the bot's folders, with it every file but Mousse's own data;
- *   either way they write only the bot's folders (and, with file access, every entry beside Mousse's data), never any
- *   network (`codexBotSandbox`). On Windows Codex can't hold them so (`CodexBotSandbox.unheld`): the turn is refused
- *   before it starts, and this `workspaceWrite` policy is never used for it.
+ *   either way they write only the bot's folders (and, with file access, every folder beside Mousse's data), never any
+ *   network (`codexBotSandbox`). On Windows, where Codex's sandbox can't close a folder, in the `workspaceWrite`
+ *   sandbox over the bot's folders (with file access, every entry beside Mousse's data too), which reads every file.
  *
  * Nothing here edits the user's Codex configuration or their MCP servers.
  */
@@ -65,15 +65,10 @@ export interface CodexBotSandbox {
    * The bot's commands on Linux and macOS (`CODEX_BOT_PROFILE`): they read `base` (Codex's `:minimal`, the system's own
    * programs and libraries, without file access; `:root`, every file, with it) and `readable` (the folders granted for
    * reading, and the Codex package that runs them: its sandbox starts Codex's own executable again inside), write
-   * `writableRoots`, and can neither read nor write `closed` (Mousse's own data, with file access), links into it
-   * included.
+   * `writableRoots`, and can neither read nor write `closed` (with file access: Mousse's own data and the other places
+   * closed to bots, `botClosedPlaces`), links into it included. Absent on Windows: the `workspaceWrite` sandbox.
    */
   profile?: { base: ':minimal' | ':root'; readable: string[]; closed: string[] }
-  /**
-   * Commands Codex can't keep away from Mousse's own data here (Windows: its sandbox reads every file, and denies no
-   * folder without a machine-wide setup Mousse doesn't make): the bot's turn doesn't run (`CODEX_BOT_COMMANDS_UNHELD_TEXT`).
-   */
-  unheld?: true
 }
 
 /** The kernel's own file systems: never a writable root (Codex's sandbox keeps `/dev/null` writable itself). */
@@ -83,7 +78,8 @@ const KERNEL_FOLDERS: ReadonlySet<string> = new Set(['/proc', '/sys', '/dev'])
  * The platforms where a bot's commands run under `CODEX_BOT_PROFILE`. Codex's permission profiles are enforced by its
  * Linux (bubblewrap, shipped in its package) and macOS (Seatbelt) sandboxes, `deny` included. On Windows a profile that
  * denies a folder needs Codex's elevated sandbox (accounts and firewall rules for the whole machine) or its newer process
- * isolation; the sandbox it runs without them reads every file.
+ * isolation, which Mousse doesn't set up; the sandbox it runs without them reads every file. There a bot that may run
+ * commands can read and change what its owner's account can, as on Pi and an unsandboxed Claude Code (docs/bots.md).
  */
 const PROFILE_PLATFORMS: ReadonlySet<NodeJS.Platform> = new Set(['linux', 'darwin'])
 
@@ -92,25 +88,6 @@ export interface CodexBotMachine {
   /** The folder of the Codex package that runs the turn (`codexPackageOf`). */
   codexPackage?: string
   platform?: NodeJS.Platform
-  /** The system's temporary folders, where Mousse keeps some folders of its own (`mousseTempEntries`). Default `systemTempDirs()`. */
-  temps?: readonly string[]
-}
-
-/**
- * Whether Codex can take `path` as a writable root: a folder (not a link) this user can write. Codex's Linux sandbox
- * makes its read-only `.git`, `.codex`, `.agents` and `.aws` inside every writable root, and when it can't (a file, or a
- * folder such as `/usr` that only the system may change) every command of the turn fails before it starts, the thread's
- * own start included.
- */
-export function writableFolder(path: string): boolean {
-  try {
-    const stat = lstatSync(path)
-    if (!stat.isDirectory()) return false
-    accessSync(path, constants.W_OK)
-    return true
-  } catch {
-    return false
-  }
 }
 
 /**
@@ -121,11 +98,12 @@ export function writableFolder(path: string): boolean {
  * - With file access (`workspace.computer`, bot-architecture.md §3.7) they read every file and write every folder
  *   beside the way down to Mousse's own data that this user can write (`entriesBeside`, `writableFolder`: not a file
  *   there, such as one in the home folder, nor a folder only the system may change, nor what is inside one), and the
- *   files and scratch folders inside it. Mousse's own data is denied, read and write (`closed`): every entry of the
+ *   files and scratch folders inside it. Denied, read and write (`closed`), are Mousse's own data: every entry of the
  *   Mousse home beside the way down to the Codex package when an entry Mousse manages keeps it there (Codex 0.162.1
- *   doesn't open a folder for reading again inside a denied one, only for writing), else the whole home; and the
- *   folders Mousse keeps in the system's temporary folders (`mousseTempEntries`). Both are read when the turn starts.
- * On Windows, `unheld`.
+ *   doesn't open a folder for reading again inside a denied one, only for writing), else the whole home; and every
+ *   other place closed to bots (`computer.outside`, `botClosedPlaces`), read when the turn was compiled.
+ * On Windows the `workspaceWrite` sandbox, as for every bot there before: writable are the same folders, but every
+ * entry beside Mousse's data, and its commands read every file.
  */
 export function codexBotSandbox(bot: Partial<Pick<BotAuthority, 'tools' | 'workspace'>>, machine: CodexBotMachine = {}): CodexBotSandbox {
   const { codexPackage, platform = process.platform } = machine
@@ -135,18 +113,32 @@ export function codexBotSandbox(bot: Partial<Pick<BotAuthority, 'tools' | 'works
   const mine = [...(workspace.files !== undefined ? [workspace.files] : []), workspace.scratch]
   const computer = workspace.computer
   const writeRoots = workspace.writeRoots ?? (workspace.access === 'write' ? workspace.roots : [])
-  const roots = computer
-    ? workspace.roots.flatMap((root) => entriesBeside(root, [computer.closed])).filter((root) => !KERNEL_FOLDERS.has(root) && writableFolder(root))
-    : writeRoots
+  const profiled = PROFILE_PLATFORMS.has(platform)
+  const beside = computer ? workspace.roots.flatMap((root) => entriesBeside(root, [computer.closed])).filter((root) => !KERNEL_FOLDERS.has(root)) : []
+  // Under the profile only a folder Codex can make its read-only folders in (`writableFolder`); on Windows as before.
+  const roots = computer ? (profiled ? beside.filter(writableFolder) : beside) : writeRoots
   const writableRoots = [...new Set([...roots, ...mine])]
-  if (!PROFILE_PLATFORMS.has(platform)) return { shell, writableRoots, unheld: true }
+  if (!profiled) return { shell, writableRoots }
   if (computer) {
     const kept = codexPackage !== undefined && insideFolder(computer.closed, codexPackage) ? [codexPackage] : []
-    const temps = mousseTempEntries(machine.temps ?? systemTempDirs()).filter((entry) => ![...mine, ...kept].some((folder) => insideFolder(entry, folder)))
-    return { shell, writableRoots, profile: { base: ':root', readable: [], closed: [...entriesBeside(computer.closed, kept), ...temps] } }
+    const outside = (computer.outside ?? []).filter((place) => ![...mine, ...kept].some((folder) => insideFolder(place, folder)))
+    return { shell, writableRoots, profile: { base: ':root', readable: [], closed: [...new Set([...entriesBeside(computer.closed, kept), ...outside])] } }
   }
   const readable = [...new Set([...workspace.roots.filter((root) => !writeRoots.includes(root)), ...(codexPackage ? [codexPackage] : [])])]
   return { shell, writableRoots, profile: { base: ':minimal', readable, closed: [] } }
+}
+
+/**
+ * What a bot with file access and "run commands" is told, under Mousse's profile (Linux and macOS), of what its commands
+ * can't change (`writableFolder`). Such a command fails with the system's own "Read-only file system", which Codex
+ * doesn't take as a sandbox refusal to retry, so Mousse has no answer of its own to put it in; the line goes in the
+ * turn's instructions instead (`codexBotInstructionsNote`). `apply_patch` there is answered by Mousse's check and writes.
+ */
+export const CODEX_BOT_WRITE_LIMIT_TEXT = 'Your commands get "Read-only file system" for a file directly in the home folder and for anything under /mnt or /media; change such a file with apply_patch instead, which Mousse checks.'
+
+/** The line a bot's Codex turn adds to its instructions (`CODEX_BOT_WRITE_LIMIT_TEXT`), or undefined when none applies. */
+export function codexBotInstructionsNote(bot: Partial<Pick<BotAuthority, 'tools' | 'workspace'>> | undefined, platform: NodeJS.Platform = process.platform): string | undefined {
+  return bot?.tools?.has('shell') === true && bot.workspace?.computer && PROFILE_PLATFORMS.has(platform) ? CODEX_BOT_WRITE_LIMIT_TEXT : undefined
 }
 
 /** Whether `path` is `folder` or inside it (absolute paths). */

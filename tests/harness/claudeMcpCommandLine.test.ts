@@ -26,7 +26,7 @@
  * refusal with Claude Code's own words.
  */
 import { execFileSync, spawn as nodeSpawn } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import type { AddressInfo, Socket } from 'node:net'
 import { homedir, tmpdir } from 'node:os'
@@ -35,6 +35,7 @@ import type { Options, SDKUserMessage, SpawnedProcess, SpawnOptions } from '@ant
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
 import { systemTempDirs } from '../../src/mms/bots/grants/compile'
+import { botClosedPlaces } from '../../src/mms/data/closedPlaces'
 import type { ClaudeLockedTurn } from '../../src/mms/harness/claude/locked'
 import { lockedEnv } from '../../src/mms/harness/env'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
@@ -125,7 +126,7 @@ const readsCommand = (reader: string, fifoRoot: string) => ({
 /** The Messages API: a prompt naming `PLAN:<name>` runs that plan's tool calls, one per request, then says "done". */
 async function anthropicMock(plans: Record<string, Json[]>) {
   const sockets = new Set<Socket>()
-  const requests: Array<{ plan?: string; tools: string[]; offered: string[]; results: string[] }> = []
+  const requests: Array<{ plan?: string; tools: string[]; offered: string[]; results: string[]; auth: string }> = []
   let ids = 0
   const textOf = (content: unknown): string => typeof content === 'string' ? content
     : Array.isArray(content) ? content.map((block: Json) => block.type === 'text' ? String(block.text) : block.type === 'tool_result' ? textOf(block.content) : '').join('\n') : ''
@@ -159,7 +160,7 @@ async function anthropicMock(plans: Record<string, Json[]>) {
       // The MCP tools the model is offered in this request: in the tool list, or named to it as tools it can load
       // (Claude Code's tool search lists them in the turn's own prompt).
       const offered = [...new Set([...tools, ...JSON.stringify(body.messages.slice(at)).match(/mcp__[A-Za-z0-9_-]+/g) ?? []].filter((name) => name.startsWith('mcp__')))].sort()
-      requests.push({ ...(plan ? { plan } : {}), tools, offered, results })
+      requests.push({ ...(plan ? { plan } : {}), tools, offered, results, auth: String(req.headers.authorization ?? req.headers['x-api-key'] ?? '') })
       const steps = plan ? plans[plan] ?? [] : []
       const block: Json = body.tools?.length && calls < steps.length ? { type: 'tool_use', id: `toolu_${++ids}`, ...steps[calls] } : { type: 'text', text: 'done' }
       const stopReason = block.type === 'tool_use' ? 'tool_use' : 'end_turn'
@@ -377,7 +378,7 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
    * wrapper that first writes 2 MB to the error stream, then becomes Claude Code (same process): a stream nobody reads
    * stops it before it starts.
    */
-  async function rig(plans: Record<string, Json[]>, options: { locked?: boolean; oneShot?: boolean; debug?: boolean; channel?: ClaudeStartupChannel; viaInput?: boolean; stderrFlood?: boolean } = {}) {
+  async function rig(plans: Record<string, Json[]>, options: { locked?: boolean; oneShot?: boolean; debug?: boolean; channel?: ClaudeStartupChannel; viaInput?: boolean; stderrFlood?: boolean; oauth?: string } = {}) {
     const base = mkdtempSync(join(tmpdir(), 'mousse-claude-mcp-argv-'))
     const started: Started[] = []
     // Runs after the service has stopped (cleanups run in reverse). A live Claude Code exits a moment after its input
@@ -392,6 +393,8 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
     const dirs = { work: join(base, 'work'), files: join(base, 'files'), root: join(base, 'root'), scratch: join(base, 'scratch'), userHome: join(base, 'user-home'), instanceHome: join(base, 'instance-home'), pids: join(base, 'pids') }
     for (const dir of Object.values(dirs)) mkdirSync(dir, { recursive: true })
     mkdirSync(join(dirs.scratch, 'tmp'), { recursive: true })
+    if (options.oauth)
+      writeFileSync(join(dirs.instanceHome, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: options.oauth, refreshToken: 'sk-ant-ort01-fake-refresh', expiresAt: Date.now() + 365 * 24 * 3600 * 1000, scopes: ['user:inference', 'user:profile'], subscriptionType: 'pro' } }), { mode: 0o600 })
     const stdioServer = join(base, 'stdio-server.cjs')
     writeFileSync(stdioServer, STDIO_SERVER)
     const hungServer = join(base, 'hung-server.cjs')
@@ -432,7 +435,7 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
       finalEnv: (env) => ({
         ...env,
         ANTHROPIC_BASE_URL: anthropic.url,
-        ANTHROPIC_API_KEY: 'sk-ant-api03-fake-local',
+        ...(options.oauth ? {} : { ANTHROPIC_API_KEY: 'sk-ant-api03-fake-local' }),
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
         DISABLE_TELEMETRY: '1',
         DISABLE_AUTOUPDATER: '1',
@@ -951,6 +954,69 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
     expect(said).toContain('wrote own')
     expect(existsSync(join(otherSession, 'b2.output'))).toBe(false)
     expect(run.leftBehind()).toEqual([])
+  }, 120_000)
+
+  it.skipIf(!hasBinary || !SANDBOX)(`a bot with file access, on the owner's own entry: its commands and its file tool read none of the places closed to bots, directly or through a link, while the files beside them read; and the turn signs in with the entry's own credentials file${NO_BINARY}${NO_SANDBOX}`, async () => {
+    const token = `sk-ant-oat01-fake-${Date.now()}`
+    const plans: Record<string, Json[]> = { closed: [] }
+    const run = await rig(plans, { oauth: token })
+    const mark = `closed-${Date.now()}`
+    // Mousse's home with another bot's browser profile in it; the app's Electron user data with the in-app browser's
+    // cookie store; the owner's Codex sign-in; Claude Code's credentials (the entry's own home: `CLAUDE_CONFIG_DIR`) and
+    // global config. Beside them, Claude Code's settings and an ordinary file stay open.
+    const mousseHome = join(run.dirs.root, '.mousse')
+    const otherBot = join(mousseHome, 'browser', 'user-data', 'p1', 'workspaces', 'botbrowser_other', 'Cookies')
+    const electron = join(run.dirs.userHome, '.config', 'mousse')
+    const cookies = join(electron, 'Partitions', 'mousse-browser', 'Cookies')
+    const codexAuth = join(run.dirs.userHome, '.codex', 'auth.json')
+    const credentials = join(run.dirs.instanceHome, '.credentials.json')
+    const claudeJson = join(run.dirs.userHome, '.claude.json')
+    const settings = join(run.dirs.instanceHome, 'settings.json')
+    const ordinary = join(run.dirs.root, 'ordinary.txt')
+    for (const file of [otherBot, cookies, codexAuth]) mkdirSync(join(file, '..'), { recursive: true })
+    for (const file of [otherBot, cookies, codexAuth, claudeJson]) writeFileSync(file, `secret ${mark}\n`)
+    writeFileSync(settings, '{"ordinary": "settings"}\n')
+    writeFileSync(ordinary, 'ordinary\n')
+    const linkToCookies = join(run.dirs.root, 'cookie-link')
+    const linkToHome = join(run.dirs.root, 'claude-link')
+    symlinkSync(cookies, linkToCookies)
+    symlinkSync(run.dirs.instanceHome, linkToHome)
+    const closed = [otherBot, cookies, linkToCookies, codexAuth, credentials, join(linkToHome, '.credentials.json'), claudeJson]
+    const command = [
+      ...[...closed, settings, ordinary].map((path) => `if cat ${JSON.stringify(path)} >/dev/null 2>&1; then echo "read ${path}"; else echo "denied ${path}"; fi`),
+      `grep -r ${mark} ${JSON.stringify(run.dirs.userHome)} ${JSON.stringify(mousseHome)} || echo "found none"`
+    ].join('; ')
+    plans.closed = [
+      { name: 'Bash', input: { command, description: 'Try the closed places' } },
+      { name: 'Read', input: { file_path: credentials } },
+      { name: 'Read', input: { file_path: join(linkToHome, '.credentials.json') } },
+      { name: 'Read', input: { file_path: settings } }
+    ]
+    // What compile gives a bot with file access, for this test's homes.
+    const outside = botClosedPlaces({ mousseHome, env: { CLAUDE_CONFIG_DIR: run.dirs.instanceHome, MOUSSE_ELECTRON_USER_DATA: electron }, userHome: run.dirs.userHome, temps: systemTempDirs(), entryEnvs: [] })
+    const authority = createBotAuthority({
+      activationId: 'act-1', role: 'activation',
+      permissions: { tools: ['read', 'list', 'search', 'edit', 'write', 'shell'], appTools: [], mcp: [], skills: [], workspace: { roots: ['/'], access: 'write', writeRoots: ['/'], scratch: run.dirs.scratch, files: run.dirs.files, computer: { closed: mousseHome, outside } } },
+      waiting: () => false, counters: { charge: vi.fn(() => ({ ok: true as const, count: 1 })) as never },
+      time: { deadline: () => Number.MAX_SAFE_INTEGER, signal: new AbortController().signal }, spend: null
+    })
+    const locked: ClaudeLockedTurn = { authority, ownerEntry: true, ledger: run.ledger, cwd: run.dirs.files, shellContained: true, temps: systemTempDirs(), systemPrompt: 'You are a test bot.' }
+    const text = await run.service.chat({ threadId: 'bot-closed', cwd: run.dirs.files, model: 'claude-sonnet-4-5', prompt: 'PLAN:closed', permissionMode: 'ask', locked, mcp: null, onText: () => undefined })
+    expect(text).toContain('done')
+    const said = run.anthropic.results('closed').join('\n')
+    for (const path of closed) expect(said, path).toContain(`denied ${path}`)
+    expect(said).toContain(`read ${settings}`)
+    expect(said).toContain(`read ${ordinary}`)
+    expect(said).toContain('found none')
+    expect(said).not.toContain(mark)
+    // The file tool: Claude Code's credentials refused, by name and through the link; its settings beside them read.
+    expect(new Set(said.split('\n').filter((line) => line.includes('sign-in, which no bot may use'))).size).toBe(2)
+    expect(said).toContain('"ordinary": "settings"')
+    // Claude Code itself read its own credentials file for every model request; the bot saw none of it.
+    const auths = run.anthropic.requests.filter((request) => request.plan === 'closed').map((request) => request.auth)
+    expect(auths.length).toBeGreaterThan(0)
+    expect(new Set(auths)).toEqual(new Set([`Bearer ${token}`]))
+    expect(said).not.toContain(token)
   }, 120_000)
 
   /** Each way the user's servers reach Claude Code: a startup channel, or its input (Windows). */

@@ -159,9 +159,10 @@ export interface BotAuthority {
     files?: string
     /**
      * File access (bot-architecture.md §3.7): every folder, read and write, but `closed`, Mousse's
-     * own data folder, of which only the files folder and scratch are the bot's.
+     * own data folder, of which only the files folder and scratch are the bot's, and `outside`: Mousse's
+     * other data and sign-ins, and the sign-in files of the CLIs it runs (`botClosedPlaces`).
      */
-    computer?: { closed: string }
+    computer?: { closed: string; outside?: readonly string[] }
   } | null
   /** True while the activation waits for the owner's answer to a wall (`waiting_grant`). */
   waiting(): boolean

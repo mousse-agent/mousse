@@ -1,6 +1,9 @@
 /**
- * What a bot's turn on the real Codex reaches of Mousse's own data: the owner token, a saved sign-in, the installation's
- * settings, the service's socket and Mousse's folders in the temporary folder, by name, through links and by search.
+ * What a bot's turn on the real Codex reaches of what is closed to bots (`botClosedPlaces`): Mousse's own data (the owner
+ * token, a saved sign-in, the installation's settings, the service's socket, another bot's browser profile, Mousse's
+ * folders in the temporary folder, the in-app browser's cookie store) and the sign-ins of the CLIs it runs (Codex's
+ * `auth.json`, Claude Code's credentials and `.claude.json`), by name, through links and by search; and that the entry's
+ * own Codex still signs in with its own `auth.json`, which the bot can't read.
  * Bots with file access, with and without "run commands", and one with commands but no file access; on an entry of the
  * owner's own Codex (its package outside the Mousse home) and on one Mousse manages (its package and Codex home inside
  * it). The model is a fake Responses endpoint in this process; every token, sign-in and setting is a fake made in a test
@@ -21,9 +24,10 @@ import { CodexProviderService, codexEnvironment } from '../../src/mms/harness/ve
 import type { CodexConnection } from '../../src/mms/harness/vendors/codex/CodexAppServerClient'
 import type { CodexModel } from '../../src/mms/harness/vendors/codex/protocol'
 import { CodexInstallation } from '../../src/mms/harness/vendors/codex/installation'
-import { codexPackageOf } from '../../src/mms/harness/vendors/codex/childPolicy'
+import { CODEX_BOT_WRITE_LIMIT_TEXT, codexPackageOf } from '../../src/mms/harness/vendors/codex/childPolicy'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
+import { botClosedPlaces } from '../../src/mms/data/closedPlaces'
 import type { NeutralTool } from '../../src/shared/harness/tools'
 
 const pinned = new CodexInstallation({ installationHome: resolve(__dirname, '..', '..', '.cache', 'codex-pin') }).installed()
@@ -54,6 +58,9 @@ for (const BINARY of BINARIES) for (const entry of ENTRIES) describe.skipIf(!BIN
   let questions: UserQuestionService
   let model: string
   let requests: Body[] = []
+  /** The `Authorization` of every model request: Codex's own sign-in, from its home's `auth.json`. */
+  let bearers: string[] = []
+  let codexHome = ''
   let script: Call[] = []
   const at: Record<string, string> = {}
 
@@ -75,24 +82,46 @@ for (const BINARY of BINARIES) for (const entry of ENTRIES) describe.skipIf(!BIN
       files: join(profile, 'bots', 'files', 'bot-1'),
       scratch: join(profile, 'bots', 'scratch', 'act-1'),
       elsewhere: join(root, 'elsewhere'),
-      temp: mkdtempSync(join(tmpdir(), 'mousse-pr-'))
+      temp: mkdtempSync(join(tmpdir(), 'mousse-pr-')),
+      // Mousse's own data outside its home: the app's Electron user data (the in-app browser's cookie store), and inside
+      // the home another bot's browser profile.
+      electron: join(home, '.config', 'mousse'),
+      cookies: join(home, '.config', 'mousse', 'Partitions', 'mousse-browser', 'Cookies'),
+      otherBot: join(mousse, 'browser', 'user-data', 'p1', 'workspaces', 'botbrowser_other', 'Default', 'Cookies'),
+      // The owner's own CLIs: Codex's sign-in, Claude Code's credentials and its global config (an API key from /login),
+      // and beside them ordinary configuration that stays open.
+      codexAuth: join(home, '.codex', 'auth.json'),
+      claudeCredentials: join(home, '.claude', '.credentials.json'),
+      claudeSettings: join(home, '.claude', 'settings.json'),
+      claudeJson: join(home, '.claude.json'),
+      bashrc: join(home, '.bashrc')
     })
-    for (const dir of [at.files, at.scratch, at.elsewhere, join(profile, 'harness', 'codex', 'entry-a')]) mkdirSync(dir, { recursive: true })
+    for (const dir of [at.files, at.scratch, at.elsewhere, join(profile, 'harness', 'codex', 'entry-a'), join(at.cookies, '..'), join(at.otherBot, '..'), join(home, '.codex'), join(home, '.claude')]) mkdirSync(dir, { recursive: true })
     writeFileSync(at.token, JSON.stringify({ pid: 1, token: `OWNER-${MARK}` }))
     writeFileSync(at.settings, `SETTINGS-${MARK}\n`)
     writeFileSync(at.signIn, JSON.stringify({ tokens: { access_token: `SIGNIN-${MARK}` } }))
     writeFileSync(join(at.temp, 'body.md'), `TEMP-${MARK}\n`)
     writeFileSync(join(at.files, 'own.txt'), `OWN-${MARK}\n`)
     writeFileSync(join(at.elsewhere, 'ordinary.txt'), `ORDINARY-${MARK}\n`)
+    writeFileSync(at.cookies, `COOKIE-${MARK}\n`)
+    writeFileSync(at.otherBot, `BOTCOOKIE-${MARK}\n`)
+    writeFileSync(at.codexAuth, JSON.stringify({ OPENAI_API_KEY: `sk-fake-CODEXAUTH-${MARK}` }))
+    writeFileSync(at.claudeCredentials, JSON.stringify({ claudeAiOauth: { accessToken: `CLAUDECRED-${MARK}` } }))
+    writeFileSync(at.claudeSettings, `{"CLAUDESETTINGS": "${MARK}"}\n`)
+    writeFileSync(at.claudeJson, JSON.stringify({ primaryApiKey: `CLAUDEJSON-${MARK}` }))
+    writeFileSync(at.bashrc, 'before\n')
     symlinkSync(at.token, join(at.elsewhere, 'token-link'))
     symlinkSync(join(mousse, 'profiles'), join(at.elsewhere, 'profiles-link'))
+    symlinkSync(at.cookies, join(at.elsewhere, 'cookie-link'))
+    symlinkSync(join(home, '.claude'), join(at.elsewhere, 'claude-link'))
+    symlinkSync(at.codexAuth, join(at.elsewhere, 'codex-auth-link'))
     socket = createSocketServer((connection) => connection.end('connected\n'))
     await new Promise<void>((done) => socket.listen(at.socket, done))
 
     // The Codex that runs the turn: the binary as it is, or a copy of its package inside the Mousse home, with a Codex
     // home there too, as for an entry Mousse manages.
     let binary = BINARY!
-    let codexHome = join(home, '.codex')
+    codexHome = join(home, '.codex')
     if (entry === 'a Codex Mousse manages') {
       const real = realpathSync(BINARY!)
       const codexPackage = codexPackageOf(real)!
@@ -107,6 +136,8 @@ for (const BINARY of BINARIES) for (const entry of ENTRIES) describe.skipIf(!BIN
       codexHome = join(profile, 'harness', 'codex', 'entry-b')
     }
     mkdirSync(codexHome, { recursive: true })
+    // The entry's own sign-in, which its Codex reads for every model request (`requires_openai_auth` below).
+    if (codexHome !== join(home, '.codex')) writeFileSync(join(codexHome, 'auth.json'), JSON.stringify({ OPENAI_API_KEY: `sk-fake-managed-${MARK}` }))
 
     server = createServer((req, res) => {
       let text = ''
@@ -115,6 +146,7 @@ for (const BINARY of BINARIES) for (const entry of ENTRIES) describe.skipIf(!BIN
         if (!req.url?.includes('/responses')) { res.writeHead(404); res.end(); return }
         const body = JSON.parse(text) as Body
         requests.push(body)
+        bearers.push(String(req.headers.authorization ?? ''))
         // Each call's output brings the next call; after the last, the model is done.
         const answered = (body.input ?? []).filter((item) => item?.type === 'function_call_output' || item?.type === 'custom_tool_call_output').length
         const next = script[answered]
@@ -131,12 +163,12 @@ for (const BINARY of BINARIES) for (const entry of ENTRIES) describe.skipIf(!BIN
     const port = (server.address() as { port: number }).port
     writeFileSync(join(codexHome, 'config.toml'), [
       'model_provider = "probe"',
-      '[model_providers.probe]', 'name = "probe"', `base_url = "http://127.0.0.1:${port}/v1"`, 'wire_api = "responses"', 'env_key = "PROBE_KEY"', ''
+      '[model_providers.probe]', 'name = "probe"', `base_url = "http://127.0.0.1:${port}/v1"`, 'wire_api = "responses"', 'requires_openai_auth = true', ''
     ].join('\n'))
     questions = new UserQuestionService()
     service = new CodexProviderService(join(root, 'state-home'), questions, {}, {
       dir: join(root, 'state'),
-      env: () => ({ ...codexEnvironment(), CODEX_HOME: codexHome, PROBE_KEY: 'probe', USERPROFILE: home, HOME: home }),
+      env: () => ({ ...codexEnvironment(), CODEX_HOME: codexHome, USERPROFILE: home, HOME: home }),
       modelProvider: 'probe',
       launch: () => ({ binaryPath: binary }),
       account: { read: async () => ({ kind: 'signed_in', planType: 'plus', email: null, label: 'data check', subject: 'data-check' }) }
@@ -162,8 +194,11 @@ for (const BINARY of BINARIES) for (const entry of ENTRIES) describe.skipIf(!BIN
   let threads = 0
   /** A bot holding `tools`, with file access (as Allow writes it) or without. */
   function botOf(tools: NeutralTool[], fileAccess: boolean) {
+    // What compile gives a bot with file access: the Mousse home closed, and every other place `botClosedPlaces` lists, for
+    // this test home (the owner's Codex runs with `CODEX_HOME`; the app's Electron user data is the test home's).
+    const outside = botClosedPlaces({ mousseHome: at.mousse, env: { CODEX_HOME: codexHome, MOUSSE_ELECTRON_USER_DATA: at.electron }, userHome: at.home, temps: [tmpdir()], entryEnvs: [] })
     const workspace = fileAccess
-      ? { roots: ['/'], access: 'write' as const, writeRoots: ['/'], scratch: at.scratch, files: at.files, computer: { closed: at.mousse } }
+      ? { roots: ['/'], access: 'write' as const, writeRoots: ['/'], scratch: at.scratch, files: at.files, computer: { closed: at.mousse, outside } }
       : { roots: [], access: 'read' as const, writeRoots: [], scratch: at.scratch, files: at.files }
     const bot = createBotAuthority({
       activationId: `act-${threads}`, role: 'activation',
@@ -177,6 +212,7 @@ for (const BINARY of BINARIES) for (const entry of ENTRIES) describe.skipIf(!BIN
   /** One turn whose model makes `calls` in order: what each call's output was, and every request the model saw. */
   async function turn(calls: Call[], bot?: ReturnType<typeof botOf>['bot']) {
     requests = []
+    bearers = []
     script = calls
     await service.chat({ threadId: `data-${threads++}`, cwd: bot ? at.scratch : at.elsewhere, model, prompt: 'Go.', mcp: null, ...(bot ? { bot } : {}), onText: () => undefined })
     const outputs = new Map<string, string>()
@@ -186,7 +222,7 @@ for (const BINARY of BINARIES) for (const entry of ENTRIES) describe.skipIf(!BIN
   }
 
   /** Mousse's own data: none of it may reach the model. */
-  const SECRETS = () => [`OWNER-${MARK}`, `SIGNIN-${MARK}`, `SETTINGS-${MARK}`, `TEMP-${MARK}`]
+  const SECRETS = () => [`OWNER-${MARK}`, `SIGNIN-${MARK}`, `SETTINGS-${MARK}`, `TEMP-${MARK}`, `COOKIE-${MARK}`, `BOTCOOKIE-${MARK}`, `CODEXAUTH-${MARK}`, `managed-${MARK}`, `CLAUDECRED-${MARK}`, `CLAUDEJSON-${MARK}`]
 
   /** The files under `dir` (links not followed) whose text holds one of `marks`. */
   function holding(dir: string, marks: readonly string[]): string[] {
@@ -227,6 +263,16 @@ for (const BINARY of BINARIES) for (const entry of ENTRIES) describe.skipIf(!BIN
     ['the Mousse home, searched', `grep -r ${MARK} ${at.mousse}`, undefined],
     ['Mousse\'s folder in /tmp', `cat ${join(at.temp, 'body.md')}`, undefined],
     ['the token, by a program', `python3 -c "print(open('${at.token}').read())"`, undefined],
+    ['the in-app browser\'s cookie store', `cat ${at.cookies}`, undefined],
+    ['a link to the cookie store', `cat ${join(at.elsewhere, 'cookie-link')}`, undefined],
+    ['the Electron user data, searched', `grep -r ${MARK} ${at.electron}`, undefined],
+    ['another bot\'s browser profile', `cat ${at.otherBot}`, undefined],
+    ['the owner\'s Codex sign-in', `cat ${at.codexAuth}`, undefined],
+    ['a link to the Codex sign-in', `cat ${join(at.elsewhere, 'codex-auth-link')}`, undefined],
+    ['Claude Code\'s credentials', `cat ${at.claudeCredentials}`, undefined],
+    ['Claude Code\'s credentials, through a link to its folder', `cat ${join(at.elsewhere, 'claude-link', '.credentials.json')}`, undefined],
+    ['Claude Code\'s global config', `cat ${at.claudeJson}`, undefined],
+    ['Claude Code\'s settings beside its credentials', `cat ${at.claudeSettings}`, 'CLAUDESETTINGS'],
     ['an ordinary file', `cat ${join(at.elsewhere, 'ordinary.txt')}`, `ORDINARY-${MARK}`],
     ['its own file', `cat ${join(at.files, 'own.txt')}`, `OWN-${MARK}`]
   ]
@@ -242,9 +288,12 @@ for (const BINARY of BINARIES) for (const entry of ENTRIES) describe.skipIf(!BIN
       ['the home moved away', `mv ${at.mousse} ${join(at.elsewhere, 'moved')}`],
       ['the service\'s socket', `python3 -c "import socket; s=socket.socket(socket.AF_UNIX); s.connect('${at.socket}'); print(s.recv(64).decode())"`],
       ['an ordinary folder', `sh -c 'echo x > ${join(at.elsewhere, 'made.txt')}'`],
-      ['its own folder', `sh -c 'echo x > ${join(at.files, 'made.txt')}'`]
+      ['its own folder', `sh -c 'echo x > ${join(at.files, 'made.txt')}'`],
+      ['a file directly in the home folder', `sh -c 'echo x >> ${at.bashrc}'`]
     ]
-    const { outputs, seen } = await turn([...probes.map(([, cmd]) => command(cmd)), ...changes.map(([, cmd]) => command(cmd))], bot)
+    // The same file changed with the file tool, which asks Mousse's check instead of running in the sandbox.
+    const bashrcPatch = patch(`*** Begin Patch\n*** Update File: ${at.bashrc}\n@@\n-before\n+after\n*** End Patch`)
+    const { outputs, seen, offered } = await turn([...probes.map(([, cmd]) => command(cmd)), ...changes.map(([, cmd]) => command(cmd)), bashrcPatch], bot)
     for (const secret of SECRETS()) expect(seen, `${secret.split('-')[0]} reached the model`).not.toContain(secret)
     probes.forEach(([what, , expected], n) => { if (expected) expect(outputs[n], what).toContain(expected) })
     expect(outputs[probes.length + 5], 'the service\'s socket').not.toContain('connected')
@@ -256,6 +305,14 @@ for (const BINARY of BINARIES) for (const entry of ENTRIES) describe.skipIf(!BIN
     for (const made of [join(at.mousse, 'new.txt'), join(at.elsewhere, 'copy.json'), join(at.elsewhere, 'hard.json')]) expect(existsSync(made), made).toBe(false)
     expect(holding(at.elsewhere, SECRETS())).toEqual([])
     for (const made of [join(at.elsewhere, 'made.txt'), join(at.files, 'made.txt')]) expect(existsSync(made), made).toBe(true)
+    // A file directly in the home folder: the command can't change it (the system's own refusal, which Codex doesn't offer
+    // to retry), the turn's instructions say so and what to use instead, and the file tool can (when Codex offers it).
+    expect(outputs[probes.length + changes.length - 1], 'a file directly in the home folder').toContain('Read-only file system')
+    expect(seen).toContain(JSON.stringify(CODEX_BOT_WRITE_LIMIT_TEXT).slice(1, -1))
+    if (offered.includes('apply_patch')) expect(readFileSync(at.bashrc, 'utf8')).toBe('after\n')
+    // The entry's own Codex signed in with its own sign-in for every model request, closed to the bot as it was.
+    expect(bearers.length).toBeGreaterThan(0)
+    expect(new Set(bearers)).toEqual(new Set([codexHome === join(at.home, '.codex') ? `Bearer sk-fake-CODEXAUTH-${MARK}` : `Bearer sk-fake-managed-${MARK}`]))
   }, 240_000)
 
   it.skipIf(!LINUX)('with file access and no "run commands": no command tool, and a file change in Mousse\'s data is refused while one elsewhere and in its own folder goes through', async () => {
@@ -266,6 +323,9 @@ for (const BINARY of BINARIES) for (const entry of ENTRIES) describe.skipIf(!BIN
       command(`cat ${at.token}`),
       patch(`*** Begin Patch\n*** Add File: ${join(at.mousse, 'added.txt')}\n+x\n*** End Patch`),
       patch(`*** Begin Patch\n*** Delete File: ${at.signIn}\n*** End Patch`),
+      patch(`*** Begin Patch\n*** Delete File: ${at.codexAuth}\n*** End Patch`),
+      patch(`*** Begin Patch\n*** Delete File: ${join(at.elsewhere, 'claude-link', '.credentials.json')}\n*** End Patch`),
+      patch(`*** Begin Patch\n*** Add File: ${join(at.cookies, '..', 'added')}\n+x\n*** End Patch`),
       patch(`*** Begin Patch\n*** Update File: ${ordinary}\n@@\n-before\n+after\n*** End Patch`),
       patch(`*** Begin Patch\n*** Add File: ${join(at.files, 'added.txt')}\n+x\n*** End Patch`)
     ]
@@ -274,6 +334,9 @@ for (const BINARY of BINARIES) for (const entry of ENTRIES) describe.skipIf(!BIN
     for (const secret of SECRETS()) expect(seen, `${secret.split('-')[0]} reached the model`).not.toContain(secret)
     expect(existsSync(join(at.mousse, 'added.txt'))).toBe(false)
     expect(readFileSync(at.signIn, 'utf8')).toContain(`SIGNIN-${MARK}`)
+    expect(readFileSync(at.codexAuth, 'utf8')).toContain(`CODEXAUTH-${MARK}`)
+    expect(readFileSync(at.claudeCredentials, 'utf8')).toContain(`CLAUDECRED-${MARK}`)
+    expect(existsSync(join(at.cookies, '..', 'added'))).toBe(false)
     // The control: Codex offered `apply_patch` to this model, and the same bot's changes outside Mousse's data went through.
     if (offered.includes('apply_patch')) {
       expect(readFileSync(ordinary, 'utf8')).toBe('after\n')

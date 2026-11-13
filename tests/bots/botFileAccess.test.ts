@@ -4,15 +4,16 @@
  * holds file access. Each runtime compiles it to the whole file system but Mousse's own data:
  * Claude Code's sandbox, Codex's writable roots, and the gate's path check on Pi.
  */
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BotEngine } from '../../src/mms/bots/activation/BotEngine'
 import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
 import { askFingerprintOf } from '../../src/mms/bots/chat/projection'
 import { botFilesFolder, botManifestDigest, compileBotThread, entriesBeside, type BotPermissions } from '../../src/mms/bots/grants/compile'
 import { claudeLockedSandbox } from '../../src/mms/harness/claude/locked'
+import { botClosedPlaces } from '../../src/mms/data/closedPlaces'
 import { PI_NATIVE_TOOLS } from '../../src/mms/harness/pi/nativeTools'
 import { CODEX_BOT_PROFILE, codexBotSandbox, codexBotSandboxConfig, codexTurnPolicy } from '../../src/mms/harness/vendors/codex/childPolicy'
 import type { BotManifest } from '../../src/shared/bots/personal/definition'
@@ -161,8 +162,11 @@ describe('each runtime compiles file access to the whole file system but Mousse\
     counters: { charge: () => ({ ok: true, count: 1 }) }, time: { deadline: () => 0, signal: new AbortController().signal }, spend: null
   })
 
-  it('closes the Mousse home, every profile in it, but for the bot\'s files folder and scratch', () => {
-    expect(permissions(everywhere()).workspace).toEqual({ roots: [base], access: 'write', writeRoots: [base], scratch, files, computer: { closed: mousse } })
+  it('closes the Mousse home, every profile in it, but for the bot\'s files folder and scratch, and every other place botClosedPlaces lists', () => {
+    const compiled = permissions(everywhere()).workspace!
+    expect(compiled).toEqual({ roots: [base], access: 'write', writeRoots: [base], scratch, files, computer: { closed: mousse, outside: expect.any(Array) } })
+    // Compiled from this process's environment: the test setup's own CLI homes and Electron user data.
+    expect(compiled.computer!.outside).toEqual(expect.arrayContaining([process.env.MOUSSE_ELECTRON_USER_DATA, join(process.env.CODEX_HOME!, 'auth.json'), join(process.env.CLAUDE_CONFIG_DIR!, '.credentials.json')]))
     expect(permissions(null).workspace).toEqual({ roots: [], access: 'read', writeRoots: [], scratch, files })
   })
 
@@ -177,32 +181,106 @@ describe('each runtime compiles file access to the whole file system but Mousse\
     expect(entriesBeside(mousse, [join(base, 'Documents')])).toEqual([mousse])
   })
 
-  it('Claude Code: commands read and write the whole file system, Mousse\'s data (its folders in the temporary folder included) closed but for the bot\'s own folders', () => {
-    const granted = authorityOf(permissions(everywhere()))
-    // A temporary folder with one of Mousse's own folders in it, and one of someone else's.
-    const temp = join(base, 'tmp')
-    for (const dir of [join(temp, 'mousse-pr-1'), join(temp, 'other')]) mkdirSync(dir, { recursive: true })
-    const sandbox = claudeLockedSandbox({ workspace: granted.workspace!, temps: [temp], home: base }) as unknown as { filesystem: Record<string, string[]> }
-    expect(sandbox.filesystem.allowWrite).toEqual([base, files, scratch])
-    expect(sandbox.filesystem.denyRead).toEqual([mousse, join(temp, 'mousse-pr-1')])
+  /** The owner's home of this test, with the places closed to bots in it and ordinary files beside them. */
+  function ownerHome() {
+    const user = join(base, 'user')
+    const at = {
+      user,
+      electron: join(user, '.config', 'mousse'),
+      cookies: join(user, '.config', 'mousse', 'Partitions', 'mousse-browser', 'Cookies'),
+      otherBot: join(mousse, 'browser', 'user-data', 'p1', 'workspaces', 'botbrowser_other', 'Cookies'),
+      codexAuth: join(user, '.codex', 'auth.json'),
+      codexConfig: join(user, '.codex', 'config.toml'),
+      claudeCredentials: join(user, '.claude', '.credentials.json'),
+      claudeSettings: join(user, '.claude', 'settings.json'),
+      claudeJson: join(user, '.claude.json'),
+      temp: join(base, 'tmp'),
+      ordinary: join(base, 'Documents', 'a.md')
+    }
+    for (const file of [at.cookies, at.otherBot, at.codexAuth, at.codexConfig, at.claudeCredentials, at.claudeSettings, at.claudeJson, at.ordinary]) {
+      mkdirSync(join(file, '..'), { recursive: true })
+      writeFileSync(file, 'x\n')
+    }
+    for (const dir of [join(at.temp, 'mousse-pr-1'), join(at.temp, 'other')]) mkdirSync(dir, { recursive: true })
+    const outside = botClosedPlaces({ mousseHome: mousse, env: { MOUSSE_ELECTRON_USER_DATA: at.electron }, userHome: user, temps: [at.temp], entryEnvs: [] })
+    return { at, outside }
+  }
+
+  /** A bot with file access whose closed places are this test's (as compile makes them for the computer it runs on). */
+  function withOutside(granted: BotPermissions, outside: string[]): BotPermissions {
+    return { ...granted, workspace: { ...granted.workspace!, computer: { closed: mousse, outside } } }
+  }
+
+  // What `botClosedPlaces` lists, by the inputs that move it: the platform's defaults, every variable that moves a CLI's
+  // home or Mousse's Electron user data, an entry's own variables, a relative value, a place inside the Mousse home.
+  it.each([
+    ['Linux defaults', 'linux', {}, [], ['.config/mousse', '.codex/auth.json', '.codex/.credentials.json', '.claude/.credentials.json', '.claude/.device-keys.json', '.claude/.session_ingress_token', '.claude/backups', '.claude.json', '.claude.json.backup', '.config/anthropic'], ['.codex', '.codex/config.toml', '.claude', '.claude/settings.json', '.config']],
+    ['macOS defaults', 'darwin', {}, [], ['Library/Application Support/mousse', '.codex/auth.json', '.claude/.credentials.json', '.config/anthropic'], ['Library/Application Support']],
+    ['Windows defaults', 'win32', {}, [], ['AppData/Roaming/mousse', '.codex/auth.json', '.claude/.credentials.json', 'AppData/Roaming/Anthropic'], ['AppData/Roaming']],
+    ['moved homes', 'linux', { CODEX_HOME: '<x>/codex', CLAUDE_CONFIG_DIR: '<x>/claude', CLAUDE_SECURESTORAGE_CONFIG_DIR: '<x>/secure', ANTHROPIC_CONFIG_DIR: '<x>/anthropic', CLAUDE_CODE_FEDERATION_CACHE_DIR: '<x>/federation', MOUSSE_ELECTRON_USER_DATA: '<x>/eud' }, [], ['<x>/codex/auth.json', '<x>/codex/.credentials.json', '.codex/auth.json', '<x>/claude/.credentials.json', '<x>/claude/.claude.json', '<x>/claude/backups', '<x>/secure/.credentials.json', '<x>/anthropic', '<x>/federation', '<x>/eud', '.claude/.credentials.json'], ['<x>/claude', '<x>/codex', '.config/mousse']],
+    ['an entry\'s own variables', 'linux', {}, [{ CODEX_HOME: '<x>/entry-codex', CLAUDE_CONFIG_DIR: '<x>/entry-claude' }], ['<x>/entry-codex/auth.json', '<x>/entry-claude/.credentials.json'], []],
+    ['a relative home names no one folder', 'linux', { CODEX_HOME: 'relative/codex' }, [], ['.codex/auth.json'], ['relative/codex/auth.json']],
+    ['a place inside the Mousse home is not listed again', 'linux', { MOUSSE_ELECTRON_USER_DATA: '<mousse>/electron-user-data' }, [], [], ['<mousse>/electron-user-data']]
+  ] as const)('botClosedPlaces: %s', (_name, platform, env, entryEnvs, listed, notListed) => {
+    const user = join(base, 'user')
+    const x = join(base, 'x')
+    const at = (spelled: string) => spelled.startsWith('<x>') ? join(x, spelled.slice(4)) : spelled.startsWith('<mousse>') ? join(mousse, spelled.slice(9)) : spelled.startsWith('relative') ? resolve(spelled) : join(user, spelled)
+    const fill = (vars: Readonly<Record<string, string>>) => Object.fromEntries(Object.entries(vars).map(([key, value]) => [key, value.startsWith('relative') ? value : at(value)]))
+    const places = botClosedPlaces({ mousseHome: mousse, env: fill(env), userHome: user, platform, temps: [], entryEnvs: entryEnvs.map(fill) })
+    for (const place of listed) expect(places, place).toContain(at(place))
+    for (const place of notListed) expect(places, place).not.toContain(at(place))
+  })
+
+  it('the file tools, on every platform: each place closed to bots refused, directly and through a link; the files beside them open', () => {
+    const { at, outside } = ownerHome()
+    const granted = authorityOf(withOutside(permissions(everywhere()), outside))
+    const closed = [at.cookies, at.otherBot, at.codexAuth, at.claudeCredentials, at.claudeJson, join(at.temp, 'mousse-pr-1', 'body.md')]
+    for (const path of closed)
+      for (const [name, args] of [['read', { path }], ['write', { path, content: 'x' }], ['edit', { path }]] as const)
+        expect(checkBuiltinCall(granted, PI_NATIVE_TOOLS, name, args), `${name} ${path}`).toMatchObject({ ok: false, wall: { kind: 'closed' } })
+    for (const path of [at.codexConfig, at.claudeSettings, at.ordinary, join(at.temp, 'other', 'x.md')])
+      expect(checkBuiltinCall(granted, PI_NATIVE_TOOLS, 'read', { path }), path).toEqual({ ok: true })
+    // A link to a folder (a junction on Windows) and, where this system lets a test make one, a link to a file.
+    const folderLink = join(base, 'Documents', 'claude-link')
+    symlinkSync(join(at.user, '.claude'), folderLink, 'junction')
+    expect(checkBuiltinCall(granted, PI_NATIVE_TOOLS, 'read', { path: join(folderLink, '.credentials.json') })).toMatchObject({ ok: false, wall: { kind: 'closed' } })
+    expect(checkBuiltinCall(granted, PI_NATIVE_TOOLS, 'read', { path: join(folderLink, 'settings.json') })).toEqual({ ok: true })
+    const fileLink = join(base, 'Documents', 'cookie-link')
+    let linked = true
+    try {
+      symlinkSync(at.cookies, fileLink, 'file')
+    } catch {
+      linked = false // Windows without the privilege to make a file link
+    }
+    if (linked) expect(checkBuiltinCall(granted, PI_NATIVE_TOOLS, 'read', { path: fileLink })).toMatchObject({ ok: false, wall: { kind: 'closed' } })
+  })
+
+  it('Claude Code: commands read and write every folder beside Mousse\'s data, which is closed, with every other place closed to bots, but for the bot\'s own folders', () => {
+    const { at, outside } = ownerHome()
+    const granted = authorityOf(withOutside(permissions(everywhere()), outside))
+    const sandbox = claudeLockedSandbox({ workspace: granted.workspace!, temps: [at.temp], home: base }) as unknown as { filesystem: Record<string, string[]> }
+    // Only folders this user can write: `/` itself would make Claude Code's sandbox fail every command.
+    expect([...sandbox.filesystem.allowWrite].sort()).toEqual([join(base, 'Documents'), at.temp, at.user, files, scratch].sort())
+    expect(sandbox.filesystem.denyRead).toEqual([mousse, ...outside])
+    expect(sandbox.filesystem.denyRead).toEqual(expect.arrayContaining([at.electron, at.codexAuth, at.claudeCredentials, at.claudeJson, join(at.temp, 'mousse-pr-1')]))
     expect(sandbox.filesystem.allowRead).toEqual([files, scratch])
-    expect(sandbox.filesystem.denyWrite.sort()).toEqual([join(mousse, 'auth.json'), join(mousse, 'profiles', 'p2'), join(profile, 'bots', 'bots.db'), join(profile, 'harness')].sort())
+    expect([...sandbox.filesystem.denyWrite].sort()).toEqual([join(mousse, 'auth.json'), join(mousse, 'browser'), join(mousse, 'profiles', 'p2'), join(profile, 'bots', 'bots.db'), join(profile, 'harness'), ...outside].sort())
     // Without file access the home stays unreadable but for its own folders, and Claude Code's storage (on macOS; Linux
     // closes more: botApprovalRuntimes.test.ts), and so do Mousse's folders in the temporary folder.
     const own = join(base, '.claude', 'projects', 'x')
-    const without = claudeLockedSandbox({ workspace: authorityOf(permissions(null)).workspace!, temps: [temp], home: base, own: [own], platform: 'darwin' }) as unknown as { filesystem: Record<string, string[]> }
-    expect(without.filesystem).toMatchObject({ denyRead: [base, join(temp, 'mousse-pr-1')], allowRead: [files, scratch, own], allowWrite: [files, scratch] })
+    const without = claudeLockedSandbox({ workspace: authorityOf(permissions(null)).workspace!, temps: [at.temp], home: base, own: [own], platform: 'darwin' }) as unknown as { filesystem: Record<string, string[]> }
+    expect(without.filesystem).toMatchObject({ denyRead: [base, join(at.temp, 'mousse-pr-1')], allowRead: [files, scratch, own], allowWrite: [files, scratch] })
   })
 
-  it('Codex (Linux, macOS): commands read every file and write everything beside Mousse\'s data and the bot\'s own folders in it; Mousse\'s data, and its folders in the temporary folder, are denied', () => {
-    const temp = join(base, 'tmp')
-    for (const dir of [join(temp, 'mousse-chatgpt-x'), join(temp, 'other')]) mkdirSync(dir, { recursive: true })
-    writeFileSync(join(temp, 'mousse-pathspec-y'), 'a\n')
-    const sandbox = codexBotSandbox(authorityOf(permissions(everywhere())), { platform: 'linux', temps: [temp] })
-    const writableRoots = [join(base, 'Documents'), temp, files, scratch]
-    const closed = [mousse, join(temp, 'mousse-chatgpt-x'), join(temp, 'mousse-pathspec-y')]
+  it('Codex (Linux, macOS): commands read every file and write the folders beside Mousse\'s data; Mousse\'s data and every other place closed to bots are denied. Windows keeps its earlier sandbox', () => {
+    const { at, outside } = ownerHome()
+    const granted = authorityOf(withOutside(permissions(everywhere()), outside))
+    const sandbox = codexBotSandbox(granted, { platform: 'linux' })
+    const writableRoots = [join(base, 'Documents'), at.temp, at.user, files, scratch]
+    const closed = [mousse, ...outside]
     expect({ ...sandbox, writableRoots: [...sandbox.writableRoots].sort(), profile: { ...sandbox.profile!, closed: [...sandbox.profile!.closed].sort() } })
       .toEqual({ shell: true, writableRoots: [...writableRoots].sort(), profile: { base: ':root', readable: [], closed: [...closed].sort() } })
+    expect(sandbox.profile!.closed).toEqual(expect.arrayContaining([at.electron, at.codexAuth, at.claudeCredentials, at.claudeJson, join(at.temp, 'mousse-pr-1')]))
     expect(codexTurnPolicy('default', undefined, 'ask', sandbox)).toEqual({ approvalPolicy: 'untrusted', permissions: CODEX_BOT_PROFILE })
     expect(codexBotSandboxConfig(sandbox)[`permissions.${CODEX_BOT_PROFILE}`]).toEqual({
       filesystem: { ':root': 'read', ...Object.fromEntries(writableRoots.map((root) => [root, 'write'])), ...Object.fromEntries(closed.map((entry) => [entry, 'deny'])) },
@@ -213,13 +291,17 @@ describe('each runtime compiles file access to the whole file system but Mousse\
     // for writing inside `profiles`.
     const codexPackage = join(mousse, 'managed', 'codex', '0.162.1')
     mkdirSync(codexPackage, { recursive: true })
-    const managed = codexBotSandbox(authorityOf(permissions(everywhere())), { platform: 'linux', temps: [], codexPackage })
-    expect([...managed.profile!.closed].sort()).toEqual([join(mousse, 'auth.json'), join(mousse, 'profiles')].sort())
-    // On Windows Codex can't keep commands out of Mousse's data: with or without file access, the turn doesn't run.
-    expect(codexBotSandbox(authorityOf(permissions(everywhere())), { platform: 'win32' })).toMatchObject({ shell: true, unheld: true })
-    expect(codexBotSandbox(authorityOf(permissions(null)), { platform: 'win32' })).toEqual({ shell: true, writableRoots: [files, scratch], unheld: true })
+    const managed = codexBotSandbox(granted, { platform: 'linux', codexPackage })
+    expect([...managed.profile!.closed].sort()).toEqual([join(mousse, 'auth.json'), join(mousse, 'browser'), join(mousse, 'profiles'), ...outside].sort())
+    // Windows: the `workspaceWrite` sandbox as before this change (every entry beside Mousse's data writable, every file
+    // readable): no profile, and the turn runs.
+    const windows = codexBotSandbox(granted, { platform: 'win32' })
+    expect(windows.profile).toBeUndefined()
+    expect(windows.writableRoots).toEqual(expect.arrayContaining([join(base, 'Documents'), files, scratch]))
+    expect(codexTurnPolicy('default', undefined, 'ask', windows)).toMatchObject({ sandbox: 'workspace-write' })
+    expect(codexBotSandbox(authorityOf(permissions(null)), { platform: 'win32' })).toEqual({ shell: true, writableRoots: [files, scratch] })
     // On the real file system: never the kernel's own folders, never Mousse's data.
-    const whole = codexBotSandbox({ tools: new Set(['shell'] as const), workspace: { roots: ['/'], access: 'write', scratch, files, computer: { closed: mousse } } }, { platform: 'linux', temps: [] })
+    const whole = codexBotSandbox({ tools: new Set(['shell'] as const), workspace: { roots: ['/'], access: 'write', scratch, files, computer: { closed: mousse } } }, { platform: 'linux' })
     for (const kernel of ['/proc', '/sys', '/dev']) expect(whole.writableRoots).not.toContain(kernel)
     expect(whole.writableRoots).toContain(files)
     expect(whole.profile?.closed).toEqual([mousse])

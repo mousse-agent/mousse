@@ -230,8 +230,8 @@ describe('What bots may do here, at each runtime\'s own gate (the owner\'s Claud
     expect(codexBotSandboxConfig(codex)).toMatchObject({
       [`permissions.${CODEX_BOT_PROFILE}`]: { filesystem: { ':minimal': 'read', '/opt/codex': 'read', ...Object.fromEntries(mine.map((root) => [root, 'write'])) }, network: { enabled: false } }
     })
-    // On Windows Codex's sandbox reads every file, Mousse's data included: a bot that may run commands doesn't run there.
-    expect(codexBotSandbox(prepared.authority, { codexPackage: '/opt/codex', platform: 'win32' })).toMatchObject({ unheld: true })
+    // On Windows Codex keeps its workspace-write sandbox, which reads every file (docs/bots.md: commands aren't held there).
+    expect(codexBotSandbox(prepared.authority, { codexPackage: '/opt/codex', platform: 'win32' }).profile).toBeUndefined()
     // Claude Code on Linux: every top folder but the system's own is unreadable (`/run`, with removable drives and the
     // user's runtime folder, included), and the home folder; the bot's folders are not. Claude Code's shared temporary
     // folders, when the turn keeps its own elsewhere, are closed read and write.

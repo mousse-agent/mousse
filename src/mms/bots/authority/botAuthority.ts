@@ -77,7 +77,7 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
     workspace: workspace ? {
       roots: [...workspace.roots], access: workspace.access, writeRoots: [...workspace.writeRoots], scratch: workspace.scratch,
       ...(permissions.workspace?.files !== undefined ? { files: permissions.workspace.files } : {}),
-      ...(computer ? { computer: { closed: computer.closed } } : {})
+      ...(computer ? { computer: { closed: computer.closed, ...(computer.outside ? { outside: [...computer.outside] } : {}) } } : {})
     } : null,
     waiting: input.waiting,
     counters: input.counters,
@@ -150,7 +150,7 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
     if (!paths.length) return { ok: true }
     // File access switched off here: only the bot's own folders, whatever this turn started with.
     if (!limit.files) return checkOwn(nativeName, paths, scratch, writes, access)
-    if (computer) return checkEverywhere(nativeName, paths, scratch, computer.closed)
+    if (computer) return checkEverywhere(nativeName, paths, scratch, computer.closed, computer.outside ?? [])
     for (const raw of paths) {
       // Git metadata is never a file tool's to change, in the scratch folder or a root (`agents/gitMetadata`).
       if (writes && touchesGitMetadata(raw, scratch)) return { ok: false, wall: { kind: 'path', tool: nativeName, path: raw, access } }
@@ -194,15 +194,21 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
 
   /**
    * File access: any path, read or write, but one inside Mousse's own data that is not the bot's
-   * (its files folder or scratch), on the path as named and on the real path its links lead to.
-   * Neither refusal asks the owner anything: the bot already has all there is to ask for.
+   * (its files folder or scratch), or inside one of the other places closed to bots (`outside`: Mousse's
+   * other data and sign-ins, the CLIs' sign-in files, `botClosedPlaces`), on the path as named and on
+   * the real path its links lead to. Neither refusal asks the owner anything: the bot already has all
+   * there is to ask for.
    */
-  function checkEverywhere(nativeName: string, paths: readonly string[], scratch: string, closed: string): { ok: true } | { ok: false; wall: WallReason } {
+  function checkEverywhere(nativeName: string, paths: readonly string[], scratch: string, closed: string, outside: readonly string[]): { ok: true } | { ok: false; wall: WallReason } {
     for (const raw of paths) {
       const named = resolve(scratch, raw)
-      for (const path of new Set([named, realPathOf(named)]))
+      for (const path of new Set([named, realPathOf(named)])) {
         if (insideFolder(closed, path) && !ownInClosed.some((folder) => insideFolder(folder, path)))
           return { ok: false, wall: { kind: 'closed', tool: nativeName, path: raw } }
+        // A place that holds the bot's own folders (a test's home in the temporary folder) is not closed to them.
+        if (outside.some((place) => insideFolder(place, path) && !ownInClosed.some((folder) => insideFolder(place, folder))))
+          return { ok: false, wall: { kind: 'closed', tool: nativeName, path: raw } }
+      }
     }
     return { ok: true }
   }

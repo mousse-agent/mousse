@@ -70,11 +70,11 @@ describe('policy table: permission decisions', () => {
       sandboxPolicy: { type: 'workspaceWrite', writableRoots: ['/p/files/b1', '/home/me/site'], networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true }
     })
     // A bot's grant decides it: the folders it may write, its files folder and scratch, only with shell. On Linux and
-    // macOS under Mousse's profile; on Windows Codex can't hold its commands, and the turn is refused (`unheld`).
+    // macOS under Mousse's profile; on Windows in the `workspaceWrite` sandbox, as before.
     const workspace = { roots: ['/home/me/site', '/home/me/ref'], access: 'read' as const, writeRoots: ['/home/me/site', '/p/files/b1'], scratch: '/p/scratch/a', files: '/p/files/b1' }
     const writableRoots = ['/home/me/site', '/p/files/b1', '/p/scratch/a']
     expect(codexBotSandbox({ tools: new Set(['read', 'shell']), workspace }, { platform: 'linux' })).toEqual({ shell: true, writableRoots, profile: { base: ':minimal', readable: ['/home/me/ref'], closed: [] } })
-    expect(codexBotSandbox({ tools: new Set(['read', 'shell']), workspace }, { platform: 'win32' })).toEqual({ shell: true, writableRoots, unheld: true })
+    expect(codexBotSandbox({ tools: new Set(['read', 'shell']), workspace }, { platform: 'win32' })).toEqual({ shell: true, writableRoots })
     expect(codexBotSandbox({ tools: new Set(['read']), workspace }, { platform: 'win32' })).toEqual({ shell: false, writableRoots: [] })
     expect(codexBotSandbox({})).toEqual({ shell: false, writableRoots: [] })
   })

@@ -313,9 +313,8 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
     // mode, and each approval is answered by the bot's authority (`vendors/codex/botApprovals.ts`).
     botAuthority: () => true,
     botApprovals: () => true,
-    // A Codex whose version hasn't been checked for bots, or Codex on Windows, where a bot that may run commands doesn't
-    // run: Runs on says so before any work is sent (the turn is refused too).
-    botRunsOnNote: (_config, installedVersion) => codexBotRunsOnNote(installedVersion, CODEX_BOT_CHECKED_VERSIONS, platform),
+    // A Codex whose version hasn't been checked for bots: Runs on says so before any work is sent (the turn is refused too).
+    botRunsOnNote: (_config, installedVersion) => codexBotRunsOnNote(installedVersion, CODEX_BOT_CHECKED_VERSIONS),
     nativeToolNames: (neutral) => CODEX_NATIVE_TOOLS[neutral] ?? [],
     updateCommand: (owner: InstallOwner) => {
       if (owner === 'npm') return 'npm install -g @openai/codex@latest'

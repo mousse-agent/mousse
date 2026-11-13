@@ -9,7 +9,7 @@ import type { BotAuthority, BotMcpTool } from '../../../shared/bots/personal/aut
 import { botAppToolRefusal, checkBuiltinCall, checkMessage, wallMessage } from '../../../shared/bots/personal/walls'
 import { runtimeExpandedPath } from '../../bots/authority/botAuthority'
 import { entriesBeside } from '../../bots/grants/compile'
-import { mousseTempEntries } from '../../data/mousseTemp'
+import { mousseTempEntries, writableFolder } from '../../data/closedPlaces'
 import { neutralToolIdempotent, neutralToolsOf, type NativeToolTable, type NeutralTool } from '../../../shared/harness/tools'
 import type { HarnessCaps } from '../../../shared/harness/types'
 import { withoutTransportFields } from '../../agentDefinitions/definitionGate'
@@ -445,9 +445,11 @@ export function claudeCommandsRefusal(authority: Pick<BotAuthority, 'tools' | 'w
  *
  * With file access (`workspace.computer`, bot-architecture.md §3.7) commands see the whole file
  * system, read and write, but Mousse's own data folder: unreadable but for the files folder and
- * scratch, and every entry in it that does not lead to them unwritable (`entriesBeside`).
+ * scratch, and every entry in it that does not lead to them unwritable (`entriesBeside`); and the
+ * other places closed to bots (`computer.outside`, `botClosedPlaces`), unreadable and unwritable.
  *
- * Either way the folders Mousse keeps in the temporary folders when the turn starts (`mousseTempEntries`) are unreadable.
+ * Without it, the folders Mousse keeps in the temporary folders when the turn starts (`mousseTempEntries`) are
+ * unreadable too; everything else on that list is in the home folder or a top folder already closed.
  */
 export function claudeLockedSandbox(input: { workspace: NonNullable<BotAuthority['workspace']>; temps: readonly string[]; home?: string; own?: readonly string[]; platform?: NodeJS.Platform; tops?: () => readonly string[]; sharedTemp?: readonly string[]; exists?: (path: string) => boolean }): SandboxSettings {
   const sharedTemp = input.sharedTemp ?? []
@@ -459,12 +461,14 @@ export function claudeLockedSandbox(input: { workspace: NonNullable<BotAuthority
   const writeRoots = input.workspace.writeRoots ?? (access === 'write' ? roots : [])
   const readRoots = roots.filter((root) => !writeRoots.includes(root))
   const mine = [...(input.workspace.files !== undefined ? [input.workspace.files] : []), scratch]
-  // Mousse's own folders in the temporary folders, as they are when the turn starts: unreadable, with or without file
-  // access, unless one holds the bot's own folders.
-  const mousseTemps = mousseTempEntries(input.temps).filter((entry) => ![...mine, ...own].some((folder) => {
-    const child = relative(entry, folder)
+  // The places closed to bots (with file access, `computer.outside`; without it, Mousse's own folders in the temporary
+  // folders as they are when the turn starts), but one that holds the bot's own folders.
+  const notMine = (place: string): boolean => ![...mine, ...own].some((folder) => {
+    const child = relative(place, folder)
     return child === '' || (!isAbsolute(child) && child !== '..' && !child.startsWith(`..${sep}`))
-  }))
+  })
+  const outside = (computer?.outside ?? []).filter(notMine)
+  const mousseTemps = computer ? [] : mousseTempEntries(input.temps).filter(notMine)
   return {
     enabled: true,
     failIfUnavailable: true,
@@ -474,9 +478,11 @@ export function claudeLockedSandbox(input: { workspace: NonNullable<BotAuthority
     enableWeakerNestedSandbox: false,
     filesystem: computer
       ? {
-          allowWrite: [...new Set([...roots, ...mine])],
-          denyWrite: entriesBeside(computer.closed, mine),
-          denyRead: [computer.closed, ...mousseTemps],
+          // Every folder beside Mousse's data that this user can write (`writableFolder`), as for Codex: `/` itself makes
+          // Claude Code's sandbox fail every command (it can't make its `/etc/claude-code` mount point).
+          allowWrite: [...new Set([...roots.flatMap((root) => entriesBeside(root, [computer.closed])).filter(writableFolder), ...mine])],
+          denyWrite: [...entriesBeside(computer.closed, mine), ...outside],
+          denyRead: [computer.closed, ...outside],
           allowRead: [...new Set(mine)]
         }
       : {
