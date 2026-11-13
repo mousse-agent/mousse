@@ -317,7 +317,10 @@ export function claudeLockedOptions(turn: ClaudeLockedTurn, input: {
     tools,
     disallowedTools,
     permissionMode: 'default',
-    systemPrompt: turn.systemPrompt,
+    // The bot's own system text, rendered as given on every request of the session (never kept from its first one): a
+    // turn after an Allow resumes the session with the wider permissions in it. It is the same text on every turn of an
+    // activation, so the prompt cache holds.
+    systemPrompt: { type: 'custom', prompt: turn.systemPrompt, snapshot: false },
     maxTurns: CLAUDE_LOCKED_MAX_TURNS,
     ...(shell ? { sandbox: claudeLockedSandbox({ workspace: turn.authority.workspace!, temps: turn.temps, ...(input.home ? { home: input.home } : {}), ...(turn.own ? { own: turn.own.folders } : {}) }) } : {}),
     ...(input.spawn ? { spawnClaudeCodeProcess: input.spawn } : {})
@@ -380,6 +383,10 @@ const GATE_FAILED = 'This call could not be checked against the bot\'s permissio
 export class ClaudeLockedGate {
   /** Ledger rows of allowed calls, by `tool_use_id`. */
   private readonly rows = new Map<string, string>()
+  /** Calls `canUse` allowed that have not ended (`committed` or `failed`), by `tool_use_id`. */
+  private readonly running = new Set<string>()
+  /** A steer's cut is decided and the query is being interrupted: no call starts until the query that carries it. */
+  private cutting = false
 
   constructor(
     private readonly turn: ClaudeLockedTurn,
@@ -445,6 +452,7 @@ export class ClaudeLockedGate {
    * count limit, so the count never refuses here.
    */
   preToolUse(toolName: string, args: Record<string, unknown>): Decision {
+    if (this.cutting) return { ok: false, reason: CLAUDE_CUT_REFUSAL }
     // Fails closed: a check or count that throws (a busy bots.db) denies the call.
     try {
       const decided = this.decide(toolName, args)
@@ -463,8 +471,11 @@ export class ClaudeLockedGate {
    * are idempotent; `edit`, `write` and `shell` are not). A Mousse tool's row is the registry's.
    */
   canUse(toolName: string, args: Record<string, unknown>, toolUseId: string): Decision {
+    if (this.cutting) return { ok: false, reason: CLAUDE_CUT_REFUSAL }
     try {
-      return this.allow(toolName, args, toolUseId)
+      const decided = this.allow(toolName, args, toolUseId)
+      if (decided.ok) this.running.add(toolUseId)
+      return decided
     } catch (error) {
       console.warn('[claude-locked] the grant gate failed; the call is denied', error instanceof Error ? error.message : String(error))
       return { ok: false, reason: GATE_FAILED }
@@ -485,6 +496,7 @@ export class ClaudeLockedGate {
 
   /** `PostToolUse`: the call's row is committed. */
   committed(toolUseId: string): void {
+    this.running.delete(toolUseId)
     const row = this.rows.get(toolUseId)
     if (!row) return
     this.rows.delete(toolUseId)
@@ -493,12 +505,34 @@ export class ClaudeLockedGate {
 
   /** `PostToolUseFailure`: the call's row is failed. */
   failed(toolUseId: string): void {
+    this.running.delete(toolUseId)
     const row = this.rows.get(toolUseId)
     if (!row) return
     this.rows.delete(toolUseId)
     this.turn.ledger?.failed(row)
   }
+
+  /**
+   * A call this gate let start has not ended. The steer's cut waits for it: Claude Code may run a call before Mousse has
+   * read the frame that announces it, so the turn's own list of tools can miss one that runs.
+   */
+  get busy(): boolean {
+    return this.running.size > 0
+  }
+
+  /**
+   * A steer's cut is decided (`true`) until the query that carries the steer starts (`false`). Meanwhile every call is
+   * refused before it runs, so nothing that starts between the check and the interrupt is cut mid-run. A new query
+   * starts with no call of the old one still running.
+   */
+  cut(active: boolean): void {
+    this.cutting = active
+    if (!active) this.running.clear()
+  }
 }
+
+/** A call made after a note's cut was decided, before the interrupt landed: it never ran. */
+export const CLAUDE_CUT_REFUSAL = 'This call did not run: your turn is pausing for a moment to take a note from your owner. Make it again afterwards if you still need it.'
 
 /** How long a locked turn's process group has to end after SIGTERM before it is killed. */
 export const CLAUDE_LOCKED_KILL_GRACE_MS = 2_000

@@ -192,6 +192,15 @@ export class BotScheduleBook {
   }
 
   /**
+   * An occurrence the bot took but never ran (a full queue dropped it): the automation shows why, as for an occurrence
+   * skipped when it was due (`botSkip`), until the next one is handed over.
+   */
+  skipped(botId: string, scheduleId: string, skip: { at: string; reason: string }): void {
+    const entry = this.get(botId, scheduleId)
+    if (entry) this.options.jobs.updateJob(entry.jobId, { botSkip: { at: skip.at, reason: skip.reason } })
+  }
+
+  /**
    * Adds a schedule: at most 8 per bot, at least 5 minutes apart. It needs no approval (a schedule is not a permission)
    * and starts from now, so it never runs for times before it existed.
    */

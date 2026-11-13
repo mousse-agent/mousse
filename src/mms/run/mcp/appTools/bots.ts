@@ -103,7 +103,7 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'work_start',
-    description: 'Hand work that takes more than a moment to a run of its own, so you stay free to talk: anything on the web or in the browser, running commands, research, writing a document, or several steps. It runs beside this chat and reports to the owner when done, as a reply to their message. Work runs one at a time; later work waits its turn. The run sees your memory but not this chat, so the brief must stand on its own: what to do, everything the owner told you that matters, and what the report should contain. Then tell the owner in one short line that you are on it.',
+    description: 'Hand work that takes more than a moment to a run of its own, so you stay free to talk: anything on the web or in the browser, running commands, research, writing a document, or several steps. It runs beside this chat and reports to the owner when done, as a reply to their message. Up to 3 pieces of work run at once, so a quick lookup can start beside a long job; more wait their turn. The run sees your memory but not this chat, so the brief must stand on its own: what to do, everything the owner told you that matters, and what the report should contain. Then tell the owner in one short line that you are on it.',
     parameters: Type.Object({
       title: Type.String({ description: 'A few words the owner will recognise, like "Vacuum comparison".' }),
       brief: Type.String({ description: 'The whole task, standing on its own.' })
@@ -363,7 +363,7 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         const title = typeof args.title === 'string' ? args.title : ''
         try {
           const started = await call.deps.host.work.start(call.botId, call.activationId, { title, brief, key: `${call.activationId}:${ctx.toolCallId ?? randomUUID()}` })
-          const result = { ...started, note: started.status === 'queued' ? `It starts after: ${started.ahead.join('; ')}. Tell the owner it is next in line.` : started.status === 'ended' ? 'This work already ran and ended; see work_list for its report.' : 'It is running. Tell the owner you are on it; its report reaches them by itself.' }
+          const result = { ...started, note: started.status === 'queued' ? `It starts when there is room, after: ${started.ahead.join('; ')}. Tell the owner it waits its turn.` : started.status === 'ended' ? 'This work already ran and ended; see work_list for its report.' : 'It is running, beside anything else you are working on. Tell the owner you are on it; its report reaches them by itself.' }
           call.deps.activity?.onAppResult(call.activity, 'work_start', started)
           return json(result)
         } catch (failure) {
@@ -407,7 +407,15 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         if (result === 'not_found') return error('You have no work with that id. See work_list.')
         if (result === 'ended') return json({ result, note: 'That work already finished, so it never saw this. Start new work for it if it still matters.' })
         if (result === 'held') return json({ result, note: 'That work is held (it stopped part-way), so it can\'t take notes. Stop it and start new work with this if it still matters.' })
-        return json({ result, note: 'It takes this into account before it reports.' })
+        // Tell the owner the truth about when the work sees it.
+        const reach = call.deps.host.work.reach?.(call.botId, args.workId) ?? 'step_end'
+        return json({ result, reaches: reach, note: reach === 'now'
+          ? 'The work gets this at its next step, while it keeps working, and its report will lead with what changed. Tell the owner it has it now.'
+          : reach === 'after_compaction'
+            ? 'The work is making room in its memory of this job right now; it gets this as soon as that ends (within a few minutes) and keeps working, and its report will lead with what changed. Tell the owner it gets it in a few minutes.'
+          : reach === 'step_end'
+            ? 'The work gets this when the step it is on now ends, then carries on with it and updates its report. Tell the owner it gets it when this step ends.'
+            : 'The work gets this when it starts (or carries on), and takes it into account before it reports. Tell the owner it has it.' })
       }
     }),
     ownTool(byName.get('remind')!, deps, {

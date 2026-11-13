@@ -255,10 +255,10 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   // The sent messages and those on their way, in one run of groups: who starts and ends each, and the day lines.
   const shown = useMemo(() => (pending.length ? [...messages, ...pending] : messages), [messages, pending])
   const places = useMemo(() => placeMessages(shown), [shown])
-  // The bot's own browser: its last run's reply shows a live preview, and Expand opens the split view.
+  // The bot's own browser: the reply of the run whose tab it shows has a live preview, and Expand opens the split view.
   const browser = useBotBrowser(bot.id, true)
   const paneOpen = useBotBrowserStore((s) => s.paneBotId === bot.id)
-  const browserRun = browser?.activations.at(-1)
+  const browserRun = browser?.activationId ?? browser?.activations.at(-1)
   const previewOn = browserRun ? messages.filter((message) => message.author === 'bot' && message.activationId === browserRun).at(-1)?.id : undefined
   const preview = browser && browserRun ? <BotBrowserPreview bot={bot} view={browser} /> : null
 

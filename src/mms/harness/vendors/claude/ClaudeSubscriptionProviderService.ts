@@ -228,6 +228,8 @@ export type ClaudeSubscriptionChatInput = {
   onStatus?: (status: 'waiting' | 'reasoning') => void
   /** Claude Code tries a failed request again. */
   onRetry?: (retry: { attempt: number; maxAttempts?: number; delayMs?: number; noResponse?: boolean }) => void
+  /** Claude Code compacts the session inside the turn (`TurnFrameSink.onCompaction`). */
+  onCompaction?: (phase: 'start' | 'complete') => void
   onMetrics?: (report: ClaudeSubscriptionMetrics) => void
   onLineEdits?: (lines: number) => void
   drainSteer?: () => string | undefined
@@ -2684,9 +2686,9 @@ export class ClaudeSubscriptionProviderService {
     const withTurn = (sessionId: string): SessionTurn[] =>
       [...turnsBefore(sessionId), promptId ? { prompt: promptId } : {}].slice(-KEPT_TURNS)
     /**
-     * A one-shot query's steers (no live session: a turn past the live-process cap; a bot's turn is one too, but bot
-     * threads are not steered), collected and waiting to go in as the prompt of the query that restarts the turn. Taken,
-     * not accepted: Claude Code has not seen them.
+     * A one-shot query's steers (no live session: a turn past the live-process cap, or a bot's turn, which takes its
+     * owner's notes and its pack after a compaction this way; nobody else steers a bot's thread), collected and waiting
+     * to go in as the prompt of the query that restarts the turn. Taken, not accepted: Claude Code has not seen them.
      */
     const steers: OneShotSteer[] = []
     /** The steers the restarted query carries as its prompt, under that prompt's id, until the model answers it. */
@@ -2777,8 +2779,9 @@ export class ClaudeSubscriptionProviderService {
       const steer = (drained ? drained.text : holds ? undefined : input.drainSteer?.())?.trim()
       if (!steer) return
       const forced = drained?.forced === true
-      // The check at dispatch, right before the cut is sent: a tool announced meanwhile keeps the steer waiting.
-      const mayCut = (): boolean => !drained || !input.mayCut || input.mayCut(drained.token)
+      // The check at dispatch, right before the cut is sent: a tool announced meanwhile keeps the steer waiting. On a
+      // bot's turn, so does a call its gate let start that Mousse has not seen announced yet (`ClaudeLockedGate.busy`).
+      const mayCut = (): boolean => !turn.locked?.busy && (!drained || !input.mayCut || input.mayCut(drained.token))
       // Accepted by its drain's token, when the drain has one (`TurnSink.steerAccepted`).
       const steered = (): void => {
         if (drained) input.onSteer?.(steer, drained.token)
@@ -2823,6 +2826,8 @@ export class ClaudeSubscriptionProviderService {
       steers.push({ text: steer, ...(drained ? { token: drained.token } : {}), steered })
       if (query && !interruptRequested) {
         interruptRequested = true
+        // From the cut's check to the interrupt landing, a bot's gate lets no call start: none is cut mid-run.
+        turn.locked?.cut(true)
         this.questions.autoRejectPendingForThread(input.threadId)
         void query.interrupt().catch(() => cancel())
       }
@@ -3225,6 +3230,7 @@ export class ClaudeSubscriptionProviderService {
             }
           })()
           interruptRequested = false
+          turn.locked?.cut(false)
           success = false
           if (frames.text) frames.text += '\n\n'
         }

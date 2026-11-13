@@ -69,6 +69,12 @@ export interface BotToolHost {
     stop(botId: string, workId: string): Promise<'stopped' | 'ended' | 'not_found'>
     /** `from`: the chat activation that passes it on (its owner's message is the note's source). */
     note(botId: string, workId: string, note: string, from?: string): 'noted' | 'held' | 'ended' | 'not_found'
+    /**
+     * When a note reaches the work: `now` (at its next step, while it runs), `after_compaction` (its runtime is making
+     * room in its context: once that ends, within minutes), `step_end` (when its current turn ends: its runtime takes no
+     * notes while it runs), or `start` (when it starts or goes on).
+     */
+    reach?(botId: string, workId: string): 'now' | 'after_compaction' | 'step_end' | 'start'
   }
   /** One-off reminders: said at a time, or work started then. */
   reminders: {
