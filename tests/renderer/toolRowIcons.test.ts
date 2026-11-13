@@ -91,6 +91,15 @@ describe('the icon of each tool', () => {
   })
 })
 
+describe('the running icon', () => {
+  it('is still with motion off or reduced motion', async () => {
+    const { readFileSync } = await import('node:fs')
+    const css = readFileSync('src/renderer/chat/components/agent-elements/tools/tool-icon.css', 'utf8')
+    expect(css).toMatch(/\[data-motion='off'\] \.an-tool-icon\[data-state='running'\] \{\s*animation: none !important;/)
+    expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\) \{\s*\.an-tool-icon\[data-state='running'\] \{\s*animation: none !important;/)
+  })
+})
+
 describe('a command', () => {
   const command = 'npm test -- --run tests/cache.test.ts'
   const output = 'Test Files  1 passed (1)\n     Tests  4 passed (4)'

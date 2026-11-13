@@ -212,6 +212,15 @@ describe('the Windows drive list', () => {
     ])
   })
 
+  it('never reads a network drive: its name comes from the saved mapping, not the drive', async () => {
+    const { readFileSync } = await import('node:fs')
+    const source = readFileSync(new URL('../src/mms/files/drives.ts', import.meta.url), 'utf8')
+    const script = source.slice(source.indexOf('const WINDOWS_DRIVES_SCRIPT'), source.indexOf("].join('\\n')"))
+    const network = script.slice(script.indexOf("-eq 'Network'"), script.indexOf('} else {'))
+    expect(network).toContain('HKCU:')
+    expect(network).not.toMatch(/IsReady|VolumeLabel|TotalSize|AvailableFreeSpace/)
+  })
+
   it('is shared by calls close together', async () => {
     forgetFilesPlaces()
     const first = listFilesPlaces('linux', 1_000)

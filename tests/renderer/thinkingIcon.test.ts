@@ -48,6 +48,12 @@ describe('Thinking icon', () => {
     // No colour animation, which would paint every frame.
     expect(css).not.toMatch(/@keyframes[^{]*\{[^@]*color:/)
   })
+
+  it('is still with motion off or reduced', () => {
+    const css = readFileSync('src/renderer/styles/thinking-icon.css', 'utf8')
+    expect(css).toMatch(/\[data-motion='off'\] \.thinking-icon\.is-thinking\s*\{\s*animation: none !important;/)
+    expect(css).toMatch(/prefers-reduced-motion: reduce\)\s*\{\s*\.thinking-icon\.is-thinking\s*\{\s*animation: none !important;/)
+  })
 })
 
 describe('Thinking shimmer in light themes', () => {

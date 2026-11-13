@@ -232,3 +232,15 @@ describe('new thread settings row', () => {
     expect(host.querySelector('[aria-label="Runs on this computer"]')).toBeNull()
   })
 })
+
+describe('new thread rows in the chat', () => {
+  it('render once each: sibling keys differ, so neither row is duplicated on re-render', async () => {
+    const { readFileSync } = await import('node:fs')
+    const chat = readFileSync(`${process.cwd()}/src/renderer/components/OrchestratorChat.tsx`, 'utf8')
+    const keyOf = (tag: string) => chat.slice(chat.indexOf(`<${tag}`)).match(/key=(.+)/)?.[1].trim()
+    expect(chat.match(/<ComposerProjectPicker\b/g)).toHaveLength(1)
+    expect(chat.match(/<ComposerThreadSettings\b/g)).toHaveLength(1)
+    expect(keyOf('ComposerProjectPicker')).toBeTruthy()
+    expect(keyOf('ComposerProjectPicker')).not.toBe(keyOf('ComposerThreadSettings'))
+  })
+})

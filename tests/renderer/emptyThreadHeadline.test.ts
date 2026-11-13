@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -73,6 +75,13 @@ describe('an empty chat', () => {
     // No "Incognito" word: the headline itself says the chat is private.
     expect(host.textContent).not.toContain('Incognito')
     expect(PRIVATE_THREAD_HEADLINES).toContain(host.querySelector('h1.chat-empty-title')?.textContent)
+  })
+
+  it('renders them above the composer, picked once per chat', () => {
+    const chat = readFileSync(resolve(__dirname, '../../src/renderer/components/OrchestratorChat.tsx'), 'utf8')
+    expect(chat).toContain('{emptyThread && <EmptyThreadHeading headline={emptyHeadline} />}')
+    expect(chat.indexOf('<EmptyThreadHeading')).toBeLessThan(chat.indexOf('<ComposerProjectPicker'))
+    expect(chat).toMatch(/useMemo\(\(\) => emptyThreadHeadline\(new Date\(\), activeThreadId \?\? '__blank__'\), \[activeThreadId\]\)/)
   })
 })
 
