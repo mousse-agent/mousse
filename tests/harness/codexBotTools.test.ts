@@ -108,7 +108,9 @@ for (const BINARY of BINARIES) describe.skipIf(!BINARY)(`what Codex ${BINARY ? v
       .split('\n').map((line) => line.trim().split(/\s+/)[0]!).filter((name) => /^[a-z0-9_]+$/.test(name))
     expect(named.length).toBeGreaterThan(50)
     // `rollout_budget` won't load without settings whose form isn't documented; it is switched off for bots instead.
-    const features = [...new Set([...named, ...CODEX_BOT_FEATURES_OFF])].filter((name) => name !== 'rollout_budget')
+    // `MOUSSE_CODEX_FEATURES_LEFT_OUT` (names, comma-separated) leaves features off: to find which one adds a tool.
+    const leftOut = new Set(['rollout_budget', ...(process.env.MOUSSE_CODEX_FEATURES_LEFT_OUT ?? '').split(',').filter(Boolean)])
+    const features = [...new Set([...named, ...CODEX_BOT_FEATURES_OFF])].filter((name) => !leftOut.has(name))
     writeFileSync(join(codexHome, 'config.toml'), [
       'model_provider = "probe"',
       'sandbox_mode = "danger-full-access"',
