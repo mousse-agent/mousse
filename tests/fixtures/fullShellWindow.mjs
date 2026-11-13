@@ -3,8 +3,14 @@
 import { app, BrowserWindow } from 'electron'
 
 /** Every window opens off-screen, transparent, click-through, out of the taskbar and unable to
- * take focus. It still counts as shown, so the page paints and `capturePage` keeps working. */
+ * take focus. It still counts as shown, so the page paints and `capturePage` keeps working.
+ *
+ * macOS pulls such a window back onto the screen, but X11 without a window manager (Xvfb in CI) keeps it
+ * off-screen and reports it fully obscured, and Chromium then treats every page in it as occluded: a page
+ * with background throttling on, such as an applet, stops rendering, so its ResizeObserver never fires.
+ * This switch makes an occluded window count as visible, which is what a test window off-screen means. */
 export function keepWindowsOffScreen() {
+  app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
   const proto = BrowserWindow.prototype
   proto.show = function show() {
     const { width, height } = this.getBounds()
