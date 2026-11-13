@@ -9,7 +9,7 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BOT_ASK_REFUSED_TEXT } from '../../src/mms/bots/activation/BotEngine'
-import { CLAUDE_TOPS_UNLISTED, claudeCommandsRefusal, ClaudeLockedGate, claudeLockedOptions, claudeLockedSandbox, claudeLockedTools, claudeOwnStorage, claudeProjectName, type ClaudeLockedTurn } from '../../src/mms/harness/claude/locked'
+import { CLAUDE_TOPS_UNLISTED, claudeBotTemp, claudeCommandsRefusal, ClaudeLockedGate, claudeLockedOptions, claudeLockedSandbox, claudeLockedTools, claudeOwnStorage, claudeProjectName, type ClaudeLockedTurn } from '../../src/mms/harness/claude/locked'
 import { filesAsk } from '../../src/shared/bots/personal/escalation'
 import { CODEX_BOT_UNSANDBOXED_REFUSAL, codexBotCommand, codexBotFileChange } from '../../src/mms/harness/vendors/codex/botApprovals'
 import { CODEX_BOT_PROFILE, codexBotSandbox, codexBotSandboxConfig, codexTurnPolicy } from '../../src/mms/harness/vendors/codex/childPolicy'
@@ -263,6 +263,28 @@ describe('What bots may do here, at each runtime\'s own gate (the owner\'s Claud
     // Not refused where it doesn't apply: listable, another platform, or file access (whose sandbox closes Mousse's data only).
     expect(claudeCommandsRefusal(prepared.authority, 'linux', () => ['usr'])).toBeUndefined()
     expect(claudeCommandsRefusal(prepared.authority, 'darwin', unlisted)).toBeUndefined()
+    await finish(f, payload, 'completed', { text: 'Done.' })
+  })
+
+  it('Claude Code on Linux keeps a bot\'s own temporary files private only in a runtime folder under /run, which its sandbox closes; elsewhere the turn keeps Claude Code\'s shared one', async () => {
+    limit = { ...limit, files: false }
+    const { prepared, payload } = await run('r1')
+    const cwd = prepared.authority.workspace!.files!
+    // A runtime folder in the shared temporary folder is open to every bot: no private folder there.
+    expect(claudeBotTemp(prepared.authority, {}, cwd, 'linux', '/tmp/runtime-1000')).toBeUndefined()
+    expect(claudeBotTemp(prepared.authority, {}, cwd, 'linux', undefined)).toBeUndefined()
+    expect(claudeBotTemp(prepared.authority, {}, cwd, 'darwin', '/run/user/1000')).toBeUndefined()
+    // Where it is real (Linux with one), the folder is its own, short enough for Claude Code to give its commands, and
+    // the shared folders are the ones the sandbox closes (the real program: claudeMcpCommandLine.test.ts).
+    const runtime = process.platform === 'linux' ? process.env.XDG_RUNTIME_DIR : undefined
+    if (runtime?.startsWith('/run/')) {
+      const temp = claudeBotTemp(prepared.authority, { TMPDIR: '/var/tmp/x' }, cwd, 'linux', runtime)
+      if (temp) {
+        expect(temp.dir.startsWith(`${runtime}/mb`)).toBe(true)
+        expect(Buffer.byteLength(temp.dir)).toBeLessThanOrEqual(30)
+        expect(temp.shared).toEqual([`/tmp/claude-${process.getuid!()}`, `/var/tmp/x/claude-${process.getuid!()}`])
+      }
+    }
     await finish(f, payload, 'completed', { text: 'Done.' })
   })
 })
