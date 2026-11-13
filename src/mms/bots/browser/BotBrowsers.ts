@@ -934,7 +934,12 @@ export class BotBrowsers implements BotBrowserHost {
       if (!paths) return refused('failed', 'Choose the file again')
       input = { kind: 'files', paths }
     } else input = inputForPage(sent.input, hold.platform)
-    const spot = this.place(state, hold, sent.picture)
+    let spot = this.place(state, hold, sent.picture)
+    // An older app names no picture: with none of the tab known yet, the page as it is now is its picture.
+    if (!spot && hold.legacy && located(input)) {
+      await this.takeFrame(state).catch(() => undefined)
+      spot = this.place(state, hold, sent.picture)
+    }
     if (located(input)) {
       // A button let go of goes without a place: the worker lets it go where the pointer is.
       if (!spot && !(input.kind === 'pointer' && input.type === 'up')) {

@@ -182,6 +182,8 @@ function host(options: { results?: (input: BrowserHumanInput, entry: { spot?: Br
         return new Promise(() => undefined)
       },
       viewerStop: async () => undefined,
+      // A fresh picture of the tab (an older app asks for these), with where it was taken.
+      frame: async () => ({ tabId: 'tab_1', url: 'https://a.test/', title: 'A', data: '/9j/', mimeType: 'image/jpeg', width: 960, height: 540, viewport: { width: 1280, height: 720 }, capturedAt: new Date(0).toISOString(), spot: { documentId: 'doc_page-a', scrollX: 0, scrollY: 0 } }),
       retireViewerBudget: () => undefined,
       close: async () => { record.lifecycle = 'closed' }
     },
@@ -301,6 +303,16 @@ describe('the owner\'s hold of a bot\'s browser', () => {
     const { hold } = await bots.open('bot-hold', undefined, { viewId: 'one' })
     await expect(bots.open('bot-hold', 'https://b.test/', { viewId: 'two', connectionId: 'c2' })).rejects.toMatchObject({ code: 'held_elsewhere', message: 'Held in another window.' })
     expect((await bots.hold('bot-hold', 'one', { op: 'renew', holdId: hold!.id })).hold!.id).toBe(hold!.id)
+  })
+
+  it('an older app\'s click (it names no picture) lands on the latest picture of its tab, taking one when there is none yet', async () => {
+    const { bots, worker, window } = host()
+    // A view watches, and no picture has come yet; an older app opens the browser for its window (no view of its own).
+    await window('one')
+    await bots.open('bot-hold', undefined, { connectionId: 'c1' })
+    expect(worker.some((call) => call.method === 'humanInputs')).toBe(false)
+    await bots.input('bot-hold', { kind: 'click', x: 5, y: 5 }, 'c1')
+    expect(worker.filter((call) => call.method === 'humanInputs').at(-1)!.args).toEqual([{ input: { kind: 'click', x: 5, y: 5 }, spot: { documentId: 'doc_page-a', scrollX: 0, scrollY: 0 } }])
   })
 
   it('a skip uses its number and applies nothing, so what follows goes on', async () => {
