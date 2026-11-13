@@ -38,6 +38,7 @@ import {
   formatTokens,
   formatTokensPerSecond,
 } from "../../../utils/assistantMessageActions";
+import { createToolOpenStore, ToolOpenContext } from "./tools/tool-open-state";
 import { ToolRenderer as DefaultToolRenderer } from "./tools/tool-renderer";
 import { ToolCallsGroup } from "./tools/tool-calls-group";
 import { TurnProgressRow, useTurnProgressState } from "./turn-progress";
@@ -1343,6 +1344,8 @@ export const MessageList = memo(function MessageList({
   toolRenderers,
 }: MessageListProps) {
   countRender("MessageList");
+  // The rows and groups the person opened, kept for the list's life (tools/tool-open-state.ts).
+  const [toolOpenStore] = useState(createToolOpenStore);
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const contentWrapperRef = useRef<HTMLDivElement>(null);
   const rowsRef = useRef<HTMLDivElement>(null);
@@ -2036,6 +2039,7 @@ export const MessageList = memo(function MessageList({
     collectThreadImages(normalizedMessages.filter((message) => !isResultNotice(message)), safeMarkdownUrl);
 
   return (
+    <ToolOpenContext.Provider value={toolOpenStore}>
     <ImageGalleryProvider images={threadImages}>
     <div
       className="an-message-list-wrap relative flex-1 min-h-0 flex flex-col"
@@ -2161,6 +2165,7 @@ export const MessageList = memo(function MessageList({
     )}
     </div>
     </ImageGalleryProvider>
+    </ToolOpenContext.Provider>
   );
 });
 
@@ -2563,6 +2568,8 @@ const TurnRow = memo(function TurnRow({
             const group = grouped.length === 0 ? null : single ? renderTool(single.part, single.nestedTools, itemKey(single, 0)) : (
               <ToolCallsGroup
                 key={`${firstId}-toolcalls`}
+                openKey={`${firstId}-toolcalls`}
+                rowKeys={grouped.map((item, k) => itemKey(item, k))}
                 count={grouped.length}
                 icon={
                   iconType === "tool-Thinking" ? (
@@ -2583,12 +2590,14 @@ const TurnRow = memo(function TurnRow({
             );
             return {
               fold: { kind: "tools", keep: unrecovered > 0 },
-              node: liveThought ? (
+              // One wrapper whether or not a thought is being written beside the calls, so the group is not rebuilt
+              // when one starts or ends.
+              node: (
                 <Fragment key={`${firstId}-toolcalls-live`}>
                   {group}
-                  {renderTool(liveThought.part, liveThought.nestedTools, itemKey(liveThought, items.length - 1))}
+                  {liveThought && renderTool(liveThought.part, liveThought.nestedTools, itemKey(liveThought, items.length - 1))}
                 </Fragment>
-              ) : group,
+              ),
             };
           });
           // A finished turn folds its work behind its "Worked for" line; the line opens it in place.
