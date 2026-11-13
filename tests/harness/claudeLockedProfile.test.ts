@@ -315,6 +315,8 @@ describe('locked Claude Code: launch options (item 1, 4, 7)', () => {
     const locked: ClaudeLockedTurn = { authority, cwd: scratch, shellContained: false, temps: [], systemPrompt: 'You are a bot.', ledger: fakeLedger().ledger }
     await service.chat({ threadId: 'bot-thread', cwd: scratch, model: 'sonnet', prompt: 'go', permissionMode: 'full', mcp: { url: 'http://127.0.0.1:1/mcp', token: 'bearer' }, mcpTurnToken: 'tok', locked, onText: vi.fn() })
     const options = captured[0]
+    // The bot's own system text replaces Claude Code's, rendered fresh on each request (never kept from the first).
+    expect(options!.systemPrompt).toEqual({ type: 'custom', prompt: 'You are a bot.', snapshot: false })
     expect(options).toMatchObject({
       cwd: scratch,
       settingSources: [],
@@ -322,7 +324,6 @@ describe('locked Claude Code: launch options (item 1, 4, 7)', () => {
       plugins: [],
       extraArgs: { 'thinking-display': 'summarized' },
       permissionMode: 'default',
-      systemPrompt: 'You are a bot.',
       maxTurns: CLAUDE_LOCKED_MAX_TURNS,
       tools: ['Glob', 'Grep', 'Read', 'ToolSearch']
     })

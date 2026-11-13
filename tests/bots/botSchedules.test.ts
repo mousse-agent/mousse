@@ -38,6 +38,7 @@ async function scheduled(prompt = 'Tidy the site.', minutes = 5): Promise<string
 const runs = () => f.store.listActivations(botId).filter((row) => row.lane === 'run').sort((a, b) => occurrence(a).localeCompare(occurrence(b)))
 const occurrence = (row: { trigger: { kind: string } }) => ('occurrenceAt' in row.trigger ? String(row.trigger.occurrenceAt) : '')
 const entry = () => f.book.list(botId)[0]!
+const scheduledRuns = () => runs().filter((row) => row.trigger.kind === 'schedule')
 
 describe('bot schedules in the shared scheduler', () => {
   it('nothing runs before the startup pass, and a new schedule starts from now', async () => {
@@ -84,14 +85,20 @@ describe('bot schedules in the shared scheduler', () => {
     expect(f.bots.get(botId).summary.schedules![0]!.skipped).toBeNull()
   })
 
-  it('a schedule whose last run still waits in the queue is skipped, never queued twice', async () => {
+  it('a schedule whose last run still waits in the queue, or still runs, is skipped, never stacked', async () => {
     const tidy = await scheduled()
     const other = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Check links.' }, 'owner').scheduleId
+    // The two schedules' runs run side by side.
     await f.tickSchedules(new Date(T0 + 5 * MIN))
-    await f.tickSchedules(new Date(T0 + 10 * MIN))
-    const ids = (rows: ReturnType<typeof runs>) => rows.map((row) => [row.trigger.kind === 'schedule' && row.trigger.scheduleId, row.status])
-    expect(ids(runs()).filter(([, status]) => status === 'queued')).toHaveLength(2)
-    expect((await f.tickSchedules(new Date(T0 + 15 * MIN))).inserted).toEqual([])
+    expect(runs().map((row) => row.status)).toEqual(['running', 'running'])
+    expect((await f.tickSchedules(new Date(T0 + 10 * MIN))).inserted).toEqual([])
+    expect(f.book.list(botId).map((schedule) => [schedule.scheduleId, schedule.skip?.reason])).toEqual(expect.arrayContaining([[tidy, 'previous_run_still_running'], [other, 'previous_run_still_running']]))
+    // With every slot held, a new occurrence waits in the queue, and the next one of its schedule is skipped.
+    for (const row of runs()) f.store.run("UPDATE bot_activations SET status = 'done' WHERE id = ?", row.id)
+    for (const id of ['h1', 'h2', 'h3']) await f.bots.activate({ botId, input: id, clientRequestId: id })
+    await f.tickSchedules(new Date(T0 + 15 * MIN))
+    expect(scheduledRuns().filter((row) => row.status === 'queued')).toHaveLength(2)
+    expect((await f.tickSchedules(new Date(T0 + 20 * MIN))).inserted).toEqual([])
     expect(f.book.list(botId).map((schedule) => [schedule.scheduleId, schedule.skip?.reason])).toEqual(expect.arrayContaining([[tidy, 'previous_run_still_queued'], [other, 'previous_run_still_queued']]))
   })
 
@@ -118,15 +125,17 @@ describe('bot schedules in the shared scheduler', () => {
     expect((await f.tickSchedules(new Date(T0 + 121 * MIN))).inserted).toEqual([])
   })
 
-  it('an occurrence while the bot runs waits in its queue and starts when the bot is free', async () => {
+  it('an occurrence runs beside what the bot runs, and waits in its queue only when every slot is held', async () => {
     await scheduled('Tidy.', 5)
     f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Links.' }, 'owner')
+    const busy = await f.bots.activate({ botId, input: 'busy', clientRequestId: 'busy' })
+    await f.bots.activate({ botId, input: 'busy too', clientRequestId: 'busy2' })
     await f.tickSchedules(new Date(T0 + 5 * MIN))
-    const [first, second] = runs()
+    // One slot was left: one schedule's run takes it, the other's waits.
+    const [first, second] = scheduledRuns()
     expect([first!.status, second!.status].sort()).toEqual(['queued', 'running'])
-    const running = first!.status === 'running' ? first! : second!
     const queued = first!.status === 'running' ? second! : first!
-    await runDispatch(f, running.id, 1, { text: 'Tidied.' })
+    await runDispatch(f, busy.id, 1, { text: 'Done.' })
     expect(f.store.activation(queued.id)!.status).toBe('running')
   })
 

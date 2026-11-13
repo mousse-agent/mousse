@@ -11,7 +11,7 @@ import { join } from 'node:path'
 import type { Query, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
-import type { ClaudeLockedTurn } from '../../src/mms/harness/claude/locked'
+import { CLAUDE_CUT_REFUSAL, type ClaudeLockedTurn } from '../../src/mms/harness/claude/locked'
 import { ClaudeSubscriptionProviderService } from '../../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 
@@ -55,11 +55,13 @@ function botTurn(scripts: Script[]) {
   writeFileSync(join(directory, 'settings.json'), JSON.stringify({ loginPolicy: 'cli', binaryPath: binary, models: [{ id: 'sonnet', label: 'Sonnet' }] }))
   const queries: FakeQuery[] = []
   const prompts: SDKUserMessage[] = []
-  const query = ({ prompt }: { prompt: AsyncIterable<SDKUserMessage> }): Query => {
+  const options: Array<Record<string, unknown>> = []
+  const query = ({ prompt, options: started }: { prompt: AsyncIterable<SDKUserMessage>; options?: Record<string, unknown> }): Query => {
     const script = scripts[queries.length]
     if (!script) throw new Error('no query left to start')
     const fake: FakeQuery = { close: vi.fn(), interrupt: vi.fn(async () => {}) }
     queries.push(fake)
+    options.push({ ...started })
     // The prompt is read once, here; the script gets it again as a one-message stream.
     const read = firstMessage(prompt).then((message) => {
       prompts.push(message)
@@ -95,9 +97,10 @@ function botTurn(scripts: Script[]) {
     cwd: root,
     shellContained: false,
     temps: [],
-    systemPrompt: '',
+    systemPrompt: 'Your name is Pip. You keep my day in order.',
     ledger: { start: () => 'row', commit: () => undefined, failed: () => undefined }
   }
+  const onCompaction = vi.fn()
   const stop = new AbortController()
   const events: string[] = []
   // Steers waiting to be drained, oldest first: one at the start, and a test may queue more while the turn runs.
@@ -120,9 +123,23 @@ function botTurn(scripts: Script[]) {
     locked,
     signal: stop.signal,
     onText: vi.fn(),
+    onCompaction,
     ...steer
   })
-  return { run, stop, steer, queries, prompts, events, pending }
+  return { run, stop, steer, queries, prompts, events, pending, options, onCompaction, root }
+}
+
+type CanUseTool = (name: string, input: Record<string, unknown>, context: { signal: AbortSignal; toolUseID: string }) => Promise<{ behavior: string; message?: string }>
+type Hook = (event: Record<string, unknown>, toolUseId: string, context: { signal: AbortSignal }) => Promise<Record<string, unknown>>
+/** The query's own permission callbacks, as Claude Code calls them for a call the model makes. */
+function gateOf(options: Record<string, unknown>) {
+  const hooks = options.hooks as Record<'PreToolUse' | 'PostToolUse', Array<{ hooks: Hook[] }>>
+  const signal = new AbortController().signal
+  return {
+    canUse: (toolUseID: string, path: string) => (options.canUseTool as CanUseTool)('Read', { file_path: path }, { signal, toolUseID }),
+    pre: (toolUseID: string, path: string) => hooks.PreToolUse[0]!.hooks[0]!({ hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: { file_path: path }, tool_use_id: toolUseID }, toolUseID, { signal }),
+    post: (toolUseID: string) => hooks.PostToolUse[0]!.hooks[0]!({ hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: {}, tool_response: 'ok', tool_use_id: toolUseID }, toolUseID, { signal })
+  }
 }
 
 /** The first query: it waits for the steer's interrupt, then ends as an interrupted query does. */
@@ -259,6 +276,98 @@ describe('a steer into a bot\'s Claude Code turn (#920)', () => {
     await expect(turn.run()).rejects.toThrow()
     expect(turn.steer.onSteer).toHaveBeenCalledExactlyOnceWith('use the other file', 'drain-1')
     expect(turn.steer.returnSteer).not.toHaveBeenCalled()
+  })
+
+  it("a note into a bot's turn resumes the same session under the same lock and system text (it widens nothing)", async () => {
+    const turn = botTurn([
+      interruptedByTheSteer,
+      async function* (prompt) {
+        const { uuid } = await firstMessage(prompt)
+        yield { type: 'command_lifecycle', command_uuid: uuid, state: 'started', session_id: SESSION }
+        yield done
+      }
+    ])
+    expect(await turn.run()).toBe('done')
+    const [first, restarted] = turn.options
+    expect(restarted).toMatchObject({ resume: SESSION, permissionMode: 'default', settingSources: [], strictMcpConfig: true, plugins: [] })
+    for (const key of ['tools', 'disallowedTools', 'systemPrompt', 'maxTurns', 'canUseTool', 'hooks', 'cwd']) expect(restarted![key]).toEqual(first![key])
+    // The bot's own system text, rendered fresh on each request of the session: the same on both.
+    expect(first!.systemPrompt).toEqual({ type: 'custom', prompt: 'Your name is Pip. You keep my day in order.', snapshot: false })
+  })
+
+  it("a compaction inside a bot's turn is reported: Claude Code's compacting status, then its boundary", async () => {
+    const turn = botTurn([
+      async function* () {
+        yield init
+        yield { type: 'system', subtype: 'status', status: 'compacting', session_id: SESSION }
+        yield { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 180_000 }, session_id: SESSION }
+        yield done
+      }
+    ])
+    turn.pending.splice(0)
+    expect(await turn.run()).toBe('done')
+    expect(turn.onCompaction.mock.calls).toEqual([['start'], ['complete']])
+  })
+
+  it('a call the model makes once the cut is decided is refused before it runs: nothing is cut mid-run', async () => {
+    // Checked after the turn: an error thrown inside the interrupted query is read as the interrupt's own.
+    const decided: Record<string, unknown> = {}
+    const turn = botTurn([
+      async function* (_prompt, query) {
+        yield init
+        await vi.waitFor(() => expect(query.interrupt).toHaveBeenCalled(), { timeout: 2_000, interval: 10 })
+        // Announced after the check, before the interrupt lands: both of the gate's checks refuse it, so it never starts.
+        const gate = gateOf(turn.options[0]!)
+        const path = join(turn.root, 'notes.md')
+        decided.pre = await gate.pre('late-1', path)
+        decided.canUse = await gate.canUse('late-1', path)
+        yield interrupted
+      },
+      async function* (prompt) {
+        const { uuid } = await firstMessage(prompt)
+        // The query that carries the note runs calls again.
+        decided.next = await gateOf(turn.options[1]!).canUse('next-1', join(turn.root, 'notes.md'))
+        yield { type: 'command_lifecycle', command_uuid: uuid, state: 'started', session_id: SESSION }
+        yield done
+      }
+    ])
+    expect(await turn.run()).toBe('done')
+    expect(CLAUDE_CUT_REFUSAL).toContain('did not run')
+    expect(decided.pre).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: CLAUDE_CUT_REFUSAL } })
+    expect(decided.canUse).toEqual({ behavior: 'deny', message: CLAUDE_CUT_REFUSAL })
+    expect(decided.next).toMatchObject({ behavior: 'allow' })
+    expect(turn.prompts[1]!.message.content).toBe('use the other file')
+    expect(turn.steer.onSteer).toHaveBeenCalledExactlyOnceWith('use the other file', 'drain-1')
+  })
+
+  it('a call the gate let start holds the cut until it ends, even before Mousse has read the frame that announces it', async () => {
+    let interruptsWhileRunning = -1
+    const turn = botTurn([
+      async function* (_prompt, query) {
+        // Claude Code asks about the call (and runs it) before its frame reaches Mousse.
+        const gate = gateOf(turn.options[0]!)
+        expect(await gate.canUse('early-1', join(turn.root, 'notes.md'))).toMatchObject({ behavior: 'allow' })
+        yield init
+        // Polls come and go while it runs: the note goes back to wait each time, and nothing is interrupted.
+        await vi.waitFor(() => expect(turn.steer.returnSteer).toHaveBeenCalled(), { timeout: 2_000, interval: 10 })
+        await new Promise((resolve) => setTimeout(resolve, 300))
+        interruptsWhileRunning = query.interrupt.mock.calls.length
+        await gate.post('early-1')
+        await vi.waitFor(() => expect(query.interrupt).toHaveBeenCalled(), { timeout: 2_000, interval: 10 })
+        yield interrupted
+      },
+      async function* (prompt) {
+        const { uuid } = await firstMessage(prompt)
+        yield { type: 'command_lifecycle', command_uuid: uuid, state: 'started', session_id: SESSION }
+        yield done
+      }
+    ])
+    // A note handed back waits to be taken again.
+    turn.steer.returnSteer.mockImplementation((text: string, token?: string) => { turn.pending.unshift({ text, token: token ?? 'drain-x' }) })
+    expect(await turn.run()).toBe('done')
+    expect(interruptsWhileRunning).toBe(0)
+    expect(turn.prompts[1]!.message.content).toBe('use the other file')
+    expect(turn.steer.onSteer).toHaveBeenCalledExactlyOnceWith('use the other file', 'drain-1')
   })
 
   it('a failed result from the restarted query is not a read, and the steer is handed back', async () => {
