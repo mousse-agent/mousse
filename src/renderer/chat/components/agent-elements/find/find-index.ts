@@ -2,6 +2,7 @@ import type { UIMessage } from "ai";
 import { readSubagentNotice } from "../../../adapters/subagentNotice";
 import { isTextPart } from "../utils/assistant-blocks";
 import { markdownToSearchBlocks, plainTextToSearchBlocks } from "./search-text";
+import { promptDisplayText } from "../prompt-links";
 import { hasLiveText, liveTextOver } from "../../../../stores/liveTextStore";
 
 /** A turn as the list groups it, with the key its row is mounted under. */
@@ -283,7 +284,8 @@ function readParts(message: UIMessage, math: boolean): SearchablePart[] {
       .filter(isTextPart)
       .map((part) => part.text)
       .join("");
-    const blocks = plainTextToSearchBlocks(text);
+    // The bubble shows each link as its label, so that is what find reads.
+    const blocks = plainTextToSearchBlocks(promptDisplayText(text));
     return blocks.length > 0 ? [{ partIndex: 0, blocks }] : [];
   }
   if (message.role !== "assistant") return [];

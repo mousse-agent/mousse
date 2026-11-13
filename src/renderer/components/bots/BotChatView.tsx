@@ -9,7 +9,7 @@ import { BotFace } from './face/BotFace'
 import { BotChips, BotChipView } from './BotChips'
 import { BotAsk } from '../asks/AskCard'
 import { BotMenu } from './BotMenu'
-import { BotAboutPanel } from './BotAboutPanel'
+import { BotAboutPanel, RUNS_ON_ID } from './BotAboutPanel'
 import { BotBrowserPane, BotBrowserPreview } from './BotBrowser'
 import { useBotBrowser, useBotBrowserStore } from '../../stores/botBrowserStore'
 import { ChatComposer, type AttachedFile, type VoiceMessage } from '../ChatComposer'
@@ -255,10 +255,10 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   // The sent messages and those on their way, in one run of groups: who starts and ends each, and the day lines.
   const shown = useMemo(() => (pending.length ? [...messages, ...pending] : messages), [messages, pending])
   const places = useMemo(() => placeMessages(shown), [shown])
-  // The bot's own browser: its last run's reply shows a live preview, and Expand opens the split view.
+  // The bot's own browser: the reply of the run whose tab it shows has a live preview, and Expand opens the split view.
   const browser = useBotBrowser(bot.id, true)
   const paneOpen = useBotBrowserStore((s) => s.paneBotId === bot.id)
-  const browserRun = browser?.activations.at(-1)
+  const browserRun = browser?.activationId ?? browser?.activations.at(-1)
   const previewOn = browserRun ? messages.filter((message) => message.author === 'bot' && message.activationId === browserRun).at(-1)?.id : undefined
   const preview = browser && browserRun ? <BotBrowserPreview bot={bot} view={browser} /> : null
 
@@ -310,7 +310,11 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
     // Sign in opens the card of the owner's provider entry the bot would run on; Set up opens the list.
     if (action.kind === 'sign_in' && action.instanceId) openProvider(action.instanceId)
     else if (action.kind === 'sign_in' || action.kind === 'open_providers') openSettingsSection('providers')
-    else void store().resume(bot.id)
+    // A picked model that can't run (#673): About opens at Runs on.
+    else if (action.kind === 'pick_model') {
+      useBotsStore.setState({ aboutOpen: true })
+      window.requestAnimationFrame(() => document.getElementById(RUNS_ON_ID)?.scrollIntoView({ block: 'center' }))
+    } else void store().resume(bot.id)
   }, [bot.id, store])
   // Reply on a message: its quote goes above the composer, which takes the focus.
   const reply = useCallback((message: BotChatMessage) => {

@@ -35,6 +35,8 @@ export interface BotSituation {
   work?: Array<{ workId: string; title: string; status: string; startedAt: string; doing?: string }>
   /** One-off reminders still to come. */
   reminders?: Array<{ dueAt: string; text: string }>
+  /** Work rows whose model can't run (#673), each as one line: work for them is not started. */
+  blocked?: string[]
 }
 
 export interface BotContextPackOptions {
@@ -126,12 +128,14 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
     if (chat && facts.work?.length)
       lines.push(`Your work now: ${facts.work.map((w) => `${cut(w.title, 60)} (${w.workId}, ${w.status === 'queued' ? 'waiting its turn' : w.status === 'running' ? `started ${agoLabel(w.startedAt, now)}` : w.status.replaceAll('_', ' ')}${w.doing ? `, ${cut(w.doing, 50)}` : ''})`).join('; ')}.`)
     else if (chat) lines.push('Your work now: nothing running.')
+    if (chat && facts.blocked?.length) lines.push(...facts.blocked)
     if (chat && facts.reminders?.length)
       lines.push(`Reminders: ${facts.reminders.slice(0, 5).map((r) => `${timeLabel(r.dueAt, tz)}: ${cut(r.text, 50)}`).join('; ')}${facts.reminders.length > 5 ? `; and ${facts.reminders.length - 5} more` : ''}.`)
     const lastEnd = store.lastOfKind(botId, 'run_end')
     if (lastEnd) {
       const reason = typeof lastEnd.json?.reason === 'string' ? lastEnd.json.reason : firstLine(lastEnd.text)
-      const guarded = guardPackText(reason, 'mousse').ok ? cut(reason, 80) : 'ended'
+      const screened = guardPackText(reason, 'mousse', '[held back]')
+      const guarded = screened.ok ? cut(screened.text, 80) : 'ended'
       lines.push(`Last run: ${guarded}, ${agoLabel(lastEnd.at, now)}.`)
     }
     return `Situation:\n${withinBudget(lines, BOT_CHAT_PACK_BUDGET.situation).join('\n')}`

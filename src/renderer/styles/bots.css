@@ -164,6 +164,16 @@ button.bot-image:focus-visible > img { opacity: 0.82; }
 .bot-new-label-gap { margin-top: 12px; }
 .chat-dialog .bot-new-name, .chat-dialog .bot-new-text { display: block; width: 100%; padding: 9px 12px; margin-bottom: 16px; border-radius: 9px; border: 1px solid rgba(var(--accent-pale-rgb), .15); background: #0002; color: var(--text-primary); font: inherit; font-size: 13px; line-height: 1.5; }
 .chat-dialog .bot-new-text { min-height: 76px; resize: none; margin-bottom: 0; }
+/* New bot's steps: one height for every step, so the dialog and Back / Next stay where they are; an error sits at its foot. */
+.bot-new-step { display: flex; flex-direction: column; height: 300px; margin-top: 16px; min-height: 0; }
+.bot-new-step .bot-look-picker { margin-bottom: 0; }
+.chat-dialog .bot-new-step .bot-new-text { flex: 1; min-height: 76px; }
+.chat-dialog .bot-new-error { margin: auto 0 0; padding-top: 10px; }
+/* Runs on: the computer, then the model rows (About's), stacked; with Advanced open they still fit the step's height. */
+.bot-new-runs-on-step { display: flex; flex-direction: column; gap: 4px; }
+.bot-new-runs-on { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: var(--text-secondary); }
+.bot-new-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 36px; }
+.bot-new-runs-on-computer { color: var(--text-primary); }
 .bot-dialog .chat-dialog-heading { margin-bottom: 14px; }
 .chat-dialog .bot-new-name::placeholder, .chat-dialog .bot-new-text::placeholder { color: var(--text-secondary); }
 .bot-new-foot { display: flex; align-items: center; gap: 10px; margin-top: 18px; }
@@ -171,7 +181,6 @@ button.bot-image:focus-visible > img { opacity: 0.82; }
 .bot-new-foot .chat-primary-button[disabled] { opacity: .4; }
 .bot-new-foot .bot-ghost-button + .chat-primary-button { margin-left: 0; }
 .bot-new-foot .bot-ghost-button:first-child { margin-left: auto; }
-.bot-new-hint { font-size: 11px; color: var(--text-secondary); }
 .bot-dialog-text { margin: 0; font-size: 13px; line-height: 1.6; color: var(--text-secondary); }
 .chat-primary-button.bot-danger-button { background: var(--error, #e79090); color: var(--surface-strong, #18151c); }
 
@@ -191,6 +200,23 @@ button.bot-image:focus-visible > img { opacity: 0.82; }
 .bot-about-row button { font-size: 11px; color: var(--text-secondary); }
 .bot-about-row button:hover { color: var(--text-primary); }
 .bot-about-empty { font-size: 11px; color: var(--text-secondary); margin: 0; line-height: 1.5; }
+/* A bot's model rows (#673, About → Runs on and New bot): a label, then the app's model picker, every picker as wide as
+   the one column they share (the label column is fixed, so Advanced never moves it). The picker reads the settings
+   control tokens, declared here because neither place is inside Settings. */
+.bot-model-picker, .bot-new-runs-on { --bot-row-label: 86px; --settings-control-h: 28px; --settings-fs-small: 12px; --space-8: 8px; }
+.bot-model-rows { display: grid; grid-template-columns: var(--bot-row-label) minmax(0, 1fr); column-gap: 12px; row-gap: 6px; align-items: center; padding: 3px 0; font-size: 12px; }
+.bot-model-row { display: contents; }
+.bot-model-row-label { white-space: nowrap; }
+.bot-model-rows .settings-model-picker { display: flex; width: 100%; }
+.bot-model-rows .settings-model-btn { flex: 1; max-width: none; }
+.bot-model-rows .settings-model-btn-label { flex: 1; text-align: left; }
+.bot-model-advanced { display: flex; align-items: center; justify-content: space-between; padding: 6px 0 3px; font-size: 12px; color: var(--text-secondary); }
+/* About is a narrow panel: a tighter label column, so a model, its level and the entry's icon fit. */
+.bot-about .bot-model-picker { --bot-row-label: 78px; }
+.bot-about .bot-model-rows { column-gap: 8px; }
+/* New bot's Runs on: Computer's label and control in the same columns as the rows. */
+.bot-new-runs-on .bot-new-row { display: grid; grid-template-columns: var(--bot-row-label) minmax(0, 1fr); column-gap: 12px; }
+.bot-new-runs-on .bot-new-row > .ui-select { width: 100%; }
 .bot-about-foot { display: flex; gap: 8px; margin-top: 22px; }
 .bot-about-foot button { flex: 1; }
 .bot-about-foot .is-danger { color: var(--error, #e79090); }

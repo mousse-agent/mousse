@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:f
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BOT_ASK_DEFERRED_TEXT, BOT_WORK_HAS_TEXT, BotEngine, type BotEngineHost } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_ASK_DEFERRED_TEXT, BOT_OFFLINE_WATCH_MS, BOT_WORK_HAS_TEXT, BotEngine, type BotEngineHost } from '../../src/mms/bots/activation/BotEngine'
 import { isBotWallAbort } from '../../src/mms/bots/activation/dispatcher'
 import { BotDefinitionStore } from '../../src/mms/bots/definitions/BotDefinitionStore'
 import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
@@ -222,8 +222,8 @@ describe('walls', () => {
     // Every later call waits, and asks nobody again.
     expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(root, 'a.md') } })).toEqual({ ok: false, wall: { kind: 'waiting' } })
     expect(store.escalations({ activationId: activation.id })).toHaveLength(1)
-    // Asks never expire: no expiry is armed (the only timer is the dispatch's deadline).
-    expect(timers.map((timer) => timer.ms)).toEqual([10 * 60_000])
+    // Asks never expire: no expiry is armed (the only timers are the dispatch's deadline and its look).
+    expect(timers.map((timer) => timer.ms)).toEqual([10 * 60_000, BOT_OFFLINE_WATCH_MS])
   })
 
   it('escalate asks for a structured permission; a malformed one is refused, and a chat turn finishes before it waits', async () => {
@@ -461,37 +461,139 @@ describe('consults', () => {
 })
 
 describe('startup pass', () => {
-  function supervised(activationId: string, n: number) {
-    const dispatch = store.dispatch(activationId, n)!
-    store.run('UPDATE bot_dispatches SET prepaid_ms = 15000, exit_at = ? WHERE activation_id = ? AND n = ?', clock, activationId, n)
-    store.run('UPDATE bot_counters SET active_ms = active_ms - ? + 15000 WHERE activation_id = ?', dispatch.prepaidMs!, activationId)
-  }
-
+  /** A crash: the process is gone without closing (nothing of the old engine runs again), then the next start. */
   async function crash() {
-    bots.close()
     bots = makeEngine()
     await bots.reconcileOnStartup()
   }
 
-  it('settles an open main dispatch at its full allowance without exit evidence, and keeps open reservations charged', async () => {
-    const { activation, payload } = await running()
+  /** A call the dispatch makes `after` ms into its run: its last recorded call. */
+  const callAt = (prepared: { authority: BotAuthority }, at: number) => {
+    clock = at
+    expect(prepared.authority.check({ kind: 'app', tool: 'memory_list', args: {} })).toEqual({ ok: true })
+  }
+
+  it('settles an open main dispatch up to its last recorded call, keeps open reservations charged, and carries it on', async () => {
+    const { activation, payload, prepared } = await running()
     store.run("INSERT INTO bot_spend_reservations(id, activation_id, run_id, input_bound, wire_cap, usd_micros, cost_limited, created_at) VALUES('r1', ?, ?, 100, 50, 7, 0, 'x')", activation.id, payload.runId)
-    clock += 30_000
+    callAt(prepared, T0 + 20_000)
+    // It went on past that call for a while, then Mousse crashed and stayed down for an hour.
+    clock = T0 + 30_000
+    end(payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+    clock += 60 * 60_000
+    await crash()
+    expect(store.dispatch(activation.id, 1)).toMatchObject({ settledBy: 'startup', usedMs: 20_000 })
+    expect(store.counters(activation.id).activeMs).toBe(20_000)
+    expect(store.get('SELECT committed_input, committed_output FROM bot_spend WHERE activation_id = ?', activation.id)).toEqual({ committed_input: 100, committed_output: 50 })
+    // Row 11: time left, so it carries on once by itself, with the rest of its time.
+    const next = store.dispatch(activation.id, 2)!
+    expect(next.prompt.text).toContain('Mousse restarted')
+    const again = bots.prepare(payloadOf(next.runId!))
+    if ('refused' in again) throw new Error(again.refused)
+    expect(again.authority.time.deadline() - clock).toBe(10 * 60_000 - 20_000)
+  })
+
+  it('a dispatch whose last call came at its deadline is a budget wall after a crash, as at the deadline', async () => {
+    const { activation, payload, prepared } = await running()
+    callAt(prepared, T0 + 10 * 60_000 - 5_000)
     end(payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
     await crash()
-    expect(store.dispatch(activation.id, 1)).toMatchObject({ settledBy: 'startup', usedMs: 10 * 60_000 })
-    expect(store.get('SELECT committed_input, committed_output FROM bot_spend WHERE activation_id = ?', activation.id)).toEqual({ committed_input: 100, committed_output: 50 })
-    // Row 10: no work time left, so a budget wall that says why, never an automatic restart.
-    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'waiting_grant', openEscalation: { kind: 'budget', reason: expect.stringContaining('Mousse stopped unexpectedly') } })
+    expect(store.dispatch(activation.id, 1)).toMatchObject({ settledBy: 'startup', usedMs: 10 * 60_000 - 5_000 })
+    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'waiting_grant', openEscalation: { kind: 'budget', reason: 'This bot used up its work time.' } })
+  })
+
+  /** The live dispatch's look (`BOT_OFFLINE_WATCH_MS`) at `at`: it finds the dispatch working and records the moment. */
+  const lookAt = async (at: number) => {
+    clock = at
+    timers.filter((timer) => timer.ms === BOT_OFFLINE_WATCH_MS && !timer.cleared).at(-1)!.fn()
+    await tick()
+  }
+
+  it('a dispatch that made no call is charged up to its last look, and carries on with the rest of its time', async () => {
+    const { activation, payload } = await running()
+    await lookAt(T0 + 20_000)
+    clock = T0 + 30_000
+    end(payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+    await crash()
+    expect(store.dispatch(activation.id, 1)).toMatchObject({ settledBy: 'startup', usedMs: 20_000 })
+    expect(store.dispatch(activation.id, 2)!.prompt.text).toContain('Mousse restarted')
+  })
+
+  it('a long call in flight when Mousse crashed is charged up to the last look, not only to when it was checked', async () => {
+    const { activation, payload, prepared } = await running()
+    // A 40-minute command is checked at 20 s; the dispatch is looked at every 20 s while it runs (no internet check
+    // runs without `connectivity`: it counts as working).
+    callAt(prepared, T0 + 20_000)
+    for (let at = T0 + 40_000; at <= T0 + 8 * 60_000; at += 20_000) await lookAt(at)
+    clock = T0 + 8 * 60_000 + 15_000
+    end(payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+    await crash()
+    expect(store.dispatch(activation.id, 1)).toMatchObject({ settledBy: 'startup', usedMs: 8 * 60_000 })
+  })
+
+  it('a call that finishes records the moment too', async () => {
+    const { activation, payload, prepared } = await running()
+    callAt(prepared, T0 + 20_000)
+    const attempt = runs.getRun(payload.runId)!.activeAttemptId!
+    runs.tools.start({ invocationId: 'long', runId: payload.runId, attemptId: attempt, tool: 'shell', argsDigest: 'd', now: 'n', idempotent: false })
+    clock = T0 + 50_000
+    runs.tools.commit('long', 'n2')
+    bots.toolCallEnded(payload.runId)
+    clock = T0 + 55_000
+    end(payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+    await crash()
+    expect(store.dispatch(activation.id, 1)).toMatchObject({ settledBy: 'startup', usedMs: 50_000 })
+  })
+
+  it('a clean quit charges a running dispatch up to the shutdown and never fails it; the next start carries it on', async () => {
+    const { activation, payload, prepared } = await running()
+    callAt(prepared, T0 + 20_000)
+    clock = T0 + 30_000
+    // The profile closes: its turn is cut by the shutdown and settled in this process, then the engine closes.
+    end(payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+    bots.settle(payload, { text: 'Half way.' })
+    await tick()
+    expect(store.dispatch(activation.id, 1)).toMatchObject({ settledBy: 'run', usedMs: 30_000 })
+    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'running' })
+    bots.close()
+    bots = makeEngine()
+    await bots.reconcileOnStartup()
+    expect(store.counters(activation.id).activeMs).toBe(30_000)
+    expect(store.dispatch(activation.id, 2)!.prompt.text).toContain('Mousse restarted')
+  })
+
+  it('a run the boot ended is left to the startup pass, even when its terminal event comes first', async () => {
+    const { activation, payload, prepared } = await running()
+    callAt(prepared, T0 + 20_000)
+    end(payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+    bots = makeEngine()
+    bots.settleRun(payload.runId)
+    expect(store.dispatch(activation.id, 1)).toMatchObject({ settledBy: null, endedAt: null })
+    expect(bots.getActivation(activation.id).status).toBe('running')
+    await bots.reconcileOnStartup()
+    expect(store.dispatch(activation.id, 1)).toMatchObject({ settledBy: 'startup', usedMs: 20_000 })
+    expect(store.dispatch(activation.id, 2)!.prompt.text).toContain('Mousse restarted')
+  })
+
+  it('a close that comes before the turn has let go settles it up to the close, once', async () => {
+    const { activation, payload, prepared } = await running()
+    callAt(prepared, T0 + 20_000)
+    clock = T0 + 30_000
+    bots.close()
+    expect(store.dispatch(activation.id, 1)).toMatchObject({ settledBy: 'run', usedMs: 30_000 })
+    // The turn's end, after the close, charges nothing more.
+    end(payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+    bots.settle(payload, {})
+    bots = makeEngine()
+    await bots.reconcileOnStartup()
+    expect(store.counters(activation.id).activeMs).toBe(30_000)
+    expect(bots.getActivation(activation.id).status).toBe('running')
   })
 
   it('an interrupted run with time left continues once automatically; a second crash pauses it', async () => {
-    const { activation, payload } = await running()
-    clock += 30_000
+    const { activation, payload, prepared } = await running()
+    callAt(prepared, T0 + 30_000)
     end(payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
-    // A supervisor that prepays in 15-second chunks, and confirmed the processes gone before the
-    // crash: the measured window is charged (this build prepays the whole allowance instead).
-    supervised(activation.id, 1)
     await crash()
     expect(store.counters(activation.id).activeMs).toBe(30_000)
     const next = store.dispatch(activation.id, 2)!
@@ -502,7 +604,6 @@ describe('startup pass', () => {
     start(again.runId)
     clock += 30_000
     end(again.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
-    supervised(activation.id, 2)
     await crash()
     expect(bots.getActivation(activation.id)).toMatchObject({ status: 'paused', endReason: 'restarted_twice' })
   })
@@ -651,8 +752,8 @@ describe('file access is one permission (bot-architecture.md §3.7)', () => {
 })
 
 describe('round 1: startup recovery', () => {
+  /** A crash: the process is gone without closing, then the next start. */
   async function crash() {
-    bots.close()
     bots = makeEngine()
     await bots.reconcileOnStartup()
   }
@@ -670,11 +771,8 @@ describe('round 1: startup recovery', () => {
     const { activation, prepared, payload } = await running()
     gateWall(prepared)
     await bots.respond({ escalationId: bots.listEscalations(activation.id)[0].id, answer: 'allow_once' })
-    // The walled run never reported its end: boot ended it. Its processes were confirmed gone, so
-    // only the window is charged (a supervisor's 15-second prepay; this build prepays everything).
+    // The walled run never reported its end: boot ended it, and charged it up to its last call.
     end(payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
-    store.run('UPDATE bot_dispatches SET prepaid_ms = 15000, exit_at = ? WHERE activation_id = ? AND n = 1', clock, activation.id)
-    store.run('UPDATE bot_counters SET active_ms = 15000 WHERE activation_id = ?', activation.id)
     await crash()
     expect(store.dispatches(activation.id).map((dispatch) => dispatch.kind)).toEqual(['start', 'continue'])
     expect(store.dispatch(activation.id, 2)!.prompt.text).toContain('The owner allowed: use files on this computer.')

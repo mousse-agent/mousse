@@ -1,13 +1,14 @@
 import { readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { ProfileDatabase, type Migration, type ProfileDatabaseFault } from '../../run/db/ProfileDatabase'
-import type { BotActivationStatus, BotActivationTrigger, BotLane, BotManifest, BotModelChoice, BotSchedule } from '../../../shared/bots/personal/definition'
+import type { BotActivationStatus, BotActivationTrigger, BotLane, BotManifest, BotModelOverride, BotSchedule } from '../../../shared/bots/personal/definition'
 import { canonicalManifest } from '../../../shared/bots/personal/manifest'
 import type { ActivationLimits } from './scopes'
 import type { BotThreadRole } from '../../../shared/bots/personal/authority'
 import type { BotAskMode, BotAskRequest, BotEscalationStatus, BotPermissionRequest, BotWallKind } from '../../../shared/bots/personal/escalation'
 import type { BotChip, BotError, BotMessageKind } from '../../../shared/bots/personal/chat'
 import type { ProviderSelection } from '../../../shared/harness/types'
+import type { BotStuckRows } from '../../../shared/bots/personal/modelSlots'
 import { BOT_MEMORY_SCHEMA_SQL } from '../memory/schema'
 
 /**
@@ -315,6 +316,19 @@ CREATE INDEX bot_work_notes_pending ON bot_work_notes(activation_id, applied_at)
 /** The `end_reason` of a running activation that waits for the internet. */
 export const BOT_OFFLINE_REASON = 'waiting_for_internet'
 
+/**
+ * Work the owner asked for that stopped short and goes on later in the same thread is `blocked` (it does not hold the
+ * run lane) with one of these end reasons, like the internet wait, so an older build still reads `bots.db`:
+ * `budget_exhausted` waits for the owner's answer to its limit ask, `room_allowed` was allowed more and goes on when
+ * the run lane is free, `usage_limit` goes on when the bot's usage pause ends.
+ */
+export const BOT_WORK_WAIT_REASONS: ReadonlySet<string> = new Set(['budget_exhausted', 'room_allowed', 'usage_limit'])
+
+/** Whether an activation is work that waits to go on (`BOT_WORK_WAIT_REASONS`). */
+export function workWaits(row: Pick<BotActivationRow, 'status' | 'lane' | 'trigger' | 'endReason'>): boolean {
+  return row.status === 'blocked' && row.lane === 'run' && row.trigger.kind === 'work' && row.endReason !== null && BOT_WORK_WAIT_REASONS.has(row.endReason)
+}
+
 /** The `bots.db` schema version this build writes. */
 export const BOTS_DB_VERSION = BOTS_MIGRATIONS.at(-1)!.version
 /** How many `bots.db.pre-v<n>` copies are kept beside the database. */
@@ -340,8 +354,39 @@ export interface BotRegistryRow {
   failureStreak: number
   error: BotStoredError | null
   readSeq: number
-  /** The last resolved selection (internal; never in a UI payload). */
-  model: { selection: ProviderSelection; activationId: string } | null
+  /**
+   * The last resolved selection (internal; never in a UI payload), and each row's last one (#673): a `model_change`
+   * journal row is written when a row's model changes, not when Talk and Work take turns. Older builds rewrite it without
+   * `rows`; each row then journals its model once more.
+   */
+  model: BotModelState | null
+}
+
+/**
+ * A provider's usage limit on one of a picked bot's entries (#673): until when, and for which models. `family`: a limit
+ * the provider names for one family only (Claude's weekly Opus or Sonnet window), else the whole entry. `said`: the
+ * chat has said it once.
+ */
+export interface BotEntryLimit {
+  instanceId: string
+  until: string
+  family?: string
+  said?: boolean
+}
+
+/**
+ * What the engine keeps about a bot's models in `model_json` (internal; never in a UI payload). `selection` and `rows`:
+ * the last resolved selection and each row's last one; a `model_change` journal row is written when a row's model
+ * changes, not when Talk and Work take turns. `stuck`: rows whose pick can't run (#673), each held until it runs again
+ * or the owner picks again for it. `limits`: usage limits on a picked bot's entries, by entry (and family). Older
+ * builds rewrite it with `selection` and `activationId` only; the rest is then forgotten.
+ */
+export interface BotModelState {
+  selection: ProviderSelection
+  activationId: string
+  rows?: Partial<Record<string, ProviderSelection>>
+  stuck?: BotStuckRows
+  limits?: Record<string, BotEntryLimit>
 }
 
 function registryOf(row: Row): BotRegistryRow {
@@ -489,7 +534,7 @@ export interface BotActivationRow {
   /** `chat`: the owner's chat on the home thread; `run`: a run on its own thread. */
   lane: BotLane
   /** `set_depth`/`use_model` for this activation only (internal). */
-  modelOverride: BotModelChoice | null
+  modelOverride: BotModelOverride | null
   /** The model changed for this activation: its next dispatch resolves it again. */
   reloadPending: boolean
   /** The model this activation runs on, resolved at its first dispatch (internal; never in a payload). */
@@ -515,12 +560,24 @@ export interface BotDispatchRow {
   prepaidMs: number | null
   usedMs: number | null
   startedAt: number | null
+  /**
+   * When the dispatch last made a call (wall clock; its start until it makes one): what a dispatch Mousse stopped while
+   * it ran is charged up to, at the next start or as the profile closes.
+   */
+  checkpointAt: number | null
   exitAt: number | null
   endedAt: string | null
   outcome: string | null
   settledBy: 'run' | 'startup' | null
   /** How a continuation is sent (the run it continues, the owner's acknowledgement), so a resend matches it. */
-  send: { continuationOfRunId?: string; acknowledgeUncertain?: boolean; /** A retry on another model after a usage limit. */ usageRetry?: boolean }
+  send: {
+    continuationOfRunId?: string
+    acknowledgeUncertain?: boolean
+    /** A retry on another model after a usage limit. */
+    usageRetry?: boolean
+    /** A continuation after the previous dispatch reached its runtime's cap on model turns. */
+    turnCap?: boolean
+  }
 }
 
 export interface BotEscalationRow {
@@ -609,7 +666,7 @@ function activationOf(row: Row): BotActivationRow {
     endedAt: str(row.ended_at),
     endReason: str(row.end_reason),
     lane: (str(row.lane) ?? 'run') as BotLane,
-    modelOverride: json<BotModelChoice>(row.model_override_json),
+    modelOverride: json<BotModelOverride>(row.model_override_json),
     reloadPending: num(row.reload_pending) === 1,
     selection: json<ProviderSelection>(row.selection_json),
     offline: row.status === 'running' && row.end_reason === BOT_OFFLINE_REASON
@@ -631,6 +688,7 @@ function dispatchOf(row: Row): BotDispatchRow {
     prepaidMs: num(row.prepaid_ms),
     usedMs: num(row.used_ms),
     startedAt: num(row.started_at),
+    checkpointAt: num(row.checkpoint_at),
     exitAt: num(row.exit_at),
     endedAt: str(row.ended_at),
     outcome: str(row.outcome),
@@ -852,7 +910,7 @@ export class BotStore {
   }
 
   /** `set_depth`/`use_model` with scope `now`: this activation's next dispatch runs on the new choice. */
-  setModelOverride(id: string, choice: BotModelChoice): void {
+  setModelOverride(id: string, choice: BotModelOverride): void {
     this.run('UPDATE bot_activations SET model_override_json = ?, reload_pending = 1 WHERE id = ?', JSON.stringify(choice), id)
   }
 
@@ -947,6 +1005,11 @@ export class BotStore {
   lastMainDispatch(activationId: string): BotDispatchRow | undefined {
     const row = this.get("SELECT * FROM bot_dispatches WHERE activation_id = ? AND kind IN ('start', 'continue') ORDER BY n DESC LIMIT 1", activationId)
     return row ? dispatchOf(row) : undefined
+  }
+
+  /** A dispatch whose time is not settled yet made a call at `at` (it only moves forward). */
+  checkpointDispatch(activationId: string, n: number, at: number): void {
+    this.run('UPDATE bot_dispatches SET checkpoint_at = ? WHERE activation_id = ? AND n = ? AND settled_by IS NULL AND (checkpoint_at IS NULL OR checkpoint_at < ?)', at, activationId, n, at)
   }
 
   setDispatchRun(activationId: string, n: number, runId: string): void {
@@ -1061,6 +1124,11 @@ export class BotStore {
     this.run("UPDATE bot_escalations SET activation_id = ?, dispatch_n = ?, mode = 'wall', applied_at = NULL WHERE id = ? AND status = 'open'", activationId, dispatchN, id)
   }
 
+  /** Work that ran out of room takes over the bot's open ask for that limit (a run's ask): its answer goes on with it. */
+  moveAsk(id: string, activationId: string, dispatchN: number): void {
+    this.run("UPDATE bot_escalations SET activation_id = ?, dispatch_n = ? WHERE id = ? AND status = 'open' AND mode = 'ask'", activationId, dispatchN, id)
+  }
+
   setEscalationMessage(id: string, messageId: string): void {
     this.run('UPDATE bot_escalations SET message_id = ? WHERE id = ? AND message_id IS NULL', messageId, id)
   }
@@ -1089,6 +1157,11 @@ export class BotStore {
       activationId
     )
     return this.run("UPDATE bot_escalations SET status = ?, answered_at = ? WHERE activation_id = ? AND status = 'open' AND mode = 'wall'", status, this.now(), activationId)
+  }
+
+  /** Withdraws an activation's open asks (its work ended under a grant that is gone). */
+  withdrawActivationAsks(activationId: string): number {
+    return this.run("UPDATE bot_escalations SET status = 'withdrawn', answered_at = ? WHERE activation_id = ? AND status = 'open'", this.now(), activationId)
   }
 
   /** Withdraws every open ask of a bot (it was deleted). */

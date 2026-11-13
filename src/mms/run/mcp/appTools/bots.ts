@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto'
 import { Type, type Tool } from '@earendil-works/pi-ai'
-import { BOT_DEPTHS, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, MAX_BOT_SCHEDULES, type BotDepth, type BotLane, type BotSchedule } from '../../../../shared/bots/personal/definition'
+import { BOT_DEPTHS, BOT_WORK_LEVELS, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, MAX_BOT_SCHEDULES, type BotDepth, type BotLane, type BotModelSlotKey, type BotModelSlots, type BotSchedule } from '../../../../shared/bots/personal/definition'
+import { entriesOf, modelsNamedBy, namedOn, ownerNamesModel, workLevelOf, type BotModelRows, type NamedModel } from '../../../../shared/bots/personal/modelSlots'
+import type { BotModelOption } from '../../../../shared/bots/personal/methods'
+import { shortModelName } from '../../../../shared/modelNames'
 import { botScheduleLabel } from '../../../../shared/scheduleLabel'
 import { botScheduleProblem } from '../../../scheduled/botJobs'
 import type { BotActivityContext, BotActivitySink, BotToolHost } from '../../../bots/seams'
@@ -16,7 +19,8 @@ import { json, plainSchema, truncateForModel, type MousseTool, type ToolCallCont
  *   `bots.db`; the job scheduler's tools already own the `schedule_*` names);
  * - `set_profile` renames it or changes its description;
  * - `set_depth` and `use_model` change how much time it takes and, in words the owner used, its
- *   model. Their effects never reach the UI.
+ *   model (#673: a level, and a pick among the Runs on choices); a model change shows as a chip
+ *   and on About → Runs on, and never names the model in the chat.
  * The bot and the lane always come from the engine (`BotToolHost.activationOf`), never from
  * arguments. An unattended run may look at its schedules and change its depth for itself, but only
  * the owner's chat changes the bot for good.
@@ -87,7 +91,7 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'set_depth',
-    description: 'Take more time to think (deep), be quicker (quick) or go back to normal. Use it when the owner asks you to think harder or be faster, or when a task needs it.',
+    description: 'Take more time to think (deep), be quicker (quick) or go back to normal. now: this conversation, or the rest of this run. always: from now on, which is also the level of work, scheduled runs and reminders that name none. Use it when the owner asks you to think harder or be faster. Its answer says whether anything changed: the owner may have set a model and reasoning level that stay as they are.',
     parameters: Type.Object({
       depth: Type.Union(BOT_DEPTHS.map((depth) => Type.Literal(depth))),
       scope: SCOPE
@@ -95,18 +99,20 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'use_model',
-    description: 'Only when the owner names a model: use it, as they said it. If it is not available here, say so plainly and carry on.',
+    description: 'Only when the owner names a model in their message: use it, as they said it. now: for this conversation. always: from now on, for talking, for work, or both (all); only when this message of theirs gives the model\'s full name. If nothing changes, tell the owner plainly to pick it in About → Runs on, and carry on.',
     parameters: Type.Object({
       model: Type.String({ description: 'The model, in the owner\'s words.' }),
-      scope: SCOPE
+      scope: SCOPE,
+      for: Type.Optional(Type.Union([Type.Literal('talk'), Type.Literal('work'), Type.Literal('all')], { description: 'With always: talk (this chat), work, or all (the default).' }))
     })
   },
   {
     name: 'work_start',
-    description: 'Hand work that takes more than a moment to a run of its own, so you stay free to talk: anything on the web or in the browser, running commands, research, writing a document, or several steps. It runs beside this chat and reports to the owner when done, as a reply to their message. Work runs one at a time; later work waits its turn. The run sees your memory but not this chat, so the brief must stand on its own: what to do, everything the owner told you that matters, and what the report should contain. Then tell the owner in one short line that you are on it.',
+    description: 'Hand work that takes more than a moment to a run of its own, so you stay free to talk: anything on the web or in the browser, running commands, research, writing a document, or several steps. It runs beside this chat and reports to the owner when done, as a reply to their message. Up to 3 pieces of work run at once, so a quick lookup can start beside a long job; more wait their turn. The run sees your memory but not this chat, so the brief must stand on its own: what to do, everything the owner told you that matters, and what the report should contain. Then tell the owner in one short line that you are on it.',
     parameters: Type.Object({
       title: Type.String({ description: 'A few words the owner will recognise, like "Vacuum comparison".' }),
-      brief: Type.String({ description: 'The whole task, standing on its own.' })
+      brief: Type.String({ description: 'The whole task, standing on its own.' }),
+      level: Type.Optional(Type.Union(BOT_WORK_LEVELS.map((level) => Type.Literal(level)), { description: 'How hard it is: light for a quick lookup or a small routine job, medium for most work, hard for research, a long or difficult problem, or when the owner asks you to think harder. Left out: your usual level.' }))
     })
   },
   {
@@ -161,8 +167,50 @@ export interface BotAppToolDeps {
   host: BotToolHost
   /** Outcome chips: new schedules, renames, depth. */
   activity?: BotActivitySink
-  /** `use_model`: whether the owner's words name a model a bot can run here (`BotModelChooser.namedAvailable`). */
-  models?: { namedAvailable(model: string): Promise<boolean> }
+  /**
+   * `use_model`: the same choices the picker offers (`BotModelChooser.pickable`), each with its entry's sign-in now,
+   * which the pick keeps.
+   */
+  models?: { pickable(): Promise<BotModelOption[]> }
+}
+
+/** `use_model`'s one line when nothing changes. */
+export const USE_MODEL_REFUSED = 'Nothing changed. Ask the owner to pick the model in About → Runs on.'
+
+/**
+ * The model the owner's own message names for `use_model` (#673), on the rows it would go on, or undefined (refused).
+ *
+ * - `always` (`rows`: Talk, Work or both): the message holds a full name of exactly one offered model, as whole words:
+ *   its name as the picker shows it ("Opus 5.5"), its own name or its id. A family word ("opus"), a bare number and
+ *   generic words ("pro", "mini", "default") never do. Offered on one entry: every row goes there. Offered on two:
+ *   each row stays on the entry it is on, when that entry offers it; otherwise it is refused.
+ * - `now` (this chat, Talk's row): a full name as above, kept on Talk's entry when two entries offer it; or else a
+ *   family word, as a whole word, when it names exactly one model among the choices on Talk's entry (all choices
+ *   while Talk has no pick on an entry).
+ */
+export function ownerModelChoice(owner: string, options: readonly BotModelOption[], scope: 'now' | 'always', rows: BotModelRows, current: BotModelSlots): Partial<Record<BotModelSlotKey, BotModelOption>> | undefined {
+  if (!owner.trim() || !options.length) return undefined
+  const keys: BotModelSlotKey[] = scope === 'now' ? ['talk'] : rows === 'talk' ? ['talk'] : rows === 'work' ? ['light', 'medium', 'hard'] : ['talk', 'light', 'medium', 'hard']
+  const place = (named: NamedModel<BotModelOption>): Partial<Record<BotModelSlotKey, BotModelOption>> | undefined => {
+    const entries = entriesOf(named)
+    const placed: Partial<Record<BotModelSlotKey, BotModelOption>> = {}
+    for (const key of keys) {
+      const onRow = current[key]?.instanceId
+      const option = entries.length === 1 ? namedOn(named, entries[0]!) : onRow ? namedOn(named, onRow) : undefined
+      if (!option) return undefined
+      placed[key] = option
+    }
+    return placed
+  }
+  const full = modelsNamedBy(owner, options, shortModelName)
+  if (full.length > 1) return undefined
+  if (full.length === 1) return place(full[0]!)
+  if (scope === 'always') return undefined
+  const entry = current.talk?.instanceId
+  const pool = entry ? options.filter((option) => option.instanceId === entry) : options
+  const family = modelsNamedBy(owner, pool, shortModelName, true)
+  if (family.length !== 1 || family[0]!.options.length !== 1) return undefined
+  return { talk: family[0]!.options[0]! }
 }
 
 const NOT_A_BOT = 'Only a bot can use this.'
@@ -341,10 +389,20 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         const scope = args.scope === 'always' ? 'always' : args.scope === 'now' ? 'now' : undefined
         if (!scope) return error('scope is now or always.')
         if (scope === 'always' && call.lane !== 'chat') return error(OWNER_ONLY)
+        let changed: boolean
         try {
-          call.deps.host.setModel(call.botId, call.activationId, scope, { depth })
+          changed = call.deps.host.setModel(call.botId, call.activationId, scope, { depth }).changed
         } catch (failure) {
           return error(failure instanceof Error ? failure.message : String(failure))
+        }
+        // A model the owner picked keeps its reasoning level at any depth (#673): say so rather than promise more time.
+        if (!changed) {
+          const note = scope === 'now'
+            ? (call.lane === 'chat'
+              ? 'Nothing changes here: the owner set the model and how long it thinks for this chat in Runs on. Don\'t say you\'ll take more or less time. For a job that needs more thought, start work with level hard; for a quick one, level light.'
+              : 'Nothing changes: this run is already on the model the owner set for that level. Carry on.')
+            : 'Saved, but nothing changes now: your work runs on the same model and reasoning level either way, as the owner set them in Runs on. Don\'t say you\'ll take more or less time; tell them plainly they can set a model for each kind of work there.'
+          return json({ ok: true as const, changed: false, note })
         }
         const result = { ok: true as const, note: scope === 'now' ? 'Mousse continues your turn with the new depth right after this. Carry on where you left off.' : 'Saved: your next conversations and runs use it.' }
         call.deps.activity?.onAppResult(call.activity, 'set_depth', result)
@@ -361,9 +419,11 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         const brief = typeof args.brief === 'string' ? args.brief.trim().slice(0, MAX_WORK_BRIEF_CHARS) : ''
         if (!brief) return error('work_start needs a brief that stands on its own.')
         const title = typeof args.title === 'string' ? args.title : ''
+        const level = workLevelOf(args.level)
+        if (args.level !== undefined && !level) return error('level is light, medium or hard.')
         try {
-          const started = await call.deps.host.work.start(call.botId, call.activationId, { title, brief, key: `${call.activationId}:${ctx.toolCallId ?? randomUUID()}` })
-          const result = { ...started, note: started.status === 'queued' ? `It starts after: ${started.ahead.join('; ')}. Tell the owner it is next in line.` : started.status === 'ended' ? 'This work already ran and ended; see work_list for its report.' : 'It is running. Tell the owner you are on it; its report reaches them by itself.' }
+          const started = await call.deps.host.work.start(call.botId, call.activationId, { title, brief, key: `${call.activationId}:${ctx.toolCallId ?? randomUUID()}`, ...(level ? { level } : {}) })
+          const result = { ...started, note: started.status === 'queued' ? `It starts when there is room, after: ${started.ahead.join('; ')}. Tell the owner it waits its turn.` : started.status === 'ended' ? 'This work already ran and ended; see work_list for its report.' : 'It is running, beside anything else you are working on. Tell the owner you are on it; its report reaches them by itself.' }
           call.deps.activity?.onAppResult(call.activity, 'work_start', started)
           return json(result)
         } catch (failure) {
@@ -407,7 +467,15 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         if (result === 'not_found') return error('You have no work with that id. See work_list.')
         if (result === 'ended') return json({ result, note: 'That work already finished, so it never saw this. Start new work for it if it still matters.' })
         if (result === 'held') return json({ result, note: 'That work is held (it stopped part-way), so it can\'t take notes. Stop it and start new work with this if it still matters.' })
-        return json({ result, note: 'It takes this into account before it reports.' })
+        // Tell the owner the truth about when the work sees it.
+        const reach = call.deps.host.work.reach?.(call.botId, args.workId) ?? 'step_end'
+        return json({ result, reaches: reach, note: reach === 'now'
+          ? 'The work gets this at its next step, while it keeps working, and its report will lead with what changed. Tell the owner it has it now.'
+          : reach === 'after_compaction'
+            ? 'The work is making room in its memory of this job right now; it gets this as soon as that ends (within a few minutes) and keeps working, and its report will lead with what changed. Tell the owner it gets it in a few minutes.'
+          : reach === 'step_end'
+            ? 'The work gets this when the step it is on now ends, then carries on with it and updates its report. Tell the owner it gets it when this step ends.'
+            : 'The work gets this when it starts (or carries on), and takes it into account before it reports. Tell the owner it has it.' })
       }
     }),
     ownTool(byName.get('remind')!, deps, {
@@ -471,14 +539,28 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         if (!model) return error('use_model needs the model, as the owner said it.')
         const scope = args.scope === 'always' ? 'always' : args.scope === 'now' ? 'now' : undefined
         if (!scope) return error('scope is now or always.')
-        const available = call.deps.models ? await call.deps.models.namedAvailable(model) : false
-        if (!available) return json({ ok: false, reason: 'That model is not available here. You stay on automatic; tell the owner plainly, without naming other models.' })
+        const rows = args.for === undefined ? 'all' : args.for === 'talk' || args.for === 'work' || args.for === 'all' ? args.for : undefined
+        if (!rows) return error('for is talk, work or all.')
+        // Only among the choices About → Runs on offers, each on its own entry, and only the model the owner's own message
+        // names (`ownerModelChoice`); the bot's words never choose it. The owner sees the change there and as a chip.
+        const options = call.deps.models ? await call.deps.models.pickable().catch(() => []) : []
+        const host = call.deps.host
+        const current = host.rows(call.botId)
+        const chosen = ownerModelChoice(host.ownerWords(call.botId, call.activationId), options, scope, rows, current)
+        // The bot's own words must name the same model: it never points the owner's words at another one.
+        const named = chosen && Object.values(chosen)[0]
+        if (!chosen || !named || ![named.label, shortModelName(named.label), named.model, ...(named.names ?? [])].some((name) => ownerNamesModel(name, [model])))
+          return json({ ok: false, reason: USE_MODEL_REFUSED })
+        const stamp = (option: BotModelOption) => ({ instanceId: option.instanceId, model: option.model, ...(option.credential ? { credential: option.credential } : {}), ...(option.account ? { account: option.account } : {}) })
         try {
-          call.deps.host.setModel(call.botId, call.activationId, scope, { mode: 'named', model })
+          if (scope === 'now') host.setModel(call.botId, call.activationId, 'now', { pick: stamp(named) })
+          else host.setModel(call.botId, call.activationId, 'always', { slots: Object.fromEntries(Object.entries(chosen).map(([key, option]) => [key, stamp(option)])) })
         } catch (failure) {
           return error(failure instanceof Error ? failure.message : String(failure))
         }
-        return json({ ok: true })
+        const result = { ok: true as const, scope, ...(scope === 'always' ? { for: rows } : {}) }
+        call.deps.activity?.onAppResult(call.activity, 'use_model', result)
+        return json(result)
       }
     })
   ]

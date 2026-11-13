@@ -175,6 +175,8 @@ type SavedThread = {
   instanceId?: string
   /** Fingerprint of the canonical history the thread holds; set after the turn commits, or after a stopped turn is fingerprinted. */
   historyKey?: string
+  /** A bot's thread: a fingerprint of the system text (developer instructions) it was opened with. */
+  instructionsHash?: string
 }
 type Settings = {
   /**
@@ -533,6 +535,10 @@ export function findCodexBinary(env: NodeJS.ProcessEnv = process.env): string | 
 }
 
 const historyKey = (history: string): string => createHash('sha256').update(history).digest('hex')
+
+/** A bot thread's saved fingerprint of the system text it was opened with (`SavedThread.instructionsHash`). */
+const botInstructionsKey = (input: Pick<CodexChatInput, 'bot' | 'developerInstructions'>): { instructionsHash?: string } =>
+  input.bot && input.developerInstructions ? { instructionsHash: historyKey(input.developerInstructions).slice(0, 32) } : {}
 
 /**
  * What the account check says. `ownSignIn` is the instruction for an instance with a home of its own
@@ -2846,6 +2852,20 @@ export class CodexProviderService {
         if (this.turns.has(saved.codexThreadId)) throw new Error('The previous Codex turn on this thread is still running')
       }
       const loaded = this.loaded.get(saved.codexThreadId)
+      // A bot's system text states what its owner allows now. A thread opened with other text keeps it (a loaded thread
+      // keeps its developer instructions, and they are what survives Codex's own compaction), so the dispatch starts a
+      // new Codex thread under the new text, with the history given in its prompt.
+      const opened = loaded?.instructionsHash ?? saved.instructionsHash
+      if (input.bot && instructionsHash !== undefined && opened !== undefined && opened !== instructionsHash) {
+        if (loaded) {
+          this.loaded.delete(saved.codexThreadId)
+          await conn.request('thread/unsubscribe', { threadId: saved.codexThreadId }, { signal, timeoutMs: 5_000 }).catch(() => undefined)
+          signal.throwIfAborted()
+        }
+        const fresh = pinnedProvider(this.modelProvider, await conn.request('thread/start', params, { signal }))
+        this.loaded.set(fresh.thread.id, { mcpToken, relayKey, cwd, childKey, instructionsHash })
+        return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false }
+      }
       if (loaded && loaded.mcpToken === mcpToken && loaded.relayKey === relayKey && loaded.cwd === cwd && loaded.childKey === childKey) {
         // A loaded thread keeps the developer instructions it was opened with: changed ones go into the prompt.
         const instructionsStale = instructionsHash !== undefined && loaded.instructionsHash !== instructionsHash
@@ -2926,7 +2946,7 @@ export class CodexProviderService {
       signal.throwIfAborted()
       const codexThreadId = thread.codexThreadId
       // The thread is not resumable until the turn commits its history.
-      this.settings.threads = { ...this.settings.threads, [input.threadId]: { codexThreadId, cwd: resolve(input.cwd), instanceId: input.instanceId ?? CODEX_INSTANCE_ID } }
+      this.settings.threads = { ...this.settings.threads, [input.threadId]: { codexThreadId, cwd: resolve(input.cwd), instanceId: input.instanceId ?? CODEX_INSTANCE_ID, ...botInstructionsKey(input) } }
       this.save()
       input.onSession?.({ codexThreadId })
       const current = new TurnRun(codexThreadId, input.threadId, input.mode ?? 'default', signal, input, (id) => this.strays.get(id))
@@ -3208,7 +3228,7 @@ export class CodexProviderService {
       this.release(current)
       current.closeTools('no_result')
       if (scope === this.scope) {
-        this.settings.threads = { ...this.settings.threads, [input.threadId]: { codexThreadId, cwd: resolve(input.cwd), instanceId: input.instanceId ?? CODEX_INSTANCE_ID } }
+        this.settings.threads = { ...this.settings.threads, [input.threadId]: { codexThreadId, cwd: resolve(input.cwd), instanceId: input.instanceId ?? CODEX_INSTANCE_ID, ...botInstructionsKey(input) } }
         this.save()
         this.readyToCommit.add(input.threadId)
       }
