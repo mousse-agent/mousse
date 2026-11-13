@@ -106,6 +106,23 @@ describe('the ambient glow while the window is not focused', () => {
     }
   })
 
+  it('rests after 30 seconds without input in a focused window, and moves again on the next input', () => {
+    vi.useFakeTimers()
+    try {
+      const { chat } = mount(true)
+      act(() => { vi.advanceTimersByTime(29_000) })
+      act(() => { window.dispatchEvent(new Event('pointermove')) })
+      act(() => { vi.advanceTimersByTime(29_000) })
+      expect(chat.hasAttribute('data-ambient-rest')).toBe(false)
+      act(() => { vi.advanceTimersByTime(1_000) })
+      expect(chat.hasAttribute('data-ambient-rest')).toBe(true)
+      act(() => { window.dispatchEvent(new Event('keydown')) })
+      expect(chat.hasAttribute('data-ambient-rest')).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('stops listening for visibility once the glow goes', () => {
     const { chat } = mount(true)
     act(() => root!.unmount())

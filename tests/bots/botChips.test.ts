@@ -27,9 +27,9 @@ describe('chipForCall: live chips, worded as attempts', () => {
     expect(chipForCall('set_depth', { depth: 'quick', scope: 'now' }, ctx)).toMatchObject({ text: 'going quicker' })
   })
 
-  it('shows none for escalate (its card is the chip) or use_model (the model is never shown)', () => {
+  it('shows none for escalate (its card is the chip); use_model shows the change without naming the model (#673)', () => {
     expect(chipForCall('escalate', { permission: { tool: 'read' }, reason: 'x' }, ctx)).toBeNull()
-    expect(chipForCall('use_model', { model: 'claude-opus-5-5', scope: 'now' }, ctx)).toBeNull()
+    expect(chipForCall('use_model', { model: 'claude-opus-5-5', scope: 'now' }, ctx)).toEqual({ icon: 'think', text: 'switching models', live: true })
     expect(chipForCall('something_else', {}, ctx)).toBeNull()
   })
 
@@ -83,18 +83,24 @@ describe('rollUpChips: settled chips', () => {
     ])
   })
 
-  it('depth and renames show the last one; escalate and use_model show nothing', () => {
-    expect(rollUpChips([
+  it('depth and renames show the last one; escalate shows nothing; use_model says it switched, never to what', () => {
+    const chips = rollUpChips([
       { tool: 'set_depth', input: { depth: 'quick', scope: 'now' }, result: { ok: true } },
       { tool: 'set_depth', input: { depth: 'deep', scope: 'now' }, result: { ok: true } },
       { tool: 'set_profile', input: { name: 'Inbox helper' }, result: { ok: true } },
       { tool: 'set_profile', input: { name: 'Inbox buddy' }, result: { ok: true } },
       { tool: 'escalate', input: {} },
-      { tool: 'use_model', input: { model: 'claude-opus-5-5' }, result: { ok: true } }
-    ], ctx)).toEqual([
+      { tool: 'use_model', input: { model: 'claude-opus-5-5' }, result: { ok: true, scope: 'now' } },
+      { tool: 'use_model', input: { model: 'claude-opus-5-5', scope: 'always', for: 'work' }, result: { ok: true, scope: 'always', for: 'work' } },
+      { tool: 'use_model', input: { model: 'grok' }, result: { ok: false, reason: 'not here' } }
+    ], ctx)
+    expect(chips).toEqual([
       { icon: 'think', text: 'taking more time' },
-      { icon: 'name', text: 'renamed itself', highlight: 'Inbox buddy' }
+      { icon: 'name', text: 'renamed itself', highlight: 'Inbox buddy' },
+      { icon: 'think', text: 'switched models', highlight: 'for this chat' },
+      { icon: 'think', text: 'switched models', highlight: 'for work' }
     ])
+    expect(JSON.stringify(chips)).not.toContain('opus')
   })
 })
 

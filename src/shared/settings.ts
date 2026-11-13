@@ -626,6 +626,33 @@ export function botProviderOptions(providers: readonly LlmProviderOption[], hold
     .filter((provider) => provider.models.length > 0)
 }
 
+/**
+ * A bot's Runs on choices for the app's model picker (#673): `providers` narrowed to the models `picks` names (each
+ * entry's models that can hold a bot), with the reasoning levels the bot may pick and no "Off", which a bot never runs at.
+ */
+export function botPickProviderOptions(providers: readonly LlmProviderOption[], picks: ReadonlyArray<{ instanceId: string; model: string; efforts: readonly string[] }>): LlmProviderOption[] {
+  const held = new Map(picks.map((entry) => [`${entry.instanceId}\u0000${entry.model}`, entry.efforts]))
+  return providers
+    .filter((provider) => provider.instanceId !== undefined)
+    .map((provider) => ({
+      ...provider,
+      models: provider.models.flatMap((model) => {
+        const efforts = held.get(`${provider.instanceId}\u0000${model.id}`)
+        if (!efforts) return []
+        const levels = (model.efforts ?? []).filter((effort) => efforts.includes(effort))
+        const { efforts: _efforts, defaultEffort, effortDescriptions: _descriptions, thinkingOff: _off, ...rest } = model
+        return [{
+          ...rest,
+          ...(levels.length ? { efforts: levels } : {}),
+          ...(defaultEffort && levels.includes(defaultEffort) ? { defaultEffort } : {}),
+          ...(model.effortDescriptions && levels.length ? { effortDescriptions: model.effortDescriptions } : {}),
+          thinkingOff: false as const
+        }]
+      })
+    }))
+    .filter((provider) => provider.models.length > 0)
+}
+
 export const ACRYLIC_INTENSITY_MIN = 0
 export const ACRYLIC_INTENSITY_MAX = 100
 export const ACRYLIC_INTENSITY_DEFAULT = 55

@@ -362,7 +362,7 @@
   margin: 0 3px;
   border-radius: 50%;
   background: var(--ui-faint);
-  animation: side-card-git-pr-pulse 1.6s ease-in-out infinite;
+  animation: side-card-git-pr-pulse 1.6s steps(12, jump-none) infinite;
 }
 
 .side-card-git-pr-number {
@@ -1057,7 +1057,7 @@
 
 .side-card-git-next-spin {
   flex: none;
-  animation: side-card-git-next-spin 0.9s linear infinite;
+  animation: side-card-git-next-spin 0.9s steps(12) infinite;
 }
 
 @keyframes side-card-git-next-spin {

@@ -1,0 +1,68 @@
+/* The numbered step bar of a dialog made of steps (ui/WizardSteps: Add provider, New bot). */
+
+.wizard-steps {
+  display: grid;
+  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-flow: column;
+  gap: var(--space-4, 4px);
+  margin: 0;
+  padding: var(--space-4, 4px);
+  list-style: none;
+  border-radius: var(--ui-card-radius);
+  background: var(--settings-surface, var(--ui-hover));
+}
+
+.wizard-step {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8, 8px);
+  width: 100%;
+  min-width: 0;
+  padding: 6px var(--space-8, 8px);
+  border: 0;
+  border-radius: var(--ui-control-radius);
+  background: none;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.wizard-step:disabled {
+  cursor: default;
+}
+
+.wizard-step.is-current {
+  background: var(--ui-selected);
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.wizard-step.is-done:hover:not(:disabled) {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+.wizard-step-num {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--ui-hover);
+  font-size: 11.5px;
+}
+
+.wizard-step.is-current .wizard-step-num,
+.wizard-step.is-done .wizard-step-num {
+  background: var(--accent);
+  color: var(--accent-contrast, #fff);
+}
+
+.wizard-step-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

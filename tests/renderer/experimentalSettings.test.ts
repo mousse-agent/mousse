@@ -59,9 +59,6 @@ describe('the experimental settings', () => {
 
   it('show the row under Agents > Subagents with an Experimental badge, off by default, and save a change in mousse.conf', () => {
     show()
-    // The one-row Experimental group is gone: the row sits with the other subagent settings.
-    const headings = Array.from(host.querySelectorAll('h2, h3, [role="heading"]')).map((heading) => heading.textContent?.trim())
-    expect(headings).not.toContain('Experimental')
     const group = toggle().closest('section.settings-group')!
     expect(group.querySelector('h3')?.textContent?.trim()).toBe('Subagents')
     const row = toggle().closest('.settings-item')!

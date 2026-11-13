@@ -83,8 +83,20 @@ describe('an answered ask', () => {
 
   it('says a run’s permission applies from the next run, and words Not now and withdrawn', () => {
     expect(askAnswerLine(ask({ status: 'allowed' }), true)).toBe('Allowed: use files on this computer. It uses it from the next run.')
+    // A limit the owner's work waits on: Allow carries that work on now, and says how many when it was several.
+    expect(askAnswerLine(ask({ status: 'allowed', title: 'work for up to 2 hours per run', carriesOn: true }), true)).toBe('Allowed: work for up to 2 hours per run. It carries on with this now.')
+    expect(askAnswerLine(ask({ status: 'allowed', title: 'work for up to 2 hours per run', carriesOn: true, carried: 3 }), true)).toBe('Allowed: work for up to 2 hours per run. 3 pieces of work carry on now.')
     expect(askAnswerLine(ask({ status: 'not_now' }))).toBe('Not now: use files on this computer')
     expect(askAnswerLine(ask({ status: 'withdrawn' }))).toBe('No longer needed: use files on this computer')
+  })
+
+  it('says what Allow did for a run’s permission: the work carries on, the next run has it, or nothing is running', () => {
+    // The work that asked is still running or waiting: it continues with the permission.
+    expect(askAnswerLine(ask({ status: 'allowed', title: 'run commands', carriesOn: true }), true)).toBe('Allowed: run commands. It carries on with this now.')
+    // It ended, and other work runs: the next run has it.
+    expect(askAnswerLine(ask({ status: 'allowed', title: 'run commands' }), true)).toBe('Allowed: run commands. It uses it from the next run.')
+    // Nothing of the bot was running or waiting.
+    expect(askAnswerLine(ask({ status: 'allowed', title: 'run commands', idle: true }), true)).toBe('Allowed: run commands. Nothing is running now; it has this from now on.')
   })
 })
 

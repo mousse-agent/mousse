@@ -213,6 +213,32 @@ export class NetIdentityService implements IdentityService {
         this.localNodeMatches(current, self.node)
     }
   }
+  /**
+   * This computer was removed from its user's devices: the roster it holds revokes it through its
+   * newest key epoch, so it can never reconnect with these keys. A delegation that only lapsed is
+   * not a removal, and the authority (which cannot be revoked) is never removed.
+   */
+  selfRemoved(): boolean {
+    const state = this.load(),
+      self = state.self
+    if (!self || state.writer === 'authority') return false
+    const user = state.users[self.user]
+    if (!user?.current || user.state !== 'ok') return false
+    let roster: Roster
+    try {
+      roster = this.rosterDocument(user.current, user.root)
+    } catch (cause) {
+      if (cause instanceof NetError) return false
+      throw cause
+    }
+    if (roster.authorityNode === self.node) return false
+    const through = roster.revoked.find((row) => row.subject === self.node)?.throughKeyEpoch
+    if (through === undefined) return false
+    // Revoking prunes the delegation; one that is still listed counts only from a newer key epoch.
+    return !this.delegations(roster).some(
+      (row) => row.kind === 'node' && row.subject === self.node && row.keyEpoch > through
+    )
+  }
   rosterState(user: UserId): RosterState {
     return this.load().users[user]?.state ?? 'ok'
   }

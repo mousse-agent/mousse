@@ -19,6 +19,7 @@ Every bot has an append-only **journal** in `bots.db` (`bot_journal`). It holds 
 - **Refs.** The bot names a version `m12` (first version) or `m12v3`. `replaces` must name the current version, or the save returns `stale` with it.
 - **Caps** (estimated tokens): owner 600, notes 1,400, run notes 500. A save over its kind's cap fails with that kind's entries. Superseded and expired entries do not count.
 - **Refused saves:** over 400 characters, unresolved relative dates ("tomorrow"; the refusal gives the absolute date), and anything the guard rejects.
+- **Lists and longer documents** are files in the bot's files folder, which the chat and its work can both change; memory keeps one short note per list with its path (`instructions.ts`).
 - **Dates:** `learned_at`, plus optional `valid_from` and `expires_at`. An entry past `expires_at` becomes `expired`: out of the pack, still listed and searchable.
 - **Forget** (chat lane, or the owner through `bots.memory.forget`): the entry's text is removed and its hash kept, so it is refused if saved again. Cited journal rows (`refs`), their exact copies, and the entry's save records are redacted to `[removed at your request · <date>]`, with their index rows. Entries citing a redacted row are forgotten too, and a redacted `bm:` row's `bot_messages` text is blanked. Thread transcripts and runtime session files are caches outside this.
 
@@ -39,7 +40,7 @@ Every bot has an append-only **journal** in `bots.db` (`bot_journal`). It holds 
 - **The window moves in chunks.** When it passes 8k tokens, its oldest rows drop until it is under 4k and fold into the chat summary, newest first: owner messages cut at 300 characters, the first line of a run report, the first sentence of a reply. No model call. Between jumps each pack's prefix extends the last one, so prompt caches hold.
 - A run's request (its prompt, after the pack) ends with "Your last message is your report to the owner …" (`BOT_RUN_REPORT_LINE`), which the engine appends.
 - The rows of the current activation (the owner's new message) are left out: they arrive as the request.
-- The **guard** checks every row entering a pack. A row it rejects shows as "(held back: … memory_read j12 shows it.)". The owner's own words skip only the instruction check.
+- The **guard** checks every row entering a pack. A piece that looks like a credential is replaced in place by "[held back: looks like a secret · memory_read j12 shows it]", and the rest of the row stays (after "password:" the rest of the line goes with it, since a password may have spaces). A row with hidden characters or instruction-shaped text is held back whole: "(held back: … memory_read j12 shows it.)". The owner's own words skip only the instruction check.
 
 ## Search
 
@@ -60,7 +61,9 @@ The five tools are always on and never grantable. The bot and lane come from `Bo
 
 ## The guard (`guard.ts`)
 
-Heuristics, not proofs. It rejects invisible and bidi characters (keeping ZWJ and ZWNJ), credential shapes (`sk-`, `ghp_`, `AKIA`, JWTs, PEM keys, `password=`, long high-entropy tokens; secrets belong in a vault, #595), and instruction-shaped text ("ignore previous instructions", "you must now", role and tool-call markup).
+Heuristics, not proofs. It rejects invisible and bidi characters (keeping ZWJ and ZWNJ), credential shapes (`sk-`, `ghp_`, `AKIA`, JWTs, PEM keys, `password=`, chat webhooks, a password in a web address, long high-entropy tokens; secrets belong in a vault, #595), and instruction-shaped text ("ignore previous instructions", "you must now", role and tool-call markup). A save with any of them is refused; in a pack only the credential piece is held back.
+
+The named shapes are found everywhere, web addresses included. Inside a web address (`http://` or `https://`), the high-entropy check is skipped for the host, the path and most query values, since a document's or a parcel's ID is not a secret; it still holds back a long value whose name says it is one (`?token=`, `&sig=`, `#access_token=`, `…key=`, `…secret=`, `…code=`).
 
 ## Owner operations
 

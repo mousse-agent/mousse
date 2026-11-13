@@ -193,6 +193,13 @@ describe('network CLI validation', () => {
     ])
       expect(() => prepareNetCommand(bad)).toThrow()
   })
+  it('turns "Share bots with other devices" on and off, or shows it', () => {
+    expect(prepareNetCommand(args('bridge', 'bots', []))).toEqual({ method: 'bridge.shareBots', params: {} })
+    expect(prepareNetCommand(args('bridge', 'bots', ['on']))).toEqual({ method: 'bridge.shareBots', params: { enabled: true } })
+    expect(prepareNetCommand(args('bridge', 'bots', ['off']))).toEqual({ method: 'bridge.shareBots', params: { enabled: false } })
+    for (const bad of [args('bridge', 'bots', ['maybe']), args('bridge', 'bots', ['on', 'off'])])
+      expect(() => prepareNetCommand(bad)).toThrow()
+  })
   it('turns the setting for other computers working on this one on and off, or shows it', () => {
     expect(prepareNetCommand(args('bridge', 'threads', []))).toEqual({
       method: 'bridge.workOnThreads',

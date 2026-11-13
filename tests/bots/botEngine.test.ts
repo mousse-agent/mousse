@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:f
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { BotEngine, type BotEngineHost } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_OFFLINE_WATCH_MS, BotEngine, type BotEngineHost } from '../../src/mms/bots/activation/BotEngine'
 import { BotDefinitionStore } from '../../src/mms/bots/definitions/BotDefinitionStore'
 import { botManifestDigest } from '../../src/mms/bots/grants/compile'
 import { BotStore } from '../../src/mms/bots/store/BotStore'
@@ -284,9 +284,10 @@ describe('activation and dispatch', () => {
     expect(store.registry('site-editor')).toMatchObject({ failureStreak: 1 })
   })
 
-  it('revoking the grant stops a running dispatch, and its authority refuses the next call', async () => {
+  it('revoking the grant stops every running dispatch, and its authority refuses the next call', async () => {
     const activation = await bots.activate({ botId: 'site-editor', input: 'go', clientRequestId: 'c1' })
-    const queued = await bots.activate({ botId: 'site-editor', input: 'later', clientRequestId: 'c2' })
+    // A second run of the bot runs beside it.
+    const beside = await bots.activate({ botId: 'site-editor', input: 'later', clientRequestId: 'c2' })
     const prepared = bots.prepare(turnStart(store.dispatch(activation.id, 1)!.runId!))
     if ('refused' in prepared) throw new Error(prepared.refused)
     const call = { kind: 'builtin' as const, tool: 'read' as const, nativeName: 'read', args: { path: join(root, 'a.md') } }
@@ -295,9 +296,9 @@ describe('activation and dispatch', () => {
     expect(prepared.authority.check(call)).toEqual({ ok: false, wall: { kind: 'revoked' } })
     expect(prepared.authority.time.signal.aborted).toBe(true)
     await new Promise((resolve) => setImmediate(resolve))
-    expect(stopped).toEqual([activation.threadId])
+    expect([...stopped].sort()).toEqual([activation.threadId, beside.threadId].sort())
     expect(bots.getActivation(activation.id)).toMatchObject({ status: 'cancelled', endReason: 'grant_revoked' })
-    expect(bots.getActivation(queued.id)).toMatchObject({ status: 'cancelled', endReason: 'grant_revoked' })
+    expect(bots.getActivation(beside.id)).toMatchObject({ status: 'cancelled', endReason: 'grant_revoked' })
   })
 
   it('approving a replacement grant ends the dispatch running under the old one', async () => {
@@ -336,7 +337,8 @@ describe('activation and dispatch', () => {
     const activation = await bots.activate({ botId: 'site-editor', input: 'go', clientRequestId: 'c1' })
     const prepared = bots.prepare(turnStart(store.dispatch(activation.id, 1)!.runId!))
     if ('refused' in prepared) throw new Error(prepared.refused)
-    expect(timers.map((timer) => timer.ms)).toEqual([10 * 60_000])
+    // Its deadline, and the look every live dispatch gets (`BOT_OFFLINE_WATCH_MS`).
+    expect(timers.map((timer) => timer.ms)).toEqual([10 * 60_000, BOT_OFFLINE_WATCH_MS])
     timers[0].fn()
     await new Promise((resolve) => setImmediate(resolve))
     expect(prepared.authority.time.signal.aborted).toBe(true)
@@ -386,17 +388,18 @@ describe('activation and dispatch', () => {
     expect(store.openAsks('site-editor')).toMatchObject([{ mode: 'ask', kind: 'budget', permission: { budget: { key: 'maxActiveMs' } } }])
   })
 
-  it('one activation runs at a time; the next starts when it ends', async () => {
+  it('three runs of a bot run at a time; the next starts when one ends', async () => {
     const first = await bots.activate({ botId: 'site-editor', input: 'one', clientRequestId: 'c1' })
-    const second = await bots.activate({ botId: 'site-editor', input: 'two', clientRequestId: 'c2' })
-    expect(second).toMatchObject({ status: 'queued', threadId: null })
+    for (const id of ['c2', 'c3']) expect(await bots.activate({ botId: 'site-editor', input: id, clientRequestId: id })).toMatchObject({ status: 'running' })
+    const fourth = await bots.activate({ botId: 'site-editor', input: 'four', clientRequestId: 'c4' })
+    expect(fourth).toMatchObject({ status: 'queued', threadId: null })
     const payload = turnStart(store.dispatch(first.id, 1)!.runId!)
     bots.prepare(payload)
     finish(payload.runId, 'failed')
     bots.settle(payload, {})
     expect(bots.getActivation(first.id)).toMatchObject({ status: 'failed', endReason: 'failed' })
     await new Promise((resolve) => setImmediate(resolve))
-    expect(bots.getActivation(second.id).status).toBe('running')
+    expect(bots.getActivation(fourth.id).status).toBe('running')
   })
 
   it('a tool call cut off without an outcome pauses the activation until the owner checks it', async () => {
@@ -420,7 +423,9 @@ describe('activation and dispatch', () => {
 
   it('stopping a queued activation ends it; stopping a running one stops its thread', async () => {
     const first = await bots.activate({ botId: 'site-editor', input: 'one', clientRequestId: 'c1' })
-    const second = await bots.activate({ botId: 'site-editor', input: 'two', clientRequestId: 'c2' })
+    for (const id of ['c2', 'c3']) await bots.activate({ botId: 'site-editor', input: id, clientRequestId: id })
+    const second = await bots.activate({ botId: 'site-editor', input: 'two', clientRequestId: 'c4' })
+    expect(second.status).toBe('queued')
     await expect(bots.stop(second.id)).resolves.toMatchObject({ status: 'cancelled', endReason: 'stopped' })
     await expect(bots.stop(first.id)).resolves.toMatchObject({ status: 'cancelled', endReason: 'stopped' })
     expect(stopped).toEqual([first.threadId])
@@ -441,15 +446,17 @@ describe('activation and dispatch', () => {
     store = new BotStore({ profileHome: profile, clock: () => clock })
   })
 
-  it('keeps at most 20 waiting activations; the oldest is dropped', async () => {
+  it('keeps at most 20 runs, running ones counted; the oldest waiting one is dropped', async () => {
     await bots.activate({ botId: 'site-editor', input: 'running', clientRequestId: 'run' })
     const waiting = []
     for (let index = 0; index < 21; index += 1) {
       clock += 1
       waiting.push(await bots.activate({ botId: 'site-editor', input: `q${index}`, clientRequestId: `q${index}` }))
     }
-    expect(bots.getActivation(waiting[0].id)).toMatchObject({ status: 'cancelled', endReason: 'queue_full' })
-    expect(bots.listActivations('site-editor').filter((row) => row.status === 'queued')).toHaveLength(20)
+    // Three run (the first, q0 and q1); of the 19 that waited, the two oldest are dropped.
+    expect(bots.listActivations('site-editor').filter((row) => row.status === 'running')).toHaveLength(3)
+    for (const index of [2, 3]) expect(bots.getActivation(waiting[index].id)).toMatchObject({ status: 'cancelled', endReason: 'queue_full' })
+    expect(bots.listActivations('site-editor').filter((row) => row.status === 'queued')).toHaveLength(17)
   })
 
   it('deleting the bot cancels its activations, revokes its grant and archives its threads (Bot Phase 1 §5.3.3)', async () => {

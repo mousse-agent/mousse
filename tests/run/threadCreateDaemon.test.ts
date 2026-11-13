@@ -646,7 +646,9 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       const replies: Record<string, Rpc> = {}
       const w = world(async (input, mcp) => {
         if (input.threadId !== w.parent.id) return 'ok'
-        replies[input.prompt] = await w.create(mcp!, { title: 'Crash test', instanceId: 'claude', model: 'sonnet', firstMessage: 'Start here', clientRequestId: KEY })
+        // The retry runs on another model, so its prompt starts with the model-change note: key by the user's own text.
+        const own = input.prompt.split('\n\n').at(-1)!
+        replies[own] = await w.create(mcp!, { title: 'Crash test', instanceId: 'claude', model: 'sonnet', firstMessage: 'Start here', clientRequestId: KEY })
         return 'ok'
       })
       w.d.orch.setThreadPermissionMode(w.parent.id, 'ask')

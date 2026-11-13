@@ -134,7 +134,8 @@ function jobToDefinition(job: ScheduledJob): ScheduledJobDefinition {
     createThread: job.createThread,
     selection: job.selection,
     ...(job.agent?.definitionId ? { agent: { definitionId: job.agent.definitionId } } : {}),
-    ...(job.bot ? { bot: { botId: job.bot.botId, scheduleId: job.bot.scheduleId, createdBy: job.bot.createdBy, ...(job.bot.model ? { model: job.bot.model } : {}) } } : {}),
+    // An automation's model by hand keeps its entry beside its name (#673); a build that writes only the name drops it.
+    ...(job.bot ? { bot: { botId: job.bot.botId, scheduleId: job.bot.scheduleId, createdBy: job.bot.createdBy, ...(job.bot.model ? { model: job.bot.model } : {}), ...(job.bot.model && job.bot.pick ? { pick: job.bot.pick } : {}) } } : {}),
     mode: job.mode,
     workspace: job.workspace,
     permissionMode: job.permissionMode,

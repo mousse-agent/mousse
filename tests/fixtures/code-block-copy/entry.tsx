@@ -48,7 +48,8 @@ function measure(): Measured[] {
   return Array.from(document.querySelectorAll<HTMLElement>('[data-streamdown="code-block"]')).map((block) => {
     const header = block.querySelector('[data-streamdown="code-block-header"]')!
     const actions = block.querySelector('[data-streamdown="code-block-actions"]')
-    const button = actions?.querySelector('button')
+    // The copy button: the Wrap toggle sits before it in the same row.
+    const button = actions?.querySelector('button:not(.an-code-wrap)')
     const wrapper = actions?.parentElement as HTMLElement | undefined
     const h = box(header)
     const b = button ? box(button) : null
@@ -73,7 +74,7 @@ function measure(): Measured[] {
   /** Every block of the shown reply has its header and copy button. */
   ready: (count: number) => {
     const blocks = document.querySelectorAll('[data-streamdown="code-block"]')
-    return blocks.length === count && Array.from(blocks).every((block) => block.querySelector('[data-streamdown="code-block-actions"] button'))
+    return blocks.length === count && Array.from(blocks).every((block) => block.querySelector('[data-streamdown="code-block-actions"] button:not(.an-code-wrap)'))
   },
   frames: async (count: number) => { for (let index = 0; index < count; index++) await frame() },
   measure,

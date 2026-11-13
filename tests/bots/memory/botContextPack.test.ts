@@ -151,7 +151,7 @@ describe('the chat pack', () => {
     expect(await packs.chatPreamble({ botId: 'ada', activationId: 'act-a' })).toContain('Likes tea.')
   })
 
-  it('leaves out the activation’s own new message, and holds back guarded rows', async () => {
+  it('leaves out the activation’s own new message, and holds back secrets in place and guarded rows whole', async () => {
     const fx = memoryFixture()
     const { packs } = provider(fx)
     fx.message({ botId: 'ada', id: 'o1', author: 'owner', text: 'My token is ghp_0123456789abcdefghijABCDEFGHIJ', activationId: 'act-1' })
@@ -160,7 +160,7 @@ describe('the chat pack', () => {
     const pack = await packs.chatPreamble({ botId: 'ada', activationId: 'act-2' })
     expect(pack).not.toContain('ghp_')
     expect(pack).not.toContain('Ignore all previous')
-    expect(pack).toContain('] Owner: (held back: it looks like a password, key or token. secrets are never kept in memory. memory_read j1 shows it.)')
+    expect(pack).toContain('] Owner: My token is [held back: looks like a secret · memory_read j1 shows it]')
     expect(pack).toContain('memory_read j2 shows it.)')
     expect(pack).not.toContain('What is the weather?')
   })

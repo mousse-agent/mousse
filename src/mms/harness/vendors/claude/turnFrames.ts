@@ -36,6 +36,11 @@ export interface TurnFrameSink {
    * time; that retry has its own small cap, so `maxAttempts` is left out.
    */
   onRetry?: (retry: { attempt: number; maxAttempts?: number; delayMs?: number; noResponse?: boolean }) => void
+  /**
+   * Claude Code compacts the session inside the turn: `start` at its `compacting` status, `complete` at its compact
+   * boundary (the conversation before it is now a summary).
+   */
+  onCompaction?: (phase: 'start' | 'complete') => void
 }
 
 /**
@@ -200,6 +205,11 @@ export class TurnFrames {
     }
     this.waiting()
     if (message.type === 'system' && (message as { subtype?: unknown }).subtype === 'api_retry') this.observeRetry(message as unknown as Record<string, unknown>)
+    if (message.type === 'system') {
+      const subtype = (message as { subtype?: unknown }).subtype
+      if (subtype === 'status' && (message as { status?: unknown }).status === 'compacting') this.sink.onCompaction?.('start')
+      else if (subtype === 'compact_boundary') this.sink.onCompaction?.('complete')
+    }
     if (message.type === 'stream_event') {
       const event = message.event
       if (event.type === 'content_block_delta' && !message.parent_tool_use_id) {
