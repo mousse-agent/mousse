@@ -164,8 +164,15 @@ button.bot-image:focus-visible > img { opacity: 0.82; }
 .bot-new-label-gap { margin-top: 12px; }
 .chat-dialog .bot-new-name, .chat-dialog .bot-new-text { display: block; width: 100%; padding: 9px 12px; margin-bottom: 16px; border-radius: 9px; border: 1px solid rgba(var(--accent-pale-rgb), .15); background: #0002; color: var(--text-primary); font: inherit; font-size: 13px; line-height: 1.5; }
 .chat-dialog .bot-new-text { min-height: 76px; resize: none; margin-bottom: 0; }
-/* Where it runs: one quiet line under the prompt, with About's pickers. */
-.bot-new-runs-on { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 12px; color: var(--text-secondary); }
+/* New bot's steps: one height for every step, so the dialog and Back / Next stay where they are; an error sits at its foot. */
+.bot-new-step { display: flex; flex-direction: column; height: 300px; margin-top: 16px; min-height: 0; }
+.bot-new-step .bot-look-picker { margin-bottom: 0; }
+.chat-dialog .bot-new-step .bot-new-text { flex: 1; min-height: 76px; }
+.chat-dialog .bot-new-error { margin: auto 0 0; padding-top: 10px; }
+/* Runs on: a few rows (computer, model) with About's pickers; room is left for more. */
+.bot-new-runs-on-step { display: flex; flex-direction: column; gap: 4px; }
+.bot-new-runs-on { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: var(--text-secondary); }
+.bot-new-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 36px; }
 .bot-new-runs-on-computer { color: var(--text-primary); }
 .bot-dialog .chat-dialog-heading { margin-bottom: 14px; }
 .chat-dialog .bot-new-name::placeholder, .chat-dialog .bot-new-text::placeholder { color: var(--text-secondary); }
@@ -174,7 +181,6 @@ button.bot-image:focus-visible > img { opacity: 0.82; }
 .bot-new-foot .chat-primary-button[disabled] { opacity: .4; }
 .bot-new-foot .bot-ghost-button + .chat-primary-button { margin-left: 0; }
 .bot-new-foot .bot-ghost-button:first-child { margin-left: auto; }
-.bot-new-hint { font-size: 11px; color: var(--text-secondary); }
 .bot-dialog-text { margin: 0; font-size: 13px; line-height: 1.6; color: var(--text-secondary); }
 .chat-primary-button.bot-danger-button { background: var(--error, #e79090); color: var(--surface-strong, #18151c); }
 
