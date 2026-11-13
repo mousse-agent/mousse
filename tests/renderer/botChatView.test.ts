@@ -385,6 +385,17 @@ describe('the transcript', () => {
     await click(button('React ❤️', bar()))
     expect(fake.calls).toContainEqual(['react', 'inbox', 'b1', '❤️'])
     expect(badge()?.textContent).toBe('❤️')
+    // A pick puts the bar away: the focus is on the bubble, not on a button that would hold the bar open, and the bar
+    // stays away while the pointer stays; leaving the message, or tabbing back into the bar, brings it back.
+    expect(document.activeElement).toBe(reply().querySelector('.bot-bubble'))
+    expect(reply().classList.contains('is-react-quiet')).toBe(true)
+    await act(async () => { reply().dispatchEvent(new MouseEvent('mouseout', { bubbles: true, relatedTarget: document.body })) })
+    expect(reply().classList.contains('is-react-quiet')).toBe(false)
+    await click(button('React 😂', bar()))
+    expect(reply().classList.contains('is-react-quiet')).toBe(true)
+    await act(async () => { button('React 👍', bar())!.focus() })
+    expect(reply().classList.contains('is-react-quiet')).toBe(false)
+    await click(button('React ❤️', bar()))
     expect(button('Remove your reaction ❤️', bar())?.getAttribute('aria-pressed')).toBe('true')
     // Another replaces it: one reaction.
     await click(button('React 👍', bar()))
