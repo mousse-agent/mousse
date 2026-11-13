@@ -162,10 +162,11 @@ function defaultTemps(platform: NodeJS.Platform): string[] {
   return [tmpdir(), ...(platform === 'win32' ? [] : ['/tmp', '/private/tmp', '/var/tmp'])]
 }
 
-/** An absolute folder a variable names, or none (a relative one names no one folder). */
+/** An absolute folder, or none when unset. A relative home cannot be closed independently of each CLI working folder. */
 function folderOf(value: string | undefined): string | undefined {
   const trimmed = value?.trim()
-  return trimmed && isAbsolute(trimmed) ? trimmed : undefined
+  if (trimmed && !isAbsolute(trimmed)) throw new ClosedPlacesUnknown('A CLI home is relative, so its sign-in folder cannot be determined.')
+  return trimmed || undefined
 }
 
 /**

@@ -16,7 +16,7 @@ import { createServer, type Server } from 'node:http'
 import { createServer as createSocketServer, type Server as SocketServer } from 'node:net'
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { cpSync, type Dirent, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { cpSync, type Dirent, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, join, relative, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -363,6 +363,26 @@ for (const BINARY of BINARIES) for (const entry of ENTRIES) describe.skipIf(!BIN
     expect(outputs[probes.length - 1], 'its own file').toContain(`OWN-${MARK}`)
     expect(outputs[probes.length - 2], 'an ordinary file, outside its grant').not.toContain(`ORDINARY-${MARK}`)
   }, 240_000)
+
+  it.skipIf(!LINUX)('never removes owner folders created during a turn, including an empty reserved name and a linked parent', async () => {
+    const { bot } = botOf(['shell'], true)
+    const tree = at.home
+    const linked = join(at.elsewhere, 'linked-tree')
+    for (const name of ['.git', '.agents', '.aws']) {
+      const path = join(tree, name)
+      if (existsSync(path)) rmdirSync(path) // Only empty stand-ins inside this test's fake home.
+    }
+    symlinkSync(tree, linked)
+    // The fake model represents the owner making these while the turn is open. They are not runtime-owned.
+    const ownerActs: Call = (body, n) => {
+      for (const name of ['.git', '.agents', '.aws']) mkdirSync(join(tree, name), { recursive: true })
+      writeFileSync(join(tree, '.git', 'keep.txt'), 'owner bytes')
+      return command('printf done')(body, n)
+    }
+    await turn([ownerActs], bot)
+    expect(readFileSync(join(linked, '.git', 'keep.txt'), 'utf8')).toBe('owner bytes')
+    for (const name of ['.agents', '.aws']) expect(readdirSync(join(tree, name))).toEqual([])
+  }, 120_000)
 
   it.skipIf(!LINUX)('the owner\'s own thread on the same Codex is unchanged: a command they allow reads what it could before', async () => {
     // The owner allows what their thread asks, as they would in the app.

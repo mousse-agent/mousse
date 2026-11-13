@@ -219,7 +219,6 @@ describe('each runtime compiles file access to the whole file system but Mousse\
     ['Windows defaults', 'win32', {}, [], ['AppData/Roaming/mousse', '.codex/auth.json', '.claude/.credentials.json', 'AppData/Roaming/Anthropic'], ['AppData/Roaming']],
     ['moved homes', 'linux', { CODEX_HOME: '<x>/codex', CLAUDE_CONFIG_DIR: '<x>/claude', CLAUDE_SECURESTORAGE_CONFIG_DIR: '<x>/secure', ANTHROPIC_CONFIG_DIR: '<x>/anthropic', CLAUDE_CODE_FEDERATION_CACHE_DIR: '<x>/federation', MOUSSE_ELECTRON_USER_DATA: '<x>/eud', GROK_HOME: '<x>/grok' }, [], ['<x>/codex/auth.json', '<x>/codex/.credentials.json', '.codex/auth.json', '<x>/claude/.credentials.json', '<x>/claude/.claude.json', '<x>/claude/.config.json', '<x>/claude/backups', '<x>/secure/.credentials.json', '<x>/anthropic', '<x>/federation', '<x>/eud', '.claude/.credentials.json', '<x>/grok/auth.json', '.grok/auth.json'], ['<x>/claude', '<x>/codex', '<x>/grok', '.config/mousse']],
     ['an entry\'s own variables', 'linux', {}, [{ CODEX_HOME: '<x>/entry-codex', CLAUDE_CONFIG_DIR: '<x>/entry-claude', GROK_HOME: '<x>/entry-grok' }], ['<x>/entry-codex/auth.json', '<x>/entry-claude/.credentials.json', '<x>/entry-claude/.config.json', '<x>/entry-grok/auth.json'], []],
-    ['a relative home names no one folder', 'linux', { CODEX_HOME: 'relative/codex' }, [], ['.codex/auth.json'], ['relative/codex/auth.json']],
     ['a place inside the Mousse home is not listed again', 'linux', { MOUSSE_ELECTRON_USER_DATA: '<mousse>/electron-user-data' }, [], [], ['<mousse>/electron-user-data']]
   ] as const)('botClosedPlaces: %s', (_name, platform, env, entryEnvs, listed, notListed) => {
     const user = join(base, 'user')
@@ -271,6 +270,10 @@ describe('each runtime compiles file access to the whole file system but Mousse\
       chmodSync(bots, 0o755)
     }
     expect(closedBeside(mousse, [files, scratch])).not.toContain(bots)
+  })
+
+  it.each(['CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_SECURESTORAGE_CONFIG_DIR', 'ANTHROPIC_CONFIG_DIR', 'CLAUDE_CODE_FEDERATION_CACHE_DIR', 'GROK_HOME'])('a relative %s refuses an incomplete closed list', (key) => {
+    expect(() => botClosedPlaces({ mousseHome: mousse, env: { [key]: 'relative/home' }, temps: [], entryEnvs: [] })).toThrow(ClosedPlacesUnknown)
   })
 
   it('an unreadable temporary folder or corrupt sibling profile refuses an incomplete closed list', () => {
