@@ -1,4 +1,5 @@
 import { basename } from 'path'
+import { dropForeignAppImageMounts } from '../../cli/appImageMounts'
 
 /** How the GUI starts the background service: the program, the arguments before `service run`, and its environment. */
 export interface DaemonCommand {
@@ -13,6 +14,8 @@ export interface DaemonCommand {
  * in the AppImage's private mount, which the AppImage runtime removes when the window quits: the
  * service then keeps running but cannot start programs (`spawn ENOTCONN`) and soon fails. There the
  * service is started from the AppImage file itself, which mounts its own copy for as long as it runs.
+ * The window's environment still names its mount first in PATH and other search paths, so those entries are left out:
+ * nothing the service or its starter runs should look there once the window quits.
  * Unpackaged runs use the CLI host (`host`).
  */
 export function daemonCommand(input: {
@@ -30,6 +33,8 @@ export function daemonCommand(input: {
   if (appImage) {
     // The AppImage runtime sets these for the copy it starts.
     const { APPIMAGE: _appImage, APPDIR: _appDir, ARGV0: _argv0, OWD: _owd, ...rest } = input.env
+    // Without APPDIR, every mount is foreign, the window's own included.
+    dropForeignAppImageMounts(rest, input.platform)
     return { command: appImage, argsPrefix: ['--cli'], env: { ...rest, MOUSSE_CLI: '1' } }
   }
   return { command: input.execPath, argsPrefix: ['--cli'], env: { ...input.env, MOUSSE_CLI: '1' } }
