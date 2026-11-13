@@ -1288,11 +1288,19 @@ export class PiRpcEngine implements ProviderAdapter {
       const decided = checkBuiltinCall(bot, PI_NATIVE_TOOLS, request.toolName, input)
       if (!decided.ok) return { allow: false, reason: checkMessage(decided) }
     }
-    // A bot's app tool is checked here too (the registry checks it again when it runs), so a
-    // refused call never costs a tool call.
+    // A bot's app tool, or one of its owner's MCP tools the turn was offered (by its proxied name), is checked here too
+    // (the registry checks it again when it runs), so a refused call never costs a tool call. An MCP tool is checked as
+    // the grant holds it (server and tool), as Claude Code's gate checks a relayed one.
     if (bot && !builtin) {
-      const refusal = botAppToolRefusal(bot, request.toolName, withoutTransportFields(request.input))
-      if (refusal) return { allow: false, reason: refusal }
+      const args = withoutTransportFields(request.input)
+      const mcp = bot.mcpTools?.find((tool) => tool.providerName === request.toolName)
+      if (mcp) {
+        const decided = bot.check({ kind: 'mcp', server: mcp.server, tool: mcp.tool, serverName: mcp.serverName, args })
+        if (!decided.ok) return { allow: false, reason: checkMessage(decided) }
+      } else {
+        const refusal = botAppToolRefusal(bot, request.toolName, args)
+        if (refusal) return { allow: false, reason: refusal }
+      }
     }
     // A definition run: every call, built-in or app/MCP, is authorized in full (approval included)
     // before it is charged, so a refused call never costs a tool call.
