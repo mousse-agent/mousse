@@ -57,7 +57,7 @@ import type { UserQuestionService } from '../orchestrator/UserQuestionService'
 import { LoginSession as LoginSessionImpl } from '../providers/LoginSession'
 import { fail } from '../run/db/RunStoreError'
 import { hidesModel, modelsWithPrefs, ModelNamesService, ModelPrefsService, visibleProviderOption, type ModelNamesStore, type ModelPrefsStore } from './catalog'
-import { privateHomeRule, type AuthReading, type DriverRuntime, type HarnessDriver, type RetiredPrompt, type InstallProgress, type InstanceConfig, type LiveProcessHost, type NativeCompactRequest, type OneShotTask } from './driver'
+import { privateHomeRule, type AuthReading, type DriverRuntime, type GeneratedImage, type HarnessDriver, type ImageModelFacts, type ImageRequestSpec, type RetiredPrompt, type InstallProgress, type InstanceConfig, type LiveProcessHost, type NativeCompactRequest, type OneShotTask } from './driver'
 import { DEFAULT_HOME_ID, findOnPath, instanceEnv, ownedLaunchEnv, reservedEnvName, reservedLaunchKeys, type InstanceEnv } from './env'
 import { ClaudeSettingsError, claudeSettingsPath, readClaudeSettingsFile, writeClaudeSetting } from './vendors/claude/claudeSettingsFile'
 import { SharedSettingsConsentStore } from './sharedSettingsConsent'
@@ -149,6 +149,17 @@ export interface HarnessGateway {
    * `ONE_SHOT_INACTIVITY_MS` without a provider event, and is never retried: the caller falls back.
    */
   oneShot(request: OneShotRequest): Promise<{ text: string }>
+  /**
+   * The models an entry can make pictures with in Mousse's own process (#1088, a bot's Images row); none for an entry
+   * that is unknown, turned off, or whose runtime makes none.
+   */
+  imageModels?(instanceId: string): readonly ImageModelFacts[]
+  /**
+   * One picture on one of an entry's `imageModels` (#1088), after the checks every dispatch passes (turned on, not
+   * stopped, not retired, signed in in Mousse). Throws the harness errors, or `ImageRequestError` when the provider made
+   * no picture. Never retried.
+   */
+  generateImage?(request: ImageRequestSpec & { instanceId: string; signal?: AbortSignal }): Promise<GeneratedImage>
 
   // -- Run engine -------------------------------------------------------------------------------
 
@@ -1595,6 +1606,31 @@ export class Harness implements HarnessGateway {
     } finally {
       if (timer) clearTimeout(timer)
     }
+  }
+
+  imageModels(instanceId: string): readonly ImageModelFacts[] {
+    try {
+      return this.record(instanceId).runtime.imageModels?.() ?? []
+    } catch {
+      // An unknown or turned-off entry makes no pictures.
+      return []
+    }
+  }
+
+  async generateImage(request: ImageRequestSpec & { instanceId: string; signal?: AbortSignal }): Promise<GeneratedImage> {
+    let record: InstanceRecord
+    try {
+      record = this.record(request.instanceId)
+    } catch (error) {
+      throw asHarnessError(error, request.instanceId)
+    }
+    const runtime = record.runtime
+    if (!runtime.generateImage || !(runtime.imageModels?.() ?? []).some((model) => model.id === request.model))
+      harnessFail('model_unavailable', `${this.displayName(record)} does not offer ${request.model} for pictures.`, record.instanceId)
+    if (record.stopped) throw this.stopError(record, record.stopped.reason)
+    this.refuseRetired(record)
+    this.admissionGate(record)
+    return runtime.generateImage({ model: request.model, prompt: request.prompt, ...(request.shape ? { shape: request.shape } : {}) }, request.signal ?? new AbortController().signal)
   }
 
   /**

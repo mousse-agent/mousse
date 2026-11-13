@@ -10,6 +10,13 @@ import { useChatsStore } from '../stores/chatsStore'
 import { orderedThreadIds } from './threadOrder'
 import { loadProviderSnapshots, pickerListsModel, pickerProviders, projectScope, scopeKey, useProviderSnapshotsStore } from './providerSnapshots'
 
+/**
+ * How long a thread being opened waits for its view before it is shown without it. The service answers a thread's
+ * newest page in a few milliseconds, but a busy computer can take a few hundred before main and this window get to
+ * it; a thread on another computer can take seconds, and then shows waiting for its messages.
+ */
+export const OPEN_THREAD_HOLD_MS = 1000
+
 /** Opens a thread in the main workspace after the navigation guards agree. */
 export async function selectThread(threadId: string): Promise<void> {
   if (!await confirmNavigation()) return
@@ -18,10 +25,18 @@ export async function selectThread(threadId: string): Promise<void> {
   // A page opened from the rail covers the workspace; the thread has to be visible.
   store.setScheduledOpen(false)
   store.setUsageOpen(false)
-  if (threadId === store.activeThreadId) return
-  // One store update: highlight + restore cached transcript (if any) while
-  // the daemon snapshot loads. Main also broadcasts thread:selected early.
-  store.switchToThread(threadId)
+  if (threadId === store.activeThreadId && !store.openingThreadId) return
+  await openAndSelect(threadId)
+}
+
+/**
+ * Shows a thread and asks main to select it. A cached thread shows at once with its messages; a started one with
+ * nothing cached stays held until its view arrives (`openThreadWhenReady`), so it never shows without them.
+ */
+export async function openAndSelect(threadId: string): Promise<void> {
+  if (useAppStore.getState().openThreadWhenReady(threadId)) {
+    setTimeout(() => useAppStore.getState().showOpeningThread(threadId), OPEN_THREAD_HOLD_MS)
+  }
   await selectOrSettle(threadId)
 }
 

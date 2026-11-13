@@ -321,12 +321,19 @@ export default function App() {
 
     const unsubs = [
       window.mousse.orchestrator.onThreadMessage(({ threadId, message }) => {
-        if (!isSelectedThread(threadId)) return
+        if (!isSelectedThread(threadId)) {
+          // A thread being opened keeps what arrives before its view; the view may be older (see openingThreadId).
+          if (isCurrentProfile()) useAppStore.getState().holdOpeningMessage(threadId, message)
+          return
+        }
         // Held updates first, then a thought it follows hands its live text to the transcript, then the message (see liveTextStore).
         landMessage(message, messageUpdates.flush)
       }),
       window.mousse.orchestrator.onThreadMessageUpdated(({ threadId, message }) => {
-        if (!isSelectedThread(threadId)) return
+        if (!isSelectedThread(threadId)) {
+          if (isCurrentProfile()) useAppStore.getState().holdOpeningMessage(threadId, message)
+          return
+        }
         messageUpdates.push(threadId, message)
       }),
       // Non-selected or legacy full-sync path (select/resnapshot use thread:view instead).
@@ -343,9 +350,14 @@ export default function App() {
       }),
       // Combined select/resnapshot payload: one store update for messages + agents + tasks.
       window.mousse.threads.onView((view) => {
-        if (!isSelectedThread(view.threadId)) return
+        const state = useAppStore.getState()
+        const opening = isCurrentProfile() && state.openingThreadId === view.threadId
+        if (!opening && !isSelectedThread(view.threadId)) return
         messageUpdates.flush()
-        startTransition(() => applyThreadView(view))
+        // The first transcript a thread shows paints in the next frame; later views (a catch-up, a reconnect) can wait
+        // behind input.
+        if (opening || state.transcriptPending) applyThreadView(view)
+        else startTransition(() => applyThreadView(view))
         hydrationReceived = true
         finishHydration()
       }),

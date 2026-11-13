@@ -108,6 +108,23 @@ describe('loading the queue', () => {
     expect(list).toHaveBeenCalledTimes(calls)
     expect(banner()).toBeNull()
   })
+
+  it('shows the queue of a thread being opened as the thread shows, from the list its select sent before', async () => {
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    let send: ((update: { threadId: string; items: QueuedMessage[] }) => void) | undefined
+    ;(window as unknown as { mousse: unknown }).mousse = { queue: { list, onUpdated: (listener: typeof send) => { send = listener; return () => undefined } } }
+    list.mockResolvedValue([])
+    await mount('t1')
+    // t2 is held for its view (`openingThreadId`); its select sends its queue first.
+    act(() => useAppStore.setState({ openingThreadId: 't2' }))
+    act(() => send!({ threadId: 't2', items: [item] }))
+    list.mockClear()
+    act(() => root.render(queue('t2')))
+    expect(host.textContent).toContain('Run the tests next')
+    await advance(500)
+    expect(list).not.toHaveBeenCalled()
+    act(() => useAppStore.setState({ openingThreadId: null }))
+  })
 })
 
 describe('readableError', () => {

@@ -1,7 +1,7 @@
 import type { BotChatMessage, BotChip, BotDetail, BotSummary } from '../../shared/bots/personal/chat'
 import type { BotLook } from '../../shared/bots/personal/look'
 import type { BotMemoryListing } from '../../shared/bots/personal/memory'
-import type { BotModelSlots, BotSchedule } from '../../shared/bots/personal/definition'
+import type { BotModelPick, BotModelSlots, BotSchedule } from '../../shared/bots/personal/definition'
 import type { BotChatAttachment, BotsPersonalV2EventData, BotsPersonalV2Method, BotsPersonalV2Params, BotsPersonalV2Result } from '../../shared/bots/personal/methods'
 import type { PlatformRequestApi } from '../../shared/platform'
 
@@ -14,8 +14,9 @@ export interface PersonalBotsClient {
   /**
    * `slots`: the rows picked on New bot (#673), all four, sent only to a service whose choices carry `providers`;
    * `model`: one model on every row (the single picker of an older service). An older service refuses the keys.
+   * `image`: the Images row (#1088), sent only to a service whose choices carry `imageProviders`.
    */
-  create(input: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots }): Promise<BotSummary>
+  create(input: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots; image?: BotModelPick }): Promise<BotSummary>
   get(botId: string): Promise<BotDetail>
   update(botId: string, change: { name?: string; look?: BotLook }): Promise<BotSummary>
   pause(botId: string): Promise<BotSummary>
@@ -40,6 +41,8 @@ export interface PersonalBotsClient {
    * work's pick on all work (Advanced closing). Only a service that sent `slots` has it.
    */
   setSlots(botId: string, change: { slots: Partial<BotModelSlots> } | { oneWork: true }): Promise<BotSummary>
+  /** The Images row (#1088): a model to make pictures with, or null for none. Only a service that sent `imageProviders` has it. */
+  setImage(botId: string, pick: BotModelPick | null): Promise<BotSummary>
   /** What New bot's Runs on line offers before the bot exists; an older service lacks it and rejects. */
   modelChoices(): Promise<BotsPersonalV2Result<'bots.model.choices'>>
   removeSchedule(botId: string, scheduleId: string): Promise<BotDetail>
@@ -57,8 +60,8 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
     transport.request<BotsPersonalV2Result<M>>(method, params)
   return {
     list: async () => (await call('bots.personal.list', {})).bots,
-    create: async ({ look, name, description, clientRequestId, model, slots }) =>
-      (await call('bots.create', { look, description, clientRequestId, ...(name ? { name } : {}), ...(slots ? { slots } : model ? { model } : {}) })).bot,
+    create: async ({ look, name, description, clientRequestId, model, slots, image }) =>
+      (await call('bots.create', { look, description, clientRequestId, ...(name ? { name } : {}), ...(slots ? { slots } : model ? { model } : {}), ...(image ? { image } : {}) })).bot,
     get: (botId) => call('bots.get', { botId }),
     update: async (botId, change) => (await call('bots.update', { botId, ...change })).bot,
     pause: async (botId) => (await call('bots.personal.pause', { botId })).bot,
@@ -76,6 +79,7 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
     model: (botId) => call('bots.model.get', { botId }),
     setModel: async (botId, model) => (await call('bots.model.set', { botId, model })).bot,
     setSlots: async (botId, change) => (await call('bots.model.setSlots', { botId, ...change })).bot,
+    setImage: async (botId, pick) => (await call('bots.model.setImage', { botId, pick })).bot,
     modelChoices: () => call('bots.model.choices', {}),
     removeSchedule: (botId, scheduleId) => call('bots.schedules.remove', { botId, scheduleId }),
     cancelReminder: (botId, reminderId) => call('bots.reminders.cancel', { botId, reminderId }),
