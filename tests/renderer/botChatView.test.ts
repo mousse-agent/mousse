@@ -556,6 +556,16 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
     expect(chip.getAttribute('title')).toBe(detail)
   })
 
+  it('work with subagents running says how many on its line, each one\'s title and model on hover, and keeps its Stop', async () => {
+    const subagents = [{ title: 'Prices', model: 'Some Model on OpenRouter' }, { title: 'Reviews', model: 'Haiku 5.5 on Claude Code, low reasoning' }]
+    await open({ ...working, work: [{ ...working.work![0]!, subagents }] })
+    const line = host.querySelector('.bot-work-line')!
+    expect(line.textContent).toBe('Vacuum comparisonworking · 2 subagents · 4 min')
+    expect(line.querySelector('[title]')!.getAttribute('title')).toBe('Prices · Some Model on OpenRouter\nReviews · Haiku 5.5 on Claude Code, low reasoning')
+    await click(button('Stop Vacuum comparison'))
+    expect(fake.calls).toContainEqual(['stopWork', 'inbox', 'act_w1'])
+  })
+
   it("the chat's own turn has the status line and Stop, with its own chip", async () => {
     await open({ ...working, chat: { activationId: 'act_c1' }, work: [] })
     await act(async () => fake.emit.activity('inbox', { icon: 'memory', text: 'remembering', live: true }, 'act_c1'))

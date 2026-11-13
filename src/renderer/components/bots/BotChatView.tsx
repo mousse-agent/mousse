@@ -101,6 +101,16 @@ function workDoing(item: BotWorkItem, chip: BotChip | undefined): string {
   return chip ? `${chip.text}${chip.highlight ? ` ${chip.highlight}` : ''}` : 'working'
 }
 
+/** "2 subagents": how many of the work's subagents run now. */
+export function subagentsCount(n: number): string {
+  return n === 1 ? '1 subagent' : `${n} subagents`
+}
+
+/** Each running subagent on a line of the tooltip: its title and its model. */
+export function subagentsTitle(subagents: ReadonlyArray<{ title: string; model: string }>): string {
+  return subagents.map((subagent) => `${subagent.title} · ${subagent.model}`).join('\n')
+}
+
 /** One piece of work above the composer: its title, what it is doing, for how long, and Stop. The time moves twice a minute. */
 const WorkLine = memo(function WorkLine({ botId, item }: { botId: string; item: BotWorkItem }) {
   const chip = useBotsStore((s) => s.activity[item.id])
@@ -113,7 +123,7 @@ const WorkLine = memo(function WorkLine({ botId, item }: { botId: string; item: 
   return <li className={`bot-work-line${running ? ' is-running' : ''}`}>
     {running ? <Loader2 size={13} className="chat-spin" aria-hidden /> : <span className="bot-work-dot" aria-hidden />}
     <span className="bot-work-title">{item.title}</span>
-    <span className="bot-work-doing">{workDoing(item, chip)}{item.model && <> · <span className="bot-work-model" title={item.model.detail}>{item.model.name}</span></>} · {workElapsed(item.startedAt, now)}</span>
+    <span className="bot-work-doing">{workDoing(item, chip)}{item.model && <> · <span className="bot-work-model" title={item.model.detail}>{item.model.name}</span></>}{item.subagents?.length ? <> · <span className="bot-work-subagents" title={subagentsTitle(item.subagents)}>{subagentsCount(item.subagents.length)}</span></> : null} · {workElapsed(item.startedAt, now)}</span>
     <button type="button" aria-label={`Stop ${item.title}`} title="Stop" onClick={() => void useBotsStore.getState().stopWork(botId, item.id)}><X size={13} aria-hidden /></button>
   </li>
 })

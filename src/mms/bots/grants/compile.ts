@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
 import { existsSync, readdirSync, realpathSync } from 'node:fs'
 import { foldersOf, type BotManifest, type BotThreadSpec } from '../../../shared/bots/personal/definition'
-import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_SUBAGENT_APP_TOOLS, BOT_SUBAGENT_TOOLS, BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest } from '../../../shared/bots/personal/manifest'
 import { BOT_MEMORY_TOOLS } from '../../../shared/bots/personal/memory'
 import { withinComputerLimit, type BotComputerLimit } from '../../../shared/bots/personal/computerLimit'
 import type { NeutralTool } from '../../../shared/harness/tools'
@@ -94,6 +94,17 @@ export interface CompileInput {
      * messaging and stopping, only for a chat turn the owner's own message started. Absent: nothing (a consult).
      */
     threads?: 'read' | 'all'
+    /**
+     * A run's main turn: it may split its job among subagents (`BOT_SUBAGENT_TOOLS`), and lists the models they may run on
+     * (`work_models`). Never the chat, a consult or a subagent.
+     */
+    subagents?: boolean
+    /**
+     * This turn is one of a run's subagents: it holds what its work holds of the built-ins, files, MCP tools and skills,
+     * and of the app tools only the web and the browser (`subagentManifest`). Every other bot tool is left out whatever
+     * the rest of `botTools` says: no asks, memory, schedules, reminders, work, threads or subagents of its own.
+     */
+    subagent?: true
   }
   /**
    * What this computer lets bots do (Settings → What bots may do here): what it has switched off is taken out of the
@@ -180,7 +191,10 @@ export function compileBotThread(input: CompileInput): CompileResult {
   const narrowed = narrowManifest(input.revision ? intersectManifest(input.revision, input.grant) : input.grant, input.thread.narrow)
   // This computer's ceiling, before the tools, the sandbox's folders and the browser are compiled from it.
   const held = input.limit ? withinComputerLimit(narrowed, input.limit) : narrowed
-  const manifest = input.botTools?.frontDesk ? frontDeskManifest(held) : held
+  // A subagent is the work, never more: what the work holds, less what is the bot's alone, and none of the bot's tools.
+  const subagent = input.botTools?.subagent === true
+  const own = subagent ? undefined : input.botTools
+  const manifest = subagent ? subagentManifest(held) : own?.frontDesk ? frontDeskManifest(held) : held
   // Checked again here, so a grant stored before a tool was refused can never widen later.
   const refusedApp = manifest.appTools.find((tool) => !BOT_APP_TOOLS.has(tool))
   if (refusedApp !== undefined) return unenforceable(`The Mousse tool ${refusedApp} would reach other threads, act in your name or ask you.`)
@@ -209,18 +223,20 @@ export function compileBotThread(input: CompileInput): CompileResult {
   // Granted skills come with the skill tools that list and load them; the browser is its tools, and the owner's threads
   // are the thread tools this turn may use (none unless the caller says which).
   const browser = manifest.appTools.includes(BOT_BROWSER_PERMISSION)
-  const threads = manifest.appTools.includes(BOT_THREADS_PERMISSION) ? input.botTools?.threads : undefined
+  const threads = manifest.appTools.includes(BOT_THREADS_PERMISSION) ? own?.threads : undefined
   const appTools = [...new Set([
     ...manifest.appTools.filter((tool) => tool !== BOT_BROWSER_PERMISSION && tool !== BOT_THREADS_PERMISSION),
     ...(browser ? BOT_BROWSER_TOOLS : []),
     ...(threads ? BOT_THREAD_READ_TOOLS : []),
     ...(threads === 'all' ? BOT_THREAD_ACT_TOOLS : []),
     ...(manifest.skills.length ? ['list_skills', 'load_skill'] : []),
-    ...(input.botTools?.escalate ? ['escalate'] : []),
-    ...(input.botTools?.consult ? ['consult'] : []),
+    ...(own?.escalate ? ['escalate'] : []),
+    ...(own?.consult ? ['consult'] : []),
     // Always on, like memory: the listing of the owner's MCP servers, so the bot can ask for the right one.
-    ...(input.botTools?.memory ? [...BOT_MEMORY_TOOLS, BOT_MCP_LIST_TOOL] : []),
-    ...(input.botTools?.frontDesk ? BOT_WORK_TOOLS : [])
+    ...(own?.memory ? [...BOT_MEMORY_TOOLS, BOT_MCP_LIST_TOOL] : []),
+    ...(own?.frontDesk ? BOT_WORK_TOOLS : []),
+    // A run's main turn splits its job among subagents, on models from the same list the chat picks work's from.
+    ...(own?.subagents && !own.frontDesk ? [...BOT_SUBAGENT_TOOLS, 'work_models'] : [])
   ])].sort()
   const mcp = [...new Set(manifest.mcp.map((pair) => `${pair.serverId}::${pair.tool}` as const))].sort()
   return {
@@ -252,6 +268,18 @@ export function compileBotThread(input: CompileInput): CompileResult {
         : null
     }
   }
+}
+
+const SUBAGENT_APP: ReadonlySet<string> = new Set(BOT_SUBAGENT_APP_TOOLS)
+
+/**
+ * What a run's subagent holds of what its work holds: the built-ins, file access, the owner's MCP tools and skills as
+ * they are, and of the Mousse app tools only the web and the browser (`BOT_SUBAGENT_APP_TOOLS`, an allowlist, so an app
+ * tool a later build makes grantable never reaches a subagent by itself). The limits stay the work's: its subagents
+ * draw on the same counts, spend and time.
+ */
+export function subagentManifest(manifest: BotManifest): BotManifest {
+  return { ...manifest, appTools: manifest.appTools.filter((tool) => SUBAGENT_APP.has(tool)) }
 }
 
 const WORK_ONLY: ReadonlySet<string> = new Set(BOT_WORK_ONLY_TOOLS)

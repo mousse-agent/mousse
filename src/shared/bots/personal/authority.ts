@@ -3,6 +3,7 @@ import type { SpendScope } from '../../harness/spend'
 import type { NeutralTool } from '../../harness/tools'
 import type { BotComputerSwitch } from './computerLimit'
 import type { PermissionMode } from '../../permissionMode'
+import type { BotModelPick, BotWorkModelName } from './definition'
 
 /**
  * The contracts of a personal bot's authority (PR 6 §2 and §4). A bot activation's runs are held to
@@ -12,8 +13,8 @@ import type { PermissionMode } from '../../permissionMode'
  * `/pi/request`) and the Mousse MCP registry code against them. Types only, browser-safe.
  */
 
-/** Which thread of an activation a turn runs on: the main thread, or a context thread it consults. */
-export type BotThreadRole = 'activation' | 'context'
+/** Which thread of an activation a turn runs on: the main thread, a context thread it consults, or a run's subagent. */
+export type BotThreadRole = 'activation' | 'context' | 'subagent'
 
 /**
  * The bot threads of a profile (`bots.db`). A turn on a bot thread binds with origin `bot`, ahead
@@ -199,6 +200,11 @@ export interface BotAuthority {
   /** The context threads `consult` may name, by key and title. */
   contexts?: ReadonlyArray<{ key: string; title: string }>
   /**
+   * The `subagent_*` app tools, on a run's main turn only: subagents of the work, each held to the work's permissions
+   * and counted by the service. Absent on the chat, a consult and a subagent (depth is 1).
+   */
+  subagents?: BotSubagents
+  /**
    * Why this turn holds the owner's threads ("use your threads") to reading only, for the words of a refused start,
    * message or Stop: `work` (work, a reminder's work or a schedule: starting is the chat's), or `not_owner` (a chat turn
    * no message of the owner started, such as the bot's first message). Absent: the turn may act, or holds
@@ -211,6 +217,35 @@ export interface BotAuthority {
    * waited (`thread_wait`), checked again before it returns anything.
    */
   stillHolds?(tool: string): string | undefined
+}
+
+/** A subagent of a bot's work, as the work reads it: its title, its model in plain words, where it is, and its result. */
+export interface BotSubagentView {
+  subagent: string
+  model: string
+  state: 'running' | 'done' | 'failed' | 'stopped'
+  /** What it returned, framed as data from a subagent; only once it ended, and only when asked for. */
+  result?: string
+  /** Why it ended without a result, in plain words. */
+  why?: string
+}
+
+/**
+ * The work's handle on its subagents (`BotAuthority.subagents`). Every answer is plain text or a view for the model;
+ * a refusal is `{ refused }` and starts nothing. The engine decides and counts, never the tool.
+ */
+export interface BotSubagents {
+  /**
+   * `model`: one of `work_models`' choices, already matched (`workModelChoice`), with its entry's sign-in now; absent, the
+   * work's own model.
+   */
+  start(request: { title: string; brief: string; model?: { pick: BotModelPick & { instanceId: string }; name: BotWorkModelName }; toolCallId?: string }): Promise<{ started: BotSubagentView; note: string } | { refused: string }>
+  send(request: { subagent: string; message: string }): Promise<{ sent: BotSubagentView; note: string } | { refused: string }>
+  /** Until `subagent` (or, without one, every running subagent) ends, the turn ends, or `timeoutMs` passes. */
+  wait(request: { subagent?: string; timeoutMs?: number; signal?: AbortSignal }): Promise<{ subagents: BotSubagentView[]; note?: string } | { refused: string }>
+  /** One subagent with its result once it ended, or (without `subagent`) every one, without results. */
+  result(request: { subagent?: string }): { subagents: BotSubagentView[]; note?: string } | { refused: string }
+  stop(request: { subagent: string }): { stopped: BotSubagentView } | { refused: string }
 }
 
 /** The active time of an activation's main dispatch, which its consults share. */
