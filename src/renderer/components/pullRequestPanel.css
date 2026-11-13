@@ -100,10 +100,6 @@
   opacity: 0.6;
 }
 
-.pr-panel-action[aria-busy='true'] svg {
-  animation: pr-panel-spin 1s steps(12) infinite;
-}
-
 .pr-panel-action:focus-visible,
 .pr-panel-link:focus-visible,
 .pr-panel-more:focus-visible,
@@ -540,18 +536,6 @@ button.pr-panel-line:hover {
 
 .pr-panel-image-omitted {
   color: var(--text-secondary);
-}
-
-@keyframes pr-panel-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .pr-panel-action[aria-busy='true'] svg {
-    animation: none;
-  }
 }
 
 /* Holds the panel and its header actions without a box of its own. */
