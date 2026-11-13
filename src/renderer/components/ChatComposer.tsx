@@ -45,6 +45,7 @@ import { useAppStore } from '../stores/appStore'
 import { openSettingsSection } from '../lib/settingsNavigation'
 import { COMPOSER_SEND_EVENT } from '../lib/composerEvents'
 import { useComposerNotice } from './ComposerNotice'
+import { composerMarkdownSpans, listContinuation, type MarkdownKind } from '../lib/composerMarkdown'
 
 export interface AttachedFile {
   id: string
@@ -207,6 +208,7 @@ export function ChatComposer({
   const recalledRef = useRef<string | null>(null)
   // Two composers can be mounted at once (the local thread behind a remote one): the shown one answers.
   useCommand('composer.focus', () => composerInputRef.current?.focus(), () => !disabled && isShown(composerInputRef.current))
+  const backdropRef = useRef<HTMLDivElement>(null)
   const resizeDraft = useCallback(() => {
     const inputElement = composerInputRef.current
     if (!inputElement) return
@@ -214,6 +216,13 @@ export function ChatComposer({
     const height = Math.max(64, Math.min(200, inputElement.scrollHeight))
     inputElement.style.removeProperty('height')
     inputElement.style.setProperty('--draft-input-height', `${height}px`)
+    // The backdrop paints the visible text: it wraps at the textarea's width, scrollbar excluded,
+    // and follows its scroll.
+    const backdrop = backdropRef.current
+    if (backdrop) {
+      backdrop.style.marginRight = `${inputElement.offsetWidth - inputElement.clientWidth}px`
+      backdrop.scrollTop = inputElement.scrollTop
+    }
   }, [])
   useLayoutEffect(() => { resizeDraft() }, [input, resizeDraft])
   useEffect(() => {
@@ -298,7 +307,6 @@ export function ChatComposer({
   const skillToken = skillsPickerDisabled
     ? null
     : findInlineSkillToken(input, enabledSkills)
-  const backdropRef = useRef<HTMLDivElement>(null)
 
   const hasAttachments = attachedFiles.length > 0 || voiceMessages.length > 0 || browserElements.length > 0 || references.length > 0
   const trimmedInput = removeInlineSkillToken(input, skillsPickerDisabled ? [] : enabledSkills).trim()
@@ -591,18 +599,31 @@ export function ChatComposer({
   }
 
   const renderInputBackdrop = () => {
-    if (!skillToken) return input.endsWith('\n') ? <>{input}{ '\u200B'}</> : input
-    const before = input.slice(0, skillToken.index)
-    const tokenText = input.slice(skillToken.index, skillToken.index + skillToken.length)
-    const after = input.slice(skillToken.index + skillToken.length)
+    const chip = skillToken ? { start: skillToken.index, end: skillToken.index + skillToken.length } : null
     return (
       <>
-        {before}
-        <span className="composer-token-chip">{tokenText}</span>
-        {after}
+        {renderMarkdownBackdrop(input, chip)}
         {input.endsWith('\n') ? '\u200B' : null}
       </>
     )
+  }
+
+  // Shift+Enter (or a picker-free new line) on a list item starts the next item, as the textarea's own
+  // typing would: through insertText, so undo and the input event stay native.
+  const continueList = (target: HTMLTextAreaElement): boolean => {
+    const edit = listContinuation(target.value, target.selectionStart, target.selectionEnd)
+    if (!edit) return false
+    target.setSelectionRange(edit.start, edit.end)
+    const inserted = edit.text
+      ? document.execCommand?.('insertText', false, edit.text)
+      : document.execCommand?.('delete')
+    if (!inserted) {
+      commitEdit({
+        value: target.value.slice(0, edit.start) + edit.text + target.value.slice(edit.end),
+        caret: edit.start + edit.text.length
+      })
+    }
+    return true
   }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -686,6 +707,10 @@ export function ChatComposer({
       recalledRef.current = null
       onInputChange('')
       setCaret(0)
+      return
+    }
+    if (e.key === 'Enter' && e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
+      if (continueList(e.currentTarget)) e.preventDefault()
       return
     }
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -807,7 +832,7 @@ export function ChatComposer({
         </div>
         <textarea
           ref={composerInputRef}
-          className="composer-input"
+          className="composer-input composer-input-mirrored"
           value={input}
           onChange={(e) => {
             setSuggestionsDismissed(false)
@@ -990,4 +1015,38 @@ export function buildComposerMessageContent(
   if (references.length) parts.push(formatChatReferences(references))
 
   return parts.join('\n\n')
+}
+
+const MARKDOWN_CLASS: Record<MarkdownKind, string> = {
+  marker: 'composer-md-marker',
+  bold: 'composer-md-bold',
+  italic: 'composer-md-italic',
+  strike: 'composer-md-strike',
+  code: 'composer-md-code',
+  codeblock: 'composer-md-codeblock',
+  heading: 'composer-md-heading',
+  quote: 'composer-md-quote',
+  list: 'composer-md-list',
+  link: 'composer-md-link'
+}
+
+/**
+ * The draft as the backdrop paints it: Markdown spans, with the inline `@skill` token's pill on top.
+ * Every character stays the width the textarea gives it, so the caret sits on the painted text.
+ */
+function renderMarkdownBackdrop(text: string, chip: { start: number; end: number } | null): ReactNode[] {
+  const cuts = chip ? [chip.start, chip.end] : []
+  const nodes: ReactNode[] = []
+  for (const span of composerMarkdownSpans(text)) {
+    const bounds = [span.start, ...cuts.filter((cut) => cut > span.start && cut < span.end), span.end]
+    for (let i = 0; i < bounds.length - 1; i += 1) {
+      const start = bounds[i]
+      const end = bounds[i + 1]
+      const classes = span.kinds.map((kind) => MARKDOWN_CLASS[kind])
+      if (chip && start >= chip.start && end <= chip.end) classes.push('composer-token-chip')
+      const piece = text.slice(start, end)
+      nodes.push(classes.length ? <span key={start} className={classes.join(' ')}>{piece}</span> : piece)
+    }
+  }
+  return nodes
 }

@@ -2429,15 +2429,75 @@ html[data-chat-width='full'] .chat {
   /* Match the wrap cap directly — % max-height is unreliable while height is auto. */
   max-height: var(--theme-composer-input-max-height, min(60vh, 640px));
   overflow: hidden;
-  padding: 11px 14px 6px;
+  padding: var(--theme-composer-input-padding, 11px 14px 6px);
   font-size: 14px;
   line-height: 1.5;
-  color: transparent;
+  color: var(--text-primary);
   white-space: pre-wrap;
   overflow-wrap: break-word;
   pointer-events: none;
   user-select: none;
   -webkit-user-select: none;
+}
+
+/* Light Markdown in the draft. The textarea's own glyphs are hidden (caret, selection, spellcheck
+ * and IME stay native) and the backdrop paints the text with these styles. None of them may change
+ * a character's width, or the caret would drift: bold is a stroke, not a heavier face, italic is a
+ * tint, and code keeps the prose font. */
+.composer-input.composer-input-mirrored {
+  -webkit-text-fill-color: transparent;
+}
+
+.composer-input.composer-input-mirrored::placeholder {
+  -webkit-text-fill-color: currentColor;
+}
+
+.composer-input.composer-input-mirrored::selection {
+  background: rgba(var(--accent-rgb), 0.28);
+}
+
+.composer-input-wrap:has(.composer-input:disabled) .composer-input-backdrop {
+  opacity: 0.5;
+}
+
+.composer-md-marker {
+  color: color-mix(in srgb, var(--text-secondary) 80%, transparent);
+}
+
+.composer-md-bold:not(.composer-md-marker),
+.composer-md-heading:not(.composer-md-marker) {
+  -webkit-text-stroke: 0.04em currentColor;
+}
+
+/* Geist's italic face has slightly different widths, so italic is a tint, not a slant. */
+.composer-md-italic:not(.composer-md-marker) {
+  color: color-mix(in srgb, var(--text-primary) 75%, var(--accent));
+}
+
+.composer-md-strike:not(.composer-md-marker) {
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, currentColor 60%, transparent);
+}
+
+.composer-md-code:not(.composer-md-marker) {
+  color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.12);
+  border-radius: 4px;
+  padding: 1px 2px;
+  margin: 0 -2px;
+}
+
+.composer-md-codeblock {
+  color: var(--text-secondary);
+}
+
+.composer-md-quote:not(.composer-md-marker) {
+  color: var(--text-secondary);
+}
+
+.composer-md-list,
+.composer-md-link:not(.composer-md-marker) {
+  color: var(--accent);
 }
 
 .composer-token-chip {
