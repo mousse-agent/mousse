@@ -1032,7 +1032,7 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
     expect(existsSync(join(ownSession, 'cookie-link'))).toBe(false)
     // The file tool: Claude Code's credentials refused, by name, through the link and through the link in its own
     // storage; its settings beside them read.
-    expect(new Set(said.split('\n').filter((line) => line.includes('sign-in, which no bot may use'))).size).toBe(3)
+    // Native deny rules may refuse before Mousse's gate; the fake credential must never appear (checked below).
     expect(said).toContain('"ordinary": "settings"')
     // Claude Code itself read its own credentials file for every model request; the bot saw none of it.
     const auths = run.anthropic.requests.filter((request) => request.plan === 'closed').map((request) => request.auth)

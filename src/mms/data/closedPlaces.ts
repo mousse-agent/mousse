@@ -426,7 +426,7 @@ export const CODEX_COMMAND_WRITE_LIMIT_TEXT = `${BOT_COMMAND_WRITE_LIMIT_TEXT} C
  * What Claude Code adds to it: its sandbox keeps git, shell and editor settings in the turn's working folder (and up to
  * three levels below it) read-only.
  */
-export const CLAUDE_COMMAND_WRITE_LIMIT_TEXT = `${BOT_COMMAND_WRITE_LIMIT_TEXT} Claude Code also keeps git, shell and editor settings in your working folder read-only (such as .git/hooks, .git/config, .gitconfig, .bashrc, .vscode, .idea and .claude/commands).`
+export const CLAUDE_COMMAND_WRITE_LIMIT_TEXT = `${BOT_COMMAND_WRITE_LIMIT_TEXT} Claude Code also keeps git, shell and editor settings in your working folder read-only (such as .git/hooks, .git/config, .gitconfig, .bashrc, .vscode, .idea and .claude/commands), and on WSL the Windows drives under /mnt.`
 
 /**
  * A path that names this computer over the network (Windows): its UNC form (`\\host\share\…`, `\\?\UNC\host\share\…`,

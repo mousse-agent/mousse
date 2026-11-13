@@ -488,7 +488,7 @@ export function claudeLockedSandbox(input: { workspace: NonNullable<BotAuthority
   const linux = platform === 'linux'
   const filesystem = computer && linux
     ? (() => {
-        const layout = linuxCommandLayout({ roots, mousseHome: computer.closed, outside: (computer.outside ?? []).filter(notMine), mine, userHome: input.home ?? homedir(), ...(input.user ? { user: input.user } : {}) })
+        const layout = linuxCommandLayout({ roots, mousseHome: computer.closed, outside: (computer.outside ?? []).filter(notMine), mine, windowsDrives: false, userHome: input.home ?? homedir(), ...(input.user ? { user: input.user } : {}) })
         return {
           allowWrite: layout.write,
           // Claude Code's own storage for this bot is read-only to commands too: no link put there leads its Read tool,
