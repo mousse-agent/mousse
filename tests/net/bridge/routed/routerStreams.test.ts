@@ -125,6 +125,14 @@ describe('a thread in view', () => {
     for (const event of t.events.slice(from)) expect(JSON.stringify(event)).not.toContain(`"${thread.id}"`)
   }, 60_000)
 
+  it('opens a thread on another computer when the window asks for its newest page', async () => {
+    const thread = t.thread('Newest page')
+    const id = t.qualified(thread.id)
+    await t.dispatch('threads.focus', { threadId: id })
+    // The app opens every thread at its newest 200 messages (`GuiMmsController`).
+    await expect(t.dispatch('thread.snapshot', { threadId: id, newest: 200 })).resolves.toMatchObject({ thread: { id } })
+  }, 60_000)
+
   it('gives the same transcript whether the routed read or the stream arrives last', async () => {
     const thread = t.thread('Orders')
     const id = t.qualified(thread.id)
