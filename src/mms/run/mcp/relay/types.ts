@@ -28,7 +28,7 @@ export interface RelayCatalogManager {
    * Each enabled server's tools for the actor, one server's failure never failing the rest. `signIn: false`: no listing
    * starts a sign-in (one that needs it fails instead).
    */
-  getEnabledToolsByServer(projectPath?: string, actor?: IntegrationActor, options?: { signIn?: false }): Promise<RelayServerTools[]>
+  getEnabledToolsByServer(projectPath?: string, actor?: IntegrationActor, options?: { signIn?: false; onServer?: (entry: RelayServerTools) => void }): Promise<RelayServerTools[]>
   /** Called when the manager's discovery cache is invalidated; returns the unsubscribe. */
   onDiscoveryInvalidated(listener: () => void): () => void
   /** The configured servers of the scope, from the manager's cached discovery. */

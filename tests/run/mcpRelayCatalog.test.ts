@@ -7,7 +7,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { McpServerConfig, McpToolDescriptor } from '../../src/shared/integrations'
 import { getDefaultSettings } from '../../src/shared/settings'
-import { RELAY_LISTING_TTL_MS, RelayCatalog, relayTurnContext } from '../../src/mms/run/mcp/relay/catalog'
+import { RELAY_LISTING_TTL_MS, RelayCatalog, mcpServerIdentity, relayTurnContext } from '../../src/mms/run/mcp/relay/catalog'
 import type { RelayServerTools } from '../../src/mms/run/mcp/relay/types'
 import { testServerConfig } from '../fixtures/agent-platform/integrations/helpers'
 
@@ -73,6 +73,71 @@ function setup(options: { servers?: McpServerConfig[] } = {}) {
 }
 
 const names = (catalog: RelayCatalog, projectPath?: string) => catalog.listing(projectPath).map((entry) => entry.name)
+
+describe('one slow and one fast server', () => {
+  it('each server is published as it answers: the fast one\'s tools at once, the slow one as starting until it answers', async () => {
+    const { catalog, manager, state } = setup({ servers: [echo, two] })
+    let release!: () => void
+    const slow = new Promise<void>((resolve) => { release = resolve })
+    // As the real manager does: each server's entry is heard as soon as it answers.
+    manager.getEnabledToolsByServer.mockImplementation(async (_project?: string, _actor?: unknown, options?: { onServer?: (entry: RelayServerTools) => void }) => {
+      const entryOf = (server: McpServerConfig): RelayServerTools => ({ installationId: server.installationId!, serverName: server.name, tools: state.tools.get(server.installationId!) ?? [] })
+      return Promise.all(state.servers.map(async (server) => {
+        if (server === two) await slow
+        const entry = entryOf(server)
+        options?.onServer?.(entry)
+        return entry
+      }))
+    })
+    const heard: Array<string | undefined> = []
+    catalog.onPublished((projectPath) => heard.push(projectPath))
+    const refreshing = catalog.refresh(undefined)
+    await vi.waitFor(() => expect(names(catalog)).toEqual(['echo__say']))
+    expect(catalog.listed()).toBe(true)
+    expect(catalog.servers().map((entry) => [entry.serverName, entry.starting, entry.failing, entry.tools.length])).toEqual([['echo', false, false, 1], ['two', true, false, 0]])
+    const partial = catalog.revision()
+    expect(partial).toMatch(/^[0-9a-f]{12}$/)
+    release()
+    await refreshing
+    expect(names(catalog)).toEqual(['echo__say', 'two__add'])
+    expect(catalog.servers().map((entry) => [entry.serverName, entry.starting])).toEqual([['echo', false], ['two', false]])
+    expect(catalog.revision()).not.toBe(partial)
+    expect(heard.length).toBeGreaterThanOrEqual(3)
+  })
+
+  it('a server that never answers ends the refresh as failing, not starting', async () => {
+    const { catalog, state } = setup({ servers: [echo, two] })
+    state.failing.add('inst-two')
+    await catalog.refresh(undefined)
+    expect(catalog.servers().find((entry) => entry.serverName === 'two')).toMatchObject({ starting: false, failing: true, tools: [] })
+  })
+})
+
+describe('a server\'s identity', () => {
+  it('follows its URL\'s origin and path, or its command and arguments, never a query or a secret', () => {
+    const http = (url: string) => mcpServerIdentity({ transport: 'http', url })
+    expect(http('https://mcp.example.test/v1')).toMatch(/^[0-9a-f]{10}$/)
+    expect(http('https://mcp.example.test/v1?token=abc')).toBe(http('https://mcp.example.test/v1?token=xyz'))
+    expect(http('https://mcp.example.test/v1')).not.toBe(http('https://other.example.test/v1'))
+    expect(http('https://mcp.example.test/v1')).not.toBe(http('https://mcp.example.test/v2'))
+    const stdio = (command: string, args: string[]) => mcpServerIdentity({ transport: 'stdio', command, args })
+    expect(stdio('node', ['server.js'])).not.toBe(stdio('node', ['other.js']))
+    // A key, after a flag that names it or on its own, and one in a URL's path, never changes the identity.
+    expect(stdio('node', ['server.js', '--api-key', 'abc'])).toBe(stdio('node', ['server.js', '--api-key', 'xyz']))
+    expect(stdio('npx', ['-y', 'gh-mcp', 'ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8'])).toBe(stdio('npx', ['-y', 'gh-mcp', 'ghp_Z9y8X7w6V5u4T3s2R1q0P9o8N7m6L5k4J3i2']))
+    expect(http('https://mcp.example.test/k/a1B2c3D4e5F6g7H8i9J0k1L2m3/sse')).toBe(http('https://mcp.example.test/k/Z9y8X7w6V5u4T3s2R1q0P9o8N7/sse'))
+    expect(stdio('node', ['C:\\servers\\notes-server-for-my-team-2026.js'])).not.toBe(stdio('node', ['C:\\servers\\other-server-for-my-team-2026.js']))
+  })
+
+  it('is listed with each enabled server, and every configured one (on or off) is known', async () => {
+    const off = testServerConfig({ id: 'mousse:off', installationId: 'inst-off', name: 'off', url: 'https://off.example.test/mcp' })
+    const { catalog } = setup({ servers: [echo, two, off] })
+    await catalog.refresh(undefined)
+    expect(catalog.servers().find((entry) => entry.serverName === 'echo')!.identity).toBe(mcpServerIdentity(echo))
+    expect(catalog.servers().find((entry) => entry.serverName === 'two')!.identity).toBe(mcpServerIdentity(two))
+    expect(catalog.configured().map((entry) => entry.installationId)).toEqual(['inst-echo', 'inst-two', 'inst-off'])
+  })
+})
 
 describe('RelayCatalog', () => {
   it('is cold and empty until refreshed, then lists the enabled servers\' tools with a revision', async () => {

@@ -294,11 +294,12 @@ export class McpManager {
   /**
    * `getEnabledTools` per enabled server: each server is listed on its own, within its own timeout, and
    * one that fails reports its error instead of failing or delaying the rest (the MCP relay's catalogue).
+   * `onServer` hears each server's entry as soon as that server answers or fails, before the slowest one is done.
    */
   async getEnabledToolsByServer(
     projectPath?: string,
     actor: IntegrationActor = defaultIntegrationActor(false),
-    options: { signIn?: false } = {}
+    options: { signIn?: false; onServer?: (entry: McpServerTools) => void } = {}
   ): Promise<McpServerTools[]> {
     this.owned.assertAccepting()
     const settings = this.settingsStore.get().integrations.mcp
@@ -309,23 +310,7 @@ export class McpManager {
       actor
     }).filter((server) => server.status !== 'missing-env' && server.status !== 'failed')
 
-    const listed = await Promise.allSettled(
-      eligibleServers.map(async (server) => {
-        // A listing that must not start a sign-in (`signIn: false`) holds each server's sign-in while it lists.
-        const release = options.signIn === false ? await this.holdSignIn(server) : undefined
-        try {
-          return await withAbortTimeout(
-            (signal) => this.listToolsForServer(server, projectPath, signal),
-            SERVER_TOOLS_TIMEOUT_MS,
-            `Timed out listing tools for ${server.name}`
-          )
-        } finally {
-          release?.()
-        }
-      })
-    )
-    return eligibleServers.map((server, index) => {
-      const result = listed[index]!
+    const entryOf = (server: McpServerConfig, result: PromiseSettledResult<McpToolDescriptor[]>): McpServerTools => {
       const entry = {
         installationId: mcpInstallationId(server),
         serverName: server.name,
@@ -338,7 +323,38 @@ export class McpManager {
         ...entry,
         tools: result.value.filter((tool) => isMcpToolAllowedForActor(tool, server, actor) && !tool.schemaError)
       }
-    })
+    }
+    const listed = await Promise.all(
+      eligibleServers.map(async (server) => {
+        let result: PromiseSettledResult<McpToolDescriptor[]>
+        try {
+          // A listing that must not start a sign-in (`signIn: false`) holds each server's sign-in while it lists.
+          const release = options.signIn === false ? await this.holdSignIn(server) : undefined
+          try {
+            result = {
+              status: 'fulfilled',
+              value: await withAbortTimeout(
+                (signal) => this.listToolsForServer(server, projectPath, signal),
+                SERVER_TOOLS_TIMEOUT_MS,
+                `Timed out listing tools for ${server.name}`
+              )
+            }
+          } finally {
+            release?.()
+          }
+        } catch (error) {
+          result = { status: 'rejected', reason: error }
+        }
+        const entry = entryOf(server, result)
+        try {
+          options.onServer?.(entry)
+        } catch (err) {
+          logWarn('McpManager', `A listing listener failed: ${redactSensitiveText(formatError(err))}`)
+        }
+        return entry
+      })
+    )
+    return listed
   }
 
   /** Resolve and connect only the named enabled installation. Used by pinned execution preparation. */
