@@ -5,7 +5,7 @@ import { openableThread } from './threadHistory'
 
 /** One step of the title bar's path: the open thread's project, the threads above it, then the thread itself. */
 export type PathSegment =
-  | { kind: 'project'; id: string; name: string }
+  | { kind: 'project'; id: string; name: string; none?: boolean }
   | { kind: 'thread'; id: string; name: string; current: boolean }
 
 const threadName = (thread: Pick<Thread, 'name' | 'lineage'>): string =>
@@ -37,6 +37,15 @@ export function threadPath(threadId: string | null, threads: readonly Thread[], 
     ...(project ? [{ kind: 'project' as const, id: project.id, name: project.name }] : []),
     ...chain.map((thread) => ({ kind: 'thread' as const, id: thread.id, name: threadName(thread), current: thread.id === current.id }))
   ]
+}
+
+/** Stands in front of a thread that has no project, so the path always starts with where the thread lives. */
+export const NO_PROJECT_SEGMENT: PathSegment = { kind: 'project', id: '', name: 'No Project', none: true }
+
+/** The path as the title bar shows it: led by the project, or by "No Project" when there is none. */
+export function withProjectLead(segments: PathSegment[]): PathSegment[] {
+  if (segments.length === 0 || segments[0]!.kind === 'project') return segments
+  return [NO_PROJECT_SEGMENT, ...segments]
 }
 
 export interface SiblingMenu {

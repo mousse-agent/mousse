@@ -242,3 +242,24 @@
 .titlebar-nav-menu .threads-context-menu-item.titlebar-nav-menu-indent {
   padding-left: calc(var(--ui-menu-row-x) + 14px);
 }
+
+/* The project leads the path, quieter than the threads after it. A thread with no project says so
+   in the accent colour, so it is noticed. */
+.titlebar-path-anchor[data-segment='project'] .titlebar-path-seg {
+  opacity: 0.6;
+}
+
+.titlebar-path-anchor[data-segment='project']:hover .titlebar-path-seg {
+  opacity: 1;
+}
+
+.titlebar-path-anchor.is-no-project,
+.titlebar-path-anchor.is-no-project:hover {
+  background: transparent;
+}
+
+.titlebar-path-anchor.is-no-project .titlebar-path-seg,
+.titlebar-path-anchor.is-no-project:hover .titlebar-path-seg {
+  color: var(--accent);
+  opacity: 0.85;
+}

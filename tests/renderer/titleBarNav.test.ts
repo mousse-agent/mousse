@@ -24,7 +24,7 @@ import {
   useThreadHistoryStore,
   type ThreadHistory
 } from '../../src/renderer/lib/threadHistory'
-import { hiddenSegmentCount, siblingThreads, threadPath } from '../../src/renderer/lib/threadPath'
+import { hiddenSegmentCount, siblingThreads, threadPath, withProjectLead } from '../../src/renderer/lib/threadPath'
 import { setThreadPathInTitleBar } from '../../src/renderer/lib/threadPathSetting'
 import { useSidebarRevealStore } from '../../src/renderer/lib/sidebarReveal'
 import { selectThread } from '../../src/renderer/lib/threadActions'
@@ -353,6 +353,16 @@ describe('the title bar navigation', () => {
     expect(html).toContain('aria-label="Thread path"')
     expect(html).toMatch(/data-segment="project"[^]*acme-web/)
     expect(html).toMatch(/is-current[^"]*" data-segment="current"[^]*aria-current="page"[^]*Fix flaky checkout test/)
+  })
+
+  it('leads a thread without a project with "No Project", in the accent colour, which opens nothing', () => {
+    expect(withProjectLead(threadPath('loose', threads, projects)).map((segment) => segment.name)).toEqual(['No Project', 'Explain git rebase'])
+    expect(withProjectLead(threadPath('t1', threads, projects)).map((segment) => segment.name)).toEqual(['acme-web', 'Fix flaky checkout test'])
+    expect(withProjectLead([])).toEqual([])
+    setStore({ activeThreadId: 'loose' })
+    const html = renderToStaticMarkup(createElement(TitleBarNav))
+    expect(html).toMatch(/is-no-project" data-segment="project"[^]*No Project[^]*Explain git rebase/)
+    expect(html).not.toMatch(/<button[^>]*>[^<]*<span class="titlebar-path-name">No Project/)
   })
 
   it('hides the topmost ancestors behind "…" and keeps the current thread', () => {
