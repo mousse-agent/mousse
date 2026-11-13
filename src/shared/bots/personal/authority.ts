@@ -145,6 +145,11 @@ export interface BotAuthority {
    */
   escalate?(request: { permission: unknown; reason: string; toolCallId?: string }): string
   /**
+   * What a call of a permission the turn lacks returns when the bot's grant holds it now (the owner allowed it after
+   * the turn started): it is not asked for again. Undefined when the grant does not hold it. Absent: never held.
+   */
+  held?(permission: unknown): string | undefined
+  /**
    * The `consult` app tool (6c-2), on activation threads only: asks the context thread `context`
    * and returns its final message. Absent on context threads (depth is 1).
    */
