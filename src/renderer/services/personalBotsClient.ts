@@ -29,6 +29,8 @@ export interface PersonalBotsClient {
   /** Stops one piece of work; the chat goes on. */
   stopWork(botId: string, workId: string): Promise<void>
   markRead(botId: string, seq: number): Promise<void>
+  /** The owner's reaction on one of the bot's messages: an emoji, or `null` to remove it. The message as it is now. */
+  react(botId: string, messageId: string, emoji: string | null): Promise<BotChatMessage>
   answer(botId: string, askId: string, answer: 'allow' | 'not_now'): Promise<BotChatMessage>
   revokePermission(botId: string, permissionId: string): Promise<BotDetail>
   addSchedule(botId: string, when: BotSchedule['when'], prompt: string, model?: string): Promise<BotDetail>
@@ -73,6 +75,7 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
     stop: async (botId) => { await call('bots.chat.stop', { botId }) },
     stopWork: async (botId, workId) => { await call('bots.work.stop', { botId, workId }) },
     markRead: async (botId, seq) => { await call('bots.chat.markRead', { botId, seq }) },
+    react: async (botId, messageId, emoji) => (await call('bots.chat.react', { botId, messageId, emoji })).message,
     answer: async (botId, askId, answer) => (await call('bots.asks.answer', { botId, askId, answer })).message,
     revokePermission: (botId, permissionId) => call('bots.permissions.revoke', { botId, permissionId }),
     addSchedule: (botId, when, prompt, model) => call('bots.schedules.add', { botId, when, prompt, ...(model ? { model } : {}) }),

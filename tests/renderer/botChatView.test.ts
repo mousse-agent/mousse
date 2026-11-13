@@ -371,6 +371,47 @@ describe('the transcript', () => {
     expect(codes.map((code) => [code.textContent, code.classList.contains('is-whole')])).toEqual([['ssd-shortlist.md', true], ['Get-PhysicalDisk | Select-Object FriendlyName, MediaType, Size', false]])
   })
 
+  it('the owner reacts to a bot message: six quick emoji and +, one reaction shown on the bubble, the same again or its badge removes it', async () => {
+    fake.chats.inbox = [message(1, { id: 'b1', text: 'Here are three SSDs.' }), message(2, { id: 'o1', author: 'owner', text: 'Thanks' })]
+    await open()
+    const reply = () => transcript().querySelector<HTMLElement>('[data-message-id="b1"]')!
+    const bar = () => reply().querySelector<HTMLElement>('[role="toolbar"]')!
+    const badge = () => reply().querySelector<HTMLButtonElement>('.bot-bubble > .bot-reaction')
+    expect(bar().getAttribute('aria-label')).toBe('React to this message')
+    expect([...bar().querySelectorAll('button')].map((choice) => choice.getAttribute('aria-label'))).toEqual(['React 👍', 'React ❤️', 'React 😂', 'React 😮', 'React 😢', 'React 🙏', 'More reactions'])
+    // The owner's own messages take none.
+    expect(transcript().querySelector('[data-message-id="o1"] [role="toolbar"]')).toBeNull()
+
+    await click(button('React ❤️', bar()))
+    expect(fake.calls).toContainEqual(['react', 'inbox', 'b1', '❤️'])
+    expect(badge()?.textContent).toBe('❤️')
+    expect(button('Remove your reaction ❤️', bar())?.getAttribute('aria-pressed')).toBe('true')
+    // Another replaces it: one reaction.
+    await click(button('React 👍', bar()))
+    expect(reply().querySelectorAll('.bot-reaction')).toHaveLength(1)
+    expect(badge()?.textContent).toBe('👍')
+    // The same one again removes it.
+    await click(button('Remove your reaction 👍', bar()))
+    expect(fake.calls.at(-1)).toEqual(['react', 'inbox', 'b1', null])
+    expect(badge()).toBeNull()
+
+    // + opens the composer's grid; a pick sets it, and the badge takes it away again.
+    await click(button('More reactions', bar()))
+    await click(button('🔥', reply().querySelector('.bot-react-grid')!))
+    expect(badge()?.textContent).toBe('🔥')
+    expect(reply().querySelector('.bot-react-grid')).toBeNull()
+    await click(badge())
+    expect(fake.calls.at(-1)).toEqual(['react', 'inbox', 'b1', null])
+    expect(badge()).toBeNull()
+
+    // Refused by the service: shown at once, then put back as it was, with why above the composer.
+    vi.mocked(fake.client.react).mockRejectedValueOnce(new Error('This bot has no such message.'))
+    await click(button('React 😮', bar()))
+    await settle()
+    expect(badge()).toBeNull()
+    expect(composerError()?.textContent).toBe('This bot has no such message.')
+  })
+
   it('a list of keys and values reads as a small card', async () => {
     fake.chats.inbox = [message(1, { id: 'b1', kind: 'run_report', text: 'Your PC looks healthy.\n\n- **CPU:** Ryzen 9 7900X\n- **RAM**: 19.7 GB free\n\nAnd a list:\n\n- one\n- two' })]
     await open()

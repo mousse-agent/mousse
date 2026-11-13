@@ -31,6 +31,7 @@ const KEYS: Record<BotsPersonalV2Method, readonly string[]> = {
   'bots.work.stop': ['botId', 'workId'],
   'bots.reminders.cancel': ['botId', 'reminderId'],
   'bots.chat.markRead': ['botId', 'seq'],
+  'bots.chat.react': ['botId', 'messageId', 'emoji'],
   'bots.asks.answer': ['botId', 'askId', 'answer'],
   'bots.permissions.revoke': ['botId', 'permissionId'],
   'bots.schedules.add': ['botId', 'when', 'prompt', 'model'],
@@ -49,6 +50,11 @@ const REQUEST_ID = /^[A-Za-z0-9._:-]{1,128}$/
 const ASK_ID = /^esc_[0-9a-f-]{36}$/
 const SCHEDULE_ID = /^[a-z0-9][a-z0-9-]{0,31}$/
 const MAX_CHAT_TEXT = 64 * 1024
+/**
+ * One emoji: pictographs, with their joiners, variation selectors, skin tones and keycaps, at most 16 code points, and
+ * at least one pictograph, flag letter or keycap (a digit or `#` alone is no emoji).
+ */
+export const REACTION = /^(?=.{1,16}$)(?=.*(?:\p{Extended_Pictographic}|\p{Regional_Indicator}|\u20e3))(?:\p{Extended_Pictographic}|\p{Regional_Indicator}|[\u200d\ufe0f\u20e3#*0-9]|\p{Emoji_Modifier})+$/u
 
 const text = (value: unknown, max: number): value is string => typeof value === 'string' && value.trim().length > 0 && value.length <= max
 const whole = (value: unknown, min: number): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= min
@@ -137,6 +143,11 @@ function validate(method: BotsPersonalV2Method, value: unknown): Params {
     case 'bots.chat.markRead':
       if (!whole(p.seq, 0)) throw new DomainRpcError('invalid_params', 'seq must be a whole number')
       break
+    case 'bots.chat.react':
+      if (!text(p.messageId, 200)) throw new DomainRpcError('invalid_params', 'A message id is required')
+      // One emoji (a flag or a family is several code points), or null to remove it.
+      if (p.emoji !== null && (typeof p.emoji !== 'string' || !REACTION.test(p.emoji))) throw new DomainRpcError('invalid_params', 'The reaction is one emoji, or null')
+      break
     case 'bots.asks.answer':
       if (typeof p.askId !== 'string' || !ASK_ID.test(p.askId)) throw new DomainRpcError('invalid_params', 'An ask id is required')
       if (p.answer !== 'allow' && p.answer !== 'not_now') throw new DomainRpcError('invalid_params', 'The answer must be allow or not_now')
@@ -191,6 +202,7 @@ async function handle(method: BotsPersonalV2Method, p: Params, bots: BotChatServ
     case 'bots.work.stop': return bots.workStop(botId, p.workId as string)
     case 'bots.reminders.cancel': return bots.reminderCancel(botId, p.reminderId as string)
     case 'bots.chat.markRead': return bots.markRead(botId, p.seq as number)
+    case 'bots.chat.react': return bots.react(botId, p.messageId as string, p.emoji as string | null)
     case 'bots.asks.answer': return bots.answer(botId, p.askId as string, p.answer as 'allow' | 'not_now')
     case 'bots.permissions.revoke': return bots.revokePermission(botId, p.permissionId as string)
     case 'bots.schedules.add': return bots.addSchedule(botId, p.when as BotSchedule['when'], p.prompt as string, typeof p.model === 'string' ? p.model : undefined)

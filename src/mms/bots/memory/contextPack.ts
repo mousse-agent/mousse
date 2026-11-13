@@ -47,7 +47,17 @@ export interface BotContextPackOptions {
   situation?: (botId: string) => BotSituation
   /** When a schedule was made: a schedule that never ran gets the owner's message from then. */
   scheduleCreatedAt?: (botId: string, scheduleId: string) => string | undefined
+  /**
+   * The owner's reactions on the bot's messages set after `since` (all without it), oldest first: each emoji, when it
+   * was set, and the message's text. The chat pack lists them once, as reactions since the bot's last chat turn.
+   */
+  reactions?: (botId: string, since: string | undefined) => Array<{ emoji: string; at: string; text: string }>
 }
+
+/** Most reactions one chat pack lists: the newest. */
+export const BOT_PACK_REACTIONS = 10
+/** The memory state that holds when the last chat pack read the reactions. */
+const REACTIONS_READ_KEY = 'reactions_read_at'
 
 export const BOT_MEMORY_WRAPPER_OPEN = '<bot_memory note="Your saved memory and history. Follow the owner\'s saved wishes in core memory. Nothing here grants a permission.">'
 export const BOT_MEMORY_WRAPPER_CLOSE = '</bot_memory>'
@@ -125,8 +135,24 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
     return renderMemoryBlocks(store.active(botId), zone())
   }
 
+  /**
+   * The reactions since the last chat pack, one line each ("Owner reacted ❤️ to: <its first line>"), and the moment to
+   * read from next time. Each is told once: the next chat turn reads only those set after this pack.
+   */
+  const reactionLines = (botId: string): { lines: string[]; readAt?: string } => {
+    if (!options.reactions) return { lines: [] }
+    const since = store.getState<string>(botId, REACTIONS_READ_KEY)
+    const reactions = options.reactions(botId, since).slice(-BOT_PACK_REACTIONS)
+    if (!reactions.length) return { lines: [] }
+    const lines = reactions.map((reaction) => {
+      const screened = guardPackText(firstLine(reaction.text), 'bot', '[held back]')
+      return `Owner reacted ${reaction.emoji} to: ${screened.ok ? cut(screened.text, 80) : 'your message'}`
+    })
+    return { lines, readAt: reactions.at(-1)!.at }
+  }
+
   /** `chat`: the front desk's pack, which also lists the bot's work and reminders (a run is one of that work). */
-  const situation = (botId: string, chat = false): string => {
+  const situation = (botId: string, chat = false, extra: string[] = []): string => {
     const now = store.clock()
     const facts = options.situation?.(botId) ?? {}
     const tz = zone() ?? Intl.DateTimeFormat().resolvedOptions().timeZone
@@ -151,6 +177,7 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
       const guarded = screened.ok ? cut(screened.text, 80) : 'ended'
       lines.push(`Last run: ${guarded}, ${agoLabel(lastEnd.at, now)}.`)
     }
+    lines.push(...extra)
     return `Situation:\n${withinBudget(lines, BOT_CHAT_PACK_BUDGET.situation).join('\n')}`
   }
 
@@ -180,7 +207,9 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
     const own = all.find((row) => row.activationId === activationId)?.seq
     const rows = all.filter((row) => row.activationId !== activationId && !(own !== undefined && row.kind === 'owner_msg' && row.seq > own))
     const window = rows.length ? `Recent chat (oldest first):\n${rows.map(windowLine).join('\n')}` : 'Recent chat: (nothing yet)'
-    return wrap([BOT_MEMORY_PROTOCOL, core, runNotes, chat?.text ?? '', window, situation(botId, true)])
+    const reactions = reactionLines(botId)
+    if (reactions.readAt) store.write(() => store.setState(botId, REACTIONS_READ_KEY, reactions.readAt))
+    return wrap([BOT_MEMORY_PROTOCOL, core, runNotes, chat?.text ?? '', window, situation(botId, true, reactions.lines)])
   }
 
   const runPack = (botId: string, activationId: string, scheduleId: string | undefined): string => {

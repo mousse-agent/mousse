@@ -418,3 +418,20 @@ html[data-theme='high-contrast'] .bot-conversation .chat-input-area.bot-input-ar
 .bot-emoji-grid { position: absolute; z-index: 30; right: -4px; bottom: calc(100% + 10px); display: grid; grid-template-columns: repeat(8, 32px); gap: 2px; padding: 6px; border-radius: 12px; border: 1px solid rgba(var(--accent-pale-rgb), .15); background: var(--bg-secondary, #201d23); box-shadow: 0 18px 50px #0006; }
 .bot-emoji-grid button { width: 32px; height: 32px; border-radius: 8px; font-size: 18px; line-height: 32px; text-align: center; }
 .bot-emoji-grid button:hover, .bot-emoji-grid button:focus-visible { background: color-mix(in srgb, var(--text-secondary) 14%, transparent); outline: none; }
+
+/* The owner's reaction on a bot's message: six quick emoji and "+" beside the bubble on hover or focus, and the badge
+   on the bubble's lower right corner (the bot's own reaction sits on the owner's lower left). */
+.bot-react-bar { position: relative; display: flex; align-items: center; gap: 1px; padding: 2px; border-radius: 999px; background: var(--bg-secondary, #201d23); border: 1px solid rgba(var(--accent-pale-rgb), .12); opacity: 0; pointer-events: none; transition: opacity .12s; }
+.chat-participant-message:hover .bot-react-bar, .bot-react-bar:focus-within, .bot-react-bar.is-open { opacity: 1; pointer-events: auto; }
+.bot-react-quick { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; font-size: 15px; line-height: 1; }
+.bot-react-quick:hover, .bot-react-quick:focus-visible { background: color-mix(in srgb, var(--text-secondary) 14%, transparent); outline: none; }
+.bot-react-quick[aria-pressed='true'] { background: rgba(var(--accent-rgb), .22); }
+.bot-react-more { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; color: var(--text-secondary); }
+.bot-react-more:hover, .bot-react-more:focus-visible, .bot-react-more[aria-expanded='true'] { color: var(--text-primary); background: color-mix(in srgb, var(--text-secondary) 14%, transparent); outline: none; }
+.bot-emoji-grid.bot-react-grid { left: 0; right: auto; bottom: auto; top: calc(100% + 6px); }
+.bot-bubble > .bot-reaction { left: auto; right: -8px; }
+button.bot-reaction { cursor: pointer; }
+button.bot-reaction:hover, button.bot-reaction:focus-visible { background: color-mix(in srgb, var(--text-secondary) 22%, var(--surface-elevated, #2e2f38)); outline: none; }
+.bot-message.has-reaction { margin-bottom: 6px; }
+.bot-emoji-grid [aria-checked='true'] { background: rgba(var(--accent-rgb), .22); }
+@media (prefers-reduced-motion: reduce) { .bot-react-bar { transition: none; } }

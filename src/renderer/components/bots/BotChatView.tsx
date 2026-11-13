@@ -12,6 +12,7 @@ import { BotSteps } from './BotSteps'
 import { BOT_IMAGES, BotFilePane, BotFilesProvider, BotMarkdown, BotPathChip } from './BotFiles'
 import { BotAppletPane, BotMessageApplets } from './BotApplets'
 import { BotPictureActions, BotReplyMedia } from './BotReplyMedia'
+import { BotReactionBadge, BotReactionBar } from './BotReactions'
 import { replyImages } from './botReplyImages'
 import { BotEmojiButton } from './BotEmoji'
 import { BotAskReplies } from './BotAskReplies'
@@ -222,7 +223,9 @@ const BotMessage = memo(function BotMessage({ bot, message, onAction, browser, q
   const pictures = shownImages.length > 0
   // The steps behind one quiet line: "Worked for 32s" when it is known how long it took, else "Steps", never dropped.
   const ms = workedMs(message, asked)
-  return <article className={`chat-participant-message from-agent bot-message${starts ? ' is-group-start' : ''}`} data-message-id={message.id}>
+  // The owner's reaction: one per message, set, replaced or removed here; the bot is told on its next chat turn.
+  const react = (emoji: string | null) => void store().react(bot.id, message.id, emoji)
+  return <article className={`chat-participant-message from-agent bot-message${starts ? ' is-group-start' : ''}${message.reaction ? ' has-reaction' : ''}`} data-message-id={message.id}>
     <div className="bot-message-line">
       <div className={`bot-bubble${pictures ? ' has-media' : ''}${pictures && !media.text && !lostChips.length ? ' is-media-only' : ''}`}>
         {quoted && <BotReplyQuote botId={bot.id} quote={message.replyTo!} botName={bot.name} />}
@@ -237,10 +240,12 @@ const BotMessage = memo(function BotMessage({ bot, message, onAction, browser, q
           {steps.length > 0 && <WorkedToggle ms={ms} open={stepsOpen} onToggle={() => setStepsOpen((open) => !open)} />}
           <BubbleTime message={message} />
         </div>
+        {message.reaction && <BotReactionBadge emoji={message.reaction} onRemove={() => react(null)} />}
       </div>
       {/* As beside a thread's reply: read it aloud, copy it as written, reply to it. Anchored to the bubble's lower
           right edge and taking no width of its own, so the bubble is as wide with them as without. */}
       <span className="bot-message-tools">
+        <BotReactionBar current={message.reaction} onReact={react} />
         <span className="bot-message-actions">
           {message.text && <ReadAloudButton speechKey={`bot:${message.id}`} markdown={message.text} />}
           {message.text && <CopyButton text={message.text} />}

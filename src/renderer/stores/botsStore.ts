@@ -126,6 +126,11 @@ interface BotsState {
   /** Stops one piece of work (the line above the composer); the chat goes on. */
   stopWork(botId: string, workId: string): Promise<void>
   answer(botId: string, askId: string, answer: 'allow' | 'not_now'): Promise<void>
+  /**
+   * The owner's reaction on one of the bot's messages: shown at once, and put back as it was when the service refuses
+   * it. `null` removes it. It never starts a turn.
+   */
+  react(botId: string, messageId: string, emoji: string | null): Promise<void>
   exportMemory(botId: string, askId: string): Promise<void>
   openNewBot(): void
   /** Closes New bot; what was put in stays for the next time it opens. */
@@ -465,6 +470,24 @@ export const useBotsStore = create<BotsState>((set, get) => {
         putMessages(botId, [message])
         void get().refresh()
       } catch (cause) { fail(owner, cause, botId) }
+    },
+
+    async react(botId, messageId, emoji) {
+      const owner = epoch
+      const before = get().chats[botId]?.messages.find((message) => message.id === messageId)
+      if (!before) return
+      const { reaction: _old, ...rest } = before
+      putMessages(botId, [emoji === null ? rest : { ...rest, reaction: emoji }])
+      set({ error: null })
+      try {
+        const message = await bots().react(botId, messageId, emoji)
+        if (owner !== epoch) return
+        putMessages(botId, [message])
+      } catch (cause) {
+        if (owner !== epoch) return
+        putMessages(botId, [before])
+        fail(owner, cause, botId)
+      }
     },
 
     async exportMemory(botId, askId) {

@@ -939,6 +939,9 @@ function defaultRedactMessage(tx: BotStoreTx, botId: string, messageId: string, 
   const has = (table: string) => Boolean(tx.statement("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table))
   if (!has('bot_messages')) return
   tx.statement('UPDATE bot_messages SET text = ? WHERE id = ? AND bot_id = ?').run(text, messageId, botId)
+  // A forgotten message keeps no reaction, so the bot is never told of one on it.
+  if (tx.statement("SELECT 1 FROM pragma_table_info('bot_messages') WHERE name = 'owner_reaction'").get())
+    tx.statement('UPDATE bot_messages SET owner_reaction = NULL, owner_reaction_at = NULL WHERE id = ? AND bot_id = ?').run(messageId, botId)
   // What the forgotten message asked for keeps no copy of its words (docs/plans/bot-always-free.md): a reminder it set
   // is cancelled and its text removed, and work it started keeps neither its brief nor the notes passed to it.
   const redactJournal = (sourceKey: string) => {

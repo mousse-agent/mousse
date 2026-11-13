@@ -311,6 +311,16 @@ CREATE TABLE bot_work_notes(
 ) STRICT;
 CREATE INDEX bot_work_notes_pending ON bot_work_notes(activation_id, applied_at);
 `
+  },
+  {
+    // The owner's reaction on a bot's message (one per message, an emoji) and when it was set: the bot's next chat turn
+    // is told the reactions set since its last one. An older build reads the table and never sees the columns.
+    version: 7,
+    sql: `
+ALTER TABLE bot_messages ADD COLUMN owner_reaction TEXT;
+ALTER TABLE bot_messages ADD COLUMN owner_reaction_at TEXT;
+CREATE INDEX bot_messages_reactions ON bot_messages(bot_id, owner_reaction_at) WHERE owner_reaction IS NOT NULL;
+`
   }
 ]
 
@@ -427,6 +437,8 @@ export interface BotMessageRow {
   clientRequestId: string | null
   /** The message this one answers (a reply to the owner, or the owner's reply to the bot); null for none. */
   replyTo: string | null
+  /** The owner's reaction on a bot's message (an emoji) and when it was set; absent for none. */
+  ownerReaction?: { emoji: string; at: string }
 }
 
 /** One one-off reminder (`bot_reminders`): a message at a time, or work started then. */
@@ -480,7 +492,8 @@ function messageOf(row: Row): BotMessageRow {
     activationId: str(row.activation_id),
     attachments: json<BotMessageRow['attachments']>(row.attachments_json),
     clientRequestId: str(row.client_request_id),
-    replyTo: str(row.reply_to)
+    replyTo: str(row.reply_to),
+    ...(str(row.owner_reaction) && str(row.owner_reaction_at) ? { ownerReaction: { emoji: row.owner_reaction as string, at: row.owner_reaction_at as string } } : {})
   }
 }
 
@@ -1344,6 +1357,19 @@ export class BotStore {
   message(id: string): BotMessageRow | undefined {
     const row = this.get('SELECT * FROM bot_messages WHERE id = ?', id)
     return row ? messageOf(row) : undefined
+  }
+
+  /** Sets the owner's reaction on a message (one per message: a new one replaces it), or removes it (`null`). */
+  setOwnerReaction(messageId: string, emoji: string | null, at: string): boolean {
+    return this.run('UPDATE bot_messages SET owner_reaction = ?, owner_reaction_at = ? WHERE id = ?', emoji, emoji === null ? null : at, messageId) > 0
+  }
+
+  /** The bot's messages the owner reacted to after `since` (all without it), oldest reaction first, at most `limit`: the newest. */
+  reactionsSince(botId: string, since: string | undefined, limit: number): BotMessageRow[] {
+    const rows = since === undefined
+      ? this.all('SELECT * FROM bot_messages WHERE bot_id = ? AND owner_reaction IS NOT NULL ORDER BY owner_reaction_at DESC, seq DESC LIMIT ?', botId, limit)
+      : this.all('SELECT * FROM bot_messages WHERE bot_id = ? AND owner_reaction IS NOT NULL AND owner_reaction_at > ? ORDER BY owner_reaction_at DESC, seq DESC LIMIT ?', botId, since, limit)
+    return rows.map(messageOf).reverse()
   }
 
   messageByRequest(clientRequestId: string): BotMessageRow | undefined {
