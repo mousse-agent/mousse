@@ -1,13 +1,13 @@
 // @vitest-environment jsdom
 /**
- * What the owner sees of "use your threads": a chip in the bot's chat for a thread it started ("started thread · <title>")
- * whose Open shows that thread, and one line above a thread a bot started, "Started by <bot>", whose name opens the bot's
+ * What the owner sees of "use your threads": a step under a reply's "Worked for" for a thread it started ("Started
+ * thread: <title>") whose Open shows that thread, and one line above a thread a bot started, "Started by <bot>", whose name opens the bot's
  * chat. How they look is checked in the real app (screenshots on the PR), not here.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { BotChips } from '../../src/renderer/components/bots/BotChips'
+import { BotSteps } from '../../src/renderer/components/bots/BotSteps'
 import { ThreadStartedByBar } from '../../src/renderer/components/ThreadStartedByBar'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import { useBotsStore } from '../../src/renderer/stores/botsStore'
@@ -37,7 +37,7 @@ describe('a bot\'s threads, as the owner sees them', () => {
     host.remove()
   })
 
-  it('a thread the bot started is a chip with its title; Open shows the thread', async () => {
+  it('a thread the bot started is a step with its title; Open shows the thread', async () => {
     // The chips of a dispatch, as Mousse rolls them up from the calls its authority allowed and their results.
     const chips = rollUpChips([
       { tool: 'thread_list', input: {} },
@@ -51,8 +51,8 @@ describe('a bot\'s threads, as the owner sees them', () => {
       ['started thread', 'Fix the login page', 't-new'],
       ['messaged', 'Signup', 't-old']
     ])
-    act(() => root.render(createElement(BotChips, { chips })))
-    expect(host.textContent).toContain('started thread · Fix the login page')
+    act(() => root.render(createElement(BotSteps, { chips })))
+    expect(host.textContent).toContain('Started thread: Fix the login page')
     const open = [...host.querySelectorAll('button')].filter((button) => button.textContent === 'Open')
     expect(open).toHaveLength(2)
     useAppStore.setState({ threadsSidebarView: 'chats' })
@@ -113,7 +113,7 @@ describe('a bot\'s threads, as the owner sees them', () => {
       { tool: 'thread_send', input: { threadId: 't-old' }, result: { threadId: 't-old', title: 'Signup', sent: 'Please also check the signup page.' } }
     ])
     expect(actedChip('thread_send', { threadId: 't-old' }, { threadId: 't-old', title: 'Signup', sent: 'Please also check the signup page.' })).toEqual(chips[0])
-    act(() => root.render(createElement(BotChips, { chips })))
-    expect(host.querySelector('.bot-chip')!.getAttribute('title')).toBe('Sent: Please also check the signup page.')
+    act(() => root.render(createElement(BotSteps, { chips })))
+    expect(host.querySelector('.bot-steps li')!.getAttribute('title')).toBe('Sent: Please also check the signup page.')
   })
 })

@@ -237,6 +237,11 @@ export type MarkdownProps = {
   streaming?: boolean;
   /** The images' own rule (`MarkdownImages`); absent: a thread's. */
   images?: MarkdownImages;
+  /**
+   * Elements drawn the caller's way instead (a bot's chat draws its own images and paths). Pass one object kept for
+   * the module's life: a new one each render would make Streamdown draw every block again.
+   */
+  components?: Partial<Components>;
 };
 
 /** Splits text into blocks as Streamdown does, counting the blocks it splits (see render-counts). */
@@ -527,11 +532,39 @@ function componentsFor(images: MarkdownImages): RuledSetup {
   return made;
 }
 
-export const Markdown = memo(function Markdown({ content, className, streaming = false, images }: MarkdownProps) {
+/** A conversation's own setup: no image rule, or no override, is this key. */
+const NONE = {};
+/** Setups made so far, by image rule and then by components override, each with its own cache name. */
+const customSetups = new WeakMap<object, WeakMap<object, RuledSetup>>();
+
+/**
+ * The components for a conversation's own image rule and its own elements (`components`): the thread's, the caller's
+ * over them, and the rule's image last, so no override can draw an image past the rule. Made once per pair, with a
+ * cache name of its own: its blocks are never drawn for a thread, nor a thread's for it.
+ */
+function setupFor(images: MarkdownImages | undefined, override: Partial<Components> | undefined): RuledSetup | undefined {
+  if (!images && !override) return undefined;
+  if (!override) return componentsFor(images!);
+  let byOverride = customSetups.get(images ?? NONE);
+  if (!byOverride) {
+    byOverride = new WeakMap();
+    customSetups.set(images ?? NONE, byOverride);
+  }
+  let made = byOverride.get(override);
+  if (!made) {
+    const rule = images ? componentsFor(images) : undefined;
+    const img = rule ? { img: rule.plain.img } : {};
+    made = { plain: { ...markdownComponents, ...override, ...img }, math: { ...markdownMathComponents, ...override, ...img }, setup: `custom${++rules}` };
+    byOverride.set(override, made);
+  }
+  return made;
+}
+
+export const Markdown = memo(function Markdown({ content, className, streaming = false, images, components }: MarkdownProps) {
   countRender("Markdown");
   const renderMath = useRenderMath();
   const math = renderMath && mayContainMath(content);
-  const ruled = images ? componentsFor(images) : undefined;
+  const ruled = setupFor(images, components);
   const live = useLiveMarkdown();
   // Math has a split of its own and is worked on whole; the live tail gives the same text and
   // blocks as the whole would, so the end of the stream changes nothing on screen.
@@ -566,7 +599,7 @@ export const Markdown = memo(function Markdown({ content, className, streaming =
       <MarkdownSetupContext.Provider value={`${ruled ? `${ruled.setup}:` : ""}${math ? "math" : "plain"}`}>
       <Streamdown
         components={ruled ? ruled[math ? "math" : "plain"] : math ? markdownMathComponents : markdownComponents}
-        {...(ruled ? { rehypePlugins: imageRulePlugins } : {})}
+        {...(images ? { rehypePlugins: imageRulePlugins } : {})}
         plugins={math ? markdownMathPlugins : markdownPlugins}
         BlockComponent={CachedBlock}
         parseMarkdownIntoBlocksFn={

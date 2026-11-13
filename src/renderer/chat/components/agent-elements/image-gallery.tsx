@@ -3,8 +3,11 @@ import { ImageLightbox, type LightboxImage } from "./image-lightbox";
 import { indexInGallery } from "./image-sources";
 
 type ImageGallery = {
-  /** Opens the preview on this image, with the conversation's other images a step away. */
-  open(image: LightboxImage): void;
+  /**
+   * Opens the preview on this image, with the conversation's other images a step away; with `set`, those images
+   * only (a bot's reply steps through its own pictures).
+   */
+  open(image: LightboxImage, set?: LightboxImage[]): void;
 };
 
 const ImageGalleryContext = createContext<ImageGallery | null>(null);
@@ -20,12 +23,12 @@ export function useImageGallery(): ImageGallery | null {
  * each streamed update would cost for nothing), and the set stays as it was until the preview closes.
  * An image not in the set opens alone.
  */
-export function ImageGalleryProvider({ images, children }: { images: () => LightboxImage[]; children: ReactNode }) {
+export function ImageGalleryProvider({ images, actions, children }: { images: () => LightboxImage[]; actions?: (image: LightboxImage) => ReactNode; children: ReactNode }) {
   const imagesRef = useRef(images);
   imagesRef.current = images;
   const [shown, setShown] = useState<{ images: LightboxImage[]; index: number } | null>(null);
-  const open = useCallback((image: LightboxImage) => {
-    const set = imagesRef.current();
+  const open = useCallback((image: LightboxImage, given?: LightboxImage[]) => {
+    const set = given ?? imagesRef.current();
     const index = indexInGallery(set, image);
     setShown(index < 0 ? { images: [image], index: 0 } : { images: set, index });
   }, []);
@@ -35,7 +38,7 @@ export function ImageGalleryProvider({ images, children }: { images: () => Light
   return (
     <ImageGalleryContext.Provider value={value}>
       {children}
-      {shown && <ImageLightbox open onClose={close} images={shown.images} initialIndex={shown.index} />}
+      {shown && <ImageLightbox open onClose={close} images={shown.images} initialIndex={shown.index} actions={actions} />}
     </ImageGalleryContext.Provider>
   );
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { ArrowTurnForward, ArrowUp, Layers, Mic, Paperclip, Square, Zap } from '../lib/icons'
 import { showsContextGauge, type ProviderWithStatus } from '../lib/providerSnapshots'
 import type { PermissionMode } from '../../shared/permissionMode'
@@ -127,6 +127,10 @@ export interface ComposerFooterProps {
    * button and the send button queues (a bot's chat, an idle thread, a card that takes the message).
    */
   sendMode?: ComposerSendModeProps
+  /** Dictation stays offered while a run can be stopped: a bot's chat, which takes messages while it works. */
+  dictateWhileStoppable?: boolean
+  /** Buttons of the caller's own, left of Attach (a bot's chat: emoji). */
+  extraActions?: ReactNode
 }
 
 /** The permission chip and the model button with its picker. */
@@ -383,6 +387,8 @@ export function ComposerFooter({
   allowAttachWhileLoading = false,
   permission,
   sendLabel,
+  dictateWhileStoppable = false,
+  extraActions,
   sendMode
 }: ComposerFooterProps) {
   const bindings = useCommandBindings()
@@ -426,6 +432,8 @@ export function ComposerFooter({
       <div className="composer-footer-right">
         {run && !run.contextHidden ? <ComposerContextRing run={run} runActive={stoppable} /> : null}
 
+        {extraActions}
+
         <button
           type="button"
           className="composer-icon-btn"
@@ -437,7 +445,7 @@ export function ComposerFooter({
           <Paperclip size={16} strokeWidth={2} />
         </button>
 
-        {primaryAction !== 'implement-plan' && !stoppable && !isRecording && onStartRecording ? (
+        {primaryAction !== 'implement-plan' && (!stoppable || dictateWhileStoppable) && !isRecording && onStartRecording ? (
           <button
             type="button"
             className="composer-icon-btn composer-dictate-btn"
