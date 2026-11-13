@@ -956,6 +956,28 @@
   width: 300px;
 }
 
+/* Inputs and buttons take the select's soft fill, so every control on the page reads as one set. */
+.prov-editor .settings-group-rows .settings-input,
+.prov-editor .settings-btn {
+  background: color-mix(in srgb, var(--text-primary) 3%, transparent);
+}
+
+/* Advanced: every field is one width and ends on one line. A trailing icon (browse, remove) sits
+   past that line; a field without one leaves its slot empty so the column stays straight. */
+.prov-editor .settings-advanced:not(.prov-models-section) .settings-item-control {
+  --prov-field-w: 300px;
+}
+
+.prov-editor .settings-advanced:not(.prov-models-section) .settings-item-control .settings-input,
+.prov-editor .settings-advanced:not(.prov-models-section) .settings-item-control .ui-select:not(.small) {
+  width: var(--prov-field-w);
+}
+
+.prov-editor .settings-advanced:not(.prov-models-section) .settings-item-control > .settings-input:only-child,
+.prov-editor .settings-advanced:not(.prov-models-section) .settings-item-control > span:only-child:has(> .ui-select) {
+  margin-right: calc(var(--settings-control-h) + var(--space-4));
+}
+
 .settings-input.prov-mono {
   font-family: var(--font-mono);
   font-size: 12px;
