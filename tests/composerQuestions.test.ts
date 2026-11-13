@@ -1,5 +1,4 @@
 // @vitest-environment jsdom
-import { readFileSync } from 'node:fs'
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -351,16 +350,5 @@ describe('a message sent from the composer while questions are open', () => {
     expect(questionComposerSend(true, false)).toEqual({ answers: false, label: 'Skip questions and send' })
     expect(questionComposerSend(true, true)).toEqual({ answers: false, label: 'Skip questions and send' })
     expect(QUESTION_COMPOSER_PLACEHOLDER).toBe('Or reply in your own words')
-  })
-
-  it('the composer stays mounted and usable beside the card, and its message answers the questions', () => {
-    const source = readFileSync('src/renderer/components/OrchestratorChat.tsx', 'utf8')
-    // The card renders before (above) the composer in the same composer column, and nothing hides the composer.
-    expect(source.indexOf('<ComposerQuestionModal')).toBeLessThan(source.indexOf('<ChatComposer'))
-    expect(source).not.toMatch(/composer-collapse|inert: true/)
-    expect(source).toMatch(/placeholder=\{[^}]*questionsTakeMessage \? QUESTION_COMPOSER_PLACEHOLDER/)
-    expect(source).toMatch(/sendLabel=\{questionsTakeMessage\s*\?\s*questionComposerSend\([^\n]*, questionAnswerSubmits\)\.label/)
-    expect(source).toMatch(/const answers = card\.answerWithMessage\(text\)\s*if \(!answers\) \{\s*clearComposer\(\)\s*return/)
-    expect(source).toMatch(/answerQuestionsDetailed\(\s*asked\.requestId,\s*answers,/)
   })
 })

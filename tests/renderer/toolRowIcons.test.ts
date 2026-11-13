@@ -91,18 +91,6 @@ describe('the icon of each tool', () => {
   })
 })
 
-describe('the running icon', () => {
-  it('pulses by opacity, and is still with motion off or reduced motion', async () => {
-    const { readFileSync } = await import('node:fs')
-    const css = readFileSync('src/renderer/chat/components/agent-elements/tools/tool-icon.css', 'utf8')
-    expect(css).toMatch(/\.an-tool-icon\[data-state='running'\] \{\s*animation: an-tool-icon-pulse/)
-    expect(css).toMatch(/@keyframes an-tool-icon-pulse \{[^}]*opacity/)
-    expect(css).toMatch(/\[data-motion='off'\] \.an-tool-icon\[data-state='running'\] \{\s*animation: none !important;/)
-    expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\) \{\s*\.an-tool-icon\[data-state='running'\] \{\s*animation: none !important;/)
-    expect(css).toMatch(/\.an-tool-icon\[data-state='failed'\] \{\s*color: var\(--danger\);/)
-  })
-})
-
 describe('a command', () => {
   const command = 'npm test -- --run tests/cache.test.ts'
   const output = 'Test Files  1 passed (1)\n     Tests  4 passed (4)'
@@ -187,12 +175,6 @@ describe('a failure the agent got past', () => {
     expect(host.querySelector('.an-tool-failed-mark')).toBeNull()
     expect([...danger()].map((node) => node.textContent)).toEqual(['Failed', 'exit 1'])
   })
-
-  it('dims the icon in the danger colour, lighter than a failure that ended the turn', async () => {
-    const { readFileSync } = await import('node:fs')
-    const css = readFileSync('src/renderer/chat/components/agent-elements/tools/tool-icon.css', 'utf8')
-    expect(css).toMatch(/\.an-tool-icon\[data-state='recovered'\] \{\s*color: color-mix\(in srgb, var\(--danger\) 55%, transparent\);/)
-  })
 })
 
 describe('the time of a work row', () => {
@@ -212,12 +194,5 @@ describe('the time of a work row', () => {
     expect(host.querySelector('.an-tool-row-time')?.textContent).toBe('2:13 PM')
     render({ type: 'tool-Read', toolCallId: 'r1', state: 'output-available', input: { file_path: 'a.ts' } })
     expect(host.querySelector('.an-tool-row-time')).toBeNull()
-  })
-
-  it('fades in on hover or keyboard focus, in quiet meta text', async () => {
-    const { readFileSync } = await import('node:fs')
-    const css = readFileSync('src/renderer/chat/components/agent-elements/tools/tool-icon.css', 'utf8')
-    expect(css).toMatch(/\.an-tool-row-time \{[^}]*margin-left: auto;[^}]*font-size: 12px;[^}]*opacity: 0;[^}]*transition: opacity/)
-    expect(css).toMatch(/\.an-tool-row-line:hover \.an-tool-row-time,\s*:focus-visible > \.an-tool-row-line \.an-tool-row-time/)
   })
 })

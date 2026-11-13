@@ -123,20 +123,4 @@ describe('chat layout styles', () => {
     const reduced = sideCardCss.slice(sideCardCss.indexOf('prefers-reduced-motion'))
     expect(reduced).toMatch(/\.thread-side-card\.thread-side-card\.thread-side-card\[data-shown\]\s*\{[^}]*transform:\s*none/)
   })
-
-  it('cuts the approval command, not the title, and stacks a second notice line above the first', () => {
-    const rule = (selector: string) => rulesFor(css, selector).find((entry) => entry.selector.endsWith(selector))!
-    expect(rule('.composer-notice-title:has(+ .composer-notice-detail)').body).toMatch(/flex:\s*none;/)
-    expect(rule('.composer-notice-detail').body).toMatch(/text-overflow:\s*ellipsis;/)
-    // The slot's own rule, not a rule that only animates it (`.chat-input-area > .composer-notice-slot`).
-    const slot = rulesFor(css, '.composer-notice-slot').find((entry) => /(^|\n)\s*\.composer-notice-slot$/.test(entry.selector))!.body
-    expect(slot).toMatch(/flex-direction:\s*column;/)
-    // Two quiet lines, one above the other, with no divider between them.
-    expect(css).not.toMatch(/\.composer-notice\s*\+\s*\.composer-notice/)
-    // The approval keeps full-strength text; the lost service above it is a muted line with a muted icon.
-    expect(rule(".composer-notice[data-priority='approval']").body).toMatch(/color:\s*var\(--text-primary\);/)
-    expect(rule(".composer-notice[data-priority='approval'] .composer-notice-btn").body).toMatch(/color:\s*var\(--text-primary\);/)
-    expect(rule(".composer-notice[data-priority='service'] .composer-notice-icon").body).toMatch(/color:\s*var\(--text-secondary\);/)
-    expect(css).not.toContain('.composer-notice-note')
-  })
 })

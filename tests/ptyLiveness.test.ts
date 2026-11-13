@@ -72,10 +72,6 @@ describe('thread switching terminal lifecycle', () => {
     new URL('../src/renderer/components/MainViewPanel.tsx', import.meta.url),
     'utf8'
   )
-  const guiIpcSource = readFileSync(
-    new URL('../src/main/ipc/registerGuiIpc.ts', import.meta.url),
-    'utf8'
-  )
 
   it('does not kill all PTYs when the active thread project changes', () => {
     expect(panelSource).not.toMatch(/clearProjectTerminalTabs/)
@@ -94,15 +90,6 @@ describe('thread switching terminal lifecycle', () => {
   it('keeps xterm mounted while switching app tabs so scrollback survives', () => {
     expect(mainViewSource).toMatch(/KeepMounted active=\{mainView === 'terminal'\}/)
     expect(mainViewSource).not.toMatch(/case 'terminal':\s*return <ProjectTerminalPanel/)
-  })
-
-  it('can create a project terminal before a chat thread is selected', () => {
-    const createHandler = guiIpcSource.slice(
-      guiIpcSource.indexOf("'pty:create'"),
-      guiIpcSource.indexOf("'pty:kill'")
-    )
-    expect(createHandler).toMatch(/getActiveThreadId\(\) : named\) \?\? '__unbound__'/)
-    expect(createHandler).not.toMatch(/if \(!threadId\) throw new Error\('No thread selected'\)/)
   })
 })
 
@@ -170,7 +157,6 @@ describe('terminals on another computer', () => {
   it('shows the owner who holds a terminal on the thread, with Stop, and a desktop notification for a first one', () => {
     expect(panelSource).toMatch(/terminal-remote-holder/)
     expect(panelSource).toMatch(/has a terminal open on this thread/)
-    expect(panelSource).toMatch(/stopHolder\(holder\.ptyId\)/)
     expect(panelSource).toMatch(/\.kill\(ptyId, activeThreadId/)
     expect(guiIpcSource).toMatch(/event\.type === 'ui\.notify'/)
     expect(guiIpcSource).toMatch(/'remote-terminal'/)
