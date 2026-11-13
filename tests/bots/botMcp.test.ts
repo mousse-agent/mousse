@@ -202,18 +202,36 @@ describe('what is not here is refused with no card, in both lanes', () => {
   })
 })
 
+describe('a cold listing', () => {
+  it('a chat turn reads the owner\'s servers before it starts, so its ask names a server set up a moment ago', async () => {
+    let warm = false
+    f.host.mcp = new BotMcp({
+      catalog: {
+        ensure: async () => { warm = true },
+        servers: () => (warm ? servers.map((server) => ({ ...server, failing: false })) : []),
+        listing: () => (warm ? listing() : [])
+      },
+      manager: { callTool: async () => ({ content: [] }) as never },
+      enabled: () => true
+    })
+    const talk = await chat('Look at my issues', 'm1')
+    expect(warm).toBe(true)
+    expect(talk.prepared.authority.escalate!({ permission: { mcp: { server: 'GitHub' } } as never, reason: 'x' })).toBe(BOT_ASK_DEFERRED_TEXT)
+  })
+})
+
 describe('mcp_servers', () => {
   it('lists the owner\'s servers by name, which ones the bot holds, and never a project\'s or a Mousse-named one', async () => {
     await allowGitHub()
     servers[1]!.failing = true
-    expect(f.bots.tools.mcpServers!(botId, 'run')).toEqual({
+    expect(await f.bots.tools.mcpServers!(botId, 'run')).toEqual({
       servers: [
         { server: 'GitHub', id: 'srv-github', about: '2 tools, such as create_issue, list_issues', yours: 'yes' },
         { server: 'Notes', id: 'srv-notes', about: '1 tool, such as read_note', yours: 'no', answering: false }
       ],
       note: expect.stringContaining('ask once with escalate')
     })
-    expect(f.bots.tools.mcpServers!(botId, 'chat').note).toMatch(/hand jobs that need them to work_start/)
+    expect((await f.bots.tools.mcpServers!(botId, 'chat')).note).toMatch(/hand jobs that need them to work_start/)
   })
 })
 

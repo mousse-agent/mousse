@@ -1920,9 +1920,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (row && dispatch && row.status === 'running' && dispatch.startedAt === null) await this.ready(row, dispatch).catch(() => false)
     const selection = this.store.activation(payload.activationId)?.selection
     if (selection) await this.refreshInstance(selection.instanceId)
-    // Work whose grant holds MCP tools reads the owner's servers first (bounded), so its turn is offered them.
-    const current = this.store.activation(payload.activationId)
-    if (this.host.mcp && current?.lane === 'run' && this.store.activeGrant(current.botId)?.manifest.mcp.length) await this.host.mcp.warm()
+    // Every turn reads the owner's servers first when the listing is cold or old (bounded, at most `BOT_MCP_WARM_MS`;
+    // a warm one returns at once): work is offered the granted tools, and a chat can name a server it asks for.
+    if (this.host.mcp) await this.host.mcp.warm()
   }
 
   prepare(payload: BotTurnPayload): PreparedBotTurn | { refused: string; code: string } {
@@ -2343,8 +2343,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * and a few of their names), whether the bot holds its tools (all, some: it has new ones, or none), and whether it is
    * answering. No schema, description or other text of the server's. Read at call time against the active grant.
    */
-  mcpServerList(botId: string, lane: BotLane): BotMcpListing {
+  async mcpServerList(botId: string, lane: BotLane): Promise<BotMcpListing> {
     if (!this.host.mcp) return { servers: [], note: 'Your owner has no MCP servers set up in Mousse here.' }
+    await this.host.mcp.warm()
     const grant = this.store.activeGrant(botId)?.manifest
     const held = new Set((grant?.mcp ?? []).map((pair) => `${pair.serverId}::${pair.tool}`))
     const servers = this.host.mcp.servers().map((server) => {

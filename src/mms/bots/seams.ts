@@ -104,7 +104,7 @@ export interface BotToolHost {
     reach?(botId: string, workId: string): 'now' | 'after_compaction' | 'step_end' | 'start'
   }
   /** `mcp_servers`: the owner's MCP servers the bot may ask for, and whether it holds their tools. Absent: none here. */
-  mcpServers?(botId: string, lane: BotLane): BotMcpListing
+  mcpServers?(botId: string, lane: BotLane): Promise<BotMcpListing>
   /** One-off reminders: said at a time, or work started then. */
   reminders: {
     add(botId: string, from: string, input: { dueAt: string; text: string; work?: { title: string; brief: string } }): { reminderId: string; dueAt: string }

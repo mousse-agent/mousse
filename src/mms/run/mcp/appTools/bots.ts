@@ -374,7 +374,7 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
       handler: async (_args, ctx) => {
         const call = botCall(deps, ctx)
         if (isOutcome(call)) return call
-        return json(call.deps.host.mcpServers?.(call.botId, call.lane) ?? { servers: [], note: 'Your owner has no MCP servers set up in Mousse here.' })
+        return json(await call.deps.host.mcpServers?.(call.botId, call.lane) ?? { servers: [], note: 'Your owner has no MCP servers set up in Mousse here.' })
       }
     }),
     ownTool(byName.get('set_profile')!, deps, {
