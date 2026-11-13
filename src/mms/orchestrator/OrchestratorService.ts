@@ -12613,7 +12613,7 @@ export class OrchestratorService extends EventEmitter {
       }, { dropLate: true })
       const onPublishApplet = this.appletStore ? (value: unknown) => {
         if (stagedApplets.length >= 3) throw new Error('Only three applets may be published per response.')
-        stagedApplets.push(validateAppletSubmission(value))
+        stagedApplets.push(validateAppletSubmission(value, { publishing: true }))
         return { queued: true, title: stagedApplets[stagedApplets.length - 1].title }
       } : undefined
       const app = appTurn ? await this.completeAppTurn(appTurn.turn, { browser: browserExecution, onPublishApplet,
