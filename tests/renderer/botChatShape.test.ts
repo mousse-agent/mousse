@@ -18,6 +18,7 @@ describe('workSignalsOf', () => {
     ['"On it." with a start', bot('b', 'On it, I’ll text you when it’s done.', [started('System check')]), ['System check'], false, true],
     ['a start on a model of its own drops the model', bot('b', 'On it.', [started('Vacuum comparison · Opus 5.5')]), ['Vacuum comparison'], false, true],
     ['a note passed on', bot('b', 'Your note’s with it now.', [noted]), [], true, true],
+    ['a note, as later services word its chip', bot('b', 'I’ll use that tab from here on.', [{ icon: 'think', text: 'noted', title: 'For SSD search' }]), [], true, true],
     ['a reply that says more', bot('b', 'Rain at 4.\n\nI also started a forecast.', [started('Forecast')]), ['Forecast'], false, false],
     ['a reply with other work too', bot('b', 'On it.', [started('A'), { icon: 'search', text: 'searched the web' }]), ['A'], false, false],
     ['a reply with an ask', bot('b', 'On it.', [started('A')], { ask: { askId: 'k', title: 'use the browser', note: '', status: 'open' } }), ['A'], false, false],

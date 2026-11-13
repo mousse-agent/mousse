@@ -13,9 +13,9 @@ export function isWorkStart(chip: BotChip): boolean {
   return chip.icon === 'think' && (chip.text === 'started' || chip.text === 'will start') && Boolean(chip.highlight)
 }
 
-/** A chip of a note the chat passed to running work (`work_note`). */
+/** A chip of a note the chat passed to running work (`work_note`): "passed on your note", or "noted" as later services word it. */
 export function isNotePassed(chip: BotChip): boolean {
-  return chip.icon === 'think' && chip.text === 'passed on your note'
+  return chip.icon === 'think' && (chip.text === 'passed on your note' || chip.text === 'noted')
 }
 
 /** The title of handed-off work, without the model a chip may add ("Vacuum comparison · Opus 5.5"). */
