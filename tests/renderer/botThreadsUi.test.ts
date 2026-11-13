@@ -12,7 +12,7 @@ import { ThreadStartedByBar } from '../../src/renderer/components/ThreadStartedB
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import { useBotsStore } from '../../src/renderer/stores/botsStore'
 import { useChatsStore } from '../../src/renderer/stores/chatsStore'
-import { rollUpChips } from '../../src/shared/bots/personal/chips'
+import { actedChip, rollUpChips } from '../../src/shared/bots/personal/chips'
 import type { BotSummary } from '../../src/shared/bots/personal/chat'
 import type { Thread } from '../../src/shared/types'
 
@@ -76,5 +76,30 @@ describe('a bot\'s threads, as the owner sees them', () => {
       act(() => useAppStore.setState({ activeThreadId: other }))
       expect(host.textContent, other).toBe('')
     }
+  })
+
+  it('a thread a deleted bot started keeps its line with the bot\'s name, marked deleted, with nothing to open', () => {
+    const started = { id: 'started', name: 'started', createdAt: NOW, updatedAt: NOW, createdByThreadId: 'bot-chat', startedByBot: { botId: 'b1', name: 'Alpha' } } as Thread
+    useAppStore.setState({ threads: [started], activeThreadId: 'started' })
+    // Before the bots are read, its name as it was.
+    useBotsStore.setState({ bots: [], loaded: false })
+    act(() => root.render(createElement(ThreadStartedByBar)))
+    expect(host.textContent).toBe('Started by Alpha')
+    // Once they are, and the bot is not among them.
+    act(() => useBotsStore.setState({ bots: [], loaded: true }))
+    expect(host.textContent).toBe('Started by Alpha (deleted)')
+    expect(host.querySelector('button')).toBeNull()
+    // A bot that is there, renamed since, is named as it is now and opens.
+    act(() => useBotsStore.setState({ bots: [{ id: 'b1', name: 'Alpha 2', homeThreadId: 'bot-chat' } as BotSummary], loaded: true }))
+    expect(host.textContent).toBe('Started by Alpha 2')
+  })
+
+  it('a start or a message shows what the bot sent there on the chip\'s hover, at once', () => {
+    const chips = rollUpChips([
+      { tool: 'thread_send', input: { threadId: 't-old' }, result: { threadId: 't-old', title: 'Signup', sent: 'Please also check the signup page.' } }
+    ])
+    expect(actedChip('thread_send', { threadId: 't-old' }, { threadId: 't-old', title: 'Signup', sent: 'Please also check the signup page.' })).toEqual(chips[0])
+    act(() => root.render(createElement(BotChips, { chips })))
+    expect(host.querySelector('.bot-chip')!.getAttribute('title')).toBe('Sent: Please also check the signup page.')
   })
 })

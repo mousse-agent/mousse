@@ -6266,7 +6266,7 @@ export function ownerChatTurn(row: Pick<BotActivationRow, 'lane' | 'idempotencyK
 }
 
 /** Why a turn holds the owner's threads to reading only (`BotAuthority.threadsReadOnly`); undefined when it may act. */
-function threadsReadOnlyOf(row: Pick<BotActivationRow, 'lane' | 'idempotencyKey'>): 'work' | 'not_owner' | undefined {
+export function threadsReadOnlyOf(row: Pick<BotActivationRow, 'lane' | 'idempotencyKey'>): 'work' | 'not_owner' | undefined {
   if (ownerChatTurn(row)) return undefined
   return row.lane === 'chat' ? 'not_owner' : 'work'
 }

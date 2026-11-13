@@ -215,7 +215,8 @@ describe("a bot's thread lists only tools a bot can hold", () => {
   it('lists no delegation or queue tools on a bot thread, only the thread tools "use your threads" gives, and every tool on any other', () => {
     const registry = new ToolRegistry({ activeRunId: () => null, botRole: (threadId) => (threadId === 'bot-home' ? 'activation' : undefined) })
     for (const name of names) registry.register(tool(name))
-    expect(registry.listForThread('bot-home').map((entry) => entry.name).sort()).toEqual(['browser_open', 'escalate', 'thread_read', 'web_fetch', 'work_start'])
+    // The thread tools only for a turn that holds them (tests/run/botThreadTools.test.ts): with no turn here, none.
+    expect(registry.listForThread('bot-home').map((entry) => entry.name).sort()).toEqual(['browser_open', 'escalate', 'web_fetch', 'work_start'])
     expect(registry.listForThread('other').map((entry) => entry.name).sort()).toEqual([...names].sort())
     expect(registry.isBotThread('bot-home')).toBe(true)
     expect(registry.isBotThread('other')).toBe(false)

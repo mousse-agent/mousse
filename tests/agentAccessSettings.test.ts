@@ -33,8 +33,9 @@ describe('agent access settings (SPEC §15.1)', () => {
 
   it('a malformed project list fails closed to lineage, never to every project', () => {
     for (const projectIds of ['a', 7, {}, [123], ['a', 7], ['a', ''], [null]]) {
+      // Marked as unreadable: a bot, which the level does not hold, then reaches no project at all.
       expect(normalizeAgentAccessSettings({ level: 'manage', projectIds: projectIds as never, answerApprovals: true }), JSON.stringify(projectIds)).toEqual({
-        level: 'lineage', projectIds: [], answerApprovals: false, remoteSubagents: false, computers: []
+        level: 'lineage', projectIds: [], answerApprovals: false, remoteSubagents: false, computers: [], projectsUnreadable: true
       })
     }
     // An absent list is every project, which is what an empty one means.
@@ -46,7 +47,7 @@ describe('agent access settings (SPEC §15.1)', () => {
     for (const computers of ['node-a', 7, [7], ['node-a', ''], [null]])
       expect(normalizeAgentAccessSettings({ level: 'read', computers: computers as never }).computers, JSON.stringify(computers)).toEqual([])
     // A malformed project list fails closed for the level; the computers chosen are kept, they are a separate grant.
-    expect(normalizeAgentAccessSettings({ projectIds: 'p' as never, computers: ['node-a'] })).toEqual({ level: 'lineage', projectIds: [], answerApprovals: false, remoteSubagents: false, computers: ['node-a'] })
+    expect(normalizeAgentAccessSettings({ projectIds: 'p' as never, computers: ['node-a'] })).toEqual({ level: 'lineage', projectIds: [], answerApprovals: false, remoteSubagents: false, computers: ['node-a'], projectsUnreadable: true })
     expect(asSettingsPartial({ agentAccess: { computers: ['node-a'] } })).toEqual({ agentAccess: { computers: ['node-a'] } })
     for (const bad of [{ computers: 'node-a' }, { computers: [''] }, { computers: [1] }])
       expect(() => asSettingsPartial({ agentAccess: bad }), JSON.stringify(bad)).toThrow(/agentAccess/)
@@ -81,6 +82,30 @@ describe('agent access settings (SPEC §15.1)', () => {
 
   it('is a profile setting', () => {
     expect(SETTINGS_CLASSIFICATION.find((entry) => entry.path === 'settings.agentAccess')).toMatchObject({ scope: 'profile' })
+  })
+
+  it('a project list that could not be read stays marked through every later save, until the owner chooses projects again', () => {
+    const home = mkdtempSync(join(tmpdir(), 'mousse-agent-access-unreadable-'))
+    const whole = { answerApprovals: false, remoteSubagents: false, computers: [] }
+    try {
+      const settings = new SettingsStore(MousseConfigStore.load(home))
+      // A list no reader can take (a hand edit, an older or newer build) is written back marked.
+      settings.set({ agentAccess: { level: 'read', projectIds: 'p' } } as never)
+      const reread = () => new SettingsStore(MousseConfigStore.load(home)).get().agentAccess
+      expect(reread()).toMatchObject({ level: 'lineage', projectIds: [], projectsUnreadable: true })
+      // A save of the whole setting that keeps the same empty list, as Settings sends a change of level, keeps the mark:
+      // the empty list never turns into "every project" for bots.
+      settings.set({ agentAccess: { level: 'manage', projectIds: [], ...whole } })
+      expect(reread()).toEqual({ level: 'manage', projectIds: [], ...whole, projectsUnreadable: true })
+      // Choosing projects (Settings sends the mark cleared with them) clears it.
+      settings.set({ agentAccess: { level: 'manage', projectIds: ['p1'], ...whole, projectsUnreadable: false } })
+      expect(reread()).toEqual({ level: 'manage', projectIds: ['p1'], ...whole })
+      // Only the daemon marks a list: a client may clear the mark, never set it.
+      expect(asSettingsPartial({ agentAccess: { projectsUnreadable: false } })).toEqual({ agentAccess: { projectsUnreadable: false } })
+      expect(() => asSettingsPartial({ agentAccess: { projectsUnreadable: true } })).toThrow(/agentAccess/)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 
   it('persists the level, the project list and the toggle through a configuration reload, and normalizes what was stored', () => {

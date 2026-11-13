@@ -4,8 +4,9 @@
  * here's fourth switch, which takes it away on this computer with no card. The tools themselves are in
  * tests/run/botThreadTools.test.ts and the service's side in tests/run/botThreadsDaemon.test.ts.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { ownerChatTurn } from '../../src/mms/bots/activation/BotEngine'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { ownerChatTurn, threadsReadOnlyOf } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_THREADS_CHAT_ONLY_TEXT, BOT_THREADS_NOT_OWNER_TEXT, botAppToolRefusal } from '../../src/shared/bots/personal/walls'
 import { botInstructions } from '../../src/mms/bots/instructions'
 import { THREADS_TEXT } from '../../src/shared/bots/personal/askText'
 import { BOT_COMPUTER_OPEN, BOT_OFF_HERE_MARK, type BotComputerLimit } from '../../src/shared/bots/personal/computerLimit'
@@ -117,16 +118,83 @@ describe('"use your threads" in the bot engine', () => {
     await finish(f, running.payload, 'completed', { text: 'Stopped.' })
   })
 
-  // Only a chat turn the owner's own message started may start, message or stop threads.
-  const turns: Array<[string, { lane: 'chat' | 'run'; idempotencyKey: string }, boolean]> = [
-    ['the owner\'s message', { lane: 'chat', idempotencyKey: 'chat:req-1' }, true],
-    ['the bot\'s first message', { lane: 'chat', idempotencyKey: 'create:req-1' }, false],
-    ['work the chat handed off', { lane: 'run', idempotencyKey: 'act-1:call-1' }, false],
-    ['a reminder\'s work', { lane: 'run', idempotencyKey: 'reminder:r1' }, false],
-    ['a scheduled run', { lane: 'run', idempotencyKey: 'sched:b1:s1:2026-11-13T09:00:00.000Z' }, false],
-    ['a run started by hand', { lane: 'run', idempotencyKey: 'chat:looks-like-a-chat-key' }, false]
+  // Only a chat turn the owner's own message started may start, message or stop threads; any other is told why not in
+  // words that fit where it is (work is told it's for the chat; the bot's first message, in the chat, that no message of
+  // the owner's started it).
+  const turns: Array<[string, { lane: 'chat' | 'run'; idempotencyKey: string }, boolean, string]> = [
+    ['the owner\'s message', { lane: 'chat', idempotencyKey: 'chat:req-1' }, true, ''],
+    ['the bot\'s first message', { lane: 'chat', idempotencyKey: 'create:req-1' }, false, BOT_THREADS_NOT_OWNER_TEXT],
+    ['work the chat handed off', { lane: 'run', idempotencyKey: 'act-1:call-1' }, false, BOT_THREADS_CHAT_ONLY_TEXT],
+    ['a reminder\'s work', { lane: 'run', idempotencyKey: 'reminder:r1' }, false, BOT_THREADS_CHAT_ONLY_TEXT],
+    ['a scheduled run', { lane: 'run', idempotencyKey: 'sched:b1:s1:2026-11-13T09:00:00.000Z' }, false, BOT_THREADS_CHAT_ONLY_TEXT],
+    ['a run started by hand', { lane: 'run', idempotencyKey: 'chat:looks-like-a-chat-key' }, false, BOT_THREADS_CHAT_ONLY_TEXT]
   ]
-  it.each(turns)('%s', (_name, row, all) => {
+  it.each(turns)('%s', (_name, row, all, refusal) => {
     expect(ownerChatTurn(row)).toBe(all)
+    // What a start is answered with in a turn holding only the reading tools.
+    const readOnly = threadsReadOnlyOf(row)
+    const bot = { check: () => ({ ok: true as const }), skills: new Set<string>(), appTools: new Set(['thread_list', 'thread_read']), ...(readOnly ? { threadsReadOnly: readOnly } : {}) }
+    expect(all ? undefined : botAppToolRefusal(bot, 'thread_create', {})).toBe(all ? undefined : refusal)
+  })
+
+  it('a chat turn another device\'s message started is held to that device\'s limit; this computer\'s own window is not', async () => {
+    await f.bots.service.chatSend({ botId, text: 'From my phone: start a thread.', clientRequestId: 'p1', from: { limit: 'ask' } })
+    const phone = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    expect(f.bots.ownerTurn(phone.id)).toEqual({ limit: 'ask' })
+    const turn = await start(f, phone.id)
+    // It asks, and waits at the wall; the owner's reply from this computer continues it, still held to the phone.
+    turn.prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'You asked.' })
+    await finish(f, turn.payload, 'completed', { text: 'Asked.' })
+    await f.bots.service.chatSend({ botId, text: 'Never mind the card, go on.', clientRequestId: 'p2' })
+    expect(f.bots.ownerTurn(phone.id)).toEqual({ limit: 'ask' })
+    await finish(f, (await start(f, phone.id, 2)).payload, 'completed', { text: 'OK.' })
+
+    const desk = await chat('From the computer.', 'd1')
+    expect(f.bots.ownerTurn(desk.activation.id)).toEqual({})
+    // A computer's turn its owner then continues from a phone is held to the phone from there on.
+    desk.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'You asked.' })
+    await finish(f, desk.payload, 'completed', { text: 'Asked.' })
+    await f.bots.service.chatSend({ botId, text: 'Go on without it.', clientRequestId: 'd2', from: { limit: 'accept_edits' } })
+    expect(f.bots.ownerTurn(desk.activation.id)).toEqual({ limit: 'accept_edits' })
+    await finish(f, (await start(f, desk.activation.id, 2)).payload, 'completed', { text: 'OK.' })
+
+    // Work is no owner's chat turn at all.
+    const work = await run('w1')
+    expect(f.bots.ownerTurn(work.id)).toBeUndefined()
+    await finish(f, work.payload, 'completed', { text: 'Done.' })
+  })
+
+  it('Remove withdraws what the bot sent that has not started; removing another permission does not, and a wait that ends after either is refused', async () => {
+    const withdrawn = vi.fn()
+    f.host.threadsWithdrawn = withdrawn
+    // The owner allows "use your threads" and "use the browser", one card each.
+    for (const [tool, id] of [['threads', 'm1'], ['browser', 'm1b']] as const) {
+      const asked = await chat(`Use ${tool}.`, id)
+      asked.prepared.authority.escalate!({ permission: { tool }, reason: 'You asked.' })
+      await finish(f, asked.payload, 'completed', { text: 'Asked.' })
+      await f.bots.service.answer(botId, cards().find((card) => card.ask?.status === 'open')!.ask!.askId, 'allow')
+      await finish(f, (await start(f, asked.activation.id, 2)).payload, 'completed', { text: 'Done.' })
+    }
+    const other = f.bots.service.get(botId).permissions.find((entry) => entry.title === 'use the browser')
+    expect(other).toBeDefined()
+    f.bots.service.revokePermission(botId, other!.id)
+    expect(withdrawn).not.toHaveBeenCalled()
+
+    const running = await chat('Wait on that thread.', 'm2')
+    const authority = running.prepared.authority
+    expect(authority.stillHolds?.('thread_wait')).toBeUndefined()
+    // The switch off: the turn no longer holds it, and nothing is asked or shown for it.
+    limit = { ...BOT_COMPUTER_OPEN, threads: false }
+    expect(authority.stillHolds?.('thread_wait')).toMatch(NOT_HERE)
+    limit = { ...BOT_COMPUTER_OPEN }
+    expect(authority.stillHolds?.('thread_wait')).toBeUndefined()
+    expect(cards().filter((card) => card.ask?.status === 'open')).toEqual([])
+
+    f.bots.service.revokePermission(botId, f.bots.service.get(botId).permissions.find((entry) => entry.title === 'use your threads')!.id)
+    expect(withdrawn).toHaveBeenCalledTimes(1)
+    expect(withdrawn).toHaveBeenCalledWith({ botId, homeThreadId: f.store.registry(botId)!.homeThreadId, name: 'Alpha' })
+    // Removed while the turn ran: a wait that ends now returns the refusal, nothing else.
+    expect(authority.stillHolds?.('thread_wait')).toEqual(expect.any(String))
+    await finish(f, running.payload, 'completed', { text: 'Stopped.' })
   })
 })
