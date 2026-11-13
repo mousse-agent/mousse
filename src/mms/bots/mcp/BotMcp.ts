@@ -175,11 +175,25 @@ export class BotMcp implements BotMcpHost {
    */
   async call(tool: BotMcpTool, args: Record<string, unknown>, signal: AbortSignal): Promise<ToolOutcome> {
     if (signal.aborted) return { text: `The call to ${tool.serverName} was stopped.`, isError: true }
+    const callMs = this.deps.callMs ?? BOT_MCP_CALL_MS
+    // The manager times the call out itself; this timer is the floor under it, so nothing a server does holds the run.
+    const timeout = new AbortController()
+    const timer = setTimeout(() => timeout.abort(Object.assign(new Error(`Timed out calling MCP tool ${tool.tool}`), { category: 'timeout' })), callMs + 1_000)
+    timer.unref?.()
+    const both = AbortSignal.any([signal, timeout.signal])
     try {
-      const result = await this.deps.manager.callTool(tool.providerName, args, undefined, signal, defaultIntegrationActor(false), undefined, { timeoutMs: this.deps.callMs ?? BOT_MCP_CALL_MS, signIn: false })
+      const result = await new Promise<McpToolCallResult>((resolve, reject) => {
+        const stop = () => reject(both.reason ?? new Error('stopped'))
+        both.addEventListener('abort', stop, { once: true })
+        this.deps.manager.callTool(tool.providerName, args, undefined, both, defaultIntegrationActor(false), undefined, { timeoutMs: callMs, signIn: false })
+          .then(resolve, reject)
+          .finally(() => both.removeEventListener('abort', stop))
+      })
       return framedResult(tool.serverName, tool.tool, userMcpOutcome(result))
     } catch (error) {
-      return { text: failureText(tool.serverName, error, signal), isError: true }
+      return { text: failureText(tool.serverName, timeout.signal.aborted && !signal.aborted ? timeout.signal.reason : error, signal), isError: true }
+    } finally {
+      clearTimeout(timer)
     }
   }
 }

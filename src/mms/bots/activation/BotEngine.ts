@@ -472,7 +472,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       emit: (event) => this.events.emit('message', { ...event, ...this.nameFor(event.botId), ...(this.quietReport(event.botId, event.message) ? { quiet: true } : {}) }),
       schedules: (botId) => this.listSchedules(botId),
       // The owner's MCP servers set up now, for About's names; one that is gone is shown so.
-      ...(host.mcp ? { mcpServers: () => host.mcp!.servers() } : {})
+      mcpServers: () => host.mcp?.servers() ?? []
     })
     this.service = new BotChatService(this, {
       store: host.store,

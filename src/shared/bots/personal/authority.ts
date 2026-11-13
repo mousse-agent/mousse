@@ -66,7 +66,7 @@ export type WallReason =
   /** A path the runtime would rewrite before opening (`~`, a variable): never checked, never an ask. */
   | { kind: 'path_form'; tool: string; path: string }
   | { kind: 'skill'; skill: string }
-  | { kind: 'mcp'; server: string; tool: string }
+  | { kind: 'mcp'; server: string; tool: string; serverName?: string }
   | { kind: 'waiting' }
   | { kind: 'policy_unenforceable'; tool: string; missing: string[] }
   /** The grant this turn runs under was revoked or replaced since the turn started. */
