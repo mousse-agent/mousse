@@ -166,7 +166,7 @@ describe('the bot browser preview', () => {
     fake.chats.noobesh = [message(1, { text: 'Hi.', activationId: 'act0' })]
     await open()
     expect(host.querySelector('.bot-browser-preview')).toBeNull()
-    expect(host.querySelector('.bot-browser-pane')).toBeNull()
+    expect(host.querySelector('.watched-browser-pane')).toBeNull()
     expect(watches()).toEqual([])
   })
 })
@@ -291,18 +291,18 @@ describe('what a page ran into', () => {
     expect(status()?.getAttribute('title')).toBe('Can\'t reach bank.example.com. Check the address, or try again later (net::ERR_NAME_NOT_RESOLVED).')
     expect(host.querySelector('.bot-browser-preview')!.textContent).not.toContain('net::')
     await click(button('Expand Noobesh\'s browser'))
-    const note = host.querySelector('.bot-browser-pane .bot-browser-note')!
+    const note = host.querySelector('.watched-browser-pane .watched-browser-note')!
     expect(note.textContent).toBe('Can\'t reach bank.example.com')
     expect(note.getAttribute('title')).toContain('net::ERR_NAME_NOT_RESOLVED')
     await push({ problem: { kind: 'needs-you', reason: 'human-check', host: 'shop.example.com' } })
-    expect(host.querySelector('.bot-browser-pane .bot-browser-note')!.textContent).toBe('shop.example.com needs you: a human check')
+    expect(host.querySelector('.watched-browser-pane .watched-browser-note')!.textContent).toBe('shop.example.com needs you: a human check')
     // A page loading again: no problem, a quiet moving line under the address, and no wait.
     browser = { ...browser, problem: undefined }
     await push({ problem: null, loading: true })
     expect(status()?.textContent).toBe('Loading')
-    expect(host.querySelector('.bot-browser-pane .bot-browser-address')!.classList.contains('is-loading')).toBe(true)
+    expect(host.querySelector('.watched-browser-pane .watched-browser-address')!.classList.contains('is-loading')).toBe(true)
     await push({ loading: false })
-    expect(host.querySelector('.bot-browser-pane .bot-browser-address')!.classList.contains('is-loading')).toBe(false)
+    expect(host.querySelector('.watched-browser-pane .watched-browser-address')!.classList.contains('is-loading')).toBe(false)
   })
 
   it('the owner\'s own navigation that fails says why in their words, with the code in the tooltip', async () => {
@@ -322,7 +322,7 @@ describe('what a page ran into', () => {
       return { browser }
     }) as never, (listener) => { pushes.add(listener); return () => pushes.delete(listener) })
     await act(async () => useBotBrowserStore.getState().load('noobesh', false))
-    const address = host.querySelector<HTMLInputElement>('.bot-browser-pane input')!
+    const address = host.querySelector<HTMLInputElement>('.watched-browser-pane input')!
     await act(async () => {
       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
       setter.call(address, 'shop.example.com')
@@ -331,7 +331,7 @@ describe('what a page ran into', () => {
     await act(async () => { address.form!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })) })
     await settle()
     expect(sentInputs()).toEqual([{ seq: 1, input: { kind: 'navigate', url: 'https://shop.example.com' } }])
-    const note = host.querySelector('.bot-browser-pane .bot-browser-note')!
+    const note = host.querySelector('.watched-browser-pane .watched-browser-note')!
     expect(note.textContent).toBe('shop.example.com refused this browser')
     expect(note.getAttribute('title')).toContain('HTTP 403')
   })
@@ -344,7 +344,7 @@ describe('the split view', () => {
     const expand = button('Expand Noobesh\'s browser')!
     expect(expand.closest('.bot-browser-preview')).not.toBeNull()
     await click(expand)
-    const pane = host.querySelector<HTMLElement>('.bot-browser-pane')!
+    const pane = host.querySelector<HTMLElement>('.watched-browser-pane')!
     expect(pane).not.toBeNull()
     // Beside the chat, not inside it.
     expect(pane.parentElement).toBe(host.querySelector('.chat-conversation')!.parentElement)
@@ -359,7 +359,7 @@ describe('the split view', () => {
     // Faster while the owner holds the browser.
     expect(watches().at(-1)).toMatchObject({ width: 960, fps: 30 })
     // A press and release on the picture land at the page's point: the frame is 1280×720 wide whatever its size on screen.
-    const frame = pane.querySelector<HTMLElement>('.bot-browser-frame')!
+    const frame = pane.querySelector<HTMLElement>('.watched-browser-frame')!
     frame.getBoundingClientRect = () => ({ left: 100, top: 50, width: 640, height: 360, right: 740, bottom: 410, x: 100, y: 50, toJSON: () => ({}) })
     await act(async () => {
       frame.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, clientX: 420, clientY: 140, button: 0, buttons: 1 }))
@@ -373,7 +373,7 @@ describe('the split view', () => {
     await click(button('Give back'))
     expect(calls).toContainEqual(['bots.browser.hold', { botId: 'noobesh', viewId: expect.any(String), request: { op: 'release', holdId: 'hold_1' } }])
     await click(button('Close the browser view'))
-    expect(host.querySelector('.bot-browser-pane')).toBeNull()
+    expect(host.querySelector('.watched-browser-pane')).toBeNull()
     // Back to the preview's own size and rate.
     expect(watches().at(-1)).toMatchObject({ width: 480, fps: 5 })
   })
@@ -387,16 +387,16 @@ describe('the person\'s input in the split view', () => {
     await open()
     await click(button('Expand Noobesh\'s browser'))
     await act(async () => useBotBrowserStore.getState().load('noobesh', false))
-    return host.querySelector<HTMLElement>('.bot-browser-pane')!
+    return host.querySelector<HTMLElement>('.watched-browser-pane')!
   }
-  const keys = () => host.querySelector<HTMLTextAreaElement>('.bot-browser-keys')!
+  const keys = () => host.querySelector<HTMLTextAreaElement>('.watched-browser-keys')!
   const type = async (key: string, code: string, keyCode: number) => {
     await act(async () => {
       keys().dispatchEvent(new KeyboardEvent('keydown', { key, code, keyCode, bubbles: true, cancelable: true }))
       keys().dispatchEvent(new KeyboardEvent('keyup', { key, code, keyCode, bubbles: true, cancelable: true }))
     })
   }
-  const note = () => host.querySelector('.bot-browser-pane .bot-browser-note')!
+  const note = () => host.querySelector('.watched-browser-pane .watched-browser-note')!
 
   it('sends each key down and up in order, with the character it types, and Enter after the text', async () => {
     await held()
@@ -435,7 +435,7 @@ describe('the person\'s input in the split view', () => {
 
   it('a press on the page\'s dialog is the dialog\'s, never the page\'s', async () => {
     const pane = await held({ dialog: { type: 'alert', message: 'Hello' } })
-    const ok = [...pane.querySelectorAll('.bot-browser-dialog button')].find((entry) => entry.textContent === 'OK')!
+    const ok = [...pane.querySelectorAll('.watched-browser-dialog button')].find((entry) => entry.textContent === 'OK')!
     await act(async () => {
       ok.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, clientX: 10, clientY: 10, button: 0, buttons: 1 }))
       ok.dispatchEvent(new MouseEvent('pointerup', { bubbles: true, clientX: 10, clientY: 10, button: 0, buttons: 0 }))
@@ -481,7 +481,7 @@ describe('the person\'s input in the split view', () => {
     // The service answers again: quiet.
     await act(async () => { release?.() })
     await settle()
-    expect(pane.querySelector('.bot-browser-retry')).toBeNull()
+    expect(pane.querySelector('.watched-browser-retry')).toBeNull()
   }, 10_000)
 
   it('says a refusal once, in a short line, and marks where the person pressed', async () => {
@@ -495,15 +495,15 @@ describe('the person\'s input in the split view', () => {
       return { browser }
     }) as never, (listener) => { pushes.add(listener); return () => pushes.delete(listener) })
     await act(async () => useBotBrowserStore.getState().load('noobesh', false))
-    const frame = pane.querySelector<HTMLElement>('.bot-browser-frame')!
+    const frame = pane.querySelector<HTMLElement>('.watched-browser-frame')!
     frame.getBoundingClientRect = () => ({ left: 0, top: 0, width: 640, height: 360, right: 640, bottom: 360, x: 0, y: 0, toJSON: () => ({}) })
     await act(async () => {
       frame.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, clientX: 100, clientY: 100, button: 0, buttons: 1 }))
     })
-    expect(pane.querySelector('.bot-browser-mark')).not.toBeNull()
+    expect(pane.querySelector('.watched-browser-mark')).not.toBeNull()
     await settle()
     expect(note().textContent).toBe('Page changed · click again')
-    expect(pane.querySelector('.bot-browser-mark.is-refused')).not.toBeNull()
+    expect(pane.querySelector('.watched-browser-mark.is-refused')).not.toBeNull()
   })
 
   it('names another window that holds it; Take over here takes it from that window on purpose', async () => {
@@ -511,7 +511,7 @@ describe('the person\'s input in the split view', () => {
     browser = { ...browser, control: 'owner', holder: 'another-view' }
     await open()
     await click(button('Expand Noobesh\'s browser'))
-    expect(host.querySelector('.bot-browser-pane .bot-browser-note')!.textContent).toBe('Held in another window. Take over to use it here.')
+    expect(host.querySelector('.watched-browser-pane .watched-browser-note')!.textContent).toBe('Held in another window. Take over to use it here.')
     await click(button('Take over'))
     expect(calls).toContainEqual(['bots.browser.hold', { botId: 'noobesh', viewId: expect.any(String), request: { op: 'take', force: true, platform: expect.any(String) } }])
     expect(button('Give back')).toBeDefined()
@@ -519,7 +519,7 @@ describe('the person\'s input in the split view', () => {
 
   it('shows the page\'s dialog over it, and the person\'s answer goes to the page', async () => {
     const pane = await held({ dialog: { type: 'confirm', message: 'Delete the draft?' } })
-    const dialog = pane.querySelector('.bot-browser-dialog')!
+    const dialog = pane.querySelector('.watched-browser-dialog')!
     expect(dialog.textContent).toContain('Delete the draft?')
     await click([...dialog.querySelectorAll('button')].find((entry) => entry.textContent === 'OK'))
     await settle()
@@ -530,7 +530,7 @@ describe('the person\'s input in the split view', () => {
     const choose = vi.fn(async () => ({ token: 'files_0123456789ab', count: 1 }))
     ;(fake.events as Record<string, unknown>).chooseBrowserFiles = choose
     const pane = await held({ chooser: { multiple: false, site: 'upload.example.com' } })
-    const card = pane.querySelector('.bot-browser-dialog')!
+    const card = pane.querySelector('.watched-browser-dialog')!
     expect(card.textContent).toContain('upload.example.com asks for a file.')
     // Nothing goes to the page until the person chooses.
     expect(sentInputs()).toEqual([])
@@ -542,7 +542,7 @@ describe('the person\'s input in the split view', () => {
 
   it('a page\'s request for several files says so; Cancel answers it with none', async () => {
     const pane = await held({ chooser: { multiple: true, site: 'upload.example.com' } })
-    const card = pane.querySelector('.bot-browser-dialog')!
+    const card = pane.querySelector('.watched-browser-dialog')!
     expect(card.textContent).toContain('upload.example.com asks for files.')
     await click([...card.querySelectorAll('button')].find((entry) => entry.textContent === 'Cancel'))
     await settle()
@@ -570,7 +570,7 @@ describe('the person\'s input in the split view', () => {
     await settle()
     expect(renews()).toBe(before + 1)
     expect(useBotBrowserStore.getState().holds.noobesh).toBeUndefined()
-    expect(host.querySelector('.bot-browser-pane .bot-browser-note')!.textContent).toContain('You no longer hold this browser')
+    expect(host.querySelector('.watched-browser-pane .watched-browser-note')!.textContent).toContain('You no longer hold this browser')
   })
 })
 

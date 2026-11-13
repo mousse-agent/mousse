@@ -23,7 +23,7 @@ import {
 } from '../../../shared/browser/watched'
 import { BROWSER_MODIFIERS, type BrowserEditCommand, type BrowserHumanInput, type BrowserPictureSpot } from '../../../shared/browser/types'
 import { agentCursorLive, type BrowserAgentCursor } from '../../../shared/browser/agentCursor'
-import type { BrowserSessionKeeper, BrowserToolContext } from '../../../shared/browser/automation'
+import type { BrowserAutomationTool, BrowserSessionKeeper, BrowserToolContext } from '../../../shared/browser/automation'
 import type { BrowserSessionRecord, BrowserViewerUpdate } from '../../../shared/browser/types'
 import { BROWSER_PROBLEM_CODES, browserProblemForPerson, browserProblemMessage, type BrowserProblem } from '../../../shared/browser/navigation'
 import { BrowserAutomationError } from '../automation/BrowserSessionManager'
@@ -61,8 +61,8 @@ export interface WatchedBrowserOptions {
   threadId: string
   /** The session open now; undefined while the browser is closed (it is a new one each time it opens). */
   sessionId(): string | undefined
-  /** The session's keeper: it answers calls that carry it alone. */
-  keeper: BrowserSessionKeeper
+  /** The session's keeper, when one keeps it (a bot's browser): it answers calls that carry it alone. */
+  keeper?: BrowserSessionKeeper
   /** The profile's browser composition; undefined when it is shutting down. */
   browser(): WatchedBrowserService | undefined
   /** One call in the person's scope over this browser; `signal` ends it early. */
@@ -223,6 +223,14 @@ export const legacyView = (connectionId: string): string => `app-${connectionId}
 
 /** Why a hold ends: given back, or `replaced` (the same view took the browser over again: a fresh channel, and nothing to tell). */
 type HoldEndReason = WatchedBrowserHoldEnd | 'given-back' | 'replaced'
+
+/**
+ * A call that acts on a page, opens a browser or a tab, or loads a page: an agent's such call is refused
+ * while a person holds the browser (they read it meanwhile). The one rule for bots and threads.
+ */
+export function actsOrLoads(name: BrowserAutomationTool, params: Record<string, unknown>): boolean {
+  return name === 'browser_act' || name === 'browser_open' || (name === 'browser_tabs' && params.operation === 'new')
+}
 
 /** Another view holds the browser: this one takes it over only on an explicit Take over. */
 export function heldElsewhere(): BrowserAutomationError {

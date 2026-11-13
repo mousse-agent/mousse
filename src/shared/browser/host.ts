@@ -1,7 +1,9 @@
 /**
  * Daemon browser host contract for root composition.
- * Viewer methods are the public GUI allowlist. Attachment methods are main-only
- * (GuiMmsController / trusted did-attach-webview), never a renderer platform API.
+ * GUI methods are the public GUI allowlist: Take control and Resume for an in-app tab's session, and a
+ * session's screenshot. A browser without a window is watched and taken over through its view
+ * (`threadView.ts`). Attachment methods are main-only (GuiMmsController / trusted did-attach-webview),
+ * never a renderer platform API.
  */
 
 import type { ArtifactReference } from '../execution/types'
@@ -11,13 +13,8 @@ import type { BrowserViewerHumanAction, BrowserViewerSnapshot } from './viewer'
 export const BROWSER_VIEWER_CAPABILITY = 'browser.viewer.v1' as const
 
 export const BROWSER_GUI_METHODS = [
-  'browser.sessions.list',
-  'browser.sessions.get',
-  'browser.sessions.observe',
   'browser.sessions.takeControl',
   'browser.sessions.resume',
-  'browser.sessions.close',
-  'browser.sessions.humanAction',
   'browser.artifacts.read'
 ] as const
 
@@ -92,13 +89,6 @@ export interface BrowserSelectedTarget {
   uiTabId: string
 }
 
-export interface BrowserSessionListResult {
-  sessions: BrowserSessionPublicRecord[]
-  selected?: BrowserSelectedTarget
-}
-
-export type BrowserSessionSnapshotResult = BrowserViewerSnapshot
-
 export interface BrowserArtifactReadResult {
   artifact: ArtifactReference
   mediaType: string
@@ -107,24 +97,3 @@ export interface BrowserArtifactReadResult {
 }
 
 export type { BrowserViewerHumanAction, BrowserViewerSnapshot }
-
-/**
- * Root BrowserViewerClient adaptation:
- * - snapshot/history -> browser.sessions.get (and list)
- * - observe -> browser.sessions.observe
- * - takeControl -> browser.sessions.takeControl
- * - resumeAgent -> browser.sessions.resume
- * - close -> browser.sessions.close
- * - humanAction -> browser.sessions.humanAction
- * - artifactUrl -> browser.artifacts.read (bounded PNG base64; never a filesystem path)
- * subscribe remains a root-owned poll/event bridge; this daemon does not stream snapshots.
- */
-export const BROWSER_VIEWER_CLIENT_METHODS = {
-  snapshot: 'browser.sessions.get',
-  observe: 'browser.sessions.observe',
-  takeControl: 'browser.sessions.takeControl',
-  resumeAgent: 'browser.sessions.resume',
-  close: 'browser.sessions.close',
-  humanAction: 'browser.sessions.humanAction',
-  artifactRead: 'browser.artifacts.read'
-} as const

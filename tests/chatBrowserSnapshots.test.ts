@@ -5,7 +5,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import type { ExecutionContext, ExecutionPolicySnapshot } from '../src/shared/execution/types'
 import type { BrowserObservation, BrowserSessionRecord } from '../src/shared/browser/types'
 import { viewerPointToCss } from '../src/shared/browser/viewer'
-import { BrowserViewerService } from '../src/mms/browser/viewer'
+import { ChatBrowserSnapshots } from '../src/mms/chats/resources/ChatBrowserSnapshots'
 import { BrowserSessionManager } from '../src/mms/browser/automation/BrowserSessionManager'
 import { createInProcessBroker, ensureManagedChrome, startFixtureSite } from './fixtures/browser/harness'
 
@@ -43,7 +43,7 @@ beforeAll(async () => {
 afterAll(async () => { await closeSite() })
 afterEach(async () => { while (brokers.length) await brokers.pop()!.close(); while (roots.length) await rm(roots.pop()!, { recursive: true, force: true }) })
 
-describe.skipIf(!chrome.ok)('managed browser viewer takeover', () => {
+describe.skipIf(!chrome.ok)('a group chat\'s shared browser: snapshots and takeover', () => {
   it('takes over a real worker session during a pending navigation, fences stale ownership, and reobserves on resume', async () => {
     const bundle = await createInProcessBroker()
     brokers.push(bundle.broker)
@@ -54,7 +54,7 @@ describe.skipIf(!chrome.ok)('managed browser viewer takeover', () => {
     const opened = await manager.open(owner, { url: `${origin}/form.html` })
     const session = opened.session as BrowserSessionRecord
     const initial = opened.observation as BrowserObservation
-    const viewer = new BrowserViewerService({
+    const viewer = new ChatBrowserSnapshots({
       sessions: manager,
       context: owner,
       now: () => '2026-01-01T00:00:00.000Z',
@@ -127,7 +127,7 @@ describe.skipIf(!chrome.ok)('managed browser viewer takeover', () => {
       observationId: resumed.observation!.observationId, action: { type: 'key', key: 'Tab' }
     })).rejects.toMatchObject({ code: 'human_controlled' })
     expect((await viewer.snapshot({ sessionId: session.id })).connection).toBe('connected')
-    const invalidArtifactViewer = new BrowserViewerService({
+    const invalidArtifactViewer = new ChatBrowserSnapshots({
       sessions: manager, context: owner,
       artifactResolver: (artifactId) => ({
         id: artifactId, profileId: PROFILE_B, runId: 'viewer-run', mediaType: 'image/png', byteLength: 1,
@@ -140,7 +140,7 @@ describe.skipIf(!chrome.ok)('managed browser viewer takeover', () => {
       { artifactId: 'fixture-image', pixelWidth: 480, pixelHeight: 320, cssToImageScaleX: 2, cssToImageScaleY: 2 },
       { cssWidth: 240, cssHeight: 160, deviceScaleFactor: 2, scrollX: 0, scrollY: 0 }
     )).toEqual({ x: 120, y: 80 })
-    expect((await viewer.history({ sessionId: session.id })).map((entry) => entry.kind)).toEqual(expect.arrayContaining(['control', 'observed']))
+    expect((await viewer.snapshot({ sessionId: session.id })).history.map((entry) => entry.kind)).toEqual(expect.arrayContaining(['control', 'observed']))
   }, 120_000)
 
   it('keeps two profile viewers partitioned', async () => {
@@ -153,8 +153,8 @@ describe.skipIf(!chrome.ok)('managed browser viewer takeover', () => {
     const ownerA = context(PROFILE_A, 'run-a')
     const opened = await managerA.open(ownerA, { url: `${origin}/form.html` })
     const session = opened.session as BrowserSessionRecord
-    const viewerA = new BrowserViewerService({ sessions: managerA, context: ownerA })
-    const viewerB = new BrowserViewerService({ sessions: managerB, context: context(PROFILE_B, 'run-b') })
+    const viewerA = new ChatBrowserSnapshots({ sessions: managerA, context: ownerA })
+    const viewerB = new ChatBrowserSnapshots({ sessions: managerB, context: context(PROFILE_B, 'run-b') })
     expect((await viewerA.snapshot()).session?.profileId).toBe(PROFILE_A)
     expect((await viewerB.snapshot()).session).toBeUndefined()
     await viewerA.close({ sessionId: session.id })

@@ -137,6 +137,7 @@ import type {
 } from '../shared/harness/types'
 import type { BotsPersonalV2EventData } from '../shared/bots/personal/methods'
 import type { BotBrowserFrameEvent } from '../shared/bots/personal/browser'
+import type { ThreadBrowserFrameEvent } from '../shared/browser/threadView'
 import type { PlatformRequestApi, PlatformRequestErrorShape, PlatformRequestMethod, PlatformResponse } from '../shared/platform'
 import type { ChatReference } from '../shared/chatReferences'
 import type { InAppBrowserApi, InAppBrowserCursor, InAppBrowserState } from '../shared/browser/inApp'
@@ -712,7 +713,20 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, state: BrowserState) => cb(state)
       ipcRenderer.on('browser:state', handler)
       return () => ipcRenderer.removeListener('browser:state', handler)
-    }
+    },
+    /** A picture of a thread's browser without a window this window watches (`browser.view.watch`), pushed as the page paints. */
+    onViewFrame: (cb: (event: ThreadBrowserFrameEvent) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, event: ThreadBrowserFrameEvent) => cb(event)
+      ipcRenderer.on('browser:viewFrame', handler)
+      return () => ipcRenderer.removeListener('browser:viewFrame', handler)
+    },
+    /**
+     * A page in a thread's browser without a window asks for files: the app opens this computer's own
+     * file dialog, naming the site, and answers a one-time token for what the person chose (never the
+     * paths), or that they cancelled, or why it was refused.
+     */
+    chooseViewFiles: (request: { threadId: string; viewId: string; holdId: string; multiple: boolean; site?: string }): Promise<{ token?: string; count?: number; cancelled?: true; refused?: string }> =>
+      ipcRenderer.invoke('browser:chooseViewFiles', request)
   },
   settings: {
     get: (): Promise<MousseSettings> => ipcRenderer.invoke('settings:get'),
