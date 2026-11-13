@@ -115,10 +115,11 @@ export interface BotToolHost {
 
 /**
  * `mcp_servers`' answer: each server by its name (and id), a line of Mousse's own about it, whether the bot holds its
- * tools, and whether it is answering. Nothing of the server's own text but its tools' names.
+ * tools, whether it is answering, and whether it is still starting (no tools listed yet). Nothing of the server's own
+ * text but its tools' names.
  */
 export interface BotMcpListing {
-  servers: Array<{ server: string; id: string; about: string; yours: 'yes' | 'no' | 'some: it has new tools'; answering?: false }>
+  servers: Array<{ server: string; id: string; about: string; yours: 'yes' | 'no' | 'some: it has new tools' | 'no: it changed since you were allowed it'; answering?: false; starting?: true }>
   note: string
 }
 

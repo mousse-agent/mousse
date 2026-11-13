@@ -50,10 +50,13 @@ export interface BotAskCard {
   /** A run's ask allowed while none of the bot's runs was running or waiting: the bot has it from its next run. */
   idle?: true
   /**
-   * What Allow grants, by name, for an expandable line under the note: an MCP ask's tools ("13 tools": their names).
-   * Absent from other asks and from older services.
+   * What Allow grants, by name, for an expandable line under the note: an MCP ask's tools ("13 tools": their names), and
+   * `more`, what a bot can't use of the server ("2 more of GitHub's tools can't be used by a bot."). Absent from other
+   * asks and from older services.
    */
-  details?: { summary: string; items: string[] }
+  details?: { summary: string; items: string[]; more?: string }
+  /** An MCP ask whose server has not listed its tools yet: Allow is off until they are filled in (Not now works). */
+  loading?: true
 }
 
 export type BotMessageKind = 'text' | 'run_report' | 'notice' | 'error'
@@ -127,6 +130,11 @@ export interface BotPermissionItem {
   grantedAt: string
   /** It names something no longer set up here (an MCP server removed from Mousse): it grants nothing until removed. */
   gone?: true
+  /**
+   * A short mark beside the title when it gives nothing now ("Gone from Mousse", "Switched off", "MCP is off",
+   * "Changed"); the note says why and what can be done. Absent from older services, which send `gone` only.
+   */
+  mark?: string
 }
 
 /** One of a bot's runs, in About → Runs. */

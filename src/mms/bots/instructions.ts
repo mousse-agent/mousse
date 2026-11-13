@@ -83,6 +83,8 @@ export interface BotAllowed {
   automation: string[]
   /** The owner's MCP servers whose tools it holds, by name (set up now); absent: none. */
   mcp?: string[]
+  /** A consult: it is never given MCP tools, whatever the bot holds (its main work uses them). */
+  mcpNotHere?: true
 }
 
 /**
@@ -119,7 +121,9 @@ export function botAllowedText(allowed: BotAllowed, lane?: BotLane, browserOffli
     `- Use the browser (your own): ${allowed.browser && browserOffline ? "yes, but it can't open on this run" : yes(allowed.browser)}`,
     `- Skills: ${allowed.skills.length ? allowed.skills.join(', ') : 'none'}`,
     `- Automation tools: ${allowed.automation.length ? allowed.automation.join(', ') : 'none'}`,
-    `- Your owner's MCP servers: ${allowed.mcp?.length ? allowed.mcp.join(', ') : 'none yet (mcp_servers lists the ones you can ask for)'}`
+    allowed.mcpNotHere
+      ? `- Your owner's MCP servers: none in this consult${allowed.mcp?.length ? ` (your main work has ${allowed.mcp.join(', ')}; answer with what you have and say what needs them)` : ''}`
+      : `- Your owner's MCP servers: ${allowed.mcp?.length ? allowed.mcp.join(', ') : 'none yet (mcp_servers lists the ones you can ask for)'}`
   ]
   if (lane === 'chat') lines.push('In the chat, the web, the browser, commands and MCP tools are for your work: hand jobs that need them to work_start.')
   else lines.push('Use what is allowed without asking. Ask with escalate only for something marked no.')

@@ -9,6 +9,7 @@ import type { BotJournalKind } from '../../../shared/bots/personal/memory'
 import { botState } from '../../../shared/bots/personal/state'
 import { normalizeBotLook } from '../../../shared/bots/personal/look'
 import type { BotJournal } from '../seams'
+import type { BotMcpWhere } from '../mcp/BotMcp'
 import { workWaits, type BotActivationRow, type BotEscalationRow, type BotMessageRow, type BotStore } from '../store/BotStore'
 
 /**
@@ -101,10 +102,10 @@ export class BotChatProjection {
     /** A bot's schedules, from the shared store (`BotEngine.listSchedules`), for About → Runs. */
     schedules?(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string }>
     /**
-     * The owner's MCP servers set up now (`BotMcp.servers`), for About → Can use; undefined while they were not read yet
-     * (nothing is shown gone then).
+     * Where a granted MCP server stands now (`BotMcp.where`), for About → Can use; undefined while the servers were not
+     * read yet (nothing is shown gone then).
      */
-    mcpServers?(): Array<{ serverId: string; name: string; tools: Array<{ tool: string }> }> | undefined
+    mcpWhere?(serverId: string): BotMcpWhere | undefined
   }) {}
 
   private get store(): BotStore {
@@ -211,15 +212,19 @@ export class BotChatProjection {
 
   card(escalation: BotEscalationRow): BotAskCard {
     const text = escalation.title !== null ? { title: escalation.title, note: escalation.note ?? '' } : askText(escalation.permission)
-    // An MCP ask lists the tools Allow grants, by name, on a line the owner can open.
-    const tools = 'mcp' in escalation.permission ? mcpAskTools(escalation.permission.mcp) : []
+    // An MCP ask lists the tools Allow grants, by name, on a line the owner can open, with how many a bot can't use. One
+    // whose server has not listed its tools yet has none: Allow stays off until they are filled in.
+    const mcp = 'mcp' in escalation.permission ? escalation.permission.mcp : undefined
+    const tools = mcp ? mcpAskTools(mcp) : []
+    const more = mcp?.unusable ? `${mcp.unusable} more of ${mcp.name ? `${mcp.name}'s` : 'its'} tools can't be used by a bot.` : undefined
     return {
       askId: escalation.id,
       title: text.title,
       note: text.note,
       status: cardStatus(escalation.status),
       kind: isSpecialAsk(escalation.permission) ? 'export_memory' : 'permission',
-      ...(tools.length ? { details: { summary: `${tools.length} ${'mcp' in escalation.permission && escalation.permission.mcp.added ? 'new ' : ''}tool${tools.length === 1 ? '' : 's'}`, items: tools } } : {}),
+      ...(tools.length ? { details: { summary: `${tools.length} ${mcp?.added ? 'new ' : ''}tool${tools.length === 1 ? '' : 's'}`, items: tools, ...(more ? { more } : {}) } } : {}),
+      ...(mcp && !tools.length && escalation.status === 'open' ? { loading: true as const } : {}),
       ...this.limitOutcome(escalation),
       ...this.permissionOutcome(escalation)
     }
@@ -369,23 +374,28 @@ export class BotChatProjection {
 
   /**
    * Each permission of `manifest` beyond the starter grant, as About → Can use lists it. The owner's MCP tools are one
-   * line per server ("Use your GitHub tools"); a server no longer set up is named as it was asked for, and shown gone.
+   * line per server ("Use your GitHub tools"). One that gives nothing now says what is true (gone from Mousse, switched
+   * off, changed since it was allowed, or MCP turned off) and is marked so; Remove is there as an option, not as the fix.
    */
   permissionItems(botId: string, manifest: BotManifest, approvedAt: string): BotPermissionItem[] {
-    const read = this.options.mcpServers?.()
-    const servers = read ?? []
     return grantedPermissions(manifest).map((permission) => {
       const id = permissionId(permission)
       const allowed = this.store.allowedAsk(botId, id)
       const grantedAt = allowed?.answeredAt ?? approvedAt
       if ('mcp' in permission) {
-        const live = servers.find((server) => server.serverId === permission.mcp.serverId)
+        const where = this.options.mcpWhere?.(permission.mcp.serverId)
+        const live = where?.state === 'on' || where?.state === 'changed' ? where.server : undefined
         const asked = allowed && 'mcp' in allowed.permission ? allowed.permission.mcp.name : undefined
-        const name = live?.name ?? asked ?? 'an MCP server'
+        const name = live?.name ?? (where?.state === 'off' ? where.name : undefined) ?? asked ?? 'an MCP server'
+        const title = `use your ${name} tools`
         const tools = mcpAskTools(permission.mcp)
-        if (!live && read) return { id, title: `use your ${name} tools`, note: `${name} isn't set up in Mousse any more, so this gives nothing. Remove it to tidy up.`, grantedAt, gone: true as const }
+        if (where?.state === 'gone') return { id, title, note: `${name} isn't set up in Mousse any more, so this gives nothing now. You can remove it.`, grantedAt, gone: true as const, mark: 'Gone from Mousse' }
+        if (where?.state === 'off') return { id, title, note: `${name} is switched off in Settings → Skills & MCP, so this gives nothing while it is. Switch it on there to use it again, or remove it.`, grantedAt, mark: 'Switched off' }
+        if (where?.state === 'mcp_off') return { id, title, note: `MCP is turned off in Settings → Skills & MCP, so this gives nothing while it is. Turn it on there to use it again, or remove it.`, grantedAt, mark: 'MCP is off' }
+        if (where?.state === 'changed') return { id, title, note: `${name} was changed since you allowed it (it runs from another address or command now), so this gives nothing until ${name} is allowed again. The bot asks when it needs it; you can also remove it.`, grantedAt, mark: 'Changed' }
         const shown = tools.slice(0, 6).join(', ')
-        return { id, title: `use your ${name} tools`, note: `${tools.length} tool${tools.length === 1 ? '' : 's'}: ${shown}${tools.length > 6 ? ', …' : ''}`, grantedAt }
+        const unusable = live?.unusable.length ? ` (${live.unusable.length} more of its tools can't be used by a bot)` : ''
+        return { id, title, note: `${tools.length} tool${tools.length === 1 ? '' : 's'}: ${shown}${tools.length > 6 ? ', …' : ''}${unusable}`, grantedAt }
       }
       const text = askText(permission, { budget: starterManifest().budget })
       return { id, title: text.title, note: text.note, grantedAt }

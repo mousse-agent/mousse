@@ -27,11 +27,13 @@ export type BotPermissionRequest =
   | { budget: { key: BotBudgetWallKey; amount?: number } }
 
 /**
- * An ask for the owner's MCP tools: one ask per server (`serverId`, its installation), never per tool. Mousse writes it
- * with the server's `name` and every tool it offers that the bot does not hold yet (`tools`); Allow grants exactly those,
- * each as its own pair in the grant, so a tool the server adds later is asked for again (`added`: the bot already holds
- * some of the server's tools). `changes` says what the tools' own annotations tell: whether any of them can change
- * things. A request naming one `tool` (the bot's, or an older build's row) is asked as its server.
+ * An ask for the owner's MCP tools: one ask per server (`serverId`: its installation and identity,
+ * `<installation>.<identity>`, or the bare installation of a grant made before identities), never per tool. Mousse
+ * writes it with the server's `name` and every tool a bot can be offered that the bot does not hold yet (`tools`);
+ * Allow grants exactly those, each as its own pair in the grant, so a tool the server adds later is asked for again
+ * (`added`: the bot already holds some of the server's tools). `changes` says what the tools' own annotations tell:
+ * whether any of them can change things. A request naming one `tool` (the bot's, or an older build's row) is asked as
+ * its server.
  */
 export interface BotMcpAsk {
   serverId: string
@@ -41,6 +43,13 @@ export interface BotMcpAsk {
   added?: true
   /** From the tools' read-only hints: `none` (every tool says it only reads), `some` (at least one says it can change things), `unknown`. */
   changes?: 'none' | 'some' | 'unknown'
+  /** The server has not answered yet: its tools are filled in when it does; until then Allow grants nothing and is off. */
+  loading?: true
+  /** The server changed since the bot was allowed it (`replaces`, the id the grant holds): Allow replaces those pairs. */
+  changed?: true
+  replaces?: string
+  /** How many of the server's tools a bot can't use (a name a grant can't hold, or a tool the relay leaves out). */
+  unusable?: number
 }
 
 /**
@@ -184,7 +193,7 @@ export function permissionText(permission: BotPermissionRequest): string {
   if ('path' in permission) return 'Use files on this computer'
   if ('skill' in permission) return `Use the skill *${permission.skill}*`
   if ('mcp' in permission) {
-    if (permission.mcp.name) return permission.mcp.added ? `Use ${permission.mcp.name}'s new tools` : `Use your ${permission.mcp.name} tools`
+    if (permission.mcp.name) return permission.mcp.added ? `Use ${permission.mcp.name}'s new tools` : permission.mcp.changed ? `Use your ${permission.mcp.name} tools again` : `Use your ${permission.mcp.name} tools`
     return permission.mcp.tool ? `Use the MCP tool \`${permission.mcp.tool}\`` : 'Use the tools of an MCP server'
   }
   const { key, amount } = permission.budget
@@ -215,6 +224,11 @@ export function permissionProblem(value: unknown): string | undefined {
     if (mcp.tool !== undefined && !text(mcp.tool)) return 'The MCP tool is invalid.'
     if (mcp.tools !== undefined && !(Array.isArray(mcp.tools) && mcp.tools.length <= 512 && mcp.tools.every(text))) return 'The MCP tools are invalid.'
     if (mcp.name !== undefined && !text(mcp.name)) return 'The MCP server name is invalid.'
+    // Mousse's own fields: a bot's request never sets them (Mousse writes the ask from the servers as they are).
+    if (mcp.loading !== undefined && mcp.loading !== true) return 'The MCP ask is invalid.'
+    if (mcp.changed !== undefined && mcp.changed !== true) return 'The MCP ask is invalid.'
+    if (mcp.replaces !== undefined && !text(mcp.replaces)) return 'The MCP ask is invalid.'
+    if (mcp.unusable !== undefined && !(typeof mcp.unusable === 'number' && Number.isSafeInteger(mcp.unusable) && mcp.unusable >= 0)) return 'The MCP ask is invalid.'
     return undefined
   }
   if (keys.length === 1 && keys[0] === 'budget') {
@@ -262,7 +276,10 @@ export function withPermission(manifest: BotManifest, permission: BotPermissionR
     if (!next.skills.includes(permission.skill)) next.skills.push(permission.skill)
   } else if ('mcp' in permission) {
     // One ask per server, stored per tool: each tool the ask lists is its own pair, so a later tool is asked for again.
+    // A server that changed since it was allowed: its old pairs go, so the grant holds only what the owner saw now.
     const serverId = permission.mcp.serverId
+    const replaced = permission.mcp.replaces
+    if (replaced && replaced !== serverId) next.mcp = next.mcp.filter((pair) => pair.serverId !== replaced)
     for (const tool of mcpAskTools(permission.mcp))
       if (!next.mcp.some((pair) => pair.serverId === serverId && pair.tool === tool)) next.mcp.push({ serverId, tool })
   } else {

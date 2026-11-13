@@ -35,8 +35,11 @@ export interface RelayHost {
    * tools the turn was offered and holds every call to the bot's grant (`BotMcp`). Absent: no bot reaches the relay.
    */
   botOf?(credential: CredentialRecord): BotAuthority | undefined
-  /** Runs a bot's call on the owner's connection (`BotMcp.call`), framed as data, bounded, never signing in. */
-  botMcp?: Pick<BotMcp, 'call'>
+  /**
+   * Runs a bot's call on the owner's connection (`BotMcp.call`), framed as data, bounded, never signing in; `known`
+   * names the grant's pair of a relayed name the turn was not offered, so it is checked (and asked for) as any is.
+   */
+  botMcp?: Pick<BotMcp, 'call'> & Partial<Pick<BotMcp, 'known'>>
 }
 
 /** The relay's `initialize` instructions: Mousse's own text, never a server's. */
@@ -94,7 +97,7 @@ export class RelayHandler {
     const grant = credential.relay
     if (!grant) throw unknownTool(name)
     // A bot's turn: its grant decides, on every call, before the server sees anything; nobody is asked.
-    if (turn.bot) return this.callForBot(turn.bot, name, args, active, request)
+    if (turn.bot) return this.callForBot(turn.bot, name, args, active, request, turn.toolImages === true)
     if (turn.definition) throw new McpToolError('mousse_scope_denied', 'A definition run cannot call relayed MCP tools.')
     if (this.host.readOnlyThread?.(threadId)) throw new McpToolError('mousse_read_only', `${name} is a relayed MCP tool; a read-only subagent cannot call it.`)
     if (turn.modeCeiling === 'plan' || credential.modeCeiling === 'plan')
@@ -140,17 +143,13 @@ export class RelayHandler {
    * The call runs on the owner's connection (`BotMcp.call`), within the turn's stop signal and deadline, and writes
    * its ledger row like any relayed call.
    */
-  private async callForBot(bot: BotAuthority, name: string, args: Record<string, unknown>, active: string, request: McpCallRequest): Promise<ToolOutcome> {
+  private async callForBot(bot: BotAuthority, name: string, args: Record<string, unknown>, active: string, request: McpCallRequest, images: boolean): Promise<ToolOutcome> {
     const mcp = this.host.botMcp
     if (!mcp) throw unknownTool(name)
-    const known = (relayed: string) => {
-      const tool = this.host.catalog.resolve(undefined, relayed)
-      return tool ? { server: tool.installationId, tool: tool.toolName, serverName: tool.serverName } : undefined
-    }
     const offered = bot.mcpTools?.find((tool) => tool.name === name)
     const ledger = offered ? this.host.toolLedger?.(active) : undefined
     const ledgerId = ledger?.start({ type: 'toolCall', id: request.toolCallId, name, arguments: args } as ToolCall)
-    const outcome = await callForBot({ bot, name, args, signal: request.signal, mcp, known })
+    const outcome = await callForBot({ bot, name, args, signal: request.signal, mcp, ...(mcp.known ? { known: (relayed: string) => mcp.known!(relayed) } : {}), images })
     if (ledgerId) {
       if (outcome.isError) ledger?.failed(ledgerId)
       else ledger?.commit(ledgerId)

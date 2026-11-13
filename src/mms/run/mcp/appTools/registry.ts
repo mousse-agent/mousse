@@ -575,7 +575,7 @@ export class ToolRegistry {
     const checked = withoutTransportFields(args)
     const ledger = this.options.toolLedger?.(at.active)
     const ledgerId = ledger?.start({ type: 'toolCall', id: at.request.toolCallId, name, arguments: checked } as ToolCall)
-    const outcome = await callForBot({ bot, name, args: checked, signal: at.request.signal, mcp })
+    const outcome = await callForBot({ bot, name, args: checked, signal: at.request.signal, mcp, images: at.turn.toolImages === true })
     if (ledgerId) {
       if (outcome.isError) ledger?.failed(ledgerId)
       else ledger?.commit(ledgerId)

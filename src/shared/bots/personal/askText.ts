@@ -81,7 +81,10 @@ export function askText(request: BotAskRequest, options: { budget?: BotBudget } 
   if ('mcp' in request) {
     const name = request.mcp.name
     if (name) {
+      // Not answered yet: the card says so, and its tools are filled in (with what their hints say) once they are listed.
+      if (request.mcp.loading) return { title: `use your ${name} tools`, note: `${name} is still starting, so its tools aren't listed yet. Allow turns on once they are.` }
       const changes = mcpChangesNote(name, request.mcp.changes)
+      if (request.mcp.changed) return { title: `use your ${name} tools again`, note: `${name} changed since you allowed it: it now runs from another address or command. ${changes}` }
       return request.mcp.added ? { title: `use ${name}'s new tools`, note: `${name} has new tools. ${changes}` } : { title: `use your ${name} tools`, note: changes }
     }
     return { title: request.mcp.tool ? `use the MCP tool ${request.mcp.tool}` : 'use the tools of an MCP server', note: '' }

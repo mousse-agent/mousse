@@ -3696,8 +3696,8 @@ export class OrchestratorService extends EventEmitter {
       ...(input.onPublishApplet ? { onPublishApplet: input.onPublishApplet } : {}),
       // A run nobody answers: Mousse tools that wait for the user are refused, on every transport.
       ...(input.approvals === 'never' ? { approvals: 'never' as const } : {}),
-      // A bot lists and loads only the skills it was granted.
-      ...(registered.bot ? grantedSkills(skills, registered.bot.skills) : skills)
+      // A bot lists and loads only the skills it was granted, and an MCP result's images reach it only on a model that sees them.
+      ...(registered.bot ? { ...grantedSkills(skills, registered.bot.skills), toolImages: this.harness.catalog.toolImages(input.instanceId, input.model) } : skills)
     }) ?? registered
     const descriptor = typeof turn.mode === 'string' ? this.modeRegistry.getModeSync(turn.mode, { projectPath: turn.projectPath }) : undefined
     // Agent and Plan run natively in the runtime; another mode's own instructions go into the preamble.
