@@ -11,6 +11,7 @@ import { ProviderAuthService } from './providers/ProviderAuthService'
 import { AppletStore } from './applets/AppletStore'
 import { ClaudeSubscriptionProviderService } from './harness/vendors/claude/ClaudeSubscriptionProviderService'
 import { ClaudeIntegrationResolver } from './harness/vendors/claude/integrations'
+import { removeClaudeBotTemp } from './harness/claude/locked'
 import { AntigravityProviderService } from './harness/acp/presets/antigravity/AntigravityProviderService'
 import { configInstanceStore, ProviderInstanceService } from './harness/instanceMap'
 import { createProviderAccess, type ProviderAccess } from './providers/providerAccess'
@@ -767,6 +768,7 @@ export class MmsProfileServices {
       // shown in the app's model picker from its own listing.
       modelOptions: () => botModels.pickable(),
       modelListing: () => harness.llmProviders({ kind: 'device' }),
+      runsOnNote: (instanceId) => harness.botRunsOnNote(instanceId),
       // The name the side card and Devices show (macOS's Computer Name, Linux's pretty hostname), else the hostname.
       // The lookup starts with the bots below and answers in milliseconds; until then the hostname stands in.
       computerName: () => computerNameIfKnown() || hostname(),
@@ -779,6 +781,8 @@ export class MmsProfileServices {
       computerLimit: () => this.config.botSettings().here,
       // "Use your threads" removed: what the bot sent that has not started leaves its owner's threads.
       threadsWithdrawn: (bot) => { this.orchestrator.withdrawBotThreadMessages(bot) },
+      // A deleted bot's private temporary folder outside Mousse's data (Claude Code's commands on Linux) goes with it.
+      removeRuntimeTemp: (cwd) => removeClaudeBotTemp(cwd),
       // The owner's MCP servers set up for the whole profile, through Mousse (`BotMcp`).
       ...(this.orchestrator.botMcp() ? { mcp: this.orchestrator.botMcp()! } : {})
     }, ({ store }) => {

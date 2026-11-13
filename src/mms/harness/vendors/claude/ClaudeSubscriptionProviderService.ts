@@ -37,7 +37,7 @@ import { TURN_TOKEN_KEY } from '../../../run/mcp/appTools/registry'
 import type { LoginSession } from '../../../providers/LoginSession'
 import { settingsMirror, type MirrorField, type VendorMirror } from '../../vendorMirror'
 import { withEnforced } from '../../env'
-import { CLAUDE_BOT_FILE_DATA_NOTE, CLAUDE_FILE_TEXT_TOOLS, CLAUDE_LOCKED_REMOVED_OPTIONS, claudeBotTemp, claudeCommandsRefusal, ClaudeLockedGate, claudeLockedOptions, claudeOwnStorage, claudeLockedSpawn, type ClaudeLockedTurn } from '../../claude/locked'
+import { CLAUDE_BOT_FILE_DATA_NOTE, CLAUDE_FILE_TEXT_TOOLS, CLAUDE_LOCKED_REMOVED_OPTIONS, claudeBotTemp, claudeCommandsRefusal, holdClaudeBotTemp, ClaudeLockedGate, claudeLockedOptions, claudeOwnStorage, claudeLockedSpawn, type ClaudeLockedTurn } from '../../claude/locked'
 import {
   claudeExtraArgs,
   cliFingerprint,
@@ -65,7 +65,7 @@ import { UsageProxyKeyStore } from '../../../providers/usageProxyKeys'
 import { claudeMcpToolBlocked, claudeProxiedMcpServer, type ClaudeTurnIntegrations } from './integrations'
 import {
   CLAUDE_MCP_POLICY_CODE, claudeInputMcpEnv, claudeLiteralServers, claudeMcpLeftOut, claudeMcpLeftOutText, claudeMcpPolicyForbidsAdded, claudeMcpPolicyText, claudeMcpRegistrationMs, claudeMcpStrings,
-  CLAUDE_MCP_START_FOLDER, claudeStartupMcpOptions, ClaudeStderrTail, dropMousseServers, promptAfter, registerClaudeMcpServers, registerUserServersLater, withoutLiteralDollar,
+  CLAUDE_MCP_START_FOLDER, claudeStartupMcpOptions, sweepClaudeMcpStartFolders, ClaudeStderrTail, dropMousseServers, promptAfter, registerClaudeMcpServers, registerUserServersLater, withoutLiteralDollar,
   type ClaudeMcpLeftOut, type ClaudeMcpServers, type ClaudeStartupChannel
 } from './mcpRegistration'
 import { claudeActionOf, claudeChildToolDenial, claudePermissionKey } from './childPolicy'
@@ -965,6 +965,8 @@ export class ClaudeSubscriptionProviderService {
     this.settingsPath = join(this.dir, 'settings.json')
     this.liveConfig = dependencies.live === false ? null : { ...DEFAULT_LIVE_TIMINGS, ...dependencies.live }
     this.loadSettings()
+    // Start folders a killed service left behind (`CLAUDE_MCP_START_FOLDER`), removed in the background.
+    void sweepClaudeMcpStartFolders(join(this.dir, CLAUDE_MCP_START_FOLDER))
   }
   /**
    * Only a missing file counts as new settings. An unreadable or malformed file is never migrated
@@ -3073,6 +3075,8 @@ export class ClaudeSubscriptionProviderService {
       ? 'accept_edits'
       : requestedMode
     const turn: TurnContext = { input, controller, integrations, editCounter, planTurn, restricted, permissionMode: threadMode, ...(lockedTurn ? { locked: new ClaudeLockedGate(lockedTurn, Boolean(input.mcp)) } : {}) }
+    // The bot's private temporary folder is in use until this turn ends; the last of its turns to end empties it.
+    const releaseBotTemp = botTemp ? holdClaudeBotTemp(botTemp.dir) : undefined
     try {
       const signedIn = await this.authenticated(controller.signal, env)
       if (!signedIn)
@@ -3554,6 +3558,7 @@ export class ClaudeSubscriptionProviderService {
       this.queries.delete(input.threadId)
       this.controllers.delete(controller)
       this.activeThreads.delete(input.threadId)
+      releaseBotTemp?.()
       if (steerTimer) clearInterval(steerTimer)
       input.signal?.removeEventListener('abort', cancel)
       const report = metrics.report()

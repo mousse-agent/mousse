@@ -13,6 +13,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createBotModelResolver } from '../../src/mms/bots/model/BotModelResolver'
 import { claudeCodeDriver } from '../../src/mms/harness/drivers/claudeCode'
 import { codexDriver } from '../../src/mms/harness/drivers/codex'
+import { CODEX_BOT_CHECKED_VERSIONS } from '../../src/mms/harness/vendors/codex/childPolicy'
+import { CODEX_BOT_RUNS_ON_TEXT } from '../../src/shared/harness/codexBotVersion'
 import { piDriver } from '../../src/mms/harness/drivers/pi'
 import { createHarnessGateway } from '../../src/mms/harness/gateway'
 import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
@@ -143,6 +145,13 @@ describe('bots run on the owner\'s own provider entries', () => {
     expect(codex.botAuthority?.({})).toBe(true)
     expect(codex.botApprovals?.({})).toBe(true)
     for (const tool of NEUTRAL_TOOLS) expect(codex.nativeToolNames?.(tool, {}).length, tool).toBeGreaterThan(0)
+  })
+
+  it('Codex says in Runs on when its installed version hasn\'t been checked for bots, and nothing on a checked or unknown one', () => {
+    const codex = codexDriver({ builtIn: () => { throw new Error('unused') } })
+    expect(codex.botRunsOnNote?.({}, '0.999.0')).toMatchObject({ text: CODEX_BOT_RUNS_ON_TEXT, title: expect.stringContaining('Codex 0.999.0 is installed here') })
+    for (const version of CODEX_BOT_CHECKED_VERSIONS) expect(codex.botRunsOnNote?.({}, version), version).toBeUndefined()
+    expect(codex.botRunsOnNote?.({}, undefined)).toBeUndefined()
   })
 })
 

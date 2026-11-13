@@ -5,6 +5,7 @@ import { entriesBeside } from '../../../bots/grants/compile'
 import type { PermissionMode } from '../../../../shared/permissionMode'
 import type { ChildTurnPolicy } from '../../adapter'
 import type { AskForApproval, SandboxMode, SandboxPolicy } from './protocol'
+import { CODEX_MANAGED_VERSION } from './release'
 
 /**
  * What a turn's mode, permission mode and delegation policy decide about Codex's sandbox and approvals: one of Codex's
@@ -127,7 +128,8 @@ export const CODEX_COMMAND_FEATURES: readonly string[] = ['shell_tool', 'unified
  * Codex's features that add a tool no bot turn may have, whatever it holds, as `codex features list` names them (Codex
  * 0.162.1). Each runs or reads without an approval the bot's authority could answer, or reaches past what Mousse holds
  * the bot to; the owner's own Codex config may switch any of them on, and the thread config switches them off again.
- * Codex ignores a name it does not know.
+ * Codex ignores a name it does not know, so this list holds only on the versions it was checked against
+ * (`CODEX_BOT_CHECKED_VERSIONS`).
  * - `view_image`: opens any image by its path, with no approval and outside every sandbox (Mousse's own data included).
  * - `image_generation`: makes images and saves them where Codex keeps them.
  * - `multi_agent`, `multi_agent_v2`: subagents (`spawn_agent` and the rest of `collaboration`), threads Mousse does not
@@ -142,6 +144,21 @@ export const CODEX_COMMAND_FEATURES: readonly string[] = ['shell_tool', 'unified
  * - `request_permissions_tool`: asks for more sandbox permissions.
  * - `default_mode_request_user_input`, `send_message_to_user_async`: questions and messages to a person, who is not there.
  * - `goals`, `sleep_tool`, `tool_suggest`, `skill_search`: goals Codex follows on its own, waiting, and suggestions.
+ * Found with every feature a checked release lists switched on in the owner's config (`CODEX_BOT_CHECKED`), each tool
+ * traced to its feature by leaving features out (`MOUSSE_CODEX_FEATURES_LEFT_OUT`):
+ * - `token_budget`: `new_context` (starts the model's context over, which can drop the bot's own rules) and
+ *   `get_context_remaining`.
+ * - `deferred_executor`: `wait_for_environment`, Codex's execution environments, which Mousse doesn't hold to the bot's
+ *   sandbox.
+ * - `agent_message_board`: a message board between agents, which reaches other threads; it also adds `clock.curr_time`
+ *   and code mode's `tool_search`.
+ * - `code_mode_tool_search`: code mode's `tool_search`, which loads tools the turn wasn't offered.
+ * - `executor_capability_discovery_v2` (from 0.164.0): a `skills` namespace (`list`, `read`, `installations`) that
+ *   reads the owner's installed skills, which a bot is held to its granted ones.
+ * - `use_legacy_landlock`: Codex's older Landlock sandbox in place of bubblewrap, which the bot's profile relies on (with
+ *   it on, a bot's turn can't start).
+ * - `rollout_budget`: a token budget that won't load without settings whose form isn't documented, so its tools, if
+ *   any, were never seen.
  */
 export const CODEX_BOT_FEATURES_OFF: readonly string[] = [
   'view_image',
@@ -167,8 +184,80 @@ export const CODEX_BOT_FEATURES_OFF: readonly string[] = [
   'goals',
   'sleep_tool',
   'tool_suggest',
-  'skill_search'
+  'skill_search',
+  'rollout_budget',
+  'token_budget',
+  'deferred_executor',
+  'agent_message_board',
+  'code_mode_tool_search',
+  'executor_capability_discovery_v2',
+  'use_legacy_landlock'
 ]
+
+/**
+ * Codex's features that add a tool no bot may have but that a thread's config can't switch off: Codex reads them once
+ * for its whole process (found on the real binary: the tool stays with the feature off in the thread's config). A bot's
+ * turn doesn't run while the owner's own config has one on (`codexBotSettingText`); their own threads keep it.
+ * - `multi_env_copy_file` (from 0.164.0): copies a file by its path between two environments, outside the bot's authority.
+ */
+export const CODEX_BOT_FEATURES_REFUSED: readonly string[] = ['multi_env_copy_file']
+
+/**
+ * Every tool a bot's turn on Codex may be offered, by the name the model sees (a namespace before a dot), and what it can
+ * do. Nested tools are the ones code mode's `exec` calls. `tests/harness/codexBotTools.test.ts` fails on a binary that
+ * offers a bot any other, with every feature it lists switched on in the owner's config.
+ */
+export const CODEX_BOT_ACCOUNTED_TOOLS: Readonly<Record<string, string>> = {
+  request_user_input: 'asks a person; Mousse answers a bot\'s with an error, nobody is asked',
+  'functions.request_user_input': 'the same, in code mode',
+  'functions.request_user_input_async': 'the same, without waiting',
+  web_search: 'OpenAI\'s hosted web search: reads no file of this computer',
+  apply_patch: 'changes files: each change asks, and the bot\'s authority decides by path',
+  exec_command: 'a command (only with "run commands"): asks under the bot\'s profile, runs in its sandbox',
+  write_stdin: 'input to a command it started (only with "run commands")',
+  exec: 'code mode: JavaScript with no file system or network, calling only the tools listed here',
+  wait: 'code mode: waits for an exec still running',
+  'functions.exec': 'code mode, as above',
+  'functions.wait': 'code mode, as above',
+  'nested:apply_patch': 'as apply_patch',
+  'nested:exec_command': 'as exec_command',
+  'nested:write_stdin': 'as write_stdin',
+  'nested:list_mcp_resources': 'resources of the MCP servers left on: Mousse\'s own, which has none',
+  'nested:list_mcp_resource_templates': 'the same',
+  'nested:read_mcp_resource': 'the same',
+  'nested:clock__curr_time': 'the time',
+  'clock.curr_time': 'the time (`current_time_reminder`)',
+  'collaboration.spawn_agent': 'a subagent: inherits the bot\'s tools and sandbox; Mousse answers none of its asks',
+  'collaboration.send_message': 'a message to a subagent',
+  'collaboration.followup_task': 'more work for a subagent',
+  'collaboration.wait_agent': 'waits for a subagent',
+  'collaboration.interrupt_agent': 'stops a subagent',
+  'collaboration.list_agents': 'lists its subagents'
+}
+
+/**
+ * The Codex versions a bot may run on, each with the day its tools were read from the real binary
+ * (`tests/harness/codexBotTools.test.ts`, every feature on) and found to be only `CODEX_BOT_ACCOUNTED_TOOLS` with
+ * `CODEX_BOT_FEATURES_OFF` and `CODEX_COMMAND_FEATURES` off. Codex ignores a feature name it doesn't know, so on any
+ * other version a tool added or renamed there could reach a bot: a bot's turn runs only on these
+ * (`codexBotVersionRefusal`), whatever entry runs it. The owner's own threads are not affected. Adding a release is one
+ * line here after that test passes on it (docs/bots.md, "Checking a new Codex release").
+ */
+export const CODEX_BOT_CHECKED: ReadonlyArray<{ version: string; checked: string }> = [
+  { version: CODEX_MANAGED_VERSION, checked: '2026-11-13' },
+  { version: '0.163.0', checked: '2026-11-13' },
+  { version: '0.164.0', checked: '2026-11-13' },
+  { version: '0.165.0', checked: '2026-11-13' },
+  { version: '0.166.0', checked: '2026-11-13' },
+  { version: '0.167.0', checked: '2026-11-13' },
+  { version: '0.167.1', checked: '2026-11-13' },
+  { version: '0.167.2', checked: '2026-11-13' },
+  { version: '0.168.0', checked: '2026-11-13' },
+  { version: '0.169.0', checked: '2026-11-13' }
+]
+
+/** The versions of `CODEX_BOT_CHECKED`. */
+export const CODEX_BOT_CHECKED_VERSIONS: readonly string[] = CODEX_BOT_CHECKED.map((entry) => entry.version)
 
 /**
  * The name of the permission profile a confined bot's commands run under, defined in its thread config

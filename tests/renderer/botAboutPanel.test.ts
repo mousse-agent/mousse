@@ -161,6 +161,23 @@ describe('About this bot', () => {
       expect([...grid.querySelectorAll('.bot-model-row')].every((row) => row.children.length === 2 && row.children[1]!.classList.contains('settings-model-picker'))).toBe(true)
     })
 
+    it('a row picked on a Codex not checked for bots says so once, with the versions in its tooltip, before any work is sent', async () => {
+      const note = { text: 'Bots\' work won\'t run on this version of Codex: it hasn\'t been checked for bots yet.', title: 'Codex 0.999.0 is installed here. Checked for bots: 0.162.1.' }
+      const onKey = { instanceId: 'pi:key', model: 'opus' }
+      // The entry with the note is offered, but no row is on it: nothing to say.
+      withRows({ talk: { instanceId: 'claude', model: 'opus' }, light: null, medium: null, hard: null }, { notes: { 'pi:key': note } })
+      await show()
+      expect(host.querySelector('[data-testid="bot-model-note"]')).toBeNull()
+      // Talk and Work both on it: one line.
+      served = { talk: onKey, light: onKey, medium: onKey, hard: onKey }
+      await pick('Work', 'Opus', 'Anthropic API')
+      await act(async () => {})
+      const shown = host.querySelectorAll<HTMLElement>('[data-testid="bot-model-note"]')
+      expect(shown).toHaveLength(1)
+      expect(shown[0]!.textContent).toBe(note.text)
+      expect(shown[0]!.title).toBe(note.title)
+    })
+
     it('a pick not offered now says so; a refused save goes back with the service\'s words', async () => {
       withRows({ talk: { instanceId: 'pi:gone', model: 'opus' }, light: null, medium: null, hard: null })
       await show()

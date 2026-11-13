@@ -1,7 +1,7 @@
 import { execFile, execFileSync, spawn as nodeSpawn, type ChildProcess } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { constants, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmdirSync, unlinkSync } from 'node:fs'
-import { mkdtemp } from 'node:fs/promises'
+import { lstat, mkdtemp, readdir, rm } from 'node:fs/promises'
 import { Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -444,6 +444,34 @@ function makeFifo(fifo: Fifo): void {
   if (!removesOnExit) {
     removesOnExit = true
     process.once('exit', () => { for (const live of liveFifos) removeFifo(live) })
+  }
+}
+
+/**
+ * Removes the start folders (`mousse-mcp-*`) in `root` that no running start owns, when the service starts: a service
+ * killed between a start's spawn and Claude Code opening its pipe leaves its folder in Mousse's data, where the system
+ * never clears it. One a start of this process holds is kept, and so is any changed in the last `FIFO_WAIT_MS`, the
+ * longest a start of any process keeps its pipe. Never throws.
+ */
+export async function sweepClaudeMcpStartFolders(root: string, now: number = Date.now()): Promise<void> {
+  let names: string[]
+  try {
+    names = await readdir(root)
+  } catch {
+    return
+  }
+  // Read again before each removal: a start may begin while the sweep waits on the disk.
+  const held = (dir: string): boolean => [...liveFifos].some((fifo) => fifo.dir === dir)
+  for (const name of names) {
+    if (!name.startsWith('mousse-mcp-')) continue
+    const dir = join(root, name)
+    try {
+      const stat = await lstat(dir)
+      if (!stat.isDirectory() || now - stat.mtimeMs < FIFO_WAIT_MS || held(dir)) continue
+      await rm(dir, { recursive: true, force: true })
+    } catch {
+      // Gone already, or not ours to remove: the next start looks again.
+    }
   }
 }
 

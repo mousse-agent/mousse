@@ -186,6 +186,8 @@ export interface HarnessGateway {
    * empty for an unknown instance.
    */
   botWithheldTools(instanceId: string): readonly NeutralTool[]
+  /** Runs on's line for a bot on the instance (`HarnessDriver.botRunsOnNote`); undefined for an unknown instance. */
+  botRunsOnNote(instanceId: string): { text: string; title: string } | undefined
   /**
    * The permission mode `bind` would record for a thread asking for `requested` (the mode itself, a
    * stricter fallback with the reason, or a refusal). Reads, binds nothing; used to tell the agent
@@ -1258,6 +1260,12 @@ export class Harness implements HarnessGateway {
     const record = this.recordOrUndefined(instanceId)
     if (!record?.driver.botWithheldTools) return []
     return record.driver.botWithheldTools(record.config, this.probes.get(record.instanceId)?.lastGood?.binary?.version, record.instanceId)
+  }
+
+  botRunsOnNote(instanceId: string): { text: string; title: string } | undefined {
+    const record = this.recordOrUndefined(instanceId)
+    if (!record?.driver.botRunsOnNote) return undefined
+    return record.driver.botRunsOnNote(record.config, this.probes.get(record.instanceId)?.lastGood?.binary?.version)
   }
 
   async refreshPolicyFacts(instanceId: string): Promise<void> {

@@ -56,6 +56,8 @@ export interface BotRunsOnChoices {
   /** The computer that holds (or will hold) the bot: always `this_computer` for now. */
   computer: string
   computers: BotComputerChoice[]
+  /** By entry, the line Runs on shows once when a row is picked there, and its tooltip: a Codex not checked for bots. */
+  notes?: Record<string, { text: string; title: string }>
 }
 
 /** A bot's rows as Runs on shows them: each a pick on an entry, or null for "Pick a model" (Mousse chooses until then). */

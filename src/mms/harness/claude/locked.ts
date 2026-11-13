@@ -1,6 +1,6 @@
 import { execFile, spawn as nodeSpawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { lstatSync, mkdirSync, readdirSync, realpathSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { Options, SandboxSettings, SpawnedProcess, SpawnOptions } from '@anthropic-ai/claude-agent-sdk'
@@ -263,10 +263,29 @@ export function claudeLockedTools(turn: Pick<ClaudeLockedTurn, 'authority' | 'sh
  * need to run. Every other top folder (`/home`, `/mnt`, `/media`, `/opt`, `/srv`, `/var`, `/root`, `/run`, …) is
  * unreadable to a bot's commands without file access, as Codex's `:minimal` profile keeps them. `/run` holds removable
  * drives (`/run/media/<user>`) and each signed-in user's runtime folder (`/run/user/<uid>`: network mounts, sign-in
- * sockets); commands need nothing there. `/tmp` stays readable: Claude Code's sandbox keeps its own sockets there
- * (writing to it is denied with the other temporary folders), and Mousse keeps nothing of its own there.
+ * sockets); commands need nothing there but NixOS's programs (`LINUX_RUN_KEPT_OPEN`).
+ *
+ * `/tmp` stays readable, not writable (it is denied with the other temporary folders): Claude Code's sandbox keeps its
+ * own sockets there. Mousse still keeps some folders of its own there, each private to this user (mode 700), which a
+ * bot's command can read since it runs as the same user: the ChatGPT token broker's socket folder (its socket can't be
+ * used: the sandbox refuses every connect to a Unix socket), and for the seconds a task runs, `mousse-pr-*` (the title
+ * and text of a pull request the owner opens), `mousse-pathspec-*` (the paths of files the owner stages or discards),
+ * `mousse-trace-*` (Git's trace of the hooks of the owner's commit or push) and `mousse-acp-*` (the working folder of an
+ * ACP agent's check). docs/bots.md lists them under what remains.
  */
 export const LINUX_SYSTEM_FOLDERS: readonly string[] = ['/bin', '/sbin', '/lib', '/lib32', '/lib64', '/libx32', '/usr', '/etc', '/proc', '/dev', '/sys', '/tmp', '/nix']
+
+/**
+ * What stays readable under the closed `/run` when it exists: on NixOS the system's programs are on the PATH through
+ * `/run/current-system/sw/bin`, and the setuid wrappers (`sudo`, `ping`, …) through `/run/wrappers`, both leading into
+ * `/nix`, which is open. Without them no command finds its programs there. Nothing else under `/run` is opened.
+ */
+export const LINUX_RUN_KEPT_OPEN: readonly string[] = ['/run/current-system/sw/bin', '/run/wrappers']
+
+/** `LINUX_RUN_KEPT_OPEN` that exist here, on Linux. */
+function keptOpenUnderRun(platform: NodeJS.Platform, exists: (path: string) => boolean): string[] {
+  return platform === 'linux' ? LINUX_RUN_KEPT_OPEN.filter((path) => exists(path)) : []
+}
 
 /** Why a bot's commands are refused when Mousse can't list `/` to close its top folders to them (`claudeCommandsRefusal`). */
 export const CLAUDE_TOPS_UNLISTED = 'Commands are off for this turn: Mousse couldn\'t list this computer\'s top folders to keep your commands out of them, so no command runs. Carry on without commands and say what you skipped.'
@@ -287,25 +306,100 @@ const CLAUDE_TMPDIR_MAX_BYTES = 30
  * and write. `shared`: those shared folders, which the sandbox then closes (`claudeLockedSandbox`'s `sharedTemp`).
  * Undefined elsewhere, and when there is no private runtime folder under `/run` (none set, elsewhere, not a folder of this
  * user's, open to others, or so long the folder's path would be too long): the turn keeps the shared folder, as Claude
- * Code does.
+ * Code does, and the service log says so once (`claudeBotTempFallback`).
+ *
+ * The folder is the bot's (it is named after the turn's working folder, the bot's files folder): a turn holds it while it
+ * runs (`holdClaudeBotTemp`), the last turn of the bot to end empties it, and it is removed when the bot is deleted
+ * (`removeClaudeBotTemp`).
  */
 export function claudeBotTemp(authority: Pick<BotAuthority, 'tools' | 'workspace'>, env: NodeJS.ProcessEnv, cwd: string, platform: NodeJS.Platform = process.platform, runtime: string | undefined = env.XDG_RUNTIME_DIR ?? process.env.XDG_RUNTIME_DIR): { dir: string; shared: string[] } | undefined {
   if (platform !== 'linux' || !authority.tools.has('shell') || !authority.workspace || authority.workspace.computer) return undefined
   const uid = process.getuid?.()
-  // Only under `/run`, which the sandbox closes: a runtime folder elsewhere (`/tmp/runtime-<uid>`) is open to every bot.
+  const dir = claudeBotTempDir(cwd, runtime, uid)
+  if (dir === undefined) {
+    claudeBotTempFallback(runtime === undefined ? 'XDG_RUNTIME_DIR is not set' : 'XDG_RUNTIME_DIR is not a private folder of this user under /run with room for a short folder name')
+    return undefined
+  }
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
+  } catch {
+    claudeBotTempFallback('the folder could not be made in XDG_RUNTIME_DIR')
+    return undefined
+  }
+  const shared = [...new Set(['/tmp', env.TMPDIR, env.CLAUDE_CODE_TMPDIR].filter((root): root is string => Boolean(root) && isAbsolute(root!)).map((root) => join(root, `claude-${uid}`)))]
+  return { dir, shared }
+}
+
+/**
+ * The bot's private temporary folder for turns run from `cwd`, in the runtime folder `runtime`: only one of this user's,
+ * mode 700, under `/run` (which the sandbox closes: a runtime folder elsewhere, such as `/tmp/runtime-<uid>`, is open to
+ * every bot), and only when its path is short enough for Claude Code to give it to the commands it runs too. Undefined
+ * otherwise.
+ */
+function claudeBotTempDir(cwd: string, runtime: string | undefined, uid: number | undefined): string | undefined {
   if (!runtime || !resolve(runtime).startsWith('/run/') || uid === undefined) return undefined
   try {
     const stat = lstatSync(runtime)
     if (!stat.isDirectory() || stat.uid !== uid || (stat.mode & 0o077) !== 0) return undefined
-    const dir = join(runtime, `mb${createHash('sha256').update(resolve(cwd)).digest('hex').slice(0, 10)}`)
-    // Claude Code uses a longer one for itself but not for the commands it runs (their sockets' paths would be too long):
-    // they would get the shared folder after all.
-    if (Buffer.byteLength(dir) > CLAUDE_TMPDIR_MAX_BYTES) return undefined
-    mkdirSync(dir, { recursive: true, mode: 0o700 })
-    const shared = [...new Set(['/tmp', env.TMPDIR, env.CLAUDE_CODE_TMPDIR].filter((root): root is string => Boolean(root) && isAbsolute(root!)).map((root) => join(root, `claude-${uid}`)))]
-    return { dir, shared }
   } catch {
     return undefined
+  }
+  const dir = join(runtime, `mb${createHash('sha256').update(resolve(cwd)).digest('hex').slice(0, 10)}`)
+  // Claude Code uses a longer one for itself but not for the commands it runs (their sockets' paths would be too long):
+  // they would get the shared folder after all.
+  return Buffer.byteLength(dir) > CLAUDE_TMPDIR_MAX_BYTES ? undefined : dir
+}
+
+let fallbackSaid = false
+/**
+ * Says once in the service log, with why and no conversation text, that bots' commands keep Claude Code's shared
+ * temporary folder here, where every session of this user keeps its commands' output.
+ */
+function claudeBotTempFallback(why: string): void {
+  if (fallbackSaid) return
+  fallbackSaid = true
+  console.warn(`[claude] bots' commands use Claude Code's shared temporary folder on this computer, which every Claude Code session of this user can read: ${why}`)
+}
+
+/** Turns running now that use each private folder (`holdClaudeBotTemp`). */
+const botTempTurns = new Map<string, number>()
+
+/**
+ * A turn starts using its bot's private temporary folder `dir`; the returned function is called when it ends. The last
+ * turn of the bot to end empties the folder, so nothing a command left there outlives the work. Never throws.
+ */
+export function holdClaudeBotTemp(dir: string): () => void {
+  botTempTurns.set(dir, (botTempTurns.get(dir) ?? 0) + 1)
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    const left = (botTempTurns.get(dir) ?? 1) - 1
+    if (left > 0) {
+      botTempTurns.set(dir, left)
+      return
+    }
+    botTempTurns.delete(dir)
+    try {
+      for (const name of readdirSync(dir)) rmSync(join(dir, name), { recursive: true, force: true })
+    } catch {
+      // Gone already, or emptied by the next turn's end.
+    }
+  }
+}
+
+/**
+ * A deleted bot's private temporary folder, named after its turns' working folder `cwd`, is removed, unless a turn of it
+ * still runs (that turn's end empties it). Never throws.
+ */
+export function removeClaudeBotTemp(cwd: string, runtime: string | undefined = process.env.XDG_RUNTIME_DIR): void {
+  if (process.platform !== 'linux') return
+  const dir = claudeBotTempDir(cwd, runtime, process.getuid?.())
+  if (!dir || botTempTurns.has(dir)) return
+  try {
+    rmSync(dir, { recursive: true, force: true })
+  } catch {
+    // Left for the system, which clears the runtime folder when the user signs out.
   }
 }
 
@@ -352,8 +446,9 @@ export function claudeCommandsRefusal(authority: Pick<BotAuthority, 'tools' | 'w
  * system, read and write, but Mousse's own data folder: unreadable but for the files folder and
  * scratch, and every entry in it that does not lead to them unwritable (`entriesBeside`).
  */
-export function claudeLockedSandbox(input: { workspace: NonNullable<BotAuthority['workspace']>; temps: readonly string[]; home?: string; own?: readonly string[]; platform?: NodeJS.Platform; tops?: () => readonly string[]; sharedTemp?: readonly string[] }): SandboxSettings {
+export function claudeLockedSandbox(input: { workspace: NonNullable<BotAuthority['workspace']>; temps: readonly string[]; home?: string; own?: readonly string[]; platform?: NodeJS.Platform; tops?: () => readonly string[]; sharedTemp?: readonly string[]; exists?: (path: string) => boolean }): SandboxSettings {
   const sharedTemp = input.sharedTemp ?? []
+  const platform = input.platform ?? process.platform
   const { roots, access, scratch } = input.workspace
   const own = input.own ?? []
   const computer = input.workspace.computer
@@ -378,8 +473,8 @@ export function claudeLockedSandbox(input: { workspace: NonNullable<BotAuthority
       : {
           allowWrite: [...writeRoots, scratch],
           denyWrite: [...readRoots, ...input.temps, ...sharedTemp],
-          denyRead: [...closedToCommands(input.home ?? homedir(), input.platform ?? process.platform, input.tops ?? rootEntries), ...sharedTemp],
-          allowRead: [...roots, scratch, ...own]
+          denyRead: [...closedToCommands(input.home ?? homedir(), platform, input.tops ?? rootEntries), ...sharedTemp],
+          allowRead: [...roots, scratch, ...own, ...keptOpenUnderRun(platform, input.exists ?? existsSync)]
         },
     network: { allowedDomains: [], strictAllowlist: true, allowLocalBinding: false, allowAllUnixSockets: false },
     credentials: { envVars: CLAUDE_KEY_VARIABLES.map((name) => ({ name, mode: 'deny' as const })) }

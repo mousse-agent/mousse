@@ -557,6 +557,12 @@ export interface HarnessDriver {
    */
   botWithheldTools?(config: InstanceConfig, installedVersion?: string, instanceId?: string): readonly NeutralTool[]
   /**
+   * Why a bot's work won't run on the entry, as Runs on says it once (a Codex whose installed version hasn't been checked
+   * for bots), read with the installed version; the tooltip says more. Absent or undefined: nothing to say. The turn
+   * itself is refused where it starts, whatever this says.
+   */
+  botRunsOnNote?(config: InstanceConfig, installedVersion?: string): { text: string; title: string } | undefined
+  /**
    * Reads again, now, what the entry's caps and `botAuthority` depend on beyond its config (a
    * locked Claude entry's organisation policy). The gateway calls it before every bot check point:
    * approval, dispatch and turn admission.

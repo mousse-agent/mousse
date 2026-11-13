@@ -71,12 +71,15 @@ import { isProviderTurnCap, type Enforceability, type HarnessError, type Provide
 import type { NeutralTool } from '../../../shared/harness/tools'
 import type { RunEngine } from '../../run/RunEngine'
 import { TERMINAL_RUN_STATUSES, type BotTurnPayload, type RunRecord } from '../../run/types'
-import { createBotAuthority } from '../authority/botAuthority'
+import { PATH_ARGUMENTS as BOT_PATH_ARGUMENTS, createBotAuthority } from '../authority/botAuthority'
+import { assertInsideRoots } from '../../agents/WorkspaceAccessPolicy'
 import { BotChatService, messageInput } from '../chat/BotChatService'
 import { askFingerprintOf, BotChatProjection, clockTime, starterManifest } from '../chat/projection'
 import { BotDefinitionError, upgradeDefinitionV1, type BotDefinitionEntry, type BotDefinitionStore } from '../definitions/BotDefinitionStore'
 import { chipCallOf } from '../activity/BotActivitySink'
-import { botFilesFolder, botManifestDigest, compileBotThread } from '../grants/compile'
+import { botFilesFolder, botManifestDigest, compileBotThread, type BotPermissions } from '../grants/compile'
+import { toolArgsDigest } from '../../run/tools/argsDigest'
+import { isCodexBotRefusal } from '../../../shared/harness/codexBotVersion'
 import { BOT_RUN_REPORT_LINE } from '../memory/contextPack'
 import type { BotActivityContext, BotActivitySink, BotContextProvider, BotDispatchEnd, BotJournal, BotJournalInput, BotMcpListing, BotMemoryAdmin, BotModelChange, BotModelProblem, BotModelResolution, BotModelResolver, BotProcessSupervision, BotToolHost, BotWorkList, BotWorkModel, BotWorkStarted } from '../seams'
 import { workWaits, type BotActivationRow, type BotDispatchRow, type BotEntryLimit, type BotEscalationRow, type BotMessageRow, type BotModelState, type BotReminderRow, type BotStore, type BotStoredError } from '../store/BotStore'
@@ -169,6 +172,11 @@ export interface BotEngineHost {
   clearContext?(threadId: string): void
   /** Archives a thread (#681): a deleted bot's threads, kept 30 days before the purge. */
   archiveThread?(threadId: string): Promise<unknown> | void
+  /**
+   * A deleted bot's private temporary folder outside Mousse's data, named after its turns' working folder (`cwd`: its files
+   * folder), is removed (Claude Code's commands on Linux). Must not throw.
+   */
+  removeRuntimeTemp?(cwd: string): void
   /** One model call on a selection (`harness.oneShot`): naming a new bot. */
   oneShot?(input: { selection: ProviderSelection; prompt: string; signal: AbortSignal }): Promise<string>
   /**
@@ -185,6 +193,8 @@ export interface BotEngineHost {
   modelOptions?(): Promise<BotModelOption[]>
   /** The app's model listing (`harness.llmProviders`), which Runs on narrows to `modelOptions` for the model picker. */
   modelListing?(): Promise<LlmProviderOption[]>
+  /** Runs on's line for a bot's row on an entry (`HarnessGateway.botRunsOnNote`): a Codex not checked for bots. */
+  runsOnNote?(instanceId: string): { text: string; title: string } | undefined
   /** This computer's name, the one computer a bot runs on for now. */
   computerName?(): string
   /** The person's other computers (About lists them; a bot runs on the computer that holds it). */
@@ -385,6 +395,13 @@ interface LiveDispatch {
    * (`files`, a sandbox over every folder). When this computer switches one off, the turn stops (`computerLimitChanged`).
    */
   powers: { shell: boolean; files: boolean }
+  /** The same for each consult of this dispatch that has not settled, by its dispatch number: it is stopped with it. */
+  consultPowers: Map<number, { shell: boolean; files: boolean }>
+}
+
+/** What a compiled turn started with that a runtime opens once for the whole turn (`LiveDispatch.powers`). */
+function powersOf(permissions: BotPermissions): { shell: boolean; files: boolean } {
+  return { shell: permissions.tools.includes('shell'), files: permissions.workspace?.computer !== undefined }
 }
 
 /** An activation that runs or waits for its owner's answer holds a slot of its lane: what does not fit waits. */
@@ -501,6 +518,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * switches: each goes on in a new turn under the new limit (`advance`), told why.
    */
   private readonly limitCuts = new Map<string, BotComputerSwitch[]>()
+  /**
+   * Per activation, the argument digests (`toolArgsDigest`, as the run's tool ledger keeps them) of the file changes its
+   * turns were allowed outside the bot's own folders (its files folder and scratch). A stop because Use files was
+   * switched off clears only those of its cut-off calls (`acknowledgeCut`). Kept in memory, as `limitCuts` is.
+   */
+  private readonly outsideChanges = new Map<string, Set<string>>()
 
   constructor(private readonly host: BotEngineHost) {
     this.chat = new BotChatProjection({
@@ -532,6 +555,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       now: () => this.now(),
       ...(host.modelOptions ? { modelOptions: host.modelOptions } : {}),
       ...(host.modelListing ? { modelListing: host.modelListing } : {}),
+      ...(host.runsOnNote ? { runsOnNote: host.runsOnNote } : {}),
       ...(host.computerName ? { computerName: host.computerName } : {}),
       ...(host.otherComputers ? { otherComputers: host.otherComputers } : {})
     })
@@ -616,7 +640,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (before && before.shell === now.shell && before.files === now.files && before.browser === now.browser && before.threads === now.threads) return
     const turnedOff = (['shell', 'files'] as const).filter((which) => (before?.[which] ?? true) && !now[which])
     if (turnedOff.length) for (const [activationId, live] of this.live) {
-      const cut = turnedOff.filter((which) => live.powers[which])
+      // A consult runs under its main dispatch's abort: one that holds the power stops the dispatch, consults and all.
+      const held = (which: keyof LiveDispatch['powers']): boolean => live.powers[which] || [...live.consultPowers.values()].some((powers) => powers[which])
+      const cut = turnedOff.filter(held)
       if (cut.length && !live.controller.signal.aborted) this.cutForLimit(activationId, live, cut)
     }
     if ((before?.threads ?? true) && !now.threads)
@@ -726,6 +752,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const quiet = await this.stopAndWait(live)
     // Scratch folders go only once nothing runs in them (the startup pass removes the rest).
     if (quiet) for (const activation of live) this.cleanup({ ...activation, status: 'cancelled' })
+    // Its runtimes' private temporary folder too (one still in use is emptied when its turn ends).
+    try { this.host.removeRuntimeTemp?.(this.filesFolder(botId)) } catch { /* left for the system */ }
     for (const row of live) this.packs.delete(row.id)
     // Its browser closes now; its sign-ins go with the purge.
     try {
@@ -2151,7 +2179,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.live.set(row.id, {
       controller, timer, startedMono, startedAt, checkpointMono: startedMono, n: dispatch.n, deadline, counters: counterScope, spend: spendScope, dispatchId: dispatch.clientRequestId,
       lastProgressMono: startedMono, workedMono: startedMono, offlineChecks: 0, steering: new Map(), steerSeq: 0, compactions: 0, regiven: 0,
-      powers: { shell: compiled.permissions.tools.includes('shell'), files: compiled.permissions.workspace?.computer !== undefined }
+      powers: powersOf(compiled.permissions), consultPowers: new Map()
     })
     this.liveRuns.set(payload.runId, row.id)
     this.watchOffline(row.id, dispatch.n)
@@ -2413,6 +2441,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     this.executing.add(`${row.id}:${dispatch.n}`)
     this.liveRuns.set(payload.runId, row.id)
+    // What the consult holds for the whole of its turn, recorded like its main dispatch's: a switch turned off stops it.
+    main.consultPowers.set(dispatch.n, powersOf(compiled.permissions))
     const authority = this.authorityFor({
       row, mainN: main.n, role: 'context', permissions: compiled.permissions, grantDigest: grant.digest, startedWith: effective,
       controller: main.controller, deadline: main.deadline, counters: main.counters, spend: main.spend, contexts: [],
@@ -2703,6 +2733,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       limit: () => this.limit()
     })
     const observe = (call: NormalisedCall): void => {
+      this.noteFileChange(row.id, input.permissions, call)
       const sink = this.host.activity
       if (!sink) return
       try {
@@ -4051,7 +4082,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.limitCuts.delete(row.id)
       const stopped = run.status === 'interrupted' && run.outcome?.interruptedBy === 'bot_wall'
       const reload = (row.reloadPending || limitCut !== undefined) && stopped
-      if (limitCut && stopped) this.acknowledgeCut(row, run.runId, limitCut)
+      if (limitCut && stopped) this.acknowledgeCut(row, main, run.runId, limitCut)
       if (run.status === 'failed' || (run.status !== 'completed' && run.status !== 'uncertain' && !reload)) {
         const unknown = this.store.unknownCalls(row.id).some((call) => !call.acknowledged)
         if (!unknown) {
@@ -4294,14 +4325,50 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * power, so they don't hold the work for an acknowledgement: the next turn is told they were interrupted. Any other
    * call whose effect is unknown still holds it, as after any interruption.
    */
-  private acknowledgeCut(row: BotActivationRow, runId: string, switches: readonly BotComputerSwitch[]): void {
+  private acknowledgeCut(row: BotActivationRow, main: BotDispatchRow, runId: string, switches: readonly BotComputerSwitch[]): void {
     if (!row.selection) return
-    const neutral: NeutralTool[] = switches.includes('files') ? ['shell', 'write', 'edit'] : ['shell']
-    const names = this.nativeNames(row.selection.instanceId, neutral)
-    if (!names.ok) return
-    const cut = new Set(names.names)
-    const ids = this.store.unknownCalls(row.id).filter((call) => !call.acknowledged && call.runId === runId && cut.has(call.tool)).map((call) => call.invocationId)
+    // The stop ended the main dispatch and its consults alike: their cut-off calls are all the stop's.
+    const runIds = new Set([runId, ...this.store.dispatches(row.id).filter((dispatch) => dispatch.kind === 'consult' && dispatch.mainN === main.n)
+      .map((dispatch) => dispatch.runId ?? this.receiptRun(dispatch.clientRequestId)).filter((id): id is string => id !== undefined)])
+    const namesOf = (neutral: NeutralTool[]): Set<string> => {
+      const names = this.nativeNames(row.selection!.instanceId, neutral)
+      return names.ok ? new Set(names.names) : new Set()
+    }
+    // Run commands off: a command. Use files off: a file change outside the bot's own folders, which it no longer may
+    // make; a cut-off change of its own files keeps the rule of any interruption, as a command does when only files went off.
+    const commands = switches.includes('shell') ? namesOf(['shell']) : new Set<string>()
+    const changes = switches.includes('files') ? namesOf(['write', 'edit']) : new Set<string>()
+    const outside = this.outsideChanges.get(row.id) ?? new Set<string>()
+    const digests = new Map<string, string>()
+    if (changes.size) for (const id of runIds) for (const call of this.host.runs()?.tools.listForRun(id) ?? []) digests.set(call.invocationId, call.argsDigest)
+    const ids = this.store.unknownCalls(row.id).filter((call) => !call.acknowledged && runIds.has(call.runId) &&
+      (commands.has(call.tool) || (changes.has(call.tool) && outside.has(digests.get(call.invocationId) ?? '')))).map((call) => call.invocationId)
     if (ids.length) this.store.acknowledgeUnknownCalls(row.id, ids)
+  }
+
+  /**
+   * An allowed file change outside the bot's own folders (its files folder and scratch) is noted by its arguments'
+   * digest, the tool ledger's key for the call, so a stop because Use files went off can tell it from a change of the
+   * bot's own files (`acknowledgeCut`). One the digest can't be matched to keeps the rule of any interruption.
+   */
+  private noteFileChange(activationId: string, permissions: BotPermissions, call: NormalisedCall): void {
+    if (call.kind !== 'builtin' || (call.tool !== 'write' && call.tool !== 'edit') || call.own) return
+    const scratch = permissions.workspace?.scratch
+    if (!scratch) return
+    const own = [scratch, ...(permissions.workspace?.files !== undefined ? [permissions.workspace.files] : [])]
+    const paths = BOT_PATH_ARGUMENTS.map((key) => call.args[key]).filter((value): value is string => typeof value === 'string')
+    const outside = paths.some((path) => {
+      try {
+        assertInsideRoots(own, path, scratch)
+        return false
+      } catch {
+        return true
+      }
+    })
+    if (!outside) return
+    const noted = this.outsideChanges.get(activationId) ?? new Set<string>()
+    noted.add(toolArgsDigest(call.args))
+    this.outsideChanges.set(activationId, noted)
   }
 
   private collectUnknownCalls(row: BotActivationRow): void {
@@ -4867,6 +4934,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private settleConsult(row: BotActivationRow, dispatch: BotDispatchRow, run: RunRecord, outcome: { text?: string }, fromExecutor: boolean): void {
     const key = `${row.id}:${dispatch.n}`
     this.liveRuns.delete(run.runId)
+    const main = this.live.get(row.id)
+    if (main?.n === dispatch.mainN) main.consultPowers.delete(dispatch.n)
     // The executor's settle carries the final message; the terminal event settles one it never ran.
     if (!fromExecutor && this.executing.has(key)) return
     this.executing.delete(key)
@@ -4926,6 +4995,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!ENDED_ACTIVATION_STATUSES.has(row.status)) return
     this.refusedAsks.delete(row.id)
     this.limitCuts.delete(row.id)
+    this.outsideChanges.delete(row.id)
     this.roomKeys.delete(row.id)
     this.carried.delete(row.id)
     this.offeredNotes.delete(row.id)
@@ -6433,6 +6503,8 @@ function isJournalFailure(error: unknown): boolean {
 
 /** Why an activation stopped, in plain words for its chat; never a provider's own message (it may name a model). */
 function failureText(reason: string): string {
+  // A runtime that can't run the bot's work says why in the bot's own words (a Codex whose tools Mousse hasn't checked).
+  if (isCodexBotRefusal(reason)) return reason
   switch (reason) {
     case 'bot_grant_revoked': return 'My permissions changed, so I stopped.'
     case 'bot_context_failed': return 'I couldn\'t read my notes, so I stopped. Try again.'

@@ -20,6 +20,7 @@ import { BOT_COMPUTER_OPEN, BOT_COMPUTER_SHUT, BOT_OFF_HERE_MARK, type BotComput
 import type { BotManifest } from '../../src/shared/bots/personal/definition'
 import { BOT_BROWSER_PERMISSION, botStarterManifest } from '../../src/shared/bots/personal/manifest'
 import { checkMessage } from '../../src/shared/bots/personal/walls'
+import { toolArgsDigest } from '../../src/mms/run/tools/argsDigest'
 import { appToolRegistry, appTurn, fakeAppToolHost } from '../run/appToolsFixture'
 import { delegationFixture } from '../run/delegationFixture'
 import { botFixture, chatOf, createBot, finish, flush, payloadOf, start, type BotFixture } from './botFixture'
@@ -428,7 +429,7 @@ describe('a bot on this computer', () => {
     f.bots.computerLimitChanged()
     expect(stopped()).toBe(true)
     expect(chatTurn.prepared.authority.time.signal.aborted).toBe(false)
-    expect(chatOf(f, botId).filter((message) => message.kind === 'notice').at(-1)).toMatchObject({ text: 'Stopped: "run commands" was switched off on this computer. I carry on without it.' })
+    expect(chatOf(f, botId).filter((message) => message.kind === 'notice').at(-1)).toMatchObject({ text: 'Stopped: "run commands" was switched off on this computer.' })
     // The runtime ends the turn as it does at a wall; the work goes on in its next turn, without commands. The command
     // the switch cut off holds nothing up: the next turn is told it was interrupted.
     await finish(f, work.payload, 'interrupted', { outcome: { interruptedBy: 'bot_wall' } })
@@ -459,6 +460,72 @@ describe('a bot on this computer', () => {
     f.bots.computerLimitChanged()
     await finish(f, work.payload, 'interrupted', { outcome: { interruptedBy: 'bot_wall' } })
     expect(f.store.activation(work.id)).toMatchObject({ status: 'paused', endReason: 'unknown_calls' })
+  })
+
+  /** The bot's published definition gains a context thread, so its turns can consult it. */
+  function withDocsContext() {
+    const definitions = f.host.definitions
+    const current = definitions.revision(botId, f.store.registry(botId)!.revision!)!
+    const published = definitions.publishRevision({ ...current, context: [{ key: 'docs', title: 'Docs expert', agent: { instructions: 'You know the docs.' }, model: { mode: 'auto', depth: 'normal' } }] })
+    f.store.setPublished(botId, published.revision!)
+  }
+
+  it('commands switched off: a consult that holds them is stopped with its chat turn, which holds none, and the command it started holds nothing up', async () => {
+    await allowAll()
+    withDocsContext()
+    const turn = await chat('What does the doc say?', 'm1')
+    const stopped = () => turn.prepared.authority.time.signal.aborted
+    expect(turn.prepared.policy.tools!.allow).not.toContain('bash')
+    // Off and on again before any consult: the chat turn holds no commands, so nothing stops.
+    limit = { ...limit, shell: false }
+    f.bots.computerLimitChanged()
+    limit = { ...limit, shell: true }
+    f.bots.computerLimitChanged()
+    expect(stopped()).toBe(false)
+    // The consult starts now, with commands, and runs one.
+    const asked = turn.prepared.authority.consult!({ context: 'docs', question: 'What does it say?' })
+    void asked.catch(() => undefined)
+    await flush()
+    const consultN = f.store.dispatches(turn.activation.id).find((dispatch) => dispatch.kind === 'consult')!.n
+    const consult = await start(f, turn.activation.id, consultN)
+    expect(consult.prepared.authority.check(command('ls'))).toEqual({ ok: true })
+    f.runs.tools.start({ invocationId: 'inv-consult-bash', runId: consult.payload.runId, attemptId: f.runs.getRun(consult.payload.runId)!.activeAttemptId!, tool: 'bash', argsDigest: 'd', now: 'n', idempotent: false })
+    // Off again: the consult, and its turn with it, stop at once.
+    limit = { ...limit, shell: false }
+    f.bots.computerLimitChanged()
+    expect(consult.prepared.authority.time.signal.aborted).toBe(true)
+    expect(stopped()).toBe(true)
+    expect(chatOf(f, botId).filter((message) => message.kind === 'notice').at(-1)).toMatchObject({ text: 'Stopped: "run commands" was switched off on this computer.' })
+    await finish(f, consult.payload, 'interrupted', { outcome: { interruptedBy: 'bot_wall' } })
+    await finish(f, turn.payload, 'interrupted', { outcome: { interruptedBy: 'bot_wall' } })
+    // The consult's cut-off command was the switch's: the chat goes on in a new turn, told it was interrupted.
+    expect(f.store.activation(turn.activation.id)!.status).toBe('running')
+    const next = await start(f, turn.activation.id, f.store.lastMainDispatch(turn.activation.id)!.n)
+    expect(next.prepared.prompt).toMatch(/switched off on this computer while you worked.*Interrupted tool calls .*bash \(consult run/s)
+    await finish(f, next.payload, 'completed', { text: 'Here is what I know.' })
+  })
+
+  // Use files off clears only a cut-off file change it took away: one outside the bot's own folders. The rest keep the
+  // rule of any interruption and wait for the owner.
+  it.each([
+    ['a change outside the bot\'s folders', 'write', 'outside', false],
+    ['a change of the bot\'s own files', 'write', 'own', true],
+    ['a change whose arguments differ from the one allowed', 'write', 'other', true],
+    ['a command (Run commands is still on)', 'bash', 'outside', true]
+  ] as const)('file access switched off: %s cut off by the stop', async (_name, tool, where, holds) => {
+    await allowAll()
+    const work = await run('w1')
+    const outside = join(f.base, 'notes.md')
+    const own = join(f.profile, 'bots', 'files', botId, 'list.md')
+    for (const path of [outside, own]) expect(work.prepared.authority.check(write(path))).toEqual({ ok: true })
+    const args = where === 'outside' ? { path: outside } : where === 'own' ? { path: own } : { path: outside, content: 'x' }
+    f.runs.tools.start({ invocationId: 'inv-cut', runId: work.payload.runId, attemptId: f.runs.getRun(work.payload.runId)!.activeAttemptId!, tool, argsDigest: toolArgsDigest(tool === 'bash' ? { command: 'ls' } : args), now: 'n', idempotent: false })
+    limit = { ...limit, files: false }
+    f.bots.computerLimitChanged()
+    expect(work.prepared.authority.time.signal.aborted).toBe(true)
+    await finish(f, work.payload, 'interrupted', { outcome: { interruptedBy: 'bot_wall' } })
+    if (holds) expect(f.store.activation(work.id)).toMatchObject({ status: 'paused', endReason: 'unknown_calls' })
+    else expect(f.store.activation(work.id)!.status).toBe('running')
   })
 
   it('a turn that finished before the stop reached it is done, with nothing carried on', async () => {
