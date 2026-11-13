@@ -78,7 +78,7 @@ The chat turn hands work off with `work_start({ title, brief })`.
 
 - A bot never asks before the owner wants something. The creation turn's prompt no longer asks for permissions. An `escalate` in an activation with no owner request (the creation turn) is answered "Ask when the owner wants something that needs it", and no card is made.
 - What a bot already holds never raises a card: the neutral web tools are found in `appTools`.
-- An ask for an MCP tool in the chat is refused at once, as in a run, because no bot can hold one.
+- An ask for an MCP tool names its server: one ask per server, raised from the chat as a wall or from a run as an ask. MCP tools are work's, like the web and the browser: a chat turn is not offered them and hands the job off. A server or tool that is not set up here is refused at once, with no card (`docs/bots.md`, "Use your MCP tools").
 - The bot's own files folder, memory, schedules, reminders and work need no permission, and the instructions say so.
 - Mousse's own data stays closed whatever the grant.
 
@@ -107,6 +107,6 @@ The base instructions are rewritten around the front desk:
 
 ## Not in this change
 
-- MCP servers for bots.
+- MCP servers for bots (they came later: `docs/bots.md`, "Use your MCP tools").
 - A compaction inside a Codex turn: Codex reports none that Mousse reads, so a bot on Codex keeps its system text through one but gets its memory pack again only with its next dispatch (Claude Code and Pi get it at once; see `docs/bots.md`, "What a compaction cannot remove").
 - Grant defaults (for example the bot's own browser without an ask). These are worth a separate look once this lands.

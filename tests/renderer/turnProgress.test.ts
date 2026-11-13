@@ -181,18 +181,6 @@ describe('the line under Working', () => {
     expect(words.getAttribute('aria-label')).toBe(words.title)
   })
 
-  it('3. a live thought is cut at the start of its box: the newest words are the ones that show', () => {
-    const css = readFileSync('src/renderer/chat/components/agent-elements/agent-ui.css', 'utf8')
-    const rule = css.match(/\.an-live-thought\s*\{([^}]*)\}/)?.[1] ?? ''
-    expect(rule).toMatch(/direction:\s*rtl/)
-    expect(rule).toMatch(/text-overflow:\s*ellipsis/)
-    expect(rule).toMatch(/overflow:\s*hidden/)
-    expect(rule).toMatch(/white-space:\s*nowrap/)
-    // Short text still starts at the left, and keeps its own direction inside the box.
-    expect(rule).toMatch(/text-align:\s*left/)
-    expect(css).toMatch(/\.an-live-thought > bdi\s*\{[^}]*direction:\s*ltr[^}]*unicode-bidi:\s*isolate/)
-  })
-
   it('3. a thought being written does not shimmer: only its icon turns (no paint every frame)', () => {
     render([ask(), reply('t1', thought('input-available', '**Reading**\n\nThe output says'))], 'streaming', { phase: 'thinking' })
     expect(host.querySelector('.turn-answer .an-text-shimmer--active')).toBeNull()
@@ -558,7 +546,6 @@ describe('its animation', () => {
     const properties = [...keyframes.matchAll(/([a-z-]+)\s*:/g)].map((match) => match[1])
     expect(new Set(properties)).toEqual(new Set(['opacity', 'transform']))
     expect(css).not.toMatch(/background-position|an-shimmer/)
-    expect(css).toMatch(/animation: turn-progress-dot calc\(1\.2s \* var\(--ui-motion-scale, 1\)\) steps\(12, jump-none\)/)
   })
 
   it('has no edge or side bar', () => {

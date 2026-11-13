@@ -104,7 +104,9 @@ function recordingQuery(seen: Seen[], state: { hold?: boolean; closed?: number }
         state.closed = (state.closed ?? 0) + 1
         release()
       },
-      interrupt: async () => release()
+      interrupt: async () => release(),
+      // A turn's MCP servers go over Claude Code's input (#358).
+      setMcpServers: async (servers: Record<string, unknown>) => ({ added: Object.keys(servers), removed: [], errors: {} })
     })
   }
 }
@@ -113,6 +115,7 @@ interface FixtureOptions {
   base?: NodeJS.ProcessEnv
   /** The entry's own variables and launch arguments. */
   config?: Partial<InstanceConfig>
+  /** Values of a user MCP server's environment (they go with the server, never in Claude Code's own). */
   integrationEnv?: Record<string, string>
   check?: ClaudeApiKeyChecker
   builtIn?: boolean
@@ -140,7 +143,7 @@ function fixture(options: FixtureOptions = {}) {
   const services: ClaudeSubscriptionProviderService[] = []
   const driver: HarnessDriver = claudeCodeDriver({
     ...(options.resolveSettings ? { resolveSettings: options.resolveSettings } : {}),
-    integrations: () => ({ resolve: async () => ({ mcpServers: {}, proxiedServers: {}, env: { ...options.integrationEnv }, toolRules: {}, warnings: [] }) }),
+    integrations: () => ({ resolve: async () => ({ mcpServers: options.integrationEnv ? { planted: { type: 'stdio' as const, command: 'planted-mcp', env: { ...options.integrationEnv } } } : {}, proxiedServers: {}, toolRules: {}, warnings: [] }) }),
     checkApiKey: async (input) => {
       checks.push({ apiKey: input.apiKey, baseUrl: input.baseUrl })
       return options.check ? options.check(input) : 'accepted'
@@ -367,7 +370,8 @@ describe('Claude Code on an API key', () => {
       }
       // The entry's own tuning is kept; an entry with its own home inherits none of Claude Code's from Mousse.
       if (where === 'entry') for (const entry of seen) expect(entry.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS, entry.path).toBe('4000')
-      expect(turnEnv(seen)?.MY_SETTING).toBe('kept')
+      // An MCP server's values go with that server, over Claude Code's input (#358): none reaches its environment.
+      expect(turnEnv(seen)?.MY_SETTING).toBe(where === 'mcp' ? undefined : 'kept')
       expect(authRuns).toEqual([])
     })
   }

@@ -71,6 +71,21 @@ describe('an open ask', () => {
     await click(button('Not now'))
     expect(onAnswer.mock.calls).toEqual([['allow'], ['not_now']])
   })
+
+  it('an MCP server still loading its tools: Allow is off, Not now works; once filled in, Allow is on and the tools show', async () => {
+    const onAnswer = vi.fn()
+    const loading = ask({ title: 'use your GitHub tools', note: 'GitHub is still starting, so its tools aren\'t listed yet. Allow turns on once they are.', loading: true })
+    act(() => root.render(createElement(BotAsk, { botName: 'Kai', ask: loading, onAnswer })))
+    expect(button('Allow')!.disabled).toBe(true)
+    expect(button('Allow')!.title).toBe('Its tools are still loading')
+    expect(host.querySelector('.ask-card-details')).toBeNull()
+    await click(button('Not now'))
+    expect(onAnswer.mock.calls).toEqual([['not_now']])
+    const filled = ask({ title: 'use your GitHub tools', note: 'GitHub says some of these tools can change things.', details: { summary: '2 tools', items: ['create_issue', 'list_issues'], more: '1 more of GitHub\'s tools can\'t be used by a bot.' } })
+    act(() => root.render(createElement(BotAsk, { botName: 'Kai', ask: filled, onAnswer })))
+    expect(button('Allow')!.disabled).toBe(false)
+    expect([...host.querySelectorAll('.ask-card-details p')].map((element) => element.textContent)).toEqual(['create_issue, list_issues', '1 more of GitHub\'s tools can\'t be used by a bot.'])
+  })
 })
 
 describe('an answered ask', () => {

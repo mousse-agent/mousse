@@ -23,6 +23,7 @@
     "tests/gitServiceWrites.test.ts",
     "tests/guiMmsController.test.ts",
     "tests/harness/claudeLockedProcess.test.ts",
+    "tests/harness/claudeMcpCommandLine.test.ts",
     "tests/harness/agentLock.test.ts",
     "tests/harness/chatgpt/crossProcess.test.ts",
     "tests/harness/chatgpt/storeProcesses.test.ts",

@@ -80,6 +80,8 @@ function fakeQuery(events: unknown[] = []) {
   return Object.assign(generator, {
     close: vi.fn(),
     interrupt: vi.fn(async () => {}),
+    // A turn's MCP servers go over Claude Code's input (#358).
+    setMcpServers: vi.fn(async (servers: Record<string, unknown>) => ({ added: Object.keys(servers), removed: [], errors: {} })),
     supportedModels: vi.fn(async () => [
       { value: 'sonnet', displayName: 'Sonnet', description: 'model' }
     ])

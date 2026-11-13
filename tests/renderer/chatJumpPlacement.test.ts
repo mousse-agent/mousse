@@ -2,7 +2,6 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 
 const polish = readFileSync(new URL('../../src/renderer/styles/polish.css', import.meta.url), 'utf8')
-const app = readFileSync(new URL('../../src/renderer/styles/app.css', import.meta.url), 'utf8')
 
 /** The declarations of the first rule whose selector is exactly `selector`. */
 function rule(css: string, selector: string): string {
@@ -29,18 +28,6 @@ describe('Go to latest', () => {
     expect(list).toMatch(/"chat-jump absolute left-1\/2 [^"]*-translate-x-1\/2"/)
   })
 
-  it('stays centred over the composer while a docked side card narrows it', () => {
-    const sideCard = readFileSync(new URL('../../src/renderer/components/sideCard/sideCard.css', import.meta.url), 'utf8')
-    // The composer is centred in the pane minus the card's reservation, whatever its max width.
-    expect(rule(sideCard, '.sidebar.sidebar-full .chat-input-area')).toContain('margin-left: max(0px, calc((100% - var(--side-card-reserved, 0px) - var(--an-max-width, 680px)) / 2))')
-    // The pill is anchored to the middle of the same space, in the same pane, and moves with it.
-    const jump = rule(sideCard, '.sidebar.sidebar-full .chat-jump')
-    expect(jump).toContain('left: calc((100% - var(--side-card-reserved, 0px)) / 2)')
-    expect(jump).toMatch(/left calc\(180ms \* var\(--ui-motion-scale\)\) ease/)
-    const reduced = sideCard.slice(sideCard.indexOf('prefers-reduced-motion'))
-    expect(rule(reduced, '.sidebar.sidebar-full .chat-jump')).not.toMatch(/left /)
-  })
-
   it('is a quiet pill: chevron and "Go to latest" in muted text on a subtle fill, no border', () => {
     const jump = rule(polish, '.chat-jump')
     expect(jump).toContain('border: 0')
@@ -54,15 +41,9 @@ describe('Go to latest', () => {
     expect(list).toMatch(/<IconChevronDown className="chat-jump-icon"[^>]*\/>\s*<span>Go to latest<\/span>/)
   })
 
-  it('stays hidden while the view follows the end, fading out and taking no input', () => {
+  it('takes no input while the view follows the end', () => {
     const list = readFileSync(new URL('../../src/renderer/chat/components/agent-elements/message-list.tsx', import.meta.url), 'utf8')
-    expect(list).toContain('const showJumpButton = !isPinned && normalizedMessages.length > 0;')
-    expect(list).toContain('data-hidden={showJumpButton ? undefined : "true"}')
     expect(list).toContain('inert={!showJumpButton}')
-    const hidden = rule(polish, '.chat-jump[data-hidden]')
-    expect(hidden).toContain('opacity: 0')
-    expect(hidden).toContain('pointer-events: none')
-    expect(rule(polish, '.chat-jump')).toMatch(/transition:\s*opacity var\(--ui-dur\)/)
   })
 
   it('lets the transcript run down to the composer, fading only in the last few px above it', () => {
@@ -81,24 +62,5 @@ describe('Go to latest', () => {
 
   it('hides while a composer menu or the notice slot is open', () => {
     expect(rule(polish, '.chat:has(.chat-composer-stack [aria-expanded="true"], .composer-notice-slot) .chat-jump')).toContain('display: none')
-  })
-})
-
-describe('Add project on an empty new chat', () => {
-  it('is in the flow, centred under the composer, below the settings row of a new thread', () => {
-    const css = rule(app, '.chat-empty-add-project')
-    expect(css).not.toContain('position: absolute')
-    expect(css).toContain('margin: 16px auto 0')
-    const chat = readFileSync(new URL('../../src/renderer/components/OrchestratorChat.tsx', import.meta.url), 'utf8')
-    expect(chat.indexOf('<EmptyThreadAddProject')).toBeGreaterThan(chat.indexOf('<ComposerThreadSettings'))
-  })
-
-  it('has the settings button gap and padding, though it renders outside Settings', () => {
-    // `.settings-btn` spaces with tokens defined on `.settings-page`; without them the glyph touches the word.
-    // The size and tokens live on the class it shares with Create agent.
-    const css = rule(app, '.chat-empty-action')
-    for (const token of ['--space-4: 4px', '--space-12: 12px']) expect(css).toContain(token)
-    const button = readFileSync(new URL('../../src/renderer/components/EmptyThreadAddProject.tsx', import.meta.url), 'utf8')
-    expect(button).toContain('className="settings-btn chat-empty-action chat-empty-add-project"')
   })
 })

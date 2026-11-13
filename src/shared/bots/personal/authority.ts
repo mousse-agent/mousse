@@ -31,8 +31,27 @@ export interface BotThreads {
 export type NormalisedCall =
   | { kind: 'builtin'; tool: NeutralTool; nativeName: string; args: Record<string, unknown>; own?: true }
   | { kind: 'app'; tool: string; args: Record<string, unknown> }
-  | { kind: 'mcp'; server: string; tool: string; args: Record<string, unknown> }
+  /** One of the owner's MCP tools: `server` is the grant's server id (its installation), `serverName` its name for chips. */
+  | { kind: 'mcp'; server: string; tool: string; args: Record<string, unknown>; serverName?: string }
   | { kind: 'skill'; skill: string }
+
+/**
+ * One of the owner's MCP tools a bot's turn is offered: granted, and on a server set up for the whole profile now
+ * (`BotMcp.offered`). Every call of it goes through Mousse, which checks it against the grant before the server sees it.
+ */
+export interface BotMcpTool {
+  /** The name the turn sees: the relay's `<server>__<tool>` on Claude Code and Codex. */
+  name: string
+  /** The proxied name (`McpManager`'s provider name), which Pi's turn sees and every call runs by. */
+  providerName: string
+  /** The grant's pair: the server's id (its installation) and the tool's own name. */
+  server: string
+  tool: string
+  serverName: string
+  /** The server's own description, framed as third-party text (never instructions). */
+  description: string
+  inputSchema: Record<string, unknown>
+}
 
 /**
  * Why a call stops at a wall: the dispatch ends and the owner is asked. `waiting`: the activation
@@ -50,7 +69,7 @@ export type WallReason =
    */
   | { kind: 'path_form'; tool: string; path: string; home?: string; full?: string }
   | { kind: 'skill'; skill: string }
-  | { kind: 'mcp'; server: string; tool: string }
+  | { kind: 'mcp'; server: string; tool: string; serverName?: string }
   | { kind: 'waiting' }
   | { kind: 'policy_unenforceable'; tool: string; missing: string[] }
   /** The grant this turn runs under was revoked or replaced since the turn started. */
@@ -99,6 +118,11 @@ export interface BotAuthority {
   skills: ReadonlySet<string>
   /** Granted MCP tools, as `<server id>::<tool name>`. */
   mcp: ReadonlySet<`${string}::${string}`>
+  /**
+   * The granted MCP tools this turn is offered, on servers set up now (none in a chat turn: they are work's). Read when
+   * the turn starts; every call is checked again against `mcp` and the server as it is then.
+   */
+  mcpTools?: readonly BotMcpTool[]
   /**
    * The roots the bot may touch and how, and the activation's private scratch folder; null when it
    * may touch no folder at all. With file access the roots are the tops of the file system and

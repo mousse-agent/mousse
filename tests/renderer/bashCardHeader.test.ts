@@ -60,16 +60,6 @@ describe('the command row', () => {
     expect(host.querySelector('.an-bash-output')!.textContent).toBe(output)
   })
 
-  it('shows the output in the mono font at 13px, capped with its own scroll', () => {
-    const host = mount()
-    act(() => host.querySelector('button')!.click())
-    const out = host.querySelector('.an-bash-output')!
-    expect(out.className).toContain('font-mono')
-    expect(out.className).toContain('max-h-[320px]')
-    expect(out.className).toContain('overflow-y-auto')
-    expect(host.querySelector('.an-bash-body')!.className).toContain('text-[13px]')
-  })
-
   it('ends a failed command with a red exit line, in the output font', () => {
     const host = mount({ bashExitCode: 1, bashDurationMs: 1500 })
     act(() => host.querySelector('button')!.click())

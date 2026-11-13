@@ -19,7 +19,7 @@ export function wallMessage(wall: WallReason): string {
         ? `Give ${wall.path} as a full path, without ~ or variables. Your owner's home folder is ${wall.home}.`
         : `Give ${wall.path} as a full path, without ~ or variables.`
     case 'skill': return `This bot is not allowed to use the skill ${wall.skill}.`
-    case 'mcp': return `This bot is not allowed to use the ${wall.server} tool ${wall.tool}.`
+    case 'mcp': return `This bot is not allowed to use the ${wall.serverName ?? 'MCP'} tool ${wall.tool}.`
     case 'policy_unenforceable': return `This bot cannot use ${wall.tool} on this runtime.`
     case 'revoked': return 'This bot\'s permissions were withdrawn, so it cannot use tools now.'
     case 'ended': return 'This bot\'s run has ended, so it cannot use tools now.'

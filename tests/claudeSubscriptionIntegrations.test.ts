@@ -13,6 +13,7 @@ import {
   claudeMcpToolBlocked,
   claudeProxiedMcpServer
 } from '../src/mms/harness/vendors/claude/integrations'
+import { resolveEnvValue } from '../src/mms/integrations/secrets'
 
 const roots: string[] = []
 afterEach(() => {
@@ -64,7 +65,7 @@ function resolver(options: {
 }
 
 describe('Claude Subscription integrations', () => {
-  it('attaches enabled MCP servers with their secrets moved into the environment', async () => {
+  it('attaches enabled MCP servers with their secrets resolved, and puts none of them in Claude Code\'s environment', async () => {
     const { resolver: claude, seen } = resolver({ servers: [
       server({ name: 'files', command: 'files-mcp', args: ['--root', '.'], env: { API_KEY: '${secret:KEY}', EMPTY: '${env:MISSING}' } }),
       server({ name: 'web search', transport: 'http', url: 'https://example.test/mcp', headers: { Authorization: 'Bearer literal-token' } }),
@@ -72,15 +73,26 @@ describe('Claude Subscription integrations', () => {
     ] })
     const result = await claude.resolve('/project')
     expect(seen).toEqual(['/project'])
+    // The values as they resolved: the servers go to Claude Code over its input (#358), so no secret is put in its
+    // environment for a `${VAR}` reference, where the commands it runs could read it. An empty value is left out.
     expect(result.mcpServers).toEqual({
-      files: { type: 'stdio', command: 'files-mcp', args: ['--root', '.'], env: { API_KEY: '${MOUSSE_MCP_VALUE_0}' } },
-      web_search: { type: 'http', url: 'https://example.test/mcp', headers: { Authorization: '${MOUSSE_MCP_VALUE_1}' } },
+      files: { type: 'stdio', command: 'files-mcp', args: ['--root', '.'], env: { API_KEY: 'resolved-key' } },
+      web_search: { type: 'http', url: 'https://example.test/mcp', headers: { Authorization: 'Bearer literal-token' } },
       legacy: { type: 'sse', url: 'https://example.test/sse' }
     })
-    expect(result.env).toEqual({ MOUSSE_MCP_VALUE_0: 'resolved-key', MOUSSE_MCP_VALUE_1: 'Bearer literal-token' })
-    expect(JSON.stringify(result.mcpServers)).not.toMatch(/resolved-key|literal-token/)
+    expect(result).not.toHaveProperty('env')
+    expect(JSON.stringify(result.mcpServers)).not.toContain('MOUSSE_MCP_VALUE')
     expect(result.warnings).toEqual([])
     expect(result.pluginPath).toBeUndefined()
+  })
+
+  it('reads a value once: a secret whose text holds `${NAME}`, and a `${NAME:-x}` Mousse does not resolve, stay as text (#358)', () => {
+    const secrets = { resolveEnv: (value: string) => value, resolveSecretRef: (ref: string) => (ref === 'KEY' ? 'pa$$-${HOME}-${ANTHROPIC_API_KEY}' : undefined) }
+    const env = { HOME: '/home/me', ANTHROPIC_API_KEY: 'sk-fake-358' }
+    expect(resolveEnvValue('${secret:KEY}', env, secrets)).toBe('pa$$-${HOME}-${ANTHROPIC_API_KEY}')
+    expect(resolveEnvValue('${ANTHROPIC_API_KEY:-x}', env, secrets)).toBe('${ANTHROPIC_API_KEY:-x}')
+    // The forms Mousse does read are read as before.
+    expect(resolveEnvValue('${HOME}|$HOME|%HOME%|${env:HOME}|${NOPE}|a$HOME', env)).toBe('/home/me|/home/me|/home/me|/home/me||a$HOME')
   })
 
   it('leaves out servers Claude cannot run and never takes the Mousse server name', async () => {
@@ -118,7 +130,7 @@ describe('Claude Subscription integrations', () => {
   it('attaches nothing when integrations are off for the main agent', async () => {
     const root = temp()
     const { resolver: claude } = resolver({ mainAgent: false, servers: [server({ name: 'files', command: 'x' })], skills: [skill(root, 'review')] })
-    expect(await claude.resolve()).toEqual({ mcpServers: {}, proxiedServers: {}, env: {}, toolRules: {}, warnings: [] })
+    expect(await claude.resolve()).toEqual({ mcpServers: {}, proxiedServers: {}, toolRules: {}, warnings: [] })
   })
 
   it('reaches a server that signs in with OAuth through Mousse\'s own connection', async () => {
@@ -150,7 +162,6 @@ describe('Claude Subscription integrations', () => {
     ] })
     const result = await claude.resolve('/project')
     expect(result.mcpServers).toEqual({})
-    expect(result.env).toEqual({})
     expect(Object.keys(result.proxiedServers)).toEqual(['linear'])
     expect(mcpManager.getEnabledToolsForServer).toHaveBeenCalledWith('install-1', '/project', actor)
     expect(result.warnings).toEqual([

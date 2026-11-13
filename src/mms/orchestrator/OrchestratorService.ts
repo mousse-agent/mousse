@@ -91,6 +91,7 @@ import { AUTOMATION_MANAGER_INSTRUCTIONS } from '../automations/automationManage
 import { questionApproval } from '../run/mcp/appTools/quickActions'
 import { RelayCatalog, relayTurnContext } from '../run/mcp/relay/catalog'
 import { RelayHandler } from '../run/mcp/relay/handler'
+import { BotMcp } from '../bots/mcp/BotMcp'
 import { mousseCallAsksPerson } from '../run/mcp/attachment'
 import { APPLET_GENERATION_GUIDANCE } from '../../shared/appletGuidance'
 import { defaultIntegrationActor } from '../../shared/integrations/actor'
@@ -1784,6 +1785,7 @@ export class OrchestratorService extends EventEmitter {
   /** The MCP relay's catalogue and handler (SPEC §15.5), built on first use; none without an MCP manager. */
   private relayCatalogImpl?: RelayCatalog
   private relayHandlerImpl?: RelayHandler
+  private botMcpImpl?: BotMcp
   /** The app-tool context of each running turn (PR 2 §2), for the Mousse MCP server's calls. */
   readonly appToolTurns = new AppToolTurns()
   /** The definition runs of each thread, for its public Stop (`stopDefinitionRuns`). */
@@ -3694,8 +3696,8 @@ export class OrchestratorService extends EventEmitter {
       ...(input.onPublishApplet ? { onPublishApplet: input.onPublishApplet } : {}),
       // A run nobody answers: Mousse tools that wait for the user are refused, on every transport.
       ...(input.approvals === 'never' ? { approvals: 'never' as const } : {}),
-      // A bot lists and loads only the skills it was granted.
-      ...(registered.bot ? grantedSkills(skills, registered.bot.skills) : skills)
+      // A bot lists and loads only the skills it was granted, and an MCP result's images reach it only on a model that sees them.
+      ...(registered.bot ? { ...grantedSkills(skills, registered.bot.skills), toolImages: this.harness.catalog.toolImages(input.instanceId, input.model) } : skills)
     }) ?? registered
     const descriptor = typeof turn.mode === 'string' ? this.modeRegistry.getModeSync(turn.mode, { projectPath: turn.projectPath }) : undefined
     // Agent and Plan run natively in the runtime; another mode's own instructions go into the preamble.
@@ -3774,8 +3776,8 @@ export class OrchestratorService extends EventEmitter {
       turns: this.appToolTurns,
       bots: () => this.botAppTools?.bots,
       botMemory: () => this.botAppTools?.memory,
-      // The user's own MCP servers, proxied for Pi's agent (`userMcp: 'proxy'`).
-      ...(this.mcpManager ? { options: { userMcp: userMcpProxy(this.mcpManager) } } : {})
+      // The user's own MCP servers, proxied for Pi's agent (`userMcp: 'proxy'`), and a bot's granted ones on Pi.
+      ...(this.mcpManager ? { options: { userMcp: userMcpProxy(this.mcpManager), ...(this.botMcp() ? { botMcp: this.botMcp()! } : {}) } } : {})
     }).registry
     return this.mcpRegistry
   }
@@ -3783,8 +3785,25 @@ export class OrchestratorService extends EventEmitter {
   /** The MCP relay's catalogue of the user's servers' tools; undefined without an MCP manager. */
   relayCatalog(): RelayCatalog | undefined {
     if (!this.mcpManager) return undefined
-    this.relayCatalogImpl ??= new RelayCatalog({ manager: this.mcpManager, settings: () => this.settingsStore.get().integrations.mcp })
+    this.relayCatalogImpl ??= new RelayCatalog({
+      manager: this.mcpManager,
+      settings: () => this.settingsStore.get().integrations.mcp,
+      // Personal bots reach the profile's own servers through Mousse whatever the threads' relay settings.
+      listProfile: () => this.botMcpImpl !== undefined
+    })
     return this.relayCatalogImpl
+  }
+
+  /**
+   * Personal bots' use of the owner's MCP servers (`BotMcp`): the profile's own servers, through the relay catalogue,
+   * each call on the owner's connection after the bot's grant allowed it. Undefined without an MCP manager.
+   */
+  botMcp(): BotMcp | undefined {
+    const catalog = this.relayCatalog()
+    const manager = this.mcpManager
+    if (!catalog || !manager) return undefined
+    this.botMcpImpl ??= new BotMcp({ catalog, manager, enabled: () => this.settingsStore.get().integrations.mcp.enabled })
+    return this.botMcpImpl
   }
 
   /** What the Mousse MCP server serves at its relay path; undefined without an MCP manager. */
@@ -3801,7 +3820,10 @@ export class OrchestratorService extends EventEmitter {
       readOnlyThread: host.readOnlyThread,
       permissionModeFor: host.permissionModeFor,
       askApproval: host.askApproval,
-      toolLedger: host.toolLedger
+      toolLedger: host.toolLedger,
+      // A bot's turn sees only its offered tools, each call held to its grant.
+      botOf: (credential) => this.appToolTurns.get(credential.runId)?.bot,
+      ...(this.botMcp() ? { botMcp: this.botMcp()! } : {})
     })
     return this.relayHandlerImpl
   }
@@ -12546,8 +12568,10 @@ export class OrchestratorService extends EventEmitter {
       return response
     }
 
+    // Applets published by tool join the turn's last reply as fences, so they publish with it.
+    const appletFences = stagedApplets.map(source => '\n\n```mousse-applet\n' + JSON.stringify(source) + '\n```').join('')
     if (mode === 'plan') {
-      const planMarkdown = (stripActionBlocks(assistantText) || assistantText.trim() || 'No plan generated.') + stagedApplets.map(source => '\n\n```mousse-applet\n' + JSON.stringify(source) + '\n```').join('')
+      const planMarkdown = (stripActionBlocks(assistantText) || assistantText.trim() || 'No plan generated.') + appletFences
       if (this.activeAssistantMessageId) {
         const streamingId = this.activeAssistantMessageId
         this.activeAssistantMessageId = null
@@ -12584,14 +12608,15 @@ export class OrchestratorService extends EventEmitter {
     // Vendor runtimes act through their own tools; `mousse-actions` blocks are a pi-loop protocol.
     const parsedActions: ReturnType<typeof parseActions> = []
     const actions = filterActionsForChatMode(parsedActions, mode)
-    const displayText = stripActionBlocks(assistantText) + stagedApplets.map(source => '\n\n```mousse-applet\n' + JSON.stringify(source) + '\n```').join('')
+    const replyOnlyText = stripActionBlocks(assistantText)
+    const displayText = replyOnlyText + appletFences
     // A tool call ends a reply row, so a turn's notes before its calls already have rows of their
     // own: the row that ends the turn (the open one, else the last closed one) holds the rest.
     const shownReplies = this.transcript.closedReplies().map((reply) => stripActionBlocks(reply.content))
-    const finalText = unshownReplyText(
-      displayText,
-      this.activeAssistantMessageId ? shownReplies : shownReplies.slice(0, -1)
-    )
+    const earlierReplies = this.activeAssistantMessageId ? shownReplies : shownReplies.slice(0, -1)
+    const finalText = unshownReplyText(displayText, earlierReplies)
+    // The streamed row never held the applet fences, so it is matched on the reply text alone.
+    const finalReplyText = unshownReplyText(replyOnlyText, earlierReplies)
 
     // A turn Send now cut before the model wrote anything shows no reply: the steer's answer, or the steer running
     // again, comes next. "Done." would read as if the turn had finished with nothing to say.
@@ -12607,12 +12632,13 @@ export class OrchestratorService extends EventEmitter {
       this.activeAssistantMessageId = null
     } else if (
       this.lastCompletedAssistantMessageId &&
-      stripActionBlocks(this.lastCompletedAssistantContent) === finalText
+      stripActionBlocks(this.lastCompletedAssistantContent) === finalReplyText
     ) {
       // Compare stripped-to-stripped: the streamed snapshot is raw (often
-      // trailing whitespace / action fences) while displayText is stripped.
-      // A raw === stripped comparison fails on whitespace alone and appends
-      // a visually identical twin message.
+      // trailing whitespace / action fences) while the reply text is stripped.
+      // A raw === stripped comparison fails on whitespace alone, and a match
+      // that counted the applet fences never succeeds; either appends a
+      // visually identical twin message.
       this.updateStreamingAssistantMessage(
         this.lastCompletedAssistantMessageId,
         finalText,

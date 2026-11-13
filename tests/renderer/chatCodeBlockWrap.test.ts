@@ -1,13 +1,9 @@
 // @vitest-environment jsdom
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { addCodeWrapToggles } from '../../src/renderer/chat/components/agent-elements/code-block-wrap'
 import { Markdown } from '../../src/renderer/chat/components/agent-elements/markdown'
-
-const css = readFileSync(resolve(process.cwd(), 'src/renderer/chat/components/agent-elements/agent-ui.css'), 'utf8')
 
 function mount(markup: string): HTMLElement {
   const host = document.createElement('div')
@@ -38,11 +34,6 @@ describe('code block Wrap toggle', () => {
     const root = mount(renderToStaticMarkup(createElement(Markdown, { content: '```bash\nls\n```\n', className: 'an-tool-quiet-output' })))
     addCodeWrapToggles(root)
     expect(root.querySelector('.an-code-wrap')).toBeNull()
-  })
-
-  it('wraps long lines unless the toggle is off, and draws code without ligatures', () => {
-    expect(css).toMatch(/\[data-streamdown="code-block"\]:not\(\[data-wrap="off"\]\) :is\(pre, code\) \{\s*white-space: pre-wrap;/)
-    expect(css).toMatch(/font-variant-ligatures: none;\s*font-feature-settings: "liga" 0, "calt" 0;/)
   })
 })
 

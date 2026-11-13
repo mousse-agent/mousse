@@ -190,6 +190,17 @@ describe('About this bot', () => {
     expect(rows('CAN USE')).toEqual(['Use the pdf skill'])
   })
 
+  it('marks an MCP server that gives nothing now with what is true of it, keeping Remove', async () => {
+    fake.details.b1!.permissions = [
+      { id: 'fp3', title: 'use your GitHub tools', note: 'GitHub is switched off in Settings → Skills & MCP, so this gives nothing while it is. Switch it on there to use it again, or remove it.', grantedAt: '2026-11-06T10:00:00.000Z', mark: 'Switched off' },
+      // An older service sends `gone` only.
+      { id: 'fp4', title: 'use your Notes tools', note: 'Notes isn\'t set up in Mousse any more.', grantedAt: '2026-11-06T10:00:00.000Z', gone: true }
+    ]
+    await show()
+    expect([...host.querySelectorAll('[data-testid="bot-about-gone"]')].map((element) => element.textContent)).toEqual(['Switched off', 'Gone from Mousse'])
+    expect(button('Remove use your GitHub tools')).toBeDefined()
+  })
+
   it('lists its runs and removes one', async () => {
     await show()
     expect(rows('RUNS')).toEqual(['Every weekday · 09:00'])

@@ -24,6 +24,7 @@ In every tier:
 - Run the tier's checks once. Record the tested commit, the commands and the results. Checkpoints, the PR, the merge and session end reuse that record while the code is unchanged; after a later code commit, rerun only the tests that commit affects.
 - Do not run hosted CI's checks locally as a precaution, and do not wait for hosted CI. A build needed to launch the app for a direct check is fine.
 - Interactive UI logic still runs its tests; screenshots show appearance, not behavior.
+- Before writing or changing tests, follow [test-the-claim](../test-the-claim/SKILL.md). It also adds one step to the checks above: run the test files that mention the copy, class, default or list entry the change altered, found with `rg` in `tests/`.
 
 ## Establish the scope
 

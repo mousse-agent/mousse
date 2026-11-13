@@ -26,7 +26,7 @@ export interface BotChipCall {
 
 /** What a call does, for its words and how it rolls up. */
 type ChipKind =
-  | 'search' | 'fetch' | 'browse' | 'read' | 'change' | 'save' | 'draft' | 'lookback' | 'consult' | 'skill' | 'tool' | 'schedules'
+  | 'search' | 'fetch' | 'browse' | 'read' | 'change' | 'save' | 'draft' | 'lookback' | 'consult' | 'skill' | 'tool' | 'mcp' | 'schedules'
   | 'schedule' | 'unschedule' | 'remember' | 'forget' | 'depth' | 'profile' | 'model'
   | 'work' | 'work_stop' | 'work_note' | 'remind' | 'unremind' | 'work_look'
 
@@ -159,9 +159,10 @@ function classify(tool: string, input: unknown, ctx: BotChipContext): Classified
       return { kind: 'skill', icon: 'think', live: 'using a skill', ...(skill ? { detail: shortChipText(skill, 30) } : {}) }
     }
     case 'list_skills': return { kind: 'skill', icon: 'think', live: 'looking at its skills' }
+    // One of the owner's MCP tools: the server's name ("using GitHub"), never the tool or its arguments.
     case 'mcp': {
       const server = str(args.server)
-      return { kind: 'tool', icon: 'think', live: 'using a tool', ...(server ? { detail: shortChipText(server, 30) } : {}) }
+      return { kind: 'mcp', icon: 'think', live: server ? 'using' : 'using a tool', ...(server ? { detail: shortChipText(server, 30) } : {}) }
     }
     case 'shell': return { kind: 'tool', icon: 'think', live: 'running a command' }
     // The chat's work and reminders (docs/plans/bot-always-free.md).
@@ -257,6 +258,7 @@ function groupChip(kind: ChipKind, icon: BotChipIcon, calls: readonly Classified
     case 'consult': return chip('checked with', listed(details))
     case 'skill': return chip(details.length ? 'used a skill' : 'looked at its skills', listed(details))
     case 'tool': return chip(details.length ? 'used a tool' : 'ran a command', listed(details))
+    case 'mcp': return details.length ? chip('used', listed(details)) : chip('used a tool')
     case 'unschedule': {
       const done = all.filter((call) => succeeded(call.result)).length
       return done ? chip(done === 1 ? 'removed a schedule' : `removed ${done} schedules`) : null

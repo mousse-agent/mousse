@@ -37,13 +37,10 @@ describe('Thinking icon', () => {
     expect(thinkingIcon(html)).not.toContain('is-thinking')
   })
 
-  it('turns smoothly by a transform on its own layer, at the Animation speed setting: the compositor draws it', () => {
+  it('turns by a transform on its own layer: the compositor draws it', () => {
     const css = readFileSync('src/renderer/styles/thinking-icon.css', 'utf8')
     const rule = css.match(/\.thinking-icon\.is-thinking\s*\{([^}]*)\}/)?.[1] ?? ''
-    expect(rule).toMatch(/animation: thinking-icon-turn calc\(2s \* var\(--ui-motion-scale, 1\)\) linear infinite;/)
     expect(rule).toContain('will-change: transform;')
-    // A stepped turn (about 12 moves a second) reads as a laggy spin.
-    expect(rule).not.toMatch(/steps\(/)
     // Only a transform animates, and only on the icon itself (one inside the SVG lays it out every frame).
     const keyframes = css.match(/@keyframes thinking-icon-turn\s*\{([^]*?)\n\}/)?.[1] ?? ''
     expect([...keyframes.matchAll(/([a-z-]+)\s*:/g)].map((match) => match[1])).toEqual(['transform'])

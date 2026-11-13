@@ -15,6 +15,10 @@ export interface AskCardProps {
   /** The line as plain text, for the row's tooltip and labels. */
   lineText: string
   note?: string
+  /** What Allow grants, by name, on one line the person can open (an MCP server's tools), and what else it can't grant. */
+  details?: { summary: string; items: string[]; more?: string }
+  /** Allow is off, with this as its tooltip (an MCP server whose tools are still loading); Not now still works. */
+  allowOff?: string
   /** An answered ask shows `answered` as its one line. */
   answered?: { text: string; allowed: boolean }
   layout?: 'card' | 'row'
@@ -25,7 +29,7 @@ export interface AskCardProps {
   label?: string
 }
 
-export function AskCard({ line, lineText, note, answered, layout = 'card', onAnswer, row, label }: AskCardProps) {
+export function AskCard({ line, lineText, note, details, allowOff, answered, layout = 'card', onAnswer, row, label }: AskCardProps) {
   const [busy, setBusy] = useState(false)
   const answer = async (choice: 'allow' | 'not_now') => {
     setBusy(true)
@@ -41,16 +45,21 @@ export function AskCard({ line, lineText, note, answered, layout = 'card', onAns
         <span className="automation-row-name">{row.name}</span>
         <span className="automation-row-meta"><span className="automation-row-seg tone-warn" data-meta="attention">{line}</span></span>
       </button>
-      <button type="button" className="settings-btn automation-primary primary" data-primary="allow" data-testid="automation-ask-allow" title={lineText} disabled={busy} onClick={() => void answer('allow')} aria-label={`Allow: ${row.name}`}>Allow</button>
+      <button type="button" className="settings-btn automation-primary primary" data-primary="allow" data-testid="automation-ask-allow" title={allowOff ?? lineText} disabled={busy || allowOff !== undefined} onClick={() => void answer('allow')} aria-label={`Allow: ${row.name}`}>Allow</button>
       <RowMenu label={`More actions for ${row.name}`} items={[{ label: 'Not now', testId: 'automation-ask-not-now', onSelect: () => void answer('not_now') }, ...(row.menu ?? [])]} />
     </div>
   }
   return <div className="ask-card" role="group" aria-label={label ?? lineText}>
     <div className="ask-card-title"><Shield size={16} aria-hidden /><span>{line}</span></div>
     {note && <p className="ask-card-note">{note}</p>}
+    {details && details.items.length > 0 && <details className="ask-card-details">
+      <summary>{details.summary}</summary>
+      <p>{details.items.join(', ')}</p>
+      {details.more && <p>{details.more}</p>}
+    </details>}
     <div className="ask-card-actions">
       <button type="button" className="bot-ghost-button" disabled={busy} onClick={() => void answer('not_now')}>Not now</button>
-      <button type="button" className="chat-primary-button" disabled={busy} onClick={() => void answer('allow')}>Allow</button>
+      <button type="button" className="chat-primary-button" disabled={busy || allowOff !== undefined} title={allowOff} onClick={() => void answer('allow')}>Allow</button>
     </div>
   </div>
 }
@@ -85,6 +94,8 @@ export function BotAsk({ botName, ask, fromRun = false, onAnswer, onExport }: {
     lineText={`${botName} wants to ${ask.title}`}
     label={`${botName} asks`}
     {...(ask.note ? { note: ask.note } : {})}
+    {...(ask.details ? { details: ask.details } : {})}
+    {...(ask.loading ? { allowOff: 'Its tools are still loading' } : {})}
     {...(ask.status !== 'open' ? { answered: { text: askAnswerLine(ask, fromRun), allowed: ask.status === 'allowed' } } : {})}
     onAnswer={(answer) => (answer === 'allow' && ask.kind === 'export_memory' && onExport ? onExport() : onAnswer(answer))}
   />
