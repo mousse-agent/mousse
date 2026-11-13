@@ -137,6 +137,32 @@ describe('opening a thread of another computer', () => {
     expect(last.map((row: { id: string }) => row.id)).toEqual(newest)
   }, 120_000)
 
+  it('answers with activity no older than the transcript when a turn ends while the stream catches up', async () => {
+    const { thread, id } = await readBeforeAndLetGo('Ends meanwhile', { ownerKeepsIt: true })
+    // The owner's answer for what the stream does not carry says what was true when it was asked: the turn is
+    // running. Before that answer arrives, the turn ends there and the stream brings that record.
+    const real = t.client().call.bind(t.client())
+    const extras = vi.spyOn(t.client(), 'call').mockImplementation(async (...args) => {
+      const [, method, params] = args as [unknown, string, { transcript?: boolean }]
+      const answer = await real(...args)
+      if (method !== 'thread.snapshot' || params?.transcript !== false) return answer
+      extras.mockRestore()
+      const from = t.events.length
+      t.owner.orchestrator.emit('turn-completed', { threadId: thread.id })
+      await vi.waitFor(
+        () => expect(t.events.slice(from).some((event) => event.threadId === id && event.type === 'turn.completed')).toBe(true),
+        { timeout: 10_000 }
+      )
+      return { ...(answer as object), activity: 'processing' }
+    })
+    const opened = await open(id)
+    extras.mockRestore()
+    opened.timing()
+    // The turn is over, and the answer says so everywhere: not still processing.
+    expect(opened.snapshot.activeTurn).toMatchObject({ active: false })
+    expect(opened.snapshot.activity).not.toBe('processing')
+  }, 120_000)
+
   it('puts a thread in view right in one step when the link to its computer comes back', async () => {
     const thread = t.thread('Relinked')
     const id = t.qualified(thread.id)

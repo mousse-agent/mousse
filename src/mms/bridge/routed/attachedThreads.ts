@@ -576,13 +576,6 @@ export class AttachedThreads {
   async snapshot(node: NodeId, threadId: string, qualified: string): Promise<unknown> {
     const attachment = this.obtain(node, threadId)
     this.touch(attachment)
-    // What the stream does not carry is asked for while the stream arrives, not after it.
-    const extrasRead: Promise<{ value: unknown } | { error: unknown }> = this.options.client
-      .call(node, 'thread.snapshot', { threadId, transcript: false })
-      .then(
-        (value) => ({ value }),
-        (error: unknown) => ({ error })
-      )
     let online = true
     let streamed = true
     try {
@@ -610,11 +603,11 @@ export class AttachedThreads {
     }
     let extras: Json = {}
     if (online) {
-      const read = await extrasRead
-      if ('value' in read) {
-        if (isRecord(read.value)) extras = read.value
-      } else {
-        const error = read.error
+      try {
+        // Asked once the stream has caught up, so it is never older than what the stream already said.
+        const read = await this.options.client.call(node, 'thread.snapshot', { threadId, transcript: false })
+        if (isRecord(read)) extras = read
+      } catch (error) {
         if (error instanceof DomainRpcError && error.code === 'computer_outdated')
           // This owner's snapshot has no way to leave the transcript out: it is read whole.
           return this.wholeRead(attachment, node, threadId)
@@ -626,6 +619,16 @@ export class AttachedThreads {
     const state = attachment.view.read()!
     // Read while the stream catches up again (a new snapshot arrived meanwhile): the window is given the rest after.
     if (attachment.catching) attachment.catching.owed ??= this.told(attachment)
+    // The view is the newer of the two for what the stream carries: a turn it saw end (or start) after the owner
+    // answered decides whether the thread is processing, and a turn running clears a connection that had failed.
+    // Other states (waiting, awaiting input...) are the owner's to say.
+    const active = state.activeTurn.active === true
+    const activity =
+      extras.activity === undefined || extras.activity === 'processing' || extras.activity === 'idle'
+        ? active
+          ? 'processing'
+          : 'idle'
+        : extras.activity
     const queued = new Set(state.queue.map((row) => String(row.id)))
     // An item the stream still queues is not also claimed: the stream is the newer of the two.
     const claimed = (Array.isArray(extras.claimed) ? (extras.claimed as Json[]) : []).filter(
@@ -640,10 +643,10 @@ export class AttachedThreads {
       agents: extras.agents ?? [],
       tasks: extras.tasks ?? [],
       ptys: extras.ptys ?? [],
-      activity: extras.activity ?? (state.activeTurn.active === true ? 'processing' : 'idle'),
+      activity,
       pendingQuestions: state.pendingQuestions,
       activeTurn: state.activeTurn,
-      connectionFailed: state.connectionFailed || extras.connectionFailed === true,
+      connectionFailed: state.connectionFailed || (extras.connectionFailed === true && !active),
       turnState: state.turnState ?? extras.turnState,
       turnSnapshot: extras.turnSnapshot,
       // Events with a higher number than this are not in the snapshot; the ones up to it are.
