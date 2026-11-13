@@ -20,6 +20,16 @@ function workDoing(item: BotWorkItem, chip: BotChip | undefined): string {
   return chip ? `${chip.text}${chip.highlight ? ` ${chip.highlight}` : ''}` : 'working'
 }
 
+/** "2 subagents": how many of the work's subagents run now. */
+export function subagentsCount(n: number): string {
+  return n === 1 ? '1 subagent' : `${n} subagents`
+}
+
+/** Each running subagent on a line of the tooltip: its title, its model and entry, and what it runs without there. */
+export function subagentsTitle(subagents: ReadonlyArray<{ title: string; model: string; lacks?: readonly string[] }>): string {
+  return subagents.map((subagent) => `${subagent.title} · ${subagent.model}${subagent.lacks?.length ? ` · can't ${subagent.lacks.join(' or ')} there` : ''}`).join('\n')
+}
+
 /** One piece of work in the header's list: its title, what it is doing, for how long, and Stop. The time moves twice a minute. */
 const WorkLine = memo(function WorkLine({ botId, item }: { botId: string; item: BotWorkItem }) {
   const chip = useBotsStore((s) => s.activity[item.id])
@@ -34,6 +44,8 @@ const WorkLine = memo(function WorkLine({ botId, item }: { botId: string; item: 
   const details: ReactNode[] = [
     workDoing(item, chip),
     ...(item.model ? [<span className="bot-work-model" title={item.model.detail}>{item.model.name}</span>] : []),
+    // Its subagents running now; on hover each one's title, model and entry (which provider does that part).
+    ...(item.subagents?.length ? [<span className="bot-work-subagents" title={subagentsTitle(item.subagents)}>{subagentsCount(item.subagents.length)}</span>] : []),
     ...(item.status === 'queued' ? [] : [workElapsed(item.startedAt, now)])
   ]
   return <li className={`bot-work-line${running ? ' is-running' : ''}`}>

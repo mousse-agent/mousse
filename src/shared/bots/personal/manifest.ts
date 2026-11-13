@@ -32,6 +32,34 @@ export const BOT_OWN_APP_TOOLS: readonly string[] = [
 export const BOT_WORK_TOOLS: readonly string[] = ['work_start', 'work_models', 'work_list', 'work_stop', 'work_note', 'remind', 'reminder_list', 'reminder_cancel']
 
 /**
+ * The tools a bot's work splits a job among subagents with: start one on a title and a brief (on the work's model, or one
+ * from `work_models`), send it a follow-up, wait for it, read its result, stop it. Like memory they are always on and
+ * never grantable: they give no power the work lacks, since each subagent is compiled from the same grant and holds less
+ * (`BOT_SUBAGENT_APP_TOOLS`). Only a run's main turn gets them, never the chat, a consult or a subagent: one level.
+ */
+export const BOT_SUBAGENT_TOOLS: readonly string[] = ['subagent_start', 'subagent_send', 'subagent_wait', 'subagent_result', 'subagent_stop']
+
+/**
+ * The grant's Mousse app tools a bot's subagent may have, when the grant holds them: the web and the bot's own browser.
+ * The rest are the bot's and its work's alone: its own tools (schedules, its name and depth, its model, memory, asks),
+ * the automation tools, and the owner's threads. The built-ins, the files folder, file access, MCP tools and skills are
+ * the work's, unchanged.
+ */
+export const BOT_SUBAGENT_APP_TOOLS: readonly string[] = ['web_search', 'web_fetch', 'browser']
+
+/** Subagents one piece of a bot's work runs at once: a bot's own run slots. */
+export const MAX_BOT_SUBAGENTS_AT_ONCE = 3
+
+/** Subagents one piece of a bot's work may start in all, across its turns: the threads a bot may have at work at once. */
+export const MAX_BOT_SUBAGENTS_PER_WORK = 10
+
+/**
+ * Subagents one bot's work may start in a day (the last 24 hours), across all its work, schedules and reminders: three
+ * pieces of work's worth, so a schedule that runs often can't start ten every time. Pictures are 20 a day, asks 10.
+ */
+export const MAX_BOT_SUBAGENTS_PER_DAY = 30
+
+/**
  * What a chat turn never does itself, though the grant may hold it: it can take long (the web, the browser, running
  * commands), so the chat hands it to work and stays free to talk. Work runs with the whole grant.
  */
@@ -128,6 +156,7 @@ const BOT_OFFERABLE_APP_TOOLS: ReadonlySet<string> = new Set([
   ...BOT_BROWSER_TOOLS,
   ...BOT_THREAD_TOOLS,
   ...BOT_WORK_TOOLS,
+  ...BOT_SUBAGENT_TOOLS,
   ...BOT_MEMORY_TOOLS,
   BOT_MCP_LIST_TOOL,
   BOT_IMAGE_TOOL,

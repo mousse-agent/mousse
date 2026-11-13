@@ -1,7 +1,7 @@
 import { readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { ProfileDatabase, type Migration, type ProfileDatabaseFault } from '../../run/db/ProfileDatabase'
-import type { BotActivationStatus, BotActivationTrigger, BotLane, BotManifest, BotModelOverride, BotSchedule } from '../../../shared/bots/personal/definition'
+import type { BotActivationStatus, BotActivationTrigger, BotLane, BotManifest, BotModelOverride, BotModelPick, BotSchedule } from '../../../shared/bots/personal/definition'
 import { canonicalManifest } from '../../../shared/bots/personal/manifest'
 import type { ActivationLimits } from './scopes'
 import type { BotThreadRole } from '../../../shared/bots/personal/authority'
@@ -567,12 +567,18 @@ export interface BotActivationRow {
 export interface BotDispatchRow {
   activationId: string
   n: number
-  kind: 'start' | 'continue' | 'consult'
+  /**
+   * `start` and `continue` are the activation's main dispatches; a `consult` and a `subagent` attach to one (`mainN`). A
+   * subagent's turn is kept as a consult in `bots.db` (`SUBAGENT_DISPATCH`), so the database needs no new version and an
+   * older build ends it at its start as it ends any consult its turn left.
+   */
+  kind: 'start' | 'continue' | 'consult' | 'subagent'
   mainN: number | null
   clientRequestId: string
   runId: string | null
   threadId: string
-  prompt: { text: string }
+  /** `subagent`: what a subagent's turn runs as, on its every dispatch (`BotSubagentSpec`). */
+  prompt: { text: string; subagent?: BotSubagentSpec }
   policyDigest: string
   deadlineMs: number | null
   prepaidMs: number | null
@@ -691,11 +697,40 @@ function activationOf(row: Row): BotActivationRow {
   }
 }
 
+/**
+ * What a subagent of a bot's work runs as, kept with each of its dispatches: its title, its model in plain words, the
+ * selection it runs on, and the pick the work named (checked again before each of its turns). Absent `pick`: the work's
+ * own model.
+ */
+export interface BotSubagentSpec {
+  title: string
+  model: string
+  selection: ProviderSelection
+  pick?: BotModelPick & { instanceId: string }
+  /** The work's tool call that started it: a repeat of the call starts nothing new. */
+  call?: string
+  /** When the work started it (wall-clock milliseconds): the bot's subagents are counted per day by it. */
+  at?: number
+  /** What it runs without, in the owner's words, because its entry holds that less tightly than the work's (`subagentHold`). */
+  lacks?: string[]
+}
+
+/** A subagent's dispatch id: `<activationId>:s<n>`; a consult's is `<activationId>:c<n>`. Both are `consult` in `bots.db`. */
+const SUBAGENT_DISPATCH = /:s\d+$/
+
+/** The key a subagent's thread is kept under in `bots.db`, as a context thread no definition can name. */
+export const SUBAGENT_THREAD_KEY = '@subagent:'
+
+/** A thread's role as the engine reads it: a context thread kept under a subagent's key is a subagent's. */
+function roleOfRow(row: Row): 'home' | BotThreadRole {
+  return row.role === 'context' && typeof row.key === 'string' && row.key.startsWith(SUBAGENT_THREAD_KEY) ? 'subagent' : row.role as 'home' | BotThreadRole
+}
+
 function dispatchOf(row: Row): BotDispatchRow {
   return {
     activationId: row.activation_id as string,
     n: num(row.n)!,
-    kind: row.kind as BotDispatchRow['kind'],
+    kind: row.kind === 'consult' && SUBAGENT_DISPATCH.test(row.client_request_id as string) ? 'subagent' : row.kind as BotDispatchRow['kind'],
     mainN: num(row.main_n),
     clientRequestId: row.client_request_id as string,
     runId: str(row.run_id),
@@ -872,15 +907,18 @@ export class BotStore {
 
   // -- Threads ---------------------------------------------------------------------------------
 
+  /** A subagent's thread is kept as a context thread under `SUBAGENT_THREAD_KEY`, so `bots.db` needs no new version. */
   putThread(input: { threadId: string; botId: string; role: 'home' | BotThreadRole; key: string; activationId?: string }): void {
+    const subagent = input.role === 'subagent'
     this.run(
       'INSERT INTO bot_threads(thread_id, bot_id, role, key, activation_id) VALUES(?, ?, ?, ?, ?) ON CONFLICT(thread_id) DO NOTHING',
-      input.threadId, input.botId, input.role, input.key, input.activationId ?? null
+      input.threadId, input.botId, subagent ? 'context' : input.role, subagent ? `${SUBAGENT_THREAD_KEY}${input.key}` : input.key, input.activationId ?? null
     )
   }
 
   threadRole(threadId: string): 'home' | BotThreadRole | undefined {
-    return (str(this.get('SELECT role FROM bot_threads WHERE thread_id = ?', threadId)?.role) ?? undefined) as 'home' | BotThreadRole | undefined
+    const row = this.get('SELECT role, key FROM bot_threads WHERE thread_id = ?', threadId)
+    return row ? roleOfRow(row) : undefined
   }
 
   threadBot(threadId: string): string | undefined {
@@ -1023,7 +1061,7 @@ export class BotStore {
   insertDispatch(row: Pick<BotDispatchRow, 'activationId' | 'n' | 'kind' | 'clientRequestId' | 'threadId' | 'prompt' | 'policyDigest'> & { mainN?: number; send?: BotDispatchRow['send'] }): void {
     this.run(
       'INSERT INTO bot_dispatches(activation_id, n, kind, main_n, client_request_id, thread_id, prompt_json, policy_digest, send_json) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      row.activationId, row.n, row.kind, row.mainN ?? null, row.clientRequestId, row.threadId, JSON.stringify(row.prompt), row.policyDigest, row.send && Object.keys(row.send).length ? JSON.stringify(row.send) : null
+      row.activationId, row.n, row.kind === 'subagent' ? 'consult' : row.kind, row.mainN ?? null, row.clientRequestId, row.threadId, JSON.stringify(row.prompt), row.policyDigest, row.send && Object.keys(row.send).length ? JSON.stringify(row.send) : null
     )
   }
 
@@ -1115,6 +1153,24 @@ export class BotStore {
   countNewAsks(botId: string, input: { activationId?: string; since?: string }): number {
     return Number(this.get("SELECT COUNT(*) AS n FROM bot_escalations WHERE bot_id = ? AND mode = 'ask' AND (? IS NULL OR activation_id = ?) AND created_at >= ?",
       botId, input.activationId ?? null, input.activationId ?? null, input.since ?? '')?.n ?? 0)
+  }
+
+  /**
+   * The subagents a bot's work started since `since` (wall-clock milliseconds), across all its activations: each one's
+   * first turn, by the time its spec records (`BotSubagentSpec.at`). Turns that started before `since` are not read.
+   */
+  countSubagentsStarted(botId: string, since: number): number {
+    const threads = new Set<string>()
+    for (const row of this.all("SELECT d.thread_id, d.client_request_id, d.prompt_json FROM bot_dispatches d JOIN bot_activations a ON a.id = d.activation_id WHERE a.bot_id = ? AND d.kind = 'consult' AND (d.started_at IS NULL OR d.started_at >= ?)", botId, since)) {
+      if (!SUBAGENT_DISPATCH.test(row.client_request_id as string)) continue
+      try {
+        const at = (JSON.parse(row.prompt_json as string) as { subagent?: { at?: unknown } }).subagent?.at
+        if (typeof at === 'number' && at >= since) threads.add(row.thread_id as string)
+      } catch {
+        // Not a subagent's prompt.
+      }
+    }
+    return threads.size
   }
 
   countEscalations(activationId: string): number {
@@ -1247,7 +1303,7 @@ export class BotStore {
   }
 
   allThreads(): Array<{ threadId: string; botId: string; role: 'home' | BotThreadRole; key: string; activationId: string | null }> {
-    return this.all('SELECT * FROM bot_threads').map((row) => ({ threadId: row.thread_id as string, botId: row.bot_id as string, role: row.role as 'home' | BotThreadRole, key: row.key as string, activationId: str(row.activation_id) }))
+    return this.all('SELECT * FROM bot_threads').map((row) => ({ threadId: row.thread_id as string, botId: row.bot_id as string, role: roleOfRow(row), key: row.key as string, activationId: str(row.activation_id) }))
   }
 
   /**
@@ -1262,7 +1318,7 @@ export class BotStore {
       .map((row) => ({
         threadId: row.thread_id as string,
         botId: row.bot_id as string,
-        role: row.role as 'home' | BotThreadRole,
+        role: roleOfRow(row),
         activationId: str(row.activation_id),
         lastActivation: typeof row.last_id === 'string' ? { id: row.last_id, lane: row.last_lane === 'chat' ? 'chat' : 'run' } : null
       }))
@@ -1536,6 +1592,6 @@ export class BotStore {
 
   /** The bot's threads, for the delete and the purge. */
   botThreads(botId: string): Array<{ threadId: string; role: 'home' | BotThreadRole; activationId: string | null }> {
-    return this.all('SELECT * FROM bot_threads WHERE bot_id = ? ORDER BY role, thread_id', botId).map((row) => ({ threadId: row.thread_id as string, role: row.role as 'home' | BotThreadRole, activationId: str(row.activation_id) }))
+    return this.all('SELECT * FROM bot_threads WHERE bot_id = ? ORDER BY role, thread_id', botId).map((row) => ({ threadId: row.thread_id as string, role: roleOfRow(row), activationId: str(row.activation_id) }))
   }
 }

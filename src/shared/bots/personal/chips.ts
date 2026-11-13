@@ -36,6 +36,7 @@ type ChipKind =
   | 'schedule' | 'unschedule' | 'remember' | 'forget' | 'depth' | 'profile' | 'model'
   | 'work' | 'work_stop' | 'work_note' | 'remind' | 'unremind' | 'work_look'
   | 'threads_look' | 'thread_wait' | 'thread_start' | 'thread_send' | 'thread_stop' | 'picture'
+  | 'subagent' | 'subagent_wait' | 'subagent_look'
 
 interface Classified {
   kind: ChipKind
@@ -196,6 +197,15 @@ function classify(tool: string, input: unknown, ctx: BotChipContext): Classified
     }
     case 'thread_send': return { kind: 'thread_send', icon: 'think', live: 'messaging a thread' }
     case 'thread_interrupt': return { kind: 'thread_stop', icon: 'think', live: 'stopping a thread' }
+    // Its work's subagents: each one it starts or sends more work by its title; waiting on them is one chip.
+    case 'subagent_start':
+    case 'subagent_send': {
+      const title = str(args.title) ?? str(args.subagent)
+      return { kind: 'subagent', icon: 'think', live: tool === 'subagent_start' ? 'starting a subagent' : 'messaging a subagent', ...(title ? { detail: shortChipText(title, 30) } : {}) }
+    }
+    case 'subagent_wait': return { kind: 'subagent_wait', icon: 'think', live: 'waiting on its subagents' }
+    case 'subagent_result':
+    case 'subagent_stop': return { kind: 'subagent_look', icon: 'think', live: 'checking on its subagents' }
     // `escalate`: its card is the chip.
     default: return null
   }
@@ -316,6 +326,10 @@ function groupChip(kind: ChipKind, icon: BotChipIcon, calls: readonly Classified
     case 'mcp': return details.length ? chip('used', listed(details)) : chip('used a tool')
     case 'threads_look': return chip('read your threads')
     case 'thread_wait': return chip(n === 1 ? 'waited on a thread' : `waited on threads · ${n}`)
+    case 'subagent': {
+      const titles = [...new Set(details)]
+      return chip(titles.length > 1 ? `used ${titles.length} subagents` : 'used a subagent', listed(titles))
+    }
     // Only the pictures made: a refused or failed call shows none.
     case 'picture': {
       const made = all.filter((call) => succeeded(call.result)).length
@@ -335,7 +349,7 @@ const OUTCOME_KINDS: ReadonlySet<ChipKind> = new Set(['schedule', 'remember', 'f
 /** Kinds that settle to one chip for the last call only. */
 const LAST_KINDS: ReadonlySet<ChipKind> = new Set(['profile'])
 /** Kinds that settle to nothing: a look at its own schedules is not worth a chip. */
-const QUIET_KINDS: ReadonlySet<ChipKind> = new Set(['schedules', 'work_look'])
+const QUIET_KINDS: ReadonlySet<ChipKind> = new Set(['schedules', 'work_look', 'subagent_wait', 'subagent_look'])
 
 /**
  * The settled chips of one dispatch: grouped by kind, with counts and a short highlight (a domain,

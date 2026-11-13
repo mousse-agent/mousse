@@ -78,6 +78,7 @@ import {
   type PermissionMode
 } from '../../shared/permissionMode'
 import type { BotAuthority } from '../../shared/bots/personal/authority'
+import type { BotRuntimeHold } from '../../shared/bots/personal/subagentHold'
 import { HarnessScopeStore } from './scope'
 import { sharedShellPath, type ShellPathResult } from './shellPath'
 import { runOwnerUpdate } from './ownerUpdate'
@@ -199,6 +200,11 @@ export interface HarnessGateway {
   botWithheldTools(instanceId: string): readonly NeutralTool[]
   /** Runs on's line for a bot on the instance (`HarnessDriver.botRunsOnNote`); undefined for an unknown instance. */
   botRunsOnNote(instanceId: string): { text: string; title: string } | undefined
+  /**
+   * How the instance's runtime holds a bot's turn here now (`HarnessDriver.botHold`), for the hold rule of a bot's
+   * subagents; undefined for an unknown instance or a driver that says nothing (held as tightly as nothing).
+   */
+  botHold(instanceId: string): BotRuntimeHold | undefined
   /**
    * The permission mode `bind` would record for a thread asking for `requested` (the mode itself, a
    * stricter fallback with the reason, or a refusal). Reads, binds nothing; used to tell the agent
@@ -1277,6 +1283,17 @@ export class Harness implements HarnessGateway {
     const record = this.recordOrUndefined(instanceId)
     if (!record?.driver.botRunsOnNote) return undefined
     return record.driver.botRunsOnNote(record.config, this.probes.get(record.instanceId)?.lastGood?.binary?.version)
+  }
+
+  botHold(instanceId: string): BotRuntimeHold | undefined {
+    const record = this.recordOrUndefined(instanceId)
+    if (!record?.driver.botHold) return undefined
+    try {
+      return record.driver.botHold(record.config, record.env)
+    } catch (error) {
+      console.warn('[harness] could not read how the instance holds a bot', { instanceId, error: errorText(error) })
+      return undefined
+    }
   }
 
   async refreshPolicyFacts(instanceId: string): Promise<void> {

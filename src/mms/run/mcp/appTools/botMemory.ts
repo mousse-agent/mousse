@@ -144,8 +144,8 @@ export function botMemoryTools(source: BotMemoryToolHost | (() => BotMemoryToolH
       // It reads and writes only the caller's own bot rows in bots.db.
       access: 'actsAsCaller',
       class: 'read',
-      listed: (listing) => listing.botRole !== undefined,
-      available: (turn) => (turn.bot ? true : 'Only a bot has a memory.'),
+      listed: (listing) => listing.botRole !== undefined && listing.botRole !== 'subagent',
+      available: (turn) => (turn.bot && turn.bot.role !== 'subagent' ? true : 'Only a bot has a memory.'),
       describe,
       handler: (args, ctx) => {
         const host = hostNow()

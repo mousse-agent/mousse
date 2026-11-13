@@ -113,7 +113,7 @@ export interface ToolRegistryOptions {
   /** The ceiling a thread's delegations gave it, whatever its current turn's mode (the stable listing). */
   threadCeiling?(threadId: string): ModeCeiling
   /** The thread's role when it is a personal bot's thread; bot tools are listed only there. */
-  botRole?(threadId: string): 'activation' | 'context' | undefined
+  botRole?(threadId: string): 'activation' | 'context' | 'subagent' | undefined
   /** The turns registered by the `turn.start` executor; MCP calls act only inside one. */
   turns?: AppToolTurns
   /**
@@ -386,7 +386,7 @@ export class ToolRegistry {
     }))
   }
 
-  private botListing(threadId: string): { botRole?: 'activation' | 'context' } {
+  private botListing(threadId: string): { botRole?: 'activation' | 'context' | 'subagent' } {
     try {
       const role = this.options.botRole?.(threadId)
       return role ? { botRole: role } : {}

@@ -163,6 +163,8 @@ export function piDriver(options: { credentials?: () => PiCredentials | undefine
     caps,
     // The engine's gate holds Pi's built-ins to a bot turn's authority (`/pi/gate`).
     botAuthority: () => Boolean(options.rpc),
+    // Its `bash` runs with no sandbox; it has no web of its own.
+    botHold: () => ({ runtime: 'pi' }),
     nativeToolNames: (neutral) => (options.rpc ? PI_NATIVE_TOOLS[neutral] ?? [] : []),
     create(context: DriverContext): DriverRuntime {
       const providerId = piProviderIdOf(context.instanceId) ?? ''

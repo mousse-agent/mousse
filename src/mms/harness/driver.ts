@@ -14,6 +14,7 @@ import type { ProviderAdapter } from './adapter'
 import type { McpTurnBinding } from '../run/mcp/appTools/registry'
 import type { ProviderRef } from '../run/types'
 import type { InstanceEnv } from './env'
+import type { BotRuntimeHold } from '../../shared/bots/personal/subagentHold'
 import type { LatestVersionSource } from './latest'
 import type { SpendModelFacts } from './policy'
 import type { VendorMirror } from './vendorMirror'
@@ -605,6 +606,13 @@ export interface HarnessDriver {
    * itself is refused where it starts, whatever this says.
    */
   botRunsOnNote?(config: InstanceConfig, installedVersion?: string): { text: string; title: string } | undefined
+  /**
+   * How the runtime holds a bot's turn on this computer now (its sandbox for commands, its hosted web search), for the
+   * hold rule of a bot's subagents (`subagentHold`): a subagent is never held less tightly than its work. `env`: the
+   * entry's environment, whose PATH decides whether Claude Code's sandbox can run. Absent: the runtime is taken to hold
+   * nothing (a subagent there runs without commands, and without the web is refused).
+   */
+  botHold?(config: InstanceConfig, env: InstanceEnv): BotRuntimeHold
   /**
    * Reads again, now, what the entry's caps and `botAuthority` depend on beyond its config (a
    * locked Claude entry's organisation policy). The gateway calls it before every bot check point:

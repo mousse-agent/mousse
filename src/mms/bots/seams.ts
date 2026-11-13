@@ -68,7 +68,7 @@ export interface BotToolHost {
    * The bot activation a thread's turn belongs to. Lane and bot always come from here, never from
    * tool arguments; `role` is the calling thread's (a consult calls from a `context` thread).
    */
-  activationOf(threadId: string): { botId: string; activationId: string; lane: BotLane; role?: 'home' | 'activation' | 'context' } | undefined
+  activationOf(threadId: string): { botId: string; activationId: string; lane: BotLane; role?: 'home' | 'activation' | 'context' | 'subagent' } | undefined
   schedules: {
     add(botId: string, s: { when: BotSchedule['when']; prompt: string }): { scheduleId: string; label: string }
     remove(botId: string, scheduleId: string): boolean

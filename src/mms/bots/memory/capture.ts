@@ -27,8 +27,13 @@ export interface BotJournalCaptureOptions {
   readThread: (threadId: string) => Pick<ThreadData, 'messages'> | undefined
   /** Every bot thread, for the startup catch-up. */
   listThreads: () => BotThreadRef[]
+  /** Whether a bot thread is one of its work's subagents' (`BotStore.threadRole`): its rows are marked as theirs. */
+  isSubagentThread?: (threadId: string) => boolean
   log?: (message: string, error?: unknown) => void
 }
+
+/** How a subagent's rows begin in the journal: what its work's helper did or said, never the bot to its owner. */
+export const SUBAGENT_JOURNAL_PREFIX = '[subagent] '
 
 interface Cursor {
   /** Messages at the start of the thread that are copied and settled. */
@@ -75,7 +80,21 @@ export function unsettled(message: ChatMessage): boolean {
  * every other non-presentation row the dispatch was given (its prompt, a wall answer) as a
  * `notice` from Mousse.
  */
-export function capturedRows(message: ChatMessage, ref: BotThreadRef): CapturedRow[] {
+export function capturedRows(message: ChatMessage, ref: BotThreadRef, subagent = false): CapturedRow[] {
+  const rows = botRows(message, ref)
+  if (!subagent) return rows
+  // A subagent of the bot's work: what it said is data it returned to the work (like a tool's result, from outside),
+  // and its calls are not the bot's, so search, the packs and an export never show them as the bot's own words.
+  return rows.map((row) => ({
+    ...row,
+    ...(row.kind === 'bot_msg' ? { kind: 'tool_result' as const, external: true } : {}),
+    who: row.who === 'bot' ? 'tool' : row.who,
+    text: `${SUBAGENT_JOURNAL_PREFIX}${row.text}`,
+    json: { ...(row.json && typeof row.json === 'object' ? row.json as Record<string, unknown> : {}), subagent: true }
+  }))
+}
+
+function botRows(message: ChatMessage, ref: BotThreadRef): CapturedRow[] {
   const kind = message.kind ?? 'message'
   if (SKIPPED_KINDS.has(kind) || message.role === 'system') return []
   const base = {
@@ -158,6 +177,14 @@ export function createBotJournal(options: BotJournalCaptureOptions): BotJournalC
       return 0
     }
     const cursorKey = `cursor:${ref.threadId}`
+    let subagent = false
+    try {
+      subagent = options.isSubagentThread?.(ref.threadId) === true
+    } catch (error) {
+      // Not known: the thread waits for the next sync rather than being copied as the bot's own words.
+      log(`bot memory: thread ${ref.threadId} could not be told apart`, error)
+      return 0
+    }
     return store.write(() => {
       const saved = store.getState<Cursor>(ref.botId, cursorKey)
       let start = saved && saved.n <= messages.length && (saved.n === 0 || messages[saved.n - 1]?.id === saved.lastId) ? saved.n : 0
@@ -166,7 +193,7 @@ export function createBotJournal(options: BotJournalCaptureOptions): BotJournalC
       for (let index = start; index < messages.length; index++) {
         const message = messages[index]!
         const partial = unsettled(message)
-        for (const row of capturedRows(message, ref)) {
+        for (const row of capturedRows(message, ref, subagent)) {
           store.putCaptured(row, partial)
           written++
         }
