@@ -6,23 +6,27 @@ import { BotFace, BotFaceStill, normalizeFaceProps } from '../../src/renderer/co
 import { FaceMotion, faceUniforms, hop, stillPose, type FaceUniforms } from '../../src/renderer/components/bots/face/facePoses'
 import {
   createWebGlGpu,
+  faceArtVersion,
   FaceRenderer,
   faceDrawSide,
   faceRendererStats,
   IDLE_LIVE_SECONDS,
-  IDLE_RELEASE_MS,
+  IDLE_SHRINK_MS,
   LOST_CONTEXT_TIMEOUT_MS,
-  PENDING_POLL_MS,
-  PENDING_TIMEOUT_MS,
+  READY_POLL_MS,
   resetSharedFaceRenderer,
-  RESTART_POLL_MS,
   SAMPLE_BUDGET,
+  SAVED_HOLD_MS,
   sharedFaceRendererStatus,
+  stillFrameKey,
   UNFOCUSED_LIVE_SECONDS,
   softwareWebGl,
+  warmFaceRenderer,
+  warmFaceRendererAfterPaint,
   type FaceGpu,
   type FaceRendererEnv
 } from '../../src/renderer/components/bots/face/faceRenderer'
+import { SavedFaceFrames, type FaceFrameBackend, type FaceFrameCodec, type SavedFrameImage, type SavedFrameRecord } from '../../src/renderer/components/bots/face/faceFrameStore'
 import { setAnimationSpeed } from '../../src/renderer/lib/motion'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -100,7 +104,13 @@ class FakeObserver {
 }
 
 /** A renderer environment with a fake GPU and a manual frame clock. */
-function fakeEnv(options: { observer?: boolean; status?: () => ReturnType<FaceGpu['status']>; pixelRatio?: number; focus?: boolean } = {}) {
+function fakeEnv(options: {
+  observer?: boolean
+  status?: () => ReturnType<FaceGpu['status']>
+  pixelRatio?: number
+  focus?: boolean
+  saved?: FakeSaved
+} = {}) {
   const frames = new Map<number, (now: number) => void>()
   let id = 0
   let now = 1000
@@ -112,16 +122,25 @@ function fakeEnv(options: { observer?: boolean; status?: () => ReturnType<FaceGp
   const ratioListeners = new Set<() => void>()
   let focused = true
   const focusListeners = new Set<() => void>()
+  /** The shared drawing buffer's size, as the WebGL side keeps it: grown by draws, shrunk to 1×1. */
+  const buffer = { width: 1, height: 1 }
   const gpu: FaceGpu = {
     canvas: document.createElement('canvas'),
     status: options.status ?? (() => 'ready'),
-    ensureSize: vi.fn(),
+    ensureSize: vi.fn((width: number, height: number) => {
+      buffer.width = Math.max(buffer.width, width)
+      buffer.height = Math.max(buffer.height, height)
+    }),
     draw: (_x, _y, side, uniforms) => draws.push({ side, uniforms }),
     finish: vi.fn(),
     onRestored: (listener) => restored.add(listener),
     onLost: (listener) => lost.add(listener),
+    shrink: vi.fn(() => {
+      buffer.width = buffer.height = 1
+    }),
     dispose: vi.fn()
   }
+  const log = vi.fn()
   const env: FaceRendererEnv = {
     createGpu: () => gpu,
     createCanvas: () => document.createElement('canvas'),
@@ -152,7 +171,9 @@ function fakeEnv(options: { observer?: boolean; status?: () => ReturnType<FaceGp
       const timer = ++id
       timers.set(timer, { at: now + ms, callback })
       return () => timers.delete(timer)
-    }
+    },
+    frames: options.saved?.store,
+    log
   }
   const tick = (ms = 1000 / 30) => {
     now += ms
@@ -177,11 +198,110 @@ function fakeEnv(options: { observer?: boolean; status?: () => ReturnType<FaceGp
     focused = next
     act(() => focusListeners.forEach((listener) => listener()))
   }
-  return { env, gpu, draws, tick, lose, restore, setRatio, setFocus, pending: () => frames.size, timers: () => timers.size }
+  return { env, gpu, draws, buffer, log, tick, lose, restore, setRatio, setFocus, pending: () => frames.size, timers: () => timers.size }
 }
 
-const coral = { colour: 'coral', accessory: 'none' }
-const spec = (overrides: Partial<Parameters<FaceRenderer['register']>[1]> = {}) => ({
+/** Lets promise callbacks run (the saved frames' loads, decodes and writes). */
+async function settle() {
+  await act(async () => {
+    for (let i = 0; i < 10; i++) await Promise.resolve()
+  })
+}
+
+/** A saved picture, as the fake codec decodes it. */
+interface FakePicture extends SavedFrameImage {
+  readonly id: number
+}
+
+/**
+ * Saved frames kept between "runs" of a test: one backend (as IndexedDB keeps it across launches)
+ * and a store opened on it per run. The codec keeps each saved canvas's size, so a decoded picture
+ * is a distinct object of that size.
+ */
+function fakeSaved(options: { version?: string; maxFrames?: number; maxBytes?: number; bytes?: number } = {}) {
+  const records = new Map<string, SavedFrameRecord>()
+  const sizes = new WeakMap<Blob, { width: number; height: number; id: number }>()
+  let nextId = 0
+  let clock = 0
+  const fail = { all: false, put: false, decode: false }
+  /** Resolves the next `all()` only when released; null lists at once. */
+  let held: (() => void) | null = null
+  let holdNext = false
+  const backend: FaceFrameBackend = {
+    all: vi.fn(async () => {
+      if (holdNext) {
+        holdNext = false
+        await new Promise<void>((resolve) => (held = resolve))
+      }
+      if (fail.all) throw new Error('no IndexedDB')
+      return [...records.values()].map((record) => ({ ...record }))
+    }),
+    put: vi.fn(async (list: SavedFrameRecord[]) => {
+      if (fail.put) throw new Error('QuotaExceededError')
+      for (const record of list) records.set(record.key, { ...record })
+    }),
+    remove: vi.fn(async (keys: string[]) => {
+      for (const key of keys) records.delete(key)
+    })
+  }
+  const codec: FaceFrameCodec = {
+    encode: async (canvas) => {
+      const blob = new Blob(['x'.repeat(options.bytes ?? 100)])
+      sizes.set(blob, { width: canvas.width, height: canvas.height, id: ++nextId })
+      return blob
+    },
+    decode: async (data) => {
+      if (fail.decode) throw new Error('corrupt')
+      const size = sizes.get(data)
+      return size ? ({ ...size } as unknown as FakePicture) : null
+    }
+  }
+  const saved = {
+    records,
+    backend,
+    fail,
+    store: null as unknown as SavedFaceFrames,
+    /** Opens the store as a new launch does; `hold` keeps it listing until `release()`. */
+    open(launch: { hold?: boolean; version?: string } = {}) {
+      holdNext = launch.hold ?? false
+      saved.store = new SavedFaceFrames(backend, launch.version ?? options.version ?? faceArtVersion(), codec, {
+        now: () => ++clock,
+        maxFrames: options.maxFrames,
+        maxBytes: options.maxBytes
+      })
+      return saved.store
+    },
+    /** Lets a held `all()` answer. */
+    release() {
+      held?.()
+      held = null
+    }
+  }
+  saved.open()
+  return saved
+}
+type FakeSaved = ReturnType<typeof fakeSaved>
+
+/** Draws a still face in one run with a ready shader, so its frame is saved for the next run. */
+async function drawAndSave(saved: FakeSaved, face: Partial<Parameters<FaceRenderer['register']>[1]> = {}) {
+  await settle()
+  const fake = fakeEnv({ saved })
+  const renderer = new FaceRenderer(fake.env)
+  renderer.register(document.createElement('canvas'), spec({ still: true, ...face }))
+  fake.tick()
+  expect(fake.draws).toHaveLength(1)
+  await settle()
+  renderer.dispose()
+}
+
+/** The canvas of a face, and what was last drawn into it. */
+function lastDrawn(canvas: HTMLCanvasElement) {
+  const calls = vi.mocked(fake2d(canvas).drawImage).mock.calls
+  return calls.at(-1)?.[0]
+}
+
+const coral = { colour: 'coral', accessory: 'none' } as const
+const spec =(overrides: Partial<Parameters<FaceRenderer['register']>[1]> = {}) => ({
   look: { colour: 'teal', accessory: 'crown' } as const,
   state: 'idle' as const,
   size: 40,
@@ -208,23 +328,11 @@ describe('BotFace fallback', () => {
     expect(host.querySelector('canvas')).toBeNull()
   })
 
-  it('switches to the still face when the shader fails to compile', () => {
-    let status: ReturnType<FaceGpu['status']> = 'pending'
-    const fake = fakeEnv({ status: () => status })
-    resetSharedFaceRenderer(() => fake.env)
-    render(createElement(BotFace, { look: coral, state: 'idle', size: 40, view: 'head' }))
-    expect(host.querySelector('canvas.bot-face-canvas')).not.toBeNull()
-    status = 'failed'
-    fake.tick()
-    expect(host.querySelector('canvas')).toBeNull()
-    expect(host.querySelector('svg.bot-face-still')).not.toBeNull()
-  })
-
-  it('is not ready while the context is lost, and switches to the still face when it does not come back', () => {
+  it('is not ready while the context is lost, and a face with no still frame draws flat when it does not come back', () => {
     let status: ReturnType<FaceGpu['status']> = 'ready'
     const fake = fakeEnv({ status: () => status })
     resetSharedFaceRenderer(() => fake.env)
-    render(createElement(BotFace, { look: coral, state: 'idle', size: 40, view: 'head', still: true }))
+    render(createElement(BotFace, { look: coral, state: 'working', size: 40, view: 'head' }))
     fake.tick()
     expect(sharedFaceRendererStatus()).toBe('ready')
     status = 'lost'
@@ -251,11 +359,43 @@ describe('BotFace fallback', () => {
     expect(fake.draws).toHaveLength(1)
     status = 'ready'
     fake.restore()
-    expect(fake.timers()).toBe(0)
     fake.tick(LOST_CONTEXT_TIMEOUT_MS)
     expect(renderer.status()).toBe('ready')
     expect(fake.draws).toHaveLength(2)
+    expect(fake.timers()).toBe(0)
     renderer.dispose()
+  })
+
+  it('keeps the picture a face shows while its context is lost, and its saved frame once it fails', async () => {
+    const saved = fakeSaved()
+    await drawAndSave(saved, { look: { colour: 'coral', accessory: 'none' }, size: 40 })
+    saved.open()
+    await settle()
+    let status: ReturnType<FaceGpu['status']> = 'ready'
+    const fake = fakeEnv({ status: () => status, saved })
+    resetSharedFaceRenderer(() => fake.env)
+    // One face with a saved frame, one (working) without.
+    render(createElement('div', null,
+      createElement(BotFace, { look: coral, state: 'idle', size: 40, view: 'head', still: true }),
+      createElement(BotFace, { look: coral, state: 'working', size: 40, view: 'head' })
+    ))
+    fake.tick()
+    await settle()
+    fake.tick()
+    const [withSaved, without] = [...host.querySelectorAll('canvas')]
+    expect(without).toBeDefined()
+    status = 'lost'
+    fake.lose()
+    // A brief loss: both keep their canvas and what it shows.
+    expect(host.querySelectorAll('canvas')).toHaveLength(2)
+    expect(host.querySelector('svg.bot-face-still')).toBeNull()
+    fake.tick(LOST_CONTEXT_TIMEOUT_MS)
+    await settle()
+    expect(sharedFaceRendererStatus()).toBe('failed')
+    // Failed: the face with a saved frame shows it, the other draws flat.
+    expect([...host.querySelectorAll('canvas')]).toEqual([withSaved])
+    expect(lastDrawn(withSaved!)).toMatchObject({ width: 40, height: 40 })
+    expect(host.querySelectorAll('svg.bot-face-still')).toHaveLength(1)
   })
 
   it('draws the still face when WebGL is refused as software', () => {
@@ -266,55 +406,17 @@ describe('BotFace fallback', () => {
     expect(host.querySelector('canvas')).toBeNull()
   })
 
-  it('draws the still face when the shader is still compiling after the timeout, even with no tick, and the live face once it compiles', () => {
-    let status: ReturnType<FaceGpu['status']> = 'pending'
-    // Off screen as far as the observer knows, so no tick runs to look at the compile.
-    const fake = fakeEnv({ observer: true, status: () => status })
-    resetSharedFaceRenderer(() => fake.env)
-    render(createElement(BotFace, { look: coral, state: 'idle', size: 40, view: 'head' }))
-    expect(sharedFaceRendererStatus()).toBe('pending')
-    expect(host.querySelector('canvas.bot-face-canvas')).not.toBeNull()
-    fake.tick(PENDING_TIMEOUT_MS - 1)
-    expect(host.querySelector('svg.bot-face-still')).toBeNull()
-    fake.tick(1)
-    expect(sharedFaceRendererStatus()).toBe('failed')
-    expect(host.querySelector('canvas')).toBeNull()
-    expect(host.querySelector('svg.bot-face-still')).not.toBeNull()
-    expect(fake.pending()).toBe(0)
-    // Still compiling: it stays still and looks again.
-    fake.tick(PENDING_POLL_MS)
-    expect(host.querySelector('svg.bot-face-still')).not.toBeNull()
-    status = 'ready'
-    fake.tick(PENDING_POLL_MS)
-    expect(sharedFaceRendererStatus()).toBe('ready')
-    expect(host.querySelector('svg.bot-face-still')).toBeNull()
-    expect(host.querySelector('canvas.bot-face-canvas')).not.toBeNull()
-    expect(fake.timers()).toBe(0)
-  })
-
-  it('draws the still face when a compile that timed out then fails', () => {
+  it('draws the still face when a compile in progress then fails', () => {
     let status: ReturnType<FaceGpu['status']> = 'pending'
     const fake = fakeEnv({ status: () => status })
     resetSharedFaceRenderer(() => fake.env)
     render(createElement(BotFace, { look: coral, state: 'idle', size: 40, view: 'head' }))
-    fake.tick(PENDING_TIMEOUT_MS)
     expect(host.querySelector('svg.bot-face-still')).not.toBeNull()
     status = 'failed'
-    fake.tick(PENDING_POLL_MS)
+    fake.tick(READY_POLL_MS)
     expect(sharedFaceRendererStatus()).toBe('failed')
     expect(fake.timers()).toBe(0)
     expect(host.querySelector('svg.bot-face-still')).not.toBeNull()
-  })
-
-  it('keeps the live face when the shader compiles in time', () => {
-    const fake = fakeEnv()
-    resetSharedFaceRenderer(() => fake.env)
-    render(createElement(BotFace, { look: coral, state: 'idle', size: 40, view: 'head' }))
-    fake.tick()
-    expect(sharedFaceRendererStatus()).toBe('ready')
-    expect(fake.timers()).toBe(0)
-    fake.tick(PENDING_TIMEOUT_MS)
-    expect(host.querySelector('canvas.bot-face-canvas')).not.toBeNull()
   })
 
   it('draws the still face when the first frame reads back empty', () => {
@@ -359,103 +461,312 @@ describe('BotFace fallback', () => {
   })
 })
 
-describe('releasing the WebGL context while no face shows', () => {
-  const face = () => createElement(BotFace, { look: coral, state: 'idle', size: 40, view: 'head' })
+const face = (overrides: Partial<Parameters<typeof BotFace>[0]> = {}) =>
+  createElement(BotFace, { look: coral, state: 'idle', size: 40, view: 'head', ...overrides })
+const flat = () => host.querySelector('svg.bot-face-still')
+const faceCanvas = () => host.querySelector<HTMLCanvasElement>('canvas.bot-face-canvas')
 
-  it('lets the context go once no face has shown for the idle time', () => {
+describe('ready from launch', () => {
+  it('starts the renderer only once the first frame has painted', () => {
     const fake = fakeEnv()
+    const createGpu = vi.spyOn(fake.env, 'createGpu')
     resetSharedFaceRenderer(() => fake.env)
-    render(face())
-    fake.tick()
-    expect(fake.draws).toHaveLength(1)
-    render(null)
-    fake.tick(IDLE_RELEASE_MS - 1)
-    expect(fake.gpu.dispose).not.toHaveBeenCalled()
-    expect(faceRendererStats()).not.toBeNull()
-    fake.tick(1)
-    expect(fake.gpu.dispose).toHaveBeenCalledTimes(1)
-    expect(faceRendererStats()).toBeNull()
-    expect(fake.timers()).toBe(0)
-    expect(fake.pending()).toBe(0)
+    let frame: FrameRequestCallback | null = null
+    let timeout: (() => void) | null = null
+    warmFaceRendererAfterPaint({
+      requestAnimationFrame: (callback) => {
+        frame = callback
+        return 1
+      },
+      setTimeout: ((callback: () => void) => {
+        timeout = callback
+        return 1
+      }) as unknown as Window['setTimeout']
+    })
+    expect(createGpu).not.toHaveBeenCalled()
+    frame!(0)
+    // The frame callback runs before that frame is painted: still nothing.
+    expect(createGpu).not.toHaveBeenCalled()
+    timeout!()
+    expect(createGpu).toHaveBeenCalledTimes(1)
   })
 
-  it('keeps the context while a face shows, and when one comes back within the idle time', () => {
-    const fake = fakeEnv()
-    resetSharedFaceRenderer(() => fake.env)
-    render(face())
-    fake.tick(IDLE_RELEASE_MS * 2)
-    render(null)
-    fake.tick(IDLE_RELEASE_MS - 1)
-    render(face())
-    fake.tick(IDLE_RELEASE_MS * 2)
-    expect(fake.gpu.dispose).not.toHaveBeenCalled()
-    expect(host.querySelector('canvas.bot-face-canvas')).not.toBeNull()
-  })
-
-  it('makes a new context for the next face, which draws still until the shader is ready and then live', () => {
-    let status: ReturnType<FaceGpu['status']> = 'ready'
+  it('compiles with no face mounted, reports how long it took, keeps the shader while no face shows, and draws the first face live at once', () => {
+    let status: ReturnType<FaceGpu['status']> = 'pending'
     const fake = fakeEnv({ status: () => status })
     const createGpu = vi.spyOn(fake.env, 'createGpu')
     resetSharedFaceRenderer(() => fake.env)
-    render(face())
-    fake.tick()
-    render(null)
-    fake.tick(IDLE_RELEASE_MS)
-    expect(fake.gpu.dispose).toHaveBeenCalledTimes(1)
-
-    // The new context compiles the shader again: the face is never empty meanwhile.
-    status = 'pending'
-    render(face())
-    expect(createGpu).toHaveBeenCalledTimes(2)
-    expect(host.querySelector('svg.bot-face-still')).not.toBeNull()
-    expect(host.querySelector('canvas')).toBeNull()
-    fake.tick(RESTART_POLL_MS)
-    expect(host.querySelector('svg.bot-face-still')).not.toBeNull()
-
+    warmFaceRenderer()
+    expect(createGpu).toHaveBeenCalledTimes(1)
+    expect(faceRendererStats()?.compileMs).toBeNull()
+    fake.tick(1000)
     status = 'ready'
-    fake.tick(PENDING_POLL_MS)
+    fake.tick(READY_POLL_MS)
     expect(sharedFaceRendererStatus()).toBe('ready')
-    expect(host.querySelector('svg.bot-face-still')).toBeNull()
-    expect(host.querySelector('canvas.bot-face-canvas')).not.toBeNull()
-    const drawn = fake.draws.length
+    expect(faceRendererStats()?.compileMs).toBe(1000 + READY_POLL_MS)
+    expect(fake.log).toHaveBeenCalledWith(`[bot faces] shader ready in ${1000 + READY_POLL_MS} ms`)
+
+    fake.tick(IDLE_SHRINK_MS * 3)
+    expect(fake.gpu.dispose).not.toHaveBeenCalled()
+    render(face())
+    expect(flat()).toBeNull()
+    expect(faceCanvas()).not.toBeNull()
     fake.tick()
-    expect(fake.draws.length).toBeGreaterThan(drawn)
-    expect(fake.timers()).toBe(0)
+    expect(fake.draws).toHaveLength(1)
+    expect(createGpu).toHaveBeenCalledTimes(1)
+    expect(fake.log).toHaveBeenCalledTimes(1)
   })
 
-  it('switches a new context that is ready at once to the live face at its first check', () => {
+  it('shrinks the drawing buffer once no face has shown for 30 s, and grows it again on the next draw', () => {
     const fake = fakeEnv()
     resetSharedFaceRenderer(() => fake.env)
-    render(face())
+    render(face({ state: 'working' }))
     fake.tick()
+    expect(fake.buffer.width).toBeGreaterThan(1)
+    // A face back within the idle time keeps the buffer.
     render(null)
-    fake.tick(IDLE_RELEASE_MS)
-    render(face())
-    expect(host.querySelector('svg.bot-face-still')).not.toBeNull()
-    fake.tick(RESTART_POLL_MS)
-    expect(host.querySelector('canvas.bot-face-canvas')).not.toBeNull()
+    fake.tick(IDLE_SHRINK_MS - 1)
+    render(face({ state: 'working' }))
+    fake.tick(IDLE_SHRINK_MS * 2)
+    expect(fake.gpu.shrink).not.toHaveBeenCalled()
+
+    render(null)
+    fake.tick(IDLE_SHRINK_MS - 1)
+    expect(fake.gpu.shrink).not.toHaveBeenCalled()
+    fake.tick(1)
+    expect(fake.buffer).toEqual({ width: 1, height: 1 })
+    expect(fake.gpu.dispose).not.toHaveBeenCalled()
+    expect(sharedFaceRendererStatus()).toBe('ready')
+
+    const drawn = fake.draws.length
+    render(face({ state: 'working' }))
+    expect(flat()).toBeNull()
+    fake.tick()
+    expect(fake.draws).toHaveLength(drawn + 1)
+    expect(fake.buffer.width).toBeGreaterThan(1)
   })
 
-  it('draws the still face when the new context fails to compile', () => {
-    let status: ReturnType<FaceGpu['status']> = 'ready'
-    const fake = fakeEnv({ status: () => status })
-    resetSharedFaceRenderer(() => fake.env)
-    render(face())
-    fake.tick()
-    render(null)
-    fake.tick(IDLE_RELEASE_MS)
-    status = 'failed'
-    render(face())
-    fake.tick(RESTART_POLL_MS)
-    expect(sharedFaceRendererStatus()).toBe('failed')
-    expect(fake.timers()).toBe(0)
-    expect(host.querySelector('svg.bot-face-still')).not.toBeNull()
-  })
-
-  it('has nothing to release without WebGL', () => {
+  it('has nothing to keep without WebGL', () => {
+    warmFaceRenderer()
     render(face())
     render(null)
     expect(sharedFaceRendererStatus()).toBe('unavailable')
+  })
+})
+
+describe('a face while the shader compiles', () => {
+  it('draws flat at once when no frame is saved, and goes live within READY_POLL_MS of the shader being ready', async () => {
+    let status: ReturnType<FaceGpu['status']> = 'pending'
+    const saved = fakeSaved()
+    await settle()
+    const fake = fakeEnv({ status: () => status, saved })
+    resetSharedFaceRenderer(() => fake.env)
+    render(face())
+    expect(flat()).not.toBeNull()
+    expect(host.querySelector('canvas')).toBeNull()
+    fake.tick(5000)
+    expect(flat()).not.toBeNull()
+    status = 'ready'
+    fake.tick(READY_POLL_MS)
+    expect(flat()).toBeNull()
+    expect(faceCanvas()).not.toBeNull()
+    fake.tick()
+    expect(fake.draws).toHaveLength(1)
+  })
+
+  it('shows the saved frame of its spec at once, never flat, then goes live; a moving face shows its saved still pose', async () => {
+    const saved = fakeSaved()
+    await drawAndSave(saved, { look: coral })
+    // The next launch.
+    saved.open()
+    await settle()
+    let status: ReturnType<FaceGpu['status']> = 'pending'
+    const fake = fakeEnv({ status: () => status, saved })
+    resetSharedFaceRenderer(() => fake.env)
+    render(face())
+    const canvas = faceCanvas()!
+    expect(canvas).not.toBeNull()
+    expect(flat()).toBeNull()
+    await settle()
+    expect(lastDrawn(canvas)).toMatchObject({ width: 40, height: 40 })
+    fake.tick(SAVED_HOLD_MS * 10)
+    expect(flat()).toBeNull()
+    expect(fake.draws).toHaveLength(0)
+
+    status = 'ready'
+    fake.tick(READY_POLL_MS)
+    fake.tick()
+    expect(faceCanvas()).toBe(canvas)
+    expect(fake.draws.length).toBeGreaterThan(0)
+    expect(lastDrawn(canvas)).toBe(fake.gpu.canvas)
+  })
+
+  it('holds an empty box at most SAVED_HOLD_MS while the saved frames load, then draws flat', () => {
+    const saved = fakeSaved()
+    saved.open({ hold: true })
+    const fake = fakeEnv({ status: () => 'pending', saved })
+    resetSharedFaceRenderer(() => fake.env)
+    render(face())
+    expect(faceCanvas()).not.toBeNull()
+    expect(flat()).toBeNull()
+    fake.tick(SAVED_HOLD_MS - 1)
+    expect(flat()).toBeNull()
+    fake.tick(1)
+    expect(flat()).not.toBeNull()
+    expect(host.querySelector('canvas')).toBeNull()
+  })
+
+  it('shows the saved frame when the saved frames load within the hold', async () => {
+    const saved = fakeSaved()
+    await drawAndSave(saved, { look: coral })
+    saved.open({ hold: true })
+    const fake = fakeEnv({ status: () => 'pending', saved })
+    resetSharedFaceRenderer(() => fake.env)
+    render(face({ still: true }))
+    const canvas = faceCanvas()!
+    fake.tick(SAVED_HOLD_MS / 2)
+    saved.release()
+    await settle()
+    expect(lastDrawn(canvas)).toMatchObject({ width: 40, height: 40 })
+    fake.tick(SAVED_HOLD_MS)
+    expect(flat()).toBeNull()
+  })
+
+  it('copies a still face saved in an earlier run in once live, instead of drawing it again', async () => {
+    const saved = fakeSaved()
+    await drawAndSave(saved, { look: coral })
+    saved.open()
+    await settle()
+    const fake = fakeEnv({ saved })
+    const renderer = new FaceRenderer(fake.env)
+    const canvas = document.createElement('canvas')
+    renderer.register(canvas, spec({ look: coral, still: true }))
+    fake.tick()
+    await settle()
+    fake.tick()
+    expect(fake.draws).toHaveLength(0)
+    expect(lastDrawn(canvas)).toMatchObject({ width: 40, height: 40 })
+    renderer.dispose()
+  })
+})
+
+describe('saved frames', () => {
+  const key = stillFrameKey({ look: coral, state: 'idle', view: 'head', size: 40 }, 40)
+  const canvasOf = (side: number) => {
+    const canvas = document.createElement('canvas')
+    canvas.width = canvas.height = side
+    return canvas
+  }
+
+  it('saves each still frame drawn under its spec and art version', async () => {
+    const saved = fakeSaved()
+    await drawAndSave(saved, { look: coral })
+    expect([...saved.records.values()]).toEqual([expect.objectContaining({ key, version: faceArtVersion() })])
+  })
+
+  it('ignores and deletes a frame saved under another art version', async () => {
+    const saved = fakeSaved({ version: 'older-art' })
+    await drawAndSave(saved, { look: coral })
+    expect(saved.records.has(key)).toBe(true)
+    // The next launch, with new art.
+    saved.open({ version: faceArtVersion() })
+    await settle()
+    expect(saved.store.has(key)).toBe(false)
+    expect(saved.records.size).toBe(0)
+    const fake = fakeEnv({ status: () => 'pending', saved })
+    resetSharedFaceRenderer(() => fake.env)
+    render(face())
+    expect(flat()).not.toBeNull()
+  })
+
+  it('keeps the least recently used frames within the count and byte bounds, across launches', async () => {
+    const saved = fakeSaved({ maxFrames: 3 })
+    await settle()
+    for (const name of ['a', 'b', 'c']) {
+      saved.store.save(name, canvasOf(40))
+      await settle()
+    }
+    // Shown again, `a` becomes the most recently used.
+    expect(await saved.store.image('a')).not.toBeNull()
+    saved.store.save('d', canvasOf(40))
+    await settle()
+    expect(['a', 'b', 'c', 'd'].filter((name) => saved.store.has(name))).toEqual(['a', 'c', 'd'])
+    expect([...saved.records.keys()].sort()).toEqual(['a', 'c', 'd'])
+    saved.open()
+    await settle()
+    expect(saved.store.has('a')).toBe(true)
+    expect(saved.store.has('b')).toBe(false)
+
+    const bySize = fakeSaved({ maxBytes: 250, bytes: 100 })
+    await settle()
+    for (const name of ['a', 'b', 'c']) {
+      bySize.store.save(name, canvasOf(40))
+      await settle()
+    }
+    expect([...bySize.records.keys()].sort()).toEqual(['b', 'c'])
+  })
+
+  it('draws as before when the saved frames cannot be read', async () => {
+    const saved = fakeSaved()
+    saved.fail.all = true
+    saved.open()
+    await settle()
+    expect(saved.store.settled()).toBe(true)
+    const fake = fakeEnv({ status: () => 'pending', saved })
+    resetSharedFaceRenderer(() => fake.env)
+    render(face())
+    expect(flat()).not.toBeNull()
+  })
+
+  it('stops saving when a write fails, and keeps the frame for this run', async () => {
+    const saved = fakeSaved()
+    saved.fail.put = true
+    await settle()
+    const fake = fakeEnv({ saved })
+    const renderer = new FaceRenderer(fake.env)
+    renderer.register(document.createElement('canvas'), spec({ look: coral, still: true }))
+    fake.tick()
+    await settle()
+    expect(saved.records.size).toBe(0)
+    expect(saved.backend.put).toHaveBeenCalledTimes(1)
+    renderer.register(document.createElement('canvas'), spec({ look: coral, state: 'stuck', still: true }))
+    fake.tick()
+    await settle()
+    expect(saved.backend.put).toHaveBeenCalledTimes(1)
+    // The first frame is still in memory: a third face like it is copied, not drawn.
+    renderer.register(document.createElement('canvas'), spec({ look: coral, still: true }))
+    fake.tick()
+    expect(fake.draws).toHaveLength(2)
+    renderer.dispose()
+  })
+
+  it('forgets a saved frame that cannot be decoded, and the face draws flat', async () => {
+    const saved = fakeSaved()
+    await drawAndSave(saved, { look: coral })
+    saved.open()
+    await settle()
+    saved.fail.decode = true
+    const fake = fakeEnv({ status: () => 'pending', saved })
+    resetSharedFaceRenderer(() => fake.env)
+    render(face())
+    await settle()
+    expect(flat()).not.toBeNull()
+    expect(saved.records.size).toBe(0)
+  })
+
+  it('saves nothing when the first frame reads back empty', async () => {
+    const saved = fakeSaved()
+    await settle()
+    const fake = fakeEnv({ saved })
+    const renderer = new FaceRenderer(fake.env)
+    const canvas = document.createElement('canvas')
+    ;(fake2d(canvas) as unknown as Record<string, unknown>).getImageData = (_x: number, _y: number, w: number, h: number) => ({ data: new Uint8ClampedArray(w * h * 4) })
+    renderer.register(canvas, spec({ look: coral, still: true }))
+    fake.tick()
+    await settle()
+    expect(renderer.status()).toBe('failed')
+    expect(saved.records.size).toBe(0)
+    renderer.dispose()
   })
 })
 

@@ -54,18 +54,54 @@ function a11y(label: string | undefined) {
 }
 
 /**
- * The live mouse, drawn by the shared WebGL renderer (`faceRenderer.ts`). Falls back to
- * `BotFaceStill` when WebGL is missing or refused, context creation fails, or the shader doesn't
- * compile, or is still compiling after a few seconds (`PENDING_TIMEOUT_MS`).
+ * The clay mouse, drawn by the shared WebGL renderer (`faceRenderer.ts`), live once its shader is
+ * ready. Until then, and when the context is lost or WebGL fails after starting, the face shows the
+ * picture of its spec saved in an earlier run, at once; a face that already showed a picture keeps
+ * it through a context loss. With no saved picture, and when WebGL is missing or refused, it draws
+ * `BotFaceStill`, the flat drawing, at once, and goes live within `READY_POLL_MS` of the shader being
+ * ready.
  */
 export function BotFace(props: BotFaceProps) {
   const status = useSyncExternalStore(subscribeSharedFaceRenderer, sharedFaceRendererStatus, () => 'unavailable' as const)
   const [broken, setBroken] = useState(false)
-  if (broken || status === 'unavailable' || status === 'failed') return <BotFaceStill {...props} />
-  return <BotFaceLive {...props} onBroken={() => setBroken(true)} />
+  // The spec whose saved picture turned out missing; its face draws flat until the renderer is live.
+  const [noPictureFor, setNoPictureFor] = useState<string | null>(null)
+  // Whether this face's canvas has been drawn live, so it holds a real picture through a context loss.
+  const drawnRef = useRef(false)
+  const normalized = normalizeFaceProps(props)
+  const key = specKey(normalized)
+  if (status === 'ready' && noPictureFor !== null) setNoPictureFor(null)
+  if (broken || status === 'unavailable') return <BotFaceStill {...props} />
+  if (status !== 'ready') {
+    const flat = noPictureFor === key || (!drawnRef.current && sharedFaceRenderer()?.pictureFor(normalized) === 'none')
+    if (flat) {
+      drawnRef.current = false
+      return <BotFaceStill {...props} />
+    }
+  }
+  return (
+    <BotFaceLive
+      {...props}
+      onBroken={() => setBroken(true)}
+      onNoPicture={() => setNoPictureFor(key)}
+      onDrawn={() => {
+        drawnRef.current = true
+      }}
+    />
+  )
 }
 
-function BotFaceLive({ onBroken, ...props }: BotFaceProps & { onBroken(): void }) {
+function specKey({ look, state, size, view }: NormalizedFaceProps): string {
+  return `${look.colour}|${look.accessory}|${look.kind ?? 'mouse'}|${look.eyes ?? 'pill'}|${state}|${view}|${size}`
+}
+
+interface BotFaceLiveProps extends BotFaceProps {
+  onBroken(): void
+  onNoPicture(): void
+  onDrawn(): void
+}
+
+function BotFaceLive({ onBroken, onNoPicture, onDrawn, ...props }: BotFaceLiveProps) {
   const { look, state, size, view } = normalizeFaceProps(props)
   const motionOff = useMotionScale() === 0
   const still = props.still === true || motionOff
@@ -74,10 +110,13 @@ function BotFaceLive({ onBroken, ...props }: BotFaceProps & { onBroken(): void }
   const spec: FaceSpec = { look, state, size, view, still }
   const specRef = useRef(spec)
   specRef.current = spec
+  const eventsRef = useRef({ onNoPicture, onDrawn })
+  eventsRef.current = { onNoPicture, onDrawn }
 
   useLayoutEffect(() => {
     const canvas = canvasRef.current
-    const handle = canvas ? sharedFaceRenderer()?.register(canvas, specRef.current) ?? null : null
+    const events = { onNoPicture: () => eventsRef.current.onNoPicture(), onDrawn: () => eventsRef.current.onDrawn() }
+    const handle = canvas ? sharedFaceRenderer()?.register(canvas, specRef.current, events) ?? null : null
     if (!handle) {
       onBroken()
       return
@@ -119,7 +158,7 @@ function BotFaceLive({ onBroken, ...props }: BotFaceProps & { onBroken(): void }
 }
 
 /**
- * The still fallback, with no WebGL: the mouse's round head and ears, or the Mousse in its glass, in
+ * The flat fallback, for a face with no live renderer and no saved picture: the mouse's round head and ears, or the Mousse in its glass, in
  * the look's colour with eyes, and a badge in the accessory's colour. Unknown look values draw as the
  * default.
  */
