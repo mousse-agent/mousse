@@ -432,10 +432,12 @@ export function workGroupHeading(items: AssistantToolItem[]): { title: string; s
   items.forEach((item, index) => { if (workKindOf(item.part.type) !== "thought") lastCall = index; });
   const thought = lastCall > 0 ? latestThoughtTitle(items.slice(0, lastCall)) : "";
   if (!thought) return { title };
-  // Short beside a thought: one kind keeps its phrase ("Ran 3 commands"), a mix is counted ("8 actions").
-  const work = tallyKinds(items).filter((tally) => tally.kind !== "thought");
-  const summary = work.length === 1 ? title : plural(work.reduce((sum, tally) => sum + tally.calls, 0), "action");
-  return { title: thought, summary };
+  // Short beside a thought: one kind keeps its phrase ("Ran 3 commands"), a mix counts its calls ("8 actions").
+  const kinds = tallyKinds(items).filter((tally) => tally.kind !== "thought").length;
+  const calls = items.filter((item) => workKindOf(item.part.type) !== "thought").length;
+  // The row cuts the thought at its width; past a few lines' worth it is not read out either.
+  const heading = thought.length > 200 ? `${thought.slice(0, 199).trimEnd()}…` : thought;
+  return { title: heading, summary: kinds === 1 ? title : plural(calls, "action") };
 }
 
 /**

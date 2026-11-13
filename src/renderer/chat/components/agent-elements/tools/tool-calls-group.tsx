@@ -65,6 +65,7 @@ export const ToolCallsGroup = memo(function ToolCallsGroup({
     <ToolRowBase
       icon={icon}
       completeLabel={title}
+      labelTitle={summary ? title : undefined}
       shimmer={false}
       badge={
         summary || failed > 0 ? (

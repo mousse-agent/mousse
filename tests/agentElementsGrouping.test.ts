@@ -384,6 +384,8 @@ describe('workGroupHeading', () => {
     ['no thought: the count is the title', [run(), run()], { title: 'Ran 2 commands' }],
     ['thoughts alone: the latest one, no count', [thought('Look around'), thought('Check the order')], { title: 'Check the order' }],
     ['a long thought is whole: the row cuts it at its width', [thought(long), run()], { title: long, summary: 'Ran 1 command' }],
+    ['an empty thought titles nothing', [thought(''), run()], { title: 'Ran 1 command' }],
+    ['a mix counts every call, a file read twice too', [thought('Check it'), read('a.ts'), read('a.ts'), run()], { title: 'Check it', summary: '3 actions' }],
   ] as const)('%s', (_name, items, expected) => {
     expect(workGroupHeading([...items])).toEqual(expected)
   })
