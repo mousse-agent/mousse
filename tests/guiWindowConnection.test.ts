@@ -99,7 +99,7 @@ describe("a window's own service connection", () => {
     const resnapshots = vi.fn()
     gui.on('window-resnapshot', resnapshots)
     await gui.prepareWindow(windowSender(903))
-    expect(resnapshots).toHaveBeenCalledWith({ senderId: 903 })
+    expect(resnapshots).toHaveBeenCalledWith({ senderId: 903, subscribed: true })
     expect(log.find((line) => line.event === 'window.subscribed')?.fields).toMatchObject({ window: 903, gap: true })
   })
 

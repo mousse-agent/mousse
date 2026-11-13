@@ -590,7 +590,8 @@ export class GuiMmsController extends EventEmitter {
       replayed: Array.isArray(subscribed.replay) ? subscribed.replay.length : 0,
       gap: client.requiresResnapshot
     })
-    if (client.requiresResnapshot) this.emit('window-resnapshot', { senderId })
+    // `subscribed`: the replay itself lost events (the service no longer holds them), unlike a gap in live events.
+    if (client.requiresResnapshot) this.emit('window-resnapshot', { senderId, subscribed: true })
   }
 
   /** A window's own connection closed. Main's own closes (`closeWindowSession`, `stop`) are not losses. */
@@ -652,17 +653,21 @@ export class GuiMmsController extends EventEmitter {
    * What the service says about a thread's turn, read through the window's own connection without the transcript: the
    * cheap check behind the catch-up (#1042). `behind` compares the service's event number when it answered with the
    * last one this connection received; an answer is written after every event numbered before it, so a lower count
-   * means events were lost on the way, not still in flight.
+   * means events were lost on the way, not still in flight. With `clearsGap` the read answers the connection's gap flag
+   * (cleared when it starts, restored if it fails), like `snapshotThreadForSender`.
    */
-  async turnStatusForSender(senderId: number, threadId: string): Promise<WindowTurnStatus> {
+  async turnStatusForSender(senderId: number, threadId: string, clearsGap = false): Promise<WindowTurnStatus> {
     const session = this.windowSessions.get(senderId)
     if (!session || !session.client.connected) throw new Error('Window MMS session is not connected')
-    const status = await session.client.request<{
-      turnState?: TurnState
-      activeTurn?: { active?: boolean; running?: boolean }
-      activity?: string
-      revision?: number
-    }>('thread.snapshot', { threadId, transcript: false })
+    const needed = clearsGap && session.client.requiresResnapshot
+    if (clearsGap) session.client.clearResnapshotFlag()
+    let status: { turnState?: TurnState; activeTurn?: { active?: boolean; running?: boolean }; activity?: string; revision?: number }
+    try {
+      status = await session.client.request('thread.snapshot', { threadId, transcript: false })
+    } catch (error) {
+      if (needed) session.client.markResnapshotNeeded()
+      throw error
+    }
     const revision = typeof status?.revision === 'number' ? status.revision : undefined
     return {
       ...(status?.turnState && typeof status.turnState === 'object' ? { turnState: status.turnState } : {}),

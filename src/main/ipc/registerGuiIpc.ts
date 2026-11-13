@@ -1079,7 +1079,7 @@ export function registerGuiIpc(
     // Installation events are already bridged by the base session. Personal
     // events, including Default, need this exact window's presentation state.
     if (!event.profileId) return
-    if (dropTurnEnd?.(event)) {
+    if (dropTurnEnd?.drop(event)) {
       linkLog.undeliverable(senderId, 'dev-dropped', event.type, event.threadId)
       return
     }
@@ -1377,8 +1377,16 @@ export function registerGuiIpc(
         return
       }
       const activeId = presentationForSender(senderId).getActiveThreadId()
-      if (!activeId) return
-      const status = await guiMms.turnStatusForSender(senderId, activeId)
+      const answersGap = reasons.includes('gap')
+      if (!activeId) {
+        // With no thread open, a gap is answered by reading every thread's status (it clears the gap flag).
+        if (answersGap) {
+          addCatchUpReason(senderId, 'gap')
+          await catchUpWindow(senderId)
+        }
+        return
+      }
+      const status = await guiMms.turnStatusForSender(senderId, activeId, answersGap)
       const held = turnStateMapFor(binding.profileId).get(activeId)
       const shownActive = isTurnStoppable(held) || isThreadActivityActive(activityTrackerFor(binding.profileId).getState(activeId))
       const serviceActive = status.turnState
@@ -1416,9 +1424,17 @@ export function registerGuiIpc(
     onQuiet: (senderId) => requestCheck(senderId, 'quiet')
   })
 
-  // A gap in the window connection's event numbers: events were lost on the way.
-  guiMms.on('window-resnapshot', ({ senderId }: { senderId: number }) => {
-    requestCatchUp(senderId, 'gap')
+  guiMms.on('window-resnapshot', ({ senderId, subscribed }: { senderId: number; subscribed?: boolean }) => {
+    // The service's replay no longer held what the window missed: read it all again.
+    if (subscribed) {
+      requestCatchUp(senderId, 'gap')
+      return
+    }
+    // A gap in live events is mostly the service replacing a waiting streamed update with its newer copy, which
+    // arrives next: the cheap check answers it, and reads the thread again only if the window really is behind.
+    // While a streaming reply is replaced like this many times a turn, its transcript is not sent again each time.
+    if (dropTurnEnd?.cutting()) return
+    requestCheck(senderId, 'gap')
   })
   // The window's own connection dropped and was opened again: everything since is unknown.
   guiMms.on('window-session-reopened', ({ senderId }: { senderId: number }) => {

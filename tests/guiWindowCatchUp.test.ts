@@ -222,14 +222,43 @@ describe('a window that missed the end of a turn', () => {
     expect(written).not.toContain('second question')
   })
 
-  it('a gap in the event numbers reads the thread at once, with its transcript', async () => {
+  it('a gap found while subscribing (the replay lost events) reads the thread at once, with its transcript', async () => {
+    startTurn()
+    finishTurnSilently()
+    for (const listener of listeners.get('window-resnapshot') ?? []) listener({ senderId: WINDOW, subscribed: true })
+    await vi.waitFor(() => expect(views()).toHaveLength(1))
+    expect(guiMms.turnStatusForSender).not.toHaveBeenCalled()
+    expect(views()[0].messages.at(-1)?.content).toBe(REPLY_TEXT)
+    expect(lastTurn()?.phase).toBe('completed')
+    expect(logLines.find((line) => line.event === 'catch-up')?.fields.reasons).toEqual(['gap'])
+  })
+
+  it('a gap in live events that lost the end of the turn is found by the status read at once and read in full', async () => {
     startTurn()
     finishTurnSilently()
     for (const listener of listeners.get('window-resnapshot') ?? []) listener({ senderId: WINDOW })
     await vi.waitFor(() => expect(views()).toHaveLength(1))
+    // The status read answers the gap flag.
+    expect(guiMms.turnStatusForSender).toHaveBeenCalledWith(WINDOW, 't1', true)
     expect(views()[0].messages.at(-1)?.content).toBe(REPLY_TEXT)
     expect(lastTurn()?.phase).toBe('completed')
-    expect(logLines.find((line) => line.event === 'catch-up')?.fields.reasons).toEqual(['gap'])
+    expect(logLines.find((line) => line.event === 'check.behind')?.fields.reasons).toEqual(['gap'])
+  })
+
+  it('a gap in live events that lost nothing (a streamed update replaced by its newer copy) sends nothing and reads no transcript', async () => {
+    startTurn()
+    sent.length = 0
+    for (let i = 0; i < 5; i += 1) {
+      push('thread.message-updated', { message: message('a2', 'assistant', `partial ${i}`, 3) })
+      for (const listener of listeners.get('window-resnapshot') ?? []) listener({ senderId: WINDOW })
+    }
+    await vi.waitFor(() => expect(guiMms.turnStatusForSender).toHaveBeenCalled())
+    await vi.advanceTimersByTimeAsync(0)
+    expect(guiMms.snapshotThreadForSender).not.toHaveBeenCalled()
+    expect(views()).toEqual([])
+    expect(ofChannel('orchestrator:turn-state')).toEqual([])
+    // A burst of gaps is at most one read running and one after it.
+    expect((guiMms.turnStatusForSender as ReturnType<typeof vi.fn>).mock.calls.length).toBeLessThanOrEqual(2)
   })
 
   it("a window whose own connection was opened again reads its thread", async () => {

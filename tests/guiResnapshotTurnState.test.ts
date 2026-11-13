@@ -1,5 +1,5 @@
 /**
- * A window that missed events reads its open thread again (`resnapshotWindow` in registerGuiIpc). The turn state
+ * A window that missed events reads its open thread again (`catchUpWindow` in registerGuiIpc). The turn state
  * it is sent must be a whole TurnState, the service's own: `{ threadId, state: 'processing' }` had no phase, read as
  * no turn, and the transcript dropped Working while the turn still ran.
  */
@@ -45,6 +45,8 @@ const guiMms = {
     ...(snapshotTurnState ? { turnState: snapshotTurnState } : {})
   })),
   activityForSender: vi.fn(async () => ({})),
+  // The gap lost events the window never received: the status read sends it to the full read.
+  turnStatusForSender: vi.fn(async () => ({ activeTurn: running, behind: true })),
   runWithSender: (_sender: unknown, run: () => unknown) => run(),
   getCurrentSenderId: () => 7,
   getWindowBindingForSender: () => ({ profileId: 'profile-1' }),
