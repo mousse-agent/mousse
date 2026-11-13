@@ -75,7 +75,7 @@ import { BotDefinitionError, upgradeDefinitionV1, type BotDefinitionEntry, type 
 import { chipCallOf } from '../activity/BotActivitySink'
 import { botFilesFolder, botManifestDigest, compileBotThread } from '../grants/compile'
 import { BOT_RUN_REPORT_LINE } from '../memory/contextPack'
-import type { BotActivityContext, BotActivitySink, BotContextProvider, BotDispatchEnd, BotJournal, BotJournalInput, BotMcpListing, BotMemoryAdmin, BotModelChange, BotModelProblem, BotModelResolution, BotModelResolver, BotProcessSupervision, BotToolHost, BotWorkList, BotWorkStarted } from '../seams'
+import type { BotActivityContext, BotActivitySink, BotContextProvider, BotDispatchEnd, BotJournal, BotJournalInput, BotMcpListing, BotMemoryAdmin, BotModelChange, BotModelProblem, BotModelResolution, BotModelResolver, BotProcessSupervision, BotToolHost, BotWorkList, BotWorkModel, BotWorkStarted } from '../seams'
 import { workWaits, type BotActivationRow, type BotDispatchRow, type BotEntryLimit, type BotEscalationRow, type BotMessageRow, type BotModelState, type BotReminderRow, type BotStore, type BotStoredError } from '../store/BotStore'
 import { BotCounterScope, BotSpendScope, type ActivationLimits } from '../store/scopes'
 import { isConnectionFailure, type BotConnectivity } from './connectivity'
@@ -966,7 +966,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return { activationId: newActivationId(), continues: false }
   }
 
-  private async enqueue(botId: string, key: string, trigger: BotActivationTrigger, lane: BotLane = 'run', presetId?: string): Promise<BotActivationSummary> {
+  private async enqueue(botId: string, key: string, trigger: BotActivationTrigger, lane: BotLane = 'run', presetId?: string, own?: BotModelOverride): Promise<BotActivationSummary> {
     const existing = this.store.activationByKey(key)
     if (existing) {
       if (existing.botId !== botId) throw new BotEngineError('client_request_id_conflict', 'This request belongs to another bot.')
@@ -974,8 +974,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     const admitted = this.admissible(botId)
     // Work for a row that can't run is not started (#673): the bot (and a reminder's line) says why, and nothing waits
-    // to run later on it.
-    if (lane === 'run') {
+    // to run later on it. Work with a model of its own (`own`) does not run on its row.
+    if (lane === 'run' && !own) {
       const turn = turnModelOf(admitted.published.main, { lane, trigger })
       if (turn.pick && isPinned(turn.pick) && this.stuckOn(botId, turn.slot))
         throw new BotEngineError(PICK_UNAVAILABLE, `the model picked for ${rowName(turn.slot).toLowerCase()} can't run now. Pick one in About → Runs on.`)
@@ -985,7 +985,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // A duplicate of the same request in flight at the same time (a chat message delivered twice)
       // finds the activation the other one inserted, and gets that one instead of an error.
       if (this.store.activationByKey(key)) return undefined
-      return this.insertQueued(botId, id, key, trigger, lane, admitted)
+      const over = this.insertQueued(botId, id, key, trigger, lane, admitted)
+      // Its own model is written with it, so it never runs a dispatch on its row first.
+      if (own) this.store.setModelOverride(id, own)
+      return over
     })
     if (dropped === undefined) {
       const raced = this.store.activationByKey(key)!
@@ -5455,17 +5458,28 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * what it waits behind: the bot's own running pieces and what starts before it, or, when the bot has room but the
    * profile does not, the other bots' work.
    */
-  async startWork(botId: string, from: string, input: { title: string; brief: string; key: string; level?: BotWorkLevel }): Promise<BotWorkStarted> {
+  async startWork(botId: string, from: string, input: { title: string; brief: string; key: string; level?: BotWorkLevel; model?: BotWorkModel }): Promise<BotWorkStarted> {
     const brief = input.brief.trim()
     if (!brief) throw new BotEngineError('invalid_params', 'work_start needs a brief.')
     const title = input.title.replace(/\s+/g, ' ').trim().slice(0, MAX_WORK_TITLE_CHARS) || summarise(brief)
     const replyTo = this.ownerMessageOf(from)
     // Its level picks its Work row (#673); absent, the bot's standing level.
-    const summary = await this.enqueue(botId, `work:${input.key}`, { kind: 'work', input: brief, title, ...(replyTo ? { replyTo } : {}), from, ...(input.level ? { level: input.level } : {}) }, 'run')
+    const trigger: Extract<BotActivationTrigger, { kind: 'work' }> = { kind: 'work', input: brief, title, ...(replyTo ? { replyTo } : {}), from, ...(input.level ? { level: input.level } : {}) }
+    // A model the owner asked for this work alone is its own pick for good, kept on its activation; the work line names
+    // it when it is not the row's.
+    let own: BotModelOverride | undefined
+    if (input.model) {
+      const main = this.published(botId).main
+      const row = turnModelOf(main, { lane: 'run', trigger })
+      own = { mode: 'named', ...copyPick(input.model.pick), model: input.model.pick.model, depth: startDepthOf(main, { lane: 'run', trigger }) }
+      if (!samePick(row.pick, input.model.pick)) trigger.model = { ...input.model.name }
+    }
+    const summary = await this.enqueue(botId, `work:${input.key}`, trigger, 'run', undefined, own)
     const row = this.store.activation(summary.id)!
-    if (ENDED_ACTIVATION_STATUSES.has(row.status)) return { workId: row.id, status: 'ended', ahead: [] }
-    if (row.status !== 'queued') return { workId: row.id, status: 'started', ahead: [] }
-    return { workId: row.id, status: 'queued', ahead: this.waitsBehind(row) }
+    const named = row.trigger.kind === 'work' && row.trigger.model ? { model: row.trigger.model } : {}
+    if (ENDED_ACTIVATION_STATUSES.has(row.status)) return { workId: row.id, status: 'ended', ahead: [], ...named }
+    if (row.status !== 'queued') return { workId: row.id, status: 'started', ahead: [], ...named }
+    return { workId: row.id, status: 'queued', ahead: this.waitsBehind(row), ...named }
   }
 
   /** What queued run work waits behind, in titles: the queue before it, and what fills the slots it waits for. */
