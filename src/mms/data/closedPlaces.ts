@@ -74,7 +74,7 @@ function everyProfileEntryEnvironment(profileHome: string): Array<Record<string,
   for (const name of names) {
     const other = join(profiles, name)
     if (other === own) continue
-    if (!lstatSync(other).isDirectory()) continue
+    if (!statSync(other).isDirectory()) continue
     envs.push(...profileEntryEnvironments(other))
   }
   return envs

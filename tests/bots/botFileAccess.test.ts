@@ -276,6 +276,14 @@ describe('each runtime compiles file access to the whole file system but Mousse\
     expect(() => botClosedPlaces({ mousseHome: mousse, env: { [key]: 'relative/home' }, temps: [], entryEnvs: [] })).toThrow(ClosedPlacesUnknown)
   })
 
+  it('includes stored CLI homes in a profile reached through a directory link', () => {
+    const target = join(base, 'linked-profile')
+    const cliHome = join(base, 'linked-codex')
+    storeEntries(target, { 'codex:linked': { driver: 'codex', config: { env: { CODEX_HOME: cliHome } } } })
+    symlinkSync(target, join(mousse, 'profiles', 'linked'), 'junction')
+    expect(botClosedPlaces({ mousseHome: mousse, profileHome: profile, env: {}, temps: [] })).toContain(join(cliHome, 'auth.json'))
+  })
+
   it('an unreadable temporary folder or corrupt sibling profile refuses an incomplete closed list', () => {
     const notFolder = join(base, 'not-a-folder')
     writeFileSync(notFolder, 'x')
