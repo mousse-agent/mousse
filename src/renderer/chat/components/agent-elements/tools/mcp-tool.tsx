@@ -2,7 +2,7 @@ import { memo, useMemo } from "react";
 import { Streamdown } from "streamdown";
 import { getToolStatus, areToolPropsEqual } from "../utils/format-tool";
 import type { McpToolInfo } from "./tool-registry";
-import { Plug } from "../../../../lib/icons";
+import { Wrench } from "../../../../lib/icons";
 import { ToolRowBase } from "./tool-row-base";
 import { codeHighlighter } from "../code-highlighter";
 
@@ -216,7 +216,7 @@ export const McpTool = memo(function McpTool({
   return (
     <div className="an-tool-mcp">
       <ToolRowBase
-        icon={<Plug size={18} />}
+        icon={<Wrench size={18} />}
         shimmerLabel={title}
         completeLabel={title}
         isAnimating={isPending}

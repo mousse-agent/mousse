@@ -28,7 +28,13 @@ import AtIcon from '@hugeicons/core-free-icons/AtIcon'
 import Attachment01Icon from '@hugeicons/core-free-icons/Attachment01Icon'
 import BookOpen01Icon from '@hugeicons/core-free-icons/BookOpen01Icon'
 import Brain01Icon from '@hugeicons/core-free-icons/Brain01Icon'
-import Atom01Icon from '@hugeicons/core-free-icons/Atom01Icon'
+import Brain03Icon from '@hugeicons/core-free-icons/Brain03Icon'
+import BotIcon from '@hugeicons/core-free-icons/BotIcon'
+import CheckListIcon from '@hugeicons/core-free-icons/CheckListIcon'
+import GlobalSearchIcon from '@hugeicons/core-free-icons/GlobalSearchIcon'
+import PencilEdit01Icon from '@hugeicons/core-free-icons/PencilEdit01Icon'
+import Search02Icon from '@hugeicons/core-free-icons/Search02Icon'
+import ToolsIcon from '@hugeicons/core-free-icons/ToolsIcon'
 import BrowserIcon from '@hugeicons/core-free-icons/BrowserIcon'
 import BubbleChatAddIcon from '@hugeicons/core-free-icons/BubbleChatAddIcon'
 import BubbleChatIcon from '@hugeicons/core-free-icons/BubbleChatIcon'
@@ -360,22 +366,27 @@ export const Cookie = /* @__PURE__ */ createIcon('Cookie', CookieIcon)
 export const BrowserTab = /* @__PURE__ */ createIcon('BrowserTab', BrowserIcon)
 export const PinOff = /* @__PURE__ */ createIcon('PinOff', PinOffIcon)
 
+// The chat's work rows: one icon per kind of step (tools/tool-icon.tsx).
+export const RowEdit = /* @__PURE__ */ createIcon('RowEdit', PencilEdit01Icon)
+export const RowSearch = /* @__PURE__ */ createIcon('RowSearch', Search02Icon)
+export const RowWeb = /* @__PURE__ */ createIcon('RowWeb', GlobalSearchIcon)
+export const RowSubagent = /* @__PURE__ */ createIcon('RowSubagent', BotIcon)
+export const RowTools = /* @__PURE__ */ createIcon('RowTools', ToolsIcon)
+export const RowTodo = /* @__PURE__ */ createIcon('RowTodo', CheckListIcon)
+
 export interface ThinkingIconProps extends IconProps {
-  /** While the model thinks: the icon turns around its centre (thinking-icon.css). */
+  /** While the model thinks: the icon pulses gently (thinking-icon.css). */
   active?: boolean
 }
 
-/**
- * The chat's thinking icon (Hugeicons Atom 01). Its own SVG so the centre circle and the orbits
- * (arcs and dots) are separate: only the orbit group rotates while `active`.
- */
+/** The chat's thinking icon (Hugeicons Brain 03). It pulses while `active` (thinking-icon.css). */
 export const ThinkingIcon = /* @__PURE__ */ forwardRef<SVGSVGElement, ThinkingIconProps>(function ThinkingIcon(
   { size = 16, stroke, strokeWidth, active = false, className = '', ...props },
   ref,
 ) {
   const width = strokeWidth === undefined ? (typeof stroke === 'number' ? stroke : 1.5) : Number(strokeWidth)
   const color = typeof stroke === 'string' ? stroke : 'currentColor'
-  const [centre, ...orbits] = Atom01Icon as unknown as Array<[string, Record<string, string>]>
+  const shapes = Brain03Icon as unknown as Array<[string, Record<string, string>]>
   const draw = ([tag, { key, ...attrs }]: [string, Record<string, string>]) => {
     const shape = { ...attrs, stroke: color, strokeWidth: width }
     return tag === 'circle' ? <circle key={key} {...shape} /> : <path key={key} {...shape} />
@@ -394,8 +405,7 @@ export const ThinkingIcon = /* @__PURE__ */ forwardRef<SVGSVGElement, ThinkingIc
       className={`mousse-icon thinking-icon${active ? ' is-thinking' : ''} ${className}`.trim()}
       {...props}
     >
-      {draw(centre!)}
-      <g className="thinking-icon-orbit">{orbits.map(draw)}</g>
+      {shapes.map(draw)}
     </svg>
   )
 })

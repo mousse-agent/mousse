@@ -31,7 +31,7 @@ import { ErrorMessage } from "./error-message";
 import { useTurnActions } from "./turn-actions";
 import type { CustomToolRendererProps } from "./types";
 import { ToolRowBase } from "./tools/tool-row-base";
-import { ArrowShrink, GitFork, History, ThinkingIcon, IconChevronDown, IconChevronRight, IconCopy, IconCheck, IconInfoCircle, IconX, Square, Wrench } from "../../../lib/icons";
+import { ArrowShrink, GitFork, History, ThinkingIcon, IconChevronDown, IconChevronRight, IconCopy, IconCheck, IconInfoCircle, IconX, RowTools, Square } from "../../../lib/icons";
 import {
   formatResponseTime,
   formatTokens,
@@ -2623,7 +2623,7 @@ const TurnRow = memo(function TurnRow({
                   ) : iconType ? (
                     <ToolIcon type={iconType} state="done" />
                   ) : (
-                    <Wrench size={18} />
+                    <RowTools size={18} />
                   )
                 }
                 title={workGroupTitle(grouped)}

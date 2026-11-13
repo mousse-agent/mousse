@@ -2,7 +2,6 @@ import { readFileSync } from 'node:fs'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
-import { ThinkingIcon } from '../../src/renderer/lib/icons'
 import { ThinkingCollapsed } from '../../src/renderer/chat/components/agent-elements/tools/thinking-tool'
 
 const step = {
@@ -18,15 +17,7 @@ const step = {
 const thinkingIcon = (html: string) => html.match(/<svg[^>]*class="[^"]*thinking-icon[^"]*"[^>]*>/)?.[0] ?? ''
 
 describe('Thinking icon', () => {
-  it('is the atom, with the orbits in their own group around a still centre', () => {
-    const html = renderToStaticMarkup(createElement(ThinkingIcon, { size: 18 }))
-    expect(html).toContain('width="18"')
-    expect(html).toMatch(/<circle[^>]*r="4"/)
-    expect(html).toContain('<g class="thinking-icon-orbit">')
-    expect(html).not.toMatch(/<g class="thinking-icon-orbit">[^]*<circle/)
-  })
-
-  it('rotates while the thought streams', () => {
+  it('pulses while the thought streams', () => {
     const html = renderToStaticMarkup(createElement(ThinkingCollapsed, { step, state: 'animating', onComplete: () => {} }))
     expect(thinkingIcon(html)).toContain('is-thinking')
   })
@@ -35,18 +26,6 @@ describe('Thinking icon', () => {
     const html = renderToStaticMarkup(createElement(ThinkingCollapsed, { step, state: 'complete', onComplete: () => {} }))
     expect(thinkingIcon(html)).not.toBe('')
     expect(thinkingIcon(html)).not.toContain('is-thinking')
-  })
-
-  it('turns by a transform on its own layer: the compositor draws it', () => {
-    const css = readFileSync('src/renderer/styles/thinking-icon.css', 'utf8')
-    const rule = css.match(/\.thinking-icon\.is-thinking\s*\{([^}]*)\}/)?.[1] ?? ''
-    expect(rule).toContain('will-change: transform;')
-    // Only a transform animates, and only on the icon itself (one inside the SVG lays it out every frame).
-    const keyframes = css.match(/@keyframes thinking-icon-turn\s*\{([^]*?)\n\}/)?.[1] ?? ''
-    expect([...keyframes.matchAll(/([a-z-]+)\s*:/g)].map((match) => match[1])).toEqual(['transform'])
-    expect(css).not.toMatch(/thinking-icon-orbit\s*\{[^}]*animation/)
-    // No colour animation, which would paint every frame.
-    expect(css).not.toMatch(/@keyframes[^{]*\{[^@]*color:/)
   })
 
   it('is still with motion off or reduced', () => {
