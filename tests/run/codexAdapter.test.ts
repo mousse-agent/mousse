@@ -2286,6 +2286,41 @@ describe('a bot turn on Codex', () => {
     expect(saved.threads['thread-1'].cwd).toBe(files)
   })
 
+  it('a bot turn that holds MCP tools gets Mousse\'s relay, and every MCP server of the owner\'s own Codex setup is off', async () => {
+    const files = join(home, 'files')
+    mkdirSync(files)
+    const { bot } = botIn(files)
+    const mcp = { url: 'http://127.0.0.1:4000/mcp', token: 'run-token', relay: { url: 'http://127.0.0.1:4000/relay', revision: 'rev-1' } }
+    const replay = transport([
+      ...handshake(),
+      // The owner's own Codex servers, one of them named like Mousse's relay: theirs are switched off, Mousse's stay.
+      out({ id: 4, method: 'config/read', params: { includeLayers: true } }),
+      inn({ id: 4, result: { config: { mcp_servers: { github: { enabled: true }, 'mousse-relay': { enabled: true } } }, layers: [] } }),
+      ...threadStart(5, threadParams({
+        config: {
+          'mcp_servers.github.enabled': false,
+          model_provider: 'openai',
+          'mcp_servers.mousse.url': mcp.url,
+          'mcp_servers.mousse.http_headers': { Authorization: 'Bearer run-token' },
+          'mcp_servers.mousse.tool_timeout_sec': 3600,
+          'mcp_servers.mousse.default_tools_approval_mode': 'approve',
+          // Every call of the bot's MCP tools goes to the relay, which checks the grant before the server sees it.
+          'mcp_servers.mousse-relay.url': mcp.relay.url,
+          'mcp_servers.mousse-relay.http_headers': { Authorization: 'Bearer run-token' },
+          'mcp_servers.mousse-relay.tool_timeout_sec': 3600,
+          'mcp_servers.mousse-relay.default_tools_approval_mode': 'approve'
+        },
+        developerInstructions: mousseOrchestrationInstructions()
+      })),
+      ...turnStart(6, 'go'),
+      ...message('msg-1', ['Done']),
+      completed('completed')
+    ])
+    const codex = service(replay)
+    await new CodexAdapter(() => codex).startTurn(input({ prompt: 'go' }), recordingSink(), control(), { ...host(mcp), bot: bot as never })
+    replay.assertDone()
+  })
+
   it('a chat activation\'s cleared context starts a new Codex thread', async () => {
     const files = join(home, 'files')
     mkdirSync(files)
