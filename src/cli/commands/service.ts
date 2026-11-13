@@ -33,6 +33,7 @@ import {
 import { installDaemonDiagnostics } from '../daemonDiagnostics'
 import { installElectronDaemonQuit } from '../electronDaemonLifetime'
 import { resolveDaemonHostInvocation } from '../daemonHost'
+import { dropForeignAppImageMounts } from '../appImageMounts'
 import { MmsProtocolServer } from '../../mms/protocol'
 import { prepareMemoryMonitor } from '../../mms/diagnostics/startMemoryMonitor'
 import {
@@ -265,6 +266,8 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
 }
 
 async function runForeground(homeFlag?: string): Promise<void> {
+  // Before anything starts a program: the app that started the service may quit and take its mount with it.
+  dropForeignAppImageMounts()
   await runDaemonForeground({
     homeDir: resolveMousseHome(homeFlag)
   })
