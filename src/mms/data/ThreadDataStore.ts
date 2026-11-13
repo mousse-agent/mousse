@@ -2699,11 +2699,20 @@ export class ThreadDataStore extends EventEmitter {
     if (!this.indexDirty.size || !this.threadDbStore) return
     const targets = [...this.indexDirty].map(([threadId, dir]) => ({ threadId, dir }))
     this.indexDirty.clear()
-    this.threadDbStore.client.callIndex('indexUpdate', this.homeDir, targets).catch((error: unknown) => {
+    this.indexUpdate = this.threadDbStore.client.callIndex('indexUpdate', this.homeDir, targets).then(() => undefined, (error: unknown) => {
       // Skipped while the index worker backs off after crashing; the client has logged that once.
       if ((error as NodeJS.ErrnoException | undefined)?.code === WORKER_BACKOFF_CODE) return
       console.warn('thread search index update failed; the next sweep catches up', { error: error instanceof Error ? error.message : String(error) })
     })
+  }
+
+  /** The last index update sent; it settles after every earlier one, since the worker applies them in order. */
+  private indexUpdate?: Promise<void>
+
+  /** Sends the pending index notices now and waits until the index has them (or they failed and were logged). */
+  async flushSearchIndex(): Promise<void> {
+    this.flushIndexNotices()
+    await this.indexUpdate
   }
 
   /** Threads kept in `thread.db`, with their folders. */

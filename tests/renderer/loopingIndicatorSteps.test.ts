@@ -11,7 +11,8 @@ const SMOOTH_ALLOWED = [
   // Kept smooth on purpose (428f6e0be): a stepped turn read as laggy. It shows only while a model thinks.
   'thinking-icon-turn',
   'composer-recording-pulse', 'composer-transcribing-spin', 'orb-liquid-drift',
-  'threads-sidebar-skeleton-shimmer', 'usage-skeleton-pulse', 'usage-bar-stripes', 'ui-loader-breathe'
+  'threads-sidebar-skeleton-shimmer', 'usage-skeleton-pulse', 'usage-bar-stripes', 'ui-loader-breathe',
+  'bot-browser-loading' // the bot browser's address bar while a page loads
 ]
 
 const cssFiles = execFileSync('git', ['ls-files', 'src/renderer/*.css', 'src/renderer/**/*.css'], { encoding: 'utf8' }).trim().split('\n')
