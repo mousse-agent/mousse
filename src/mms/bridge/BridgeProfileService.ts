@@ -25,7 +25,7 @@ import { MmsRemoteBackend, RemoteApi, ThreadStreamAdapter } from './remote'
 import { MmsThreadSource } from './remote/MmsThreadSource'
 import { LISTS_STREAM_THREAD_ID, MmsListsSource } from './remote/MmsListsSource'
 import { remoteListMethods } from './remote/RemoteLists'
-import { remoteBotMethods } from './remote/RemoteBots'
+import { botDeviceLimitFrom, remoteBotMethods } from './remote/RemoteBots'
 import type { BotsSharingPort } from '../protocol/botsSharingPort'
 import { cleanDeviceName } from '../../shared/bridge/editorAsk'
 import { phoneSpeechMethods } from './remote/speech'
@@ -408,7 +408,7 @@ export class BridgeProfileService {
       bots: () => services.personalBots?.service ?? undefined,
       refusal: () => botsSharing.refusal(),
       // The device's own limit here: what a bot does with threads in a turn its message started is held to it.
-      deviceLimit: (node) => rt.policy.get(node as NodeId).maxPermissionMode
+      deviceLimit: botDeviceLimitFrom(rt.policy)
     }))
       rt.rpc.register({
         ...method,

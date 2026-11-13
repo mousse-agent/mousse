@@ -210,8 +210,8 @@ export interface BotEngineHost {
    */
   computerLimit?(): BotComputerLimit
   /**
-   * "Use your threads" no longer holds for this bot (Remove in About; the computer's switch is the service's to watch):
-   * the messages it sent that have not started yet are withdrawn from the owner's threads. Must not throw.
+   * "Use your threads" no longer holds for this bot (Remove in About, the computer's switch going off, or the bot
+   * deleted): the messages it sent that have not started yet are withdrawn from the owner's threads. Must not throw.
    */
   threadsWithdrawn?(bot: { botId: string; homeThreadId: string; name: string }): void
   /**
@@ -705,7 +705,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * threads, schedules and files are kept 30 days, then `sweepDeleted` purges them.
    */
   async remove(botId: string): Promise<{ purgeAt: string }> {
-    this.entry(botId)
+    const entry = this.entry(botId)
     const live = this.store.db.transaction(() => {
       const running = this.store.activationsIn(botId, [...NOT_ENDED])
       for (const activation of running) {
@@ -719,6 +719,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.store.cancelReminders(botId)
       return running
     })
+    // Its messages still waiting in its owner's threads ("use your threads") go with it, each thread saying so, as after
+    // Remove. Named now: the deleted bot's definition is no longer read.
+    this.withdrawThreadMessages(botId, (entry.published ?? entry.draft).name)
     // Its runs end before its threads are archived; the stop is bounded, a hung provider stop included.
     const quiet = await this.stopAndWait(live)
     // Scratch folders go only once nothing runs in them (the startup pass removes the rest).
@@ -3850,7 +3853,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           any = true
         }
       // A message from another device continues the turn: the rest of it is held to that device's limit too ("use your
-      // threads"). One re-admitted after a restart carries no device and leaves the turn as it was.
+      // threads"). `chatSend` already wrote it with the message, so one re-admitted after a restart keeps it too.
       if (any && !limit && owner?.limit) this.store.narrowOwnerLimit(activationId, owner.limit)
       return any
     })
@@ -5400,18 +5403,20 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * "Use your threads" was removed (About → Remove) or switched off on this computer: the bot's messages still waiting
-   * in its owner's threads are withdrawn (`BotEngineHost.threadsWithdrawn`). A bot with no chat thread yet sent none.
+   * "Use your threads" was removed (About → Remove), switched off on this computer, or the bot was deleted: the bot's
+   * messages still waiting in its owner's threads are withdrawn (`BotEngineHost.threadsWithdrawn`). A bot with no chat
+   * thread yet sent none.
    */
-  withdrawThreadMessages(botId: string): void {
+  withdrawThreadMessages(botId: string, botName?: string): void {
     const homeThreadId = this.store.registry(botId)?.homeThreadId
     if (!homeThreadId || !this.host.threadsWithdrawn) return
-    let name = botId
-    try {
-      name = this.definitionOf(botId).name
-    } catch {
-      // A bot without its definition still has its messages withdrawn, under its id.
-    }
+    let name = botName ?? botId
+    if (botName === undefined)
+      try {
+        name = this.definitionOf(botId).name
+      } catch {
+        // A bot without its definition still has its messages withdrawn, under its id.
+      }
     try {
       this.host.threadsWithdrawn({ botId, homeThreadId, name })
     } catch (error) {

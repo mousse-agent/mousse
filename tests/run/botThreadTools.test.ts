@@ -166,10 +166,10 @@ describe('a bot\'s thread tools ("use your threads")', () => {
 
   // Who the bot may reach, by each tool that names a thread: whether read, send, wait and stop go ahead. Every thread the
   // list and search hide is refused by id, in the same words; an archived thread is read, waited on and stopped, and
-  // takes no new message.
+  // takes no new message; so is a thread it started in a project it may not use now, as for ordinary agents.
   const reach: Array<[string, string, { read: boolean; send: boolean; wait: boolean; stop: boolean }]> = [
     ['an ordinary thread in an allowed project', 'mine', { read: true, send: true, wait: true, stop: true }],
-    ['a thread it started, now outside the allowed projects', 'started', { read: true, send: true, wait: true, stop: true }],
+    ['a thread it started, now outside the allowed projects', 'started', { read: true, send: false, wait: true, stop: true }],
     ['an archived thread', 'archived', { read: true, send: false, wait: true, stop: true }],
     ['its own chat thread', 'home', { read: false, send: false, wait: false, stop: false }],
     ['another bot\'s thread', 'other-bot', { read: false, send: false, wait: false, stop: false }],
@@ -194,6 +194,7 @@ describe('a bot\'s thread tools ("use your threads")', () => {
       // A thread out of reach is refused in one form of words, whatever kind it is.
       if (!ok[tool] && !(tool === 'send' && ok.read)) expect(outcome.text, `${tool} ${threadId}`).toContain(`Thread ${threadId} is not available to you.`)
     }
+    if (threadId === 'started') expect((await calls.send()).text).toContain(`Thread started is in a project you may not use now (Settings → Agents), so you can't message it.`)
     expect(vi.mocked(host.sendToThread!).mock.calls.length).toBe(ok.send ? 1 : 0)
     expect(vi.mocked(host.stopRun!).mock.calls.length).toBe(ok.stop ? 1 : 0)
   })
@@ -221,7 +222,11 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(await text('thread_read', { threadId: 'mine' })).toEqual({ error: true, text: expect.stringContaining(BOT_PROJECTS_UNREADABLE_TEXT) })
     expect(await text('thread_create', { projectId: 'p1', title: 'X', firstMessage: 'Y' })).toEqual({ error: true, text: expect.stringContaining(BOT_PROJECTS_UNREADABLE_TEXT) })
     expect((await text('thread_read', { threadId: 'started' })).error).toBe(false)
+    // Read, waited on and stopped, but never messaged: its project is not one the bot may use now.
+    expect(await text('thread_send', { threadId: 'started', content: 'Go on.' })).toEqual({ error: true, text: expect.stringContaining("in a project you may not use now (your owner's project list in Settings → Agents could not be read)") })
+    expect((await text('thread_interrupt', { threadId: 'started', runId: 'run-x' })).error).toBe(false)
     expect(host.createThread).not.toHaveBeenCalled()
+    expect(host.sendToThread).not.toHaveBeenCalled()
     fx?.dispose()
     fx = undefined
     // A list never set is every project, as before.
@@ -295,7 +300,12 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(await text('thread_create', { projectId: 'p1', title: 'Fix login' })).toMatchObject({ error: true, text: expect.stringMatching(/first message/) })
     const started = await text('thread_create', { projectId: 'p1', title: 'Fix login', firstMessage: 'Look at the login page.', instanceId: 'claude', model: 'opus' })
     expect(started.error).toBe(false)
-    expect(JSON.parse(started.text)).toMatchObject({ threadId: 'new-1', title: 'Fix login', project: 'Web app', permissionMode: 'full' })
+    expect(JSON.parse(started.text)).toMatchObject({ threadId: 'new-1', title: 'Fix login', project: 'Web app', permissionMode: 'full', note: expect.stringMatching(/^It runs with full access:/) })
+    // A thread held to the device the owner wrote from: the bot is told the mode it really runs in.
+    vi.mocked(host.createThread!).mockResolvedValueOnce({ threadId: 'new-2', projectId: 'p1', title: 'On the phone', workspace: 'project', runsIn: 'project_folder', model: null, permissionMode: 'ask', replayed: false })
+    const held = JSON.parse((await text('thread_create', { projectId: 'p1', title: 'On the phone', firstMessage: 'Look.' })).text) as { note: string }
+    expect(held.note).toMatch(/^It runs in Ask, as the device your owner wrote from allows/)
+    expect(held.note).not.toMatch(/full access/)
     expect(host.createThread).toHaveBeenCalledWith(expect.objectContaining({ projectId: 'p1', title: 'Fix login', instanceId: 'claude', model: 'opus', firstMessage: 'Look at the login page.' }), expect.anything())
     // No note in the bot's own thread; the new thread says who started it.
     expect(host.noteOnThread).not.toHaveBeenCalled()

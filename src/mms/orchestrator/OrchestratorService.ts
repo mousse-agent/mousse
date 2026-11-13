@@ -4593,11 +4593,16 @@ export class OrchestratorService extends EventEmitter {
     if (engine.store.getReceipt(clientRequestId)) return () => undefined
     const key = `${tool}:${bot.activationId}`
     const max = tool === 'thread_create' ? THREAD_CREATE_MAX_PER_RUN : THREAD_SEND_MAX_PER_RUN
-    const used = engine.store.countReceipts(prefix, tool === 'thread_create' ? AGENT_THREAD_COMMAND : 'send') + (this.botActsInFlight.get(key) ?? 0)
-    if (used >= max)
+    // Only what was accepted counts (a refused message writes no receipt), with what is still being sent; the bot is told
+    // only what was accepted.
+    const done = engine.store.countReceipts(prefix, tool === 'thread_create' ? AGENT_THREAD_COMMAND : 'send', 'accepted')
+    const sending = this.botActsInFlight.get(key) ?? 0
+    if (done + sending >= max) {
+      const pending = sending ? `, and ${sending} more ${sending === 1 ? 'is' : 'are'} still being ${tool === 'thread_create' ? 'started' : 'sent'}` : ''
       throw new McpToolError('mousse_conflict', tool === 'thread_create'
-        ? `You started ${used} threads in this chat turn, the most one turn may start (${max}). Tell your owner what you started; they can ask for more in their next message.`
-        : `You sent ${used} messages to threads in this chat turn, the most one turn may send (${max}). Tell your owner; they can ask for more in their next message.`, { conflict: 'turn_limit', used })
+        ? `You started ${done} threads in this chat turn${pending}, the most one turn may start (${max}). Tell your owner what you started; they can ask for more in their next message.`
+        : `You sent ${done} messages to threads in this chat turn${pending}, the most one turn may send (${max}). Tell your owner; they can ask for more in their next message.`, { conflict: 'turn_limit', used: done })
+    }
     this.botActsInFlight.set(key, (this.botActsInFlight.get(key) ?? 0) + 1)
     let given = false
     return () => {
@@ -4619,9 +4624,11 @@ export class OrchestratorService extends EventEmitter {
     if (!engine) return 0
     let threads: string[]
     try {
+      // Only threads where one of its messages has a run that has not started: one query, so the settings save that
+      // switches it off never reads the queue of every thread the bot ever messaged.
       threads = [...new Set([
-        ...engine.store.receiptThreads(`thread_send:${bot.homeThreadId}:`, 'send'),
-        ...engine.store.receiptThreads(`thread_create:${bot.homeThreadId}:`, 'send')
+        ...engine.store.receiptThreadsWithWaitingRuns(`thread_send:${bot.homeThreadId}:`, 'send'),
+        ...engine.store.receiptThreadsWithWaitingRuns(`thread_create:${bot.homeThreadId}:`, 'send')
       ])]
     } catch (error) {
       console.warn('the threads a bot messaged could not be read', { error: error instanceof Error ? error.message : String(error) })
