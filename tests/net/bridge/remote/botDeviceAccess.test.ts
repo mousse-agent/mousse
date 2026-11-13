@@ -366,6 +366,28 @@ describe('"Started by" on a thread a bot started', () => {
   })
 })
 
+describe('disk usage on another device', () => {
+  it('counts a bot\'s threads without naming them: they are named after the bot and its work', async () => {
+    const at = '2026-11-13T10:00:00.000Z'
+    const threads = [
+      { id: 'home-1', name: 'Server keeper', botOwned: true, createdAt: at, updatedAt: at },
+      { id: 'work-1', name: 'Restart the database', botOwned: true, createdAt: at, updatedAt: at },
+      { id: 'mine', name: 'Fix the login page', createdAt: at, updatedAt: at }
+    ]
+    const usage = {
+      measuredAt: at, durationMs: 1, partial: false,
+      entries: [{ kind: 'thread', threadId: 'home-1', bytes: 10, files: 1 }, { kind: 'thread', threadId: 'work-1', bytes: 20, files: 1 }, { kind: 'thread', threadId: 'mine', bytes: 30, files: 1 }],
+      names: { projects: {}, threads: { 'home-1': 'Server keeper', 'work-1': 'Restart the database', mine: 'Fix the login page' } }
+    }
+    const services = { threads: { listAllThreads: () => threads, getThread: (id: string) => threads.find((thread) => thread.id === id) }, projects: { listProjects: () => [] }, storageUsage: { measure: async () => usage } }
+    const { MmsRemoteBackend } = await import('../../../../src/mms/bridge/remote/MmsBackend')
+    const seen = (await new MmsRemoteBackend(services as never).execute('storage.usage', {}, { node: PHONE as never })) as typeof usage
+    expect(JSON.stringify(seen)).not.toMatch(/Server keeper|Restart the database|home-1|work-1/)
+    expect(seen.entries.map((entry) => entry.bytes)).toEqual([10, 20, 30])
+    expect(seen.names.threads).toEqual({ mine: 'Fix the login page' })
+  })
+})
+
 function listsServices(fixture: BotFixture, botReach: BotReachPort): ListsServices {
   return {
     threads: Object.assign(new EventEmitter(), { listAllThreads: () => [] }),

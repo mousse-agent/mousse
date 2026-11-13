@@ -146,7 +146,27 @@ export class MmsRemoteBackend implements RemoteBackendPort {
   async execute(method: BridgeOrdinaryMethod, params: Record<string, unknown>, caller?: { node: NodeId }): Promise<unknown> {
     const result = await this.executeFor(method, params, caller)
     // A thread a bot started names that bot only to a device that reaches it ("Started by a bot" otherwise).
-    return withHiddenBots(result, this.services.botReach?.hiddenFor(caller?.node))
+    const shown = withHiddenBots(result, this.services.botReach?.hiddenFor(caller?.node))
+    return method === 'storage.usage' ? this.withoutBotThreadNames(shown) : shown
+  }
+  /**
+   * Disk usage as another device sees it: a personal bot's threads are its chat, never listed to a device, and are
+   * named after the bot and its work, so their space is counted without a thread (as a private thread's is).
+   */
+  private withoutBotThreadNames(usage: unknown): unknown {
+    const value = usage as { entries?: Array<{ threadId?: string }>; names?: { threads?: Record<string, string> } } | null
+    if (!value || !Array.isArray(value.entries)) return usage
+    const bots = new Set(this.services.threads.listAllThreads().filter((thread) => thread.botOwned).map((thread) => thread.id))
+    if (!bots.size) return usage
+    return {
+      ...value,
+      entries: value.entries.map((entry) => {
+        if (!entry.threadId || !bots.has(entry.threadId)) return entry
+        const { threadId: _bot, ...unattributed } = entry
+        return unattributed
+      }),
+      ...(value.names ? { names: { ...value.names, threads: Object.fromEntries(Object.entries(value.names.threads ?? {}).filter(([id]) => !bots.has(id))) } } : {})
+    }
   }
   private async executeFor(method: BridgeOrdinaryMethod, params: Record<string, unknown>, caller?: { node: NodeId }): Promise<unknown> {
     if (typeof params.threadId === 'string' && !this.remoteThread(params.threadId))
