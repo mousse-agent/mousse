@@ -14,7 +14,7 @@ import {
 } from '../../shared/bots/personal/browser'
 import { errorText } from '../services/personalBotsClient'
 import { browserProblemForPerson, type BrowserProblem } from '../../shared/browser/navigation'
-import { BotBrowserChannel, type ChannelHealth } from './botBrowserChannel'
+import { BrowserInputChannel, viewerPlatform, type ChannelHealth } from './browserInputChannel'
 
 /**
  * Each bot's own browser as its chat shows it: the live preview in its reply and the split view.
@@ -32,7 +32,7 @@ import { BotBrowserChannel, type ChannelHealth } from './botBrowserChannel'
  * - **Take over is this window's hold** (`bots.browser.hold`): the window is one view, with an id kept
  *   across its reloads, so a window that reloads picks its hold up again. While it holds the browser
  *   it says so every 5 seconds (with or without the split view on screen); every input goes on the
- *   hold's numbered channel (`BotBrowserChannel`) and is answered. Whether input arrives is known per
+ *   hold's numbered channel (`BrowserInputChannel`) and is answered. Whether input arrives is known per
  *   bot (`inputHealth`), and a refusal is said once (`inputNote`).
  */
 
@@ -246,12 +246,7 @@ export function viewId(): string {
   return windowViewId
 }
 
-/** Whether this window runs on a Mac: its Command key is the page's Control key elsewhere. */
-export function viewerPlatform(): 'mac' | 'other' {
-  return typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent) ? 'mac' : 'other'
-}
-
-const channels = new Map<string, BotBrowserChannel>()
+const channels = new Map<string, BrowserInputChannel>()
 const beats = new Map<string, { timer: ReturnType<typeof setInterval>; stop(): void }>()
 
 /** Inputs whose refusal is worth a line (a hover's is not). */
@@ -310,7 +305,7 @@ function adoptHold(botId: string, hold: BotBrowserHold): void {
   if (known?.id === hold.id && channels.has(botId)) return
   dropHold(botId)
   const legacy = hold.id === LEGACY_HOLD
-  const channel = new BotBrowserChannel({
+  const channel = new BrowserInputChannel({
     lastSeq: hold.lastSeq,
     send: legacy ? (inputs) => sendOneByOne(botId, inputs) : (inputs) => call('bots.browser.send', { botId, viewId: viewId(), holdId: hold.id, inputs }),
     health: (health) => setInput(botId, { health }),
@@ -364,7 +359,7 @@ function dropHold(botId: string, why?: string): void {
 }
 
 /** An older daemon takes one input per call: answered as applied when it went, refused when it did not. */
-async function sendOneByOne(botId: string, inputs: Parameters<NonNullable<ConstructorParameters<typeof BotBrowserChannel>[0]>['send']>[0]): Promise<{ acks: BotBrowserAck[]; lastSeq: number }> {
+async function sendOneByOne(botId: string, inputs: Parameters<NonNullable<ConstructorParameters<typeof BrowserInputChannel>[0]>['send']>[0]): Promise<{ acks: BotBrowserAck[]; lastSeq: number }> {
   const acks: BotBrowserAck[] = []
   for (const sent of inputs) {
     // An older daemon counts nothing: a skip is answered here.

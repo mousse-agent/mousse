@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState, type ClipboardEvent, type CompositionEvent, type FormEvent, type KeyboardEvent, type PointerEvent, type RefObject } from 'react'
-import type { BotBrowserAck, BotBrowserInput, BotBrowserView } from '../../../shared/bots/personal/browser'
+import type { WatchedBrowserAck, WatchedBrowserInput, WatchedBrowserView } from '../../../shared/browser/watched'
 import { BROWSER_MODIFIERS, MAX_BROWSER_PASTE_CHARS, type BrowserMouseButton } from '../../../shared/browser/types'
-import { useBotBrowserStore, viewerPlatform } from '../../stores/botBrowserStore'
+import { viewerPlatform } from '../../stores/browserInputChannel'
 
 /**
- * The person's input in the split view, while this window holds the bot's browser: everything a
+ * The person's input in a browser view, while this window holds the browser: everything a
  * mouse, a keyboard, an IME and a touch screen do, at the page's CSS pixels of the picture they acted
- * on, on the hold's channel.
+ * on, on the hold's channel (send, which its user numbers and delivers).
  *
  * - **Pointer**: a button going down and up (with how many presses in a row, so a double click is one)
  *   and the moves between, so hover, drag, text selection and a right click work. Control-click on a Mac
@@ -51,8 +51,17 @@ function typed(event: KeyboardEvent): string | undefined {
   return [...event.key].length === 1 ? event.key : undefined
 }
 
-export function useBotBrowserInput(options: { botId: string; owner: boolean; view: BotBrowserView; frame: RefObject<HTMLDivElement | null>; keys: RefObject<HTMLTextAreaElement | null> }) {
-  const { botId, owner, frame, keys } = options
+export function useBrowserInput(options: {
+  owner: boolean
+  view: Pick<WatchedBrowserView, 'frame'>
+  frame: RefObject<HTMLDivElement | null>
+  keys: RefObject<HTMLTextAreaElement | null>
+  /** Sends one input, made on picture `picture`, on the hold's channel. */
+  send(input: WatchedBrowserInput, picture?: number): { seq: number; done: Promise<WatchedBrowserAck> }
+  /** Says a short line about the person's input (a paste too long to send). */
+  note(text: string): void
+}) {
+  const { owner, frame, keys } = options
   const [marks, setMarks] = useState<InputMark[]>([])
   const viewRef = useRef(options.view)
   viewRef.current = options.view
@@ -67,8 +76,8 @@ export function useBotBrowserInput(options: { botId: string; owner: boolean; vie
   const touchGesture = useRef<{ moved: boolean; long: boolean; timer?: ReturnType<typeof setTimeout> }>({ moved: false, long: false })
   const mac = viewerPlatform() === 'mac'
 
-  const send = (input: BotBrowserInput): { seq: number; done: Promise<BotBrowserAck> } =>
-    useBotBrowserStore.getState().send(botId, input, viewRef.current.frame?.id)
+  const send = (input: WatchedBrowserInput): { seq: number; done: Promise<WatchedBrowserAck> } =>
+    options.send(input, viewRef.current.frame?.id)
 
   /** A client point at the page's CSS pixels, and in percent of the picture (for a mark). */
   const point = (event: { clientX: number; clientY: number }) => {
@@ -81,7 +90,7 @@ export function useBotBrowserInput(options: { botId: string; owner: boolean; vie
   }
 
   /** A small mark where the person pressed, that settles when the host answers. */
-  const mark = (sent: { seq: number; done: Promise<BotBrowserAck> }, at: { left: number; top: number }) => {
+  const mark = (sent: { seq: number; done: Promise<WatchedBrowserAck> }, at: { left: number; top: number }) => {
     setMarks((list) => [...list.filter((entry) => entry.seq !== sent.seq), { seq: sent.seq, left: at.left, top: at.top, state: 'pending' }])
     void sent.done.then((ack) => {
       const state = ack.status === 'refused' || (ack.status === 'duplicate' && ack.reason) ? 'refused' : 'done'
@@ -323,7 +332,7 @@ export function useBotBrowserInput(options: { botId: string; owner: boolean; vie
       const text = event.clipboardData.getData('text/plain')
       if (!text) return
       if (text.length > MAX_BROWSER_PASTE_CHARS) {
-        useBotBrowserStore.setState((state) => ({ inputNote: { ...state.inputNote, [botId]: { text: `Too long to paste (over ${MAX_BROWSER_PASTE_CHARS.toLocaleString()} characters)`, at: Date.now() } } }))
+        options.note(`Too long to paste (over ${MAX_BROWSER_PASTE_CHARS.toLocaleString()} characters)`)
         return
       }
       send({ kind: 'paste', text })
