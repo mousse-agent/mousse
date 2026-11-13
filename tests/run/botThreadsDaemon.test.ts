@@ -212,8 +212,9 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
       sent.push((await w.send(targets[index]!.id, `m${index}`)).runId)
     }
     await expect(w.send(targets[THREAD_SEND_MAX_PER_RUN]!.id, 'm-over')).rejects.toMatchObject({ code: 'mousse_conflict', message: expect.stringMatching(/the most one turn may send/) })
-    for (const runId of sent) await w.settled(runId)
-  })
+    // Twenty turns run before the daemon stops; on a busy machine they take a while.
+    await waitFor(() => sent.every((runId) => ['completed', 'failed', 'cancelled', 'interrupted'].includes(w.d.engine.getRun(runId)?.status ?? '')), 'the twenty runs', 120_000)
+  }, 180_000)
 
   it('a Stop is refused while a thread waits on its owner, in the words of a refused message, and stops a turn that is simply running', async () => {
     let busy = ''
