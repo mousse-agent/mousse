@@ -1,0 +1,11 @@
+/* A thread agent's browser without a window in its Browser panel: one line, and the view over the tabs once opened. */
+
+.thread-browser-row { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 6px 12px; font-size: 12px; color: var(--text-secondary); background: color-mix(in srgb, var(--text-secondary) 6%, transparent); }
+.thread-browser-row-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); }
+.thread-browser-row > button { height: 24px; padding: 0 10px; border-radius: 6px; font-size: 12px; font-weight: 500; color: var(--text-primary); background: rgba(var(--accent-rgb), .16); }
+.thread-browser-row > button:hover { background: rgba(var(--accent-rgb), .26); }
+
+/* The view covers the panel's tabs, which stay mounted underneath. */
+.browser-panel:has(> .thread-browser-layer) { position: relative; }
+.thread-browser-layer { position: absolute; inset: 0; z-index: 6; display: flex; background: var(--bg-primary); }
+.thread-browser-layer > .watched-browser-pane { border-left: 0; }

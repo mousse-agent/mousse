@@ -19,6 +19,7 @@ import { createAllowHttpPolicy } from './defaultPorts'
 import { BrowserAutomationError, BrowserSessionManager } from './automation/BrowserSessionManager'
 import { BrowserToolDispatcher } from './automation/BrowserToolDispatcher'
 import { ManagedBrowserWorkflowAdapter } from './automation/BrowserWorkflowAdapter'
+import { ThreadBrowsers, type ThreadBrowsersOptions } from './viewer/ThreadBrowsers'
 import {
   AttachedBrowserConnectionBackend,
   type AttachedCommandDispatchPort
@@ -65,6 +66,8 @@ export interface MmsBrowserServiceOptions {
   commandRouter?: AttachedCommandDispatchPort
   createManagedBackend?: () => BrowserBackendPort
   admitManagedLaunch?: () => Promise<{ release(): void }>
+  /** The thread browsers' view clock and hold lease (tests). */
+  views?: Pick<ThreadBrowsersOptions, 'holdLeaseMs' | 'leaseTimer' | 'now' | 'computerName'>
 }
 
 function requireUuid(value: string, label: string): string {
@@ -109,6 +112,8 @@ export class MmsBrowserService {
   readonly workerArtifactRoot: string
   readonly attached: AttachedBrowserConnectionBackend
   readonly router: BrowserBackendRouter
+  /** The person's view of each thread agent's browser without a window (`browser.view.*`). */
+  readonly views: ThreadBrowsers
   private readonly live = new Map<string, LiveAttachment>()
   private readonly byUiTab = new Map<string, string>()
   private readonly byConnection = new Map<string, Set<string>>()
@@ -143,6 +148,7 @@ export class MmsBrowserService {
     })
     this.tools = new BrowserToolDispatcher({ sessions: this.sessions,
       requestHuman: ({ context, request }) => this.sessions.requestHuman(context, request) })
+    this.views = new ThreadBrowsers({ ...options.views, profileId: options.profileId, browser: () => (this.disposed ? undefined : this), threadExists: options.threadExists })
     // Workflow calls must pass through the same trusted target resolver as
     // native/GUI tool calls; direct dispatcher use could silently choose managed.
     this.workflow = new ManagedBrowserWorkflowAdapter({
@@ -176,6 +182,7 @@ export class MmsBrowserService {
 
   async dispose(): Promise<void> {
     this.beginShutdown()
+    this.views.dispose()
     await this.sessions.closeAll()
     const results = await Promise.allSettled([
       this.router.shutdown(),
@@ -201,7 +208,9 @@ export class MmsBrowserService {
       const signal = context.execution.source === 'gui'
         ? AbortSignal.any([this.access.signal, ...(context.signal ? [context.signal] : [])])
         : context.signal
-      const operation = this.tools.invoke(name, args, { ...context, target, signal })
+      const invoke = (held?: AbortSignal): Promise<BrowserToolResult> => this.tools.invoke(name, args, { ...context, target, signal: held ? (signal ? AbortSignal.any([signal, held]) : held) : signal })
+      // A thread agent's browser without a window: the person's view of it follows the call, and a hold refuses what acts.
+      const operation = target.backend === 'managed-chromium' ? this.views.agentCall({ ...context, target }, name, args, invoke) : invoke()
       if (context.execution.source === 'gui') this.guiDispatches.add(operation)
       try { return await operation }
       finally { this.guiDispatches.delete(operation) }

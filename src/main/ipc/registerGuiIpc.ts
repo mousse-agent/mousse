@@ -73,6 +73,7 @@ import type { KokoroFrontEnd } from '../readAloud/kokoroText'
 import type { PlatformRequestMethod, PlatformResponse } from '../../shared/platform'
 import { WORKFLOW_RUN_METHODS } from '../../shared/workflowRunPlatform'
 import { BROWSER_GUI_METHODS } from '../../shared/browser/host'
+import { BROWSER_VIEW_METHODS } from '../../shared/browser/threadView'
 import { BROWSER_ACCESS_METHODS } from '../../shared/browser/access'
 import { BROWSER_SETUP_METHODS } from '../../shared/browser/setup'
 import {
@@ -87,7 +88,7 @@ import { appearanceSurfaceBase } from '../../shared/themeSurfaces'
 import { showCopyMenu } from '../contextMenu'
 import { pickExecutable } from './pickExecutable'
 import { stageBotAttachment } from './botAttachments'
-import { chooseBotBrowserFiles } from './botBrowserFiles'
+import { chooseBrowserViewFiles, type BrowserViewFilesDeps } from './browserViewFiles'
 import { stat } from 'node:fs/promises'
 import { openExternalSafely } from '../safeExternalUrl'
 import { dispatchMcpAuthBrowser } from '../mcpAuthBrowser'
@@ -243,6 +244,7 @@ export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new 
   ...SPEECH_HOST_METHODS,
   ...BROWSER_ACCESS_METHODS,
   ...BROWSER_GUI_METHODS,
+  ...BROWSER_VIEW_METHODS,
   ...BROWSER_SETUP_METHODS,
   ...WORKFLOW_RUN_METHODS,
   'workflows.list', 'workflows.get', 'workflows.getRevision', 'workflows.create',
@@ -1108,6 +1110,8 @@ export function registerGuiIpc(
     if (event.type === 'git.operation') win.webContents.send('git:operation', (event.data as { event?: unknown } | null)?.event)
     // A picture of a bot's browser this window watches, on its own connection too.
     if (event.type === 'bots.browser.frame') win.webContents.send('bots:browserFrame', event.data)
+    // A picture of a thread's browser without a window this window watches.
+    if (event.type === 'browser.view.frame') win.webContents.send('browser:viewFrame', event.data)
   })
   guiMms.on('window-event', ({ senderId, event, replay, instance }: { senderId: number; event: ProtocolEvent; replay?: boolean; instance?: string }) => {
     const win = BrowserWindow.getAllWindows().find((candidate) => candidate.webContents.id === senderId)
@@ -3550,16 +3554,18 @@ export function registerGuiIpc(
   registerHandler('bots:stageAttachment', async (_event, name: unknown, bytes: unknown) =>
     stageBotAttachment(app.getPath('temp'), name, bytes)
   )
-  // A page in a bot's browser asks for files: this computer's own dialog picks them, and the window's
-  // renderer gets a one-time token for them, never the paths.
-  registerHandler('bots:chooseBrowserFiles', async (event, request: unknown) => {
+  // A page in a browser without a window (a bot's, or a thread's) asks for files: this computer's own dialog
+  // picks them, and the window's renderer gets a one-time token for them, never the paths.
+  const browserFilesDeps = (event: Electron.IpcMainInvokeEvent): BrowserViewFilesDeps => {
     const win = BrowserWindow.fromWebContents(event.sender) ?? getWindow()
-    return chooseBotBrowserFiles(request, {
+    return {
       showOpenDialog: (options) => (win ? dialog.showOpenDialog(win, options) : dialog.showOpenDialog(options)),
       stat: (path) => stat(path),
-      request: (method, params) => guiMms.request(method, params)
-    })
-  })
+      request: ((method: string, params: unknown) => guiMms.request(method as never, params as never)) as BrowserViewFilesDeps['request']
+    }
+  }
+  registerHandler('bots:chooseBrowserFiles', async (event, request: unknown) => chooseBrowserViewFiles(request, 'botId', browserFilesDeps(event)))
+  registerHandler('browser:chooseViewFiles', async (event, request: unknown) => chooseBrowserViewFiles(request, 'threadId', browserFilesDeps(event)))
   registerHandler('dialog:pickExecutable', async (event, request: unknown) => {
     const win = BrowserWindow.fromWebContents(event.sender) ?? getWindow()
     return pickExecutable((options) => (win ? dialog.showOpenDialog(win, options) : dialog.showOpenDialog(options)), request)

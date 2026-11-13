@@ -213,7 +213,7 @@ export function useBrowserInput(options: {
   }
 
   /** A press on the view's own panels over the picture (the page's dialog, its file request) is theirs, not the page's. */
-  const onPanel = (event: { target: EventTarget | null }) => event.target instanceof Element && Boolean(event.target.closest('.bot-browser-dialog, .bot-browser-closed'))
+  const onPanel = (event: { target: EventTarget | null }) => event.target instanceof Element && Boolean(event.target.closest('.watched-browser-dialog, .watched-browser-closed'))
 
   const frameHandlers = {
     onPointerDown(event: PointerEvent<HTMLDivElement>) {
