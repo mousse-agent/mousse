@@ -17,7 +17,8 @@ import { CODEX_BOT_PROFILE, codexBotSandbox, codexBotSandboxConfig, codexTurnPol
 import { BOT_COMPUTER_OPEN, type BotComputerLimit } from '../../src/shared/bots/personal/computerLimit'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 import type { ToolLedger } from '../../src/mms/run/mcp/appTools/types'
-import { botFixture, createBot, finish, start, type BotFixture } from './botFixture'
+import { botFixture, chatOf, createBot, finish, start, type BotFixture } from './botFixture'
+import { CODEX_BOT_VERSION_NEWER_TEXT } from '../../src/shared/harness/codexBotVersion'
 
 let f: BotFixture
 let botId: string
@@ -325,6 +326,13 @@ describe('What bots may do here, at each runtime\'s own gate (the owner\'s Claud
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+
+  it('a turn a Codex of an unchecked version would run does not run, and the bot\'s chat says why in one line', async () => {
+    const { payload } = await run('r1')
+    // What `CodexProviderService` throws before the thread starts (codexAdapter.test.ts), as the run's error.
+    await finish(f, payload, 'failed', { outcome: { error: CODEX_BOT_VERSION_NEWER_TEXT } })
+    expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'error', error: { text: CODEX_BOT_VERSION_NEWER_TEXT } })
   })
 
   it('a deleted bot\'s private temporary folder goes with it', async () => {
