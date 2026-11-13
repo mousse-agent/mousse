@@ -1459,14 +1459,24 @@ export function registerGuiIpc(
   /**
    * The window was not told the service's turn: it holds none, an older one, or another at the same moment. One newer
    * than the service's answer is not behind: an update sent after the service read its state arrives before the answer.
+   * Idle is the same state on both sides whatever its time: an older service stamps a thread with no turn with the
+   * time of each read, so its idle always looks newer. A turn the window missed ends in another phase, never idle.
    */
   const turnBehind = (held: TurnState | undefined, service: TurnState): boolean => {
+    if (service.phase === 'idle' && (held?.phase ?? 'idle') === 'idle') return false
     if (!held) return true
     const heldAt = Date.parse(held.updatedAt)
     const serviceAt = Date.parse(service.updatedAt)
     if (Number.isFinite(heldAt) && Number.isFinite(serviceAt) && heldAt !== serviceAt) return heldAt < serviceAt
     return held.turnId !== service.turnId || held.phase !== service.phase
   }
+
+  /**
+   * A gap in live events is only the service replacing a waiting update with its newer copy (a streamed message, the
+   * thread list, every thread's status), which the window then receives: its lists lost nothing. A check that finds the
+   * turn behind after one reads the thread again, not the lists (`LIST_REREAD_REASONS`).
+   */
+  const catchUpReasonOfCheck = (reason: string): string => reason === 'gap' ? 'live-gap' : reason
 
   const checkReasons = new Map<number, Set<string>>()
   /**
@@ -1486,7 +1496,7 @@ export function registerGuiIpc(
       }
       const binding = guiMms.getWindowBindingForSender(senderId)
       if (!binding) {
-        for (const reason of reasons) addCatchUpReason(senderId, reason)
+        for (const reason of reasons) addCatchUpReason(senderId, catchUpReasonOfCheck(reason))
         await catchUpWindow(senderId)
         return
       }
@@ -1495,11 +1505,15 @@ export function registerGuiIpc(
       if (!activeId) {
         // With no thread open, a gap is answered by reading every thread's status (it clears the gap flag).
         if (answersGap) {
-          addCatchUpReason(senderId, 'gap')
+          addCatchUpReason(senderId, 'live-gap')
           await catchUpWindow(senderId)
         }
         return
       }
+      // The status read starts first: it clears the gap flag as it starts, so the updates that arrive while the
+      // statuses below are read do not ask for a second check of the same gap.
+      const statusRead = guiMms.turnStatusForSender(senderId, activeId, answersGap)
+      statusRead.catch(() => undefined)
       if (answersGap) {
         // Every thread's status is small to read: after a gap the sidebar's marks are the service's again.
         try {
@@ -1509,7 +1523,7 @@ export function registerGuiIpc(
           linkLog.write('check.failed', { window: senderId, reasons, read: 'activity', error: describeLinkError(error) })
         }
       }
-      const status = await guiMms.turnStatusForSender(senderId, activeId, answersGap)
+      const status = await statusRead
       const held = turnStateMapFor(binding.profileId).get(activeId)
       const shownActive = isTurnStoppable(held) || isThreadActivityActive(activityTrackerFor(binding.profileId).getState(activeId))
       const serviceActive = status.turnState
@@ -1526,7 +1540,7 @@ export function registerGuiIpc(
         return
       }
       linkLog.write('check.behind', { window: senderId, thread: activeId, reasons, found: behind, shown: held?.phase ?? null, service: status.turnState?.phase ?? null })
-      for (const reason of reasons) addCatchUpReason(senderId, reason)
+      for (const reason of reasons) addCatchUpReason(senderId, catchUpReasonOfCheck(reason))
       await catchUpWindow(senderId)
     } catch (error) {
       linkLog.write('check.failed', { window: senderId, reasons, error: describeLinkError(error) })
