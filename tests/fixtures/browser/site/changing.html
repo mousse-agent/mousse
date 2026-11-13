@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Changing</title>
+  <style>
+    body { margin: 0; font: 16px sans-serif; position: relative; height: 2000px; }
+    .at { position: absolute; box-sizing: border-box; }
+    #content { position: absolute; left: 0; top: 0; width: 100%; }
+    .row { position: absolute; left: 40px; width: 300px; height: 60px; }
+    #prev { top: 140px; background: #eee; }
+    #target { top: 200px; background: #cfe; }
+    #next { top: 260px; background: #fde; }
+    #banner { display: none; position: relative; height: 60px; background: #ffc; }
+    #modal { display: none; position: fixed; inset: 0; background: rgba(0, 0, 0, .3); }
+    #modal button { position: absolute; left: 40px; top: 180px; width: 400px; height: 120px; }
+    #inner { left: 600px; top: 200px; width: 300px; height: 200px; overflow: auto; border: 1px solid #999; }
+    #inner button { display: block; width: 100%; height: 50px; }
+    #out { left: 600px; top: 450px; width: 600px; margin: 0; font: 13px monospace; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <!-- A page whose layout changes under a click: a modal over it, a banner that pushes it down, an inner list that scrolls. -->
+  <pre id="out" class="at"></pre>
+  <div id="banner">banner</div>
+  <div id="content">
+    <button id="prev" class="row">prev</button>
+    <button id="target" class="row">target</button>
+    <button id="next" class="row">next</button>
+  </div>
+  <div id="inner" class="at"></div>
+  <div id="modal"><button id="modal-button">modal</button></div>
+  <script>
+    const out = document.getElementById('out')
+    // Written down twice: in the page, and in its title (which an observation always reads whole).
+    const note = (line) => { out.textContent += line + '\n'; document.title = 'Changing ' + out.textContent.trim().split('\n').join(' ') }
+    const inner = document.getElementById('inner')
+    for (let i = 0; i < 8; i++) {
+      const item = document.createElement('button')
+      item.textContent = 'item ' + i
+      item.addEventListener('click', () => note('clicked:item ' + i))
+      inner.appendChild(item)
+    }
+    for (const id of ['prev', 'target', 'next', 'modal-button']) document.getElementById(id).addEventListener('click', () => note('clicked:' + id))
+    // What the person's keys change: m shows the modal, b the banner (the content moves down 60 px), i scrolls the inner list.
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'm') document.getElementById('modal').style.display = 'block'
+      if (event.key === 'b') {
+        document.getElementById('banner').style.display = 'block'
+        document.getElementById('content').style.top = '60px'
+      }
+      if (event.key === 'i') inner.scrollTop = 100
+      // d: the page is busy a moment, then asks (a dialog that opens while the next input is being checked).
+      if (event.key === 'd') setTimeout(() => {
+        const end = Date.now() + 600
+        while (Date.now() < end) { /* busy */ }
+        alert('later')
+        note('alert:answered')
+      }, 0)
+      note('key:' + event.key)
+    })
+  </script>
+</body>
+</html>

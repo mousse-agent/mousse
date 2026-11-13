@@ -60,9 +60,31 @@
 @media (prefers-reduced-motion: reduce) { .bot-browser-address.is-loading::after { animation: none; width: 100%; opacity: .5; } }
 .bot-browser-stage { flex: 1; min-height: 0; overflow: auto; padding: 14px; }
 .bot-browser-stage .bot-browser-frame { box-shadow: 0 0 0 1px rgba(var(--accent-pale-rgb), .16), 0 6px 24px rgba(0, 0, 0, .25); }
-.bot-browser-stage .bot-browser-frame[tabindex="0"] { cursor: default; }
+/* Held here: the page takes every pointer, touch and key; the app neither selects, pans nor drags. */
+.bot-browser-frame.is-held { cursor: default; touch-action: none; user-select: none; -webkit-user-select: none; }
+/* Keys land in a field over the page, where the person last pressed (an IME's candidates show there). */
+.bot-browser-keys { position: absolute; left: 0; top: 0; width: 1px; height: 18px; margin: 0; padding: 0; border: 0; opacity: 0; resize: none; overflow: hidden; pointer-events: none; caret-color: transparent; z-index: 1; }
 /* The page covers the frame, so keyboard focus fills the stage around it. */
-.bot-browser-stage:has(> .bot-browser-frame[tabindex="0"]:focus-visible) { background-image: var(--ui-focus-layer); }
+.bot-browser-stage:has(.bot-browser-keys:focus-visible) { background-image: var(--ui-focus-layer); }
+/* Where the person pressed: a small ring that settles when the input reaches the page. */
+.bot-browser-mark { position: absolute; z-index: 3; width: 16px; height: 16px; margin: -8px 0 0 -8px; border-radius: 50%; pointer-events: none;
+  border: 2px solid rgba(var(--accent-rgb), .85); box-shadow: 0 0 0 1px rgba(0, 0, 0, .25); transition: opacity .35s ease-out, transform .35s ease-out; }
+.bot-browser-mark.is-done { opacity: 0; transform: scale(1.5); }
+.bot-browser-mark.is-refused { border-color: var(--warning); opacity: 0; transform: scale(.6); transition-duration: 1s; }
+@media (prefers-reduced-motion: reduce) { .bot-browser-mark { transition: opacity .2s; transform: none !important; } }
+/* The page's own dialog or file request, answered here. */
+.bot-browser-dialog { position: absolute; inset: 0; z-index: 4; display: grid; place-items: center; padding: 16px; background: rgba(24, 21, 28, .35); }
+.bot-browser-dialog-card { display: flex; flex-direction: column; gap: 12px; width: min(340px, 100%); padding: 16px; border-radius: 12px; color: var(--text-primary);
+  background: var(--bg-primary); box-shadow: var(--ui-specular, 0 0 transparent), 0 12px 32px rgba(0, 0, 0, .3); }
+.bot-browser-dialog-message { margin: 0; max-height: 160px; overflow: auto; font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.bot-browser-dialog-card input:not([type="file"]) { height: 28px; padding: 0 9px; border: 0; border-radius: 7px; font-size: 12.5px; color: var(--text-primary); background: color-mix(in srgb, var(--text-secondary) 10%, transparent); outline: none; }
+.bot-browser-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.bot-browser-dialog-actions button { height: 28px; padding: 0 12px; border-radius: 7px; font-size: 12px; font-weight: 500; color: var(--text-primary); background: color-mix(in srgb, var(--text-secondary) 12%, transparent); }
+.bot-browser-dialog-actions button.is-primary { color: #fff; background: var(--accent); }
+.bot-browser-dialog-hint { margin: 0; font-size: 12px; color: var(--text-secondary); }
+.bot-browser-note.is-input { display: flex; align-items: center; gap: 10px; }
+.bot-browser-retry { height: 22px; padding: 0 9px; border-radius: 6px; font-size: 11px; font-weight: 500; color: var(--text-primary); background: color-mix(in srgb, var(--text-secondary) 12%, transparent); }
+.bot-browser-retry:hover { background: color-mix(in srgb, var(--text-secondary) 20%, transparent); }
 .bot-browser-closed { position: absolute; inset: 0; z-index: 5; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; background: rgba(24, 21, 28, .6); color: #fff; font-size: 13px; }
 .bot-browser-closed p { margin: 0; }
 .bot-browser-closed button { padding: 7px 14px; border-radius: 8px; font-size: 12px; font-weight: 500; color: #fff; background: var(--accent); }

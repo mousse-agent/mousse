@@ -1,10 +1,14 @@
-import { useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type WheelEvent } from 'react'
+import { useEffect, useRef, useState, type MouseEvent, type PointerEvent } from 'react'
 import { ArrowLeft, ArrowRight, Globe, Maximize, RefreshCw, X } from '../../lib/icons'
 import type { BotSummary } from '../../../shared/bots/personal/chat'
-import { BOT_BROWSER_PANE_WATCH, BOT_BROWSER_PREVIEW_WATCH, type BotBrowserInput, type BotBrowserView } from '../../../shared/bots/personal/browser'
+import { BOT_BROWSER_PANE_WATCH, BOT_BROWSER_PREVIEW_WATCH, type BotBrowserDialog, type BotBrowserInput, type BotBrowserView } from '../../../shared/bots/personal/browser'
 import { browserProblemForPerson } from '../../../shared/browser/navigation'
 import { useBotBrowserStore, useBotBrowserStream, useBotBrowserWatch, type BotBrowserStream } from '../../stores/botBrowserStore'
+import type { ChannelHealth } from '../../stores/botBrowserChannel'
+import { useAppStore } from '../../stores/appStore'
+import { localDeviceName } from '../sideCard/deviceMenu'
 import { AgentCursor } from '../browser/AgentCursor'
+import { useBotBrowserInput } from './useBotBrowserInput'
 import './botBrowser.css'
 
 /**
@@ -62,6 +66,7 @@ export function browserStatus(view: BotBrowserView, stream: BotBrowserStream | u
   // The tab the owner holds is the one in front (Take over and their input bring it there): never "on another tab".
   if (view.behind && view.control !== 'owner') return { text: 'On another tab', detail: `${botName} is using another of its tabs. This picture updates when it's back on this one.`, live: false }
   if (view.loading) return { text: 'Loading', detail: 'The page is still loading.', live: Boolean(stream?.live) }
+  if (view.control === 'owner' && view.holder === 'another-view') return { text: 'In another window', detail: 'You took it over in another window.', live: Boolean(stream?.live) }
   if (view.control === 'owner') return { text: 'You have it', live: Boolean(stream?.live) }
   return stream?.live ? { text: 'Live', live: true } : { text: '', live: false }
 }
@@ -80,20 +85,22 @@ function frameSrc(view: BotBrowserView): string | undefined {
 }
 
 /** The picture of the bot's tab at its page's shape, with the agent cursor over it. */
-function BrowserFrame({ bot, view, children, ...handlers }: {
+function BrowserFrame({ bot, view, children, className, ...handlers }: {
   bot: BotSummary
   view: BotBrowserView
   children?: React.ReactNode
-  onClick?(event: MouseEvent<HTMLDivElement>): void
-  onWheel?(event: WheelEvent<HTMLDivElement>): void
-  onKeyDown?(event: KeyboardEvent<HTMLDivElement>): void
-  tabIndex?: number
+  className?: string
+  onPointerDown?(event: PointerEvent<HTMLDivElement>): void
+  onPointerMove?(event: PointerEvent<HTMLDivElement>): void
+  onPointerUp?(event: PointerEvent<HTMLDivElement>): void
+  onPointerCancel?(event: PointerEvent<HTMLDivElement>): void
+  onContextMenu?(event: MouseEvent<HTMLDivElement>): void
   frameRef?: React.Ref<HTMLDivElement>
 }) {
   const src = frameSrc(view)
   const viewport = view.frame?.viewport ?? { width: 16, height: 10 }
   const { frameRef, ...events } = handlers
-  return <div ref={frameRef} className="bot-browser-frame" style={{ aspectRatio: `${viewport.width} / ${viewport.height}` }} {...events}>
+  return <div ref={frameRef} className={`bot-browser-frame${className ? ` ${className}` : ''}`} style={{ aspectRatio: `${viewport.width} / ${viewport.height}` }} {...events}>
     {src
       ? <img src={src} alt={view.tab?.title || `${bot.name}'s browser`} draggable={false} />
       : <div className="bot-browser-frame-empty">{!view.setup && <Globe size={22} aria-hidden />}</div>}
@@ -145,47 +152,98 @@ function useStageWidth(element: React.RefObject<HTMLElement | null>): number {
   return width
 }
 
-/** Keys the split view sends as keys; other single characters are typed. */
-const KEYS = new Set(['Enter', 'Tab', 'Backspace', 'Delete', 'Escape', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown'])
+/** How long a refusal of the person's input stays said. */
+const NOTE_MS = 4_000
+
+/** What the split view says of the person's input: nothing while it arrives, else one short line (and Retry). */
+function inputLine(health: ChannelHealth | undefined, note: { text: string; at: number; detail?: string } | undefined, computer: string, now: number): { text: string; detail?: string; retry?: boolean } | undefined {
+  if (health === 'unreachable') return { text: `Not reaching ${computer}`, detail: `What you did has not reached ${computer} yet. Mousse keeps trying; Retry sends it again now. Nothing is done twice.`, retry: true }
+  if (health === 'sending') return { text: 'Sending…' }
+  if (note && now - note.at < NOTE_MS) return { text: note.text, ...(note.detail ? { detail: note.detail } : {}) }
+  return undefined
+}
+
+/** The page's dialog, answered here: the page waits for it and takes nothing else until then. */
+function PageDialog({ dialog, canAnswer, answer }: { dialog: BotBrowserDialog; canAnswer: boolean; answer(accept: boolean, text?: string): void }) {
+  const [text, setText] = useState(dialog.defaultPrompt ?? '')
+  const leaving = dialog.type === 'beforeunload'
+  return <div className="bot-browser-dialog" role="alertdialog" aria-label="The page asks">
+    <div className="bot-browser-dialog-card">
+      <p className="bot-browser-dialog-message">{leaving ? 'Leave this page? Changes you made may not be saved.' : dialog.message || 'The page asks you to continue.'}</p>
+      {dialog.type === 'prompt' && <input aria-label="Your answer" value={text} maxLength={4096} disabled={!canAnswer} onChange={(event) => setText(event.target.value)}
+        onKeyDown={(event) => { if (event.key === 'Enter') answer(true, text) }} />}
+      {canAnswer
+        ? <div className="bot-browser-dialog-actions">
+          {dialog.type !== 'alert' && <button type="button" onClick={() => answer(false)}>{leaving ? 'Stay' : 'Cancel'}</button>}
+          <button type="button" className="is-primary" onClick={() => answer(true, dialog.type === 'prompt' ? text : undefined)}>{leaving ? 'Leave' : 'OK'}</button>
+        </div>
+        : <p className="bot-browser-dialog-hint">Take over to answer it.</p>}
+    </div>
+  </div>
+}
+
+/** What the file request says: "example.com asks for a file", or "for files" when it takes several. */
+export function filesAskText(chooser: { multiple: boolean; site?: string }): string {
+  return `${chooser.site ?? 'The page'} asks for ${chooser.multiple ? 'files' : 'a file'}`
+}
+
+/**
+ * The page asks for files: the card names the site and whether it takes one or several, and Choose…
+ * opens this computer's own file dialog (the app's, not the page's). Only what the person chooses
+ * there goes to the page; nothing goes until they do.
+ */
+function FileRequest({ chooser, choose, cancel }: { chooser: { multiple: boolean; site?: string }; choose(): void; cancel(): void }) {
+  const asks = filesAskText(chooser)
+  return <div className="bot-browser-dialog" role="dialog" aria-label={asks}>
+    <div className="bot-browser-dialog-card">
+      <p className="bot-browser-dialog-message">{asks}.</p>
+      <p className="bot-browser-dialog-hint">Only what you choose goes to the page.</p>
+      <div className="bot-browser-dialog-actions">
+        <button type="button" onClick={cancel}>Cancel</button>
+        <button type="button" className="is-primary" onClick={choose}>Choose…</button>
+      </div>
+    </div>
+  </div>
+}
 
 /**
  * The split view: the bot's browser beside its chat. The owner watches; Take over hands the
- * browser to them (the bot's actions wait), and clicks, scrolling and typing then reach the page;
- * Give back returns it. A closed browser can be opened again here, under the owner's control.
+ * browser to this window (the bot's actions wait), and everything they do then reaches the page in
+ * order, each input answered; Give back returns it. Another window that holds it is named, and can
+ * be taken over from here. A closed browser can be opened again here, under the owner's control.
  */
 export function BotBrowserPane({ bot, view }: { bot: BotSummary; view: BotBrowserView }) {
   const busy = useBotBrowserStore((state) => state.busy)
   const error = useBotBrowserStore((state) => state.error)
   const errorDetail = useBotBrowserStore((state) => state.errorDetail)
+  const hold = useBotBrowserStore((state) => state.holds[bot.id])
+  const health = useBotBrowserStore((state) => state.inputHealth[bot.id])
+  const note = useBotBrowserStore((state) => state.inputNote[bot.id])
   const store = useBotBrowserStore.getState
-  const owner = view.open && view.control === 'owner'
+  // This window holds it: its input goes to the page. Another window may hold it instead.
+  const owner = view.open && view.control === 'owner' && Boolean(hold) && view.holder !== 'another-view'
+  const elsewhere = view.open && view.control === 'owner' && !owner
   const url = view.tab?.url ?? ''
   const [address, setAddress] = useState(url)
   const editing = useRef(false)
   const frame = useRef<HTMLDivElement>(null)
   const stage = useRef<HTMLDivElement>(null)
-  const typed = useRef('')
-  const flush = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
-  const lastWheel = useRef(0)
+  const keys = useRef<HTMLTextAreaElement>(null)
   useEffect(() => { if (!editing.current) setAddress(url) }, [url])
-  useEffect(() => () => clearTimeout(flush.current), [])
   // Watched while on screen: the panel's width up to 960 px, faster while the owner holds the browser.
   const width = useStageWidth(stage)
   useBotBrowserWatch(bot.id, stage, view.open ? { width, fps: owner ? BOT_BROWSER_PANE_WATCH.heldFps : BOT_BROWSER_PANE_WATCH.fps } : undefined)
   const stream = useBotBrowserStream(bot.id)
-  const now = useNow(Boolean(view.open && stream && !stream.live))
+  const fresh = Boolean(note && Date.now() - note.at < NOTE_MS)
+  const now = useNow(Boolean(view.open && stream && !stream.live) || fresh)
   const status = browserStatus(view, stream, bot.name, now)
   const quiet = view.open && !status.live && Boolean(status.detail)
+  const input = useBotBrowserInput({ botId: bot.id, owner, view, frame, keys })
+  // The browser runs on this computer: it is named as the app names this computer everywhere.
+  const computer = useAppStore((state) => localDeviceName(state.appInfo?.deviceName))
+  const said = owner ? inputLine(health, note, computer, now) : undefined
+  const send = (entry: BotBrowserInput) => { input.send(entry) }
 
-  const send = (input: BotBrowserInput) => { void store().input(bot.id, input) }
-  const point = (event: { clientX: number; clientY: number }) => {
-    const rect = frame.current?.getBoundingClientRect()
-    const viewport = view.frame?.viewport
-    if (!rect || !viewport || !rect.width || !rect.height) return undefined
-    const x = Math.max(0, Math.min(viewport.width, ((event.clientX - rect.left) / rect.width) * viewport.width))
-    const y = Math.max(0, Math.min(viewport.height, ((event.clientY - rect.top) / rect.height) * viewport.height))
-    return { x, y }
-  }
   const go = () => {
     editing.current = false
     const text = address.trim()
@@ -193,15 +251,6 @@ export function BotBrowserPane({ bot, view }: { bot: BotSummary; view: BotBrowse
     const target = /^https?:\/\//i.test(text) ? text : `https://${text}`
     if (owner) send({ kind: 'navigate', url: target })
     else if (!view.open) void store().open(bot.id, target)
-  }
-  const typeLater = (text: string) => {
-    typed.current += text
-    clearTimeout(flush.current)
-    flush.current = setTimeout(() => {
-      const chunk = typed.current
-      typed.current = ''
-      if (chunk) send({ kind: 'type', text: chunk })
-    }, 120)
   }
 
   return <aside className="bot-browser-pane" aria-label={`${bot.name}'s browser`}>
@@ -216,46 +265,37 @@ export function BotBrowserPane({ bot, view }: { bot: BotSummary; view: BotBrowse
           onFocus={() => { editing.current = true }} onBlur={() => { editing.current = false }} onChange={(event) => setAddress(event.target.value)} spellCheck={false} />
       </form>
       {view.open && (owner
-        ? <button type="button" className="bot-browser-control" disabled={busy} onClick={() => void store().control(bot.id, 'bot')}>Give back</button>
-        : <button type="button" className="bot-browser-control" disabled={busy} onClick={() => void store().control(bot.id, 'owner')}>Take over</button>)}
+        ? <button type="button" className="bot-browser-control" disabled={busy} onClick={() => void store().giveBack(bot.id)}>Give back</button>
+        : <button type="button" className="bot-browser-control" disabled={busy} title={elsewhere ? 'Held in another window' : undefined} onClick={() => void store().takeOver(bot.id, elsewhere)}>Take over</button>)}
       <button type="button" aria-label="Close the browser view" title="Close" onClick={() => store().closePane()}><X size={15} /></button>
     </header>
     <div className="bot-browser-stage" ref={stage}>
-      <BrowserFrame bot={bot} view={view} frameRef={frame} tabIndex={owner ? 0 : -1}
-        onClick={(event) => {
-          if (!owner) return
-          frame.current?.focus()
-          const at = point(event)
-          if (at) send({ kind: 'click', ...at })
-        }}
-        onWheel={(event) => {
-          if (!owner || Date.now() - lastWheel.current < 120) return
-          lastWheel.current = Date.now()
-          const at = point(event)
-          if (at) send({ kind: 'scroll', ...at, deltaX: event.deltaX, deltaY: event.deltaY })
-        }}
-        onKeyDown={(event) => {
-          if (!owner || event.metaKey || event.ctrlKey || event.altKey) return
-          if (KEYS.has(event.key)) {
-            event.preventDefault()
-            send({ kind: 'key', key: event.key })
-          } else if (event.key.length === 1) {
-            event.preventDefault()
-            typeLater(event.key)
-          }
-        }}>
+      <BrowserFrame bot={bot} view={view} frameRef={frame} className={owner ? 'is-held' : undefined} {...input.frameHandlers}>
+        {input.marks.map((mark) => <span key={mark.seq} className={`bot-browser-mark is-${mark.state}`} style={{ left: `${mark.left}%`, top: `${mark.top}%` }} aria-hidden />)}
+        {owner && <textarea ref={keys} className="bot-browser-keys" aria-label={`Type into ${bot.name}'s browser`} autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false}
+          {...input.keyHandlers} />}
+        {view.open && view.dialog && <PageDialog key={`${view.dialog.type}:${view.dialog.message}`} dialog={view.dialog} canAnswer={owner}
+          answer={(accept, text) => send({ kind: 'dialog', accept, ...(text !== undefined ? { text } : {}) })} />}
+        {owner && !view.dialog && view.chooser && <FileRequest chooser={view.chooser}
+          choose={() => void store().chooseFiles(bot.id, view.chooser!)} cancel={() => send({ kind: 'files' })} />}
         {!view.open && !view.setup && <div className="bot-browser-closed">
           <p>{view.stopped ? 'The browser stopped.' : `${bot.name}'s browser is closed.`}</p>
           <button type="button" disabled={busy} onClick={() => void store().open(bot.id, /^https?:\/\//i.test(address.trim()) ? address.trim() : undefined)}>Open it</button>
         </div>}
       </BrowserFrame>
     </div>
-    <p className={`bot-browser-note${quiet ? ' is-quiet' : ''}`} role="status" title={error ? errorDetail ?? undefined : view.open && view.problem ? browserProblemForPerson(view.problem).detail : quiet ? status.detail : undefined}>{error
-      ? error
-      : view.open && view.problem ? browserProblemForPerson(view.problem).line
-      : quiet ? status.text
-      : owner ? `You're using ${bot.name}'s browser. Sites you sign in to stay signed in for it. Give it back when you're done.`
-      : view.open ? `${bot.name} is using its own browser, apart from your tabs. Take over to click or type in it.`
-      : `Only ${bot.name} uses this browser. Open it to sign in to a site for it.`}</p>
+    {said
+      ? <p className="bot-browser-note is-input" role="status" title={said.detail}>
+        <span>{said.text}</span>
+        {said.retry && <button type="button" className="bot-browser-retry" onClick={() => store().retry(bot.id)}>Retry</button>}
+      </p>
+      : <p className={`bot-browser-note${quiet ? ' is-quiet' : ''}`} role="status" title={error ? errorDetail ?? undefined : view.open && view.problem ? browserProblemForPerson(view.problem).detail : quiet ? status.detail : undefined}>{error
+        ? error
+        : view.open && view.problem ? browserProblemForPerson(view.problem).line
+        : quiet ? status.text
+        : owner ? `You're using ${bot.name}'s browser. Sites you sign in to stay signed in for it. Give it back when you're done.`
+        : elsewhere ? 'Held in another window. Take over to use it here.'
+        : view.open ? `${bot.name} is using its own browser, apart from your tabs. Take over to click or type in it.`
+        : `Only ${bot.name} uses this browser. Open it to sign in to a site for it.`}</p>}
   </aside>
 }

@@ -825,6 +825,15 @@ export class MmsProfileServices {
       }
     }
     this.personalBots = opened?.engine ?? null
+    // A bot's browser that comes back to it on its own (the window that held it went away) says so in its chat.
+    const chat = opened?.engine.chat
+    if (chat) botBrowsers.setNotice((botId, text) => {
+      try {
+        chat.post({ botId, author: 'bot', kind: 'notice', text })
+      } catch (error) {
+        console.warn('a bot browser notice could not be posted', { botId, error: error instanceof Error ? error.message : String(error) })
+      }
+    })
     if (this.personalBots) {
       void this.skillsRegistry.discover()
         .then((snapshot) => { this.botKnownSkills = new Set(snapshot.skills.map((skill) => skill.id)) })

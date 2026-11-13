@@ -38,6 +38,16 @@ export interface BrowserToolContext {
   readonly vision?: boolean
   /** Host-selected target. Models cannot supply or change this through tool arguments. */
   readonly target?: { readonly backend: 'electron-attached'; readonly uiTabId: string } | { readonly backend: 'managed-chromium' }
+  /**
+   * Host-held keeper of the sessions this call may reach beyond ordinary ones (a bot's browser, kept
+   * by `BotBrowsers`). Never built from tool arguments or a request: see `defineBrowserSessionKeeper`.
+   */
+  readonly keeper?: BrowserSessionKeeper
+}
+
+/** The one owner of the sessions it opens and the workspaces it names (`defineBrowserSessionKeeper`). */
+export interface BrowserSessionKeeper {
+  readonly name: string
 }
 
 export interface BrowserOpenArgs {

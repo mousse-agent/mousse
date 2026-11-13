@@ -1,5 +1,6 @@
 import type { CdpEventListener, CdpTransport } from '../cdp/transport'
 import type { BrowserProblem } from '../../shared/browser/navigation'
+import type { BrowserFileChooser, BrowserPageDialog, BrowserPictureHits, BrowserPictureSpot } from '../../shared/browser/types'
 
 /**
  * The pictures of a managed tab a person watches (a bot's browser view), for every viewer at once.
@@ -81,6 +82,8 @@ export interface ViewerPicture {
   at: number
   /** The still picture, taken once the page was still (or of a tab behind), at the best quality that fits. */
   sharp: boolean
+  /** The document and scroll it shows: a person's input on it is checked against the page as it is then. */
+  spot?: BrowserPictureSpot
 }
 
 /** What a watcher's long-poll answers: the tab's state, and its latest picture when the watcher has not had it. */
@@ -95,6 +98,10 @@ export interface ViewerUpdate {
   loading: boolean
   /** What its last navigation ran into, or what the opened page needs. */
   problem?: BrowserProblem
+  /** The page's open dialog. */
+  dialog?: BrowserPageDialog
+  /** The page's file picker waiting for files. */
+  chooser?: BrowserFileChooser
   /** Pass back as `afterFrame` / `afterState`. */
   frameSeq: number
   stateSeq: number
@@ -120,6 +127,16 @@ export interface ViewerCapturesOptions {
   loading?(cdpSessionId: string): boolean
   /** What the tab's last navigation ran into when its capture starts. */
   problem?(cdpSessionId: string): BrowserProblem | undefined
+  /** The tab's document now (it changes with each page): each picture is marked with it. */
+  document?(cdpSessionId: string): string | undefined
+  /** The tab's open dialog and file picker when its capture starts. */
+  dialog?(cdpSessionId: string): BrowserPageDialog | undefined
+  chooser?(cdpSessionId: string): BrowserFileChooser | undefined
+  /**
+   * What is on top at a grid of points of the tab's page now, read with each picture while a person
+   * holds the browser (undefined otherwise, or when the page does not answer soon).
+   */
+  hits?(cdpSessionId: string): Promise<BrowserPictureHits | undefined>
   now?: () => number
   settleMs?: number
   leaseMs?: number
@@ -184,6 +201,14 @@ interface TabCapture {
   loading: boolean
   /** What its last navigation ran into, or what the opened page needs. */
   problem?: BrowserProblem
+  dialog?: BrowserPageDialog
+  chooser?: BrowserFileChooser
+  /** Where the page was scrolled when last read (a screencast picture does not say). */
+  scroll: { x: number; y: number }
+  /** What was on top at a grid of points when last read, while a person holds the browser. */
+  hits?: BrowserPictureHits
+  /** The latest picture's scroll and grid are being read (the read under way): it is handed to no watcher before they are. */
+  placing?: number
   settle?: ReturnType<typeof setTimeout>
   settling?: Promise<void>
   /** A still was asked for while another was under way. */
@@ -218,6 +243,8 @@ export class ViewerCaptures {
   private readonly leaseMs: number
   private sweep: ReturnType<typeof setInterval> | undefined
   private disposed = false
+  /** Counts the reads of a picture's scroll and grid (`place`). */
+  private placings = 0
   /** One counter for every capture's pictures and states, so numbers never go back when a capture starts again. */
   private seq = 0
 
@@ -419,6 +446,24 @@ export class ViewerCaptures {
     this.pump(capture)
   }
 
+  /** The page opened a dialog (or it was answered). */
+  dialog(cdpSessionId: string, dialog: BrowserPageDialog | undefined): void {
+    const capture = this.captures.get(cdpSessionId)
+    if (!capture || JSON.stringify(capture.dialog) === JSON.stringify(dialog)) return
+    capture.dialog = dialog
+    capture.stateSeq = this.bump()
+    this.pump(capture)
+  }
+
+  /** The page asks for files (or was answered). */
+  chooser(cdpSessionId: string, chooser: BrowserFileChooser | undefined): void {
+    const capture = this.captures.get(cdpSessionId)
+    if (!capture || JSON.stringify(capture.chooser) === JSON.stringify(chooser)) return
+    capture.chooser = chooser
+    capture.stateSeq = this.bump()
+    this.pump(capture)
+  }
+
   /** The tab's address and title as the session knows them (it follows every commit and title). */
   private describe(capture: TabCapture, info: ViewerTabInfo): void {
     if (capture.info.url === info.url && capture.info.title === info.title && capture.info.tabId === info.tabId && capture.info.page === info.page) return
@@ -439,10 +484,14 @@ export class ViewerCaptures {
         capture = {
           info, viewport: { width: 1280, height: 720 }, viewportRead: false, width: 0, recent: [], frameSeq: 0, stateSeq: this.bump(),
           handedSeq: 0, quietSeq: -1, held: [], behind: false, loading: this.options.loading?.(info.cdpSessionId) ?? false,
-          settleMs: this.settleMs, echoUntil: 0, echoChecks: 0, repeatGapMs: 0, actedAt: 0, watchers: new Set()
+          settleMs: this.settleMs, echoUntil: 0, echoChecks: 0, repeatGapMs: 0, actedAt: 0, watchers: new Set(), scroll: { x: 0, y: 0 }
         }
         const problem = this.options.problem?.(info.cdpSessionId)
         if (problem) capture.problem = problem
+        const dialog = this.options.dialog?.(info.cdpSessionId)
+        if (dialog) capture.dialog = dialog
+        const chooser = this.options.chooser?.(info.cdpSessionId)
+        if (chooser) capture.chooser = chooser
         this.captures.set(info.cdpSessionId, capture)
       }
       watcher = { key, capture, maxWidth: 960, minIntervalMs: 0, lastPictureAt: 0, seenAt: this.now(), fresh: true }
@@ -588,7 +637,42 @@ export class ViewerCaptures {
     capture.held.push(event.sessionId)
     if (capture.settle) clearTimeout(capture.settle)
     capture.settle = undefined
+    // A screencast picture does not say where the page was scrolled (Chromium without a window
+    // reports 0), nor what is under each point: both are read now, before the picture goes to any
+    // watcher, so input on it lands where it should, or is refused when the page has changed under it.
+    void this.place(capture)
+  }
+
+  /** Reads the latest picture's scroll and grid, then hands it on; a newer picture meanwhile is placed in turn. */
+  private async place(capture: TabCapture): Promise<void> {
+    const shown = capture.latest
+    const reading = ++this.placings
+    capture.placing = reading
+    await Promise.all([this.readScroll(capture), this.readHits(capture)])
+    // A newer picture's read is under way: that one hands it on.
+    if (capture.placing !== reading) return
+    if (shown && capture.latest === shown) Object.assign(shown, this.spot(capture))
+    capture.placing = undefined
     this.pump(capture)
+  }
+
+  /** Reads where the tab's page is scrolled now (kept for its next pictures). */
+  private async readScroll(capture: TabCapture): Promise<void> {
+    try {
+      const metrics = await this.cdp.send<LayoutMetrics>('Page.getLayoutMetrics', {}, { sessionId: capture.info.cdpSessionId, timeoutMs: 2_000 })
+      capture.scroll = { x: metrics.cssVisualViewport?.pageX ?? 0, y: metrics.cssVisualViewport?.pageY ?? 0 }
+    } catch {
+      // The tab closed or its page is busy: the last scroll read stands.
+    }
+  }
+
+  /** Reads what is on top at the grid's points now; unknown (no check) when it cannot be read. */
+  private async readHits(capture: TabCapture): Promise<void> {
+    try {
+      capture.hits = await this.options.hits?.(capture.info.cdpSessionId)
+    } catch {
+      capture.hits = undefined
+    }
   }
 
   /** A screencast picture becomes the latest. A still it replaces soon after was not worth taking: the next one waits longer. */
@@ -601,7 +685,7 @@ export class ViewerCaptures {
       capture.stillAt = undefined
     }
     const scale = Math.min(1, capture.width / capture.viewport.width, SCREENCAST_MAX_HEIGHT / capture.viewport.height)
-    capture.latest = { data, width: Math.round(capture.viewport.width * scale), height: Math.round(capture.viewport.height * scale), at: now, sharp: false }
+    capture.latest = { data, width: Math.round(capture.viewport.width * scale), height: Math.round(capture.viewport.height * scale), at: now, sharp: false, ...this.spot(capture) }
     capture.shownCast = data
     capture.frameSeq = this.bump()
     capture.echoPending = undefined
@@ -647,7 +731,8 @@ export class ViewerCaptures {
       const waiting = watcher.waiting
       if (!waiting) continue
       const newState = watcher.fresh || capture.stateSeq > waiting.afterState
-      const newPicture = Boolean(capture.latest) && (watcher.fresh || capture.frameSeq > waiting.afterFrame)
+      // A picture still being placed (its scroll and grid read) waits; the tab's state goes on.
+      const newPicture = Boolean(capture.latest) && capture.placing === undefined && (watcher.fresh || capture.frameSeq > waiting.afterFrame)
       watcher.fresh = false
       // A timer may fire a millisecond before the clock says so: within that, the cap is met.
       const wait = newPicture ? watcher.lastPictureAt + watcher.minIntervalMs - now : 0
@@ -742,12 +827,14 @@ export class ViewerCaptures {
         }
       }
       if (this.captures.get(sessionId) !== capture) return
+      if (shot && capture.frameSeq === before) await this.readHits(capture)
       // The page painted meanwhile: that newer picture stands, and this one is not sent.
-      if (capture.frameSeq !== before || !shot) {
+      if (capture.frameSeq !== before || !shot || this.captures.get(sessionId) !== capture) {
         if (viewportChanged) this.pump(capture)
         return
       }
-      capture.latest = { data: shot.data, width: Math.round(width * scale), height: Math.round(height * scale), at: this.now(), sharp: true }
+      capture.scroll = { x: visual.pageX ?? 0, y: visual.pageY ?? 0 }
+      capture.latest = { data: shot.data, width: Math.round(width * scale), height: Math.round(height * scale), at: this.now(), sharp: true, ...this.spot(capture) }
       capture.lastStill = shot
       capture.shownCast = over
       capture.stillAt = capture.behind ? undefined : this.now()
@@ -786,7 +873,11 @@ export class ViewerCaptures {
     try {
       const data = await this.screenshot(capture, still.params)
       if (capture.frameSeq !== before || this.captures.get(capture.info.cdpSessionId) !== capture || data === still.data || data.length > MAX_PICTURE_CHARS) return
-      capture.latest = { ...capture.latest, data, at: this.now() }
+      // The page changed as the still was taken: this picture is placed on its own scroll and grid, not the still's.
+      await Promise.all([this.readScroll(capture), this.readHits(capture)])
+      if (capture.frameSeq !== before || this.captures.get(capture.info.cdpSessionId) !== capture) return
+      const { spot: _stillSpot, ...rest } = capture.latest
+      capture.latest = { ...rest, data, at: this.now(), ...this.spot(capture) }
       capture.lastStill = { data, params: still.params }
       capture.shownCast = capture.lastCast
       capture.stillAt = capture.behind ? undefined : this.now()
@@ -795,6 +886,12 @@ export class ViewerCaptures {
     } catch {
       // The tab closed: nothing to check.
     }
+  }
+
+  /** The document a picture of the tab shows now, and where its page was scrolled (as last read). */
+  private spot(capture: TabCapture): { spot?: BrowserPictureSpot } {
+    const documentId = this.options.document?.(capture.info.cdpSessionId)
+    return documentId ? { spot: { documentId, scrollX: capture.scroll.x, scrollY: capture.scroll.y, ...(capture.hits ? { hits: capture.hits } : {}) } } : {}
   }
 
   private async readViewport(capture: TabCapture): Promise<boolean> {
@@ -844,6 +941,8 @@ export class ViewerCaptures {
       behind: capture.behind,
       loading: capture.loading,
       ...(capture.problem ? { problem: capture.problem } : {}),
+      ...(capture.dialog ? { dialog: capture.dialog } : {}),
+      ...(capture.chooser ? { chooser: capture.chooser } : {}),
       frameSeq: picture ? capture.frameSeq : waiting.afterFrame,
       stateSeq: capture.stateSeq,
       ...(picture && capture.latest ? { picture: capture.latest } : {}),

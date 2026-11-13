@@ -216,6 +216,8 @@ export function formatBrowserToolOutput(output: BrowserToolOutput, reader: Brows
           requestId: output.action.requestId,
           outcome: output.action.outcome,
           dispatched: output.action.dispatched,
+          // A person took the browser over while it ran: whether it took effect (applied, not-applied, unknown).
+          ...(output.action.takeover ? { takeover: output.action.takeover } : {}),
           code: output.action.code,
           message: output.action.message,
           navigation: navigationForModel(output.action.navigation, reader),

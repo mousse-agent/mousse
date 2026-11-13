@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Freezing</title>
+  <style>
+    body { margin: 0; font: 16px sans-serif; position: relative; }
+    .at { position: absolute; box-sizing: border-box; }
+    #field { left: 40px; top: 40px; width: 500px; height: 40px; font: 18px sans-serif; }
+    #freeze { left: 40px; top: 120px; width: 200px; height: 40px; }
+    #out { left: 40px; top: 200px; width: 700px; margin: 0; font: 13px monospace; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <!-- A page that stops answering: Freeze, or Enter in the field, blocks its main thread (for ?ms= milliseconds, 20 seconds by default). -->
+  <input id="field" class="at" autocomplete="off" placeholder="Type here; Enter freezes the page">
+  <button id="freeze" class="at">Freeze</button>
+  <pre id="out" class="at"></pre>
+  <script>
+    const out = document.getElementById('out')
+    const note = (line) => { out.textContent += line + '\n' }
+    const ms = Number(new URLSearchParams(location.search).get('ms')) || 20000
+    const freeze = () => {
+      note('frozen')
+      // The input that asked finishes first; the page then stops answering.
+      setTimeout(() => {
+        const end = Date.now() + ms
+        while (Date.now() < end) { /* the page answers nothing meanwhile */ }
+        note('thawed')
+      }, 50)
+    }
+    document.getElementById('freeze').addEventListener('click', freeze)
+    const field = document.getElementById('field')
+    field.addEventListener('keydown', (event) => { if (event.key === 'Enter') freeze() })
+    field.addEventListener('input', () => { document.title = 'Freezing ' + field.value })
+  </script>
+</body>
+</html>

@@ -13,8 +13,8 @@ import { processRecordPath, workspaceUserDataDir } from '../src/browser-worker/l
 
 const chrome = await ensureManagedChrome()
 
-describe('control changes on a session that is not available', () => {
-  const session = async (state: 'disconnected' | 'closed') => {
+describe('control changes that are refused', () => {
+  const session = async (state: 'disconnected' | 'closed' | 'human-controlled') => {
     const root = await mkdtemp(join(tmpdir(), 'mousse-browser-control-'))
     const value = new ManagedSession({ profileId: 'profile_control', browserRoot: join(root, 'browser'), artifactRoot: join(root, 'artifacts'), executablePath: 'chrome', browserVersion: '1' }, { persistent: false })
     // A started session whose Chromium went away (or that has closed) keeps its connection object.
@@ -35,6 +35,12 @@ describe('control changes on a session that is not available', () => {
     const value = await session('closed')
     expect(() => value.handle('control.take', { owner: 'human' })).toThrow(expect.objectContaining({ code: 'session_closed' }))
     expect(value.lifecycle).toBe('closed')
+  })
+
+  it('a release by a lease that is not the current one is refused at once', async () => {
+    const value = await session('human-controlled')
+    expect(() => value.handle('control.release', { controlLeaseId: 'lease_old' })).toThrow(expect.objectContaining({ code: 'stale_generation' }))
+    expect(value.lifecycle).toBe('human-controlled')
   })
 })
 

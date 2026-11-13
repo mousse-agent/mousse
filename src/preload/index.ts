@@ -789,7 +789,14 @@ const api = {
     },
     /** A composer file's path on this computer: where it is, or, for a pasted one, a temporary copy. */
     attachmentPath: async (file: File): Promise<string> =>
-      webUtils.getPathForFile(file) || ipcRenderer.invoke('bots:stageAttachment', file.name, new Uint8Array(await file.arrayBuffer()))
+      webUtils.getPathForFile(file) || ipcRenderer.invoke('bots:stageAttachment', file.name, new Uint8Array(await file.arrayBuffer())),
+    /**
+     * A page in a bot's browser asks for files: the app opens this computer's own file dialog, naming
+     * the site, and answers a one-time token for what the person chose (never the paths), or that they
+     * cancelled, or why it was refused.
+     */
+    chooseBrowserFiles: (request: { botId: string; viewId: string; holdId: string; multiple: boolean; site?: string }): Promise<{ token?: string; count?: number; cancelled?: true; refused?: string }> =>
+      ipcRenderer.invoke('bots:chooseBrowserFiles', request)
   },
   skills: {
     list: (projectId?: string): Promise<SkillsRegistrySnapshot> =>
