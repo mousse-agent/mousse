@@ -15,7 +15,7 @@ import { MAX_PICTURE_CHARS, MAX_REPEAT_GAP_MS, REPEAT_GAP_MS, SETTLE_MS, ViewerC
  * (`screenshotRepaints`), as another encoding of the same page the first time (`'variant'`:
  * `<page>@<quality>~`), and then as that same encoding. `shot` answers a screenshot's picture.
  */
-function fakeCdp({ sendsOnStart = true, screenshotRepaints = false as boolean | 'variant', shot = undefined as ((params: Record<string, unknown>, index: number) => string) | undefined } = {}) {
+function fakeCdp({ sendsOnStart = true, screenshotRepaints = false as boolean | 'variant', shot = undefined as ((params: Record<string, unknown>, index: number) => string) | undefined, layout = () => ({ width: 1280, height: 720 }) } = {}) {
   const listeners = new Map<string, Set<CdpEventListener>>()
   const sent: Array<{ method: string; params?: Record<string, unknown>; sessionId?: string }> = []
   const pages = new Map<string, string>()
@@ -32,7 +32,7 @@ function fakeCdp({ sendsOnStart = true, screenshotRepaints = false as boolean | 
     async send<T>(method: string, params?: Record<string, unknown>, options?: { sessionId?: string }) {
       sent.push({ method, params, sessionId: options?.sessionId })
       const sessionId = options?.sessionId ?? ''
-      if (method === 'Page.getLayoutMetrics') return { cssVisualViewport: { clientWidth: 1280, clientHeight: 720, pageX: 0, pageY: 0 } } as T
+      if (method === 'Page.getLayoutMetrics') return { cssVisualViewport: { clientWidth: layout().width, clientHeight: layout().height, pageX: 0, pageY: 0 } } as T
       if (method === 'Page.captureScreenshot') {
         const page = pages.get(sessionId)
         if (screenshotRepaints && page && casting.has(sessionId)) emit(sessionId, `${page}@${casting.get(sessionId)}${screenshotRepaints === 'variant' ? '~' : ''}`)
@@ -81,6 +81,40 @@ beforeEach(() => { vi.useFakeTimers() })
 afterEach(() => { vi.useRealTimers() })
 
 describe('the pictures of a watched tab', () => {
+  it('after the page is resized, a picture the screencast sends places nothing until a still shows the page at its new size', async () => {
+    let page = { width: 1280, height: 720, scale: 1, seq: 0 }
+    const { cdp, paint } = fakeCdp({ layout: () => page })
+    const captures = new ViewerCaptures(cdp, { behind: () => false, document: () => 'doc_a', page: () => page })
+    const state = await join(captures, TAB_A, 'w1', { maxWidth: 600 })
+    const first = ask(captures, TAB_A, 'w1', state, { maxWidth: 600 })
+    paint('cdp-a', 'WIDE')
+    const wide = await after(first)
+    expect(wide.picture).toMatchObject({ data: 'WIDE@60', viewport: { width: 1280, height: 720 }, spot: { documentId: 'doc_a', sizeSeq: 0 } })
+    // The split view is tall now: the session lays the page out at its size.
+    page = { width: 600, height: 1000, scale: 1, seq: 1 }
+    captures.pageResized()
+    /** The watcher's next picture, after the state changes that come before it. */
+    const nextPicture = async (seen: ViewerUpdate, paints?: string): Promise<ViewerUpdate> => {
+      let update = ask(captures, TAB_A, 'w1', seen, { maxWidth: 600, waitMs: 100 })
+      if (paints) paint('cdp-a', paints)
+      for (;;) {
+        const answered = await after(update, 150)
+        if (answered.picture) return answered
+        update = ask(captures, TAB_A, 'w1', answered, { maxWidth: 600, waitMs: 100 })
+      }
+    }
+    // A picture Chromium painted before it, sent after: shown, and it places nothing.
+    const inflight = await nextPicture(wide, 'INFLIGHT')
+    expect(inflight.picture).toMatchObject({ data: 'INFLIGHT@60', spot: { sizeSeq: -1 } })
+    // The still taken just after shows the page as it is, and places a click.
+    const still = await nextPicture(inflight)
+    expect(still).toMatchObject({ viewport: { width: 600, height: 1000 }, picture: { sharp: true, viewport: { width: 600, height: 1000 }, width: 600, height: 1000, spot: { sizeSeq: 1 } } })
+    // From then on the screencast's pictures place clicks again (one painted after the still's echo).
+    await vi.advanceTimersByTimeAsync(500)
+    expect((await nextPicture(still, 'TALL')).picture).toMatchObject({ data: 'TALL@60', viewport: { width: 600, height: 1000 }, spot: { sizeSeq: 1 } })
+    captures.dispose()
+  })
+
   it('captures nothing while nobody watches', async () => {
     const { cdp, sent } = fakeCdp()
     const captures = new ViewerCaptures(cdp, { behind: () => false })

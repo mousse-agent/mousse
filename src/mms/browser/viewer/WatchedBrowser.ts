@@ -6,9 +6,13 @@ import {
   MAX_WATCHED_BROWSER_FILES_BYTES,
   WATCHED_BROWSER_FILES_LIMIT_TEXT,
   WATCHED_BROWSER_HOLD_LEASE_MS,
+  WATCHED_BROWSER_PAGE,
   WATCHED_BROWSER_PANE,
   WATCHED_BROWSER_RENEW_MS,
+  sameWatchedBrowserPageSize,
+  watchedBrowserPageSize,
   type WatchedBrowserAck,
+  type WatchedBrowserPageSize,
   type WatchedBrowserChooser,
   type WatchedBrowserDialog,
   type WatchedBrowserFrame,
@@ -70,6 +74,11 @@ export interface WatchedBrowserOptions {
   call<T>(call: (context: BrowserToolContext) => Promise<T>, signal?: AbortSignal): Promise<T>
   /** One input of the person's, in the browser's turn: resolves once the worker applied it. */
   input<T>(call: (context: BrowserToolContext) => Promise<T>, tabId?: string): Promise<T>
+  /**
+   * The page laid out at a view's size, in the browser's turn: ahead of the agent's calls that wait, after
+   * the one under way (never stopping it), with no hold. Without it the page keeps its default size.
+   */
+  resize?<T>(call: (context: BrowserToolContext) => Promise<T>): Promise<T>
   /** A hold ended and nobody else took it on: the browser is its agent's again, and its user picks the tab the views follow. */
   givenBack?(): void
   /** A hold ran out: the view that held it went away. */
@@ -158,6 +167,9 @@ interface Viewer extends WatchedBrowserWatcher {
   viewId?: string
   width: number
   fps: number
+  /** The page size it asks for (a large view: its own size), and when it began asking (a count: the latest wins). */
+  page?: WatchedBrowserPageSize
+  pageSince?: number
   /** Dropped when not renewed by then. */
   until: number
   /** The update waiting for the one being delivered: newer fields replace older ones (latest wins). */
@@ -373,6 +385,12 @@ export class WatchedBrowser {
   private readonly leaseTimer: (fn: () => void, ms: number) => { clear(): void }
   /** The browser is open in a real window for the view that holds it ("Open in a window"): the window's last known change. */
   private windowed?: { serial: number }
+  /** The page's size in the open session, as last set (a session opens at the default). */
+  private pageSet: WatchedBrowserPageSize = { ...WATCHED_BROWSER_PAGE.default }
+  /** A resize is under way: the next waits for it, and goes at the size wanted then. */
+  private resizing = false
+  /** Counts views that began asking for a size: the one that began last wins when none holds the browser. */
+  private pageAsks = 0
 
   constructor(private readonly options: WatchedBrowserOptions) {
     this.now = options.now ?? Date.now
@@ -423,7 +441,7 @@ export class WatchedBrowser {
    * watch one browser. Answers the state, with whether pictures can reach the view now (`stalled`
    * when not), and the last picture unless the view has had one.
    */
-  async watch(watchId: string, input: { width: number; fps: number; connectionId: string; viewId?: string } & WatchedBrowserWatcher): Promise<WatchedBrowserView> {
+  async watch(watchId: string, input: { width: number; fps: number; connectionId: string; viewId?: string; page?: WatchedBrowserPageSize } & WatchedBrowserWatcher): Promise<WatchedBrowserView> {
     const key = `${input.connectionId}\u0000${watchId}`
     let viewer = this.viewers.get(key)
     // An older app's window keeps its hold alive by watching (it has no heartbeat).
@@ -444,6 +462,15 @@ export class WatchedBrowser {
     viewer.width = Math.max(MIN_VIEW_WIDTH, Math.min(WATCHED_BROWSER_PANE.maxWidth, Math.floor(input.width)))
     viewer.fps = Math.max(1, Math.min(WATCHED_BROWSER_PANE.heldFps, Math.floor(input.fps)))
     viewer.until = this.now() + VIEWER_LEASE_MS
+    // A large view asks the page to have its size; it began asking now, or asks still.
+    if (input.page) {
+      if (!viewer.page) viewer.pageSince = ++this.pageAsks
+      viewer.page = watchedBrowserPageSize(input.page)
+    } else {
+      delete viewer.page
+      delete viewer.pageSince
+    }
+    this.syncPage()
     // Everything it has not seen goes with its first update.
     const hadPicture = viewer.lastPictureAt > 0
     if (!hadPicture) viewer.sent = {}
@@ -468,6 +495,43 @@ export class WatchedBrowser {
   /** Every view stops watching (the browser's user is going). */
   dropViewers(): void {
     for (const key of [...this.viewers.keys()]) this.dropViewer(key)
+  }
+
+  // -- the page's size
+
+  /**
+   * The size the page is laid out at, as the views ask: the one of the view that holds the browser, else
+   * of the view that began asking last (two windows with the split view open: the one opened last). None
+   * asking (no large view on screen): the default.
+   */
+  private wantedPage(): WatchedBrowserPageSize {
+    const asking = [...this.viewers.values()].filter((viewer) => viewer.page)
+    const held = this.hold ? asking.find((viewer) => viewer.viewId === this.hold!.viewId) : undefined
+    const latest = asking.reduce<Viewer | undefined>((best, viewer) => !best || (viewer.pageSince ?? 0) > (best.pageSince ?? 0) ? viewer : best, undefined)
+    return (held ?? latest)?.page ?? { ...WATCHED_BROWSER_PAGE.default }
+  }
+
+  /**
+   * Lays the open session's page out at the size wanted now, one resize at a time (the latest wins): in the
+   * browser's turn (`resize`), so it never lands in the middle of the agent's call, and the agent's next
+   * look sees it. A resize that fails is not tried again until the size wanted changes.
+   */
+  private syncPage(): void {
+    const resize = this.options.resize
+    const sessionId = this.liveSession()
+    if (!resize || this.resizing || !sessionId) return
+    const page = this.wantedPage()
+    if (sameWatchedBrowserPageSize(page, this.pageSet)) return
+    this.resizing = true
+    void resize((context) => this.sessions().resizePage(context, { sessionId, page }))
+      .then((set) => { if (this.liveSession() === sessionId) this.pageSet = set }, (error: unknown) => {
+        if (this.liveSession() === sessionId) this.pageSet = page
+        console.warn(`a ${this.options.log.name} page could not be resized`, { ...this.options.log.fields, error: error instanceof Error ? error.message : String(error) })
+      })
+      .finally(() => {
+        this.resizing = false
+        this.syncPage()
+      })
   }
 
   /** A view watches, or one asked for a picture lately. */
@@ -710,6 +774,8 @@ export class WatchedBrowser {
     if (hold.tabId) this.followTab(hold.tabId)
     this.beat(hold)
     this.notifyHolder()
+    // The page takes the size of the view that holds it.
+    this.syncPage()
     return hold
   }
 
@@ -777,7 +843,10 @@ export class WatchedBrowser {
     }
     this.refreshCapture()
     // A hold another one replaces at once (`keepControl`): the views hear of the new one instead.
-    if (!options.keepControl) this.notifyHolder()
+    if (!options.keepControl) {
+      this.notifyHolder()
+      this.syncPage()
+    }
   }
 
   /** A hold ends with its browser (closed, its user gone): nothing to give back. */
@@ -926,12 +995,16 @@ export class WatchedBrowser {
   opened(tabId: string | undefined): void {
     this.behind = false
     this.followTab(tabId)
+    // A new session opens at the default size: it takes the size a view asks for.
+    this.pageSet = { ...WATCHED_BROWSER_PAGE.default }
+    this.syncPage()
   }
 
   /** The session is closing: a hold ends with it, and the views follow no tab. */
   closed(): void {
     this.windowed = undefined
     this.dropHold()
+    this.pageSet = { ...WATCHED_BROWSER_PAGE.default }
     this.follow = undefined
     this.behind = false
     this.dialog = undefined
@@ -1186,11 +1259,12 @@ export class WatchedBrowser {
     const now = this.now()
     if (update.picture) {
       // Each picture has a number, and what it showed is kept a while: input made on it lands on that.
-      const { spot, ...picture } = update.picture
+      const { spot, viewport: shows, ...picture } = update.picture
       const id = ++this.pictureSerial
       this.rememberPicture({ id, tabId: update.tabId, ...(spot ? { spot } : {}), at: now })
-      this.picture = { ...picture, viewport: update.viewport, id }
-    } else if (this.picture) this.picture = { ...this.picture, viewport: update.viewport }
+      this.picture = { ...picture, viewport: shows ?? update.viewport, id }
+    }
+    // A picture keeps the size it shows: an update without one says nothing of it.
     this.pictureTab = update.tabId
     this.dialog = update.dialog
     this.chooser = update.chooser
@@ -1221,8 +1295,10 @@ export class WatchedBrowser {
       // A file picker is answered by the view that holds the browser alone.
       const chooser = JSON.stringify(viewer.viewId && this.hold?.viewId === viewer.viewId ? update.chooser ?? null : null)
       if ((viewer.sent.chooser ?? 'null') !== chooser) next.chooser = JSON.parse(chooser) as WatchedBrowserChooser | null
-      const viewport = JSON.stringify(update.viewport)
-      if (viewer.sent.viewport !== viewport) next.viewport = update.viewport
+      // The page's size the picture shows: a view maps the person's pointer on it with that.
+      const shows = this.picture?.viewport ?? update.viewport
+      const viewport = JSON.stringify(shows)
+      if (viewer.sent.viewport !== viewport) next.viewport = { ...shows }
       if (viewer.sent.tab !== JSON.stringify(this.tab)) next.tab = { ...this.tab }
       if ((viewer.sent.cursorAt ?? null) !== (cursor?.at ?? null)) next.cursor = cursor
       if (viewer.sent.behind !== update.behind) next.behind = update.behind
@@ -1352,6 +1428,8 @@ export class WatchedBrowser {
     if (!this.viewers.size && this.capture) this.stopWorkerWatch(this.capture.key)
     else this.refreshCapture()
     this.capture?.wake?.()
+    // A large view gone: the page takes the size another asks for, or its default.
+    if (viewer.page) this.syncPage()
   }
 
   // -- the session's record

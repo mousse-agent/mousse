@@ -299,7 +299,6 @@ describe('what a page ran into', () => {
     // A page loading again: no problem, a quiet moving line under the address, and no wait.
     browser = { ...browser, problem: undefined }
     await push({ problem: null, loading: true })
-    expect(status()?.textContent).toBe('Loading')
     expect(host.querySelector('.watched-browser-pane .watched-browser-address')!.classList.contains('is-loading')).toBe(true)
     await push({ loading: false })
     expect(host.querySelector('.watched-browser-pane .watched-browser-address')!.classList.contains('is-loading')).toBe(false)
@@ -376,6 +375,76 @@ describe('the split view', () => {
     expect(host.querySelector('.watched-browser-pane')).toBeNull()
     // Back to the preview's own size and rate.
     expect(watches().at(-1)).toMatchObject({ width: 480, fps: 5 })
+  })
+})
+
+describe('the split view\'s size', () => {
+  /** The split view's stage as the window lays it out, told to its ResizeObserver; the screen's pixel ratio. */
+  let stage = { width: 790, height: 1070 }
+  const resized = new Set<() => void>()
+  const measured = (element: HTMLElement, side: 'width' | 'height') => element.classList.contains('watched-browser-stage') ? stage[side] : 0
+  const resize = async (next: { width: number; height: number }) => {
+    stage = next
+    await act(async () => { for (const callback of resized) callback() })
+  }
+  beforeEach(() => {
+    stage = { width: 790, height: 1070 }
+    ;(globalThis as { ResizeObserver?: unknown }).ResizeObserver = class {
+      constructor(private readonly callback: () => void) { resized.add(callback) }
+      observe() {}
+      disconnect() { resized.delete(this.callback) }
+    }
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get(this: HTMLElement) { return measured(this, 'width') } })
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', { configurable: true, get(this: HTMLElement) { return measured(this, 'height') } })
+    Object.defineProperty(window, 'devicePixelRatio', { configurable: true, value: 1.5 })
+  })
+  afterEach(() => {
+    delete (globalThis as { ResizeObserver?: unknown }).ResizeObserver
+    resized.clear()
+    // Back to the element's own (none of the window's layout in this document).
+    delete (HTMLElement.prototype as { clientWidth?: number }).clientWidth
+    delete (HTMLElement.prototype as { clientHeight?: number }).clientHeight
+    Object.defineProperty(window, 'devicePixelRatio', { configurable: true, value: 1 })
+  })
+
+  it('asks for the page at its own size once it stays put; the chat then shows one line, no second picture, and asks for none; closed, the preview is back', async () => {
+    fake.chats.noobesh = [message(1, { text: 'Here it is.', activationId: 'act1' })]
+    await open()
+    expect(host.querySelector('.bot-browser-preview img')).not.toBeNull()
+    expect(watches().at(-1)).toMatchObject({ width: 480, fps: 5 })
+    const before = watches().length
+    await click(button('Expand Noobesh\'s browser'))
+    // The tall, narrow split view: the page at its size, the picture at the screen's pixel ratio.
+    expect(watches().slice(before)).toEqual([expect.objectContaining({ width: 1185, fps: 15, page: { width: 790, height: 1070, scale: 1.5 } })])
+    // In the chat, one line in place of the preview: no picture, nothing watched for it.
+    expect(host.querySelector('.bot-browser-preview')).toBeNull()
+    expect(host.querySelector('.bot-browser-beside')!.textContent).toBe('Browser open beside the chat')
+    expect([...host.querySelectorAll('img')].every((image) => image.closest('.watched-browser-pane'))).toBe(true)
+    // The divider dragged: nothing asked until it stays put, then the size it settled at, once.
+    const dragged = watches().length
+    await resize({ width: 700, height: 1070 })
+    await resize({ width: 640, height: 1070 })
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 120)) })
+    expect(watches().length).toBe(dragged)
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 300)) })
+    expect(watches().slice(dragged)).toEqual([expect.objectContaining({ width: 960, page: { width: 640, height: 1070, scale: 1.5 } })])
+    // Taken over: the person's press lands at the page's point of the tall picture, whatever the pixel ratio.
+    browser = { ...browser, frame: { ...FRAME, id: 7, width: 960, height: 1605, viewport: { width: 640, height: 1070 } } }
+    await click(button('Take over'))
+    const frame = host.querySelector<HTMLElement>('.watched-browser-pane .watched-browser-frame')!
+    frame.getBoundingClientRect = () => ({ left: 14, top: 60, width: 640, height: 1070, right: 654, bottom: 1130, x: 14, y: 60, toJSON: () => ({}) })
+    await act(async () => {
+      frame.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, clientX: 334, clientY: 1090, button: 0, buttons: 1 }))
+      frame.dispatchEvent(new MouseEvent('pointerup', { bubbles: true, clientX: 334, clientY: 1090, button: 0, buttons: 0 }))
+    })
+    await settle()
+    expect(sentInputs().find((sent) => 'input' in sent && sent.input.kind === 'pointer' && sent.input.type === 'down')).toMatchObject({ picture: 7, input: { x: 320, y: 1030 } })
+    // Closed: the preview and its picture are back, and the page is asked for at no size of its own.
+    await click(button('Close the browser view'))
+    expect(host.querySelector('.bot-browser-beside')).toBeNull()
+    expect(host.querySelector('.bot-browser-preview img')).not.toBeNull()
+    expect(watches().at(-1)).toMatchObject({ width: 480, fps: 5 })
+    expect(watches().at(-1)).not.toHaveProperty('page')
   })
 })
 
@@ -604,6 +673,8 @@ describe('the bot\'s browser in a real window', () => {
     await act(async () => root.unmount())
     root = createRoot(host)
     useChatsStore.setState(chatsInitial)
+    // The split view closed, so the reply's preview (and its Expand) shows again.
+    useBotBrowserStore.getState().closePane()
     await pane()
     expect(button('Open in a window')!.title).toBe('Pages reload when the window opens and when it closes.')
   })

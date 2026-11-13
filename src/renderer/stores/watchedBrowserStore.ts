@@ -7,6 +7,7 @@ import {
   type WatchedBrowserFrame,
   type WatchedBrowserHold,
   type WatchedBrowserInput,
+  type WatchedBrowserPageSize,
   type WatchedBrowserSent,
   type WatchedBrowserUpdate,
   type WatchedBrowserView
@@ -50,8 +51,11 @@ const RENEW_ANSWER_MS = 5000
 /** Whether pictures can arrive: live, or not updating since a time (ms since the epoch). */
 export type WatchedBrowserStream = { live: true } | { live: false; since: number }
 
-/** What a surface needs while it is seen: its width in CSS pixels and pictures a second. */
-export interface WatchedBrowserNeed { width: number; fps: number }
+/**
+ * What a surface needs while it is seen: its picture's width in pixels and pictures a second, and, for
+ * a large view, the page's size (its own: the page is laid out at it while the view is seen).
+ */
+export interface WatchedBrowserNeed { width: number; fps: number; page?: WatchedBrowserPageSize }
 
 /** The page's file request as a view answers it: this computer's own dialog, by the app. */
 export type ChooseFiles = (request: { key: string; viewId: string; holdId: string; multiple: boolean; site?: string }) => Promise<{ token?: string; count?: number; cancelled?: true; refused?: string }>
@@ -137,8 +141,14 @@ export interface WatchedBrowserStoreConfig<E extends WatchedBrowserUpdate> {
 const missingMethod = (cause: unknown) => /method not allowed|not allowlisted|unknown method|domain method is unavailable/i.test(errorText(cause))
   || ['platform_method_not_allowed', 'method_not_available', 'unknown_method'].includes(String((cause as { code?: unknown } | null)?.code ?? ''))
 
+/** An older service refuses a page size (it lays every page out at one size). */
+const refusesPage = (cause: unknown) => /unexpected field: page/i.test(errorText(cause))
+
 /** An older service refuses a view's id (it predates holds). */
 const refusesViewId = (cause: unknown) => String((cause as { code?: unknown } | null)?.code ?? '') === 'unknown_field' || /unexpected field: viewId/i.test(errorText(cause))
+
+const samePage = (a: WatchedBrowserPageSize | undefined, b: WatchedBrowserPageSize | undefined) =>
+  a === b || Boolean(a && b && a.width === b.width && a.height === b.height && a.scale === b.scale)
 
 /** The same picture (whenever it was read). */
 const samePicture = (a: WatchedBrowserFrame, b: WatchedBrowserFrame) =>
@@ -212,6 +222,7 @@ interface Watch {
   watchId: string
   width: number
   fps: number
+  page?: WatchedBrowserPageSize
   renew?: ReturnType<typeof setTimeout>
   retryMs: number
   /** A service that cannot push: pictures are asked for each time instead. */
@@ -226,6 +237,8 @@ export function createWatchedBrowserStore<V extends WatchedBrowserView, E extend
   let frameSource: WatchedBrowserFrames<E> | null = null
   /** Whether the service predates holds and views: set when it says so (a bot's only). */
   let legacyService = false
+  /** Whether the service lays every page out at one size (it refused a view's size). */
+  let fixedPage = false
   const channels = new Map<string, BrowserInputChannel>()
   const beats = new Map<string, { timer: ReturnType<typeof setInterval>; stop(): void }>()
   const needs = new Map<string, Map<number, WatchedBrowserNeed>>()
@@ -548,11 +561,12 @@ export function createWatchedBrowserStore<V extends WatchedBrowserView, E extend
     }
   }
 
-  /** What the browser's seen views need together: the widest, the fastest. */
+  /** What the browser's seen views need together: the widest, the fastest, and the page size of the large view seen last. */
   function merged(key: string): WatchedBrowserNeed | undefined {
     const list = [...(needs.get(key)?.values() ?? [])]
     if (!list.length) return undefined
-    return { width: Math.max(...list.map((need) => need.width)), fps: Math.max(...list.map((need) => need.fps)) }
+    const page = [...list].reverse().find((need) => need.page)?.page
+    return { width: Math.max(...list.map((need) => need.width)), fps: Math.max(...list.map((need) => need.fps)), ...(page ? { page } : {}) }
   }
 
   /** Starts, changes or stops the browser's watch to match what is seen now. */
@@ -573,7 +587,7 @@ export function createWatchedBrowserStore<V extends WatchedBrowserView, E extend
       clearTimeout(watch.stopping)
       watch.stopping = undefined
     }
-    if (watch && watch.width === need.width && watch.fps === need.fps) return
+    if (watch && watch.width === need.width && watch.fps === need.fps && samePage(watch.page, need.page)) return
     if (!watch) {
       watch = { watchId: `w${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`, width: need.width, fps: need.fps, retryMs: RETRY_MS, stopped: false }
       watches.set(key, watch)
@@ -581,6 +595,8 @@ export function createWatchedBrowserStore<V extends WatchedBrowserView, E extend
     }
     watch.width = need.width
     watch.fps = need.fps
+    if (need.page) watch.page = need.page
+    else delete watch.page
     if (store.polling) startPolling(key, watch)
     else void renew(key, watch)
   }
@@ -593,8 +609,13 @@ export function createWatchedBrowserStore<V extends WatchedBrowserView, E extend
       if (!watch.stopped) setStream(key, { live: false, since: lastGood.get(key) ?? Date.now() })
     }, RENEW_ANSWER_MS)
     try {
-      const ask = () => call(config.methods.watch, params(key, { watchId: watch.watchId, width: watch.width, fps: watch.fps, ...(legacyService ? {} : { viewId: viewId() }) }))
+      const ask = () => call(config.methods.watch, params(key, { watchId: watch.watchId, width: watch.width, fps: watch.fps, ...(legacyService ? {} : { viewId: viewId() }), ...(watch.page && !fixedPage ? { page: watch.page } : {}) }))
       const { browser } = await ask().catch((cause: unknown) => {
+        // An older service lays every page out at one size: the view shows it whole, scaled.
+        if (!fixedPage && watch.page && refusesPage(cause)) {
+          fixedPage = true
+          return ask()
+        }
         if (legacyService || !config.methods.legacy || !refusesViewId(cause)) throw cause
         legacyService = true
         return ask()
@@ -671,13 +692,17 @@ export function createWatchedBrowserStore<V extends WatchedBrowserView, E extend
     if (!id.current) id.current = nextNeed++
     const width = need?.width
     const fps = need?.fps
+    const pageWidth = need?.page?.width
+    const pageHeight = need?.page?.height
+    const pageScale = need?.page?.scale
     useEffect(() => {
       if (width === undefined || fps === undefined) return
       const slot = id.current
+      const page = pageWidth !== undefined && pageHeight !== undefined ? { width: pageWidth, height: pageHeight, scale: pageScale ?? 1 } : undefined
       let onScreen = typeof IntersectionObserver === 'undefined'
       const update = () => {
         const list = needs.get(key) ?? new Map<number, WatchedBrowserNeed>()
-        if (onScreen && windowShown()) list.set(slot, { width, fps })
+        if (onScreen && windowShown()) list.set(slot, { width, fps, ...(page ? { page } : {}) })
         else list.delete(slot)
         if (list.size) needs.set(key, list)
         else needs.delete(key)
@@ -700,7 +725,7 @@ export function createWatchedBrowserStore<V extends WatchedBrowserView, E extend
         if (list && !list.size) needs.delete(key)
         syncWatch(key)
       }
-    }, [key, element, width, fps])
+    }, [key, element, width, fps, pageWidth, pageHeight, pageScale])
   }
 
   /**
@@ -739,6 +764,7 @@ export function createWatchedBrowserStore<V extends WatchedBrowserView, E extend
     givenBack.clear()
     windowHolds.clear()
     legacyService = false
+    fixedPage = false
     unsubscribeFrames?.()
     unsubscribeFrames = null
   }
