@@ -4,7 +4,7 @@ import type { InstanceConfigPatch, ProviderOperationEvent, RemoveInstallResult, 
 import { Select } from '../ui/Select'
 import { Download, Plus, RotateCcw, X } from '../../lib/icons'
 import { SettingsRow, Switch } from '../settings/SettingsRow'
-import { BrowseButton, CommandBox, RefreshButton, StatusLine, useAsyncAction } from './parts'
+import { BrowseButton, CommandBox, FieldWithAction, RefreshButton, StatusLine, useAsyncAction } from './parts'
 import {
   binaryOverrideOf,
   formatArgs,
@@ -300,28 +300,33 @@ export function ExecutableRow({
               <RotateCcw size={14} />
             </button>
           )}
-          <input
-            className="settings-input prov-mono prov-wide"
-            value={draft}
-            disabled={busy !== null}
-            placeholder={resolved ?? 'Path to the executable'}
-            title={resolved}
-            aria-label="Executable path"
-            aria-invalid={error ? true : undefined}
-            spellCheck={false}
-            onChange={(event) => setDraft(event.target.value)}
-            onBlur={commit}
-            onKeyDown={blurOnEnter}
-          />
-          <BrowseButton
-            title={`Choose the ${label} executable`}
-            defaultPath={draft.trim() || resolved}
-            disabled={busy !== null}
-            onPick={(path) => {
-              setDraft(path)
-              if (path !== saved) save(path)
-            }}
-          />
+          <FieldWithAction
+            action={
+              <BrowseButton
+                title={`Choose the ${label} executable`}
+                defaultPath={draft.trim() || resolved}
+                disabled={busy !== null}
+                onPick={(path) => {
+                  setDraft(path)
+                  if (path !== saved) save(path)
+                }}
+              />
+            }
+          >
+            <input
+              className="settings-input prov-mono prov-wide"
+              value={draft}
+              disabled={busy !== null}
+              placeholder={resolved ?? 'Path to the executable'}
+              title={resolved}
+              aria-label="Executable path"
+              aria-invalid={error ? true : undefined}
+              spellCheck={false}
+              onChange={(event) => setDraft(event.target.value)}
+              onBlur={commit}
+              onKeyDown={blurOnEnter}
+            />
+          </FieldWithAction>
         </span>
       }
     />

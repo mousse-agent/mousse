@@ -1001,21 +1001,41 @@ html[data-theme='high-contrast'] .prov-status-badge {
   background: color-mix(in srgb, var(--text-primary) 3%, transparent);
 }
 
-/* Every field in the editor starts on one line. A field with a trailing icon (browse, remove)
-   leaves room for it; a field without one runs on into that room, to the row's end. */
+/* Every field in the editor is one width, on one column. A field's icon action (browse, remove)
+   sits inside its right end, like a select's chevron. */
 .prov-editor .settings-item-control {
-  --prov-field-w: 300px;
-  --prov-field-w-full: calc(var(--prov-field-w) + var(--settings-control-h) + var(--space-4));
+  --prov-field-w: 336px;
 }
 
 .prov-editor .settings-item-control .settings-input,
-.prov-editor .settings-item-control .ui-select:not(.small) {
+.prov-editor .settings-item-control .ui-select:not(.small),
+.prov-field {
   width: var(--prov-field-w);
 }
 
-.prov-editor .settings-item-control > .settings-input:only-child,
-.prov-editor .settings-item-control > span:only-child > .ui-select:only-child:not(.small) {
-  width: var(--prov-field-w-full);
+.prov-field {
+  position: relative;
+  display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.prov-editor .settings-item-control .prov-field > .settings-input {
+  width: 100%;
+  padding-right: calc(var(--settings-control-h) + 2px);
+}
+
+.prov-field-action {
+  position: absolute;
+  top: 50%;
+  right: 3px;
+  display: inline-flex;
+  transform: translateY(-50%);
+}
+
+.prov-field-action .settings-icon-btn {
+  width: 22px;
+  height: 22px;
 }
 
 .settings-input.prov-mono {

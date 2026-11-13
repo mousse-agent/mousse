@@ -78,6 +78,16 @@ export function StatusLine({ status }: { status: StatusDescription }) {
   )
 }
 
+/** A text field with its one icon action (browse, remove) inside its right end, like a select's chevron. */
+export function FieldWithAction({ children, action }: { children: ReactNode; action: ReactNode }) {
+  return (
+    <span className="prov-field">
+      {children}
+      <span className="prov-field-action">{action}</span>
+    </span>
+  )
+}
+
 /** Icon-only refresh; the glyph spins while busy. */
 export function RefreshButton({ label, busy, disabled, onClick }: { label: string; busy?: boolean; disabled?: boolean; onClick: () => void }) {
   return (
