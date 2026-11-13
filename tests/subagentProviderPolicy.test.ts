@@ -71,7 +71,13 @@ describe('policy table: permission decisions', () => {
     })
     // A bot's grant decides it: the folders it may write, its files folder and scratch, only with shell.
     const workspace = { roots: ['/home/me/site', '/home/me/ref'], access: 'read' as const, writeRoots: ['/home/me/site', '/p/files/b1'], scratch: '/p/scratch/a', files: '/p/files/b1' }
-    expect(codexBotSandbox({ tools: new Set(['read', 'shell']), workspace })).toEqual({ shell: true, writableRoots: ['/home/me/site', '/p/files/b1', '/p/scratch/a'] })
+    expect(codexBotSandbox({ tools: new Set(['read', 'shell']), workspace }, undefined, 'win32')).toEqual({ shell: true, writableRoots: ['/home/me/site', '/p/files/b1', '/p/scratch/a'] })
+    // On Linux and macOS the same grant is confined: the folders it may only read are listed too.
+    expect(codexBotSandbox({ tools: new Set(['read', 'shell']), workspace }, undefined, 'linux')).toEqual({
+      shell: true,
+      writableRoots: ['/home/me/site', '/p/files/b1', '/p/scratch/a'],
+      confined: { readable: ['/home/me/ref'] }
+    })
     expect(codexBotSandbox({ tools: new Set(['read']), workspace })).toEqual({ shell: false, writableRoots: [] })
     expect(codexBotSandbox({})).toEqual({ shell: false, writableRoots: [] })
   })
