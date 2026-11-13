@@ -773,9 +773,9 @@ export class MmsProfileServices {
       // A run may only ask for a skill this profile has. MCP asks are made from the owner's servers set up now (`mcp`).
       knownAsk: (permission) => 'skill' in permission && (this.botKnownSkills?.has(permission.skill) ?? true),
       browser: botBrowsers,
-      // What bots may do on this computer (Settings → Agents), from this profile's own settings: read at every dispatch
-      // and call, never taken from a caller or another computer.
-      computerLimit: () => this.settings.get().bots.here,
+      // What bots may do on this computer (Settings → Agents): the installation's setting, the same for every profile,
+      // read at every dispatch and call, never taken from a caller or another computer.
+      computerLimit: () => this.config.botSettings().here,
       // The owner's MCP servers set up for the whole profile, through Mousse (`BotMcp`).
       ...(this.orchestrator.botMcp() ? { mcp: this.orchestrator.botMcp()! } : {})
     }, ({ store }) => {

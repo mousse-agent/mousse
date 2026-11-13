@@ -14,7 +14,7 @@ import { basename, dirname, join } from 'path'
 import { quarantineUnreadableFileSync } from '../data/AtomicFs'
 import { trackFileWatcher } from '../diagnostics/liveCounts'
 import { upgradeSelection } from '../../shared/modelSelection'
-import { getDefaultSettings, type MousseSettings } from '../../shared/settings'
+import { botComputerLimitOf, BOTS_HERE_SHAPE, getDefaultSettings, normalizeBotSettings, type BotComputerLimit, type BotSettings, type MousseSettings } from '../../shared/settings'
 import { DEFAULT_FEATURE_FLAGS, validateFeatureFlags } from '../../shared/featureFlags'
 import { getMousseHomeDir } from '../data/paths'
 import type {
@@ -103,8 +103,7 @@ function splitSettings(full: MousseSettings): {
       storage: full.storage,
       integrations: full.integrations,
       title: full.title,
-      botModel: full.botModel,
-      bots: full.bots
+      botModel: full.botModel
     },
     providers: { ...full.provider },
     agents: { ...full.agents }
@@ -114,12 +113,14 @@ function splitSettings(full: MousseSettings): {
 function mergeSettings(
   settings: MousseSettingsSection,
   providers: MousseProvidersConfig,
-  agents: MousseAgentsConfig
+  agents: MousseAgentsConfig,
+  bots: BotSettings = normalizeBotSettings(undefined)
 ): MousseSettings {
   return {
     ...settings,
     provider: { ...providers },
-    agents: { ...agents }
+    agents: { ...agents },
+    bots
   }
 }
 
@@ -170,6 +171,14 @@ function defaultConf(): MousseConf {
     mms: defaultMmsSection(),
     features: { ...DEFAULT_FEATURE_FLAGS }
   }
+}
+
+/**
+ * What bots may do on this computer, as written after a settings file that held it was unreadable and replaced: every
+ * switch off, and when (`normalizeBotSettings` reads any `unreadable` as every switch off).
+ */
+function unreadableBots(at: Date): { here: BotComputerLimit; unreadable: string } {
+  return { here: { shell: false, files: false, browser: false }, unreadable: at.toISOString() }
 }
 
 function writeMigratedMarker(originalPath: string): void {
@@ -288,18 +297,24 @@ export class MousseConfigStore {
 
   static readOrMigrate(confPath: string, opts?: { persist?: boolean }): MousseConf {
     let persist = opts?.persist ?? true
+    let unreadable = false
     if (existsSync(confPath)) {
       try {
         const raw = JSON.parse(readFileSync(confPath, 'utf-8')) as Partial<MousseConf>
         return MousseConfigStore.normalize(raw)
       } catch (err) {
         console.error('[MousseConfigStore] Failed to parse mousse.conf, using defaults:', err)
+        unreadable = true
         // Never replace the only copy of the user's configuration.
         if (persist && !quarantineUnreadableFileSync(confPath, err)) persist = false
       }
     }
 
     const migrated = MousseConfigStore.migrateLegacyConfig(dirname(confPath), persist)
+    // What bots may do on this computer was in the file that could not be read: the defaults that replace it must not
+    // turn every switch back on. Every switch is off, and marked so, until the owner sets them again (a profile's file
+    // never keeps this key: `persist` drops it there).
+    if (unreadable) migrated.bots = unreadableBots(new Date())
     if (persist) atomicWriteJson(confPath, migrated)
     return migrated
   }
@@ -337,6 +352,10 @@ export class MousseConfigStore {
       mms: { ...base.mms, ...(raw.mms ?? {}) },
       features: { ...base.features, ...(raw.features ?? {}) }
     }
+    // What bots may do here is the installation's (top-level `bots`), never a profile's: a `settings.bots` an unreleased
+    // build wrote into a profile's file is dropped. The top-level value stays as stored; it is read through
+    // `normalizeBotSettings`, which fails closed.
+    delete (normalized.settings as unknown as Record<string, unknown>).bots
     validateFeatureFlags(normalized.features)
     return normalized
   }
@@ -390,8 +409,47 @@ export class MousseConfigStore {
       const shared = this.installation.getSnapshot()
       snapshot.mms = shared.mms
       snapshot.features = shared.features
+      if (shared.bots === undefined) delete snapshot.bots
+      else snapshot.bots = shared.bots
     }
     return snapshot
+  }
+
+  /**
+   * What bots may do on this computer: the installation's setting, the same for every profile (`normalizeBotSettings`:
+   * missing reads all on, malformed or unreadable all off). Cheap: read at every dispatch and every bot call.
+   */
+  botSettings(): BotSettings {
+    if (this.installation) return this.installation.botSettings()
+    return normalizeBotSettings(this.conf.bots)
+  }
+
+  /**
+   * Sets what bots may do on this computer, for the whole installation: exactly three booleans, or nothing changes. It
+   * replaces the stored value whole, so a mark left by an unreadable file goes with it.
+   */
+  setBotsHere(here: BotComputerLimit): void {
+    if (this.installation) {
+      this.installation.setBotsHere(here)
+      return
+    }
+    this.assertBotsWritable()
+    const exact = botComputerLimitOf(here)
+    if (!exact) throw new Error(BOTS_HERE_SHAPE)
+    const previous = this.conf.bots
+    this.conf.bots = { here: exact }
+    try {
+      this.persist()
+    } catch (error) {
+      // Not saved, so not kept: bots must not run under a setting the file does not hold.
+      this.conf.bots = previous
+      throw error
+    }
+  }
+
+  /** A profile's own store never holds what bots may do here: it is the installation's. */
+  private assertBotsWritable(): void {
+    if (this.scope === 'profile') throw new Error('What bots may do here belongs to the installation')
   }
 
   getSettingsSection(): MousseSettingsSection {
@@ -434,6 +492,7 @@ export class MousseConfigStore {
     } else if (this.scope === 'profile') {
       delete payload.mms
       delete payload.features
+      delete payload.bots
     }
     atomicWriteJson(this.confPath, payload)
   }
@@ -503,7 +562,7 @@ export class MousseConfigStore {
 
   /** Assemble full MousseSettings for SettingsStore compatibility. */
   assembleSettings(): MousseSettings {
-    return mergeSettings(this.conf.settings, this.conf.providers, this.conf.agents)
+    return mergeSettings(this.conf.settings, this.conf.providers, this.conf.agents, this.botSettings())
   }
 
   updateSettingsSection(partial: Partial<MousseSettingsSection>): void {
@@ -610,8 +669,7 @@ export class MousseConfigStore {
       partial.storage ||
       partial.integrations ||
       partial.title ||
-      partial.botModel ||
-      partial.bots
+      partial.botModel
     ) {
       this.updateSettingsSection({
         ...(partial.context ? { context: partial.context as MousseSettingsSection['context'] } : {}),
@@ -633,8 +691,7 @@ export class MousseConfigStore {
           ? { integrations: partial.integrations as MousseSettingsSection['integrations'] }
           : {}),
         ...(partial.title ? { title: partial.title as MousseSettingsSection['title'] } : {}),
-        ...(partial.botModel ? { botModel: partial.botModel as MousseSettingsSection['botModel'] } : {}),
-        ...(partial.bots ? { bots: partial.bots as MousseSettingsSection['bots'] } : {})
+        ...(partial.botModel ? { botModel: partial.botModel as MousseSettingsSection['botModel'] } : {})
       })
     }
     if (partial.provider) {

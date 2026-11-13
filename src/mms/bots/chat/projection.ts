@@ -5,7 +5,7 @@ import { BOT_MODEL_SLOT_KEYS, type BotDefinition, type BotLane, type BotManifest
 import { isPinned, limitOnPick, slotsOf, stuckRowsOf } from '../../../shared/bots/personal/modelSlots'
 import { askFingerprint, filesAsk, filesAskOf, isSpecialAsk, mcpAskTools, type BotAskRequest, type BotEscalationStatus, type BotPermissionRequest } from '../../../shared/bots/personal/escalation'
 import { botStarterManifest, canonicalManifest, isOwnBotAppTool } from '../../../shared/bots/personal/manifest'
-import { BOT_OFF_HERE_MARK, BOT_OFF_HERE_NOTE, switchedOff, type BotComputerLimit } from '../../../shared/bots/personal/computerLimit'
+import { BOT_OFF_HERE_MARK, offHereNote, switchedOff, type BotComputerLimit } from '../../../shared/bots/personal/computerLimit'
 import type { BotJournalKind } from '../../../shared/bots/personal/memory'
 import { botState } from '../../../shared/bots/personal/state'
 import { normalizeBotLook } from '../../../shared/bots/personal/look'
@@ -404,7 +404,8 @@ export class BotChatProjection {
       }
       const text = askText(permission, { budget: starterManifest().budget })
       // Kept in the grant, but this computer has it switched off: it gives nothing here until it is switched on.
-      if (limit && switchedOff(limit, permission)) return { id, title: text.title, note: BOT_OFF_HERE_NOTE, grantedAt, mark: BOT_OFF_HERE_MARK }
+      const off = limit ? switchedOff(limit, permission) : undefined
+      if (limit && off) return { id, title: text.title, note: offHereNote(off, limit), grantedAt, mark: BOT_OFF_HERE_MARK }
       return { id, title: text.title, note: text.note, grantedAt }
     })
   }

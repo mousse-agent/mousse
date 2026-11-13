@@ -4,10 +4,10 @@ import type { BotAskRequest } from './escalation'
 import { BOT_BROWSER_PERMISSION, botGrantTool } from './manifest'
 
 /**
- * What bots may do on this computer (Settings → Agents → What bots may do here, `settings.bots.here`): a ceiling over
- * every bot's grant, set on the computer it protects. A switch that is off takes its permission out of what every bot
- * runs with here (`withinComputerLimit`), whatever its grant holds; the grant itself is kept, so switching it on again
- * gives it back with no new ask. Browser-safe.
+ * What bots may do on this computer (Settings → Agents → What bots may do here, `settings.bots.here`, kept once for the
+ * installation): a ceiling over every bot's grant, in every profile, set on the computer it protects. A switch that is
+ * off takes its permission out of what every bot runs with here (`withinComputerLimit`), whatever its grant holds; the
+ * grant itself is kept, so switching it on again gives it back with no new ask. Browser-safe.
  */
 
 export type { BotComputerLimit }
@@ -33,6 +33,23 @@ export const BOT_OFF_HERE_MARK = 'Off on this computer'
 
 /** What About's tooltip says about such a permission. */
 export const BOT_OFF_HERE_NOTE = 'Switched off in Settings → Agents → What bots may do here, so it gives nothing on this computer. Switch it on there to use it again.'
+
+/** About's tooltip for file access switched off while commands are on: a command may still read files, by runtime. */
+export const BOT_OFF_HERE_FILES_NOTE = 'Switched off in Settings → Agents → What bots may do here. Its commands may still read files on this computer while Run commands is on, depending on where it runs; switch that off too to stop them.'
+
+/** What About's tooltip says about a permission this computer has switched off (`which`), under `limit`. */
+export function offHereNote(which: BotComputerSwitch, limit: BotComputerLimit): string {
+  return which === 'files' && limit.shell ? BOT_OFF_HERE_FILES_NOTE : BOT_OFF_HERE_NOTE
+}
+
+/**
+ * What a bot is told it may ask for, after an ask it wrote wrongly: never file access while this computer has files
+ * switched off.
+ */
+export function whatToAskText(limit: BotComputerLimit): string {
+  const kinds = ['a tool', ...(limit.files ? ['file access (any full folder path)'] : []), 'a skill', "the tools of one of your owner's MCP servers", 'a limit']
+  return `Ask for ${kinds.join(', ')}, or to export your memory.`
+}
 
 /**
  * What a bot is told when it calls or asks for something this computer has switched off: no card is made, and asking

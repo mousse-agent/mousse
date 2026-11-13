@@ -2,28 +2,22 @@
  * What bots may do here (Settings → Agents): each computer's ceiling over every bot's grant. A switch that is off gives
  * no bot that permission: on the next call of a turn already running and on every later turn, in the chat, in work and
  * in a consult. An ask for it makes no card and the bot is told it is not on this computer; About marks a permission the
- * bot holds; the grant is kept, so switching it on gives it back with no new ask. The service enforces it, from this
- * computer's own settings.
+ * bot holds; the grant is kept, so switching it on gives it back with no new ask. The service enforces it; how the
+ * setting is stored and read, once for the whole installation, is in botsHereSetting.test.ts.
  */
-import { randomUUID } from 'node:crypto'
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { BotBrowserHost } from '../../src/mms/bots/activation/dispatcher'
-import type { BotEngineHost } from '../../src/mms/bots/activation/BotEngine'
+import { BotEngine } from '../../src/mms/bots/activation/BotEngine'
 import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
 import { botManifestDigest, compileBotThread } from '../../src/mms/bots/grants/compile'
 import { botInstructions } from '../../src/mms/bots/instructions'
-import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
-import { MmsProfileServices } from '../../src/mms/MmsProfileServices'
-import { dispatchMethod } from '../../src/mms/protocol/handlers'
-import { DomainHandlerRegistry } from '../../src/mms/protocol/domainRegistry'
-import { ProviderAuthService } from '../../src/mms/providers/ProviderAuthService'
 import { PI_NATIVE_TOOLS } from '../../src/mms/harness/pi/nativeTools'
 import type { BotCheck, NormalisedCall } from '../../src/shared/bots/personal/authority'
 import { BOT_COMPUTER_OPEN, BOT_COMPUTER_SHUT, BOT_OFF_HERE_MARK, type BotComputerLimit } from '../../src/shared/bots/personal/computerLimit'
-import type { BotDefinition, BotManifest } from '../../src/shared/bots/personal/definition'
+import type { BotManifest } from '../../src/shared/bots/personal/definition'
 import { BOT_BROWSER_PERMISSION, botStarterManifest } from '../../src/shared/bots/personal/manifest'
 import { checkMessage } from '../../src/shared/bots/personal/walls'
 import { appToolRegistry, appTurn, fakeAppToolHost } from '../run/appToolsFixture'
@@ -257,6 +251,12 @@ describe('a bot on this computer', () => {
     expect(work.prepared.authority.check(write(own))).toEqual({ ok: true })
     // Its commands were set up over every folder: they wait for a turn without file access.
     expect(work.prepared.authority.check(command('ls'))).toMatchObject({ ok: false, wall: { kind: 'computer', off: 'files' } })
+    // About never says files are closed while commands are on: a command may still read them.
+    const filesItem = () => f.bots.service.get(botId).permissions.find((item) => item.title === 'use files on this computer')!
+    expect(filesItem()).toMatchObject({ mark: BOT_OFF_HERE_MARK, note: expect.stringMatching(/commands may still read files/) })
+    limit = { ...limit, shell: false }
+    expect(filesItem().note).not.toMatch(/commands may still read files/)
+    limit = { ...limit, shell: true }
     await finish(f, work.payload, 'completed', { text: 'Done.' })
     const next = await run('w2')
     expect(next.prepared.authority.workspace?.computer).toBeUndefined()
@@ -340,6 +340,78 @@ describe('a bot on this computer', () => {
     await finish(f, work.payload, 'completed', { text: 'Done.' })
   })
 
+  /** What a turn that holds everything was prepared with, under a computer that has everything off. */
+  function heldToNothing(prepared: Awaited<ReturnType<typeof start>>['prepared']) {
+    expect(prepared.policy.tools!.allow).not.toContain('bash')
+    expect(prepared.policy.tools!.allow!.filter((name) => name.startsWith('browser_'))).toEqual([])
+    expect(prepared.authority.workspace?.computer).toBeUndefined()
+    expect(prepared.browser).toBeUndefined()
+    expect(prepared.authority.check(command('ls'))).toMatchObject({ ok: false, wall: { kind: 'computer', off: 'shell' } })
+    expect(prepared.authority.check(read(join(f.base, 'a.md')))).toMatchObject({ ok: false, wall: { kind: 'computer', off: 'files' } })
+  }
+
+  it('a scheduled run and a reminder\'s work start under the same ceiling, with no card', async () => {
+    await allowAll()
+    const before = cards().length
+    limit = { ...BOT_COMPUTER_SHUT }
+    const scheduled = f.bots.runScheduledOccurrence({ botId, scheduleId: 'sched-1', prompt: 'Tidy the notes.', occurrenceAt: new Date(f.clock.now).toISOString() })
+    if (scheduled.kind !== 'started') throw new Error(`not started: ${scheduled.kind}`)
+    await flush()
+    const run = await start(f, scheduled.activationId)
+    heldToNothing(run.prepared)
+    expect(run.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'To tidy.' })).toMatch(NOT_HERE)
+    await finish(f, run.payload, 'completed', { text: 'Tidied what I could.' })
+
+    const turn = await chat('Remind me in a minute and check the weather then', 'm1')
+    f.bots.tools.reminders.add(botId, turn.activation.id, { dueAt: new Date(f.clock.now + 60_000).toISOString(), text: 'Checking.', work: { title: 'Weather', brief: 'Check the weather.' } })
+    await finish(f, turn.payload, 'completed', { text: 'I will.' })
+    f.clock.now += 2 * 60_000
+    await f.bots.deliverDueReminders()
+    const reminderWork = f.store.laneActivations(botId, 'run', ['running']).find((row) => row.idempotencyKey.startsWith('reminder:'))!
+    const reminded = await start(f, reminderWork.id)
+    heldToNothing(reminded.prepared)
+    await finish(f, reminded.payload, 'completed', { text: 'Checked.' })
+    expect(cards()).toHaveLength(before)
+  })
+
+  it('a turn resumed after Mousse restarts is held to what this computer allows now', async () => {
+    await allowAll()
+    const work = await run('w1')
+    expect(work.prepared.authority.check(command('ls'))).toEqual({ ok: true })
+    // Mousse stops mid-turn; while it is down the owner switches everything off.
+    f.runs.markTerminal(work.payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+    f.bots.close()
+    limit = { ...BOT_COMPUTER_SHUT }
+    f.bots = new BotEngine(f.host)
+    await f.bots.reconcileOnStartup()
+    await flush(12)
+    const resumed = await start(f, work.id, 2)
+    expect(resumed.prepared.prompt).toContain('Mousse restarted')
+    heldToNothing(resumed.prepared)
+    await finish(f, resumed.payload, 'completed', { text: 'Done what I could.' })
+  })
+
+  it('the bot is never told it has, or can ask for, what is switched off: its instructions and the answer to a wrong ask', async () => {
+    limit = { ...BOT_COMPUTER_OPEN, files: false, browser: false }
+    const turn = await chat('Hello', 'm1')
+    const text = turn.prepared.instructions!
+    expect(text).not.toMatch(/With the browser|the browser,|use files on this computer"/)
+    expect(line(text, 'Use the browser')).toMatch(/off on this computer/)
+    // What is on is still offered.
+    expect(text).toContain('You can ask for "run commands"')
+    // An ask written wrongly is answered with what can be asked for: never file access while files are off.
+    const answer = turn.prepared.authority.escalate!({ permission: { nonsense: true } as never, reason: 'x' })
+    expect(answer).toMatch(/Ask for a tool, a skill/)
+    expect(answer).not.toMatch(/file access|folder path/)
+    await finish(f, turn.payload, 'completed', { text: 'Hi.' })
+    // The control: with files on, the same answer offers file access.
+    limit = { ...BOT_COMPUTER_OPEN }
+    const again = await chat('Hello again', 'm2')
+    expect(again.prepared.authority.escalate!({ permission: { nonsense: true } as never, reason: 'x' })).toMatch(/file access \(any full folder path\)/)
+    expect(again.prepared.instructions).toMatch(/With the browser/)
+    await finish(f, again.payload, 'completed', { text: 'Hi.' })
+  })
+
   it('About reads again when a switch changes, and not on other saves', () => {
     const changed = vi.fn()
     f.host.changed = changed
@@ -349,52 +421,4 @@ describe('a bot on this computer', () => {
     f.bots.computerLimitChanged()
     expect(changed).toHaveBeenCalledWith({ botId })
   })
-})
-
-describe('the setting, through this computer\'s profile', () => {
-  const cleanup: Array<() => unknown> = []
-  afterEach(async () => {
-    for (const close of cleanup.splice(0).reverse()) await close()
-  })
-
-  it('is saved in this profile by settings.set, and the service holds every bot to it at once', async () => {
-    const home = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-bot-limit-profile-')))
-    cleanup.push(() => rmSync(home, { recursive: true, force: true }))
-    const auth = new ProviderAuthService(join(home, 'provider-auth.json'))
-    cleanup.push(() => auth.stop())
-    const profileId = randomUUID()
-    const services = new MmsProfileServices(
-      MousseConfigStore.load(home),
-      { homeDir: home, repoRoot: home, headless: true, requireOwnership: false },
-      null,
-      home,
-      { providerAuth: auth, domains: new DomainHandlerRegistry(), installationHome: home, profileId, allowLegacyProjectData: false }
-    )
-    cleanup.push(() => services.stop())
-    const bots = services.personalBots!
-    const host = (bots as unknown as { host: BotEngineHost }).host
-    host.models = { resolve: async () => ({ selection: { instanceId: 'pi:test', model: 'test' } }), markLimited: () => {} }
-    const definition: BotDefinition = {
-      format: 2, id: 'runner', name: 'Runner', description: 'test', look: { colour: 'coral', accessory: 'none' },
-      owner: { kind: 'person', id: 'self' }, placement: { kind: 'this_computer' }, role: 'test',
-      main: { key: 'main', title: 'Main', agent: { instructions: '' }, model: { mode: 'auto', depth: 'normal' } },
-      context: [], triggers: { manual: true },
-      permissions: { tools: ['shell'], appTools: [], mcp: [], skills: [], workspace: null, budget: { maxActiveMs: 60_000 }, audience: 'owner' }
-    }
-    const draft = bots.save(definition)
-    bots.publish(definition.id, draft.draftHash)
-    bots.approve(definition.id, botManifestDigest(definition.permissions))
-    expect(services.settings.get().bots.here).toEqual(BOT_COMPUTER_OPEN)
-    expect(bots.service.get('runner').permissions.filter((item) => item.mark)).toEqual([])
-    const changed: unknown[] = []
-    bots.events.on('changed', (event) => changed.push(event))
-
-    // As the Settings switch sends it.
-    await dispatchMethod({ mms: services, connection: { id: 'test', binding: { profileId, epoch: 1 }, capabilities: new Set() } } as never, 'settings.set', { partial: { bots: { here: { ...BOT_COMPUTER_OPEN, shell: false } } } })
-    expect(services.settings.get().bots.here).toEqual(off({ shell: false }))
-    // Saved in this profile's own config, so a restart keeps it.
-    expect(MousseConfigStore.load(home).assembleSettings().bots).toEqual({ here: off({ shell: false }) })
-    expect(bots.service.get('runner').permissions.find((item) => item.title === 'run commands')).toMatchObject({ mark: BOT_OFF_HERE_MARK })
-    expect(changed).toContainEqual({ botId: 'runner' })
-  }, 60_000)
 })

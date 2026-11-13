@@ -429,8 +429,10 @@ export function normalizeExperimentalSettings(raw?: Partial<ExperimentalSettings
 
 /**
  * What bots may do on this computer (Settings → Agents → What bots may do here): a ceiling over every bot's grant, kept
- * in this computer's profile settings and never sent to or set from another computer (`settings.*` methods are not
- * routed). A switch that is off gives no bot that permission here, whatever its grant holds, and no bot can ask for it.
+ * once for the whole installation (the top-level `bots` key of the installation's `mousse.conf`), so every profile's
+ * bots are held to it and every profile's Settings shows it. It is never sent to or set from another computer
+ * (`settings.*` methods are not routed). A switch that is off gives no bot that permission here, whatever its grant
+ * holds, and no bot can ask for it.
  */
 export interface BotComputerLimit {
   /** "Run commands" (`shell`). */
@@ -443,16 +445,63 @@ export interface BotComputerLimit {
 
 export interface BotSettings {
   here: BotComputerLimit
+  /**
+   * The stored setting could not be read (the settings file was unreadable and replaced, or the setting is malformed):
+   * every switch reads off until the owner sets them again. Settings says so beside the switches.
+   */
+  unreadable?: true
+}
+
+const BOT_SWITCH_KEYS: ReadonlyArray<keyof BotComputerLimit> = ['shell', 'files', 'browser']
+
+/** Settings' one line beside the switches while the stored setting can't be read (`BotSettings.unreadable`). */
+export const BOTS_UNREADABLE_LINE = "All off: the saved setting couldn't be read. Switch on what bots may use."
+
+/**
+ * The Run commands switch's tooltip: a command is not held to Use files everywhere (docs/bots.md, What bots may do
+ * here), so the switch says so.
+ */
+export const BOTS_SHELL_TIP =
+  'Commands can read files on this computer even with Use files off. Only Claude Code’s sandbox on Linux and Codex on Linux and macOS hold them to system programs and the bot’s own folders.'
+
+/** Why a write of What bots may do here was refused: it takes exactly the three switches, each on or off. */
+export const BOTS_HERE_SHAPE = 'What bots may do here takes { here: { shell, files, browser } }, each true or false. Nothing was changed.'
+
+/**
+ * The switches a settings update writes for What bots may do here: exactly `{ here: { shell, files, browser } }` with
+ * three booleans and nothing else, or undefined (refused). A partial write would leave a switch to a default.
+ */
+export function botSettingsWrite(value: unknown): BotComputerLimit | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const keys = Object.keys(value)
+  if (keys.length !== 1 || keys[0] !== 'here') return undefined
+  const here = (value as { here: unknown }).here
+  if (!here || typeof here !== 'object' || Object.keys(here).length !== BOT_SWITCH_KEYS.length) return undefined
+  return botComputerLimitOf(here)
+}
+
+/** The three switches, when `value` is exactly an object holding each as a boolean; undefined otherwise. */
+export function botComputerLimitOf(value: unknown): BotComputerLimit | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const here = value as Record<string, unknown>
+  if (!BOT_SWITCH_KEYS.every((key) => typeof here[key] === 'boolean')) return undefined
+  return { shell: here.shell as boolean, files: here.files as boolean, browser: here.browser as boolean }
 }
 
 /**
- * The setting as the daemon reads it. A switch never written is on, so existing installs keep what they had. One
- * written as anything but `true` is off: a ceiling that can't be read fails closed.
+ * The stored setting (the raw top-level `bots` value) as the daemon reads it. Missing (an install that never set it):
+ * every switch on, so existing installs keep what they had. Present but not `{ here: { shell, files, browser } }` with
+ * three booleans, or marked unreadable (written after an unreadable settings file was replaced): every switch off. A
+ * ceiling that can't be read fails closed.
  */
-export function normalizeBotSettings(raw?: { here?: Partial<Record<keyof BotComputerLimit, unknown>> | null } | null): BotSettings {
-  const here = raw?.here && typeof raw.here === 'object' ? raw.here : {}
-  const on = (key: keyof BotComputerLimit) => here[key] === undefined || here[key] === true
-  return { here: { shell: on('shell'), files: on('files'), browser: on('browser') } }
+export function normalizeBotSettings(raw: unknown): BotSettings {
+  if (raw === undefined) return { here: { shell: true, files: true, browser: true } }
+  const shut: BotSettings = { here: { shell: false, files: false, browser: false }, unreadable: true }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return shut
+  const stored = raw as Record<string, unknown>
+  if (stored.unreadable !== undefined) return shut
+  const here = botComputerLimitOf(stored.here)
+  return here ? { here } : shut
 }
 
 /** A worktree folder the person chose, and the id written in its marker (`.mousse-worktrees.json`) when it was chosen. */
@@ -929,7 +978,7 @@ export function getDefaultSettings(): MousseSettings {
       llmProvider: '',
       model: ''
     },
-    bots: normalizeBotSettings(),
+    bots: normalizeBotSettings(undefined),
     agents: {
       enabled: {
         mousse: true,

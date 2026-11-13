@@ -1,7 +1,7 @@
 import { findListedModel, modelLabel } from '../../../shared/modelChoice'
 import { resolveModelChoice } from '../../lib/modelChoice'
 import type { BotComputerLimit, IdleCompactionSetting, MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../../../shared/settings'
-import { normalizeBotSettings, normalizeContextSettings, normalizeExperimentalSettings, oneShotProviderOptions } from '../../../shared/settings'
+import { BOTS_SHELL_TIP, BOTS_UNREADABLE_LINE, normalizeBotSettings, normalizeContextSettings, normalizeExperimentalSettings, oneShotProviderOptions } from '../../../shared/settings'
 import { Select, type SelectOption } from '../ui/Select'
 import type { Project } from '../../../shared/types'
 import type { InstanceSnapshot } from '../../../shared/harness/status'
@@ -66,26 +66,32 @@ function CacheTimeRow() {
   )
 }
 
-/** The switches of What bots may do here, in the owner's words, with where search lands on each. */
-const BOT_SWITCHES: ReadonlyArray<{ key: keyof BotComputerLimit; title: string; anchor: string }> = [
-  { key: 'shell', title: 'Run commands', anchor: 'agents-bots-shell' },
+/** The switches of What bots may do here, in the owner's words, with where search lands on each and its tooltip. */
+const BOT_SWITCHES: ReadonlyArray<{ key: keyof BotComputerLimit; title: string; anchor: string; tip?: string }> = [
+  { key: 'shell', title: 'Run commands', anchor: 'agents-bots-shell', tip: BOTS_SHELL_TIP },
   { key: 'files', title: 'Use files on this computer', anchor: 'agents-bots-files' },
   { key: 'browser', title: 'Use the browser', anchor: 'agents-bots-browser' }
 ]
 
 /**
- * What bots may do here: a ceiling over every bot's grant on this computer, enforced by the background service. A
- * switch that is off gives no bot that permission here, and no bot can ask for it; a bot that holds it keeps it for
- * when it is switched on again.
+ * What bots may do here: a ceiling over every bot of every profile on this computer, enforced by the background
+ * service. A switch that is off gives no bot that permission here, and no bot can ask for it; a bot that holds it keeps
+ * it for when it is switched on again. When the stored setting could not be read, every switch is off and one line says
+ * why, until the owner sets them again.
  */
 function BotsHereGroup({ settings, updateSettings }: { settings: MousseSettings; updateSettings: (partial: MousseSettingsUpdate) => Promise<void> }) {
-  const here = normalizeBotSettings(settings.bots).here
+  const { here, unreadable } = normalizeBotSettings(settings.bots)
   return (
-    <SettingsGroup title="What bots may do here" icon={Bot} anchor="agents-bots-here" description="Every bot on this computer, whatever it was allowed.">
-      {BOT_SWITCHES.map(({ key, title, anchor }) => (
+    <SettingsGroup
+      title="What bots may do here"
+      icon={Bot}
+      anchor="agents-bots-here"
+      description={unreadable ? <span role="status">{BOTS_UNREADABLE_LINE}</span> : 'Every bot on this computer, whatever it was allowed.'}
+    >
+      {BOT_SWITCHES.map(({ key, title, anchor, tip }) => (
         <SettingsRow
           key={key}
-          title={title}
+          title={tip ? <span title={tip}>{title}</span> : title}
           anchor={anchor}
           htmlFor={anchor}
           control={

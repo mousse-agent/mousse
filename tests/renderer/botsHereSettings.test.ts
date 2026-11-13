@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 /**
- * Settings → Agents → What bots may do here: three switches, on by default, each saved in this profile's own settings as
- * the service reads them. A switch never written is on; one that can't be read is off.
+ * Settings → Agents → What bots may do here: three switches, on by default, each saved as the service reads them (once
+ * for the installation). After a settings file that could not be read, every switch is off and one line says why until
+ * the owner sets them again. How the stored value is read is in tests/bots/botsHereSetting.test.ts.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -14,7 +15,7 @@ import { searchSettings, type SettingsSearchPage } from '../../src/renderer/lib/
 import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
 import { SettingsStore } from '../../src/mms/settings/SettingsStore'
 import { asSettingsPartial } from '../../src/mms/protocol/validators'
-import { normalizeBotSettings, type SettingsOptions } from '../../src/shared/settings'
+import { BOTS_UNREADABLE_LINE, type SettingsOptions } from '../../src/shared/settings'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -66,7 +67,7 @@ describe('What bots may do here', () => {
     expect(saved()).toEqual({ shell: true, files: true, browser: true })
   })
 
-  it('saves each switch on its own in this profile\'s settings, and another section\'s save leaves them alone', () => {
+  it('saves each switch on its own, and another section\'s save leaves them alone', () => {
     show()
     act(() => toggle('Run commands').click())
     expect(toggle('Run commands').getAttribute('aria-checked')).toBe('false')
@@ -79,10 +80,22 @@ describe('What bots may do here', () => {
     expect(saved()).toEqual({ shell: true, files: true, browser: false })
   })
 
-  it('reads a switch never written as on, and one that is not exactly on as off', () => {
-    expect(normalizeBotSettings(undefined).here).toEqual({ shell: true, files: true, browser: true })
-    expect(normalizeBotSettings({ here: { files: false } }).here).toEqual({ shell: true, files: false, browser: true })
-    for (const value of ['yes', 1, null, 'true']) expect(normalizeBotSettings({ here: { shell: value } }).here.shell, String(value)).toBe(false)
+  it('after a settings file that could not be read: every switch off and one line saying so, gone once the owner sets one', () => {
+    writeFileSync(join(home, 'mousse.conf'), '{"bots":{"here":{"shell":tr')
+    store = new SettingsStore(MousseConfigStore.load(home))
+    show()
+    const group = toggle('Run commands').closest('section.settings-group')!
+    expect(group.querySelector('[role="status"]')?.textContent).toBe(BOTS_UNREADABLE_LINE)
+    expect([...group.querySelectorAll('[role="switch"]')].map((node) => node.getAttribute('aria-checked'))).toEqual(['false', 'false', 'false'])
+    act(() => toggle('Use the browser').click())
+    expect(saved()).toEqual({ shell: false, files: false, browser: true })
+    expect(toggle('Run commands').closest('section.settings-group')!.querySelector('[role="status"]')).toBeNull()
+  })
+
+  it('says on the Run commands switch that commands can read files even with Use files off', () => {
+    show()
+    const label = host.querySelector('label[for="agents-bots-shell"] [title]')
+    expect(label?.getAttribute('title')).toMatch(/^Commands can read files on this computer even with Use files off/)
   })
 
   it('is found by search, on the Agents page', () => {

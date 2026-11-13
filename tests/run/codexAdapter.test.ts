@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { usageLimitError } from '../../src/mms/orchestrator/providerErrors'
@@ -18,6 +18,7 @@ import { decideUsageLimit } from '../../src/mms/run/pausePolicy'
 import { CodexAdapter } from '../../src/mms/harness/drivers/codex/adapter'
 import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
 import { CODEX_BOT_UNSANDBOXED_REFUSAL } from '../../src/mms/harness/vendors/codex/botApprovals'
+import { CODEX_BOT_PROFILE } from '../../src/mms/harness/vendors/codex/childPolicy'
 import type { NeutralTool } from '../../src/shared/harness/tools'
 import type { AdapterHost, TurnControl, TurnInput, TurnSink } from '../../src/mms/harness/adapter'
 import { mousseOrchestrationInstructions } from '../../src/mms/run/mcp/instructions'
@@ -2225,6 +2226,8 @@ describe('CodexAdapter', () => {
 })
 
 describe('a bot turn on Codex', () => {
+  /** A bot without "run commands" starts with every command tool of Codex off, so it has none at all. */
+  const NO_COMMANDS = { 'features.shell_tool': false, 'features.unified_exec': false }
   /** A bot whose authority allows changes in its files folder, refuses (with an ask) a command, and walls anything else. */
   function botIn(files: string) {
     const calls: Array<{ tool: string; args: Record<string, unknown> }> = []
@@ -2248,7 +2251,7 @@ describe('a bot turn on Codex', () => {
       // The user's own MCP servers, read on the turn's connection and switched off for the thread.
       out({ id: 4, method: 'config/read', params: { includeLayers: true } }),
       inn({ id: 4, result: { config: { mcp_servers: { github: { enabled: true }, off: { enabled: false } } }, layers: [{ disabledReason: null, config: { mcp_servers: { linear: {} } } }] } }),
-      ...threadStart(5, threadParams({ config: { 'mcp_servers.github.enabled': false, 'mcp_servers.linear.enabled': false, model_provider: 'openai' } })),
+      ...threadStart(5, threadParams({ config: { 'mcp_servers.github.enabled': false, 'mcp_servers.linear.enabled': false, ...NO_COMMANDS, model_provider: 'openai' } })),
       // Full access asked for by the thread: the bot's turn still runs in Ask (untrusted, read-only).
       ...turnStart(6, 'go'),
       inn({ id: 'srv-1', method: 'item/commandExecution/requestApproval', params: { kind: 'command', threadId: T, turnId: 'turn-1', itemId: 'cmd-1', startedAtMs: 0, environmentId: null, command: 'rm -rf ~', cwd: files, reason: null } }),
@@ -2299,6 +2302,7 @@ describe('a bot turn on Codex', () => {
       ...threadStart(5, threadParams({
         config: {
           'mcp_servers.github.enabled': false,
+          ...NO_COMMANDS,
           model_provider: 'openai',
           'mcp_servers.mousse.url': mcp.url,
           'mcp_servers.mousse.http_headers': { Authorization: 'Bearer run-token' },
@@ -2332,13 +2336,13 @@ describe('a bot turn on Codex', () => {
     const replay = transport([
       ...handshake(),
       ...setup(4),
-      ...threadStart(5),
+      ...threadStart(5, threadParams({ config: { ...NO_COMMANDS, model_provider: 'openai' } })),
       ...turnStart(6, 'one'),
       ...message('msg-1', ['one']),
       completed('completed'),
       // Cleared: the saved thread holds another history, so a new one starts.
       ...setup(7),
-      out({ id: 8, method: 'thread/start', params: threadParams() }),
+      out({ id: 8, method: 'thread/start', params: threadParams({ config: { ...NO_COMMANDS, model_provider: 'openai' } }) }),
       inn({ id: 8, result: threadResult('thr-2') }),
       out({ id: 9, method: 'turn/start', params: { summary: 'auto', threadId: 'thr-2', input: text('two'), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
       inn({ id: 9, result: { turn: { id: 'turn-2', status: 'inProgress', error: null } } }),
@@ -2365,7 +2369,7 @@ describe('a bot turn on Codex', () => {
     const replay = transport([
       ...handshake(),
       ...setup(4),
-      ...threadStart(5, threadParams({ developerInstructions: before })),
+      ...threadStart(5, threadParams({ config: { ...NO_COMMANDS, model_provider: 'openai' }, developerInstructions: before })),
       ...turnStart(6, 'one'),
       ...message('msg-1', ['one']),
       completed('completed'),
@@ -2379,7 +2383,7 @@ describe('a bot turn on Codex', () => {
       ...setup(9),
       out({ id: 10, method: 'thread/unsubscribe', params: { threadId: T } }),
       inn({ id: 10, result: { status: 'unsubscribed' } }),
-      out({ id: 11, method: 'thread/start', params: threadParams({ developerInstructions: after }) }),
+      out({ id: 11, method: 'thread/start', params: threadParams({ config: { ...NO_COMMANDS, model_provider: 'openai' }, developerInstructions: after }) }),
       inn({ id: 11, result: threadResult('thr-2') }),
       out({ id: 12, method: 'turn/start', params: { summary: 'auto', threadId: 'thr-2', input: text('Previous conversation (context only; do not repeat earlier actions):\nhistory+two\n\nCurrent request:\nthree'), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
       inn({ id: 12, result: { turn: { id: 'turn-3', status: 'inProgress', error: null } } }),
@@ -2420,23 +2424,38 @@ describe('a bot turn on Codex', () => {
   const command = (id: string, text: string, cwd: string, reason: string | null = null) =>
     inn({ id, method: 'item/commandExecution/requestApproval', params: { kind: 'command', threadId: T, turnId: 'turn-1', itemId: `cmd-${id}`, startedAtMs: 0, environmentId: null, command: text, cwd, reason } })
 
-  it('with "run commands": workspace-write over exactly its own folders, every command allowed by the grant with no question, never a retry outside the sandbox', async () => {
+  it('with "run commands": every command allowed by the grant with no question, never a retry outside the sandbox; without file access its own profile (Linux, macOS) or workspace-write (Windows) over exactly its own folders', async () => {
     const { bot, files, docs, scratch } = realBot(['read', 'shell'])
     const writable = [docs, files, scratch]
+    // Linux and macOS: Mousse's permission profile, reading Codex's `:minimal`, the folder granted for reading and the
+    // Codex package (the replay's `codex` is in the test home, so its package is the folder above), writing the bot's folders; Windows keeps workspace-write.
+    const confined = process.platform !== 'win32'
+    const ref = join(home, 'ref')
+    const codexPackage = dirname(realpathSync.native(home))
+    const profile = { filesystem: { ':minimal': 'read', [ref]: 'read', [codexPackage]: 'read', ...Object.fromEntries(writable.map((root) => [root, 'write'])) }, network: { enabled: false } }
     const replay = transport([
       ...handshake(),
       ...setupRead(4),
-      ...threadStart(5, threadParams({
-        sandbox: 'workspace-write',
-        config: {
-          'sandbox_workspace_write.writable_roots': writable,
-          'sandbox_workspace_write.network_access': false,
-          'sandbox_workspace_write.exclude_tmpdir_env_var': true,
-          'sandbox_workspace_write.exclude_slash_tmp': true,
-          model_provider: 'openai'
-        }
-      })),
-      ...turnStart(6, 'go', 'turn-1', { sandboxPolicy: { type: 'workspaceWrite', writableRoots: writable, networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true } }),
+      ...(confined
+        ? [
+            out({ id: 5, method: 'thread/start', params: { approvalPolicy: 'untrusted', permissions: CODEX_BOT_PROFILE, model: 'gpt-x', modelProvider: 'openai', config: { [`permissions.${CODEX_BOT_PROFILE}`]: profile, model_provider: 'openai' } } }),
+            inn({ id: 5, result: threadResult() }),
+            out({ id: 6, method: 'turn/start', params: { summary: 'auto', threadId: T, input: text('go'), approvalPolicy: 'untrusted', permissions: CODEX_BOT_PROFILE, model: 'gpt-x' } }),
+            inn({ id: 6, result: { turn: { id: 'turn-1', status: 'inProgress', error: null, items: [] } } })
+          ]
+        : [
+            ...threadStart(5, threadParams({
+              sandbox: 'workspace-write',
+              config: {
+                'sandbox_workspace_write.writable_roots': writable,
+                'sandbox_workspace_write.network_access': false,
+                'sandbox_workspace_write.exclude_tmpdir_env_var': true,
+                'sandbox_workspace_write.exclude_slash_tmp': true,
+                model_provider: 'openai'
+              }
+            })),
+            ...turnStart(6, 'go', 'turn-1', { sandboxPolicy: { type: 'workspaceWrite', writableRoots: writable, networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true } })
+          ]),
       command('srv-1', 'rm -rf build', files),
       out({ id: 'srv-1', result: { decision: 'accept' } }),
       command('srv-2', 'make test', '/somewhere/else'),
@@ -2453,12 +2472,12 @@ describe('a bot turn on Codex', () => {
     expect(asked).toEqual([])
   })
 
-  it('without "run commands": read-only, and a command is declined by the authority', async () => {
+  it('without "run commands": no command tool at all (read-only, every command feature off), and a command that still came is declined by the authority', async () => {
     const { bot, files, scratch } = realBot(['read'])
     const replay = transport([
       ...handshake(),
       ...setupRead(4),
-      ...threadStart(5),
+      ...threadStart(5, threadParams({ config: { ...NO_COMMANDS, model_provider: 'openai' } })),
       ...turnStart(6, 'go'),
       command('srv-1', 'ls', files),
       out({ id: 'srv-1', result: { decision: 'decline' } }),

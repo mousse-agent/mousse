@@ -1,15 +1,19 @@
+import { realpathSync } from 'node:fs'
+import { dirname } from 'node:path'
 import type { BotAuthority } from '../../../../shared/bots/personal/authority'
 import { entriesBeside } from '../../../bots/grants/compile'
 import type { PermissionMode } from '../../../../shared/permissionMode'
 import type { ChildTurnPolicy } from '../../adapter'
 import type { AskForApproval, SandboxMode, SandboxPolicy } from './protocol'
 
-/** What a turn's mode, permission mode and delegation policy decide about Codex's sandbox and approvals. */
-export interface CodexTurnPolicy {
-  approvalPolicy: AskForApproval
-  sandbox: SandboxMode
-  sandboxPolicy: SandboxPolicy
-}
+/**
+ * What a turn's mode, permission mode and delegation policy decide about Codex's sandbox and approvals: one of Codex's
+ * sandbox modes, or (a bot's commands without file access) the named permission profile its thread config defines
+ * (`codexBotSandboxConfig`). Codex takes one or the other, never both.
+ */
+export type CodexTurnPolicy =
+  | { approvalPolicy: AskForApproval; sandbox: SandboxMode; sandboxPolicy: SandboxPolicy; permissions?: undefined }
+  | { approvalPolicy: AskForApproval; permissions: string; sandbox?: undefined; sandboxPolicy?: undefined }
 
 /**
  * The sandbox and approval policy of one Codex turn, used for `thread/start` / `thread/resume` and
@@ -24,15 +28,17 @@ export interface CodexTurnPolicy {
  *   narrow what Codex's own full-access profile means.
  * - Full access is Codex's own full-access profile: `never` ask, no sandbox.
  * - A bot's turn (`bot`) asks like Ask before acting (`untrusted`), and the bot's authority answers.
- *   Without "run commands" it is in the read-only sandbox; with it, in the `workspaceWrite` sandbox
- *   over exactly the bot's own folders, or with file access every folder but Mousse's own data
- *   (`codexBotSandbox`), with no network and no temporary folder.
+ *   Without "run commands" it has no command tool at all (`CODEX_COMMAND_FEATURES` off) in the read-only sandbox. With
+ *   it and without file access, its commands run under Mousse's permission profile (`CODEX_BOT_PROFILE`): they read
+ *   only the system's own programs and the bot's folders and write only the bot's folders. With file access, in the
+ *   `workspaceWrite` sandbox over every folder but Mousse's own data (`codexBotSandbox`). Never any network.
  *
  * Nothing here edits the user's Codex configuration or their MCP servers.
  */
 export function codexTurnPolicy(mode: 'plan' | 'default', child: ChildTurnPolicy | undefined, permissionMode: PermissionMode, bot?: CodexBotSandbox): CodexTurnPolicy {
   if (mode === 'plan' || child?.readOnly === true)
     return { approvalPolicy: 'on-request', sandbox: 'read-only', sandboxPolicy: { type: 'readOnly', networkAccess: false } }
+  if (bot?.shell && bot.confined) return { approvalPolicy: 'untrusted', permissions: CODEX_BOT_PROFILE }
   if (bot?.shell)
     return {
       approvalPolicy: 'untrusted',
@@ -51,36 +57,95 @@ export interface CodexBotSandbox {
   shell: boolean
   /** The bot's files folder, its scratch folder and the folders it may change. */
   writableRoots: string[]
+  /**
+   * Commands without file access (`CODEX_BOT_PROFILE`): beside Codex's `:minimal` (the system's own programs and
+   * libraries) and `writableRoots`, they read only these: the folders granted for reading, and the Codex package that
+   * runs them (its sandbox starts Codex's own executable again inside). Absent with file access: the `workspaceWrite`
+   * sandbox, which reads every file.
+   */
+  confined?: { readable: string[] }
 }
 
 /** The kernel's own file systems: never a writable root (Codex's sandbox keeps `/dev/null` writable itself). */
 const KERNEL_FOLDERS: ReadonlySet<string> = new Set(['/proc', '/sys', '/dev'])
 
 /**
+ * The platforms where a bot's commands without file access run under `CODEX_BOT_PROFILE`. Codex's permission profiles
+ * are enforced by its Linux (bubblewrap) and macOS (Seatbelt) sandboxes; on Windows they keep the `workspaceWrite`
+ * sandbox, which reads every file.
+ */
+const CONFINED_PLATFORMS: ReadonlySet<NodeJS.Platform> = new Set(['linux', 'darwin'])
+
+/**
  * A bot's Codex sandbox from its authority: with `shell`, writable are its files folder, its
  * scratch folder and the folders granted for writing (`BotAuthority.workspace.writeRoots`, which
- * holds the files folder), and nothing else. With file access (`workspace.computer`,
- * bot-architecture.md §3.7) that is the whole file system but Mousse's own data: every entry
- * beside the way down to it (`entriesBeside`), and the files and scratch folders inside it.
+ * holds the files folder), and nothing else. Without file access (on Linux and macOS) reading is held to those, the
+ * folders granted for reading and the system's own programs too (`confined`). With file access (`workspace.computer`,
+ * bot-architecture.md §3.7) writing is the whole file system but Mousse's own data: every entry beside the way down to
+ * it (`entriesBeside`), and the files and scratch folders inside it. `codexPackage`: the folder of the Codex package
+ * that runs the turn (`codexPackageOf`).
  */
-export function codexBotSandbox(bot: Partial<Pick<BotAuthority, 'tools' | 'workspace'>>): CodexBotSandbox {
+export function codexBotSandbox(bot: Partial<Pick<BotAuthority, 'tools' | 'workspace'>>, codexPackage?: string, platform: NodeJS.Platform = process.platform): CodexBotSandbox {
   const shell = bot.tools?.has('shell') === true
   const workspace = bot.workspace
   if (!shell || !workspace) return { shell, writableRoots: [] }
   const mine = [...(workspace.files !== undefined ? [workspace.files] : []), workspace.scratch]
   const computer = workspace.computer
+  const writeRoots = workspace.writeRoots ?? (workspace.access === 'write' ? workspace.roots : [])
   const roots = computer
     ? workspace.roots.flatMap((root) => entriesBeside(root, [computer.closed])).filter((root) => !KERNEL_FOLDERS.has(root))
-    : workspace.writeRoots ?? (workspace.access === 'write' ? workspace.roots : [])
-  return { shell, writableRoots: [...new Set([...roots, ...mine])] }
+    : writeRoots
+  const writableRoots = [...new Set([...roots, ...mine])]
+  if (computer || !CONFINED_PLATFORMS.has(platform)) return { shell, writableRoots }
+  const readable = [...new Set([...workspace.roots.filter((root) => !writeRoots.includes(root)), ...(codexPackage ? [codexPackage] : [])])]
+  return { shell, writableRoots, confined: { readable } }
 }
 
 /**
- * The thread config of a bot turn with "run commands": the same `workspaceWrite` sandbox as its
- * turns (`codexTurnPolicy`), so nothing in the user's `config.toml` widens it while the thread loads.
+ * The folder of the Codex package `binary` belongs to: two levels above the real executable (`<package>/bin/codex`, or
+ * an npm install's `<package>/bin/codex.js`). Its sandbox runs Codex's own executable again for each command, so a
+ * confined bot's profile must let it be read. Undefined when it can't be resolved.
  */
-export function codexBotSandboxConfig(sandbox: CodexBotSandbox): Record<string, string[] | boolean> {
-  if (!sandbox.shell) return {}
+export function codexPackageOf(binary: string | undefined): string | undefined {
+  if (!binary) return undefined
+  try {
+    return dirname(dirname(realpathSync.native(binary)))
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Codex's features that give the model a command tool, as `codex features list` names them (Codex 0.162.1): its shell
+ * and its unified exec. A bot turn without "run commands" starts with both off, so it has no command tool at all: Codex
+ * would otherwise run the read-only commands it trusts (`cat`, `ls`, `grep`, …) without asking anyone, in a sandbox that
+ * reads every file.
+ */
+export const CODEX_COMMAND_FEATURES: readonly string[] = ['shell_tool', 'unified_exec']
+
+/**
+ * The name of the permission profile a confined bot's commands run under, defined in its thread config
+ * (`codexBotSandboxConfig`), which wins over a profile of that name in the user's own Codex config.
+ */
+export const CODEX_BOT_PROFILE = 'mousse-bot'
+
+/** A value of Codex's thread config, as JSON. */
+type CodexConfigValue = string | boolean | string[] | { [key: string]: CodexConfigValue }
+
+/**
+ * The thread config of a bot turn. Without "run commands": every command tool off (`CODEX_COMMAND_FEATURES`). With it
+ * and confined: `CODEX_BOT_PROFILE`, reading Codex's `:minimal` and `confined.readable`, writing `writableRoots`, with no
+ * network. Otherwise the same `workspaceWrite` sandbox as its turns (`codexTurnPolicy`). Either way nothing in the user's
+ * `config.toml` widens it while the thread loads.
+ */
+export function codexBotSandboxConfig(sandbox: CodexBotSandbox): Record<string, CodexConfigValue> {
+  if (!sandbox.shell) return Object.fromEntries(CODEX_COMMAND_FEATURES.map((feature) => [`features.${feature}`, false]))
+  if (sandbox.confined) {
+    const filesystem: Record<string, string> = { ':minimal': 'read' }
+    for (const root of sandbox.confined.readable) filesystem[root] = 'read'
+    for (const root of sandbox.writableRoots) filesystem[root] = 'write'
+    return { [`permissions.${CODEX_BOT_PROFILE}`]: { filesystem, network: { enabled: false } } }
+  }
   return {
     'sandbox_workspace_write.writable_roots': [...sandbox.writableRoots],
     'sandbox_workspace_write.network_access': false,

@@ -1,5 +1,5 @@
 import type { ContextSettings, MousseSettings, MousseSettingsUpdate } from '../../shared/settings'
-import { CONTEXT_COMPACTION_DEFAULT_MARKER, DEFAULT_CONTEXT_COMPACTION_TOKENS, REMOVED_THEME_IDS, getDefaultSettings, normalizeAgentAccessSettings, normalizeAppearance, normalizeBotSettings, normalizeContextSettings, normalizeExperimentalSettings, normalizePermissionSettings, normalizeRunSettings, normalizeStorageSettings } from '../../shared/settings'
+import { BOTS_HERE_SHAPE, botSettingsWrite, CONTEXT_COMPACTION_DEFAULT_MARKER, DEFAULT_CONTEXT_COMPACTION_TOKENS, REMOVED_THEME_IDS, getDefaultSettings, normalizeAgentAccessSettings, normalizeAppearance, normalizeBotSettings, normalizeContextSettings, normalizeExperimentalSettings, normalizePermissionSettings, normalizeRunSettings, normalizeStorageSettings } from '../../shared/settings'
 import { MOUSSE_BUILTIN_TOOL_IDS } from '../../shared/integrations'
 import { generateRandomUsername } from '../../shared/randomUsername'
 import { normalizeShortcuts } from '../../shared/commands'
@@ -95,7 +95,7 @@ function normalizeSettings(settings: MousseSettings): MousseSettings {
     runs: normalizeRunSettings(settings.runs),
     experimental: normalizeExperimentalSettings(settings.experimental),
     storage: normalizeStorageSettings(settings.storage),
-    // What bots may do on this computer: a switch never written is on, one that can't be read is off.
+    // What bots may do on this computer, as the installation holds it (already read through `normalizeBotSettings`).
     bots: normalizeBotSettings(settings.bots),
     ...(typeof settings.provider?.model === 'string' ? { provider: upgradeSelection(settings.provider) } : {}),
     ...(settings.title ? { title: withInstance(settings.title) } : {}),
@@ -174,7 +174,13 @@ export class SettingsStore {
     return normalizeSettings(structuredClone(this.config.assembleSettings()))
   }
 
-  set(partial: MousseSettingsUpdate): MousseSettings {
+  set(update: MousseSettingsUpdate): MousseSettings {
+    // What bots may do on this computer is the installation's, written whole and checked before anything else is
+    // written: a value that is not exactly the three switches is refused, and nothing in the update is saved.
+    const { bots, ...partial } = update as MousseSettingsUpdate & { bots?: unknown }
+    const botsHere = Object.hasOwn(update, 'bots') ? botSettingsWrite(bots) : undefined
+    if (Object.hasOwn(update, 'bots') && !botsHere) throw new Error(BOTS_HERE_SHAPE)
+    if (botsHere) this.config.setBotsHere(botsHere)
     const current = this.get()
     const merged = deepMerge(
       current as unknown as Record<string, unknown>,

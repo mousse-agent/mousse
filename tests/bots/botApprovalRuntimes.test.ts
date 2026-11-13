@@ -9,9 +9,11 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BOT_ASK_REFUSED_TEXT } from '../../src/mms/bots/activation/BotEngine'
-import { ClaudeLockedGate, claudeOwnStorage, claudeProjectName, type ClaudeLockedTurn } from '../../src/mms/harness/claude/locked'
+import { ClaudeLockedGate, claudeLockedSandbox, claudeLockedTools, claudeOwnStorage, claudeProjectName, type ClaudeLockedTurn } from '../../src/mms/harness/claude/locked'
 import { filesAsk } from '../../src/shared/bots/personal/escalation'
 import { CODEX_BOT_UNSANDBOXED_REFUSAL, codexBotCommand, codexBotFileChange } from '../../src/mms/harness/vendors/codex/botApprovals'
+import { CODEX_BOT_PROFILE, codexBotSandbox, codexBotSandboxConfig, codexTurnPolicy } from '../../src/mms/harness/vendors/codex/childPolicy'
+import { BOT_COMPUTER_OPEN, type BotComputerLimit } from '../../src/shared/bots/personal/computerLimit'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 import type { ToolLedger } from '../../src/mms/run/mcp/appTools/types'
 import { botFixture, createBot, finish, start, type BotFixture } from './botFixture'
@@ -159,5 +161,82 @@ describe('approvals on the owner\'s entries are answered by the bot\'s authority
     expect(claudeGate(second.prepared.authority).preToolUse('Bash', { command: 'make' })).toEqual({ ok: true })
     expect(f.store.openAsks(botId)).toEqual([])
     await finish(f, second.payload, 'completed', { text: 'Done.' })
+  })
+})
+
+describe('What bots may do here, at each runtime\'s own gate (the owner\'s Claude Code and Codex entries)', () => {
+  const NOT_HERE = /^Not on this computer: "(run commands|use files on this computer)" is switched off here/
+  let limit: BotComputerLimit
+
+  /** The owner allows commands and file access while every switch is on. */
+  beforeEach(async () => {
+    limit = { ...BOT_COMPUTER_OPEN }
+    f.host.computerLimit = () => limit
+    const work = await run('grant')
+    for (const permission of [{ tool: 'shell' }, { path: invoices, access: 'write' as const }])
+      work.prepared.authority.escalate!({ permission, reason: 'The owner asked.' })
+    await finish(f, work.payload, 'completed', { text: 'Asked.' })
+    for (const ask of f.store.openAsks(botId)) await f.bots.service.answer(botId, ask.id, 'allow')
+    expect(f.store.openAsks(botId)).toEqual([])
+  })
+
+  it('Run commands off in a turn already running: the next command is refused by Claude Code\'s gate and Codex\'s approval, with no ask', async () => {
+    const { prepared, payload } = await run('r1')
+    const files = prepared.authority.workspace!.files!
+    expect(claudeGate(prepared.authority).preToolUse('Bash', { command: 'ls' })).toEqual({ ok: true })
+    expect(codexBotCommand(prepared.authority, { command: 'ls', cwd: files })).toEqual({ decision: 'accept' })
+    limit = { ...limit, shell: false }
+    expect(claudeGate(prepared.authority).preToolUse('Bash', { command: 'ls' })).toMatchObject({ ok: false, reason: expect.stringMatching(NOT_HERE) })
+    expect(codexBotCommand(prepared.authority, { command: 'ls', cwd: files })).toMatchObject({ decision: 'decline', reason: expect.stringMatching(NOT_HERE) })
+    expect(f.store.openAsks(botId)).toEqual([])
+    await finish(f, payload, 'completed', { text: 'Done.' })
+  })
+
+  it('Run commands off from the start: Claude Code is offered no Bash, and Codex starts with no command tool', async () => {
+    limit = { ...limit, shell: false }
+    const { prepared, payload } = await run('r1')
+    expect(claudeLockedTools({ authority: prepared.authority, shellContained: true }, false).tools).not.toContain('Bash')
+    expect(codexBotSandboxConfig(codexBotSandbox(prepared.authority))).toEqual({ 'features.shell_tool': false, 'features.unified_exec': false })
+    await finish(f, payload, 'completed', { text: 'Done.' })
+  })
+
+  it('Use files off in a turn already running: a read or change outside the bot\'s folders is refused by both runtimes\' gates; its own folder still works', async () => {
+    const { prepared, payload } = await run('r1')
+    const files = prepared.authority.workspace!.files!
+    const outside = join(invoices, 'a.pdf')
+    expect(claudeGate(prepared.authority).canUse('Read', { file_path: outside }, 'tu-1')).toEqual({ ok: true })
+    limit = { ...limit, files: false }
+    expect(claudeGate(prepared.authority).canUse('Read', { file_path: outside }, 'tu-2')).toMatchObject({ ok: false, reason: expect.stringMatching(NOT_HERE) })
+    expect(codexBotFileChange(prepared.authority, { changes: [{ path: outside, kind: 'update' }], cwd: files })).toMatchObject({ decision: 'decline', reason: expect.stringMatching(NOT_HERE) })
+    expect(codexBotFileChange(prepared.authority, { changes: [{ path: 'notes.md', kind: 'add' }], cwd: files })).toEqual({ decision: 'accept' })
+    // Its commands were set up over every folder: they wait for a turn that starts without file access.
+    expect(codexBotCommand(prepared.authority, { command: 'ls', cwd: files })).toMatchObject({ decision: 'decline', reason: expect.stringMatching(NOT_HERE) })
+    expect(f.store.openAsks(botId)).toEqual([])
+    await finish(f, payload, 'completed', { text: 'Done.' })
+  })
+
+  it('Use files off from the start: commands run, in a sandbox that reads only the system\'s programs and the bot\'s own folders', async () => {
+    limit = { ...limit, files: false }
+    const { prepared, payload } = await run('r1')
+    const workspace = prepared.authority.workspace!
+    const mine = [workspace.files!, workspace.scratch]
+    expect(workspace.computer).toBeUndefined()
+    // Codex on Linux and macOS: Mousse's permission profile, reading `:minimal`, writing only the bot's folders.
+    const codex = codexBotSandbox(prepared.authority, '/opt/codex', 'linux')
+    expect(codexTurnPolicy('default', undefined, 'ask', codex)).toEqual({ approvalPolicy: 'untrusted', permissions: CODEX_BOT_PROFILE })
+    expect(codexBotSandboxConfig(codex)).toEqual({
+      [`permissions.${CODEX_BOT_PROFILE}`]: { filesystem: { ':minimal': 'read', '/opt/codex': 'read', ...Object.fromEntries(mine.map((root) => [root, 'write'])) }, network: { enabled: false } }
+    })
+    // On Windows Codex keeps its workspace-write sandbox, which reads every file.
+    expect(codexBotSandbox(prepared.authority, '/opt/codex', 'win32').confined).toBeUndefined()
+    // Claude Code on Linux: every top folder but the system's own is unreadable, and the home folder; the bot's folders are not.
+    const tops = ['bin', 'boot', 'dev', 'etc', 'home', 'lib', 'lib64', 'media', 'mnt', 'opt', 'proc', 'root', 'run', 'sbin', 'snap', 'srv', 'sys', 'tmp', 'usr', 'var']
+    const linux = claudeLockedSandbox({ workspace, temps: ['/tmp'], home: '/home/owner', platform: 'linux', tops: () => tops }).filesystem!
+    expect([...linux.denyRead!].sort()).toEqual(['/boot', '/home', '/home/owner', '/media', '/mnt', '/opt', '/root', '/snap', '/srv', '/var'])
+    expect(linux.allowRead).toEqual(expect.arrayContaining(mine))
+    expect(linux.allowWrite).toEqual(expect.arrayContaining(mine))
+    // On macOS, the home folder only.
+    expect(claudeLockedSandbox({ workspace, temps: [], home: '/Users/owner', platform: 'darwin', tops: () => tops }).filesystem!.denyRead).toEqual(['/Users/owner'])
+    await finish(f, payload, 'completed', { text: 'Done.' })
   })
 })

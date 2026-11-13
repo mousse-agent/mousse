@@ -8,7 +8,7 @@ import type { PathOwnershipRule, SettingsClassificationEntry, SettingsScope } fr
  * removed Channels feature: it still moves with its profile so its data (bot tokens included)
  * never becomes installation-wide, and nothing reads it.
  */
-export const MOUSSE_CONF_INSTALLATION_KEYS = ['version', 'mms', 'features'] as const
+export const MOUSSE_CONF_INSTALLATION_KEYS = ['version', 'mms', 'features', 'bots'] as const
 export const MOUSSE_CONF_PROFILE_KEYS = [
   'settings',
   'providers',
@@ -27,6 +27,11 @@ export const SETTINGS_CLASSIFICATION: readonly SettingsClassificationEntry[] = [
     notes: 'Operational rollout flags stay installation-wide; they are not per-profile experiments.'
   },
   {
+    path: 'bots',
+    scope: 'installation',
+    notes: 'What bots may do on this computer caps every bot of every profile here; it is set here and never sent to or set from another computer.'
+  },
+  {
     path: 'settings.profile.username',
     scope: 'profile',
     notes: 'Display username is personal presentation state.'
@@ -41,7 +46,6 @@ export const SETTINGS_CLASSIFICATION: readonly SettingsClassificationEntry[] = [
   { path: 'settings.agentAccess', scope: 'profile', notes: 'How far agents may act on other threads is a per-profile trust choice.' },
   { path: 'settings.integrations', scope: 'profile', notes: 'Skill/MCP enablement is profile-owned.' },
   { path: 'settings.title', scope: 'profile', notes: 'Title-model selection points at the shared catalog.' },
-  { path: 'settings.bots', scope: 'profile', notes: 'What bots may do on this computer is set on this computer; it is never sent to or set from another one.' },
   {
     path: 'providers.llmProvider',
     scope: 'profile',

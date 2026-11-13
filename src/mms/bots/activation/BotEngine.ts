@@ -60,7 +60,7 @@ import {
   type BotThreadSpec
 } from '../../../shared/bots/personal/definition'
 import { addedPermissions, intersectManifest, manifestSubset, narrowManifest } from '../../../shared/bots/personal/manifest'
-import { BOT_COMPUTER_OPEN, BOT_COMPUTER_SHUT, notOnThisComputerText, switchedOff, withinComputerLimit, type BotComputerLimit } from '../../../shared/bots/personal/computerLimit'
+import { BOT_COMPUTER_OPEN, BOT_COMPUTER_SHUT, notOnThisComputerText, switchedOff, whatToAskText, withinComputerLimit, type BotComputerLimit } from '../../../shared/bots/personal/computerLimit'
 import { allPinned, copyPick, isPinned, limitFamilyOf, limitOnPick, pickProblemText, rowName, samePick, samePickTarget, sameStoredPick, slotsOf, slotsWith, startDepthOf, stuckRowsOf, turnModelOf, UNPICKED_SLOTS, withSlots, type BotPickMiss, type BotStuckEntry, type BotTurnModel } from '../../../shared/bots/personal/modelSlots'
 import type { BotModelOption } from '../../../shared/bots/personal/methods'
 import type { LlmProviderOption } from '../../../shared/settings'
@@ -2729,7 +2729,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       escalate: (request) => {
         this.progress(row.id)
         const problem = askProblem(request.permission)
-        if (problem) return `${problem} Ask for a tool, file access (any full folder path), a skill, the tools of one of your owner's MCP servers, a limit, or to export your memory.`
+        if (problem) return `${problem} ${whatToAskText(this.limit())}`
         // A new bot's first message answers no request: it asks once the owner wants something that needs more.
         if (firstMessage) return BOT_ASK_NOT_YET_TEXT
         const live = base.check({ kind: 'app', tool: 'escalate', args: {} })

@@ -48,7 +48,7 @@ export interface MousseAgentsConfig {
 
 export type MousseSettingsSection = Pick<
   MousseSettings,
-  'profile' | 'appearance' | 'notifications' | 'shortcuts' | 'permissions' | 'context' | 'agentAccess' | 'runs' | 'experimental' | 'storage' | 'integrations' | 'title' | 'botModel' | 'bots'
+  'profile' | 'appearance' | 'notifications' | 'shortcuts' | 'permissions' | 'context' | 'agentAccess' | 'runs' | 'experimental' | 'storage' | 'integrations' | 'title' | 'botModel'
 >
 
 /** Default port of the loopback listener that receives job webhooks. */
@@ -128,4 +128,9 @@ export interface MousseConf {
   scheduled: ScheduledConfigSection
   mms: MmsConfigSection
   features: MousseFeatureFlags
+  /**
+   * What bots may do on this computer (`BotSettings`), as stored: kept once for the installation, never in a profile's
+   * file. Absent until the owner sets it; read only through `normalizeBotSettings`, which fails closed.
+   */
+  bots?: unknown
 }

@@ -248,17 +248,45 @@ export function claudeLockedTools(turn: Pick<ClaudeLockedTurn, 'authority' | 'sh
 }
 
 /**
+ * The top folders of a Linux system that hold its own programs, libraries, settings and kernel views, which commands
+ * need to run. Every other top folder (`/home`, `/mnt`, `/media`, `/opt`, `/srv`, `/var`, `/root`, …) is unreadable to a
+ * bot's commands without file access, as Codex's `:minimal` profile keeps them. `/tmp` stays readable: Claude Code's
+ * sandbox keeps its own sockets and output there (writing to it is denied with the other temporary folders).
+ */
+export const LINUX_SYSTEM_FOLDERS: readonly string[] = ['/bin', '/sbin', '/lib', '/lib32', '/lib64', '/libx32', '/usr', '/etc', '/proc', '/dev', '/sys', '/run', '/tmp', '/nix']
+
+/**
+ * What a bot's commands without file access may not read: on Linux every top folder but the system's own
+ * (`LINUX_SYSTEM_FOLDERS`), and the home folder wherever it is; elsewhere the home folder. `tops`: the entries of `/`.
+ */
+function closedToCommands(home: string, platform: NodeJS.Platform, tops: () => readonly string[]): string[] {
+  if (platform !== 'linux') return [home]
+  const system = new Set(LINUX_SYSTEM_FOLDERS)
+  return [...new Set([...tops().map((name) => `/${name}`).filter((top) => !system.has(top)), home])]
+}
+
+/** The entries of `/`, or none when it can't be listed. */
+function rootEntries(): string[] {
+  try {
+    return readdirSync('/')
+  } catch {
+    return []
+  }
+}
+
+/**
  * The sandbox of a `shell` grant. `allowWrite` only adds to what the sandbox already allows (the
  * working directory and temporary storage), so the system temporary folders and, for a read-only
- * grant, the roots are denied explicitly; the working directory is the scratch folder. The home
- * folder is unreadable but for the roots, scratch and Claude Code's own storage (`own`), the
- * network is closed, and the instance's key is unset for every command.
+ * grant, the roots are denied explicitly; the working directory is the scratch folder. Without file access, on Linux
+ * every top folder but the system's own (`LINUX_SYSTEM_FOLDERS`) is unreadable, and on macOS the home folder, but for
+ * the roots, scratch and Claude Code's own storage (`own`); the network is closed, and the instance's key is unset for
+ * every command.
  *
  * With file access (`workspace.computer`, bot-architecture.md §3.7) commands see the whole file
  * system, read and write, but Mousse's own data folder: unreadable but for the files folder and
  * scratch, and every entry in it that does not lead to them unwritable (`entriesBeside`).
  */
-export function claudeLockedSandbox(input: { workspace: NonNullable<BotAuthority['workspace']>; temps: readonly string[]; home?: string; own?: readonly string[] }): SandboxSettings {
+export function claudeLockedSandbox(input: { workspace: NonNullable<BotAuthority['workspace']>; temps: readonly string[]; home?: string; own?: readonly string[]; platform?: NodeJS.Platform; tops?: () => readonly string[] }): SandboxSettings {
   const { roots, access, scratch } = input.workspace
   const own = input.own ?? []
   const computer = input.workspace.computer
@@ -283,7 +311,7 @@ export function claudeLockedSandbox(input: { workspace: NonNullable<BotAuthority
       : {
           allowWrite: [...writeRoots, scratch],
           denyWrite: [...readRoots, ...input.temps],
-          denyRead: [input.home ?? homedir()],
+          denyRead: closedToCommands(input.home ?? homedir(), input.platform ?? process.platform, input.tops ?? rootEntries),
           allowRead: [...roots, scratch, ...own]
         },
     network: { allowedDomains: [], strictAllowlist: true, allowLocalBinding: false, allowAllUnixSockets: false },

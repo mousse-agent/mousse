@@ -92,6 +92,8 @@ export interface ThreadStartParams {
   cwd?: string | null
   approvalPolicy?: AskForApproval | null
   sandbox?: SandboxMode | null
+  /** A named permission profile (defined in `config`); never together with `sandbox`. */
+  permissions?: string | null
   config?: ThreadConfig | null
   developerInstructions?: string | null
   /** Replaces Codex's own base instructions (a one-shot's system text). */
@@ -133,6 +135,8 @@ export interface TurnStartParams {
   cwd?: string | null
   approvalPolicy?: AskForApproval | null
   sandboxPolicy?: SandboxPolicy | null
+  /** A named permission profile of the thread's config; never together with `sandboxPolicy`. */
+  permissions?: string | null
   model?: string | null
   effort?: string | null
   /** How much of the model's reasoning comes back as summary text; the server sends none unless asked. */
