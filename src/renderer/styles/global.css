@@ -641,6 +641,9 @@ html.platform-darwin .overlay-titlebar {
 .chat-user-link:focus-visible {
   text-decoration: underline;
 }
+.chat-user-link.is-unbroken {
+  white-space: nowrap;
+}
 .chat-user-link-icon {
   display: inline-block;
   margin-right: 0.25em;

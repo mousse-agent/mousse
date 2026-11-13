@@ -113,7 +113,8 @@ function PromptText({ text }: { text: string }) {
             key={i}
             href={segment.href}
             title={segment.href}
-            className="chat-user-link"
+            // A short GitHub label stays on one line with its mark, so the mark never ends a line alone.
+            className={cn("chat-user-link", segment.github && segment.text.length <= 24 && "is-unbroken")}
             onClick={(event) => {
               event.preventDefault();
               routeLink(segment.href);
