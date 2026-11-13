@@ -53,6 +53,7 @@ import { openPersonalBots } from './bots/activation/open'
 import { botApiHost, createBotConnectivity } from './bots/activation/connectivity'
 import { createBotActivitySink } from './bots/activity/BotActivitySink'
 import { BotBrowsers } from './bots/browser/BotBrowsers'
+import { publishedApplets } from './bots/chat/replyApplets'
 import { botFilesFolder } from './bots/grants/compile'
 import { BotImageMaker } from './bots/images/BotImageMaker'
 import { botInstructions } from './bots/instructions'
@@ -851,6 +852,8 @@ export class MmsProfileServices {
     this.personalBots = opened?.engine ?? null
     // A bot's browser that comes back to it on its own (the window that held it went away) says so in its chat.
     const chat = opened?.engine.chat
+    // A bot's reply shows the applets its turn published in its thread, as a thread's reply does.
+    chat?.setReplyParts({ published: (threadId) => publishedApplets(this.threads.loadThreadData(threadId).messages) })
     if (chat) botBrowsers.setNotice((botId, text) => {
       try {
         chat.post({ botId, author: 'bot', kind: 'notice', text })

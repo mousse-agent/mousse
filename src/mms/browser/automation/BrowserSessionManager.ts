@@ -20,6 +20,7 @@ import type {
 import { browserNavigationUrl } from '../../../shared/browser/validation'
 import type { BrowserNavigation } from '../../../shared/browser/navigation'
 import type { BrowserWindowDisplay, BrowserWindowState } from '../../../shared/browser/window'
+import { watchedBrowserPageSize, type WatchedBrowserPageSize } from '../../../shared/browser/watched'
 import type { BrowserAutomationTool, BrowserSessionKeeper, BrowserToolContext, BrowserToolError, BrowserToolOutput } from '../../../shared/browser/automation'
 import type { BrowserBroker } from '../BrowserBroker'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
@@ -397,6 +398,19 @@ export class BrowserSessionManager {
     this.authorize(context, undefined, 'browser.observe', 'read', input)
     this.requireOwned(input.sessionId, context)
     await this.call(context.execution.profileId, 'frame.stop', { sessionId: input.sessionId, watchKey: input.watchKey }, this.signal(context))
+  }
+
+  /**
+   * The size every page of a managed session is laid out at (`page.resize`): a person's large view of
+   * it, as a window would be resized; none goes back to the default. Host-side only, like `frame`:
+   * it takes no hold, and its caller puts it in the browser's turn so it never lands mid-action.
+   */
+  async resizePage(context: BrowserToolContext, input: { sessionId: string; page?: WatchedBrowserPageSize }): Promise<WatchedBrowserPageSize> {
+    this.authorize(context, undefined, 'browser.observe', 'read', { sessionId: input.sessionId })
+    const entry = this.requireOwned(input.sessionId, context)
+    if (entry.record.backend !== 'managed-chromium') throw new BrowserAutomationError({ code: 'unsupported', message: 'Only a managed browser session is resized for a view' })
+    const result = await this.call(context.execution.profileId, 'page.resize', { sessionId: input.sessionId, ...(input.page ?? {}) }, this.signal(context))
+    return watchedBrowserPageSize(result as Partial<WatchedBrowserPageSize>)
   }
 
   /**

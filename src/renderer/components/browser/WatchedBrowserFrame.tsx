@@ -1,4 +1,4 @@
-import type { MouseEvent, PointerEvent, ReactNode, Ref } from 'react'
+import type { CSSProperties, MouseEvent, PointerEvent, ReactNode, Ref } from 'react'
 import { Globe } from '../../lib/icons'
 import type { WatchedBrowserView } from '../../../shared/browser/watched'
 import { AgentCursor } from './AgentCursor'
@@ -29,7 +29,9 @@ export function WatchedBrowserFrame({ label, view, children, className, ...handl
   const src = frameSrc(view)
   const viewport = view.frame?.viewport ?? { width: 16, height: 10 }
   const { frameRef, ...events } = handlers
-  return <div ref={frameRef} className={`watched-browser-frame${className ? ` ${className}` : ''}`} style={{ aspectRatio: `${viewport.width} / ${viewport.height}` }} {...events}>
+  // The page's shape: the large view fits the whole picture in its stage by it (`--watched-frame-aspect`).
+  const shape = { aspectRatio: `${viewport.width} / ${viewport.height}`, '--watched-frame-aspect': viewport.width / viewport.height } as CSSProperties
+  return <div ref={frameRef} className={`watched-browser-frame${className ? ` ${className}` : ''}`} style={shape} {...events}>
     {src
       ? <img src={src} alt={view.tab?.title || label} draggable={false} />
       : <div className="watched-browser-frame-empty">{!view.setup && <Globe size={22} aria-hidden />}</div>}

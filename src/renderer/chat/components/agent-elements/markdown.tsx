@@ -1,7 +1,8 @@
 "use client";
 
-import { memo, useEffect, useRef, type ComponentProps, type ReactNode } from "react";
-import { parseMarkdownIntoBlocks, Streamdown, type Components } from "streamdown";
+import { memo, useEffect, useRef, type ComponentProps, type ComponentType, type ReactNode } from "react";
+import type { Element, ElementContent, Root } from "hast";
+import { defaultRehypePlugins, parseMarkdownIntoBlocks, Streamdown, type Components } from "streamdown";
 import { Children, cloneElement, isValidElement } from "react";
 import { cn } from "./utils/cn";
 import { MessageImage } from "./message-image";
@@ -217,6 +218,14 @@ function splitAlert(children: ReactNode): { kind: AlertKind; body: ReactNode[] }
   return { kind: match[1].toLowerCase() as AlertKind, body };
 }
 
+/**
+ * A conversation's own rule for the pictures in its text, in place of a thread's: `Image` draws every image, written in
+ * Markdown or as HTML, and gets its `src` exactly as written (a `data:` URL or a path included), so it alone decides
+ * what may load. Nothing else in the text loads a picture: a `<picture>`'s sources are dropped. A bot's chat uses it
+ * (`BotMarkdownImage`), since a bot's reply can be shaped by what it read on the web. Keep it stable (module scope).
+ */
+export type MarkdownImages = { Image: ComponentType<{ src?: string; alt?: string }> };
+
 export type MarkdownProps = {
   content: string;
   className?: string;
@@ -226,6 +235,13 @@ export type MarkdownProps = {
    * each update, and blocks that appear fade in. Off for everything already written.
    */
   streaming?: boolean;
+  /** The images' own rule (`MarkdownImages`); absent: a thread's. */
+  images?: MarkdownImages;
+  /**
+   * Elements drawn the caller's way instead (a bot's chat draws its own images and paths). Pass one object kept for
+   * the module's life: a new one each render would make Streamdown draw every block again.
+   */
+  components?: Partial<Components>;
 };
 
 /** Splits text into blocks as Streamdown does, counting the blocks it splits (see render-counts). */
@@ -462,10 +478,93 @@ const markdownMathComponents: Components = {
   },
 };
 
-export const Markdown = memo(function Markdown({ content, className, streaming = false }: MarkdownProps) {
+/**
+ * With an image rule (`MarkdownImages`), an image's `src` is carried through the sanitizer and the URL hardening as a
+ * same-origin marker, which both keep as written, and handed back unchanged to the rule's `Image`. Without it the
+ * sanitizer drops a `data:` image and a Windows path, and the hardening a `file:` URL, before the rule could judge them.
+ */
+const IMAGE_MARK = "/__mousse_image__?src=";
+
+function markImageSources(node: Root | Element): void {
+  node.children = node.children.filter((child: ElementContent | Root["children"][number]) => {
+    if (child.type !== "element") return true;
+    // A `<picture>`'s sources would load beside its image, past the rule.
+    if (child.tagName === "source") return false;
+    if (child.tagName === "img") {
+      const src = child.properties.src;
+      child.properties.src = `${IMAGE_MARK}${encodeURIComponent(typeof src === "string" ? src : "")}`;
+      delete child.properties.srcSet;
+    }
+    markImageSources(child);
+    return true;
+  }) as typeof node.children;
+}
+
+/** Runs after raw HTML is parsed and before it is sanitized, so HTML images are marked like Markdown ones. */
+const markImages = () => markImageSources;
+const imageRulePlugins = [defaultRehypePlugins.raw!, markImages, defaultRehypePlugins.sanitize!, defaultRehypePlugins.harden!];
+
+function unmarkImageSource(src: unknown): string | undefined {
+  if (typeof src !== "string" || !src.startsWith(IMAGE_MARK)) return undefined;
+  try {
+    return decodeURIComponent(src.slice(IMAGE_MARK.length)) || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+type RuledSetup = { plain: Components; math: Components; setup: string };
+
+/**
+ * The components for one image rule, made once per rule so their identity stays stable (see `markdownComponents`), and
+ * the name its blocks are cached under: a block parsed under a rule is never drawn for a thread, nor the other way.
+ */
+const ruledComponents = new WeakMap<MarkdownImages, RuledSetup>();
+let rules = 0;
+function componentsFor(images: MarkdownImages): RuledSetup {
+  let made = ruledComponents.get(images);
+  if (!made) {
+    const { Image } = images;
+    const img: Components["img"] = ({ src, alt }) => <Image src={unmarkImageSource(src)} alt={typeof alt === "string" ? alt : undefined} />;
+    made = { plain: { ...markdownComponents, img }, math: { ...markdownMathComponents, img }, setup: `images${++rules}` };
+    ruledComponents.set(images, made);
+  }
+  return made;
+}
+
+/** A conversation's own setup: no image rule, or no override, is this key. */
+const NONE = {};
+/** Setups made so far, by image rule and then by components override, each with its own cache name. */
+const customSetups = new WeakMap<object, WeakMap<object, RuledSetup>>();
+
+/**
+ * The components for a conversation's own image rule and its own elements (`components`): the thread's, the caller's
+ * over them, and the rule's image last, so no override can draw an image past the rule. Made once per pair, with a
+ * cache name of its own: its blocks are never drawn for a thread, nor a thread's for it.
+ */
+function setupFor(images: MarkdownImages | undefined, override: Partial<Components> | undefined): RuledSetup | undefined {
+  if (!images && !override) return undefined;
+  if (!override) return componentsFor(images!);
+  let byOverride = customSetups.get(images ?? NONE);
+  if (!byOverride) {
+    byOverride = new WeakMap();
+    customSetups.set(images ?? NONE, byOverride);
+  }
+  let made = byOverride.get(override);
+  if (!made) {
+    const rule = images ? componentsFor(images) : undefined;
+    const img = rule ? { img: rule.plain.img } : {};
+    made = { plain: { ...markdownComponents, ...override, ...img }, math: { ...markdownMathComponents, ...override, ...img }, setup: `custom${++rules}` };
+    byOverride.set(override, made);
+  }
+  return made;
+}
+
+export const Markdown = memo(function Markdown({ content, className, streaming = false, images, components }: MarkdownProps) {
   countRender("Markdown");
   const renderMath = useRenderMath();
   const math = renderMath && mayContainMath(content);
+  const ruled = setupFor(images, components);
   const live = useLiveMarkdown();
   // Math has a split of its own and is worked on whole; the live tail gives the same text and
   // blocks as the whole would, so the end of the stream changes nothing on screen.
@@ -497,9 +596,10 @@ export const Markdown = memo(function Markdown({ content, className, streaming =
       onCopy={math ? copyMathAsTex : undefined}
       data-streaming={streaming || undefined}
     >
-      <MarkdownSetupContext.Provider value={math ? "math" : "plain"}>
+      <MarkdownSetupContext.Provider value={`${ruled ? `${ruled.setup}:` : ""}${math ? "math" : "plain"}`}>
       <Streamdown
-        components={math ? markdownMathComponents : markdownComponents}
+        components={ruled ? ruled[math ? "math" : "plain"] : math ? markdownMathComponents : markdownComponents}
+        {...(images ? { rehypePlugins: imageRulePlugins } : {})}
         plugins={math ? markdownMathPlugins : markdownPlugins}
         BlockComponent={CachedBlock}
         parseMarkdownIntoBlocksFn={

@@ -1,7 +1,7 @@
 import { hostname } from 'node:os'
 import { BROWSER_AUTOMATION_TOOLS, type BrowserAutomationTool, type BrowserToolContext, type BrowserToolOutput, type BrowserToolResult } from '../../../shared/browser/automation'
 import { MAX_BROWSER_VIEW_ASK_CHARS, type ThreadBrowserFrameEvent, type ThreadBrowserView } from '../../../shared/browser/threadView'
-import type { WatchedBrowserAck, WatchedBrowserHold, WatchedBrowserHoldRequest, WatchedBrowserSent, WatchedBrowserView } from '../../../shared/browser/watched'
+import type { WatchedBrowserAck, WatchedBrowserHold, WatchedBrowserHoldRequest, WatchedBrowserPageSize, WatchedBrowserSent, WatchedBrowserView } from '../../../shared/browser/watched'
 import { browserTakeoverMessage, type BrowserSessionRecord } from '../../../shared/browser/types'
 import type { BrowserProblem } from '../../../shared/browser/navigation'
 import type { ExecutionPolicySnapshot } from '../../../shared/execution/types'
@@ -108,7 +108,7 @@ export class ThreadBrowsers {
     return view
   }
 
-  async watch(threadId: string, watchId: string, input: { width: number; fps: number; connectionId: string; viewId?: string } & ThreadBrowserViewer): Promise<ThreadBrowserView> {
+  async watch(threadId: string, watchId: string, input: { width: number; fps: number; connectionId: string; viewId?: string; page?: WatchedBrowserPageSize } & ThreadBrowserViewer): Promise<ThreadBrowserView> {
     const state = this.stateFor(threadId)
     const { emit, ...watcher } = input
     return this.threadView(state, await state.viewer.watch(watchId, { ...watcher, emit: (update) => emit({ threadId, ...update }) }))
@@ -306,6 +306,8 @@ export class ThreadBrowsers {
       browser: () => this.options.browser(),
       call: (call, signal) => this.personCall(state, call, signal),
       input: (call, tabId) => state.turns.personInput((held) => this.personCall(state, call, held), { holds: userHolds, busy: inputBusy, ...(tabId ? { tab: tabId } : {}) }),
+      // The view's size: in the person's turn, after the agent's call under way (never stopping it).
+      resize: (call) => state.turns.personCall((held) => this.personCall(state, call, held), { busy: inputBusy }),
       // The agent has its browser again: the view follows the tab it used last.
       givenBack: () => state.viewer.followTab(state.tab),
       text: { closed: 'No browser is open for this thread.', tooManyViews: 'Too many windows are watching this browser. Close one, then try again.' },

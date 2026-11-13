@@ -81,6 +81,15 @@ html[data-theme='light'] {
 /* Mousse agent-elements deltas — live here (not the vendored agent-ui.css)
    so registry re-syncs can't silently drop them. Unlayered, so they also
    hold regardless of Tailwind layer ordering. */
+/* The image preview's Previous and Next: the whole edge strip is the button, but the focus shows on its round arrow
+   only (group-focus-visible). The app's focus fill would paint the strip, a tall grey slab at the edge. */
+.image-preview-overlay .image-preview-edge:focus-visible {
+  background-image: none;
+}
+/* Keyboard focus on an edge: a ring round its arrow, so it reads apart from hover's lighter fill. */
+.image-preview-overlay .image-preview-edge:focus-visible > span {
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, .85);
+}
 /* Headerless highlighted code (quick-action bash preview): the surrounding
    "Action" label already names the block, so the Streamdown language header
    row is hidden — highlighting and the themed border stay. */
@@ -189,6 +198,10 @@ html[data-theme='light'] {
   display: none;
 }
 .an-message-list .an-tool-chrome:has(.an-text-shimmer--active) {
+  opacity: 1;
+}
+/* A thought being written reads at the label's colour, not dimmed: its words are what the person follows. */
+.an-message-list .an-tool-chrome:has(.thinking-icon.is-thinking) {
   opacity: 1;
 }
 /* Cards awaiting the user's decision (quick-action approval) stay at full

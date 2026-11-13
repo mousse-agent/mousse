@@ -188,7 +188,7 @@ describe('offline while a dispatch runs', () => {
     await fire(DEFAULT_BOT_ACTIVE_MS)
     expect(f.store.activation(activation.id)).toMatchObject({ status: 'failed', endReason: 'no_progress' })
     expect(f.store.openAsks(botId)).toEqual([])
-    expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'error', error: { text: 'I couldn\'t get anything done on this run, so I stopped.' } })
+    expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'error', error: { text: 'I couldn\'t get anything done on this, so I stopped.' } })
   })
 
   it('a run that fails on a connection error waits when the internet is gone, then continues', async () => {

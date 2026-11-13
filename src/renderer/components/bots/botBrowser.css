@@ -29,3 +29,6 @@
 .bot-browser-preview.is-live .bot-browser-dot { background: var(--accent); box-shadow: 0 0 0 3px rgba(var(--accent-rgb), .2); }
 /* No new picture for a while: the picture stays, the dot says it needs attention. */
 .bot-browser-preview.is-stale .bot-browser-dot { background: var(--warning); }
+/* While the split view shows the browser, the reply carries one line in place of a second picture. */
+.bot-browser-beside { display: flex; align-items: center; gap: 6px; margin: 10px 0 0; font-size: 11px; color: var(--text-secondary); min-width: 0; }
+.bot-browser-beside > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

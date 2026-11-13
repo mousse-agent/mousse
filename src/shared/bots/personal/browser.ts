@@ -16,6 +16,7 @@ import {
   type WatchedBrowserHoldRequest,
   type WatchedBrowserHolder,
   type WatchedBrowserInput,
+  type WatchedBrowserPageSize,
   type WatchedBrowserRefusal,
   type WatchedBrowserSent,
   type WatchedBrowserUpdate,
@@ -72,7 +73,7 @@ export const BOT_BROWSER_FRAME_EVENT = 'bots.browser.frame'
 export const BOTS_BROWSER_STREAM_CAPABILITY = 'bots.browser.stream.v1'
 /** The small preview in a reply: 480 px wide, at most 5 pictures a second. */
 export const BOT_BROWSER_PREVIEW_WATCH = { width: 480, fps: 5 } as const
-/** The split view: the panel's width up to 960 px, at most 15 a second, 30 while the owner holds the browser. */
+/** The split view: the page's width at the screen's pixel ratio, up to 1920 px, at most 15 a second, 30 while the owner holds the browser. */
 export const BOT_BROWSER_PANE_WATCH = WATCHED_BROWSER_PANE
 /** How often a view renews its watch (`bots.browser.watch`). */
 export const BOT_BROWSER_WATCH_RENEW_MS = WATCHED_BROWSER_RENEW_MS
@@ -132,7 +133,7 @@ export interface BotsBrowserApi {
    * (both capped). Renew it every `BOT_BROWSER_WATCH_RENEW_MS`; it ends with `unwatch`, the
    * connection, or a missed renewal. Answers the state and the last picture.
    */
-  'bots.browser.watch': { params: { botId: string; watchId: string; width: number; fps: number; viewId?: string }; result: { browser: BotBrowserView } }
+  'bots.browser.watch': { params: { botId: string; watchId: string; width: number; fps: number; viewId?: string; page?: WatchedBrowserPageSize }; result: { browser: BotBrowserView } }
   'bots.browser.unwatch': { params: { botId: string; watchId: string }; result: { ok: true } }
   /**
    * A view's hold of the browser (`viewId`: the view's own id, kept across its reloads). `take` hands

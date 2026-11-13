@@ -6,7 +6,7 @@ export function publishAppletPresentation(
   store: AppletStore,
   input: { threadId: string; messageId: string; turnId: string; content: string }
 ): AppletPresentationPart[] | undefined {
-  const extracted = extractAppletParts(input.content, true)
+  const extracted = extractAppletParts(input.content, true, { publishing: true })
   if (extracted.every((part) => part.type === 'text')) return undefined
   let index = 0
   return extracted.map((part): AppletPresentationPart => {

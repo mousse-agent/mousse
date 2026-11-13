@@ -219,6 +219,7 @@ export const GIT_ACCESS = {
   'git.diff': 'owned',
   'review.files': 'owned',
   'review.file': 'owned',
+  'review.turnFile': 'read',
   'git.log': 'owned',
   'git.branches': 'owned',
   'git.diffStats': 'owned',

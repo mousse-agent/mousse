@@ -2163,7 +2163,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // A chat turn is the bot's front desk: it hands what takes long to work (docs/plans/bot-always-free.md).
       // The owner's threads: reading in every lane; starting, messaging and stopping only in a chat turn the owner's own
       // message started (`chat:`), never in work, a reminder's work, a schedule or the bot's first message.
-      botTools: { escalate: true, consult: definition.context.length > 0, memory: true, frontDesk: row.lane === 'chat', threads: ownerChatTurn(row) ? 'all' : 'read', images: this.imagePick(row.botId) !== null, subagents: row.lane === 'run' },
+      botTools: { escalate: true, consult: definition.context.length > 0, memory: true, frontDesk: row.lane === 'chat', threads: ownerChatTurn(row) ? 'all' : 'read', images: this.imagePick(row.botId) !== null, applets: true, subagents: row.lane === 'run' },
       limit
     })
     if (!compiled.ok) return this.block(row, 'policy_unenforceable', compiled.error.reason ?? compiled.error.message)
@@ -3292,9 +3292,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           if (!replyComes) this.postRoom(this.store.activation(row.id)!, input.dispatchN)
         } else if (!open && !cooling) {
           const ask = this.insertLimitAsk(row, input)
-          this.chat.post({ botId: row.botId, author: 'bot', kind: 'notice', text: `I ran out of room on this run. ${name} wants to ${ask.title}.`, askId: ask.id, activationId: row.id, lane: 'run', id: `bm_${row.id}_budget` })
+          this.chat.post({ botId: row.botId, author: 'bot', kind: 'notice', text: `I ran out of room for this. ${name} wants to ${ask.title}.`, askId: ask.id, activationId: row.id, lane: 'run', id: `bm_${row.id}_budget` })
         } else {
-          this.chat.post({ botId: row.botId, author: 'bot', kind: 'error', text: '', error: { text: 'I ran out of room on this run, so I stopped.' }, activationId: row.id, lane: 'run', id: `bm_${row.id}_budget` })
+          this.chat.post({ botId: row.botId, author: 'bot', kind: 'error', text: '', error: { text: 'I ran out of room for this, so I stopped.' }, activationId: row.id, lane: 'run', id: `bm_${row.id}_budget` })
         }
         // Waiting work has not ended: its end is journaled when it does.
         if (!waits) this.journalEnd(row, options.stuck ? 'no_progress' : 'budget_exhausted')
@@ -5673,8 +5673,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (sink) {
       try {
         const chips = sink.drain(dispatchId)
-        // A chip of a thread the bot started, messaged or stopped keeps that thread, which its Open shows.
-        if (chips.length) this.drained.set(key, chips.map((chip) => ({ icon: chip.icon, text: chip.text, ...(chip.highlight ? { highlight: chip.highlight } : {}), ...(chip.thread ? { thread: chip.thread } : {}), ...(chip.said ? { said: chip.said } : {}) })))
+        // A chip of a thread the bot started, messaged or stopped keeps that thread, which its Open shows; a chip with
+        // details on hover (the job a note was for, the model of work on a model of its own) keeps them.
+        if (chips.length) this.drained.set(key, chips.map((chip) => ({ icon: chip.icon, text: chip.text, ...(chip.highlight ? { highlight: chip.highlight } : {}), ...(chip.thread ? { thread: chip.thread } : {}), ...(chip.said ? { said: chip.said } : {}), ...(chip.title ? { title: chip.title } : {}) })))
       } catch {
         // No chips; the message still posts.
       }
@@ -7390,7 +7391,7 @@ function failureText(reason: string): string {
     case 'uncertain': return 'I was interrupted and can\'t tell what my last step did, so I stopped here.'
     case 'restarted_twice': return 'Mousse restarted twice while I was working, so I stopped here.'
     case 'queue_full': return 'Too many messages were waiting, so I skipped this one. Send it again if it still matters.'
-    case 'no_progress': return 'I couldn\'t get anything done on this run, so I stopped.'
+    case 'no_progress': return 'I couldn\'t get anything done on this, so I stopped.'
     case 'turn_cap_repeated': return 'I kept going without finishing, so I stopped here.'
     default: return 'Something went wrong, so I stopped. Try again.'
   }

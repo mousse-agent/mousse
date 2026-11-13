@@ -906,6 +906,11 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
       'They are the Files panel of a window on the computer itself: a routed call names the thread and gets the daemon search, listing and Undo-able save instead.'
   },
   {
+    methods: ['review.turnFile'],
+    reason:
+      'A file a thread’s agent wrote outside its folder is read from a window on that computer only; another computer reviews the thread’s own changes.'
+  },
+  {
     methods: ['files.drives'],
     reason: 'The drives of a computer are browsed from a window on that computer only; another computer sees the thread’s folder.'
   },

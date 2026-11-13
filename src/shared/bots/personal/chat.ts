@@ -1,3 +1,4 @@
+import type { AppletReference } from '../../applets'
 import type { BotLook } from './look'
 
 /**
@@ -30,7 +31,7 @@ export interface BotChip {
   thread?: string
   /** The first line of what the bot sent to that thread, shown on the chip's hover. */
   said?: string
-  /** Details on hover: the model, entry and reasoning level of work on a model of its own. */
+  /** Details on hover: the model, entry and reasoning level of work on a model of its own, or the job a note was for. */
   title?: string
 }
 
@@ -82,11 +83,23 @@ export interface BotChatMessage {
   ask?: BotAskCard
   error?: BotError
   activationId?: string
+  /** Files: the owner's attachments, and pictures a tool handed the bot (kept in its files folder). */
   attachments?: Array<{ name: string; path: string }>
+  /** Applets the reply shows under its words, as a thread's reply does (`publish_applet`). Absent from older services. */
+  applets?: BotChatApplet[]
   /** The message this one answers, as a short quote: a bot's reply to the owner's message, or the owner's reply to the bot's. */
   replyTo?: BotChatQuote
   /** The owner's message: the request id it was sent with, which matches it to the bubble shown while it was on its way. */
   clientRequestId?: string
+}
+
+/**
+ * An applet a bot made: the bot's thread it was published in (the app reads and runs it from there, in the same sandbox
+ * as a thread's) and its reference.
+ */
+export interface BotChatApplet {
+  threadId: string
+  reference: AppletReference
 }
 
 /** A quoted message: its id (to scroll to it), who wrote it and its first line. `gone` when it was removed. */

@@ -80,6 +80,14 @@ export const BOT_MCP_LIST_TOOL = 'mcp_servers'
  */
 export const BOT_IMAGE_TOOL = 'make_image'
 
+/**
+ * Publishing an applet (`publish_applet`): an offline HTML/CSS/JS illustration or small dashboard under the bot's
+ * message, exactly as a thread's agent publishes one. It reaches nothing (no network, files, the app or other applets:
+ * it runs in the same sandbox as a thread's applet) and needs no permission, so like memory it is always on and never
+ * grantable. A bot's main turns get it in both lanes; never a consult.
+ */
+export const BOT_APPLET_TOOL = 'publish_applet'
+
 /** Every new bot's app tools: the web, and its own tools. */
 export const BOT_DEFAULT_APP_TOOLS: readonly string[] = ['web_search', 'web_fetch', ...BOT_OWN_APP_TOOLS]
 
@@ -152,6 +160,7 @@ const BOT_OFFERABLE_APP_TOOLS: ReadonlySet<string> = new Set([
   ...BOT_MEMORY_TOOLS,
   BOT_MCP_LIST_TOOL,
   BOT_IMAGE_TOOL,
+  BOT_APPLET_TOOL,
   'list_skills', 'load_skill', 'escalate', 'consult'
 ])
 

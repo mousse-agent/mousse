@@ -22,7 +22,7 @@ import { useAppStore } from '../stores/appStore'
 import { workspaceModeFor } from '../stores/sidebarTabAgreement'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useChatsStore } from '../stores/chatsStore'
-import { createAndSelectProjectThread, createAndSelectThread, selectThread } from '../lib/threadActions'
+import { archiveThread, createAndSelectProjectThread, createAndSelectThread, selectThread } from '../lib/threadActions'
 import { dropPendingThreadRows, isPendingRowId, pruneRowKeys, servedPendingRows, usePendingThreadRows, withPendingRows } from '../lib/pendingThreadRows'
 import { runWithToast, showUndoToast } from '../lib/actionToast'
 import { Modal } from './ui/Modal'
@@ -896,7 +896,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     runWithToast(pinned ? 'pin' : 'unpin', () => (type === 'thread' ? window.mousse.threads.pin(id, pinned) : window.mousse.projects.pin(id, pinned)), { retry: true })
 
   const setArchived = async (threadId: string, archived: boolean) => {
-    const done = await runWithToast(archived ? 'archive' : 'unarchive', () => window.mousse.threads.settle(threadId, archived), { retry: true })
+    const done = await runWithToast(archived ? 'archive' : 'unarchive', () => (archived ? archiveThread(threadId) : window.mousse.threads.settle(threadId, false)), { retry: true })
     if (done && archived) showUndoToast('Archived', 'unarchive', () => window.mousse.threads.settle(threadId, false))
   }
 

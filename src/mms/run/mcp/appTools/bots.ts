@@ -68,7 +68,7 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'consult',
-    description: 'Ask one of your context threads a question and get its answer. Context threads keep their history between runs.',
+    description: 'Ask one of your context threads a question and get its answer. Context threads keep their history between runs. What it answers is what you know: speak of it as your own knowledge, never as someone you asked.',
     parameters: Type.Object({
       context: Type.String({ description: 'The key of the context thread.' }),
       question: Type.String({ description: 'What to ask it.' })
@@ -124,7 +124,7 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'work_start',
-    description: 'Hand work that takes more than a moment to a run of its own, so you stay free to talk: anything on the web or in the browser, running commands, research, writing a document, or several steps. It runs beside this chat and reports to the owner when done, as a reply to their message. Up to 3 pieces of work run at once, so a quick lookup can start beside a long job; more wait their turn. The run sees your memory but not this chat, so the brief must stand on its own: what to do, everything the owner told you that matters, and what the report should contain. Then tell the owner in one short line that you are on it.',
+    description: 'Start work that takes more than a moment, so you stay free to talk: anything on the web or in the browser, running commands, research, writing a document, or several steps. You do it beside this chat, and when you finish, your report reaches the owner by itself, as a reply to their message. Up to 3 pieces of work run at once, so a quick lookup can start beside a long job; more wait their turn. While you work on it you see your memory but not this chat, so the brief must stand on its own: what to do, everything the owner told you that matters, and what the report should contain. Then tell the owner in one short line that you are on it.',
     parameters: Type.Object({
       title: Type.String({ description: 'A few words the owner will recognise, like "Vacuum comparison".' }),
       brief: Type.String({ description: 'The whole task, standing on its own.' }),
@@ -176,20 +176,20 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'work_list',
-    description: 'What you are working on now (running or waiting, with what it is doing), and the last few pieces that ended, with their ids and the start of their reports. Use it when the owner asks how something is going.',
+    description: 'What you are working on now (running or waiting, with what you are doing in it), and the last few pieces that ended, with their ids and the start of your reports. Use it when the owner asks how something is going, and answer as yourself ("I\'m comparing prices now").',
     parameters: Type.Object({})
   },
   {
     name: 'work_stop',
-    description: 'Stop a piece of work by its id (see work_list), when the owner asks or it is no longer needed.',
+    description: 'Stop a piece of your work by its id (see work_list), when the owner asks or it is no longer needed.',
     parameters: Type.Object({ workId: Type.String() })
   },
   {
     name: 'work_note',
-    description: 'Pass something the owner added to work that is running or waiting (by its id, see work_list): it takes it into account before it reports. If the owner changed the task entirely, stop the work and start new work instead.',
+    description: 'When the owner adds to or changes something you are working on (running or waiting; its id is in work_list), give it to that work: you take it into account there and your report leads with what changed. If their words could fit more than one piece of work, ask them which first. If they changed the task entirely, stop the work and start new work instead. Its answer says what is now true, in words you can tell the owner as your own.',
     parameters: Type.Object({
       workId: Type.String(),
-      note: Type.String({ description: 'What the owner added, standing on its own.' })
+      note: Type.String({ description: 'What the owner added, standing on its own, as you will follow it ("Use the browser tab that is already open").' })
     })
   },
   {
@@ -201,7 +201,7 @@ export const BOT_TOOLS: Tool[] = [
       at: Type.Optional(Type.String({ description: 'Local date and time, like 2026-11-14T09:00.' })),
       work: Type.Optional(Type.Object({
         title: Type.String(),
-        brief: Type.String({ description: 'What to do at that time, standing on its own; its report goes to the owner.' })
+        brief: Type.String({ description: 'What to do at that time, standing on its own; you report to the owner when it is done.' })
       }))
     })
   },
@@ -400,6 +400,35 @@ function botCall(deps: (() => BotAppToolDeps | undefined) | undefined, ctx: Tool
 }
 
 const isOutcome = (value: BotCall | ToolOutcome): value is ToolOutcome => 'text' in value
+
+/** A piece of the bot's work by its title, among what runs, waits or ended lately (`work_list`); undefined when not there. */
+function workTitleOf(call: BotCall, workId: string): string | undefined {
+  const list = call.deps.host.work.list(call.botId)
+  const title = [...list.now, ...list.recent].find((work) => work.workId === workId)?.title.trim()
+  return title || undefined
+}
+
+/**
+ * `work_note`'s answer to the chat: what is now true and when, said to the bot as its own doing, so what it tells the
+ * owner is in the first person ("I'll use that tab from here on") rather than about a job that "knows" something. A
+ * note that came too late, or to work that stopped part-way, says so, and offers to do the job again.
+ */
+export function workNoteAnswer(outcome: 'now' | 'after_compaction' | 'step_end' | 'start' | 'ended' | 'held', note: string, title?: string): string {
+  const job = title ? `"${title}"` : 'that job'
+  const line = note.replace(/\s+/g, ' ').trim()
+  const cut = line.length > 300 ? `${line.slice(0, 299).trimEnd()}…` : line
+  // The owner's words, quoted, and a full stop after them unless they end with one.
+  const said = `"${cut}"${/[.!?…]$/.test(cut) ? '' : '.'}`
+  const speak = 'Tell the owner in a few words, as yourself, what you\'ll do now'
+  switch (outcome) {
+    case 'now': return `From your next step on ${job}, you also do this: ${said} ${speak} ("I'll … from here on"). Your report will lead with what changed.`
+    case 'after_compaction': return `In a few minutes, once you've caught up on ${job}, you also do this there: ${said} ${speak}, and that it's in a few minutes ("In a few minutes I'll …").`
+    case 'step_end': return `As soon as the step you're on in ${job} ends, you also do this there: ${said} ${speak}, and that it's once this step is done ("As soon as I've finished this step, I'll …").`
+    case 'start': return `When you start on ${job} (or carry on with it), you also do this: ${said} ${speak} ("I'll … when I get to it").`
+    case 'ended': return `You had already finished ${job} before the owner said this, so it was not used. Tell them so as yourself, and offer to do it again with this ("I'd already finished it; want me to do it again with that?").`
+    case 'held': return `You stopped part-way on ${job} and it can't go on as it is, so this can't be used there. Tell them so as yourself, and offer to stop it and start again with this.`
+  }
+}
 
 /** A tool's common shape: listed and offered on bot activation threads only. */
 function ownTool(tool: Tool, deps: (() => BotAppToolDeps | undefined) | undefined, part: Pick<MousseTool, 'class' | 'describe' | 'handler'>): MousseTool {
@@ -638,7 +667,7 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         try {
           const started = await call.deps.host.work.start(call.botId, call.activationId, { title, brief, key: `${call.activationId}:${ctx.toolCallId ?? randomUUID()}`, ...(level ? { level } : {}), ...(model ? { model } : {}) })
           const where = model ? ` It runs on ${model.name.name} on ${model.name.entry}${model.name.effort ? `, ${model.name.effort} reasoning` : ''}, for this work only.` : ''
-          const result = { ...started, note: (started.status === 'queued' ? `It starts when there is room, after: ${started.ahead.join('; ')}. Tell the owner it waits its turn.` : started.status === 'ended' ? 'This work already ran and ended; see work_list for its report.' : 'It is running, beside anything else you are working on. Tell the owner you are on it; its report reaches them by itself.') + where }
+          const result = { ...started, note: (started.status === 'queued' ? `You start on it when there is room, after: ${started.ahead.join('; ')}. Tell the owner you'll get to it after that.` : started.status === 'ended' ? 'You already did this and finished; work_list has the start of your report.' : 'You are on it now, beside anything else you are working on. Tell the owner in one short line that you are on it; when you finish, your report reaches them by itself.') + where }
           call.deps.activity?.onAppResult(call.activity, 'work_start', started)
           return json(result)
         } catch (failure) {
@@ -685,10 +714,11 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         if (isOutcome(call)) return call
         if (call.lane !== 'chat') return error(CHAT_ONLY)
         if (typeof args.workId !== 'string' || !args.workId) return error('work_stop needs a work id (see work_list).')
+        const title = workTitleOf(call, args.workId)
         const result = await call.deps.host.work.stop(call.botId, args.workId)
-        call.deps.activity?.onAppResult(call.activity, 'work_stop', { result })
+        call.deps.activity?.onAppResult(call.activity, 'work_stop', { result, ...(title ? { title } : {}) })
         if (result === 'not_found') return error('You have no work with that id. See work_list.')
-        return json({ result })
+        return json({ result, note: result === 'stopped' ? `You stopped${title ? ` "${title}"` : ' it'}. Tell the owner as yourself ("I've stopped…").` : 'You had already finished it, so there was nothing to stop. Tell the owner so, as yourself.' })
       }
     }),
     ownTool(byName.get('work_note')!, deps, {
@@ -699,20 +729,14 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         if (isOutcome(call)) return call
         if (call.lane !== 'chat') return error(CHAT_ONLY)
         if (typeof args.workId !== 'string' || !args.workId || typeof args.note !== 'string' || !args.note.trim()) return error('work_note needs a work id and the note.')
+        const title = workTitleOf(call, args.workId)
         const result = call.deps.host.work.note(call.botId, args.workId, args.note, call.activationId)
-        call.deps.activity?.onAppResult(call.activity, 'work_note', { result })
+        call.deps.activity?.onAppResult(call.activity, 'work_note', { result, ...(title ? { title } : {}) })
         if (result === 'not_found') return error('You have no work with that id. See work_list.')
-        if (result === 'ended') return json({ result, note: 'That work already finished, so it never saw this. Start new work for it if it still matters.' })
-        if (result === 'held') return json({ result, note: 'That work is held (it stopped part-way), so it can\'t take notes. Stop it and start new work with this if it still matters.' })
-        // Tell the owner the truth about when the work sees it.
-        const reach = call.deps.host.work.reach?.(call.botId, args.workId) ?? 'step_end'
-        return json({ result, reaches: reach, note: reach === 'now'
-          ? 'The work gets this at its next step, while it keeps working, and its report will lead with what changed. Tell the owner it has it now.'
-          : reach === 'after_compaction'
-            ? 'The work is making room in its memory of this job right now; it gets this as soon as that ends (within a few minutes) and keeps working, and its report will lead with what changed. Tell the owner it gets it in a few minutes.'
-          : reach === 'step_end'
-            ? 'The work gets this when the step it is on now ends, then carries on with it and updates its report. Tell the owner it gets it when this step ends.'
-            : 'The work gets this when it starts (or carries on), and takes it into account before it reports. Tell the owner it has it.' })
+        if (result !== 'noted') return json({ result, note: workNoteAnswer(result, args.note, title) })
+        // When the work takes it in, truly: the bot tells the owner that, as its own.
+        const reaches = call.deps.host.work.reach?.(call.botId, args.workId) ?? 'step_end'
+        return json({ result, reaches, note: workNoteAnswer(reaches, args.note, title) })
       }
     }),
     ownTool(byName.get('remind')!, deps, {

@@ -445,6 +445,8 @@ interface AppState {
   openDocument: (title: string, markdown: string) => string
   /** Shows a thread's applet in the side panel's Documents tab, reusing its tab when it is already open. */
   openAppletDocument: (threadId: string, reference: AppletReference) => string
+  /** Shows a file a thread's agent wrote as a diff in the Documents tab, reusing its tab when it is already open. */
+  openTurnFileDiff: (threadId: string, path: string, title: string) => string
   closeDocumentTab: (tabId: string) => void
   setActiveDocumentTab: (tabId: string | null) => void
   setChatMode: (mode: ChatMode) => void
@@ -1054,6 +1056,22 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       documentTabs: open
         ? s.documentTabs
         : [...s.documentTabs, { id, title: reference.title, markdown: '', applet: { threadId, profileId: s.profileId, reference } }],
+      activeDocumentTabId: id,
+      documentsTabVisible: true,
+      mainView: 'documents',
+      mainAreaOpen: true
+    }))
+    return id
+  },
+  openTurnFileDiff: (threadId, path, title) => {
+    const state = get()
+    const open = state.documentTabs.find((tab) =>
+      tab.turnFile?.threadId === threadId && tab.turnFile.profileId === state.profileId && tab.turnFile.path === path)
+    const id = open?.id ?? crypto.randomUUID()
+    set((s) => ({
+      documentTabs: open
+        ? s.documentTabs
+        : [...s.documentTabs, { id, title, markdown: '', turnFile: { threadId, profileId: s.profileId, path } }],
       activeDocumentTabId: id,
       documentsTabVisible: true,
       mainView: 'documents',
