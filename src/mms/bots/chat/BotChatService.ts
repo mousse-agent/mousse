@@ -6,7 +6,7 @@ import { DEFAULT_BOT_MODEL, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, type 
 import { normalizeBotLook, type BotLook } from '../../../shared/bots/personal/look'
 import { isSpecialAsk } from '../../../shared/bots/personal/escalation'
 import type { BotMemoryForgetResult, BotMemoryListing } from '../../../shared/bots/personal/memory'
-import { MAX_BOT_CHAT_PAGE, type BotChatAttachment, type BotComputerChoice } from '../../../shared/bots/personal/methods'
+import { MAX_BOT_CHAT_PAGE, type BotChatAttachment, type BotRunsOnChoices } from '../../../shared/bots/personal/methods'
 import { copyBotAttachments, removeBotAttachments, type SavedBotAttachment } from './attachments'
 import { BotEngineError, type BotEngine } from '../activation/BotEngine'
 import type { BotMemoryAdmin } from '../seams'
@@ -140,8 +140,10 @@ export class BotChatService {
    * `bots.create` (§5.3.1): validates, names the bot (or uses the given name), writes and approves
    * its starter grant, makes its home thread and files folder, and starts its first chat
    * activation, whose reply is its first message. A repeat of `clientRequestId` returns the same bot.
+   * A model picked by hand (#673) must be among the current choices: one that is not is refused in plain words, never
+   * swapped for another, and the bot's first message runs on the one picked.
    */
-  async create(input: { look: BotLook; name?: string; description: string; clientRequestId: string }): Promise<{ bot: BotSummary }> {
+  async create(input: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string }): Promise<{ bot: BotSummary }> {
     const description = input.description.trim()
     if (!description || description.length > MAX_BOT_DESCRIPTION_CHARS) throw new BotEngineError('invalid_params', `Say what the bot should do in 1 to ${MAX_BOT_DESCRIPTION_CHARS} characters.`)
     const given = input.name?.trim()
@@ -149,6 +151,11 @@ export class BotChatService {
     const key = `create:${input.clientRequestId}`
     const made = this.store.activationByKey(key)
     if (made) return { bot: this.summaryOf(made.botId) }
+    const picked = input.model?.trim() || undefined
+    if (picked) {
+      const models = await this.pickableModels().catch(() => [])
+      if (!models.some((choice) => choice.model === picked)) throw new BotEngineError('model_unavailable', 'The model you picked is not available now. Pick another one, or By usage.')
+    }
     const botId = `bot-${randomUUID().replaceAll('-', '').slice(0, 12)}`
     const named = given ? { name: given, chosen: true } : await this.nameFor(botId, description)
     const name = named.name
@@ -161,7 +168,8 @@ export class BotChatService {
       owner: { kind: 'person', id: 'self' },
       placement: { kind: 'this_computer' },
       role: description,
-      main: { key: 'main', title: 'Main', agent: { instructions: '' }, model: { ...DEFAULT_BOT_MODEL } },
+      // By hand, as About's picker saves it (`setOwnerModel`): named, at the default depth.
+      main: { key: 'main', title: 'Main', agent: { instructions: '' }, model: picked ? { mode: 'named', model: picked, depth: DEFAULT_BOT_MODEL.depth } : { ...DEFAULT_BOT_MODEL } },
       context: [],
       permissions: starterManifest(),
       triggers: { manual: true }
@@ -422,9 +430,14 @@ export class BotChatService {
    * computers, the same list the Automations page's Computer chip offers; a bot runs on the computer that holds it, so
    * the others are listed but cannot be picked (`unavailable` says why), and an offline one says so.
    */
-  async modelGet(botId: string): Promise<{ model: string | null; models: Array<{ model: string; label: string }>; computer: string; computers: BotComputerChoice[] }> {
+  async modelGet(botId: string): Promise<{ model: string | null } & BotRunsOnChoices> {
     this.engine.definitionOf(botId)
-    const models = await (this.options.modelChoices?.() ?? Promise.resolve([])).catch(() => [])
+    return { model: this.engine.ownerModel(botId), ...await this.modelChoices() }
+  }
+
+  /** `bots.model.choices`: what `bots.model.get` offers, before a bot exists (New bot's Runs on line). */
+  async modelChoices(): Promise<BotRunsOnChoices> {
+    const models = await this.pickableModels().catch(() => [])
     const computer = this.options.computerName?.() ?? 'This computer'
     let others: Array<{ node: string; name: string; online: boolean }> = []
     try {
@@ -433,7 +446,6 @@ export class BotChatService {
       // The device list cannot be read now: this computer is the one listed.
     }
     return {
-      model: this.engine.ownerModel(botId),
       models,
       computer: 'this_computer',
       computers: [
@@ -441,6 +453,10 @@ export class BotChatService {
         ...others.map((other) => ({ id: other.node, name: other.name, ...(other.online ? {} : { offline: true as const }), unavailable: other.online ? 'A bot runs on the computer that holds it.' : `${other.name} is offline.` }))
       ]
     }
+  }
+
+  private pickableModels(): Promise<Array<{ model: string; label: string }>> {
+    return this.options.modelChoices?.() ?? Promise.resolve([])
   }
 
   /** `bots.model.set`: the owner picks a model by hand, or by usage again (`null`). */

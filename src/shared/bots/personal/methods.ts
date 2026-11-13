@@ -12,6 +12,14 @@ export interface BotComputerChoice {
   unavailable?: string
 }
 
+/** What a bot can run on (#673): the ready models that can hold a bot here, and the computers, this one first. */
+export interface BotRunsOnChoices {
+  models: Array<{ model: string; label: string }>
+  /** The computer that holds (or will hold) the bot: always `this_computer` for now. */
+  computer: string
+  computers: BotComputerChoice[]
+}
+
 /**
  * The personal-bot methods (PR 6 §4): profile-bound, apart from the Space-bot `bots.*` set and
  * not behind `net.v1`. Walls and escalation (6c-2) add `bots.escalations.*`, `continue`, `markDone`
@@ -72,10 +80,10 @@ export const BOTS_PERSONAL_V2_METHODS = [
   'bots.memory.export'
 ] as const
 /**
- * Methods added after the required Bot UI set (docs/plans/bot-always-free.md): the app calls them when they are there,
- * and an older service that lacks them is still compatible (`guiDaemonCompatibility` lists only the set above).
+ * Methods added after the required Bot UI set (docs/plans/bot-always-free.md, #673): the app calls them when they are
+ * there, and an older service that lacks them is still compatible (`guiDaemonCompatibility` lists only the set above).
  */
-export const BOTS_WORK_METHODS = ['bots.work.stop', 'bots.reminders.cancel'] as const
+export const BOTS_WORK_METHODS = ['bots.work.stop', 'bots.reminders.cancel', 'bots.model.choices'] as const
 export type BotsPersonalV2Method = (typeof BOTS_PERSONAL_V2_METHODS)[number] | (typeof BOTS_WORK_METHODS)[number]
 export const BOTS_PERSONAL_V2_CAPABILITY = 'bots.personal.v2'
 
@@ -99,7 +107,12 @@ export const MAX_BOT_CHAT_ATTACHMENT_BYTES = 50 * 1024 * 1024
 /** Each v2 method's params (`profileId` aside) and result. */
 export interface BotsPersonalV2Api {
   'bots.personal.list': { params: Record<string, never>; result: { bots: BotSummary[] } }
-  'bots.create': { params: { look: BotLook; name?: string; description: string; clientRequestId: string }; result: { bot: BotSummary } }
+  /**
+   * `model`: one picked by hand on New bot (#673), from `bots.model.choices`; absent, by usage. A model that is not among
+   * the current choices is refused (`model_unavailable`) rather than replaced. Older services refuse the key, so the app
+   * sends it only to a service that has `bots.model.choices`.
+   */
+  'bots.create': { params: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string }; result: { bot: BotSummary } }
   'bots.get': { params: { botId: string }; result: BotDetail }
   'bots.update': { params: { botId: string; name?: string; look?: BotLook }; result: { bot: BotSummary } }
   'bots.personal.pause': { params: { botId: string }; result: { bot: BotSummary } }
@@ -130,7 +143,9 @@ export interface BotsPersonalV2Api {
    * the pickers that use them only. `computers` are this one and the person's other computers; a bot runs on the computer
    * that holds it, so the others carry `unavailable` (why they cannot be picked) and `offline`.
    */
-  'bots.model.get': { params: { botId: string }; result: { model: string | null; models: Array<{ model: string; label: string }>; computer: string; computers: BotComputerChoice[] } }
+  'bots.model.get': { params: { botId: string }; result: { model: string | null } & BotRunsOnChoices }
+  /** What New bot's Runs on line offers before the bot exists (#673): the same choices as `bots.model.get`. */
+  'bots.model.choices': { params: Record<string, never>; result: BotRunsOnChoices }
   'bots.model.set': { params: { botId: string; model: string | null }; result: { bot: BotSummary } }
   'bots.schedules.remove': { params: { botId: string; scheduleId: string }; result: BotDetail }
   'bots.memory.list': { params: { botId: string; history?: boolean }; result: BotMemoryListing }
