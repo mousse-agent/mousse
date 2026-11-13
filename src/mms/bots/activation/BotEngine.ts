@@ -4902,8 +4902,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (sink) {
       try {
         const chips = sink.drain(dispatchId)
-        // A chip of a thread the bot started, messaged or stopped keeps that thread, which its Open shows.
-        if (chips.length) this.drained.set(key, chips.map((chip) => ({ icon: chip.icon, text: chip.text, ...(chip.highlight ? { highlight: chip.highlight } : {}), ...(chip.thread ? { thread: chip.thread } : {}), ...(chip.said ? { said: chip.said } : {}) })))
+        // A chip of a thread the bot started, messaged or stopped keeps that thread, which its Open shows; a chip with
+        // details on hover (the job a note was for, the model of work on a model of its own) keeps them.
+        if (chips.length) this.drained.set(key, chips.map((chip) => ({ icon: chip.icon, text: chip.text, ...(chip.highlight ? { highlight: chip.highlight } : {}), ...(chip.thread ? { thread: chip.thread } : {}), ...(chip.said ? { said: chip.said } : {}), ...(chip.title ? { title: chip.title } : {}) })))
       } catch {
         // No chips; the message still posts.
       }

@@ -379,13 +379,15 @@ function workTitleOf(call: BotCall, workId: string): string | undefined {
 export function workNoteAnswer(outcome: 'now' | 'after_compaction' | 'step_end' | 'start' | 'ended' | 'held', note: string, title?: string): string {
   const job = title ? `"${title}"` : 'that job'
   const line = note.replace(/\s+/g, ' ').trim()
-  const said = `"${line.length > 300 ? `${line.slice(0, 299).trimEnd()}…` : line}"`
+  const cut = line.length > 300 ? `${line.slice(0, 299).trimEnd()}…` : line
+  // The owner's words, quoted, and a full stop after them unless they end with one.
+  const said = `"${cut}"${/[.!?…]$/.test(cut) ? '' : '.'}`
   const speak = 'Tell the owner in a few words, as yourself, what you\'ll do now'
   switch (outcome) {
-    case 'now': return `From your next step on ${job}, you also do this: ${said}. ${speak} ("I'll … from here on"). Your report will lead with what changed.`
-    case 'after_compaction': return `In a few minutes, once you've caught up on ${job}, you also do this there: ${said}. ${speak}, and that it's in a few minutes ("In a few minutes I'll …").`
-    case 'step_end': return `As soon as the step you're on in ${job} ends, you also do this there: ${said}. ${speak}, and that it's once this step is done ("As soon as I've finished this step, I'll …").`
-    case 'start': return `When you start on ${job} (or carry on with it), you also do this: ${said}. ${speak} ("I'll … when I get to it").`
+    case 'now': return `From your next step on ${job}, you also do this: ${said} ${speak} ("I'll … from here on"). Your report will lead with what changed.`
+    case 'after_compaction': return `In a few minutes, once you've caught up on ${job}, you also do this there: ${said} ${speak}, and that it's in a few minutes ("In a few minutes I'll …").`
+    case 'step_end': return `As soon as the step you're on in ${job} ends, you also do this there: ${said} ${speak}, and that it's once this step is done ("As soon as I've finished this step, I'll …").`
+    case 'start': return `When you start on ${job} (or carry on with it), you also do this: ${said} ${speak} ("I'll … when I get to it").`
     case 'ended': return `You had already finished ${job} before the owner said this, so it was not used. Tell them so as yourself, and offer to do it again with this ("I'd already finished it; want me to do it again with that?").`
     case 'held': return `You stopped part-way on ${job} and it can't go on as it is, so this can't be used there. Tell them so as yourself, and offer to stop it and start again with this.`
   }

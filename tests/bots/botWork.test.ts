@@ -114,6 +114,17 @@ describe('the chat is the front desk', () => {
 })
 
 describe('notes to work', () => {
+  it('the chat\'s "noted" chip keeps the job it was for on hover, in the posted message', async () => {
+    const first = await chat('Find me an SSD', 'm1')
+    const { workId } = await f.bots.tools.work.start(botId, first.activation.id, { title: 'SSD search', brief: 'Find SSDs.', key: 'k' })
+    await finish(f, first.payload, 'completed', { text: 'On it.' })
+    const turn = await chat('Use the open tab', 'm2')
+    expect(f.bots.tools.work.note(botId, workId, 'Use the open tab.', turn.activation.id)).toBe('noted')
+    f.chips.set(f.store.dispatch(turn.activation.id, 1)!.clientRequestId, [{ icon: 'think', text: 'noted', title: 'For SSD search' }])
+    await finish(f, turn.payload, 'completed', { text: "I'll use that tab from here on." })
+    expect(chatOf(f, botId).at(-1)!.chips).toEqual([{ icon: 'think', text: 'noted', title: 'For SSD search' }])
+  })
+
   it('running work posts what it has, takes the note, and reports again with the change', async () => {
     const first = await chat('Compare vacuums', 'm1')
     const { workId } = await f.bots.tools.work.start(botId, first.activation.id, { title: 'Vacuums', brief: 'Compare vacuums.', key: 'k' })
