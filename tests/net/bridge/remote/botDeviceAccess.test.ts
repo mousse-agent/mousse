@@ -48,6 +48,7 @@ function paramsFor(botId: string): Record<Exclude<RemoteBotMethod, 'bots.create'
     'bots.work.stop': { botId, workId: WORK },
     'bots.chat.markRead': { botId, seq: 1 },
     'bots.asks.answer': { botId, askId: ASK, answer: 'allow' },
+    'bots.questions.answer': { botId, questionId: 'q_00000000-0000-0000-0000-000000000000', choice: 'Yes', clientRequestId: 'r-q' },
     'bots.personal.pause': { botId },
     'bots.personal.resume': { botId },
     'bots.update': { botId, name: 'Pip' },

@@ -112,6 +112,16 @@
 .bot-ask-buttons button:disabled { opacity: .5; }
 .bot-ask-details { padding: 2px 4px; font-size: var(--bot-meta); line-height: 1.5; color: var(--text-secondary); }
 .bot-ask-details p { margin: 0 0 3px; overflow-wrap: anywhere; }
+/* A bot's question: its answers as the ask's quick replies; answers with a detail stack, one per line, the detail under
+   the label. The one being sent is lit by its background. Moved past, the buttons stay, quieter. */
+.bot-question-replies.has-details .bot-ask-buttons { flex-direction: column; align-items: flex-start; }
+.bot-question-replies.has-details .bot-ask-buttons button { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; max-width: 100%; padding: 6px 13px; border-radius: 14px; text-align: left; }
+.bot-question-label { overflow-wrap: anywhere; }
+.bot-question-detail { font-size: var(--bot-meta); font-weight: 400; line-height: 16px; color: var(--text-secondary); overflow-wrap: anywhere; }
+.bot-question-replies .bot-ask-buttons button[aria-pressed="true"] { color: var(--surface-strong, #18151c); background: var(--accent); opacity: 1; }
+.bot-question-replies .bot-ask-buttons button[aria-pressed="true"] .bot-question-detail { color: inherit; }
+.bot-question-replies .bot-ask-buttons .bot-question-other { color: var(--text-secondary); font-weight: 400; }
+.bot-question-replies[data-status="moved_on"] .bot-ask-buttons button { color: var(--text-secondary); font-weight: 400; background: color-mix(in srgb, var(--text-secondary) 7%, transparent); }
 
 /* The owner's are right-aligned bubbles; in a group, the bubbles under the first square their top corner. */
 .chat-participant-message.bot-you { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; padding-left: 14%; }

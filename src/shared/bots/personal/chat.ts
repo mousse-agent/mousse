@@ -1,5 +1,8 @@
 import type { AppletReference } from '../../applets'
 import type { BotLook } from './look'
+import type { BotChatQuestion } from './questions'
+
+export type { BotChatQuestion } from './questions'
 
 /**
  * What the Bot UI sees of a bot (Bot Phase 1 §5.1.1, bot-ui C2–C8): its state, its chat as rows of
@@ -93,6 +96,18 @@ export interface BotChatMessage {
   clientRequestId?: string
   /** A bot's message: the owner's reaction on it, an emoji (`bots.chat.react`). */
   reaction?: string
+  /**
+   * A bot's question to tap an answer to (`ask_owner`, `bots.questions.answer`); on the owner's message that answered
+   * one, its id alone. Absent from older services.
+   */
+  question?: BotChatQuestion
+  /** The owner's message answered a question (by a tap or in their own words): which one. */
+  answers?: { questionId: string; tapped: boolean }
+  /**
+   * Where `text`'s plain copy of the question's answers starts ("Flat A · Flat B"), for an app that doesn't draw them: an
+   * app that does shows `text` up to here, then the buttons. Absent when the text has none.
+   */
+  plainFrom?: number
 }
 
 /**

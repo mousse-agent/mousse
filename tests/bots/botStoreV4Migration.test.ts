@@ -281,3 +281,29 @@ describe('bots.db v2 → v4', () => {
     }
   })
 })
+
+describe('bots.db v7 → v8', () => {
+  it('keeps every chat row and reaction, copies the database first, and adds the questions table', () => {
+    const v7 = new ProfileDatabase({ profileHome: profile, name: 'bots' })
+    v7.migrate(BOTS_MIGRATIONS.filter((migration) => migration.version <= 7))
+    v7.statement("INSERT INTO bot_messages(id, bot_id, at, author, kind, text, reply_to, owner_reaction, owner_reaction_at) VALUES('bm_1', 'site-editor', ?, 'bot', 'text', 'Which flat?', NULL, '❤️', ?)").run(T, T)
+    v7.statement("INSERT INTO bot_messages(id, bot_id, at, author, kind, text, reply_to) VALUES('bm_2', 'site-editor', ?, 'owner', 'text', 'The second one', 'bm_1')").run(T)
+    v7.close()
+    store = new BotStore({ profileHome: profile })
+    const copy = new DatabaseSync(join(profile, 'bots', 'bots.db.pre-v8'))
+    try {
+      expect(Number(copy.prepare('PRAGMA user_version').get()!.user_version)).toBe(7)
+      expect(copy.prepare('SELECT COUNT(*) AS n FROM bot_messages').get()).toEqual({ n: 2 })
+    } finally {
+      copy.close()
+    }
+    expect(store.db.userVersion()).toBe(8)
+    expect(store.message('bm_1')).toMatchObject({ text: 'Which flat?', ownerReaction: { emoji: '❤️', at: T } })
+    expect(store.message('bm_1')).not.toHaveProperty('questionId')
+    expect(store.message('bm_2')).toMatchObject({ text: 'The second one', replyTo: 'bm_1' })
+    // The new table takes a question, and a message can carry it.
+    store.insertQuestion({ id: 'q_1', botId: 'site-editor', activationId: 'act_1', dispatchN: 1, lane: 'chat', spec: { question: 'Which flat?', choices: [{ label: 'A' }, { label: 'B' }], other: true }, createdAt: T })
+    store.setQuestionMessage('q_1', 'bm_1')
+    expect(store.question('q_1')).toMatchObject({ status: 'open', messageId: 'bm_1', answer: null })
+  })
+})

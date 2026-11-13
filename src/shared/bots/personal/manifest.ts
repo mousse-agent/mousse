@@ -88,6 +88,13 @@ export const BOT_IMAGE_TOOL = 'make_image'
  */
 export const BOT_APPLET_TOOL = 'publish_applet'
 
+/**
+ * Asking the owner a question with answers to tap (`ask_owner`, issue #1123). It grants nothing (a "Yes" allows no
+ * permission: that is `escalate`), so like memory it is always on and never grantable. Offered to a chat turn only in
+ * this build; work, scheduled runs, consults and subagents never get it.
+ */
+export const BOT_QUESTION_TOOL = 'ask_owner'
+
 /** Every new bot's app tools: the web, and its own tools. */
 export const BOT_DEFAULT_APP_TOOLS: readonly string[] = ['web_search', 'web_fetch', ...BOT_OWN_APP_TOOLS]
 
@@ -161,6 +168,7 @@ const BOT_OFFERABLE_APP_TOOLS: ReadonlySet<string> = new Set([
   BOT_MCP_LIST_TOOL,
   BOT_IMAGE_TOOL,
   BOT_APPLET_TOOL,
+  BOT_QUESTION_TOOL,
   'list_skills', 'load_skill', 'escalate', 'consult'
 ])
 

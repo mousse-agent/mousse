@@ -206,7 +206,7 @@ function classify(tool: string, input: unknown, ctx: BotChipContext): Classified
     case 'subagent_wait': return { kind: 'subagent_wait', icon: 'think', live: 'waiting on its subagents' }
     case 'subagent_result':
     case 'subagent_stop': return { kind: 'subagent_look', icon: 'think', live: 'checking on its subagents' }
-    // `escalate`: its card is the chip.
+    // `escalate`: its card is the chip. `ask_owner`: its question's bubble is.
     default: return null
   }
 }

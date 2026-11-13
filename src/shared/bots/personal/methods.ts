@@ -141,7 +141,7 @@ export const BOTS_PERSONAL_V2_METHODS = [
  * Methods added after the required Bot UI set (docs/plans/bot-always-free.md, #673): the app calls them when they are
  * there, and an older service that lacks them is still compatible (`guiDaemonCompatibility` lists only the set above).
  */
-export const BOTS_WORK_METHODS = ['bots.work.stop', 'bots.reminders.cancel', 'bots.model.choices', 'bots.model.setSlots', 'bots.model.setImage', 'bots.chat.react'] as const
+export const BOTS_WORK_METHODS = ['bots.work.stop', 'bots.reminders.cancel', 'bots.model.choices', 'bots.model.setSlots', 'bots.model.setImage', 'bots.chat.react', 'bots.questions.answer'] as const
 export type BotsPersonalV2Method = (typeof BOTS_PERSONAL_V2_METHODS)[number] | (typeof BOTS_WORK_METHODS)[number]
 export const BOTS_PERSONAL_V2_CAPABILITY = 'bots.personal.v2'
 
@@ -194,6 +194,13 @@ export interface BotsPersonalV2Api {
   /** The owner's reaction on one of the bot's messages: an emoji, which replaces any other, or `null` to remove it. */
   'bots.chat.react': { params: { botId: string; messageId: string; emoji: string | null }; result: { message: BotChatMessage } }
   'bots.asks.answer': { params: { botId: string; askId: string; answer: 'allow' | 'not_now' }; result: { message: BotChatMessage } }
+  /**
+   * The owner taps one of a question's answers (`choice`, its label): their reply to its bubble, which starts or continues
+   * a chat turn, as writing it would. `message` is the owner's answer, `question` the bubble as it is now. One already
+   * answered (`question_answered`) or no longer open (`question_closed`) is refused before anything is written. An older
+   * service lacks it: the owner answers with Reply.
+   */
+  'bots.questions.answer': { params: { botId: string; questionId: string; choice: string; clientRequestId: string }; result: { message: BotChatMessage; question?: BotChatMessage } }
   /** `permissionId` is a `BotDetail.permissions` item's id (its fingerprint). */
   'bots.permissions.revoke': { params: { botId: string; permissionId: string }; result: BotDetail }
   /**
@@ -235,7 +242,7 @@ export interface BotsPersonalV2Api {
   'bots.schedules.remove': { params: { botId: string; scheduleId: string }; result: BotDetail }
   'bots.memory.list': { params: { botId: string; history?: boolean }; result: BotMemoryListing }
   'bots.memory.forget': { params: { botId: string; id: string }; result: BotMemoryForgetResult }
-  /** Writes `memory.md`, `memory.jsonl`, `journal.jsonl` and the definition into `dir`. */
+  /** Writes `memory.md`, `memory.jsonl`, `journal.jsonl`, `questions.jsonl` (when it asked any) and the definition into `dir`. */
   'bots.memory.export': { params: { botId: string; dir: string }; result: { files: string[] } }
 }
 

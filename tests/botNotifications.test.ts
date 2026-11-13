@@ -27,6 +27,14 @@ describe('what a bot row announces', () => {
     expect(botNotificationKind(row({ kind: 'notice', ask: { ...ask, status: 'allowed' } }), NOW)).toBeNull()
   })
 
+  it('announces a question with answers to tap as a question, with its answers; an answered one not at all', () => {
+    const question = { questionId: 'q_1', choices: [{ label: 'Flat A' }, { label: 'Flat B' }], other: true, status: 'open' as const }
+    const asked = row({ kind: 'text', text: 'Which flat should I book a viewing for?\n\nFlat A · Flat B · Something else', plainFrom: 39, question })
+    expect(botNotificationKind(asked, NOW)).toBe('question')
+    expect(botNotificationContent('Flat Finder', asked)).toEqual({ title: 'Flat Finder', body: 'Which flat should I book a viewing for? — Flat A / Flat B' })
+    expect(botNotificationKind(row({ kind: 'text', question: { ...question, status: 'answered', answer: 'Flat B' } }), NOW)).toBeNull()
+  })
+
   it('never announces the owner’s own messages or an old row that changed', () => {
     expect(botNotificationKind(row({ author: 'owner', kind: 'text' }), NOW)).toBeNull()
     expect(botNotificationKind(row({ at: '2026-11-06T09:00:00.000Z' }), NOW)).toBeNull()

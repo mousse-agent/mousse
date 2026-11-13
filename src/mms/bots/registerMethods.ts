@@ -1,6 +1,7 @@
 import { BOTS_PERSONAL_V2_CAPABILITY, BOTS_PERSONAL_V2_METHODS, BOTS_WORK_METHODS, MAX_BOT_CHAT_ATTACHMENTS, MAX_BOT_CHAT_PAGE, type BotChatAttachment, type BotsPersonalV2Method } from '../../shared/bots/personal/methods'
 import { MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_MODEL_CHARS, MAX_BOT_NAME_CHARS, type BotModelPick, type BotModelSlots, type BotSchedule } from '../../shared/bots/personal/definition'
 import { modelPickProblem, modelRowsProblem } from '../../shared/bots/personal/modelSlots'
+import { MAX_CHOICE_LABEL_CHARS } from '../../shared/bots/personal/questions'
 import { isAbsolutePath } from '../../shared/bots/personal/manifest'
 import type { BotLook } from '../../shared/bots/personal/look'
 import { DomainHandlerRegistry, DomainRpcError, domainObject } from '../protocol/domainRegistry'
@@ -33,6 +34,7 @@ const KEYS: Record<BotsPersonalV2Method, readonly string[]> = {
   'bots.chat.markRead': ['botId', 'seq'],
   'bots.chat.react': ['botId', 'messageId', 'emoji'],
   'bots.asks.answer': ['botId', 'askId', 'answer'],
+  'bots.questions.answer': ['botId', 'questionId', 'choice', 'clientRequestId'],
   'bots.permissions.revoke': ['botId', 'permissionId'],
   'bots.schedules.add': ['botId', 'when', 'prompt', 'model'],
   'bots.schedules.remove': ['botId', 'scheduleId'],
@@ -48,6 +50,7 @@ const KEYS: Record<BotsPersonalV2Method, readonly string[]> = {
 
 const REQUEST_ID = /^[A-Za-z0-9._:-]{1,128}$/
 const ASK_ID = /^esc_[0-9a-f-]{36}$/
+const QUESTION_ID = /^q_[0-9a-f-]{36}$/
 const SCHEDULE_ID = /^[a-z0-9][a-z0-9-]{0,31}$/
 const MAX_CHAT_TEXT = 64 * 1024
 /**
@@ -161,6 +164,10 @@ function validate(method: BotsPersonalV2Method, value: unknown): Params {
       if (typeof p.askId !== 'string' || !ASK_ID.test(p.askId)) throw new DomainRpcError('invalid_params', 'An ask id is required')
       if (p.answer !== 'allow' && p.answer !== 'not_now') throw new DomainRpcError('invalid_params', 'The answer must be allow or not_now')
       break
+    case 'bots.questions.answer':
+      if (typeof p.questionId !== 'string' || !QUESTION_ID.test(p.questionId)) throw new DomainRpcError('invalid_params', 'A question id is required')
+      if (!text(p.choice, MAX_CHOICE_LABEL_CHARS)) throw new DomainRpcError('invalid_params', 'The choice is one of the question\'s answers')
+      break
     case 'bots.permissions.revoke':
       if (!text(p.permissionId, 4096)) throw new DomainRpcError('invalid_params', 'A permission id is required')
       break
@@ -213,6 +220,7 @@ async function handle(method: BotsPersonalV2Method, p: Params, bots: BotChatServ
     case 'bots.chat.markRead': return bots.markRead(botId, p.seq as number)
     case 'bots.chat.react': return bots.react(botId, p.messageId as string, p.emoji as string | null)
     case 'bots.asks.answer': return bots.answer(botId, p.askId as string, p.answer as 'allow' | 'not_now')
+    case 'bots.questions.answer': return bots.answerQuestion({ botId, questionId: p.questionId as string, choice: p.choice as string, clientRequestId: p.clientRequestId as string })
     case 'bots.permissions.revoke': return bots.revokePermission(botId, p.permissionId as string)
     case 'bots.schedules.add': return bots.addSchedule(botId, p.when as BotSchedule['when'], p.prompt as string, typeof p.model === 'string' ? p.model : undefined)
     case 'bots.model.get': return bots.modelGet(botId)

@@ -44,10 +44,18 @@ export function workSignalsOf(message: BotChatMessage): { titles: string[]; queu
   return { titles: starts.map(workTitle), queued: starts.length > 0 && starts.every((chip) => chip.text === 'will start'), noted, only, details }
 }
 
-/** One row of the transcript: a message, or a quiet centred line between messages. */
+/**
+ * One row of the transcript: a message, or a quiet centred line between messages. `of`: the message a line stands in
+ * for (an answer the owner tapped), so a reply to it, or a quote of it, finds it there.
+ */
 export type BotChatRow =
   | { kind: 'message'; message: BotChatMessage }
-  | { kind: 'system'; id: string; at: string; text: string; title?: string }
+  | { kind: 'system'; id: string; at: string; text: string; title?: string; of?: string }
+
+/** The quiet line an answer the owner tapped leaves in place of their bubble: "You answered “Flat B”". */
+export function tappedAnswerLine(label: string): string {
+  return `You answered “${label}”`
+}
 
 /** What a bot's handling left on an owner's message: a 👍 for work it started, "Noted" for a note; `title`: its hover text. */
 export interface OwnerMarks { reaction?: string; passedOn?: boolean; title?: string }
@@ -68,7 +76,8 @@ export function askAnsweredLine(botName: string, ask: Pick<BotAskCard, 'title' |
 
 /**
  * The transcript's rows: each message, with the work a reply started as its own quiet line before it (the reply's
- * bubble left out when it said nothing more), and each answered ask followed by its line. `marks` holds what replies
+ * bubble left out when it said nothing more), each answered ask followed by its line, and each answer the owner tapped
+ * to a question as a quiet line where their bubble would be (its hover text the question). `marks` holds what replies
  * left on the owner's messages: the 👍 of started work and "Noted" of a note, on the message the reply answers, else the
  * owner's last message before it. A line's and a mark's hover text is the reply's words when its bubble was left out, and
  * the chips' own hover text (the model of the work, the job a note is for), so nothing a chip said is lost.
@@ -79,6 +88,12 @@ export function chatRows(messages: readonly BotChatMessage[], botName: string, a
   let lastOwner: string | undefined
   for (const message of messages) {
     if (message.author === 'owner') lastOwner = message.id
+    // A tapped answer is the bot's own label, so it reads as a quiet line, as an answered ask does.
+    if (message.author === 'owner' && message.answers?.tapped) {
+      const question = message.replyTo && !message.replyTo.gone ? message.replyTo.text : ''
+      rows.push({ kind: 'system', id: `${message.id}:answered`, at: message.at, text: tappedAnswerLine(message.text), of: message.id, ...(question ? { title: question } : {}) })
+      continue
+    }
     const signals = workSignalsOf(message)
     if (signals) {
       const target = message.replyTo?.author === 'owner' ? message.replyTo.id : lastOwner
