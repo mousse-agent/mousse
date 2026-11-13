@@ -238,11 +238,14 @@ const BotMessage = memo(function BotMessage({ bot, message, onAction, browser, q
           <BubbleTime message={message} />
         </div>
       </div>
-      {/* As beside a thread's reply: read it aloud, copy it as written, reply to it. */}
-      <span className="bot-message-actions">
-        {message.text && <ReadAloudButton speechKey={`bot:${message.id}`} markdown={message.text} />}
-        {message.text && <CopyButton text={message.text} />}
-        <ReplyButton onReply={() => onReply(message)} />
+      {/* As beside a thread's reply: read it aloud, copy it as written, reply to it. Anchored to the bubble's lower
+          right edge and taking no width of its own, so the bubble is as wide with them as without. */}
+      <span className="bot-message-tools">
+        <span className="bot-message-actions">
+          {message.text && <ReadAloudButton speechKey={`bot:${message.id}`} markdown={message.text} />}
+          {message.text && <CopyButton text={message.text} />}
+          <ReplyButton onReply={() => onReply(message)} />
+        </span>
       </span>
     </div>
     {!!message.applets?.length && <BotMessageApplets botId={bot.id} applets={message.applets} onOpen={onApplet} />}

@@ -3,7 +3,7 @@
  * written, and what each chip reads.
  */
 import { describe, expect, it } from 'vitest'
-import { botFileHref, botPathLabel, linkBotPaths } from '../../src/renderer/components/bots/botPaths'
+import { botFileHref, botPathLabel, joinCodeToPunctuation, linkBotPaths } from '../../src/renderer/components/bots/botPaths'
 
 const FILES = 'C:\\Users\\me\\.mousse\\profiles\\d9d018ad-5de0\\bots\\files\\bot-8f8f'
 const link = (path: string, name = path.split(/[\\/]/).at(-1)!) => `[${name}](${botFileHref(path)})`
@@ -43,5 +43,20 @@ describe('botPathLabel', () => {
     expect(botPathLabel(`${FILES}\\attachments\\2026-11-13\\notes.md`, 'bot-8f8f')).toBe('attachments/2026-11-13/notes.md')
     expect(botPathLabel(`${FILES}\\notes.md`, 'another-bot')).toBe('notes.md')
     expect(botPathLabel('/home/me/Desktop/shot.png', 'bot-8f8f')).toBe('shot.png')
+  })
+})
+
+describe('joinCodeToPunctuation', () => {
+  const J = '⁠'
+  // [what, the bot wrote, what the chat reads]
+  const rows: Array<[string, string, string]> = [
+    ['a colon after code', 'Saved in `ssd-shortlist.md`: run it.', `Saved in \`ssd-shortlist.md\`${J}: run it.`],
+    ['a full stop and a closing bracket', 'Run `npm test`. (or `npm t`)', `Run \`npm test\`${J}. (or \`npm t\`${J})`],
+    ['a space after code is left alone', 'Run `npm test` now', 'Run `npm test` now'],
+    ['fenced code is left as written', '```\n`a`: b\n```', '```\n`a`: b\n```'],
+    ['text without code is left alone', 'Plain: text.', 'Plain: text.']
+  ]
+  it.each(rows)('%s', (_what, written, read) => {
+    expect(joinCodeToPunctuation(written)).toBe(read)
   })
 })

@@ -89,6 +89,33 @@ function linkLine(line: string): string {
   return out + linkProse(line.slice(at))
 }
 
+/** A code span, and the punctuation right after it. */
+const CODE_THEN_PUNCTUATION = /(`[^`\n]+`)(?=[.,;:!?)\]}'"])/g
+/** WORD JOINER: no line break on either side of it. */
+const WORD_JOINER = '⁠'
+
+/**
+ * The punctuation right after inline code stays on its line ("`ssd-shortlist.md`:" never leaves the colon alone on the
+ * next line): a word joiner goes between them, outside fenced and indented code.
+ */
+export function joinCodeToPunctuation(markdown: string): string {
+  if (!markdown.includes('`')) return markdown
+  let fence: string | null = null
+  return markdown.split('\n').map((line) => {
+    const marker = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1]
+    if (fence) {
+      if (marker && marker[0] === fence[0] && marker.length >= fence.length && !line.trim().slice(marker.length).trim()) fence = null
+      return line
+    }
+    if (marker) {
+      fence = marker
+      return line
+    }
+    if (/^(?: {4}|\t)/.test(line) && !/^\s*(?:[-*+]|\d+[.)])\s/.test(line)) return line
+    return line.replace(CODE_THEN_PUNCTUATION, `$1${WORD_JOINER}`)
+  }).join('\n')
+}
+
 /** A bot message's Markdown with each path in its prose made a file link, ready for the chat's Markdown. */
 export function linkBotPaths(markdown: string): string {
   if (!/[\\/]/.test(markdown)) return markdown

@@ -60,9 +60,9 @@ function PictureMenu({ at, onOpen, onClose }: { at: MenuAt; onOpen(): void; onCl
   }, [onClose])
   const path = at.image.path
   const pick = (action: () => void) => () => { onClose(); action() }
-  // Kept on screen: the menu is about 180 by 150.
-  const left = Math.min(at.x, window.innerWidth - 196)
-  const top = Math.min(at.y, window.innerHeight - 166)
+  // A little off the pointer, and kept 8px inside the window: the menu is about 180 by 150.
+  const left = Math.max(8, Math.min(at.x + 4, window.innerWidth - 188 - 8))
+  const top = Math.max(8, Math.min(at.y + 4, window.innerHeight - 158 - 8))
   return <FloatingPortal>
     <div ref={panel} className="row-menu bot-picture-menu" role="menu" aria-label={`Actions for ${at.image.name}`} style={{ position: 'fixed', left, top, zIndex: 60 }}>
       <button type="button" role="menuitem" className="row-menu-item" onClick={pick(onOpen)}>Open</button>
@@ -109,10 +109,20 @@ function Carousel({ images, children }: { images: readonly ReplyImage[]; childre
   const track = useRef<HTMLDivElement>(null)
   const [index, setIndex] = useState(0)
   const [overflows, setOverflows] = useState(false)
+  // Which edges have more pictures past them: those fade out, rather than cut a picture hard.
+  const [more, setMore] = useState({ before: false, after: false })
+  const edges = useCallback(() => {
+    const element = track.current
+    if (!element) return
+    const before = element.scrollLeft > 2
+    const after = element.scrollLeft + element.clientWidth < element.scrollWidth - 2
+    setMore((was) => (was.before === before && was.after === after ? was : { before, after }))
+  }, [])
   const measure = useCallback(() => {
     const element = track.current
     if (element) setOverflows(element.scrollWidth > element.clientWidth + 1)
-  }, [])
+    edges()
+  }, [edges])
   useLayoutEffect(() => {
     measure()
     const element = track.current
@@ -140,16 +150,21 @@ function Carousel({ images, children }: { images: readonly ReplyImage[]; childre
     let nearest = 0
     all.forEach((slide, at) => { if (Math.abs(slide.offsetLeft - element.scrollLeft) < Math.abs(all[nearest]!.offsetLeft - element.scrollLeft)) nearest = at })
     setIndex(nearest)
+    edges()
   }
   const keys = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.target !== event.currentTarget || (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight')) return
     event.preventDefault()
     go(index + (event.key === 'ArrowRight' ? 1 : -1))
   }
+  const fades = `${overflows && more.before ? ' fades-before' : ''}${overflows && more.after ? ' fades-after' : ''}`
   return <div className={`bot-carousel${overflows ? ' is-overflowing' : ''}`} role="group" aria-roledescription="carousel" aria-label={`${images.length} pictures`} tabIndex={0} onKeyDown={keys}>
-    <div className="bot-carousel-track" ref={track} onScroll={scrolled}>{children}</div>
-    {overflows && index > 0 && <button type="button" className="bot-carousel-arrow is-previous" aria-label="Previous picture" tabIndex={-1} onClick={() => go(index - 1)}><ChevronLeft size={16} aria-hidden /></button>}
-    {overflows && index < images.length - 1 && <button type="button" className="bot-carousel-arrow is-next" aria-label="Next picture" tabIndex={-1} onClick={() => go(index + 1)}><ChevronRight size={16} aria-hidden /></button>}
+    <div className={`bot-carousel-strip${fades}`}>
+      <div className="bot-carousel-track" ref={track} onScroll={scrolled}>{children}</div>
+      {overflows && index > 0 && <button type="button" className="bot-carousel-arrow is-previous" aria-label="Previous picture" tabIndex={-1} onClick={() => go(index - 1)}><ChevronLeft size={16} aria-hidden /></button>}
+      {overflows && index < images.length - 1 && <button type="button" className="bot-carousel-arrow is-next" aria-label="Next picture" tabIndex={-1} onClick={() => go(index + 1)}><ChevronRight size={16} aria-hidden /></button>}
+    </div>
+    {/* Under the strip, never on a picture. */}
     {overflows && <span className="bot-carousel-count" aria-live="polite">{index + 1}/{images.length}</span>}
   </div>
 }

@@ -1,5 +1,5 @@
 import { Fragment, memo, useEffect, useRef, useState, type ReactNode } from 'react'
-import { Activity, AppWindow, Brain, ChevronDown, Clock, FileText, Globe, Pause, Pencil, Search, TerminalSquare, X } from '../../lib/icons'
+import { Activity, AppWindow, Brain, ChevronDown, Clock, FileText, Globe, Moon, Pencil, Search, TerminalSquare, X } from '../../lib/icons'
 import type { BotChip, BotSummary, BotWorkItem } from '../../../shared/bots/personal/chat'
 import { useBotsStore } from '../../stores/botsStore'
 import { presenceOf, stickerOf, type BotStickerKind } from './botChatShape'
@@ -53,7 +53,7 @@ const STICKER_ICONS: Record<BotStickerKind, { icon: typeof Pencil; label: string
   schedule: { icon: Clock, label: 'Setting a schedule' },
   memory: { icon: Brain, label: 'Remembering' },
   working: { icon: Activity, label: 'Working' },
-  paused: { icon: Pause, label: 'Paused' }
+  paused: { icon: Moon, label: 'Paused' }
 }
 
 /**

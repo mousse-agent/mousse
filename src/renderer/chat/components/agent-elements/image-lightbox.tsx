@@ -174,7 +174,7 @@ export function ImageLightbox({
   // (always on touch screens, which have no hover). The looks sit on an inner span, as the app's base
   // button style would win over them on the button itself.
   const edge =
-    "group/edge absolute top-16 bottom-16 z-10 flex w-20 items-center justify-center outline-none";
+    "image-preview-edge group/edge absolute top-16 bottom-16 z-10 flex w-20 items-center justify-center outline-none";
   const arrow =
     "inline-flex size-10 items-center justify-center rounded-full bg-white/10 text-white/80 opacity-0 transition-[opacity,background-color] group-hover/edge:opacity-100 group-hover/edge:bg-white/20 group-hover/edge:text-white group-focus-visible/edge:opacity-100 group-focus-visible/edge:bg-white/25 group-focus-visible/edge:text-white [@media(hover:none)]:opacity-100";
 

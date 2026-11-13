@@ -7,7 +7,7 @@ import { classifyLink, routeLink } from '../../utils/chatLinks'
 import { fileLocation, isAbsolutePath } from '../../utils/filesBrowse'
 import { parseMousseFileLink } from '../../../shared/chatReferences'
 import { BotMarkdownImage, useFileImage } from './BotImages'
-import { botPathLabel, linkBotPaths, pathName } from './botPaths'
+import { botPathLabel, joinCodeToPunctuation, linkBotPaths, pathName } from './botPaths'
 import { isKeyValueList } from './botChatShape'
 import { MathInline } from '../../markdown/math/MathView'
 import { readMathClass } from '../../markdown/math/math-markup'
@@ -128,7 +128,7 @@ const botMarkdownComponents: Partial<Components> = {
 
 /** A bot message's text, drawn as a thread's reply is (headings, lists, tables, code), with its paths as chips. */
 export function BotMarkdown({ text, className }: { text: string; className?: string }) {
-  return <Markdown content={linkBotPaths(text)} className={className} images={BOT_IMAGES} components={botMarkdownComponents} />
+  return <Markdown content={joinCodeToPunctuation(linkBotPaths(text))} className={className} images={BOT_IMAGES} components={botMarkdownComponents} />
 }
 
 /** The language a file's code block is highlighted as, from its name. */
