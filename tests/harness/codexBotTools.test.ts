@@ -107,7 +107,8 @@ for (const BINARY of BINARIES) describe.skipIf(!BINARY)(`what Codex ${BINARY ? v
     const named = execFileSync(BINARY!, ['features', 'list'], { encoding: 'utf8', env: { ...process.env, CODEX_HOME: codexHome } })
       .split('\n').map((line) => line.trim().split(/\s+/)[0]!).filter((name) => /^[a-z0-9_]+$/.test(name))
     expect(named.length).toBeGreaterThan(50)
-    const features = [...new Set([...named, ...CODEX_BOT_FEATURES_OFF])]
+    // `rollout_budget` won't load without settings whose form isn't documented; it is switched off for bots instead.
+    const features = [...new Set([...named, ...CODEX_BOT_FEATURES_OFF])].filter((name) => name !== 'rollout_budget')
     writeFileSync(join(codexHome, 'config.toml'), [
       'model_provider = "probe"',
       'sandbox_mode = "danger-full-access"',

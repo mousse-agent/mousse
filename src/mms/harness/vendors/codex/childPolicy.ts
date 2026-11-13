@@ -169,7 +169,8 @@ export const CODEX_BOT_FEATURES_OFF: readonly string[] = [
   'goals',
   'sleep_tool',
   'tool_suggest',
-  'skill_search'
+  'skill_search',
+  'rollout_budget'
 ]
 
 /**
