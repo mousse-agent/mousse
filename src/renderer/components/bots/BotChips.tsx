@@ -1,6 +1,13 @@
 import { AlertTriangle, Brain, Clock, FileText, Globe, Pencil, Search, Shield, Sparkles, UserCircle } from '../../lib/icons'
 import type { BotChip, BotChipIcon } from '../../../shared/bots/personal/chat'
 import { selectThread } from '../../lib/threadActions'
+import { useAppStore } from '../../stores/appStore'
+
+/** Shows a thread the bot started, messaged or stopped, with its project's threads in the sidebar. */
+function openThread(threadId: string): void {
+  useAppStore.getState().setThreadsSidebarView('projects')
+  void selectThread(threadId).catch(() => undefined)
+}
 
 const CHIP_ICONS: Record<BotChipIcon, typeof Search> = {
   search: Search,
@@ -24,7 +31,7 @@ export function BotChipView({ chip }: { chip: BotChip }) {
   const thread = chip.thread
   return <span className={`bot-chip${chip.live ? ' is-live' : ''}`}>
     <Icon size={13} aria-hidden />{chip.text}{chip.highlight && <>{thread ? ' · ' : ' '}<b>{chip.highlight}</b></>}
-    {thread && <button type="button" className="bot-chip-open" title="Open this thread" onClick={() => void selectThread(thread).catch(() => undefined)}>Open</button>}
+    {thread && <button type="button" className="bot-chip-open" title="Open this thread" onClick={() => openThread(thread)}>Open</button>}
   </span>
 }
 

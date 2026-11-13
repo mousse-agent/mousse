@@ -55,8 +55,11 @@ describe('a bot\'s threads, as the owner sees them', () => {
     expect(host.textContent).toContain('started thread · Fix the login page')
     const open = [...host.querySelectorAll('button')].filter((button) => button.textContent === 'Open')
     expect(open).toHaveLength(2)
+    useAppStore.setState({ threadsSidebarView: 'chats' })
     await act(async () => { open[0]!.click() })
     expect(select).toHaveBeenCalledWith('t-new')
+    // The sidebar shows the projects, where the thread is listed.
+    expect(useAppStore.getState().threadsSidebarView).toBe('projects')
   })
 
   it('above a thread a bot started: "Started by" and the bot\'s name, which opens its chat; nothing above any other thread', () => {
