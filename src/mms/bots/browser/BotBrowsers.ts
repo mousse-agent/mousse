@@ -8,6 +8,7 @@ import type { BrowserAutomationTool, BrowserToolContext, BrowserToolOutput } fro
 import type { BrowserRuntimePort } from '../../../shared/browser/runtime'
 import type { BrowserSetupStatus } from '../../../shared/browser/setup'
 import type { BrowserSessionRecord, BrowserTab, BrowserViewerUpdate } from '../../../shared/browser/types'
+import type { BrowserNavigation, BrowserProblem } from '../../../shared/browser/navigation'
 import type { ExecutionContext, ExecutionPolicySnapshot } from '../../../shared/execution/types'
 import { BrowserAutomationError } from '../../browser/automation/BrowserSessionManager'
 import type { MmsBrowserService } from '../../browser/MmsBrowserService'
@@ -101,7 +102,7 @@ interface Viewer extends BotBrowserViewer {
   lastPictureAt: number
   timer?: { clear(): void }
   /** What it was last sent, so only changes go. */
-  sent: { viewport?: string; tab?: string; cursorAt?: number | null; behind?: boolean; stalled?: boolean }
+  sent: { viewport?: string; tab?: string; cursorAt?: number | null; behind?: boolean; stalled?: boolean; loading?: boolean; problem?: string }
   /** Updates its connection refused one after another as busy. */
   busy: number
   release?: () => void
@@ -143,6 +144,17 @@ interface BotBrowserState {
   tab?: { url: string; title: string }
   cursor?: BrowserAgentCursor
   behind?: boolean
+  loading?: boolean
+  /** What the view shows: the followed tab's problem, else the bot's last. */
+  problem?: BrowserProblem
+  /** The followed tab's own (from the worker). */
+  tabProblem?: BrowserProblem
+  /** What the bot's last page ran into, wherever it was. */
+  botProblem?: BrowserProblem
+  /** The followed tab, its address and its page (document) when that was noted. */
+  botProblemAt?: { tab?: string; url?: string; page?: string }
+  /** The followed tab's page (its main document) as the worker last told it. */
+  page?: string
   /** Why pictures cannot reach the views now (the followed tab closed, the worker does not answer), until they can again. */
   stalled?: string
   /** When a picture was last taken for `view` (an older app asks each time). */
@@ -428,6 +440,8 @@ export class BotBrowsers implements BotBrowserHost {
       ...(frame && (options.frame || options.last || !open) ? { frame } : {}),
       ...(open && state.cursor && agentCursorLive(state.cursor, this.now()) ? { cursor: state.cursor } : {}),
       ...(open && state.behind ? { behind: true } : {}),
+      ...(open && state.loading ? { loading: true } : {}),
+      ...(open && state.problem ? { problem: { ...state.problem } } : {}),
       ...(open && state.stalled ? { stalled: state.stalled } : {}),
       ...(!open && this.stopped(state) ? { stopped: true as const } : {}),
       ...(this.installing && !open ? { setup: { ...this.installing } } : {})
@@ -510,12 +524,19 @@ export class BotBrowsers implements BotBrowserHost {
     const tabId = state.follow
     const gone = (): BrowserAutomationError => new BrowserAutomationError({ code: 'stale_ref', message: 'The tab you took over has closed. Give the browser back, then take it over again.' })
     if (!tabId && this.held(state)) throw gone()
-    await state.turns.run(
-      (held) => this.ownerCall(state, (context) => this.service().sessions.humanInput(context, { sessionId, input, ...(tabId ? { tabId } : {}) }), held),
-      { first: true, waitMs: OWNER_INPUT_WAIT_MS, busy: ownerInputBusy, ...(tabId ? { tab: tabId } : {}) }
-    ).catch((error: unknown) => {
+    const navigates = input.kind === 'navigate' || input.kind === 'back' || input.kind === 'forward' || input.kind === 'reload'
+    try {
+      const { navigation } = await state.turns.run(
+        (held) => this.ownerCall(state, (context) => this.service().sessions.humanInput(context, { sessionId, input, ...(tabId ? { tabId } : {}) }), held),
+        { first: true, waitMs: OWNER_INPUT_WAIT_MS, busy: ownerInputBusy, ...(tabId ? { tab: tabId } : {}) }
+      )
+      // The owner's own page replaces what the bot's last page ran into.
+      if (navigates) this.noteBotProblem(state, navigation?.problem)
+    } catch (error) {
+      const problem = error instanceof BrowserAutomationError ? error.details?.problem as BrowserProblem | undefined : undefined
+      if (navigates && problem) this.noteBotProblem(state, problem)
       throw error instanceof BrowserAutomationError && error.code === 'stale_ref' ? gone() : error
-    })
+    }
     return this.viewAfterChange(state)
   }
 
@@ -589,33 +610,44 @@ export class BotBrowsers implements BotBrowserHost {
     state.idle?.clear()
     state.idle = undefined
     // While the owner holds the browser the bot reads it, and acts, opens or loads nothing.
-    if (actsOrLoads(name, params) && this.held(state)) throw ownerHolds()
+    const opens = actsOrLoads(name, params)
+    if (opens && this.held(state)) throw ownerHolds()
+    // A page the bot could not open (in a tab that closed again, too): its owner's view says so.
+    // Only the run the view follows: another run's page never shows over its tab.
+    const noted = (error: unknown): never => {
+      const problem = error instanceof BrowserAutomationError ? error.details?.problem as BrowserProblem | undefined : undefined
+      if (opens && problem && this.isFollowed(state, activation)) this.noteBotProblem(state, problem)
+      throw error
+    }
     // Opening the session (and a first use's install) is shared and needs no turn: the open is made once.
     const url = name === 'browser_open' && typeof params.url === 'string' ? params.url : undefined
-    const opened = name === 'browser_open' ? await this.ensureSession(state, context, url) : undefined
+    const opened = name === 'browser_open' ? await this.ensureSession(state, context, url).catch(noted) : undefined
     // Each call drives the browser on its own, in its turn: another activation's call never pulls its tab away mid-way.
     const tab = typeof params.tabId === 'string' ? params.tabId : activation.current
     return state.turns.run(async (held) => {
       if (activation.ended || turnSignal.aborted) throw new BrowserAutomationError({ code: 'cancelled', message: 'This run of the bot has ended.' })
-      return this.dispatchInTurn(state, activation, { ...context, signal: AbortSignal.any([context.signal ?? turnSignal, held]) }, name, params, opened, url)
+      return this.dispatchInTurn(state, activation, { ...context, signal: AbortSignal.any([context.signal ?? turnSignal, held]) }, name, params, opened, url).catch(noted)
     }, { signal: context.signal ?? turnSignal, ...(tab ? { tab } : {}) })
   }
 
   /** One of the bot's tool calls, while it holds the browser (`BrowserTurns`). */
   private async dispatchInTurn(state: BotBrowserState, activation: ActivationTabs, context: BrowserToolContext, name: BrowserAutomationTool, params: Record<string, unknown>, opened: OpenedSession | undefined, url: string | undefined): Promise<BrowserToolOutput> {
     let result: BrowserToolOutput
+    const opens = actsOrLoads(name, params)
     // Checked again in the call's turn: the owner may have taken the browser over while it waited.
-    if (actsOrLoads(name, params) && this.held(state)) throw ownerHolds()
+    if (opens && this.held(state)) throw ownerHolds()
     if (opened) {
       const open = async (session: OpenedSession): Promise<BrowserToolOutput> => {
         let tabId: string | undefined
+        // How the page went (a slow or failed page leaves the browser open).
+        let navigation = session.opened?.navigation
         if (session.opened) tabId = session.opened.observation?.tabId
-        else if (url || !activation.current) tabId = await this.newTab(context, session.sessionId, url)
+        else if (url || !activation.current) ({ tabId, navigation } = await this.newTab(context, session.sessionId, url))
         else tabId = activation.current
         if (tabId) this.useTab(state, activation, tabId)
         const observed = await this.invoke(context, 'browser_observe', { sessionId: session.sessionId, ...(tabId ? { tabId } : {}) })
         const record = this.record(state)
-        return { ...observed, ...(record ? { session: record, capabilities: record.capabilities } : {}) }
+        return { ...observed, ...(record ? { session: record, capabilities: record.capabilities } : {}), ...(navigation ? { navigation } : {}) }
       }
       // The browser stopped by itself since its last use (nothing was done in it): it starts again, once.
       result = await open(opened).catch(async (error: unknown) => {
@@ -637,6 +669,8 @@ export class BotBrowsers implements BotBrowserHost {
         result = await this.invoke(context, name, params)
       }
     }
+    const navigation = result.navigation ?? result.action?.navigation
+    if (opens && navigation && this.isFollowed(state, activation)) this.noteBotProblem(state, navigation.problem)
     const tabId = result.observation?.tabId ?? result.action?.observation?.tabId
     if (tabId && activation.tabs.has(tabId)) this.useTab(state, activation, tabId)
     return result
@@ -644,9 +678,11 @@ export class BotBrowsers implements BotBrowserHost {
 
   private async tabs(state: BotBrowserState, activation: ActivationTabs, context: BrowserToolContext, sessionId: string, params: Record<string, unknown>): Promise<BrowserToolOutput> {
     const operation = params.operation ?? 'list'
+    let navigation: BrowserNavigation | undefined
     if (operation === 'new') {
-      const tabId = await this.newTab(context, sessionId, typeof params.url === 'string' ? params.url : undefined)
-      if (tabId) this.useTab(state, activation, tabId)
+      const made = await this.newTab(context, sessionId, typeof params.url === 'string' ? params.url : undefined)
+      navigation = made.navigation
+      if (made.tabId) this.useTab(state, activation, made.tabId)
     } else if (operation === 'switch' || operation === 'close') {
       if (typeof params.tabId !== 'string' || !activation.tabs.has(params.tabId))
         throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'That tab belongs to another of your runs.' })
@@ -661,7 +697,7 @@ export class BotBrowsers implements BotBrowserHost {
     } else if (operation !== 'list') throw new BrowserAutomationError({ code: 'invalid_action', message: 'Invalid browser operation' })
     // Every operation answers with this activation's own tabs.
     const listed = await this.invoke(context, 'browser_tabs', { sessionId, operation: 'list' })
-    return { tabs: (listed.tabs ?? []).filter((tab: BrowserTab) => activation.tabs.has(tab.id)) }
+    return { tabs: (listed.tabs ?? []).filter((tab: BrowserTab) => activation.tabs.has(tab.id)), ...(navigation ? { navigation } : {}) }
   }
 
   private useTab(state: BotBrowserState, activation: ActivationTabs, tabId: string): void {
@@ -702,14 +738,23 @@ export class BotBrowsers implements BotBrowserHost {
     if (followed?.current) this.followTab(state, followed.current)
   }
 
+  /** The view follows this activation's tab, or none yet. */
+  private isFollowed(state: BotBrowserState, activation: ActivationTabs): boolean {
+    return !state.followed || state.activations.get(state.followed) === activation
+  }
+
   /** The owner holds the bot's browser (Take over, or opened for them). */
   private held(state: BotBrowserState): boolean {
     return this.record(state)?.lifecycle === 'human-controlled'
   }
 
-  /** A new tab in the bot's session: the one the browser opened for this call, whatever other activations opened meanwhile. */
-  private async newTab(context: BrowserToolContext, sessionId: string, url: string | undefined): Promise<string | undefined> {
-    return (await this.invoke(context, 'browser_tabs', { sessionId, operation: 'new', ...(url ? { url } : {}) })).tab?.id
+  /**
+   * A new tab in the bot's session: the one the browser opened for this call, whatever other
+   * activations opened meanwhile, and how its page went.
+   */
+  private async newTab(context: BrowserToolContext, sessionId: string, url: string | undefined): Promise<{ tabId?: string; navigation?: BrowserNavigation }> {
+    const made = await this.invoke(context, 'browser_tabs', { sessionId, operation: 'new', ...(url ? { url } : {}) })
+    return { ...(made.tab?.id ? { tabId: made.tab.id } : {}), ...(made.navigation ? { navigation: made.navigation } : {}) }
   }
 
   private async invoke(context: BrowserToolContext, name: BrowserAutomationTool, args: Record<string, unknown>): Promise<BrowserToolOutput> {
@@ -935,8 +980,23 @@ export class BotBrowsers implements BotBrowserHost {
     else if (state.picture) state.picture = { ...state.picture, viewport: update.viewport }
     state.pictureTab = update.tabId
     state.tab = { url: update.url, title: update.title }
+    state.page = update.page
     state.cursor = update.cursor
     state.behind = update.behind
+    state.loading = update.loading === true
+    state.tabProblem = update.problem
+    // What the bot's last page ran into (in a tab that closed again) holds only until the followed tab
+    // moves on: another tab, another address, or another page at the same address (the bot or the owner
+    // carried on, or the page replaced itself: a redirect or reload once a check was passed).
+    const at = state.botProblemAt
+    const moved = (at?.tab !== undefined && at.tab !== update.tabId) || (at?.url !== undefined && at.url !== update.url) || (at?.page !== undefined && update.page !== undefined && at.page !== update.page)
+    if (state.botProblem && at && moved) {
+      state.botProblem = undefined
+      state.botProblemAt = undefined
+    }
+    // The followed tab's own problem, else what the bot's last page ran into.
+    state.problem = update.problem ?? state.botProblem
+    const problem = JSON.stringify(state.problem ?? null)
     const cursor = update.cursor && agentCursorLive(update.cursor, now) ? update.cursor : null
     for (const viewer of state.viewers.values()) {
       const next: NonNullable<Viewer['slot']> = { ...viewer.slot }
@@ -946,7 +1006,26 @@ export class BotBrowsers implements BotBrowserHost {
       if (viewer.sent.tab !== JSON.stringify(state.tab)) next.tab = { ...state.tab }
       if ((viewer.sent.cursorAt ?? null) !== (cursor?.at ?? null)) next.cursor = cursor
       if (viewer.sent.behind !== update.behind) next.behind = update.behind
+      if ((viewer.sent.loading ?? false) !== (update.loading === true)) next.loading = update.loading === true
+      if ((viewer.sent.problem ?? 'null') !== problem) next.problem = state.problem ?? null
       viewer.slot = next
+      this.deliver(state, viewer)
+    }
+  }
+
+  /**
+   * What the bot's last page ran into, or nothing once a page went well: shown to its owner even
+   * when it was in a tab that closed again (a tab opened on an address nothing answers on).
+   */
+  private noteBotProblem(state: BotBrowserState, problem: BrowserProblem | undefined): void {
+    state.botProblem = problem
+    // It stands while the view stays on the same tab at the same address; once that moves on, the tab's own state is shown.
+    state.botProblemAt = problem ? { ...(state.follow ? { tab: state.follow } : {}), ...(state.tab ? { url: state.tab.url } : {}), ...(state.page ? { page: state.page } : {}) } : undefined
+    const shown = state.tabProblem ?? problem
+    if (JSON.stringify(shown ?? null) === JSON.stringify(state.problem ?? null)) return
+    state.problem = shown
+    for (const viewer of state.viewers.values()) {
+      viewer.slot = { ...viewer.slot, problem: shown ?? null }
       this.deliver(state, viewer)
     }
   }
@@ -986,6 +1065,8 @@ export class BotBrowsers implements BotBrowserHost {
     if (send.tab) viewer.sent.tab = JSON.stringify(send.tab)
     if (send.cursor !== undefined) viewer.sent.cursorAt = send.cursor?.at ?? null
     if (send.behind !== undefined) viewer.sent.behind = send.behind
+    if (send.loading !== undefined) viewer.sent.loading = send.loading
+    if (send.problem !== undefined) viewer.sent.problem = JSON.stringify(send.problem)
     if (send.live) viewer.sent.stalled = false
     if (send.stalled) viewer.sent.stalled = true
     viewer.delivering = true

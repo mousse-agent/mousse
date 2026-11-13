@@ -7,11 +7,18 @@ import {
   type BrowserToolDescriptor
 } from '../../../shared/browser/automation'
 
+/**
+ * How every browser tool reports a page that loads, for the model: done once it committed and its
+ * document is ready, still loading is no failure, and the problem classes not to retry.
+ */
+export const BROWSER_NAVIGATION_GUIDE =
+  'When a result has a navigation field (the managed browser gives one), it says how the page went. state "loading" means it is still loading, which is not a failure: carry on, or browser_wait for {"type":"document-ready"}. A page that opened is never a failure because of what is on it: its note says what it shows that you may deal with (a sign-in form, a cookie banner, a human check that is part of the page, a page not found or a server error). A page that fails comes back as site_unreachable (check the address; try again later at most once), site_blocked (the site refused this browser and shows nothing a person could get past: don\'t retry it), needs_person (a human check or consent wall covers the page, whatever status the site answered with: a person can get past it, so don\'t retry it or get around it, ask the person; or a sign-in the browser can\'t show), browser_refused (an unsafe port, the browser\'s own rules, or a certificate it does not trust: never get around it), or browser_cannot_start, each with what to do next. The browser session stays open whatever a page did.'
+
 export const BROWSER_TOOL_DESCRIPTORS: readonly BrowserToolDescriptor[] = [
   {
     name: 'browser_open',
     description:
-      'Open a session on the host-selected in-app tab or managed browser and return its initial observation. The host selects the backend and tab; do not pass backend, uiTabId, profile, or execution fields.',
+      `Open a session on the host-selected in-app tab or managed browser and return its initial observation. The host selects the backend and tab; do not pass backend, uiTabId, profile, or execution fields. ${BROWSER_NAVIGATION_GUIDE}`,
     capability: 'browser.session',
     vision: false,
     effect: 'external'
@@ -40,14 +47,14 @@ export const BROWSER_TOOL_DESCRIPTORS: readonly BrowserToolDescriptor[] = [
   {
     name: 'browser_act',
     description:
-      'Perform one browser action using the sessionId, tabId, generation, observationId and controlLeaseId from the latest observation. Copy element refs exactly. Example action: {"type":"fill","target":{"kind":"ref","ref":"el_123"},"text":"hello"}; then {"type":"key","key":"Enter"}. Target requires kind:"ref", not elementRef or a selector. Use the returned observation for the next action. Coordinate/image-point actions require a vision-capable host binding.',
+      'Perform one browser action using the sessionId, tabId, generation, observationId and controlLeaseId from the latest observation. Copy element refs exactly. Example action: {"type":"fill","target":{"kind":"ref","ref":"el_123"},"text":"hello"}; then {"type":"key","key":"Enter"}. Target requires kind:"ref", not elementRef or a selector. Use the returned observation for the next action. Coordinate/image-point actions require a vision-capable host binding. For navigate, back, forward and reload in the managed browser, the result has action.navigation (see browser_open): "loading" is still loading, not a failure, and its note says what the page shows.',
     capability: 'browser.action',
     vision: true,
     effect: 'external'
   },
   {
     name: 'browser_wait',
-    description: 'Wait for an explicit bounded browser condition.',
+    description: 'Wait for an explicit bounded browser condition. {"type":"document-ready"} waits until the page has finished loading where the browser can tell (the managed browser; an in-app tab answers at once). A page that never finishes loading can be used as it is.',
     capability: 'browser.observe',
     vision: false,
     effect: 'read'

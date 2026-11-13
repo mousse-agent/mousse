@@ -201,7 +201,9 @@ describe.skipIf(!chrome.ok)('managed Chromium lifecycle', () => {
     const second = await createInProcessBroker()
     const conflict = await second.broker.call(workerRequest('profile_lock', 'session.open', { persistent: true, workspaceId: 'ws_shared', url: `${origin}/form.html` }))
     expect(conflict.ok).toBe(false)
-    expect(conflict.error?.code).toBe('policy_denied')
+    // The second browser can't start while the first holds the profile: that class, with the cause.
+    expect(conflict.error?.code).toBe('browser_cannot_start')
+    expect(conflict.error?.details?.problem).toMatchObject({ kind: 'cannot-start', cause: expect.stringMatching(/profile/) })
     await second.broker.close()
     await first.broker.close()
   }, 120_000)

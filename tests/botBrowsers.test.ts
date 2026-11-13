@@ -17,6 +17,10 @@ import { ExecutionPolicyService } from '../src/mms/execution/ExecutionPolicyServ
 import { BROWSER_TURN_HOLD_MS, BotBrowsers, BrowserTurns, MAX_BROWSER_WAITERS, botBrowserWorkspace } from '../src/mms/bots/browser/BotBrowsers'
 import type { BotTurnBrowser } from '../src/mms/bots/activation/dispatcher'
 import { dispatchBrowserTool } from '../src/mms/orchestrator/browser/dispatch'
+import { snapshotBrowserExecutionBinding } from '../src/mms/orchestrator/browser/binding'
+import { browserToolCapability } from '../src/mms/orchestrator/browser/tools'
+import { BrowserAutomationError } from '../src/mms/browser/automation/BrowserSessionManager'
+import type { BrowserRuntimePort } from '../src/shared/browser/runtime'
 import { BROWSER_AUTOMATION_TOOLS, type BrowserToolContext } from '../src/shared/browser/automation'
 import type { BrowserObservation, BrowserSessionRecord } from '../src/shared/browser/types'
 import type { BotBrowserFrameEvent } from '../src/shared/bots/personal/browser'
@@ -694,5 +698,220 @@ describe.skipIf(!chrome.ok)('watching a bot\'s browser', () => {
     await sleep(1_500)
     expect(busy.events.length).toBe(count)
     expect(bots.watch(BOT_A, 'w-ninth', { width: 480, fps: 5, connectionId: 'c-ninth', emit: viewer().emit })).resolves.toBeDefined()
+  }, 60_000)
+})
+
+interface ModelNavigation { state: string; note?: string; problem?: string; reason?: string; next?: string }
+/** An address nothing answers on: a port that was free a moment ago (port 1 would be one Chromium refuses as unsafe). */
+async function closedAddress(): Promise<string> {
+  const { createServer } = await import('node:net')
+  const server = createServer()
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = (server.address() as { port: number }).port
+  await new Promise<void>((resolve) => server.close(() => resolve()))
+  return `http://127.0.0.1:${port}/`
+}
+/** A tool result the model reads (an error's text is the same JSON when the page failed). */
+const modelResult = (result: Parsed & { error?: string }) => (result.error?.startsWith('{') ? JSON.parse(result.error) : result) as Parsed & { navigation?: ModelNavigation; action?: { outcome: string; navigation?: ModelNavigation } }
+
+describe.skipIf(!chrome.ok)('a slow page is not a failed page', () => {
+  it('a page that commits and never finishes loading is still loading, and the browser stays open', async () => {
+    const { turn, call, origin } = await fixture()
+    const bot = turn(BOT_A, 'act-1')
+    const started = Date.now()
+    const opened = modelResult(await call(bot, 'browser_open', { url: `${origin}/never-loads.html` }))
+    // Done once the document is ready, not when every image has come.
+    expect(Date.now() - started).toBeLessThan(10_000)
+    expect(opened.error).toBeUndefined()
+    expect(opened.navigation).toMatchObject({ state: 'loading', note: expect.stringMatching(/not a failure/) })
+    expect(opened.session!.lifecycle).toBe('agent-controlled')
+    expect(opened.observation!.warnings).toContain('page-still-loading')
+    expect(opened.observation!.elements.some((element) => element.name?.includes('Ready, still loading'))).toBe(true)
+    // Waiting for it to finish loading waits, and says it did not.
+    expect((await call(bot, 'browser_wait', { tabId: opened.observation!.tabId, condition: { type: 'document-ready' }, timeoutMs: 800 })).error).toMatch(/timeout/)
+    // The browser goes on: the same session opens the next page.
+    const next = modelResult(await call(bot, 'browser_open', { url: `${origin}/nav-a.html` }))
+    expect(next.session!.id).toBe(opened.session!.id)
+    expect(next.observation!.warnings).not.toContain('page-still-loading')
+  }, 60_000)
+
+  it('a site that can\'t be reached, one that refuses the browser and one that needs a person come back in their class, and the browser stays open', async () => {
+    const { turn, call, origin } = await fixture()
+    const bot = turn(BOT_A, 'act-1')
+    const nowhere = await closedAddress()
+    // The first page fails: the session opens anyway, and the model reads the class and what to do next.
+    const unreachable = await call(bot, 'browser_open', { url: nowhere })
+    expect(unreachable.error).toBeDefined()
+    const failed = modelResult(unreachable)
+    expect(failed.session!.id).toBeTruthy()
+    expect(failed.navigation).toMatchObject({ state: 'failed', problem: 'site_unreachable', next: expect.stringMatching(/^Can't reach 127\.0\.0\.1 \(net::ERR_CONNECTION_REFUSED\)\. Check the address/) })
+    // It goes on in the same session.
+    const good = modelResult(await call(bot, 'browser_open', { url: `${origin}/nav-a.html` }))
+    expect(good.session!.id).toBe(failed.session!.id)
+    const page = good.observation!
+    const act = (url: string) => call(bot, 'browser_act', { tabId: page.tabId, generation: page.generation, observationId: page.observationId, controlLeaseId: good.session!.controlLeaseId, action: { type: 'navigate', url } })
+    expect((await act(nowhere)).error).toMatch(/^site_unreachable: Can't reach 127\.0\.0\.1 \(net::ERR_CONNECTION_REFUSED\)/)
+    // An unsafe port is the browser refusing the address itself, not the site.
+    const fresh = modelResult(await call(bot, 'browser_observe', { tabId: page.tabId })).observation!
+    const refused = await call(bot, 'browser_act', { tabId: fresh.tabId, generation: fresh.generation, observationId: fresh.observationId, controlLeaseId: good.session!.controlLeaseId, action: { type: 'navigate', url: 'http://127.0.0.1:6000/' } })
+    expect(refused.error).toMatch(/^browser_refused: This browser won't open that address: its port is one browsers refuse \(net::ERR_UNSAFE_PORT\)/)
+    // A sign-in page (401 with its form) opens: a note for the bot to ask its owner, never a failure.
+    const signIn = modelResult(await call(bot, 'browser_open', { url: `${origin}/sign-in.html` }))
+    expect(signIn.error).toBeUndefined()
+    expect(signIn.navigation).toMatchObject({ state: 'ready', shows: ['sign-in-form'], note: expect.stringMatching(/sign-in form\. You have no sign-in of your own: ask your owner to sign in here/) })
+    expect(JSON.stringify(signIn.navigation)).not.toMatch(/Don't retry/)
+    expect(modelResult(await call(bot, 'browser_tabs', { operation: 'list' })).tabs!.length).toBeGreaterThanOrEqual(2)
+  }, 60_000)
+
+  it('the owner\'s view shows the bot\'s new tab loading, and a page the bot could not open even in a tab that closed again', async () => {
+    const { bots, turn, call, origin } = await fixture()
+    const bot = turn(BOT_A, 'act-1')
+    expect((await call(bot, 'browser_open', { url: `${origin}/nav-a.html` })).error).toBeUndefined()
+    const view = viewer()
+    await bots.watch(BOT_A, 'w1', { width: 480, fps: 5, connectionId: 'c1', emit: view.emit })
+    await expect.poll(() => view.frames().length, { timeout: 5_000 }).toBeGreaterThan(0)
+    // A new tab on a page that never finishes loading: the view follows it, loading.
+    const opened = modelResult(await call(bot, 'browser_open', { url: `${origin}/never-loads.html` }))
+    expect(opened.navigation).toMatchObject({ state: 'loading' })
+    await expect.poll(() => view.events.some((event) => event.loading === true), { timeout: 5_000 }).toBe(true)
+    // A new tab on an address nothing answers on is closed again; the view still says what happened.
+    expect((await call(bot, 'browser_open', { url: await closedAddress() })).error).toMatch(/^site_unreachable/)
+    await expect.poll(() => view.events.some((event) => event.problem?.kind === 'unreachable'), { timeout: 5_000 }).toBe(true)
+    expect((await bots.view(BOT_A)).problem).toMatchObject({ kind: 'unreachable', code: 'net::ERR_CONNECTION_REFUSED' })
+    // A page that opens clears it.
+    expect((await call(bot, 'browser_open', { url: `${origin}/nav-b.html` })).error).toBeUndefined()
+    await expect.poll(() => view.events.at(-1) && (view.events.some((event, index) => index > 0 && event.problem === null)), { timeout: 5_000 }).toBe(true)
+    expect((await bots.view(BOT_A)).problem).toBeUndefined()
+    // So does the owner's own page, after the bot's failed one.
+    expect((await call(bot, 'browser_open', { url: await closedAddress() })).error).toMatch(/^site_unreachable/)
+    expect((await bots.view(BOT_A)).problem).toMatchObject({ kind: 'unreachable' })
+    await bots.control(BOT_A, 'owner')
+    await bots.input(BOT_A, { kind: 'navigate', url: `${origin}/nav-a.html` })
+    expect((await bots.view(BOT_A)).problem).toBeUndefined()
+    bots.unwatch(BOT_A, 'w1', 'c1')
+  }, 60_000)
+
+  it('a thread agent reads a local sign-in page as a form it may fill, and fills it; a bot is told to ask its owner', async () => {
+    const { browser, turn, call, origin } = await fixture()
+    // A thread's agent, as the orchestrator dispatches it (not a bot).
+    const policy = new ExecutionPolicyService().snapshot(profileId, { allowedTools: [...BROWSER_AUTOMATION_TOOLS], allowedCapabilities: [...new Set(BROWSER_AUTOMATION_TOOLS.map(browserToolCapability))], allowedEffects: ['read', 'external'], maxToolCalls: 50, maxElapsedMs: 60_000 })
+    const binding = snapshotBrowserExecutionBinding({ execution: { profileId, threadId: 'thread-1', turnId: 'turn-1', actor: { kind: 'main' }, source: 'gui', policySnapshotId: policy.id, cancellationId: 'turn-1' }, policy, mode: 'structured', vision: false })
+    const port: BrowserRuntimePort = {
+      resolveTarget: () => ({ backend: 'managed-chromium' }),
+      requestAccess: async () => 'already-allowed',
+      dispatch: async (context, name, args) => {
+        const result = await browser.tools.invoke(name, args as Record<string, unknown>, context)
+        if (!result.ok) throw new BrowserAutomationError(result.error)
+        return result.value
+      }
+    }
+    const agent = async (name: string, args: Record<string, unknown>) => dispatchBrowserTool({ port, binding, name, args })
+    const opened = await agent('browser_open', { url: `${origin}/login` })
+    expect(opened.isError).toBe(false)
+    const result = JSON.parse(opened.text) as Parsed & { navigation?: Record<string, unknown> }
+    expect(result.navigation).toMatchObject({ state: 'ready', shows: ['sign-in-form'], note: expect.stringMatching(/sign-in form\. Fill it if you have what it needs/) })
+    expect(opened.text).not.toMatch(/Don't retry|needs_person|ask your owner/)
+    // It fills the form with the test account it was given, and is signed in.
+    const page = result.observation!
+    const field = (name: string) => page.elements.find((element) => element.role === 'textbox' && element.name?.includes(name))!
+    const act = async (action: Record<string, unknown>, seen: BrowserObservation) => JSON.parse((await agent('browser_act', { sessionId: seen.sessionId, tabId: seen.tabId, generation: seen.generation, observationId: seen.observationId, controlLeaseId: result.session!.controlLeaseId, action })).text) as Parsed
+    let seen = (await act({ type: 'fill', target: { kind: 'ref', ref: field('Email').ref }, text: 'tester@local.test' }, page)).action!.observation!
+    seen = (await act({ type: 'fill', target: { kind: 'ref', ref: seen.elements.find((element) => element.name?.includes('Password'))!.ref }, text: 'test-password' }, seen)).action!.observation!
+    await act({ type: 'click', target: { kind: 'ref', ref: seen.elements.find((element) => element.role === 'button')!.ref } }, seen)
+    expect((JSON.parse((await agent('browser_extract', { sessionId: page.sessionId, tabId: page.tabId })).text) as Parsed).extraction!.text).toMatch(/Signed in as tester@local\.test/)
+    // A bot on the same page has no sign-in of its own: its note says to ask its owner.
+    const bot = turn(BOT_A, 'act-1')
+    const botOpened = modelResult(await call(bot, 'browser_open', { url: `${origin}/login` }))
+    expect(botOpened.navigation).toMatchObject({ state: 'ready', note: expect.stringMatching(/You have no sign-in of your own: ask your owner to sign in here/) })
+  }, 60_000)
+
+  it('the owner signs in by clicking and typing: the view no longer says the page needs a sign-in', async () => {
+    const { bots, turn, call, origin } = await fixture()
+    const bot = turn(BOT_A, 'act-1')
+    expect((await call(bot, 'browser_open', { url: `${origin}/login` })).error).toBeUndefined()
+    const view = viewer()
+    await bots.watch(BOT_A, 'w1', { width: 960, fps: 15, connectionId: 'c1', emit: view.emit })
+    await expect.poll(async () => (await bots.view(BOT_A)).problem, { timeout: 5_000 }).toMatchObject({ kind: 'needs-you', reason: 'sign-in', host: '127.0.0.1' })
+    await bots.control(BOT_A, 'owner')
+    // The form signs in where it is: no new page commits.
+    await bots.input(BOT_A, { kind: 'click', x: 230, y: 66 })
+    await bots.input(BOT_A, { kind: 'type', text: 'owner@local.test' })
+    await bots.input(BOT_A, { kind: 'click', x: 230, y: 110 })
+    await bots.input(BOT_A, { kind: 'type', text: 'secret' })
+    await bots.input(BOT_A, { kind: 'key', key: 'Enter' })
+    await expect.poll(() => view.events.some((event) => event.problem === null), { timeout: 5_000 }).toBe(true)
+    expect((await bots.view(BOT_A)).problem).toBeUndefined()
+    await bots.control(BOT_A, 'bot')
+    expect((await call(bot, 'browser_extract', {})).extraction!.text).toMatch(/Signed in as owner@local\.test/)
+    bots.unwatch(BOT_A, 'w1', 'c1')
+  }, 60_000)
+
+  it('what the bot\'s failed new tab ran into stops showing once the bot carries on in the tab the view follows', async () => {
+    const { bots, turn, call, origin } = await fixture()
+    const bot = turn(BOT_A, 'act-1')
+    const opened = modelResult(await call(bot, 'browser_open', { url: `${origin}/nav-a.html` }))
+    const view = viewer()
+    await bots.watch(BOT_A, 'w1', { width: 480, fps: 5, connectionId: 'c1', emit: view.emit })
+    await expect.poll(() => view.frames().length, { timeout: 5_000 }).toBeGreaterThan(0)
+    // A new tab on an address nothing answers on closes again; the view says what happened.
+    expect((await call(bot, 'browser_open', { url: await closedAddress() })).error).toMatch(/^site_unreachable/)
+    await expect.poll(async () => (await bots.view(BOT_A)).problem?.kind, { timeout: 5_000 }).toBe('unreachable')
+    // The bot carries on by clicking a link in its tab: the view follows the tab as it is now.
+    const seen = modelResult(await call(bot, 'browser_observe', { tabId: opened.observation!.tabId })).observation!
+    const link = seen.elements.find((element) => element.role === 'link')!
+    expect((await call(bot, 'browser_act', { tabId: seen.tabId, generation: seen.generation, observationId: seen.observationId, controlLeaseId: opened.session!.controlLeaseId, action: { type: 'click', target: { kind: 'ref', ref: link.ref } } })).error).toBeUndefined()
+    await expect.poll(async () => (await bots.view(BOT_A)).problem, { timeout: 5_000 }).toBeUndefined()
+    expect((await bots.view(BOT_A)).tab?.url).toBe(`${origin}/nav-b.html`)
+    bots.unwatch(BOT_A, 'w1', 'c1')
+  }, 60_000)
+
+  it('a challenge served with 403 tells the bot to ask its owner; once the page replaces itself the view\'s line clears; a failed address stays in the address field', async () => {
+    const { bots, turn, call, origin } = await fixture()
+    const bot = turn(BOT_A, 'act-1')
+    const first = modelResult(await call(bot, 'browser_open', { url: `${origin}/nav-a.html` }))
+    const view = viewer()
+    await bots.watch(BOT_A, 'w1', { width: 480, fps: 5, connectionId: 'c1', emit: view.emit })
+    await expect.poll(() => view.frames().length, { timeout: 5_000 }).toBeGreaterThan(0)
+    // A challenge that arrives with 403 and shows its check a moment later: a person can pass it.
+    const challenge = `${origin}/challenge?code=403&after=7000`
+    const challenged = await call(bot, 'browser_open', { url: challenge })
+    expect(challenged.error).toMatch(/needs_person/)
+    expect(challenged.error).toMatch(/ask your owner to take over your browser/)
+    expect(challenged.error).not.toMatch(/site_blocked|refused/)
+    await expect.poll(async () => (await bots.view(BOT_A)).problem, { timeout: 5_000 }).toMatchObject({ kind: 'needs-you', reason: 'human-check', code: 'HTTP 403' })
+    // It passes by itself and reloads the same address, which the site now answers with its page: the line clears.
+    await expect.poll(async () => (await bots.view(BOT_A)).problem, { timeout: 15_000 }).toBeUndefined()
+    expect((await bots.view(BOT_A)).tab?.url).toBe(challenge)
+    expect((await call(bot, 'browser_extract', {})).extraction!.text).toMatch(/Welcome to the shop/)
+    // An address nothing answers on, in the tab the view follows: the address field keeps it, so the owner can correct it.
+    const nowhere = await closedAddress()
+    const seen = modelResult(await call(bot, 'browser_observe', {}))
+    const leaseId = first.session!.controlLeaseId
+    expect((await call(bot, 'browser_act', { tabId: seen.observation!.tabId, generation: seen.observation!.generation, observationId: seen.observation!.observationId, controlLeaseId: leaseId, action: { type: 'navigate', url: nowhere } })).error).toMatch(/^site_unreachable/)
+    await expect.poll(async () => (await bots.view(BOT_A)).problem?.kind, { timeout: 5_000 }).toBe('unreachable')
+    await expect.poll(() => view.events.filter((event) => event.tab).at(-1)?.tab?.url, { timeout: 5_000 }).toBe(nowhere)
+    expect(view.events.some((event) => event.tab?.url.startsWith('chrome-error:'))).toBe(false)
+    bots.unwatch(BOT_A, 'w1', 'c1')
+  }, 60_000)
+
+  it('the owner\'s own navigation answers at the commit, and the view shows the page loading or what it ran into', async () => {
+    const { bots, origin } = await fixture()
+    await bots.open(BOT_A, `${origin}/nav-a.html`)
+    const view = viewer()
+    await bots.watch(BOT_A, 'w1', { width: 960, fps: 15, connectionId: 'c1', emit: view.emit })
+    await expect.poll(() => view.frames().length, { timeout: 5_000 }).toBeGreaterThan(0)
+    const started = Date.now()
+    await bots.input(BOT_A, { kind: 'navigate', url: `${origin}/never-loads.html` })
+    expect(Date.now() - started).toBeLessThan(3_000)
+    await expect.poll(() => view.events.some((event) => event.loading === true), { timeout: 5_000 }).toBe(true)
+    expect((await bots.view(BOT_A)).loading).toBe(true)
+    // A site that can't be reached: the owner's call fails in its class, and the view says so.
+    const failed = await bots.input(BOT_A, { kind: 'navigate', url: await closedAddress() }).catch((error: unknown) => error)
+    expect(failed).toMatchObject({ code: 'site_unreachable', details: { problem: { kind: 'unreachable', code: 'net::ERR_CONNECTION_REFUSED' } } })
+    await expect.poll(() => view.events.some((event) => event.problem?.kind === 'unreachable'), { timeout: 5_000 }).toBe(true)
+    // A good page clears it.
+    await bots.input(BOT_A, { kind: 'navigate', url: `${origin}/nav-b.html` })
+    await expect.poll(() => view.events.at(-1)?.problem === null || view.events.some((event, index) => index > 0 && event.problem === null), { timeout: 5_000 }).toBe(true)
+    bots.unwatch(BOT_A, 'w1', 'c1')
   }, 60_000)
 })

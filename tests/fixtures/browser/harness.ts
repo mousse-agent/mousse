@@ -64,6 +64,65 @@ export async function startFixtureSite(): Promise<{ origin: string; close: () =>
       setTimeout(() => res.end('<!doctype html><title>Viewer slow fixture</title><main>slow fixture</main>'), 5_000)
       return
     }
+    // A page whose document is ready at once and that never finishes loading: one image is never answered.
+    if (req.method === 'GET' && url.pathname === '/never-loads.html') {
+      res.statusCode = 200
+      res.setHeader('content-type', 'text/html; charset=utf-8')
+      res.end('<!doctype html><title>Never loads</title><main><h1>Ready, still loading</h1><img src="/hang.png" alt=""></main>')
+      return
+    }
+    if (req.method === 'GET' && url.pathname === '/hang.png') {
+      res.statusCode = 200
+      res.setHeader('content-type', 'image/png')
+      res.flushHeaders()
+      return
+    }
+    // A local app's sign-in page, as a thread agent meets one: it signs in where it is (no new page).
+    if (req.method === 'GET' && url.pathname === '/login') {
+      res.statusCode = 200
+      res.setHeader('content-type', 'text/html; charset=utf-8')
+      res.end(`<!doctype html><title>Log in · Local app</title><style>body{margin:0;font:20px sans-serif} form{position:absolute;left:40px;top:40px;width:400px} input,button{display:block;width:380px;height:36px;font:20px sans-serif;margin:8px 0}</style>
+<main id="app"><form id="login"><input id="email" name="email" placeholder="Email" autocomplete="off"><input id="password" type="password" name="password" placeholder="Password" autocomplete="off"><button id="go" type="submit">Log in</button></form></main>
+<script>document.getElementById('login').addEventListener('submit', (event) => { event.preventDefault(); const who = document.getElementById('email').value || 'someone'; document.getElementById('app').innerHTML = '<h1>Signed in as ' + who.replace(/[<>&]/g, '') + '</h1><p>Your dashboard.</p>' })</script>`)
+      return
+    }
+    // An address that is a file to download, not a page.
+    if (req.method === 'GET' && url.pathname === '/report.csv') {
+      res.statusCode = 200
+      res.setHeader('content-type', 'text/csv')
+      res.setHeader('content-disposition', 'attachment; filename="report.csv"')
+      res.end('month,total\njanuary,12\n')
+      return
+    }
+    // The site answers an error status, with a page (?body=1) or none; a 429 names its wait.
+    if (req.method === 'GET' && url.pathname === '/status') {
+      const status = Number(url.searchParams.get('code') ?? 500)
+      res.statusCode = status
+      if (status === 429) res.setHeader('retry-after', '30')
+      res.setHeader('content-type', 'text/html; charset=utf-8')
+      res.end(url.searchParams.get('body') === '1' ? `<!doctype html><title>HTTP ${status}</title><h1>The site says ${status}</h1>` : '')
+      return
+    }
+    // A challenge page served with an error status (?code=403 or 503), until it was passed (its cookie): then the site's own page.
+    if (req.method === 'GET' && url.pathname === '/challenge') {
+      res.setHeader('content-type', 'text/html; charset=utf-8')
+      res.setHeader('cache-control', 'no-store')
+      if (/(?:^|;\s*)mousse_check_passed=1/.test(req.headers.cookie ?? '')) {
+        res.statusCode = 200
+        res.end('<!doctype html><title>Shop</title><main><h1>Welcome to the shop</h1><p>Every part, every price.</p><a href="/nav-a.html">Deals</a></main>')
+        return
+      }
+      res.statusCode = Number(url.searchParams.get('code') ?? 403)
+      res.end(readFileSync(join(SITE_DIR, 'signs-challenge-late.html')))
+      return
+    }
+    // A sign-in wall: 401 and a password field.
+    if (req.method === 'GET' && url.pathname === '/sign-in.html') {
+      res.statusCode = 401
+      res.setHeader('content-type', 'text/html; charset=utf-8')
+      res.end('<!doctype html><title>Sign in</title><main><form><label>Email <input name="email"></label><label>Password <input type="password" name="password"></label><button>Sign in</button></form></main>')
+      return
+    }
     const relative = url.pathname === '/' ? '/form.html' : url.pathname
     const file = join(SITE_DIR, relative.replace(/^\/+/, ''))
     if (!file.startsWith(SITE_DIR) || !existsSync(file)) {
@@ -78,7 +137,11 @@ export async function startFixtureSite(): Promise<{ origin: string; close: () =>
   const address = server.address() as AddressInfo
   return {
     origin: `http://127.0.0.1:${address.port}`,
-    close: () => new Promise((resolvePromise, reject) => server.close((error) => (error ? reject(error) : resolvePromise()))),
+    close: () => new Promise((resolvePromise, reject) => {
+      server.close((error) => (error ? reject(error) : resolvePromise()))
+      // The never-answered image would hold the server open.
+      server.closeAllConnections()
+    }),
     submitCount: () => submitRequests
   }
 }

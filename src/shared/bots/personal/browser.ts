@@ -1,4 +1,5 @@
 import type { BrowserAgentCursor } from '../../browser/agentCursor'
+import type { BrowserProblem } from '../../browser/navigation'
 import type { BrowserHumanInput } from '../../browser/types'
 
 /**
@@ -41,6 +42,10 @@ export interface BotBrowserView {
   setup?: { percent?: number }
   /** The followed tab is not the one in front, so Chromium does not paint it: its picture is a still. */
   behind?: boolean
+  /** Its page is still loading. */
+  loading?: boolean
+  /** What its last page ran into (can't reach, blocked) or needs from the owner (a sign-in, a human check). */
+  problem?: BrowserProblem
   /**
    * Pictures cannot reach a view now, and why (the followed tab closed, the browser does not answer):
    * a view says it is not updating until they can. Absent while they can.
@@ -69,6 +74,10 @@ export interface BotBrowserFrameEvent {
   cursor?: BrowserAgentCursor | null
   /** The followed tab went behind (true) or came to the front (false). */
   behind?: boolean
+  /** Its page started (true) or finished (false) loading. */
+  loading?: boolean
+  /** What its page ran into or needs; null clears it. */
+  problem?: BrowserProblem | null
   /** Pictures stopped (the browser closed, or could not be reached): the view says it is not updating. */
   stalled?: string
   /** Pictures flow again after `stalled`. */

@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Many frames</title>
+</head>
+<body>
+  <!-- 300 small frames, each with its own load events, all before the page's own load. -->
+  <h1>Many frames</h1>
+  <script>
+    for (let index = 0; index < 300; index += 1) document.write('<iframe width="20" height="20" srcdoc="<p>' + index + '</p>"></iframe>')
+  </script>
+</body>
+</html>

@@ -261,6 +261,58 @@ describe('the view\'s line while the owner holds the browser', () => {
   })
 })
 
+describe('what a page ran into', () => {
+  it('says it in plain words, with Chromium\'s code only in the tooltip, and shows a page still loading', async () => {
+    fake.chats.noobesh = [message(1, { text: 'Here it is.', activationId: 'act1' })]
+    await open()
+    const problem = { kind: 'unreachable' as const, code: 'net::ERR_NAME_NOT_RESOLVED', host: 'bank.example.com' }
+    // The daemon's view has it too (a renewed watch answers it).
+    browser = { ...browser, problem }
+    await push({ problem })
+    expect(status()?.textContent).toBe('Can\'t reach site')
+    expect(status()?.getAttribute('title')).toBe('Can\'t reach bank.example.com. Check the address, or try again later (net::ERR_NAME_NOT_RESOLVED).')
+    expect(host.querySelector('.bot-browser-preview')!.textContent).not.toContain('net::')
+    await click(button('Expand Noobesh\'s browser'))
+    const note = host.querySelector('.bot-browser-pane .bot-browser-note')!
+    expect(note.textContent).toBe('Can\'t reach bank.example.com')
+    expect(note.getAttribute('title')).toContain('net::ERR_NAME_NOT_RESOLVED')
+    await push({ problem: { kind: 'needs-you', reason: 'human-check', host: 'shop.example.com' } })
+    expect(host.querySelector('.bot-browser-pane .bot-browser-note')!.textContent).toBe('shop.example.com needs you: a human check')
+    // A page loading again: no problem, a quiet moving line under the address, and no wait.
+    browser = { ...browser, problem: undefined }
+    await push({ problem: null, loading: true })
+    expect(status()?.textContent).toBe('Loading')
+    expect(host.querySelector('.bot-browser-pane .bot-browser-address')!.classList.contains('is-loading')).toBe(true)
+    await push({ loading: false })
+    expect(host.querySelector('.bot-browser-pane .bot-browser-address')!.classList.contains('is-loading')).toBe(false)
+  })
+
+  it('the owner\'s own navigation that fails says why in their words, with the code in the tooltip', async () => {
+    fake.chats.noobesh = [message(1, { text: 'Here it is.', activationId: 'act1' })]
+    browser = { ...browser, control: 'owner' }
+    await open()
+    await click(button('Expand Noobesh\'s browser'))
+    setBotBrowserTransport((async (method: BotsBrowserMethod, params: Record<string, unknown>) => {
+      calls.push([method, params])
+      if (method === 'bots.browser.input') throw { code: 'site_blocked', message: 'shop.example.com blocked this browser (HTTP 403). Don\'t retry it.', details: { problem: { kind: 'blocked', code: 'HTTP 403', host: 'shop.example.com' } } }
+      if (method === 'bots.browser.unwatch') return { ok: true }
+      return { browser }
+    }) as never, (listener) => { pushes.add(listener); return () => pushes.delete(listener) })
+    const address = host.querySelector<HTMLInputElement>('.bot-browser-pane input')!
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+      setter.call(address, 'shop.example.com')
+      address.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await act(async () => { address.form!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })) })
+    await act(async () => {})
+    expect(calls).toContainEqual(['bots.browser.input', { botId: 'noobesh', input: { kind: 'navigate', url: 'https://shop.example.com' } }])
+    const note = host.querySelector('.bot-browser-pane .bot-browser-note')!
+    expect(note.textContent).toBe('shop.example.com refused this browser')
+    expect(note.getAttribute('title')).toContain('HTTP 403')
+  })
+})
+
 describe('the split view', () => {
   it('Expand opens the bot\'s browser beside its chat; Take over, a click and Give back reach the bot\'s browser', async () => {
     fake.chats.noobesh = [message(1, { text: 'Here it is.', activationId: 'act1' })]

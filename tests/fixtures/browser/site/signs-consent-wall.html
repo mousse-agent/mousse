@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>News</title>
+  <style>
+    body { margin: 20px; font: 18px sans-serif; }
+    .onetrust-pc-dark-filter { position: fixed; inset: 0; background: #000a; z-index: 10; }
+    #onetrust-pc-sdk { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 520px; height: 360px; background: #fff; z-index: 11; padding: 20px; }
+  </style>
+</head>
+<body>
+  <!-- A consent wall: a dialog over a dark layer that covers the whole page, which can't be used until a choice is made. -->
+  <h1>Today's news</h1>
+  <p>Stories of the day, from the town hall to the harbour.</p>
+  <ul><li><a href="/nav-a.html">Weather</a></li><li><a href="/nav-b.html">Sports</a></li></ul>
+  <div id="onetrust-consent-sdk">
+    <div class="onetrust-pc-dark-filter"></div>
+    <div id="onetrust-pc-sdk" role="dialog" aria-modal="true" aria-label="Privacy and cookie choices">
+      <h2>Your privacy choices</h2>
+      <p>We and our partners use cookies. Choose to continue.</p>
+      <button>Accept all</button> <button>Manage choices</button>
+    </div>
+  </div>
+</body>
+</html>

@@ -1,4 +1,5 @@
 import type { CdpEventListener, CdpTransport } from '../cdp/transport'
+import type { BrowserProblem } from '../../shared/browser/navigation'
 
 /**
  * The pictures of a managed tab a person watches (a bot's browser view), for every viewer at once.
@@ -66,6 +67,8 @@ export interface ViewerTabInfo {
   tabId: string
   url: string
   title: string
+  /** The tab's main document now: it changes with each page the tab shows. */
+  page?: string
 }
 
 export interface ViewerPicture {
@@ -88,6 +91,10 @@ export interface ViewerUpdate {
   viewport: { width: number; height: number }
   /** The tab is not the one in front: Chromium does not paint it, so its picture is a still. */
   behind: boolean
+  /** The page is still loading. */
+  loading: boolean
+  /** What its last navigation ran into, or what the opened page needs. */
+  problem?: BrowserProblem
   /** Pass back as `afterFrame` / `afterState`. */
   frameSeq: number
   stateSeq: number
@@ -109,6 +116,10 @@ export interface ViewerNextRequest {
 export interface ViewerCapturesOptions {
   /** Whether the tab is not the one in front (Chromium paints only that one). */
   behind(cdpSessionId: string): boolean
+  /** Whether the tab's page is still loading when its capture starts. */
+  loading?(cdpSessionId: string): boolean
+  /** What the tab's last navigation ran into when its capture starts. */
+  problem?(cdpSessionId: string): BrowserProblem | undefined
   now?: () => number
   settleMs?: number
   leaseMs?: number
@@ -169,6 +180,10 @@ interface TabCapture {
   /** Screencast pictures not acknowledged yet. */
   held: number[]
   behind: boolean
+  /** The page is still loading. */
+  loading: boolean
+  /** What its last navigation ran into, or what the opened page needs. */
+  problem?: BrowserProblem
   settle?: ReturnType<typeof setTimeout>
   settling?: Promise<void>
   /** A still was asked for while another was under way. */
@@ -307,10 +322,10 @@ export class ViewerCaptures {
   }
 
   /** A new page committed in a tab: its screencast starts again (Chromium may stop sending after a commit), and its size is read again. */
-  committed(cdpSessionId: string, url: string): void {
+  committed(cdpSessionId: string, url: string, page?: string): void {
     const capture = this.captures.get(cdpSessionId)
     if (!capture) return
-    capture.info = { ...capture.info, url }
+    capture.info = { ...capture.info, url, ...(page ? { page } : {}) }
     capture.lastCast = undefined
     capture.viewportRead = false
     capture.stateSeq = this.bump()
@@ -386,9 +401,27 @@ export class ViewerCaptures {
 
   // -- watchers and captures
 
+  /** The tab's page is loading (or stopped loading). */
+  loading(cdpSessionId: string, loading: boolean): void {
+    const capture = this.captures.get(cdpSessionId)
+    if (!capture || capture.loading === loading) return
+    capture.loading = loading
+    capture.stateSeq = this.bump()
+    this.pump(capture)
+  }
+
+  /** What the tab's last navigation ran into (or needs), or nothing. */
+  problem(cdpSessionId: string, problem: BrowserProblem | undefined): void {
+    const capture = this.captures.get(cdpSessionId)
+    if (!capture || JSON.stringify(capture.problem) === JSON.stringify(problem)) return
+    capture.problem = problem
+    capture.stateSeq = this.bump()
+    this.pump(capture)
+  }
+
   /** The tab's address and title as the session knows them (it follows every commit and title). */
   private describe(capture: TabCapture, info: ViewerTabInfo): void {
-    if (capture.info.url === info.url && capture.info.title === info.title && capture.info.tabId === info.tabId) return
+    if (capture.info.url === info.url && capture.info.title === info.title && capture.info.tabId === info.tabId && capture.info.page === info.page) return
     capture.info = { ...info }
     capture.stateSeq = this.bump()
   }
@@ -405,8 +438,11 @@ export class ViewerCaptures {
       if (!capture) {
         capture = {
           info, viewport: { width: 1280, height: 720 }, viewportRead: false, width: 0, recent: [], frameSeq: 0, stateSeq: this.bump(),
-          handedSeq: 0, quietSeq: -1, held: [], behind: false, settleMs: this.settleMs, echoUntil: 0, echoChecks: 0, repeatGapMs: 0, actedAt: 0, watchers: new Set()
+          handedSeq: 0, quietSeq: -1, held: [], behind: false, loading: this.options.loading?.(info.cdpSessionId) ?? false,
+          settleMs: this.settleMs, echoUntil: 0, echoChecks: 0, repeatGapMs: 0, actedAt: 0, watchers: new Set()
         }
+        const problem = this.options.problem?.(info.cdpSessionId)
+        if (problem) capture.problem = problem
         this.captures.set(info.cdpSessionId, capture)
       }
       watcher = { key, capture, maxWidth: 960, minIntervalMs: 0, lastPictureAt: 0, seenAt: this.now(), fresh: true }
@@ -803,8 +839,11 @@ export class ViewerCaptures {
       tabId: capture.info.tabId,
       url: capture.info.url,
       title: capture.info.title,
+      ...(capture.info.page ? { page: capture.info.page } : {}),
       viewport: { ...capture.viewport },
       behind: capture.behind,
+      loading: capture.loading,
+      ...(capture.problem ? { problem: capture.problem } : {}),
       frameSeq: picture ? capture.frameSeq : waiting.afterFrame,
       stateSeq: capture.stateSeq,
       ...(picture && capture.latest ? { picture: capture.latest } : {}),

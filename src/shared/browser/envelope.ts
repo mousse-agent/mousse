@@ -1,4 +1,5 @@
 import type { BrowserErrorCode, BrowserWorkerRequest, BrowserWorkerResponse } from './types'
+import { BROWSER_PROBLEM_CODES, type BrowserProblem } from './navigation'
 
 const METHODS: readonly BrowserWorkerRequest['method'][] = [
   'session.open', 'session.close', 'tabs.list', 'tabs.new', 'tabs.close', 'tabs.switch',
@@ -27,8 +28,35 @@ function id(value: unknown): string {
 const ERROR_CODES: readonly BrowserErrorCode[] = [
   'setup_required', 'profile_mismatch', 'session_closed', 'stale_generation', 'stale_observation', 'stale_ref',
   'invalid_geometry', 'not_actionable', 'policy_denied', 'approval_required', 'human_controlled', 'timeout',
-  'cancelled', 'worker_disconnected', 'unsupported', 'invalid_action', 'no_progress', 'download_failed', 'artifact_denied'
+  'cancelled', 'worker_disconnected', 'unsupported', 'invalid_action', 'no_progress', 'download_failed', 'artifact_denied',
+  ...Object.values(BROWSER_PROBLEM_CODES)
 ]
+
+const PROBLEM_KINDS: readonly BrowserProblem['kind'][] = ['unreachable', 'blocked', 'needs-you', 'browser-refused', 'cannot-start']
+const PROBLEM_REASONS: readonly NonNullable<BrowserProblem['reason']>[] = ['sign-in', 'consent', 'human-check', 'unsafe-port', 'browser-rules', 'certificate']
+
+/** A failed navigation's class, from a worker error's details: bounded plain fields only. */
+function problemDetails(value: unknown): { problem?: BrowserProblem } | undefined {
+  if (value === undefined) return undefined
+  const details = object(value, ['problem'])
+  if (details.problem === undefined) return {}
+  const p = object(details.problem, ['kind', 'reason', 'code', 'host', 'cause'])
+  if (!PROBLEM_KINDS.includes(p.kind as BrowserProblem['kind'])) throw new Error('invalid_action: unsupported problem kind')
+  if (p.reason !== undefined && !PROBLEM_REASONS.includes(p.reason as NonNullable<BrowserProblem['reason']>)) throw new Error('invalid_action: unsupported problem reason')
+  const text = (field: unknown, max: number) => field === undefined ? undefined : string(field, max)
+  const code = text(p.code, 128)
+  const host = text(p.host, 255)
+  const cause = text(p.cause, 1024)
+  return {
+    problem: {
+      kind: p.kind as BrowserProblem['kind'],
+      ...(p.reason ? { reason: p.reason as BrowserProblem['reason'] } : {}),
+      ...(code ? { code } : {}),
+      ...(host ? { host } : {}),
+      ...(cause ? { cause } : {})
+    }
+  }
+}
 
 export function validateBrowserWorkerRequest(value: unknown): BrowserWorkerRequest {
   const p = object(value, ['version', 'id', 'profileId', 'method', 'params'])
@@ -54,14 +82,15 @@ export function validateBrowserWorkerResponse(value: unknown): BrowserWorkerResp
     if (p.error !== undefined) throw new Error('invalid_action: unexpected field error')
     return { version: 1, id: id(p.id), ok: true, ...(p.result === undefined ? {} : { result: p.result }) }
   }
-  const error = object(p.error, ['code', 'message'])
+  const error = object(p.error, ['code', 'message', 'details'])
   const code = string(error.code, 64)
   if (!ERROR_CODES.includes(code as BrowserErrorCode)) throw new Error('invalid_action: unsupported error code')
+  const details = problemDetails(error.details)
   return {
     version: 1,
     id: id(p.id),
     ok: false,
-    error: { code: code as BrowserErrorCode, message: string(error.message, 4096) }
+    error: { code: code as BrowserErrorCode, message: string(error.message, 4096), ...(details?.problem ? { details } : {}) }
   }
 }
 

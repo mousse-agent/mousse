@@ -123,6 +123,8 @@ export interface BrowserToolOutput {
   readonly extraction?: unknown
   readonly artifacts?: ArtifactReference[]
   readonly handoff?: { requestId: string; state: 'waiting-human' }
+  /** How the page `browser_open` (or a tab opened on a URL) went: ready, still loading, or failed with its class. */
+  readonly navigation?: import('./navigation').BrowserNavigation
 }
 
 export interface BrowserToolError {

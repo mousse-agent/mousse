@@ -16,6 +16,7 @@ import type {
   BrowserWorkerResponse
 } from '../../../shared/browser/types'
 import { browserNavigationUrl } from '../../../shared/browser/validation'
+import type { BrowserNavigation } from '../../../shared/browser/navigation'
 import type { BrowserAutomationTool, BrowserToolContext, BrowserToolError, BrowserToolOutput } from '../../../shared/browser/automation'
 import type { BrowserBroker } from '../BrowserBroker'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
@@ -191,7 +192,7 @@ export class BrowserSessionManager {
       threadId: execution.threadId
     }
     const result = await this.call(execution.profileId, 'session.open', params, signal)
-    const payload = result as { session?: BrowserSessionRecord; observation?: BrowserObservation; capabilities?: { capabilities?: { screenshots?: boolean } } }
+    const payload = result as { session?: BrowserSessionRecord; observation?: BrowserObservation; navigation?: BrowserNavigation; capabilities?: { capabilities?: { screenshots?: boolean } } }
     if (!payload.session || payload.session.profileId !== this.options.profileId || payload.session.threadId !== execution.threadId || payload.session.runId !== execution.runId || payload.session.backend !== target.backend) {
       throw new BrowserAutomationError({ code: 'invalid_action', message: 'Worker returned an invalid session identity' })
     }
@@ -202,7 +203,13 @@ export class BrowserSessionManager {
       owner: { threadId: execution.threadId, runId: execution.runId }
     })
     this.persist()
-    return { capabilities, session: { ...session }, ...(payload.observation ? { observation: await this.observation(context, session.id, payload.observation) } : {}) }
+    return {
+      capabilities,
+      session: { ...session },
+      ...(payload.observation ? { observation: await this.observation(context, session.id, payload.observation) } : {}),
+      // A slow or failed first page leaves the session open: the caller learns how the page went.
+      ...(payload.navigation ? { navigation: payload.navigation } : {})
+    }
   }
 
   async close(context: BrowserToolContext, sessionId: string): Promise<BrowserToolOutput> {
@@ -223,9 +230,9 @@ export class BrowserSessionManager {
     const operation = input.operation ?? 'list'
     const method = operation === 'list' ? 'tabs.list' : `tabs.${operation}`
     const result = await this.call(context.execution.profileId, method as Parameters<BrowserBroker['call']>[0]['method'], { sessionId, ...(input.tabId ? { tabId: input.tabId } : {}), ...(input.url ? { url: input.url } : {}) }, this.signal(context))
-    const payload = result as { tabs?: BrowserTab[]; id?: unknown; title?: unknown; url?: unknown }
+    const payload = result as { tabs?: BrowserTab[]; id?: unknown; title?: unknown; url?: unknown; navigation?: BrowserNavigation }
     const opened = operation === 'new' && typeof payload.id === 'string'
-      ? { tab: { id: payload.id, title: typeof payload.title === 'string' ? payload.title : '', url: typeof payload.url === 'string' ? payload.url : '' } }
+      ? { tab: { id: payload.id, title: typeof payload.title === 'string' ? payload.title : '', url: typeof payload.url === 'string' ? payload.url : '' }, ...(payload.navigation ? { navigation: payload.navigation } : {}) }
       : {}
     return { tabs: payload.tabs ?? (Array.isArray(result) ? result as BrowserTab[] : []), ...opened }
   }
@@ -315,14 +322,18 @@ export class BrowserSessionManager {
     await this.call(context.execution.profileId, 'frame.stop', { sessionId: input.sessionId, watchKey: input.watchKey }, this.signal(context))
   }
 
-  /** A person's input while they hold a managed session (`control` as human). */
-  async humanInput(context: BrowserToolContext, input: { sessionId: string; tabId?: string; input: BrowserHumanInput }): Promise<void> {
+  /**
+   * A person's input while they hold a managed session (`control` as human). Their navigation answers
+   * once the page has committed, with whether it is still loading.
+   */
+  async humanInput(context: BrowserToolContext, input: { sessionId: string; tabId?: string; input: BrowserHumanInput }): Promise<{ navigation?: BrowserNavigation }> {
     this.authorize(context, undefined, 'browser.action', 'external', input)
     const entry = this.requireOwned(input.sessionId, context.execution)
     if (entry.record.lifecycle !== 'human-controlled' || !entry.record.controlLeaseId) throw new BrowserAutomationError({ code: 'human_controlled', message: 'Take control of the browser first' })
-    await this.call(context.execution.profileId, 'human.input', {
+    const result = await this.call(context.execution.profileId, 'human.input', {
       sessionId: input.sessionId, controlLeaseId: entry.record.controlLeaseId, input: input.input, ...(input.tabId ? { tabId: input.tabId } : {})
-    }, this.signal(context))
+    }, this.signal(context)) as { navigation?: BrowserNavigation } | undefined
+    return result?.navigation ? { navigation: result.navigation } : {}
   }
 
   async wait(context: BrowserToolContext, input: { sessionId: string; tabId: string; condition: BrowserWaitCondition; timeoutMs?: number }): Promise<BrowserToolOutput> {
