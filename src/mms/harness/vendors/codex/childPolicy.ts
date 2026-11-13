@@ -173,13 +173,60 @@ export const CODEX_BOT_FEATURES_OFF: readonly string[] = [
 ]
 
 /**
- * The Codex versions whose tools a bot is offered were read from the real binary and accounted for, with
- * `CODEX_BOT_FEATURES_OFF` and `CODEX_COMMAND_FEATURES` off (`tests/harness/codexBotTools.test.ts`). Codex ignores a
- * feature name it does not know, so on any other version a tool added or renamed there would reach a bot: a bot's turn
- * runs only on these (`codexBotVersionRefusal`), whatever entry runs it. The owner's own threads are not affected. When
- * Mousse moves to a new Codex, that test is run on it and its version is added here.
+ * Every tool a bot's turn on Codex may be offered, by the name the model sees (a namespace before a dot), and what it can
+ * do. Nested tools are the ones code mode's `exec` calls. `tests/harness/codexBotTools.test.ts` fails on a binary that
+ * offers a bot any other, with every feature it lists switched on in the owner's config.
  */
-export const CODEX_BOT_CHECKED_VERSIONS: readonly string[] = [CODEX_MANAGED_VERSION]
+export const CODEX_BOT_ACCOUNTED_TOOLS: Readonly<Record<string, string>> = {
+  request_user_input: 'asks a person; Mousse answers a bot\'s with an error, nobody is asked',
+  'functions.request_user_input': 'the same, in code mode',
+  'functions.request_user_input_async': 'the same, without waiting',
+  web_search: 'OpenAI\'s hosted web search: reads no file of this computer',
+  apply_patch: 'changes files: each change asks, and the bot\'s authority decides by path',
+  exec_command: 'a command (only with "run commands"): asks under the bot\'s profile, runs in its sandbox',
+  write_stdin: 'input to a command it started (only with "run commands")',
+  exec: 'code mode: JavaScript with no file system or network, calling only the tools listed here',
+  wait: 'code mode: waits for an exec still running',
+  'functions.exec': 'code mode, as above',
+  'functions.wait': 'code mode, as above',
+  'nested:apply_patch': 'as apply_patch',
+  'nested:exec_command': 'as exec_command',
+  'nested:write_stdin': 'as write_stdin',
+  'nested:list_mcp_resources': 'resources of the MCP servers left on: Mousse\'s own, which has none',
+  'nested:list_mcp_resource_templates': 'the same',
+  'nested:read_mcp_resource': 'the same',
+  'nested:clock__curr_time': 'the time',
+  'collaboration.spawn_agent': 'a subagent: inherits the bot\'s tools and sandbox; Mousse answers none of its asks',
+  'collaboration.send_message': 'a message to a subagent',
+  'collaboration.followup_task': 'more work for a subagent',
+  'collaboration.wait_agent': 'waits for a subagent',
+  'collaboration.interrupt_agent': 'stops a subagent',
+  'collaboration.list_agents': 'lists its subagents'
+}
+
+/**
+ * The Codex versions a bot may run on, each with the day its tools were read from the real binary
+ * (`tests/harness/codexBotTools.test.ts`, every feature on) and found to be only `CODEX_BOT_ACCOUNTED_TOOLS` with
+ * `CODEX_BOT_FEATURES_OFF` and `CODEX_COMMAND_FEATURES` off. Codex ignores a feature name it doesn't know, so on any
+ * other version a tool added or renamed there could reach a bot: a bot's turn runs only on these
+ * (`codexBotVersionRefusal`), whatever entry runs it. The owner's own threads are not affected. Adding a release is one
+ * line here after that test passes on it (docs/bots.md, "Checking a new Codex release").
+ */
+export const CODEX_BOT_CHECKED: ReadonlyArray<{ version: string; checked: string }> = [
+  { version: CODEX_MANAGED_VERSION, checked: '2026-11-13' },
+  { version: '0.163.0', checked: '2026-11-13' },
+  { version: '0.164.0', checked: '2026-11-13' },
+  { version: '0.165.0', checked: '2026-11-13' },
+  { version: '0.166.0', checked: '2026-11-13' },
+  { version: '0.167.0', checked: '2026-11-13' },
+  { version: '0.167.1', checked: '2026-11-13' },
+  { version: '0.167.2', checked: '2026-11-13' },
+  { version: '0.168.0', checked: '2026-11-13' },
+  { version: '0.169.0', checked: '2026-11-13' }
+]
+
+/** The versions of `CODEX_BOT_CHECKED`. */
+export const CODEX_BOT_CHECKED_VERSIONS: readonly string[] = CODEX_BOT_CHECKED.map((entry) => entry.version)
 
 /**
  * The name of the permission profile a confined bot's commands run under, defined in its thread config

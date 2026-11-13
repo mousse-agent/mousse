@@ -1,64 +1,38 @@
 /**
- * What the pinned Codex offers a bot's turn, on the real binary (`npm run codex:pin`, or `MOUSSE_CODEX_BINARY`), run as
- * the owner's own Codex with every feature that adds a tool switched on in their config: the worst a bot can meet. A
- * fake Responses endpoint in this process records every model request; nothing leaves the machine, and nothing of the
- * owner's is read.
+ * What a Codex offers a bot's turn, on the real binary, run as the owner's own Codex with every feature the binary lists
+ * switched on in their config (`codex features list`): the worst a bot can meet. A fake Responses endpoint in this
+ * process records every model request; nothing leaves the machine, nothing of the owner's is read, and nobody signs in.
  *
- * Every tool offered must be one this file accounts for, with what it can reach (`ACCOUNTED`): a tool the next Codex
- * adds fails here until someone has decided what it means for a bot. Each model kind of the binary's catalog is checked
- * (no subagents, `v1`, `v2`), for a bot without "run commands" and one with it, neither with file access. Then a
- * subagent: the models that have them keep `spawn_agent` whatever the config says, so a child must inherit the bot's
- * tools and sandbox, and Mousse must answer nothing a child asks.
+ * Which binaries: the pinned one (`npm run codex:pin`), or each of `MOUSSE_CODEX_BINARIES` (paths separated by `:`, `;`
+ * on Windows; `MOUSSE_CODEX_BINARY` names one). Every tool offered must be accounted for, with what it can reach
+ * (`CODEX_BOT_ACCOUNTED_TOOLS`), and the binary's version must be in `CODEX_BOT_CHECKED`: a tool a new Codex adds fails
+ * here until someone has decided what it means for a bot, and only then is the version added. Each model kind of the
+ * binary's catalog is checked (no subagents, `v1`, `v2`), for a bot without "run commands" and one with it, neither with
+ * file access. Then a subagent: the models that have them keep `spawn_agent` whatever the config says, so a child must
+ * inherit the bot's tools and sandbox, and Mousse must answer nothing a child asks.
  */
 import { createServer, type Server } from 'node:http'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { delimiter, join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { CodexProviderService, codexEnvironment } from '../../src/mms/harness/vendors/codex/CodexProviderService'
 import type { CodexConnection } from '../../src/mms/harness/vendors/codex/CodexAppServerClient'
 import type { CodexModel } from '../../src/mms/harness/vendors/codex/protocol'
 import { CodexInstallation } from '../../src/mms/harness/vendors/codex/installation'
-import { CODEX_BOT_CHECKED_VERSIONS, CODEX_BOT_FEATURES_OFF } from '../../src/mms/harness/vendors/codex/childPolicy'
+import { CODEX_BOT_ACCOUNTED_TOOLS, CODEX_BOT_CHECKED_VERSIONS, CODEX_BOT_FEATURES_OFF } from '../../src/mms/harness/vendors/codex/childPolicy'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
 import type { NeutralTool } from '../../src/shared/harness/tools'
 
 const pinned = new CodexInstallation({ installationHome: resolve(__dirname, '..', '..', '.cache', 'codex-pin') }).installed()
-const BINARY = process.env.MOUSSE_CODEX_BINARY || (pinned && !pinned.broken ? pinned.path : undefined)
-const SKIPPED = BINARY ? '' : ' [skipped: no pinned Codex; run npm run codex:pin]'
+const listed = (process.env.MOUSSE_CODEX_BINARIES || process.env.MOUSSE_CODEX_BINARY || '').split(delimiter).filter(Boolean)
+const BINARIES: Array<string | undefined> = listed.length ? listed : [pinned && !pinned.broken ? pinned.path : undefined]
+const SKIPPED = ' [skipped: no pinned Codex; run npm run codex:pin]'
+/** What `codex --version` says (`codex-cli 0.167.0`): the version alone. */
+const versionOf = (binary: string): string => execFileSync(binary, ['--version'], { encoding: 'utf8' }).trim().split(/\s+/).at(-1)!
 
-/**
- * Every tool a bot's turn may be offered, by the name the model sees (a namespace before a dot), and what it can do.
- * Nested tools are the ones code mode's `exec` calls.
- */
-const ACCOUNTED: Record<string, string> = {
-  request_user_input: 'asks a person; Mousse answers a bot\'s with an error, nobody is asked',
-  'functions.request_user_input': 'the same, in code mode',
-  'functions.request_user_input_async': 'the same, without waiting',
-  web_search: 'OpenAI\'s hosted web search: reads no file of this computer',
-  apply_patch: 'changes files: each change asks, and the bot\'s authority decides by path',
-  exec_command: 'a command (only with "run commands"): asks under the bot\'s profile, runs in its sandbox',
-  write_stdin: 'input to a command it started (only with "run commands")',
-  exec: 'code mode: JavaScript with no file system or network, calling only the tools listed here',
-  wait: 'code mode: waits for an exec still running',
-  'functions.exec': 'code mode, as above',
-  'functions.wait': 'code mode, as above',
-  'nested:apply_patch': 'as apply_patch',
-  'nested:exec_command': 'as exec_command',
-  'nested:write_stdin': 'as write_stdin',
-  'nested:list_mcp_resources': 'resources of the MCP servers left on: Mousse\'s own, which has none',
-  'nested:list_mcp_resource_templates': 'the same',
-  'nested:read_mcp_resource': 'the same',
-  'nested:clock__curr_time': 'the time',
-  'collaboration.spawn_agent': 'a subagent: inherits the bot\'s tools and sandbox; Mousse answers none of its asks (below)',
-  'collaboration.send_message': 'a message to a subagent',
-  'collaboration.followup_task': 'more work for a subagent',
-  'collaboration.wait_agent': 'waits for a subagent',
-  'collaboration.interrupt_agent': 'stops a subagent',
-  'collaboration.list_agents': 'lists its subagents'
-}
 const COMMANDS = /(^|[.:])(exec_command|write_stdin|shell|local_shell)$/
 /** Whether a `sleep <seconds>` runs anywhere on this computer (POSIX). */
 const sleeping = (seconds: string): boolean => {
@@ -90,7 +64,7 @@ function offered(body: Body | undefined): string[] {
 const CHILD_TASK = 'CHILD TASK: list the folder.'
 const isChild = (body: Body) => { const all = JSON.stringify(body.input ?? []); return all.includes(CHILD_TASK) && !all.includes('"call_1"') }
 
-describe.skipIf(!BINARY)(`what the pinned Codex offers a bot's turn, with every tool feature on in the owner's config${SKIPPED}`, () => {
+for (const BINARY of BINARIES) describe.skipIf(!BINARY)(`what Codex ${BINARY ? versionOf(BINARY) : ''} offers a bot's turn, with every feature on in the owner's config${BINARY ? '' : SKIPPED}`, () => {
   let root: string
   let server: Server
   let service: CodexProviderService
@@ -129,8 +103,11 @@ describe.skipIf(!BINARY)(`what the pinned Codex offers a bot's turn, with every 
     const codexHome = join(root, 'codex-home')
     const user = join(root, 'user')
     for (const dir of [codexHome, user]) mkdirSync(dir, { recursive: true })
-    // The owner's own Codex: every feature that adds a tool on, and no sandbox at all.
-    const features = [...CODEX_BOT_FEATURES_OFF, 'shell_tool', 'unified_exec', 'standalone_web_search', 'worktrees', 'workspace_dependencies', 'artifact', 'agent_message_board']
+    // The owner's own Codex: every feature this binary lists on (`codex features list`), and no sandbox at all.
+    const named = execFileSync(BINARY!, ['features', 'list'], { encoding: 'utf8', env: { ...process.env, CODEX_HOME: codexHome } })
+      .split('\n').map((line) => line.trim().split(/\s+/)[0]!).filter((name) => /^[a-z0-9_]+$/.test(name))
+    expect(named.length).toBeGreaterThan(50)
+    const features = [...new Set([...named, ...CODEX_BOT_FEATURES_OFF])]
     writeFileSync(join(codexHome, 'config.toml'), [
       'model_provider = "probe"',
       'sandbox_mode = "danger-full-access"',
@@ -185,7 +162,8 @@ describe.skipIf(!BINARY)(`what the pinned Codex offers a bot's turn, with every 
   // starts. A binary given by `MOUSSE_CODEX_BINARY` fails here until its tools are accounted for and its version added.
   it('the version Mousse reads from this binary is one a bot may run on', () => {
     const app = (service as unknown as { app: { conn: CodexConnection }; versions: WeakMap<CodexConnection, string | undefined> })
-    expect(CODEX_BOT_CHECKED_VERSIONS).toContain(app.versions.get(app.app.conn))
+    expect(app.versions.get(app.app.conn)).toBe(versionOf(BINARY!))
+    expect(CODEX_BOT_CHECKED_VERSIONS).toContain(versionOf(BINARY!))
   })
 
   const kinds: Array<[string, string | null]> = [['no subagents', null], ['v1 subagents', 'v1'], ['v2 subagents', 'v2']]
@@ -198,7 +176,7 @@ describe.skipIf(!BINARY)(`what the pinned Codex offers a bot's turn, with every 
     const withShell = offered((await botTurn(model!.id, ['read', 'shell']))[0])
     for (const list of [without, withShell]) {
       expect(list.length).toBeGreaterThan(0)
-      expect(list.filter((name) => !Object.hasOwn(ACCOUNTED, name)), `tools nobody has accounted for (${model!.id})`).toEqual([])
+      expect(list.filter((name) => !Object.hasOwn(CODEX_BOT_ACCOUNTED_TOOLS, name)), `tools nobody has accounted for (${model!.id})`).toEqual([])
       expect(list.filter((name) => /view_image|image_gen|spawn_agents_on_csv|browser|computer|memor|goal|sleep|request_permissions|send_message_to_user/.test(name))).toEqual([])
     }
     expect(without.filter((name) => COMMANDS.test(name))).toEqual([])
@@ -249,4 +227,4 @@ describe.skipIf(!BINARY)(`what the pinned Codex offers a bot's turn, with every 
 })
 
 // Without the binary every test above is skipped, and its name says so.
-if (!BINARY && existsSync(resolve(__dirname, '..', '..', '.cache'))) console.info(`[codexBotTools]${SKIPPED}`)
+if (!BINARIES[0] && existsSync(resolve(__dirname, '..', '..', '.cache'))) console.info(`[codexBotTools]${SKIPPED}`)
