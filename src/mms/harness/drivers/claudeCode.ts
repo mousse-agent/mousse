@@ -312,6 +312,8 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
         installedVersion !== undefined && hasContainmentEvidence({ driver: 'claude', kind: 'sandbox', platform, cliVersion: installedVersion }, evidence)
       return contained ? [] : ['shell']
     },
+    // A bot's Bash runs in Claude Code's sandbox where it can run here, read with the entry's own PATH, as each turn does.
+    botHold: (_config, env) => ({ runtime: 'claude', sandbox: claudeSandboxFact(platform, (name) => Boolean(findOnPath([name], env))) }),
     readPolicyFacts: async (config, instanceId) => {
       if (claudeLocked(config)) await readManaged(instanceId)
     },

@@ -348,3 +348,12 @@ function codexBotSandboxOnly(sandbox: CodexBotSandbox): Record<string, CodexConf
     'sandbox_workspace_write.exclude_slash_tmp': true
   }
 }
+
+/**
+ * Whether a bot's turn has Codex's hosted web search switched off: when its grant holds no web (`web_search` or
+ * `web_fetch`, Mousse's own web tools), the thread's config sets `web_search = "disabled"`, which every checked version
+ * honours (`tests/harness/codexBotTools.test.ts`). A bot with the web keeps it beside Mousse's web tools.
+ */
+export function codexBotWebOff(bot: Partial<Pick<BotAuthority, 'appTools'>>): boolean {
+  return !(bot.appTools?.has('web_search') || bot.appTools?.has('web_fetch'))
+}

@@ -60,6 +60,14 @@ describe('rollUpChips: settled chips', () => {
       .toEqual([{ icon: 'edit', text: 'saved 2 files', highlight: 'a.md, b.md' }])
   })
 
+  it('work\'s subagents settle to one chip with their titles; waiting on them and reading them show none', () => {
+    const start = (title: string): BotChipCall => ({ tool: 'subagent_start', input: { title, brief: 'x' }, result: { subagent: title } })
+    expect(chipForCall('subagent_start', { title: 'Prices', brief: 'x' }, ctx)).toMatchObject({ text: 'starting a subagent', highlight: 'Prices' })
+    expect(rollUpChips([start('Prices'), start('Reviews'), { tool: 'subagent_wait', input: {} }, { tool: 'subagent_result', input: { subagent: 'Prices' } }, { tool: 'subagent_send', input: { subagent: 'Prices', message: 'more' } }], ctx))
+      .toEqual([{ icon: 'think', text: 'used 2 subagents', highlight: 'Prices, Reviews' }])
+    expect(rollUpChips([start('Prices')], ctx)).toEqual([{ icon: 'think', text: 'used a subagent', highlight: 'Prices' }])
+  })
+
   it('a new schedule is an outcome chip with its label, once it returned', () => {
     const add: BotChipCall = { tool: 'bot_schedule_add', input: { when: { kind: 'cron', expr: '0 9 * * 1-5' }, prompt: 'inbox' }, result: { scheduleId: 's1', label: 'every weekday · 09:00' } }
     expect(rollUpChips([add], ctx)).toEqual([{ icon: 'schedule', text: 'every weekday · 09:00' }])

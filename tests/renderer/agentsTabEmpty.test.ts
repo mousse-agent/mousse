@@ -102,13 +102,14 @@ describe('the Agents tab sidebar', () => {
     expect(host.querySelector('[data-testid="space-dialog"]')).not.toBeNull()
   })
 
-  it('shows Recent once there is a chat with an agent or a bot', () => {
+  it('shows Recent once there is a chat with an agent; a bot is listed once, in the Bots row, not in Recent', () => {
     show(ChatsSidebar, [agent], [direct])
     expect(text('.chat-section-heading h2')).toEqual(['Bots', 'Groups', 'Recent'])
     show(ChatsSidebar, [])
     expect(text('.chat-section-heading h2')).toEqual(['Bots', 'Groups'])
     act(() => useBotsStore.setState({ bots: [summary('b1')] }))
-    expect(text('.chat-section-heading h2')).toEqual(['Bots', 'Groups', 'Recent'])
+    expect(text('.chat-section-heading h2')).toEqual(['Bots', 'Groups'])
+    expect(host.querySelectorAll('.bot-roster button')).toHaveLength(1)
   })
 })
 

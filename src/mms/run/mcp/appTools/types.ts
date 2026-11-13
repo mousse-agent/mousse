@@ -207,7 +207,7 @@ export interface ToolListing {
   /** The caller's effective agent access level; absent is `lineage`, which hides tools that need more. */
   accessLevel?: AgentAccessLevel
   /** The thread's role when it is a personal bot's thread (PR 6 §5): only bot threads list the bot tools. */
-  botRole?: 'activation' | 'context'
+  botRole?: 'activation' | 'context' | 'subagent'
   /**
    * A bot thread's turn now: the app tools it holds. Its thread tools ("use your threads") are listed only when held,
    * so a bot is shown what it can call in that turn; with no turn running, none.

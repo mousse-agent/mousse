@@ -74,7 +74,7 @@ import { isUsageLimitInfo, isUsageLimitText, resetFromSnapshot, trimResetCredits
 import { readUsageLimit, usageLimitError } from '../../../orchestrator/providerErrors'
 import { normalizePermissionMode, permissionModeAllows, type PermissionMode } from '../../../../shared/permissionMode'
 import { PERMISSION_KEYS } from '../../../../shared/permissionKeys'
-import { CODEX_BOT_CHECKED_VERSIONS, CODEX_BOT_FEATURES_REFUSED, type CodexBotSandbox, codexBotInstructionsNote, codexBotSandbox, codexBotSandboxConfig, codexPackageOf, codexTurnPolicy } from './childPolicy'
+import { CODEX_BOT_CHECKED_VERSIONS, CODEX_BOT_FEATURES_REFUSED, type CodexBotSandbox, codexBotInstructionsNote, codexBotSandbox, codexBotSandboxConfig, codexBotWebOff, codexPackageOf, codexTurnPolicy } from './childPolicy'
 import { CODEX_BOT_SETUP_UNREADABLE_TEXT, codexBotSettingText, codexBotVersionRefusal, codexVersionOf } from '../../../../shared/harness/codexBotVersion'
 import { STOP_GRACE_MS, listProcesses, stopCommandProcesses } from '../../stopProcesses'
 import { DEFAULT_TREE_TIMING, HelperTree, RpcRefused, ThreadStatuses, TreeOff, isWakeUp, type TreePorts, type TreeTiming } from './helperTree'
@@ -201,7 +201,7 @@ type AccountProbe = CodexAccountReading
 
 /** A one-way key of the account a limits snapshot belongs to: the account itself is never written. */
 function limitsOwner(subject: string | undefined): string | undefined {
-  return subject ? createHash('sha256').update(`codex-limits ${subject}`).digest('hex') : undefined
+  return subject ? createHash('sha256').update(`codex-limits\u0000${subject}`).digest('hex') : undefined
 }
 
 /** A window as it is saved: its three numbers only, whatever else Codex sent with it. */
@@ -433,7 +433,7 @@ export type CodexChatInput = {
    * raises is answered by this authority (`botApprovals.ts`). Questions to the user are refused.
    * Its `tools` and `workspace` set the sandbox: a bot with "run commands" writes in its own folders.
    */
-  bot?: Pick<BotAuthority, 'check'> & Partial<Pick<BotAuthority, 'tools' | 'workspace'>>
+  bot?: Pick<BotAuthority, 'check'> & Partial<Pick<BotAuthority, 'tools' | 'workspace' | 'appTools'>>
   onText: (text: string) => void
   onThinking?: (text: string) => void
   onTool?: (event: CodexToolEvent) => void
@@ -2844,6 +2844,9 @@ export class CodexProviderService {
       ...codexMcpConfigOverrides(input.mcp),
       ...(compactLimit !== undefined ? { model_auto_compact_token_limit: compactLimit } : {})
     } as ThreadConfig
+    // A bot's turn without the web has Codex's hosted web search off too, whatever the owner's Codex config says.
+    const webOff = input.bot !== undefined && codexBotWebOff(input.bot)
+    if (webOff) overrides.web_search = 'disabled'
     const { baseId } = parseThinkingSuffixFromModelId(input.model)
     const permissionMode = input.bot ? 'ask' : normalizePermissionMode(input.permissionMode)
     const policy = codexTurnPolicy(input.mode ?? 'default', input.bot ? undefined : input.child, permissionMode, botSandbox)
@@ -2852,7 +2855,7 @@ export class CodexProviderService {
     // The policy a loaded thread was opened with: a change of child policy, permission mode, compaction
     // threshold or a bot's writable folders reopens it (Codex applies thread overrides when it loads a thread
     // and ignores them on a loaded one).
-    const childKey = `${input.child ? (input.child.readOnly ? 'read-only' : 'child') : ''}|${policy.approvalPolicy}|${policy.permissions ?? policy.sandbox}|${compactLimit ?? ''}${botOverrides ? `|bot:${Object.keys(botOverrides).sort().join(',')}` : ''}${botSandbox?.shell ? `|write:${botSandbox.writableRoots.join('\u0000')}` : ''}${botSandbox?.profile ? `|${botSandbox.profile.base}|read:${botSandbox.profile.readable.join('\u0000')}|deny:${botSandbox.profile.closed.filter((place) => !isMousseTempEntry(place)).join('\u0000')}` : ''}`
+    const childKey = `${input.child ? (input.child.readOnly ? 'read-only' : 'child') : ''}|${policy.approvalPolicy}|${policy.permissions ?? policy.sandbox}|${compactLimit ?? ''}${botOverrides ? `|bot:${Object.keys(botOverrides).sort().join(',')}` : ''}${botSandbox?.shell ? `|write:${botSandbox.writableRoots.join('\u0000')}` : ''}${botSandbox?.profile ? `|${botSandbox.profile.base}|read:${botSandbox.profile.readable.join('\u0000')}|deny:${botSandbox.profile.closed.filter((place) => !isMousseTempEntry(place)).join('\u0000')}` : ''}${webOff ? '|web:off' : ''}`
     const params = {
       cwd,
       approvalPolicy: policy.approvalPolicy,

@@ -812,7 +812,9 @@ export class MmsProfileServices {
       const journal = createBotJournal({
         store: memory,
         readThread: (threadId) => this.threads.loadThreadData(threadId),
-        listThreads: () => botThreadsForCatchUp(store.captureThreads())
+        listThreads: () => botThreadsForCatchUp(store.captureThreads()),
+        // A subagent's thread is copied as its own rows, never as the bot's words to its owner.
+        isSubagentThread: (threadId) => store.threadRole(threadId) === 'subagent'
       })
       const pack = createBotContextProvider({
         store: memory,

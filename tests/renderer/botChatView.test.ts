@@ -1014,6 +1014,17 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
     expect(line.querySelector('[title]')!.getAttribute('title')).toBe(detail)
   })
 
+  it("work with subagents running says how many in its row's details, each one's title, model and entry on hover, and keeps its Stop", async () => {
+    const subagents = [{ title: 'Prices', model: 'Some Model on OpenRouter' }, { title: 'Reviews', model: 'Haiku 5.5 on Claude Code, low reasoning', lacks: ['run commands'] }]
+    await open({ ...working, work: [{ ...working.work![0]!, subagents }] })
+    await click(presence())
+    const line = host.querySelector('.bot-work-line')!
+    expect(line.textContent).toBe('Vacuum comparisonworking · 2 subagents · 4 min')
+    expect(line.querySelector('.bot-work-subagents')!.getAttribute('title')).toBe("Prices · Some Model on OpenRouter\nReviews · Haiku 5.5 on Claude Code, low reasoning · can't run commands there")
+    await click(button('Stop Vacuum comparison'))
+    expect(fake.calls).toContainEqual(['stopWork', 'inbox', 'act_w1'])
+  })
+
   it("the chat's own turn types and has Stop; the header still opens the work", async () => {
     await open({ ...working, chat: { activationId: 'act_c1' } })
     expect(transcript().querySelector('.bot-typing')).not.toBeNull()

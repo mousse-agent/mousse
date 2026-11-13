@@ -120,6 +120,8 @@ for (const BINARY of BINARIES) describe.skipIf(!BINARY)(`what Codex ${BINARY ? v
       'model_provider = "probe"',
       'sandbox_mode = "danger-full-access"',
       'approval_policy = "never"',
+      // The owner's own web search on, live: what a bot's thread must switch off when its grant has no web.
+      'web_search = "live"',
       '[model_providers.probe]', 'name = "probe"', `base_url = "http://127.0.0.1:${port}/v1"`, 'wire_api = "responses"', 'env_key = "PROBE_KEY"',
       '[features]', ...[...new Set([...named, ...CODEX_BOT_FEATURES_OFF, ...more])].filter((name) => more.includes(name) || !leftOut.has(name)).map((feature) => `${feature} = true`), ''
     ].join('\n'))
@@ -146,21 +148,21 @@ for (const BINARY of BINARIES) describe.skipIf(!BINARY)(`what Codex ${BINARY ? v
   }, 30_000)
 
   let threads = 0
-  /** A bot holding `tools`, without file access: its files folder and scratch only. */
-  function botOf(tools: NeutralTool[]) {
+  /** A bot holding `tools` (and `appTools`: the web is `web_search`, `web_fetch`), without file access: its files folder and scratch only. */
+  function botOf(tools: NeutralTool[], appTools: string[] = []) {
     const files = join(root, `bot-${threads}`, 'files')
     const scratch = join(root, `bot-${threads}`, 'scratch')
     for (const folder of [files, scratch]) mkdirSync(folder, { recursive: true })
     const bot = createBotAuthority({
       activationId: `act-${threads}`, role: 'activation',
-      permissions: { tools, appTools: [], mcp: [], skills: [], workspace: { roots: [], access: 'read', writeRoots: [], scratch, files } },
+      permissions: { tools, appTools, mcp: [], skills: [], workspace: { roots: [], access: 'read', writeRoots: [], scratch, files } },
       waiting: () => false, counters: { charge: () => ({ ok: true, count: 1 }) },
       time: { deadline: () => Number.MAX_SAFE_INTEGER, signal: new AbortController().signal }, spend: null
     })
     return { bot, files, scratch, threadId: `bot-tools-${threads++}` }
   }
-  async function botTurn(model: string, tools: NeutralTool[]) {
-    const { bot, scratch, threadId } = botOf(tools)
+  async function botTurn(model: string, tools: NeutralTool[], appTools: string[] = []) {
+    const { bot, scratch, threadId } = botOf(tools, appTools)
     requests = []
     await service.chat({ threadId, cwd: scratch, model, prompt: 'Go.', mcp: null, bot, onText: () => undefined })
     return requests
@@ -202,6 +204,24 @@ for (const BINARY of BINARIES) describe.skipIf(!BINARY)(`what Codex ${BINARY ? v
     }
     expect(without.filter((name) => COMMANDS.test(name))).toEqual([])
     expect(withShell.filter((name) => COMMANDS.test(name)).length).toBeGreaterThan(0)
+  }, 120_000)
+
+  // Codex's hosted web search reaches the web whatever the bot holds unless the thread switches it off: a bot without
+  // the web (no `web_search` or `web_fetch` in its grant) is offered no hosted search, with web search live in the
+  // owner's config. Models with subagents were never seen offering it to a bot; the control is on the one that does.
+  it.each(kinds)('a model with %s: a bot without the web is offered no hosted web search', async (_name, version) => {
+    const model = modelWith(version)
+    expect(model).toBeDefined()
+    first = undefined
+    child = undefined
+    expect(offered((await botTurn(model!.id, ['read']))[0])).not.toContain('web_search')
+    expect(offered((await botTurn(model!.id, ['read', 'shell']))[0])).not.toContain('web_search')
+  }, 120_000)
+
+  it('the control: the same bot with the web is offered the hosted search', async () => {
+    first = undefined
+    child = undefined
+    expect(offered((await botTurn(modelWith(null)!.id, ['read'], ['web_search', 'web_fetch']))[0])).toContain('web_search')
   }, 120_000)
 
   it.skipIf(process.platform === 'win32')('a subagent of a bot inherits its tools and sandbox, and Mousse answers nothing it asks: no command of a child runs', async () => {

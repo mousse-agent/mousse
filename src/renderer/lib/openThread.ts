@@ -14,3 +14,13 @@ export async function openThread(threadId: string): Promise<void> {
   if (state.activeThreadId === threadId && !state.openingThreadId) return
   await openAndSelect(threadId)
 }
+
+/**
+ * Whether `threadId` is the thread this window shows, or is opening: a started thread with nothing cached is held in
+ * `openingThreadId` until its view arrives, so right after `openThread` it is not yet `activeThreadId`. A page that
+ * gives way to an opened thread (Settings) checks this, so it still steps aside when the thread is being opened.
+ */
+export function isThreadShownOrOpening(threadId: string): boolean {
+  const state = useAppStore.getState()
+  return (state.openingThreadId ?? state.activeThreadId) === threadId
+}
