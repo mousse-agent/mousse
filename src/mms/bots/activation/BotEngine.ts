@@ -26,7 +26,7 @@ import {
   grantRequestOf
 } from '../../../shared/bots/personal/escalation'
 import { findServer, installationOf, mcpAskFor, type BotMcpHost, type BotMcpServer } from '../mcp/BotMcp'
-import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_WORK_ONLY_TOOLS, botGrantTool, isAbsolutePath, manifestProblem } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, botGrantTool, isAbsolutePath, manifestProblem } from '../../../shared/bots/personal/manifest'
 import { checkMessage, wallMessage } from '../../../shared/bots/personal/walls'
 import type { ChargeResult, CountKind, CounterScope } from '../../../shared/harness/counters'
 import type { ReserveResult, SpendLimits, SpendRequest, SpendScope } from '../../../shared/harness/spend'
@@ -2032,7 +2032,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       remaining: { ...limitsOf(effective), deadlineMs: remainingMs },
       filesFolder: this.filesFolder(row.botId),
       // A chat turn is the bot's front desk: it hands what takes long to work (docs/plans/bot-always-free.md).
-      botTools: { escalate: true, consult: definition.context.length > 0, memory: true, frontDesk: row.lane === 'chat' },
+      // The owner's threads: reading in every lane; starting, messaging and stopping only in a chat turn the owner's own
+      // message started (`chat:`), never in work, a reminder's work, a schedule or the bot's first message.
+      botTools: { escalate: true, consult: definition.context.length > 0, memory: true, frontDesk: row.lane === 'chat', threads: ownerChatTurn(row) ? 'all' : 'read' },
       limit
     })
     if (!compiled.ok) return this.block(row, 'policy_unenforceable', compiled.error.reason ?? compiled.error.message)
@@ -5297,6 +5299,18 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return role === 'home' ? 'activation' : role === 'activation' || role === 'context' ? role : undefined
   }
 
+  /** The bot `threadId` belongs to, with its name now (`BotThreads.botOf`). Never throws. */
+  botOf(threadId: string): { botId: string; name: string } | undefined {
+    let botId: string | undefined
+    try {
+      botId = this.store.threadBot(threadId)
+    } catch {
+      botId = this.known.get(threadId)?.botId
+    }
+    if (!botId) return undefined
+    return { botId, name: this.ownerOf(threadId) ?? botId }
+  }
+
   /** Never throws: a failed read answers from the threads this process knows of. */
   ownerOf(threadId: string): string | undefined {
     let botId: string | undefined
@@ -6173,8 +6187,9 @@ function heldAlready(authority: Pick<BotAuthority, 'tools' | 'appTools' | 'skill
   if ('tool' in asked) {
     // The web tools are neutral tools that a grant keeps with the app tools (the starter grant does): either holds them.
     if (isNeutralTool(asked.tool)) return authority.tools.has(asked.tool) || authority.appTools.has(asked.tool)
-    // The browser is held as its tools.
-    return asked.tool === BOT_BROWSER_PERMISSION ? authority.appTools.has('browser_open') : authority.appTools.has(asked.tool)
+    // The browser is held as its tools, and the owner's threads as theirs (reading them, in every lane that has them).
+    if (asked.tool === BOT_BROWSER_PERMISSION) return authority.appTools.has('browser_open')
+    return asked.tool === BOT_THREADS_PERMISSION ? authority.appTools.has('thread_list') : authority.appTools.has(asked.tool)
   }
   if ('skill' in asked) return authority.skills.has(asked.skill)
   if ('mcp' in asked) {
@@ -6182,6 +6197,14 @@ function heldAlready(authority: Pick<BotAuthority, 'tools' | 'appTools' | 'skill
     return tools.length > 0 && tools.every((tool) => authority.mcp.has(`${asked.mcp.serverId}::${tool}`))
   }
   return false
+}
+
+/**
+ * Whether the activation is a chat turn its owner's own message started (`bots.chat.send`, keyed `chat:`): the only
+ * turn that may start, message or stop the owner's threads. The bot's first message (`create:`) is not one.
+ */
+export function ownerChatTurn(row: Pick<BotActivationRow, 'lane' | 'idempotencyKey'>): boolean {
+  return row.lane === 'chat' && row.idempotencyKey.startsWith('chat:')
 }
 
 /** What a gate refusal asks the owner for. */

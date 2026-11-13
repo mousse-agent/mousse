@@ -15,6 +15,8 @@ export interface AskCardProps {
   /** The line as plain text, for the row's tooltip and labels. */
   lineText: string
   note?: string
+  /** What Allow gives in full, as the note's tooltip (a bot's "use your threads"). */
+  tip?: string
   /** What Allow grants, by name, on one line the person can open (an MCP server's tools), and what else it can't grant. */
   details?: { summary: string; items: string[]; more?: string }
   /** Allow is off, with this as its tooltip (an MCP server whose tools are still loading); Not now still works. */
@@ -29,7 +31,7 @@ export interface AskCardProps {
   label?: string
 }
 
-export function AskCard({ line, lineText, note, details, allowOff, answered, layout = 'card', onAnswer, row, label }: AskCardProps) {
+export function AskCard({ line, lineText, note, tip, details, allowOff, answered, layout = 'card', onAnswer, row, label }: AskCardProps) {
   const [busy, setBusy] = useState(false)
   const answer = async (choice: 'allow' | 'not_now') => {
     setBusy(true)
@@ -41,7 +43,7 @@ export function AskCard({ line, lineText, note, details, allowOff, answered, lay
   if (layout === 'row' && row) {
     return <div className="automation-row" data-testid="automation-row" data-key={row.key} data-kind={row.kind} data-ask="" role="option" aria-selected={false}>
       <span className="automation-glyph needs" data-glyph="needs" title="Needs you" role="img" aria-label="Needs you">⚠</span>
-      <button type="button" className="automation-row-main" data-row-button="" title={note || undefined} onClick={row.onOpen}>
+      <button type="button" className="automation-row-main" data-row-button="" title={tip ?? (note || undefined)} onClick={row.onOpen}>
         <span className="automation-row-name">{row.name}</span>
         <span className="automation-row-meta"><span className="automation-row-seg tone-warn" data-meta="attention">{line}</span></span>
       </button>
@@ -51,7 +53,7 @@ export function AskCard({ line, lineText, note, details, allowOff, answered, lay
   }
   return <div className="ask-card" role="group" aria-label={label ?? lineText}>
     <div className="ask-card-title"><Shield size={16} aria-hidden /><span>{line}</span></div>
-    {note && <p className="ask-card-note">{note}</p>}
+    {note && <p className="ask-card-note" title={tip}>{note}</p>}
     {details && details.items.length > 0 && <details className="ask-card-details">
       <summary>{details.summary}</summary>
       <p>{details.items.join(', ')}</p>
@@ -94,6 +96,7 @@ export function BotAsk({ botName, ask, fromRun = false, onAnswer, onExport }: {
     lineText={`${botName} wants to ${ask.title}`}
     label={`${botName} asks`}
     {...(ask.note ? { note: ask.note } : {})}
+    {...(ask.tip ? { tip: ask.tip } : {})}
     {...(ask.details ? { details: ask.details } : {})}
     {...(ask.loading ? { allowOff: 'Its tools are still loading' } : {})}
     {...(ask.status !== 'open' ? { answered: { text: askAnswerLine(ask, fromRun), allowed: ask.status === 'allowed' } } : {})}

@@ -26,6 +26,8 @@ export interface BotChip {
   /** The short highlighted part: a domain, a folder name, a schedule label. */
   highlight?: string
   live?: boolean
+  /** A thread the call started, messaged or stopped ("use your threads"): the chip offers Open, which shows it. */
+  thread?: string
 }
 
 export type BotAskStatus = 'open' | 'allowed' | 'not_now' | 'withdrawn'
@@ -37,6 +39,8 @@ export interface BotAskCard {
   title: string
   /** One line on the limit: "Only this folder. It can't change anything." */
   note: string
+  /** What Allow gives, in full, as the note's tooltip; absent when the note says it all (and from older services). */
+  tip?: string
   status: BotAskStatus
   /** `export_memory`: Allow opens a folder picker and calls `bots.memory.export`; it grants nothing. */
   kind?: 'permission' | 'export_memory'
@@ -106,6 +110,11 @@ export interface BotSummary {
   lastOutcome?: 'ok' | 'failed' | 'stopped'
   unread: number
   createdAt: string
+  /**
+   * The thread of its chat: a thread the bot started names it as its launcher (`Thread.createdByThreadId`), which is
+   * how the app shows "Started by <name>". Absent from older services.
+   */
+  homeThreadId?: string
   /** The chat turn that runs now (its status line and Stop); absent while the chat is free. `offline`: it waits for the internet. */
   chat?: { activationId: string; offline?: true }
   /** Work that runs or waits beside the chat (docs/plans/bot-always-free.md), oldest first. */

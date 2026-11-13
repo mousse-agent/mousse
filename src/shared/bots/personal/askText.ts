@@ -12,6 +12,18 @@ export interface AskText {
   title: string
   /** One line on the limit; empty when there is nothing to add. */
   note: string
+  /** What Allow gives, in full, for the card's tooltip and About's: absent when the note says it all. */
+  tip?: string
+}
+
+/**
+ * "Use your threads": what the card and About say. The line names what matters most, that a thread it starts runs with
+ * full access; the tooltip says the rest.
+ */
+export const THREADS_TEXT: AskText = {
+  title: 'use your threads',
+  note: 'Threads it starts run with full access on this computer.',
+  tip: 'It can read your threads, start new ones and message or stop them, only when you ask it in its chat. A thread it starts runs commands and changes files without asking; a message it sends runs in that thread\'s own mode. It never answers an approval or a question.'
 }
 
 /** Tools by name, as a card says them after "wants to". */
@@ -24,7 +36,8 @@ const TOOL_TEXT: Record<string, AskText> = {
   shell: { title: 'run commands', note: 'Any command, started in its files folder. Commands can reach other files on this computer.' },
   web_search: { title: 'search the web', note: 'It sees search results, not your files.' },
   web_fetch: { title: 'read web pages', note: 'It sees the pages, not your files.' },
-  browser: { title: 'use the browser', note: 'Its own browser, apart from your tabs. It can open pages, click and type. Sites you sign in to there stay signed in for it.' }
+  browser: { title: 'use the browser', note: 'Its own browser, apart from your tabs. It can open pages, click and type. Sites you sign in to there stay signed in for it.' },
+  threads: THREADS_TEXT
 }
 
 /**

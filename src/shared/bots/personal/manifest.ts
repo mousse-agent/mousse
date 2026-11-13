@@ -67,13 +67,40 @@ export const BOT_BROWSER_TOOLS: readonly BrowserAutomationTool[] = BROWSER_AUTOM
 export const BOT_AUTOMATION_APP_TOOLS: readonly string[] = ['automation_draft_save', 'automation_ask', 'automation_list', 'automation_update', 'automation_pause']
 
 /**
- * The Mousse app tools a bot may be granted: ones that read the web, its own browser, the bot's
- * own tools, and the automation tools. Every other app tool starts, wakes, writes or reads other
- * threads (delegation, forks, queues, merge-backs), acts in the owner's name, or asks a person, so
- * it would run work outside the grant. Consults (6c-2) are the way a bot uses other threads. The
- * skill tools come with granted skills.
+ * "Use your threads": one permission, asked for once, for the owner's ordinary threads in this profile. The grant names
+ * it alone; `compileBotThread` turns it into the thread tools a turn may use (`BOT_THREAD_READ_TOOLS` in every lane but a
+ * consult, `BOT_THREAD_ACT_TOOLS` only in a chat turn the owner's own message started). A thread the bot starts runs in
+ * Full access, and a message it sends runs in that thread's own mode, so the card says so (`askText`).
  */
-export const BOT_APP_TOOLS: ReadonlySet<string> = new Set([...BOT_DEFAULT_APP_TOOLS, BOT_BROWSER_PERMISSION, ...BOT_AUTOMATION_APP_TOOLS])
+export const BOT_THREADS_PERMISSION = 'threads'
+
+/** What a bot with "use your threads" may do in its work as well as its chat: list, search, read and wait on threads. */
+export const BOT_THREAD_READ_TOOLS: readonly string[] = ['thread_list', 'thread_search', 'thread_read', 'thread_wait']
+
+/**
+ * What changes threads: start one, message one, stop one's turn. Only a chat turn the owner's own message started gets
+ * them, so nothing a bot read in its work, a reminder or a schedule starts or steers a thread.
+ */
+export const BOT_THREAD_ACT_TOOLS: readonly string[] = ['thread_create', 'thread_send', 'thread_interrupt']
+
+/** Every thread tool a bot can hold, all under "use your threads". */
+export const BOT_THREAD_TOOLS: readonly string[] = [...BOT_THREAD_READ_TOOLS, ...BOT_THREAD_ACT_TOOLS]
+
+const THREAD_TOOL_NAMES: ReadonlySet<string> = new Set(BOT_THREAD_TOOLS)
+
+/** Whether `name` is one of the thread tools a bot can hold under "use your threads". */
+export function isBotThreadTool(name: string): boolean {
+  return THREAD_TOOL_NAMES.has(name)
+}
+
+/**
+ * The Mousse app tools a bot may be granted: ones that read the web, its own browser, the bot's
+ * own tools, the automation tools, and the owner's threads as one permission. Every other app tool starts, wakes,
+ * writes or reads other threads (delegation, forks, queues, merge-backs), acts in the owner's name, or asks a person,
+ * so it would run work outside the grant. Consults (6c-2) are the way a bot uses its own threads. The skill tools come
+ * with granted skills.
+ */
+export const BOT_APP_TOOLS: ReadonlySet<string> = new Set([...BOT_DEFAULT_APP_TOOLS, BOT_BROWSER_PERMISSION, ...BOT_AUTOMATION_APP_TOOLS, BOT_THREADS_PERMISSION])
 
 /**
  * Every Mousse app tool a bot's turn can ever be offered (what `compileBotThread` may add to a turn): the grantable
@@ -81,8 +108,9 @@ export const BOT_APP_TOOLS: ReadonlySet<string> = new Set([...BOT_DEFAULT_APP_TO
  * tools. A bot's thread lists only these, so its runtime never shows the model a tool no bot can hold.
  */
 const BOT_OFFERABLE_APP_TOOLS: ReadonlySet<string> = new Set([
-  ...[...BOT_APP_TOOLS].filter((tool) => tool !== BOT_BROWSER_PERMISSION),
+  ...[...BOT_APP_TOOLS].filter((tool) => tool !== BOT_BROWSER_PERMISSION && tool !== BOT_THREADS_PERMISSION),
   ...BOT_BROWSER_TOOLS,
+  ...BOT_THREAD_TOOLS,
   ...BOT_WORK_TOOLS,
   ...BOT_MEMORY_TOOLS,
   BOT_MCP_LIST_TOOL,
@@ -99,10 +127,12 @@ const BROWSER_TOOLS: ReadonlySet<string> = new Set(BROWSER_AUTOMATION_TOOLS)
 
 /**
  * The permission an app tool falls under: every browser tool is "use the browser" (`browser`), so
- * an ask for `browser_act` is the same one ask; any other tool is its own.
+ * an ask for `browser_act` is the same one ask; every thread tool is "use your threads" (`threads`); any other tool is
+ * its own.
  */
 export function botGrantTool(tool: string): string {
-  return BROWSER_TOOLS.has(tool) ? BOT_BROWSER_PERMISSION : tool
+  if (BROWSER_TOOLS.has(tool)) return BOT_BROWSER_PERMISSION
+  return THREAD_TOOL_NAMES.has(tool) ? BOT_THREADS_PERMISSION : tool
 }
 
 /** Whether `tool` is one of the bot's own tools: not a permission, never listed in About. */
@@ -296,9 +326,11 @@ function toolLine(tool: NeutralTool, workspace: BotManifest['workspace']): BotPe
   return { kind: 'tool', text: workspace ? TOOL_WORDS[tool] : `${TOOL_WORDS[tool]} in its files folder` }
 }
 
-/** An app tool in plain words: the browser by what it is, any other tool by its name. */
+/** An app tool in plain words: the browser and the owner's threads by what they are, any other tool by its name. */
 function appToolLine(tool: string): BotPermissionLine {
-  return { kind: 'app_tool', text: tool === BOT_BROWSER_PERMISSION ? 'Use the browser' : `Use the Mousse tool \`${tool}\`` }
+  if (tool === BOT_BROWSER_PERMISSION) return { kind: 'app_tool', text: 'Use the browser' }
+  if (tool === BOT_THREADS_PERMISSION) return { kind: 'app_tool', text: 'Use your threads' }
+  return { kind: 'app_tool', text: `Use the Mousse tool \`${tool}\`` }
 }
 
 function mcpLine(pair: { serverId: string; tool: string }): BotPermissionLine {

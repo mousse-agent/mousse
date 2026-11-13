@@ -23,7 +23,7 @@ export * from './types'
 export * from './registry'
 export * from './turns'
 export type { AgentActionDetails, AgentApprovalResult, AgentCreatedThread, AgentQueueCommand, AgentQueueResult, AgentScheduleHost, AgentRunCommandResult, AgentSendResult, AgentThreadRequest, ApprovalRequestInfo, AppToolHost, QueueSnapshot, ThreadSearchHit } from './host'
-export { AGENT_MESSAGE_END, AGENT_MESSAGE_PREFIX, agentMessageText } from './agentMessage'
+export { AGENT_MESSAGE_END, AGENT_MESSAGE_PREFIX, agentMessageText, BOT_MESSAGE_END, BOT_MESSAGE_PREFIX, botMessageText } from './agentMessage'
 export type { BotAppToolDeps } from './bots'
 export { AUTOMATION_TOOL_NAMES, type AutomationToolHost } from './automations'
 export type { BotMemoryToolHost } from './botMemory'
@@ -106,7 +106,7 @@ export function createAppToolRegistry(input: {
   add('delegation', delegationTools(host))
   add('plans', planTools(host))
   add('tasks', taskTools(host))
-  add('thread', engine ? threadTools(host, engine) : [])
+  add('thread', engine ? threadTools(host, engine, input.bots) : [])
   add('schedules', [...(engine ? scheduleTools(host, engine) : []), ...automationTools(host)])
   add('skills', skillTools(host))
   add('quickActions', quickActionTools(host))

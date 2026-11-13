@@ -256,6 +256,11 @@ export interface AppToolHost extends DelegationToolsHost {
   /** The profile's projects. */
   listProjects?(): Array<{ id: string; name: string }>
   /**
+   * The models a thread can run on now, by provider entry (what the composer's picker lists for this computer), for a
+   * bot that starts a thread ("use your threads"): it names one with `instanceId` and `model`.
+   */
+  threadModels?(): Array<{ instanceId: string; entry: string; model: string; name: string }>
+  /**
    * Matches over thread names, project names and messages; subagent threads are not searched. `allow`
    * (which threads the caller may see) and `titlesOnly` are applied before the limit and before any
    * transcript is read.

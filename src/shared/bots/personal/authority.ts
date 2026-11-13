@@ -22,6 +22,11 @@ export type BotThreadRole = 'activation' | 'context'
 export interface BotThreads {
   /** The thread's role, or undefined when it is not a bot thread. */
   roleOf(threadId: string): BotThreadRole | undefined
+  /**
+   * The bot a thread belongs to, by id and its name now, or undefined when it is no bot's: how a thread the bot started
+   * and a message it sent are shown as the bot's ("use your threads"). Never throws.
+   */
+  botOf?(threadId: string): { botId: string; name: string } | undefined
 }
 
 /**

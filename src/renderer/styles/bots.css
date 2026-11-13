@@ -137,6 +137,8 @@ button.bot-image:focus-visible > img { opacity: 0.82; }
 .bot-chip { display: inline-flex; align-items: center; gap: 8px; padding: 6px 11px; border-radius: 9px; background: color-mix(in srgb, var(--text-secondary) 9%, transparent); color: var(--text-secondary); font-family: 'Geist Mono', ui-monospace, monospace; font-size: 12px; }
 .bot-chip b { font-weight: 500; color: var(--accent); }
 .bot-chip.is-live svg { animation: chat-spin 1s steps(12) infinite; }
+.bot-chip-open { border: 0; padding: 2px 8px; border-radius: 6px; background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); font: inherit; cursor: pointer; }
+.bot-chip-open:hover, .bot-chip-open:focus-visible { background: color-mix(in srgb, var(--accent) 24%, transparent); outline: none; }
 .chat-run-status .bot-chip { margin-left: 4px; }
 @media (prefers-reduced-motion: reduce) { .bot-chip.is-live svg { animation: none; } }
 

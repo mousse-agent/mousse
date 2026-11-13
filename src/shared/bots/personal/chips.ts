@@ -29,6 +29,7 @@ type ChipKind =
   | 'search' | 'fetch' | 'browse' | 'read' | 'change' | 'save' | 'draft' | 'lookback' | 'consult' | 'skill' | 'tool' | 'mcp' | 'schedules'
   | 'schedule' | 'unschedule' | 'remember' | 'forget' | 'depth' | 'profile' | 'model'
   | 'work' | 'work_stop' | 'work_note' | 'remind' | 'unremind' | 'work_look'
+  | 'threads_look' | 'thread_wait' | 'thread_start' | 'thread_send' | 'thread_stop'
 
 interface Classified {
   kind: ChipKind
@@ -173,6 +174,18 @@ function classify(tool: string, input: unknown, ctx: BotChipContext): Classified
     case 'remind': return { kind: 'remind', icon: 'schedule', live: 'setting a reminder' }
     case 'reminder_cancel': return { kind: 'unremind', icon: 'schedule', live: 'cancelling a reminder' }
     case 'reminder_list': return { kind: 'schedules', icon: 'schedule', live: 'checking its reminders' }
+    // The owner's threads ("use your threads"): what it read rolls up into one chip; each start, message and stop is its
+    // own chip, with the thread to open.
+    case 'thread_list':
+    case 'thread_search':
+    case 'thread_read': return { kind: 'threads_look', icon: 'read', live: 'reading your threads' }
+    case 'thread_wait': return { kind: 'thread_wait', icon: 'think', live: 'waiting on a thread' }
+    case 'thread_create': {
+      const title = str(args.title)
+      return { kind: 'thread_start', icon: 'think', live: 'starting a thread', ...(title ? { detail: shortChipText(title, 40) } : {}) }
+    }
+    case 'thread_send': return { kind: 'thread_send', icon: 'think', live: 'messaging a thread' }
+    case 'thread_interrupt': return { kind: 'thread_stop', icon: 'think', live: 'stopping a thread' }
     // `escalate`: its card is the chip.
     default: return null
   }
@@ -227,6 +240,16 @@ function outcomeChip(kind: ChipKind, call: BotChipCall): BotChip | null {
       return { icon: 'schedule', text: 'reminder', ...(label ? { highlight: label } : {}) }
     }
     case 'unremind': return { icon: 'schedule', text: 'cancelled a reminder' }
+    // A thread it started, messaged or stopped: its title, and the thread, which the chip opens.
+    case 'thread_start':
+    case 'thread_send':
+    case 'thread_stop': {
+      const threadId = str(result.threadId)
+      if (!threadId) return null
+      const title = str(result.title)
+      const text = kind === 'thread_start' ? 'started thread' : kind === 'thread_send' ? 'messaged' : 'stopped'
+      return { icon: 'think', text, ...(title ? { highlight: shortChipText(title, 40) } : {}), thread: threadId }
+    }
     case 'model': {
       const rows = result.for === 'talk' ? 'for talking' : result.for === 'work' ? 'for work' : result.for === 'all' ? 'from now on' : 'for this chat'
       return { icon: 'think', text: 'switched models', highlight: rows }
@@ -259,6 +282,8 @@ function groupChip(kind: ChipKind, icon: BotChipIcon, calls: readonly Classified
     case 'skill': return chip(details.length ? 'used a skill' : 'looked at its skills', listed(details))
     case 'tool': return chip(details.length ? 'used a tool' : 'ran a command', listed(details))
     case 'mcp': return details.length ? chip('used', listed(details)) : chip('used a tool')
+    case 'threads_look': return chip('read your threads')
+    case 'thread_wait': return chip(n === 1 ? 'waited on a thread' : `waited on threads · ${n}`)
     case 'unschedule': {
       const done = all.filter((call) => succeeded(call.result)).length
       return done ? chip(done === 1 ? 'removed a schedule' : `removed ${done} schedules`) : null
@@ -269,7 +294,7 @@ function groupChip(kind: ChipKind, icon: BotChipIcon, calls: readonly Classified
 }
 
 /** Kinds whose every successful call is its own chip. */
-const OUTCOME_KINDS: ReadonlySet<ChipKind> = new Set(['schedule', 'remember', 'forget', 'work', 'work_stop', 'work_note', 'remind', 'unremind', 'model'])
+const OUTCOME_KINDS: ReadonlySet<ChipKind> = new Set(['schedule', 'remember', 'forget', 'work', 'work_stop', 'work_note', 'remind', 'unremind', 'model', 'thread_start', 'thread_send', 'thread_stop'])
 /** Kinds that settle to one chip for the last call only. */
 const LAST_KINDS: ReadonlySet<ChipKind> = new Set(['profile'])
 /** Kinds that settle to nothing: a look at its own schedules is not worth a chip. */

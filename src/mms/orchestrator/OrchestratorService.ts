@@ -81,7 +81,9 @@ import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type Effe
 import { steerReleaseWindow, stopStrategy, type SteerDelivery } from '../run/CommandPolicy'
 import { agentMessageText, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentCreatedThread, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, LAUNCHED_THREAD_ACCESS_CEILING, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
-import { THREAD_CREATE_MAX_ACTIVE_PER_THREAD } from '../run/mcp/appTools/thread'
+import { BOT_THREAD_STARTS_PER_DAY, THREAD_CREATE_MAX_ACTIVE_PER_THREAD } from '../run/mcp/appTools/thread'
+import { botMessageText } from '../run/mcp/appTools/agentMessage'
+import { notOnThisComputerText } from '../../shared/bots/personal/computerLimit'
 import { createHash, randomUUID } from 'node:crypto'
 import { QueueCommands, type QueueIntent } from '../run/QueueCommands'
 import type { PlannedQueueCommand, QueueEffects } from '../queue/queueJournal'
@@ -3880,6 +3882,9 @@ export class OrchestratorService extends EventEmitter {
       threadMeta: (threadId) => this.threadStore?.getThread(threadId),
       listThreads: () => this.threadStore?.listAllThreads() ?? [],
       listProjects: () => (this.threadStore?.listProjects() ?? []).map(({ id, name }) => ({ id, name })),
+      // What the composer's picker lists on this computer: each entry's models, by the entry's id and name.
+      threadModels: () => this.harness.listedLlmProviders({ kind: 'device' }).flatMap((provider) =>
+        provider.instanceId ? provider.models.map((model) => ({ instanceId: provider.instanceId!, entry: provider.label, model: model.id, name: model.label })) : []),
       searchThreads: async (query, limit, options) => (await this.threadStore?.searchThreadsAsync(query, limit, { hideSubagents: true, ...options })) ?? [],
       threadMessages: (threadId) => this.visibleMessagesWithoutLoading(threadId),
       threadActivity: (threadId) => this.threadActivity(threadId),
@@ -4047,15 +4052,18 @@ export class OrchestratorService extends EventEmitter {
   private async sendToThreadAsAgent(
     threadId: string,
     input: { content: string; mode: 'agent' | 'plan' },
-    options: { clientRequestId: string; actor: AgentActor }
+    options: { clientRequestId: string; actor: AgentActor; bot?: { botId: string; name: string } }
   ): Promise<AgentSendResult> {
     const engine = this.requireRunEngine()
+    // A bot's thread sends only as the owner's bot, with "use your threads" held by the turn that sends (or, for a thread
+    // it just started, by the creation that carries it).
+    const bot = options.bot ?? this.botSenderOf(options.actor, 'thread_send')
     const sender = this.withAgentHops(options.actor)
     this.assertQueueOpen(threadId)
     // A thread a person keeps in Plan takes the message as a plan turn, whatever mode the sender asked for.
     const mode: 'agent' | 'plan' = this.lastChatModeOf(threadId) === 'plan' ? 'plan' : input.mode
     const response = await this.send(
-      { content: agentMessageText(sender.threadId, this.titleOf(sender.threadId), input.content), mode },
+      { content: bot ? botMessageText(bot.name, input.content) : agentMessageText(sender.threadId, this.titleOf(sender.threadId), input.content), mode },
       false,
       {
         threadId,
@@ -4063,7 +4071,10 @@ export class OrchestratorService extends EventEmitter {
         clientRequestId: options.clientRequestId,
         awaitMode: 'ack',
         agent: sender,
-        permissionMode: this.runPermissionMode(sender.runId),
+        // An agent's message runs no wider than the agent's own run. The owner's bot's runs in the thread's own mode, as
+        // the owner's own message would: the owner allowed it to message their threads.
+        ...(bot ? {} : { permissionMode: this.runPermissionMode(sender.runId) }),
+        // Neither ever answers or skips a question, an approval or a plan review waiting in the thread.
         preemptQuestions: false,
         refuseWhileAsking: true
       }
@@ -4150,8 +4161,9 @@ export class OrchestratorService extends EventEmitter {
   ): Promise<AgentCreatedThread> {
     const engine = this.requireRunEngine()
     if (!this.threadStore || !this.projectManager) throw new Error('Creating threads needs the thread store and the project manager.')
-    // A bot's thread acts for a person outside Mousse and starts no threads.
-    if (this.botThreads?.roleOf(options.actor.threadId)) throw new McpToolError('mousse_scope_denied', 'A thread that belongs to a bot cannot create threads.')
+    // A bot's thread starts threads only as the owner's bot, from a chat turn the owner's own message started, with "use
+    // your threads" held by that turn and on on this computer. Any other thread of a bot starts none.
+    const bot = this.botSenderOf(options.actor, 'thread_create')
     const key = options.clientRequestId
     // Whether the project is a Git repository, read ahead without blocking, so the receipt is looked up, planned and
     // recorded below with nothing awaited in between. Only for a request not seen before.
@@ -4164,7 +4176,7 @@ export class OrchestratorService extends EventEmitter {
       intent = earlier.intent
     } else {
       // Everything that can refuse does so here, before anything is recorded or made.
-      intent = this.planAgentThread(input, options, gitBacked)
+      intent = this.planAgentThread(input, { ...options, ...(bot ? { bot } : {}) }, gitBacked)
       engine.store.putReceipt({
         clientRequestId: key,
         threadId: options.actor.threadId,
@@ -4194,7 +4206,7 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /** `gitBacked`: {@link projectGitBacked} of the project, read by the caller before the receipt lookup. */
-  private planAgentThread(input: AgentThreadRequest, options: { actor: AgentActor; accessLevel: AgentAccessLevel }, gitBacked: boolean): AgentThreadIntent {
+  private planAgentThread(input: AgentThreadRequest, options: { actor: AgentActor; accessLevel: AgentAccessLevel; bot?: { botId: string; name: string } }, gitBacked: boolean): AgentThreadIntent {
     const engine = this.requireRunEngine()
     const project = this.projectManager?.getProject(input.projectId)
     if (!project) throw new Error(`Project ${input.projectId} was not found.`)
@@ -4206,9 +4218,18 @@ export class OrchestratorService extends EventEmitter {
     const working = this.threadStore!.listAllThreads().filter((thread) => thread.createdByThreadId === options.actor.threadId && busy.has(thread.id)).length
     if (working >= THREAD_CREATE_MAX_ACTIVE_PER_THREAD)
       throw new McpToolError('mousse_conflict', `${working} of the threads this thread launched are still working (the limit is ${THREAD_CREATE_MAX_ACTIVE_PER_THREAD}); wait for some to finish (thread_wait) before launching more.`, { conflict: 'creation_limit', working })
-    const modelOverride = this.agentThreadModel(input, options.actor.threadId, project.id)
+    // A bot starts at most so many threads a day: the per-run and working-at-once limits bound one chat turn, not days.
+    if (options.bot) {
+      const since = Date.now() - 24 * 60 * 60 * 1000
+      const today = this.threadStore!.listAllThreads().filter((thread) => thread.createdByThreadId === options.actor.threadId && Date.parse(thread.createdAt) >= since).length
+      if (today >= BOT_THREAD_STARTS_PER_DAY)
+        throw new McpToolError('mousse_conflict', `You started ${today} threads in the last day, the most a bot may start in a day (${BOT_THREAD_STARTS_PER_DAY}). Tell your owner you can start more tomorrow.`, { conflict: 'daily_limit', started: today })
+    }
+    // A bot's thread never takes the bot's own model: the one it names, or the profile's default.
+    const modelOverride = this.agentThreadModel(input, options.actor.threadId, project.id, options.bot !== undefined)
     // The thread runs no wider than its creator, and a looser default later cannot widen it: its mode is the stricter of
     // the creator's and the profile's default, stored as a concrete mode. Its agents are held to a level of their own.
+    // A thread the owner's bot starts runs in Full access instead: the owner allowed that with "use your threads".
     const callerMode = this.runPermissionMode(options.actor.runId)
     const profileMode = normalizePermissionMode(this.settingsStore.get().permissions.defaultMode)
     // The first message counts as the next agent message in a row: a creation cannot start a chain the limit would stop.
@@ -4220,12 +4241,14 @@ export class OrchestratorService extends EventEmitter {
       worktreeEnabled: input.workspace === 'new_worktree',
       gitBacked,
       modelOverride,
-      permissionMode: narrowPermissionMode(profileMode, callerMode),
+      permissionMode: options.bot ? 'full' : narrowPermissionMode(profileMode, callerMode),
       accessCeiling: narrowAgentAccess(this.effectiveAccess(options.accessLevel), LAUNCHED_THREAD_ACCESS_CEILING) ?? 'lineage',
+      // Its launcher: for a bot, the bot's chat thread, which is how the app shows "Started by <bot>".
       createdByThreadId: options.actor.threadId,
       // An agent in a private thread only ever starts private threads.
       ...(this.isLocalOnly(options.actor.threadId) ? { localOnly: true as const } : {}),
       actor: options.actor,
+      ...(options.bot ? { bot: options.bot } : {}),
       request: input,
       firstMessage: input.firstMessage === undefined ? null : { content: input.firstMessage, mode: input.mode ?? 'agent' }
     }
@@ -4237,10 +4260,10 @@ export class OrchestratorService extends EventEmitter {
    * go through the checks `threads.setModel` makes: the instance must exist and be enabled, and the model must be
    * visible to the project. Null: no selection is stored and the thread follows the profile's default.
    */
-  private agentThreadModel(input: AgentThreadRequest, callerThreadId: string, projectId: string): ModelOverride | null {
+  private agentThreadModel(input: AgentThreadRequest, callerThreadId: string, projectId: string, bot = false): ModelOverride | null {
     const scope = { kind: 'project', projectId } as const
     const callerThread = this.threadStore?.getThread(callerThreadId)
-    const inherited = this.harness.instanceMap.migrate(this.getOrCreateSession(callerThreadId).modelOverride ?? callerThread?.modelOverride)
+    const inherited = bot ? undefined : this.harness.instanceMap.migrate(this.getOrCreateSession(callerThreadId).modelOverride ?? callerThread?.modelOverride)
     if (!input.model) {
       if (!inherited) return null
       try {
@@ -4335,7 +4358,7 @@ export class OrchestratorService extends EventEmitter {
   private async sendFirstMessage(intent: AgentThreadIntent, key: string): Promise<NonNullable<AgentCreatedThread['firstMessage']>> {
     try {
       const sent = this.earlierAgentSend(intent.threadId, key)
-        ?? await this.sendToThreadAsAgent(intent.threadId, intent.firstMessage!, { clientRequestId: key, actor: intent.actor })
+        ?? await this.sendToThreadAsAgent(intent.threadId, intent.firstMessage!, { clientRequestId: key, actor: intent.actor, ...(intent.bot ? { bot: intent.bot } : {}) })
       return { sent: true, ...sent }
     } catch (error) {
       return { sent: false, reason: error instanceof Error ? error.message : String(error) }
@@ -4397,6 +4420,8 @@ export class OrchestratorService extends EventEmitter {
   /** `thread_interrupt`: the one Stop (`stopThread`), asked for by an agent, aimed at one run. */
   private async stopRunAsAgent(threadId: string, runId: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult> {
     const engine = this.requireRunEngine()
+    // A bot's thread stops another thread's turn only as the owner's bot, from a chat turn the owner's message started.
+    this.botSenderOf(options.actor, 'thread_interrupt')
     const result = await this.stopThread(threadId, 'agent', { runId, clientRequestId: options.clientRequestId, requesterThreadId: options.actor.threadId, actor: options.actor })
     return this.agentRunCommandResult(engine, threadId, runId, result)
   }
@@ -4408,6 +4433,8 @@ export class OrchestratorService extends EventEmitter {
    */
   private async steerRunAsAgent(threadId: string, runId: string, text: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult> {
     const engine = this.requireRunEngine()
+    // A bot never steers a turn: it messages a thread, which queues behind the running turn.
+    if (this.botThreads?.roleOf(options.actor.threadId)) return { status: 'rejected', reason: 'bot_thread' }
     let sender: AgentActor
     try {
       sender = this.withAgentHops(options.actor)
@@ -4439,7 +4466,40 @@ export class OrchestratorService extends EventEmitter {
   /** The transcript row of a change an agent made (its `agent.action` event is the record; this is the projection). */
   private showAgentAction(threadId: string, actor: AgentActor, summary: string): void {
     const session = this.getOrCreateSession(threadId)
-    this.sessionAls.run(session, () => this.addSystemMessage(`Changed by an agent in thread «${this.titleOf(actor.threadId) ?? actor.threadId}» (${actor.threadId}): ${summary}`))
+    // The owner's bot is named as itself, never as "an agent in" its chat thread.
+    const bot = this.botThreads?.botOf?.(actor.threadId)
+    const text = bot ? `By ${bot.name}, your bot: ${summary}` : `Changed by an agent in thread «${this.titleOf(actor.threadId) ?? actor.threadId}» (${actor.threadId}): ${summary}`
+    this.sessionAls.run(session, () => this.addSystemMessage(text))
+  }
+
+  /**
+   * The owner's bot behind a call from one of its threads ("use your threads"), when the call may go ahead: the bot's
+   * main thread made it, in a turn registered with the bot's authority that holds `tool` now (starting, messaging and
+   * stopping only in a chat turn the owner's own message started), and this computer has "use your threads" on. Undefined
+   * for a thread that is no bot's. A bot's thread that may not make the call is refused here, whatever let it this far.
+   */
+  private botSenderOf(actor: AgentActor, tool: 'thread_create' | 'thread_send' | 'thread_interrupt'): { botId: string; name: string } | undefined {
+    let role: string | undefined
+    try {
+      role = this.botThreads?.roleOf(actor.threadId)
+    } catch {
+      role = 'unknown'
+    }
+    if (!role) return undefined
+    const refused = new McpToolError('mousse_scope_denied', 'A bot starts, messages or stops your threads only in its chat, with "use your threads" allowed.')
+    if (role !== 'activation') throw refused
+    const turn = this.appToolTurns.get(actor.runId)
+    if (!turn?.bot || turn.threadId !== actor.threadId || !turn.bot.appTools.has(tool)) throw refused
+    let here = false
+    try {
+      here = this.settingsStore.get().bots.here.threads === true
+    } catch {
+      here = false
+    }
+    if (!here) throw new McpToolError('mousse_scope_denied', notOnThisComputerText('threads'))
+    const bot = this.botThreads?.botOf?.(actor.threadId)
+    if (!bot) throw refused
+    return bot
   }
 
   /**

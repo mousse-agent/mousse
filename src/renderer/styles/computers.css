@@ -42,6 +42,21 @@
   color: var(--ui-faint);
 }
 
+.thread-started-by-name {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--text-secondary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.thread-started-by-name:hover,
+.thread-started-by-name:focus-visible {
+  color: var(--accent);
+  outline: none;
+}
+
 .thread-computer-bar[data-state='offline'],
 .thread-computer-bar[data-state='not-shared'] {
   color: var(--warning, var(--text-secondary));
