@@ -566,6 +566,13 @@ describe('composer send slot', () => {
     expect(actions()).toEqual(['Attach files', 'Stop run', 'Send message'])
   })
 
+  it('keeps dictation beside Stop when the caller asks (a bot, which takes messages while it works)', () => {
+    const { onStartRecording } = slot({ loading: true, dictateWhileStoppable: true })
+    expect(actions()).toEqual(['Attach files', 'Dictate', 'Stop run'])
+    act(() => button('Dictate').click())
+    expect(onStartRecording).toHaveBeenCalledTimes(1)
+  })
+
   it('uses the macOS symbols in the Stop tooltip on a Mac', () => {
     useAppStore.setState({ appInfo: { platform: 'darwin' } as never })
     slot({ loading: true })

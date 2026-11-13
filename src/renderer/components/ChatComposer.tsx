@@ -115,6 +115,10 @@ export interface ChatComposerProps {
   mentionScope?: { scopeKey: string; threadId?: string; projectId?: string }
   /** The thread's permission mode and how to change it (see `ComposerFooter`). */
   permission?: ComponentProps<typeof ComposerFooter>['permission']
+  /** Dictation stays offered while a run can be stopped (see `ComposerFooter`): a bot's chat. */
+  dictateWhileStoppable?: boolean
+  /** Buttons of the caller's own in the footer, left of Attach (see `ComposerFooter`). */
+  extraActions?: ReactNode
   /**
    * The thread whose send mode (Queue or Steer, `lib/sendMode.ts`) Enter follows while a reply runs; the mode
    * button left of send shows and switches it. Absent (a bot's chat, which never steers): Enter queues and there is
@@ -185,7 +189,9 @@ export function ChatComposer({
   searchMentions,
   mentionScope,
   permission,
-  sendModeThreadId
+  sendModeThreadId,
+  dictateWhileStoppable = false,
+  extraActions
 }: ChatComposerProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const composerInputRef = useRef<HTMLTextAreaElement>(null)
@@ -939,6 +945,8 @@ export function ChatComposer({
         onStopRecording={dictation.stop}
         allowAttachWhileLoading
         permission={permission}
+        dictateWhileStoppable={dictateWhileStoppable}
+        extraActions={extraActions}
         {...(sendModeShown ? { sendMode: { mode: sendMode, onSwitch: switchSendMode } } : {})}
       />
     </div>

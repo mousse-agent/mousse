@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Image as ImageIcon, Paperclip } from '../../lib/icons'
 import type { BotChatMessage } from '../../../shared/bots/personal/chat'
 import { useImageGallery } from '../../chat/components/agent-elements/image-gallery'
@@ -47,7 +47,8 @@ function loadFileImage(path: string): Promise<void> {
   return read
 }
 
-function useFileImage(path: string | undefined): FileImage | undefined {
+/** An image file's picture, read once per window (the Files pane shows it too). */
+export function useFileImage(path: string | undefined): FileImage | undefined {
   const [image, setImage] = useState(() => (path ? fileImages.get(path) : undefined))
   useEffect(() => {
     if (!path) return
@@ -58,6 +59,30 @@ function useFileImage(path: string | undefined): FileImage | undefined {
     return () => { listeners.delete(update) }
   }, [path])
   return image
+}
+
+/**
+ * The image files among `paths` that could not be read as a picture (gone, unreadable, or not a picture after all),
+ * once each has been tried. A path still being read is not among them.
+ */
+export function useFailedFileImages(paths: readonly string[]): ReadonlySet<string> {
+  // The paths by value: a new array with the same paths reads nothing again.
+  const key = paths.join('\n')
+  const current = useRef(paths)
+  current.current = paths
+  const failedNow = () => new Set(current.current.filter((path) => fileImages.get(path)?.failed))
+  const [failed, setFailed] = useState<ReadonlySet<string>>(failedNow)
+  useEffect(() => {
+    const update = () => setFailed((was) => {
+      const next = new Set(current.current.filter((path) => fileImages.get(path)?.failed))
+      return next.size === was.size && [...next].every((path) => was.has(path)) ? was : next
+    })
+    listeners.add(update)
+    update()
+    for (const path of current.current) void loadFileImage(path)
+    return () => { listeners.delete(update) }
+  }, [key])
+  return failed
 }
 
 /** Forgets the pictures read so far. Tests start clean. */

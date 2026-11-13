@@ -98,7 +98,8 @@ describe('a bot\'s reply, drawn as a thread\'s', () => {
     expect(code.querySelector('button[aria-label="Copy Code"]')).not.toBeNull()
     expect(code.querySelector('.an-code-wrap')).not.toBeNull()
     const actions = [...reply().querySelectorAll('.bot-message-actions button')].map((button) => button.getAttribute('aria-label'))
-    expect(actions).toEqual(['Read aloud', 'Copy'])
+    // Beside its bubble on hover, with Reply.
+    expect(actions).toEqual(['Read aloud', 'Copy', 'Reply'])
     // The owner's message can be copied too.
     expect(host.querySelector('.bot-you button[aria-label="Copy"]')).not.toBeNull()
   })

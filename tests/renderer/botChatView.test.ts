@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 /**
- * A bot's chat (bot-ui §4.4, §4.8, §4.9): the owner's bubbles, the bot's messages with chips, asks
- * and error lines, one status line with the live chip while it works, the thread composer without a
- * thread's run settings (text, attach by button, drop or paste, dictation, and send or Stop), and the
- * one menu with About, Rename, Change look, Pause and Delete.
+ * A bot's chat (bot-ui §4.4, §4.8, §4.9), as a one-to-one messenger: the owner's bubbles on the right and the bot's on
+ * the left, each with its time; asks as quick replies and error lines; work folded behind "Worked for"; a typing
+ * bubble while its chat turn runs and its presence in the header; the thread composer without a thread's run settings
+ * (text, emoji, attach by button, drop or paste, dictation, and send or Stop); and the one menu with About, Rename,
+ * Change look, Pause and Delete.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -25,6 +26,12 @@ const markdown = vi.hoisted(() => ({ renders: 0 }))
 vi.mock('../../src/renderer/chat/components/agent-elements/markdown', async (importOriginal) => {
   const { createElement: h } = await import('react')
   return { ...(await importOriginal<object>()), Markdown: ({ content, className }: { content: string; className?: string }) => { markdown.renders++; return h('div', { className }, content) } }
+})
+// The bot's messages are drawn by the thread's Markdown, counted here as it draws.
+vi.mock('../../src/renderer/chat/components/agent-elements/markdown', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/renderer/chat/components/agent-elements/markdown')>()
+  const { createElement: h } = await import('react')
+  return { ...actual, Markdown: (props: Parameters<typeof actual.Markdown>[0]) => { markdown.renders++; return h(actual.Markdown, props) } }
 })
 
 const { ChatWorkspace } = await import('../../src/renderer/components/chats/ChatWorkspace')
@@ -90,35 +97,289 @@ afterEach(() => {
 })
 
 describe('the transcript', () => {
-  it('shows the owner’s messages as bubbles and the bot’s with its face, name, chips, ask and error', async () => {
+  it('shows the owner’s messages and the bot’s as bubbles, with no face or name on the bot’s; its work folds behind Worked for', async () => {
+    const at = (seconds: number) => new Date(Date.UTC(2026, 10, 13, 9, 0, seconds)).toISOString()
     fake.chats.inbox = [
-      message(1, { author: 'owner', text: 'Send the one to the Lisbon host.' }),
-      message(2, { text: 'Sent.', chips: [{ icon: 'web', text: 'read 2 pages', highlight: 'example.com' }, { icon: 'memory', text: 'remembered', highlight: 'vegetarian' }] }),
-      message(3, { text: 'I need one thing.', ask: { askId: 'k1', title: 'use files on this computer', note: "Read and change any file or folder, except Mousse's own data.", status: 'open' } }),
-      message(4, { kind: 'error', text: 'I couldn’t do this morning’s check.', error: { text: 'Set up a provider so I can work.', action: { kind: 'open_providers', label: 'Set up' } } })
+      message(1, { id: 'o1', at: at(0), author: 'owner', text: 'Send the one to the Lisbon host.' }),
+      message(2, { id: 'b1', at: at(32), text: 'Sent.', replyTo: { id: 'o1', author: 'owner', text: 'Send the one to the Lisbon host.' }, chips: [{ icon: 'web', text: 'read 2 pages', highlight: 'example.com' }, { icon: 'memory', text: 'remembered', highlight: 'vegetarian' }] }),
+      message(3, { kind: 'error', text: 'I couldn’t do this morning’s check.', error: { text: 'Set up a provider so I can work.', action: { kind: 'open_providers', label: 'Set up' } } })
     ]
     await open()
-    const [owner, chips, ask, error] = [...transcript().querySelectorAll('article')]
+    const [owner, reply, error] = [...transcript().querySelectorAll('article')]
     expect(owner!.classList.contains('bot-you')).toBe(true)
-    expect(owner!.querySelector('.bot-you-bubble')?.textContent).toBe('Send the one to the Lisbon host.')
-    expect(owner!.querySelector('.bot-face, strong')).toBeNull()
-    expect(chips!.classList.contains('from-agent')).toBe(true)
-    expect(chips!.querySelector('.bot-face')).not.toBeNull()
-    expect(chips!.querySelector('.chat-message-meta strong')?.textContent).toBe('Inbox helper')
-    // Nothing beside the name: the group's one time is under its last message.
-    expect(chips!.querySelector('.chat-message-meta time')).toBeNull()
-    expect([...chips!.querySelectorAll('.bot-chip')].map((chip) => chip.textContent)).toEqual(['read 2 pages example.com', 'remembered vegetarian'])
-    expect(chips!.querySelector('.bot-chip b')?.textContent).toBe('example.com')
-    // The ask and the error are in the bot's group: no face or name again, and each still draws its card.
-    expect(ask!.querySelector('.bot-face, .chat-message-meta')).toBeNull()
-    expect(error!.querySelector('.bot-face, .chat-message-meta')).toBeNull()
-    expect(ask!.querySelector('.ask-card-title')?.textContent).toBe('Inbox helper wants to use files on this computer')
+    expect(owner!.querySelector('.bot-you-bubble .bot-markdown')?.textContent).toBe('Send the one to the Lisbon host.')
+    // A one-to-one chat: the header says who it is, so the bot's bubbles carry no face or name.
+    expect(transcript().querySelector('.bot-face, .chat-message-meta')).toBeNull()
+    expect(reply!.querySelector('.bot-bubble .bot-markdown')?.textContent).toBe('Sent.')
+    // No chips under the text: one quiet line, which opens the steps in plain words.
+    expect(reply!.querySelector('.bot-chip, .bot-steps')).toBeNull()
+    const worked = reply!.querySelector<HTMLButtonElement>('.bot-worked')!
+    expect(worked.textContent).toBe('Worked for 32s')
+    await click(worked)
+    expect([...reply!.querySelectorAll('.bot-steps li')].map((step) => step.textContent)).toEqual(['Read 2 pages · example.com', 'Remembered · vegetarian'])
+    // A message with no work has no such line.
+    expect(error!.querySelector('.bot-worked')).toBeNull()
+    // Work whose time isn't known (a reply to no message): "Steps", never a bare "Worked", and its steps still open.
+    await act(async () => fake.emit.message('inbox', message(9, { id: 'b9', text: 'Here are four takes.', chips: [{ icon: 'think', text: 'made 4 pictures' }] })))
+    const steps = transcript().querySelector<HTMLButtonElement>('[data-message-id="b9"] .bot-worked')!
+    expect(steps.textContent).toBe('Steps')
+    await click(steps)
+    expect(transcript().querySelector('[data-message-id="b9"] .bot-steps')?.textContent).toBe('Made 4 pictures')
     expect(error!.querySelector('.bot-error span')?.textContent).toBe('Set up a provider so I can work.')
     await click(button('Set up', error!))
     expect(useAppStore.getState().settingsOpen).toBe(true)
   })
 
-  it('groups one sender’s messages within ten minutes, with one time under the last on its side and a day line per day', async () => {
+  it('an ask is quick replies under the bubble, Details shows what it is for, and an answered ask is a quiet line', async () => {
+    fake.chats.inbox = [
+      message(1, { id: 'a1', text: 'I need one thing.', ask: { askId: 'k1', title: 'use files on this computer', note: "Read and change any file or folder, except Mousse's own data.", status: 'open' } }),
+      message(2, { id: 'a0', text: 'Can I use my own browser for this?', ask: { askId: 'k0', title: 'use the browser', note: 'Its own browser.', status: 'allowed' } })
+    ]
+    await open()
+    const ask = transcript().querySelector('[data-message-id="a1"]')!
+    expect(ask.querySelector('.bot-bubble-ask')?.textContent).toBe('Wants to use files on this computer')
+    expect([...ask.querySelectorAll('.bot-ask-buttons button')].map((choice) => choice.textContent)).toEqual(['Allow', 'Not now', 'Details'])
+    expect(ask.querySelector('.bot-ask-details')).toBeNull()
+    await click(button('Details', ask))
+    expect(ask.querySelector('.bot-ask-details')?.textContent).toBe("Read and change any file or folder, except Mousse's own data.")
+    await click(button('Not now', ask))
+    expect(fake.calls).toContainEqual(['answer', 'inbox', 'k1', 'not_now'])
+    // The answered one has no buttons; a centred line after it says what was answered.
+    const answered = transcript().querySelector('[data-message-id="a0"]')!
+    expect(answered.querySelector('.bot-ask-buttons, .bot-bubble-ask')).toBeNull()
+    expect(answered.nextElementSibling?.textContent).toBe('You let Inbox helper use the browser')
+  })
+
+  it('work it started is a 👍 and a quiet line, a note a "Noted" receipt; what their chips said stays on them, and in the steps', async () => {
+    const opus = 'Opus 5.5 on Claude Code, high reasoning, for this work only'
+    fake.chats.inbox = [
+      message(1, { id: 'o1', author: 'owner', text: 'run some command pls' }),
+      message(2, { id: 'b1', text: 'On it, I’ll text you when it’s done.', replyTo: { id: 'o1', author: 'owner', text: 'run some command pls' }, chips: [{ icon: 'think', text: 'started', highlight: 'System check · Opus 5.5', title: opus }] }),
+      message(3, { id: 'o2', author: 'owner', text: 'Use PC Part Picker' }),
+      message(4, { id: 'b2', text: 'I’ll use PC Part Picker from here on.', chips: [{ icon: 'think', text: 'noted', title: 'For SSD search' }] }),
+      message(5, { id: 'o3', author: 'owner', text: 'And the weather?' }),
+      // A reply that says more stays a message, with the line for its work before it, and its chip in its steps.
+      message(6, { id: 'b3', text: 'Rain at 4. I also started a forecast check:\n\nit runs hourly.', replyTo: { id: 'o3', author: 'owner', text: 'And the weather?' }, chips: [{ icon: 'think', text: 'started', highlight: 'Forecast' }] })
+    ]
+    await open()
+    const log = transcript()
+    expect(log.querySelector('[data-message-id="b1"], [data-message-id="b2"]')).toBeNull()
+    expect(log.querySelector('[data-message-id="o1"] .bot-reaction')?.textContent).toBe('👍')
+    // The reply's words and the model the work runs on stay on the mark and the line, on hover.
+    expect(log.querySelector('[data-message-id="o1"] .bot-reaction')?.getAttribute('title')).toBe(`On it, I’ll text you when it’s done.\n${opus}`)
+    expect(log.querySelector('[data-message-id="o2"] .bot-receipt')?.textContent).toBe('Noted')
+    expect(log.querySelector('[data-message-id="o2"] .bot-receipt')?.getAttribute('title')).toBe('I’ll use PC Part Picker from here on.\nFor SSD search')
+    expect(log.querySelector('[data-message-id="o2"] .bot-reaction')).toBeNull()
+    const lines = [...log.querySelectorAll('.bot-system-line')]
+    expect(lines.map((line) => line.textContent)).toEqual(['Inbox helper started System check', 'Inbox helper started Forecast'])
+    expect(lines[0]!.getAttribute('title')).toBe(`On it, I’ll text you when it’s done.\n${opus}`)
+    // No plumbing words on what stands in for the chips.
+    expect(log.textContent).not.toMatch(/passed to work|the run|Passed on/)
+    expect(log.querySelector('[data-message-id="o3"] .bot-reaction')?.textContent).toBe('👍')
+    await click(log.querySelector('[data-message-id="b3"] .bot-worked'))
+    expect(log.querySelector('[data-message-id="b3"] .bot-steps')?.textContent).toBe('Started · Forecast')
+  })
+
+  it('a path in a reply is a chip with the file’s name: a click opens it in the Files pane, and Show in folder selects it', async () => {
+    const folder = 'C:\\Users\\me\\.mousse\\profiles\\d9d018ad-5de0\\bots\\files\\inbox'
+    fake.chats.inbox = [message(1, { id: 'b1', text: `Picture: ${folder}\\chip-clouds-boy.png\n\nNotes in \`${folder}\\notes\\plan.md\`.` })]
+    const readFile = vi.fn(async () => '# Plan\n\nThree steps.')
+    const showInFolder = vi.fn(async () => undefined)
+    installPreload(fake, { app: { setViewedBot }, fs: { readFile, readAsset: vi.fn(async () => { throw new Error('none') }) }, localFiles: { showInFolder } })
+    await open()
+    const chips = [...transcript().querySelectorAll<HTMLButtonElement>('.bot-path-open')]
+    // The name only (inside the bot's files folder, the path there), never the profile's folders; the full path on hover.
+    expect(chips.map((chip) => [chip.textContent, chip.title])).toEqual([
+      ['chip-clouds-boy.png', `${folder}\\chip-clouds-boy.png`],
+      ['notes/plan.md', `${folder}\\notes\\plan.md`]
+    ])
+    expect(transcript().textContent).not.toContain('d9d018ad')
+    await click(chips[1])
+    await settle()
+    const pane = host.querySelector('aside.bot-file-pane')!
+    expect(pane.querySelector('.bot-file-name')?.textContent).toBe('notes/plan.md')
+    expect(readFile).toHaveBeenCalledWith('plan.md', undefined, null, `${folder}\\notes`)
+    expect(pane.querySelector('.bot-file-body h1')?.textContent).toBe('Plan')
+    // The file itself, selected in its folder; a refusal is said above the composer.
+    await click(button('Show notes/plan.md in folder'))
+    expect(showInFolder).toHaveBeenCalledWith(`${folder}\\notes\\plan.md`)
+    showInFolder.mockRejectedValueOnce(new Error("Error invoking remote method 'localFiles:showInFolder': Error: That file does not exist."))
+    await click(button('Show in folder', pane))
+    await settle()
+    expect(composerError()?.textContent).toBe('That file does not exist.')
+    await click(button('Close file'))
+    expect(host.querySelector('aside.bot-file-pane')).toBeNull()
+  })
+
+  describe('pictures', () => {
+    const FILES = '/home/me/.mousse/bots/files/inbox'
+    const picture = (name: string) => `${FILES}/${name}`
+    let localFiles: Record<string, ReturnType<typeof vi.fn>>
+    /** Every picture file reads as a PNG, each with its own preview address. */
+    const install = () => {
+      localFiles = { showInFolder: vi.fn(async () => undefined), saveCopy: vi.fn(async () => '/home/me/Downloads/a.png'), copyImage: vi.fn(async () => undefined) }
+      let made = 0
+      URL.createObjectURL = vi.fn(() => `blob:picture-${++made}`)
+      installPreload(fake, { app: { setViewedBot }, fs: { readAsset: vi.fn(async () => ({ mimeType: 'image/png', data: [137, 80, 78, 71] })) }, localFiles })
+    }
+    const article = (id: string) => transcript().querySelector<HTMLElement>(`[data-message-id="${id}"]`)!
+    const contextMenu = async (target: Element) => {
+      await act(async () => { target.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 50 })) })
+    }
+
+    it('one picture is a message of its own above the words, never a preview above its chip; a picture alone is a bubble with no words', async () => {
+      install()
+      fake.chats.inbox = [
+        message(1, { id: 'b1', text: `Here it is: ${picture('boy.png')}` }),
+        message(2, { id: 'b2', text: `![a boy on a chip](file://${picture('made.png')})` })
+      ]
+      await open()
+      await settle()
+      const one = article('b1')
+      expect(one.querySelectorAll('.bot-reply-media .bot-picture.is-single img')).toHaveLength(1)
+      expect(one.querySelector('.bot-carousel')).toBeNull()
+      // The picture comes before the words, whose path stays a plain chip.
+      const bubble = one.querySelector('.bot-bubble')!
+      expect(bubble.querySelector('.bot-reply-media')!.compareDocumentPosition(bubble.querySelector('.bot-markdown')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+      expect(one.querySelector('.bot-path img')).toBeNull()
+      expect(one.querySelector('.bot-path-open')?.textContent).toBe('boy.png')
+      // A picture it made, with nothing else to say: the picture alone, its time under it.
+      const alone = article('b2')
+      expect(alone.querySelector('.bot-bubble')!.classList.contains('is-media-only')).toBe(true)
+      expect(alone.querySelector('.bot-markdown')).toBeNull()
+      expect(alone.querySelector('.bot-picture img')?.getAttribute('alt')).toBe('a boy on a chip')
+    })
+
+    it('several pictures in one reply are one carousel; Left and Right step through it once it overflows, with a count', async () => {
+      install()
+      const names = ['a.png', 'b.png', 'c.png', 'd.png']
+      fake.chats.inbox = [message(1, { id: 'b1', text: `Four takes:\n\n${names.map((name) => `![${name}](${picture(name)})`).join(' ')}` })]
+      // The track is wider than the bubble: the pictures don't all fit.
+      const widths = vi.spyOn(HTMLElement.prototype, 'scrollWidth', 'get').mockImplementation(function (this: HTMLElement) { return this.classList.contains('bot-carousel-track') ? 1000 : 0 })
+      const clients = vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockImplementation(function (this: HTMLElement) { return this.classList.contains('bot-carousel-track') ? 400 : 0 })
+      try {
+        await open()
+        await settle()
+        const carousel = article('b1').querySelector<HTMLElement>('.bot-carousel')!
+        expect(carousel.getAttribute('aria-label')).toBe('4 pictures')
+        expect([...carousel.querySelectorAll('.bot-picture img')].map((image) => image.getAttribute('alt'))).toEqual(names)
+        expect(carousel.querySelector('.bot-carousel-count')?.textContent).toBe('1/4')
+        expect(button('Previous picture', carousel)).toBeUndefined()
+        await act(async () => { carousel.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })) })
+        await act(async () => { carousel.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })) })
+        expect(carousel.querySelector('.bot-carousel-count')?.textContent).toBe('3/4')
+        await click(button('Previous picture', carousel))
+        expect(carousel.querySelector('.bot-carousel-count')?.textContent).toBe('2/4')
+      } finally {
+        widths.mockRestore()
+        clients.mockRestore()
+      }
+    })
+
+    it('pictures that all fit show no count and no arrows', async () => {
+      install()
+      fake.chats.inbox = [message(1, { id: 'b1', text: `![a](${picture('a.png')}) ![b](${picture('b.png')})` })]
+      await open()
+      await settle()
+      const carousel = article('b1').querySelector('.bot-carousel')!
+      expect(carousel.querySelectorAll('.bot-picture')).toHaveLength(2)
+      expect(carousel.querySelector('.bot-carousel-count, .bot-carousel-arrow')).toBeNull()
+    })
+
+    it('a picture that can’t be read never shows: the reply keeps its chip, or gets one under its words', async () => {
+      install()
+      // Only `gone.png` can't be read.
+      installPreload(fake, { app: { setViewedBot }, fs: { readAsset: vi.fn(async (name: string) => { if (name === 'gone.png') throw new Error('ENOENT'); return { mimeType: 'image/png', data: [137, 80, 78, 71] } }) }, localFiles })
+      fake.chats.inbox = [
+        message(1, { id: 'b1', text: `Picture: ${picture('gone.png')}` }),
+        message(2, { id: 'b2', text: `![made](${picture('gone.png')})` }),
+        message(3, { id: 'b3', text: `![a](${picture('a.png')}) ![gone](${picture('gone.png')})` })
+      ]
+      await open()
+      await settle()
+      // Named in the words: its chip there, no picture and no box.
+      expect(article('b1').querySelector('.bot-reply-media, .bot-picture')).toBeNull()
+      expect(article('b1').querySelector('.bot-bubble')!.classList.contains('has-media')).toBe(false)
+      expect([...article('b1').querySelectorAll('.bot-path-open')].map((chip) => chip.textContent)).toEqual(['gone.png'])
+      // A picture alone that can't be read: its chip, as the message.
+      expect(article('b2').querySelector('.bot-picture')).toBeNull()
+      expect(article('b2').querySelector('.bot-bubble')!.classList.contains('is-media-only')).toBe(false)
+      expect(article('b2').querySelector('.bot-picture-chips .bot-path-open')?.textContent).toBe('gone.png')
+      // With a picture that can: that one alone, as a single picture, and the other's chip.
+      expect([...article('b3').querySelectorAll('.bot-picture')].map((tile) => tile.getAttribute('aria-label'))).toEqual(['Open picture: a'])
+      expect(article('b3').querySelector('.bot-picture.is-single, .bot-carousel')?.classList.contains('is-single')).toBe(true)
+      expect(article('b3').querySelector('.bot-picture-chips .bot-path-open')?.textContent).toBe('gone.png')
+    })
+
+    it('a click opens the preview on the reply’s own pictures, with Previous and Next, Save and Show in folder', async () => {
+      install()
+      fake.chats.inbox = [
+        message(1, { id: 'b0', text: `An older one: ![old](${picture('old.png')})` }),
+        message(2, { id: 'b1', text: `![a](${picture('a.png')}) ![b](${picture('b.png')}) ![c](${picture('c.png')})` })
+      ]
+      await open()
+      await settle()
+      // A picture's name is its label and alt text, never a tooltip that could cover what is above it.
+      expect(article('b1').querySelector('.bot-picture[title], .bot-picture img[title]')).toBeNull()
+      await click(button('Open picture: b', article('b1')))
+      const preview = document.querySelector<HTMLElement>('[role="dialog"]')!
+      expect(preview.getAttribute('aria-label')).toBe('b')
+      // The reply's three pictures, not the chat's four; in the middle, both arrows, as for a thread's pictures.
+      expect(preview.textContent).toContain('2 / 3')
+      expect(button('Previous image (←)', preview)).toBeDefined()
+      expect(button('Next image (→)', preview)).toBeDefined()
+      await click(button('Save', preview))
+      expect(localFiles.saveCopy).toHaveBeenCalledWith(picture('b.png'))
+      await click(button('Previous image (←)', preview))
+      await click(button('Show in folder', preview))
+      expect(localFiles.showInFolder).toHaveBeenCalledWith(picture('a.png'))
+      // The actions are not the backdrop: the preview stays open.
+      expect(document.querySelector('[role="dialog"]')).not.toBeNull()
+      await click(button('Close fullscreen (Esc)', preview))
+    })
+
+    it('a right-click offers Open, Save as…, Show in folder and Copy image, each on that picture', async () => {
+      install()
+      fake.chats.inbox = [message(1, { id: 'b1', text: `![a](${picture('a.png')}) ![b](${picture('b.png')})` })]
+      await open()
+      await settle()
+      const second = button('Open picture: b', article('b1'))!
+      const menuItems = () => [...document.querySelectorAll<HTMLButtonElement>('.bot-picture-menu [role="menuitem"]')]
+      for (const [label, action] of [['Save as…', 'saveCopy'], ['Show in folder', 'showInFolder'], ['Copy image', 'copyImage']] as const) {
+        await contextMenu(second)
+        expect(menuItems().map((item) => item.textContent)).toEqual(['Open', 'Save as…', 'Show in folder', 'Copy image'])
+        await click(menuItems().find((item) => item.textContent === label))
+        expect(localFiles[action]).toHaveBeenCalledWith(picture('b.png'))
+        expect(document.querySelector('.bot-picture-menu')).toBeNull()
+      }
+      await contextMenu(second)
+      await click(menuItems()[0])
+      expect(document.querySelector('[role="dialog"]')?.getAttribute('aria-label')).toBe('b')
+      await click(button('Close fullscreen (Esc)', document.querySelector('[role="dialog"]')!))
+      // Escape closes the menu with nothing done.
+      await contextMenu(second)
+      await act(async () => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
+      expect(document.querySelector('.bot-picture-menu')).toBeNull()
+    })
+  })
+
+  it('short inline code never breaks inside, and the punctuation after it stays with it; longer code may wrap', async () => {
+    fake.chats.inbox = [message(1, { id: 'b1', text: 'The shortlist is saved in `ssd-shortlist.md`: run `Get-PhysicalDisk | Select-Object FriendlyName, MediaType, Size` to see it.' })]
+    await open()
+    const codes = [...transcript().querySelectorAll<HTMLElement>('[data-message-id="b1"] code.an-md-code')]
+    // Which pieces keep whole is decided here; how a line wraps is checked in screenshots.
+    expect(codes.map((code) => [code.textContent, code.classList.contains('is-whole')])).toEqual([['ssd-shortlist.md', true], ['Get-PhysicalDisk | Select-Object FriendlyName, MediaType, Size', false]])
+  })
+
+  it('a list of keys and values reads as a small card', async () => {
+    fake.chats.inbox = [message(1, { id: 'b1', kind: 'run_report', text: 'Your PC looks healthy.\n\n- **CPU:** Ryzen 9 7900X\n- **RAM**: 19.7 GB free\n\nAnd a list:\n\n- one\n- two' })]
+    await open()
+    const card = transcript().querySelector('.bot-kv')!
+    expect([...card.querySelectorAll('.bot-kv-row')].map((row) => [row.querySelector('dt')?.textContent, row.querySelector('dd')?.textContent])).toEqual([['CPU', 'Ryzen 9 7900X'], ['RAM', '19.7 GB free']])
+    expect([...transcript().querySelectorAll('ul li')].map((item) => item.textContent)).toEqual(['one', 'two'])
+  })
+
+  it('groups one sender’s messages within ten minutes, with a time on every message and a day line per day', async () => {
     const today = new Date()
     today.setHours(11, 27, 0, 0)
     const at = (minutes: number, days = 0) => new Date(today.getTime() + minutes * 60_000 - days * 86_400_000).toISOString()
@@ -137,18 +398,16 @@ describe('the transcript', () => {
     expect([...log.querySelectorAll('.bot-day')].map((line) => [line.textContent, line.nextElementSibling?.getAttribute('data-message-id')])).toEqual([['Yesterday', 'y1'], ['Today', 'o1']])
     // Owner o1+o2, bot b1+b2 (a quote does not break a group), then o3 twenty minutes later.
     expect(['y1', 'o1', 'o2', 'b1', 'b2', 'o3'].map((id) => article(id).classList.contains('is-group-start'))).toEqual([true, true, false, true, false, true])
-    expect(article('b2').querySelector('.bot-face, .chat-message-meta')).toBeNull()
     expect(article('b2').querySelector('.bot-reply-quote')?.textContent).toBe('tool calls')
-    // One time per group, right after its last message, on the sender's side; the full date and time in each tooltip.
-    const times = [...log.querySelectorAll<HTMLElement>('.bot-group-time')]
-    expect(times.map((time) => [time.previousElementSibling?.getAttribute('data-message-id'), time.dataset.author])).toEqual([['y1', 'bot'], ['o2', 'owner'], ['b2', 'bot'], ['o3', 'owner']])
-    expect(times[1]!.querySelector('time')?.getAttribute('dateTime')).toBe(at(0))
-    expect(article('o1').title).toBe(article('o2').title)
-    expect(article('o1').title).not.toBe('')
-    expect(article('y1').title).not.toBe(article('o1').title)
+    // Every message has its own time in its bubble, grouped or not, and no time on hover.
+    const time = (id: string) => article(id).querySelector('time.bot-bubble-time')
+    expect(['y1', 'o1', 'o2', 'b1', 'b2', 'o3'].map((id) => time(id)?.getAttribute('dateTime'))).toEqual([at(0, 1), at(0), at(0), at(0), at(1), at(20)])
+    expect(time('b2')?.closest('.bot-bubble')).not.toBeNull()
+    expect(time('o2')?.closest('.bot-you-bubble')).not.toBeNull()
+    expect(log.querySelector('[title*="2026"], article[title]')).toBeNull()
   })
 
-  it('a message on its way joins its group, and the group says Sending… under it', async () => {
+  it('a message on its way joins its group, and says Sending… where its time goes', async () => {
     fake.chats.inbox = [message(1, { id: 'o1', author: 'owner', at: new Date().toISOString(), text: 'First' })]
     await open()
     vi.mocked(fake.client.send).mockImplementationOnce(() => new Promise(() => {}))
@@ -156,8 +415,7 @@ describe('the transcript', () => {
     await press('Enter')
     const sending = transcript().querySelector<HTMLElement>('.bot-you.is-pending')!
     expect(sending.classList.contains('is-group-start')).toBe(false)
-    const times = [...transcript().querySelectorAll('.bot-group-time')]
-    expect(times.map((time) => time.textContent)).toEqual(['Sending…'])
+    expect(sending.querySelector('.bot-bubble-time')?.textContent).toBe('Sending…')
   })
 
   it('Sign in opens Settings, Providers on the entry to sign in to (the bot runner\'s card)', async () => {
@@ -245,30 +503,49 @@ describe('the transcript', () => {
 })
 
 describe('while it works', () => {
-  it('shows one status line with the live chip, and Stop in place of send', async () => {
+  const presence = () => host.querySelector('.chat-conversation-header .bot-presence')
+  const sticker = () => host.querySelector('.bot-header-about .bot-sticker')
+
+  it('types as a messenger does: dots in a bubble, "typing…" and a pen in the header, no spinner or chip; Stop and the mic stay', async () => {
+    fake.chats.inbox = [message(1, { id: 'o1', author: 'owner', text: 'again' })]
     fake.live.inbox = { activationId: 'act1', chip: { icon: 'search', text: 'searching the web' } }
     await open({ ...inbox, state: 'working', stateText: 'Working…' })
-    const status = transcript().querySelector('.chat-run-status')!
-    expect(status.textContent).toBe('Inbox helper is working…searching the web')
-    expect(status.querySelector('.bot-chip.is-live')).not.toBeNull()
-    await act(async () => fake.emit.activity('inbox', { icon: 'web', text: 'reading a page', highlight: 'example.com' }))
-    expect(status.querySelector('.bot-chip')?.textContent).toBe('reading a page example.com')
+    const typing = transcript().querySelector('.bot-typing')!
+    expect(typing.getAttribute('aria-label')).toBe('Inbox helper is typing')
+    expect(typing.querySelectorAll('.bot-typing-bubble i')).toHaveLength(3)
+    expect(transcript().querySelector('.chat-spin, .bot-chip, .chat-run-status')).toBeNull()
+    expect(transcript().textContent).not.toContain('is working')
+    expect(presence()?.textContent).toBe('typing…')
+    expect(sticker()?.getAttribute('data-kind')).toBe('typing')
     await click(button('Stop run'))
     expect(fake.calls).toContainEqual(['stop', 'inbox'])
+    // You can always talk to a bot: the mic stays beside Stop while it works.
+    expect(button('Dictate')).toBeDefined()
     // With words in the box, Stop moves left of Send, as in a thread: sending does not wait for the run.
     await type(box(), 'Also check the spam folder.')
     expect(button('Stop run')).toBeDefined()
     expect(button('Send message')?.disabled).toBe(false)
   })
 
-  it('says Waiting for internet in the status line, with no spinner, and still offers Stop', async () => {
+  it('says Waiting for internet where it would type, with nothing moving, and still offers Stop', async () => {
     await open({ ...inbox, state: 'working', stateText: 'Waiting for internet', waiting: 'internet' })
-    const status = transcript().querySelector('.chat-run-status')!
-    expect(status.textContent).toBe('Waiting for internet')
-    expect(status.querySelector('.chat-spin')).toBeNull()
-    expect(transcript().textContent).not.toContain('is working')
+    expect(transcript().querySelector('.bot-typing')?.textContent).toBe('Waiting for internet')
+    expect(transcript().querySelector('.bot-typing-bubble, .chat-spin')).toBeNull()
+    expect(presence()?.textContent).toBe('waiting for internet')
+    expect(sticker()).toBeNull()
     await click(button('Stop run'))
     expect(fake.calls).toContainEqual(['stop', 'inbox'])
+  })
+
+  it('a free bot says free, with no sticker; a paused one says paused, with a pause sticker', async () => {
+    await open()
+    expect(presence()?.textContent).toBe('free')
+    expect(sticker()).toBeNull()
+    act(() => root.unmount())
+    root = createRoot(host)
+    await open({ ...inbox, state: 'paused', stateText: 'Paused until 14:00' })
+    expect(presence()?.textContent).toBe('paused')
+    expect(sticker()?.getAttribute('data-kind')).toBe('paused')
   })
 })
 
@@ -283,7 +560,7 @@ describe('what renders again', () => {
     await act(async () => { await useBotsStore.getState().refresh() })
     await act(async () => useChatsStore.setState({ snapshot: { ...useChatsStore.getState().snapshot } }))
     expect(markdown.renders).toBe(0)
-    expect(transcript().querySelector('.chat-run-status')?.textContent).toContain('reading a page')
+    expect(transcript().querySelector('.bot-typing')).not.toBeNull()
     // A new message renders itself only.
     await act(async () => fake.emit.message('inbox', message(4, { text: 'Done.' })))
     expect(markdown.renders).toBe(1)
@@ -291,13 +568,13 @@ describe('what renders again', () => {
 })
 
 describe('the composer', () => {
-  it('is the thread composer with attach, dictation and send, and no model, context, permission, commands or skills', async () => {
+  it('is the thread composer with emoji, attach, dictation and send, and no model, context, permission, commands or skills', async () => {
     await open()
     const form = composer()
     expect(form.querySelectorAll('textarea')).toHaveLength(1)
     expect(box().placeholder).toBe('Message Inbox helper')
     expect([...form.querySelectorAll('input')].map((element) => element.type)).toEqual(['file'])
-    expect([...form.querySelectorAll('button')].map((element) => element.getAttribute('aria-label'))).toEqual(['Attach files', 'Dictate', 'Send message'])
+    expect([...form.querySelectorAll('button')].map((element) => element.getAttribute('aria-label'))).toEqual(['Emoji', 'Attach files', 'Dictate', 'Send message'])
     expect(form.querySelector('.composer-run-controls, .composer-model-btn, .composer-context-anchor, .composer-permission-chip')).toBeNull()
     expect(button('Send message')?.disabled).toBe(true)
     // Neither `/` commands nor `@` skills open a list.
@@ -305,6 +582,17 @@ describe('the composer', () => {
       await type(box(), text)
       expect(host.querySelector('#composer-command-suggestions')).toBeNull()
     }
+  })
+
+  it('Emoji opens a small grid; a pick goes in at the caret and the grid closes', async () => {
+    await open()
+    await type(box(), 'sounds good')
+    box().setSelectionRange(6, 6)
+    await click(button('Emoji'))
+    const grid = host.querySelector('.bot-emoji-grid')!
+    await click(button('👍', grid))
+    expect(box().value).toBe('sounds👍 good')
+    expect(host.querySelector('.bot-emoji-grid')).toBeNull()
   })
 
   it('sends the words with Enter, shows them at once and empties the box', async () => {
@@ -426,10 +714,10 @@ describe('the menu', () => {
     expect(host.querySelector('[role="menu"]')).toBeNull()
   })
 
-  it('shows only the name in the header, and opens About from it', async () => {
+  it('shows the name and its presence in the header, and opens About from the face', async () => {
     await open()
-    // What the bot does is in About, not under the name.
-    expect(host.querySelector('.bot-header-about > div')?.textContent).toBe('Inbox helper')
+    // What the bot does is in About, not under the name: under it is only its presence.
+    expect(host.querySelector('.bot-header-who')?.textContent).toBe('Inbox helperfree')
     expect(host.querySelector('.chat-conversation-header')?.textContent).not.toContain('Tells me which emails need a reply.')
     await click(button('About Inbox helper'))
     expect(host.querySelector('aside.bot-about')?.getAttribute('aria-label')).toBe('About Inbox helper')
@@ -533,35 +821,50 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
     ]
   })
 
-  it('shows each piece of work above the composer, keeps send (not Stop), and stops one piece by its own button', async () => {
+  const presence = () => host.querySelector<HTMLElement>('.chat-conversation-header .bot-presence')!
+  const sticker = () => host.querySelector('.bot-header-about .bot-sticker')
+
+  it('names its work in the header ("Vacuum comparison +1"), whose list has each piece with Stop; the chat stays free', async () => {
     await open(working)
-    const lines = [...host.querySelectorAll('.bot-work-line')].map((line) => line.textContent)
-    expect(lines).toEqual(['Vacuum comparisonworking · 4 min', 'Train timeswaiting its turn · just now'])
-    // The chat is free: no status line, and the composer sends.
-    expect(transcript().querySelector('.chat-run-status')).toBeNull()
-    expect(button('Stop run')).toBeUndefined()
+    // The work running longest, and how many more; the sticker says what that work does now.
+    expect(presence().textContent).toBe('Vacuum comparison +1')
+    expect(sticker()?.getAttribute('data-kind')).toBe('working')
     await act(async () => fake.emit.activity('inbox', { icon: 'search', text: 'searching the web', highlight: 'vacuum', live: true }, 'act_w1'))
-    expect(host.querySelector('.bot-work-line')!.textContent).toBe('Vacuum comparisonsearching the web vacuum · 4 min')
+    expect(sticker()?.getAttribute('data-kind')).toBe('search')
+    // No strip above the composer: the list opens from the header.
+    expect(host.querySelector('.bot-work')).toBeNull()
+    await click(presence())
+    expect([...host.querySelectorAll('.bot-work-line')].map((line) => line.textContent)).toEqual(['Vacuum comparisonsearching the web vacuum · 4 min', 'Train timesqueued'])
+    // The chat is free: nothing typing, and the composer sends.
+    expect(transcript().querySelector('.bot-typing')).toBeNull()
+    expect(button('Stop run')).toBeUndefined()
     await click(button('Stop Vacuum comparison'))
     expect(fake.calls).toContainEqual(['stopWork', 'inbox', 'act_w1'])
   })
 
-  it('work on a model the owner named says which on its line and its chip, with the details on hover', async () => {
+  it('one piece of work is named alone, never "+0", and the browser shows as its sticker', async () => {
+    await open({ ...working, work: [working.work![0]!] })
+    expect(presence().textContent).toBe('Vacuum comparison')
+    await act(async () => fake.emit.activity('inbox', { icon: 'web', text: 'using the browser', highlight: 'example.com', live: true }, 'act_w1'))
+    expect(sticker()?.getAttribute('data-kind')).toBe('browser')
+  })
+
+  it('work on a model the owner named says which in its line, with the details on hover', async () => {
     const detail = 'Opus 5.5 on Claude Code, high reasoning, for this work only'
-    fake.chats.inbox = [message(1, { id: 'b1', text: 'On it.', chips: [{ icon: 'think', text: 'started', highlight: 'Vacuum comparison · Opus 5.5', title: detail }] })]
     await open({ ...working, work: [{ ...working.work![0]!, model: { name: 'Opus 5.5', detail } }] })
+    await click(presence())
     const line = host.querySelector('.bot-work-line')!
     expect(line.textContent).toBe('Vacuum comparisonworking · Opus 5.5 · 4 min')
     expect(line.querySelector('[title]')!.getAttribute('title')).toBe(detail)
-    const chip = [...transcript().querySelectorAll('.bot-chip')].find((element) => element.textContent?.includes('Opus 5.5'))!
-    expect(chip.getAttribute('title')).toBe(detail)
   })
 
-  it("the chat's own turn has the status line and Stop, with its own chip", async () => {
-    await open({ ...working, chat: { activationId: 'act_c1' }, work: [] })
-    await act(async () => fake.emit.activity('inbox', { icon: 'memory', text: 'remembering', live: true }, 'act_c1'))
-    expect(transcript().querySelector('.chat-run-status')!.textContent).toBe('Inbox helper is working…remembering')
+  it("the chat's own turn types and has Stop; the header still opens the work", async () => {
+    await open({ ...working, chat: { activationId: 'act_c1' } })
+    expect(transcript().querySelector('.bot-typing')).not.toBeNull()
+    expect(presence().textContent).toBe('typing…')
     expect(button('Stop run')).toBeDefined()
+    await click(presence())
+    expect(host.querySelectorAll('.bot-work-line')).toHaveLength(2)
   })
 
   it('a reply shows what it answers only when that is not right above it; Reply quotes a message and sends with it', async () => {
@@ -727,18 +1030,16 @@ describe('loading and labels', () => {
     expect(composerError()).not.toBeNull()
   })
 
-  it('labels reminders and work reports beside the name, or above the text later in a group', async () => {
+  it('a report reads as an ordinary reply that quotes the request, with no tag', async () => {
     fake.chats.inbox = [
-      message(1, { id: 'bm_rem_1', kind: 'run_report', text: 'Time to stretch.' }),
+      message(1, { id: 'o1', author: 'owner', text: 'run some command pls' }),
       message(2, { id: 'm2', text: 'Plain reply.' }),
-      message(3, { id: 'bm_act_1', kind: 'run_report', activationId: 'act_1', text: 'The Q7 is the pick.' })
+      message(3, { id: 'bm_act_1', kind: 'run_report', activationId: 'act_1', text: 'Done. Nothing changed.', replyTo: { id: 'o1', author: 'owner', text: 'run some command pls' } })
     ]
     await open()
-    const label = (id: string) => transcript().querySelector(`[data-message-id="${id}"] .bot-message-label`)
-    expect(label('bm_rem_1')?.textContent).toBe('Reminder')
-    expect(label('bm_rem_1')?.closest('.chat-message-meta')).not.toBeNull()
-    expect(label('m2')).toBeNull()
-    expect(label('bm_act_1')?.textContent).toBe('Work report')
-    expect(label('bm_act_1')?.classList.contains('is-own-line')).toBe(true)
+    const report = transcript().querySelector('[data-message-id="bm_act_1"]')!
+    expect(report.querySelector('.bot-bubble > .bot-reply-quote')?.textContent).toBe('run some command pls')
+    expect(report.textContent).not.toContain('Work report')
+    expect(report.querySelector('.bot-message-label')).toBeNull()
   })
 })

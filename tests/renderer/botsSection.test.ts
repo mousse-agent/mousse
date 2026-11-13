@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /**
  * The Chats tab's Bots section (bot-ui §4.1): Bots where Roster was, + opens New bot, each bot by
- * its face, and Recent with bot chats and direct chats together, saying each bot's state in words.
+ * its face (its state in the face, and in words on hover), and Recent with the direct chats.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -110,20 +110,20 @@ describe('the Bots section', () => {
     expect(host.textContent).not.toContain('No bots yet')
   })
 
-  it('merges bot chats into Recent by their last message, with the state in words', async () => {
+  it('lists each bot once, in the Bots row with its state on hover; Recent has the direct chats only', async () => {
     await show([
       summary('a', { name: 'Inbox helper', state: 'needs_you', stateText: 'Wants to use files on this computer', last: { text: 'Hi', at: '2026-11-07T08:00:00.000Z', author: 'bot' } }),
       summary('b', { name: 'Flight deals', state: 'paused', stateText: 'Paused', last: { text: 'Found one', at: '2026-11-07T10:00:00.000Z', author: 'bot' } })
     ], [direct('c1', 'Reviewer', '2026-11-07T09:00:00.000Z')])
     expect(headings()).toEqual(['Bots', 'Groups', 'Recent'])
     const rows = [...host.querySelectorAll('.chat-recent-section .chat-list-row')]
-    expect(rows.map((element) => element.querySelector('.chat-list-name')?.textContent)).toEqual(['Flight deals', 'Reviewer', 'Inbox helper'])
-    expect(rows[0]!.querySelector('.chat-list-preview')?.textContent).toBe('Paused')
-    expect(rows[2]!.querySelector('.chat-list-preview')?.textContent).toBe('Wants to use files on this computer')
-    expect(rows[2]!.querySelector('.bot-face')?.getAttribute('width')).toBe('40')
+    expect(rows.map((element) => element.querySelector('.chat-list-name')?.textContent)).toEqual(['Reviewer'])
+    expect(host.querySelectorAll('.bot-face')).toHaveLength(2)
+    expect(button('Message Inbox helper')?.title).toBe('Inbox helper: Wants to use files on this computer')
+    expect(button('Message Flight deals')?.title).toBe('Flight deals: Paused')
   })
 
-  it('opens a bot’s chat from its face, and its chat from Recent', async () => {
+  it('opens a bot’s chat from its face', async () => {
     fake.chats.a = [message(1, { text: 'Good morning.' })]
     await show([summary('a', { name: 'Inbox helper' })])
     await click(button('Message Inbox helper'))
@@ -131,7 +131,6 @@ describe('the Bots section', () => {
     expect(host.querySelector('.chat-conversation-header h1')?.textContent).toBe('Inbox helper')
     expect(host.querySelector('.chat-transcript')?.textContent).toContain('Good morning.')
     expect(host.querySelector('.bot-roster button.bot-roster-active')).not.toBeNull()
-    expect(host.querySelector('.chat-recent-section .chat-list-row.active')).not.toBeNull()
   })
 
   it('marks the open bot in the Bots row, and a bot with unread messages with a dot that opening its chat clears', async () => {
@@ -166,7 +165,6 @@ describe('the Bots section', () => {
     await act(async () => { fake.emit.changed('a') })
     await act(async () => {})
     expect(host.querySelector('.bot-roster .bot-face')?.getAttribute('data-state')).toBe('happy')
-    expect(host.querySelector('.chat-recent-section .chat-list-preview')?.textContent).toBe('All done')
   })
 })
 
