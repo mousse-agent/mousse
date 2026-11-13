@@ -67,7 +67,12 @@ describe('Claude Code', () => {
     const options: Options[] = []
     const finished = (o: Options) => Object.assign((async function* () {
       yield { type: 'result', subtype: 'success', is_error: false, result: 'ok', session_id: 's' }
-    })(), { close: vi.fn(), interrupt: vi.fn(async () => {}) }) as unknown as Query
+    })(), {
+      close: vi.fn(),
+      interrupt: vi.fn(async () => {}),
+      // The turn's servers go over Claude Code's input (#358).
+      setMcpServers: vi.fn(async (servers: Record<string, unknown>) => ({ added: Object.keys(servers), removed: [], errors: {} }))
+    }) as unknown as Query
     const { home, service: claude } = service(({ options: o }) => { options.push(o); return finished(o) })
     await claude.chat({ threadId: 't', cwd: home, model: 'sonnet', prompt: 'hi', onText: vi.fn(), mcp: relayed('rev-1'), mcpTurnToken: 'turn-7' })
     const hook = (tool_name: string) => options[0].hooks!.PreToolUse![0].hooks[0](

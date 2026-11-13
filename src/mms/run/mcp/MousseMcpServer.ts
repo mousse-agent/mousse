@@ -37,6 +37,12 @@ export interface McpAttachment {
   token: string
   /** The MCP relay, under the same bearer; absent: the turn attaches only `mousse`. */
   relay?: McpRelayAttachment
+  /**
+   * What decides the tools the server lists under this bearer: the caller's policy and the agent access level, as the
+   * gateway keys the credential epoch on them. Equal for two bearers that differ only by a rotation, so a runtime that
+   * caches the tool list knows a new bearer alone from new tools; absent counts as one value.
+   */
+  tools?: string
 }
 
 /**
