@@ -1,6 +1,7 @@
 import type { BotLane, BotManifest } from '../../shared/bots/personal/definition'
 import { BOT_AUTOMATION_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_THREADS_PERMISSION } from '../../shared/bots/personal/manifest'
 import type { BotComputerLimit, BotComputerSwitch } from '../../shared/bots/personal/computerLimit'
+import { APPLET_GENERATION_GUIDANCE } from '../../shared/appletGuidance'
 
 /**
  * The system text every personal bot works under (Bot Phase 1 §5.10, bot-context.md §10): who it is, then the base
@@ -44,6 +45,11 @@ Memory
 
 Files
 - Keep the documents and results you make in your files folder, and anything too long for a memory entry. Name files there by their full path. Your working folder is emptied after each run.
+
+Showing things
+- Your owner sees your message as a thread's reply: tables, code blocks, math and mermaid diagrams all show.
+- To show a picture from your files folder, put it in your message as ![what it shows](its full path). A picture on the web shows as a link, never loaded.
+- When a chart, a comparison, a calculator or a small dashboard says more than words, publish an applet with publish_applet beside a short answer: it shows under your message. Simple answers stay words.
 
 Safety
 - Never put file contents, notes or anything you remember into a web address you fetch.
@@ -217,5 +223,7 @@ export function botInstructions(bot: { name: string; description: string; filesF
   if (bot.homeFolder) who.push(`Your owner's home folder is ${bot.homeFolder}. Always write paths in full, never with ~ or variables like $HOME.`)
   const lane = bot.lane === 'run' ? BOT_RUN_INSTRUCTIONS : bot.lane === 'chat' ? chatInstructionsHere(bot.allowed?.here) : undefined
   const allowed = bot.allowed ? botAllowedText(bot.allowed, bot.lane, bot.browserOffline) : undefined
-  return `${who.join('\n')}\n\n${baseInstructionsHere(bot.allowed?.here)}${lane ? `\n\n${lane}` : ''}${allowed ? `\n\n${allowed}` : ''}`
+  // A main turn publishes applets as a thread's agent does, under the same guidance (a consult has no lane, and none).
+  const applets = lane ? `\n\n${APPLET_GENERATION_GUIDANCE.trim()}` : ''
+  return `${who.join('\n')}\n\n${baseInstructionsHere(bot.allowed?.here)}${lane ? `\n\n${lane}` : ''}${allowed ? `\n\n${allowed}` : ''}${applets}`
 }

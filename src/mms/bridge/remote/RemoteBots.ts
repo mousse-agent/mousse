@@ -257,13 +257,19 @@ export interface RemoteBotFile {
 }
 
 /** A chat row as another device sees it. */
-export type RemoteBotMessage = Omit<BotChatMessage, 'attachments'> & { attachments?: RemoteBotFile[] }
+export type RemoteBotMessage = Omit<BotChatMessage, 'attachments' | 'applets'> & { attachments?: RemoteBotFile[] }
 
-/** A chat row as another device sees it: a file's name and type without its path on this computer, an error without an instance id. */
+/**
+ * A chat row as another device sees it: a file's name and type without its path on this computer, an error without an
+ * instance id, and an applet as one line naming it (it runs only in this computer's app, from the bot's thread here).
+ */
 export function remoteBotMessage(message: BotChatMessage): RemoteBotMessage {
-  const { attachments, error, ...rest } = message
+  const { attachments, error, applets, ...rest } = message
+  // The title is the bot's words: plain, so it can't add a link or an image to the line.
+  const named = applets?.map((applet) => `_Applet: ${applet.reference.title.replace(/[\\`*_[\]()<>!#|~]/g, '').trim()}. It opens on the computer._`).join('\n')
   return {
     ...rest,
+    ...(named ? { text: rest.text ? `${rest.text}\n\n${named}` : named } : {}),
     ...(error ? { error: remoteBotError(error) } : {}),
     ...(attachments ? { attachments: attachments.map((file) => ({ name: file.name, ...remoteFileType(file.path || file.name) })) } : {})
   }
