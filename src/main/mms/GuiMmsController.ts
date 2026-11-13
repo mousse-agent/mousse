@@ -519,10 +519,11 @@ export class GuiMmsController extends EventEmitter {
         const bound = result as unknown as {profile?:{id?:string};epoch?:number}
         if (session && bound?.profile?.id && typeof bound.epoch === 'number' && Number.isSafeInteger(bound.epoch)) {
           session.binding = {profileId:bound.profile.id,epoch:bound.epoch}
-          this.rememberWindowProfile(sender, bound.profile.id)
           const subscribed = await session.client.subscribe(0)
           this.afterWindowSubscribe(sender.id, session.client, subscribed, 'profile-bound')
           await this.attachedBrowserHost?.acknowledgeClosed(sender)
+          // Only a switch that finished: after a failed one the window still shows the profile it had.
+          this.rememberWindowProfile(sender, bound.profile.id)
         }
       }
       return result
