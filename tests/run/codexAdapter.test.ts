@@ -18,7 +18,7 @@ import { decideUsageLimit } from '../../src/mms/run/pausePolicy'
 import { CodexAdapter } from '../../src/mms/harness/drivers/codex/adapter'
 import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
 import { CODEX_BOT_UNSANDBOXED_REFUSAL } from '../../src/mms/harness/vendors/codex/botApprovals'
-import { CODEX_BOT_PROFILE } from '../../src/mms/harness/vendors/codex/childPolicy'
+import { CODEX_BOT_FEATURES_OFF, CODEX_BOT_PROFILE } from '../../src/mms/harness/vendors/codex/childPolicy'
 import type { NeutralTool } from '../../src/shared/harness/tools'
 import type { AdapterHost, TurnControl, TurnInput, TurnSink } from '../../src/mms/harness/adapter'
 import { mousseOrchestrationInstructions } from '../../src/mms/run/mcp/instructions'
@@ -2227,7 +2227,9 @@ describe('CodexAdapter', () => {
 
 describe('a bot turn on Codex', () => {
   /** A bot without "run commands" starts with every command tool of Codex off, so it has none at all. */
-  const NO_COMMANDS = { 'features.shell_tool': false, 'features.unified_exec': false }
+  /** Every bot turn starts with Codex's tools that no bot may have off (`CODEX_BOT_FEATURES_OFF`). */
+  const BOT_FEATURES = Object.fromEntries(CODEX_BOT_FEATURES_OFF.map((feature) => [`features.${feature}`, false]))
+  const NO_COMMANDS = { ...BOT_FEATURES, 'features.shell_tool': false, 'features.unified_exec': false }
   /** A bot whose authority allows changes in its files folder, refuses (with an ask) a command, and walls anything else. */
   function botIn(files: string) {
     const calls: Array<{ tool: string; args: Record<string, unknown> }> = []
@@ -2438,7 +2440,7 @@ describe('a bot turn on Codex', () => {
       ...setupRead(4),
       ...(confined
         ? [
-            out({ id: 5, method: 'thread/start', params: { approvalPolicy: 'untrusted', permissions: CODEX_BOT_PROFILE, model: 'gpt-x', modelProvider: 'openai', config: { [`permissions.${CODEX_BOT_PROFILE}`]: profile, model_provider: 'openai' } } }),
+            out({ id: 5, method: 'thread/start', params: { approvalPolicy: 'untrusted', permissions: CODEX_BOT_PROFILE, model: 'gpt-x', modelProvider: 'openai', config: { ...BOT_FEATURES, [`permissions.${CODEX_BOT_PROFILE}`]: profile, model_provider: 'openai' } } }),
             inn({ id: 5, result: threadResult() }),
             out({ id: 6, method: 'turn/start', params: { summary: 'auto', threadId: T, input: text('go'), approvalPolicy: 'untrusted', permissions: CODEX_BOT_PROFILE, model: 'gpt-x' } }),
             inn({ id: 6, result: { turn: { id: 'turn-1', status: 'inProgress', error: null, items: [] } } })
@@ -2447,6 +2449,7 @@ describe('a bot turn on Codex', () => {
             ...threadStart(5, threadParams({
               sandbox: 'workspace-write',
               config: {
+                ...BOT_FEATURES,
                 'sandbox_workspace_write.writable_roots': writable,
                 'sandbox_workspace_write.network_access': false,
                 'sandbox_workspace_write.exclude_tmpdir_env_var': true,

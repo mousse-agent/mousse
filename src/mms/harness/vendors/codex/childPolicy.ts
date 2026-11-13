@@ -124,6 +124,53 @@ export function codexPackageOf(binary: string | undefined): string | undefined {
 export const CODEX_COMMAND_FEATURES: readonly string[] = ['shell_tool', 'unified_exec']
 
 /**
+ * Codex's features that add a tool no bot turn may have, whatever it holds, as `codex features list` names them (Codex
+ * 0.162.1). Each runs or reads without an approval the bot's authority could answer, or reaches past what Mousse holds
+ * the bot to; the owner's own Codex config may switch any of them on, and the thread config switches them off again.
+ * Codex ignores a name it does not know.
+ * - `view_image`: opens any image by its path, with no approval and outside every sandbox (Mousse's own data included).
+ * - `image_generation`: makes images and saves them where Codex keeps them.
+ * - `multi_agent`, `multi_agent_v2`: subagents (`spawn_agent` and the rest of `collaboration`), threads Mousse does not
+ *   hold to the bot's authority.
+ * - `apps`, `plugins`, `remote_plugin`, `skill_mcp_dependency_install`: ChatGPT apps, plugins and the MCP servers they
+ *   bring, whose tools run under Codex's rules.
+ * - `hooks`: the owner's own commands, run on Codex's events.
+ * - `browser_use`, `browser_use_external`, `browser_use_full_cdp_access`, `in_app_browser`, `computer_use`: Codex's own
+ *   browser and control of the computer's screen, beside Mousse's browser and its switch.
+ * - `memories`: what Codex remembers from the owner's other sessions.
+ * - `code_mode`, `code_mode_only`: a JavaScript `exec` that calls the other tools.
+ * - `request_permissions_tool`: asks for more sandbox permissions.
+ * - `default_mode_request_user_input`, `send_message_to_user_async`: questions and messages to a person, who is not there.
+ * - `goals`, `sleep_tool`, `tool_suggest`, `skill_search`: goals Codex follows on its own, waiting, and suggestions.
+ */
+export const CODEX_BOT_FEATURES_OFF: readonly string[] = [
+  'view_image',
+  'image_generation',
+  'multi_agent',
+  'multi_agent_v2',
+  'apps',
+  'plugins',
+  'remote_plugin',
+  'skill_mcp_dependency_install',
+  'hooks',
+  'browser_use',
+  'browser_use_external',
+  'browser_use_full_cdp_access',
+  'in_app_browser',
+  'computer_use',
+  'memories',
+  'code_mode',
+  'code_mode_only',
+  'request_permissions_tool',
+  'default_mode_request_user_input',
+  'send_message_to_user_async',
+  'goals',
+  'sleep_tool',
+  'tool_suggest',
+  'skill_search'
+]
+
+/**
  * The name of the permission profile a confined bot's commands run under, defined in its thread config
  * (`codexBotSandboxConfig`), which wins over a profile of that name in the user's own Codex config.
  */
@@ -133,12 +180,17 @@ export const CODEX_BOT_PROFILE = 'mousse-bot'
 type CodexConfigValue = string | boolean | string[] | { [key: string]: CodexConfigValue }
 
 /**
- * The thread config of a bot turn. Without "run commands": every command tool off (`CODEX_COMMAND_FEATURES`). With it
- * and confined: `CODEX_BOT_PROFILE`, reading Codex's `:minimal` and `confined.readable`, writing `writableRoots`, with no
- * network. Otherwise the same `workspaceWrite` sandbox as its turns (`codexTurnPolicy`). Either way nothing in the user's
- * `config.toml` widens it while the thread loads.
+ * The thread config of a bot turn: every feature of `CODEX_BOT_FEATURES_OFF` off, and its sandbox. Without "run
+ * commands": every command tool off too (`CODEX_COMMAND_FEATURES`). With it and confined: `CODEX_BOT_PROFILE`, reading
+ * Codex's `:minimal` and `confined.readable`, writing `writableRoots`, with no network. Otherwise the same
+ * `workspaceWrite` sandbox as its turns (`codexTurnPolicy`). Either way nothing in the user's `config.toml` widens it
+ * while the thread loads.
  */
 export function codexBotSandboxConfig(sandbox: CodexBotSandbox): Record<string, CodexConfigValue> {
+  return { ...Object.fromEntries(CODEX_BOT_FEATURES_OFF.map((feature) => [`features.${feature}`, false])), ...codexBotSandboxOnly(sandbox) }
+}
+
+function codexBotSandboxOnly(sandbox: CodexBotSandbox): Record<string, CodexConfigValue> {
   if (!sandbox.shell) return Object.fromEntries(CODEX_COMMAND_FEATURES.map((feature) => [`features.${feature}`, false]))
   if (sandbox.confined) {
     const filesystem: Record<string, string> = { ':minimal': 'read' }
