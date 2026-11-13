@@ -35,7 +35,7 @@ type ChipKind =
   | 'search' | 'fetch' | 'browse' | 'read' | 'change' | 'save' | 'draft' | 'lookback' | 'consult' | 'skill' | 'tool' | 'mcp' | 'schedules'
   | 'schedule' | 'unschedule' | 'remember' | 'forget' | 'depth' | 'profile' | 'model'
   | 'work' | 'work_stop' | 'work_note' | 'remind' | 'unremind' | 'work_look'
-  | 'threads_look' | 'thread_wait' | 'thread_start' | 'thread_send' | 'thread_stop'
+  | 'threads_look' | 'thread_wait' | 'thread_start' | 'thread_send' | 'thread_stop' | 'picture'
   | 'subagent' | 'subagent_wait' | 'subagent_look'
 
 interface Classified {
@@ -173,6 +173,8 @@ function classify(tool: string, input: unknown, ctx: BotChipContext): Classified
       return { kind: 'mcp', icon: 'think', live: server ? 'using' : 'using a tool', ...(server ? { detail: shortChipText(server, 30) } : {}) }
     }
     case 'shell': return { kind: 'tool', icon: 'think', live: 'running a command' }
+    // A picture on the Images row's model (#1088), never the model's name.
+    case 'make_image': return { kind: 'picture', icon: 'think', live: 'making a picture' }
     // The chat's work and reminders (docs/plans/bot-always-free.md).
     case 'work_start': return { kind: 'work', icon: 'think', live: 'starting on it' }
     case 'work_stop': return { kind: 'work_stop', icon: 'think', live: 'stopping work' }
@@ -316,6 +318,11 @@ function groupChip(kind: ChipKind, icon: BotChipIcon, calls: readonly Classified
     case 'subagent': {
       const titles = [...new Set(details)]
       return chip(titles.length > 1 ? `used ${titles.length} subagents` : 'used a subagent', listed(titles))
+    }
+    // Only the pictures made: a refused or failed call shows none.
+    case 'picture': {
+      const made = all.filter((call) => succeeded(call.result)).length
+      return made ? chip(made === 1 ? 'made a picture' : `made ${made} pictures`) : null
     }
     case 'unschedule': {
       const done = all.filter((call) => succeeded(call.result)).length

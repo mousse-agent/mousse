@@ -16,7 +16,7 @@ import { botTools } from '../../src/mms/run/mcp/appTools/bots'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
 import { BOT_COMPUTER_OPEN, type BotComputerLimit } from '../../src/shared/bots/personal/computerLimit'
 import type { BotManifest } from '../../src/shared/bots/personal/definition'
-import { BOT_AUTOMATION_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_OWN_APP_TOOLS, BOT_SUBAGENT_TOOLS, BOT_THREAD_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_TOOLS, MAX_BOT_SUBAGENTS_AT_ONCE, MAX_BOT_SUBAGENTS_PER_WORK, botStarterManifest } from '../../src/shared/bots/personal/manifest'
+import { BOT_AUTOMATION_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_OWN_APP_TOOLS, BOT_SUBAGENT_TOOLS, BOT_THREAD_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_TOOLS, MAX_BOT_SUBAGENTS_AT_ONCE, MAX_BOT_SUBAGENTS_PER_WORK, botStarterManifest } from '../../src/shared/bots/personal/manifest'
 import { BOT_MEMORY_TOOLS } from '../../src/shared/bots/personal/memory'
 import type { BotModelOption } from '../../src/shared/bots/personal/methods'
 import { appToolRegistry, appTurn, fakeAppToolHost } from '../run/appToolsFixture'
@@ -27,7 +27,7 @@ const command: NormalisedCall = { kind: 'builtin', tool: 'shell', nativeName: 'b
 const app = (tool: string): NormalisedCall => ({ kind: 'app', tool, args: {} })
 
 /** What only the bot and its work may have: a subagent never holds one of these, whatever the grant says. */
-const NEVER_A_SUBAGENTS = [...BOT_OWN_APP_TOOLS, ...BOT_WORK_TOOLS, ...BOT_THREAD_TOOLS, ...BOT_MEMORY_TOOLS, ...BOT_SUBAGENT_TOOLS, ...BOT_AUTOMATION_APP_TOOLS, 'consult', 'escalate', 'mcp_servers', 'delegate_task']
+const NEVER_A_SUBAGENTS = [...BOT_OWN_APP_TOOLS, ...BOT_WORK_TOOLS, ...BOT_THREAD_TOOLS, ...BOT_MEMORY_TOOLS, ...BOT_SUBAGENT_TOOLS, ...BOT_AUTOMATION_APP_TOOLS, BOT_IMAGE_TOOL, 'consult', 'escalate', 'mcp_servers', 'delegate_task']
 
 describe('a subagent is compiled from its work\'s grant, and holds no more', () => {
   let base: string
@@ -62,7 +62,7 @@ describe('a subagent is compiled from its work\'s grant, and holds no more', () 
     if (!compiled.ok) throw new Error(compiled.error.message)
     return compiled
   }
-  const work = { escalate: true, consult: true, memory: true, threads: 'read' as const, subagents: true }
+  const work = { escalate: true, consult: true, memory: true, threads: 'read' as const, images: true, subagents: true }
 
   it.each([
     ['the starter grant', starter, BOT_COMPUTER_OPEN],

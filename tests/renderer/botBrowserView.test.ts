@@ -574,6 +574,106 @@ describe('the person\'s input in the split view', () => {
   })
 })
 
+describe('the bot\'s browser in a real window', () => {
+  /** The split view, with the app able to open the browser in a window (`browserWindow`) answering as the daemon would. */
+  async function pane(extra: Partial<BotBrowserView> = {}, answer?: (request: { op: string }) => { browser?: BotBrowserView; refused?: string }) {
+    const asked: Array<Record<string, unknown>> = []
+    ;(fake.events as Record<string, unknown>).browserWindow = vi.fn(async (request: Record<string, unknown>) => {
+      asked.push(request)
+      const said = answer?.(request as { op: string })
+      if (said) return said
+      if (request.op === 'open') browser = { ...browser, windowed: true }
+      else {
+        browser = { ...browser, control: 'bot', holder: 'bot' }
+        delete browser.windowed
+        delete browser.hold
+      }
+      return { browser }
+    })
+    browser = { ...browser, windowable: true, ...extra }
+    fake.chats.noobesh = [message(1, { text: 'Here it is.', activationId: 'act1' })]
+    await open()
+    await click(button('Expand Noobesh\'s browser'))
+    return { asked, pane: () => host.querySelector<HTMLElement>('.watched-browser-pane')! }
+  }
+  const holds = () => calls.filter(([method]) => method === 'bots.browser.hold').map(([, params]) => (params as { request: { op: string } }).request.op)
+
+  it('is offered, with what reloads in its tooltip, only where the service says this app may open one', async () => {
+    await pane({ windowable: undefined })
+    expect(button('Open in a window')).toBeUndefined()
+    await act(async () => root.unmount())
+    root = createRoot(host)
+    useChatsStore.setState(chatsInitial)
+    await pane()
+    expect(button('Open in a window')!.title).toBe('Pages reload when the window opens and when it closes.')
+  })
+
+  it('takes the browser over and opens it in a window: one line in the view, no pictures, Close window gives it back', async () => {
+    const { asked, pane: view } = await pane()
+    expect(watches().at(-1)).toMatchObject({ width: 960 })
+    await click(button('Open in a window'))
+    await settle()
+    expect(holds()).toEqual(['take'])
+    expect(asked).toEqual([{ botId: 'noobesh', viewId: expect.any(String), holdId: 'hold_1', op: 'open' }])
+    expect(view().textContent).toContain('Open in a window on this computer.')
+    expect(view().textContent).toContain('Noobesh waits until you close the window.')
+    expect(button('Take over')).toBeUndefined()
+    expect(button('Give back')).toBeUndefined()
+    // Nothing is watched while it is in a window (the watch ends after its grace), and nothing is typed or clicked from here.
+    const watched = watches().length
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, STOP_GRACE_MS + 100)) })
+    expect(unwatches().length).toBeGreaterThan(0)
+    expect(watches().length).toBe(watched)
+    expect(view().querySelector('.watched-browser-keys')).toBeNull()
+    await click(button('Close window'))
+    await settle()
+    expect(asked.at(-1)).toMatchObject({ op: 'close', holdId: 'hold_1' })
+    expect(useBotBrowserStore.getState().holds.noobesh).toBeUndefined()
+    expect(button('Take over')).toBeDefined()
+    // Pictures again.
+    expect(watches().length).toBeGreaterThan(watched)
+  })
+
+  it('a window that does not open says why in one line, and the browser is not left taken over', async () => {
+    const { pane: view } = await pane({}, (request) => (request.op === 'open' ? { refused: 'The window did not open on this computer, so the browser stays here.' } : {}))
+    await click(button('Open in a window'))
+    await settle()
+    expect(holds()).toEqual(['take', 'release'])
+    expect(useBotBrowserStore.getState().holds.noobesh).toBeUndefined()
+    expect(view().querySelector('.watched-browser-note')!.textContent).toBe('The window did not open on this computer, so the browser stays here.')
+  })
+
+  it('the window closed by the person gives the browser back without an error, and the view shows pictures again', async () => {
+    await pane()
+    await click(button('Open in a window'))
+    await settle()
+    let ended = false
+    setBotBrowserTransport((async (method: BotsBrowserMethod, params: Record<string, unknown>) => {
+      calls.push([method, params])
+      if (method === 'bots.browser.hold' && (params as { request: { op: string } }).request.op === 'renew' && ended) throw { code: 'hold_ended', message: "You don't hold this browser now." }
+      if (method === 'bots.browser.hold') return { browser, hold: HOLD }
+      if (method === 'bots.browser.unwatch') return { ok: true }
+      return { browser }
+    }) as never, (listener) => { pushes.add(listener); return () => pushes.delete(listener) })
+    // This window reads its view again (as after a reload): the browser is in a window, held here.
+    await act(async () => useBotBrowserStore.getState().load('noobesh', false))
+    expect(useBotBrowserStore.getState().holds.noobesh).toBeDefined()
+    // The person closes the window: the daemon gives the browser back, and the hold has ended.
+    ended = true
+    browser = { ...browser, control: 'bot', holder: 'bot' }
+    delete browser.windowed
+    delete browser.hold
+    // The view is read again before the heartbeat hears the hold ended: it no longer says it is in a window.
+    await act(async () => useBotBrowserStore.getState().load('noobesh', false))
+    await act(async () => { document.dispatchEvent(new Event('visibilitychange')) })
+    await settle()
+    expect(calls.some(([method, params]) => method === 'bots.browser.hold' && (params as { request: { op: string } }).request.op === 'renew')).toBe(true)
+    expect(useBotBrowserStore.getState().holds.noobesh).toBeUndefined()
+    expect(host.querySelector('.watched-browser-pane .watched-browser-note')!.textContent).not.toContain('You no longer hold this browser')
+    expect(button('Take over')).toBeDefined()
+  })
+})
+
 describe('the agent cursor over a live in-app page', () => {
   it('sits at the page\'s CSS pixels at the tab\'s zoom, in a layer that takes no events', async () => {
     const { AgentCursor } = await import('../../src/renderer/components/browser/AgentCursor')

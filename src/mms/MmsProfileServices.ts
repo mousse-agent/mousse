@@ -54,6 +54,7 @@ import { botApiHost, createBotConnectivity } from './bots/activation/connectivit
 import { createBotActivitySink } from './bots/activity/BotActivitySink'
 import { BotBrowsers } from './bots/browser/BotBrowsers'
 import { botFilesFolder } from './bots/grants/compile'
+import { BotImageMaker } from './bots/images/BotImageMaker'
 import { botInstructions } from './bots/instructions'
 import { createBotMemoryAdmin } from './bots/memory/admin'
 import { BotMemoryStore } from './bots/memory/BotMemoryStore'
@@ -683,6 +684,16 @@ export class MmsProfileServices {
       chipContext: (ctx) => ({ filesFolder: botFilesFolder(homeDir, ctx.botId), home: homedir() })
     })
     let botMemory: BotMemoryStore | undefined
+    // A bot's pictures (#1088): on the Images row's model, through Mousse's own provider code, saved in its files folder.
+    const botImages = new BotImageMaker({
+      dir: join(homeDir, 'bots'),
+      filesFolder: (botId) => botFilesFolder(homeDir, botId),
+      pick: (botId) => this.personalBots?.imagePick(botId) ?? null,
+      snapshots: () => harness.instances.snapshots({ kind: 'device' }),
+      imageModels: (instanceId) => harness.imageModels(instanceId),
+      generate: (request) => harness.generateImage(request),
+      log: (message, details) => console.warn(message, details)
+    })
     // Each bot's own browser: a managed Chromium session on a profile of its own, apart from the owner's tabs.
     const botBrowsers = new BotBrowsers({
       profileId: this.profileId,
@@ -769,6 +780,7 @@ export class MmsProfileServices {
       modelOptions: () => botModels.pickable(),
       modelListing: () => harness.llmProviders({ kind: 'device' }),
       runsOnNote: (instanceId) => harness.botRunsOnNote(instanceId),
+      images: { options: () => botImages.options(), usage: (botId) => botImages.usage(botId) },
       // The name the side card and Devices show (macOS's Computer Name, Linux's pretty hostname), else the hostname.
       // The lookup starts with the bots below and answers in milliseconds; until then the hostname stands in.
       computerName: () => computerNameIfKnown() || hostname(),
@@ -866,7 +878,7 @@ export class MmsProfileServices {
     if (personalBots && botMemory) {
       const memory = botMemory
       this.orchestrator.setBotAppTools({
-        bots: { host: personalBots.tools, activity: botActivity, models: botModels },
+        bots: { host: personalBots.tools, activity: botActivity, models: botModels, images: botImages },
         memory: {
           activationOf: (threadId) => personalBots.tools.activationOf(threadId),
           memory,

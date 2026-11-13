@@ -1834,6 +1834,11 @@ export class OrchestratorService extends EventEmitter {
   private startupDrainScheduled = new Set<string>()
   private featureFlags: MousseFeatureFlags = { ...DEFAULT_FEATURE_FLAGS }
   private turnStates = new Map<string, TurnState>()
+  /**
+   * When a thread with no turn held here was last known to change: this service's start. Every read of such a thread
+   * gives the same idle state, so a window that holds it is not taken for behind (it compares `updatedAt`).
+   */
+  private readonly noTurnSince = new Date().toISOString()
   /** The steer hold of each run whose turn runs in this process (`SteerHold`), for Send now. */
   private readonly steerHolds = new Map<string, SteerHold>()
   /** Replaces every instance's release window after a foreground tool (`steerReleaseWindow`); tests lengthen it. */
@@ -1932,7 +1937,7 @@ export class OrchestratorService extends EventEmitter {
   }
 
   getTurnState(threadId: string): TurnState {
-    return this.turnStates.get(threadId) ?? { threadId, turnId: null, phase: 'idle', updatedAt: new Date().toISOString() }
+    return this.turnStates.get(threadId) ?? { threadId, turnId: null, phase: 'idle', updatedAt: this.noTurnSince }
   }
 
   getTurnSnapshot(): TurnStateSnapshot {

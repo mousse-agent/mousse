@@ -210,6 +210,34 @@ describe('event numbers the window skipped', () => {
   })
 })
 
+describe('a thread with no turn', () => {
+  // The service here stamps a thread it holds no turn for with the time of each read, as services before #1086 did.
+  const check = async (): Promise<Array<{ event: string; fields: Record<string, unknown> }>> => {
+    const status = vi.spyOn(gui, 'turnStatusForSender')
+    const before = log.length
+    win.emit('responsive')
+    await vi.waitFor(() => expect(status).toHaveBeenCalled())
+    await status.mock.results[0]!.value
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    status.mockRestore()
+    return log.slice(before)
+  }
+
+  it('is current while the window shows it idle, until the service holds a newer idle state the window missed', async () => {
+    const shown = await newThread('Never ran')
+    await invoke('threads:select', shown)
+    const views = count('thread:view')
+    expect((await check()).filter((line) => line.event === 'check.behind')).toEqual([])
+    expect(count('thread:view')).toBe(views)
+
+    // A paused turn was cancelled while the window heard nothing: the service holds an idle state newer than the window's.
+    turns.set(shown, turn(shown, 'idle', 'none'))
+    const lines = await check()
+    expect(lines.find((line) => line.event === 'check.behind')?.fields).toMatchObject({ thread: shown, found: ['turn-differs'] })
+    await vi.waitFor(() => expect(count('thread:view')).toBeGreaterThan(views))
+  })
+})
+
 describe('a service restart', () => {
   const reconnectedWindow = async (): Promise<void> => {
     await vi.waitFor(() => {

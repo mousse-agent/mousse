@@ -59,6 +59,8 @@ export interface NewBotDraft {
    * until every row holds a pick, and sends them only to a service whose choices carry `providers`.
    */
   slots: BotShownRows | null
+  /** The Images row (#1088): a model to make pictures with, or null (none, the default). */
+  image: BotModelPick | null
   /** The step New bot shows, so closing and reopening returns to it. */
   step: NewBotStep
   /** The owner typed or picked something: a click beside the dialog no longer closes it. */
@@ -66,7 +68,7 @@ export interface NewBotDraft {
 }
 /** New bot's steps: the look, what it does (name and sentence), and where it runs. */
 export type NewBotStep = 'look' | 'about' | 'runsOn'
-const EMPTY_NEW_BOT: NewBotDraft = { look: null, name: '', description: '', model: null, slots: null, step: 'look', touched: false }
+const EMPTY_NEW_BOT: NewBotDraft = { look: null, name: '', description: '', model: null, slots: null, image: null, step: 'look', touched: false }
 
 /**
  * The step that can fix a refused create: a model no longer offered is Runs on's, a name or sentence the service
@@ -137,7 +139,7 @@ interface BotsState {
   /** Moves New bot to a step; moving alone is not putting anything in. */
   setNewBotStep(step: NewBotStep): void
   /** One create at a time: a second call while one is on its way gets the same answer. */
-  create(input: { look: BotLook; name?: string; description: string; model?: string; slots?: BotModelSlots }): Promise<BotSummary | null>
+  create(input: { look: BotLook; name?: string; description: string; model?: string; slots?: BotModelSlots; image?: BotModelPick }): Promise<BotSummary | null>
   update(botId: string, change: { name?: string; look?: BotLook }): Promise<boolean>
   pause(botId: string): Promise<void>
   resume(botId: string): Promise<void>

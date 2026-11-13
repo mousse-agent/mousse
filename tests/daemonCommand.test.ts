@@ -19,6 +19,22 @@ describe('the program the GUI starts the background service with', () => {
     })
   })
 
+  it('does not hand the service the window\'s mount in PATH, which is dead once the window quits', () => {
+    const started = daemonCommand({
+      execPath: '/tmp/.mount_MousseAbc/mousse',
+      platform: 'linux',
+      electron: true,
+      env: {
+        APPIMAGE: '/home/u/Applications/Mousse.AppImage',
+        APPDIR: '/tmp/.mount_MousseAbc',
+        PATH: '/tmp/.mount_MousseAbc:/tmp/.mount_MousseAbc/usr/sbin:/usr/bin:/bin',
+        LD_LIBRARY_PATH: '/tmp/.mount_MousseAbc/usr/lib'
+      },
+      host
+    })
+    expect(started.env).toEqual({ PATH: '/usr/bin:/bin', MOUSSE_CLI: '1' })
+  })
+
   it('is the app\'s own executable elsewhere, and the CLI host when not packaged', () => {
     expect(
       daemonCommand({ execPath: '/Applications/Mousse.app/Contents/MacOS/Mousse', platform: 'darwin', electron: true, env: { HOME: '/Users/u' }, host })

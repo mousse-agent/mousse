@@ -26,7 +26,8 @@ export function SettingsModelPicker({
   id,
   title,
   entry,
-  disabled
+  disabled,
+  clear
 }: {
   providers: LlmProviderOption[]
   providerId: string
@@ -48,6 +49,11 @@ export function SettingsModelPicker({
    */
   entry?: string
   disabled?: boolean
+  /**
+   * A choice of no model, at the right of the menu's footer ("None" for a bot's Images row): shown highlighted while
+   * nothing is selected, and closes the menu when picked.
+   */
+  clear?: { label: string; title?: string; onClear(): void }
 }) {
   const [open, setOpen] = useState(false)
   const buttonRef = useRef<HTMLButtonElement>(null)
@@ -120,7 +126,16 @@ export function SettingsModelPicker({
           selectedModelId={pickerId}
           anchorRef={buttonRef}
           contentRef={menuRef}
-          runSettings={modelPickerRunSettings({ providers, selection, onSelect: choose, onClose: close })}
+          runSettings={modelPickerRunSettings({
+            providers,
+            selection,
+            onSelect: choose,
+            onClose: close,
+            ...(clear ? {
+              footerEnd: <button type="button" className={`model-picker-clear${selected ? '' : ' selected'}`} title={clear.title} aria-pressed={!selected}
+                onClick={() => { close(); clear.onClear() }}>{clear.label}</button>
+            } : {})
+          })}
           onSelect={(nextProviderId, nextModelId, nextInstanceId) => {
             close()
             choose(nextProviderId, nextModelId, nextInstanceId)

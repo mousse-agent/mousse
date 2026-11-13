@@ -4,7 +4,7 @@ import { useAppStore } from '../stores/appStore'
 /**
  * The empty thread's glow (ambient-glow.css): a box pinned to the composer that holds the two wave layers.
  * While the window is hidden, minimised or not focused, or the search palette covers the chat, it marks the
- * chat data-ambient-rest, which holds the glow, the composer's rim and the logo's swirl where they are and
+ * chat data-ambient-rest, which holds the glow, the composer's rim and the logo's swirl and liquid where they are and
  * drops the waves' will-change, so their layers can be let go. An unfocused window then draws nothing, and
  * the palette's full-window blur is not drawn again on every frame of the glow. It also rests after
  * IDLE_REST_MS without pointer or keyboard input, so a focused window left on an empty thread stops drawing;

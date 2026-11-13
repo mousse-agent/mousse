@@ -151,6 +151,8 @@ export interface WatchedBrowserView {
   chooser?: WatchedBrowserChooser
   /** It is not open because its process ended by itself (a crash, the system): the next use starts it again. */
   stopped?: true
+  /** It is open in a real window on the screen of the computer it runs on ("Open in a window"): nothing is pictured. */
+  windowed?: true
 }
 
 /**

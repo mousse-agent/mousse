@@ -32,8 +32,17 @@ const bots = createWatchedBrowserStore<BotBrowserView, BotBrowserFrameEvent>({
   chooseFiles: () => {
     const choose = window.mousse?.personalBots?.chooseBrowserFiles
     return choose ? ({ key, ...request }) => choose({ botId: key, ...request }) : undefined
+  },
+  window: () => {
+    const open = window.mousse?.personalBots?.browserWindow
+    return open ? ({ key, ...request }) => open({ botId: key, ...request }) : undefined
   }
 })
+
+/** Whether this app can open a bot's browser in a window (an older app's bridge cannot). */
+export function canOpenBotBrowserWindow(): boolean {
+  return typeof window !== 'undefined' && typeof window.mousse?.personalBots?.browserWindow === 'function'
+}
 
 export const useBotBrowserStore = bots.useStore
 /** The store's hooks, for the general view (`WatchedBrowserPane`). */

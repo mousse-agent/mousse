@@ -1,6 +1,6 @@
 import { useEffect, useId, useState } from 'react'
 import type { BotModelPick, BotModelSlotKey } from '../../../shared/bots/personal/definition'
-import type { BotComputerChoice, BotRunsOnChoices, BotShownRows } from '../../../shared/bots/personal/methods'
+import type { BotComputerChoice, BotImageUsage, BotRunsOnChoices, BotShownRows } from '../../../shared/bots/personal/methods'
 import { isPinned, workRowsDiffer } from '../../../shared/bots/personal/modelSlots'
 import { modelLabel } from '../../../shared/modelChoice'
 import { shortModelName } from '../../../shared/modelNames'
@@ -74,6 +74,33 @@ export function botRowTitle(providers: readonly LlmProviderOption[], pick: BotMo
   return undefined
 }
 
+/** The Images row's control while no entry of the owner's can make pictures (its tooltip says what to add). */
+export const NO_IMAGE_MODELS = 'None available'
+/** The Images row with no pick: the bot makes no pictures. */
+export const NO_IMAGES = 'None'
+
+/** The Images row's tooltip: the model on its entry and today's pictures, why it can't be used, or what a pick does. */
+export function imageRowTitle(providers: readonly LlmProviderOption[], pick: BotModelPick | null, missing?: string, usage?: BotImageUsage): string {
+  const listing = offeredListing(providers, pick)
+  const today = usage ? ` · ${usage.today} of ${usage.perDay} today` : ''
+  if (listing && pick) return `${shortModelName(modelLabel(resolveModelChoice({ instanceId: pick.instanceId, provider: listing.id, model: pick.model }, providers), { effort: false }))} on ${listing.label}${today}`
+  if (isPinned(pick)) return 'Not available now. Pick another model, or None.'
+  if (missing) return missing
+  return `Pick a model to let it make pictures when you ask${usage ? `, up to ${usage.perDay} a day` : ''}`
+}
+
+/** The Images row (#1088): absent from an older service, which has no image tool. */
+export interface BotImageRow {
+  /** Each ready entry's image models; empty when none of the owner's entries can make pictures. */
+  providers: readonly LlmProviderOption[]
+  pick: BotModelPick | null
+  /** What to add while `providers` is empty (the tooltip). */
+  missing?: string
+  usage?: BotImageUsage
+  /** A model, or null for None. */
+  onPick: (pick: (BotModelPick & { instanceId: string }) | null) => void
+}
+
 /** The line to say once for the rows: the first picked row's entry that has one (a Codex not checked for bots). */
 export function pickedNote(slots: BotShownRows, notes: BotRunsOnChoices['notes']): { text: string; title: string } | undefined {
   if (!notes) return undefined
@@ -108,7 +135,7 @@ const ROWS_OF: Record<RowSpec['key'], readonly BotModelSlotKey[]> = { talk: ['ta
  * when the work rows differ; closing it puts Medium work's pick on all work (`onOneWork`), and is refused while Medium
  * work has no pick and the rows differ. Controlled: `onPick` gets the rows a pick goes on (Work is all three).
  */
-export function BotModelRows({ name, providers, slots, named, notes, onPick, onOneWork, disabled }: {
+export function BotModelRows({ name, providers, slots, named, notes, image, onPick, onOneWork, disabled }: {
   /** The bot's name for the controls' labels ("Pip's Talk model"); New bot passes "New bot". */
   name: string
   providers: readonly LlmProviderOption[]
@@ -117,15 +144,19 @@ export function BotModelRows({ name, providers, slots, named, notes, onPick, onO
   named?: Partial<Record<BotModelSlotKey, string>>
   /** By entry, what to say once when a row is picked there (`BotRunsOnChoices.notes`). */
   notes?: BotRunsOnChoices['notes']
+  /** The Images row, under the work rows in Advanced (#1088). */
+  image?: BotImageRow
   onPick: (rows: readonly BotModelSlotKey[], pick: BotModelPick & { instanceId: string }) => void
   onOneWork: () => void
   disabled?: boolean
 }) {
   const differ = workRowsDiffer(slots)
-  const [advanced, setAdvanced] = useState(differ)
+  // An Images row with a pick shows too: Advanced starts open with it.
+  const imaged = isPinned(image?.pick)
+  const [advanced, setAdvanced] = useState(differ || imaged)
   const advancedId = useId()
-  // Rows that came to differ elsewhere (`use_model`, another window) open it.
-  useEffect(() => { if (differ) setAdvanced(true) }, [differ])
+  // Rows that came to differ elsewhere (`use_model`, another window), or an image model picked elsewhere, open it.
+  useEffect(() => { if (differ || imaged) setAdvanced(true) }, [differ, imaged])
   const rows = advanced ? ADVANCED_ROWS : SIMPLE_ROWS
   // With two or more entries offering models, each row names its entry too, or two entries of one provider look alike.
   const entries = severalEntries(providers)
@@ -162,11 +193,42 @@ export function BotModelRows({ name, providers, slots, named, notes, onPick, onO
         />
       </div>
     })}
+    {advanced && image ? <ImageRow name={name} image={image} disabled={disabled} /> : null}
   </div>
     {note ? <p className="bot-model-note" title={note.title} data-testid="bot-model-note">{note.text}</p> : null}
     <div className="bot-model-advanced">
-      <span id={advancedId} title={cannotClose ? 'Pick a model for Medium work first' : 'A model for each kind of work'}>Advanced</span>
+      <span id={advancedId} title={cannotClose ? 'Pick a model for Medium work first' : image ? 'A model for each kind of work, and for pictures' : 'A model for each kind of work'}>Advanced</span>
       <Switch checked={advanced} onChange={toggle} labelledBy={advancedId} disabled={disabled || cannotClose} />
     </div>
+  </div>
+}
+
+/**
+ * The Images row (#1088): the same label and model picker as the other rows, fed the entries' image models, with None
+ * in the menu's footer. While no entry can make pictures, the control says so and its tooltip says what to add.
+ */
+function ImageRow({ name, image, disabled }: { name: string; image: BotImageRow; disabled?: boolean }) {
+  const listing = offeredListing(image.providers, image.pick)
+  const shown = listing && image.pick ? image.pick : null
+  const none = image.providers.length === 0
+  // A pick whose entry offers nothing now can still be set to None: the menu opens on its entry, empty, with None.
+  const providers = none && isPinned(image.pick) ? [{ id: image.pick.instanceId.split(':').at(-1) ?? image.pick.instanceId, instanceId: image.pick.instanceId, label: '', models: [] }] : image.providers
+  return <div className="bot-model-row" data-testid="bot-model-row-image">
+    <span className="bot-model-row-label" title="Pictures it makes when you ask">Images</span>
+    <SettingsModelPicker
+      ariaLabel={`${name}'s Images model`}
+      providers={providers as LlmProviderOption[]}
+      providerId={listing?.id ?? ''}
+      instanceId={shown?.instanceId}
+      modelId={shown?.model ?? ''}
+      placeholder={isPinned(image.pick) && !listing ? `${shortModelName(image.pick.model)} · not available` : none ? NO_IMAGE_MODELS : NO_IMAGES}
+      title={imageRowTitle(image.providers, image.pick, image.missing, image.usage)}
+      entry={severalEntries(image.providers) && listing ? listing.label : undefined}
+      disabled={disabled}
+      clear={{ label: NO_IMAGES, title: 'It makes no pictures', onClear: () => image.onPick(null) }}
+      onSelect={(_providerId, choice, instanceId) => {
+        if (instanceId) image.onPick({ instanceId, model: choice.model })
+      }}
+    />
   </div>
 }

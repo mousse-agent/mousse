@@ -145,13 +145,15 @@ describe('the ambient glow while the window is not focused', () => {
     expect(glowCss.match(/will-change:/g)).toHaveLength(1)
   })
 
-  it('holds the waves, the rim and the swirl while resting', () => {
+  it('holds the waves, the rim, the swirl and the liquid while resting', () => {
     const rest = glowCss.slice(glowCss.indexOf('.app .chat--empty[data-ambient-rest] .ambient-glow-wave'))
     const selectors = rest.slice(0, rest.indexOf('{'))
     expect(selectors).toContain('.chat--empty[data-ambient-rest] .chat-input-area .composer::before')
     expect(selectors).toContain('.chat--empty[data-ambient-rest] .chat-input-area .composer::after')
     expect(block(rest, '.app .chat--empty[data-ambient-rest] .ambient-glow-wave')).toContain('animation-play-state: paused')
-    expect(block(logoCss, '.chat--empty[data-ambient-rest] .empty-logo-swirl {')).toContain('animation-play-state: paused')
+    const logoRest = logoCss.slice(logoCss.indexOf('.chat--empty[data-ambient-rest] .empty-logo-swirl'))
+    expect(logoRest.slice(0, logoRest.indexOf('{'))).toContain('.chat--empty[data-ambient-rest] .empty-logo-liquid .empty-logo-wave')
+    expect(block(logoRest, '.chat--empty[data-ambient-rest] .empty-logo-swirl')).toContain('animation-play-state: paused')
   })
 })
 

@@ -78,4 +78,18 @@ describe('startAfterExit', () => {
     for (let i = 0; i < 40 && !existsSync(marker); i += 1) await new Promise((resolve) => setTimeout(resolve, 50))
     expect(readFileSync(marker, 'utf8')).toBe('--ozone-platform=x11|a b|')
   })
+
+  it('does not hand the new copy the old copy\'s mount, which goes away when the old copy exits', async () => {
+    const marker = join(root, 'path')
+    const program = join(root, 'apps', 'fake.AppImage')
+    writeFileSync(program, `#!/bin/sh\nprintf '%s' "$PATH" > "${marker}"\n`, { mode: 0o755 })
+    const { spawn } = await import('node:child_process')
+    const old = spawn('sleep', ['0.1'])
+
+    startAfterExit(old.pid!, program, [], { PATH: '/tmp/.mount_MousseOld:/tmp/.mount_MousseOld/usr/sbin:/usr/bin:/bin', APPDIR: '/tmp/.mount_MousseOld' })
+
+    await new Promise((resolve) => old.on('exit', resolve))
+    for (let i = 0; i < 40 && !existsSync(marker); i += 1) await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(readFileSync(marker, 'utf8')).toBe('/usr/bin:/bin')
+  })
 })

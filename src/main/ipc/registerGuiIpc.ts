@@ -89,6 +89,7 @@ import { showCopyMenu } from '../contextMenu'
 import { pickExecutable } from './pickExecutable'
 import { stageBotAttachment } from './botAttachments'
 import { chooseBrowserViewFiles, type BrowserViewFilesDeps } from './browserViewFiles'
+import { botBrowserWindow, type BotBrowserWindowDeps } from './botBrowserWindow'
 import { stat } from 'node:fs/promises'
 import { openExternalSafely } from '../safeExternalUrl'
 import { dispatchMcpAuthBrowser } from '../mcpAuthBrowser'
@@ -1459,14 +1460,25 @@ export function registerGuiIpc(
   /**
    * The window was not told the service's turn: it holds none, an older one, or another at the same moment. One newer
    * than the service's answer is not behind: an update sent after the service read its state arrives before the answer.
+   * An idle state the service does not hold (`turnHeld` false) means no turn ran there since it started: a window
+   * showing idle is current whatever the times, as an older service stamps that state with the time of each read. An
+   * idle state it holds is compared like any other: a paused turn that was cancelled or stopped ends idle (#1086).
    */
-  const turnBehind = (held: TurnState | undefined, service: TurnState): boolean => {
+  const turnBehind = (held: TurnState | undefined, service: TurnState, serviceHolds?: boolean): boolean => {
+    if (service.phase === 'idle' && serviceHolds === false && (held?.phase ?? 'idle') === 'idle') return false
     if (!held) return true
     const heldAt = Date.parse(held.updatedAt)
     const serviceAt = Date.parse(service.updatedAt)
     if (Number.isFinite(heldAt) && Number.isFinite(serviceAt) && heldAt !== serviceAt) return heldAt < serviceAt
     return held.turnId !== service.turnId || held.phase !== service.phase
   }
+
+  /**
+   * A gap in live events is only the service replacing a waiting update with its newer copy (a streamed message, the
+   * thread list, every thread's status), which the window then receives: its lists lost nothing. A check that finds the
+   * turn behind after one reads the thread again, not the lists (`LIST_REREAD_REASONS`).
+   */
+  const catchUpReasonOfCheck = (reason: string): string => reason === 'gap' ? 'live-gap' : reason
 
   const checkReasons = new Map<number, Set<string>>()
   /**
@@ -1486,7 +1498,7 @@ export function registerGuiIpc(
       }
       const binding = guiMms.getWindowBindingForSender(senderId)
       if (!binding) {
-        for (const reason of reasons) addCatchUpReason(senderId, reason)
+        for (const reason of reasons) addCatchUpReason(senderId, catchUpReasonOfCheck(reason))
         await catchUpWindow(senderId)
         return
       }
@@ -1495,11 +1507,15 @@ export function registerGuiIpc(
       if (!activeId) {
         // With no thread open, a gap is answered by reading every thread's status (it clears the gap flag).
         if (answersGap) {
-          addCatchUpReason(senderId, 'gap')
+          addCatchUpReason(senderId, 'live-gap')
           await catchUpWindow(senderId)
         }
         return
       }
+      // The status read starts first: it clears the gap flag as it starts, so the updates that arrive while the
+      // statuses below are read do not ask for a second check of the same gap.
+      const statusRead = guiMms.turnStatusForSender(senderId, activeId, answersGap)
+      statusRead.catch(() => undefined)
       if (answersGap) {
         // Every thread's status is small to read: after a gap the sidebar's marks are the service's again.
         try {
@@ -1509,7 +1525,7 @@ export function registerGuiIpc(
           linkLog.write('check.failed', { window: senderId, reasons, read: 'activity', error: describeLinkError(error) })
         }
       }
-      const status = await guiMms.turnStatusForSender(senderId, activeId, answersGap)
+      const status = await statusRead
       const held = turnStateMapFor(binding.profileId).get(activeId)
       const shownActive = isTurnStoppable(held) || isThreadActivityActive(activityTrackerFor(binding.profileId).getState(activeId))
       const serviceActive = status.turnState
@@ -1519,14 +1535,14 @@ export function registerGuiIpc(
       const turnCurrent = !answerApplies(binding.profileId, 'turn', status, activeId)
       const statusCurrent = !answerApplies(binding.profileId, 'activity', status, activeId)
       const behind: string[] = []
-      if (!turnCurrent && (status.turnState ? turnBehind(held, status.turnState) : isTurnStoppable(held) !== serviceActive)) behind.push('turn-differs')
+      if (!turnCurrent && (status.turnState ? turnBehind(held, status.turnState, status.turnHeld) : isTurnStoppable(held) !== serviceActive)) behind.push('turn-differs')
       if (!turnCurrent && !statusCurrent && shownActive && !serviceActive && status.activity !== undefined && !isThreadActivityActive(status.activity as ThreadActivityState)) behind.push('ended')
       if (!behind.length) {
         if (reasons.includes('quiet')) linkLog.write('check.running', { window: senderId, thread: activeId, reasons, phase: status.turnState?.phase ?? null, newer: turnCurrent || undefined })
         return
       }
       linkLog.write('check.behind', { window: senderId, thread: activeId, reasons, found: behind, shown: held?.phase ?? null, service: status.turnState?.phase ?? null })
-      for (const reason of reasons) addCatchUpReason(senderId, reason)
+      for (const reason of reasons) addCatchUpReason(senderId, catchUpReasonOfCheck(reason))
       await catchUpWindow(senderId)
     } catch (error) {
       linkLog.write('check.failed', { window: senderId, reasons, error: describeLinkError(error) })
@@ -3566,6 +3582,10 @@ export function registerGuiIpc(
   }
   registerHandler('bots:chooseBrowserFiles', async (event, request: unknown) => chooseBrowserViewFiles(request, 'botId', browserFilesDeps(event)))
   registerHandler('browser:chooseViewFiles', async (event, request: unknown) => chooseBrowserViewFiles(request, 'threadId', browserFilesDeps(event)))
+  // Open in a window and Close window in a bot's browser view: this app names its own screen, on the window's own connection.
+  registerHandler('bots:browserWindow', async (_event, request: unknown) => botBrowserWindow(request, {
+    request: ((method: string, params: unknown) => guiMms.request(method as never, params as never)) as BotBrowserWindowDeps['request']
+  }))
   registerHandler('dialog:pickExecutable', async (event, request: unknown) => {
     const win = BrowserWindow.fromWebContents(event.sender) ?? getWindow()
     return pickExecutable((options) => (win ? dialog.showOpenDialog(win, options) : dialog.showOpenDialog(options)), request)

@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
 import { existsSync, readdirSync, realpathSync } from 'node:fs'
 import { foldersOf, type BotManifest, type BotThreadSpec } from '../../../shared/bots/personal/definition'
-import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_SUBAGENT_APP_TOOLS, BOT_SUBAGENT_TOOLS, BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_SUBAGENT_APP_TOOLS, BOT_SUBAGENT_TOOLS, BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest } from '../../../shared/bots/personal/manifest'
 import { BOT_MEMORY_TOOLS } from '../../../shared/bots/personal/memory'
 import { withinComputerLimit, type BotComputerLimit } from '../../../shared/bots/personal/computerLimit'
 import type { NeutralTool } from '../../../shared/harness/tools'
@@ -94,6 +94,8 @@ export interface CompileInput {
      * messaging and stopping, only for a chat turn the owner's own message started. Absent: nothing (a consult).
      */
     threads?: 'read' | 'all'
+    /** `make_image` (#1088): the owner picked a model in Runs on's Images row. Chat and work alike; never a consult or a subagent. */
+    images?: boolean
     /**
      * A run's main turn: it may split its job among subagents (`BOT_SUBAGENT_TOOLS`), and lists the models they may run on
      * (`work_models`). Never the chat, a consult or a subagent.
@@ -102,7 +104,7 @@ export interface CompileInput {
     /**
      * This turn is one of a run's subagents: it holds what its work holds of the built-ins, files, MCP tools and skills,
      * and of the app tools only the web and the browser (`subagentManifest`). Every other bot tool is left out whatever
-     * the rest of `botTools` says: no asks, memory, schedules, reminders, work, threads or subagents of its own.
+     * the rest of `botTools` says: no asks, memory, schedules, reminders, pictures, work, threads or subagents of its own.
      */
     subagent?: true
   }
@@ -235,6 +237,7 @@ export function compileBotThread(input: CompileInput): CompileResult {
     // Always on, like memory: the listing of the owner's MCP servers, so the bot can ask for the right one.
     ...(own?.memory ? [...BOT_MEMORY_TOOLS, BOT_MCP_LIST_TOOL] : []),
     ...(own?.frontDesk ? BOT_WORK_TOOLS : []),
+    ...(own?.images ? [BOT_IMAGE_TOOL] : []),
     // A run's main turn splits its job among subagents, on models from the same list the chat picks work's from.
     ...(own?.subagents && !own.frontDesk ? [...BOT_SUBAGENT_TOOLS, 'work_models'] : [])
   ])].sort()

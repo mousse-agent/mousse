@@ -27,7 +27,7 @@ import {
   grantRequestOf
 } from '../../../shared/bots/personal/escalation'
 import { findServer, installationOf, mcpAskFor, type BotMcpHost, type BotMcpServer } from '../mcp/BotMcp'
-import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, MAX_BOT_SUBAGENTS_AT_ONCE, MAX_BOT_SUBAGENTS_PER_WORK, botGrantTool, isAbsolutePath, manifestProblem } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, MAX_BOT_SUBAGENTS_AT_ONCE, MAX_BOT_SUBAGENTS_PER_WORK, botGrantTool, isAbsolutePath, manifestProblem } from '../../../shared/bots/personal/manifest'
 import { checkMessage, wallMessage } from '../../../shared/bots/personal/walls'
 import type { ChargeResult, CountKind, CounterScope } from '../../../shared/harness/counters'
 import type { ReserveResult, SpendLimits, SpendRequest, SpendScope } from '../../../shared/harness/spend'
@@ -63,7 +63,7 @@ import {
 } from '../../../shared/bots/personal/definition'
 import { addedPermissions, intersectManifest, manifestSubset, narrowManifest } from '../../../shared/bots/personal/manifest'
 import { BOT_COMPUTER_OPEN, BOT_COMPUTER_SHUT, limitCutLead, notOnThisComputerText, stoppedForLimitText, switchedOff, whatToAskText, withinComputerLimit, type BotComputerLimit, type BotComputerSwitch } from '../../../shared/bots/personal/computerLimit'
-import { allPinned, copyPick, isPinned, limitFamilyOf, limitOnPick, pickProblemText, plainLabel, rowName, samePick, samePickTarget, sameStoredPick, slotsOf, slotsWith, startDepthOf, stuckRowsOf, turnModelOf, UNPICKED_SLOTS, withSlots, type BotPickMiss, type BotStuckEntry, type BotTurnModel } from '../../../shared/bots/personal/modelSlots'
+import { allPinned, copyPick, imagePickOf, isPinned, limitFamilyOf, limitOnPick, pickProblemText, plainLabel, rowName, samePick, samePickTarget, sameStoredPick, slotsOf, slotsWith, startDepthOf, stuckRowsOf, turnModelOf, UNPICKED_SLOTS, withImagePick, withSlots, type BotPickMiss, type BotStuckEntry, type BotTurnModel } from '../../../shared/bots/personal/modelSlots'
 import type { BotModelOption } from '../../../shared/bots/personal/methods'
 import type { LlmProviderOption } from '../../../shared/settings'
 import { botAllowedOf, type BotAllowed } from '../instructions'
@@ -73,7 +73,7 @@ import type { RunEngine } from '../../run/RunEngine'
 import { TERMINAL_RUN_STATUSES, type BotTurnPayload, type RunRecord } from '../../run/types'
 import { PATH_ARGUMENTS as BOT_PATH_ARGUMENTS, createBotAuthority } from '../authority/botAuthority'
 import { assertInsideRoots } from '../../agents/WorkspaceAccessPolicy'
-import { BotChatService, messageInput } from '../chat/BotChatService'
+import { type BotChatImages, BotChatService, messageInput } from '../chat/BotChatService'
 import { askFingerprintOf, BotChatProjection, clockTime, starterManifest } from '../chat/projection'
 import { BotDefinitionError, upgradeDefinitionV1, type BotDefinitionEntry, type BotDefinitionStore } from '../definitions/BotDefinitionStore'
 import { chipCallOf } from '../activity/BotActivitySink'
@@ -196,6 +196,8 @@ export interface BotEngineHost {
   modelListing?(): Promise<LlmProviderOption[]>
   /** Runs on's line for a bot's row on an entry (`HarnessGateway.botRunsOnNote`): a Codex not checked for bots. */
   runsOnNote?(instanceId: string): { text: string; title: string } | undefined
+  /** Runs on's Images row (#1088): the image models on offer, and a bot's pictures today (`BotImageMaker`). */
+  images?: BotChatImages
   /** This computer's name, the one computer a bot runs on for now. */
   computerName?(): string
   /** The person's other computers (About lists them; a bot runs on the computer that holds it). */
@@ -573,6 +575,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       ...(host.modelOptions ? { modelOptions: host.modelOptions } : {}),
       ...(host.modelListing ? { modelListing: host.modelListing } : {}),
       ...(host.runsOnNote ? { runsOnNote: host.runsOnNote } : {}),
+      ...(host.images ? { images: host.images } : {}),
       ...(host.computerName ? { computerName: host.computerName } : {}),
       ...(host.otherComputers ? { otherComputers: host.otherComputers } : {})
     })
@@ -2135,7 +2138,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // A chat turn is the bot's front desk: it hands what takes long to work (docs/plans/bot-always-free.md).
       // The owner's threads: reading in every lane; starting, messaging and stopping only in a chat turn the owner's own
       // message started (`chat:`), never in work, a reminder's work, a schedule or the bot's first message.
-      botTools: { escalate: true, consult: definition.context.length > 0, memory: true, frontDesk: row.lane === 'chat', threads: ownerChatTurn(row) ? 'all' : 'read', subagents: row.lane === 'run' },
+      botTools: { escalate: true, consult: definition.context.length > 0, memory: true, frontDesk: row.lane === 'chat', threads: ownerChatTurn(row) ? 'all' : 'read', images: this.imagePick(row.botId) !== null, subagents: row.lane === 'run' },
       limit
     })
     if (!compiled.ok) return this.block(row, 'policy_unenforceable', compiled.error.reason ?? compiled.error.message)
@@ -2218,7 +2221,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // What the owner allows now, from the permissions this dispatch runs with: a chat turn is told what its work
       // holds (it hands those jobs off), a run what it holds itself, and whether its browser could be offered.
       ...this.instructionsOf(definition, definition.main, row.lane, {
-        allowed: { ...botAllowedOf(narrowManifest(effective, definition.main.narrow), (ids) => this.mcpServerNames(ids)), here: limit },
+        allowed: { ...botAllowedOf(narrowManifest(effective, definition.main.narrow), (ids) => this.mcpServerNames(ids)), here: limit, ...(compiled.permissions.appTools.includes(BOT_IMAGE_TOOL) ? { images: true } : {}) },
         ...(row.lane !== 'chat' && compiled.permissions.browser && !browser ? { browserOffline: true } : {})
       }),
       selection: { ...selection },
@@ -6578,6 +6581,24 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.store.setError(botId, null)
       this.changed({ botId })
     }
+  }
+
+  /**
+   * The Images row (#1088): the model `make_image` runs on, from the published definition, or null when the owner picked
+   * none (or the definition can't be read). Read at every dispatch and every call, so a change shows at the next turn.
+   */
+  imagePick(botId: string): (BotModelPick & { instanceId: string }) | null {
+    try {
+      return imagePickOf(this.published(botId).main)
+    } catch {
+      return null
+    }
+  }
+
+  /** The owner sets or clears the Images row (About → Runs on): a revision with the same grant, like the other rows. */
+  setImagePick(botId: string, pick: BotModelPick | null): void {
+    this.entry(botId)
+    this.publishProfile(botId, (next) => ({ ...next, main: withImagePick(next.main, pick) }))
   }
 
   /** The bot's rows, upgraded on read (`slotsOf`): a bot from before rows has its one model on each. */

@@ -66,6 +66,14 @@ export const BOT_WORK_ONLY_TOOLS: readonly string[] = ['shell', 'web_search', 'w
  */
 export const BOT_MCP_LIST_TOOL = 'mcp_servers'
 
+/**
+ * Making a picture (#1088): offered only to a bot whose owner picked a model in Runs on's Images row, in chat and in
+ * work. The pick is the consent, so it is no permission: it is never in a grant, never asked for, and About never lists
+ * it. It runs no command, reads no file and opens no page: Mousse calls the picked model and saves the picture in the
+ * bot's files folder.
+ */
+export const BOT_IMAGE_TOOL = 'make_image'
+
 /** Every new bot's app tools: the web, and its own tools. */
 export const BOT_DEFAULT_APP_TOOLS: readonly string[] = ['web_search', 'web_fetch', ...BOT_OWN_APP_TOOLS]
 
@@ -126,8 +134,8 @@ export const BOT_APP_TOOLS: ReadonlySet<string> = new Set([...BOT_DEFAULT_APP_TO
 
 /**
  * Every Mousse app tool a bot's turn can ever be offered (what `compileBotThread` may add to a turn): the grantable
- * tools, the browser's tools in place of "browser", the skill tools, consult, and the front desk's work and reminder
- * tools. A bot's thread lists only these, so its runtime never shows the model a tool no bot can hold.
+ * tools, the browser's tools in place of "browser", the skill tools, consult, the front desk's work and reminder
+ * tools, and `make_image` with an Images row. A bot's thread lists only these, so its runtime never shows the model a tool no bot can hold.
  */
 const BOT_OFFERABLE_APP_TOOLS: ReadonlySet<string> = new Set([
   ...[...BOT_APP_TOOLS].filter((tool) => tool !== BOT_BROWSER_PERMISSION && tool !== BOT_THREADS_PERMISSION),
@@ -137,6 +145,7 @@ const BOT_OFFERABLE_APP_TOOLS: ReadonlySet<string> = new Set([
   ...BOT_SUBAGENT_TOOLS,
   ...BOT_MEMORY_TOOLS,
   BOT_MCP_LIST_TOOL,
+  BOT_IMAGE_TOOL,
   'list_skills', 'load_skill', 'escalate', 'consult'
 ])
 

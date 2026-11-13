@@ -155,6 +155,22 @@ export interface BotModelSlots {
 export type BotModelSlotKey = keyof BotModelSlots
 export const BOT_MODEL_SLOT_KEYS: readonly BotModelSlotKey[] = ['talk', 'light', 'medium', 'hard']
 
+/**
+ * The rows as `main.slots` stores them: the four model rows, and the Images row (#1088), the model `make_image` runs on.
+ * The Images row is no turn's model and is never chosen by Mousse: absent or null, the bot has no image tool. Older
+ * builds ignore it (`modelSlotsProblem` skips a key it does not know) and keep it while the rows are live (`withSlots`).
+ */
+export type BotStoredSlots = BotModelSlots & { image?: BotModelPick | null }
+
+/** At most this many images a bot makes in a day (the owner's local day), counted by the service (#1088). */
+export const BOT_IMAGES_PER_DAY = 20
+/** At most this many images one activation (a chat turn with its continuations, or one piece of work) makes. */
+export const BOT_IMAGES_PER_TURN = 4
+/** The largest image file a bot saves; a bigger one is refused and nothing is saved. */
+export const MAX_BOT_IMAGE_BYTES = 8 * 1024 * 1024
+/** The longest description `make_image` sends. */
+export const MAX_BOT_IMAGE_PROMPT_CHARS = 4000
+
 /** The thread a bot works in: who it is (an agent definition or plain instructions) and what it runs on. */
 export interface BotThreadSpec {
   key: string
@@ -165,9 +181,9 @@ export interface BotThreadSpec {
   /**
    * The rows by hand (#673), written whenever a row holds a pick on an entry. Older builds ignore it and run on `model`;
    * once one rewrites `model`, the rows no longer match it and are dropped (`slotsOf`). Rows this build does not know
-   * are kept as they are.
+   * are kept as they are. `image` is the Images row (#1088).
    */
-  slots?: BotModelSlots
+  slots?: BotStoredSlots
   /** Removes permissions for this thread only; never adds any. */
   narrow?: Partial<Pick<BotManifest, 'tools' | 'mcp' | 'skills' | 'workspace'>>
 }
