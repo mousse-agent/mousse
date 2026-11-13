@@ -108,19 +108,102 @@ function botThreadCall(bots: (() => BotAppToolDeps | undefined) | undefined, ctx
   }
 }
 
-/** The outcome chip of a thread a bot started, messaged or stopped: its title and the thread, which the chip opens. */
-function botChip(call: BotThreadCall, tool: string, threadId: string, title: string | undefined): void {
+/**
+ * The outcome chip of a thread a bot started, messaged or stopped: its title and the thread, which the chip opens, and
+ * the first line of what it sent there (shown with the chip), so the owner sees at once what the bot said.
+ */
+function botChip(call: BotThreadCall, tool: string, threadId: string, title: string | undefined, sent?: unknown): void {
+  const said = typeof sent === 'string' ? oneLine(sent.trim().split(/\r?\n/).find((line) => line.trim()) ?? '', 160) : ''
   try {
-    call.activity?.onAppResult(call.chips, tool, { threadId, ...(title ? { title } : {}) })
+    call.activity?.onAppResult(call.chips, tool, { threadId, ...(title ? { title } : {}), ...(said ? { sent: said } : {}) })
   } catch {
     // Chips are a view of the calls; they never fail one.
   }
 }
 
-/** A bot reaches the owner's ordinary threads only: never a subagent, which its parent owns. */
-function assertOrdinaryForBot(engine: RunEngine, threadId: string): void {
-  if (engine.delegations.getLineage(threadId)?.relationship === 'subagent')
-    throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is a subagent of another thread; you reach your owner's own threads only.`)
+/**
+ * The projects a bot ("use your threads") reaches: the agent access project list, where empty is every project. A list
+ * that is present but could not be read (`AgentAccessSettings.projectsUnreadable`) is no project: the bot is not held to
+ * the access level, which is what keeps ordinary agents out then. A host that says nothing about access: every project.
+ */
+export type BotProjects = { kind: 'all' } | { kind: 'some'; ids: readonly string[] } | { kind: 'unreadable' }
+
+export function botProjectsOf(host: AppToolHost): BotProjects {
+  let access: ReturnType<NonNullable<AppToolHost['agentAccess']>> | undefined
+  try {
+    access = host.agentAccess?.()
+  } catch {
+    return { kind: 'unreadable' }
+  }
+  if (access?.projectsUnreadable === true) return { kind: 'unreadable' }
+  const ids = access?.projectIds ?? []
+  return ids.length ? { kind: 'some', ids } : { kind: 'all' }
+}
+
+/** Whether a bot reaches `projectId` (undefined: a thread with no project, which only "every project" covers). */
+export function botProjectAllowed(projects: BotProjects, projectId: string | undefined): boolean {
+  if (projects.kind === 'unreadable') return false
+  return projects.kind === 'all' || (projectId !== undefined && projects.ids.includes(projectId))
+}
+
+/** What a bot is told when its owner's project list could not be read: it reaches none of their projects. */
+export const BOT_PROJECTS_UNREADABLE_TEXT =
+  "Your owner's project list (Settings → Agents) could not be read, so you reach none of their projects' threads. Tell your owner to choose the projects there again."
+
+/**
+ * Whether a personal bot ("use your threads") may reach `threadId`, and how: the one rule that list, search, read, wait,
+ * start, send and stop all go through (the registry's scope check and each handler), so a thread the list and search
+ * hide is never reachable by its id. A bot reaches its owner's ordinary threads in its projects (`botProjectsOf`), and
+ * the threads it started (`launched`, wherever they are). Never its own chat, a bot's thread, the Automation manager's,
+ * a private thread or a subagent; a thread that does not exist is refused like one out of reach, in the same words.
+ */
+export function botThreadReach(host: AppToolHost, engine: RunEngine, callerThreadId: string, threadId: string): { scope: 'manage' | 'launched' } | { refused: string } {
+  const unreachable = { refused: `Thread ${threadId} is not available to you.` }
+  if (!threadId || threadId === callerThreadId) return unreachable
+  let meta: Thread | undefined
+  try {
+    meta = host.threadMeta?.(threadId)
+  } catch {
+    return unreachable
+  }
+  if (!meta) return unreachable
+  if (botThreadHidden(host, engine, meta, () => host.listThreads?.() ?? [])) return unreachable
+  const projects = botProjectsOf(host)
+  if (botProjectAllowed(projects, meta.projectId)) return { scope: 'manage' }
+  if (meta.createdByThreadId === callerThreadId) return { scope: 'launched' }
+  return projects.kind === 'unreadable' ? { refused: BOT_PROJECTS_UNREADABLE_TEXT } : unreachable
+}
+
+/**
+ * The kinds of thread a bot never lists, finds or reaches, whatever its projects: a bot's thread (its own chat
+ * included), the Automation manager's, a private thread (or one below a private thread), and a subagent.
+ */
+function botThreadHidden(host: AppToolHost, engine: RunEngine, thread: Thread, inventory: () => readonly Thread[]): boolean {
+  if (thread.automationManager === true) return true
+  if (isBotThread(host, thread.id, thread)) return true
+  if (thread.lineage?.relationship === 'subagent' || engine.delegations.getLineage(thread.id)?.relationship === 'subagent') return true
+  return isLocalOnlyThread(thread, thread.lineage?.rootThreadId ? inventory() : undefined)
+}
+
+/** `botThreadReach` for a handler: the scope, or the refusal thrown as a scope error. */
+function requireBotReach(host: AppToolHost, engine: RunEngine, callerThreadId: string, threadId: string): 'manage' | 'launched' {
+  const reach = botThreadReach(host, engine, callerThreadId, threadId)
+  if ('refused' in reach) throw new McpToolError('mousse_scope_denied', reach.refused)
+  return reach.scope
+}
+
+/** Whether a bot may list or find `thread` (the same rule as `botThreadReach`, over a thread already read). */
+function botMayList(host: AppToolHost, engine: RunEngine, callerThreadId: string, thread: Thread, projects: BotProjects, inventory: readonly Thread[]): boolean {
+  if (thread.id === callerThreadId || botThreadHidden(host, engine, thread, () => inventory)) return false
+  return botProjectAllowed(projects, thread.projectId) || thread.createdByThreadId === callerThreadId
+}
+
+/**
+ * The request key of a bot's start or message: its chat turn (activation) is part of it, so the service counts a turn's
+ * starts and messages from their durable receipts (`OrchestratorService.reserveBotAct`), across every run of the turn.
+ */
+export function botRequestPrefix(tool: 'thread_create' | 'thread_send', callerThreadId: string, activationId: string): string {
+  return `${tool}:${callerThreadId}:${activationId}:`
 }
 
 /** `threadId` (when given) must be the caller's thread. Returns the caller's thread. */
@@ -333,7 +416,9 @@ const SEND_CONFLICTS: Readonly<Record<string, string>> = {
   agent_queue_full:
     'The thread already has several messages from agents waiting in its queue. Wait for them to run (thread_wait), or try again later.',
   plan_review_pending:
-    'The thread shows a plan waiting for your owner to review; a bot never answers it. Tell your owner, and send again once they have replied in that thread.'
+    'The thread shows a plan waiting for your owner to review; a bot never answers it. Tell your owner, and send again once they have replied in that thread.',
+  device_limit:
+    "Your owner wrote to you from a device this computer holds below that thread's access, so you can't send to it in this turn. Ask your owner to send it from the computer, or to message the thread themselves."
 }
 
 /** An engine refusal that means the thread is not in a state to take the message now, as a `mousse_conflict`. */
@@ -530,8 +615,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
    * Framed as data from that thread. The registry has already decided it may reach the thread (`botThreadScope`).
    */
   const botRead = (threadId: string, args: Record<string, unknown>, callerThreadId: string): ToolOutcome => {
-    assertNotBotThread(host, threadId, 'thread_read')
-    assertOrdinaryForBot(engine, threadId)
+    requireBotReach(host, engine, callerThreadId, threadId)
     const view = args.view === undefined ? 'summary' : args.view
     if (view !== 'summary' && view !== 'messages') throw new Error("view must be 'summary' or 'messages'")
     const meta = host.threadMeta?.(threadId)
@@ -680,9 +764,11 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           throw new McpToolError('mousse_scope_denied', bot ? 'You reach your owner\'s own threads only, never subagents.' : 'includeSubagents needs the "manage" agent access level.')
         const view = agentThreadView(host, ctx.caller.threadId)
         const { all, projectIds } = view
+        // A personal bot lists exactly what it may reach by id (`botThreadReach`).
+        const botProjects = bot ? botProjectsOf(host) : undefined
         const candidates = (args.includeSubagents === true ? all : visibleThreads(all)).filter((thread) => {
           // Private, out-of-project (unless launched) and bot threads are not listed.
-          if (!threadVisibleToAgent(host, thread, view)) return false
+          if (bot ? !botMayList(host, engine, ctx.caller.threadId, thread, botProjects!, all) : !threadVisibleToAgent(host, thread, view)) return false
           const launched = thread.createdByThreadId === ctx.caller.threadId
           if (args.projectId !== undefined && thread.projectId !== args.projectId) return false
           if (!launched && args.includeUnstarted !== true && !thread.startedAt) return false
@@ -711,8 +797,9 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           const models = bot.appTools.has('thread_create') ? host.threadModels?.() ?? [] : undefined
           return botData('Your owner\'s threads', {
             threads: rows,
-            projects: [...projectNames].filter(([id]) => inProjects(projectIds, id)).map(([id, name]) => ({ id, name })),
-            ...(models ? { models } : {})
+            projects: [...projectNames].filter(([id]) => botProjectAllowed(botProjects!, id)).map(([id, name]) => ({ id, name })),
+            ...(models ? { models } : {}),
+            ...(botProjects!.kind === 'unreadable' ? { note: BOT_PROJECTS_UNREADABLE_TEXT } : {})
           })
         }
         for (const thread of candidates) {
@@ -772,13 +859,18 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         // Who may be seen, and titles only below manage, are decided by the host before it applies the limit
         // or reads any transcript; transcripts are scanned for the most recent threads only.
         const callerPrivate = host.threadMeta?.(ctx.caller.threadId)?.localOnly === true
+        // A personal bot finds exactly what it may reach by id (`botThreadReach`).
+        const projects = bot ? botProjectsOf(host) : undefined
+        const inventory = bot ? host.listThreads?.() ?? [] : []
         const results = (await host.searchThreads(args.query, limit, {
-          allow: (found) => (callerPrivate || found.localOnly !== true) && (inProjects(projectIds, found.projectId) || found.createdByThreadId === ctx.caller.threadId) && !isBotThread(host, found.id, found),
+          allow: (found) => bot
+            ? botMayList(host, engine, ctx.caller.threadId, found, projects!, inventory)
+            : (callerPrivate || found.localOnly !== true) && (inProjects(projectIds, found.projectId) || found.createdByThreadId === ctx.caller.threadId) && !isBotThread(host, found.id, found),
           titlesOnly: !manage,
           maxMessageThreads: THREAD_SEARCH_MESSAGE_THREADS
         }))
           .filter((hit) => manage || hit.matchType !== 'message')
-          .filter((hit) => inProjects(projectIds, hit.projectId) || host.threadMeta?.(hit.threadId)?.createdByThreadId === ctx.caller.threadId)
+          .filter((hit) => bot ? 'scope' in botThreadReach(host, engine, ctx.caller.threadId, hit.threadId) : inProjects(projectIds, hit.projectId) || host.threadMeta?.(hit.threadId)?.createdByThreadId === ctx.caller.threadId)
           .slice(0, limit)
           .map(({ snippet, ...hit }) => (manage && snippet !== undefined ? { ...hit, snippet } : hit))
         // A personal bot: each hit as a handle and one line, framed as data from the owner's threads.
@@ -821,15 +913,22 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         if (threadId === ctx.caller.threadId) throw new Error('thread_send is for other threads; use queue_enqueue to queue a message on your own thread.')
         // Defence in depth: a plan ceiling is held to `read` and never gets here.
         if (mode === 'agent' && ctx.caller.modeCeiling === 'plan') throw new McpToolError('mousse_ceiling_exceeded', 'A plan-ceiling caller can only send plan turns.')
+        // A personal bot reaches only what it may (`botThreadReach`: never a subagent, a bot's, a private thread or the
+        // Automation manager's).
+        if (ctx.turn.bot) requireBotReach(host, engine, ctx.caller.threadId, threadId)
         // A subagent is reached through its parent: a message sent to it directly would run untracked.
         if (engine.delegations.getLineage(threadId)?.relationship === 'subagent')
           throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is a subagent; its parent reaches it with continue_subagent, and a message from here would run without its parent hearing the result.`)
         assertNotBotThread(host, threadId, 'thread_send')
         assertTakesWork(host, threadId)
         const actor = actorOf(ctx)
-        const requestKey = `thread_send:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`
+        // A bot's messages are counted per chat turn by the service, from their receipts: its key names the turn.
+        const requestKey = ctx.turn.bot
+          ? `${botRequestPrefix('thread_send', ctx.caller.threadId, ctx.turn.bot.activationId)}${toolRequestId(args, ctx)}`
+          : `thread_send:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`
+        const counted = !ctx.turn.bot
         try {
-          reserveSend(actor.runId)
+          if (counted) reserveSend(actor.runId)
         } catch (limit) {
           // A retry of a send this run already made is answered with its first result, however many it has made.
           const earlier = host.earlierSend?.(threadId, requestKey)
@@ -840,17 +939,17 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         try {
           sent = await host.sendToThread(threadId, { content: args.content, mode }, { clientRequestId: requestKey, actor })
         } catch (error) {
-          releaseSend(actor.runId)
+          if (counted) releaseSend(actor.runId)
           throw sendConflict(error) ?? error
         }
         // A retry returns the first result and changes nothing, so it is not another send.
-        if (sent.replayed) releaseSend(actor.runId)
-        else showAction(host, threadId, actor, `sent a message (run ${sent.runId})`)
-        // A personal bot: its chat shows a chip for the message, with the thread to open.
+        if (sent.replayed && counted) releaseSend(actor.runId)
+        if (!sent.replayed) showAction(host, threadId, actor, `sent a message (run ${sent.runId})`)
+        // A personal bot: its chat shows a chip for the message, with the thread to open and what it sent.
         const bot = botThreadCall(bots, ctx)
         if (bot) {
           const title = titleOf(threadId)
-          if (!sent.replayed) botChip(bot, 'thread_send', threadId, title)
+          if (!sent.replayed) botChip(bot, 'thread_send', threadId, title, args.content)
           return json({ threadId, title: title ?? null, ...sent, note: 'It runs in that thread\'s own mode. Approvals and questions there wait for your owner, never for you.' })
         }
         return json({ threadId, ...sent })
@@ -879,10 +978,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         const timeoutMs = boundedInt(args.timeoutMs, 'timeoutMs', 1, THREAD_WAIT_MAX_MS, THREAD_WAIT_DEFAULT_MS)
         if (threadId === ctx.caller.threadId) throw new Error('thread_wait is for other threads: your own run ends only when your turn does.')
         const bot = ctx.turn.bot
-        if (bot) {
-          assertNotBotThread(host, threadId, 'thread_wait')
-          assertOrdinaryForBot(engine, threadId)
-        }
+        if (bot) requireBotReach(host, engine, ctx.caller.threadId, threadId)
         const scope = ctx.scope ?? 'read'
         let target = args.runId as string | undefined
         let settle!: (end: WaitEnd) => void
@@ -932,6 +1028,14 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           if (answered(run) || (seenTerminal.has(run.runId) && answered(engine.getRun(run.runId) ?? run))) settle({ kind: 'finished' })
           const end = await ended
           if (end.kind === 'caller_ended') return json({ status: 'caller_ended', threadId })
+          // A bot's wait that ends after its owner removed "use your threads", or this computer switched it off, or the
+          // thread went out of its reach, returns the refusal and nothing of the thread.
+          if (bot) {
+            const refusal = bot.stillHolds?.('thread_wait')
+            if (refusal) return { text: refusal, isError: true }
+            const reach = botThreadReach(host, engine, ctx.caller.threadId, threadId)
+            if ('refused' in reach) return { text: reach.refused, isError: true }
+          }
           const now = engine.getRun(target) ?? run
           const fullView = resultTextVisible(scope)
           const outcome = now.outcome
@@ -993,13 +1097,14 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         if (!host.stopRun) return notAvailable('thread_interrupt')
         if (threadId === ctx.caller.threadId) throw new Error('thread_interrupt is for other threads; stop your own work by ending your turn.')
         // A Stop removes work, so an archived thread (which can still have a live or paused run) may be stopped.
+        const bot = botThreadCall(bots, ctx)
+        if (bot) requireBotReach(host, engine, ctx.caller.threadId, threadId)
         assertNotBotThread(host, threadId, 'thread_interrupt')
         assertOwnSubagentsOnly(engine, ctx.caller, threadId, 'thread_interrupt')
-        const bot = botThreadCall(bots, ctx)
-        if (bot) assertOrdinaryForBot(engine, threadId)
         const actor = actorOf(ctx)
         const result = acceptedRunCommand(await host.stopRun(threadId, runId, { clientRequestId: `thread_interrupt:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`, actor }), runId)
-        if (!result.replayed) showAction(host, threadId, actor, `stopped run ${runId}`)
+        // The thread says who stopped its turn: a bot's line names the bot (`showAgentAction`).
+        if (!result.replayed) showAction(host, threadId, actor, bot ? 'stopped the turn that was running' : `stopped run ${runId}`)
         if (bot && !result.replayed) botChip(bot, 'thread_interrupt', threadId, titleOf(threadId))
         return json({ threadId, ...result })
       }
@@ -1171,27 +1276,31 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           ...(typeof args.firstMessage === 'string' ? { firstMessage: args.firstMessage, mode: (args.mode as 'agent' | 'plan' | undefined) ?? 'agent' } : {})
         }
         const actor = actorOf(ctx)
-        const requestKey = `thread_create:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`
+        // A bot's starts are counted per chat turn by the service, from their receipts: its key names the turn.
+        const requestKey = bot
+          ? `${botRequestPrefix('thread_create', ctx.caller.threadId, ctx.turn.bot!.activationId)}${toolRequestId(args, ctx)}`
+          : `thread_create:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`
         // A key that already has a stored creation is a retry of that one thread: it takes no new place under the cap
         // (past the cap it still finishes its own thread and first message), and the host refuses it if the thread was
         // used by a person meanwhile.
-        const retry = host.creationStarted?.(requestKey) === true
-        if (!retry) reserveCreation(actor.runId)
+        // A bot's start is counted by the service instead, per chat turn.
+        const uncounted = bot !== undefined || host.creationStarted?.(requestKey) === true
+        if (!uncounted) reserveCreation(actor.runId)
         let created: AgentCreatedThread
         try {
           created = await host.createThread(request, { clientRequestId: requestKey, actor, accessLevel: ctx.caller.accessLevel })
         } catch (error) {
-          if (!retry) releaseCreation(actor.runId)
+          if (!uncounted) releaseCreation(actor.runId)
           throw sendConflict(error) ?? error
         }
         // A retry that found the thread complete changes nothing, so it is not another creation.
-        if (!retry && created.replayed) releaseCreation(actor.runId)
-        // A personal bot: the new thread says the bot started it, and the bot's chat gets a chip that opens it. The bot's
-        // own thread is its chat, read from bots.db: no note goes there.
+        if (!uncounted && created.replayed) releaseCreation(actor.runId)
+        // A personal bot: the new thread says the bot started it, and the bot's chat gets a chip that opens it, with the
+        // first line of what it asked there. The bot's own thread is its chat, read from bots.db: no note goes there.
         if (bot) {
           if (!created.replayed) {
             showAction(host, created.threadId, actor, 'started this thread')
-            botChip(bot, 'thread_create', created.threadId, created.title)
+            botChip(bot, 'thread_create', created.threadId, created.title, args.firstMessage)
           }
           return json({
             threadId: created.threadId,

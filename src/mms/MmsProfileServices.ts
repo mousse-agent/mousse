@@ -42,6 +42,7 @@ import { OrchestratorService } from './orchestrator/OrchestratorService'
 import { ProfileDatabase } from './run/db/ProfileDatabase'
 import { McpCredentials } from './run/mcp/McpCredentials'
 import { MousseMcpServer } from './run/mcp/MousseMcpServer'
+import { isPersonMessage } from './run/mcp/appTools/agentMessage'
 import { EffectWorker, type EffectWorkerFibres } from './run/EffectWorker'
 import { TERMINAL_RUN_STATUSES, type RunRecord, type ThreadEvent } from './run/types'
 import { Reconciler } from './run/Reconciler'
@@ -776,6 +777,8 @@ export class MmsProfileServices {
       // What bots may do on this computer (Settings → Agents): the installation's setting, the same for every profile,
       // read at every dispatch and call, never taken from a caller or another computer.
       computerLimit: () => this.config.botSettings().here,
+      // "Use your threads" removed: what the bot sent that has not started leaves its owner's threads.
+      threadsWithdrawn: (bot) => { this.orchestrator.withdrawBotThreadMessages(bot) },
       // The owner's MCP servers set up for the whole profile, through Mousse (`BotMcp`).
       ...(this.orchestrator.botMcp() ? { mcp: this.orchestrator.botMcp()! } : {})
     }, ({ store }) => {
@@ -845,7 +848,16 @@ export class MmsProfileServices {
     const personalBots = this.personalBots
     if (personalBots) this.orchestrator.setBotThreads(personalBots)
     // A switch of What bots may do here changed: every bot's About reads again (it marks what is off here).
-    if (personalBots) this.platform.onDispose(onSettingsSaved(() => personalBots.computerLimitChanged()))
+    if (personalBots) {
+      // "Use your threads" switched off here: every bot's messages still waiting in this profile's threads are withdrawn.
+      let threadsHere = this.botThreadsHere()
+      this.platform.onDispose(onSettingsSaved(() => {
+        personalBots.computerLimitChanged()
+        const now = this.botThreadsHere()
+        if (threadsHere && !now) for (const bot of personalBots.list()) personalBots.withdrawThreadMessages(bot.id)
+        threadsHere = now
+      }))
+    }
     // The bots' own app tools (schedules, profile, depth) and memory tools, through the engine.
     if (personalBots && botMemory) {
       const memory = botMemory
@@ -1055,7 +1067,8 @@ export class MmsProfileServices {
     this.orchestrator.setAutomationTools({
       drafts: this.automationDrafts,
       isManagerThread: (threadId) => this.threads.getThread(threadId)?.automationManager === true,
-      personRequest: (threadId) => [...this.orchestrator.getMessages(threadId)].reverse().find((message) => message.role === 'user')?.content,
+      // The person's own latest message: never one an agent or a bot sent there.
+      personRequest: (threadId) => [...this.orchestrator.getMessages(threadId)].reverse().find((message) => isPersonMessage(message))?.content,
       managerWorkspace: () => automationManagerWorkspace(this.homeDir, this.automationManagerProjectId ? this.projects.getProject(this.automationManagerProjectId)?.path : undefined),
       botOf: (threadId) => this.personalBots?.tools.activationOf(threadId)?.botId,
       activationOf: (threadId) => this.personalBots?.tools.activationOf(threadId)?.activationId,
@@ -1756,6 +1769,15 @@ export class MmsProfileServices {
   /** Saved keys (#595, the automation part): names in the profile's secret store; values are written, never read back out. */
   automationKeys!: { list(): string[]; set(name: string, value: string): void; has(name: string): boolean }
   automationDrafts!: AutomationDrafts
+
+  /** Whether this computer lets bots use their owners' threads now (What bots may do here); off when it can't be read. */
+  private botThreadsHere(): boolean {
+    try {
+      return this.config.botSettings().here.threads === true
+    } catch {
+      return false
+    }
+  }
 
   /** The project the composer picked for the manager's next turns (see `automationManagerWorkspace`). */
   private automationManagerProjectId: string | undefined

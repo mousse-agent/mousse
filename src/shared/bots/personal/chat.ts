@@ -28,6 +28,8 @@ export interface BotChip {
   live?: boolean
   /** A thread the call started, messaged or stopped ("use your threads"): the chip offers Open, which shows it. */
   thread?: string
+  /** The first line of what the bot sent to that thread, shown on the chip's hover. */
+  said?: string
 }
 
 export type BotAskStatus = 'open' | 'allowed' | 'not_now' | 'withdrawn'

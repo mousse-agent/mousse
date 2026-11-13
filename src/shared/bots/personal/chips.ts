@@ -248,7 +248,9 @@ function outcomeChip(kind: ChipKind, call: BotChipCall): BotChip | null {
       if (!threadId) return null
       const title = str(result.title)
       const text = kind === 'thread_start' ? 'started thread' : kind === 'thread_send' ? 'messaged' : 'stopped'
-      return { icon: 'think', text, ...(title ? { highlight: shortChipText(title, 40) } : {}), thread: threadId }
+      // The first line of what it sent there, which the chip shows on hover.
+      const said = str(result.sent)
+      return { icon: 'think', text, ...(title ? { highlight: shortChipText(title, 40) } : {}), thread: threadId, ...(said ? { said: shortChipText(said, 160) } : {}) }
     }
     case 'model': {
       const rows = result.for === 'talk' ? 'for talking' : result.for === 'work' ? 'for work' : result.for === 'all' ? 'from now on' : 'for this chat'
@@ -305,6 +307,15 @@ const QUIET_KINDS: ReadonlySet<ChipKind> = new Set(['schedules', 'work_look'])
  * a folder name, a schedule label), in first-seen order. Saves, forgets and new schedules are one
  * chip each, worded by their outcome; a call that failed shows none of those.
  */
+/**
+ * The chip of a thread a bot started, messaged or stopped ("use your threads"), as soon as the call returned: the chat
+ * shows it at once, before the turn ends and its message carries every chip. Null for any other call.
+ */
+export function actedChip(tool: string, input: unknown, result: unknown): BotChip | null {
+  const kind = tool === 'thread_create' ? 'thread_start' : tool === 'thread_send' ? 'thread_send' : tool === 'thread_interrupt' ? 'thread_stop' : undefined
+  return kind ? outcomeChip(kind, { tool, input, result }) : null
+}
+
 export function rollUpChips(calls: readonly BotChipCall[], ctx: BotChipContext = {}): BotChip[] {
   const order: Array<{ key: string; chip?: BotChip }> = []
   const groups = new Map<string, { kind: ChipKind; icon: BotChipIcon; classified: Classified[]; calls: BotChipCall[] }>()

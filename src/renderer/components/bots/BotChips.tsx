@@ -24,12 +24,13 @@ const CHIP_ICONS: Record<BotChipIcon, typeof Search> = {
 
 /**
  * One activity chip (C3): an icon, a few words and the highlighted part. A live chip's icon spins. A chip of a thread the
- * bot started, messaged or stopped reads "started thread · <title>" and offers Open, which shows that thread.
+ * bot started, messaged or stopped reads "started thread · <title>" and offers Open, which shows that thread; its tooltip
+ * is the first line of what the bot sent there.
  */
 export function BotChipView({ chip }: { chip: BotChip }) {
   const Icon = CHIP_ICONS[chip.icon] ?? Sparkles
   const thread = chip.thread
-  return <span className={`bot-chip${chip.live ? ' is-live' : ''}`}>
+  return <span className={`bot-chip${chip.live ? ' is-live' : ''}`} title={chip.said ? `Sent: ${chip.said}` : undefined}>
     <Icon size={13} aria-hidden />{chip.text}{chip.highlight && <>{thread ? ' · ' : ' '}<b>{chip.highlight}</b></>}
     {thread && <button type="button" className="bot-chip-open" title="Open this thread" onClick={() => openThread(thread)}>Open</button>}
   </span>

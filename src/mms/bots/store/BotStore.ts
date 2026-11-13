@@ -10,6 +10,7 @@ import type { BotChip, BotError, BotMessageKind } from '../../../shared/bots/per
 import type { ProviderSelection } from '../../../shared/harness/types'
 import type { BotStuckRows } from '../../../shared/bots/personal/modelSlots'
 import { BOT_MEMORY_SCHEMA_SQL } from '../memory/schema'
+import { narrowPermissionMode, type PermissionMode } from '../../../shared/permissionMode'
 
 /**
  * `<profileHome>/bots/bots.db` (PR 6 §4): personal bots' grants, threads, activations, dispatches
@@ -926,6 +927,19 @@ export class BotStore {
     )
     this.run('INSERT INTO bot_counters(activation_id, limits_json) VALUES(?, ?)', row.id, JSON.stringify(limits))
     this.run('INSERT INTO bot_spend(activation_id) VALUES(?)', row.id)
+  }
+
+  /**
+   * Another device's message continued a chat activation at its wall ("use your threads", `BotOwnerTurn`): the rest of
+   * the turn is held to that device's limit too, the narrower of the two. Inside the caller's transaction; false for an
+   * activation that is not a manual chat one.
+   */
+  narrowOwnerLimit(id: string, limit: PermissionMode): boolean {
+    const row = this.activation(id)
+    if (!row || row.lane !== 'chat' || row.trigger.kind !== 'manual') return false
+    const held = row.trigger.owner?.limit
+    const trigger = { ...row.trigger, owner: { limit: held ? narrowPermissionMode(held, limit) : limit } }
+    return this.run('UPDATE bot_activations SET trigger_json = ? WHERE id = ?', JSON.stringify(trigger), id) > 0
   }
 
   /** A running activation waits for the internet, or no longer does. False when it is not running (or did not wait). */

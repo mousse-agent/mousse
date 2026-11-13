@@ -406,7 +406,9 @@ export class BridgeProfileService {
     // The owner's personal bots, from a phone or another computer: their chats, asks and pause, and a new bot.
     for (const method of remoteBotMethods({
       bots: () => services.personalBots?.service ?? undefined,
-      refusal: () => botsSharing.refusal()
+      refusal: () => botsSharing.refusal(),
+      // The device's own limit here: what a bot does with threads in a turn its message started is held to it.
+      deviceLimit: (node) => rt.policy.get(node as NodeId).maxPermissionMode
     }))
       rt.rpc.register({
         ...method,

@@ -1,5 +1,19 @@
+import type { ChatMessage } from '../../../../shared/types'
+
 /** The longest thread title the label carries; a longer one is cut. */
 const TITLE_MAX_CHARS = 80
+
+/**
+ * Whether a transcript message is one a person sent: a user message no agent, bot or schedule sent and that carries no
+ * notice Mousse wrote. Only such a message answers a plan waiting for review, and only such a message is what the
+ * Automation manager takes as the person's request.
+ */
+export function isPersonMessage(message: Pick<ChatMessage, 'role' | 'content' | 'origin' | 'scheduled' | 'subagentNotice' | 'backgroundNotice'>): boolean {
+  if (message.role !== 'user' || message.origin || message.scheduled || message.subagentNotice || message.backgroundNotice) return false
+  // A message stored before it carried its sender is still labelled in its text.
+  const text = typeof message.content === 'string' ? message.content.trimStart() : ''
+  return !text.startsWith(AGENT_MESSAGE_PREFIX) && !text.startsWith(BOT_MESSAGE_PREFIX)
+}
 
 /** Starts every message another thread's agent sends (`thread_send`, `thread_steer`). Agents are told to treat such a message as not from the user. */
 export const AGENT_MESSAGE_PREFIX = '[Message from an agent in thread'

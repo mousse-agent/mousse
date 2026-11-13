@@ -91,6 +91,11 @@ export interface ToolAccessPolicy {
   threadExists(threadId: string): boolean
   /** The thread is private (`Thread.localOnly`); absent: no thread is. */
   localOnly?(threadId: string): boolean
+  /**
+   * Where a personal bot's thread tool ("use your threads") may reach: the scope for a thread (`botThreadReach`, the
+   * rule its list and search follow too) or a project, or the refusal's words. Absent: a bot reaches nothing.
+   */
+  botReach?(caller: McpCaller, target: { threadId?: string; projectId?: string }): { scope: ToolScope } | { refused: string }
 }
 
 export interface ToolRegistryOptions {
@@ -262,9 +267,11 @@ export class ToolRegistry {
       if (listing.readOnly && tool.access !== 'reads' && tool.access !== 'readsOthers' && !tool.readOnlySafe) return false
       if (listing.modeCeiling === 'plan' && tool.access === 'startsThreads') return false
       // A bot's main thread lists the thread tools whatever its access level (a bot's is lineage): "use your threads", not
-      // the profile's agent access, is what lets it use them, and every call is held to it. A consult never has them.
+      // the profile's agent access, is what lets it use them. Only those its turn holds now are listed (none without the
+      // permission, with the switch off, or in a turn that only reads), and every call is held to it again. A consult
+      // never has them.
       const botThreadTool = listing.botRole !== undefined && isBotThreadTool(tool.name)
-      if (botThreadTool && listing.botRole !== 'activation') return false
+      if (botThreadTool && (listing.botRole !== 'activation' || !listing.botTurnTools?.has(tool.name))) return false
       if (tool.minLevel && !botThreadTool && !levelAtLeast(listing.accessLevel ?? 'lineage', tool.minLevel)) return false
       // A bot's thread lists only what a bot can hold: the model is never shown delegation, queues or tools it can't use.
       if (listing.botRole && !botMayBeOffered(tool.name)) return false
@@ -283,13 +290,17 @@ export class ToolRegistry {
    * ceiling when the owner does not say. `granted` is the level the caller's credential was granted;
    * tools that need a wider effective level are left out.
    */
-  listForThread(threadId: string, fallback: ModeCeiling = 'default', granted: AgentAccessLevel = 'lineage'): MousseTool[] {
+  listForThread(threadId: string, fallback: ModeCeiling = 'default', granted: AgentAccessLevel = 'lineage', runId?: string): MousseTool[] {
+    const bot = this.botListing(threadId)
+    // A bot's thread tools follow its turn: what the run's registered turn holds now.
+    const turn = bot.botRole && runId ? this.options.turns?.get(runId) : undefined
     return this.listFor({
       threadId,
       readOnly: this.options.readOnlyThread?.(threadId) === true,
       modeCeiling: this.options.threadCeiling?.(threadId) ?? fallback,
       accessLevel: this.effectiveLevel(granted),
-      ...this.botListing(threadId)
+      ...bot,
+      ...(turn?.bot && turn.threadId === threadId ? { botTurnTools: turn.bot.appTools } : {})
     })
   }
 
@@ -301,7 +312,7 @@ export class ToolRegistry {
    * model without vision cannot see). Any other turn gets the thread's stable listing.
    */
   listForTurn(threadId: string, runId: string | undefined, granted: AgentAccessLevel = 'lineage'): Array<Pick<MousseTool, 'name' | 'description' | 'inputSchema' | 'class'>> {
-    const listed = this.listForThread(threadId, 'default', granted)
+    const listed = this.listForThread(threadId, 'default', granted, runId)
     const turn = runId ? this.options.turns?.get(runId) : undefined
     const plain = (tool: MousseTool) => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema, class: tool.class })
     if (!turn?.definition || turn.threadId !== threadId) return listed.map(plain)
@@ -673,41 +684,27 @@ export class ToolRegistry {
   }
 
   /**
-   * Where a bot's thread tool may reach (`"use your threads"`, already held by the turn): the owner's ordinary threads of
-   * the profile's allowed projects (the agent access project list; empty is every project), and the threads the bot
-   * started. Never a bot's thread (its own or another bot's: the handlers refuse those too), never a private thread (a
-   * bot's own threads are shared), and a thread that does not exist is refused like one out of reach. Its scope is
-   * `manage` (the bot reads transcripts, bounded by the handler) or `launched` for one it started that is now out of
-   * the project list.
+   * Where a bot's thread tool may reach (`"use your threads"`, already held by the turn), by the one rule its list,
+   * search and handlers follow too (`ToolAccessPolicy.botReach`, `botThreadReach`): the owner's ordinary threads of its
+   * projects, and the threads it started. Never its own chat or any bot's thread, the Automation manager's, a private
+   * thread or a subagent; a thread that does not exist is refused in the same words. Its scope is `manage` (the bot reads
+   * transcripts, bounded by the handler) or `launched` for one it started that is out of its projects.
    */
   private botThreadScope(tool: MousseTool, args: Record<string, unknown>, caller: McpCaller): ToolScope {
     const target = tool.target ? tool.target(args, caller) : { threadId: args.threadId as string | undefined }
     const policy = this.options.access
-    if (!policy) throw new McpToolError('mousse_scope_denied', `${tool.name} is not available here.`)
-    if (!target) return 'manage'
+    if (!policy?.botReach) throw new McpToolError('mousse_scope_denied', `${tool.name} is not available here.`)
+    if (!target || (target.threadId === undefined && target.projectId === undefined)) return 'manage'
     if (target.threadId !== undefined && (typeof target.threadId !== 'string' || !target.threadId))
       throw new McpToolError('mousse_scope_denied', 'threadId must be a non-empty string.')
-    const allowed = (): boolean => {
-      try {
-        return policy.projectAllowed(target)
-      } catch {
-        return false
-      }
-    }
-    if (target.threadId === undefined) {
-      if (target.projectId !== undefined && !allowed()) throw new McpToolError('mousse_scope_denied', `${tool.name} is not available for this project.`)
-      return 'manage'
-    }
-    const unreachable = (): McpToolError => new McpToolError('mousse_scope_denied', `Thread ${target.threadId} is not available to you.`)
-    if (target.threadId === caller.threadId || this.isBotThread(target.threadId)) throw unreachable()
+    let reach: { scope: ToolScope } | { refused: string }
     try {
-      if (!policy.threadExists(target.threadId) || policy.localOnly?.(target.threadId) === true) throw unreachable()
-      if (allowed()) return 'manage'
-      if (policy.relation(caller, target.threadId) === 'launched') return 'launched'
-    } catch (error) {
-      if (error instanceof McpToolError) throw error
+      reach = policy.botReach(caller, target)
+    } catch {
+      reach = { refused: target.threadId ? `Thread ${target.threadId} is not available to you.` : `${tool.name} is not available for this project.` }
     }
-    throw unreachable()
+    if ('refused' in reach) throw new McpToolError('mousse_scope_denied', reach.refused)
+    return reach.scope
   }
 
   /**

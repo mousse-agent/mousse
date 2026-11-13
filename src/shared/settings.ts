@@ -320,6 +320,13 @@ export interface AgentAccessSettings {
    * chosen here.
    */
   computers: string[]
+  /**
+   * The stored project list was present but could not be read. Ordinary agents fall back to `lineage` (which reaches no
+   * other thread); a bot with "use your threads", which the level does not hold, reaches no project at all. Kept on
+   * every later write, so a save of something else never turns the empty list into "every project"; cleared (written
+   * as false, which reads as absent) when the owner chooses other projects (`SettingsStore.set`). Only true counts.
+   */
+  projectsUnreadable?: boolean
 }
 
 const AGENT_ACCESS_LEVELS: readonly AgentAccessLevel[] = ['lineage', 'read', 'manage']
@@ -352,13 +359,15 @@ export function normalizeAgentAccessSettings(raw?: Partial<AgentAccessSettings> 
   const nodes: unknown = raw?.computers
   const computers = Array.isArray(nodes) && nodes.every((node) => typeof node === 'string' && node.length > 0) ? [...new Set(nodes as string[])] : []
   const remoteSubagents = raw?.remoteSubagents === true
-  if (malformed) return { level: 'lineage', projectIds: [], answerApprovals: false, remoteSubagents, computers }
+  if (malformed) return { level: 'lineage', projectIds: [], answerApprovals: false, remoteSubagents, computers, projectsUnreadable: true }
   const level = isAgentAccessLevel(raw?.level) ? raw.level : 'lineage'
   return {
     level,
     projectIds: Array.isArray(ids) ? [...new Set(ids as string[])] : [],
     remoteSubagents,
     computers,
+    // Once unreadable, still unreadable for bots until the owner chooses the projects again.
+    ...(raw?.projectsUnreadable === true ? { projectsUnreadable: true as const } : {}),
     // Answering approvals is part of Manage. Below it the switch reads, and is saved, as off, whoever wrote the
     // level (the Settings screen, a partial update from another client, a hand edit), so raising the level
     // again never brings the permission back by itself.
