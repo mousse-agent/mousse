@@ -299,13 +299,15 @@ describe('Providers page toolbar', () => {
 })
 
 describe('Agent editor layout', () => {
-  it('keeps Setup to status and account, with the name and telemetry under Advanced', () => {
+  it('keeps the name in Setup beside the status, with telemetry in Advanced under Behavior', () => {
     const entry = snapshot({ telemetry: { setting: 'off', defaultSetting: 'off', variables: ['DISABLE_TELEMETRY'] } })
     const html = renderToStaticMarkup(createElement(AgentEditor, { snapshot: entry, status: describeStatus(entry), actions, onSaveModelPrefs: noop, onRefreshModels: noop }))
     const advanced = html.indexOf('Advanced</summary>')
     expect(advanced).toBeGreaterThan(html.indexOf('>Setup<'))
-    expect(html.indexOf('Display name')).toBeGreaterThan(advanced)
-    expect(html.indexOf('aria-label="Telemetry"')).toBeGreaterThan(advanced)
+    expect(html.indexOf('Display name')).toBeGreaterThan(html.indexOf('>Status<'))
+    expect(html.indexOf('Display name')).toBeLessThan(advanced)
+    expect(html.indexOf('>Behavior<')).toBeGreaterThan(advanced)
+    expect(html.indexOf('aria-label="Telemetry"')).toBeGreaterThan(html.indexOf('>Behavior<'))
     expect(html.indexOf('>Status<')).toBeLessThan(advanced)
   })
 

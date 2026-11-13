@@ -79,12 +79,16 @@ describe('Advanced of a Claude Code entry', () => {
     host.remove()
   })
 
-  it('opens on what can be changed, then the Claude settings, then a closed and dimmed Info with the facts', async () => {
+  it('keeps the name up front, groups what can be changed under titles, then a closed and dimmed Info with the facts', async () => {
     await mount()
-    const sections = [...advanced().children].map((child) => child.getAttribute('data-testid') ?? child.querySelector('.settings-group-title')?.textContent)
-    expect(sections).toEqual(['prov-advanced-list', 'Claude settings', 'prov-info'])
-    const editable = host.querySelector('[data-testid="prov-advanced-list"]')!.textContent!
-    for (const title of ['Display name', 'Executable path', 'Launch arguments', 'Variables']) expect(editable).toContain(title)
+    expect(advanced().querySelector('[aria-label="Display name"]')).toBeNull()
+    expect(host.querySelector('[aria-label="Display name"]')).not.toBeNull()
+    const groups = [...advanced().children].map((child) => child.getAttribute('data-testid') ?? child.querySelector('.settings-group-title')?.textContent)
+    // No telemetry switch on this entry, so no Behavior group.
+    expect(groups).toEqual(['Runtime', 'Environment', 'Claude settings', 'prov-info'])
+    const group = (title: string) => [...advanced().children].find((child) => child.querySelector('.settings-group-title')?.textContent === title)!.textContent!
+    for (const title of ['Executable path', 'Launch arguments']) expect(group('Runtime')).toContain(title)
+    expect(group('Environment')).toContain('Variables')
     // No read-only fact sits among the editable rows.
     for (const fact of ['Executable in use', 'Account home', '/usr/local/bin/claude', 'set up the way you use it']) expect(advanced().textContent).not.toContain(fact)
 

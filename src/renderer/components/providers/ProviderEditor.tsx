@@ -79,14 +79,9 @@ export function EditorHeader({
   )
 }
 
-/** The editable settings under Advanced: one compact list of rows, no section headings. */
-function AdvancedList({ note, children }: { note?: string; children: ReactNode }) {
-  return (
-    <section className="settings-group prov-editor-section prov-advanced-list" data-testid="prov-advanced-list">
-      {note && <p className="settings-group-desc">{note}</p>}
-      <div className="settings-group-rows">{children}</div>
-    </section>
-  )
+/** Whether the Behavior group under Advanced has a row to show (Telemetry, or the prompt cache switch). */
+function hasBehaviorRows(snapshot: InstanceSnapshot): boolean {
+  return Boolean(snapshot.telemetry || (snapshot.promptCacheHour && snapshot.promptCacheHour.basis !== 'subscription'))
 }
 
 /** Renames the instance; empty clears it back to the default. */
@@ -124,8 +119,8 @@ function DisplayNameRow({ snapshot, onRename }: { snapshot: InstanceSnapshot; on
 
 /**
  * The editor of one agent instance: Setup (status, next step, account, an available update) and
- * Models up front; the rest (its name, telemetry, the executable Mousse resolved, path and
- * arguments, home, environment) under a collapsed Advanced, so most people never meet it.
+ * its name, then Models; the rest (telemetry, the executable Mousse resolved, path and arguments,
+ * environment) under a collapsed Advanced in titled groups, so most people never meet it.
  */
 export function AgentEditor({
   snapshot,
@@ -175,27 +170,34 @@ export function AgentEditor({
         <SetupRow snapshot={snapshot} status={status} operation={operation?.kind === 'update' ? undefined : operation} actions={actions} updateRow={!info.bundled} />
         {source && <RegistrySourceRow snapshot={snapshot} source={source} actions={actions} />}
         <AccountRow snapshot={snapshot} actions={actions} onOpenUsage={USAGE_DRIVERS.has(snapshot.driver) ? openUsagePage : undefined} />
+        <DisplayNameRow snapshot={snapshot} onRename={(displayName) => actions.configure({ displayName })} />
         {/* A newer version: the one place to update, with its progress. */}
         {!info.bundled && <UpdateRow snapshot={snapshot} operation={operation} actions={actions} />}
       </EditorSection>
       <ModelsEditorSection snapshot={snapshot} onSave={onSaveModelPrefs} onRefresh={onRefreshModels} reveal={revealModels} />
-      {/* Advanced: what the user can change first, in one compact list; the read-only facts last, in Info. */}
+      {/* Advanced: what the user can change, in titled groups; the read-only facts last, in Info. */}
       <SettingsAdvanced>
-        <AdvancedList note={deviceWideNote(snapshot)}>
-          <DisplayNameRow snapshot={snapshot} onRename={(displayName) => actions.configure({ displayName })} />
-          <TelemetryRow snapshot={snapshot} onSave={(telemetry) => actions.configure({ telemetry })} />
-          <PromptCacheHourRow snapshot={snapshot} onSave={(promptCacheHour) => actions.configure({ promptCacheHour })} />
-          {/* A runtime that ships with Mousse has no executable, arguments, home or variables to set. */}
-          {!info.bundled && (
-            <>
-              {downloaded && <DownloadedFilesRow snapshot={snapshot} bytes={downloaded.bytes} onRemoveInstall={actions.removeInstall} />}
-              {/* A managed entry runs only the Codex Mousse downloaded, with Mousse's own settings. */}
-              {!managed && <ExecutableRow snapshot={snapshot} label={info.label} onSave={(binaryPath) => actions.configure({ binaryPath })} />}
-              {!managed && <ArgsRow snapshot={snapshot} onSave={(args) => actions.configure({ args })} />}
-              {!managed && <EnvRow snapshot={snapshot} onSave={(env) => actions.configure({ env })} />}
-            </>
-          )}
-        </AdvancedList>
+        {deviceWideNote(snapshot) && <p className="settings-group-desc prov-advanced-note">{deviceWideNote(snapshot)}</p>}
+        {hasBehaviorRows(snapshot) && (
+          <EditorSection title="Behavior">
+            <TelemetryRow snapshot={snapshot} onSave={(telemetry) => actions.configure({ telemetry })} />
+            <PromptCacheHourRow snapshot={snapshot} onSave={(promptCacheHour) => actions.configure({ promptCacheHour })} />
+          </EditorSection>
+        )}
+        {/* A runtime that ships with Mousse has no executable, arguments, home or variables to set;
+            a managed entry runs only the Codex Mousse downloaded, with Mousse's own settings. */}
+        {!info.bundled && (downloaded || !managed) && (
+          <EditorSection title="Runtime">
+            {downloaded && <DownloadedFilesRow snapshot={snapshot} bytes={downloaded.bytes} onRemoveInstall={actions.removeInstall} />}
+            {!managed && <ExecutableRow snapshot={snapshot} label={info.label} onSave={(binaryPath) => actions.configure({ binaryPath })} />}
+            {!managed && <ArgsRow snapshot={snapshot} onSave={(args) => actions.configure({ args })} />}
+          </EditorSection>
+        )}
+        {!info.bundled && !managed && (
+          <EditorSection title="Environment">
+            <EnvRow snapshot={snapshot} onSave={(env) => actions.configure({ env })} />
+          </EditorSection>
+        )}
         <VendorSettingsSection snapshot={snapshot} />
         <ProviderInfoSection rows={agentInfoRows(snapshot)} />
       </SettingsAdvanced>
@@ -295,9 +297,9 @@ export function ApiEditor({
       <ModelsEditorSection snapshot={snapshot} onSave={onSaveModelPrefs} onRefresh={onRefreshModels} reveal={revealModels} />
       <SettingsAdvanced>
         {onSaveTelemetry && snapshot.telemetry && (
-          <AdvancedList>
+          <EditorSection title="Behavior">
             <TelemetryRow snapshot={snapshot} onSave={onSaveTelemetry} />
-          </AdvancedList>
+          </EditorSection>
         )}
         <ProviderInfoSection rows={apiInfoRows(snapshot)} />
       </SettingsAdvanced>

@@ -39,10 +39,14 @@ export function useAsyncAction() {
  * below the row (a terminal sign-in's message names the command it asks for).
  */
 export function statusText(status: StatusDescription): string {
-  const headline = status.headline
+  const detail = statusDetail(status)
+  return detail ? `${status.headline} · ${detail}` : status.headline
+}
+
+/** The detail after the headline, unless it only repeats the headline or the next step's command. */
+function statusDetail(status: StatusDescription): string | null {
   const command = status.nextStep?.command
-  const detail = status.detail && status.detail !== status.headline && !(command && status.detail.includes(command)) ? status.detail : null
-  return detail ? `${headline} · ${detail}` : headline
+  return status.detail && status.detail !== status.headline && !(command && status.detail.includes(command)) ? status.detail : null
 }
 
 /** The headline alone, for the provider list: "Signed in", "Not found", "Checking". */
@@ -61,11 +65,15 @@ export function CompactStatus({ status }: { status: StatusDescription }) {
   )
 }
 
-/** "Not signed in · Run claude to sign in", in the tone's colour (the editor's Setup → Status). */
+/** The editor's Setup → Status: the headline in a badge of the tone's colour, the detail under it. */
 export function StatusLine({ status }: { status: StatusDescription }) {
   return (
     <span className={`prov-status-text is-${status.tone}`} aria-live="polite">
-      {statusText(status)}
+      <span className="prov-status-badge">
+        <span className="prov-status-badge-dot" aria-hidden="true" />
+        {status.headline}
+      </span>
+      {statusDetail(status) && <span className="prov-status-detail">{statusDetail(status)}</span>}
     </span>
   )
 }
