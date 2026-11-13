@@ -19,6 +19,7 @@ import type {
 } from '../../../shared/browser/types'
 import { browserNavigationUrl } from '../../../shared/browser/validation'
 import type { BrowserNavigation } from '../../../shared/browser/navigation'
+import type { BrowserWindowDisplay, BrowserWindowState } from '../../../shared/browser/window'
 import type { BrowserAutomationTool, BrowserSessionKeeper, BrowserToolContext, BrowserToolError, BrowserToolOutput } from '../../../shared/browser/automation'
 import type { BrowserBroker } from '../BrowserBroker'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
@@ -459,6 +460,28 @@ export class BrowserSessionManager {
     this.observations.delete(sessionId)
     this.persist()
     return { session: { ...entry.record } }
+  }
+
+  /**
+   * A managed session shown as a real window on the person's screen (`open`; `display`: the app's own, on Linux), or
+   * back without one (`close`). Only while a person holds it, and through the same ownership check as every call: a
+   * kept session (a bot's) answers its keeper alone.
+   */
+  async window(context: BrowserToolContext, input: { sessionId: string; op: 'open' | 'close'; display?: BrowserWindowDisplay }): Promise<BrowserWindowState> {
+    this.authorize(context, undefined, 'browser.session', 'external', { sessionId: input.sessionId, op: input.op })
+    const entry = this.requireOwned(input.sessionId, context)
+    if (entry.record.backend !== 'managed-chromium') throw new BrowserAutomationError({ code: 'unsupported', message: 'Only a managed browser opens in a window of its own' })
+    if (input.op === 'open' && entry.record.lifecycle !== 'human-controlled') throw new BrowserAutomationError({ code: 'human_controlled', message: 'Take control of the browser first' })
+    return await this.call(context.execution.profileId, input.op === 'open' ? 'window.open' : 'window.close', {
+      sessionId: input.sessionId, ...(input.op === 'open' && input.display ? { display: input.display } : {})
+    }, this.signal(context)) as BrowserWindowState
+  }
+
+  /** The session's window as it is once it changed from `after` (or `waitMs` ran out): a long-poll, like `viewerNext`. */
+  async windowWait(context: BrowserToolContext, input: { sessionId: string; after: number; waitMs: number }): Promise<BrowserWindowState> {
+    this.authorize(context, undefined, 'browser.session', 'read', { sessionId: input.sessionId })
+    this.requireOwned(input.sessionId, context)
+    return await this.call(context.execution.profileId, 'window.wait', { sessionId: input.sessionId, after: input.after, waitMs: input.waitMs }, this.signal(context)) as BrowserWindowState
   }
 
   async releaseControl(context: BrowserToolContext, sessionId: string, controlLeaseId: string): Promise<BrowserToolOutput> {

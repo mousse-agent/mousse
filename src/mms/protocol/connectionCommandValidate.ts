@@ -213,6 +213,10 @@ export function validateAttachedBrowserWorkerRequest(value: unknown): BrowserWor
     case 'frame.next':
     case 'frame.stop':
     case 'human.input':
+    // A window of its own is a managed browser's: an in-app tab is already in the app's window.
+    case 'window.open':
+    case 'window.close':
+    case 'window.wait':
       throw new Error(`${request.method} is not an attached browser method`)
   }
   return { ...request, params }

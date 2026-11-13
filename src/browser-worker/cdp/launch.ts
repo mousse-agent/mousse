@@ -12,6 +12,9 @@ import {
 } from '../lifecycle/ownedTree'
 import { fail } from '../errors'
 
+/** How long a browser asked to close has to end by itself before its processes are stopped. */
+const GRACEFUL_EXIT_MS = 3_000
+
 export interface LaunchedChrome {
   pid: number
   process: ChildProcess
@@ -84,10 +87,11 @@ export function chromeLaunchArgs(options: LaunchChromeOptions): string[] {
     '--enable-features=NetworkService,NetworkServiceInProcess',
     '--disable-features=Translate,MediaRouter,OptimizationHints,PaintHolding,BackForwardCache',
     `--window-size=${size.width},${size.height}`,
-    '--hide-scrollbars',
     '--mute-audio'
   ]
   if (options.headless !== false) {
+    // A person never sees this browser's pages directly: its pictures have no scrollbars. A window keeps them.
+    args.push('--hide-scrollbars')
     args.unshift('--headless=new', '--disable-gpu')
     const userAgent = windowedChromeUserAgent(options.browserVersion)
     if (userAgent) args.push(`--user-agent=${userAgent}`)
@@ -95,7 +99,8 @@ export function chromeLaunchArgs(options: LaunchChromeOptions): string[] {
   if (options.automationMarkedPerPage) args.push('--disable-blink-features=AutomationControlled')
   if (options.deviceScaleFactor && options.deviceScaleFactor !== 1) args.push(`--force-device-scale-factor=${options.deviceScaleFactor}`)
   if (options.extraArgs) args.push(...options.extraArgs)
-  if (args.some((arg) => arg.startsWith('--remote-debugging-port'))) fail('invalid_action', 'Public remote-debugging TCP is not permitted')
+  // The browser is driven over its private pipe alone, with a window or without: no port a page or another program could reach.
+  if (args.some((arg) => arg.startsWith('--remote-debugging-port') || arg.startsWith('--remote-allow-origins'))) fail('invalid_action', 'Public remote-debugging TCP is not permitted')
   if ((options.extraArgs ?? []).some((arg) => arg.startsWith('--user-data-dir') || arg.startsWith('--profile-directory') || arg.startsWith('--remote-debugging'))) {
     fail('invalid_action', 'Extra Chromium arguments may not override profile or debugging isolation')
   }
@@ -198,6 +203,8 @@ export async function launchManagedChrome(options: LaunchChromeOptions): Promise
         try { await cdp.send('Browser.close', {}, { timeoutMs: 3_000 }) } catch { /* ignore */ }
         // Ended by a signal (killed), a process has no exit code but is gone all the same.
         const exited = () => child.exitCode !== null || child.signalCode !== null
+        // A browser asked to close writes what it holds (its newest cookies among it) as it goes: it has a moment to.
+        if (!exited()) await Promise.race([exitPromise, new Promise((resolve) => setTimeout(resolve, GRACEFUL_EXIT_MS))])
         if (!exited()) {
           await stopOwnedProcessTree(tree)
         }

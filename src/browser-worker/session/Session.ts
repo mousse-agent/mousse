@@ -45,6 +45,7 @@ import { ScopedActionJournal } from '../action/journal'
 import { CdpDisconnectedError } from '../cdp/connection'
 import { boundText, nowIso, optionalBoolean, optionalString, requiredId, sanitizeUrl, sleep, workerWarning } from '../util'
 import { BrowserWorkerError, isBrowserWorkerError } from '../errors'
+import { browserWindowDisplay, type BrowserWindowDisplay, type BrowserWindowEnd, type BrowserWindowState } from '../../shared/browser/window'
 
 export interface SessionConfig {
   profileId: string
@@ -94,6 +95,30 @@ interface MarkedTarget {
   pageSessionId: string
 }
 
+/** A cookie as `Storage.getCookies` read it, ready for `Storage.setCookies`. */
+type CarriedCookie = Record<string, unknown>
+
+/** What a restart carries: the cookies, and the tabs it keeps (by id, in order) with the one in front. */
+interface Carried {
+  cookies: CarriedCookie[]
+  tabs: string[]
+  front?: string
+}
+
+/** The browser in a window on the person's screen: copies of its cookies, and its tabs that left it. */
+interface WindowRun {
+  display?: BrowserWindowDisplay
+  /** The cookies as read lately, oldest first, each with when it was asked for. */
+  shots: Array<{ at: number; cookies: CarriedCookie[] }>
+  /** When each of the session's tabs left the window (the person closed it, or the window closed). */
+  gone: Map<string, number>
+  /** It is closing (`closeWindow`, `windowClosed`): nothing else ends it. */
+  ending: boolean
+  timer?: ReturnType<typeof setInterval>
+  soon?: ReturnType<typeof setTimeout>
+  check?: ReturnType<typeof setTimeout>
+}
+
 type Settled<T> = { ok: true; value: T } | { ok: false; error: unknown }
 
 const MAX_ATTACHED_FRAMES_PER_OBSERVATION = 32
@@ -109,6 +134,20 @@ const MARK_AFTER_RUN_MS = 10_000
 const MARK_ANSWER_MS = 2_000
 /** How long a starting session waits for Chromium's own window before it opens its first tab (`startupWindow`); it is up in well under a second. */
 const STARTUP_WINDOW_MS = 5_000
+/** How often a browser in a window has its cookies read (and soon after each page commits): what its own close button can lose. */
+const WINDOW_SHOT_MS = 1_000
+const WINDOW_SHOT_SOON_MS = 150
+const MAX_WINDOW_SHOTS = 8
+/** Copies read this close to the window beginning to close may already lack them: Chromium drops them as its last window closes. */
+const WINDOW_SHOT_MARGIN_MS = 300
+/** Tabs that leave the window within this long of each other are the window closing, not the person closing one tab. */
+const WINDOW_CLOSE_BURST_MS = 1_500
+/** How long after a tab of the window closes it is checked whether any page is left. */
+const WINDOW_CHECK_MS = 400
+/** How long a restart waits for its tabs' pages to commit before it answers. */
+const WINDOW_RELOAD_MS = 15_000
+/** The longest `window.wait`. */
+const MAX_WINDOW_WAIT_MS = 25_000
 
 function settle<T>(promise: Promise<T>): Promise<Settled<T>> {
   return promise.then((value) => ({ ok: true as const, value }), (error: unknown) => ({ ok: false as const, error }))
@@ -201,6 +240,13 @@ export class ManagedSession {
   private readonly hitWorlds = new Map<string, { page: string; contextId: Promise<number> }>()
   /** Whether pages are refused the clipboard now (a person holds the browser: `guardClipboard`). */
   private clipboardGuarded = false
+  /** The browser has a window on the person's screen ("Open in a window"), and what that window carries when it closes. */
+  private windowed: WindowRun | null = null
+  /** Chromium is starting again (into a window, or out of one): other calls wait for it to finish. */
+  private switching = false
+  private windowSerial = 0
+  private windowEnded: BrowserWindowEnd | undefined
+  private readonly windowWaiters = new Set<() => void>()
 
   constructor(private readonly config: SessionConfig, options: { persistent: boolean; workspaceId?: string; runId?: string; threadId?: string }) {
     this.id = 'sess_' + randomUUID()
@@ -260,49 +306,11 @@ export class ManagedSession {
     this.downloadDir = join(this.userDataDir, 'quarantine-downloads')
     mkdirSync(this.downloadDir, { recursive: true })
     this.clearDownloadQuarantine()
-    ensureWindowsBrowserSandboxAccess(this.config.browserRoot, dirname(this.config.executablePath))
-    this.chrome = await launchManagedChrome({
-      executablePath: this.config.executablePath,
-      userDataDir: this.userDataDir,
-      headless: true,
-      browserVersion: this.config.browserVersion,
-      automationMarkedPerPage: true,
-      extraArgs: this.config.chromeExtraArgs,
-      signal
-    })
+    const chrome = await this.launch(false, undefined, signal)
+    this.chrome = chrome
     this.throwIfUnavailable(signal)
-    this.chrome.cdp.on('disconnect', () => {
-      if (!this.closed && !this.closing) {
-        this.lifecycle = 'disconnected'
-        this.browserEnded()
-      }
-    })
-    // Every target Chromium attaches on its own (the session's tabs too) waits until `onAttached` marks it and lets it run.
-    this.chrome.cdp.on('Target.attachedToTarget', (params: unknown, parentSessionId?: string) => { this.onAttached(params, parentSessionId) })
-    const startupWindow = this.startupWindow(signal)
-    await this.chrome.cdp.send('Target.setDiscoverTargets', { discover: true }, { signal })
-    await startupWindow
-    await this.chrome.cdp.send('Target.setAutoAttach', {
-      autoAttach: true,
-      waitForDebuggerOnStart: true,
-      flatten: true
-    }, { signal })
-    await this.chrome.cdp.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: this.downloadDir, eventsEnabled: true }, { signal })
-    this.chrome.cdp.on('Browser.downloadWillBegin', (params: unknown) => {
-      if (this.closed || this.closing) return
-      const record = params as { guid?: string; suggestedFilename?: string }
-      if (record.guid) {
-        this.downloadNames.set(record.guid, sanitizeDisplayName(record.suggestedFilename ?? 'download.bin'))
-        this.downloadStates.set(record.guid, 'inProgress')
-      }
-    })
-    this.chrome.cdp.on('Browser.downloadProgress', (params: unknown) => {
-      if (this.closed || this.closing) return
-      const record = params as { guid?: string; state?: string }
-      if (!record.guid) return
-      const state = record.state === 'completed' ? 'completed' : record.state === 'canceled' ? 'canceled' : record.state === 'interrupted' ? 'interrupted' : 'inProgress'
-      this.downloadStates.set(record.guid, state)
-    })
+    this.wire(chrome)
+    await this.prepare(chrome, signal)
     const created = await this.openPage(signal)
     const tabId = 'tab_' + randomUUID()
     const tab: TabState = {
@@ -320,13 +328,95 @@ export class ManagedSession {
     this.throwIfUnavailable(signal)
     this.tabs.set(tabId, tab)
     this.activeTabId = tabId
-    // The tab in front closed (by itself, or a site's): the one in front before it comes back.
-    this.chrome.cdp.on('Target.targetDestroyed', (params: unknown) => {
-      const targetId = (params as { targetId?: string })?.targetId
-      if (targetId && !this.closed && !this.closing) this.frontGone(targetId)
+    if (initialUrl) {
+      // A slow or failed first page never fails the session: the caller gets the session and how the page went.
+      this.firstNavigation = await this.navigateTabOf(tab, initialUrl, { signal }).catch((error: unknown) => {
+        if (isBrowserWorkerError(error) && error.problem) return { url: initialUrl, state: 'failed' as const, problem: error.problem }
+        throw error
+      })
+    }
+    this.throwIfUnavailable(signal)
+    this.lifecycle = 'agent-controlled'
+    this.touch()
+    return this.record()
+  }
+
+  /**
+   * Starts Chromium on the session's profile: without a window, or with one on the person's screen
+   * (`display` names it on Linux). The same flags either way, the private pipe alone included.
+   */
+  private async launch(windowed: boolean, display: BrowserWindowDisplay | undefined, signal: AbortSignal): Promise<LaunchedChrome> {
+    ensureWindowsBrowserSandboxAccess(this.config.browserRoot, dirname(this.config.executablePath))
+    // Tests check the restarts on a desktop where nobody may see a window: the "window" then has none.
+    const headless = !windowed || process.env.MOUSSE_BROWSER_TEST_WINDOW_HEADLESS === '1'
+    const wayland = !headless && display?.WAYLAND_DISPLAY && !display.DISPLAY ? ['--ozone-platform=wayland'] : []
+    return launchManagedChrome({
+      executablePath: this.config.executablePath,
+      userDataDir: this.userDataDir,
+      headless,
+      browserVersion: this.config.browserVersion,
+      automationMarkedPerPage: true,
+      extraArgs: [...(this.config.chromeExtraArgs ?? []), ...wayland],
+      ...(display && !headless ? { env: { ...display } } : {}),
+      signal
     })
-    this.chrome.cdp.on('Page.frameNavigated', (params: unknown, sessionId?: string) => {
-      if (this.closed || this.closing) return
+  }
+
+  /** Chromium's targets, its own window first (`startupWindow`), each new one held for its mark, and downloads into quarantine. */
+  private async prepare(chrome: LaunchedChrome, signal: AbortSignal): Promise<void> {
+    const startupWindow = this.startupWindow(signal)
+    await chrome.cdp.send('Target.setDiscoverTargets', { discover: true }, { signal })
+    await startupWindow
+    await chrome.cdp.send('Target.setAutoAttach', {
+      autoAttach: true,
+      waitForDebuggerOnStart: true,
+      flatten: true
+    }, { signal })
+    await chrome.cdp.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: this.downloadDir, eventsEnabled: true }, { signal })
+  }
+
+  /** What the session hears from one Chromium. Nothing from a Chromium it has stopped using (`restart`) counts. */
+  private wire(chrome: LaunchedChrome): void {
+    const cdp = chrome.cdp
+    const live = () => this.chrome === chrome && !this.closed && !this.closing
+    cdp.on('disconnect', () => {
+      if (!live()) return
+      // A browser in a window ends when the person closes it (or it stops): it comes back without one.
+      if (this.windowed) {
+        this.background(this.windowClosed('exit', chrome))
+        return
+      }
+      this.lifecycle = 'disconnected'
+      this.browserEnded()
+    })
+    // Every target Chromium attaches on its own (the session's tabs too) waits until `onAttached` marks it and lets it run.
+    cdp.on('Target.attachedToTarget', (params: unknown, parentSessionId?: string) => {
+      if (this.chrome === chrome) this.onAttached(params, parentSessionId)
+    })
+    cdp.on('Browser.downloadWillBegin', (params: unknown) => {
+      if (!live()) return
+      const record = params as { guid?: string; suggestedFilename?: string }
+      if (record.guid) {
+        this.downloadNames.set(record.guid, sanitizeDisplayName(record.suggestedFilename ?? 'download.bin'))
+        this.downloadStates.set(record.guid, 'inProgress')
+      }
+    })
+    cdp.on('Browser.downloadProgress', (params: unknown) => {
+      if (!live()) return
+      const record = params as { guid?: string; state?: string }
+      if (!record.guid) return
+      const state = record.state === 'completed' ? 'completed' : record.state === 'canceled' ? 'canceled' : record.state === 'interrupted' ? 'interrupted' : 'inProgress'
+      this.downloadStates.set(record.guid, state)
+    })
+    // The tab in front closed (by itself, or a site's): the one in front before it comes back. In a window the person decides.
+    cdp.on('Target.targetDestroyed', (params: unknown) => {
+      const targetId = (params as { targetId?: string })?.targetId
+      if (!targetId || !live()) return
+      if (this.windowed) this.windowCheckSoon()
+      else this.frontGone(targetId)
+    })
+    cdp.on('Page.frameNavigated', (params: unknown, sessionId?: string) => {
+      if (!live()) return
       const frame = (params as { frame?: { id?: string; parentId?: string; loaderId?: string; url?: string; unreachableUrl?: string } })?.frame
       if (!frame) return
       if (sessionId && this.frames.has(sessionId)) {
@@ -341,6 +431,8 @@ export class ManagedSession {
         return
       }
       if (frame.parentId) return
+      // A page committed in the window: a sign-in it carried is read now, so the window's own close loses none of it.
+      if (this.windowed) this.windowShotSoon()
       const navigated = [...this.tabs.values()].find((entry) => entry.cdpSessionId === sessionId)
       if (!navigated) return
       navigated.loaderId = frame.loaderId ?? navigated.loaderId
@@ -367,7 +459,7 @@ export class ManagedSession {
     // Whether a tab's page is still loading: a page target's main frame has the target's id. A tab opened
     // on a URL starts loading before it is one of the session's tabs, so every page Chromium attached counts.
     const loading = (started: boolean) => (params: unknown, sessionId?: string) => {
-      if (this.closed || this.closing || !sessionId) return
+      if (!live() || !sessionId) return
       const frameId = (params as { frameId?: string } | undefined)?.frameId
       const page = this.marked.get(sessionId)
       if (!page || page.type !== 'page' || frameId !== page.targetId) return
@@ -375,17 +467,18 @@ export class ManagedSession {
       else this.loadingTabs.delete(sessionId)
       this.viewers?.loading(sessionId, started)
     }
-    this.chrome.cdp.on('Page.frameStartedLoading', loading(true))
-    this.chrome.cdp.on('Page.frameStoppedLoading', loading(false))
+    cdp.on('Page.frameStartedLoading', loading(true))
+    cdp.on('Page.frameStoppedLoading', loading(false))
     // A page that moved without loading another (a sign-in done in place): what it needs is read again.
-    this.chrome.cdp.on('Page.navigatedWithinDocument', (params: unknown, sessionId?: string) => {
-      if (this.closed || this.closing || !sessionId) return
+    cdp.on('Page.navigatedWithinDocument', (params: unknown, sessionId?: string) => {
+      if (!live() || !sessionId) return
+      if (this.windowed) this.windowShotSoon()
       const tab = [...this.tabs.values()].find((entry) => entry.cdpSessionId === sessionId)
       if (tab && (params as { frameId?: string } | undefined)?.frameId === tab.targetId) this.recheckPage(tab)
     })
     // What a person watching sees of a tab: its title as the page sets it (kept apart from what agents are told), and its size.
-    this.chrome.cdp.on('Target.targetInfoChanged', (params: unknown) => {
-      if (this.closed || this.closing) return
+    cdp.on('Target.targetInfoChanged', (params: unknown) => {
+      if (!live()) return
       const info = (params as { targetInfo?: { targetId?: string; title?: string } })?.targetInfo
       const tab = info?.targetId ? [...this.tabs.values()].find((entry) => entry.targetId === info.targetId) : undefined
       if (!tab || typeof info?.title !== 'string') return
@@ -393,41 +486,41 @@ export class ManagedSession {
       this.viewerTitles.set(tab.targetId, title)
       this.viewers?.titled(tab.cdpSessionId, title)
     })
-    this.chrome.cdp.on('Page.frameResized', (_params: unknown, sessionId?: string) => {
-      if (sessionId && !this.closed && !this.closing) this.viewers?.resized(sessionId)
+    cdp.on('Page.frameResized', (_params: unknown, sessionId?: string) => {
+      if (sessionId && live()) this.viewers?.resized(sessionId)
     })
     // A page's dialog (alert, confirm, prompt, leave page) stops it until it is answered: a person watching is shown it.
-    this.chrome.cdp.on('Page.javascriptDialogOpening', (params: unknown, sessionId?: string) => {
-      if (!sessionId || this.closed || this.closing || ![...this.tabs.values()].some((entry) => entry.cdpSessionId === sessionId)) return
+    cdp.on('Page.javascriptDialogOpening', (params: unknown, sessionId?: string) => {
+      if (!sessionId || !live() || ![...this.tabs.values()].some((entry) => entry.cdpSessionId === sessionId)) return
       const opened = params as { type?: string; message?: string; defaultPrompt?: string }
       const type = opened.type === 'confirm' || opened.type === 'prompt' || opened.type === 'beforeunload' ? opened.type : 'alert'
       this.pageDialog(sessionId, { type, message: boundText(String(opened.message ?? ''), 2_000), ...(type === 'prompt' ? { defaultPrompt: boundText(String(opened.defaultPrompt ?? ''), 2_000) } : {}) })
     })
-    this.chrome.cdp.on('Page.javascriptDialogClosed', (_params: unknown, sessionId?: string) => {
-      if (sessionId && this.tabDialogs.has(sessionId)) this.pageDialog(sessionId, undefined)
+    cdp.on('Page.javascriptDialogClosed', (_params: unknown, sessionId?: string) => {
+      if (sessionId && live() && this.tabDialogs.has(sessionId)) this.pageDialog(sessionId, undefined)
     })
     // The page asks for files while a person holds the browser (`interceptChooser`): their view answers
     // it, and names the site that asks (the frame's own, which may be another site's inside the page).
-    this.chrome.cdp.on('Page.fileChooserOpened', (params: unknown, sessionId?: string) => {
-      if (!sessionId || this.closed || this.closing || this.controlOwner !== 'human') return
+    cdp.on('Page.fileChooserOpened', (params: unknown, sessionId?: string) => {
+      if (!sessionId || !live() || this.controlOwner !== 'human') return
       const opened = params as { mode?: string; backendNodeId?: number; frameId?: string }
       if (typeof opened.backendNodeId !== 'number') return
       const chooser: PageChooser = { mode: opened.mode === 'selectMultiple' ? 'selectMultiple' : 'selectSingle', backendNodeId: opened.backendNodeId }
       void this.chooserSite(sessionId, opened.frameId).then((site) => {
-        if (this.closed || this.closing || this.controlOwner !== 'human') return
+        if (!live() || this.controlOwner !== 'human') return
         this.pageChooser(sessionId, { ...chooser, ...(site ? { site } : {}) })
       })
     })
     // Chromium does not always report a page's own title as it changes: a watched page's is read once it has loaded.
-    this.chrome.cdp.on('Page.lifecycleEvent', (params: unknown, sessionId?: string) => {
-      if (!sessionId || this.closed || this.closing || !this.viewers?.watching(sessionId)) return
+    cdp.on('Page.lifecycleEvent', (params: unknown, sessionId?: string) => {
+      if (!sessionId || !live() || !this.viewers?.watching(sessionId)) return
       const name = (params as { name?: string } | undefined)?.name
       if (name !== 'DOMContentLoaded' && name !== 'load') return
       const tab = [...this.tabs.values()].find((entry) => entry.cdpSessionId === sessionId)
       if (tab) void this.refreshViewerTitle(tab)
     })
-    this.chrome.cdp.on('Target.detachedFromTarget', (params: unknown) => {
-      if (this.closed || this.closing) return
+    cdp.on('Target.detachedFromTarget', (params: unknown) => {
+      if (!live()) return
       const sessionId = (params as { sessionId?: string })?.sessionId
       if (sessionId) {
         const target = this.marked.get(sessionId)
@@ -443,6 +536,12 @@ export class ManagedSession {
         return
       }
       const detached = [...this.tabs.values()].find((entry) => entry.cdpSessionId === sessionId)
+      if (detached && this.windowed) {
+        // The person closed it, or the whole window is closing: which one is decided when the window ends (`windowClosed`).
+        this.windowed.gone.set(detached.publicId, Date.now())
+        this.windowCheckSoon()
+        return
+      }
       if (detached) {
         this.loadingTabs.delete(detached.cdpSessionId)
         this.tabProblems.delete(detached.cdpSessionId)
@@ -457,17 +556,314 @@ export class ManagedSession {
         this.frontGone(detached.targetId)
       }
     })
-    if (initialUrl) {
-      // A slow or failed first page never fails the session: the caller gets the session and how the page went.
-      this.firstNavigation = await this.navigateTabOf(tab, initialUrl, { signal }).catch((error: unknown) => {
-        if (isBrowserWorkerError(error) && error.problem) return { url: initialUrl, state: 'failed' as const, problem: error.problem }
-        throw error
+  }
+
+  // -- a real window on the person's screen ("Open in a window")
+
+  /** Whether the browser has a window now, how the last one ended, and a count of changes (`window.wait`). */
+  windowState(): BrowserWindowState {
+    return { open: this.windowed !== null, serial: this.windowSerial, ...(this.windowEnded ? { ended: this.windowEnded } : {}) }
+  }
+
+  private windowChanged(ended?: BrowserWindowEnd): void {
+    this.windowSerial += 1
+    this.windowEnded = ended
+    for (const wake of [...this.windowWaiters]) wake()
+  }
+
+  /** Answers the window's state once it changed from `after`, or when `waitMs` ran out. */
+  private async waitWindow(params: Record<string, unknown>, signal: AbortSignal): Promise<BrowserWindowState> {
+    const after = typeof params.after === 'number' ? params.after : -1
+    const waitMs = Math.min(MAX_WINDOW_WAIT_MS, Math.max(0, typeof params.waitMs === 'number' && Number.isFinite(params.waitMs) ? params.waitMs : 0))
+    if (this.windowSerial !== after || !waitMs) return this.windowState()
+    await new Promise<void>((resolve) => {
+      const done = () => {
+        clearTimeout(timer)
+        this.windowWaiters.delete(done)
+        signal.removeEventListener('abort', done)
+        resolve()
+      }
+      const timer = setTimeout(done, waitMs)
+      this.windowWaiters.add(done)
+      signal.addEventListener('abort', done, { once: true })
+      if (signal.aborted) done()
+    })
+    return this.windowState()
+  }
+
+  /**
+   * Shows the browser as a real window on the person's screen, while they hold it: Chromium starts again with a
+   * window on the same profile. Its tabs come back, under the same ids, at their addresses (each page loads again),
+   * and its cookies are carried across, session-only ones included. Refused while a
+   * page waits on the person in a way a reload would lose without anyone seeing (a dialog, a file request) or a
+   * download is under way. When no window comes up, the browser comes back without one and the call says so.
+   */
+  private async openWindow(display: BrowserWindowDisplay | undefined, signal: AbortSignal): Promise<BrowserWindowState> {
+    if (this.windowed) return this.windowState()
+    this.requireChrome()
+    if (this.controlOwner !== 'human') fail('human_controlled', 'Take the browser over first: only the person who holds it opens it in a window.')
+    if (this.tabDialogs.size) fail('not_actionable', 'A page is asking something. Answer it first, then open the window.')
+    if (this.tabChoosers.size) fail('not_actionable', 'A page is asking for a file. Choose it or cancel first, then open the window.')
+    if ([...this.downloadStates.values()].some((state) => state === 'inProgress')) fail('not_actionable', 'A download is still running. Open the window when it ends.')
+    if (process.platform === 'linux' && !display && process.env.MOUSSE_BROWSER_TEST_WINDOW_HEADLESS !== '1') fail('unsupported', 'There is no screen here to open the window on.')
+    const carried = await this.carry(await this.readCookies())
+    const run: WindowRun = { ...(display ? { display } : {}), shots: [{ at: Date.now(), cookies: carried.cookies }], gone: new Map(), ending: false }
+    this.windowed = run
+    try {
+      await this.restart(true, display, carried, signal)
+    } catch (error) {
+      this.windowed = null
+      const why = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 200)
+      workerWarning('a browser window did not open', { session: this.id, error: why })
+      // No window came up: the browser comes back as it was, without one.
+      await this.restart(false, undefined, carried, signal).catch((again: unknown) => {
+        workerWarning('a browser could not come back after its window did not open', { session: this.id, error: again instanceof Error ? again.message : String(again) })
+        this.lifecycle = 'disconnected'
+        this.browserEnded()
       })
+      fail('not_actionable', 'The window did not open on this computer, so the browser stays here.')
     }
-    this.throwIfUnavailable(signal)
-    this.lifecycle = 'agent-controlled'
+    run.timer = setInterval(() => this.windowShot(run), WINDOW_SHOT_MS)
+    run.timer.unref?.()
+    this.windowChanged()
     this.touch()
-    return this.record()
+    return this.windowState()
+  }
+
+  /**
+   * Closes the window for the person (Close window, Give back, or the agent getting the browser back): its
+   * cookies are read now, while the window still has them, and Chromium starts again without a window with the
+   * window's tabs at their addresses. A tab the person closed in the window stays closed.
+   */
+  private async closeWindow(signal: AbortSignal): Promise<BrowserWindowState> {
+    const run = this.windowed
+    if (!run || run.ending) return this.windowState()
+    run.ending = true
+    this.stopWindowRun(run)
+    const cookies = await this.readCookies().catch(() => run.shots.at(-1)?.cookies ?? [])
+    const carried = await this.carry(cookies)
+    this.windowed = null
+    await this.restart(false, undefined, carried, signal).catch((error: unknown) => {
+      this.windowChanged('given-back')
+      this.lifecycle = 'disconnected'
+      this.browserEnded()
+      throw error
+    })
+    this.windowChanged('given-back')
+    this.touch()
+    return this.windowState()
+  }
+
+  /**
+   * The window went away by itself: the person closed it (Chromium ended normally, or, on macOS, kept running with no
+   * window left), or it stopped (a crash, or someone ended the process). Its session-only cookies are gone with it:
+   * Chromium drops them as its last window closes, before anything can be read. The latest copy read before the window
+   * began to close goes back in, with the window's tabs at their addresses; a tab the person had closed earlier stays
+   * closed. Chromium starts again without a window, and the change is told (`ended`: `closed` or `crashed`).
+   */
+  private async windowClosed(how: 'exit' | 'closed', chrome?: LaunchedChrome): Promise<void> {
+    const run = this.windowed
+    if (!run || run.ending) return
+    run.ending = true
+    this.stopWindowRun(run)
+    const ended: BrowserWindowEnd = how === 'closed' ? 'closed' : chrome ? await exitOf(chrome) : 'crashed'
+    const now = Date.now()
+    const times = [...run.gone.values()]
+    const last = times.length ? Math.max(...times) : now
+    // Tabs that left together, as the window closed, come back; one the person closed on its own before does not.
+    const burst = times.filter((at) => at >= last - WINDOW_CLOSE_BURST_MS)
+    const closing = burst.length && last >= now - 10_000 ? Math.min(...burst) : now
+    for (const [id, at] of run.gone) if (at < closing) this.tabs.delete(id)
+    const shot = [...run.shots].reverse().find((entry) => entry.at <= closing - WINDOW_SHOT_MARGIN_MS) ?? run.shots[0]
+    const carried: Carried = { cookies: shot?.cookies ?? [], tabs: [...this.tabs.keys()], ...(this.frontTab() ? { front: this.frontTab() } : {}) }
+    this.windowed = null
+    try {
+      await this.restart(false, undefined, carried, this.sessionAbort.signal)
+      this.windowChanged(ended)
+      this.touch()
+    } catch (error) {
+      workerWarning('a browser could not come back after its window closed', { session: this.id, error: error instanceof Error ? error.message : String(error) })
+      this.windowChanged(ended)
+      this.lifecycle = 'disconnected'
+      this.browserEnded()
+    }
+  }
+
+  /** A tab of the window closed: once the dust settles, whether any page is left in it. */
+  private windowCheckSoon(): void {
+    const run = this.windowed
+    if (!run || run.ending) return
+    if (run.check) clearTimeout(run.check)
+    run.check = setTimeout(() => {
+      run.check = undefined
+      void this.windowLeft(run)
+    }, WINDOW_CHECK_MS)
+    run.check.unref?.()
+  }
+
+  /** No page is left in the window (macOS keeps Chromium running then): the person closed it. */
+  private async windowLeft(run: WindowRun): Promise<void> {
+    const chrome = this.chrome
+    if (this.windowed !== run || run.ending || !chrome || this.switching || this.closing || this.closed) return
+    let pages: number
+    try {
+      const { targetInfos } = await chrome.cdp.send<{ targetInfos?: Array<{ type?: string }> }>('Target.getTargets', {}, { timeoutMs: 2_000 })
+      pages = (targetInfos ?? []).filter((info) => info.type === 'page').length
+    } catch {
+      // Chromium is going: its end says how (`disconnect`).
+      return
+    }
+    if (!pages) this.background(this.windowClosed('closed'))
+  }
+
+  /** Reads the window's cookies soon (a page just committed), once for a burst of pages. */
+  private windowShotSoon(): void {
+    const run = this.windowed
+    if (!run || run.ending || run.soon) return
+    run.soon = setTimeout(() => {
+      run.soon = undefined
+      this.windowShot(run)
+    }, WINDOW_SHOT_SOON_MS)
+    run.soon.unref?.()
+  }
+
+  /** Keeps a copy of the window's cookies, as they were when it was asked for. */
+  private windowShot(run: WindowRun): void {
+    if (this.windowed !== run || run.ending || this.switching) return
+    const at = Date.now()
+    void this.readCookies().then((cookies) => {
+      if (this.windowed !== run || run.ending) return
+      run.shots.push({ at, cookies })
+      if (run.shots.length > MAX_WINDOW_SHOTS) run.shots.splice(0, run.shots.length - MAX_WINDOW_SHOTS)
+    }, () => undefined)
+  }
+
+  private stopWindowRun(run: WindowRun): void {
+    if (run.timer) clearInterval(run.timer)
+    if (run.soon) clearTimeout(run.soon)
+    if (run.check) clearTimeout(run.check)
+    run.timer = undefined
+    run.soon = undefined
+    run.check = undefined
+  }
+
+  /**
+   * The browser's cookies, as `Storage.setCookies` takes them again: session-only ones (which a restart would lose)
+   * and the ones kept on disk too, so a sign-in a page set a moment ago is carried even before Chromium wrote it out.
+   */
+  private async readCookies(): Promise<CarriedCookie[]> {
+    const chrome = this.chrome
+    if (!chrome) return []
+    const { cookies } = await chrome.cdp.send<{ cookies?: Array<Record<string, unknown>> }>('Storage.getCookies', {}, { timeoutMs: 5_000 })
+    return (cookies ?? []).map((cookie) => {
+      const { size: _size, session, expires, ...kept } = cookie
+      return session === true || typeof expires !== 'number' || expires <= 0 ? kept : { ...kept, expires }
+    })
+  }
+
+  /** What a restart carries: these cookies, and the session's tabs still open, in order, with the one in front. */
+  private async carry(cookies: CarriedCookie[]): Promise<Carried> {
+    const gone = this.windowed?.gone
+    const tabs = [...this.tabs.keys()].filter((id) => !gone?.has(id))
+    const front = this.frontTab()
+    return { cookies, tabs, ...(front && tabs.includes(front) ? { front } : {}) }
+  }
+
+  /** The session's tab in front now. */
+  private frontTab(): string | undefined {
+    return [...this.tabs.values()].find((tab) => tab.targetId === this.frontTargetId)?.publicId ?? (this.tabs.has(this.activeTabId) ? this.activeTabId : undefined)
+  }
+
+  /**
+   * Chromium starts again on the same profile, with a window or without, and the session carries on in it: the same
+   * session, lock, lease and generation; the carried tabs under the same ids, each loading its address again; the
+   * carried cookies set again. Whatever was in flight is fenced first (a person holds the browser, so
+   * nothing of the agent's runs). Every page reads as the person's or the agent's as before (`onAttached`).
+   */
+  private async restart(windowed: boolean, display: BrowserWindowDisplay | undefined, carried: Carried, signal: AbortSignal): Promise<void> {
+    this.switching = true
+    try {
+      const old = this.chrome
+      this.chrome = null
+      this.resetTargets()
+      if (old) await old.stop().catch((error: unknown) => workerWarning('a browser did not stop cleanly before it started again', { session: this.id, error: error instanceof Error ? error.message : String(error) }))
+      const keep = new Set(carried.tabs)
+      for (const id of [...this.tabs.keys()]) if (!keep.has(id)) this.tabs.delete(id)
+      this.throwIfUnavailable(signal)
+      const chrome = await this.launch(windowed, display, signal)
+      if (this.closed || this.closing || signal.aborted || this.sessionAbort.signal.aborted) {
+        await chrome.stop().catch(() => undefined)
+        this.throwIfUnavailable(signal)
+      }
+      this.chrome = chrome
+      this.wire(chrome)
+      await this.prepare(chrome, signal)
+      if (carried.cookies.length) {
+        await chrome.cdp.send('Storage.setCookies', { cookies: carried.cookies }, { signal, timeoutMs: 5_000 })
+          .catch((error: unknown) => workerWarning('session cookies could not be carried across a restart', { session: this.id, error: error instanceof Error ? error.message : String(error) }))
+      }
+      const loads: Array<Promise<unknown>> = []
+      for (const id of carried.tabs) {
+        const tab = this.tabs.get(id)
+        if (!tab) continue
+        const url = tab.url
+        const page = await this.openPage(signal)
+        Object.assign(tab, { targetId: page.targetId, cdpSessionId: page.sessionId, page: 'doc_' + randomUUID(), documentId: 'doc_' + randomUUID(), loaderId: '', frameId: '' })
+        await this.enableTab(tab, signal)
+        if (url && url !== 'about:blank') loads.push(this.navigateTabOf(tab, url, { signal, untilCommit: true }).catch(() => undefined))
+      }
+      // Each page loads again; a slow one carries on loading after this answers.
+      await Promise.race([Promise.allSettled(loads), new Promise((resolve) => setTimeout(resolve, WINDOW_RELOAD_MS).unref?.())])
+      // Chromium's own first tab in the window is not one of the session's: only the session's tabs are shown.
+      if (windowed && this.tabs.size) {
+        const ours = new Set([...this.tabs.values()].map((tab) => tab.targetId))
+        const { targetInfos } = await chrome.cdp.send<{ targetInfos?: Array<{ type?: string; targetId?: string }> }>('Target.getTargets', {}, { timeoutMs: 5_000 }).catch(() => ({ targetInfos: [] }))
+        for (const info of targetInfos ?? []) if (info.type === 'page' && info.targetId && !ours.has(info.targetId))
+          await chrome.cdp.send('Target.closeTarget', { targetId: info.targetId }, { timeoutMs: 5_000 }).catch(() => undefined)
+      }
+      const front = carried.front ? this.tabs.get(carried.front) : undefined
+      if (front) await this.toFront(front).catch(() => undefined)
+      if (!this.tabs.has(this.activeTabId)) this.activeTabId = this.tabs.keys().next().value ?? ''
+      // While a person holds a browser without a window, no page reads or writes a clipboard; a window uses the computer's own.
+      if (this.controlOwner === 'human' && !windowed) await this.guardClipboard(true)
+      this.refs = new BrowserReferenceStore({ profileId: this.profileId, sessionId: this.id, generation: this.generation })
+      this.observations.clear()
+    } finally {
+      this.switching = false
+    }
+  }
+
+  /** Forgets everything one Chromium's targets held: a restart (`restart`) attaches them all again. */
+  private resetTargets(): void {
+    this.fenceInFlight('human_controlled')
+    for (const opening of this.openingTabs) opening.abort.abort('human_controlled')
+    this.viewers?.dispose()
+    this.viewers = null
+    for (const timer of this.pageRechecks.values()) clearTimeout(timer)
+    this.pageRechecks.clear()
+    this.frames.clear()
+    this.frameLoaders.clear()
+    this.frameEnables.clear()
+    this.marked.clear()
+    this.agentPages.clear()
+    this.attachWork.clear()
+    for (const waiters of this.attachWaiters.values()) for (const wake of waiters) wake()
+    this.attachWaiters.clear()
+    for (const waiters of this.dialogWaiters.values()) for (const wake of waiters) wake()
+    this.dialogWaiters.clear()
+    this.loadingTabs.clear()
+    this.tabProblems.clear()
+    this.tabDialogs.clear()
+    this.tabChoosers.clear()
+    this.owedRelease.clear()
+    this.hitWorlds.clear()
+    this.readingTabs.clear()
+    this.humanPressed = { keys: new Map(), buttons: new Set(), composing: false }
+    this.frontTargetId = ''
+    this.frontHistory = []
+    this.clipboardGuarded = false
+    this.downloadNames.clear()
+    this.downloadStates.clear()
   }
 
   async close(): Promise<void> {
@@ -503,12 +899,24 @@ export class ManagedSession {
     })().catch((error: unknown) => console.warn('a browser that stopped could not be closed', { sessionId: this.id, error: error instanceof Error ? error.message : String(error) }))
   }
 
+  /** Work the session does on its own (a window that closed by itself): a close waits for it. */
+  private background(work: Promise<void>): void {
+    this.ops.add(work)
+    void work.finally(() => this.ops.delete(work))
+  }
+
   /** Whether Chromium went away by itself (`browserEnded`). */
   get browserGone(): boolean {
     return this.ended
   }
 
   private async closeOwned(): Promise<void> {
+    if (this.windowed) {
+      this.stopWindowRun(this.windowed)
+      this.windowed.ending = true
+      this.windowed = null
+    }
+    for (const wake of [...this.windowWaiters]) wake()
     this.fenceInFlight('cancelled')
     if (!this.sessionAbort.signal.aborted) {
       try { this.sessionAbort.abort('cancelled') } catch { /* already aborted */ }
@@ -1624,8 +2032,23 @@ export class ManagedSession {
 
   handle(method: BrowserWorkerRequest['method'], params: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> | unknown {
     // A browser that stopped by itself answers every use with that until it is closed (then the next use starts it again).
-    if (this.ended && method !== 'session.close' && method !== 'frame.stop') fail('worker_disconnected', BROWSER_STOPPED)
+    if (this.ended && method !== 'session.close' && method !== 'frame.stop' && method !== 'window.wait') fail('worker_disconnected', BROWSER_STOPPED)
+    if (this.switching && method !== 'session.close' && method !== 'frame.stop' && method !== 'window.wait') fail('not_actionable', 'The browser is starting again. Try again in a moment.')
+    // A browser in a window is used there: nothing of it is pictured or driven from a view.
+    if (this.windowed && (method === 'frame' || method === 'frame.next')) fail('human_controlled', 'The browser is open in a window.')
+    if (this.windowed && (method === 'human.input' || method === 'human.act')) fail('not_actionable', 'The browser is open in a window: use it there.')
     switch (method) {
+      case 'window.open': {
+        let display: BrowserWindowDisplay | undefined
+        try {
+          display = browserWindowDisplay(params.display)
+        } catch (error) {
+          fail('invalid_action', error instanceof Error ? error.message : String(error))
+        }
+        return this.trackOp(signal, (opSignal) => this.openWindow(display, opSignal))
+      }
+      case 'window.close': return this.trackOp(signal, (opSignal) => this.closeWindow(opSignal))
+      case 'window.wait': return this.trackOp(signal, (opSignal) => this.waitWindow(params, opSignal))
       case 'session.close': return this.close()
       case 'tabs.list': return { tabs: this.listTabs(), activeTabId: this.activeTabId }
       case 'tabs.new': return this.trackOp(signal, (opSignal) => this.newTab(optionalString(params.url, 8192), opSignal))
@@ -1645,6 +2068,7 @@ export class ManagedSession {
       case 'human.input': return this.trackOp(signal, (opSignal) => this.humanInput(params, opSignal))
       case 'control.take': {
         const owner = params.owner === 'human' ? 'human' : 'agent'
+        if (owner === 'agent' && this.windowed) return this.trackOp(signal, (opSignal) => this.closeWindow(opSignal)).then(() => this.handle(method, params, signal))
         // A closing, closed or disconnected session refuses at once, before anything is let go of.
         this.requireChrome()
         // A page the agent's action was still loading never commits for the person.
@@ -1693,6 +2117,8 @@ export class ManagedSession {
       cdp.send('Accessibility.enable', {}, { sessionId: tab.cdpSessionId, signal }),
       cdp.send('Page.setLifecycleEventsEnabled', { enabled: true }, { sessionId: tab.cdpSessionId, signal })
     ])
+    // A window keeps its own size: only a browser without one paints at a fixed size.
+    if (this.windowed) return
     await cdp.send('Emulation.setDeviceMetricsOverride', {
       width: 1280,
       height: 720,
@@ -1786,7 +2212,7 @@ export class ManagedSession {
     this.marked.set(sessionId, target)
     // A tab a site opened (a link to a new tab, `window.open`) may take the front: nobody uses it, so
     // the tab in front before goes back there, and the agent, the person and the view stay on it.
-    if (type === 'page' && info.openerId) void this.keepFront()
+    if (type === 'page' && info.openerId && !this.windowed) void this.keepFront()
     if (type === 'iframe') {
       this.frames.set(sessionId, {
         sessionId,
@@ -2260,4 +2686,19 @@ function pictureSpot(value: unknown): BrowserPictureSpot | undefined {
 export function mapImagePoint(observation: BrowserObservation, point: { x: number; y: number }): { x: number; y: number } {
   if (!observation.screenshot) fail('invalid_geometry', 'Coordinate action requires a screenshot observation')
   return imagePointToViewport(point, observation.screenshot, observation.viewport)
+}
+
+/** How a window's Chromium ended: normally (the person closed its window, or quit it) or not (a crash, or ended from outside). */
+async function exitOf(chrome: LaunchedChrome): Promise<BrowserWindowEnd> {
+  const child = chrome.process
+  if (child.exitCode === null && child.signalCode === null) {
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 5_000)
+      child.once('exit', () => {
+        clearTimeout(timer)
+        resolve()
+      })
+    })
+  }
+  return child.exitCode === 0 && child.signalCode === null ? 'closed' : 'crashed'
 }

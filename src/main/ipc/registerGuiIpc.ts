@@ -89,6 +89,7 @@ import { showCopyMenu } from '../contextMenu'
 import { pickExecutable } from './pickExecutable'
 import { stageBotAttachment } from './botAttachments'
 import { chooseBrowserViewFiles, type BrowserViewFilesDeps } from './browserViewFiles'
+import { botBrowserWindow, type BotBrowserWindowDeps } from './botBrowserWindow'
 import { stat } from 'node:fs/promises'
 import { openExternalSafely } from '../safeExternalUrl'
 import { dispatchMcpAuthBrowser } from '../mcpAuthBrowser'
@@ -3581,6 +3582,10 @@ export function registerGuiIpc(
   }
   registerHandler('bots:chooseBrowserFiles', async (event, request: unknown) => chooseBrowserViewFiles(request, 'botId', browserFilesDeps(event)))
   registerHandler('browser:chooseViewFiles', async (event, request: unknown) => chooseBrowserViewFiles(request, 'threadId', browserFilesDeps(event)))
+  // Open in a window and Close window in a bot's browser view: this app names its own screen, on the window's own connection.
+  registerHandler('bots:browserWindow', async (_event, request: unknown) => botBrowserWindow(request, {
+    request: ((method: string, params: unknown) => guiMms.request(method as never, params as never)) as BotBrowserWindowDeps['request']
+  }))
   registerHandler('dialog:pickExecutable', async (event, request: unknown) => {
     const win = BrowserWindow.fromWebContents(event.sender) ?? getWindow()
     return pickExecutable((options) => (win ? dialog.showOpenDialog(win, options) : dialog.showOpenDialog(options)), request)

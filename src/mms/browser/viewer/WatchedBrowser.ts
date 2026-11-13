@@ -26,6 +26,7 @@ import { agentCursorLive, type BrowserAgentCursor } from '../../../shared/browse
 import type { BrowserAutomationTool, BrowserSessionKeeper, BrowserToolContext } from '../../../shared/browser/automation'
 import type { BrowserSessionRecord, BrowserViewerUpdate } from '../../../shared/browser/types'
 import { BROWSER_PROBLEM_CODES, browserProblemForPerson, browserProblemMessage, type BrowserProblem } from '../../../shared/browser/navigation'
+import type { BrowserWindowDisplay, BrowserWindowState } from '../../../shared/browser/window'
 import { BrowserAutomationError } from '../automation/BrowserSessionManager'
 import type { MmsBrowserService } from '../MmsBrowserService'
 import { InputSequencer } from './InputSequencer'
@@ -73,6 +74,8 @@ export interface WatchedBrowserOptions {
   givenBack?(): void
   /** A hold ran out: the view that held it went away. */
   expired?(): void
+  /** The browser's real window ("Open in a window") stopped by itself (a crash, or its process ended from outside). */
+  windowStopped?(): void
   /** What the person reads in the words of the browser's user. */
   text: {
     /** The browser is closed. */
@@ -208,6 +211,8 @@ const BROWSER_STOPPED = 'The browser stopped.'
 const HELD_TAB_CLOSED = 'The tab you took over has closed.'
 /** The limit on a picture taken for a view that asks each time: quick or broken. */
 export const BROWSER_SIDE_CALL_MS = 15_000
+/** How long one wait for the window to change lasts (`windowWait`); the worker answers at once when it does. */
+const WINDOW_WAIT_MS = 20_000
 
 /**
  * Pictures remembered per browser for the input made on them: always the last `MIN_PICTURES` (a still
@@ -366,6 +371,8 @@ export class WatchedBrowser {
   private readonly now: () => number
   private readonly holdLeaseMs: number
   private readonly leaseTimer: (fn: () => void, ms: number) => { clear(): void }
+  /** The browser is open in a real window for the view that holds it ("Open in a window"): the window's last known change. */
+  private windowed?: { serial: number }
 
   constructor(private readonly options: WatchedBrowserOptions) {
     this.now = options.now ?? Date.now
@@ -401,7 +408,8 @@ export class WatchedBrowser {
       ...(open && this.loading ? { loading: true } : {}),
       ...(open && this.problem ? { problem: { ...this.problem } } : {}),
       ...(open && this.stalled ? { stalled: this.stalled } : {}),
-      ...(!open && this.stopped() ? { stopped: true as const } : {})
+      ...(!open && this.stopped() ? { stopped: true as const } : {}),
+      ...(open && this.windowed ? { windowed: true as const } : {})
     }
   }
 
@@ -740,6 +748,8 @@ export class WatchedBrowser {
     hold.lease = undefined
     hold.files.clear()
     await hold.channel.close('not-held', end === 'taken' ? 'Held in another window' : end === 'replaced' ? 'You took the browser over again' : 'You gave the browser back')
+    // The window lasts as long as its hold: it closes first, while the person still holds the browser.
+    if (this.windowed) await this.shutWindow()
     const sessionId = this.liveSession()
     if (sessionId) {
       if (options.keepControl) {
@@ -772,6 +782,7 @@ export class WatchedBrowser {
 
   /** A hold ends with its browser (closed, its user gone): nothing to give back. */
   private dropHold(): void {
+    this.windowed = undefined
     const hold = this.hold
     if (!hold) return
     this.hold = undefined
@@ -817,6 +828,7 @@ export class WatchedBrowser {
    */
   private async applyInput(hold: OwnerHold, sent: WatchedBrowserSent): Promise<Omit<WatchedBrowserAck, 'seq'>> {
     if ('skip' in sent) return refused('skipped', 'Skipped')
+    if (this.windowed) return refused('failed', 'The browser is open in a window: use it there.')
     const sessionId = this.liveSession()
     if (!sessionId || this.hold !== hold) return refused('not-held', 'You gave the browser back')
     const tabId = hold.tabId
@@ -918,6 +930,7 @@ export class WatchedBrowser {
 
   /** The session is closing: a hold ends with it, and the views follow no tab. */
   closed(): void {
+    this.windowed = undefined
     this.dropHold()
     this.follow = undefined
     this.behind = false
@@ -961,6 +974,91 @@ export class WatchedBrowser {
     this.cursor = frame.cursor
   }
 
+  // -- a real window ("Open in a window")
+
+  /**
+   * The browser opens as a real window on the screen of the app that asked, for the view that holds it (`holdId`, on
+   * this connection). The same hold, with its heartbeat, lasts as long as the window: the agent stays refused, and is
+   * told its owner uses the browser. Nothing is pictured meanwhile. The window ending by itself (its own close, or its
+   * browser stopping) gives the browser back to the agent; a browser that stopped is told (`windowStopped`).
+   */
+  async openWindow(viewId: string, holdId: string, connectionId: string, display: BrowserWindowDisplay | undefined): Promise<WatchedBrowserView> {
+    await this.inTurn(async () => {
+      const hold = this.hold
+      if (!hold || !this.claim(hold, viewId, holdId, connectionId)) throw holdEnded()
+      this.beat(hold)
+      if (this.windowed) return
+      const sessionId = this.requireLive()
+      const state = await this.options.call((context) => this.sessions().window(context, { sessionId, op: 'open', ...(display ? { display } : {}) }))
+      const run = { serial: state.serial }
+      this.windowed = run
+      this.stopCapture()
+      void this.followWindow(sessionId, run)
+    })
+    return this.view({ viewId, connectionId })
+  }
+
+  /** Close window: the window closes (its cookies read while it still has them) and the browser goes back to the agent. */
+  async closeWindow(viewId: string, holdId: string, connectionId: string): Promise<WatchedBrowserView> {
+    await this.inTurn(async () => {
+      const hold = this.hold
+      if (!hold || !this.claim(hold, viewId, holdId, connectionId)) throw holdEnded()
+      await this.endHold(hold, 'given-back')
+    })
+    return this.viewAfterChange(viewId, connectionId)
+  }
+
+  /** Waits for the window to end by itself, then gives the browser back as Give back would. */
+  private async followWindow(sessionId: string, run: { serial: number }): Promise<void> {
+    let failures = 0
+    while (this.windowed === run) {
+      let state: BrowserWindowState
+      try {
+        state = await this.options.call((context) => this.sessions().windowWait(context, { sessionId, after: run.serial, waitMs: WINDOW_WAIT_MS }))
+        failures = 0
+      } catch (error) {
+        if (this.windowed !== run) return
+        // The browser itself is gone (closed, or stopped and not back): the hold went or goes with it.
+        if (!this.liveSession() || (failures += 1) >= 3) {
+          console.warn(`a ${this.options.log.name} window is no longer followed`, { ...this.options.log.fields, error: error instanceof Error ? error.message : String(error) })
+          this.windowed = undefined
+          return
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1_000))
+        continue
+      }
+      if (this.windowed !== run) return
+      run.serial = state.serial
+      if (state.open) continue
+      this.windowed = undefined
+      if (state.ended === 'crashed') this.options.windowStopped?.()
+      await this.inTurn(async () => {
+        const hold = this.hold
+        if (hold) await this.endHold(hold, 'given-back')
+      }).catch((error) => console.warn(`a ${this.options.log.name} could not be given back after its window closed`, { ...this.options.log.fields, error: error instanceof Error ? error.message : String(error) }))
+      return
+    }
+  }
+
+  /** The window closes for the person (Close window, Give back, a hold taken elsewhere or run out). */
+  private async shutWindow(): Promise<void> {
+    const sessionId = this.liveSession()
+    this.windowed = undefined
+    if (!sessionId) return
+    await this.options.call((context) => this.sessions().window(context, { sessionId, op: 'close' })).catch((error) => {
+      console.warn(`a ${this.options.log.name} window could not be closed`, { ...this.options.log.fields, error: error instanceof Error ? error.message : String(error) })
+    })
+  }
+
+  /** The capture stops (the browser is in a window). */
+  private stopCapture(): void {
+    const capture = this.capture
+    if (!capture) return
+    this.capture = undefined
+    this.stopWorkerWatch(capture.key)
+    capture.wake?.()
+  }
+
   // -- watching views
 
   /** A capture starts if views wait for one, at the size and rate they ask for now. */
@@ -976,7 +1074,8 @@ export class WatchedBrowser {
    * delivering, Chromium is asked for nothing.
    */
   private runCapture(): void {
-    if (this.capture || !this.viewers.size || !this.liveSession()) return
+    // A browser in a window is seen there: nothing is pictured meanwhile.
+    if (this.capture || this.windowed || !this.viewers.size || !this.liveSession()) return
     const capture: Capture = { key: `view_${randomUUID()}`, afterFrame: 0, afterState: 0 }
     this.capture = capture
     void (async () => {

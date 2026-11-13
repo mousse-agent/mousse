@@ -1,6 +1,8 @@
 import {
   BOT_BROWSER_FILES_METHOD,
   BOT_BROWSER_FRAME_EVENT,
+  BOT_BROWSER_WINDOW_METHOD,
+  BOTS_BROWSER_WINDOW_CAPABILITY,
   BOTS_BROWSER_HOLD_CAPABILITY,
   BOTS_BROWSER_METHODS,
   BOTS_BROWSER_STREAM_CAPABILITY,
@@ -12,6 +14,8 @@ import {
 import { validateWatchedBrowserInput as validateBotBrowserInput } from '../../../shared/browser/watched'
 import { BOTS_PERSONAL_V2_CAPABILITY } from '../../../shared/bots/personal/methods'
 import { browserNavigationUrl } from '../../../shared/browser/validation'
+import { browserWindowDisplay, type BrowserWindowDisplay } from '../../../shared/browser/window'
+import { serviceHasDesktop } from '../../browser/windowDesktop'
 import { appWindowConnection, asDomainError, chosenPaths, holdRequest, isCount, isHoldId, isWatchId, sentInputs, viewPlatform as platform } from '../../browser/viewer/watchedParams'
 import type { HandlerContext } from '../../protocol/handlers'
 import { DomainHandlerRegistry, DomainRpcError, domainObject } from '../../protocol/domainRegistry'
@@ -25,7 +29,10 @@ import type { BotBrowsers } from './BotBrowsers'
  * desktop app on this computer. Taking the browser over, and every input, is the desktop app's on
  * this computer alone too (`hold`, `send`, and an older app's `control`, `input` and `open`), and so
  * are a fresh picture (`get` with `frame`) and closing the browser. A hold is bound to the connection
- * that took it. `bots.browser.files` is the app's main process's alone: the renderer cannot call it.
+ * that took it. `bots.browser.files` is the app's main process's alone: the renderer cannot call it, and
+ * so is `bots.browser.window` (the browser as a real window on that app's screen, which names its display).
+ * Every view the desktop app on this computer reads says whether it may open the browser in a window
+ * (`windowable`); no other caller is ever told so.
  */
 
 const KEYS: Record<BotsBrowserMethod, readonly string[]> = {
@@ -135,6 +142,26 @@ function handle(context: HandlerContext, method: BotsBrowserMethod, p: Record<st
   }
 }
 
+/** Whether the calling connection is the desktop app's own on this computer. */
+function isAppWindow(context: HandlerContext): boolean {
+  try {
+    appWindowConnection(context, '')
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * A view of the bot's browser, as the asking connection may see it: the desktop app on this computer, on a service that
+ * runs on a desktop a window can appear on, is told it may open the browser in a window (`windowable`).
+ */
+async function withWindowable(context: HandlerContext, result: unknown): Promise<unknown> {
+  const browser = (result as { browser?: Record<string, unknown> } | null)?.browser
+  if (!browser || typeof browser !== 'object' || !isAppWindow(context) || !(await serviceHasDesktop())) return result
+  return { ...(result as object), browser: { ...browser, windowable: true } }
+}
+
 /** The capability each method is offered under: `watch` and `hold` tell the app what this daemon can do. */
 function capabilityOf(method: BotsBrowserMethod): string {
   if (method === 'bots.browser.watch' || method === 'bots.browser.unwatch') return BOTS_BROWSER_STREAM_CAPABILITY
@@ -154,13 +181,46 @@ export function registerBotBrowserMethods(domains: DomainHandlerRegistry, browse
         const browsers = await browsersForProfile(binding!.profileId)
         if (!browsers) throw new DomainRpcError('bots_unavailable', 'Bots are unavailable in this profile.')
         try {
-          return await handle(context, method, params, browsers)
+          return await withWindowable(context, await handle(context, method, params, browsers))
         } catch (error) {
           throw asDomainError(error)
         }
       }
     })
   }
+  // The browser as a real window on the screen of the app that asks, from that app's main process (the renderer's
+  // request bridge does not offer this method), for the view that holds the browser; or back without one.
+  domains.register({
+    method: BOT_BROWSER_WINDOW_METHOD,
+    scope: 'profile',
+    capability: BOTS_BROWSER_WINDOW_CAPABILITY,
+    validate: (params): Record<string, unknown> => {
+      const p = domainObject(params ?? {}, ['profileId', 'botId', 'viewId', 'holdId', 'op', 'display'])
+      if (!isBotId(p.botId)) throw new DomainRpcError('invalid_params', 'A bot id is required')
+      if (!isWatchId(p.viewId)) throw new DomainRpcError('invalid_params', 'A view id is required')
+      if (!isHoldId(p.holdId)) throw new DomainRpcError('invalid_params', 'A hold id is required')
+      if (p.op !== 'open' && p.op !== 'close') throw new DomainRpcError('invalid_params', 'op must be open or close')
+      let display: BrowserWindowDisplay | undefined
+      try {
+        display = browserWindowDisplay(p.display)
+      } catch (error) {
+        throw new DomainRpcError('invalid_params', error instanceof Error ? error.message : String(error))
+      }
+      return { ...p, ...(display ? { display } : { display: undefined }) }
+    },
+    async handle(context, params, binding) {
+      const browsers = await browsersForProfile(binding!.profileId)
+      if (!browsers) throw new DomainRpcError('bots_unavailable', 'Bots are unavailable in this profile.')
+      const connection = ownerConnection(context, 'open a window for')
+      if (params.op === 'open' && !(await serviceHasDesktop())) throw new DomainRpcError('unsupported', 'The browser runs where no window can be shown.')
+      try {
+        const browser = await browsers.window(params.botId as string, params.viewId as string, params.holdId as string, params.op as 'open' | 'close', params.display as BrowserWindowDisplay | undefined, connection.id)
+        return withWindowable(context, { browser })
+      } catch (error) {
+        throw asDomainError(error)
+      }
+    }
+  })
   // The files the person chose in this computer's own file dialog, from the app's main process (the
   // renderer's request bridge does not offer this method): a one-time token for the hold's `files` input.
   domains.register({
