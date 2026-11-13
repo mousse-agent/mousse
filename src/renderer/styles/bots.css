@@ -250,6 +250,8 @@ button.bot-image:focus-visible > img { opacity: 0.82; }
 .bot-carousel-arrow.is-previous { left: 8px; }
 .bot-carousel-arrow.is-next { right: 8px; }
 .bot-carousel:hover .bot-carousel-arrow, .bot-carousel:focus-within .bot-carousel-arrow { opacity: 1; }
+/* While a picture's menu is open, the menu is what the owner looks at: no arrow beside it. */
+.bot-carousel.is-menu-open .bot-carousel-arrow { opacity: 0; pointer-events: none; }
 .bot-carousel-arrow:hover { background: rgba(0, 0, 0, .7); }
 .bot-carousel-count { display: block; margin-top: 6px; text-align: right; font-size: 11.5px; line-height: 16px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 @media (prefers-reduced-motion: reduce) { .bot-carousel-track { scroll-behavior: auto; } .bot-carousel-arrow { transition: none; } }
@@ -432,7 +434,7 @@ html[data-theme='high-contrast'] .bot-conversation .chat-input-area.bot-input-ar
 /* On the bot's bubble: its lower right corner, inside its width, half over its bottom edge as a messenger's; only a
    message with a reaction keeps the space for its lower half, so a group without reactions stays tight. */
 .bot-bubble > .bot-reaction { left: auto; right: 12px; bottom: -10px; }
-.bot-message.has-reaction { margin-bottom: 10px; }
+.bot-message.has-reaction { margin-bottom: 14px; }
 /* After a pick the bar goes until the pointer leaves the message; the bubble takes the focus, with no ring for it. */
 .chat-participant-message.is-react-quiet .bot-react-bar { opacity: 0; pointer-events: none; }
 .bot-bubble:focus { outline: none; }
