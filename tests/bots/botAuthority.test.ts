@@ -13,6 +13,7 @@ import { BOT_ASKING_MODE_REQUIRED, BOT_RUNTIME_GAPS, botRuntimeGapReason, checkP
 import { PI_NATIVE_TOOLS } from '../../src/mms/harness/pi/nativeTools'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 import type { BotManifest } from '../../src/shared/bots/personal/definition'
+import { botStarterManifest } from '../../src/shared/bots/personal/manifest'
 import { botAppToolRefusal, checkBuiltinCall, wallMessage } from '../../src/shared/bots/personal/walls'
 import type { HarnessCaps, RunPolicy } from '../../src/shared/harness/types'
 import type { NeutralTool } from '../../src/shared/harness/tools'
@@ -213,6 +214,26 @@ describe('host approvals in checkPolicy', () => {
     expect(refused).toMatchObject({ ok: false, error: { code: 'policy_unenforceable', missing: ['containment'], reason: botRuntimeGapReason(gaps) } })
     // Policies without a bot authority are untouched.
     expect(checkPolicy(exact, { mode: 'default', approvals: 'grants' })).toEqual({ ok: true })
+  })
+})
+
+describe('the files folder under the starter grant', () => {
+  it('the chat and its work both read, list, search, edit and write there, and nothing outside', () => {
+    const files = join(profile, 'bots', 'files', 'b1')
+    mkdirSync(files, { recursive: true })
+    const list = join(files, 'lists', 'shopping.md')
+    for (const frontDesk of [true, false]) {
+      const grant = botStarterManifest()
+      const compiled = compile({ grant, filesFolder: files, botTools: { escalate: true, consult: false, memory: true, frontDesk } })
+      if (!compiled.ok) throw new Error(compiled.error.message)
+      const bot = createBotAuthority({
+        activationId: 'act-1', role: 'activation', permissions: compiled.permissions, waiting: () => false,
+        counters: { charge: () => ({ ok: true, count: 1 }) }, time: { deadline: () => 0, signal: new AbortController().signal }, spend: null
+      })
+      for (const tool of ['read', 'list', 'search', 'edit', 'write'] as const)
+        expect(bot.check({ kind: 'builtin', tool, nativeName: tool, args: { path: list } }), `${tool} frontDesk=${frontDesk}`).toEqual({ ok: true })
+      expect(bot.check({ kind: 'builtin', tool: 'write', nativeName: 'write', args: { path: join(base, 'elsewhere.md') } })).toMatchObject({ ok: false, wall: { kind: 'path' } })
+    }
   })
 })
 

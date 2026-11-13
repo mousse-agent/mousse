@@ -32,6 +32,14 @@ describe('BOT_BASE_INSTRUCTIONS', () => {
     expect(BOT_BASE_INSTRUCTIONS).not.toMatch(/shell commands/i)
   })
 
+  it('keeps lists as files both lanes can change, with a short memory note pointing at each', () => {
+    expect(BOT_BASE_INSTRUCTIONS).toContain('are files in your files folder, one file each, changed the moment they change; your work can read and change them too')
+    expect(BOT_BASE_INSTRUCTIONS).toContain('Memory holds one short note per list saying it exists and its full path.')
+    expect(BOT_BASE_INSTRUCTIONS).toContain('and anything too long for a memory entry')
+    // A list no longer lives in one memory entry, which holds 400 characters and only the chat may change.
+    expect(BOT_BASE_INSTRUCTIONS).not.toContain('one entry per list')
+  })
+
   it('names no model and no memory file', () => {
     for (const model of bundledModelCatalog().models) {
       expect(BOT_BASE_INSTRUCTIONS).not.toContain(model.id)
