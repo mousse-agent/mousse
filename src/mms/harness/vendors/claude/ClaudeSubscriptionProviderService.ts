@@ -22,6 +22,7 @@ import type { ChatImageAttachment } from '../../../../shared/types'
 import { normalizePermissionMode, permissionModeAllows, type PermissionLimits, type PermissionMode as ThreadPermissionMode } from '../../../../shared/permissionMode'
 import { parseThinkingSuffixFromModelId, supportedEffortOf } from '../../../../shared/modelVariants'
 import { AppError } from '../../../../shared/errors'
+import { PROVIDER_TURN_CAP } from '../../../../shared/harness/types'
 import type { ProviderToolEvent } from '../../../../shared/agentActivity'
 import { CLAUDE_INSTANCE_ID } from '../../../../shared/providerInstances'
 import { catalogModelsOnRoute, MODEL_CATALOG_FORMAT, type ModelCatalog, type ModelCatalogEntry, type ModelCatalogRoute } from '../../../../shared/modelCatalog'
@@ -3431,6 +3432,8 @@ function claudeResultFailure(message: SDKResultMessage, seen: RejectedWindows): 
 /** The error a result frame stands for, or undefined when the turn succeeded. */
 function resultFailure(message: SDKResultMessage): Error | undefined {
   if (message.subtype === 'success' && !message.is_error) return undefined
+  // Only a bot's turn sets `maxTurns`: reaching it ends this turn, not the work, which a bot carries on in its next one.
+  if (message.subtype === 'error_max_turns') return new AppError({ code: PROVIDER_TURN_CAP, message: 'Claude Code reached the most steps one turn may take.', errorInfo: { category: 'internal', retryable: false } })
   // A failed `success` frame carries Claude Code's reason (a sign-in failure, say) as its result text.
   const failure = 'errors' in message ? message.errors.join('\n') : message.result?.trim() || 'Claude Code turn failed'
   if (/Failed to refresh OAuth token: another Claude Code process is refreshing it or exited mid-refresh/i.test(failure)) {

@@ -851,6 +851,14 @@ export class MmsProfileServices {
     }
     // Every bot run that ends is settled, whatever path its turn took (no activation stays running).
     if (personalBots) this.runEngine.on('event', (event: ThreadEvent) => {
+      // A call of a bot's live dispatch finished: it was working until now (what a restart charges it up to).
+      if (event.type === 'tool.status') {
+        const call = event.payload as { runId?: unknown; status?: unknown }
+        if (typeof call.runId === 'string' && call.status !== 'started') {
+          try { personalBots.toolCallEnded(call.runId) } catch { /* a record never fails the call */ }
+        }
+        return
+      }
       if (event.type !== 'run.status') return
       const run = event.payload as RunRecord
       if (run.source !== 'bot' || !TERMINAL_RUN_STATUSES.has(run.status)) return

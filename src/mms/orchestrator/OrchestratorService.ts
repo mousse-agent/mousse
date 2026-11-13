@@ -108,8 +108,8 @@ import { piDriver } from '../harness/drivers/pi'
 import { contextGauge, policyOrigin, threadTurnOrigin } from '../harness/policy'
 import type { BotThreads } from '../../shared/bots/personal/authority'
 import { botTurnOffers } from '../../shared/bots/personal/walls'
-import { isBotWallAbort, type BotTurnDispatcher, type PreparedBotTurn } from '../bots/activation/dispatcher'
-import { harnessAppError, isRetriesExhausted, onRetiredBareRoute, type BindPolicy, type ExecutionBinding, type HarnessCaps, type ProviderScope, type RunPolicy, type TurnOrigin } from '../../shared/harness/types'
+import { isBotRoomAbort, isBotWallAbort, type BotTurnDispatcher, type PreparedBotTurn } from '../bots/activation/dispatcher'
+import { harnessAppError, isRetriesExhausted, onRetiredBareRoute, PROVIDER_TURN_CAP, providerFailureText, type BindPolicy, type ExecutionBinding, type HarnessCaps, type ProviderScope, type RunPolicy, type TurnOrigin } from '../../shared/harness/types'
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
 import { planWakeNotice, type NoticeContext } from '../run/delegation/notice'
 import { acknowledgeRows } from '../run/terminal'
@@ -123,7 +123,7 @@ import { isRunningSubagent, type BackgroundTaskNoticeItem, type SubagentNoticeIt
 import type { DelegationRequest, ForkPointSeed, ThreadCreation } from '../run/RunEngine'
 import type { HandoffItem } from '../run/handoff/budget'
 import { committedTransfers, TurnHandoffs, type PlannedHandoff } from './turnHandoffs'
-import { nestedUnderSubagentOrBackground, TranscriptAssembler, unshownReplyText } from '../run/transcript/TranscriptAssembler'
+import { nestedUnderSubagentOrBackground, stoppedReplyText, TranscriptAssembler, unshownReplyText } from '../run/transcript/TranscriptAssembler'
 import { forkStrategy, handoffDelivery, mcpAttachable, subagentTargetRefusal, type SubagentRefusal } from '../run/policy/featureGates'
 import { isContextOverflowError, retryContextOverflowOnce } from '../run/transcript/retryContextOverflow'
 import {
@@ -4719,7 +4719,8 @@ export class OrchestratorService extends EventEmitter {
           bot: prepared
         }
       )
-      text = response.message
+      // A failed turn's message is its error, never the bot's words; a turn its work goes on from hands back what it said.
+      text = response.error ? response.partial : response.message
     } catch (error) {
       const settled = engine.getRun(payload.runId)
       if (!settled || (!TERMINAL_RUN_STATUSES.has(settled.status) && settled.status !== 'queued')) throw error
@@ -12339,7 +12340,7 @@ export class OrchestratorService extends EventEmitter {
         // A bot turn fails the same way: its engine tries the next model, or pauses the bot until the reset.
         const scheduled = opts?.schedule || opts?.bot ? usageLimitOf(err) : undefined
         if (scheduled) scheduledLimitUntil = (scheduled.estimated ? undefined : boundedResetIso(scheduled.resetsAt, Date.now())) ?? estimatedReset(Date.now())
-        assistantText = `[${providerError.code}] ${providerError.message}`
+        assistantText = providerFailureText(providerError)
       }
     } finally {
       // Nothing is held once the provider's turn is over: what is still pending is an unread steer, and the turn's end
@@ -12409,8 +12410,13 @@ export class OrchestratorService extends EventEmitter {
 
     if (providerError) {
       console.error('Orchestrator turn failed', failureDiagnostic ?? errorDiagnostic(providerError, 'orchestrator.chat'))
+      // A bot's turn that reached its runtime's cap on model turns hands back what it said last: its work goes on in the
+      // next dispatch and keeps it (`BotEngine.continueAfterTurnCap`). Any other failure's words are not a reply.
+      const capped = opts?.bot && providerError.code === PROVIDER_TURN_CAP
+        ? stoppedReplyText(stripActionBlocks(this.transcript.openAssistantContent() ?? '').trim(), this.transcript.closedReplies().map((reply) => stripActionBlocks(reply.content)), true)
+        : undefined
       this.transcript.abandonAssistant(this.transcript.openAssistantContent() ?? '', false)
-      const message = `[${providerError.code}] ${providerError.message}`
+      const message = providerFailureText(providerError)
       this.addSystemMessage(message)
       const failure = this.messages.at(-1)!
       failure.error = providerError
@@ -12425,7 +12431,7 @@ export class OrchestratorService extends EventEmitter {
       markRunTerminal('failed', { error: message, ...(scheduledLimitUntil ? { usageLimitUntil: scheduledLimitUntil } : {}) })
       await checkpointTurn('failed')
       this.persist(true)
-      const response: OrchestratorResponse = { message, actions: [], error: providerError }
+      const response: OrchestratorResponse = { message, actions: [], error: providerError, ...(capped ? { partial: capped } : {}) }
       this.emit('response', response)
       settleOnce(false, true)
       this.releaseSessionExecutionLease(session)
@@ -12466,7 +12472,9 @@ export class OrchestratorService extends EventEmitter {
         restart ? RESTART_INTERRUPTED_TEXT : wall ? 'Paused: waiting for the owner.' : TURN_STOPPED_TEXT,
         turnEnd ? { turnId: engineRunId, turnEnd } : undefined
       )
-      const response: OrchestratorResponse = { message: partial, actions: [] }
+      // Work cut because it ran out of room hands back what it had, even right after a tool call; any other stop its open reply.
+      const outOfRoom = wall && isBotRoomAbort(turn.abort.signal.reason)
+      const response: OrchestratorResponse = { message: stoppedReplyText(partial, replies.map((reply) => stripActionBlocks(reply.content)), outOfRoom), actions: [] }
       this.setTurnPhase(session.threadId, 'stopped')
       markRunTerminal('interrupted', { interruptedBy: restart ? 'daemon_restart' : wall ? 'bot_wall' : 'user' }, partial)
       try {

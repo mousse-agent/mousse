@@ -130,7 +130,9 @@ export class BotBrowsers implements BotBrowserHost {
   turn(input: { botId: string; activationId: string; lane: BotLane; homeThreadId: string; runId: string; signal: AbortSignal }): BotTurnBrowser | undefined {
     if (!this.options.browser()) return undefined
     const state = this.state(input.botId, input.homeThreadId)
-    const activation = state.activations.get(input.activationId) ?? { tabs: new Set<string>(), ended: false }
+    // Work that let go of the browser while it waited (for room, or a usage limit's reset) opens fresh tabs when it goes on.
+    const known = state.activations.get(input.activationId)
+    const activation = known && !known.ended ? known : { tabs: new Set<string>(), ended: false }
     state.activations.set(input.activationId, activation)
     const policy = this.policy(500)
     const execution: ExecutionContext = {

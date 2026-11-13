@@ -39,6 +39,15 @@ export interface BotAskCard {
   status: BotAskStatus
   /** `export_memory`: Allow opens a folder picker and calls `bots.memory.export`; it grants nothing. */
   kind?: 'permission' | 'export_memory'
+  /**
+   * Allow carries work on now, not only from the next run: the work that asked is still running or waits to go on (it
+   * continues with the permission), or, for a limit, work that waits on it goes on.
+   */
+  carriesOn?: true
+  /** How many pieces of work an allowed limit carried on, when more than one. */
+  carried?: number
+  /** A run's ask allowed while none of the bot's runs was running or waiting: the bot has it from its next run. */
+  idle?: true
 }
 
 export type BotMessageKind = 'text' | 'run_report' | 'notice' | 'error'
