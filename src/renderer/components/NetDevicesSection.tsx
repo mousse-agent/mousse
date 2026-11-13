@@ -34,6 +34,8 @@ function networkingLine(status?: NetStatus): string {
     if (status.enabled) return `No network identity yet${error}`
     return status.vaultUnavailable ? 'Off · set a passphrase to turn it on' : 'Off · turning it on creates a network identity for this device'
   }
+  // Removed on the owner computer: activation is refused, which is expected rather than a fault.
+  if (status.self.removed) return 'Removed from your devices'
   if (!status.enabled) return status.keystore === 'unlocked' ? `Off · local conversations and network records are kept${error}` : `Off · unlock below to turn it on${error}`
   if (status.keystore === 'locked') return `On · locked until you enter the passphrase${error}`
   if (status.rosterState === 'conflict') return `On · device list conflict, recovery required${error}`
@@ -240,6 +242,8 @@ export function NetDevicesSection() {
   const authority = !!self?.isAuthority
   // On unless this computer turned it off; an older daemon that does not report it has no such switch.
   const workOnThreads = status?.workOnThreads !== false
+  // "Share bots with other devices": on unless this computer turned it off.
+  const shareBots = status?.shareBots !== false
 
   // The keychain refused to protect a new identity's keys, so a passphrase protects them instead.
   const needsPassphrase = !self && !!status?.vaultUnavailable
@@ -388,6 +392,16 @@ export function NetDevicesSection() {
             ? 'On · devices with Works on threads can open and change this device’s threads, within the limits set for each device below'
             : 'Off · no other device can open or change this device’s threads'}
           control={<Switch checked={workOnThreads} label="Let my other devices work on this device's threads"disabled={busy} onChange={(next) => void action('bridge.workOnThreads', { enabled: next })} />}
+        />
+      )}
+      {self && status?.enabled && unlocked && status.shareBots !== undefined && (
+        <SettingsRow
+          title="Share bots with other devices"
+          anchor="devices-bots"
+          description={shareBots
+            ? 'On · my phones and other devices list this device’s bots and can chat with them'
+            : 'Off · my other devices don’t see this device’s bots'}
+          control={<Switch checked={shareBots} label="Share bots with other devices" disabled={busy} onChange={(next) => void action('bridge.shareBots', { enabled: next })} />}
         />
       )}
       {/* Unlocking and protecting keys are next steps, so they stay here; keys already protected are noted under Advanced. */}

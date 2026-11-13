@@ -25,6 +25,9 @@ import { MmsRemoteBackend, RemoteApi, ThreadStreamAdapter } from './remote'
 import { MmsThreadSource } from './remote/MmsThreadSource'
 import { LISTS_STREAM_THREAD_ID, MmsListsSource } from './remote/MmsListsSource'
 import { remoteListMethods } from './remote/RemoteLists'
+import { remoteBotMethods } from './remote/RemoteBots'
+import type { BotsSharingPort } from '../protocol/botsSharingPort'
+import { cleanDeviceName } from '../../shared/bridge/editorAsk'
 import { phoneSpeechMethods } from './remote/speech'
 import type { ThreadSourcePort } from './remote/ThreadStreamAdapter'
 import { DispatchService, mmsDispatchRuntime, type DispatchRuntime } from './dispatch'
@@ -89,6 +92,20 @@ export class BridgeProfileService {
   ) {
     const { services, runtime: rt, net } = options
     raiseStreamListenerLimits(services)
+    // "Share bots with other devices": the lists and the bot methods ask on every push and call.
+    const botsSharing: BotsSharingPort = {
+      refusal: () => {
+        if (net.sharesBots?.() !== false) return undefined
+        const self = rt.identity.self()?.node
+        const name = cleanDeviceName(self ? deviceNameOf(rt.identity, self, 'This computer') : 'This computer')
+        return `${name} doesn't share its bots with other devices.`
+      },
+      onChange: (listener) => net.onShareBotsChanged?.(listener) ?? (() => undefined)
+    }
+    services.botsSharing = botsSharing
+    this.disposers.add(() => {
+      if (services.botsSharing === botsSharing) services.botsSharing = undefined
+    })
     this.clock = options.clock ?? systemClock
     this.spaces = new SpaceProfileService({
       runtime: rt,
@@ -381,6 +398,15 @@ export class BridgeProfileService {
         return { descriptor, head: this.threads.store.head(descriptor.id) }
       },
       chats: () => services.platform.chats
+    }))
+      rt.rpc.register({
+        ...method,
+        handle: (params, context) => this.track(method.handle(params, context))
+      })
+    // The owner's personal bots, from a phone or another computer: their chats, asks and pause, and a new bot.
+    for (const method of remoteBotMethods({
+      bots: () => services.personalBots?.service ?? undefined,
+      refusal: () => botsSharing.refusal()
     }))
       rt.rpc.register({
         ...method,

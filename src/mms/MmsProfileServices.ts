@@ -112,6 +112,7 @@ import { DomainHandlerRegistry, DomainRpcError } from './protocol/domainRegistry
 import type { ThreadRouterPort } from './protocol/threadRouterPort'
 import type { RoutedTerminalsPort } from './protocol/routedTerminalsPort'
 import type { EditorAsksPort } from './protocol/editorAsksPort'
+import type { BotsSharingPort } from './protocol/botsSharingPort'
 import type { RemoteListsPort } from './protocol/remoteListsPort'
 import type { MmsOptions } from './MmsOptions'
 import { MmsProfilePlatform } from './platform/MmsProfilePlatform'
@@ -296,6 +297,8 @@ export class MmsProfileServices {
   routedTerminals?: RoutedTerminalsPort
   /** The asks other computers made for editor connections, set while Bridge is on. */
   editorAsks?: EditorAsksPort
+  /** "Share bots with other devices" on this computer, set while Bridge is on. */
+  botsSharing?: BotsSharingPort
   /**
    * The threads, projects and statuses of the user's other computers, merged into this computer's lists
    * for windows. Set and cleared with `threadRouter`; empty while routing is off.
@@ -748,7 +751,8 @@ export class MmsProfileServices {
         prompt,
         maxChars: 60
       })).text,
-      instructions: (bot) => botInstructions(bot),
+      // The owner's home folder by its real path: `~` and variables are refused in a bot's paths.
+      instructions: (bot) => botInstructions({ ...bot, homeFolder: homedir() }),
       scheduleLabel: (when) => botScheduleLabel(when),
       providerLabel: (instanceId) => this.botProviderLabel(instanceId),
       // No internet: a bot waits instead of failing (a DNS lookup and a connection, never a model call).
@@ -1077,12 +1081,17 @@ export class MmsProfileServices {
       accepted: () => this.scheduled.wake()
     })
 
+    let netDomainClosed = false
     this.net = new NetService({
       profileDir: this.homeDir,
       editorSsh: { home: homedir(), mousseHome: this.installationHome, profile: this.profileId },
       hosted: mousseIdNetModule,
       onChanged: (status) => this.events.emit({ channel: 'net:updated', data: status }),
       composeRuntime: (runtime) => {
+        // Net closed its earlier runtime without stopping (a removed computer's identity was set
+        // aside): chats over the network work again with the new one.
+        if (netDomainClosed) this.chatNetwork?.resume()
+        netDomainClosed = false
         this.bridgeService = new BridgeProfileService({
           services: this,
           runtime,
@@ -1101,8 +1110,10 @@ export class MmsProfileServices {
             this.chatNetwork?.beginShutdown()
             composition.beginDisable?.()
           },
-          close: () =>
-            Promise.all([this.chatNetwork?.close(), composition.close?.()]).then(() => undefined),
+          close: () => {
+            netDomainClosed = true
+            return Promise.all([this.chatNetwork?.close(), composition.close?.()]).then(() => undefined)
+          },
           activeCount: () =>
             (composition.activeCount?.() ?? 0) + (this.chatNetwork?.activeCount() ?? 0)
         }

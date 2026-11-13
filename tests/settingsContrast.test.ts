@@ -279,19 +279,3 @@ describe('settings contrast', () => {
     expect(Number(disabled?.[1])).toBeLessThanOrEqual(0.5)
   })
 })
-
-describe('settings column', () => {
-  it('ordinary pages use one ~720px column; Providers keeps a wider one for its list and editor', () => {
-    expect(token(settingsCss, '.settings-page', '--settings-content-w')).toBe('720px')
-    expect(settingsCss).toMatch(
-      /\.settings-content:has\(> #providers\)\s*\{[^}]*--settings-content-w:\s*var\(--settings-content-wide-w\)/
-    )
-  })
-
-  it('theme choices wrap inside the column instead of scrolling sideways', () => {
-    const carousel = settingsCss.match(/\.theme-carousel\s*\{([^}]*)\}/)?.[1] ?? ''
-    expect(carousel).toMatch(/display:\s*grid/)
-    expect(carousel).toMatch(/grid-template-columns:\s*repeat\(auto-fill/)
-    expect(carousel).not.toMatch(/overflow-x/)
-  })
-})

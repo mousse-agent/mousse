@@ -161,6 +161,8 @@ export const formatCountdown = (seconds: number) =>
  * needs the person, because unlocking takes their passphrase.
  */
 export function mousseIdPreparation(net?: NetStatus): 'ready' | 'automatic' | 'manual' {
+  // A removed computer's identity is set aside by sign-in, which then joins with new keys.
+  if (net?.self?.removed) return 'automatic'
   if (net?.enabled && net.self && net.keystore === 'unlocked' && net.protected) return 'ready'
   if (net?.self && net.keystore !== 'unlocked') return 'manual'
   return 'automatic'
@@ -173,6 +175,9 @@ export function mousseIdSetupStep(net?: NetStatus): string {
   if (net.keystore !== 'unlocked') return 'Unlock this device first.'
   return 'Protect network keys with a passphrase first.'
 }
+
+/** This computer was removed from the user's devices; signing in sets its old identity aside and adds it back. */
+export const REMOVED_FROM_DEVICES = 'This computer was removed from your devices. Sign in to add it back.'
 
 /** Sign-in failure in words a person can act on. */
 export function signInErrorMessage(cause: unknown, origin: string, net?: NetStatus): string {
@@ -198,8 +203,10 @@ export function signInErrorMessage(cause: unknown, origin: string, net?: NetStat
       return 'The sign-in code expired. Sign in again.'
     case 'bad_delegation':
     case 'revoked':
-      // This computer's 7-day pass lapsed and nobody has renewed it yet (or it was removed).
-      return 'This computer was away too long to reconnect on its own. Open Mousse on the computer that owns your devices, then sign in again.'
+      if (net?.self?.removed) return REMOVED_FROM_DEVICES
+      // This computer's 7-day pass lapsed and nobody has renewed it yet. Signing in fetches the
+      // device list again, so the owner computer only needs to be open.
+      return 'This computer was away too long to reconnect on its own. Open Mousse on the computer that owns your devices, then sign in here again to get the renewed device list.'
     default:
       return String((cause as Error | null)?.message ?? cause)
   }

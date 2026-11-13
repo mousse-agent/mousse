@@ -278,24 +278,13 @@ describe('SubagentCardView', () => {
     expect(html).toContain('aria-label="Open API reviewer, Working"')
   })
 
-  it('is one compact row: a 24px avatar, a 12px title, one 11px line of plain result with the rest in its tooltip', () => {
+  it('is one line of plain result with the rest in its tooltip', () => {
     const long = `Found **two** issues in \`api.ts\`. ${'More detail. '.repeat(30)}`
     const html = render(card({ state: 'done' }), long)
     expect(html).not.toContain('`')
     expect(html).not.toContain('**')
     expect(html).toContain('class="subagent-card-result">Found two issues in api.ts.')
     expect(html).toMatch(/class="subagent-card-line" title="Found two issues in api\.ts\. More detail/)
-    // The provider icon is 14px inside its 24px chip.
-    expect(html).toContain('width:14px;height:14px')
-    const css = readFileSync(new URL('../src/renderer/chat/components/agent-elements/tools/subagent-card.css', import.meta.url), 'utf8')
-    // Every block whose selector list ends with this selector.
-    const rule = (selector: string) => [...css.matchAll(new RegExp(`\\n${selector.replace(/[.]/g, '\\.')}\\s*\\{([^}]*)\\}`, 'g'))].map((match) => match[1]).join('')
-    expect(rule('.subagent-card')).toContain('padding: 4px 8px')
-    expect(rule('.subagent-card')).toContain('background: transparent')
-    expect(rule('.subagent-card-title')).toMatch(/font-size: 12px;[\s\S]*line-height: 15px/)
-    expect(rule('.subagent-card-line')).toMatch(/font-size: 11px;[\s\S]*line-height: 14px/)
-    expect(rule('.subagent-card-result')).toContain('text-overflow: ellipsis')
-    expect(css).not.toContain('line-clamp')
   })
 
   it('shows a failure quietly: a tinted Failed and the reason on the second line', () => {

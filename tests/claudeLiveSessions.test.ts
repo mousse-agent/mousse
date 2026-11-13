@@ -206,8 +206,16 @@ describe('a live Claude query', () => {
       }
     }
     const warnings = () => vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const WINDOWS = process.platform === 'win32'
+    /**
+     * Said in the name of a test about the startup channel, skipped on Windows: Windows has none, and its own way (the
+     * user's servers over the input after Mousse's) has the tests named "Windows".
+     */
+    const NO_CHANNEL = WINDOWS ? ' [skipped on Windows: no startup channel there; the user\'s servers go over the input]' : ''
+    /** Said in the name of the test of Windows' own way, skipped elsewhere (the same code runs there for a user's --mcp-config). */
+    const ONLY_WINDOWS = WINDOWS ? '' : ' [skipped: Windows only; elsewhere the test of a user\'s --mcp-config runs this way]'
 
-    it('registers Mousse\'s server over the input before the first prompt and the user\'s through the startup pipe, with nothing in the options or the environment', async () => {
+    it.skipIf(WINDOWS)(`registers Mousse's server over the input before the first prompt and the user's through the startup pipe, with nothing in the options or the environment${NO_CHANNEL}`, async () => {
       const { cli, turn } = fixture()
       await turn({ ...mcp('mousse-token-one'), ...withUser })
       await turn({ ...mcp('mousse-token-one'), ...withUser })
@@ -216,12 +224,46 @@ describe('a live Claude query', () => {
       // What the SDK would write on Claude Code's command line, and its environment: no server and no secret. The
       // command line names only the pipe, and the first turn waits for the user's servers at most 3 s.
       expect(process.options.mcpServers).toEqual({})
-      expect(process.options.extraArgs?.['mcp-config']).toBe('/dev/fd/3')
+      // macOS: the process's fourth stream; Linux: a named pipe in a folder of its own.
+      expect(process.options.extraArgs?.['mcp-config']).toMatch(globalThis.process.platform === 'darwin' ? /^\/dev\/fd\/3$/ : /\/mousse-mcp-[^/]+\/servers$/)
       expect(process.options.env?.CLAUDE_CODE_MCP_STARTUP_WAIT_MS).toBe('3000')
       expect(JSON.stringify(process.options)).not.toMatch(/mousse-token-one|user-header-secret-358|user-env-secret-358|MOUSSE_MCP_VALUE/)
       // Mousse's own, registered once and waited for; the user's values as they resolved, read from the pipe.
       expect(process.mcpRegistrations).toEqual([{ mousse: { type: 'http', url: URL, headers: { Authorization: 'Bearer mousse-token-one' }, timeout: 60 * 60 * 1000 } }])
       expect(await process.startup).toEqual(withUser.integrations.mcpServers)
+    })
+
+    it.runIf(WINDOWS)(`on Windows, Mousse's server is registered over the input before the first prompt and the user's after it, without waiting; nothing is in the options or the environment, a slow user server does not hold the turn, and only a server that failed is named${ONLY_WINDOWS}`, async () => {
+      const warn = warnings()
+      const { cli, chat, host } = fixture()
+      // Claude Code answers the registration of the user's servers only once each has connected or timed out: here,
+      // not before the turn has ended.
+      let answer!: () => void
+      const held = new Promise((resolve) => { answer = () => resolve(undefined) })
+      cli.mcpHold = (servers) => 'web' in servers ? held : undefined
+      expect(await chat({ ...mcp('mousse-token-one'), ...withUser })).toBe('reply to 1')
+      const process = cli.last
+      expect(process.options.extraArgs?.['mcp-config']).toBeUndefined()
+      expect(process.options.spawnClaudeCodeProcess).toBeUndefined()
+      expect(await process.startup).toBeUndefined()
+      expect(process.options.mcpServers).toEqual({})
+      // The bounds on how long the user's servers can hold Claude Code's first prompt, and no start-up wait.
+      expect(process.options.env).toMatchObject({ MCP_TIMEOUT: '10000', MCP_SERVER_CONNECTION_BATCH_SIZE: '16' })
+      expect(process.options.env?.CLAUDE_CODE_MCP_STARTUP_WAIT_MS).toBeUndefined()
+      expect(JSON.stringify(process.options)).not.toMatch(/mousse-token-one|user-header-secret-358|user-env-secret-358|MOUSSE_MCP_VALUE/)
+      expect(process.mcpRegistrations.map((servers) => Object.keys(servers))).toEqual([['mousse'], ['web', 'files', 'mousse']])
+      expect(process.mcpRegistrations[1]).toMatchObject({ web: withUser.integrations.mcpServers.web, files: withUser.integrations.mcpServers.files, mousse: process.mcpRegistrations[0]!.mousse })
+      // Every server connected: nothing is said. A server that did not is named once.
+      answer()
+      await later(20)
+      expect(host.notice).not.toHaveBeenCalled()
+      const failing = new FakeClaudeCli()
+      failing.mcpErrors = { files: 'spawn files-mcp ENOENT' }
+      const second = fixture({}, failing)
+      expect(await second.chat({ ...mcp('mousse-token-one'), ...withUser })).toBe('reply to 1')
+      await vi.waitFor(() => expect(second.host.notice).toHaveBeenCalledExactlyOnceWith('thread', 'Claude started this turn without an MCP server: files (could not connect).'))
+      expect(JSON.stringify(warn.mock.calls)).not.toMatch(/user-env-secret-358|ENOENT/)
+      warn.mockRestore()
     })
 
     it('where the pipe cannot be used (a launch argument of the user\'s names --mcp-config), the user\'s servers are registered after Mousse\'s and the turn does not wait for them', async () => {
@@ -232,19 +274,20 @@ describe('a live Claude query', () => {
       home = f.home
       // Claude Code answers the second registration only once every server connected; the turn does not wait for it.
       let answer!: () => void
-      cli.reply = (message, self) => {
-        self.mcpGate = new Promise((resolve) => { answer = () => resolve(undefined) })
-        self.answer(String(message.uuid), 'reply')
-      }
+      const held = new Promise((resolve) => { answer = () => resolve(undefined) })
+      cli.mcpHold = (servers) => 'web' in servers ? held : undefined
       const turn = f.chat({ ...mcp('mousse-token-one'), ...withUser })
-      expect(await turn).toBe('reply')
+      expect(await turn).toBe('reply to 1')
       const process = cli.last
       expect(process.options.extraArgs?.['mcp-config']).toBe('mine.json')
       expect(await process.startup).toBeUndefined()
       expect(process.mcpRegistrations.map((servers) => Object.keys(servers))).toEqual([['mousse'], ['web', 'files', 'mousse']])
-      // Mousse's server is sent again unchanged, so Claude Code keeps it connected.
+      // Mousse's server is sent again unchanged, so Claude Code keeps it connected; it does not list it as added, and
+      // that is no failure: with every server connected, the thread is told nothing.
       expect(process.mcpRegistrations[1]!.mousse).toEqual(process.mcpRegistrations[0]!.mousse)
       answer()
+      await later(20)
+      expect(f.host.notice).not.toHaveBeenCalled()
     })
 
     it.each([['a live process', {}], ['a one-shot query', { live: false as const }]])('holds the first prompt until Claude Code has the servers (%s)', async (_, extra) => {
@@ -268,16 +311,21 @@ describe('a live Claude query', () => {
       }
       await f.turn({ ...mcp('mousse-token-one'), ...withUser })
       const process = f.cli.last
+      // What the process has: Mousse's own, and on Windows the user's too (registered over the input after Mousse's).
+      const before = process.mcpServers!
+      expect(Object.keys(before)).toEqual(WINDOWS ? ['web', 'files', 'mousse'] : ['mousse'])
+      const sent = process.mcpRegistrations.length
       f.cli.reply = (message, self) => self.answer(String(message.uuid), 'renewed')
       // Background work is running: a new credential no longer needs a new process, so the turn is not refused.
       expect(await f.turn({ ...mcp('mousse-token-two'), ...withUser })).toBe('renewed')
       expect(f.cli.processes).toHaveLength(1)
       expect(process.closed).toBe(false)
-      expect(process.mcpRegistrations).toHaveLength(2)
-      expect(process.mcpServers).toEqual({ ...process.mcpRegistrations[0], mousse: { ...(process.mcpRegistrations[0].mousse as object), headers: { Authorization: 'Bearer mousse-token-two' } } })
+      // One registration: the same servers (the user's kept, unchanged, where they came over the input), the new bearer.
+      expect(process.mcpRegistrations).toHaveLength(sent + 1)
+      expect(process.mcpServers).toEqual({ ...before, mousse: { ...(before.mousse as object), headers: { Authorization: 'Bearer mousse-token-two' } } })
       // The same credential again sends nothing.
       await f.turn({ ...mcp('mousse-token-two'), ...withUser })
-      expect(process.mcpRegistrations).toHaveLength(2)
+      expect(process.mcpRegistrations).toHaveLength(sent + 1)
     })
 
     it('a new credential the process cannot take: a new process when it is idle, a refusal naming it while work runs', async () => {
@@ -355,7 +403,9 @@ describe('a live Claude query', () => {
     /** Claude Code's words (2.1.291) when `disableSideloadFlags` refuses `--mcp-config` servers, and its exit. */
     const SIDELOAD_REFUSAL = 'Error: --mcp-config is not allowed on this machine. Plugins, custom agents, and MCP servers can only be loaded from sources your administrator has approved. Ask your administrator to remove disableSideloadFlags from managed settings, or use an approved marketplace / settings file instead.\n'
 
-    it.each([['a live process', {}], ['a one-shot query', { live: false as const }]])('a Claude Code whose policy refuses the user\'s servers at its start: the turn starts again with Mousse\'s own only, the thread is told once, and later starts leave them out (%s)', async (_, extra) => {
+    // Claude Code refuses only servers given at its start (`--mcp-config`); Windows gives none there, and its policy case
+    // is the test after these (a policy Mousse sees before the start).
+    it.skipIf(WINDOWS).each([['a live process', {}], ['a one-shot query', { live: false as const }]])(`a Claude Code whose policy refuses the user's servers at its start: the turn starts again with Mousse's own only, the thread is told once, and later starts leave them out (%s)${NO_CHANNEL}`, async (_, extra) => {
       const warn = warnings()
       const cli = new FakeClaudeCli()
       cli.startupRefusal = SIDELOAD_REFUSAL
@@ -389,7 +439,9 @@ describe('a live Claude query', () => {
       expect(f.host.notice).toHaveBeenCalledExactlyOnceWith('thread', expect.stringContaining('policy does not allow added MCP servers'))
     })
 
-    it('a start Claude Code ended because it could not read its servers says so, with what it wrote, redacted', async () => {
+    // About the servers read at the start; on Windows a user server Claude Code cannot take is named in the thread and
+    // the turn runs (the Windows test above).
+    it.skipIf(WINDOWS)(`a start Claude Code ended because it could not read its servers says so, with what it wrote, redacted${NO_CHANNEL}`, async () => {
       const warn = warnings()
       const cli = new FakeClaudeCli()
       cli.startupRefusal = 'Error: Invalid MCP configuration:\nmcpServers.web.headers.X-Api-Key: bad value user-header-secret-358\n'

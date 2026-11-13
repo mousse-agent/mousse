@@ -13,7 +13,11 @@ export function wallMessage(wall: WallReason): string {
       ? `This bot is not allowed to change ${wall.path}.`
       : `This bot is not allowed to read ${wall.path}.`
     case 'closed': return `${wall.path} is Mousse's own data, which no bot may use. Use another folder.`
-    case 'path_form': return `Give ${wall.path} as a full path, without ~ or variables.`
+    case 'path_form': return wall.full
+      ? `Give ${wall.path} as a full path, without ~ or variables: ${wall.full}`
+      : wall.home
+        ? `Give ${wall.path} as a full path, without ~ or variables. Your owner's home folder is ${wall.home}.`
+        : `Give ${wall.path} as a full path, without ~ or variables.`
     case 'skill': return `This bot is not allowed to use the skill ${wall.skill}.`
     case 'mcp': return `This bot is not allowed to use the ${wall.serverName ?? 'MCP'} tool ${wall.tool}.`
     case 'policy_unenforceable': return `This bot cannot use ${wall.tool} on this runtime.`

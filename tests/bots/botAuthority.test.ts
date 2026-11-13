@@ -4,16 +4,17 @@
  * point applies on every call. Nothing asks a person; a call outside the grant stops at a wall.
  */
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { createBotAuthority, runtimeExpandedPath } from '../../src/mms/bots/authority/botAuthority'
+import { createBotAuthority, pathFormWall, runtimeExpandedPath } from '../../src/mms/bots/authority/botAuthority'
 import { botManifestDigest, compileBotThread, computerRoots, mousseDataFolder, type CompileInput } from '../../src/mms/bots/grants/compile'
 import { BOT_ASKING_MODE_REQUIRED, BOT_RUNTIME_GAPS, botRuntimeGapReason, checkPolicy } from '../../src/mms/harness/policy'
 import { PI_NATIVE_TOOLS } from '../../src/mms/harness/pi/nativeTools'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 import type { BotManifest } from '../../src/shared/bots/personal/definition'
-import { botAppToolRefusal, checkBuiltinCall } from '../../src/shared/bots/personal/walls'
+import { botStarterManifest } from '../../src/shared/bots/personal/manifest'
+import { botAppToolRefusal, checkBuiltinCall, wallMessage } from '../../src/shared/bots/personal/walls'
 import type { HarnessCaps, RunPolicy } from '../../src/shared/harness/types'
 import type { NeutralTool } from '../../src/shared/harness/tools'
 
@@ -227,6 +228,26 @@ describe('host approvals in checkPolicy', () => {
   })
 })
 
+describe('the files folder under the starter grant', () => {
+  it('the chat and its work both read, list, search, edit and write there, and nothing outside', () => {
+    const files = join(profile, 'bots', 'files', 'b1')
+    mkdirSync(files, { recursive: true })
+    const list = join(files, 'lists', 'shopping.md')
+    for (const frontDesk of [true, false]) {
+      const grant = botStarterManifest()
+      const compiled = compile({ grant, filesFolder: files, botTools: { escalate: true, consult: false, memory: true, frontDesk } })
+      if (!compiled.ok) throw new Error(compiled.error.message)
+      const bot = createBotAuthority({
+        activationId: 'act-1', role: 'activation', permissions: compiled.permissions, waiting: () => false,
+        counters: { charge: () => ({ ok: true, count: 1 }) }, time: { deadline: () => 0, signal: new AbortController().signal }, spend: null
+      })
+      for (const tool of ['read', 'list', 'search', 'edit', 'write'] as const)
+        expect(bot.check({ kind: 'builtin', tool, nativeName: tool, args: { path: list } }), `${tool} frontDesk=${frontDesk}`).toEqual({ ok: true })
+      expect(bot.check({ kind: 'builtin', tool: 'write', nativeName: 'write', args: { path: join(base, 'elsewhere.md') } })).toMatchObject({ ok: false, wall: { kind: 'path' } })
+    }
+  })
+})
+
 describe('BotAuthority.check', () => {
   const read = (path: string) => ({ kind: 'builtin' as const, tool: 'read' as const, nativeName: 'read', args: { path } })
   const edit = (path: string) => ({ kind: 'builtin' as const, tool: 'edit' as const, nativeName: 'edit', args: { path } })
@@ -367,15 +388,32 @@ describe('paths a runtime rewrites before it opens them (PR 6 review M1)', () =>
       [PI_NATIVE_TOOLS, 'grep', { pattern: 'x', path: '~' }],
       [PI_NATIVE_TOOLS, 'write', { path: '@notes.md', content: 'x' }]
     ]
-    // With file access it is a path to give in full, never an ask; without it, the ask for file access.
+    // A path to give in full, never an ask, with or without file access: no Allow could let the
+    // bot use it as written, so asking for file access would only be refused again after Allow.
     const without = authorityFor(manifest({ workspace: null }))
     for (const [table, name, args] of cases) {
       expect(checkBuiltinCall(bot, table, name, args), `${name} ${JSON.stringify(args)}`).toMatchObject({ ok: false, wall: { kind: 'path_form' } })
-      expect(checkBuiltinCall(without, table, name, args), `${name} ${JSON.stringify(args)}`).toMatchObject({ ok: false, wall: { kind: 'path' } })
+      expect(checkBuiltinCall(without, table, name, args), `${name} ${JSON.stringify(args)}`).toMatchObject({ ok: false, wall: { kind: 'path_form' } })
     }
+    // A real path outside the bot's folders is still the ask for file access.
+    expect(checkBuiltinCall(without, claude, 'Read', { file_path: join(base, 'elsewhere', 'x.txt') })).toMatchObject({ ok: false, wall: { kind: 'path' } })
     // A real path in scratch or the root still passes.
     expect(checkBuiltinCall(bot, claude, 'Grep', { pattern: 'x', path: root })).toEqual({ ok: true })
     expect(checkBuiltinCall(bot, PI_NATIVE_TOOLS, 'write', { path: join(scratch, 'notes.md'), content: 'x' })).toEqual({ ok: true })
+  })
+
+  it('the refusal gives the owner’s home folder, and the full path for ~ and $HOME', () => {
+    const home = join(base, 'home', 'ada')
+    const text = (path: string) => wallMessage(pathFormWall('Read', path, home))
+    expect(text('~/Notes/todo.md')).toBe(`Give ~/Notes/todo.md as a full path, without ~ or variables: ${join(home, 'Notes', 'todo.md')}`)
+    expect(text('~')).toBe(`Give ~ as a full path, without ~ or variables: ${home}`)
+    expect(text('$HOME/x')).toBe(`Give $HOME/x as a full path, without ~ or variables: ${join(home, 'x')}`)
+    expect(text('${HOME}/x')).toBe(`Give \${HOME}/x as a full path, without ~ or variables: ${join(home, 'x')}`)
+    expect(text('~other/x')).toBe(`Give ~other/x as a full path, without ~ or variables. Your owner's home folder is ${home}.`)
+    expect(text('$TMPDIR/x')).toBe(`Give $TMPDIR/x as a full path, without ~ or variables. Your owner's home folder is ${home}.`)
+    expect(text('@notes.md')).toBe('Give @notes.md as a full path, without ~ or variables.')
+    // The live check names the real home folder of this computer.
+    expect(checkBuiltinCall(authorityFor(manifest({ workspace: null })), PI_NATIVE_TOOLS, 'read', { path: '~/x' })).toMatchObject({ ok: false, wall: { kind: 'path_form', home: homedir(), full: join(homedir(), 'x') } })
   })
 
   it('names what each runtime rewrites, by platform', () => {

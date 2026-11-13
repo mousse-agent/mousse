@@ -1,4 +1,5 @@
 import { realpathSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { ActiveTimeScope, BotAllowedObserver, BotAuthority, BotThreadRole, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
 import type { CounterScope } from '../../../shared/harness/counters'
@@ -116,6 +117,11 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
     if (own) return { ok: true }
     const writes = WRITE_TOOLS.has(tool)
     const access = writes ? 'write' : 'read'
+    // A path the runtime itself expands is read only after this check, so it is never inside a
+    // root. It is refused with how to write it, never asked about, in every branch below: no
+    // permission would let the bot use it as written.
+    const expanded = PATH_ARGUMENTS.map((key) => args[key]).find((value): value is string => typeof value === 'string' && runtimeExpandedPath(value))
+    if (expanded !== undefined) return { ok: false, wall: pathFormWall(nativeName, expanded) }
     // Without file access the bot has no folder at all, not even its scratch folder.
     if (!workspace) return { ok: false, wall: { kind: 'path', tool: nativeName, path: String(firstPath(args) ?? '.'), access } }
     const scratch = workspace.scratch
@@ -124,8 +130,6 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
     if (!paths.length) return { ok: true }
     if (computer) return checkEverywhere(nativeName, paths, scratch, computer.closed)
     for (const raw of paths) {
-      // A path the runtime itself expands is read only after this check: never inside a root.
-      if (runtimeExpandedPath(raw)) return { ok: false, wall: { kind: 'path', tool: nativeName, path: raw, access } }
       // Git metadata is never a file tool's to change, in the scratch folder or a root (`agents/gitMetadata`).
       if (writes && touchesGitMetadata(raw, scratch)) return { ok: false, wall: { kind: 'path', tool: nativeName, path: raw, access } }
       try {
@@ -161,7 +165,6 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
    */
   function checkEverywhere(nativeName: string, paths: readonly string[], scratch: string, closed: string): { ok: true } | { ok: false; wall: WallReason } {
     for (const raw of paths) {
-      if (runtimeExpandedPath(raw)) return { ok: false, wall: { kind: 'path_form', tool: nativeName, path: raw } }
       const named = resolve(scratch, raw)
       for (const path of new Set([named, realPathOf(named)]))
         if (insideFolder(closed, path) && !ownInClosed.some((folder) => insideFolder(folder, path)))
@@ -214,6 +217,19 @@ export function runtimeExpandedPath(raw: string, platform: NodeJS.Platform = pro
   if (/\$(\{|[A-Za-z_])/.test(raw)) return true
   if (platform === 'win32' && (/%[^%\\/]+%/.test(raw) || /^\/[A-Za-z](\/|$)/.test(raw))) return true
   return false
+}
+
+/**
+ * The refusal for a path a runtime would rewrite: it names the owner's home folder by its real
+ * path, and for `~/…` or `$HOME/…` the full path the bot meant. A hint only: the full path is
+ * checked like any other when the bot uses it.
+ */
+export function pathFormWall(tool: string, raw: string, home: string = homedir()): WallReason {
+  const trimmed = raw.trim()
+  if (!/^[~%]/.test(trimmed) && !trimmed.includes('$')) return { kind: 'path_form', tool, path: raw }
+  const rest = /^(?:~|\$HOME|\$\{HOME\}|%USERPROFILE%)(?:[\\/]+(.*))?$/s.exec(trimmed)
+  const full = rest ? (rest[1] ? join(home, rest[1]) : home) : undefined
+  return { kind: 'path_form', tool, path: raw, home, ...(full !== undefined ? { full } : {}) }
 }
 
 /** The compiled workspace as the authority checks it: the files folder joins the roots, writable. */

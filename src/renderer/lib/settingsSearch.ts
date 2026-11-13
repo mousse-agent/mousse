@@ -111,6 +111,7 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Device name', section: 'connections', anchor: 'devices-name', keywords: ['computer name'] },
   { title: 'Networking', section: 'connections', anchor: 'devices-networking', keywords: ['network', 'connection'] },
   { title: 'Let my other devices work here', section: 'connections', anchor: 'devices-inbound', keywords: ['remote', 'sharing', 'computers', "let my other devices work on this device's threads"] },
+  { title: 'Share bots with other devices', section: 'connections', anchor: 'devices-bots', keywords: ['bots', 'phone', 'mobile', 'sharing', 'personal bots', 'mousse bot'] },
   { title: 'Passphrase', section: 'connections', anchor: 'devices-passphrase', keywords: ['unlock', 'network keys'] },
   { title: 'My devices', section: 'connections', anchor: 'devices-list', keywords: ['pair', 'add device', 'computers'] },
   { title: 'Let my editor reach my other devices', section: 'connections', anchor: 'devices-editors', keywords: ['editors', 'ssh', 'computers'] },

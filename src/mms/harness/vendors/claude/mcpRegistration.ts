@@ -1,5 +1,7 @@
-import { execFile, spawn as nodeSpawn, type ChildProcess } from 'node:child_process'
-import { constants, existsSync, mkdtempSync, openSync, readdirSync, readFileSync, rmdirSync, unlinkSync } from 'node:fs'
+import { execFile, execFileSync, spawn as nodeSpawn, type ChildProcess } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
+import { constants, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmdirSync, unlinkSync } from 'node:fs'
+import { mkdtemp } from 'node:fs/promises'
 import { Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -160,6 +162,11 @@ type RegistrationOptions = {
   threadId?: string
   /** What Claude Code wrote to its error stream, redacted (`ClaudeStderrTail`): read when the process ended. */
   explain?: () => Promise<string>
+  /**
+   * Mousse's server is sent again exactly as it was registered and answered before (`registerUserServersLater`): Claude
+   * Code keeps it connected and does not list it as added, which is not a denial.
+   */
+  mousseKept?: boolean
 }
 
 /** The error for a request that failed because the process ended, named from what the process said (`explain`). */
@@ -234,9 +241,10 @@ export async function registerClaudeMcpServers(target: Partial<Pick<Query, 'setM
   }
   const errors = result.errors ?? {}
   const failed = names.filter((name) => Object.prototype.hasOwnProperty.call(errors, name))
-  // Mousse's server is always sent with a header the process does not have yet (a new process, or a new token), so
-  // Claude Code lists it as added; one it left out without an error (a policy that denies it) is missing all the same.
-  const denied = required && !failed.includes(MOUSSE_MCP_SERVER_NAME) && !(result.added ?? []).includes(MOUSSE_MCP_SERVER_NAME)
+  // Mousse's server is sent with a header the process does not have yet (a new process, or a new token), so Claude
+  // Code lists it as added; one it left out without an error (a policy that denies it) is missing all the same. Sent
+  // again unchanged (`mousseKept`), it stays connected and is not listed.
+  const denied = required && !options.mousseKept && !failed.includes(MOUSSE_MCP_SERVER_NAME) && !(result.added ?? []).includes(MOUSSE_MCP_SERVER_NAME)
   for (const name of failed)
     console.warn(`[claude-subscription] MCP server "${name}" could not be attached; it is left out of this turn`, { threadId: options.threadId })
   if (required && failed.includes(MOUSSE_MCP_SERVER_NAME)) throw mousseUnavailable('Claude Code could not connect to Mousse\'s MCP server; try again.')
@@ -253,7 +261,7 @@ export async function registerClaudeMcpServers(target: Partial<Pick<Query, 'setM
 export function registerUserServersLater(target: Partial<Pick<Query, 'setMcpServers'>>, registered: ClaudeMcpServers, users: ClaudeMcpServers, threadId: string, done: (failed: string[]) => void): ClaudeMcpServers {
   const servers = { ...claudeLiteralServers(users, 'input'), ...registered }
   // Never past the turn: an answer that does not come in Claude Code's own connect time is not waited for.
-  void registerClaudeMcpServers(target, servers, { timeoutMs: 10 * 60_000, threadId }).then(
+  void registerClaudeMcpServers(target, servers, { timeoutMs: 10 * 60_000, threadId, mousseKept: true }).then(
     ({ failed }) => { if (failed.length > 0) done(failed) },
     () => done(Object.keys(users))
   )
@@ -367,20 +375,69 @@ export function claudeStartupChannel(platform: NodeJS.Platform): ClaudeStartupCh
 const FIFO_WAIT_MS = 5 * 60_000
 const FIFO_POLL_MS = { first: 5, most: 100 }
 
+type Fifo = { dir: string; path: string }
+
+/** Folders where a named pipe could be made, each checked once (`canMakeFifo`). */
+const fifoRoots = new Map<string, Promise<boolean>>()
+
 /**
- * Makes a named pipe only this user can reach (`mkfifo -m 600` in a new folder of mode 700), or undefined when the
- * system cannot (no `mkfifo`): the user's servers then go over Claude Code's input.
+ * Whether a named pipe can be made in `root` (no `mkfifo`, or a folder Mousse cannot write to: the user's servers then
+ * go over Claude Code's input). Checked once per folder, by making one in a new folder and removing both at once,
+ * whatever happens meanwhile; a failure is checked again next time.
  */
-async function privateFifo(root: string): Promise<{ dir: string; path: string } | undefined> {
-  let dir: string | undefined
+function canMakeFifo(root: string): Promise<boolean> {
+  let known = fifoRoots.get(root)
+  if (!known) {
+    known = (async () => {
+      let dir: string | undefined
+      try {
+        dir = await mkdtemp(join(root, 'mousse-mcp-'))
+        await promisify(execFile)('mkfifo', ['-m', '600', join(dir, 'servers')], { timeout: 5_000 })
+        return true
+      } catch {
+        return false
+      } finally {
+        if (dir) removeFifo({ dir, path: join(dir, 'servers') })
+      }
+    })()
+    fifoRoots.set(root, known)
+    void known.then((made) => { if (!made) fifoRoots.delete(root) })
+  }
+  return known
+}
+
+/** Where a start's named pipe will be: a folder name nobody can guess, made only when Claude Code is spawned. */
+function fifoPlace(root: string): Fifo {
+  const dir = join(root, `mousse-mcp-${randomBytes(9).toString('base64url')}`)
+  return { dir, path: join(dir, 'servers') }
+}
+
+function removeFifo(fifo: Fifo): void {
+  try { unlinkSync(fifo.path) } catch { /* already gone */ }
+  try { rmdirSync(fifo.dir) } catch { /* already gone */ }
+}
+
+/** Pipes made and not yet removed, removed when the daemon exits before their process opened them. */
+const liveFifos = new Set<Fifo>()
+let removesOnExit = false
+
+/**
+ * Makes the named pipe only this user can reach (`mkfifo -m 600` in a new folder of mode 700) as Claude Code is
+ * spawned, so a start that never spawns it leaves nothing. A folder already there is refused, not reused. It runs
+ * `mkfifo` to its end (a few milliseconds), as the spawn that follows needs the pipe.
+ */
+function makeFifo(fifo: Fifo): void {
+  mkdirSync(fifo.dir, { mode: 0o700 })
   try {
-    dir = mkdtempSync(join(root, 'mousse-mcp-'))
-    const path = join(dir, 'servers')
-    await promisify(execFile)('mkfifo', ['-m', '600', path], { timeout: 5_000 })
-    return { dir, path }
-  } catch {
-    if (dir) try { rmdirSync(dir) } catch { /* left empty, mode 700 */ }
-    return undefined
+    execFileSync('mkfifo', ['-m', '600', fifo.path], { timeout: 5_000, stdio: 'ignore', windowsHide: true })
+  } catch (error) {
+    removeFifo(fifo)
+    throw new Error(`Claude Code was not started: the named pipe for the user's MCP servers could not be made (${error instanceof Error ? error.message : String(error)})`)
+  }
+  liveFifos.add(fifo)
+  if (!removesOnExit) {
+    removesOnExit = true
+    process.once('exit', () => { for (const live of liveFifos) removeFifo(live) })
   }
 }
 
@@ -390,13 +447,13 @@ async function privateFifo(root: string): Promise<{ dir: string; path: string } 
  * blocking and looked at again until a reader is there (`FIFO_POLL_MS`), so no thread waits on it; a process that ends
  * first, or never opens it in `FIFO_WAIT_MS`, gets nothing, and the pipe is removed.
  */
-function writeWhenOpened(fifo: { dir: string; path: string }, config: string, child: ChildProcess): void {
+function writeWhenOpened(fifo: Fifo, config: string, child: ChildProcess): void {
   let done = false
   const remove = (): void => {
     if (done) return
     done = true
-    try { unlinkSync(fifo.path) } catch { /* already gone */ }
-    try { rmdirSync(fifo.dir) } catch { /* already gone */ }
+    liveFifos.delete(fifo)
+    removeFifo(fifo)
   }
   child.once('exit', remove)
   child.once('error', remove)
@@ -433,8 +490,9 @@ function writeWhenOpened(fifo: { dir: string; path: string }, config: string, ch
  * used: on Windows, when a launch argument of the user's names `--mcp-config` already, when another spawn is set, or when
  * a named pipe cannot be made.
  *
- * On Linux, another process of the same user that opens the named pipe before Claude Code does, in the moment between
- * its creation and Claude Code's start (it holds no value until a reader opens it), would read the servers; Claude Code
+ * On Linux the named pipe and its folder exist only from Claude Code's spawn until it opens the pipe, or ends: a start
+ * that never spawns it leaves nothing. Another process of the same user that opens the pipe before Claude Code does, in
+ * that moment (it holds no value until a reader opens it), would read the servers; Claude Code
  * would then read nothing and fail to start, which the turn reports. That process can already read the same user's
  * Mousse files and Claude Code settings. No other user can enter the folder.
  */
@@ -446,8 +504,9 @@ export async function claudeStartupMcpOptions(
 ): Promise<Options | undefined> {
   const channel = deps.channel ?? claudeStartupChannel(deps.platform ?? process.platform)
   if (!channel || options.spawnClaudeCodeProcess || Object.hasOwn(options.extraArgs ?? {}, 'mcp-config')) return undefined
-  const fifo = channel === 'fifo' ? await privateFifo(deps.fifoRoot ?? tmpdir()) : undefined
-  if (channel === 'fifo' && !fifo) return undefined
+  const root = deps.fifoRoot ?? tmpdir()
+  if (channel === 'fifo' && !(await canMakeFifo(root))) return undefined
+  const fifo = channel === 'fifo' ? fifoPlace(root) : undefined
   const spawn = deps.spawn ?? nodeSpawn
   const config = JSON.stringify({ mcpServers: claudeLiteralServers(servers, 'startup') })
   const env = options.env ?? {}
@@ -456,13 +515,23 @@ export async function claudeStartupMcpOptions(
     extraArgs: { ...options.extraArgs, 'mcp-config': fifo ? fifo.path : CLAUDE_STARTUP_MCP_CONFIG },
     ...(env.CLAUDE_CODE_MCP_STARTUP_WAIT_MS === undefined ? { env: { ...env, CLAUDE_CODE_MCP_STARTUP_WAIT_MS: String(CLAUDE_MCP_STARTUP_WAIT_MS) } } : {}),
     spawnClaudeCodeProcess: (spawned: SpawnOptions): SpawnedProcess => {
-      const child = spawn(spawned.command, spawned.args, {
-        ...(spawned.cwd ? { cwd: spawned.cwd } : {}),
-        env: spawned.env as NodeJS.ProcessEnv,
-        stdio: fifo ? ['pipe', 'pipe', 'pipe'] : ['pipe', 'pipe', 'pipe', 'pipe'],
-        signal: spawned.signal,
-        windowsHide: true
-      })
+      if (fifo) makeFifo(fifo)
+      let child: ChildProcess
+      try {
+        child = spawn(spawned.command, spawned.args, {
+          ...(spawned.cwd ? { cwd: spawned.cwd } : {}),
+          env: spawned.env as NodeJS.ProcessEnv,
+          stdio: fifo ? ['pipe', 'pipe', 'pipe'] : ['pipe', 'pipe', 'pipe', 'pipe'],
+          signal: spawned.signal,
+          windowsHide: true
+        })
+      } catch (error) {
+        if (fifo) {
+          liveFifos.delete(fifo)
+          removeFifo(fifo)
+        }
+        throw error
+      }
       // Read to the end whatever it writes there, as the SDK does for a process it starts itself.
       child.stderr?.on('data', (chunk: Buffer) => deps.onStderr?.push(chunk))
       child.stderr?.once('close', () => deps.onStderr?.end())

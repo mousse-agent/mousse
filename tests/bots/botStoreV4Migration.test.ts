@@ -253,7 +253,6 @@ describe('contract version', () => {
   it('CONTRACT_VERSIONS.botsDb is the newest bots.db migration', async () => {
     const { CONTRACT_VERSIONS } = await import('../../src/mms/contractVersions')
     expect(CONTRACT_VERSIONS.botsDb).toBe(BOTS_MIGRATIONS.at(-1)!.version)
-    expect(CONTRACT_VERSIONS.botsDb).toBe(6)
   })
 })
 

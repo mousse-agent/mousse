@@ -17,13 +17,14 @@ Pick the tier from what the change touches, not from how many files it has. Use 
 | 2. Small UI | Layout, styling, one component's look or a small interaction; no data, IPC or protocol change | One search of issues and PRs in all states with two or three terms | Named test files for the touched component, if any. No typecheck, lint or build | Before/after screenshots |
 | 3. Feature | New behavior in one area, such as a renderer view and its store, or one service | "Coordinate shared work" below | Named test files covering the changed code, plus a typecheck of the touched project (`npx tsc --noEmit -p tsconfig.web.json` or `tsconfig.node.json`) | Tests and a direct check of the behavior |
 | 4. Cross-area | Several modules, shared types, or renderer-to-main IPC | [check-related-work](../check-related-work/SKILL.md) | Named test files in each affected area, plus `npm run typecheck` | Tests and a direct check of the behavior |
-| 5. Core | Run engine, persistence and migrations, auth and permissions, daemon protocol, networking and security, anything that deletes data | [check-related-work](../check-related-work/SKILL.md) | Named test files across the boundaries it crosses; the full suite only when the change spans multiple modules | Tests, a direct check, and teammate review for the sensitive changes listed in the shared policy |
+| 5. Core | Run engine, persistence and migrations, auth and permissions, daemon protocol, networking and security, anything that deletes data | [check-related-work](../check-related-work/SKILL.md) | Named test files across the boundaries it crosses; the full suite only when the change spans multiple modules | Tests, a direct check, and teammate review for the sensitive changes listed in the shared policy. Storage, sync, size-limit and performance changes also run [check-on-real-data](../check-on-real-data/SKILL.md) |
 
 In every tier:
 
 - Run the tier's checks once. Record the tested commit, the commands and the results. Checkpoints, the PR, the merge and session end reuse that record while the code is unchanged; after a later code commit, rerun only the tests that commit affects.
 - Do not run hosted CI's checks locally as a precaution, and do not wait for hosted CI. A build needed to launch the app for a direct check is fine.
 - Interactive UI logic still runs its tests; screenshots show appearance, not behavior.
+- Before writing or changing tests, follow [test-the-claim](../test-the-claim/SKILL.md). It also adds one step to the checks above: run the test files that mention the copy, class, default or list entry the change altered, found with `rg` in `tests/`.
 
 ## Establish the scope
 

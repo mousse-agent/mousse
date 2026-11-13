@@ -163,7 +163,9 @@ describe('Claude Subscription children', () => {
   const untouched = (turn: Options) => {
     for (const key of ['tools', 'disallowedTools', 'strictMcpConfig', 'settingSources']) expect(turn).not.toHaveProperty(key)
     // The user's own servers reach Claude Code through the pipe it reads at its start; the rest over its input (#358).
-    expect(turn.extraArgs).toEqual({ ...CLAUDE_TURN_EXTRA_ARGS, ...(process.platform === 'win32' ? {} : { 'mcp-config': '/dev/fd/3' }) })
+    // macOS: the process's fourth stream; Linux: a named pipe in a folder of its own.
+    const startup = process.platform === 'darwin' ? '/dev/fd/3' : expect.stringMatching(/\/mousse-mcp-[^/]+\/servers$/)
+    expect(turn.extraArgs).toEqual({ ...CLAUDE_TURN_EXTRA_ARGS, ...(process.platform === 'win32' ? {} : { 'mcp-config': startup }) })
     expect(Object.keys(registered.get(turn) ?? {})).toEqual(expect.arrayContaining(['mousse', 'oauthserver', ...(process.platform === 'win32' ? ['userserver'] : [])]))
   }
 

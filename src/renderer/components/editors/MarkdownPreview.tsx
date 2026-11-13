@@ -6,6 +6,7 @@ import type rehypeHighlight from 'rehype-highlight'
 import remarkGfm from 'remark-gfm'
 import { isSafePreviewHref, resolvePreviewImageSrc } from './markdownPreviewPolicy'
 import { routeLink } from '../../utils/chatLinks'
+import { LinkLabel } from '../../chat/components/agent-elements/link-label-view'
 import { mayContainMath } from '../../markdown/math/math-detect'
 import { readMathClass } from '../../markdown/math/math-markup'
 import { MathBlock, MathInline } from '../../markdown/math/MathView'
@@ -38,7 +39,7 @@ function PreviewLink({
     <a href={href} target="_blank" rel="noopener noreferrer" onClick={(event) => {
       if (href && /^https?:\/\//i.test(href)) { event.preventDefault(); routeLink(href) }
     }}>
-      {children}
+      {href ? <LinkLabel href={href}>{children}</LinkLabel> : children}
     </a>
   )
 }

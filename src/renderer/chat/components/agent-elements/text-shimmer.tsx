@@ -24,7 +24,8 @@ function TextShimmerComponent({
     animationDelay: delay > 0 ? `${delay}s` : undefined,
     animationDuration: `${duration}s`,
     animationIterationCount: "infinite",
-    animationTimingFunction: "linear",
+    // About 15 updates a second, not every frame: each update redraws the whole window (agent-ui.css).
+    animationTimingFunction: `steps(${Math.max(1, Math.round(duration * 15))})`,
   } as React.CSSProperties;
 
   return (

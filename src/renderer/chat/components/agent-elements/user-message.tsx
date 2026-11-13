@@ -9,6 +9,9 @@ import { useImageGallery } from "./image-gallery";
 import { userMessageImages, userMessageImageTiles } from "./image-sources";
 import { ChatReferencePill } from "../../../components/ReferencePill";
 import { parseChatReference, type ChatReference } from "../../../../shared/chatReferences";
+import { routeLink } from "../../../utils/chatLinks";
+import { LinkLabel } from "./link-label-view";
+import { promptSegments } from "./prompt-links";
 
 export type UserMessageProps = {
   message: UIMessage;
@@ -94,6 +97,34 @@ function useTallEnoughToFold(ref: RefObject<HTMLElement | null>, text: string): 
     return () => observer.disconnect();
   }, [ref, text]);
   return tall;
+}
+
+/** The prompt's text with its links drawn as links, the way a reply draws them (see prompt-links, link-label). */
+function PromptText({ text }: { text: string }) {
+  const segments = promptSegments(text);
+  if (segments.length === 1 && segments[0]!.kind === "text") return <>{text}</>;
+  return (
+    <>
+      {segments.map((segment, i) =>
+        segment.kind === "text" ? (
+          segment.text
+        ) : (
+          <a
+            key={i}
+            href={segment.href}
+            title={segment.href}
+            className="chat-user-link"
+            onClick={(event) => {
+              event.preventDefault();
+              routeLink(segment.href);
+            }}
+          >
+            <LinkLabel href={segment.href}>{segment.text}</LinkLabel>
+          </a>
+        ),
+      )}
+    </>
+  );
 }
 
 export const UserMessage = memo(function UserMessage({
@@ -208,7 +239,7 @@ export const UserMessage = memo(function UserMessage({
           data-message-id={message.id}
           data-part-index="0"
         >
-          {text}
+          <PromptText text={text} />
         </p>
       )}
       {text && foldable && (

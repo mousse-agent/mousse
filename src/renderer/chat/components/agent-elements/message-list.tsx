@@ -20,6 +20,7 @@ import { modelLabel } from "../../../../shared/modelChoice";
 import type { TurnEnd } from "../../../../shared/types";
 
 import { UserMessage } from "./user-message";
+import { AfterTurnsLayoutProvider, type AfterTurnsLayout } from "./after-turns";
 import { ImageGalleryProvider } from "./image-gallery";
 import { collectThreadImages } from "./image-sources";
 import { safeMarkdownUrl } from "../../../utils/chatLinks";
@@ -1638,6 +1639,10 @@ export const MessageList = memo(function MessageList({
   });
   const follower = followerRef.current;
   useEffect(() => () => followerRef.current?.dispose(), []);
+  const afterTurnsLayout = useMemo<AfterTurnsLayout>(() => ({
+    resized: () => followerRef.current?.follow(),
+    closing: () => followerRef.current?.closeNext(),
+  }), []);
 
   const isAtBottom = useCallback(() => {
     const container = chatContainerRef.current;
@@ -2146,7 +2151,7 @@ export const MessageList = memo(function MessageList({
         {afterTurns != null && (
           // Clear of the last turn's toolbar, which reaches into the space below the rows.
           <div ref={afterTurnsRef} data-after-turns className="[&:not(:empty)]:mt-5">
-            {afterTurns}
+            <AfterTurnsLayoutProvider value={afterTurnsLayout}>{afterTurns}</AfterTurnsLayoutProvider>
           </div>
         )}
         {showReplyGap && (

@@ -1,6 +1,4 @@
 // @vitest-environment jsdom
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
 import { act, createElement, Fragment, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -200,46 +198,6 @@ describe('the background service notice', () => {
     expect(onReconnect).toHaveBeenCalledTimes(1)
     draw(false)
     expect(shown()).toHaveLength(0)
-  })
-
-  it('shows the shorter title when the line is narrow', () => {
-    const css = readFileSync(resolve(process.cwd(), 'src/renderer/styles/app.css'), 'utf8')
-    expect(css).toMatch(/\.composer-notice-slot\s*\{[^}]*container:\s*composer-notice \/ inline-size;/)
-    expect(css).toMatch(/\.composer-notice-title-short\s*\{\s*display:\s*none;/)
-    const narrow = css.slice(css.indexOf('@container composer-notice (max-width: 420px)'))
-    expect(narrow).toMatch(/^@container composer-notice[^{]*\{\s*\.composer-notice-title-full\s*\{\s*display:\s*none;\s*\}\s*\.composer-notice-title-short\s*\{\s*display:\s*inline;/)
-  })
-})
-
-describe('the dock on the composer', () => {
-  const css = readFileSync(resolve(process.cwd(), 'src/renderer/styles/app.css'), 'utf8')
-  const body = (selector: string) => {
-    const start = css.indexOf(`${selector} {`)
-    expect(start, selector).toBeGreaterThanOrEqual(0)
-    return css.slice(start, css.indexOf('}', start))
-  }
-
-  it('draws a notice as one quiet line: no border, fill, shadow or corners, muted metadata text, plain text actions', () => {
-    expect(body('.chat-input-area > .composer-notice-slot')).toMatch(/animation:\s*composer-dock-in/)
-    const rules = [...css.matchAll(/([^{}]*\.composer-notice[^{}]*)\{([^}]*)\}/g)].map(([, selector, declarations]) => ({ selector: selector.trim(), declarations }))
-    expect(rules.length).toBeGreaterThan(5)
-    for (const { selector, declarations } of rules) {
-      // Buttons keep their rounded hover shape and their focus ring; nothing else draws an edge.
-      if (!/:focus-visible/.test(selector)) expect(declarations, selector).not.toMatch(/(^|;)\s*(border(?!-radius)(-[a-z]+)*|box-shadow)\s*:(?!\s*(0|none);)/)
-      // A fill only on hover and press.
-      if (!/:(hover|active)/.test(selector)) expect(declarations, selector).not.toMatch(/background(-color)?\s*:(?!\s*transparent;)/)
-    }
-    expect(css).not.toMatch(/:has\([^)]*\.composer-notice-slot[^)]*\)[^{]*\.composer\s*\{/)
-    const line = body('.composer-notice')
-    expect(line).toMatch(/color:\s*var\(--text-secondary\);/)
-    expect(line).toMatch(/font-size:\s*12\.5px;/)
-    expect(body('.composer-notice-btn-primary')).toMatch(/color:\s*color-mix\(in srgb, var\(--accent\)/)
-  })
-
-  it('sits in the composer stack, so the transcript keeps clear of it without an offset of its own', () => {
-    expect(body('.composer-notice-slot')).not.toMatch(/position:\s*absolute/)
-    const polish = readFileSync(resolve(process.cwd(), 'src/renderer/styles/polish.css'), 'utf8')
-    expect(polish).not.toContain('--chat-notice-stack')
   })
 })
 

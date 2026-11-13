@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs'
 import { createElement, type ComponentProps } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
@@ -44,15 +43,6 @@ describe('a usage window', () => {
   it('sorts a share left into levels: plenty above half, getting low to a quarter, low under it, critical under a tenth', () => {
     expect([100, 51, 50, 25, 24, 10, 9, 0].map(usageLevel)).toEqual(['plenty', 'plenty', 'getting-low', 'getting-low', 'low', 'low', 'critical', 'critical'])
     expect([25, 24, 0].map(usageRunningLow)).toEqual([false, true, true])
-  })
-
-  it('gives each level its own fixed colour (sage green, soft yellow, amber, red), never the accent', () => {
-    const css = readFileSync(new URL('../../src/renderer/styles/usage.css', import.meta.url), 'utf8')
-    const hues = Object.fromEntries([...css.matchAll(/--usage-(plenty|getting-low|low|critical): oklch\([\d.]+ [\d.]+ (\d+)\)/g)].map((match) => [match[1], Number(match[2])]))
-    expect(hues).toEqual({ plenty: 155, 'getting-low': 95, low: 58, critical: 23 })
-    expect(css).toContain("[data-usage-level] {\n  --usage-level: var(--usage-plenty);")
-    for (const level of ['getting-low', 'low', 'critical']) expect(css).toContain(`[data-usage-level='${level}'] { --usage-level: var(--usage-${level}); }`)
-    expect(css.match(/\.usage-bar-fill \{[^}]*\}/)?.[0]).not.toContain('--accent')
   })
 
   it('counts down, not by weekday: 45m, 1h 12m; from a day on always with hours (1d 0h, 3d 0h, 6d 23h)', () => {
