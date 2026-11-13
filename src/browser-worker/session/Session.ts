@@ -33,8 +33,8 @@ import { prepareActionableTarget, readControlValue, type ActionableTarget } from
 import { dispatchAction, dispatchHumanInput, navigateAndWaitForLoad, waitForLoad } from '../action/dispatch'
 import { ScopedActionJournal } from '../action/journal'
 import { CdpDisconnectedError } from '../cdp/connection'
-import { boundText, nowIso, optionalBoolean, optionalString, requiredId, sanitizeUrl, sleep } from '../util'
-import { isBrowserWorkerError } from '../errors'
+import { boundText, nowIso, optionalBoolean, optionalString, requiredId, sanitizeUrl, sleep, workerWarning } from '../util'
+import { BrowserWorkerError, isBrowserWorkerError } from '../errors'
 
 export interface SessionConfig {
   profileId: string
@@ -63,9 +63,37 @@ interface AttachedFrameState {
   parentFrameId?: string
   targetId: string
   url: string
+  /** The session of the page (a tab or a page a site opened) this frame is in: it belongs to that page alone. */
+  pageSessionId: string
 }
 
+/**
+ * A page or frame carrying the automation mark (`navigator.webdriver`), by its CDP session: every one
+ * Chromium attached, each held before its first script until its mark was set.
+ */
+interface MarkedTarget {
+  sessionId: string
+  targetId: string
+  type: 'page' | 'iframe'
+  /** The page it is, or the page whose frame it is (through every level of nested frames). */
+  pageSessionId: string
+}
+
+type Settled<T> = { ok: true; value: T } | { ok: false; error: unknown }
+
 const MAX_ATTACHED_FRAMES_PER_OBSERVATION = 32
+/** How long a new page or frame is held for its mark before it is let go. A page a site opens without an opener has no renderer yet: it answers only once it runs. */
+const MARK_BEFORE_RUN_MS = 1_000
+/** How long after that its mark may still take before the page is closed: it never runs on unmarked. */
+const MARK_AFTER_RUN_MS = 10_000
+/** How long Take over and Give back wait for each page or frame to take its mark, per try (a page with an open dialog never answers). */
+const MARK_ANSWER_MS = 2_000
+/** How long a new tab waits for its page to commit, so a failure carries its real error, before it is handed back still loading. */
+const NEW_TAB_COMMIT_MS = 5_000
+
+function settle<T>(promise: Promise<T>): Promise<Settled<T>> {
+  return promise.then((value) => ({ ok: true as const, value }), (error: unknown) => ({ ok: false as const, error }))
+}
 
 export class ManagedSession {
   readonly id: string
@@ -85,7 +113,7 @@ export class ManagedSession {
   private frames = new Map<string, AttachedFrameState>()
   private frameLoaders = new Map<string, string>()
   private activeTabId = ''
-  private inFlight: { requestId: string; dispatched: boolean; abort: AbortController } | null = null
+  private inFlight: { requestId: string; dispatched: boolean; abort: AbortController; tabSessionId: string } | null = null
   private readonly artifacts: ScopedArtifactWriter
   private readonly journal: ScopedActionJournal
   private readonly clock: () => Date
@@ -108,6 +136,18 @@ export class ManagedSession {
   private frontTargetId = ''
   /** The screencast of the tab a person watches (`frame()`), started on the first picture asked for. */
   private screencast: TabScreencast | null = null
+  /** Pages and frames carrying the automation mark (`markAutomation`), by CDP session. */
+  private readonly marked = new Map<string, MarkedTarget>()
+  /**
+   * Pages that read as automated whoever holds the browser: a tab the agent was still opening when a
+   * person took over, until it closes. Keyed by page session.
+   */
+  private readonly agentPages = new Set<string>()
+  /** Each new page's hold until its mark is set (`holdUntilMarked`), by target id: resolves true when it runs marked. */
+  private readonly attachWork = new Map<string, { sessionId: string; work: Promise<boolean> }>()
+  private readonly attachWaiters = new Map<string, Array<() => void>>()
+  /** Tabs the agent is opening (`newTab`): a person taking over stops and closes them. */
+  private readonly openingTabs = new Set<{ abort: AbortController; pageSessionId?: string }>()
 
   constructor(private readonly config: SessionConfig, options: { persistent: boolean; workspaceId?: string; runId?: string; threadId?: string }) {
     this.id = 'sess_' + randomUUID()
@@ -172,6 +212,8 @@ export class ManagedSession {
       executablePath: this.config.executablePath,
       userDataDir: this.userDataDir,
       headless: true,
+      browserVersion: this.config.browserVersion,
+      automationMarkedPerPage: true,
       extraArgs: this.config.chromeExtraArgs,
       signal
     })
@@ -179,30 +221,14 @@ export class ManagedSession {
     this.chrome.cdp.on('disconnect', () => {
       if (!this.closed && !this.closing) this.lifecycle = 'disconnected'
     })
+    // Every target Chromium attaches on its own (the session's tabs too) waits until `onAttached` marks it and lets it run.
+    this.chrome.cdp.on('Target.attachedToTarget', (params: unknown, parentSessionId?: string) => { this.onAttached(params, parentSessionId) })
     await this.chrome.cdp.send('Target.setDiscoverTargets', { discover: true }, { signal })
     await this.chrome.cdp.send('Target.setAutoAttach', {
       autoAttach: true,
-      waitForDebuggerOnStart: false,
+      waitForDebuggerOnStart: true,
       flatten: true
     }, { signal })
-    this.chrome.cdp.on('Target.attachedToTarget', (params: unknown) => {
-      if (this.closed || this.closing) return
-      const record = params as { sessionId?: string; targetInfo?: { type?: string; targetId?: string; parentFrameId?: string; url?: string } }
-      if (record.targetInfo?.type !== 'iframe' || !record.sessionId || !record.targetInfo.targetId) return
-      this.frames.set(record.sessionId, {
-        sessionId: record.sessionId,
-        frameId: record.targetInfo.targetId,
-        parentFrameId: record.targetInfo.parentFrameId,
-        targetId: record.targetInfo.targetId,
-        url: sanitizeUrl(record.targetInfo.url ?? '')
-      })
-      const sessionId = record.sessionId
-      const work = this.enableFrame(sessionId)
-      this.frameEnables.set(sessionId, work)
-      void work.finally(() => {
-        if (this.frameEnables.get(sessionId) === work) this.frameEnables.delete(sessionId)
-      })
-    })
     await this.chrome.cdp.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: this.downloadDir, eventsEnabled: true }, { signal })
     this.chrome.cdp.on('Browser.downloadWillBegin', (params: unknown) => {
       if (this.closed || this.closing) return
@@ -219,18 +245,12 @@ export class ManagedSession {
       const state = record.state === 'completed' ? 'completed' : record.state === 'canceled' ? 'canceled' : record.state === 'interrupted' ? 'interrupted' : 'inProgress'
       this.downloadStates.set(record.guid, state)
     })
-    const created = await this.chrome.cdp.send<{ targetId: string }>('Target.createTarget', { url: 'about:blank' }, { signal })
-    const attached = await this.chrome.cdp.send<{ sessionId: string }>('Target.attachToTarget', { targetId: created.targetId, flatten: true }, { signal })
-    await this.chrome.cdp.send('Target.setAutoAttach', {
-      autoAttach: true,
-      waitForDebuggerOnStart: false,
-      flatten: true
-    }, { sessionId: attached.sessionId, signal })
+    const created = await this.openPage(signal)
     const tabId = 'tab_' + randomUUID()
     const tab: TabState = {
       publicId: tabId,
       targetId: created.targetId,
-      cdpSessionId: attached.sessionId,
+      cdpSessionId: created.sessionId,
       url: 'about:blank',
       title: '',
       documentId: 'doc_' + randomUUID(),
@@ -272,6 +292,12 @@ export class ManagedSession {
     this.chrome.cdp.on('Target.detachedFromTarget', (params: unknown) => {
       if (this.closed || this.closing) return
       const sessionId = (params as { sessionId?: string })?.sessionId
+      if (sessionId) {
+        const target = this.marked.get(sessionId)
+        this.marked.delete(sessionId)
+        this.agentPages.delete(sessionId)
+        if (target && this.attachWork.get(target.targetId)?.sessionId === sessionId) this.attachWork.delete(target.targetId)
+      }
       if (sessionId && this.frames.has(sessionId)) {
         const child = this.frames.get(sessionId)!
         this.frames.delete(sessionId)
@@ -328,6 +354,10 @@ export class ManagedSession {
     }
     this.chrome = null
     this.frames.clear()
+    this.marked.clear()
+    this.agentPages.clear()
+    this.attachWork.clear()
+    this.attachWaiters.clear()
     this.frameLoaders.clear()
     this.tabs.clear()
     if (this.downloadDir) this.clearDownloadQuarantine()
@@ -355,25 +385,41 @@ export class ManagedSession {
     return [...this.tabs.values()].map((tab) => ({ id: tab.publicId, title: tab.title, url: tab.url }))
   }
 
+  /**
+   * A tab the agent opens. Nothing the agent opens runs while a person holds the browser: a new tab
+   * is refused then, and one still opening when a person takes over is closed (`takeControl`), reading
+   * as automated until it is gone.
+   */
   async newTab(url?: string, signal?: AbortSignal): Promise<BrowserTab> {
     const chrome = this.requireChrome()
     this.throwIfUnavailable(signal)
-    const created = await chrome.cdp.send<{ targetId: string }>('Target.createTarget', { url: url ?? 'about:blank' }, { signal })
-    const attached = await chrome.cdp.send<{ sessionId: string }>('Target.attachToTarget', { targetId: created.targetId, flatten: true }, { signal })
-    const tabId = 'tab_' + randomUUID()
-    const tab: TabState = {
-      publicId: tabId,
-      targetId: created.targetId,
-      cdpSessionId: attached.sessionId,
-      url: url ?? 'about:blank',
-      title: '',
-      documentId: 'doc_' + randomUUID(),
-      loaderId: '',
-      frameId: ''
-    }
+    this.refuseWhileHeld()
+    const opening: { abort: AbortController; pageSessionId?: string } = { abort: new AbortController() }
+    this.openingTabs.add(opening)
+    const opSignal = signal ? AbortSignal.any([signal, opening.abort.signal]) : opening.abort.signal
+    let targetId: string | undefined
     try {
-      await this.enableTab(tab, signal)
-      this.throwIfUnavailable(signal)
+      // The tab opens blank, held until it is marked, and loads `url` once it is: a page created on a
+      // URL is not held, so its first script could run before its mark.
+      const created = await this.openPage(opSignal, (page) => {
+        targetId = page.targetId
+        opening.pageSessionId = page.sessionId
+      })
+      const tabId = 'tab_' + randomUUID()
+      const tab: TabState = {
+        publicId: tabId,
+        targetId: created.targetId,
+        cdpSessionId: created.sessionId,
+        url: url ?? 'about:blank',
+        title: '',
+        documentId: 'doc_' + randomUUID(),
+        loaderId: '',
+        frameId: ''
+      }
+      await this.enableTab(tab, opSignal)
+      this.throwIfUnavailable(opSignal)
+      this.refuseWhileHeld()
+      if (url) await this.loadNewTab(tab, url, opSignal)
       this.tabs.set(tabId, tab)
       this.activeTabId = tabId
       // A new tab opens in front.
@@ -381,9 +427,52 @@ export class ManagedSession {
       this.touch()
       return { id: tabId, title: tab.title, url: tab.url }
     } catch (error) {
-      try { await chrome.cdp.send('Target.closeTarget', { targetId: created.targetId }) } catch { /* compensate failed tab */ }
+      if (targetId) {
+        try { await chrome.cdp.send('Target.closeTarget', { targetId }, { timeoutMs: 5_000 }) } catch { /* compensate failed tab */ }
+      }
+      if (opening.abort.signal.aborted && !signal?.aborted) fail('human_controlled', 'A person took over the browser while the tab opened; it was closed')
       throw error
+    } finally {
+      this.openingTabs.delete(opening)
     }
+  }
+
+  private refuseWhileHeld(): void {
+    if (this.controlOwner === 'human') fail('human_controlled', 'A person holds the browser: nothing new opens until they give it back')
+  }
+
+  /**
+   * The new tab's first page. Its answer comes once the page commits (or fails to), which carries a
+   * failure's real error; a slow page is handed back still loading. The blank page it opened on is
+   * then dropped from its history, so Back in a fresh tab has nowhere to go, as for a tab opened on a URL.
+   */
+  private async loadNewTab(tab: TabState, url: string, signal: AbortSignal): Promise<void> {
+    const cdp = this.requireChrome().cdp
+    const navigation = cdp.send<{ errorText?: string }>('Page.navigate', { url }, { sessionId: tab.cdpSessionId, signal })
+    const waited = new AbortController()
+    const answered = await Promise.race([settle(navigation), sleep(NEW_TAB_COMMIT_MS, AbortSignal.any([signal, waited.signal])).then(() => undefined, () => undefined)])
+    waited.abort()
+    if (signal.aborted) this.throwIfUnavailable(signal)
+    if (answered && !answered.ok) throw answered.error
+    if (answered?.ok && answered.value.errorText) fail('not_actionable', `The tab could not open ${sanitizeUrl(url)}: ${answered.value.errorText}`)
+    const forgetBlankPage = async (): Promise<void> => {
+      // Just after the page commits, Chromium may answer "not attached" for a moment.
+      let history: { currentIndex: number; entries: Array<{ url: string }> } | undefined
+      for (let attempt = 0; !history && attempt < 20; attempt += 1) {
+        history = await cdp.send<{ currentIndex: number; entries: Array<{ url: string }> }>('Page.getNavigationHistory', {}, { sessionId: tab.cdpSessionId, timeoutMs: 5_000 })
+          .catch(() => sleep(25).then(() => undefined))
+      }
+      if (!history) return
+      // Only the blank page and this one: anything more is history someone made since.
+      if (history.entries.length === 2 && history.currentIndex === 1 && history.entries[0]!.url === 'about:blank') {
+        await cdp.send('Page.resetNavigationHistory', {}, { sessionId: tab.cdpSessionId, timeoutMs: 5_000 })
+      }
+    }
+    if (answered) {
+      await forgetBlankPage().catch(() => undefined)
+      return
+    }
+    void navigation.then((result) => result.errorText ? undefined : forgetBlankPage()).catch(() => undefined)
   }
 
   async closeTab(tabId: string, signal?: AbortSignal): Promise<void> {
@@ -428,7 +517,8 @@ export class ManagedSession {
     tab.documentId = collected.documentId
     tab.loaderId = collected.loaderId
     tab.frameId = collected.frameId
-    const attachedFrames = [...this.frames.values()]
+    // Only this tab's frames: every page attaches its own, and one tab never reads another's.
+    const attachedFrames = this.framesOf(tab)
     const childCollections: CollectedObservation[] = []
     let remainingElements = requestedMax - collected.elements.length
     let childObservationTruncated = attachedFrames.length > MAX_ATTACHED_FRAMES_PER_OBSERVATION
@@ -498,7 +588,7 @@ export class ManagedSession {
       ...(screenshot ? { screenshot } : {}),
       truncated: collected.truncated || childObservationTruncated,
       ...(collected.continuation ? { continuation: collected.continuation } : {}),
-      warnings: [...new Set([...collected.warnings.filter((warning) => warning !== 'unsupported-oopif' && warning !== 'iframe-observation-limited'), ...childCollections.flatMap((item) => item.warnings), ...(this.frames.size ? ['oopif-attached'] : []), ...(childObservationTruncated ? ['frame-observation-truncated'] : [])])],
+      warnings: [...new Set([...collected.warnings.filter((warning) => warning !== 'unsupported-oopif' && warning !== 'iframe-observation-limited'), ...childCollections.flatMap((item) => item.warnings), ...(attachedFrames.length ? ['oopif-attached'] : []), ...(childObservationTruncated ? ['frame-observation-truncated'] : [])])],
       provenance: 'untrusted-page'
     }
   }
@@ -543,6 +633,13 @@ export class ManagedSession {
   takeControl(owner: 'human' | 'agent'): { controlLeaseId: string; generation: number; lifecycle: BrowserLifecycle } {
     // A closing, closed or disconnected session keeps that state; control cannot move on it.
     this.requireChrome()
+    if (owner === 'human') {
+      // A tab the agent is still opening never becomes the person's: it stays automated until it closes.
+      for (const opening of this.openingTabs) {
+        if (opening.pageSessionId) this.agentPages.add(opening.pageSessionId)
+        opening.abort.abort('human_controlled')
+      }
+    }
     this.fenceInFlight('human_controlled')
     this.generation += 1
     this.refs = new BrowserReferenceStore({ profileId: this.profileId, sessionId: this.id, generation: this.generation })
@@ -586,7 +683,7 @@ export class ManagedSession {
       if (signal.aborted) fail('cancelled', 'Action cancelled before dispatch')
       signal.addEventListener('abort', onAbort, { once: true })
     }
-    this.inFlight = { requestId: request.requestId, dispatched: false, abort }
+    this.inFlight = { requestId: request.requestId, dispatched: false, abort, tabSessionId: tab.cdpSessionId }
     this.clearDownloadQuarantine()
     this.downloadNames.clear()
     this.downloadStates.clear()
@@ -779,10 +876,16 @@ export class ManagedSession {
         return this.trackOp(signal, (opSignal) => this.act(params, opSignal, true))
       case 'frame': return this.trackOp(signal, () => this.frame(params))
       case 'human.input': return this.trackOp(signal, (opSignal) => this.humanInput(params, opSignal))
-      case 'control.take': return this.takeControl(params.owner === 'human' ? 'human' : 'agent')
+      case 'control.take': {
+        const owner = params.owner === 'human' ? 'human' : 'agent'
+        // A page the agent's action was still loading never commits for the person.
+        const loadingForAgent = owner === 'human' && this.inFlight?.dispatched ? this.inFlight.tabSessionId : undefined
+        const taken = this.takeControl(owner)
+        return this.afterControlMoved(loadingForAgent).then(() => taken)
+      }
       case 'control.release':
         this.releaseControl(requiredId(params.controlLeaseId))
-        return { ok: true, lifecycle: this.lifecycle }
+        return this.afterControlMoved().then(() => ({ ok: true, lifecycle: this.lifecycle }))
       default:
         fail('unsupported', 'Unsupported method')
     }
@@ -795,6 +898,7 @@ export class ManagedSession {
     if (delayMs) await sleep(delayMs, signal ?? this.sessionAbort.signal)
     this.throwIfUnavailable(signal)
     const cdp = this.requireChrome().cdp
+    // Its mark, and the hold on frames from other sites inside it, were set when it attached (`onAttached`).
     await Promise.all([
       cdp.send('Page.enable', {}, { sessionId: tab.cdpSessionId, signal }),
       cdp.send('DOM.enable', {}, { sessionId: tab.cdpSessionId, signal }),
@@ -808,6 +912,189 @@ export class ManagedSession {
       deviceScaleFactor: 1,
       mobile: false
     }, { sessionId: tab.cdpSessionId, signal })
+  }
+
+  /**
+   * What `navigator.webdriver` reads on a page or frame: true while the agent holds the browser,
+   * false only while a person holds it (`control.take` as human), except on a page the agent was
+   * still opening then (`agentPages`). Frames follow the page they are in.
+   */
+  private automated(target: MarkedTarget): boolean {
+    return this.controlOwner !== 'human' || this.agentPages.has(target.pageSessionId)
+  }
+
+  private async markAutomation(target: MarkedTarget, timeoutMs: number): Promise<boolean> {
+    const enabled = this.automated(target)
+    await this.requireChrome().cdp.send('Emulation.setAutomationOverride', { enabled }, { sessionId: target.sessionId, timeoutMs })
+    return enabled
+  }
+
+  /**
+   * After Take over or Give back, every page and frame takes the mark for who now holds the browser.
+   * Each has a short time to answer (a page with an open dialog cannot), so neither waits long on one.
+   * One that should read as automated and did not take it is asked once more, then its page is
+   * closed: no page is left reading false under the agent. One that should read false and did not
+   * keeps reading true, the safe side.
+   */
+  private async afterControlMoved(loadingForAgent?: string): Promise<void> {
+    const cdp = this.chrome?.cdp
+    if (!cdp) return
+    if (loadingForAgent) await cdp.send('Page.stopLoading', {}, { sessionId: loadingForAgent, timeoutMs: MARK_ANSWER_MS }).catch(() => undefined)
+    const unmarked = await this.markEach([...this.marked.values()])
+    if (!unmarked.length) return
+    const still = await this.markEach(unmarked)
+    await Promise.all(still.map((target) => this.closePageOf(target, 'its page did not take the automation mark when the agent got the browser back')))
+  }
+
+  /** Marks each target, answering with those that should read as automated and did not confirm it. */
+  private async markEach(targets: MarkedTarget[]): Promise<MarkedTarget[]> {
+    const results = await Promise.all(targets.map(async (target) => {
+      const marked = await settle(this.markAutomation(target, MARK_ANSWER_MS))
+      if (marked.ok || !this.marked.has(target.sessionId)) return undefined
+      if (!this.automated(target)) {
+        workerWarning('a page kept reading as automated after a person took over', { session: this.id, type: target.type })
+        return undefined
+      }
+      return target
+    }))
+    return results.filter((target): target is MarkedTarget => target !== undefined)
+  }
+
+  /** Closes the page (a tab, or a page a site opened) a target is or is in: the way it fails closed. */
+  private async closePageOf(target: MarkedTarget, reason: string): Promise<void> {
+    if (!this.marked.has(target.sessionId) || !this.automated(target)) return
+    const page = this.marked.get(target.pageSessionId)
+    workerWarning(`closed a page: ${reason}`, { session: this.id, type: target.type })
+    await this.chrome?.cdp.send('Target.closeTarget', { targetId: page?.targetId ?? target.targetId }, { timeoutMs: 5_000 }).catch(() => undefined)
+  }
+
+  /**
+   * A target Chromium attached on its own, held before its first script: a page (one of this
+   * session's tabs, or a page a site opened, with or without an opener), a frame from another site at
+   * any depth, a worker. A page or frame belongs to the page it is or is in (its parent session, as
+   * Chromium attached it), takes that page's mark, and holds the frames inside it the same way,
+   * before it runs. A worker has no `navigator.webdriver` and runs at once.
+   */
+  private onAttached(params: unknown, parentSessionId?: string): void {
+    const record = params as { sessionId?: string; waitingForDebugger?: boolean; targetInfo?: { type?: string; targetId?: string; parentFrameId?: string; url?: string } }
+    const sessionId = record.sessionId
+    const info = record.targetInfo
+    const cdp = this.chrome?.cdp
+    if (!sessionId || !cdp) return
+    const run = (): Promise<void> => record.waitingForDebugger
+      ? cdp.send('Runtime.runIfWaitingForDebugger', {}, { sessionId }).then(() => undefined, () => undefined)
+      : Promise.resolve()
+    const type = info?.type
+    if (this.closed || this.closing || (type !== 'page' && type !== 'iframe') || !info?.targetId) {
+      void run()
+      return
+    }
+    const parent = parentSessionId ? this.marked.get(parentSessionId) : undefined
+    const target: MarkedTarget = {
+      sessionId,
+      targetId: info.targetId,
+      type,
+      pageSessionId: type === 'page' ? sessionId : parent?.pageSessionId ?? parentSessionId ?? sessionId
+    }
+    this.marked.set(sessionId, target)
+    if (type === 'iframe') {
+      this.frames.set(sessionId, {
+        sessionId,
+        frameId: info.targetId,
+        parentFrameId: info.parentFrameId,
+        targetId: info.targetId,
+        url: sanitizeUrl(info.url ?? ''),
+        pageSessionId: target.pageSessionId
+      })
+      const work = this.enableFrame(sessionId)
+      this.frameEnables.set(sessionId, work)
+      void work.finally(() => {
+        if (this.frameEnables.get(sessionId) === work) this.frameEnables.delete(sessionId)
+      })
+    }
+    const work = this.holdUntilMarked(target, run).catch(() => false)
+    this.attachWork.set(info.targetId, { sessionId, work })
+    for (const wake of this.attachWaiters.get(info.targetId) ?? []) wake()
+    this.attachWaiters.delete(info.targetId)
+  }
+
+  /**
+   * Sets a held target's mark and the hold on frames inside it, then lets it run. A page a site
+   * opened without an opener has no renderer until it runs, so its mark is answered only after: it
+   * still lands before the page's first script, and if it never does, the page is closed. A target
+   * whose mark fails is never let run unmarked: a frame stays held (it never loads), a page is closed.
+   * Answers whether it runs marked.
+   */
+  private async holdUntilMarked(target: MarkedTarget, run: () => Promise<void>): Promise<boolean> {
+    let cdp: LaunchedChrome['cdp']
+    try {
+      cdp = this.requireChrome().cdp
+    } catch {
+      await run()
+      return false
+    }
+    const mark = settle(this.markAutomation(target, MARK_BEFORE_RUN_MS + MARK_AFTER_RUN_MS))
+    const nested = await settle(cdp.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }, { sessionId: target.sessionId, timeoutMs: MARK_AFTER_RUN_MS }))
+    const waited = new AbortController()
+    const early = await Promise.race([mark, sleep(MARK_BEFORE_RUN_MS, waited.signal).then(() => undefined, () => undefined)])
+    waited.abort()
+    const failed = async (released: boolean): Promise<false> => {
+      if (!this.marked.has(target.sessionId) || this.closed || this.closing) return false
+      // Unmarked reads false: harmless only while a person holds the browser and the frames inside are held.
+      if (nested.ok && !this.automated(target)) {
+        if (!released) await run()
+        return false
+      }
+      if (target.type === 'iframe' && !released) {
+        workerWarning('a frame stays held: it could not be marked as automated', { session: this.id })
+        return false
+      }
+      await this.closePageOf(target, 'it could not be marked as automated before it ran')
+      return false
+    }
+    if (!nested.ok || (early && !early.ok)) return failed(false)
+    await run()
+    const answered = early ?? await mark
+    if (!answered.ok) return failed(true)
+    return true
+  }
+
+  /**
+   * Opens a blank page for a tab, held until it is marked (`onAttached`), and answers its session:
+   * the session's tabs are the very sessions Chromium attached, so each page has one session and its
+   * frames attach once.
+   */
+  private async openPage(signal: AbortSignal, created?: (page: { targetId: string; sessionId?: string }) => void): Promise<{ targetId: string; sessionId: string }> {
+    const cdp = this.requireChrome().cdp
+    const { targetId } = await cdp.send<{ targetId: string }>('Target.createTarget', { url: 'about:blank' }, { signal })
+    created?.({ targetId })
+    if (!this.attachWork.has(targetId)) {
+      await new Promise<void>((resolve, reject) => {
+        const waiters = this.attachWaiters.get(targetId) ?? []
+        const done = (error?: Error) => {
+          clearTimeout(timer)
+          signal.removeEventListener('abort', onAbort)
+          const left = (this.attachWaiters.get(targetId) ?? []).filter((entry) => entry !== wake)
+          if (left.length) this.attachWaiters.set(targetId, left)
+          else this.attachWaiters.delete(targetId)
+          if (error) reject(error)
+          else resolve()
+        }
+        const wake = () => done()
+        const onAbort = () => done(new BrowserWorkerError('cancelled', 'Opening the tab was cancelled'))
+        const timer = setTimeout(() => done(new BrowserWorkerError('worker_disconnected', 'The new tab never attached')), MARK_AFTER_RUN_MS)
+        waiters.push(wake)
+        this.attachWaiters.set(targetId, waiters)
+        signal.addEventListener('abort', onAbort, { once: true })
+        if (signal.aborted) onAbort()
+      })
+    }
+    const attached = this.attachWork.get(targetId)
+    if (!attached) fail('worker_disconnected', 'The new tab closed while it opened')
+    created?.({ targetId, sessionId: attached.sessionId })
+    if (!await attached.work) fail('worker_disconnected', 'The new tab could not be marked as automated and was closed')
+    this.throwIfUnavailable(signal)
+    return { targetId, sessionId: attached.sessionId }
   }
 
   private async enableFrame(sessionId: string): Promise<void> {
@@ -844,10 +1131,17 @@ export class ManagedSession {
     if (signal?.aborted || this.sessionAbort.signal.aborted) fail('cancelled', 'Browser session work cancelled')
   }
 
+  /** The frames from other sites in one tab, nested ones included. */
+  private framesOf(tab: TabState): AttachedFrameState[] {
+    return [...this.frames.values()].filter((frame) => frame.pageSessionId === tab.cdpSessionId)
+  }
+
   private async frameViewportOffset(tab: TabState, frame: AttachedFrameState, visited = new Set<string>()): Promise<{ x: number; y: number } | null> {
     try {
+      if (frame.pageSessionId !== tab.cdpSessionId) return null
       if (visited.has(frame.sessionId)) return null
       visited.add(frame.sessionId)
+      const siblings = this.framesOf(tab)
       const candidates: Array<{ id?: string; parentId?: string; url?: string }> = []
       const tree = await this.requireChrome().cdp.send<{ frameTree?: { frame?: { id?: string; parentId?: string; url?: string }; childFrames?: unknown[] } }>('Page.getFrameTree', {}, { sessionId: tab.cdpSessionId })
       const visit = (node: { frame?: { id?: string; parentId?: string; url?: string }; childFrames?: unknown } | undefined) => {
@@ -858,14 +1152,14 @@ export class ManagedSession {
       }
       visit(tree.frameTree)
       const candidate = candidates.find((entry) => entry.id === frame.frameId)
-        ?? candidates.find((entry) => entry.id && ![...this.frames.values()].some((other) => other !== frame && other.frameId === entry.id))
+        ?? candidates.find((entry) => entry.id && !siblings.some((other) => other !== frame && other.frameId === entry.id))
       if (candidate?.id) {
         frame.frameId = candidate.id
         frame.parentFrameId = candidate.parentId
         frame.url = sanitizeUrl(candidate.url ?? frame.url)
       }
       if (!frame.frameId) return null
-      const parent = frame.parentFrameId ? [...this.frames.values()].find((entry) => entry.frameId === frame.parentFrameId) : undefined
+      const parent = frame.parentFrameId ? siblings.find((entry) => entry.frameId === frame.parentFrameId) : undefined
       const parentOffset = parent ? await this.frameViewportOffset(tab, parent, visited) : { x: 0, y: 0 }
       if (!parentOffset) return null
       const parentSessionId = parent?.sessionId ?? tab.cdpSessionId
@@ -926,7 +1220,7 @@ export class ManagedSession {
     }
     if (stored.identity.documentId !== tab.documentId) fail('stale_ref', 'Reference belongs to a previous document')
     const sessionId = stored.cdpSessionId ?? tab.cdpSessionId
-    if (sessionId !== tab.cdpSessionId && !this.frames.has(sessionId)) fail('stale_ref', 'Frame session is detached')
+    if (sessionId !== tab.cdpSessionId && this.frames.get(sessionId)?.pageSessionId !== tab.cdpSessionId) fail('stale_ref', 'Frame session is detached')
     return prepareActionableTarget(this.requireChrome().cdp, sessionId, stored, this.inFlight?.abort.signal)
   }
 

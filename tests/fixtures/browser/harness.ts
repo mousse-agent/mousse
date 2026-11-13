@@ -83,8 +83,32 @@ export async function startFixtureSite(): Promise<{ origin: string; close: () =>
   }
 }
 
-export async function startCrossOriginFixtureSite(): Promise<{ parentOrigin: string; childOrigin: string; close: () => Promise<void>; frameSubmitCount: () => number }> {
+/** What a fixture page reported (`/report?k=…&v=…`): a value its script read, on the site that served it. */
+export interface FixtureReport { site: 'parent' | 'child'; key: string; value: string; at: number }
+/** A page request's identity headers, as a site sees them. */
+export interface FixtureRequest { site: 'parent' | 'child'; path: string; userAgent?: string; secChUa?: string; secChUaPlatform?: string; secChUaMobile?: string }
+
+export async function startCrossOriginFixtureSite(): Promise<{ parentOrigin: string; childOrigin: string; close: () => Promise<void>; frameSubmitCount: () => number; reports: FixtureReport[]; requests: FixtureRequest[] }> {
   let frameSubmitRequests = 0
+  const reports: FixtureReport[] = []
+  const requests: FixtureRequest[] = []
+  let parentOrigin = ''
+  /** `/report` records what a page read; a page asked for with `delayMs` is answered that much later. */
+  const probe = (site: 'parent' | 'child', req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse, url: URL, serve: () => void): void => {
+    if (url.pathname === '/report') {
+      reports.push({ site, key: url.searchParams.get('k') ?? '', value: url.searchParams.get('v') ?? '', at: Date.now() })
+      res.setHeader('access-control-allow-origin', '*')
+      res.end('')
+      return
+    }
+    if (url.pathname.endsWith('.html')) {
+      const header = (name: string) => { const value = req.headers[name]; return Array.isArray(value) ? value.join(', ') : value }
+      requests.push({ site, path: url.pathname + url.search, userAgent: header('user-agent'), secChUa: header('sec-ch-ua'), secChUaPlatform: header('sec-ch-ua-platform'), secChUaMobile: header('sec-ch-ua-mobile') })
+    }
+    const delayMs = Number(url.searchParams.get('delayMs') ?? 0)
+    if (delayMs > 0) setTimeout(serve, Math.min(delayMs, 20_000))
+    else serve()
+  }
   const serveFile = (res: import('node:http').ServerResponse, pathname: string, extraBody?: string) => {
     const relative = pathname.replace(/^\/+/, '')
     const file = join(SITE_DIR, relative)
@@ -105,25 +129,39 @@ export async function startCrossOriginFixtureSite(): Promise<{ parentOrigin: str
       res.end('accepted')
       return
     }
-    serveFile(res, url.pathname === '/' ? '/frame-child.html' : url.pathname)
+    probe('child', req, res, url, () => {
+      const pathname = url.pathname === '/' ? '/frame-child.html' : url.pathname
+      const page = join(SITE_DIR, pathname.replace(/^\/+/, ''))
+      if (pathname.startsWith('/automation-') && pathname.endsWith('.html') && page.startsWith(SITE_DIR) && existsSync(page)) {
+        serveFile(res, pathname, readFileSync(page, 'utf8').replaceAll('__CHILD_ORIGIN__', childOrigin).replaceAll('__PARENT_ORIGIN__', parentOrigin))
+        return
+      }
+      serveFile(res, pathname)
+    })
   })
   await new Promise<void>((resolvePromise) => childServer.listen(0, resolvePromise))
   const childAddress = childServer.address() as AddressInfo
   const childOrigin = `http://foo.test:${childAddress.port}`
   const parentServer: Server = createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
-    if (url.pathname === '/frame-parent.html') {
-      serveFile(res, '/frame-parent.html', readFileSync(join(SITE_DIR, 'frame-parent.html'), 'utf8').replace('__CHILD_ORIGIN__', childOrigin))
-      return
-    }
-    serveFile(res, url.pathname === '/' ? '/form.html' : url.pathname)
+    probe('parent', req, res, url, () => {
+      const pathname = url.pathname === '/' ? '/form.html' : url.pathname
+      const page = join(SITE_DIR, pathname.replace(/^\/+/, ''))
+      if (pathname.endsWith('.html') && page.startsWith(SITE_DIR) && existsSync(page)) {
+        serveFile(res, pathname, readFileSync(page, 'utf8').replaceAll('__CHILD_ORIGIN__', childOrigin).replaceAll('__PARENT_ORIGIN__', parentOrigin))
+        return
+      }
+      serveFile(res, pathname)
+    })
   })
   await new Promise<void>((resolvePromise) => parentServer.listen(0, '127.0.0.1', resolvePromise))
   const parentAddress = parentServer.address() as AddressInfo
-  const parentOrigin = `http://127.0.0.1:${parentAddress.port}`
+  parentOrigin = `http://127.0.0.1:${parentAddress.port}`
   return {
     parentOrigin,
     childOrigin,
+    reports,
+    requests,
     frameSubmitCount: () => frameSubmitRequests,
     close: async () => {
       await Promise.all([

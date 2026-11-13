@@ -115,6 +115,8 @@ export interface BrowserToolOutput {
   readonly session?: BrowserSessionRecord
   readonly observation?: BrowserObservation
   readonly tabs?: BrowserTab[]
+  /** The tab `browser_tabs` `new` opened (host-side: its caller keeps it, whatever else opened meanwhile). */
+  readonly tab?: BrowserTab
   readonly matches?: unknown[]
   readonly observationId?: string
   readonly action?: BrowserActionResult

@@ -31,6 +31,28 @@ export interface LaunchChromeOptions {
   extraArgs?: string[]
   env?: NodeJS.ProcessEnv
   signal?: AbortSignal
+  /** The browser's version (`153.0.8010.36`): without a window it still reports the user agent it has with one. */
+  browserVersion?: string
+  /**
+   * The session sets `navigator.webdriver` on each page and frame itself (`Emulation.setAutomationOverride`),
+   * so it can be false while a person holds the browser. Chromium marks every page of a pipe-driven
+   * browser as automated and that mark cannot be lifted per page, so the process starts without it.
+   */
+  automationMarkedPerPage?: boolean
+}
+
+/**
+ * The user agent this Chrome reports when it has a window: Chrome's reduced user agent, whose
+ * platform and minor version are frozen. Without a window Chrome says `HeadlessChrome`, which sites
+ * read as a robot even when a person is the one clicking.
+ */
+export function windowedChromeUserAgent(browserVersion: string | undefined, platform: NodeJS.Platform = process.platform): string | undefined {
+  const major = /^(\d+)\.\d/.exec(browserVersion ?? '')?.[1]
+  if (!major) return undefined
+  const system = platform === 'darwin' ? 'Macintosh; Intel Mac OS X 10_15_7'
+    : platform === 'win32' ? 'Windows NT 10.0; Win64; x64'
+    : 'X11; Linux x86_64'
+  return `Mozilla/5.0 (${system}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36`
 }
 
 export function chromeLaunchArgs(options: LaunchChromeOptions): string[] {
@@ -65,7 +87,12 @@ export function chromeLaunchArgs(options: LaunchChromeOptions): string[] {
     '--hide-scrollbars',
     '--mute-audio'
   ]
-  if (options.headless !== false) args.unshift('--headless=new', '--disable-gpu')
+  if (options.headless !== false) {
+    args.unshift('--headless=new', '--disable-gpu')
+    const userAgent = windowedChromeUserAgent(options.browserVersion)
+    if (userAgent) args.push(`--user-agent=${userAgent}`)
+  }
+  if (options.automationMarkedPerPage) args.push('--disable-blink-features=AutomationControlled')
   if (options.deviceScaleFactor && options.deviceScaleFactor !== 1) args.push(`--force-device-scale-factor=${options.deviceScaleFactor}`)
   if (options.extraArgs) args.push(...options.extraArgs)
   if (args.some((arg) => arg.startsWith('--remote-debugging-port'))) fail('invalid_action', 'Public remote-debugging TCP is not permitted')

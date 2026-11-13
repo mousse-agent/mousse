@@ -195,6 +195,21 @@ export class BrowserTurns {
   }
 }
 
+/** The bot's answer when it tries to act, open or load a page while its owner holds the browser. */
+function ownerHolds(): BrowserAutomationError {
+  return new BrowserAutomationError({ code: 'human_controlled', message: 'Your owner is using your browser now. Wait for them to give it back, or carry on without it.' })
+}
+
+/** The owner's input waited past `OWNER_INPUT_WAIT_MS` for the call under way. */
+function ownerInputBusy(): BrowserAutomationError {
+  return new BrowserAutomationError({ code: 'timeout', message: 'The bot\'s browser is busy finishing a step of its work. Try again in a moment.' })
+}
+
+/** A call that acts on a page, opens a tab or loads a page: refused while the owner holds the browser. */
+function actsOrLoads(name: BrowserAutomationTool, params: Record<string, unknown>): boolean {
+  return name === 'browser_act' || name === 'browser_open' || (name === 'browser_tabs' && params.operation === 'new')
+}
+
 const defaultTimer = (fn: () => void, ms: number): { clear(): void } => {
   const timer = setTimeout(fn, ms)
   timer.unref?.()
@@ -339,7 +354,7 @@ export class BotBrowsers implements BotBrowserHost {
     if (!tabId && this.held(state)) throw gone()
     await state.turns.run(
       (held) => this.ownerCall(state, (context) => this.service().sessions.humanInput(context, { sessionId, input, ...(tabId ? { tabId } : {}) }), held),
-      { first: true, waitMs: OWNER_INPUT_WAIT_MS, busy: () => new BrowserAutomationError({ code: 'timeout', message: 'The bot\'s browser is busy finishing a step of its work. Try again in a moment.' }), ...(tabId ? { tab: tabId } : {}) }
+      { first: true, waitMs: OWNER_INPUT_WAIT_MS, busy: ownerInputBusy, ...(tabId ? { tab: tabId } : {}) }
     ).catch((error: unknown) => {
       throw error instanceof BrowserAutomationError && error.code === 'stale_ref' ? gone() : error
     })
@@ -349,16 +364,25 @@ export class BotBrowsers implements BotBrowserHost {
 
   /**
    * Opens the bot's browser for its owner, under their control: to sign in to a site for the bot.
-   * An open browser is handed to the owner as it is, on `url` when one is given.
+   * An open browser is handed to the owner as it is, on `url` when one is given. A closed one opens
+   * blank and is the owner's before it loads anything, so `url` loads as the owner's page.
    */
   async open(botId: string, url?: string): Promise<BotBrowserView> {
     const state = this.stateFor(botId)
     state.follow ??= state.lastFrame?.frame.tabId
-    await this.ownerCall(state, async (context) => {
-      const opened = await this.ensureSession(state, context, url)
+    const sessionId = await this.ownerCall(state, async (context) => {
+      const opened = await this.ensureSession(state, context, undefined)
       if (this.record(state)?.lifecycle !== 'human-controlled') await this.service().sessions.control(context, opened.sessionId, 'human')
-      if (url && !opened.opened) await this.service().sessions.humanInput(context, { sessionId: opened.sessionId, input: { kind: 'navigate', url }, ...(state.follow ? { tabId: state.follow } : {}) })
+      return opened.sessionId
     })
+    // The page loads as the owner's input: in the next turn, so it never lands beside a run's call.
+    if (url) {
+      const tabId = state.follow
+      await state.turns.run(
+        (held) => this.ownerCall(state, (context) => this.service().sessions.humanInput(context, { sessionId, input: { kind: 'navigate', url }, ...(tabId ? { tabId } : {}) }), held),
+        { first: true, waitMs: OWNER_INPUT_WAIT_MS, busy: ownerInputBusy, ...(tabId ? { tab: tabId } : {}) }
+      )
+    }
     state.lastViewedAt = this.now()
     if (![...state.activations.values()].some((entry) => !entry.ended)) this.armIdle(state)
     state.lastFrame = undefined
@@ -399,6 +423,8 @@ export class BotBrowsers implements BotBrowserHost {
     this.markUsed(state, activationId)
     state.idle?.clear()
     state.idle = undefined
+    // While the owner holds the browser the bot reads it, and acts, opens or loads nothing.
+    if (actsOrLoads(name, params) && this.held(state)) throw ownerHolds()
     // Opening the session (and a first use's install) is shared and needs no turn: the open is made once.
     const url = name === 'browser_open' && typeof params.url === 'string' ? params.url : undefined
     const opened = name === 'browser_open' ? await this.ensureSession(state, context, url) : undefined
@@ -413,6 +439,8 @@ export class BotBrowsers implements BotBrowserHost {
   /** One of the bot's tool calls, while it holds the browser (`BrowserTurns`). */
   private async dispatchInTurn(state: BotBrowserState, activation: ActivationTabs, context: BrowserToolContext, name: BrowserAutomationTool, params: Record<string, unknown>, opened: OpenedSession | undefined, url: string | undefined): Promise<BrowserToolOutput> {
     let result: BrowserToolOutput
+    // Checked again in the call's turn: the owner may have taken the browser over while it waited.
+    if (actsOrLoads(name, params) && this.held(state)) throw ownerHolds()
     if (opened) {
       let tabId: string | undefined
       if (opened.opened) tabId = opened.opened.observation?.tabId
@@ -434,8 +462,6 @@ export class BotBrowsers implements BotBrowserHost {
         if (params.tabId === undefined && activation.current) params.tabId = activation.current
         if (typeof params.tabId === 'string' && !activation.tabs.has(params.tabId))
           throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'That tab belongs to another of your runs. Open your own with browser_open.' })
-        if (name === 'browser_act' && this.record(state)?.lifecycle === 'human-controlled')
-          throw new BrowserAutomationError({ code: 'human_controlled', message: 'Your owner is using your browser now. Wait for them to give it back, or carry on without it.' })
         result = await this.invoke(context, name, params)
       }
     }
@@ -496,12 +522,9 @@ export class BotBrowsers implements BotBrowserHost {
     return this.record(state)?.lifecycle === 'human-controlled'
   }
 
-  /** A new tab in the bot's session; its id is the one the list did not have before. */
+  /** A new tab in the bot's session: the one the browser opened for this call, whatever other activations opened meanwhile. */
   private async newTab(context: BrowserToolContext, sessionId: string, url: string | undefined): Promise<string | undefined> {
-    const before = new Set((await this.invoke(context, 'browser_tabs', { sessionId, operation: 'list' })).tabs?.map((tab) => tab.id) ?? [])
-    await this.invoke(context, 'browser_tabs', { sessionId, operation: 'new', ...(url ? { url } : {}) })
-    const after = (await this.invoke(context, 'browser_tabs', { sessionId, operation: 'list' })).tabs ?? []
-    return after.find((tab) => !before.has(tab.id))?.id
+    return (await this.invoke(context, 'browser_tabs', { sessionId, operation: 'new', ...(url ? { url } : {}) })).tab?.id
   }
 
   private async invoke(context: BrowserToolContext, name: BrowserAutomationTool, args: Record<string, unknown>): Promise<BrowserToolOutput> {

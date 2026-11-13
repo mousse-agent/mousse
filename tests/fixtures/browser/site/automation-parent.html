@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Automation mark</title>
+  <script>window.firstMark = String(navigator.webdriver)</script>
+</head>
+<body>
+  <p id="top-first"></p>
+  <p id="top-now"></p>
+  <p id="identity"></p>
+  <p id="worker">worker:waiting</p>
+  <p id="popup">popup:none</p>
+  <button id="open-popup" type="button">Open popup</button>
+  <iframe title="Automation child" style="display:block;width:400px;height:160px" src="__CHILD_ORIGIN__/automation-child.html"></iframe>
+  <script>
+    document.getElementById('top-first').textContent = 'top-first:' + window.firstMark
+    const agent = navigator.userAgent
+    document.getElementById('identity').textContent = 'identity:' + (agent.includes('HeadlessChrome') ? 'headless' : agent.includes('Chrome/') ? 'chrome' : 'other')
+    setInterval(() => { document.getElementById('top-now').textContent = 'top-now:' + navigator.webdriver }, 50)
+    const worker = new Worker(URL.createObjectURL(new Blob(['postMessage("ran")'])))
+    worker.onmessage = () => { document.getElementById('worker').textContent = 'worker:ran' }
+    document.getElementById('open-popup').addEventListener('click', () => {
+      const opened = window.open('/automation-popup.html', '_blank')
+      setTimeout(() => { document.getElementById('popup').textContent = 'popup:' + (opened && opened.firstMark) }, 800)
+    })
+  </script>
+</body>
+</html>

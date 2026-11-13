@@ -145,6 +145,7 @@
     "tests/platformBrowserPackaging.test.ts",
     "tests/platformBrowserViewer.test.ts",
     "tests/platformBrowserWorker.actions.test.ts",
+    "tests/platformBrowserWorker.automationMark.test.ts",
     "tests/platformBrowserWorker.lifecycle.test.ts",
     "tests/platformBrowserWorker.observation.test.ts",
     "tests/platformBrowserWorkerBinaryResolver.test.ts",

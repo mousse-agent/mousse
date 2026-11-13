@@ -222,8 +222,11 @@ export class BrowserSessionManager {
     const operation = input.operation ?? 'list'
     const method = operation === 'list' ? 'tabs.list' : `tabs.${operation}`
     const result = await this.call(context.execution.profileId, method as Parameters<BrowserBroker['call']>[0]['method'], { sessionId, ...(input.tabId ? { tabId: input.tabId } : {}), ...(input.url ? { url: input.url } : {}) }, this.signal(context))
-    const payload = result as { tabs?: BrowserTab[] }
-    return { tabs: payload.tabs ?? (Array.isArray(result) ? result as BrowserTab[] : []) }
+    const payload = result as { tabs?: BrowserTab[]; id?: unknown; title?: unknown; url?: unknown }
+    const opened = operation === 'new' && typeof payload.id === 'string'
+      ? { tab: { id: payload.id, title: typeof payload.title === 'string' ? payload.title : '', url: typeof payload.url === 'string' ? payload.url : '' } }
+      : {}
+    return { tabs: payload.tabs ?? (Array.isArray(result) ? result as BrowserTab[] : []), ...opened }
   }
 
   async observe(context: BrowserToolContext, input: { sessionId: string; tabId?: string; ref?: string; includeScreenshot?: boolean; maxElements?: number }, tool: 'browser_observe' | 'browser_screenshot' = 'browser_observe'): Promise<BrowserToolOutput> {

@@ -9,6 +9,13 @@ function mouseButton(button?: 'left' | 'right' | 'middle'): 'left' | 'right' | '
   return button ?? 'left'
 }
 
+/** The `buttons` bit a pressed button sets, as in `MouseEvent.buttons`. */
+const BUTTON_BITS = { left: 1, right: 2, middle: 4 } as const
+
+/**
+ * A click as a mouse makes one: the pointer arrives with no button held, the button goes down, then
+ * up. A move that names a button reads as a drag that started before the press.
+ */
 async function mouseClick(
   cdp: CdpTransport,
   sessionId: string,
@@ -18,9 +25,9 @@ async function mouseClick(
   clickCount: number,
   signal?: AbortSignal
 ): Promise<void> {
-  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button }, { sessionId, signal })
-  await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button, clickCount }, { sessionId, signal })
-  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button, clickCount }, { sessionId, signal })
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none', buttons: 0 }, { sessionId, signal })
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button, buttons: BUTTON_BITS[button], clickCount }, { sessionId, signal })
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button, buttons: 0, clickCount }, { sessionId, signal })
 }
 
 async function focus(cdp: CdpTransport, sessionId: string, backendNodeId: number, signal?: AbortSignal): Promise<void> {
