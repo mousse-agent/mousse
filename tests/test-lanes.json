@@ -134,6 +134,7 @@
   "browser": [
     "tests/botBrowserClipboard.test.ts",
     "tests/botBrowserInput.test.ts",
+    "tests/chatBrowserSnapshots.test.ts",
     "tests/chatUndoFullShell.test.ts",
     "tests/errorElectronBridge.test.ts",
     "tests/gitFoundationFullShell.test.ts",
@@ -145,7 +146,6 @@
     "tests/platformBrowserModelAdapters.test.ts",
     "tests/platformBrowserNetworkSandbox.test.ts",
     "tests/platformBrowserPackaging.test.ts",
-    "tests/platformBrowserViewer.test.ts",
     "tests/platformBrowserWorker.actions.test.ts",
     "tests/platformBrowserWorker.automationMark.test.ts",
     "tests/platformBrowserWorker.lifecycle.test.ts",
@@ -164,6 +164,7 @@
     "tests/renderer/profileReady-startup-electron.test.ts",
     "tests/renderer/storage-settings-electron.test.ts",
     "tests/renderer/turn-window-electron.test.ts",
-    "tests/resourceLifecycleFullShell.test.ts"
+    "tests/resourceLifecycleFullShell.test.ts",
+    "tests/threadBrowsers.test.ts"
   ]
 }
