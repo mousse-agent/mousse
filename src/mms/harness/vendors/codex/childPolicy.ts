@@ -153,6 +153,9 @@ export const CODEX_COMMAND_FEATURES: readonly string[] = ['shell_tool', 'unified
  * - `agent_message_board`: a message board between agents, which reaches other threads; it also adds `clock.curr_time`
  *   and code mode's `tool_search`.
  * - `code_mode_tool_search`: code mode's `tool_search`, which loads tools the turn wasn't offered.
+ * - `multi_env_copy_file` (from 0.164.0): copies a file by its path between environments, outside the bot's authority.
+ * - `executor_capability_discovery_v2` (from 0.164.0): a `skills` namespace (`list`, `read`, `installations`) that
+ *   reads the owner's installed skills, which a bot is held to its granted ones.
  * - `use_legacy_landlock`: Codex's older Landlock sandbox in place of bubblewrap, which the bot's profile relies on (with
  *   it on, a bot's turn can't start).
  * - `rollout_budget`: a token budget that won't load without settings whose form isn't documented, so its tools, if
@@ -188,6 +191,8 @@ export const CODEX_BOT_FEATURES_OFF: readonly string[] = [
   'deferred_executor',
   'agent_message_board',
   'code_mode_tool_search',
+  'multi_env_copy_file',
+  'executor_capability_discovery_v2',
   'use_legacy_landlock'
 ]
 
