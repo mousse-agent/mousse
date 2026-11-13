@@ -1057,13 +1057,6 @@
 
 .side-card-git-next-spin {
   flex: none;
-  animation: side-card-git-next-spin 0.9s steps(12) infinite;
-}
-
-@keyframes side-card-git-next-spin {
-  to {
-    transform: rotate(360deg);
-  }
 }
 
 
@@ -1101,10 +1094,4 @@
 .side-card-git-commit-open:hover {
   background: var(--ui-hover);
   color: var(--text-primary);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .side-card-git-next-spin {
-    animation: none;
-  }
 }

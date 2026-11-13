@@ -1,6 +1,7 @@
 import { forwardRef, type ForwardRefExoticComponent, type RefAttributes, type SVGProps } from 'react'
 import { HugeiconsIcon, type IconSvgElement } from '@hugeicons/react'
 import '../styles/thinking-icon.css'
+import { turnable } from './turning'
 import Activity01Icon from '@hugeicons/core-free-icons/Activity01Icon'
 import Add01Icon from '@hugeicons/core-free-icons/Add01Icon'
 import AddSquareIcon from '@hugeicons/core-free-icons/AddSquareIcon'
@@ -181,7 +182,8 @@ export type LucideIcon = IconComponent
 
 function createIcon(name: string, icon: IconSvgElement): IconComponent {
   const Component = forwardRef<SVGSVGElement, IconProps>(function AppIcon({ size = 16, stroke, strokeWidth, className = '', ...props }, ref) {
-    return <HugeiconsIcon
+    // A spinner class (icon-spin, spin, animate-spin…) turns a wrapper span instead of the svg (lib/turning.tsx).
+    return turnable(className, (svgClass) => <HugeiconsIcon
       ref={ref}
       icon={icon}
       size={size}
@@ -189,9 +191,9 @@ function createIcon(name: string, icon: IconSvgElement): IconComponent {
       {...(typeof stroke === 'string' ? { stroke } : {})}
       aria-hidden={props['aria-label'] ? undefined : true}
       data-icon-library="hugeicons"
-      className={`mousse-icon ${className}`.trim()}
+      className={`mousse-icon ${svgClass}`.trim()}
       {...props}
-    />
+    />)
   })
   Component.displayName = name
   return Component

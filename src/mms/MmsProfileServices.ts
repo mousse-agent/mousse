@@ -60,7 +60,7 @@ import { botInstructions } from './bots/instructions'
 import { createBotMemoryAdmin } from './bots/memory/admin'
 import { BotMemoryStore } from './bots/memory/BotMemoryStore'
 import { botThreadsForCatchUp, createBotJournal } from './bots/memory/capture'
-import { createBotContextProvider, type BotSituation } from './bots/memory/contextPack'
+import { BOT_PACK_REACTIONS, createBotContextProvider, type BotSituation } from './bots/memory/contextPack'
 import { createBotModelResolver, type BotModelChooser } from './bots/model/BotModelResolver'
 import { BOT_SUPERVISOR_MISSING, createBotProcessRegistry, type BotProcessRegistry } from './bots/supervisor/BotProcessRegistry'
 import { BotScheduleBook, botWhenOf } from './scheduled/botJobs'
@@ -818,7 +818,9 @@ export class MmsProfileServices {
         store: memory,
         journal,
         situation: (botId) => this.botSituation(botId),
-        scheduleCreatedAt: (botId, scheduleId) => this.botSchedules?.get(botId, scheduleId)?.createdAt
+        scheduleCreatedAt: (botId, scheduleId) => this.botSchedules?.get(botId, scheduleId)?.createdAt,
+        reactions: (botId, since) => store.reactionsSince(botId, since, BOT_PACK_REACTIONS)
+          .map((row) => ({ emoji: row.ownerReaction!.emoji, at: row.ownerReaction!.at, text: row.text, fromWork: row.kind === 'run_report' || (row.activationId !== null && store.activation(row.activationId)?.lane === 'run') }))
       })
       // A scheduled run of a bot's automation learns the report levels, its context and Tuning, as any automation run does.
       const context: typeof pack = {

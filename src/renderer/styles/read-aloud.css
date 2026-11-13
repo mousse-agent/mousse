@@ -154,12 +154,3 @@
   margin: 0;
 }
 
-.read-aloud-spin {
-  animation: read-aloud-spin 0.9s steps(12) infinite;
-}
-
-@keyframes read-aloud-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}

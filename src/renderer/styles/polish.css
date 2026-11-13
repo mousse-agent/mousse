@@ -1018,7 +1018,10 @@ html .composer-command-suggestion.selected::before {
   background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.5), transparent);
   background-size: 36% 100%;
   background-repeat: no-repeat;
-  animation: ui-edge-glint calc(680ms * var(--ui-motion-scale)) ease-out 1 forwards;
+  /* Hidden at rest, so the run ends where it started and nothing holds it: a fill-mode of forwards would keep the
+     finished run in effect, and with it a composited layer, for as long as the item stays selected. */
+  opacity: 0;
+  animation: ui-edge-glint calc(680ms * var(--ui-motion-scale)) ease-out 1;
 }
 
 @keyframes ui-edge-glint {

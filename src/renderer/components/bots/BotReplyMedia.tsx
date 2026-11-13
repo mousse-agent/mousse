@@ -105,7 +105,8 @@ function Picture({ image, images, single, onMenu }: { image: ReplyImage; images:
 }
 
 /** Several pictures side by side: snap scrolling, arrows on hover, Left and Right once focused, a count while they overflow. */
-function Carousel({ images, children }: { images: readonly ReplyImage[]; children: ReactNode }) {
+/** `menuOpen`: a picture's menu is open, and the arrows step aside for it. */
+function Carousel({ images, menuOpen = false, children }: { images: readonly ReplyImage[]; menuOpen?: boolean; children: ReactNode }) {
   const track = useRef<HTMLDivElement>(null)
   const [index, setIndex] = useState(0)
   const [overflows, setOverflows] = useState(false)
@@ -160,7 +161,7 @@ function Carousel({ images, children }: { images: readonly ReplyImage[]; childre
     go(index + (event.key === 'ArrowRight' ? 1 : -1))
   }
   const fades = `${overflows && more.before ? ' fades-before' : ''}${overflows && more.after ? ' fades-after' : ''}`
-  return <div className={`bot-carousel${overflows ? ' is-overflowing' : ''}`} role="group" aria-roledescription="carousel" aria-label={`${images.length} pictures`} tabIndex={0} onKeyDown={keys}>
+  return <div className={`bot-carousel${overflows ? ' is-overflowing' : ''}${menuOpen ? ' is-menu-open' : ''}`} role="group" aria-roledescription="carousel" aria-label={`${images.length} pictures`} tabIndex={0} onKeyDown={keys}>
     <div className={`bot-carousel-strip${fades}`}>
       <div className="bot-carousel-track" ref={track} onScroll={scrolled}>{children}</div>
       {/* An arrow only where there is more to see. */}
@@ -172,11 +173,16 @@ function Carousel({ images, children }: { images: readonly ReplyImage[]; childre
   </div>
 }
 
-/** A reply's pictures, above its words: one alone, or several in a carousel. */
-export function BotReplyMedia({ images }: { images: readonly ReplyImage[] }) {
+/**
+ * A reply's pictures, above its words: one alone, or several in a carousel. `onMenuOpen`: a picture's menu opened or
+ * closed, so what sits beside the bubble steps aside for it.
+ */
+export function BotReplyMedia({ images, onMenuOpen }: { images: readonly ReplyImage[]; onMenuOpen?: (open: boolean) => void }) {
   const [menu, setMenu] = useState<MenuAt | null>(null)
   const gallery = useImageGallery()
   const closeMenu = useCallback(() => setMenu(null), [])
+  const menuOpen = menu !== null
+  useEffect(() => { onMenuOpen?.(menuOpen) }, [menuOpen, onMenuOpen])
   if (!images.length) return null
   const openFromMenu = () => {
     if (!menu || !gallery) return
@@ -186,7 +192,7 @@ export function BotReplyMedia({ images }: { images: readonly ReplyImage[] }) {
   }
   const pictures = images.map((image) => <Picture key={image.key} image={image} images={images} single={images.length === 1} onMenu={setMenu} />)
   return <div className="bot-reply-media">
-    {images.length === 1 ? pictures : <Carousel images={images}>{pictures}</Carousel>}
+    {images.length === 1 ? pictures : <Carousel images={images} menuOpen={menuOpen}>{pictures}</Carousel>}
     {menu && <PictureMenu at={menu} onOpen={openFromMenu} onClose={closeMenu} />}
   </div>
 }
