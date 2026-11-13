@@ -421,6 +421,26 @@ export function workGroupTitle(items: AssistantToolItem[]): string {
 }
 
 /**
+ * A group's header: the latest thought written before one of its calls, with a short tag of what the calls did after
+ * it (`summary`: "Ran 1 command", or "8 actions" for a mix); otherwise what the calls did (`workGroupTitle`) and no summary. That thought says why
+ * the calls ran, which a count does not. A thought after the group's last call is about what comes next, so it does
+ * not title the calls.
+ */
+export function workGroupHeading(items: AssistantToolItem[]): { title: string; summary?: string } {
+  const title = workGroupTitle(items);
+  let lastCall = -1;
+  items.forEach((item, index) => { if (workKindOf(item.part.type) !== "thought") lastCall = index; });
+  const thought = lastCall > 0 ? latestThoughtTitle(items.slice(0, lastCall)) : "";
+  if (!thought) return { title };
+  // Short beside a thought: one kind keeps its phrase ("Ran 3 commands"), a mix counts its calls ("8 actions").
+  const kinds = tallyKinds(items).filter((tally) => tally.kind !== "thought").length;
+  const calls = items.filter((item) => workKindOf(item.part.type) !== "thought").length;
+  // The row cuts the thought at its width; past a few lines' worth it is not read out either.
+  const heading = thought.length > 200 ? `${thought.slice(0, 199).trimEnd()}…` : thought;
+  return { title: heading, summary: kinds === 1 ? title : plural(calls, "action") };
+}
+
+/**
  * The part type whose icon stands for a group: its calls' type when they are all of one kind ("tool-Thinking" when
  * it holds only thoughts), undefined for a mix.
  */

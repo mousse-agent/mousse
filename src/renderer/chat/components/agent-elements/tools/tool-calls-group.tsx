@@ -9,8 +9,10 @@ export type ToolCallsGroupProps = {
   count: number;
   /** The icon of the calls' kind, or a wrench for a mix. */
   icon?: ReactNode;
-  /** What the calls did ("Read 3 files and ran 2 commands"), from `workGroupTitle`. */
+  /** The latest thought in the group, or what the calls did ("Read 3 files and ran 2 commands"): `workGroupHeading`. */
   title: string;
+  /** What the calls did, after a thought title: a short dim tag that is never cut. */
+  summary?: string;
   /** Failed calls inside the group: named in the header. */
   failed?: number;
   /** True while the turn runs: an open group keeps its newest row in view as rows arrive. */
@@ -33,6 +35,7 @@ export const ToolCallsGroup = memo(function ToolCallsGroup({
   count,
   icon,
   title,
+  summary,
   failed = 0,
   live = false,
   openKey,
@@ -62,10 +65,14 @@ export const ToolCallsGroup = memo(function ToolCallsGroup({
     <ToolRowBase
       icon={icon}
       completeLabel={title}
+      labelTitle={summary ? title : undefined}
       shimmer={false}
       badge={
-        failed > 0 ? (
-          <span className="text-[var(--danger)]">· {failed} failed</span>
+        summary || failed > 0 ? (
+          <>
+            {summary && <span className="text-an-foreground-muted/60">· {summary}</span>}
+            {failed > 0 && <span className="text-[var(--danger)]">{summary ? " " : ""}· {failed} failed</span>}
+          </>
         ) : undefined
       }
       isAnimating={false}

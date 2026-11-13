@@ -87,10 +87,10 @@ export function getToolStatus(part: any, chatStatus?: string) {
 }
 
 /**
- * Heading for a thinking row: first non-empty line of the thought content,
- * truncated. Shown beside the thinking icon, and as an activity-group title.
+ * Heading for a thinking row: first non-empty line of the thought content, in plain text, cut at `limit` characters
+ * (with no limit, the row cuts it at its own width).
  */
-export function thoughtHeading(content: string | undefined): string {
+export function thoughtHeading(content: string | undefined, limit = 64): string {
   if (!content) return "";
   const firstLine =
     content
@@ -100,8 +100,8 @@ export function thoughtHeading(content: string | undefined): string {
   const plainText = stripInlineMarkdown(
     firstLine.replace(/^#{1,6}\s+/, "").replace(/^>\s?/, ""),
   ).trim();
-  if (plainText.length <= 64) return plainText;
-  return `${plainText.slice(0, 61).trimEnd()}...`;
+  if (plainText.length <= limit) return plainText;
+  return `${plainText.slice(0, limit - 3).trimEnd()}...`;
 }
 
 /**
@@ -114,7 +114,7 @@ export function thoughtLine(content: string | undefined): string {
 }
 
 /**
- * One line for the newest part of a thought. A thought made of titled
+ * One line for the newest part of a thought, whole (a row cuts it at its width). A thought made of titled
  * summaries ("**Title**" lines, as Codex sends them) gives its last title;
  * any other gives the first line of its last paragraph.
  */
@@ -123,11 +123,11 @@ export function latestThoughtHeading(content: string | undefined): string {
   const lines = content.split("\n").map((line) => line.trim());
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     if (/^(\*\*|__)[^*_].*\1$/.test(lines[index]!)) {
-      return thoughtHeading(lines[index]);
+      return thoughtHeading(lines[index], Infinity);
     }
   }
   const paragraphs = content.split(/\n\s*\n/).filter((block) => block.trim());
-  return thoughtHeading(paragraphs[paragraphs.length - 1]);
+  return thoughtHeading(paragraphs[paragraphs.length - 1], Infinity);
 }
 
 /**

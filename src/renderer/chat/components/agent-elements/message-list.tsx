@@ -65,7 +65,7 @@ import {
   isStandaloneToolType,
   settleEarlierThoughts,
   workGroupIconType,
-  workGroupTitle,
+  workGroupHeading,
   type FoldRow,
   isErrorPart,
   isRecord,
@@ -2580,7 +2580,7 @@ const TurnRow = memo(function TurnRow({
                     <RowTools size={18} />
                   )
                 }
-                title={workGroupTitle(grouped)}
+                {...workGroupHeading(grouped)}
                 // Only failures the agent did not get past are named on the group line.
                 failed={unrecovered}
                 live={isLastTurn && isStreaming}
