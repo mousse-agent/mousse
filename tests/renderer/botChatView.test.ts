@@ -545,6 +545,17 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
     expect(fake.calls).toContainEqual(['stopWork', 'inbox', 'act_w1'])
   })
 
+  it('work on a model the owner named says which on its line and its chip, with the details on hover', async () => {
+    const detail = 'Opus 5.5 on Claude Code, high reasoning, for this work only'
+    fake.chats.inbox = [message(1, { id: 'b1', text: 'On it.', chips: [{ icon: 'think', text: 'started', highlight: 'Vacuum comparison · Opus 5.5', title: detail }] })]
+    await open({ ...working, work: [{ ...working.work![0]!, model: { name: 'Opus 5.5', detail } }] })
+    const line = host.querySelector('.bot-work-line')!
+    expect(line.textContent).toBe('Vacuum comparisonworking · Opus 5.5 · 4 min')
+    expect(line.querySelector('[title]')!.getAttribute('title')).toBe(detail)
+    const chip = [...transcript().querySelectorAll('.bot-chip')].find((element) => element.textContent?.includes('Opus 5.5'))!
+    expect(chip.getAttribute('title')).toBe(detail)
+  })
+
   it("the chat's own turn has the status line and Stop, with its own chip", async () => {
     await open({ ...working, chat: { activationId: 'act_c1' }, work: [] })
     await act(async () => fake.emit.activity('inbox', { icon: 'memory', text: 'remembering', live: true }, 'act_c1'))
