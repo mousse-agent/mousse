@@ -198,7 +198,7 @@ describe('the line under Working', () => {
     const first = reply('t1', { ...thought('output-available', '**Reading the test**\n\nIt starts both.'), toolCallId: 'th1' })
     render([ask(), first, reply('c1', tool('Bash', 'input-available', { command: 'npm test' }))], 'streaming', { phase: 'tool_running' })
     expect(host.querySelector('.turn-answer .an-text-shimmer--active')).toBeNull()
-    expect(groupHeader('Ran 1 command')).not.toBeNull()
+    expect(groupHeader('Reading the test')!.textContent).toContain('· Ran 1 command')
   })
 
   it('3. a thought being written is read out now and then, not with every word', () => {
@@ -251,7 +251,8 @@ describe('the line under Working', () => {
     const live = reply('t2', { ...thought('input-available', '**Planning the fix**\n\nMake A due earlier'), toolCallId: 'th2' })
     render([ask(), first, call, live], 'streaming', { phase: 'thinking' })
     expect(line()).toBeNull()
-    const group = groupHeader('Ran 1 command')!
+    const group = groupHeader('Reading the test')!
+    expect(group.textContent).toContain('· Ran 1 command')
     expect(group.getAttribute('aria-expanded')).toBe('false')
     expect(group.textContent).not.toContain('Make A due earlier')
     expect(liveRows()).toEqual(['Make A due earlier'])
@@ -261,10 +262,10 @@ describe('the line under Working', () => {
     render([ask(), first, call, still, reply('a1', text('Fixed by'))], 'streaming', { phase: 'streaming' })
     expect(liveRows()).toEqual([])
     expect(reasoningRows()).toHaveLength(0)
-    expect(groupHeader('Ran 1 command')!.getAttribute('aria-expanded')).toBe('false')
+    expect(groupHeader('Reading the test')!.getAttribute('aria-expanded')).toBe('false')
     expectLive('Writing…')
-    act(() => { groupHeader('Ran 1 command')!.click() })
-    const opened = groupHeader('Ran 1 command')!.parentElement!.textContent!
+    act(() => { groupHeader('Reading the test')!.click() })
+    const opened = groupHeader('Reading the test')!.parentElement!.textContent!
     for (const piece of ['Reading the test', 'ls', 'Planning the fix']) expect(opened).toContain(piece)
   })
 

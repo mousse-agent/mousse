@@ -14,6 +14,7 @@ import { BRIDGE_ACTIVITY_METHODS } from '../../shared/bridge/deviceActivity'
 import { SPACES_LOCAL_METHODS } from '../../shared/spaces/local'
 import { BOTS_LOCAL_METHODS } from '../../shared/bots/space/local'
 import { BOTS_PERSONAL_V2_METHODS, BOTS_WORK_METHODS } from '../../shared/bots/personal/methods'
+import { BOT_DEVICE_METHODS } from '../../shared/bots/personal/deviceAccess'
 import { BOTS_BROWSER_METHODS } from '../../shared/bots/personal/browser'
 import type { BotChatMessage } from '../../shared/bots/personal/chat'
 import { AUTOMATIONS_METHODS, type ScheduledRunEnded } from '../../shared/automations'
@@ -47,6 +48,7 @@ import {
 } from '../mms/protocolEventBridge'
 import { SettingsStore } from '../../mms/settings/SettingsStore'
 import { listEditors, openInEditor, openRemoteInEditor } from '../editors'
+import { copyImageFile, saveFileCopy, showFileInFolder } from '../localFiles'
 import { nodeOfThread, remoteRoute } from '../remoteEditorFlow'
 import { EDITOR_PROXY_READY, type RemoteAskResult, type RemoteOpenResult, type RemoteRoute } from '../../shared/remoteEditor'
 import { askForEditorAccess } from '../remoteEditorAsk'
@@ -239,6 +241,7 @@ export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new 
   ...BOTS_LOCAL_METHODS,
   ...BOTS_PERSONAL_V2_METHODS,
   ...BOTS_WORK_METHODS,
+  ...BOT_DEVICE_METHODS,
   ...BOTS_BROWSER_METHODS,
   ...AUTOMATIONS_METHODS,
   ...SPACE_ARCHIVE_METHODS,
@@ -1974,6 +1977,7 @@ export function registerGuiIpc(
   )
   registerHandler('review:files', async (_e, params: Record<string, unknown>) => guiMms.request('review.files', params))
   registerHandler('review:file', async (_e, params: Record<string, unknown>) => guiMms.request('review.file', params))
+  registerHandler('review:turnFile', async (_e, params: Record<string, unknown>) => guiMms.request('review.turnFile', params))
   registerHandler('actions:pin', async (_e, params: Record<string, unknown>) => guiMms.request('actions.pin', params))
   registerHandler('actions:configureRetention', async (_e, params: Record<string, unknown>) => guiMms.request('actions.configureRetention', params))
   registerHandler('actions:sweepRetention', async (_e, threadId: string) => guiMms.request('actions.sweepRetention', { threadId }))
@@ -3220,6 +3224,11 @@ export function registerGuiIpc(
   registerHandler('editors:open', async (_e, editorId: string, path: string) => {
     await openInEditor(editorId, path)
   })
+  // A file of this computer that a bot's chat names (localFiles.ts): only an existing file by its absolute path.
+  registerHandler('localFiles:showInFolder', async (_e, path: unknown) => { await showFileInFolder(path) })
+  registerHandler('localFiles:saveCopy', async (event, path: unknown) =>
+    saveFileCopy(path, BrowserWindow.fromWebContents(event.sender) ?? getWindow(), app.getPath('downloads')))
+  registerHandler('localFiles:copyImage', async (_e, path: unknown) => { await copyImageFile(path) })
   // A thread of another computer: its folder opens in an editor of this one over SSH. The window names the
   // thread only; the folder is the one the owner answers, and the SSH address is read here from this
   // computer's own records.

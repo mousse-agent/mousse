@@ -1,6 +1,6 @@
 import { NetError } from '../../../shared/net'
 import type { ChatSummary, LocalChatConversation } from '../../../shared/chats'
-import type { RpcMethod } from '../../net/contracts'
+import type { RpcContext, RpcMethod } from '../../net/contracts'
 import { canonicalJson } from '../../net/sync/codec'
 
 /** The phone's sidebar methods: open the live lists stream, and send to or stop an agent chat. */
@@ -85,7 +85,8 @@ function result(conversation: LocalChatConversation): unknown {
 }
 
 export function remoteListMethods(options: {
-  openLists(): unknown
+  /** Opens the calling device's own lists stream. */
+  openLists(context: RpcContext): unknown
   chats(): RemoteChatsPort
 }): RpcMethod[] {
   return [
@@ -94,7 +95,7 @@ export function remoteListMethods(options: {
       family: 'bridge',
       ...REMOTE_LIST_METHODS['bridge.lists.open'],
       validate: (value) => exact(value, []),
-      handle: async () => options.openLists()
+      handle: async (_value, context) => options.openLists(context)
     },
     {
       method: 'chats.send',

@@ -5,6 +5,7 @@
 import { vi } from 'vitest'
 import type { BotChatMessage, BotChip, BotDetail, BotSummary } from '../../src/shared/bots/personal/chat'
 import type { BotMemoryEntry } from '../../src/shared/bots/personal/memory'
+import type { BotDevicesView } from '../../src/shared/bots/personal/deviceAccess'
 import type { PersonalBotsClient, PersonalBotsEvents } from '../../src/renderer/services/personalBotsClient'
 
 export const AT = '2026-11-07T09:00:00.000Z'
@@ -29,6 +30,8 @@ export interface FakeBots {
   live: Record<string, { activationId: string; chip?: BotChip }>
   /** Each bot's memory entries, as `bots.memory.list` returns them. */
   memory: Record<string, BotMemoryEntry[]>
+  /** Each bot's Devices (`bots.devices.get`); a bot without one reaches every device and has none to pick. */
+  devices: Record<string, BotDevicesView>
   calls: Array<[string, ...unknown[]]>
   emit: {
     changed(botId: string): void
@@ -47,6 +50,7 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
     details: { ...(initial.details ?? {}) },
     live: {},
     memory: { ...(initial.memory ?? {}) },
+    devices: {},
     calls: [],
     client: undefined as unknown as PersonalBotsClient,
     events: {
@@ -100,6 +104,14 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
     stop: vi.fn((botId) => record('stop', [botId], () => undefined)),
     stopWork: vi.fn((botId, workId) => record('stopWork', [botId, workId], () => undefined)),
     markRead: vi.fn((botId, at) => record('markRead', [botId, at], () => undefined)),
+    react: vi.fn((botId, messageId, emoji) => record('react', [botId, messageId, emoji], () => {
+      const rows = fake.chats[botId] ?? []
+      const at = rows.findIndex((entry) => entry.id === messageId)
+      if (at < 0) throw new Error('No such message')
+      const { reaction: _old, ...rest } = rows[at]!
+      rows[at] = emoji === null ? rest : { ...rest, reaction: emoji }
+      return rows[at]!
+    })),
     answer: vi.fn((botId, askId, answer) => record('answer', [botId, askId, answer], () => {
       const rows = fake.chats[botId] ?? []
       const row = rows.find((entry) => entry.ask?.askId === askId)
@@ -130,7 +142,14 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
     })),
     exportMemory: vi.fn((botId, dir) => record('exportMemory', [botId, dir], () => ({ files: [`${dir}/memory.md`] }))),
     memory: vi.fn((botId) => record('memory', [botId], () => ({ entries: (fake.memory[botId] ?? []).map((entry) => ({ ...entry })), gauge: 'core 0/2,000' }))),
-    forgetMemory: vi.fn((botId, id) => record('forgetMemory', [botId, id], () => { fake.memory[botId] = (fake.memory[botId] ?? []).filter((entry) => entry.id !== id) }))
+    forgetMemory: vi.fn((botId, id) => record('forgetMemory', [botId, id], () => { fake.memory[botId] = (fake.memory[botId] ?? []).filter((entry) => entry.id !== id) })),
+    devices: vi.fn((botId) => record('devices', [botId], () => fake.devices[botId] ?? { access: { mode: 'all' as const }, devices: [] })),
+    setDevices: vi.fn((botId, access) => record('setDevices', [botId, access], () => {
+      const next = { ...(fake.devices[botId] ?? { devices: [] }), access }
+      delete (next as { unreadable?: true }).unreadable
+      fake.devices[botId] = next
+      return next
+    }))
   }
   return fake
 }

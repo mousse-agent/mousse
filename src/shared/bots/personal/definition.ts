@@ -282,6 +282,12 @@ export const MAX_BOT_SCHEDULES = 8
  */
 export interface BotOwnerTurn {
   limit?: PermissionMode
+  /**
+   * The other device the message came from (its Net node id). A chat activation it queued that has not started is not
+   * delivered once that device can no longer reach the bot (`docs/bots.md`, Which devices reach a bot). Older builds
+   * ignore it.
+   */
+  node?: string
 }
 
 export type BotActivationTrigger =

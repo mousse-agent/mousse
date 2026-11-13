@@ -4,6 +4,7 @@ import type { BotMemoryListing } from '../../shared/bots/personal/memory'
 import type { BotModelPick, BotModelSlots, BotSchedule } from '../../shared/bots/personal/definition'
 import type { BotChatAttachment, BotsPersonalV2EventData, BotsPersonalV2Method, BotsPersonalV2Params, BotsPersonalV2Result } from '../../shared/bots/personal/methods'
 import type { PlatformRequestApi } from '../../shared/platform'
+import type { BotDeviceAccess, BotDevicesView } from '../../shared/bots/personal/deviceAccess'
 
 /**
  * The Bot UI's methods (`bots.personal.v2`, Bot Phase 1 §5.11) over the host's profile-bound
@@ -29,6 +30,8 @@ export interface PersonalBotsClient {
   /** Stops one piece of work; the chat goes on. */
   stopWork(botId: string, workId: string): Promise<void>
   markRead(botId: string, seq: number): Promise<void>
+  /** The owner's reaction on one of the bot's messages: an emoji, or `null` to remove it. The message as it is now. */
+  react(botId: string, messageId: string, emoji: string | null): Promise<BotChatMessage>
   answer(botId: string, askId: string, answer: 'allow' | 'not_now'): Promise<BotChatMessage>
   revokePermission(botId: string, permissionId: string): Promise<BotDetail>
   addSchedule(botId: string, when: BotSchedule['when'], prompt: string, model?: string): Promise<BotDetail>
@@ -53,6 +56,10 @@ export interface PersonalBotsClient {
   memory(botId: string): Promise<BotMemoryListing>
   /** Forgets one entry (`m12`): the next turn no longer carries it. */
   forgetMemory(botId: string, id: string): Promise<void>
+  /** Which of the owner's devices reach the bot, and the devices to pick from. An older service lacks it and rejects. */
+  devices(botId: string): Promise<BotDevicesView>
+  /** Saves which devices reach the bot; only this computer's window and command line may. */
+  setDevices(botId: string, access: BotDeviceAccess): Promise<BotDevicesView>
 }
 
 export function createPersonalBotsClient(transport: PlatformRequestApi): PersonalBotsClient {
@@ -73,6 +80,7 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
     stop: async (botId) => { await call('bots.chat.stop', { botId }) },
     stopWork: async (botId, workId) => { await call('bots.work.stop', { botId, workId }) },
     markRead: async (botId, seq) => { await call('bots.chat.markRead', { botId, seq }) },
+    react: async (botId, messageId, emoji) => (await call('bots.chat.react', { botId, messageId, emoji })).message,
     answer: async (botId, askId, answer) => (await call('bots.asks.answer', { botId, askId, answer })).message,
     revokePermission: (botId, permissionId) => call('bots.permissions.revoke', { botId, permissionId }),
     addSchedule: (botId, when, prompt, model) => call('bots.schedules.add', { botId, when, prompt, ...(model ? { model } : {}) }),
@@ -85,7 +93,9 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
     cancelReminder: (botId, reminderId) => call('bots.reminders.cancel', { botId, reminderId }),
     exportMemory: (botId, dir) => call('bots.memory.export', { botId, dir }),
     memory: (botId) => call('bots.memory.list', { botId }),
-    forgetMemory: async (botId, id) => { await call('bots.memory.forget', { botId, id }) }
+    forgetMemory: async (botId, id) => { await call('bots.memory.forget', { botId, id }) },
+    devices: (botId) => transport.request<BotDevicesView>('bots.devices.get', { botId }),
+    setDevices: (botId, access) => transport.request<BotDevicesView>('bots.devices.set', { botId, access })
   }
 }
 

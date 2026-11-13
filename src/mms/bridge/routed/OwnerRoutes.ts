@@ -62,6 +62,7 @@ import { ReplyPages } from './pages'
 import { cleanUpBlockedDevice } from './blockCleanup'
 import type { RoutedStaging } from './staging'
 import { RoutedTerminals, type TerminalClaim } from './terminals'
+import { withHiddenBots } from '../remote/botReach'
 
 /** Ids are text of this length at most, as in the protocol handlers. */
 const ID_MAX = 256
@@ -598,6 +599,8 @@ export class OwnerRoutes {
         const sent = typeof params.data === 'string' ? Buffer.byteLength(params.data) : 0
         result = await verdict.apply(sent, () => this.dispatch(method, row, params, context, head))
       } else result = await this.dispatch(method, row, params, context, head, slot)
+      // A thread a bot started names that bot only to a computer that reaches it ("Started by a bot" otherwise).
+      if (!row.sequenced) result = withHiddenBots(result, this.options.services.botReach?.hiddenFor(node))
       if (method === 'projects.open')
         project = (result as { project?: { id?: string } }).project?.id ?? project
       if (method === 'pty.create') {

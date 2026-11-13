@@ -68,7 +68,7 @@ const edit = (id: string, path: string): UIMessage =>
 const reply = (id: string, said: string): UIMessage => ({ id, role: 'assistant', parts: [{ type: 'text', text: said }] })
 
 describe('a tool call group', () => {
-  it('is titled with what its calls did, not with a thought', () => {
+  it('is titled with its latest thought, then what its calls did', () => {
     const html = render(
       [
         user,
@@ -83,8 +83,8 @@ describe('a tool call group', () => {
       ],
       'streaming'
     )
-    expect(text(html)).toContain('Read 3 files and ran 3 commands')
-    expect(text(html)).not.toContain('watch the log')
+    // The latest thought says why the calls ran; what they did follows it.
+    expect(text(html)).toContain('The app is starting; watch the log · 6 actions')
   })
 
   it('splits at narration: the calls on each side are a group of their own, the narration prose between them', () => {
@@ -137,6 +137,7 @@ describe('a finished turn', () => {
     const html = render(turn, 'streaming')
     expect(rows(html)).toEqual([
       'Checking the start script first.',
+      // The thought came after the command: it says what is next, so the group keeps its count.
       'Ran 1 command',
       'The app starts on port 3000.',
       'Nothing else to check',

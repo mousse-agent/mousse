@@ -9,6 +9,7 @@ import { useAppStore } from '../../stores/appStore'
 import { errorText } from '../../services/personalBotsClient'
 import { BotComputerSelect, BotModelRows, BotModelSelect } from './BotRunsOn'
 import { BotFace } from './face/BotFace'
+import { BotDevicesRow } from './BotDevices'
 
 /** About's Runs on section, which a bot's Pick a model scrolls to. */
 export const RUNS_ON_ID = 'bot-about-runs-on'
@@ -170,7 +171,8 @@ function Memory({ botId, detail }: { botId: string; detail: unknown }) {
 
 /**
  * About this bot (bot-ui §4.8): the whole mouse, the name and the description; what it can use and
- * when it runs, each with Remove; what it remembers, each with Remove; what it runs on, by hand or by usage (#673); Pause and Delete.
+ * when it runs, each with Remove; what it remembers, each with Remove; what it runs on, by hand or by usage (#673), and
+ * which of the owner's devices reach it; Pause and Delete.
  */
 export function BotAboutPanel({ bot }: { bot: BotSummary }) {
   const detail = useBotsStore((s) => s.details[bot.id])
@@ -215,6 +217,7 @@ export function BotAboutPanel({ bot }: { bot: BotSummary }) {
     <Memory botId={bot.id} detail={detail} />
     <h3>RUNS ON</h3>
     <RunsOn botId={bot.id} name={bot.name} refresh={`${bot.last?.at ?? ''}|${bot.error?.text ?? ''}`} />
+    <BotDevicesRow botId={bot.id} name={bot.name} />
     <div className="bot-about-foot">
       <button type="button" className="bot-ghost-button" onClick={() => void (paused ? store().resume(bot.id) : store().pause(bot.id))}>{paused ? 'Resume' : 'Pause'}</button>
       <button type="button" className="bot-ghost-button is-danger" onClick={() => useBotsStore.setState({ dialog: { kind: 'delete', botId: bot.id }, error: null })}>Delete</button>

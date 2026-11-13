@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Globe, Plus, X } from '../../lib/icons'
 import type { ChatSummary } from '../../../shared/chats'
-import type { BotSummary } from '../../../shared/bots/personal/chat'
 import { useChatsStore } from '../../stores/chatsStore'
 import { botFaceState, useBotsPolling, useBotsStore } from '../../stores/botsStore'
 import { BotFace } from '../bots/face/BotFace'
@@ -35,19 +34,12 @@ export function ChatsSidebar() {
     <span className="chat-list-text"><span className="chat-list-name">{chat.name}</span><span className="chat-list-preview">{chat.presentation === 'network' ? 'Space conversation' : chat.run?.state === 'running' ? 'Working…' : chat.lastMessage?.text || `${chat.participants.filter((p) => p.kind === 'agent').length} agent${chat.kind === 'group' ? 's' : ''}`}</span></span>
     {chat.run?.state === 'running' && <span className="chat-working-dot" aria-label="Working" />}
   </button>
-  // A bot's row says its state in words; its face holds the state's pose (the Bots row above moves).
-  const botRow = (bot: BotSummary) => <button type="button" key={`bot:${bot.id}`} className={`chat-list-row${bot.id === activeBotId ? ' active' : ''}`} onClick={() => void openBot(bot.id)}>
-    <BotFace look={bot.look} state={botFaceState(bot, happy[bot.id])} size={40} view="head" still />
-    <span className="chat-list-text"><span className="chat-list-name">{bot.name}</span><span className="chat-list-preview">{bot.stateText || bot.last?.text || bot.description}</span></span>
-    {bot.unread > 0 && <span className="bot-unread" aria-label={`${bot.unread} unread`}>{bot.unread}</span>}
-  </button>
   const groups = snapshot.chats.filter((chat) => chat.kind === 'group' && matches(chat.name))
   const shownBots = bots.filter((bot) => matches(bot.name))
-  // Recent: bot chats and direct chats together, the latest first.
-  const recent = [
-    ...snapshot.chats.filter((chat) => chat.kind === 'direct' && matches(chat.name)).map((chat) => ({ at: chat.lastMessage?.createdAt ?? chat.updatedAt, row: () => row(chat) })),
-    ...shownBots.map((bot) => ({ at: bot.last?.at ?? bot.createdAt, row: () => botRow(bot) }))
-  ].sort((a, b) => (b.at ?? '').localeCompare(a.at ?? ''))
+  // Recent: direct chats, the latest first. Bots are listed once, in the Bots row above, with their faces and unread marks.
+  const recent = snapshot.chats.filter((chat) => chat.kind === 'direct' && matches(chat.name))
+    .map((chat) => ({ at: chat.lastMessage?.createdAt ?? chat.updatedAt, row: () => row(chat) }))
+    .sort((a, b) => (b.at ?? '').localeCompare(a.at ?? ''))
   return <div className="chats-sidebar-content">
     {searchOpen && <div className="chat-search"><input ref={input} aria-label="Search chats" placeholder="Search chats" value={search} onChange={(event) => useChatsStore.setState({ search: event.target.value })} /><button aria-label="Close chat search" onClick={() => useChatsStore.setState({ searchOpen: false, search: '' })}><X size={14} /></button></div>}
     <section aria-label="Bots"><div className="chat-section-heading"><h2>Bots</h2><button aria-label="New bot" title="New bot" onClick={newBot}><Plus size={15} /></button></div>

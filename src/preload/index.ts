@@ -142,6 +142,7 @@ import type { PlatformRequestApi, PlatformRequestErrorShape, PlatformRequestMeth
 import type { ChatReference } from '../shared/chatReferences'
 import type { InAppBrowserApi, InAppBrowserCursor, InAppBrowserState } from '../shared/browser/inApp'
 import type { ReviewFileParams, ReviewFileResult, ReviewFilesParams, ReviewFilesResult } from '../shared/review'
+import type { TurnFileParams, TurnFileResult } from '../shared/turnFiles'
 import type {
   GitHubApi,
   GitHubAvailability,
@@ -681,6 +682,15 @@ const api = {
     /** Asks the computer that runs a thread to allow editor connections from this one. A person there answers. */
     askAccess: (threadId: string): Promise<RemoteAskResult> => ipcRenderer.invoke('editors:askAccess', threadId)
   },
+  /** A file of this computer by its absolute path (a bot's file chip or picture); each refuses anything but an existing file. */
+  localFiles: {
+    /** Shows the file selected in the computer's file manager. */
+    showInFolder: (path: string): Promise<void> => ipcRenderer.invoke('localFiles:showInFolder', path),
+    /** Saves a copy where the person picks; the path it was saved to, or null when they closed the dialog. */
+    saveCopy: (path: string): Promise<string | null> => ipcRenderer.invoke('localFiles:saveCopy', path),
+    /** Puts a picture file on the clipboard as an image. */
+    copyImage: (path: string): Promise<void> => ipcRenderer.invoke('localFiles:copyImage', path)
+  },
   inAppBrowser: {
     registerTab: (input) => ipcRenderer.invoke('browser:register-tab', input),
     selectTab: (input) => ipcRenderer.invoke('browser:select-tab', input),
@@ -872,7 +882,9 @@ const api = {
   },
   review: {
     files: (params: ReviewFilesParams): Promise<ReviewFilesResult> => ipcRenderer.invoke('review:files', params),
-    file: (params: ReviewFileParams): Promise<ReviewFileResult> => ipcRenderer.invoke('review:file', params)
+    file: (params: ReviewFileParams): Promise<ReviewFileResult> => ipcRenderer.invoke('review:file', params),
+    /** A file the thread's agent wrote, anywhere on this computer: a diff against its own repository, or the file itself. */
+    turnFile: (params: TurnFileParams): Promise<TurnFileResult> => ipcRenderer.invoke('review:turnFile', params)
   },
   publish: {
     start: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('publish:start', params)

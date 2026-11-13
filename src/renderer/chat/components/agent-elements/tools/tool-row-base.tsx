@@ -54,6 +54,8 @@ export type ToolRowBaseProps = {
    */
   liveDetail?: boolean;
   detailTitle?: string;
+  /** The label's tooltip: its whole text when the row may cut it (a group headed by a thought). */
+  labelTitle?: string;
   /** Classes for the detail (a command shows in mono). */
   detailClassName?: string;
   /**
@@ -82,6 +84,7 @@ export function ToolRowBase({
   detail,
   liveDetail = false,
   detailTitle,
+  labelTitle,
   detailClassName,
   shimmer = true,
   badge,
@@ -134,6 +137,7 @@ export function ToolRowBase({
           </span>
         ) : (
         <span
+          title={labelTitle}
           className={cn(
             "font-[450] whitespace-nowrap",
             loudFailure && "text-[var(--danger)]",

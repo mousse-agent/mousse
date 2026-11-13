@@ -59,7 +59,6 @@
 .side-card-action-spin {
   flex-shrink: 0;
   color: var(--text-secondary);
-  animation: side-card-action-spin 0.9s steps(12) infinite;
 }
 
 .side-card-action-done {
@@ -131,10 +130,4 @@
 .modal-footer > .quick-actions-dialog-delete {
   margin-right: auto;
   color: var(--danger);
-}
-
-@keyframes side-card-action-spin {
-  to {
-    transform: rotate(360deg);
-  }
 }

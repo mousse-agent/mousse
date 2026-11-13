@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { Check, ChevronDown, ChevronRight, MessageSquare, MoreHorizontal } from '../../lib/icons'
-import { joinReviewPath, sameReviewFile, type ChatReference } from '../../../shared/chatReferences'
-import type { ReviewFileEntry, ReviewFilesResult, ReviewScope } from '../../../shared/review'
+import { joinReviewPath, type ChatReference } from '../../../shared/chatReferences'
+import type { ReviewFileEntry, ReviewScope } from '../../../shared/review'
 import { useAppStore } from '../../stores/appStore'
 import { useChangesStore } from '../../stores/changesStore'
 import { initGitRepository, refreshGitStatus } from '../../stores/gitStatusStore'
@@ -44,8 +44,8 @@ import {
   KEY_HELP,
   latestEndedTurn,
   lineChoicesFor,
+  listedFile,
   matchDaemonHunk,
-  mergeUncommittedLists,
   newerTurnNotice,
   nextUnviewed,
   orderRows,
@@ -74,6 +74,7 @@ import {
   type UncommittedParts,
   type ViewedState
 } from './changesModel'
+import { readScopeList, type ScopeList } from './scopeList'
 import { ChangesDiff, type HunkActions, type LineRange } from './ChangesDiff'
 import { ChangesFooter } from './ChangesFooter'
 import { ChangesHeader, type SyncChipModel } from './ChangesHeader'
@@ -97,27 +98,6 @@ interface Row extends ReviewFileEntry {
   api?: ChangedFile
   /** On Uncommitted: which of Git's two diffs the file is in, so its card reads both ends. */
   parts?: UncommittedParts
-}
-
-interface ScopeList {
-  result: ReviewFilesResult
-  /** Uncommitted only: per path, whether it is staged, unstaged or both. */
-  parts: Map<string, UncommittedParts> | null
-}
-
-/** Reads a scope's list. Uncommitted is HEAD → working tree, so Git's staged and unstaged diffs are read together. */
-async function readScopeList(target: { threadId?: string; projectId?: string }, scope: ReviewScope): Promise<ScopeList> {
-  if (scope.kind !== 'worktree') return { result: await window.mousse.review.files({ ...target, scope }), parts: null }
-  const [unstaged, staged] = await Promise.all([
-    window.mousse.review.files({ ...target, scope: { kind: 'worktree' } }),
-    window.mousse.review.files({ ...target, scope: { kind: 'worktree', staged: true } }).catch(() => null)
-  ])
-  return mergeUncommittedLists(unstaged, staged)
-}
-
-/** A POSIX, drive-letter or UNC path; anything else is relative to the worktree. */
-function isAbsolutePath(path: string): boolean {
-  return /^(?:[\\/]|[A-Za-z]:[\\/])/.test(path)
 }
 
 function isTextInput(target: EventTarget | null): boolean {
@@ -425,8 +405,7 @@ export function ChangesPanel() {
   const pendingFile = threadState?.pendingFile
   useEffect(() => {
     if (!stateKey || !pendingFile || !result) return
-    const wanted = isAbsolutePath(pendingFile.path) ? pendingFile.path : joinReviewPath(result.root, pendingFile.path)
-    const match = result.files.find((file) => sameReviewFile(joinReviewPath(result.root, file.path), wanted, platform))
+    const match = listedFile(result, pendingFile.path, platform)
     useChangesStore.getState().resolvePendingFile(stateKey, match?.path ?? null)
   }, [stateKey, pendingFile, result, platform])
 

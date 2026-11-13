@@ -285,7 +285,7 @@ describe('New bot', () => {
     expect(dialog()).toBeNull()
     expect(useChatsStore.getState().activeBotId).toBe('new1')
     expect(host.querySelector('.chat-conversation-header h1')?.textContent).toBe('Inbox helper')
-    expect(host.querySelector('.chat-run-status')?.textContent).toBe('Inbox helper is working…')
+    expect(host.querySelector('.bot-typing')?.getAttribute('aria-label')).toBe('Inbox helper is typing')
     await act(async () => fake.emit.message('new1', message(1, { text: 'Hi, I’m Inbox helper.' })))
     expect(host.querySelector('.chat-transcript')?.textContent).toContain('Hi, I’m Inbox helper.')
   })

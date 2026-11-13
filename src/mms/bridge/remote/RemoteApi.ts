@@ -25,7 +25,8 @@ export interface RemoteChatExtras {
 export interface RemoteBackendPort {
   /** `queue.enqueue` params carry resolved `images` instead of staged `attachments`. */
   execute(method: BridgeOrdinaryMethod, params: Record<string, unknown>, caller?: { node: NodeId }): Promise<unknown>
-  snapshot(threadId: string): unknown
+  /** `reader`: the device asking; a thread a bot started names the bot only if that device reaches it. */
+  snapshot(threadId: string, maximumBytes?: number, options?: { reader?: string }): unknown
   /** Reads a thread kept in thread.db off the event loop, so the snapshot that follows finds it in memory. */
   warm?(threadId: string): Promise<void>
   /**
@@ -122,7 +123,7 @@ export class RemoteApi {
     if (context.deadlineAt <= this.clock.now()) throw new NetError('deadline_exceeded')
     if (method === 'thread.snapshot') {
       await this.backend.warm?.(params.threadId as string)
-      return this.backend.snapshot(params.threadId as string)
+      return this.backend.snapshot(params.threadId as string, undefined, { reader: context.caller.node })
     }
     if (method === 'attachments.stage') {
       try {
@@ -248,10 +249,9 @@ export class RemoteApi {
       run.bytes += bytes
       return { ok: true }
     }
-    // A thread remembers the device that created it, so every device can list it.
-    if (method === 'threads.create' || method === 'composer.options')
-      return this.backend.execute(method, params, { node: context.caller.node })
-    return this.backend.execute(method, params)
+    // A thread remembers the device that created it, so every device can list it; and a thread a bot started names the
+    // bot only to a device that reaches it, so every result knows who asks.
+    return this.backend.execute(method, params, { node: context.caller.node })
   }
   close(): void {
     for (const run of this.runs.values()) run.abort.abort()

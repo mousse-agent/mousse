@@ -33,12 +33,6 @@
   transition: stroke-dashoffset calc(300ms * var(--ui-motion-scale)) ease;
 }
 
-.downloads-ring.indeterminate { animation: downloads-ring-spin 1s steps(12) infinite; }
-
-@keyframes downloads-ring-spin {
-  from { transform: rotate(-90deg); }
-  to { transform: rotate(270deg); }
-}
 
 .downloads-ok { color: var(--success); }
 .downloads-bad { color: var(--danger); }
@@ -316,7 +310,6 @@ html[data-theme='high-contrast'] .downloads-ring-fill { stroke: var(--text-prima
 html[data-theme='high-contrast'] .downloads-icon-btn.accent { color: var(--text-primary); }
 
 @media (prefers-reduced-motion: reduce) {
-  .downloads-ring.indeterminate,
   .downloads-popover { animation: none; }
   .downloads-ring-fill { transition: none; }
 }

@@ -100,7 +100,7 @@ describe('opening a turn in the Changes tab', () => {
     getStatus.mockReset()
     vi.stubGlobal('window', { localStorage: { getItem: () => null, setItem: () => undefined, removeItem: () => undefined }, mousse: { workspace: { getStatus } } })
     useChangesStore.setState({ byThread: {} })
-    useAppStore.setState({ mainView: 'browser', openedSurfaceKinds: [], mainAreaOpen: false })
+    useAppStore.setState({ activeThreadId: 't1', mainView: 'browser', openedSurfaceKinds: [], mainAreaOpen: false })
   })
   afterEach(() => vi.unstubAllGlobals())
 

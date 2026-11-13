@@ -9,6 +9,7 @@ import type { RpcContext, RpcMethod } from '../../net/contracts'
 import type { PermissionMode } from '../../../shared/permissionMode'
 import { canonicalJson } from '../../net/sync/codec'
 import { isBotId } from '../../bots/definitions/BotDefinitionStore'
+import type { BotReachPort } from '../../protocol/botReachPort'
 
 /**
  * The personal-bot methods of the user's other devices (phones and other computers): a bot's chat and its images, its
@@ -16,6 +17,10 @@ import { isBotId } from '../../bots/definitions/BotDefinitionStore'
  * each one calls the same `BotChatService` method the desktop's `bots.*` handler calls, with the same params (less
  * `attachments`, which name files on this computer) and results. No result carries a model, an instance id or a path
  * on this computer. While "Share bots with other devices" is off, every one is refused.
+ *
+ * Which devices reach which bot (`docs/bots.md`, Which devices reach a bot) is checked in `remoteBotMethods`'s one
+ * wrapper, so a method added here later is held to it too: a device whose switch for bots is off is refused every one,
+ * and a bot whose Devices choice leaves the device out answers exactly as a bot that is not there.
  */
 export const REMOTE_BOT_METHODS = {
   'bots.get': { capability: 'read', mutating: false },
@@ -40,9 +45,10 @@ export type RemoteBotMethod = keyof typeof REMOTE_BOT_METHODS
 
 /** What the remote methods use of the profile's bots (`BotChatService`). */
 export interface RemoteBotsPort {
+  list(): { bots: BotSummary[] }
   get(botId: string): BotDetail
   chatList(botId: string, page?: { beforeSeq?: number; limit?: number }): BotsPersonalV2Api['bots.chat.list']['result']
-  chatSend(input: { botId: string; text: string; clientRequestId: string; replyTo?: string; from?: { limit: PermissionMode } }): Promise<{ message: BotChatMessage }>
+  chatSend(input: { botId: string; text: string; clientRequestId: string; replyTo?: string; from?: { limit: PermissionMode; node?: string } }): Promise<{ message: BotChatMessage }>
   chatStop(botId: string): Promise<Record<string, never>>
   workStop(botId: string, workId: string): Promise<{ stopped: boolean }>
   markRead(botId: string, seq: number): Record<string, never>
@@ -376,6 +382,16 @@ export function remoteBotMethods(options: {
    * passes `botDeviceLimitFrom` (a device with none on record: Accept edits). Absent (tests only): the strictest, Ask.
    */
   deviceLimit?(node: string): PermissionMode
+  /**
+   * Which bots the calling device reaches (`BotReachPort`): its switch for bots here, and each bot's Devices choice.
+   * Absent (tests of other things only): every device reaches every bot, as before the setting existed.
+   */
+  reach?: Pick<BotReachPort, 'canReach' | 'deviceOn'> & Partial<Pick<BotReachPort, 'hiddenFor'>>
+  /**
+   * A bot a device just made: it is kept within reach of that device (its choice gains the device), so the device is not
+   * locked out of what it made. No other bot changes.
+   */
+  madeBy?(botId: string, node: string): void
 }): RpcMethod[] {
   const limitOf = (context: RpcContext): PermissionMode => {
     try {
@@ -384,21 +400,59 @@ export function remoteBotMethods(options: {
       return 'ask'
     }
   }
-  const shared = (): void => {
+  const shared = (node: string): void => {
     const words = options.refusal?.()
     if (words) throw new NetError('forbidden', words, { details: { reason: 'setting_off' } })
+    // The device's own switch for bots here: off, it is answered as if this computer shared none (only the code and the
+    // reason cross the wire, the same for every bot, so nothing tells one bot from another).
+    if (options.reach && !options.reach.deviceOn(node))
+      throw new NetError('forbidden', "This computer doesn't share its bots with this device.", { details: { reason: 'setting_off' } })
   }
-  const bots = (): RemoteBotsPort => {
-    shared()
+  const bots = (context: RpcContext): RemoteBotsPort => {
+    shared(context.caller.node)
     const port = options.bots()
     if (!port) throw new NetError('conflict', 'Bots are unavailable on this computer.')
     return port
   }
-  /** A bot the call names must be there; checked before the call is admitted, so a refusal is plain. */
-  const known = (params: unknown): void => {
+  /** What a bot that is not there answers; a bot the device may not reach answers the same, word for word. */
+  const absent = (): never => {
+    throw new NetError('stream_unknown', 'This bot is gone.')
+  }
+  /** The bot the call names, which the calling device must reach. */
+  const reachable = (botId: string, context: RpcContext): void => {
+    if (options.reach && !options.reach.canReach(botId, context.caller.node)) absent()
+  }
+  /**
+   * The bot each kept call named, by execution: a saved result is asked for by request id alone (`rpc.result.get`), with
+   * no parameters to check. Kept in memory, the newest few thousand; a result whose bot is no longer known here (this
+   * service restarted since) goes only to a device that no bot is held from.
+   */
+  const named = new Map<string, string>()
+  const remember = (execution: string | undefined, botId: string): void => {
+    if (!execution) return
+    named.delete(execution)
+    named.set(execution, botId)
+    if (named.size > 4096) named.delete(named.keys().next().value as string)
+  }
+  /** Before a saved result of a bot call is handed back: the device must still reach the bot it named. */
+  const savedResult = (execution: string, caller: RpcContext['caller']): void => {
+    shared(caller.node)
+    if (!options.reach) return
+    const botId = named.get(execution)
+    if (botId !== undefined) {
+      if (!options.reach.canReach(botId, caller.node)) absent()
+      return
+    }
+    const hidden = options.reach.hiddenFor
+    if (!hidden || hidden(caller.node) !== undefined) throw new NetError('outcome_uncertain')
+  }
+  /** A bot the call names must be there, and within the device's reach; checked before the call is admitted. */
+  const known = (params: unknown, context: RpcContext): void => {
     const botId = (params as { botId?: unknown }).botId
-    if (typeof botId === 'string') refusing(() => bots().get(botId))
-    else bots()
+    const port = bots(context)
+    if (typeof botId !== 'string') return
+    reachable(botId, context)
+    refusing(() => port.get(botId))
   }
   const method = (
     name: RemoteBotMethod,
@@ -411,11 +465,17 @@ export function remoteBotMethods(options: {
     // A read's result is the chat itself: it is never kept in the request ledger on disk.
     ...(REMOTE_BOT_METHODS[name].mutating ? {} : { ephemeral: true }),
     validate: (value) => validateRemoteBotParams(name, value),
-    authorize: (value) => known(value),
+    authorize: (value, context) => known(value, context),
+    authorizeResult: (execution, caller) => savedResult(execution, caller),
     ...extra,
     handle: async (value, context) => {
       const p = value as Record<string, unknown>
-      const port = bots()
+      const port = bots(context)
+      // Read again as the call runs: a device taken off the bot meanwhile gets nothing.
+      if (typeof p.botId === 'string') {
+        reachable(p.botId, context)
+        remember(context.execution, p.botId)
+      }
       // A read refuses plainly whatever happens; a change refused after it started is reported as it is.
       if (!REMOTE_BOT_METHODS[name].mutating) {
         try {
@@ -431,7 +491,7 @@ export function remoteBotMethods(options: {
   const first = (check: (p: Record<string, unknown>, port: RemoteBotsPort, context: RpcContext) => void): Partial<RpcMethod> => ({
     authorizeNew: (value, context) => {
       const p = value as Record<string, unknown>
-      refusing(() => check(p, bots(), context))
+      refusing(() => check(p, bots(context), context))
     }
   })
   const gone = (what: string): never => {
@@ -459,7 +519,8 @@ export function remoteBotMethods(options: {
         text: p.text as string,
         clientRequestId: p.clientRequestId as string,
         ...(typeof p.replyTo === 'string' ? { replyTo: p.replyTo } : {}),
-        from: { limit: limitOf(context) }
+        // The device it came from: a message still queued when the device loses the bot is not delivered.
+        from: { limit: limitOf(context), node: context.caller.node }
       })
       return { message: fitted(remoteBotMessage(message)) }
     }),
@@ -492,13 +553,26 @@ export function remoteBotMethods(options: {
     ),
     method('bots.personal.pause', async (p, port) => ({ bot: remoteBotSummary(port.pause(botId(p)).bot) })),
     method('bots.personal.resume', async (p, port) => ({ bot: remoteBotSummary((await port.resume(botId(p))).bot) })),
-    method('bots.create', async (p, port) => {
+    method('bots.create', async (p, port, context) => {
+      const before = new Set(port.list().bots.map((bot) => bot.id))
       const { bot } = await port.create({
         look: p.look as BotLook,
         ...(typeof p.name === 'string' && p.name.trim() ? { name: p.name } : {}),
         description: p.description as string,
         clientRequestId: p.clientRequestId as string
       })
+      remember(context.execution, bot.id)
+      // The device that made it keeps it within reach; a request id that names a bot made before is answered only if the
+      // device reaches that bot, and never widens it.
+      if (before.has(bot.id)) reachable(bot.id, context)
+      else
+        try {
+          options.madeBy?.(bot.id, context.caller.node)
+        } catch {
+          // The choice could not be written: the bot keeps what a new bot has (every device, unless what is stored
+          // can't be read, when it stays on this computer until the owner picks). The device still learns of the bot
+          // it just made, and of nothing else.
+        }
       return { bot: remoteBotSummary(bot) }
     }),
     method('bots.update', async (p, port) => {

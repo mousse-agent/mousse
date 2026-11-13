@@ -1,6 +1,7 @@
 import { forwardRef, type ForwardRefExoticComponent, type RefAttributes, type SVGProps } from 'react'
 import { HugeiconsIcon, type IconSvgElement } from '@hugeicons/react'
 import '../styles/thinking-icon.css'
+import { turnable } from './turning'
 import Activity01Icon from '@hugeicons/core-free-icons/Activity01Icon'
 import Add01Icon from '@hugeicons/core-free-icons/Add01Icon'
 import AddSquareIcon from '@hugeicons/core-free-icons/AddSquareIcon'
@@ -142,6 +143,8 @@ import SidebarRight01Icon from '@hugeicons/core-free-icons/SidebarRight01Icon'
 import SmartPhone01Icon from '@hugeicons/core-free-icons/SmartPhone01Icon'
 import SourceCodeIcon from '@hugeicons/core-free-icons/SourceCodeIcon'
 import SparklesIcon from '@hugeicons/core-free-icons/SparklesIcon'
+import SmileIcon from '@hugeicons/core-free-icons/SmileIcon'
+import Moon02Icon from '@hugeicons/core-free-icons/Moon02Icon'
 import FlaskConicalIcon from '@hugeicons/core-free-icons/FlaskConicalIcon'
 import SquareIcon from '@hugeicons/core-free-icons/SquareIcon'
 import SquareLock01Icon from '@hugeicons/core-free-icons/SquareLock01Icon'
@@ -179,7 +182,8 @@ export type LucideIcon = IconComponent
 
 function createIcon(name: string, icon: IconSvgElement): IconComponent {
   const Component = forwardRef<SVGSVGElement, IconProps>(function AppIcon({ size = 16, stroke, strokeWidth, className = '', ...props }, ref) {
-    return <HugeiconsIcon
+    // A spinner class (icon-spin, spin, animate-spin…) turns a wrapper span instead of the svg (lib/turning.tsx).
+    return turnable(className, (svgClass) => <HugeiconsIcon
       ref={ref}
       icon={icon}
       size={size}
@@ -187,9 +191,9 @@ function createIcon(name: string, icon: IconSvgElement): IconComponent {
       {...(typeof stroke === 'string' ? { stroke } : {})}
       aria-hidden={props['aria-label'] ? undefined : true}
       data-icon-library="hugeicons"
-      className={`mousse-icon ${className}`.trim()}
+      className={`mousse-icon ${svgClass}`.trim()}
       {...props}
-    />
+    />)
   })
   Component.displayName = name
   return Component
@@ -320,6 +324,8 @@ export const ShieldOff = /* @__PURE__ */ createIcon('ShieldOff', ShieldOffIcon)
 export const Brain = /* @__PURE__ */ createIcon('Brain', Brain01Icon)
 export const SidebarRight = /* @__PURE__ */ createIcon('SidebarRight', SidebarRight01Icon)
 export const Sparkles = /* @__PURE__ */ createIcon('Sparkles', SparklesIcon)
+export const Smile = /* @__PURE__ */ createIcon('Smile', SmileIcon)
+export const Moon = /* @__PURE__ */ createIcon('Moon', Moon02Icon)
 export const FlaskConical = /* @__PURE__ */ createIcon('FlaskConical', FlaskConicalIcon)
 export const Square = /* @__PURE__ */ createIcon('Square', SquareIcon)
 export const Smartphone = /* @__PURE__ */ createIcon('Smartphone', SmartPhone01Icon)

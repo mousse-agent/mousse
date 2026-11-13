@@ -421,6 +421,8 @@ html[data-theme='light'] .ui-toaster {
   line-height: 20px;
   padding-bottom: 3px;
   transition: opacity 0.18s ease;
+  /* Faded out, its opacity still stacks it above the close button in the same cell: clicks go through to the button. */
+  pointer-events: none;
 }
 
 /* Close buttons show once the stack is open, or on the toast that has keyboard focus. */

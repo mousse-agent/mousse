@@ -673,6 +673,11 @@ export interface DocumentTab {
   markdown: string
   /** Set when the tab shows an applet from a thread rather than Markdown. */
   applet?: { threadId: string; profileId: string | null; reference: AppletReference }
+  /**
+   * Set when the tab shows, read-only, the uncommitted change of a file a thread's agent wrote outside what the
+   * Changes tab lists: `path` is absolute, compared with the last commit of its own repository.
+   */
+  turnFile?: { threadId: string; profileId: string | null; path: string }
 }
 
 export type CliType = 'mousse' | 'claude-code' | 'codex' | 'opencode' | 'cursor-agents-cli'

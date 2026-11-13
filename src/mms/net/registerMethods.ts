@@ -76,7 +76,7 @@ const keys: Record<NetLocalMethod, readonly string[]> = {
   'bridge.rename': ['node', 'name'],
   'bridge.setCaps': ['node', 'caps'],
   'bridge.setKind': ['node', 'kind'],
-  'bridge.policy': ['node', 'blocked', 'maxPermissionMode', 'terminal', 'editor'],
+  'bridge.policy': ['node', 'blocked', 'maxPermissionMode', 'terminal', 'editor', 'bots'],
   'bridge.workOnThreads': ['enabled'],
   'bridge.shareBots': ['enabled'],
   'bridge.editorServer': ['system']
@@ -274,7 +274,8 @@ function validate(method: NetLocalMethod, value: unknown): Record<string, unknow
       params.blocked === undefined &&
       params.maxPermissionMode === undefined &&
       params.terminal === undefined &&
-      params.editor === undefined
+      params.editor === undefined &&
+      params.bots === undefined
     )
       throw new DomainRpcError('invalid_params', 'Choose a limit to change')
     if (params.blocked !== undefined && typeof params.blocked !== 'boolean')
@@ -283,6 +284,8 @@ function validate(method: NetLocalMethod, value: unknown): Record<string, unknow
       throw new DomainRpcError('invalid_params', 'terminal must be boolean')
     if (params.editor !== undefined && typeof params.editor !== 'boolean')
       throw new DomainRpcError('invalid_params', 'editor must be boolean')
+    if (params.bots !== undefined && typeof params.bots !== 'boolean')
+      throw new DomainRpcError('invalid_params', 'bots must be boolean')
     if (params.maxPermissionMode !== undefined && !isPermissionMode(params.maxPermissionMode))
       throw new DomainRpcError('invalid_params', 'Unknown permission mode')
   }

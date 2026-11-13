@@ -288,10 +288,6 @@
 .inbox-row[data-group='needs_you'] .inbox-run-icon[data-tone='trigger'] { color: var(--status-input); }
 .inbox-row[data-group='needs_you'] .inbox-run-icon[data-tone='failed'] + .inbox-row-body .inbox-row-summary { color: color-mix(in srgb, var(--danger) 80%, var(--text-secondary)); }
 
-.inbox-spin { animation: inbox-spin 1.1s steps(12) infinite; }
-@keyframes inbox-spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .inbox-spin { animation: none; } }
-
 .inbox-row-body { min-width: 0; }
 
 .inbox-row-top,
@@ -617,7 +613,7 @@
 }
 
 /* An icon sits on the text's line (icons are display: block by default), with a small gap; the text still ellipsizes. */
-.inbox-cell > svg { display: inline-block; margin-right: 5px; vertical-align: middle; position: relative; top: -1px; }
+.inbox-cell > :is(svg, .turning) { display: inline-block; margin-right: 5px; vertical-align: middle; position: relative; top: -1px; }
 .inbox-cell.is-pending { color: var(--accent); }
 .inbox-cell[data-tone='failed'] { color: var(--danger); }
 

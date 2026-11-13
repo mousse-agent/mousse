@@ -924,6 +924,11 @@ export interface RpcMethod {
    * skips this and gets its saved result; a refusal fails the admitted execution as a plain error.
    */
   authorizeNew?(params: unknown, context: RpcContext): void
+  /**
+   * Checked before a saved result is handed back by request id (`rpc.result.get`), where the call's parameters are no
+   * longer at hand: a caller that lost its access since the call ran gets nothing. Throwing refuses the result.
+   */
+  authorizeResult?(execution: ExecutionId, caller: RpcContext['caller']): void
   handle(params: unknown, context: RpcContext): Promise<unknown>
 }
 
