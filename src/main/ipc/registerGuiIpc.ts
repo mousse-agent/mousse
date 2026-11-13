@@ -1549,8 +1549,14 @@ export function registerGuiIpc(
     requestCatchUp(senderId, 'reconnected')
   })
   // A window subscribed to its profile's updates: a counter that started again voids the numbers held for it.
-  guiMms.on('window-subscribed', ({ profileId, instance, sequence }: { profileId: string; instance?: string; sequence: number }) => {
+  guiMms.on('window-subscribed', ({ senderId, profileId, instance, sequence, how }: { senderId: number; profileId: string; instance?: string; sequence: number; how?: string }) => {
     orderFor(profileId).subscribed(instance, sequence)
+    // A window's first connection: the window reads everything as it starts, so a catch-up asked before it had one
+    // (the service came up after the window) has nothing to add.
+    if (how === 'opened') {
+      catchUpReasons.delete(senderId)
+      catchUpWaiting.delete(senderId)
+    }
   })
 
   // Windows becoming visible again, and their renderer or graphics process being replaced.

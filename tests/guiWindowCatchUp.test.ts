@@ -309,6 +309,19 @@ describe('a window that missed the end of a turn', () => {
     expect(logLines.find((line) => line.event === 'catch-up')?.fields.reasons).toEqual(['undelivered'])
   })
 
+  it("a catch-up asked before the window's first connection is dropped once that connection opens", async () => {
+    binding = null
+    push('turn.state', { threadId: 't1', turnId: 'run:1', phase: 'completed', updatedAt: at(1) })
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(logLines.filter((line) => line.event === 'catch-up.waiting')).toHaveLength(1)
+    binding = { profileId: PROFILE, epoch: 1 }
+    // The window's first connection: the window reads everything as it starts.
+    for (const listener of listeners.get('window-subscribed') ?? []) listener({ senderId: WINDOW, profileId: PROFILE, sequence: eventsReceived, how: 'opened' })
+    for (const listener of listeners.get('window-session-reopened') ?? []) listener({ senderId: WINDOW })
+    await vi.waitFor(() => expect(logLines.some((line) => line.event === 'catch-up')).toBe(true))
+    expect(logLines.find((line) => line.event === 'catch-up')?.fields.reasons).toEqual(['reconnected'])
+  })
+
   it('a profile switch is not a fault: the new profile\'s replay is neither logged as undelivered nor caught up', async () => {
     binding = null
     profileChanging = true

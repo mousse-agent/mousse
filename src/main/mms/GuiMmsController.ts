@@ -711,7 +711,7 @@ export class GuiMmsController extends EventEmitter {
     })
     // Where the profile's counter stands: one lower than numbers already applied was started again (#1042).
     const profileId = this.windowSessions.get(senderId)?.binding?.profileId
-    if (profileId) this.emit('window-subscribed', { senderId, profileId, instance: client.hello?.instanceId, sequence: subscribed.sequence })
+    if (profileId) this.emit('window-subscribed', { senderId, profileId, instance: client.hello?.instanceId, sequence: subscribed.sequence, how })
     // `subscribed`: the replay itself lost events (the service no longer holds them), unlike a gap in live events.
     if (client.requiresResnapshot) this.emit('window-resnapshot', { senderId, subscribed: true })
   }
