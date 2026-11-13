@@ -41,6 +41,26 @@ async function settle() {
   }
 }
 
+/** Boxes for elements other than the host, laid out by hand. */
+const rects = new WeakMap<HTMLElement, { left: number; top: number; width: number; height: number }>()
+type Box = { left: number; top: number; width: number; height: number }
+/** An element with inline styles and a box, added at the end of the page unless `into` or `before` says otherwise. */
+function place(style: Partial<CSSStyleDeclaration>, box: Box, where: { into?: HTMLElement; before?: Node } = {}) {
+  const element = document.createElement('div')
+  Object.assign(element.style, style)
+  rects.set(element, box)
+  if (where.before) where.before.parentNode!.insertBefore(element, where.before)
+  else (where.into ?? document.body).appendChild(element)
+  return element
+}
+/** A hover label: fixed, with a background, drawn after the transcript (like `.app-tooltip`). */
+const label = (box: Box, where?: { into?: HTMLElement; before?: Node }) =>
+  place({ position: 'fixed', backgroundColor: 'rgb(17, 17, 19)' }, box, where)
+/** The clip the view was last shown with. */
+const lastClip = () => (shownCalls().at(-1)?.[0] as { clip: unknown } | undefined)?.clip
+/** The whole visible part of the transcript: the scroller's box, the view's clip when nothing is drawn over the host. */
+const OPEN_CLIP = { x: 0, y: 0, width: 900, height: 700 }
+
 const preview = () => app.querySelector<HTMLElement>('.mousse-applet-preview')!
 const hidCalls = () => api.update.mock.calls.filter(([input]) => (input as { visible?: boolean }).visible === false)
 const shownCalls = () => api.update.mock.calls.filter(([input]) => (input as { visible?: boolean }).visible === true)
@@ -93,6 +113,8 @@ beforeEach(() => {
   root = createRoot(row)
   const original = HTMLElement.prototype.getBoundingClientRect
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+    const placed = rects.get(this)
+    if (placed) return rect(placed)
     return this.classList.contains('mousse-applet-preview') ? rect(hostRect) : original.call(this)
   })
 })
@@ -175,11 +197,146 @@ describe("an applet's native view follows its host", () => {
     expect(api.unmount).toHaveBeenCalledWith({ runtimeId: 'runtime-1' })
   })
 
+  it('hides behind a dialog that does not even touch the host', async () => {
+    await renderApplet()
+    const dialog = place({ position: 'fixed', backgroundColor: 'rgb(0, 0, 0)' }, { left: 750, top: 20, width: 100, height: 60 })
+    dialog.setAttribute('role', 'dialog')
+    dialog.getClientRects = () => [rect({ left: 750, top: 20, width: 100, height: 60 })] as unknown as DOMRectList
+    await settle()
+    expect(hidCalls()).toHaveLength(1)
+  })
+
   it('never starts while its host is hidden', async () => {
     app.setAttribute('inert', '')
     await act(async () => root.render(createElement(AppletCard, { reference })))
     await settle()
     expect(api.mount).not.toHaveBeenCalled()
     expect(preview()).not.toBeNull()
+  })
+})
+
+/**
+ * Floating UI over an applet stays visible. The host is at (100, 100), 600 × 300; the toolbar under it opens its hover
+ * labels upward over the host's bottom edge.
+ */
+describe('floating app UI over an applet', () => {
+  it('cuts a hover label over the bottom edge out of the view, and gives the strip back when it goes', async () => {
+    await renderApplet()
+    const tip = label({ left: 150, top: 380, width: 100, height: 28 })
+    await settle()
+    // The largest band nothing is drawn over: everything above the label.
+    expect(lastClip()).toEqual({ x: 100, y: 100, width: 600, height: 280 })
+    expect(hidCalls()).toHaveLength(0)
+
+    tip.remove()
+    await settle()
+    expect(lastClip()).toEqual(OPEN_CLIP)
+  })
+
+  it('finds a label that appears by a style change, not only one that is added', async () => {
+    await renderApplet()
+    const tip = label({ left: 150, top: 380, width: 100, height: 28 })
+    tip.style.display = 'none'
+    await settle()
+    expect(lastClip()).toEqual(OPEN_CLIP)
+    tip.style.display = ''
+    await settle()
+    expect(lastClip()).toEqual({ x: 100, y: 100, width: 600, height: 280 })
+  })
+
+  // What counts as drawn over the host. Each row adds its layers to a page with the applet showing.
+  const rows: Array<{ name: string; add: () => void; clip: unknown }> = [
+    { name: 'a label away from the host', add: () => label({ left: 150, top: 420, width: 100, height: 28 }), clip: OPEN_CLIP },
+    { name: 'a label touching the host edge', add: () => label({ left: 150, top: 400, width: 100, height: 28 }), clip: OPEN_CLIP },
+    {
+      name: 'a transparent full-window layer whose card is elsewhere (the side card layer)',
+      add: () => {
+        const layer = place({ position: 'absolute', zIndex: '20' }, { left: 0, top: 0, width: 1000, height: 800 })
+        place({ backgroundColor: 'rgb(30, 30, 30)' }, { left: 750, top: 20, width: 200, height: 100 }, { into: layer })
+      },
+      clip: OPEN_CLIP
+    },
+    {
+      name: 'a transparent layer whose card is over the host (a toast stack)',
+      add: () => {
+        const layer = place({ position: 'fixed' }, { left: 400, top: 0, width: 400, height: 800 })
+        place({ backgroundColor: 'rgb(30, 30, 30)' }, { left: 500, top: 330, width: 300, height: 60 }, { into: layer })
+      },
+      clip: { x: 100, y: 100, width: 600, height: 230 }
+    },
+    {
+      name: 'a layer before the transcript, drawn under it',
+      add: () => label({ left: 150, top: 380, width: 100, height: 28 }, { before: app }),
+      clip: OPEN_CLIP
+    },
+    {
+      name: 'a layer before the transcript, raised above it',
+      add: () => place({ position: 'absolute', zIndex: '5', backgroundColor: 'rgb(9, 9, 9)' }, { left: 150, top: 380, width: 100, height: 28 }, { before: app }),
+      clip: { x: 100, y: 100, width: 600, height: 280 }
+    },
+    {
+      name: 'a layer with a negative z-index',
+      add: () => place({ position: 'fixed', zIndex: '-1', backgroundColor: 'rgb(9, 9, 9)' }, { left: 150, top: 380, width: 100, height: 28 }),
+      clip: OPEN_CLIP
+    },
+    {
+      name: 'an invisible layer',
+      add: () => place({ position: 'fixed', opacity: '0', backgroundColor: 'rgb(9, 9, 9)' }, { left: 150, top: 380, width: 100, height: 28 }),
+      clip: OPEN_CLIP
+    },
+    {
+      name: 'a layer in an inert part of the app',
+      add: () => {
+        const inert = document.createElement('div')
+        inert.setAttribute('inert', '')
+        document.body.appendChild(inert)
+        label({ left: 150, top: 380, width: 100, height: 28 }, { into: inert })
+      },
+      clip: OPEN_CLIP
+    },
+    {
+      name: 'an element in the page flow (not floating)',
+      add: () => place({ backgroundColor: 'rgb(9, 9, 9)' }, { left: 150, top: 380, width: 100, height: 28 }),
+      clip: OPEN_CLIP
+    },
+    {
+      name: 'a narrow layer over the left edge: the band to its right is the largest',
+      add: () => label({ left: 90, top: 150, width: 30, height: 200 }),
+      clip: { x: 120, y: 100, width: 580, height: 300 }
+    }
+  ]
+  it.each(rows)('$name', async ({ add, clip }) => {
+    await renderApplet()
+    add()
+    await settle()
+    expect(lastClip()).toEqual(clip)
+    expect(hidCalls()).toHaveLength(0)
+  })
+
+  it('hides while a layer covers the whole host, and shows again when it goes', async () => {
+    await renderApplet()
+    const sheet = label({ left: 50, top: 50, width: 800, height: 500 })
+    await settle()
+    expect(hidCalls()).toHaveLength(1)
+    sheet.remove()
+    await settle()
+    expect(lastClip()).toEqual(OPEN_CLIP)
+  })
+
+  it('on macOS, where a native view cannot be clipped, hides only while a label is over the host', async () => {
+    ;(window as unknown as { mousse: { platform?: string } }).mousse.platform = 'darwin'
+    await renderApplet()
+    const away = label({ left: 150, top: 420, width: 100, height: 28 })
+    await settle()
+    expect(hidCalls()).toHaveLength(0)
+    away.remove()
+    const tip = label({ left: 150, top: 380, width: 100, height: 28 })
+    await settle()
+    expect(hidCalls()).toHaveLength(1)
+    const before = shownCalls().length
+    tip.remove()
+    await settle()
+    expect(shownCalls().length).toBeGreaterThan(before)
+    expect(lastClip()).toEqual(OPEN_CLIP)
   })
 })

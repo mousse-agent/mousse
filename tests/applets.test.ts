@@ -75,6 +75,60 @@ describe('explicit applet extraction', () => {
     expect(() => validateAppletSubmission({ ...source, data: circular })).toThrow('JSON')
   })
 })
+describe('applets sized to the viewport', () => {
+  // The frame grows to fit the page, so a page sized to the frame grows without end. Rejected where a new applet
+  // enters the thread; one already published still loads.
+  const rejected: Array<[string, Partial<typeof source>]> = [
+    ['vh in css', { css: 'main{min-height:100vh}' }],
+    ['dvh in css', { css: '.wrap{height:50dvh}' }],
+    ['svh in css', { css: '.wrap{height:80svh}' }],
+    ['lvh in css', { css: '.wrap{height:80lvh}' }],
+    ['vh inside calc', { css: '.wrap{height:calc(100vh - 40px)}' }],
+    ['a fractional vh', { css: '.wrap{max-height:.5vh}' }],
+    ['vmin, which is vh in a wide frame', { css: '.dial{width:40vmin}' }],
+    ['vh inside @media', { css: '@media (min-width:1px){.wrap{height:100vh}}' }],
+    ['height:100% on html and body', { css: 'html,body{height:100%}' }],
+    ['min-height:100% on body with a class', { css: 'body.dark { color: red; min-height: 100% !important }' }],
+    ['height:100% on :root', { css: ':root{height:100%}' }],
+    ['vh in a style attribute', { html: '<div style="height: 100vh">x</div>' }],
+    ['vh in a <style> element', { html: '<style>.a{height:100dvh}</style><div class=a></div>' }],
+    ['height:100% on a stray <body>', { html: '<body style="height:100%"><p>x</p></body>' }]
+  ]
+  const accepted: Array<[string, Partial<typeof source>]> = [
+    ['pixel heights', { css: 'main{min-height:240px;height:80px}' }],
+    ['height:100% on an inner element', { css: '.chart{height:100%}' }],
+    ['max-height and line-height 100% on body', { css: 'body{max-height:100%;line-height:100%}' }],
+    ['width in vw', { css: '.row{width:50vw}' }],
+    ['"100vh" in prose', { html: '<p>Panels used to be 100vh tall.</p>' }],
+    ['a vh unit in a comment', { css: '/* not 100vh */ main{height:80px}' }],
+    ['a class name that ends in vh', { css: '.h-100vh-free{height:80px}', html: '<div class="h-100vh-free"></div>' }]
+  ]
+  it.each(rejected)('rejects %s at publish, telling the agent to use content or pixel heights', (_name, change) => {
+    const submission = { ...source, ...change }
+    expect(() => validateAppletSubmission(submission, { publishing: true })).toThrow(
+      /sizes itself to the viewport.*Use content-driven heights or pixel heights/
+    )
+    // Loading, recovering and exporting an applet already published still accept it.
+    expect(validateAppletSubmission(submission).css).toBe(submission.css)
+  })
+  it.each(accepted)('accepts %s', (_name, change) => {
+    expect(() => validateAppletSubmission({ ...source, ...change }, { publishing: true })).not.toThrow()
+  })
+  it('a reply fence that sizes to the viewport stays text with the reason; an earlier published one still recovers', () => {
+    const { store } = fixture()
+    const sized = { ...source, css: 'main{min-height:100vh}' }
+    const parts = publishAppletPresentation(store, { threadId: 'one', messageId: 'm', turnId: 't', content: fence(sized) })
+    expect(parts?.map((part) => part.type)).toEqual(['text'])
+    expect(JSON.stringify(parts)).toContain('Applet unavailable: Applet sizes itself to the viewport')
+    expect(store.list('one')).toEqual([])
+
+    // Published before this check existed: it loads, and a restart recovers it from the reply.
+    const input = { threadId: 'one', messageId: 'old', turnId: 'old', content: fence(sized) }
+    const legacy = store.publish({ ...input, submission: sized })
+    expect(store.load('one', legacy.appletId, legacy.revisionId).source.css).toBe(sized.css)
+    expect(recoverAppletPresentation(store, input)?.map((part) => part.type)).toEqual(['applet'])
+  })
+})
 describe('durable applet publication', () => {
   it('survives restart, deduplicates retries and preserves immutable revisions', () => {
     const { home, store, resolve } = fixture()

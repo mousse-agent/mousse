@@ -2,7 +2,8 @@ import { useEffect, useRef, useState, type RefObject } from 'react'
 import type { AppletReference } from '../../../shared/applets'
 import { readAppletAppearance, subscribeAppletAppearance } from './appearance'
 import { subscribeAppletScroll } from './scrollPresentation'
-import { appletHostBlocked, appletHostShown, subscribeAppletHostVisibility } from './hostVisibility'
+import { appletHostBlocked, appletHostShown, appletUncoveredClip, subscribeAppletHostVisibility } from './hostVisibility'
+import { appletHeightKey, rememberAppletHeight, rememberedAppletHeight } from './appletHeights'
 
 /**
  * Where a preview sits. In the transcript it scrolls with the chat and stays above the composer; in the side panel
@@ -31,7 +32,10 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
   const [error, setError] = useState<string | null>(null)
   const [ready, setReady] = useState(false)
   const [scrollImage, setScrollImage] = useState<string | null>(null)
-  const [height, setHeight] = useState<number | null>(null)
+  // In the transcript a card starts at the height this revision last measured; the side panel fills its stage.
+  const heightKey = host === 'transcript' ? appletHeightKey(profileId, threadId, reference.revisionId) : null
+  const [measured, setMeasured] = useState<{ key: string | null; height: number } | null>(null)
+  const height = measured && measured.key === heightKey ? measured.height : heightKey ? rememberedAppletHeight(heightKey) : null
   const [conversationInput, setConversationInput] = useState<string | null>(null)
 
   useEffect(() => {
@@ -58,6 +62,7 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
     let appearance = readAppletAppearance()
     let lastGeometry = ''
     let resizeTimer: ReturnType<typeof setTimeout> | undefined
+    let sized = false
     setReady(false)
     const remove = () => {
       const id = runtime.current
@@ -121,7 +126,9 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
           document.querySelector('.chat-composer-stack')
         : null
       const composerTop = composer?.getBoundingClientRect().top ?? window.innerHeight
-      const clip = {
+      // Floating app UI drawn over the host (a hover label, a popover) is cut out of the clip, so it is not hidden
+      // behind the view (on macOS the view hides while it is there).
+      const clip = appletUncoveredClip(node, {
         x: Math.max(0, viewport?.left ?? 0),
         y: Math.max(0, viewport?.top ?? 0),
         width:
@@ -130,7 +137,7 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
         height:
           Math.min(window.innerHeight, composerTop, viewport?.bottom ?? window.innerHeight) -
           Math.max(0, viewport?.top ?? 0)
-      }
+      })
       const area = {
         x: Math.max(rect.left, clip.x),
         y: Math.max(rect.top, clip.y),
@@ -260,10 +267,17 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
         remove()
       }
       if (event.type === 'resize' && Number.isFinite(event.height)) {
+        const next = event.height!
+        if (heightKey) rememberAppletHeight(heightKey, next)
         clearTimeout(resizeTimer)
-        resizeTimer = setTimeout(() => {
-          if (!disposed) setHeight(event.height!)
-        }, 80)
+        // The first report sizes the frame at once; later ones settle first so a burst moves it once.
+        if (!sized) {
+          sized = true
+          setMeasured({ key: heightKey, height: next })
+        } else
+          resizeTimer = setTimeout(() => {
+            if (!disposed) setMeasured({ key: heightKey, height: next })
+          }, 80)
       }
       if (event.type === 'ready') { setReady(true); refreshSnapshot() }
       if (event.type === 'state-changed' || event.type === 'visual-changed') {
