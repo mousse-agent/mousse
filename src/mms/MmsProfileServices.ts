@@ -5,7 +5,7 @@ import { join } from 'path'
 import { homedir, hostname } from 'os'
 import { MousseConfigStore } from './config/MousseConfigStore'
 import { MmsEventBus } from './events'
-import { SettingsStore } from './settings/SettingsStore'
+import { onSettingsSaved, SettingsStore } from './settings/SettingsStore'
 import { rewriteMovedDefaults } from './settings/movedDefaults'
 import { ProviderAuthService } from './providers/ProviderAuthService'
 import { AppletStore } from './applets/AppletStore'
@@ -773,6 +773,9 @@ export class MmsProfileServices {
       // A run may only ask for a skill this profile has. MCP asks are made from the owner's servers set up now (`mcp`).
       knownAsk: (permission) => 'skill' in permission && (this.botKnownSkills?.has(permission.skill) ?? true),
       browser: botBrowsers,
+      // What bots may do on this computer (Settings → Agents), from this profile's own settings: read at every dispatch
+      // and call, never taken from a caller or another computer.
+      computerLimit: () => this.settings.get().bots.here,
       // The owner's MCP servers set up for the whole profile, through Mousse (`BotMcp`).
       ...(this.orchestrator.botMcp() ? { mcp: this.orchestrator.botMcp()! } : {})
     }, ({ store }) => {
@@ -841,6 +844,8 @@ export class MmsProfileServices {
     }
     const personalBots = this.personalBots
     if (personalBots) this.orchestrator.setBotThreads(personalBots)
+    // A switch of What bots may do here changed: every bot's About reads again (it marks what is off here).
+    if (personalBots) this.platform.onDispose(onSettingsSaved(() => personalBots.computerLimitChanged()))
     // The bots' own app tools (schedules, profile, depth) and memory tools, through the engine.
     if (personalBots && botMemory) {
       const memory = botMemory

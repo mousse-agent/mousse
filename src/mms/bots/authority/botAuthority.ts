@@ -2,6 +2,8 @@ import { realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { ActiveTimeScope, BotAllowedObserver, BotAuthority, BotThreadRole, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
+import { BOT_COMPUTER_OPEN, type BotComputerLimit } from '../../../shared/bots/personal/computerLimit'
+import { BOT_BROWSER_PERMISSION, botGrantTool } from '../../../shared/bots/personal/manifest'
 import type { CounterScope } from '../../../shared/harness/counters'
 import type { SpendScope } from '../../../shared/harness/spend'
 import type { NeutralTool } from '../../../shared/harness/tools'
@@ -14,7 +16,8 @@ import type { BotPermissions } from '../grants/compile'
  * Pi's `/pi/gate` for built-ins, the Mousse MCP registry for app and proxied MCP tools, Claude Code's
  * grant gate (its hooks and `canUseTool`), and Codex's approval requests. It asks nobody: a call outside the grant stops at a wall. The bot's
  * files folder (Bot Phase 1 §5.10) counts as a granted writable root, and every allowed call is
- * reported to `onAllowed`, the source of activity chips (§5.8).
+ * reported to `onAllowed`, the source of activity chips (§5.8). What this computer lets bots do (`limit`, read on
+ * every call) comes before the grant: a call it has switched off is refused (a `computer` wall), never asked about.
  */
 
 /** The arguments that name a path, on every runtime (Pi's and Claude's built-ins). */
@@ -41,6 +44,11 @@ export interface BotAuthorityInput {
   spend: SpendScope | null
   /** Told of every call the check allows, whatever the runtime (`BotActivitySink.observer`). Never fails a call. */
   onAllowed?: BotAllowedObserver
+  /**
+   * What this computer lets bots do now (Settings → What bots may do here), read on every call, so a switch turned off
+   * refuses the next call of a turn already running. Absent: everything. Must not throw.
+   */
+  limit?(): BotComputerLimit
 }
 
 export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
@@ -57,6 +65,8 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
   // scratch, inside that data, stay the bot's.
   const computer = permissions.workspace?.computer
   const ownInClosed = workspace ? [workspace.scratch, ...(permissions.workspace?.files !== undefined ? [permissions.workspace.files] : [])] : []
+  // Without file access on this computer, the bot's own folders: its scratch and its files folder, both writable.
+  const ownRoots = ownInClosed
   const authority: BotAuthority = {
     activationId: input.activationId,
     role: input.role,
@@ -91,6 +101,7 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
     const ended = input.live?.() ?? (input.time.signal.aborted ? { kind: 'ended' as const } : undefined)
     if (ended) return { ok: false, wall: ended }
     if (input.waiting()) return { ok: false, wall: { kind: 'waiting' } }
+    const limit = input.limit?.() ?? BOT_COMPUTER_OPEN
     switch (call.kind) {
       case 'skill':
         return skills.has(call.skill) ? { ok: true } : { ok: false, wall: { kind: 'skill', skill: call.skill } }
@@ -100,13 +111,20 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
           ? { ok: true }
           : { ok: false, wall: { kind: 'mcp', server: call.server, tool: call.tool, ...(call.serverName ? { serverName: call.serverName } : {}) } }
       case 'app':
+        // The browser switched off on this computer: none of its tools runs, whatever the grant holds.
+        if (!limit.browser && botGrantTool(call.tool) === BOT_BROWSER_PERMISSION) return { ok: false, wall: { kind: 'computer', tool: call.tool, off: 'browser' } }
         return appTools.has(call.tool) ? { ok: true } : { ok: false, wall: { kind: 'tool', tool: call.tool } }
       case 'builtin':
-        return checkBuiltin(call.tool, call.nativeName, call.args, call.own)
+        return checkBuiltin(call.tool, call.nativeName, call.args, limit, call.own)
     }
   }
 
-  function checkBuiltin(tool: NeutralTool, nativeName: string, args: Record<string, unknown>, own?: true): { ok: true } | { ok: false; wall: WallReason } {
+  function checkBuiltin(tool: NeutralTool, nativeName: string, args: Record<string, unknown>, limit: BotComputerLimit, own?: true): { ok: true } | { ok: false; wall: WallReason } {
+    // This computer's switches come before the grant: what is off here is refused, and never asked for.
+    if (tool === 'shell' && !limit.shell) return { ok: false, wall: { kind: 'computer', tool: nativeName, off: 'shell' } }
+    // A turn that started with file access runs its commands in a sandbox opened over every folder (Claude Code,
+    // Codex). Once file access is switched off here, its commands wait for a turn that starts without it.
+    if (tool === 'shell' && computer && !limit.files) return { ok: false, wall: { kind: 'computer', tool: nativeName, off: 'files' } }
     if (!tools.has(tool)) return { ok: false, wall: { kind: 'tool', tool: nativeName } }
     // "Run commands" is granted as a whole: any command, wherever it says it runs. What a command
     // can reach is the runtime's sandbox, where it has one, not a path check here.
@@ -123,11 +141,13 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
     const expanded = PATH_ARGUMENTS.map((key) => args[key]).find((value): value is string => typeof value === 'string' && runtimeExpandedPath(value))
     if (expanded !== undefined) return { ok: false, wall: pathFormWall(nativeName, expanded) }
     // Without file access the bot has no folder at all, not even its scratch folder.
-    if (!workspace) return { ok: false, wall: { kind: 'path', tool: nativeName, path: String(firstPath(args) ?? '.'), access } }
+    if (!workspace) return { ok: false, wall: limit.files ? { kind: 'path', tool: nativeName, path: String(firstPath(args) ?? '.'), access } : { kind: 'computer', tool: nativeName, off: 'files' } }
     const scratch = workspace.scratch
     const paths = PATH_ARGUMENTS.map((key) => args[key]).filter((value): value is string => typeof value === 'string')
     // A file tool with no path argument works in its working directory: the scratch folder.
     if (!paths.length) return { ok: true }
+    // File access switched off here: only the bot's own folders, whatever this turn started with.
+    if (!limit.files) return checkOwn(nativeName, paths, scratch, writes, access)
     if (computer) return checkEverywhere(nativeName, paths, scratch, computer.closed)
     for (const raw of paths) {
       // Git metadata is never a file tool's to change, in the scratch folder or a root (`agents/gitMetadata`).
@@ -154,6 +174,18 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
         }
         if (readOnlyRoots.length && insideAny(readOnlyRoots, raw, scratch)) return { ok: false, wall: { kind: 'path', tool: nativeName, path: raw, access } }
       }
+    }
+    return { ok: true }
+  }
+
+  /**
+   * File access switched off on this computer: a path inside the bot's own folders (its scratch and its files folder),
+   * read or write, and nothing else. Git metadata stays closed to a write, as without file access.
+   */
+  function checkOwn(nativeName: string, paths: readonly string[], scratch: string, writes: boolean, access: 'read' | 'write'): { ok: true } | { ok: false; wall: WallReason } {
+    for (const raw of paths) {
+      if (writes && touchesGitMetadata(raw, scratch)) return { ok: false, wall: { kind: 'path', tool: nativeName, path: raw, access } }
+      if (!insideAny(ownRoots, raw, scratch)) return { ok: false, wall: { kind: 'computer', tool: nativeName, off: 'files' } }
     }
     return { ok: true }
   }

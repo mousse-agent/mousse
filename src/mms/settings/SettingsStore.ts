@@ -1,5 +1,5 @@
 import type { ContextSettings, MousseSettings, MousseSettingsUpdate } from '../../shared/settings'
-import { CONTEXT_COMPACTION_DEFAULT_MARKER, DEFAULT_CONTEXT_COMPACTION_TOKENS, REMOVED_THEME_IDS, getDefaultSettings, normalizeAgentAccessSettings, normalizeAppearance, normalizeContextSettings, normalizeExperimentalSettings, normalizePermissionSettings, normalizeRunSettings, normalizeStorageSettings } from '../../shared/settings'
+import { CONTEXT_COMPACTION_DEFAULT_MARKER, DEFAULT_CONTEXT_COMPACTION_TOKENS, REMOVED_THEME_IDS, getDefaultSettings, normalizeAgentAccessSettings, normalizeAppearance, normalizeBotSettings, normalizeContextSettings, normalizeExperimentalSettings, normalizePermissionSettings, normalizeRunSettings, normalizeStorageSettings } from '../../shared/settings'
 import { MOUSSE_BUILTIN_TOOL_IDS } from '../../shared/integrations'
 import { generateRandomUsername } from '../../shared/randomUsername'
 import { normalizeShortcuts } from '../../shared/commands'
@@ -95,6 +95,8 @@ function normalizeSettings(settings: MousseSettings): MousseSettings {
     runs: normalizeRunSettings(settings.runs),
     experimental: normalizeExperimentalSettings(settings.experimental),
     storage: normalizeStorageSettings(settings.storage),
+    // What bots may do on this computer: a switch never written is on, one that can't be read is off.
+    bots: normalizeBotSettings(settings.bots),
     ...(typeof settings.provider?.model === 'string' ? { provider: upgradeSelection(settings.provider) } : {}),
     ...(settings.title ? { title: withInstance(settings.title) } : {}),
     // The bot's depth sets the level, so a bot model keeps none.

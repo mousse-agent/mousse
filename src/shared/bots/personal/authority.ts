@@ -1,6 +1,7 @@
 import type { CounterScope } from '../../harness/counters'
 import type { SpendScope } from '../../harness/spend'
 import type { NeutralTool } from '../../harness/tools'
+import type { BotComputerSwitch } from './computerLimit'
 
 /**
  * The contracts of a personal bot's authority (PR 6 §2 and §4). A bot activation's runs are held to
@@ -63,6 +64,11 @@ export type WallReason =
   | { kind: 'path'; tool: string; path: string; access: 'read' | 'write' }
   /** A path inside Mousse's own data, closed to every bot even with file access: never an ask. */
   | { kind: 'closed'; tool: string; path: string }
+  /**
+   * Something this computer has switched off for every bot (Settings → What bots may do here, `BotComputerLimit`):
+   * commands, files outside the bot's own folders, or the browser. Never an ask, whatever the grant holds.
+   */
+  | { kind: 'computer'; tool: string; off: BotComputerSwitch }
   /**
    * A path the runtime would rewrite before opening (`~`, a variable): never checked, never an ask.
    * `home`: the owner's home folder, for a `~` or variable path; `full`: the path it stands for.

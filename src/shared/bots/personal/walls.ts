@@ -1,6 +1,7 @@
 import type { BotAuthority, BotCheck, BotCheckDenied, NormalisedCall, WallReason } from './authority'
 import { neutralToolsOf, type NativeToolTable, type NeutralTool } from '../../harness/tools'
 import { BROWSER_AUTOMATION_TOOLS } from '../../browser/automation'
+import { notOnThisComputerText } from './computerLimit'
 
 /** Walls in plain words, and the built-in check a runtime's gate makes (PR 6 §4). Browser-safe. */
 
@@ -13,6 +14,7 @@ export function wallMessage(wall: WallReason): string {
       ? `This bot is not allowed to change ${wall.path}.`
       : `This bot is not allowed to read ${wall.path}.`
     case 'closed': return `${wall.path} is Mousse's own data, which no bot may use. Use another folder.`
+    case 'computer': return notOnThisComputerText(wall.off)
     case 'path_form': return wall.full
       ? `Give ${wall.path} as a full path, without ~ or variables: ${wall.full}`
       : wall.home

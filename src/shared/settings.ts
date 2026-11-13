@@ -427,6 +427,34 @@ export function normalizeExperimentalSettings(raw?: Partial<ExperimentalSettings
   return { subagentWorktrees: raw?.subagentWorktrees === true, profiler: normalizeProfilerSettings(raw?.profiler) }
 }
 
+/**
+ * What bots may do on this computer (Settings → Agents → What bots may do here): a ceiling over every bot's grant, kept
+ * in this computer's profile settings and never sent to or set from another computer (`settings.*` methods are not
+ * routed). A switch that is off gives no bot that permission here, whatever its grant holds, and no bot can ask for it.
+ */
+export interface BotComputerLimit {
+  /** "Run commands" (`shell`). */
+  shell: boolean
+  /** "Use files on this computer": files and folders outside the bot's own files folder and scratch. */
+  files: boolean
+  /** "Use the browser" (the bot's own browser). */
+  browser: boolean
+}
+
+export interface BotSettings {
+  here: BotComputerLimit
+}
+
+/**
+ * The setting as the daemon reads it. A switch never written is on, so existing installs keep what they had. One
+ * written as anything but `true` is off: a ceiling that can't be read fails closed.
+ */
+export function normalizeBotSettings(raw?: { here?: Partial<Record<keyof BotComputerLimit, unknown>> | null } | null): BotSettings {
+  const here = raw?.here && typeof raw.here === 'object' ? raw.here : {}
+  const on = (key: keyof BotComputerLimit) => here[key] === undefined || here[key] === true
+  return { here: { shell: on('shell'), files: on('files'), browser: on('browser') } }
+}
+
 /** A worktree folder the person chose, and the id written in its marker (`.mousse-worktrees.json`) when it was chosen. */
 export interface WorktreeFolderEntry {
   path: string
@@ -511,6 +539,8 @@ export interface MousseSettings {
     model: string
     instanceId?: string
   }
+  /** What bots may do on this computer (`BotComputerLimit`). */
+  bots: BotSettings
   agents: {
     enabled: Record<AgentTypeId, boolean>
     /** Default provider for in-app Mousse subagents; blank inherits the main model. */
@@ -899,6 +929,7 @@ export function getDefaultSettings(): MousseSettings {
       llmProvider: '',
       model: ''
     },
+    bots: normalizeBotSettings(),
     agents: {
       enabled: {
         mousse: true,

@@ -41,6 +41,7 @@ export const SETTINGS_CLASSIFICATION: readonly SettingsClassificationEntry[] = [
   { path: 'settings.agentAccess', scope: 'profile', notes: 'How far agents may act on other threads is a per-profile trust choice.' },
   { path: 'settings.integrations', scope: 'profile', notes: 'Skill/MCP enablement is profile-owned.' },
   { path: 'settings.title', scope: 'profile', notes: 'Title-model selection points at the shared catalog.' },
+  { path: 'settings.bots', scope: 'profile', notes: 'What bots may do on this computer is set on this computer; it is never sent to or set from another one.' },
   {
     path: 'providers.llmProvider',
     scope: 'profile',

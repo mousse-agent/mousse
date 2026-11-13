@@ -60,6 +60,7 @@ import {
   type BotThreadSpec
 } from '../../../shared/bots/personal/definition'
 import { addedPermissions, intersectManifest, manifestSubset, narrowManifest } from '../../../shared/bots/personal/manifest'
+import { BOT_COMPUTER_OPEN, BOT_COMPUTER_SHUT, notOnThisComputerText, switchedOff, withinComputerLimit, type BotComputerLimit } from '../../../shared/bots/personal/computerLimit'
 import { allPinned, copyPick, isPinned, limitFamilyOf, limitOnPick, pickProblemText, rowName, samePick, samePickTarget, sameStoredPick, slotsOf, slotsWith, startDepthOf, stuckRowsOf, turnModelOf, UNPICKED_SLOTS, withSlots, type BotPickMiss, type BotStuckEntry, type BotTurnModel } from '../../../shared/bots/personal/modelSlots'
 import type { BotModelOption } from '../../../shared/bots/personal/methods'
 import type { LlmProviderOption } from '../../../shared/settings'
@@ -201,6 +202,11 @@ export interface BotEngineHost {
    * browser tools on it, and an ended activation's tabs close. Absent: no bot gets the browser.
    */
   browser?: BotBrowserHost
+  /**
+   * What this computer lets bots do (Settings → Agents → What bots may do here, `settings.bots.here`): a ceiling over
+   * every bot's grant, read when each dispatch is prepared and on every call. Absent: everything.
+   */
+  computerLimit?(): BotComputerLimit
   /**
    * Whether the internet is there for the bot's provider (`createBotConnectivity`): checked before
    * a dispatch is sent, while one makes no progress, and while an activation waits for it. Absent:
@@ -476,6 +482,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private lastSweep = 0
   /** The owner's MCP servers this engine follows while an ask waits for a server's tools (`watchMcp`). */
   private mcpWatch?: { mcp: BotMcpHost; stop: () => void }
+  /** What this computer let bots do at the last settings save (`computerLimitChanged`), as JSON. */
+  private lastLimit: string | undefined
 
   constructor(private readonly host: BotEngineHost) {
     this.chat = new BotChatProjection({
@@ -485,6 +493,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // report its schedule's Tell me keeps quiet says so (`quiet`): it is in the chat, without a notification.
       emit: (event) => this.events.emit('message', { ...event, ...this.nameFor(event.botId), ...(this.quietReport(event.botId, event.message) ? { quiet: true } : {}) }),
       schedules: (botId) => this.listSchedules(botId),
+      // About marks a permission this computer has switched off.
+      computerLimit: () => this.limit(),
       // Where each granted MCP server stands now, for About (on, switched off, changed, gone, or MCP off). Before the
       // servers were read since Mousse started, nothing is known: they are read in the background, and About names what
       // it can.
@@ -514,6 +524,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     } catch (error) {
       console.warn('bot threads could not be read', { error: error instanceof Error ? error.message : String(error) })
     }
+    this.lastLimit = JSON.stringify(this.limit())
   }
 
   /**
@@ -556,6 +567,32 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     } catch {
       // A listener never undoes a committed change.
     }
+  }
+
+  /**
+   * What this computer lets bots do now (Settings → What bots may do here), read where a grant becomes what a turn
+   * runs with and on every call. A setting that can't be read gives nothing: the ceiling fails closed.
+   */
+  private limit(): BotComputerLimit {
+    if (!this.host.computerLimit) return BOT_COMPUTER_OPEN
+    try {
+      return this.host.computerLimit()
+    } catch (error) {
+      console.warn('what bots may do here could not be read; bots get none of it meanwhile', { error: error instanceof Error ? error.message : String(error) })
+      return BOT_COMPUTER_SHUT
+    }
+  }
+
+  /**
+   * The settings were saved: when what bots may do here changed since the last save, every bot's About is read again
+   * (it marks what is off here). What turns run with needs nothing: it is read at every dispatch and call.
+   */
+  computerLimitChanged(): void {
+    const now = JSON.stringify(this.limit())
+    const before = this.lastLimit
+    this.lastLimit = now
+    if (before === now) return
+    for (const botId of this.host.definitions.ids()) if (!this.store.registry(botId)?.deletedAt) this.changed({ botId })
   }
 
   // -- Definitions ------------------------------------------------------------------------------
@@ -1971,8 +2008,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const selection = row.selection
     if (!selection) return refuse('bot_model_missing', 'No model was chosen for this activation.')
     // What runs: the revision's own permissions held inside the grant, so a narrower revision
-    // narrows, plus what the owner allowed for this activation only.
-    const effective = this.effectiveManifest(row, definition.permissions, grant.manifest)
+    // narrows, plus what the owner allowed for this activation only, under what this computer lets bots do.
+    const limit = this.limit()
+    const effective = this.effectiveManifest(row, definition.permissions, grant.manifest, limit)
     const problem = manifestProblem(effective)
     if (problem) return this.block(row, 'bot_permissions_invalid', problem)
     const counters = this.store.counters(row.id)
@@ -1994,7 +2032,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       remaining: { ...limitsOf(effective), deadlineMs: remainingMs },
       filesFolder: this.filesFolder(row.botId),
       // A chat turn is the bot's front desk: it hands what takes long to work (docs/plans/bot-always-free.md).
-      botTools: { escalate: true, consult: definition.context.length > 0, memory: true, frontDesk: row.lane === 'chat' }
+      botTools: { escalate: true, consult: definition.context.length > 0, memory: true, frontDesk: row.lane === 'chat' },
+      limit
     })
     if (!compiled.ok) return this.block(row, 'policy_unenforceable', compiled.error.reason ?? compiled.error.message)
     const checked = this.host.harness.checkPolicy(selection.instanceId, { mode: 'default', origin: 'bot', ...compiled.policy }, selection.model)
@@ -2075,7 +2114,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // What the owner allows now, from the permissions this dispatch runs with: a chat turn is told what its work
       // holds (it hands those jobs off), a run what it holds itself, and whether its browser could be offered.
       ...this.instructionsOf(definition, definition.main, row.lane, {
-        allowed: botAllowedOf(narrowManifest(effective, definition.main.narrow), (ids) => this.mcpServerNames(ids)),
+        allowed: { ...botAllowedOf(narrowManifest(effective, definition.main.narrow), (ids) => this.mcpServerNames(ids)), here: limit },
         ...(row.lane !== 'chat' && compiled.permissions.browser && !browser ? { browserOffline: true } : {})
       }),
       selection: { ...selection },
@@ -2280,7 +2319,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!spec) return refuse('bot_consult_unknown', 'This context thread is not part of the bot.')
     const selection = row.selection
     if (!selection) return refuse('bot_model_missing', 'No model was chosen for this activation.')
-    const effective = this.effectiveManifest(row, definition.permissions, grant.manifest)
+    const limit = this.limit()
+    const effective = this.effectiveManifest(row, definition.permissions, grant.manifest, limit)
     const remainingMs = main.deadline - this.now()
     if (remainingMs <= 0) return refuse('active_time_exhausted', 'This bot used up its work time.')
     const scratch = row.scratch ?? join(this.store.directory, 'scratch', row.id)
@@ -2293,7 +2333,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       nativeNames: (tools) => this.nativeNames(selection.instanceId, tools),
       remaining: { ...limitsOf(effective), deadlineMs: remainingMs },
       filesFolder: this.filesFolder(row.botId),
-      botTools: { escalate: true, consult: false, memory: true }
+      botTools: { escalate: true, consult: false, memory: true },
+      limit
     })
     if (!compiled.ok) return refuse('policy_unenforceable', compiled.error.reason ?? compiled.error.message)
     const checked = this.host.harness.checkPolicy(selection.instanceId, { mode: 'default', origin: 'bot', ...compiled.policy }, selection.model)
@@ -2325,7 +2366,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       dispatchN: dispatch.n,
       prompt: dispatch.prompt.text.startsWith('/') ? ` ${dispatch.prompt.text}` : dispatch.prompt.text,
       // A consult is never given MCP tools (its authority offers none): it is told so, never that it holds them.
-      ...this.instructionsOf(definition, spec, undefined, { allowed: { ...botAllowedOf(narrowManifest(effective, spec.narrow), (ids) => this.mcpServerNames(ids)), mcpNotHere: true } }),
+      ...this.instructionsOf(definition, spec, undefined, { allowed: { ...botAllowedOf(narrowManifest(effective, spec.narrow), (ids) => this.mcpServerNames(ids)), mcpNotHere: true, here: limit } }),
       selection: { ...selection },
       policy: compiled.policy,
       authority,
@@ -2336,11 +2377,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
   }
 
-  /** What an activation runs with: the revision held inside the grant, plus its "Allow this time" overlays. */
-  private effectiveManifest(row: BotActivationRow, revision: BotManifest, granted: BotManifest): BotManifest {
+  /**
+   * What an activation runs with: the revision held inside the grant, plus its "Allow this time" overlays, under what
+   * this computer lets bots do (`limit`, read now when not given). The ceiling comes last, so no overlay adds back
+   * what is switched off here; the grant itself is never changed by it.
+   */
+  private effectiveManifest(row: BotActivationRow, revision: BotManifest, granted: BotManifest, limit: BotComputerLimit = this.limit()): BotManifest {
     let manifest = intersectManifest(revision, granted)
     for (const overlay of this.store.overlays(row.id)) manifest = withPermission(manifest, overlay.permission, overlay.amount ?? undefined)
-    return manifest
+    return withinComputerLimit(manifest, limit)
   }
 
   /**
@@ -2595,7 +2640,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       },
       counters: input.counters,
       time: { deadline: () => input.deadline, signal: controller.signal },
-      spend: input.spend
+      spend: input.spend,
+      // What this computer lets bots do, on every call: a switch turned off refuses this turn's next call.
+      limit: () => this.limit()
     })
     const observe = (call: NormalisedCall): void => {
       const sink = this.host.activity
@@ -2617,6 +2664,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
      * grant does not hold it.
      */
     const heldNow = (asked: BotAskRequest): string | undefined => {
+      // Switched off on this computer: nothing to hold or ask for, whatever the grant says.
+      const off = switchedOff(this.limit(), asked)
+      if (off) return notOnThisComputerText(off)
       const now = this.grantNow(row.id)
       if (!now || !grantHolds(now, asked)) return undefined
       const workOnly = row.lane === 'chat' && frontDeskLacks(asked)
@@ -2697,6 +2747,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         // A Mousse tool no bot can hold is refused now, before the owner sees a card it can't grant.
         if ('tool' in asked && !isNeutralTool(asked.tool) && !BOT_APP_TOOLS.has(asked.tool))
           return `A bot can't be given the Mousse tool ${asked.tool}. Carry on without it.`
+        // Switched off on this computer: no card, whatever the grant holds; asking would not help.
+        const off = switchedOff(this.limit(), asked)
+        if (off) return notOnThisComputerText(off)
         // File access is one permission: a bot that has it has every folder already.
         if ('path' in asked && base.workspace?.computer) return BOT_FILES_HELD_TEXT
         // What the bot already holds is no ask: a card for it would grant nothing. In a chat turn its work holds more
