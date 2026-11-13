@@ -286,7 +286,7 @@ export interface LinuxCommandLayout {
   write: string[]
   /** Read-only: the folders on the way down to the bot's folders inside the Mousse home, and the Codex package there. */
   read: string[]
-  /** Neither readable nor writable: Mousse's own data beside those, and every other closed place. */
+  /** Neither readable nor writable: Mousse's own data beside those, and every other closed place that exists. */
   deny: string[]
 }
 
@@ -322,17 +322,22 @@ export function linuxCommandLayout(input: {
    * them at the root of the owner's Windows drives. Default true.
    */
   windowsDrives?: boolean
-  /** For tests: whether a folder is writable (`writableFolder`), a folder's entries, and whether this is WSL. */
+  /** For tests: whether a folder is writable (`writableFolder`), a folder's entries, whether this is WSL, and whether a place exists. */
   writable?: (path: string) => boolean
   list?: (path: string) => string[]
   wsl?: boolean
+  exists?: (path: string) => boolean
 }): LinuxCommandLayout {
   const writable = input.writable ?? writableFolder
   const list = input.list ?? ((path: string) => readdirSync(path))
   const home = resolve(input.mousseHome)
   const userHome = resolve(input.userHome ?? homedir())
   const kept = [...input.mine, ...(input.readable ?? [])].map((path) => resolve(path))
-  const outside = input.outside.map((place) => resolve(place)).filter((place) => !kept.some((folder) => inside(place, folder)))
+  // Only the places that exist when the turn starts: both sandboxes make a stand-in on the disk for one that doesn't, and
+  // Codex 0.162.1 fails every command when the folder it is in doesn't exist either. One made later is closed from the
+  // next turn (a change of the list opens a new Codex thread); the file tool's check holds the whole list throughout.
+  const present = input.exists ?? ((path: string) => safe(() => lstatSync(path)) !== undefined)
+  const outside = input.outside.map((place) => resolve(place)).filter((place) => !kept.some((folder) => inside(place, folder)) && present(place))
   const deny = [...new Set([...closedBeside(home, kept), ...outside])]
   // The way down from the Mousse home to each folder kept inside it: read-only, so nothing can be made or renamed there.
   const way = new Set<string>()

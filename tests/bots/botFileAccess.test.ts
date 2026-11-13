@@ -298,6 +298,9 @@ describe('each runtime compiles file access to the whole file system but Mousse\
     if (linked) expect(checkBuiltinCall(granted, PI_NATIVE_TOOLS, 'read', { path: fileLink })).toMatchObject({ ok: false, wall: { kind: 'closed' } })
   })
 
+  /** The closed places that exist: a sandbox denies only those (`linuxCommandLayout`); the file tool's check holds them all. */
+  const existing = (places: readonly string[]) => places.filter((place) => existsSync(place))
+
   /** The folders of this test among `paths` (the layout also opens the drives of the computer it runs on). */
   const ours = (paths: readonly string[]) => paths.filter((path) => path === base || path.startsWith(`${base}${sep}`)).sort()
 
@@ -323,7 +326,11 @@ describe('each runtime compiles file access to the whole file system but Mousse\
     expect(codex.write).not.toContain(drive('/mnt/c'))
     expect(codex.write).toEqual(expect.arrayContaining([drive('/mnt/wsl'), drive('/mnt/data'), drive('/media/owner/usb')]))
     // Closed: the Mousse home but the way down to the bot's folders, and every other place on the list.
-    expect([...layout.deny].sort()).toEqual([join(mousse, 'auth.json'), join(mousse, 'browser'), join(mousse, 'profiles', 'p2'), join(profile, 'bots', 'bots.db'), join(profile, 'harness'), ...outside].sort())
+    expect([...layout.deny].sort()).toEqual([join(mousse, 'auth.json'), join(mousse, 'browser'), join(mousse, 'profiles', 'p2'), join(profile, 'bots', 'bots.db'), join(profile, 'harness'), ...existing(outside)].sort())
+    // A closed place that doesn't exist (Grok's sign-in here) is left to the file tool's check: a sandbox would make a
+    // stand-in for it on the disk.
+    expect(outside).toContain(join(at.user, '.grok', 'auth.json'))
+    expect(layout.deny).not.toContain(join(at.user, '.grok', 'auth.json'))
     // The way down is read-only: nothing can be made or renamed on it.
     expect(layout.read).toEqual(expect.arrayContaining([mousse, join(mousse, 'profiles'), profile, join(profile, 'bots')]))
     for (const folder of layout.read) expect(layout.write).not.toContain(folder)
@@ -336,7 +343,7 @@ describe('each runtime compiles file access to the whole file system but Mousse\
     const sandbox = claudeLockedSandbox({ workspace: granted.workspace!, temps: [at.temp], home: at.user, own: [ownStorage], platform: 'linux', user: 'owner' }) as unknown as { filesystem: Record<string, string[]> }
     // Only folders this user can write: `/` itself would make Claude Code's sandbox fail every command.
     expect(ours(sandbox.filesystem.allowWrite)).toEqual([at.user, join(at.user, '.claude'), join(at.user, '.codex'), join(at.user, '.config'), join(base, 'Documents'), at.temp, files, scratch].sort())
-    expect([...sandbox.filesystem.denyRead].sort()).toEqual([join(mousse, 'auth.json'), join(mousse, 'browser'), join(mousse, 'profiles', 'p2'), join(profile, 'bots', 'bots.db'), join(profile, 'harness'), ...outside].sort())
+    expect([...sandbox.filesystem.denyRead].sort()).toEqual([join(mousse, 'auth.json'), join(mousse, 'browser'), join(mousse, 'profiles', 'p2'), join(profile, 'bots', 'bots.db'), join(profile, 'harness'), ...existing(outside)].sort())
     expect(sandbox.filesystem.denyRead).toEqual(expect.arrayContaining([at.electron, at.codexAuth, at.claudeCredentials, at.claudeJson, join(at.temp, 'mousse-pr-1')]))
     expect(sandbox.filesystem.allowRead).toEqual([files, scratch])
     expect(sandbox.filesystem.denyWrite).toEqual(expect.arrayContaining([...sandbox.filesystem.denyRead, mousse, join(mousse, 'profiles'), profile, ownStorage]))
@@ -384,7 +391,7 @@ describe('each runtime compiles file access to the whole file system but Mousse\
     const codexPackage = join(mousse, 'managed', 'codex', '0.162.1')
     mkdirSync(codexPackage, { recursive: true })
     const managed = codexBotSandbox(granted, { platform: 'linux', codexPackage, userHome: at.user, user: 'owner', wsl: true })
-    expect(managed.profile!.closed).toEqual(expect.arrayContaining([join(mousse, 'auth.json'), join(mousse, 'browser'), join(mousse, 'profiles', 'p2'), ...outside]))
+    expect(managed.profile!.closed).toEqual(expect.arrayContaining([join(mousse, 'auth.json'), join(mousse, 'browser'), join(mousse, 'profiles', 'p2'), ...existing(outside)]))
     expect(managed.profile!.closed).not.toContain(mousse)
     expect(managed.profile!.readable).toContain(codexPackage)
     // Windows: the `workspaceWrite` sandbox as before this change (every entry beside Mousse's data writable, every file
