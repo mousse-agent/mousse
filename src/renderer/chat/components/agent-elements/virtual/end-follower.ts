@@ -50,6 +50,8 @@ export function createEndFollower(options: {
   /** While a turn that ended with messages queued waits for the next: the queue's tail held. */
   let queueTail: number | null = null;
   let collapseFrame = 0;
+  /** The person folded something near the end away (`closeNext`): the next shrink is not held. */
+  let closing = false;
 
   const setReserve = (px: number) => {
     const next = Math.max(0, Math.round(px));
@@ -124,11 +126,11 @@ export function createEndFollower(options: {
    */
   const sizeReserve = (container: HTMLElement, content: number) => {
     const following = options.mode() === "following-end";
-    if (holdTotal !== null && !following) releaseHold();
+    if (holdTotal !== null && (!following || (closing && holdTimer === null))) releaseHold();
     // Something near the end left while a turn runs at the end: hold its space for what replaces it.
     // Only for a transcript taller than the viewport; a short one does not scroll either way.
     const total = lastContent + reserve;
-    if (holdTotal === null && live && following && !collapseFrame && content < lastContent - 0.5 && total > container.clientHeight) {
+    if (holdTotal === null && live && following && !closing && !collapseFrame && content < lastContent - 0.5 && total > container.clientHeight) {
       holdTotal = total;
     }
     if (holdTotal !== null) {
@@ -149,6 +151,8 @@ export function createEndFollower(options: {
   const updateReserve = (container: HTMLElement) => {
     const content = contentHeight(container);
     sizeReserve(container, content);
+    // The fold is committed in the same task as `closeNext`, so the first size after it is the one.
+    closing = false;
     lastContent = content;
     const top = queueTop(container);
     lastQueueTail = top === null ? null : content + reserve - top;
@@ -249,6 +253,15 @@ export function createEndFollower(options: {
       if (!container) return;
       if (holdTotal !== null && options.mode() !== "following-end") releaseHold();
       if (holdTotal === null && reserve > 0) updateReserve(container);
+    },
+
+    /**
+     * The person is folding something near the end away (Show less under the queue). It is not being
+     * replaced, so its space is not held for the reply: the next time the content shrinks, the view
+     * lands on the new end, as when a turn ends.
+     */
+    closeNext() {
+      closing = true;
     },
 
     /** Any input from the person: stop every motion of ours where it is. `settle` follows it. */
