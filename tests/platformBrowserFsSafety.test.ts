@@ -48,10 +48,12 @@ describe.skipIf(!canCreateSymlinks())('managed browser tree check (used before m
 
   it.each([
     ['leaves the tree', async (tree: string, outside: string) => symlink(outside, join(tree, 'app', 'escape'), dirLink), /leaves its tree/],
+    // Windows resolves a target's `..` by name before it follows links, so there this link dangles instead of leaving:
+    // refused either way.
     ['leaves the tree through another link', async (tree: string) => {
       await symlink('..', join(tree, 'app', 'sub', 'up'), dirLink)
       await symlink('sub/up/../../../../outside', join(tree, 'app', 'escape'))
-    }, /leaves its tree/],
+    }, process.platform === 'win32' ? /dangling symlink/ : /leaves its tree/],
     ['dangles', async (tree: string) => symlink('missing', join(tree, 'app', 'dangling')), /dangling symlink/],
     ['points at its own folder', async (tree: string) => symlink('../sub', join(tree, 'app', 'sub', 'self'), dirLink), /own folder or a folder above it/],
     ['points at a folder above it inside the tree', async (tree: string) => symlink('..', join(tree, 'app', 'sub', 'up'), dirLink), /own folder or a folder above it/]

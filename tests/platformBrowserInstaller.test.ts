@@ -343,15 +343,20 @@ describe('managed browser installer refusing unsafe macOS archives (any platform
   })
 })
 
-describe.skipIf(!canCreateSymlinks())('managed browser installer with the macOS app bundle on disk', () => {
+// Real links on disk: Windows creates them only with Developer Mode or an administrator's privilege. Elsewhere the group
+// shows as skipped with its reason, and the refusals above still run on every platform.
+const SYMLINKS = canCreateSymlinks()
+describe.skipIf(!SYMLINKS)(`managed browser installer with the macOS app bundle on disk${SYMLINKS ? '' : ' (skipped: this computer cannot create symlinks without a privilege)'}`, () => {
   it('installs a macOS archive whose framework links stay inside the bundle, then replaces and cleans it up', async () => {
     const { root, fixture, installer } = await macSetup()
     const first = await installer.install(options(root, fixture))
     expect((await installer.availability(root)).status).toBe('ready')
     expect(await readFile(first.executablePath, 'utf8')).toContain('mac fixture')
     const versionRoot = join(root, 'versions', `mac-arm64-${VERSION_1}`, MAC_FRAMEWORK)
-    expect(await readlink(join(versionRoot, 'Versions/Current'))).toBe('123.0.0.1')
-    expect(await readlink(join(versionRoot, 'Resources'))).toBe('Versions/Current/Resources')
+    // Windows keeps a relative link target with its own separator; the archive's is POSIX.
+    const target = async (path: string) => (await readlink(path)).replaceAll('\\', '/')
+    expect(await target(join(versionRoot, 'Versions/Current'))).toBe('123.0.0.1')
+    expect(await target(join(versionRoot, 'Resources'))).toBe('Versions/Current/Resources')
     expect([...await readFile(join(versionRoot, 'Resources/resources.pak'))]).toEqual([1, 2, 3])
     expect([...await readFile(join(versionRoot, 'Google Chrome for Testing Framework'))]).toEqual([7, 7, 7])
 

@@ -221,7 +221,8 @@ describe.skipIf(!symlinksAvailable)('Chrome archive links that are accepted', ()
     const out = await freshOut()
     await extract(rawZip([real, dir('app/sub/'), file('app/sub/inner', 'in'), link('app/stored', 'real'), link('app/deflated', 'sub/inner', { method: 8 })]), out)
     expect(await readlink(join(out, 'app/stored'))).toBe('real')
-    expect(await readlink(join(out, 'app/deflated'))).toBe('sub/inner')
+    // Windows keeps a relative link target with its own separator; the archive's is POSIX.
+    expect((await readlink(join(out, 'app/deflated'))).replaceAll('\\', '/')).toBe('sub/inner')
     expect(await readFile(join(out, 'app/deflated'), 'utf8')).toBe('in')
   })
 
