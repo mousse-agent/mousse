@@ -673,6 +673,8 @@ describe('the bot\'s browser in a real window', () => {
     await act(async () => root.unmount())
     root = createRoot(host)
     useChatsStore.setState(chatsInitial)
+    // The split view closed, so the reply's preview (and its Expand) shows again.
+    useBotBrowserStore.getState().closePane()
     await pane()
     expect(button('Open in a window')!.title).toBe('Pages reload when the window opens and when it closes.')
   })
