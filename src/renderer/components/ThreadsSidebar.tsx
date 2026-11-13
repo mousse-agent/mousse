@@ -347,7 +347,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const agentChats = useChatsStore((s) => s.snapshot.chats)
   const agentThreadIds = useMemo(() => new Set(agentChats.map((chat) => chat.threadId)), [agentChats])
 
-  const storeActiveThreadId = useAppStore((s) => s.activeThreadId)
+  // A thread being opened is highlighted from the click on, while the chat still shows the one before (`openingThreadId`).
+  const storeActiveThreadId = useAppStore((s) => s.openingThreadId ?? s.activeThreadId)
   const speakingThreadId = useSpeakingThreadId()
 
   // The activity the list is drawn from. A push that only swaps Working and Waiting on a plain thread keeps the one
