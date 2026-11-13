@@ -8,16 +8,21 @@ import { shaderCost } from '../../scripts/face-shader-cost.mjs'
 describe('bot face shader compile cost', () => {
   const cost = shaderCost(MICE_FRAGMENT_SHADER)
 
-  it('inlines each heavy function only a few times', () => {
-    // Was 7 copies of map and 35 of accD before the call sites were folded into loops.
-    expect(cost.copies.map).toBeLessThanOrEqual(3)
-    expect(cost.copies.accD).toBeLessThanOrEqual(3)
-    expect(cost.copies.headM).toBeLessThanOrEqual(3)
+  it('inlines each heavy function once', () => {
+    // map was 7 copies (11,019 statements), then 3 (2,332); now one loop runs the march, normal and occlusion.
+    expect(cost.copies.map).toBe(1)
+    expect(cost.copies.accD).toBe(1)
+    // The head's knot table, read in one loop.
+    expect(cost.copies.hk).toBe(1)
+    // One for the scene, one for the colour, eyes and glass.
+    expect(cost.copies.toP).toBeLessThanOrEqual(2)
+    // The mouse's eyes in the scene and the Mousse's painted eyes.
+    expect(cost.copies.eye2).toBeLessThanOrEqual(2)
   })
 
-  it('stays far below the old inlined size', () => {
-    // Was 11,019 statements; now about 2,330.
-    expect(cost.total.statements).toBeLessThan(2600)
+  it('stays near its inlined size', () => {
+    // Now 708 statements.
+    expect(cost.total.statements).toBeLessThan(720)
   })
 
   it('counts a loop body once and every call site in full', () => {

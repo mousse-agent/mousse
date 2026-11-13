@@ -1453,6 +1453,12 @@ export interface Thread {
    * is not a subagent relation; it only lets the creator read and stop the thread at any agent access level.
    */
   createdByThreadId?: string
+  /**
+   * Set on a thread one of the owner's bots started ("use your threads"): the bot and its name then, so the thread still
+   * says who started it after the bot is renamed or deleted ("Started by Alpha (deleted)"). `createdByThreadId` is the
+   * bot's chat thread.
+   */
+  startedByBot?: { botId: string; name: string }
   /** Set on a thread another of the user's devices created through Bridge. */
   startedFrom?: ThreadStartedFrom
   /**

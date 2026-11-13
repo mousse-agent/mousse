@@ -37,7 +37,7 @@ import { TURN_TOKEN_KEY } from '../../../run/mcp/appTools/registry'
 import type { LoginSession } from '../../../providers/LoginSession'
 import { settingsMirror, type MirrorField, type VendorMirror } from '../../vendorMirror'
 import { withEnforced } from '../../env'
-import { CLAUDE_LOCKED_REMOVED_OPTIONS, claudeBotTemp, claudeCommandsRefusal, holdClaudeBotTemp, ClaudeLockedGate, claudeLockedOptions, claudeOwnStorage, claudeLockedSpawn, type ClaudeLockedTurn } from '../../claude/locked'
+import { CLAUDE_BOT_FILE_DATA_NOTE, CLAUDE_FILE_TEXT_TOOLS, CLAUDE_LOCKED_REMOVED_OPTIONS, claudeBotTemp, claudeCommandsRefusal, holdClaudeBotTemp, ClaudeLockedGate, claudeLockedOptions, claudeOwnStorage, claudeLockedSpawn, type ClaudeLockedTurn } from '../../claude/locked'
 import {
   claudeExtraArgs,
   cliFingerprint,
@@ -2559,6 +2559,9 @@ export class ClaudeSubscriptionProviderService {
                 if (event.hook_event_name === 'PostToolUse') {
                   turnOf().locked?.committed(event.tool_use_id)
                   await turnOf().editCounter.success(event.tool_use_id, event.tool_response)
+                  // A bot's file read is framed as data, like its thread and MCP results.
+                  if (turnOf().locked && CLAUDE_FILE_TEXT_TOOLS.has(event.tool_name))
+                    return { hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: CLAUDE_BOT_FILE_DATA_NOTE } }
                 }
                 return {}
               }

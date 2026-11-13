@@ -68,7 +68,12 @@ describe('reading the stored setting', () => {
 
   // The stored `bots` value, and what every switch reads.
   const rows: Array<[string, unknown, typeof open | typeof shut | { here: BotComputerLimit }]> = [
-    ['all three on', { here: { shell: true, files: true, browser: true } }, open],
+    ['all four on', { here: { shell: true, files: true, browser: true, threads: true } }, open],
+    // Written before Use your threads existed: it reads on, as a switch never set does; the others as stored.
+    ['written before "use your threads" existed', { here: { shell: false, files: true, browser: true } }, { here: { ...BOT_COMPUTER_OPEN, shell: false } }],
+    ['use your threads off', { here: { shell: true, files: true, browser: true, threads: false } }, { here: { ...BOT_COMPUTER_OPEN, threads: false } }],
+    ['use your threads not a boolean', { here: { shell: true, files: true, browser: true, threads: 'off' } }, shut],
+    ['use your threads null', { here: { shell: true, files: true, browser: true, threads: null } }, shut],
     ['one off', { here: { shell: false, files: true, browser: true } }, { here: { ...BOT_COMPUTER_OPEN, shell: false } }],
     ['a switch the build does not know is ignored', { here: { shell: true, files: true, browser: true, camera: false } }, open],
     ['null', null, shut],
@@ -103,9 +108,9 @@ describe('reading the stored setting', () => {
     const settings = new SettingsStore(profile)
     expect(settings.get().bots).toEqual(shut)
     // The owner switches one on: the notice goes, and what was set is what is read, after a restart too.
-    settings.set({ bots: { here: { shell: false, files: true, browser: false } } })
-    expect(settings.get().bots).toEqual({ here: { shell: false, files: true, browser: false } })
-    expect(MousseConfigStore.loadInstallation(home).botSettings()).toEqual({ here: { shell: false, files: true, browser: false } })
+    settings.set({ bots: { here: { shell: false, files: true, browser: false, threads: false } } })
+    expect(settings.get().bots).toEqual({ here: { shell: false, files: true, browser: false, threads: false } })
+    expect(MousseConfigStore.loadInstallation(home).botSettings()).toEqual({ here: { shell: false, files: true, browser: false, threads: false } })
   })
 
   it('a profile\'s own file that can\'t be read leaves the installation\'s setting as it is', () => {
@@ -143,7 +148,7 @@ describe('one setting for every profile of this computer, through the real servi
   const set = (services: MmsProfileServices, partial: unknown) =>
     dispatchMethod({ mms: services, connection: { id: 'test', binding: { profileId: services.profileId, epoch: 1 }, capabilities: new Set() } } as never, 'settings.set', { partial })
 
-  it('set in one profile: every profile\'s Settings shows it and every profile\'s bots are held to it, a new profile too; a write that is not three switches changes nothing', async () => {
+  it('set in one profile: every profile\'s Settings shows it and every profile\'s bots are held to it, a new profile too; a write that is not the four switches changes nothing', async () => {
     vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
     const root = tempHome()
     const home = join(root, 'home')
@@ -205,22 +210,25 @@ describe('one setting for every profile of this computer, through the real servi
     await set(other, { bots: { here: { shell: false } } })
     // Window A, whose copy still says commands are on, switches the browser off: commands stay off.
     await set(main, { bots: { here: { browser: false } } })
-    expect(main.settings.get().bots).toEqual({ here: { shell: false, files: true, browser: false } })
+    expect(main.settings.get().bots).toEqual({ here: { shell: false, files: true, browser: false, threads: true } })
     // The CLI, as the owner types it.
     cli.request = (method, params) => dispatchMethod({ mms: main, connection: { id: 'cli', binding: { profileId: main.profileId, epoch: 1 }, capabilities: new Set() } } as never, method, params)
     vi.spyOn(process.stdout, 'write').mockReturnValue(true)
     await runConfig(parseArgs(['config', 'set', 'bots.here.files', 'false']))
-    expect(stored(conf(home)).bots).toEqual({ here: { shell: false, files: false, browser: false } })
+    expect(stored(conf(home)).bots).toEqual({ here: { shell: false, files: false, browser: false, threads: true } })
     await runConfig(parseArgs(['config', 'set', 'bots.here.shell', 'true']))
-    expect(other.settings.get().bots).toEqual({ here: { shell: true, files: false, browser: false } })
+    expect(other.settings.get().bots).toEqual({ here: { shell: true, files: false, browser: false, threads: true } })
+    // The fourth switch is written the same way, alone.
+    await runConfig(parseArgs(['config', 'set', 'bots.here.threads', 'false']))
+    expect(stored(conf(home)).bots).toEqual({ here: { shell: true, files: false, browser: false, threads: false } })
 
     // Every profile's windows were told of each change with that profile's own settings, whichever profile made it.
-    const steps = [{ shell: false, files: true, browser: true }, { shell: false, files: true, browser: false }, { shell: false, files: false, browser: false }, { shell: true, files: false, browser: false }]
+    const steps = [{ shell: false, files: true, browser: true, threads: true }, { shell: false, files: true, browser: false, threads: true }, { shell: false, files: false, browser: false, threads: true }, { shell: true, files: false, browser: false, threads: true }, { shell: true, files: false, browser: false, threads: false }]
     for (const services of [main, other]) expect(told.get(services.profileId)!.filter((here, index, all) => index === 0 || JSON.stringify(here) !== JSON.stringify(all[index - 1])), services.profileId).toEqual(steps)
 
     // The control: a window that sends its whole old copy, as the first version did, turns back what others changed.
     await set(main, { bots: { here: { ...windowA, browser: false } } })
-    expect(main.settings.get().bots.here).toEqual({ shell: true, files: true, browser: false })
+    expect(main.settings.get().bots.here).toEqual({ shell: true, files: true, browser: false, threads: true })
   }, 120_000)
 })
 

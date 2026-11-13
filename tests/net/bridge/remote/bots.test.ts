@@ -20,6 +20,7 @@ import {
 } from '../../../../src/mms/bridge/remote/RemoteBots'
 import { MmsListsSource, type ListsServices } from '../../../../src/mms/bridge/remote/MmsListsSource'
 import type { BotChatMessage, BotSummary } from '../../../../src/shared/bots/personal/chat'
+import type { PermissionMode } from '../../../../src/shared/permissionMode'
 import { botFixture, chatOf, createBot, finish, start, type BotFixture } from '../../../bots/botFixture'
 
 const at = '2026-11-07T09:00:00.000Z'
@@ -221,6 +222,40 @@ describe('bot methods on a real bot', () => {
     // An ask that is not there is a plain refusal too.
     const missing = await refused(() => call(methods, 'bots.asks.answer', { botId, askId: ASK, answer: 'allow' }))
     expect(missing.code).toBe('stream_unknown')
+  })
+
+  it('"use your threads" from a device: its message holds the turn to its own limit, and only a Full access device may Allow the card', async () => {
+    let limit: PermissionMode = 'ask'
+    methods = remoteBotMethods({ bots: () => f.bots.service, deviceLimit: (node) => (node === 'n' ? limit : 'full') })
+    await call(methods, 'bots.chat.send', { botId, text: 'Start a thread to fix the login page', clientRequestId: 'phone-t1' })
+    const activation = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    expect(f.bots.ownerTurn(activation.id)).toEqual({ limit: 'ask' })
+    const { payload, prepared } = await start(f, activation.id)
+    prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'You asked me to start one.' })
+    await finish(f, payload, 'completed', { text: 'May I?' })
+    const card = chatOf(f, botId).at(-1)!.ask!
+    const error = await refused(() => call(methods, 'bots.asks.answer', { botId, askId: card.askId, answer: 'allow' }))
+    expect(error).toMatchObject({ code: 'forbidden', message: 'Allow this on the computer.' })
+    expect(f.store.activeGrant(botId)!.manifest.appTools).not.toContain('threads')
+    // A device whose own limit here is Full access may allow it.
+    limit = 'full'
+    const answered = (await call(methods, 'bots.asks.answer', { botId, askId: card.askId, answer: 'allow' })) as { message: BotChatMessage }
+    expect(answered.message.ask).toMatchObject({ askId: card.askId, status: 'allowed' })
+    expect(f.store.activeGrant(botId)!.manifest.appTools).toContain('threads')
+  })
+
+  it('"use your threads": Not now works from any device, and a computer that says nothing of a device holds it to Ask', async () => {
+    methods = remoteBotMethods({ bots: () => f.bots.service })
+    await call(methods, 'bots.chat.send', { botId, text: 'Start a thread', clientRequestId: 'phone-t2' })
+    const activation = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    expect(f.bots.ownerTurn(activation.id)).toEqual({ limit: 'ask' })
+    const { payload, prepared } = await start(f, activation.id)
+    prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'You asked.' })
+    await finish(f, payload, 'completed', { text: 'May I?' })
+    const card = chatOf(f, botId).at(-1)!.ask!
+    expect((await refused(() => call(methods, 'bots.asks.answer', { botId, askId: card.askId, answer: 'allow' }))).code).toBe('forbidden')
+    const answered = (await call(methods, 'bots.asks.answer', { botId, askId: card.askId, answer: 'not_now' })) as { message: BotChatMessage }
+    expect(answered.message.ask).toMatchObject({ status: 'not_now' })
   })
 
   it('answers a permission ask', async () => {

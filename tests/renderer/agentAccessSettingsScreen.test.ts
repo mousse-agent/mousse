@@ -157,13 +157,25 @@ describe('Settings > Agents > Access', () => {
     expect(updates).not.toHaveBeenCalled()
   })
 
-  it('a stored list that cannot be read fails closed to the narrowest level, not to every project', () => {
+  it('a stored list that cannot be read fails closed: agents at the narrowest level, no project on, one line for bots, until a project is chosen', () => {
     show()
     // Straight into the screen, as a hand-edited or damaged file would reach it.
     const damaged = { ...getDefaultSettings(), agentAccess: { level: 'manage', projectIds: 'p1', answerApprovals: true } } as unknown as MousseSettings
     act(() => root.render(createElement(AgentAccessSettings, { settings: damaged, projects: PROJECTS, updateSettings: async () => undefined })))
     expect(trigger().textContent).toContain('Lineage only')
-    expect(rows()).toHaveLength(0)
+    // Bots with "Use your threads" follow the list at every level: it shows, with nothing on, "All projects" included.
+    expect(checked()).toEqual([])
+    expect(text()).toContain("Couldn't read the saved list. Bots reach no project until you turn one on.")
+
+    // Saved that way by the daemon, then a project chosen here: the mark goes, and only that project is reached.
+    store.set({ agentAccess: { level: 'manage', projectIds: 'p1' } } as never)
+    expect(savedByDaemon()).toMatchObject({ projectIds: [], projectsUnreadable: true })
+    const { updates } = show()
+    expect(checked()).toEqual([])
+    click(row('Alpha'))
+    expect(updates).toHaveBeenLastCalledWith({ agentAccess: expect.objectContaining({ projectIds: ['p1'], projectsUnreadable: false }) })
+    expect(savedByDaemon()).toEqual({ level: 'lineage', projectIds: ['p1'], answerApprovals: false, remoteSubagents: false, computers: [] })
+    expect(text()).not.toContain("Couldn't read the saved list")
   })
 
   it('keeps a listed project that no longer exists visible, and removable while another stays', () => {

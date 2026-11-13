@@ -37,6 +37,11 @@ export interface AgentThreadIntent {
   /** The creator is a private thread, so this one is private too (`Thread.localOnly`). Absent on older intents. */
   localOnly?: true
   actor: AgentActor
+  /**
+   * The owner's bot that started it ("use your threads"): the thread runs in Full access, and its first message is the
+   * bot's. Absent: an agent in a thread started it.
+   */
+  bot?: { botId: string; name: string }
   request: AgentThreadRequest
   firstMessage: { content: string; mode: 'agent' | 'plan' } | null
 }

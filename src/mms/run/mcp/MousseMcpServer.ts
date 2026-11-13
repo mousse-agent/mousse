@@ -240,7 +240,8 @@ export class MousseMcpServer implements McpAttachmentProvider {
       // For the thread's ceiling, not the turn's mode, and for the credential's agent access level as it
       // is now. A runtime that caches the list gets a new bearer when the level changes (the level is part
       // of the runtime generation), and the call-time check refuses a tool the list left out in any case.
-      tools: registry.listForThread(resolved.threadId, 'default', (credentials.current(resolved.tokenHash) ?? resolved).accessLevel).map(listedTool)
+      // A bot's thread tools follow the run the credential acts for now (`ToolListing.botTurnTools`).
+      tools: ((current) => registry.listForThread(resolved.threadId, 'default', current.accessLevel, current.runId))(credentials.current(resolved.tokenHash) ?? resolved).map(listedTool)
     }))
     server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       const { clientRequestId, ...args } = (request.params.arguments ?? {}) as Record<string, unknown>

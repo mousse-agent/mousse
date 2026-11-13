@@ -2,6 +2,7 @@ import type { BotAuthority, BotCheck, BotCheckDenied, NormalisedCall, WallReason
 import { neutralToolsOf, type NativeToolTable, type NeutralTool } from '../../harness/tools'
 import { BROWSER_AUTOMATION_TOOLS } from '../../browser/automation'
 import { notOnThisComputerText } from './computerLimit'
+import { BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS } from './manifest'
 
 /** Walls in plain words, and the built-in check a runtime's gate makes (PR 6 §4). Browser-safe. */
 
@@ -69,7 +70,12 @@ export function botTurnOffers(bot: Pick<BotAuthority, 'appTools'> | undefined, n
  * Why a bot may not run the Mousse app tool `name` with `args` (its wall in plain words), or
  * undefined when its grant holds the call. The registry checks this on every call of a bot turn.
  */
-export function botAppToolRefusal(bot: Pick<BotAuthority, 'check' | 'skills' | 'escalate'>, name: string, args: Record<string, unknown>): string | undefined {
+export function botAppToolRefusal(bot: Pick<BotAuthority, 'check' | 'skills' | 'escalate'> & Partial<Pick<BotAuthority, 'appTools' | 'threadsReadOnly'>>, name: string, args: Record<string, unknown>): string | undefined {
+  // Starting, messaging and stopping threads belong to a chat turn the owner's own message started: a turn
+  // that holds the owner's threads to read only is told why (work, or a chat turn no message of the owner's started),
+  // and nothing is asked. A turn of a bot without the permission falls through to the check below, which asks for it.
+  if (THREAD_ACT.has(name) && bot.appTools && !bot.appTools.has(name) && BOT_THREAD_READ_TOOLS.some((tool) => bot.appTools!.has(tool)))
+    return bot.threadsReadOnly === 'not_owner' ? BOT_THREADS_NOT_OWNER_TEXT : BOT_THREADS_CHAT_ONLY_TEXT
   if (SKILL_TOOLS.has(name)) {
     // The skill tools come with granted skills. Which skill loads is held by the turn itself: a
     // bot turn's skills are only its granted ones (by id), whether `load_skill` names one by id or name.
@@ -84,6 +90,16 @@ export function botAppToolRefusal(bot: Pick<BotAuthority, 'check' | 'skills' | '
 }
 
 const BROWSER_TOOL_NAMES: ReadonlySet<string> = new Set(BROWSER_AUTOMATION_TOOLS)
+const THREAD_ACT: ReadonlySet<string> = new Set(BOT_THREAD_ACT_TOOLS)
+
+/** What work (a reminder's work, a schedule) is told when it tries to start, message or stop one of the owner's threads. */
+export const BOT_THREADS_CHAT_ONLY_TEXT = "Not on this turn: you start, message or stop your owner's threads only in your chat, when your owner's message asks for it. Here you may list, search, read and wait on them. Say in your report what you would start or send, and your owner can ask you in the chat."
+
+/**
+ * What a chat turn that no message of the owner started (the bot's first message) is told when it tries
+ * to start, message or stop one of the owner's threads.
+ */
+export const BOT_THREADS_NOT_OWNER_TEXT = "Not on this turn: it did not start with a message from your owner, and you start, message or stop their threads only when their own message asks for it. You may list, search, read and wait on them now. Say what you would do, and do it once your owner replies."
 
 /**
  * What a bot's call of a browser tool returns when its turn does not hold the browser (a bot's thread lists the browser

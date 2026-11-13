@@ -15,7 +15,7 @@ import { scheduleTools } from './schedules'
 import { automationTools } from './automations'
 import { skillTools } from './skills'
 import { taskTools } from './tasks'
-import { lineageRelation, threadTools } from './thread'
+import { BOT_PROJECTS_UNREADABLE_TEXT, botProjectAllowed, botProjectsOf, botThreadReach, lineageRelation, threadTools } from './thread'
 import type { AppToolTurns } from './turns'
 import { webTools } from './web'
 
@@ -23,7 +23,7 @@ export * from './types'
 export * from './registry'
 export * from './turns'
 export type { AgentActionDetails, AgentApprovalResult, AgentCreatedThread, AgentQueueCommand, AgentQueueResult, AgentScheduleHost, AgentRunCommandResult, AgentSendResult, AgentThreadRequest, ApprovalRequestInfo, AppToolHost, QueueSnapshot, ThreadSearchHit } from './host'
-export { AGENT_MESSAGE_END, AGENT_MESSAGE_PREFIX, agentMessageText } from './agentMessage'
+export { AGENT_MESSAGE_END, AGENT_MESSAGE_PREFIX, agentMessageText, BOT_MESSAGE_END, BOT_MESSAGE_PREFIX, botMessageText, isPersonMessage } from './agentMessage'
 export type { BotAppToolDeps } from './bots'
 export { AUTOMATION_TOOL_NAMES, type AutomationToolHost } from './automations'
 export type { BotMemoryToolHost } from './botMemory'
@@ -65,6 +65,13 @@ function agentAccessPolicy(host: AppToolHost, engine: RunEngine): ToolAccessPoli
       if (host.threadMeta?.(threadId)?.createdByThreadId === caller.threadId) return 'launched'
       const lineage = lineageRelation(engine, caller.threadId, threadId)
       return lineage === 'descendant' ? 'descendant' : lineage ? 'ancestor_or_sibling' : null
+    },
+    // A personal bot: its own projects (an unreadable list is none) and its own rule for threads, never the level's.
+    botReach: (caller, target) => {
+      if (target.threadId !== undefined) return botThreadReach(host, engine, caller.threadId, target.threadId)
+      const projects = botProjectsOf(host)
+      if (botProjectAllowed(projects, target.projectId)) return { scope: 'manage' }
+      return { refused: projects.kind === 'unreadable' ? BOT_PROJECTS_UNREADABLE_TEXT : "That project is not one of the projects your owner lets you reach." }
     }
   }
 }
@@ -106,7 +113,7 @@ export function createAppToolRegistry(input: {
   add('delegation', delegationTools(host))
   add('plans', planTools(host))
   add('tasks', taskTools(host))
-  add('thread', engine ? threadTools(host, engine) : [])
+  add('thread', engine ? threadTools(host, engine, input.bots) : [])
   add('schedules', [...(engine ? scheduleTools(host, engine) : []), ...automationTools(host)])
   add('skills', skillTools(host))
   add('quickActions', quickActionTools(host))

@@ -166,6 +166,18 @@ describe('BotActivitySink', () => {
     ])
   })
 
+  it('a thread the bot started or messaged shows at once, with the thread and what it sent, before the turn ends', () => {
+    const { activity, events, advance } = sink()
+    activity.onAllowed(at, { tool: 'thread_create', input: { title: 'Fix the login page' } })
+    advance(BOT_ACTIVITY_MIN_INTERVAL_MS)
+    activity.onAppResult({ botId: 'b1', activationId: 'a1', dispatchId: '' }, 'thread_create', { threadId: 't-new', title: 'Fix the login page', sent: 'Look at the login page.' })
+    advance(BOT_ACTIVITY_MIN_INTERVAL_MS)
+    const done = { icon: 'think', text: 'started thread', highlight: 'Fix the login page', thread: 't-new', said: 'Look at the login page.' }
+    expect(events.at(-1)).toEqual({ botId: 'b1', activationId: 'a1', chip: done })
+    // And the posted message carries it.
+    expect(activity.drain('d1')).toEqual([done])
+  })
+
   it('counts a call once when several check points allow it, and a repeat later as a new call', () => {
     const { activity, advance } = sink()
     // Locked Claude checks one call at PreToolUse, canUseTool and the registry; Pi at its gate and the registry.

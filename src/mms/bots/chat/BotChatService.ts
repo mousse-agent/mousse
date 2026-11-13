@@ -5,6 +5,9 @@ import type { BotChatMessage, BotChip, BotDetail, BotSummary } from '../../../sh
 import { BOT_MODEL_SLOT_KEYS, DEFAULT_BOT_MODEL, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, type BotDefinition, type BotModelPick, type BotModelSlotKey, type BotModelSlots, type BotSchedule } from '../../../shared/bots/personal/definition'
 import { normalizeBotLook, type BotLook } from '../../../shared/bots/personal/look'
 import { isSpecialAsk } from '../../../shared/bots/personal/escalation'
+import { BOT_THREADS_PERMISSION, botGrantTool } from '../../../shared/bots/personal/manifest'
+import type { BotOwnerTurn } from '../../../shared/bots/personal/definition'
+import type { PermissionMode } from '../../../shared/permissionMode'
 import type { BotMemoryForgetResult, BotMemoryListing } from '../../../shared/bots/personal/memory'
 import { MAX_BOT_CHAT_PAGE, type BotChatAttachment, type BotModelOption, type BotRunsOnChoices, type BotShownRows } from '../../../shared/bots/personal/methods'
 import { allPinned, isPinned, shownPick, slotsAllOn, UNPICKED_SLOTS, withSlots } from '../../../shared/bots/personal/modelSlots'
@@ -279,7 +282,7 @@ export class BotChatService {
    * transaction) starts behind the lane. Sending the same request again answers a wall the first
    * one never reached.
    */
-  async chatSend(input: { botId: string; text: string; attachments?: BotChatAttachment[]; clientRequestId: string; replyTo?: string }): Promise<{ message: BotChatMessage }> {
+  async chatSend(input: { botId: string; text: string; attachments?: BotChatAttachment[]; clientRequestId: string; replyTo?: string; from?: { limit: PermissionMode } }): Promise<{ message: BotChatMessage }> {
     const definition = this.engine.definitionOf(input.botId)
     const text = input.text.trim()
     if (!text && !input.attachments?.length) throw new BotEngineError('invalid_params', 'The message is empty.')
@@ -299,6 +302,9 @@ export class BotChatService {
     const replyTo = quoted && quoted.botId === input.botId ? quoted : undefined
     const prompt = messageInput({ botId: input.botId, text, attachments: saved, replyTo: replyTo?.id ?? null }, (id) => this.store.message(id))
     const key = `chat:${input.clientRequestId}`
+    // The owner wrote this: the turn it starts or continues may start, message and stop their threads, held to the
+    // limit of the device it came from (`BotOwnerTurn`; absent: this computer's own window).
+    const owner: BotOwnerTurn = input.from ? { limit: input.from.limit } : {}
     let message: BotChatMessage
     let refused: BotEngineError | undefined
     try {
@@ -314,7 +320,7 @@ export class BotChatService {
           lane: 'chat',
           ...(replyTo ? { replyTo: replyTo.id } : {})
         })
-        if (!target.continues) refused = this.engine.queueChatInTx(input.botId, key, prompt, target.activationId)
+        if (!target.continues) refused = this.engine.queueChatInTx(input.botId, key, prompt, target.activationId, owner)
         return posted
       })
     } catch (error) {
@@ -327,12 +333,12 @@ export class BotChatService {
     }
     try {
       // A limit answered Not now ends its walled turn first; the queued activation then starts.
-      const continued = await this.engine.continueChatWith(input.botId, prompt)
+      const continued = await this.engine.continueChatWith(input.botId, prompt, owner)
       if (target.continues) {
         if (continued) return { message }
         // The wall was answered meanwhile: the message starts a chat of its own.
         this.engine.approveStarterIfNeeded(definition.id)
-        await this.engine.enqueueChat(input.botId, key, prompt)
+        await this.engine.enqueueChat(input.botId, key, prompt, undefined, owner)
       } else if (refused) throw refused
       else await this.engine.startQueuedChat(input.botId, target.activationId)
     } catch (error) {
@@ -386,14 +392,16 @@ export class BotChatService {
    * The checks `answer` makes before it changes anything, without answering: for a caller that must refuse plainly
    * (a phone), and the ask's kind (`export_memory` needs a folder picker on this computer).
    */
-  askKind(botId: string, askId: string): 'permission' | 'export_memory' {
+  askKind(botId: string, askId: string): 'permission' | 'export_memory' | 'threads' {
     this.engine.definitionOf(botId)
     const escalation = this.store.escalation(askId)
     if (!escalation || escalation.botId !== botId) throw new BotEngineError('ask_not_found', 'No such ask.')
     if (escalation.status !== 'open') throw new BotEngineError('ask_answered', 'This was already answered.')
     if (escalation.mode === 'wall' && this.store.activation(escalation.activationId)?.status === 'running')
       throw new BotEngineError('ask_not_ready', 'Wait until the bot finishes its message.')
-    return isSpecialAsk(escalation.permission) ? 'export_memory' : 'permission'
+    if (isSpecialAsk(escalation.permission)) return 'export_memory'
+    // "Use your threads" starts threads that run with full access: another device allows it only if it may run them so.
+    return 'tool' in escalation.permission && botGrantTool(escalation.permission.tool) === BOT_THREADS_PERMISSION ? 'threads' : 'permission'
   }
 
   /**
@@ -426,6 +434,8 @@ export class BotChatService {
     const permission = grant ? grantedPermissions(grant.manifest).find((item) => permissionId(item) === id) : undefined
     if (!permission) throw new BotEngineError('permission_not_found', 'This bot doesn\'t have that permission.')
     this.engine.narrowGrant(botId, (manifest) => withoutPermission(manifest, permission))
+    // Its messages that wait in the owner's threads go with it: none of them starts after Remove.
+    if ('tool' in permission && botGrantTool(permission.tool) === BOT_THREADS_PERMISSION) this.engine.withdrawThreadMessages(botId)
     return this.detailOf(botId)
   }
 

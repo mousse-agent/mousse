@@ -1055,8 +1055,10 @@ function assertRunsPatch(value: unknown): void {
 function assertAgentAccessPatch(value: unknown): void {
   const patch = asPlainObject(value, 'partial.agentAccess')
   for (const key of Object.keys(patch)) {
-    if (key !== 'level' && key !== 'projectIds' && key !== 'answerApprovals' && key !== 'remoteSubagents' && key !== 'computers') throw new Error(`partial.agentAccess.${key} is not allowed`)
+    if (key !== 'level' && key !== 'projectIds' && key !== 'answerApprovals' && key !== 'remoteSubagents' && key !== 'computers' && key !== 'projectsUnreadable') throw new Error(`partial.agentAccess.${key} is not allowed`)
   }
+  // Only the daemon marks a list unreadable; a client may only say the owner chose the projects again.
+  if (patch.projectsUnreadable !== undefined && patch.projectsUnreadable !== false) throw new Error('partial.agentAccess.projectsUnreadable can only be false')
   if (patch.level !== undefined && !isAgentAccessLevel(patch.level)) throw new Error('partial.agentAccess.level must be lineage, read or manage')
   if (patch.answerApprovals !== undefined && typeof patch.answerApprovals !== 'boolean') throw new Error('partial.agentAccess.answerApprovals must be a boolean')
   if (patch.remoteSubagents !== undefined && typeof patch.remoteSubagents !== 'boolean') throw new Error('partial.agentAccess.remoteSubagents must be a boolean')

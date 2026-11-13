@@ -216,6 +216,8 @@ export class BotChatProjection {
 
   card(escalation: BotEscalationRow): BotAskCard {
     const text = escalation.title !== null ? { title: escalation.title, note: escalation.note ?? '' } : askText(escalation.permission)
+    // What Allow gives in full, as the note's tooltip ("use your threads"): read from the permission, never stored.
+    const tip = isSpecialAsk(escalation.permission) || 'budget' in escalation.permission ? undefined : askText(escalation.permission).tip
     // An MCP ask lists the tools Allow grants, by name, on a line the owner can open, with how many a bot can't use. One
     // whose server has not listed its tools yet has none: Allow stays off until they are filled in.
     const mcp = 'mcp' in escalation.permission ? escalation.permission.mcp : undefined
@@ -225,6 +227,7 @@ export class BotChatProjection {
       askId: escalation.id,
       title: text.title,
       note: text.note,
+      ...(tip ? { tip } : {}),
       status: cardStatus(escalation.status),
       kind: isSpecialAsk(escalation.permission) ? 'export_memory' : 'permission',
       ...(tools.length ? { details: { summary: `${tools.length} ${mcp?.added ? 'new ' : ''}tool${tools.length === 1 ? '' : 's'}`, items: tools, ...(more ? { more } : {}) } } : {}),
@@ -356,6 +359,7 @@ export class BotChatProjection {
       ...(ended ? { lastOutcome: ended.status === 'done' ? 'ok' as const : ended.status === 'failed' ? 'failed' as const : 'stopped' as const } : {}),
       unread: this.store.unread(definition.id, registry?.readSeq ?? 0),
       createdAt: registry?.createdAt ?? new Date(now).toISOString(),
+      ...(registry?.homeThreadId ? { homeThreadId: registry.homeThreadId } : {}),
       ...(chatTurn ? { chat: { activationId: chatTurn.id, ...(chatTurn.offline ? { offline: true as const } : {}) } } : {}),
       ...(work.length ? { work } : {})
     }
@@ -409,7 +413,8 @@ export class BotChatProjection {
       // Kept in the grant, but this computer has it switched off: it gives nothing here until it is switched on.
       const off = limit ? switchedOff(limit, permission) : undefined
       if (limit && off) return { id, title: text.title, note: offHereNote(off, limit), grantedAt, mark: BOT_OFF_HERE_MARK }
-      return { id, title: text.title, note: text.note, grantedAt }
+      // About's tooltip says what it gives in full, as the card's does ("use your threads": full access).
+      return { id, title: text.title, note: text.tip ?? text.note, grantedAt }
     })
   }
 }

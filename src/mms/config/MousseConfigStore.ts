@@ -178,7 +178,7 @@ function defaultConf(): MousseConf {
  * switch off, and when (`normalizeBotSettings` reads any `unreadable` as every switch off).
  */
 function unreadableBots(at: Date): { here: BotComputerLimit; unreadable: string } {
-  return { here: { shell: false, files: false, browser: false }, unreadable: at.toISOString() }
+  return { here: { shell: false, files: false, browser: false, threads: false }, unreadable: at.toISOString() }
 }
 
 function writeMigratedMarker(originalPath: string): void {
