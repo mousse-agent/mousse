@@ -9,6 +9,7 @@ import type { BotFaceState } from '../components/bots/face/BotFace'
 import type { AttachedFile } from '../components/ChatComposer'
 import { attachmentPath, createPersonalBotsClient, errorText, personalBotsEvents, type PersonalBotsClient } from '../services/personalBotsClient'
 import { keepEqualById } from '../lib/keepEqual'
+import { expandComposerQuotes } from '../lib/composerQuotes'
 
 /**
  * The owner's bots in the Chats tab (Bot Phase 1 §5.12): the list, each bot's chat as far as it
@@ -414,7 +415,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
     },
 
     async send(botId) {
-      const text = (get().drafts[botId] ?? '').trim()
+      const text = expandComposerQuotes(get().drafts[botId] ?? '').trim()
       const attachments = get().attachments[botId] ?? []
       const replyTo = get().replyingTo[botId]
       if (!text && !attachments.length) return

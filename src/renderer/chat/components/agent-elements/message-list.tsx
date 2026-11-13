@@ -2043,6 +2043,7 @@ export const MessageList = memo(function MessageList({
     <ImageGalleryProvider images={threadImages}>
     <div
       className="an-message-list-wrap relative flex-1 min-h-0 flex flex-col"
+      data-quote-source
       onMouseMove={handleGutterHover}
     >
     <div

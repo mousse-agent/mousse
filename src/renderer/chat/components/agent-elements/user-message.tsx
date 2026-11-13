@@ -12,6 +12,7 @@ import { parseChatReference, type ChatReference } from "../../../../shared/chatR
 import { routeLink } from "../../../utils/chatLinks";
 import { LinkLabel } from "./link-label-view";
 import { promptSegments } from "./prompt-links";
+import { WithSentQuotes } from "../../../components/QuotePill";
 
 export type UserMessageProps = {
   message: UIMessage;
@@ -239,7 +240,7 @@ export const UserMessage = memo(function UserMessage({
           data-message-id={message.id}
           data-part-index="0"
         >
-          <PromptText text={text} />
+          <WithSentQuotes text={text} render={(part) => <PromptText text={part} />} />
         </p>
       )}
       {text && foldable && (

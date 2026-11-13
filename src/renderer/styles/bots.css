@@ -443,3 +443,9 @@ button.bot-reaction { cursor: pointer; }
 button.bot-reaction:hover, button.bot-reaction:focus-visible { background: color-mix(in srgb, var(--text-secondary) 22%, var(--surface-elevated, #2e2f38)); outline: none; }
 .bot-emoji-grid [aria-checked='true'] { background: rgba(var(--accent-rgb), .22); }
 @media (prefers-reduced-motion: reduce) { .bot-react-bar { transition: none; } }
+
+/* A message's words can be selected, to copy them or to reply to that part (SelectionReplyButton). */
+.bot-conversation .bot-markdown {
+  user-select: text;
+  -webkit-user-select: text;
+}

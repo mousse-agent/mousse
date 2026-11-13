@@ -28,6 +28,7 @@ import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from
 import { botGroupTime, placeMessages } from './messageGroups'
 import { chatRows, type BotChatRow, type OwnerMarks } from './botChatShape'
 import { formatDurationLong, formatWorkedFor } from '../../utils/responseTimeline'
+import { WithSentQuotes } from '../QuotePill'
 import { ImageGalleryProvider } from '../../chat/components/agent-elements/image-gallery'
 import type { LightboxImage } from '../../chat/components/agent-elements/image-lightbox'
 import { BotImageFiles, BotOtherFiles, botFileImageUrl, useFailedFileImages } from './BotImages'
@@ -177,7 +178,7 @@ const OwnerMessage = memo(function OwnerMessage({ botId, message, pending, botNa
       <div className="bot-you-content">
         {!!message.attachments?.length && <BotImageFiles files={message.attachments} />}
         {message.text && <div className="bot-you-bubble">
-          <Markdown content={message.text} className="bot-markdown" images={BOT_IMAGES} />
+          <WithSentQuotes text={message.text} render={(part) => <Markdown content={part} className="bot-markdown" images={BOT_IMAGES} />} />
           <BubbleTime message={message} pending={pending} />
           {marks?.reaction && <span className="bot-reaction" role="img" aria-label={`${botName} reacted ${marks.reaction}`} title={marks.title}>{marks.reaction}</span>}
         </div>}
@@ -482,7 +483,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
         </div>
         <BotMenu bot={bot} />
       </header>
-      <div className="chat-transcript" data-applet-scroller ref={transcript} role="log" aria-label={`${bot.name} messages`} onScroll={(event) => {
+      <div className="chat-transcript" data-applet-scroller data-quote-source ref={transcript} role="log" aria-label={`${bot.name} messages`} onScroll={(event) => {
         const element = event.currentTarget
         anchor.current.atEnd = element.scrollHeight - element.scrollTop - element.clientHeight < 40
         anchor.current.height = element.scrollHeight
