@@ -6,7 +6,7 @@
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import type { UIMessage } from 'ai'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MessageList } from '../../src/renderer/chat/components/agent-elements/message-list'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -115,6 +115,39 @@ describe('a finished turn', () => {
     expect(toggles()).toHaveLength(1)
     expect(visible(0)).toContain('Overloaded')
     expect(visible(0)).not.toContain('Read ')
+  })
+})
+
+describe('a turn whose end the window learned late', () => {
+  it('shows how long its work really took, not how long until the window heard it ended (#1042)', () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(T0 + 1_000)
+      const question = ask('u1', 'Fix it', 0)
+      render([question, { id: 'a1', role: 'assistant', createdAt: at(1), parts: [{ type: 'text', text: 'Looking' }] } as unknown as UIMessage], 'streaming')
+      // The window missed the end; 30 seconds later it caught up with the service, which saved when the reply ended.
+      vi.setSystemTime(T0 + 31_000)
+      const finished = { id: 'a1', role: 'assistant', createdAt: at(1), completedAt: at(4), parts: [{ type: 'text', text: 'Fixed.' }] } as unknown as UIMessage
+      render([question, finished], 'ready')
+      expect(host.querySelector('.turn-work-label')!.textContent).toBe('Worked for 4s')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a turn heard ending as it ends still shows its own clock', () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(T0 + 1_000)
+      const question = ask('u1', 'Fix it', 0)
+      render([question, { id: 'a1', role: 'assistant', createdAt: at(1), parts: [{ type: 'text', text: 'Looking' }] } as unknown as UIMessage], 'streaming')
+      vi.setSystemTime(T0 + 7_000)
+      // The end arrives before the reply's saved end does.
+      render([question, { id: 'a1', role: 'assistant', createdAt: at(1), parts: [{ type: 'text', text: 'Fixed.' }] } as unknown as UIMessage], 'ready')
+      expect(host.querySelector('.turn-work-label')!.textContent).toBe('Worked for 7s')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 

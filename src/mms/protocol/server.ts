@@ -1010,7 +1010,10 @@ export class MmsProtocolServer {
         serverBuild: this.opts.build,
         instanceId: this.instanceId,
         capabilities: advertised,
-        globalSequence: this.ring.currentSequence
+        // The numbering an unbound client's events carry: the default profile's audience. The installation-wide
+        // counter (`this.ring`) also counts other profiles' events, so a cursor taken from it ran ahead of the events
+        // this client is sent and made them look stale (#1042).
+        globalSequence: this.globalSequence
       }
       this.attachCommandConnection(session)
       this.sendRaw(session, ok)

@@ -63,8 +63,15 @@ vi.mock('../src/main/mms/GuiMmsController', () => ({ GuiMmsController: class {
   request = vi.fn(async () => ({ settings: {} }))
   on = vi.fn()
   setAttachedBrowserHost = vi.fn()
+  setConnectionLog = vi.fn()
   getWindowBindingForSender = vi.fn(() => null)
   constructor() { startup.controller = this; startup.controllers.push(this) }
+} }))
+// The real log would write under the home this test resolves, which is not a test folder.
+vi.mock('../src/main/mms/guiConnectionLog', () => ({ GuiConnectionLog: class {
+  write = vi.fn()
+  undeliverable = vi.fn()
+  flushSync = vi.fn()
 } }))
 vi.mock('../src/main/ipc/registerGuiIpc', () => ({
   registerGuiIpc: (deps: unknown) => { startup.ipc = true; startup.ipcDeps = deps },

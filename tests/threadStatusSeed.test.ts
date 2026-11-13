@@ -45,12 +45,14 @@ const guiMms = Object.assign(new EventEmitter(), {
     }
     return {}
   }),
-  activityForSender: vi.fn(async (senderId: number, clearsGap?: boolean): Promise<ThreadActivitySnapshot> => {
+  activityForSender: vi.fn(async (senderId: number, clearsGap?: boolean): Promise<{ activity: ThreadActivitySnapshot }> => {
     activityReads.push({ senderId, clearsGap })
-    return { ...serviceActivity }
+    return { activity: { ...serviceActivity } }
   }),
   snapshotThread: vi.fn(async () => ({ messages: [], queue: [], claimed: [], activeTurn: { active: false, running: false }, connectionFailed: false })),
   snapshotThreadForSender: vi.fn(async () => ({ messages: [], queue: [], claimed: [], activeTurn: { active: false, running: false }, connectionFailed: false })),
+  // The open thread's turn, read without its transcript after a gap in live events.
+  turnStatusForSender: vi.fn(async () => ({ activeTurn: { active: false, running: false } })),
   runWithSender: (_sender: unknown, run: () => unknown) => run(),
   getCurrentSenderId: () => currentSender,
   getWindowBindingForSender: (senderId: number) => (senderId === WINDOW || senderId === OPEN_WINDOW ? { profileId: 'default', epoch: 1 } : undefined),
@@ -118,9 +120,9 @@ describe('a window shows the status of every thread', () => {
     serviceActivity = { other: 'completed', open: 'processing' }
     guiMms.emit('window-resnapshot', { senderId: OPEN_WINDOW })
     await vi.waitFor(() => expect(lastActivitySent()).toEqual({ other: 'completed', open: 'processing' }))
-    // The open thread's snapshot ends the gap.
+    // The open thread's status read ends the gap; its transcript is read again only if the window is behind.
     expect(activityReads).toEqual([{ senderId: OPEN_WINDOW, clearsGap: false }])
-    await vi.waitFor(() => expect(guiMms.snapshotThreadForSender).toHaveBeenCalledWith(OPEN_WINDOW, 'open'))
+    await vi.waitFor(() => expect(guiMms.turnStatusForSender).toHaveBeenCalledWith(OPEN_WINDOW, 'open', true))
   })
 
   it('drops a status the service no longer has, after missed events', async () => {

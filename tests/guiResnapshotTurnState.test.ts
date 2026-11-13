@@ -1,5 +1,5 @@
 /**
- * A window that missed events reads its open thread again (`resnapshotWindow` in registerGuiIpc). The turn state
+ * A window that missed events reads its open thread again (`catchUpWindow` in registerGuiIpc). The turn state
  * it is sent must be a whole TurnState, the service's own: `{ threadId, state: 'processing' }` had no phase, read as
  * no turn, and the transcript dropped Working while the turn still ran.
  */
@@ -44,7 +44,8 @@ const guiMms = {
     messages: [], queue: [], claimed: [], activeTurn: running, connectionFailed: false,
     ...(snapshotTurnState ? { turnState: snapshotTurnState } : {})
   })),
-  activityForSender: vi.fn(async () => ({})),
+  activityForSender: vi.fn(async () => ({ activity: {} })),
+  turnStatusForSender: vi.fn(async () => ({ activeTurn: running })),
   runWithSender: (_sender: unknown, run: () => unknown) => run(),
   getCurrentSenderId: () => 7,
   getWindowBindingForSender: () => ({ profileId: 'profile-1' }),
@@ -56,7 +57,8 @@ const turnStatesSent = () => sentToWindow.filter((sent) => sent.channel === 'orc
 
 async function resnapshot(): Promise<TurnState | undefined> {
   sentToWindow.length = 0
-  for (const listener of listeners.get('window-resnapshot') ?? []) listener({ senderId: 7 })
+  // The service's replay no longer held what the window missed: it reads its thread in full.
+  for (const listener of listeners.get('window-resnapshot') ?? []) listener({ senderId: 7, subscribed: true })
   await vi.waitFor(() => expect(turnStatesSent().length).toBeGreaterThan(0))
   return turnStatesSent().at(-1)
 }
