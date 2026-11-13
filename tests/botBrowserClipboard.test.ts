@@ -18,7 +18,7 @@ import { MmsBrowserService } from '../src/mms/browser/MmsBrowserService'
 import { BrowserArtifactService } from '../src/mms/browser/BrowserArtifactService'
 import { createAllowHttpPolicy } from '../src/mms/browser/defaultPorts'
 import { ExecutionPolicyService } from '../src/mms/execution/ExecutionPolicyService'
-import { BotBrowsers } from '../src/mms/bots/browser/BotBrowsers'
+import { BOT_BROWSER_KEEPER, BotBrowsers } from '../src/mms/bots/browser/BotBrowsers'
 import { BROWSER_AUTOMATION_TOOLS, type BrowserToolContext } from '../src/shared/browser/automation'
 import type { BrowserObservation } from '../src/shared/browser/types'
 import type { BotBrowserFrameEvent, BotBrowserInput } from '../src/shared/bots/personal/browser'
@@ -61,10 +61,10 @@ async function fixture() {
     await rm(root, { force: true, recursive: true })
   })
   const policy = new ExecutionPolicyService().snapshot(profileId, { allowedTools: [...BROWSER_AUTOMATION_TOOLS], allowedCapabilities: ['browser.session', 'browser.observe'], allowedEffects: ['read', 'external'], maxToolCalls: 1_000, maxElapsedMs: 600_000 })
-  const home: BrowserToolContext = { execution: { profileId, threadId: 'home-clip', turnId: 'reader', actor: { kind: 'main' }, source: 'schedule', policySnapshotId: policy.id, cancellationId: 'reader' }, policy, target: { backend: 'managed-chromium' } }
+  const home: BrowserToolContext = { execution: { profileId, threadId: 'home-clip', turnId: 'reader', actor: { kind: 'main' }, source: 'schedule', policySnapshotId: policy.id, cancellationId: 'reader' }, policy, target: { backend: 'managed-chromium' }, keeper: BOT_BROWSER_KEEPER }
   /** What the page wrote down, and its title. */
   const page = async (): Promise<string> => {
-    const sessionId = browser.sessions.listThreadSessions({ profileId, threadId: 'home-clip' })[0]!.id
+    const sessionId = browser.sessions.listThreadSessions({ profileId, threadId: 'home-clip', keeper: BOT_BROWSER_KEEPER })[0]!.id
     const seen = await browser.tools.invoke('browser_observe', { sessionId }, home)
     if (!seen.ok) throw new Error(seen.error.message)
     const observation = seen.value.observation as BrowserObservation

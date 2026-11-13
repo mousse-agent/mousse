@@ -33,7 +33,7 @@ import type { BrowserSetupStatus } from '../../../shared/browser/setup'
 import type { BrowserSessionRecord, BrowserTab, BrowserViewerUpdate } from '../../../shared/browser/types'
 import { BROWSER_PROBLEM_CODES, browserProblemForPerson, browserProblemMessage, type BrowserNavigation, type BrowserProblem } from '../../../shared/browser/navigation'
 import type { ExecutionContext, ExecutionPolicySnapshot } from '../../../shared/execution/types'
-import { BrowserAutomationError } from '../../browser/automation/BrowserSessionManager'
+import { BrowserAutomationError, defineBrowserSessionKeeper } from '../../browser/automation/BrowserSessionManager'
 import type { MmsBrowserService } from '../../browser/MmsBrowserService'
 import { ExecutionPolicyService } from '../../execution/ExecutionPolicyService'
 import { snapshotBrowserExecutionBinding } from '../../orchestrator/browser/binding'
@@ -55,6 +55,8 @@ import type { BotBrowserHost, BotTurnBrowser } from '../activation/dispatcher'
  *   paints (one capture shared by every view, each view with its own latest-wins slot and cap), and
  *   nothing is sent while nothing changes. `view` answers the state (and, for an older app, a frame).
  *   The owner can take it over.
+ * - Only this class reaches it: its session and its profile are kept (`BOT_BROWSER_KEEPER`), so the
+ *   general browser methods, another thread's agent, a group chat or a workflow are refused.
  */
 
 /** The browser surface `BotBrowsers` uses: the profile's sessions, tool dispatcher and artifacts. */
@@ -250,10 +252,23 @@ interface OpenedSession {
   opened?: BrowserToolOutput
 }
 
+const BOT_WORKSPACE_PREFIX = 'botbrowser_'
+
 /** The persistent Chromium profile of a bot's browser. */
 export function botBrowserWorkspace(botId: string): string {
-  return `botbrowser_${botId}`
+  return `${BOT_WORKSPACE_PREFIX}${botId}`
 }
+
+/**
+ * The keeper of every bot's browser: a session this class opens, and a bot's profile, answer only
+ * calls that carry it (its owner's view and controls, and the bot's own tools). Anything else, such
+ * as the general `browser.sessions.*` methods on a bot's home thread, is refused.
+ */
+export const BOT_BROWSER_KEEPER = defineBrowserSessionKeeper({
+  name: 'bot',
+  refusal: 'This browser belongs to a bot. Open it from the bot\'s page.',
+  ownsWorkspace: (workspaceId) => workspaceId.startsWith(BOT_WORKSPACE_PREFIX)
+})
 
 /**
  * A frame asked for again within this long is the same frame (two views of one browser share it).
@@ -1019,6 +1034,7 @@ export class BotBrowsers implements BotBrowserHost {
     const context: BrowserToolContext = {
       ...original,
       target: { backend: 'managed-chromium' },
+      keeper: BOT_BROWSER_KEEPER,
       signal: original.signal ? AbortSignal.any([original.signal, turnSignal]) : turnSignal
     }
     const params = { ...(args as Record<string, unknown>) }
@@ -1576,7 +1592,8 @@ export class BotBrowsers implements BotBrowserHost {
         cancellationId: `owner-${state.botId}`
       },
       policy,
-      target: { backend: 'managed-chromium' }
+      target: { backend: 'managed-chromium' },
+      keeper: BOT_BROWSER_KEEPER
     }
     try {
       return await call(context)
@@ -1588,7 +1605,7 @@ export class BotBrowsers implements BotBrowserHost {
   private record(state: BotBrowserState): BrowserSessionRecord | undefined {
     if (!state.sessionId) return undefined
     try {
-      return this.options.browser()?.sessions.trustedSessionScope({ profileId: this.options.profileId, threadId: state.homeThreadId, sessionId: state.sessionId }).record
+      return this.options.browser()?.sessions.trustedSessionScope({ profileId: this.options.profileId, threadId: state.homeThreadId, sessionId: state.sessionId, keeper: BOT_BROWSER_KEEPER }).record
     } catch {
       return undefined
     }

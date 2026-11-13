@@ -19,7 +19,7 @@ import type {
 } from '../../../shared/browser/types'
 import { browserNavigationUrl } from '../../../shared/browser/validation'
 import type { BrowserNavigation } from '../../../shared/browser/navigation'
-import type { BrowserAutomationTool, BrowserToolContext, BrowserToolError, BrowserToolOutput } from '../../../shared/browser/automation'
+import type { BrowserAutomationTool, BrowserSessionKeeper, BrowserToolContext, BrowserToolError, BrowserToolOutput } from '../../../shared/browser/automation'
 import type { BrowserBroker } from '../BrowserBroker'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import { assertOwnedPath, assertProfileId } from '../../profiles/pathSafety'
@@ -51,10 +51,62 @@ export interface BrowserSessionManagerOptions {
 
 interface StoredSession {
   record: BrowserSessionRecord
-  owner: { threadId?: string; runId?: string }
+  /** `keeper`: the name of the only keeper this session answers (`defineBrowserSessionKeeper`). */
+  owner: { threadId?: string; runId?: string; keeper?: string }
 }
 
 interface BudgetState { calls: number; startedAt: number }
+
+interface KeeperEntry {
+  keeper: BrowserSessionKeeper
+  refusal: string
+  ownsWorkspace(workspaceId: string): boolean
+}
+
+const keepers = new Map<string, KeeperEntry>()
+
+/**
+ * Defines a keeper: the one owner of the sessions it opens and of the persistent workspaces it names
+ * (a bot's browser, kept by `BotBrowsers`). The session manager answers such a session, or opens such a
+ * workspace, only for a call that carries this very keeper object. Every other call is refused with
+ * `refusal`, whichever method makes it (one there today or one added later: the check is in
+ * `requireOwned`, which every session method goes through), and every listing leaves the session out.
+ * Defined once per name, by the module that keeps the sessions.
+ */
+export function defineBrowserSessionKeeper(input: { name: string; refusal: string; ownsWorkspace(workspaceId: string): boolean }): BrowserSessionKeeper {
+  if (keepers.has(input.name)) throw new Error(`Browser session keeper "${input.name}" is already defined`)
+  const keeper: BrowserSessionKeeper = Object.freeze({ name: input.name })
+  keepers.set(input.name, { keeper, refusal: input.refusal, ownsWorkspace: input.ownsWorkspace })
+  return keeper
+}
+
+/** The keeper a call carries, when it is a real one (a look-alike object is no keeper). */
+function callKeeper(keeper: BrowserSessionKeeper | undefined): KeeperEntry | undefined {
+  if (!keeper) return undefined
+  const entry = keepers.get(keeper.name)
+  if (!entry || entry.keeper !== keeper) throw new BrowserAutomationError({ code: 'policy_denied', message: 'Browser keeper is not recognised' })
+  return entry
+}
+
+/** The keeper of a workspace, if one names it. */
+function workspaceKeeper(workspaceId: string | undefined): KeeperEntry | undefined {
+  if (workspaceId === undefined) return undefined
+  for (const entry of keepers.values()) if (entry.ownsWorkspace(workspaceId)) return entry
+  return undefined
+}
+
+/**
+ * Why a call carrying `keeper` (or none) may not reach `entry`, or undefined when it may. A session no
+ * keeper holds is open to its ordinary owner; a kept one (opened under a keeper, or on a keeper's
+ * workspace before sessions recorded their keeper) only to that keeper.
+ */
+function keptFrom(entry: StoredSession, keeper: BrowserSessionKeeper | undefined): string | undefined {
+  const name = entry.owner.keeper ?? workspaceKeeper(entry.record.workspaceId)?.keeper.name
+  if (name === undefined) return undefined
+  const kept = keepers.get(name)
+  if (kept && keeper === kept.keeper) return undefined
+  return kept?.refusal ?? 'This browser session is kept apart and cannot be reached from here.'
+}
 
 export class BrowserAutomationError extends Error {
   readonly code: string
@@ -83,8 +135,9 @@ export class BrowserSessionManager {
 
   list(context: BrowserToolContext): BrowserSessionRecord[] {
     this.authorize(context, undefined, 'browser.session', 'read')
+    callKeeper(context.keeper)
     return [...this.sessions.values()]
-      .filter((entry) => this.ownedBy(entry.record, context.execution))
+      .filter((entry) => this.ownedBy(entry.record, context.execution) && !keptFrom(entry, context.keeper))
       .map((entry) => ({ ...entry.record }))
   }
 
@@ -100,7 +153,7 @@ export class BrowserSessionManager {
 
   /** A bounded, already-authorized observation for the viewer; never persisted page content. */
   latestObservation(context: BrowserToolContext, sessionId: string): BrowserObservation | undefined {
-    const entry = this.requireOwned(sessionId, context.execution)
+    const entry = this.requireOwned(sessionId, context)
     const observation = this.observations.get(sessionId)
     return observation && observation.generation === entry.record.generation
       && !['closed', 'disconnected', 'recovering'].includes(entry.record.lifecycle)
@@ -115,7 +168,7 @@ export class BrowserSessionManager {
 
   async requestHuman(context: BrowserToolContext, request: { sessionId: string; reason: string; operation?: string }): Promise<{ requestId: string; state: 'waiting-human' }> {
     this.assertHumanHandoffOwned(context, request)
-    const entry = this.requireOwned(request.sessionId, context.execution)
+    const entry = this.requireOwned(request.sessionId, context)
     const pending = this.handoffs.get(request.sessionId)
     if (pending) return pending
     const previous = entry.record.humanHandoff
@@ -144,27 +197,44 @@ export class BrowserSessionManager {
   }
 
   /**
-   * Trusted host listing of sessions on one profile thread, including native-run
-   * sessions. Does not consume tool budgets; returned records are copies.
+   * Why a call carrying `keeper` (or none) may not reach session `sessionId`, in plain words, when it
+   * is kept from it; undefined otherwise (including a session that does not exist). For a caller that
+   * found no listed session by that id and wants to say why: every session method refuses it anyway.
    */
-  listThreadSessions(input: { profileId: string; threadId: string }): BrowserSessionRecord[] {
+  keptRefusal(sessionId: string, keeper?: BrowserSessionKeeper): string | undefined {
+    callKeeper(keeper)
+    const entry = this.sessions.get(sessionId)
+    return entry && entry.record.lifecycle !== 'closed' ? keptFrom(entry, keeper) : undefined
+  }
+
+  /**
+   * Trusted host listing of sessions on one profile thread, including native-run
+   * sessions. Does not consume tool budgets; returned records are copies. A kept session
+   * (`defineBrowserSessionKeeper`) is listed only for its keeper.
+   */
+  listThreadSessions(input: { profileId: string; threadId: string; keeper?: BrowserSessionKeeper }): BrowserSessionRecord[] {
     if (input.profileId !== this.options.profileId) throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'Browser context belongs to another profile' })
     if (!isIdentifier(input.threadId)) throw new BrowserAutomationError({ code: 'invalid_action', message: 'Browser thread identity is invalid' })
+    callKeeper(input.keeper)
     return [...this.sessions.values()]
-      .filter((entry) => entry.record.profileId === input.profileId && entry.record.threadId === input.threadId && entry.record.lifecycle !== 'closed')
+      .filter((entry) => entry.record.profileId === input.profileId && entry.record.threadId === input.threadId && entry.record.lifecycle !== 'closed' && !keptFrom(entry, input.keeper))
       .map((entry) => ({ ...entry.record }))
   }
 
   /**
    * Trusted host lookup of a session's recorded execution owner.
    * Validates profile and thread ownership before the returned scope may be used
-   * as ExecutionContext. Never deserialize this from renderer/model claims.
+   * as ExecutionContext. Never deserialize this from renderer/model claims. A kept session
+   * (`defineBrowserSessionKeeper`) answers only its keeper.
    */
-  trustedSessionScope(input: { profileId: string; threadId: string; sessionId: string }): { threadId: string; runId?: string; record: BrowserSessionRecord } {
+  trustedSessionScope(input: { profileId: string; threadId: string; sessionId: string; keeper?: BrowserSessionKeeper }): { threadId: string; runId?: string; record: BrowserSessionRecord } {
     if (input.profileId !== this.options.profileId) throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'Browser context belongs to another profile' })
     if (!isIdentifier(input.threadId) || !isIdentifier(input.sessionId)) throw new BrowserAutomationError({ code: 'invalid_action', message: 'Browser session identity is invalid' })
+    callKeeper(input.keeper)
     const entry = this.sessions.get(input.sessionId)
     if (!entry || entry.record.lifecycle === 'closed') throw new BrowserAutomationError({ code: 'session_closed', message: 'Browser session is unavailable' })
+    const refusal = keptFrom(entry, input.keeper)
+    if (refusal) throw new BrowserAutomationError({ code: 'policy_denied', message: refusal })
     if (entry.record.profileId !== input.profileId || entry.record.threadId !== input.threadId || entry.owner.threadId !== input.threadId) {
       throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'Browser session is owned by another execution context' })
     }
@@ -180,6 +250,10 @@ export class BrowserSessionManager {
     if (input.url !== undefined) browserNavigationUrl(input.url)
     if (input.persistent !== undefined && typeof input.persistent !== 'boolean') throw new BrowserAutomationError({ code: 'invalid_action', message: 'persistent must be a boolean' })
     if (input.workspaceId !== undefined && !/^[a-zA-Z0-9:_-]{1,160}$/.test(input.workspaceId)) throw new BrowserAutomationError({ code: 'invalid_action', message: 'workspaceId must be an identifier' })
+    // A keeper's workspace (its sign-ins and site data) opens only for that keeper; what a keeper opens is kept.
+    const keeper = callKeeper(context.keeper)
+    const workspaceOwner = workspaceKeeper(input.workspaceId)
+    if (workspaceOwner && workspaceOwner !== keeper) throw new BrowserAutomationError({ code: 'policy_denied', message: workspaceOwner.refusal })
     const execution = context.execution
     const target = resolveBrowserTarget(context)
     if (target.backend === 'electron-attached' && (input.persistent !== undefined || input.workspaceId !== undefined)) throw new BrowserAutomationError({ code: 'invalid_action', message: 'The selected in-app tab retains its existing browser storage' })
@@ -202,7 +276,7 @@ export class BrowserSessionManager {
     const session = { ...payload.session, capabilities }
     this.sessions.set(session.id, {
       record: session,
-      owner: { threadId: execution.threadId, runId: execution.runId }
+      owner: { threadId: execution.threadId, runId: execution.runId, ...(keeper ? { keeper: keeper.keeper.name } : {}) }
     })
     this.persist()
     return {
@@ -216,7 +290,7 @@ export class BrowserSessionManager {
 
   async close(context: BrowserToolContext, sessionId: string): Promise<BrowserToolOutput> {
     this.authorize(context, undefined, 'browser.session', 'external', { sessionId })
-    const entry = this.requireOwned(sessionId, context.execution)
+    const entry = this.requireOwned(sessionId, context)
     // A worker that no longer knows the session (it restarted or crashed) has nothing left to close.
     try { await this.call(context.execution.profileId, 'session.close', { sessionId }, this.signal(context)) }
     catch (error) { if (!isUnknownSession(error)) throw error }
@@ -228,7 +302,7 @@ export class BrowserSessionManager {
 
   async tabs(context: BrowserToolContext, sessionId: string, input: { operation?: 'list' | 'new' | 'switch' | 'close'; tabId?: string; url?: string }): Promise<BrowserToolOutput> {
     this.authorize(context, 'browser_tabs', 'browser.session', 'external', { sessionId, ...input })
-    this.requireOwned(sessionId, context.execution)
+    this.requireOwned(sessionId, context)
     const operation = input.operation ?? 'list'
     const method = operation === 'list' ? 'tabs.list' : `tabs.${operation}`
     const result = await this.call(context.execution.profileId, method as Parameters<BrowserBroker['call']>[0]['method'], { sessionId, ...(input.tabId ? { tabId: input.tabId } : {}), ...(input.url ? { url: input.url } : {}) }, this.signal(context))
@@ -241,7 +315,7 @@ export class BrowserSessionManager {
 
   async observe(context: BrowserToolContext, input: { sessionId: string; tabId?: string; ref?: string; includeScreenshot?: boolean; maxElements?: number }, tool: 'browser_observe' | 'browser_screenshot' = 'browser_observe'): Promise<BrowserToolOutput> {
     this.authorize(context, tool, 'browser.observe', 'read', input)
-    const entry = this.requireOwned(input.sessionId, context.execution)
+    const entry = this.requireOwned(input.sessionId, context)
     const result = await this.call(context.execution.profileId, 'observe', {
       sessionId: input.sessionId,
       ...(input.tabId ? { tabId: input.tabId } : {}),
@@ -254,7 +328,7 @@ export class BrowserSessionManager {
 
   async find(context: BrowserToolContext, input: { sessionId: string; tabId: string; query: string; role?: string; ref?: string }): Promise<BrowserToolOutput> {
     this.authorize(context, 'browser_find', 'browser.observe', 'read', input)
-    this.requireOwned(input.sessionId, context.execution)
+    this.requireOwned(input.sessionId, context)
     const result = await this.call(context.execution.profileId, 'find', { sessionId: input.sessionId, tabId: input.tabId, text: input.query, ...(input.role ? { role: input.role } : {}), ...(input.ref ? { ref: input.ref } : {}) }, this.signal(context))
     const payload = result as { observationId?: string; elements?: unknown[] }
     return { observationId: payload.observationId, matches: payload.elements ?? [] }
@@ -262,7 +336,7 @@ export class BrowserSessionManager {
 
   async act(context: BrowserToolContext, input: { sessionId: string; tabId: string; generation: number; observationId: string; controlLeaseId: string; action: BrowserAction; timeoutMs?: number; expected?: BrowserWaitCondition }): Promise<BrowserToolOutput> {
     this.authorize(context, 'browser_act', 'browser.action', 'external', input)
-    this.requireOwned(input.sessionId, context.execution)
+    this.requireOwned(input.sessionId, context)
     const requestId = `${context.execution.runId ?? context.execution.threadId}_${randomUUID()}`
     const result = await this.call(context.execution.profileId, 'act', {
       requestId, sessionId: input.sessionId, tabId: input.tabId, generation: input.generation,
@@ -275,7 +349,7 @@ export class BrowserSessionManager {
   /** Execute one generation-fenced action while an explicit human lease is active. */
   async humanAct(context: BrowserToolContext, input: { sessionId: string; tabId: string; generation: number; observationId: string; action: BrowserAction; timeoutMs?: number; expected?: BrowserWaitCondition }): Promise<BrowserToolOutput> {
     this.authorize(context, undefined, 'browser.action', 'external', input)
-    const entry = this.requireOwned(input.sessionId, context.execution)
+    const entry = this.requireOwned(input.sessionId, context)
     if (entry.record.lifecycle !== 'human-controlled' || !entry.record.controlLeaseId) throw new BrowserAutomationError({ code: 'human_controlled', message: 'A human control lease is not active' })
     const requestId = `${context.execution.runId ?? context.execution.threadId}_human_${randomUUID()}`
     const result = await this.call(context.execution.profileId, 'human.act', {
@@ -292,7 +366,7 @@ export class BrowserSessionManager {
    */
   async frame(context: BrowserToolContext, input: { sessionId: string; tabId?: string; maxWidth?: number }): Promise<BrowserViewerFrame> {
     this.authorize(context, undefined, 'browser.observe', 'read', input)
-    const entry = this.requireOwned(input.sessionId, context.execution)
+    const entry = this.requireOwned(input.sessionId, context)
     if (entry.record.backend !== 'managed-chromium') throw new BrowserAutomationError({ code: 'unsupported', message: 'Only a managed browser session has viewer frames' })
     const result = await this.call(context.execution.profileId, 'frame', {
       sessionId: input.sessionId, ...(input.tabId ? { tabId: input.tabId } : {}), ...(input.maxWidth ? { maxWidth: input.maxWidth } : {})
@@ -308,7 +382,7 @@ export class BrowserSessionManager {
    */
   async viewerNext(context: BrowserToolContext, input: { sessionId: string; tabId?: string; watchKey: string; maxWidth: number; maxFps: number; afterFrame: number; afterState: number; waitMs: number }): Promise<BrowserViewerUpdate> {
     this.authorize(context, undefined, 'browser.observe', 'read', input)
-    const entry = this.requireOwned(input.sessionId, context.execution)
+    const entry = this.requireOwned(input.sessionId, context)
     if (entry.record.backend !== 'managed-chromium') throw new BrowserAutomationError({ code: 'unsupported', message: 'Only a managed browser session has viewer frames' })
     const result = await this.call(context.execution.profileId, 'frame.next', {
       sessionId: input.sessionId, ...(input.tabId ? { tabId: input.tabId } : {}), watchKey: input.watchKey, maxWidth: input.maxWidth, maxFps: input.maxFps,
@@ -320,7 +394,7 @@ export class BrowserSessionManager {
   /** A viewer stops: its waiting `viewerNext` is answered, and the worker stops a tab's screencast once nobody watches it. */
   async viewerStop(context: BrowserToolContext, input: { sessionId: string; watchKey: string }): Promise<void> {
     this.authorize(context, undefined, 'browser.observe', 'read', input)
-    this.requireOwned(input.sessionId, context.execution)
+    this.requireOwned(input.sessionId, context)
     await this.call(context.execution.profileId, 'frame.stop', { sessionId: input.sessionId, watchKey: input.watchKey }, this.signal(context))
   }
 
@@ -331,7 +405,7 @@ export class BrowserSessionManager {
   async humanInput(context: BrowserToolContext, input: { sessionId: string; tabId?: string; input: BrowserHumanInput }): Promise<{ navigation?: BrowserNavigation }> {
     // The policy hears which session and tab, and a navigation's address; never what the person types.
     this.authorize(context, undefined, 'browser.action', 'external', { sessionId: input.sessionId, ...(input.tabId ? { tabId: input.tabId } : {}), ...(input.input.kind === 'navigate' ? { url: input.input.url } : {}) })
-    const entry = this.requireOwned(input.sessionId, context.execution)
+    const entry = this.requireOwned(input.sessionId, context)
     if (entry.record.lifecycle !== 'human-controlled' || !entry.record.controlLeaseId) throw new BrowserAutomationError({ code: 'human_controlled', message: 'Take control of the browser first' })
     const result = await this.call(context.execution.profileId, 'human.input', {
       sessionId: input.sessionId, controlLeaseId: entry.record.controlLeaseId, input: input.input, ...(input.tabId ? { tabId: input.tabId } : {})
@@ -345,7 +419,7 @@ export class BrowserSessionManager {
    */
   async humanInputs(context: BrowserToolContext, input: { sessionId: string; tabId: string; inputs: Array<{ input: BrowserHumanInput; spot?: BrowserPictureSpot }> }): Promise<BrowserHumanInputResult[]> {
     this.authorize(context, undefined, 'browser.action', 'external', { sessionId: input.sessionId, tabId: input.tabId })
-    const entry = this.requireOwned(input.sessionId, context.execution)
+    const entry = this.requireOwned(input.sessionId, context)
     if (entry.record.lifecycle !== 'human-controlled' || !entry.record.controlLeaseId) throw new BrowserAutomationError({ code: 'human_controlled', message: 'Take control of the browser first' })
     const result = await this.call(context.execution.profileId, 'human.input', {
       sessionId: input.sessionId, controlLeaseId: entry.record.controlLeaseId, tabId: input.tabId, inputs: input.inputs
@@ -356,14 +430,14 @@ export class BrowserSessionManager {
 
   async wait(context: BrowserToolContext, input: { sessionId: string; tabId: string; condition: BrowserWaitCondition; timeoutMs?: number }): Promise<BrowserToolOutput> {
     this.authorize(context, 'browser_wait', 'browser.observe', 'read', input)
-    this.requireOwned(input.sessionId, context.execution)
+    this.requireOwned(input.sessionId, context)
     const result = await this.call(context.execution.profileId, 'wait', { sessionId: input.sessionId, tabId: input.tabId, condition: input.condition, timeoutMs: input.timeoutMs ?? 30_000 }, this.signal(context))
     return { observation: await this.observation(context, input.sessionId, result as BrowserObservation) }
   }
 
   async extract(context: BrowserToolContext, input: { sessionId: string; tabId: string; ref?: string; schema?: unknown }): Promise<BrowserToolOutput> {
     this.authorize(context, 'browser_extract', 'browser.extract', 'read', input)
-    this.requireOwned(input.sessionId, context.execution)
+    this.requireOwned(input.sessionId, context)
     const result = await this.call(context.execution.profileId, 'extract', { sessionId: input.sessionId, tabId: input.tabId, ...(input.ref ? { ref: input.ref } : {}) }, this.signal(context))
     return { extraction: result }
   }
@@ -378,7 +452,7 @@ export class BrowserSessionManager {
   }
 
   private async changeControl(context: BrowserToolContext, sessionId: string, owner: 'agent' | 'human', tabId?: string, chooser = false): Promise<BrowserToolOutput> {
-    const entry = this.requireOwned(sessionId, context.execution)
+    const entry = this.requireOwned(sessionId, context)
     const result = await this.call(context.execution.profileId, 'control.take', { sessionId, owner, ...(tabId ? { tabId } : {}), ...(chooser ? { chooser: true } : {}) }, this.signal(context)) as { controlLeaseId?: string; generation?: number; lifecycle?: BrowserSessionRecord['lifecycle'] }
     entry.record = { ...entry.record, controlLeaseId: result.controlLeaseId, generation: result.generation ?? entry.record.generation, lifecycle: result.lifecycle ?? entry.record.lifecycle, updatedAt: new Date().toISOString() }
     if (owner === 'agent' && entry.record.humanHandoff) entry.record.humanHandoff = { ...entry.record.humanHandoff, state: 'resumed', updatedAt: new Date().toISOString() }
@@ -389,7 +463,7 @@ export class BrowserSessionManager {
 
   async releaseControl(context: BrowserToolContext, sessionId: string, controlLeaseId: string): Promise<BrowserToolOutput> {
     this.authorize(context, undefined, 'browser.session', 'external', { sessionId, controlLeaseId })
-    const entry = this.requireOwned(sessionId, context.execution)
+    const entry = this.requireOwned(sessionId, context)
     await this.call(context.execution.profileId, 'control.release', { sessionId, controlLeaseId }, this.signal(context))
     entry.record = { ...entry.record, controlLeaseId: undefined, lifecycle: 'ready', updatedAt: new Date().toISOString() }
     this.persist()
@@ -398,7 +472,7 @@ export class BrowserSessionManager {
 
   assertHumanHandoffOwned(context: BrowserToolContext, request: { sessionId: string; reason: string; operation?: string }): void {
     this.authorize(context, 'browser_request_human', 'browser.task', 'external', request)
-    this.requireOwned(request.sessionId, context.execution)
+    this.requireOwned(request.sessionId, context)
   }
 
   async closeAll(backend?: BrowserSessionRecord['backend']): Promise<void> {
@@ -451,7 +525,7 @@ export class BrowserSessionManager {
   }
 
   private async observation(context: BrowserToolContext, sessionId: string, observation: BrowserObservation): Promise<BrowserObservation> {
-    const entry = this.requireOwned(sessionId, context.execution)
+    const entry = this.requireOwned(sessionId, context)
     if (!observation || observation.sessionId !== sessionId) throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'Browser observation does not belong to the requested session' })
     let decorated = observation
     try { if (this.options.decorateObservation && observation.screenshot) decorated = await this.options.decorateObservation(context, observation) }
@@ -494,10 +568,19 @@ export class BrowserSessionManager {
       && (record.runId === undefined ? context.runId === undefined : record.runId === context.runId)
   }
 
-  private requireOwned(sessionId: string, context: ExecutionContext): StoredSession {
+  /**
+   * The session a call may use, or a refusal. Every session method goes through here, so a kept
+   * session (`defineBrowserSessionKeeper`) is refused to every call without its keeper, whatever the
+   * method: one added later is refused by default.
+   */
+  private requireOwned(sessionId: string, context: BrowserToolContext): StoredSession {
+    callKeeper(context.keeper)
+    const execution = context.execution
     const entry = this.sessions.get(sessionId)
     if (!entry || entry.record.lifecycle === 'closed') throw new BrowserAutomationError({ code: 'session_closed', message: 'Browser session is unavailable' })
-    if (!this.ownedBy(entry.record, context) || entry.owner.threadId !== context.threadId || (!!entry.owner.runId && entry.owner.runId !== context.runId)) throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'Browser session is owned by another execution context' })
+    const refusal = keptFrom(entry, context.keeper)
+    if (refusal) throw new BrowserAutomationError({ code: 'policy_denied', message: refusal })
+    if (!this.ownedBy(entry.record, execution) || entry.owner.threadId !== execution.threadId || (!!entry.owner.runId && entry.owner.runId !== execution.runId)) throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'Browser session is owned by another execution context' })
     return entry
   }
 
@@ -626,6 +709,7 @@ function isStoredSession(value: unknown, profileId: string): value is StoredSess
   if (typeof record.createdAt !== 'string' || !Number.isFinite(Date.parse(record.createdAt))
     || typeof record.updatedAt !== 'string' || !Number.isFinite(Date.parse(record.updatedAt))) return false
   if (owner.threadId !== record.threadId || owner.runId !== record.runId) return false
+  if (owner.keeper !== undefined && (typeof owner.keeper !== 'string' || !/^[a-zA-Z0-9:_-]{1,160}$/.test(owner.keeper))) return false
   if (record.humanHandoff) {
     const handoff = record.humanHandoff
     if (typeof handoff !== 'object' || typeof handoff.requestId !== 'string' || !isIdentifier(handoff.requestId) || typeof handoff.reason !== 'string' || handoff.reason.length > 4096

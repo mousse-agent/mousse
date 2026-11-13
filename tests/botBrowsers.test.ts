@@ -14,7 +14,7 @@ import { MmsBrowserService } from '../src/mms/browser/MmsBrowserService'
 import { BrowserArtifactService } from '../src/mms/browser/BrowserArtifactService'
 import { createAllowHttpPolicy } from '../src/mms/browser/defaultPorts'
 import { ExecutionPolicyService } from '../src/mms/execution/ExecutionPolicyService'
-import { BotBrowsers, botBrowserWorkspace } from '../src/mms/bots/browser/BotBrowsers'
+import { BOT_BROWSER_KEEPER, BotBrowsers, botBrowserWorkspace } from '../src/mms/bots/browser/BotBrowsers'
 import type { BotTurnBrowser } from '../src/mms/bots/activation/dispatcher'
 import { dispatchBrowserTool } from '../src/mms/orchestrator/browser/dispatch'
 import { snapshotBrowserExecutionBinding } from '../src/mms/orchestrator/browser/binding'
@@ -126,13 +126,13 @@ describe.skipIf(!chrome.ok)('a bot\'s own browser', () => {
     const policy = new ExecutionPolicyService().snapshot(profileId, { allowedTools: [...BROWSER_AUTOMATION_TOOLS], allowedCapabilities: ['browser.session', 'browser.observe', 'browser.action', 'browser.extract'], allowedEffects: ['read', 'external'], maxToolCalls: 10, maxElapsedMs: 60_000 })
     const thread: BrowserToolContext = { execution: { profileId, threadId: 'owner-thread', turnId: 't1', actor: { kind: 'main' }, source: 'schedule', policySnapshotId: policy.id, cancellationId: 't1' }, policy, target: { backend: 'managed-chromium' } }
     const foreign = await browser.tools.invoke('browser_observe', { sessionId: opened.session!.id }, thread)
-    expect(foreign).toMatchObject({ ok: false, error: { code: 'profile_mismatch' } })
+    expect(foreign).toMatchObject({ ok: false, error: { code: 'policy_denied', message: expect.stringMatching(/belongs to a bot/) } })
 
     // Alice's activation ends; nobody watches, so the idle browser closes. Its sign-in stays.
     bots.activationEnded({ botId: BOT_A, activationId: 'act-a1' })
     expect(idle).toHaveLength(1)
     idle[0]!()
-    await expect.poll(() => browser.sessions.listThreadSessions({ profileId, threadId: 'home-a' }).length).toBe(0)
+    await expect.poll(() => browser.sessions.listThreadSessions({ profileId, threadId: 'home-a', keeper: BOT_BROWSER_KEEPER }).length).toBe(0)
     expect((await bots.view(BOT_A)).open).toBe(false)
     const again = turn(BOT_A, 'act-a2', 'run')
     const reopened = await call(again, 'browser_open', { url: `${origin}/remember.html` })
@@ -212,8 +212,8 @@ describe.skipIf(!chrome.ok)('a bot\'s own browser', () => {
     expect(opened.cursor).toBeUndefined()
     // The owner holds the browser before its first page loads: a check on that page sees a person.
     const policy = new ExecutionPolicyService().snapshot(profileId, { allowedTools: [...BROWSER_AUTOMATION_TOOLS], allowedCapabilities: ['browser.session', 'browser.observe'], allowedEffects: ['read', 'external'], maxToolCalls: 10, maxElapsedMs: 60_000 })
-    const home: BrowserToolContext = { execution: { profileId, threadId: 'home-a', turnId: 'owner-check', actor: { kind: 'main' }, source: 'schedule', policySnapshotId: policy.id, cancellationId: 'owner-check' }, policy, target: { backend: 'managed-chromium' } }
-    const sessionId = browser.sessions.listThreadSessions({ profileId, threadId: 'home-a' })[0]!.id
+    const home: BrowserToolContext = { execution: { profileId, threadId: 'home-a', turnId: 'owner-check', actor: { kind: 'main' }, source: 'schedule', policySnapshotId: policy.id, cancellationId: 'owner-check' }, policy, target: { backend: 'managed-chromium' }, keeper: BOT_BROWSER_KEEPER }
+    const sessionId = browser.sessions.listThreadSessions({ profileId, threadId: 'home-a', keeper: BOT_BROWSER_KEEPER })[0]!.id
     const seen = await browser.tools.invoke('browser_observe', { sessionId }, home)
     expect(seen.ok).toBe(true)
     const text = seen.ok ? seen.value.observation!.elements.map((element) => `${element.name ?? ''} ${element.text ?? ''}`).join(' ') : ''

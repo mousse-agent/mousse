@@ -234,8 +234,11 @@ export function registerBrowserMethods(
             } satisfies BrowserSessionListResult
           }
           const sessionId = method === 'browser.sessions.get' ? optionalString(params.sessionId, 'sessionId') : asString(params.sessionId, 'sessionId')
+          // A kept session (a bot's browser) is never listed here; named, it is refused in plain words.
           const listed = browser.listPublicSessions(threadId)
           const selected = sessionId ? listed.find((record) => record.id === sessionId) : listed[0]
+          const kept = sessionId && !selected ? browser.sessions.keptRefusal(sessionId) : undefined
+          if (kept) throw new DomainRpcError('policy_denied', kept)
           if (method === 'browser.sessions.get' && !selected) {
             return { mode: 'managed', tabs: [], connection: 'disconnected', history: [], artifacts: [], updatedAt: new Date().toISOString() } satisfies BrowserSessionSnapshotResult
           }
