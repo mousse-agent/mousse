@@ -29,14 +29,6 @@ export function pathName(path: string): string {
   return path.split(/[\\/]+/).filter(Boolean).at(-1) ?? path
 }
 
-/** The folder a path is in, as the computer writes it; undefined at a root. */
-export function pathFolder(path: string): string | undefined {
-  const at = Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/'))
-  if (at <= 0) return undefined
-  const folder = path.slice(0, at)
-  return /^[A-Za-z]:$/.test(folder) ? `${folder}\\` : folder
-}
-
 /**
  * What a path's chip reads. A file in the bot's own files folder (`…/bots/files/<botId>/…`) reads as its path inside
  * that folder (`chip-clouds-boy.png`, `attachments/2026-11-13/notes.md`), never the profile's folders around it;

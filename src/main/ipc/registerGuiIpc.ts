@@ -46,7 +46,7 @@ import {
   threadListPayload
 } from '../mms/protocolEventBridge'
 import { SettingsStore } from '../../mms/settings/SettingsStore'
-import { listEditors, openInEditor, openRemoteInEditor } from '../editors'
+import { listEditors, openInEditor, openRemoteInEditor, showFileInFolder } from '../editors'
 import { nodeOfThread, remoteRoute } from '../remoteEditorFlow'
 import { EDITOR_PROXY_READY, type RemoteAskResult, type RemoteOpenResult, type RemoteRoute } from '../../shared/remoteEditor'
 import { askForEditorAccess } from '../remoteEditorAsk'
@@ -3218,6 +3218,10 @@ export function registerGuiIpc(
   )
   registerHandler('editors:open', async (_e, editorId: string, path: string) => {
     await openInEditor(editorId, path)
+  })
+  // A file of this computer shown selected in its folder; only an existing file by its absolute path.
+  registerHandler('editors:showInFolder', async (_e, path: string) => {
+    await showFileInFolder(path)
   })
   // A thread of another computer: its folder opens in an editor of this one over SSH. The window names the
   // thread only; the folder is the one the owner answers, and the SSH address is read here from this

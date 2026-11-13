@@ -7,7 +7,7 @@ import { classifyLink, routeLink } from '../../utils/chatLinks'
 import { fileLocation, isAbsolutePath } from '../../utils/filesBrowse'
 import { parseMousseFileLink } from '../../../shared/chatReferences'
 import { BotMarkdownImage, useFileImage } from './BotImages'
-import { botPathLabel, linkBotPaths, pathFolder, pathName } from './botPaths'
+import { botPathLabel, linkBotPaths, pathName } from './botPaths'
 import { isKeyValueList } from './botChatShape'
 
 /**
@@ -25,10 +25,9 @@ export function BotFilesProvider({ botId, open, children }: BotFilesHost & { chi
 
 const IMAGE_FILE = /\.(?:png|jpe?g|gif|webp)$/i
 
-/** Opens a file's folder in File Explorer, Finder or the Files app (the Files editor entry opens folders). */
+/** Shows the file selected in its folder, in File Explorer, Finder or the Files app. A file that is gone shows nothing. */
 export function showInFolder(path: string): void {
-  const folder = pathFolder(path)
-  if (folder) void window.mousse.editors.open('files', folder).catch(() => undefined)
+  void window.mousse.editors.showInFolder(path).catch(() => undefined)
 }
 
 /** A picture's preview above its chip, once it has been read; nothing while it is read or when it can't be. */
@@ -155,7 +154,7 @@ function TextPreview({ path }: { path: string }) {
   if (read.state === 'loading') return <p className="bot-file-state">Opening…</p>
   if (read.state === 'failed') return <p className="bot-file-state">Can't open this file.</p>
   return <>
-    <BotMarkdown text={filePreviewMarkdown(path, read.text)} className="bot-file-text chat-message-markdown chat-markdown" />
+    <BotMarkdown text={filePreviewMarkdown(path, read.text)} className="bot-markdown bot-file-text" />
     {read.cut && <p className="bot-file-state">Showing the start of this file.</p>}
   </>
 }

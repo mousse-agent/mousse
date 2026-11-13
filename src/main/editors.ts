@@ -267,6 +267,19 @@ async function assertFolder(path: string): Promise<void> {
   if (!info?.isDirectory()) throw new Error('That folder does not exist.')
 }
 
+/** A file that exists, named by its absolute path: never a folder, a device or a path with a NUL in it. */
+async function assertFile(path: string): Promise<void> {
+  if (typeof path !== 'string' || !isAbsolute(path) || path.includes('\0')) throw new Error('Choose an absolute file path to show.')
+  const info = await stat(path).catch(() => null)
+  if (!info?.isFile()) throw new Error('That file does not exist.')
+}
+
+/** Shows a file selected in its folder, in File Explorer, Finder or the Files app (a bot's file chip: Show in folder). */
+export async function showFileInFolder(path: string): Promise<void> {
+  await assertFile(path)
+  shell.showItemInFolder(path)
+}
+
 function run(command: string, args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
     execFile(command, args, { windowsHide: true }, (error) => (error ? reject(error) : resolve()))

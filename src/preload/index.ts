@@ -673,6 +673,8 @@ const api = {
       ipcRenderer.invoke('editors:list', options),
     open: (editorId: string, path: string): Promise<void> =>
       ipcRenderer.invoke('editors:open', editorId, path),
+    /** Shows a file selected in its folder in the computer's file manager; refused for anything but an existing file. */
+    showInFolder: (path: string): Promise<void> => ipcRenderer.invoke('editors:showInFolder', path),
     /** Opens the folder of a thread of another computer in an editor of this one, over SSH. */
     openRemote: (editorId: string, threadId: string): Promise<RemoteOpenResult> =>
       ipcRenderer.invoke('editors:openRemote', editorId, threadId),

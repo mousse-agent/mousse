@@ -3,7 +3,7 @@
  * written, and what each chip reads.
  */
 import { describe, expect, it } from 'vitest'
-import { botFileHref, botPathLabel, linkBotPaths, pathFolder } from '../../src/renderer/components/bots/botPaths'
+import { botFileHref, botPathLabel, linkBotPaths } from '../../src/renderer/components/bots/botPaths'
 
 const FILES = 'C:\\Users\\me\\.mousse\\profiles\\d9d018ad-5de0\\bots\\files\\bot-8f8f'
 const link = (path: string, name = path.split(/[\\/]/).at(-1)!) => `[${name}](${botFileHref(path)})`
@@ -43,11 +43,5 @@ describe('botPathLabel', () => {
     expect(botPathLabel(`${FILES}\\attachments\\2026-11-13\\notes.md`, 'bot-8f8f')).toBe('attachments/2026-11-13/notes.md')
     expect(botPathLabel(`${FILES}\\notes.md`, 'another-bot')).toBe('notes.md')
     expect(botPathLabel('/home/me/Desktop/shot.png', 'bot-8f8f')).toBe('shot.png')
-  })
-
-  it('finds the folder Show in folder opens', () => {
-    expect(pathFolder(`${FILES}\\a.png`)).toBe(FILES)
-    expect(pathFolder('C:\\a.png')).toBe('C:\\')
-    expect(pathFolder('/home/me/a.png')).toBe('/home/me')
   })
 })

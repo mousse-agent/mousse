@@ -15,7 +15,7 @@
 .bot-header-name { display: block; max-width: 100%; padding: 0; color: inherit; text-align: left; }
 .app .bot-header-name h1 { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; line-height: 18px; font-weight: 600; margin: 0; }
 /* What it does now, on the face's corner: one of the app's icons on a round tile. It never moves. */
-.bot-sticker { position: absolute; right: -5px; bottom: -4px; display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; color: var(--text-primary); background: var(--surface-elevated, #2e2f38); box-shadow: 0 0 0 2px var(--bg-primary, #000); pointer-events: none; }
+.bot-sticker { position: absolute; right: -3px; bottom: -2px; display: grid; place-items: center; width: 14px; height: 14px; border-radius: 50%; color: var(--text-primary); background: var(--surface-elevated, #2e2f38); box-shadow: 0 0 0 2px var(--bg-primary, #000); pointer-events: none; }
 .bot-sticker[data-kind='typing'] { color: var(--success, #7ec99a); }
 .bot-sticker[data-kind='paused'] { color: var(--text-secondary); }
 /* The presence under the name: quiet words; typing in the success tint, work in the warning tint. */
@@ -68,7 +68,12 @@
 .bot-message-line { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; }
 .bot-bubble { position: relative; min-width: 0; max-width: 100%; padding: 8px 13px 6px; border-radius: 16px 16px 16px 5px; color: var(--text-primary); background: color-mix(in srgb, var(--text-primary) 7%, var(--bg-primary, transparent)); }
 .bot-message:not(.is-group-start) .bot-bubble { border-top-left-radius: 6px; }
-.bot-bubble > .chat-markdown { margin: 0; }
+/* The thread's Markdown (an-md-*), at the bubble's size. Inline code keeps a short piece whole: it moves to the next line
+   as one, and breaks only when it is wider than the bubble. Tables keep the thread's padding inside the bubble's own. */
+.bot-bubble > .bot-markdown { margin: 0; }
+.bot-markdown > :first-child { margin-top: 0; }
+.bot-markdown > :last-child { margin-bottom: 0; }
+.bot-markdown .an-md-code { display: inline-block; max-width: 100%; vertical-align: bottom; line-height: 1.45; white-space: normal; overflow-wrap: anywhere; }
 .bot-bubble-foot { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 2px; }
 .bot-bubble-time { margin-left: auto; font-size: 11px; line-height: 16px; color: var(--text-secondary); opacity: .8; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .bot-bubble > .bot-reply-quote { margin: 0 0 6px; max-width: 100%; }

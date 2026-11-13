@@ -206,7 +206,7 @@ const BotMessage = memo(function BotMessage({ bot, message, onAction, browser, q
     <div className="bot-message-line">
       <div className="bot-bubble">
         {quoted && <BotReplyQuote botId={bot.id} quote={message.replyTo!} botName={bot.name} />}
-        {message.text && <BotMarkdown text={message.text} className="chat-message-markdown chat-markdown" />}
+        {message.text && <BotMarkdown text={message.text} className="bot-markdown" />}
         {openAsk && <p className="bot-bubble-ask"><Shield size={14} aria-hidden /><span>Wants to <strong>{openAsk.title}</strong></span></p>}
         {!!message.attachments?.length && <div className="bot-message-files"><BotImageFiles files={message.attachments} /><BotOtherFiles files={message.attachments} /></div>}
         {message.error && <BotErrorLine error={message.error} onAction={onAction} />}

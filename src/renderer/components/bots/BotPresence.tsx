@@ -59,7 +59,7 @@ export function BotActivitySticker({ bot, typing, offline }: { bot: BotSummary; 
   const kind = stickerOf(presence, chip)
   if (!kind) return null
   const { icon: Icon, label } = STICKER_ICONS[kind]
-  return <span className="bot-sticker" data-kind={kind} role="img" aria-label={label} title={label}><Icon size={11} strokeWidth={2.2} aria-hidden /></span>
+  return <span className="bot-sticker" data-kind={kind} role="img" aria-label={label} title={label}><Icon size={9} strokeWidth={2.4} aria-hidden /></span>
 }
 
 /**
