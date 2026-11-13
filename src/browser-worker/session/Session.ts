@@ -98,17 +98,17 @@ interface MarkedTarget {
 /** A cookie as `Storage.getCookies` read it, ready for `Storage.setCookies`. */
 type CarriedCookie = Record<string, unknown>
 
-/** What a restart carries: session-only cookies, and the tabs it keeps (by id, in order) with the one in front. */
+/** What a restart carries: the cookies, and the tabs it keeps (by id, in order) with the one in front. */
 interface Carried {
   cookies: CarriedCookie[]
   tabs: string[]
   front?: string
 }
 
-/** The browser in a window on the person's screen: copies of its session-only cookies, and its tabs that left it. */
+/** The browser in a window on the person's screen: copies of its cookies, and its tabs that left it. */
 interface WindowRun {
   display?: BrowserWindowDisplay
-  /** Session-only cookies as read lately, oldest first, each with when it was asked for. */
+  /** The cookies as read lately, oldest first, each with when it was asked for. */
   shots: Array<{ at: number; cookies: CarriedCookie[] }>
   /** When each of the session's tabs left the window (the person closed it, or the window closed). */
   gone: Map<string, number>
@@ -134,7 +134,7 @@ const MARK_AFTER_RUN_MS = 10_000
 const MARK_ANSWER_MS = 2_000
 /** How long a starting session waits for Chromium's own window before it opens its first tab (`startupWindow`); it is up in well under a second. */
 const STARTUP_WINDOW_MS = 5_000
-/** How often a browser in a window has its session-only cookies read (and soon after each page commits): what its own close button can lose. */
+/** How often a browser in a window has its cookies read (and soon after each page commits): what its own close button can lose. */
 const WINDOW_SHOT_MS = 1_000
 const WINDOW_SHOT_SOON_MS = 150
 const MAX_WINDOW_SHOTS = 8
@@ -594,7 +594,7 @@ export class ManagedSession {
   /**
    * Shows the browser as a real window on the person's screen, while they hold it: Chromium starts again with a
    * window on the same profile. Its tabs come back, under the same ids, at their addresses (each page loads again),
-   * and its session-only cookies are carried across; cookies kept on disk are the profile's own. Refused while a
+   * and its cookies are carried across, session-only ones included. Refused while a
    * page waits on the person in a way a reload would lose without anyone seeing (a dialog, a file request) or a
    * download is under way. When no window comes up, the browser comes back without one and the call says so.
    */
@@ -606,7 +606,7 @@ export class ManagedSession {
     if (this.tabChoosers.size) fail('not_actionable', 'A page is asking for a file. Choose it or cancel first, then open the window.')
     if ([...this.downloadStates.values()].some((state) => state === 'inProgress')) fail('not_actionable', 'A download is still running. Open the window when it ends.')
     if (process.platform === 'linux' && !display && process.env.MOUSSE_BROWSER_TEST_WINDOW_HEADLESS !== '1') fail('unsupported', 'There is no screen here to open the window on.')
-    const carried = await this.carry(await this.readSessionCookies())
+    const carried = await this.carry(await this.readCookies())
     const run: WindowRun = { ...(display ? { display } : {}), shots: [{ at: Date.now(), cookies: carried.cookies }], gone: new Map(), ending: false }
     this.windowed = run
     try {
@@ -640,7 +640,7 @@ export class ManagedSession {
     if (!run || run.ending) return this.windowState()
     run.ending = true
     this.stopWindowRun(run)
-    const cookies = await this.readSessionCookies().catch(() => run.shots.at(-1)?.cookies ?? [])
+    const cookies = await this.readCookies().catch(() => run.shots.at(-1)?.cookies ?? [])
     const carried = await this.carry(cookies)
     this.windowed = null
     await this.restart(false, undefined, carried, signal).catch((error: unknown) => {
@@ -716,7 +716,7 @@ export class ManagedSession {
     if (!pages) this.background(this.windowClosed('closed'))
   }
 
-  /** Reads the window's session-only cookies soon (a page just committed), once for a burst of pages. */
+  /** Reads the window's cookies soon (a page just committed), once for a burst of pages. */
   private windowShotSoon(): void {
     const run = this.windowed
     if (!run || run.ending || run.soon) return
@@ -727,11 +727,11 @@ export class ManagedSession {
     run.soon.unref?.()
   }
 
-  /** Keeps a copy of the window's session-only cookies, as they were when it was asked for. */
+  /** Keeps a copy of the window's cookies, as they were when it was asked for. */
   private windowShot(run: WindowRun): void {
     if (this.windowed !== run || run.ending || this.switching) return
     const at = Date.now()
-    void this.readSessionCookies().then((cookies) => {
+    void this.readCookies().then((cookies) => {
       if (this.windowed !== run || run.ending) return
       run.shots.push({ at, cookies })
       if (run.shots.length > MAX_WINDOW_SHOTS) run.shots.splice(0, run.shots.length - MAX_WINDOW_SHOTS)
@@ -747,14 +747,17 @@ export class ManagedSession {
     run.check = undefined
   }
 
-  /** The browser's session-only cookies (the ones a restart would lose), as `Storage.setCookies` takes them again. */
-  private async readSessionCookies(): Promise<CarriedCookie[]> {
+  /**
+   * The browser's cookies, as `Storage.setCookies` takes them again: session-only ones (which a restart would lose)
+   * and the ones kept on disk too, so a sign-in a page set a moment ago is carried even before Chromium wrote it out.
+   */
+  private async readCookies(): Promise<CarriedCookie[]> {
     const chrome = this.chrome
     if (!chrome) return []
     const { cookies } = await chrome.cdp.send<{ cookies?: Array<Record<string, unknown>> }>('Storage.getCookies', {}, { timeoutMs: 5_000 })
-    return (cookies ?? []).filter((cookie) => cookie.session === true).map((cookie) => {
-      const { size: _size, session: _session, expires: _expires, ...kept } = cookie
-      return kept
+    return (cookies ?? []).map((cookie) => {
+      const { size: _size, session, expires, ...kept } = cookie
+      return session === true || typeof expires !== 'number' || expires <= 0 ? kept : { ...kept, expires }
     })
   }
 
@@ -774,7 +777,7 @@ export class ManagedSession {
   /**
    * Chromium starts again on the same profile, with a window or without, and the session carries on in it: the same
    * session, lock, lease and generation; the carried tabs under the same ids, each loading its address again; the
-   * carried session-only cookies set again. Whatever was in flight is fenced first (a person holds the browser, so
+   * carried cookies set again. Whatever was in flight is fenced first (a person holds the browser, so
    * nothing of the agent's runs). Every page reads as the person's or the agent's as before (`onAttached`).
    */
   private async restart(windowed: boolean, display: BrowserWindowDisplay | undefined, carried: Carried, signal: AbortSignal): Promise<void> {

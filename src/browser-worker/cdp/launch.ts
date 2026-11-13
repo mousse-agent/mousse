@@ -12,6 +12,9 @@ import {
 } from '../lifecycle/ownedTree'
 import { fail } from '../errors'
 
+/** How long a browser asked to close has to end by itself before its processes are stopped. */
+const GRACEFUL_EXIT_MS = 3_000
+
 export interface LaunchedChrome {
   pid: number
   process: ChildProcess
@@ -200,6 +203,8 @@ export async function launchManagedChrome(options: LaunchChromeOptions): Promise
         try { await cdp.send('Browser.close', {}, { timeoutMs: 3_000 }) } catch { /* ignore */ }
         // Ended by a signal (killed), a process has no exit code but is gone all the same.
         const exited = () => child.exitCode !== null || child.signalCode !== null
+        // A browser asked to close writes what it holds (its newest cookies among it) as it goes: it has a moment to.
+        if (!exited()) await Promise.race([exitPromise, new Promise((resolve) => setTimeout(resolve, GRACEFUL_EXIT_MS))])
         if (!exited()) {
           await stopOwnedProcessTree(tree)
         }
