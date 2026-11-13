@@ -84,7 +84,9 @@ html[data-theme='light'] .empty-logo {
   animation: empty-logo-wobble calc(var(--ambient-glow-loop, calc(18s * var(--ui-motion-scale, 1))) / 2) var(--empty-logo-wobble-ease) var(--empty-logo-glow-delay, 0s) infinite;
 }
 
-.chat--empty[data-ambient-rest] .empty-logo-swirl {
+/* The liquid's wave holds with it: the wave moves inside the SVG, so each of its steps repaints the logo. */
+.chat--empty[data-ambient-rest] .empty-logo-swirl,
+.chat--empty[data-ambient-rest] .empty-logo-liquid .empty-logo-wave {
   animation-play-state: paused;
 }
 
