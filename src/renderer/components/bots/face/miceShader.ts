@@ -8,6 +8,25 @@
  * ambient occlusion sample reaches. Near the tail the exact distance is used, so the picture is the
  * same (at most 11/255 on a few silhouette pixels) and a face draws 20 to 30% faster.
  *
+ * Compile cost. On Windows, Chromium runs WebGL through ANGLE's Direct3D 11 backend, which hands this
+ * shader to Microsoft's FXC. FXC inlines every function call and its time grows faster than linearly
+ * with the straight-line code that results, and every face shows the flat fallback until it ends. So
+ * count call sites, not loop trips: a loop body compiles about once however many trips it has.
+ * `node scripts/face-shader-cost.mjs` prints the size with every call inlined: 2,332 statements, down
+ * from 11,019 when `map` had seven call sites and `accD` thirty-five copies. Keep it that way:
+ * - `map` has three call sites: the march, the 4-trip loop in `nrm` and the loop in `ao`. The march
+ *   carries the material out of the loop, so nothing calls `map` again for it.
+ * - `accD` has one call site in `map`: each character picks its accessory frame first.
+ * - `prM` has one call site in `mousseD` (a 3-trip loop); the bend's pivot and the middle above the
+ *   tip are written out as the values `headM` returns there.
+ * - New repeated work goes in a loop around one call, not in several calls. GLSL ES 1.00 loops need
+ *   constant bounds, and deep nests of constant loops can be unrolled; keep nests shallow.
+ * - A quick compile on a Mac (Metal) says nothing about Windows, which is about ten times slower.
+ * Two merges would shrink it further but change pixels, so they are not made: the glass normal's six
+ * taps as a loop (its edge alpha is steep enough that any change in rounding shows, up to 3/255), and
+ * the march, normal taps and occlusion as one loop (one `map`, about 900 statements, but shading moves
+ * by up to 9/255 because each original tap is optimised with its own constant offset).
+ *
  * Uniforms (set by `faceRenderer.ts` from `facePoses.ts`):
  * - `uRes`, `uOrg`: the viewport size and origin in drawing-buffer pixels.
  * - `uCol`: the body colour; `uAC`: the accessory colour, with `w` = 1 for metal (the crown).
@@ -53,10 +72,7 @@ float seg2(vec2 p,vec2 a,vec2 b){vec2 pa=p-a,ba=b-a;return length(pa-ba*clamp(do
 float ell2(vec2 p,vec2 r){return (length(p/r)-1.)*min(r.x,r.y);}
 // An open eye of shape k (BOT_EYES order) as a 2D distance, opened by op, side s; the pill is the original.
 float eye2(vec2 e,float op,float es,float s,float k){
- if(k<.5)return ell2(e,vec2(.155,max(.225*op,.012))*es);
- if(k<1.5)return ell2(e,vec2(.2,max(.2*op,.012))*es);
- if(k<2.5)return ell2(e,vec2(.105,max(.105*op,.012))*es);
- if(k<3.5)return ell2(e,vec2(.115,max(.3*op,.012))*es);
+ if(k<3.5){vec2 r=k<.5?vec2(.155,.225):k<1.5?vec2(.2):k<2.5?vec2(.105):vec2(.115,.3);return ell2(e,vec2(r.x,max(r.y*op,.012))*es);}
  if(k<4.5){vec2 q=abs(e)-vec2(.115,max(.115*op,.006))*es;return length(max(q,0.))+min(max(q.x,q.y),0.)-.06*es;}
  float o=max(op,.06),d2;vec2 f=vec2(e.x,e.y/o)/es;
  if(k<5.5)d2=heart2(f/.33)*.33;
@@ -147,14 +163,16 @@ vec2 headM(float y){
 // The mousse's middle and radius at each height: the bowl's round bottom, then the head.
 vec2 prM(float y){if(y<3.45){if(y<2.85){float u=(2.85-y)/1.44;return vec2(0.,1.42*pow(max(0.,1.-pow(u,2.6)),.385));}float u=(y-2.85)/.6;return vec2(0.,1.42-.09*u*u);}return headM(y);}
 // The whole mousse: round slices about the bent middle, a little flatter front to back near the top;
-// above y 3.95 it bends with the tail value.
+// above y 3.95 it bends with the tail value. The bend's pivot is headM(3.95).x in float32 and the middle above
+// 5.13 is headM(5.13).x, both written out; prM has one call site, a 3-trip loop over y and either side of it.
 float mousseD(vec3 Q){
- vec2 pv=vec2(headM(3.95).x,3.95);float s=smoothstep(3.95,5.13,Q.y);Q.xy=pv+R(-uB.w*.6*s*sqrt(s))*(Q.xy-pv);
- float y=clamp(Q.y,1.41,5.13);vec2 m=prM(y),hi=prM(min(y+.02,5.13)),lo=prM(max(y-.02,1.41));
+ vec2 pv=vec2(.148343742,3.95);float s=smoothstep(3.95,5.13,Q.y);Q.xy=pv+R(-uB.w*.6*s*sqrt(s))*(Q.xy-pv);
+ float y=clamp(Q.y,1.41,5.13);vec2 m=vec2(0.),hi=m,lo=m;
+ for(int i=0;i<3;i++){vec2 v=prM(i==0?y:i==1?min(y+.02,5.13):max(y-.02,1.41));if(i==0)m=v;else if(i==1)hi=v;else lo=v;}
  float dr=(hi.y-lo.y)/.04,dc=(hi.x-lo.x)/.04,zs=1.-.1*smoothstep(4.2,4.8,y);
  float rho=length(vec2(Q.x-m.x,Q.z/zs)),d=(rho-max(m.y,0.))*zs/sqrt(1.+min(dr*dr,25.)+dc*dc);
  if(Q.y<1.41)d=max(d,length(vec2(rho,Q.y-1.41)));
- if(Q.y>5.13)d=length(Q-vec3(headM(5.13).x,5.13,0.));
+ if(Q.y>5.13)d=length(Q-vec3(.3286,5.13,0.));
  return d;
 }
 // The glass bowl's profile (radius at height), and its shell: the distance to that curve, turned about the axis.
@@ -177,84 +195,98 @@ float eyesM(vec3 Q,float fl){
   vec2 v=vec2(d2,abs(w)-.012);blk=min(blk,fl>.5?d2:min(max(v.x,v.y),0.)+length(max(v,0.)));}
  return blk;
 }
-vec2 mapM(vec3 p){
- vec3 P=toP(p),Q=toQ(P);
- float clay=mousseD(Q);
- float gl=stemM(P),rim=length(vec2(length(Q.xz)-1.36,Q.y-4.11))-max(.024,.5*gPx),blk=eyesM(Q,0.);
- // Accessories in the mouse's frames, placed on the Mousse: hats (beret, beanie, cap, crown, chef's hat)
- // tilted on its left shoulder beside the curl, headphones, goggles and hood around its top, glasses on
- // its eyes, the bow tie, scarf and laptop by the stem.
- float hb=uAcc<3.5?1.22:uAcc<6.5?1.:uAcc<7.5?1.37:1.28;vec2 hx=R(.38)*(Q.xy-vec2(-.5,4.12))/.85;vec3 qh=vec3(hx.x,hx.y+hb,(Q.z-.1)/.85);
- vec3 qt=(Q-vec3(0.,3.55,0.))*.78+HC,qf=vec3(Q.x*.95,(Q.y-2.2)*.95+.55,(Q.z-1.5)*.95+.9),bn=(P-vec3(0.,1.15,0.))*1.4+vec3(0.,-.3,0.);
- float a=uAcc,hat=float(a>2.5&&a<3.5||a>4.5&&a<7.5||a>9.5&&a<10.5),ac=hat>.5?accD(qh,bn,1e5)*.85:a>1.5&&a<2.5?accD(qf,bn,1e5)/.95:a>7.5&&a<9.5?accD(qt,bn+vec3(0.,0.,a<8.5?.3:0.),1e5)/1.4:accD(qt,bn,1e5)/.78,lap=1e5,logo=1e5,sw=1e5;
- if(uH2.w>.01){float L=uH2.w;lap=sdB(bn-vec3(0.,-.95,.62),vec3(.36,.018,.22)*L,.012);vec3 s2=bn-vec3(0.,-.95,.84);s2.yz=R(.22)*s2.yz;s2.y-=.25*L;lap=min(lap,sdB(s2,vec3(.36,.25,.016)*L,.035));
-  vec2 g=s2.xy/max(L,.01);float l2=length(g)-.055;logo=max(l2*L,abs(s2.z-.053*L)-.006);lap/=1.4;logo/=1.4;}
- if(uE2.w>.01){vec3 s0=qt-vec3(.98,1.02-.06*uE2.w,.4);sw=smin(sdE(s0,vec3(.085,.11,.07)*uE2.w),sdE(s0-vec3(0.,.1*uE2.w,0.),vec3(.03,.06,.03)*uE2.w),.05)/.78;}
- float d=min(min(min(clay,blk),min(gl,rim)),min(min(sw,logo),min(ac,lap)));
- return vec2(d*MS*.8,d==clay?0.:d==blk?1.:d==sw?2.:d==ac?3.:d==lap?4.:d==gl?6.:d==rim?7.:5.);
-}
 // The logo's mousse gradient (light at the top, deep at the bottom) on the bot's colour, by height in the logo frame.
 vec3 mousseCol(float y){vec3 B=uCol,W=vec3(1.),D=uCol*vec3(.3,.26,.38);float t=(3.7-y)/2.81;
  vec3 c=t<.154?mix(mix(B,W,.82),mix(B,W,.6),t/.154):t<.357?mix(mix(B,W,.6),mix(B,W,.2),(t-.154)/.203):t<.466?mix(mix(B,W,.2),B,(t-.357)/.109):t<.553?mix(B,B*.86,(t-.466)/.087):t<.75?mix(B*.86,mix(B,D,.6),(t-.553)/.197):mix(mix(B,D,.6),mix(B,D,.72),clamp((t-.75)/.25,0.,1.));
  vec3 w=mix(mix(B,W,.66),mix(B,W,.5),smoothstep(4.6,5.1,y));return mix(c,w,smoothstep(3.5,3.9,y));}
+// The scene: x the distance, y the material. Each character builds its own parts and the frames its accessory
+// sits in; then one accD call serves both.
 vec2 map(vec3 p){
- if(uK.x>.5)return mapM(p);
- p.y-=uB.x;
- float sq=uB.y;vec3 b=p;b.y=(b.y+1.47)/sq-1.47;b.xz*=sqrt(sq);
- b.xy=R(-uB.z)*(b.xy-vec2(0.,-1.47))+vec2(0.,-1.47);
- vec3 q=b-vec3(0.,-.05,0.);q.xz=R(uH.x)*q.xz;q.yz=R(-uH.y)*q.yz;q.xy=R(-uH.z)*q.xy;q+=vec3(0.,-.05,0.);
- float dh=sdE(q-HC,HR),de=1e5;
- for(int i=0;i<2;i++){float s=i==0?-1.:1.;float dr=i==0?uH.w:uH2.x;vec3 e=q-vec3(s*.6,1.1,-.12);e.xy=R(s*(.28+dr))*e.xy;de=min(de,sdE(e-vec3(0.,.42,0.),vec3(.58,.58,.16)));}
- float head=smin(dh,de,.06);
- float db=sdE(b-vec3(0.,-.66,0.),vec3(.64,.6,.53)),dr=1e5;
- for(int i=0;i<2;i++){float s=i==0?-1.:1.;float ra=i==0?uH2.y:uH2.z;vec3 sh=vec3(s*.5,-.3,.05);vec3 dir=vec3(s*.17,-.4,.07);dir.xy=R(s*ra)*dir.xy;dir=mix(dir,vec3(-s*.06,-.5+ra*.5,.72),uH2.w);
-  db=smin(db,sdC(b,sh,sh+dir,.125),.07);dr=smin(dr,sdE(b-vec3(s*.27,-1.33,.1),vec3(.22,.14,.25)),.02);}
+ bool mk=uK.x>.5;
+ float clay,blk,gl=1e5,rim=1e5,ac0=1e5,a=uAcc,hat=0.,lap=1e5,logo=1e5,sw=1e5;vec3 aq,ab;
+ if(mk){
+  vec3 P=toP(p),Q=toQ(P);
+  clay=mousseD(Q);
+  gl=stemM(P);rim=length(vec2(length(Q.xz)-1.36,Q.y-4.11))-max(.024,.5*gPx);blk=eyesM(Q,0.);
+  // Accessories in the mouse's frames, placed on the Mousse: hats (beret, beanie, cap, crown, chef's hat)
+  // tilted on its left shoulder beside the curl, headphones, goggles and hood around its top, glasses on
+  // its eyes, the bow tie, scarf and laptop by the stem.
+  float hb=uAcc<3.5?1.22:uAcc<6.5?1.:uAcc<7.5?1.37:1.28;vec2 hx=R(.38)*(Q.xy-vec2(-.5,4.12))/.85;vec3 qh=vec3(hx.x,hx.y+hb,(Q.z-.1)/.85);
+  vec3 qt=(Q-vec3(0.,3.55,0.))*.78+HC,qf=vec3(Q.x*.95,(Q.y-2.2)*.95+.55,(Q.z-1.5)*.95+.9),bn=(P-vec3(0.,1.15,0.))*1.4+vec3(0.,-.3,0.);
+  hat=float(a>2.5&&a<3.5||a>4.5&&a<7.5||a>9.5&&a<10.5);
+  aq=hat>.5?qh:a>1.5&&a<2.5?qf:qt;ab=a>7.5&&a<9.5?bn+vec3(0.,0.,a<8.5?.3:0.):bn;
+  if(uH2.w>.01){float L=uH2.w;lap=sdB(bn-vec3(0.,-.95,.62),vec3(.36,.018,.22)*L,.012);vec3 s2=bn-vec3(0.,-.95,.84);s2.yz=R(.22)*s2.yz;s2.y-=.25*L;lap=min(lap,sdB(s2,vec3(.36,.25,.016)*L,.035));
+   vec2 g=s2.xy/max(L,.01);float l2=length(g)-.055;logo=max(l2*L,abs(s2.z-.053*L)-.006);lap/=1.4;logo/=1.4;}
+  if(uE2.w>.01){vec3 s0=qt-vec3(.98,1.02-.06*uE2.w,.4);sw=smin(sdE(s0,vec3(.085,.11,.07)*uE2.w),sdE(s0-vec3(0.,.1*uE2.w,0.),vec3(.03,.06,.03)*uE2.w),.05)/.78;}
+ }else{
+  p.y-=uB.x;
+  float sq0=uB.y;vec3 b=p;b.y=(b.y+1.47)/sq0-1.47;b.xz*=sqrt(sq0);
+  b.xy=R(-uB.z)*(b.xy-vec2(0.,-1.47))+vec2(0.,-1.47);
+  vec3 q=b-vec3(0.,-.05,0.);q.xz=R(uH.x)*q.xz;q.yz=R(-uH.y)*q.yz;q.xy=R(-uH.z)*q.xy;q+=vec3(0.,-.05,0.);
+  float dh=sdE(q-HC,HR),de=1e5;
+  for(int i=0;i<2;i++){float s=i==0?-1.:1.;float dr=i==0?uH.w:uH2.x;vec3 e=q-vec3(s*.6,1.1,-.12);e.xy=R(s*(.28+dr))*e.xy;de=min(de,sdE(e-vec3(0.,.42,0.),vec3(.58,.58,.16)));}
+  float head=smin(dh,de,.06);
+  float db=sdE(b-vec3(0.,-.66,0.),vec3(.64,.6,.53)),dr=1e5;
+  for(int i=0;i<2;i++){float s=i==0?-1.:1.;float ra=i==0?uH2.y:uH2.z;vec3 sh=vec3(s*.5,-.3,.05);vec3 dir=vec3(s*.17,-.4,.07);dir.xy=R(s*ra)*dir.xy;dir=mix(dir,vec3(-s*.06,-.5+ra*.5,.72),uH2.w);
+   db=smin(db,sdC(b,sh,sh+dir,.125),.07);dr=smin(dr,sdE(b-vec3(s*.27,-1.33,.1),vec3(.22,.14,.25)),.02);}
   dr=min(dr,tailD(b));
- bool hood=uAcc>10.5;
- float clay=hood?min(head,dr):smin(smin(head,db,.14),dr,.06);
- float blk=1e5;
- float es=uE2.z,op=uE.x;
- for(int i=0;i<2;i++){float s=i==0?-1.:1.;
-  float x0=s*.37+uE2.x*.09,y0=.55+uE2.y;vec3 eq=q-vec3(x0,y0,zs(x0,y0)-.035);
-  float dp=eyeD(eq,op,es,s,uK.y);
-  float top=max(eyeHH(uK.y)*op,.012)*es*(1.-.3*uE.w)-uE.w*.6*(eq.x*s);dp=-smin(-dp,-(eq.y-top)*.7,.03);
-  float py=uE.z>0.?eq.y:-eq.y;float d2=arc(vec2(eq.x,py+.13),1.1,.17)-.045*es;
-  vec2 w=vec2(d2,abs(eq.z)-.05);float da=min(max(w.x,w.y),0.)+length(max(w,0.));
-  blk=min(blk,mix(dp,da,uE.y));
-  if(uV.w<.5)blk=min(blk,whisk(q,s));
+  bool hood=uAcc>10.5;
+  clay=hood?min(head,dr):smin(smin(head,db,.14),dr,.06);
+  blk=1e5;
+  float es=uE2.z,op=uE.x;
+  for(int i=0;i<2;i++){float s=i==0?-1.:1.;
+   float x0=s*.37+uE2.x*.09,y0=.55+uE2.y;vec3 eq=q-vec3(x0,y0,zs(x0,y0)-.035);
+   float dp=eyeD(eq,op,es,s,uK.y);
+   float top=max(eyeHH(uK.y)*op,.012)*es*(1.-.3*uE.w)-uE.w*.6*(eq.x*s);dp=-smin(-dp,-(eq.y-top)*.7,.03);
+   float py=uE.z>0.?eq.y:-eq.y;float d2=arc(vec2(eq.x,py+.13),1.1,.17)-.045*es;
+   vec2 w=vec2(d2,abs(eq.z)-.05);float da=min(max(w.x,w.y),0.)+length(max(w,0.));
+   blk=min(blk,mix(dp,da,uE.y));
+   if(uV.w<.5)blk=min(blk,whisk(q,s));
+  }
+  blk=min(blk,sdE(q-vec3(0.,.39,.855),vec3(.075,.055,.05)));
+  if(uH2.w>.01){float L=uH2.w;lap=sdB(b-vec3(0.,-.95,.62),vec3(.36,.018,.22)*L,.012);vec3 s2=b-vec3(0.,-.95,.84);s2.yz=R(.22)*s2.yz;s2.y-=.25*L;lap=min(lap,sdB(s2,vec3(.36,.25,.016)*L,.035));
+   vec2 g=s2.xy/max(L,.01);float l2=length(g)-.055;logo=max(l2*L,abs(s2.z-.053*L)-.006);}
+  if(uE2.w>.01){vec3 s0=q-vec3(.98,1.02-.06*uE2.w,.4);sw=smin(sdE(s0,vec3(.085,.11,.07)*uE2.w),sdE(s0-vec3(0.,.1*uE2.w,0.),vec3(.03,.06,.03)*uE2.w),.05);}
+  aq=q;ab=b;ac0=hood?db:1e5;
  }
- blk=min(blk,sdE(q-vec3(0.,.39,.855),vec3(.075,.055,.05)));
- float lap=1e5,ac=accD(q,b,hood?db:1e5);
- float logo=1e5;if(uH2.w>.01){float L=uH2.w;lap=sdB(b-vec3(0.,-.95,.62),vec3(.36,.018,.22)*L,.012);vec3 s2=b-vec3(0.,-.95,.84);s2.yz=R(.22)*s2.yz;s2.y-=.25*L;lap=min(lap,sdB(s2,vec3(.36,.25,.016)*L,.035));
-  vec2 g=s2.xy/max(L,.01);float l2=length(g)-.055;logo=max(l2*L,abs(s2.z-.053*L)-.006);}
- float sw=1e5;if(uE2.w>.01){vec3 s0=q-vec3(.98,1.02-.06*uE2.w,.4);sw=smin(sdE(s0,vec3(.085,.11,.07)*uE2.w),sdE(s0-vec3(0.,.1*uE2.w,0.),vec3(.03,.06,.03)*uE2.w),.05);}
- float d=min(min(clay,blk),min(min(sw,logo),min(ac,lap)));
- return vec2(d*.8,d==clay?0.:d==blk?1.:d==sw?2.:d==ac?3.:d==lap?4.:5.);
+ float ac=accD(aq,ab,ac0);
+ // On the Mousse the accessory is scaled back from the mouse's frame it was built in.
+ if(mk)ac=hat>.5?ac*.85:a>1.5&&a<2.5?ac/.95:a>7.5&&a<9.5?ac/1.4:ac/.78;
+ // The mouse has no glass (gl and rim stay 1e5, far beyond any part), so one material chain serves both.
+ float d=min(min(min(clay,blk),min(gl,rim)),min(min(sw,logo),min(ac,lap)));
+ return vec2(mk?d*MS*.8:d*.8,d==clay?0.:d==blk?1.:d==sw?2.:d==ac?3.:d==lap?4.:d==gl?6.:d==rim?7.:5.);
 }
-vec3 nrm(vec3 p){const vec2 k=vec2(1.,-1.)*.0009;return normalize(k.xyy*map(p+k.xyy).x+k.yyx*map(p+k.yyx).x+k.yxy*map(p+k.yxy).x+k.xxx*map(p+k.xxx).x);}
+// The normal from four taps, as a 4-trip loop so map() has one call site here. The taps are kept and summed
+// in the original expression, so the normal rounds as before.
+vec3 nrm(vec3 p){const vec2 k=vec2(1.,-1.)*.0009;vec4 D=vec4(0.);
+ for(int i=0;i<4;i++){float d=map(p+vec3(i==0||i==3?1.:-1.,i>1?1.:-1.,i==1||i==3?1.:-1.)*.0009).x;if(i==0)D.x=d;else if(i==1)D.y=d;else if(i==2)D.z=d;else D.w=d;}
+ return normalize(k.xyy*D.x+k.yyx*D.y+k.yxy*D.z+k.xxx*D.w);}
 float ao(vec3 p,vec3 n){float o=0.,s=1.;for(int i=1;i<=5;i++){float h=.02+.07*float(i);o+=(h-map(p+n*h).x/.8)*s;s*=.7;}return clamp(1.-1.6*o,0.,1.);}
 vec4 shade(vec2 uv){
  float vx=uV.x;if(uK.x>.5&&vx>.5)vx=.6;vec3 tg=vec3(0.,vx,0.),ro=vec3(0.,vx+.9,9.);vec3 fw=normalize(tg-ro),rt=normalize(cross(fw,vec3(0.,1.,0.))),up=cross(rt,fw);
  float th=uV.y/9.*(uK.x>.5&&uV.x>.5?1.16:1.);vec3 rd=normalize(fw+uv.x*th*rt+uv.y*th*up);
  vec3 oc=ro-vec3(0.,.35,0.);float bb=dot(oc,rd),cc=dot(oc,oc)-8.5,hh=bb*bb-cc;float t=0.;bool hit=false;float pxa=th*2./uRes.y,tol=min(.0012,.3*pxa),md=1e5,mt=0.,cov=1.;gPx=pxa*9./MS;
- if(hh>0.){hh=sqrt(hh);t=max(-bb-hh,0.);float tm=-bb+hh;for(int i=0;i<110;i++){float d=map(ro+rd*t).x;if(d<md*t){md=d/t;mt=t;}if(d<tol*t){hit=true;break;}t+=d;if(t>tm)break;}}
+ // The march keeps the material of the point it stops at, so map() is not called again for it.
+ float m=0.,mm=0.;
+ if(hh>0.){hh=sqrt(hh);t=max(-bb-hh,0.);float tm=-bb+hh;for(int i=0;i<110;i++){vec2 dm=map(ro+rd*t);float d=dm.x;if(d<md*t){md=d/t;mt=t;mm=dm.y;}if(d<tol*t){hit=true;m=dm.y;break;}t+=d;if(t>tm)break;}}
  // A ray that passes within a pixel of the surface covers part of the pixel: soft edges at no extra cost.
- if(!hit&&md<tol+.8*pxa){hit=true;t=mt;cov=clamp(1.-(md-tol)/(.8*pxa),0.,1.);}
+ if(!hit&&md<tol+.8*pxa){hit=true;t=mt;cov=clamp(1.-(md-tol)/(.8*pxa),0.,1.);m=mm;}
  bool mk=uK.x>.5;vec4 bg=vec4(0.);
  if((!hit||cov<1.)&&rd.y<0.){vec3 g=ro+rd*((-1.48-ro.y)/rd.y);bg=vec4(0.,0.,0.,exp(-(g.x*g.x/.45+g.z*g.z/.16))*.42*(1.-clamp(uB.x*1.4,0.,.7)));}
+ // The glass normal stays six written-out taps: its edge alpha is so steep that any change in how they round shows (up to 3/255).
  float ga=0.;vec3 gc=vec3(0.);
  if(mk&&hh>0.){float tg=max(-bb-hh,0.),te=hit?t:-bb+hh;
   for(int i=0;i<64;i++){vec3 q=ro+rd*tg;float d=gD(toQ(toP(q)))*MS;if(d<.0008*tg){vec3 ng=normalize(vec3(gD(toQ(toP(q+vec3(.002,0.,0.))))-gD(toQ(toP(q-vec3(.002,0.,0.)))),gD(toQ(toP(q+vec3(0.,.002,0.))))-gD(toQ(toP(q-vec3(0.,.002,0.)))),gD(toQ(toP(q+vec3(0.,0.,.002))))-gD(toQ(toP(q-vec3(0.,0.,.002))))));
     ga=.07+.93*smoothstep(.72,.86,1.-abs(dot(ng,rd)));gc=pow(uCol*.76,vec3(2.2));break;}tg+=d*.9;if(tg>te)break;}}
  if(!hit){if(ga>0.)return vec4(pow(gc,vec3(1./2.2))*ga,ga+bg.a*(1.-ga));return bg;}
- vec3 p=ro+rd*t;float m=map(p).y;vec3 n=nrm(p);float o=ao(p,n);
+ vec3 p=ro+rd*t,n=nrm(p);float o=ao(p,n);
  vec3 L=normalize(vec3(-.55,.75,.65)),F=normalize(vec3(.75,.15,.5));
  float nl=dot(n,L),dif=clamp(nl,0.,1.),wr=pow(nl*.5+.5,1.7),fil=clamp(dot(n,F),0.,1.),fr=pow(1.-clamp(dot(n,-rd),0.,1.),3.);
  float spc=pow(clamp(dot(n,normalize(L-rd)),0.,1.),m>.5?36.:12.);
  vec3 col;
  float band=mix(.8,1.,smoothstep(-.06,.06,dot(n,L)+.12));
- if(mk&&m<1.5){vec3 bc=pow(mousseCol(toP(p).y),vec3(2.2))*(m>.5?1.:band);if(ga>0.)bc=mix(bc,gc,ga);
-  vec3 qp=toQ(toP(p));gRd=normalize(toQ(toP(p+rd))-qp);float ec=clamp(.5-eyesM(qp,1.)/(pxa*t/MS),0.,1.);col=mix(bc,uK.z>.5?vec3(1.):vec3(.004),ec);}
+ if(mk&&m<1.5){vec3 P=toP(p),bc=pow(mousseCol(P.y),vec3(2.2))*(m>.5?1.:band);if(ga>0.)bc=mix(bc,gc,ga);
+  vec3 qp=toQ(P);gRd=normalize(toQ(toP(p+rd))-qp);float ec=clamp(.5-eyesM(qp,1.)/(pxa*t/MS),0.,1.);col=mix(bc,uK.z>.5?vec3(1.):vec3(.004),ec);}
  else if(mk&&m>5.5){col=pow(m<6.5?uCol*.76:mix(uCol,vec3(1.),.35),vec3(2.2))*band;}
  else if(m<.5){vec3 a=pow(uCol,vec3(2.2));col=a*(.16+1.0*wr)*mix(.5,1.,o)+a*fil*.14+.05*spc*dif+a*fr*.3+a*a*.15*(1.-dif)*o;col+=vec3(.55,.7,1.)*a*uH2.w*.45*clamp(dot(n,normalize(vec3(0.,-.5,1.))),0.,1.)*smoothstep(-.4,.2,p.y-uB.x);}
  else if(m<1.5){col=vec3(.02)*(.5+wr)*mix(.6,1.,o)+.3*spc*dif*o+vec3(.07)*fr*o;}
@@ -267,6 +299,6 @@ vec4 shade(vec2 uv){
  return vec4(pow(col,vec3(1./2.2))*cov,cov)+bg*(1.-cov);
 }
 void main(){vec2 fc=gl_FragCoord.xy-uOrg;vec4 c=vec4(0.);float n=uV.z;
- for(int j=0;j<2;j++)for(int i=0;i<2;i++){if(float(i)>=n||float(j)>=n)continue;vec2 o=(vec2(float(i),float(j))+.5)/n-.5;c+=shade(((fc+o)/uRes)*2.-1.);}
+ for(int k=0;k<4;k++){int j=k/2,i=k-j*2;if(float(i)>=n||float(j)>=n)continue;vec2 o=(vec2(float(i),float(j))+.5)/n-.5;c+=shade(((fc+o)/uRes)*2.-1.);}
  gl_FragColor=c/(n*n);}
 `
