@@ -4,9 +4,10 @@
  * Mousse's own server must connect or the turn fails with an error that names the cause; a user server that does not
  * is left out and named; only server names are ever logged.
  */
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 import type { McpSetServersResult, Options, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
@@ -16,6 +17,9 @@ import {
 } from '../src/mms/harness/vendors/claude/mcpRegistration'
 
 const POSIX = globalThis.process.platform !== 'win32'
+/** Where Mousse makes named pipes: a POSIX system with `mkfifo`. */
+const FIFO = POSIX && !spawnSync('mkfifo', [], { stdio: 'ignore' }).error
+const NO_FIFO = FIFO ? '' : ' [skipped: no mkfifo on this system, so no named pipe is made]'
 
 const SECRET = 'mousse-token-358'
 const servers: ClaudeMcpServers = {
@@ -144,11 +148,13 @@ describe('registering a turn\'s MCP servers over Claude Code\'s input (#358)', (
       const fifo = (await claudeStartupMcpOptions(options, user, onSpawned, { platform: 'linux', fifoRoot: root }))!
       const path = String(fifo.extraArgs!['mcp-config'])
       expect(path.startsWith(root)).toBe(true)
-      expect(statSync(path).isFIFO()).toBe(true)
-      expect(statSync(path).mode & 0o777).toBe(0o600)
-      expect(statSync(dirname(path)).mode & 0o777).toBe(0o700)
-      const { text } = await readThrough(fifo, path)
-      expect(JSON.parse(text)).toEqual({ mcpServers: user })
+      // Made as the process is spawned, not before; the process sees it before it reads it.
+      expect(readdirSync(root)).toEqual([])
+      const seen = `const s = require("fs").statSync, p = ${JSON.stringify(path)}; process.stdout.write(JSON.stringify({ fifo: s(p).isFIFO(), mode: s(p).mode & 0o777, dir: s(require("path").dirname(p)).mode & 0o777 }) + "\\n");`
+      const { text } = await readThrough(fifo, path, seen)
+      const line = text.indexOf('\n')
+      expect(JSON.parse(text.slice(0, line))).toEqual({ fifo: true, mode: 0o600, dir: 0o700 })
+      expect(JSON.parse(text.slice(line + 1))).toEqual({ mcpServers: user })
       expect(existsSync(path)).toBe(false)
       expect(readdirSync(root)).toEqual([])
       expect(JSON.stringify({ args: fifo.extraArgs, env: fifo.env })).not.toMatch(/user-secret-358|user-env-secret-358/)
@@ -189,6 +195,22 @@ describe('registering a turn\'s MCP servers over Claude Code\'s input (#358)', (
       const child = fifo.spawnClaudeCodeProcess!({ command: globalThis.process.execPath, args: ['-e', ''], env: { PATH: globalThis.process.env.PATH }, signal: new AbortController().signal }) as unknown as { once(event: string, listener: () => void): void }
       await new Promise<void>((resolve) => child.once('exit', resolve))
       expect(existsSync(path)).toBe(false)
+      expect(readdirSync(root)).toEqual([])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it.skipIf(!FIFO)(`a start prepared but never spawned, or whose spawn fails, leaves nothing in the temporary folder${NO_FIFO}`, async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mousse-fifo-test-'))
+    try {
+      // Abandoned before Claude Code is spawned.
+      const prepared = (await claudeStartupMcpOptions({}, { web: servers.web! }, () => undefined, { channel: 'fifo', fifoRoot: root }))!
+      expect(String(prepared.extraArgs!['mcp-config'])).toMatch(/\/mousse-mcp-[^/]+\/servers$/)
+      expect(readdirSync(root)).toEqual([])
+      // A spawn that throws: the pipe made for it goes too.
+      const failing = (await claudeStartupMcpOptions({}, { web: servers.web! }, () => undefined, { channel: 'fifo', fifoRoot: root, spawn: (() => { throw new Error('spawn failed') }) as never }))!
+      expect(() => failing.spawnClaudeCodeProcess!({ command: 'claude', args: [], env: {}, signal: new AbortController().signal })).toThrow('spawn failed')
       expect(readdirSync(root)).toEqual([])
     } finally {
       rmSync(root, { recursive: true, force: true })
