@@ -14,7 +14,7 @@ import { basename, dirname, join } from 'path'
 import { quarantineUnreadableFileSync } from '../data/AtomicFs'
 import { trackFileWatcher } from '../diagnostics/liveCounts'
 import { upgradeSelection } from '../../shared/modelSelection'
-import { botComputerLimitOf, BOTS_HERE_SHAPE, getDefaultSettings, normalizeBotSettings, type BotComputerLimit, type BotSettings, type MousseSettings } from '../../shared/settings'
+import { botComputerLimitOf, BOTS_HERE_SHAPE, botSettingsWrite, getDefaultSettings, normalizeBotSettings, type BotComputerLimit, type BotSettings, type MousseSettings } from '../../shared/settings'
 import { DEFAULT_FEATURE_FLAGS, validateFeatureFlags } from '../../shared/featureFlags'
 import { getMousseHomeDir } from '../data/paths'
 import type {
@@ -425,16 +425,19 @@ export class MousseConfigStore {
   }
 
   /**
-   * Sets what bots may do on this computer, for the whole installation: exactly three booleans, or nothing changes. It
-   * replaces the stored value whole, so a mark left by an unreadable file goes with it.
+   * Sets switches of what bots may do on this computer, for the whole installation: the ones `change` names, put over
+   * the switches held now (every one off when the stored value can't be read), or nothing changes. The whole value is
+   * written again, so a mark left by an unreadable file goes with it. One store holds it for every profile, so two
+   * windows that each change one switch both keep theirs.
    */
-  setBotsHere(here: BotComputerLimit): void {
+  setBotsHere(change: Partial<BotComputerLimit>): void {
     if (this.installation) {
-      this.installation.setBotsHere(here)
+      this.installation.setBotsHere(change)
       return
     }
     this.assertBotsWritable()
-    const exact = botComputerLimitOf(here)
+    const named = botSettingsWrite({ here: change })
+    const exact = named && botComputerLimitOf({ ...this.botSettings().here, ...named })
     if (!exact) throw new Error(BOTS_HERE_SHAPE)
     const previous = this.conf.bots
     this.conf.bots = { here: exact }
@@ -443,6 +446,29 @@ export class MousseConfigStore {
     } catch (error) {
       // Not saved, so not kept: bots must not run under a setting the file does not hold.
       this.conf.bots = previous
+      throw error
+    }
+  }
+
+  /**
+   * Runs `change`, which saves through this store and, for a profile, through its installation's too: when it throws,
+   * each store it changed is put back as it was and written again, so the change is saved whole or not at all.
+   */
+  atomically<T>(change: () => T): T {
+    const stores = [this, ...(this.installation ? [this.installation] : [])]
+    const before = stores.map((store) => JSON.stringify(store.conf))
+    try {
+      return change()
+    } catch (error) {
+      stores.forEach((store, index) => {
+        if (JSON.stringify(store.conf) === before[index]) return
+        store.conf = JSON.parse(before[index]!) as MousseConf
+        try {
+          store.persist()
+        } catch (restore) {
+          console.error('[MousseConfigStore] a settings change failed and could not be undone on disk', restore)
+        }
+      })
       throw error
     }
   }

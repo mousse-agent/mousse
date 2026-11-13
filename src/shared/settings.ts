@@ -452,6 +452,7 @@ export interface BotSettings {
   unreadable?: true
 }
 
+/** Every switch of What bots may do here: what a stored value must hold, and the only keys a write may name. */
 const BOT_SWITCH_KEYS: ReadonlyArray<keyof BotComputerLimit> = ['shell', 'files', 'browser']
 
 /** Settings' one line beside the switches while the stored setting can't be read (`BotSettings.unreadable`). */
@@ -462,22 +463,26 @@ export const BOTS_UNREADABLE_LINE = "All off: the saved setting couldn't be read
  * here), so the switch says so.
  */
 export const BOTS_SHELL_TIP =
-  'Commands can read files on this computer even with Use files off. Only Claude Code’s sandbox on Linux and Codex on Linux and macOS hold them to system programs and the bot’s own folders.'
+  'Commands can read files on this computer even with Use files off. Only Claude Code’s sandbox on Linux and Codex on Linux and macOS hold them to the bot’s own folders and the system’s (/usr, /etc, and /tmp with Claude Code).'
 
-/** Why a write of What bots may do here was refused: it takes exactly the three switches, each on or off. */
-export const BOTS_HERE_SHAPE = 'What bots may do here takes { here: { shell, files, browser } }, each true or false. Nothing was changed.'
+/** Why a write of What bots may do here was refused: it names one or more of the switches, each on or off. */
+export const BOTS_HERE_SHAPE = `What bots may do here takes { here: { … } } naming one or more of ${BOT_SWITCH_KEYS.join(', ')}, each true or false. Nothing was changed.`
 
 /**
- * The switches a settings update writes for What bots may do here: exactly `{ here: { shell, files, browser } }` with
- * three booleans and nothing else, or undefined (refused). A partial write would leave a switch to a default.
+ * The switches a settings update changes for What bots may do here: `{ here: { … } }` naming one or more known switches,
+ * each a boolean, and nothing else, or undefined (refused). Each window and the CLI send only the switch they change, and
+ * the service puts it over the switches it holds (`MousseConfigStore.setBotsHere`), so a window whose copy is older
+ * never turns back a switch another one changed. A switch added later is written the same way.
  */
-export function botSettingsWrite(value: unknown): BotComputerLimit | undefined {
+export function botSettingsWrite(value: unknown): Partial<BotComputerLimit> | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
   const keys = Object.keys(value)
   if (keys.length !== 1 || keys[0] !== 'here') return undefined
   const here = (value as { here: unknown }).here
-  if (!here || typeof here !== 'object' || Object.keys(here).length !== BOT_SWITCH_KEYS.length) return undefined
-  return botComputerLimitOf(here)
+  if (!here || typeof here !== 'object' || Array.isArray(here)) return undefined
+  const named = Object.entries(here as Record<string, unknown>)
+  if (!named.length || !named.every(([key, on]) => (BOT_SWITCH_KEYS as readonly string[]).includes(key) && typeof on === 'boolean')) return undefined
+  return Object.fromEntries(named) as Partial<BotComputerLimit>
 }
 
 /** The three switches, when `value` is exactly an object holding each as a boolean; undefined otherwise. */
@@ -485,7 +490,7 @@ export function botComputerLimitOf(value: unknown): BotComputerLimit | undefined
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
   const here = value as Record<string, unknown>
   if (!BOT_SWITCH_KEYS.every((key) => typeof here[key] === 'boolean')) return undefined
-  return { shell: here.shell as boolean, files: here.files as boolean, browser: here.browser as boolean }
+  return Object.fromEntries(BOT_SWITCH_KEYS.map((key) => [key, here[key]])) as unknown as BotComputerLimit
 }
 
 /**
