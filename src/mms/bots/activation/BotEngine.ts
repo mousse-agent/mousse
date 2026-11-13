@@ -471,8 +471,16 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // report its schedule's Tell me keeps quiet says so (`quiet`): it is in the chat, without a notification.
       emit: (event) => this.events.emit('message', { ...event, ...this.nameFor(event.botId), ...(this.quietReport(event.botId, event.message) ? { quiet: true } : {}) }),
       schedules: (botId) => this.listSchedules(botId),
-      // The owner's MCP servers set up now, for About's names; one that is gone is shown so.
-      mcpServers: () => host.mcp?.servers() ?? []
+      // The owner's MCP servers set up now, for About's names; one that is gone is shown so. Before they were read since
+      // Mousse started, nothing is known to be gone: they are read in the background, and About names what it can.
+      mcpServers: () => {
+        if (!host.mcp) return []
+        if (host.mcp.listed?.() === false) {
+          void host.mcp.warm()
+          return undefined
+        }
+        return host.mcp.servers()
+      }
     })
     this.service = new BotChatService(this, {
       store: host.store,

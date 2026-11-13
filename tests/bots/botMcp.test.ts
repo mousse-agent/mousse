@@ -6,7 +6,7 @@
  * is not here is refused with no card, in both lanes; a server removed from Mousse stops at once and About shows it gone.
  * The engine runs over a real `bots.db`; the owner's servers are a real `BotMcp` over a fake catalogue and connection.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_ENOUGH_TEXT, BOT_ASK_REFUSED_TEXT, BOT_WORK_HAS_TEXT } from '../../src/mms/bots/activation/BotEngine'
 import { BotMcp } from '../../src/mms/bots/mcp/BotMcp'
 import { botInstructions } from '../../src/mms/bots/instructions'
@@ -217,6 +217,26 @@ describe('a cold listing', () => {
     const talk = await chat('Look at my issues', 'm1')
     expect(warm).toBe(true)
     expect(talk.prepared.authority.escalate!({ permission: { mcp: { server: 'GitHub' } } as never, reason: 'x' })).toBe(BOT_ASK_DEFERRED_TEXT)
+  })
+
+  it('before the servers are read (Mousse just started), About shows nothing as gone, and reads them', async () => {
+    await allowGitHub()
+    let read = false
+    f.host.mcp = new BotMcp({
+      catalog: {
+        ensure: async () => { read = true },
+        listed: () => read,
+        servers: () => (read ? servers.map((server) => ({ ...server, failing: false })) : []),
+        listing: () => (read ? listing() : [])
+      },
+      manager: { callTool: async () => ({ content: [] }) as never },
+      enabled: () => true
+    })
+    const cold = f.bots.service.get(botId).permissions.find((item) => item.id === github)!
+    expect(cold.gone).toBeUndefined()
+    expect(cold.title).toBe('use your GitHub tools')
+    await vi.waitFor(() => expect(read).toBe(true))
+    expect(f.bots.service.get(botId).permissions.find((item) => item.id === github)).toMatchObject({ note: '2 tools: create_issue, list_issues' })
   })
 })
 

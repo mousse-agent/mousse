@@ -100,8 +100,11 @@ export class BotChatProjection {
     emit(event: { botId: string; message: BotChatMessage }): void
     /** A bot's schedules, from the shared store (`BotEngine.listSchedules`), for About → Runs. */
     schedules?(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string }>
-    /** The owner's MCP servers set up now (`BotMcp.servers`), for About → Can use. */
-    mcpServers?(): Array<{ serverId: string; name: string; tools: Array<{ tool: string }> }>
+    /**
+     * The owner's MCP servers set up now (`BotMcp.servers`), for About → Can use; undefined while they were not read yet
+     * (nothing is shown gone then).
+     */
+    mcpServers?(): Array<{ serverId: string; name: string; tools: Array<{ tool: string }> }> | undefined
   }) {}
 
   private get store(): BotStore {
@@ -369,7 +372,8 @@ export class BotChatProjection {
    * line per server ("Use your GitHub tools"); a server no longer set up is named as it was asked for, and shown gone.
    */
   permissionItems(botId: string, manifest: BotManifest, approvedAt: string): BotPermissionItem[] {
-    const servers = this.options.mcpServers?.() ?? []
+    const read = this.options.mcpServers?.()
+    const servers = read ?? []
     return grantedPermissions(manifest).map((permission) => {
       const id = permissionId(permission)
       const allowed = this.store.allowedAsk(botId, id)
@@ -379,7 +383,7 @@ export class BotChatProjection {
         const asked = allowed && 'mcp' in allowed.permission ? allowed.permission.mcp.name : undefined
         const name = live?.name ?? asked ?? 'an MCP server'
         const tools = mcpAskTools(permission.mcp)
-        if (!live) return { id, title: `use your ${name} tools`, note: `${name} isn't set up in Mousse any more, so this gives nothing. Remove it to tidy up.`, grantedAt, gone: true as const }
+        if (!live && read) return { id, title: `use your ${name} tools`, note: `${name} isn't set up in Mousse any more, so this gives nothing. Remove it to tidy up.`, grantedAt, gone: true as const }
         const shown = tools.slice(0, 6).join(', ')
         return { id, title: `use your ${name} tools`, note: `${tools.length} tool${tools.length === 1 ? '' : 's'}: ${shown}${tools.length > 6 ? ', …' : ''}`, grantedAt }
       }

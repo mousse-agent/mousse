@@ -61,12 +61,14 @@ export interface BotMcpHost {
   /** Reads the servers again when the listing is cold or old, waiting at most `BOT_MCP_WARM_MS`. Never throws. */
   warm(): Promise<void>
   servers(): BotMcpServer[]
+  /** Whether the servers were read since Mousse started: before that, `servers()` says nothing of a server being gone. */
+  listed?(): boolean
   /** The granted tools (`<server id>::<tool>`) of servers set up now. */
   offered(granted: ReadonlySet<string>): BotMcpTool[]
 }
 
 export interface BotMcpDeps {
-  catalog: Pick<RelayCatalog, 'ensure' | 'servers' | 'listing'>
+  catalog: Pick<RelayCatalog, 'ensure' | 'servers' | 'listing'> & Partial<Pick<RelayCatalog, 'listed'>>
   manager: { callTool(providerName: string, args: Record<string, unknown>, projectPath: string | undefined, signal: AbortSignal | undefined, actor: ReturnType<typeof defaultIntegrationActor>, expected: undefined, options: McpCallOptions): Promise<McpToolCallResult> }
   /** MCP is on in Settings. */
   enabled(): boolean
@@ -123,6 +125,10 @@ export class BotMcp implements BotMcpHost {
     } catch {
       // The listing stays as it was; a turn starts without the tools it could not list.
     }
+  }
+
+  listed(): boolean {
+    return !this.deps.enabled() || (this.deps.catalog.listed?.(undefined) ?? true)
   }
 
   servers(): BotMcpServer[] {

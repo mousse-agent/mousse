@@ -85,6 +85,11 @@ export class RelayCatalog {
     return [...scope.servers.values()].map((entry) => ({ ...entry, failing: scope.failing.has(entry.installationId) }))
   }
 
+  /** Whether the scope was read at least once (a cold scope lists nothing yet, which says nothing of its servers). */
+  listed(projectPath?: string): boolean {
+    return this.scopes.get(scopeKey(projectPath))?.refreshedAt !== undefined
+  }
+
   /** The tool a relayed name resolves to, in the current or previous good listing of the scope. */
   resolve(projectPath: string | undefined, name: string): RelayTool | undefined {
     const scope = this.scopes.get(scopeKey(projectPath))
