@@ -69,16 +69,13 @@ describe('policy table: permission decisions', () => {
       sandbox: 'workspace-write',
       sandboxPolicy: { type: 'workspaceWrite', writableRoots: ['/p/files/b1', '/home/me/site'], networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true }
     })
-    // A bot's grant decides it: the folders it may write, its files folder and scratch, only with shell.
+    // A bot's grant decides it: the folders it may write, its files folder and scratch, only with shell. On Linux and
+    // macOS under Mousse's profile; on Windows in the `workspaceWrite` sandbox, as before.
     const workspace = { roots: ['/home/me/site', '/home/me/ref'], access: 'read' as const, writeRoots: ['/home/me/site', '/p/files/b1'], scratch: '/p/scratch/a', files: '/p/files/b1' }
-    expect(codexBotSandbox({ tools: new Set(['read', 'shell']), workspace }, undefined, 'win32')).toEqual({ shell: true, writableRoots: ['/home/me/site', '/p/files/b1', '/p/scratch/a'] })
-    // On Linux and macOS the same grant is confined: the folders it may only read are listed too.
-    expect(codexBotSandbox({ tools: new Set(['read', 'shell']), workspace }, undefined, 'linux')).toEqual({
-      shell: true,
-      writableRoots: ['/home/me/site', '/p/files/b1', '/p/scratch/a'],
-      confined: { readable: ['/home/me/ref'] }
-    })
-    expect(codexBotSandbox({ tools: new Set(['read']), workspace })).toEqual({ shell: false, writableRoots: [] })
+    const writableRoots = ['/home/me/site', '/p/files/b1', '/p/scratch/a']
+    expect(codexBotSandbox({ tools: new Set(['read', 'shell']), workspace }, { platform: 'linux' })).toEqual({ shell: true, writableRoots, profile: { base: ':minimal', readable: ['/home/me/ref'], closed: [] } })
+    expect(codexBotSandbox({ tools: new Set(['read', 'shell']), workspace }, { platform: 'win32' })).toEqual({ shell: true, writableRoots })
+    expect(codexBotSandbox({ tools: new Set(['read']), workspace }, { platform: 'win32' })).toEqual({ shell: false, writableRoots: [] })
     expect(codexBotSandbox({})).toEqual({ shell: false, writableRoots: [] })
   })
 

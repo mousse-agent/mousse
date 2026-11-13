@@ -93,7 +93,7 @@ describe('compileBotThread', () => {
       authority: { kind: 'bot', digest: botManifestDigest(manifest()) }
     })
     // File access is one permission (§3.7): every folder, read and write, with Mousse's data closed.
-    expect(compiled.permissions.workspace).toEqual({ roots: computerRoots(), access: 'write', writeRoots: computerRoots(), scratch: realpathSync(scratch), computer: { closed: profile } })
+    expect(compiled.permissions.workspace).toEqual({ roots: computerRoots(), access: 'write', writeRoots: computerRoots(), scratch: realpathSync(scratch), computer: { closed: profile, outside: expect.any(Array) } })
   })
 
   it('compiles "run commands" (shell) like any tool: the runtime\'s shell is on the allowlist', () => {
@@ -110,10 +110,13 @@ describe('compileBotThread', () => {
     if (!whole.ok) throw new Error(whole.error.message)
     // A write folder in a temporary folder, one holding scratch, one inside Mousse data: each was
     // refused when it was a folder of its own; now each grants the same file access.
+    // (Without the other places closed to bots: they include the temporary folder's `mousse-…` entries as they are at each
+    // compile, which other tests running beside this one add and remove.)
+    const withoutOutside = (workspace: typeof whole.permissions.workspace) => workspace && { ...workspace, computer: workspace.computer && { closed: workspace.computer.closed } }
     for (const roots of [[temp], [base], [join(profile, 'bots')]]) {
       const compiled = compile({ grant: manifest({ workspace: { roots, access: 'read' } }) })
       if (!compiled.ok) throw new Error(compiled.error.message)
-      expect(compiled.permissions.workspace, roots[0]).toEqual(whole.permissions.workspace)
+      expect(withoutOutside(compiled.permissions.workspace), roots[0]).toEqual(withoutOutside(whole.permissions.workspace))
     }
     expect(compile({ grant: manifest({ workspace: null }) })).toMatchObject({ ok: true, permissions: { workspace: null } })
   })

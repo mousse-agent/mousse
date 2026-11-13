@@ -2,13 +2,14 @@ import { execFile, spawn as nodeSpawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { Options, SandboxSettings, SpawnedProcess, SpawnOptions } from '@anthropic-ai/claude-agent-sdk'
 import type { ToolCall } from '@earendil-works/pi-ai'
 import type { BotAuthority, BotMcpTool } from '../../../shared/bots/personal/authority'
 import { botAppToolRefusal, checkBuiltinCall, checkMessage, wallMessage } from '../../../shared/bots/personal/walls'
 import { runtimeExpandedPath } from '../../bots/authority/botAuthority'
 import { entriesBeside } from '../../bots/grants/compile'
+import { CLAUDE_COMMAND_WRITE_LIMIT_TEXT, closedBeside, linuxCommandLayout, mousseTempEntries } from '../../data/closedPlaces'
 import { neutralToolIdempotent, neutralToolsOf, type NativeToolTable, type NeutralTool } from '../../../shared/harness/tools'
 import type { HarnessCaps } from '../../../shared/harness/types'
 import { withoutTransportFields } from '../../agentDefinitions/definitionGate'
@@ -230,16 +231,34 @@ export function claudeOwnStorage(home: string, cwd: string): ClaudeOwnStorage {
   })
   return {
     folders: [...new Set(folders)],
+    // Where the path really leads (every link on the part that exists followed), never only how it is named: a link put
+    // in the storage that leads out of it is checked as where it leads.
     holds(path: string): boolean {
-      for (const candidate of new Set([resolve(path), real(path)]))
-        for (const projects of homes) {
-          const child = relative(projects, candidate)
-          if (!child || isAbsolute(child) || child === '..' || child.startsWith(`..${sep}`)) continue
-          const [name, ...rest] = child.split(sep)
-          // The project folder itself is not storage of a session; what is in it is.
-          if (name && rest.length && named(name)) return true
-        }
+      const candidate = realOrNamed(path)
+      for (const projects of homes) {
+        const child = relative(projects, candidate)
+        if (!child || isAbsolute(child) || child === '..' || child.startsWith(`..${sep}`)) continue
+        const [name, ...rest] = child.split(sep)
+        // The project folder itself is not storage of a session; what is in it is.
+        if (name && rest.length && named(name)) return true
+      }
       return false
+    }
+  }
+}
+
+/** `path` with every link on the part of it that exists followed; the rest as named. */
+function realOrNamed(path: string): string {
+  const rest: string[] = []
+  let current = resolve(path)
+  for (;;) {
+    try {
+      return rest.length ? join(realpathSync.native(current), ...rest) : realpathSync.native(current)
+    } catch {
+      const parent = dirname(current)
+      if (parent === current) return resolve(path)
+      rest.unshift(basename(current))
+      current = parent
     }
   }
 }
@@ -444,9 +463,13 @@ export function claudeCommandsRefusal(authority: Pick<BotAuthority, 'tools' | 'w
  *
  * With file access (`workspace.computer`, bot-architecture.md §3.7) commands see the whole file
  * system, read and write, but Mousse's own data folder: unreadable but for the files folder and
- * scratch, and every entry in it that does not lead to them unwritable (`entriesBeside`).
+ * scratch, and every entry in it that does not lead to them unwritable (`entriesBeside`); and the
+ * other places closed to bots (`computer.outside`, `botClosedPlaces`), unreadable and unwritable.
+ *
+ * Without it, the folders Mousse keeps in the temporary folders when the turn starts (`mousseTempEntries`) are
+ * unreadable too; everything else on that list is in the home folder or a top folder already closed.
  */
-export function claudeLockedSandbox(input: { workspace: NonNullable<BotAuthority['workspace']>; temps: readonly string[]; home?: string; own?: readonly string[]; platform?: NodeJS.Platform; tops?: () => readonly string[]; sharedTemp?: readonly string[]; exists?: (path: string) => boolean }): SandboxSettings {
+export function claudeLockedSandbox(input: { workspace: NonNullable<BotAuthority['workspace']>; temps: readonly string[]; home?: string; own?: readonly string[]; platform?: NodeJS.Platform; tops?: () => readonly string[]; sharedTemp?: readonly string[]; exists?: (path: string) => boolean; user?: string }): SandboxSettings {
   const sharedTemp = input.sharedTemp ?? []
   const platform = input.platform ?? process.platform
   const { roots, access, scratch } = input.workspace
@@ -456,14 +479,26 @@ export function claudeLockedSandbox(input: { workspace: NonNullable<BotAuthority
   const writeRoots = input.workspace.writeRoots ?? (access === 'write' ? roots : [])
   const readRoots = roots.filter((root) => !writeRoots.includes(root))
   const mine = [...(input.workspace.files !== undefined ? [input.workspace.files] : []), scratch]
-  return {
-    enabled: true,
-    failIfUnavailable: true,
-    allowUnsandboxedCommands: false,
-    autoAllowBashIfSandboxed: false,
-    excludedCommands: [],
-    enableWeakerNestedSandbox: false,
-    filesystem: computer
+  // A closed place that holds the bot's own folders (a test's home in the temporary folder) stays the bot's.
+  const notMine = (place: string): boolean => ![...mine, ...own].some((folder) => {
+    const child = relative(place, folder)
+    return child === '' || (!isAbsolute(child) && child !== '..' && !child.startsWith(`..${sep}`))
+  })
+  // macOS keeps its sandbox as before; closing the other places to commands there waits for a run on a real Mac.
+  const linux = platform === 'linux'
+  const filesystem = computer && linux
+    ? (() => {
+        const layout = linuxCommandLayout({ roots, mousseHome: computer.closed, outside: (computer.outside ?? []).filter(notMine), mine, windowsDrives: false, userHome: input.home ?? homedir(), ...(input.user ? { user: input.user } : {}) })
+        return {
+          allowWrite: layout.write,
+          // Claude Code's own storage for this bot is read-only to commands too: no link put there leads its Read tool,
+          // which runs outside the sandbox, out of it (`claudeOwnStorage` checks the real path as well).
+          denyWrite: [...new Set([...layout.deny, ...layout.read, ...own])],
+          denyRead: layout.deny,
+          allowRead: [...new Set(mine)]
+        }
+      })()
+    : computer
       ? {
           allowWrite: [...new Set([...roots, ...mine])],
           denyWrite: entriesBeside(computer.closed, mine),
@@ -473,12 +508,44 @@ export function claudeLockedSandbox(input: { workspace: NonNullable<BotAuthority
       : {
           allowWrite: [...writeRoots, scratch],
           denyWrite: [...readRoots, ...input.temps, ...sharedTemp],
-          denyRead: [...closedToCommands(input.home ?? homedir(), platform, input.tops ?? rootEntries), ...sharedTemp],
+          denyRead: [...closedToCommands(input.home ?? homedir(), platform, input.tops ?? rootEntries), ...sharedTemp, ...(linux ? mousseTempEntries(input.temps).filter(notMine) : [])],
           allowRead: [...roots, scratch, ...own, ...keptOpenUnderRun(platform, input.exists ?? existsSync)]
-        },
+        }
+  return {
+    enabled: true,
+    failIfUnavailable: true,
+    allowUnsandboxedCommands: false,
+    autoAllowBashIfSandboxed: false,
+    excludedCommands: [],
+    enableWeakerNestedSandbox: false,
+    filesystem,
     network: { allowedDomains: [], strictAllowlist: true, allowLocalBinding: false, allowAllUnixSockets: false },
     credentials: { envVars: CLAUDE_KEY_VARIABLES.map((name) => ({ name, mode: 'deny' as const })) }
   } as SandboxSettings
+}
+
+/**
+ * Claude Code's `Read` deny rules for every place closed to a bot with file access (`computer`): each entry of the
+ * Mousse home beside the way down to the bot's folders (`closedBeside`) and every other closed place, each as itself and
+ * as everything under it. Claude Code turns them into exclusions of its own Grep and Glob, which skip those places in a
+ * search over a folder above them, and refuses a Read of one. Paths in the form its rules take: `//` and the absolute
+ * path with `/`, a Windows drive as `/c/…`, and the characters its patterns read as special escaped.
+ */
+export function claudeReadDenyRules(workspace: BotAuthority['workspace']): string[] {
+  const computer = workspace?.computer
+  if (!workspace || !computer) return []
+  const mine = [...(workspace.files !== undefined ? [workspace.files] : []), workspace.scratch]
+  const inside = (folder: string, path: string) => {
+    const child = relative(folder, path)
+    return child === '' || (!isAbsolute(child) && child !== '..' && !child.startsWith(`..${sep}`))
+  }
+  const places = [...closedBeside(computer.closed, mine), ...(computer.outside ?? []).filter((place) => !mine.some((folder) => inside(place, folder)))]
+  const rule = (path: string) => {
+    const posix = path.replace(/\\/g, '/').replace(/^([A-Za-z]):/, (_, drive: string) => `/${drive.toLowerCase()}`)
+    const escaped = posix.replace(/[*?[\]{}!#]/g, (char) => `\\${char}`)
+    return `/${escaped.startsWith('/') ? escaped : `/${escaped}`}`
+  }
+  return [...new Set(places.flatMap((place) => [`Read(${rule(place)})`, `Read(${rule(place)}/**)`]))]
 }
 
 /**
@@ -509,12 +576,13 @@ export function claudeLockedOptions(turn: ClaudeLockedTurn, input: {
     // Code's input once it starts (`registerClaudeMcpServers`, #358).
     mcpServers: {},
     tools,
-    disallowedTools,
+    // The places closed to a bot with file access: its own Grep and Glob skip them (`claudeReadDenyRules`).
+    disallowedTools: [...disallowedTools, ...claudeReadDenyRules(turn.authority.workspace)],
     permissionMode: 'default',
     // The bot's own system text, rendered as given on every request of the session (never kept from its first one): a
     // turn after an Allow resumes the session with the wider permissions in it. It is the same text on every turn of an
     // activation, so the prompt cache holds.
-    systemPrompt: { type: 'custom', prompt: turn.systemPrompt, snapshot: false },
+    systemPrompt: { type: 'custom', prompt: shell && turn.authority.workspace?.computer && process.platform === 'linux' ? `${turn.systemPrompt}\n\n${CLAUDE_COMMAND_WRITE_LIMIT_TEXT}` : turn.systemPrompt, snapshot: false },
     maxTurns: CLAUDE_LOCKED_MAX_TURNS,
     ...(shell ? { sandbox: claudeLockedSandbox({ workspace: turn.authority.workspace!, temps: turn.temps, ...(input.home ? { home: input.home } : {}), ...(turn.own ? { own: turn.own.folders } : {}), ...(turn.sharedTemp ? { sharedTemp: turn.sharedTemp } : {}) }) } : {}),
     ...(input.spawn ? { spawnClaudeCodeProcess: input.spawn } : {})

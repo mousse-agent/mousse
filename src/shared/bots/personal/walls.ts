@@ -14,8 +14,10 @@ export function wallMessage(wall: WallReason): string {
     case 'path': return wall.access === 'write'
       ? `This bot is not allowed to change ${wall.path}.`
       : `This bot is not allowed to read ${wall.path}.`
-    case 'closed': return `${wall.path} is Mousse's own data, which no bot may use. Use another folder.`
+    case 'closed': return `${wall.path} is Mousse's own data or a sign-in, which no bot may use. Use another file or folder.`
     case 'computer': return notOnThisComputerText(wall.off)
+    case 'network_path': return `Give ${wall.path} by its path on this computer, not as a network path to it.`
+    case 'search_closed': return `${wall.path} holds Mousse's own data or a sign-in, so ${wall.tool} can't search all of it here. Search a narrower folder that holds neither.`
     case 'path_form': return wall.full
       ? `Give ${wall.path} as a full path, without ~ or variables: ${wall.full}`
       : wall.home

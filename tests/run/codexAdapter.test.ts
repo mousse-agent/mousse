@@ -20,7 +20,7 @@ import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
 import { CODEX_BOT_UNSANDBOXED_REFUSAL } from '../../src/mms/harness/vendors/codex/botApprovals'
 import { CODEX_BOT_FEATURES_OFF, CODEX_BOT_PROFILE } from '../../src/mms/harness/vendors/codex/childPolicy'
 import { CODEX_MANAGED_VERSION } from '../../src/mms/harness/vendors/codex/release'
-import { CODEX_BOT_VERSION_TEXT, codexBotSettingText } from '../../src/shared/harness/codexBotVersion'
+import { CODEX_BOT_SETUP_UNREADABLE_TEXT, CODEX_BOT_VERSION_TEXT, codexBotSettingText } from '../../src/shared/harness/codexBotVersion'
 import type { NeutralTool } from '../../src/shared/harness/tools'
 import type { AdapterHost, TurnControl, TurnInput, TurnSink } from '../../src/mms/harness/adapter'
 import { mousseOrchestrationInstructions } from '../../src/mms/run/mcp/instructions'
@@ -2537,15 +2537,25 @@ describe('a bot turn on Codex', () => {
     expect(asked).toEqual([])
   })
 
-  it('does not run while the user\'s MCP servers cannot be read', async () => {
+  it('a bot\'s turn doesn\'t run while the owner\'s Codex config can\'t be read, and says so; the owner\'s own thread runs', async () => {
     const files = join(home, 'files')
     mkdirSync(files)
+    const { bot, calls } = botIn(files)
     const replay = transport([
       ...handshake(),
       out({ id: 4, method: 'config/read', params: { includeLayers: true } }),
-      inn({ id: 4, error: { code: -32603, message: 'unreadable' } })
+      inn({ id: 4, error: { code: -32603, message: 'unreadable' } }),
+      ...threadStart(5),
+      ...turnStart(6, 'mine'),
+      ...message('msg-1', ['Done']),
+      completed('completed')
     ])
     const codex = service(replay)
-    await expect(new CodexAdapter(() => codex).startTurn(input({ prompt: 'go' }), recordingSink(), control(), { ...host(), bot: botIn(files).bot as never })).rejects.toMatchObject({ code: 'policy_unenforceable' })
+    const adapter = new CodexAdapter(() => codex)
+    await expect(adapter.startTurn(input({ prompt: 'go', threadId: 'bot-thread' }), recordingSink(), control(), { ...host(), bot: bot as never }))
+      .rejects.toMatchObject({ code: 'policy_unenforceable', message: CODEX_BOT_SETUP_UNREADABLE_TEXT })
+    expect(calls).toEqual([])
+    await adapter.startTurn(input({ prompt: 'mine' }), recordingSink(), control(), host())
+    replay.assertDone()
   })
 })

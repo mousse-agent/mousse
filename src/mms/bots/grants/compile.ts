@@ -9,6 +9,7 @@ import { withinComputerLimit, type BotComputerLimit } from '../../../shared/bots
 import type { NeutralTool } from '../../../shared/harness/tools'
 import type { BindPolicy, HarnessCaps, HarnessError } from '../../../shared/harness/types'
 import { stableStringify } from '../../run/json'
+import { botClosedPlaces, ClosedPlacesUnknown } from '../../data/closedPlaces'
 
 /**
  * A bot thread's grant, compiled for one dispatch (PR 6 §4). Pure: the caller supplies the native
@@ -41,9 +42,10 @@ export interface BotPermissions {
    * `writeRoots`: the roots the bot may change. `files`: the bot's files folder, writable beside the
    * roots like scratch; never one of `roots`, so it is never listed as a permission. `computer`: file
    * access (bot-architecture.md §3.7), with the tops of the file system as the roots, read and
-   * write, and Mousse's own data folder (`closed`) shut but for the files folder and scratch.
+   * write, and Mousse's own data folder (`closed`) shut but for the files folder and scratch, and the places
+   * `botClosedPlaces` lists outside it (`outside`).
    */
-  workspace: { roots: string[]; access: 'read' | 'write'; writeRoots?: string[]; scratch: string; files?: string; computer?: { closed: string } } | null
+  workspace: { roots: string[]; access: 'read' | 'write'; writeRoots?: string[]; scratch: string; files?: string; computer?: { closed: string; outside?: string[] } } | null
   /** "Use the browser": `appTools` holds the browser tools, on the bot's own browser. */
   browser?: true
   /** "Use your threads": `appTools` holds the thread tools of this turn, to read (`read`) or also to start, message and stop (`all`). */
@@ -157,6 +159,19 @@ export function mousseDataFolder(profileHome: string): string {
 }
 
 /**
+ * What file access leaves closed: the Mousse home `closed`, and every place `botClosedPlaces` lists outside it, with the
+ * homes the profile's own CLI entries are set to use. Undefined when those entries can't be read.
+ */
+function closedTo(closed: string, profileHome: string): { closed: string; outside: string[] } | undefined {
+  try {
+    return { closed, outside: botClosedPlaces({ mousseHome: closed, profileHome }) }
+  } catch (error) {
+    if (error instanceof ClosedPlacesUnknown) return undefined
+    throw error
+  }
+}
+
+/**
  * Every entry inside `folder` that is not one of `keep` and does not lead to one: at each folder on
  * the way down to them, every other entry; `folder` itself when none of `keep` is inside it. With
  * file access, a sandbox closes these (Claude Code's `denyWrite` over Mousse's data) or opens them
@@ -245,6 +260,8 @@ export function compileBotThread(input: CompileInput): CompileResult {
     ...(own?.subagents && !own.frontDesk ? [...BOT_SUBAGENT_TOOLS, 'work_models'] : [])
   ])].sort()
   const mcp = [...new Set(manifest.mcp.map((pair) => `${pair.serverId}::${pair.tool}` as const))].sort()
+  const closed = computer ? closedTo(real(mousseDataFolder(input.profileHome)), input.profileHome) : undefined
+  if (computer && !closed) return unenforceable('Mousse couldn\'t read this profile\'s provider settings, so it can\'t tell which sign-ins to keep closed to this bot.', ['containment'])
   return {
     ok: true,
     policy: {
@@ -269,7 +286,7 @@ export function compileBotThread(input: CompileInput): CompileResult {
             writeRoots: computer ?? [],
             scratch,
             ...(files !== undefined ? { files } : {}),
-            ...(computer ? { computer: { closed: real(mousseDataFolder(input.profileHome)) } } : {})
+            ...(closed ? { computer: closed } : {})
           }
         : null
     }

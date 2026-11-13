@@ -9,7 +9,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BotEngine } from '../../src/mms/bots/activation/BotEngine'
-import { botManifestDigest, compileBotThread } from '../../src/mms/bots/grants/compile'
+import { botManifestDigest, compileBotThread, type BotPermissions } from '../../src/mms/bots/grants/compile'
+import { isMousseTempEntry } from '../../src/mms/data/closedPlaces'
 import { botInstructions } from '../../src/mms/bots/instructions'
 import { PI_NATIVE_TOOLS } from '../../src/mms/harness/pi/nativeTools'
 import { botTools } from '../../src/mms/run/mcp/appTools/bots'
@@ -71,11 +72,25 @@ describe('a subagent is compiled from its work\'s grant, and holds no more', () 
   ] as const)('%s: what the work holds of the built-ins, files, MCP tools and skills; of the app tools only the web and the browser', (_name, grant, limit) => {
     for (const runtime of Object.keys(runtimes)) {
       const parent = compile(grant, 'pi', work, limit).permissions
-      const child = compile(grant, runtime, { ...work, subagent: true }, limit)
+      // Each compile snapshots temporary entries independently. A new one must be closed to the child without changing its grant.
+      const transient = parent.workspace?.computer ? mkdtempSync(join(tmpdir(), 'mousse-between-turns-')) : undefined
+      let child: ReturnType<typeof compile>
+      try {
+        child = compile(grant, runtime, { ...work, subagent: true }, limit)
+        if (transient) {
+          expect(parent.workspace!.computer!.outside).not.toContain(transient)
+          expect(child.permissions.workspace!.computer!.outside).toContain(transient)
+        }
+      } finally {
+        if (transient) rmSync(transient, { recursive: true, force: true })
+      }
       expect(child.permissions.tools).toEqual(parent.tools)
       expect(child.permissions.mcp).toEqual(parent.mcp)
       expect(child.permissions.skills).toEqual(parent.skills)
-      expect(child.permissions.workspace).toEqual(parent.workspace)
+      const stable = (workspace: BotPermissions['workspace']) => workspace?.computer
+        ? { ...workspace, computer: { ...workspace.computer, outside: workspace.computer.outside?.filter((place) => !isMousseTempEntry(place)) } }
+        : workspace
+      expect(stable(child.permissions.workspace)).toEqual(stable(parent.workspace))
       expect(child.permissions.browser).toEqual(parent.browser)
       // Never more than the work: every app tool it holds, the work holds too.
       for (const tool of child.permissions.appTools) expect(parent.appTools, `${runtime}: ${tool}`).toContain(tool)

@@ -94,10 +94,10 @@ describe('What bots may do here', () => {
     expect(toggle('Run commands').closest('section.settings-group')!.querySelector('[role="status"]')).toBeNull()
   })
 
-  it('says on the Run commands switch that commands can read files even with Use files off', () => {
+  it('says on the Run commands switch that where commands run without a sandbox they reach everything, and that switching it off closes that', () => {
     show()
     const label = host.querySelector('label[for="agents-bots-shell"] [title]')
-    expect(label?.getAttribute('title')).toMatch(/^Commands can read files on this computer even with Use files off/)
+    expect(label?.getAttribute('title')).toMatch(/^Where a bot’s commands run without a sandbox \(on Windows, with Pi, and with Claude Code on Linux .*\), a bot that may run commands can read and change anything your account can, Mousse’s own data included\. Switch this off to close that here\.$/)
   })
 
   it('says on the Use your threads switch that a thread a bot starts can run commands with the other switches off', () => {

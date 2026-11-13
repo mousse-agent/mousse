@@ -5,7 +5,7 @@
  * with an ask, and the run carries on; anything that can't be asked for is just refused. Nobody is
  * shown a normal approval prompt.
  */
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -77,6 +77,31 @@ describe('Claude Code\'s own storage never asks (bot-architecture.md §3.7)', ()
       await finish(f, payload, lane === 'run' ? 'completed' : 'interrupted', { text: 'Done.', ...(lane === 'chat' ? { outcome: { interruptedBy: 'bot_wall' } } : {}) })
       for (const ask of f.store.openAsks(botId)) f.store.answerEscalation(ask.id, 'withdrawn')
     }
+  })
+
+  it('a link put in its storage is checked where it leads: one to a folder (a junction on Windows) or a file outside it needs file access, as that path would', async () => {
+    const home = join(f.base, 'claude-home')
+    const { prepared, payload } = await run('r1')
+    const gate = gateWithOwn(prepared.authority, home)
+    const session = join(home, 'projects', claudeProjectName(prepared.authority.workspace!.files!), 's1', 'tool-results')
+    mkdirSync(session, { recursive: true })
+    const outside = join(f.base, 'elsewhere')
+    mkdirSync(outside)
+    writeFileSync(join(outside, 'secret.txt'), 'x')
+    symlinkSync(outside, join(session, 'folder-link'), 'junction')
+    expect(gate.canUse('Read', { file_path: join(session, 'folder-link', 'secret.txt') }, 'tu-1')).toMatchObject({ ok: false })
+    expect(gate.canUse('Grep', { pattern: 'x', path: join(session, 'folder-link') }, 'tu-2')).toMatchObject({ ok: false })
+    let fileLinked = true
+    try {
+      symlinkSync(join(outside, 'secret.txt'), join(session, 'file-link.txt'), 'file')
+    } catch {
+      fileLinked = false // Windows without the privilege to make a file link
+    }
+    if (fileLinked) expect(gate.canUse('Read', { file_path: join(session, 'file-link.txt') }, 'tu-3')).toMatchObject({ ok: false })
+    // The storage itself still needs nothing.
+    writeFileSync(join(session, 'toolu_1.txt'), 'saved')
+    expect(gate.canUse('Read', { file_path: join(session, 'toolu_1.txt') }, 'tu-4')).toEqual({ ok: true })
+    await finish(f, payload, 'completed', { text: 'Done.' })
   })
 
   it('names project folders as Claude Code does, and matches a cut name by its cut part', () => {
@@ -225,26 +250,26 @@ describe('What bots may do here, at each runtime\'s own gate (the owner\'s Claud
     const mine = [workspace.files!, workspace.scratch]
     expect(workspace.computer).toBeUndefined()
     // Codex on Linux and macOS: Mousse's permission profile, reading `:minimal`, writing only the bot's folders.
-    const codex = codexBotSandbox(prepared.authority, '/opt/codex', 'linux')
+    const codex = codexBotSandbox(prepared.authority, { codexPackage: '/opt/codex', platform: 'linux' })
     expect(codexTurnPolicy('default', undefined, 'ask', codex)).toEqual({ approvalPolicy: 'untrusted', permissions: CODEX_BOT_PROFILE })
     expect(codexBotSandboxConfig(codex)).toMatchObject({
       [`permissions.${CODEX_BOT_PROFILE}`]: { filesystem: { ':minimal': 'read', '/opt/codex': 'read', ...Object.fromEntries(mine.map((root) => [root, 'write'])) }, network: { enabled: false } }
     })
-    // On Windows Codex keeps its workspace-write sandbox, which reads every file.
-    expect(codexBotSandbox(prepared.authority, '/opt/codex', 'win32').confined).toBeUndefined()
+    // On Windows Codex keeps its workspace-write sandbox, which reads every file (docs/bots.md: commands aren't held there).
+    expect(codexBotSandbox(prepared.authority, { codexPackage: '/opt/codex', platform: 'win32' }).profile).toBeUndefined()
     // Claude Code on Linux: every top folder but the system's own is unreadable (`/run`, with removable drives and the
     // user's runtime folder, included), and the home folder; the bot's folders are not. Claude Code's shared temporary
     // folders, when the turn keeps its own elsewhere, are closed read and write.
     const tops = ['bin', 'boot', 'dev', 'etc', 'home', 'lib', 'lib64', 'media', 'mnt', 'opt', 'proc', 'root', 'run', 'sbin', 'snap', 'srv', 'sys', 'tmp', 'usr', 'var']
-    const linux = claudeLockedSandbox({ workspace, temps: ['/tmp'], home: '/home/owner', platform: 'linux', tops: () => tops, sharedTemp: ['/tmp/claude-1000'], exists: () => false }).filesystem!
+    const linux = claudeLockedSandbox({ workspace, temps: ['/nowhere/tmp'], home: '/home/owner', platform: 'linux', tops: () => tops, sharedTemp: ['/tmp/claude-1000'], exists: () => false }).filesystem!
     expect([...linux.denyRead!].sort()).toEqual(['/boot', '/home', '/home/owner', '/media', '/mnt', '/opt', '/root', '/run', '/snap', '/srv', '/tmp/claude-1000', '/var'])
-    expect(linux.denyWrite).toEqual(expect.arrayContaining(['/tmp', '/tmp/claude-1000']))
+    expect(linux.denyWrite).toEqual(expect.arrayContaining(['/nowhere/tmp', '/tmp/claude-1000']))
     expect(linux.allowRead).toEqual(expect.arrayContaining(mine))
     expect(linux.allowWrite).toEqual(expect.arrayContaining(mine))
     expect(linux.allowRead!.filter((path) => path.startsWith('/run'))).toEqual([])
     // NixOS: its programs (on the PATH) and setuid wrappers live under `/run`; those two stay readable, nothing else there.
     const present = new Set(['/run/current-system/sw/bin', '/run/wrappers', '/run/user/1000', '/run/media'])
-    const nixos = claudeLockedSandbox({ workspace, temps: ['/tmp'], home: '/home/owner', platform: 'linux', tops: () => [...tops, 'nix'], exists: (path) => present.has(path) }).filesystem!
+    const nixos = claudeLockedSandbox({ workspace, temps: ['/nowhere/tmp'], home: '/home/owner', platform: 'linux', tops: () => [...tops, 'nix'], exists: (path) => present.has(path) }).filesystem!
     expect(nixos.denyRead).toContain('/run')
     expect(nixos.allowRead!.filter((path) => path.startsWith('/run')).sort()).toEqual(['/run/current-system/sw/bin', '/run/wrappers'])
     expect(nixos.denyRead).not.toContain('/nix')
