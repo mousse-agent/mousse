@@ -58,6 +58,21 @@ export interface BotRunsOnChoices {
   computers: BotComputerChoice[]
   /** By entry, the line Runs on shows once when a row is picked there, and its tooltip: a Codex not checked for bots. */
   notes?: Record<string, { text: string; title: string }>
+  /**
+   * The Images row's choices (#1088): each ready entry with the models Mousse can make pictures with on it. Absent from an
+   * older service, whose app shows no Images row; empty when none of the owner's entries can, and `imagesMissing` says
+   * what to add.
+   */
+  imageProviders?: LlmProviderOption[]
+  /** What the owner can add for the Images row to offer a model, while it offers none (its tooltip). */
+  imagesMissing?: string
+}
+
+/** The pictures a bot made today against its caps (#1088), for the Images row's tooltip. */
+export interface BotImageUsage {
+  today: number
+  perDay: number
+  perTurn: number
 }
 
 /** A bot's rows as Runs on shows them: each a pick on an entry, or null for "Pick a model" (Mousse chooses until then). */
@@ -126,7 +141,7 @@ export const BOTS_PERSONAL_V2_METHODS = [
  * Methods added after the required Bot UI set (docs/plans/bot-always-free.md, #673): the app calls them when they are
  * there, and an older service that lacks them is still compatible (`guiDaemonCompatibility` lists only the set above).
  */
-export const BOTS_WORK_METHODS = ['bots.work.stop', 'bots.reminders.cancel', 'bots.model.choices', 'bots.model.setSlots'] as const
+export const BOTS_WORK_METHODS = ['bots.work.stop', 'bots.reminders.cancel', 'bots.model.choices', 'bots.model.setSlots', 'bots.model.setImage'] as const
 export type BotsPersonalV2Method = (typeof BOTS_PERSONAL_V2_METHODS)[number] | (typeof BOTS_WORK_METHODS)[number]
 export const BOTS_PERSONAL_V2_CAPABILITY = 'bots.personal.v2'
 
@@ -155,9 +170,10 @@ export interface BotsPersonalV2Api {
    * `providers`. A pick that is not offered now is refused (`model_unavailable`) rather than replaced. `model` (an app
    * from before rows): one model by name on every row; neither, by usage (an app from before picks). Older services
    * refuse these keys, so the app sends `model` only to a service that has `bots.model.choices`, and `slots` only to one
-   * whose choices carry `providers`.
+   * whose choices carry `providers`. `image`: the Images row (#1088), one of `imageProviders`' models; sent only to a
+   * service whose choices carry `imageProviders`.
    */
-  'bots.create': { params: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots }; result: { bot: BotSummary } }
+  'bots.create': { params: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots; image?: BotModelPick }; result: { bot: BotSummary } }
   'bots.get': { params: { botId: string }; result: BotDetail }
   'bots.update': { params: { botId: string; name?: string; look?: BotLook }; result: { bot: BotSummary } }
   'bots.personal.pause': { params: { botId: string }; result: { bot: BotSummary } }
@@ -189,9 +205,10 @@ export interface BotsPersonalV2Api {
    * `model`: the Talk row's model by name, or null, for an app from before rows. Model names appear here and on the
    * pickers that use them only. `computers` are this one and the person's other computers; a bot runs on the computer
    * that holds it, so the others carry `unavailable` (why they cannot be picked) and `offline`. An older service sends
-   * no `slots` or `providers`, and the app shows its single Model picker.
+   * no `slots` or `providers`, and the app shows its single Model picker. `image` is the Images row (#1088), a pick or
+   * null, and `images` today's pictures against the caps; an older service sends neither.
    */
-  'bots.model.get': { params: { botId: string }; result: { model: string | null; slots?: BotShownRows; named?: Partial<Record<BotModelSlotKey, string>> } & BotRunsOnChoices }
+  'bots.model.get': { params: { botId: string }; result: { model: string | null; slots?: BotShownRows; named?: Partial<Record<BotModelSlotKey, string>>; image?: BotModelPick | null; images?: BotImageUsage } & BotRunsOnChoices }
   /**
    * What New bot's Runs on offers before the bot exists (#673): the same choices as `bots.model.get`, and `last`, the
    * rows of the owner's newest bot with picks, which a new bot starts from (null where it had none).
@@ -208,6 +225,11 @@ export interface BotsPersonalV2Api {
    * Medium work's pick, as it is, on all work. One of the two.
    */
   'bots.model.setSlots': { params: { botId: string; slots?: Partial<BotModelSlots>; oneWork?: true }; result: { bot: BotSummary } }
+  /**
+   * The Images row (#1088): a model among `imageProviders`, saved with the entry's sign-in now (`model_unavailable` when
+   * it is not offered), or null, which takes the bot's image tool away from its next turn. A revision with the same grant.
+   */
+  'bots.model.setImage': { params: { botId: string; pick: BotModelPick | null }; result: { bot: BotSummary } }
   'bots.schedules.remove': { params: { botId: string; scheduleId: string }; result: BotDetail }
   'bots.memory.list': { params: { botId: string; history?: boolean }; result: BotMemoryListing }
   'bots.memory.forget': { params: { botId: string; id: string }; result: BotMemoryForgetResult }

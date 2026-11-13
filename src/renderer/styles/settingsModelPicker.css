@@ -76,3 +76,30 @@
   opacity: 0.5;
   cursor: default;
 }
+
+/* A choice of no model in the menu's footer (a bot's Images row): muted text, a light chip while it is the choice. */
+.model-picker-clear {
+  height: 24px;
+  margin-left: auto;
+  padding: 0 10px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  transition: background 0.12s, color 0.12s;
+}
+
+.model-picker-clear:hover {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+.model-picker-clear.selected {
+  background: color-mix(in srgb, var(--text-primary) 11%, transparent);
+  color: var(--text-primary);
+}
+
+.model-picker-clear:focus-visible {
+  outline: none;
+  background-image: var(--ui-focus-layer);
+}
