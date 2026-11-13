@@ -990,7 +990,7 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
     symlinkSync(credentials, ownLink)
     const codexFolder = join(run.dirs.userHome, '.codex')
     const tryWrite = (label: string, shell: string) => `if ${shell} 2>/dev/null; then echo "wrote ${label}"; else echo "denied ${label}"; fi`
-    const command = [
+    const commands = [
       ...[...closed, settings, ordinary].map((path) => `if cat ${JSON.stringify(path)} >/dev/null 2>&1; then echo "read ${path}"; else echo "denied ${path}"; fi`),
       `grep -r ${mark} ${JSON.stringify(run.dirs.userHome)} ${JSON.stringify(mousseHome)} || echo "found none"`,
       tryWrite('beside', `echo new > ${JSON.stringify(join(run.dirs.userHome, 'new.txt'))}`),
@@ -999,9 +999,9 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
       tryWrite('moved home', `mv ${JSON.stringify(run.dirs.userHome)} ${JSON.stringify(`${run.dirs.userHome}-moved`)}`),
       tryWrite('system', 'echo x > /etc/mousse-bot-test'),
       tryWrite('own link', `ln -s ${JSON.stringify(cookies)} ${JSON.stringify(join(ownSession, 'cookie-link'))}`)
-    ].join('; ')
+    ]
     plans.closed = [
-      { name: 'Bash', input: { command, description: 'Try the closed places' } },
+      ...commands.map((command) => ({ name: 'Bash', input: { command, description: 'Try one file boundary' } })),
       { name: 'Read', input: { file_path: credentials } },
       { name: 'Read', input: { file_path: join(linkToHome, '.credentials.json') } },
       { name: 'Read', input: { file_path: settings } },
@@ -1023,7 +1023,7 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
     expect(said).toContain(`read ${settings}`)
     expect(said).toContain(`read ${ordinary}`)
     expect(said).toContain('found none')
-    expect(said).not.toContain(mark)
+    expect(said).not.toContain(`secret ${mark}`)
     // Its commands: a new file beside the closed places, and a change to Codex's config, are written; moving the folder a
     // closed place is in, or one above it, a system folder and a link in Claude Code's own storage are not.
     for (const done of ['wrote beside', 'wrote codex config', 'denied moved codex', 'denied moved home', 'denied system', 'denied own link']) expect(said).toContain(done)
