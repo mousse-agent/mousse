@@ -319,9 +319,8 @@ for (const BINARY of BINARIES) for (const entry of ENTRIES) describe.skipIf(!BIN
     expect(existsSync('/etc/mousse-bot-test')).toBe(false)
     expect(seen).toContain(JSON.stringify(CODEX_COMMAND_WRITE_LIMIT_TEXT).slice(1, -1))
     expect(readFileSync(at.bashrc, 'utf8')).toBe(offered.includes('apply_patch') ? 'after\nx\n' : 'before\nx\n')
-    // Nothing left where a closed place doesn't exist (Grok's sign-in, Claude Code's device keys), and none of the folders
-    // Codex keeps read-only at the top of a writable folder while a command runs.
-    for (const left of [join(at.home, '.grok'), join(at.home, '.claude', '.device-keys.json'), ...['.git', '.agents', '.aws'].map((name) => join(at.home, name))]) expect(existsSync(left), left).toBe(false)
+    // No stand-ins for absent sign-ins. Codex may leave empty .git, .agents and .aws folders; Mousse never removes them.
+    for (const left of [join(at.home, '.grok'), join(at.home, '.claude', '.device-keys.json')]) expect(existsSync(left), left).toBe(false)
     // The entry's own Codex signed in with its own sign-in for every model request, closed to the bot as it was.
     expect(bearers.length).toBeGreaterThan(0)
     expect(new Set(bearers)).toEqual(new Set([codexHome === join(at.home, '.codex') ? `Bearer sk-fake-CODEXAUTH-${MARK}` : `Bearer sk-fake-managed-${MARK}`]))

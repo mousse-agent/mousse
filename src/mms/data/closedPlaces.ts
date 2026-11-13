@@ -1,4 +1,4 @@
-import { accessSync, constants, existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { accessSync, constants, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { isIP } from 'node:net'
 import { homedir, hostname, networkInterfaces, tmpdir, userInfo } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep, win32 } from 'node:path'
@@ -69,16 +69,13 @@ function everyProfileEntryEnvironment(profileHome: string): Array<Record<string,
   try {
     names = readdirSync(profiles)
   } catch {
-    // The bot's own profile is in it, so this is a folder Mousse just read from.
+    throw new ClosedPlacesUnknown('Mousse could not list its profiles.')
   }
   for (const name of names) {
     const other = join(profiles, name)
     if (other === own) continue
-    try {
-      envs.push(...profileEntryEnvironments(other))
-    } catch {
-      // Unreadable: see above.
-    }
+    if (!lstatSync(other).isDirectory()) continue
+    envs.push(...profileEntryEnvironments(other))
   }
   return envs
 }
@@ -94,11 +91,11 @@ const CLI_DRIVERS: ReadonlySet<string> = new Set(['codex', 'claude', 'grok'])
  */
 export function profileEntryEnvironments(profileHome: string): Array<Record<string, string>> {
   const file = join(profileHome, 'mousse.conf')
-  if (!existsSync(file)) return []
   let parsed: unknown
   try {
     parsed = JSON.parse(readFileSync(file, 'utf8'))
   } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
     throw new ClosedPlacesUnknown(`Mousse couldn't read this profile's provider settings (${error instanceof Error ? error.message : String(error)}).`)
   }
   const instances = (parsed as { providers?: { instances?: unknown } } | null)?.providers?.instances
@@ -147,8 +144,9 @@ export function mousseTempEntries(temps: readonly string[]): string[] {
     let names: string[]
     try {
       names = readdirSync(temp)
-    } catch {
-      continue
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+      throw new ClosedPlacesUnknown('Mousse could not list a temporary folder.')
     }
     for (const name of names) if (name.startsWith('mousse-')) entries.push(join(temp, name))
   }

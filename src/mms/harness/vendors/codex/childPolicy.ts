@@ -1,4 +1,4 @@
-import { lstatSync, realpathSync, rmdirSync } from 'node:fs'
+import { realpathSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import type { BotAuthority } from '../../../../shared/bots/personal/authority'
 import { entriesBeside } from '../../../bots/grants/compile'
@@ -146,48 +146,6 @@ export function codexBotSandbox(bot: Partial<Pick<BotAuthority, 'tools' | 'works
  */
 export function codexBotInstructionsNote(bot: Partial<Pick<BotAuthority, 'tools' | 'workspace'>> | undefined, platform: NodeJS.Platform = process.platform): string | undefined {
   return bot?.tools?.has('shell') === true && bot.workspace?.computer && platform === 'linux' ? CODEX_COMMAND_WRITE_LIMIT_TEXT : undefined
-}
-
-/**
- * The folders Codex's Linux sandbox keeps read-only at the top of each writable folder. Where one is missing it makes an
- * empty one on the disk for the time its sandbox runs, and Codex 0.162.1 leaves some of them behind after a turn (in the
- * owner's home folder, say).
- */
-const CODEX_STAND_IN_NAMES = ['.git', '.codex', '.agents', '.aws'] as const
-
-/** Which of `CODEX_STAND_IN_NAMES` are at the top of each writable folder of a bot's turn before it starts. */
-export interface CodexStandIns {
-  missing: string[]
-}
-
-/** Before a bot's turn with file access on Linux: the stand-ins Codex may make for it (`removeCodexStandIns`). */
-export function codexStandInsBefore(sandbox: CodexBotSandbox | undefined): CodexStandIns | undefined {
-  if (sandbox?.profile?.base !== ':root') return undefined
-  const missing: string[] = []
-  for (const root of sandbox.writableRoots)
-    for (const name of CODEX_STAND_IN_NAMES) {
-      const path = join(root, name)
-      try {
-        lstatSync(path)
-      } catch {
-        missing.push(path)
-      }
-    }
-  return { missing }
-}
-
-/**
- * After the turn: each stand-in that wasn't there before it and is an empty folder is removed. A folder with anything in
- * it, or a link, is left as it is: it is not Codex's stand-in.
- */
-export function removeCodexStandIns(standIns: CodexStandIns | undefined): void {
-  for (const path of standIns?.missing ?? []) {
-    try {
-      if (lstatSync(path).isDirectory()) rmdirSync(path)
-    } catch {
-      // Not there, not empty, or still in use: left as it is.
-    }
-  }
 }
 
 /** Whether `path` is `folder` or inside it (absolute paths). */

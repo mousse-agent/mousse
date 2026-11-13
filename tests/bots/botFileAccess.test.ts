@@ -13,7 +13,7 @@ import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
 import { askFingerprintOf } from '../../src/mms/bots/chat/projection'
 import { botFilesFolder, botManifestDigest, compileBotThread, entriesBeside, type BotPermissions } from '../../src/mms/bots/grants/compile'
 import { claudeLockedOptions, claudeLockedSandbox, type ClaudeLockedTurn } from '../../src/mms/harness/claude/locked'
-import { botClosedPlaces, CLAUDE_COMMAND_WRITE_LIMIT_TEXT, closedBeside, linuxCommandLayout, localPathOf, onLocalVolume, type ThisComputer } from '../../src/mms/data/closedPlaces'
+import { botClosedPlaces, ClosedPlacesUnknown, CLAUDE_COMMAND_WRITE_LIMIT_TEXT, closedBeside, linuxCommandLayout, localPathOf, onLocalVolume, type ThisComputer } from '../../src/mms/data/closedPlaces'
 import { PI_NATIVE_TOOLS } from '../../src/mms/harness/pi/nativeTools'
 import { CODEX_BOT_PROFILE, codexBotInstructionsNote, codexBotSandbox, codexBotSandboxConfig, codexTurnPolicy } from '../../src/mms/harness/vendors/codex/childPolicy'
 import type { BotManifest } from '../../src/shared/bots/personal/definition'
@@ -272,6 +272,23 @@ describe('each runtime compiles file access to the whole file system but Mousse\
       chmodSync(bots, 0o755)
     }
     expect(closedBeside(mousse, [files, scratch])).not.toContain(bots)
+  })
+
+  it('an unreadable temporary folder or corrupt sibling profile refuses an incomplete closed list', () => {
+    const notFolder = join(base, 'not-a-folder')
+    writeFileSync(notFolder, 'x')
+    expect(() => botClosedPlaces({ mousseHome: mousse, temps: [notFolder], entryEnvs: [] })).toThrow(ClosedPlacesUnknown)
+    const other = join(mousse, 'profiles', 'other')
+    mkdirSync(other, { recursive: true })
+    writeFileSync(join(other, 'mousse.conf'), '{broken')
+    expect(() => botClosedPlaces({ mousseHome: mousse, profileHome: profile, temps: [] })).toThrow(ClosedPlacesUnknown)
+  })
+
+  it.skipIf(process.platform !== 'win32')('file tools refuse alternate streams of closed files', () => {
+    const { at, outside } = ownerHome()
+    const granted = authorityOf(withOutside(permissions(everywhere()), outside))
+    for (const suffix of [':stream', '::$DATA'])
+      expect(checkBuiltinCall(granted, PI_NATIVE_TOOLS, 'read', { path: at.codexAuth + suffix }).ok).toBe(false)
   })
 
   it('the file tools, on every platform: each place closed to bots refused, directly and through a link; the files beside them open', () => {

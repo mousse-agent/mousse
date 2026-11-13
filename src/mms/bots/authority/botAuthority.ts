@@ -286,6 +286,7 @@ export function runtimeExpandedPath(raw: string, platform: NodeJS.Platform = pro
   if (raw.split(/[\\/]/).some((segment) => segment !== '.' && segment !== '..' && /[ .]$/.test(segment))) return true
   if (/^[~@]/.test(raw)) return true
   if (/\$(\{|[A-Za-z_])/.test(raw)) return true
+  if (platform === 'win32' && /:/.test(raw.replace(/^(?:\\\\[?.]\\)?[A-Za-z]:/, ''))) return true
   if (platform === 'win32' && (/%[^%\\/]+%/.test(raw) || /^\/[A-Za-z](\/|$)/.test(raw))) return true
   return false
 }

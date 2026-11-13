@@ -74,7 +74,7 @@ import { isUsageLimitInfo, isUsageLimitText, resetFromSnapshot, trimResetCredits
 import { readUsageLimit, usageLimitError } from '../../../orchestrator/providerErrors'
 import { normalizePermissionMode, permissionModeAllows, type PermissionMode } from '../../../../shared/permissionMode'
 import { PERMISSION_KEYS } from '../../../../shared/permissionKeys'
-import { CODEX_BOT_CHECKED_VERSIONS, CODEX_BOT_FEATURES_REFUSED, type CodexBotSandbox, codexBotInstructionsNote, codexBotSandbox, codexBotSandboxConfig, codexPackageOf, codexStandInsBefore, codexTurnPolicy, removeCodexStandIns } from './childPolicy'
+import { CODEX_BOT_CHECKED_VERSIONS, CODEX_BOT_FEATURES_REFUSED, type CodexBotSandbox, codexBotInstructionsNote, codexBotSandbox, codexBotSandboxConfig, codexPackageOf, codexTurnPolicy } from './childPolicy'
 import { CODEX_BOT_SETUP_UNREADABLE_TEXT, codexBotSettingText, codexBotVersionRefusal, codexVersionOf } from '../../../../shared/harness/codexBotVersion'
 import { STOP_GRACE_MS, listProcesses, stopCommandProcesses } from '../../stopProcesses'
 import { DEFAULT_TREE_TIMING, HelperTree, RpcRefused, ThreadStatuses, TreeOff, isWakeUp, type TreePorts, type TreeTiming } from './helperTree'
@@ -1180,12 +1180,6 @@ export class CodexProviderService {
   private readonly strays = new Map<string, StrayThread>()
   /** Stops in progress by Mousse thread: the sweep that still interrupts a released chat's turn and helpers. */
   private readonly pendingSweeps = new Map<string, Promise<void>>()
-  /**
-   * Where a bot's turn with file access on Linux found none of the folders Codex's sandbox keeps read-only at the top of
-   * each writable folder (`codexStandInsBefore`): an empty one there afterwards is Codex's stand-in, and each bot turn's
-   * end removes them, whichever turn made them.
-   */
-  private readonly standIns = new Set<string>()
   /** Helpers of finished chats that were told to stop before their turn id was known. */
   private readonly orphans = new Set<NativeHelpers>()
   /** The Codex package each app-server process runs (`codexPackageOf`), for a bot's profile. */
@@ -2975,8 +2969,6 @@ export class CodexProviderService {
       })
       const conn = await this.verifiedConnection(signal)
       await abortable(this.ensureTreeMode(conn), signal)
-      // Before the thread opens: Codex runs its sandbox to read the folder's instructions then too.
-      if (input.bot) for (const path of codexStandInsBefore(codexBotSandbox(input.bot, { codexPackage: this.packages.get(conn) }))?.missing ?? []) this.standIns.add(path)
       const thread = await this.openThread(conn, input, signal)
       signal.throwIfAborted()
       const codexThreadId = thread.codexThreadId
@@ -3296,12 +3288,7 @@ export class CodexProviderService {
       // A stopped turn stays registered (for routing) until its sweep ends or the process dies.
       run?.mute()
       run?.cancelQuestions()
-      if (input.bot && this.standIns.size) {
-        const left = { missing: [...this.standIns] }
-        removeCodexStandIns(left)
-        // A stopped turn's commands may still be ending: once they have, again.
-        void this.pendingSweeps.get(input.threadId)?.then(() => removeCodexStandIns(left), () => removeCodexStandIns(left))
-      }
+
     }
   }
 
