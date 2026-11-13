@@ -3,11 +3,12 @@ import { Type, type Tool } from '@earendil-works/pi-ai'
 import { BOT_DEPTHS, BOT_WORK_LEVELS, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, MAX_BOT_SCHEDULES, type BotDepth, type BotLane, type BotModelPick, type BotModelSlotKey, type BotModelSlots, type BotSchedule } from '../../../../shared/bots/personal/definition'
 import { entriesOf, modelsNamedBy, namedOn, ownerNamesModel, pickReasonText, plainLabel, workLevelOf, type BotModelRows, type NamedModel } from '../../../../shared/bots/personal/modelSlots'
 import type { BotModelOption, BotWorkChoices } from '../../../../shared/bots/personal/methods'
-import { BOT_MCP_LIST_TOOL } from '../../../../shared/bots/personal/manifest'
+import { BOT_IMAGE_TOOL, BOT_MCP_LIST_TOOL } from '../../../../shared/bots/personal/manifest'
 import { shortModelName } from '../../../../shared/modelNames'
 import { botScheduleLabel } from '../../../../shared/scheduleLabel'
 import { botScheduleProblem } from '../../../scheduled/botJobs'
 import type { BotActivityContext, BotActivitySink, BotToolHost, BotWorkModel } from '../../../bots/seams'
+import type { BotImageMaker } from '../../../bots/images/BotImageMaker'
 import { json, plainSchema, truncateForModel, type MousseTool, type ToolCallContext, type ToolOutcome } from './types'
 
 /**
@@ -179,6 +180,14 @@ export const BOT_TOOLS: Tool[] = [
     name: 'reminder_cancel',
     description: 'Cancel one of your reminders by its id (see reminder_list).',
     parameters: Type.Object({ reminderId: Type.String() })
+  },
+  {
+    name: BOT_IMAGE_TOOL,
+    description: 'Make a picture with the image model your owner picked, when they ask for one. Describe it in full: what it shows, its style, colours and any words in it. It is saved in your files folder; to show it, put the markdown line the result gives you in your reply, and say in a few words what you made.',
+    parameters: Type.Object({
+      description: Type.String({ description: 'What the picture shows, in full.' }),
+      shape: Type.Optional(Type.Union([Type.Literal('square'), Type.Literal('landscape'), Type.Literal('portrait')], { description: 'square, landscape (16:9) or portrait (9:16). Some models keep their own shape.' }))
+    })
   }
 ]
 
@@ -200,6 +209,8 @@ export interface BotAppToolDeps {
     /** `work_models` and `work_start` with a model: the same choices, and the entries a bot's work can't run on. */
     workChoices?(): Promise<BotWorkChoices>
   }
+  /** `make_image` (#1088): pictures on the Images row's model. Absent: no bot here makes pictures. */
+  images?: Pick<BotImageMaker, 'make'>
 }
 
 /** What work may be asked to run on: every choice and why other entries are left out, or the choices alone. */
@@ -320,6 +331,8 @@ export function ownerModelChoice(owner: string, options: readonly BotModelOption
 }
 
 const NOT_A_BOT = 'Only a bot can use this.'
+const NO_PICTURES_HERE = "Pictures can't be made here. Nothing was made."
+const NO_IMAGE_MODEL_LINE = "Your owner hasn't picked an image model for you. Tell them they can pick one in About → Runs on, in the Images row."
 const CHAT_ONLY = 'Only your chat hands out work and sets reminders. In a run, do the work yourself and say in your report what should happen next.'
 const OWNER_ONLY = 'Only the owner can change this, in your chat. Suggest it in your report instead.'
 const error = (text: string): ToolOutcome => ({ text, isError: true })
@@ -669,6 +682,45 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         return json(result)
       }
     }),
+    {
+      ...ownTool(byName.get(BOT_IMAGE_TOOL)!, deps, {
+        class: 'mutation',
+        describe: () => 'Make a picture',
+        handler: async (args, ctx) => {
+          const call = botCall(deps, ctx)
+          if (isOutcome(call)) return call
+          // The Images row is read again here, at the call: a pick removed since the turn started makes nothing.
+          if (!call.deps.images) return error(NO_PICTURES_HERE)
+          const description = typeof args.description === 'string' ? args.description.trim() : ''
+          if (!description) return error('make_image needs a description of the picture.')
+          const shape = args.shape === 'square' || args.shape === 'landscape' || args.shape === 'portrait' ? args.shape : undefined
+          if (args.shape !== undefined && !shape) return error('shape is square, landscape or portrait.')
+          const bot = ctx.turn.bot
+          const made = await call.deps.images.make({
+            botId: call.botId,
+            activationId: call.activationId,
+            prompt: description,
+            ...(shape ? { shape } : {}),
+            ...(bot?.counters ? { counters: bot.counters } : {}),
+            spend: bot?.spend ?? null,
+            signal: ctx.signal
+          })
+          call.deps.activity?.onAppResult(call.activity, BOT_IMAGE_TOOL, { ok: made.ok })
+          if (!made.ok) return error(made.text)
+          return json({
+            saved: made.name,
+            path: made.path,
+            show: made.markdown,
+            ...(made.text ? { modelSaid: made.text } : {}),
+            note: 'Saved in your files folder. To show it, put the show line in your reply exactly as it is, and say in a few words what you made. Refer to it by its file name later.'
+          })
+        }
+      }),
+      // Only a turn of a bot whose owner picked an image model holds it (`compileBotThread`): listed and offered then only.
+      listed: (listing) => listing.botRole === 'activation' && Boolean(listing.botTurnTools?.has(BOT_IMAGE_TOOL)),
+      available: (turn) => (turn.bot?.appTools.has(BOT_IMAGE_TOOL) && deps?.()?.images ? true : NO_IMAGE_MODEL_LINE),
+      offered: (turn) => Boolean(turn.bot?.appTools.has(BOT_IMAGE_TOOL) && deps?.()?.images)
+    },
     ownTool(byName.get('use_model')!, deps, {
       class: 'mutation',
       describe: () => 'Change how it works',

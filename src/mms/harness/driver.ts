@@ -221,6 +221,42 @@ export const ONE_SHOT_TASK_TEXT: Readonly<Record<OneShotTask, string>> = {
   commit_message: 'write commit messages'
 }
 
+/**
+ * A model a runtime can make pictures with in Mousse's own process (#1088, a bot's Images row): its id and name, and
+ * USD per token from its catalogue (zeros when the catalogue gives no price).
+ */
+export interface ImageModelFacts {
+  id: string
+  label: string
+  price: { input: number; output: number }
+}
+
+/** One picture asked of an image model: the description, and a shape the model may honour. */
+export interface ImageRequestSpec {
+  model: string
+  prompt: string
+  shape?: 'square' | 'landscape' | 'portrait'
+}
+
+/** The picture an image model made: its type and base64 data, any words it sent with it, and what it cost. */
+export interface GeneratedImage {
+  mimeType: string
+  data: string
+  text?: string
+  usage?: { input: number; output: number; usd: number }
+}
+
+/** Why an image request made no picture, by kind (`ImageRequestError`); the provider's own words stay in the log. */
+export type ImageFailureKind = 'refused' | 'signed_out' | 'no_credit' | 'busy' | 'no_answer' | 'no_image' | 'failed'
+
+/** An image request that made no picture: its kind, and the provider's raw text for the log only. */
+export class ImageRequestError extends Error {
+  constructor(readonly kind: ImageFailureKind, readonly detail: string) {
+    super(`image request failed (${kind})`)
+    this.name = 'ImageRequestError'
+  }
+}
+
 /** What `/compact` asks a runtime: the thread, the history its native session must hold, and an optional focus. */
 export interface NativeCompactRequest {
   threadId: string
@@ -240,6 +276,13 @@ export interface DriverRuntime {
    * aborts it (the caller stopped, or the gateway's inactivity timeout).
    */
   oneShot?(spec: OneShotSpec, signal: AbortSignal): Promise<{ text: string }>
+  /** The models this entry can make pictures with in Mousse's own process (#1088); absent or empty: none. */
+  imageModels?(): readonly ImageModelFacts[]
+  /**
+   * One picture on one of `imageModels` (#1088), in Mousse's own process: one request, no retry. Throws
+   * `ImageRequestError` when the provider made none; `signal` aborts it.
+   */
+  generateImage?(spec: ImageRequestSpec, signal: AbortSignal): Promise<GeneratedImage>
   /**
    * What token and spend limits need from `model` (`SpendModelFacts`), read at turn admission only
    * when the policy has such a limit and the caps reserve spend. Absent or undefined refuses them.

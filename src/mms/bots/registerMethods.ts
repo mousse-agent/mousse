@@ -1,6 +1,6 @@
 import { BOTS_PERSONAL_V2_CAPABILITY, BOTS_PERSONAL_V2_METHODS, BOTS_WORK_METHODS, MAX_BOT_CHAT_ATTACHMENTS, MAX_BOT_CHAT_PAGE, type BotChatAttachment, type BotsPersonalV2Method } from '../../shared/bots/personal/methods'
-import { MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_MODEL_CHARS, MAX_BOT_NAME_CHARS, type BotModelSlots, type BotSchedule } from '../../shared/bots/personal/definition'
-import { modelRowsProblem } from '../../shared/bots/personal/modelSlots'
+import { MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_MODEL_CHARS, MAX_BOT_NAME_CHARS, type BotModelPick, type BotModelSlots, type BotSchedule } from '../../shared/bots/personal/definition'
+import { modelPickProblem, modelRowsProblem } from '../../shared/bots/personal/modelSlots'
 import { isAbsolutePath } from '../../shared/bots/personal/manifest'
 import type { BotLook } from '../../shared/bots/personal/look'
 import { DomainHandlerRegistry, DomainRpcError, domainObject } from '../protocol/domainRegistry'
@@ -19,7 +19,7 @@ type Params = Record<string, unknown>
 
 const KEYS: Record<BotsPersonalV2Method, readonly string[]> = {
   'bots.personal.list': [],
-  'bots.create': ['look', 'name', 'description', 'clientRequestId', 'model', 'slots'],
+  'bots.create': ['look', 'name', 'description', 'clientRequestId', 'model', 'slots', 'image'],
   'bots.get': ['botId'],
   'bots.update': ['botId', 'name', 'look'],
   'bots.personal.pause': ['botId'],
@@ -39,6 +39,7 @@ const KEYS: Record<BotsPersonalV2Method, readonly string[]> = {
   'bots.model.choices': [],
   'bots.model.set': ['botId', 'model'],
   'bots.model.setSlots': ['botId', 'slots', 'oneWork'],
+  'bots.model.setImage': ['botId', 'pick'],
   'bots.memory.list': ['botId', 'history'],
   'bots.memory.forget': ['botId', 'id'],
   'bots.memory.export': ['botId', 'dir']
@@ -69,6 +70,12 @@ function slots(value: unknown, options: { all?: boolean } = {}): void {
   if (problem) throw new DomainRpcError('invalid_params', problem)
 }
 
+/** The Images row's pick (#1088): a model on an entry, with no reasoning level. */
+function imagePick(value: unknown): void {
+  const problem = modelPickProblem(value, { client: true }) ?? ((value as { effort?: unknown }).effort !== undefined ? 'An image model has no reasoning level.' : undefined)
+  if (problem) throw new DomainRpcError('invalid_params', problem)
+}
+
 const MODEL_NAME_TEXT = `A model is a name of 1 to ${MAX_BOT_MODEL_CHARS} characters`
 
 function attachments(value: unknown): BotChatAttachment[] {
@@ -94,6 +101,11 @@ function validate(method: BotsPersonalV2Method, value: unknown): Params {
       if (p.model !== undefined && !text(p.model, MAX_BOT_MODEL_CHARS)) throw new DomainRpcError('invalid_params', MODEL_NAME_TEXT)
       if (p.slots !== undefined) slots(p.slots, { all: true })
       if (p.slots !== undefined && p.model !== undefined) throw new DomainRpcError('invalid_params', 'Give the models as slots or as one model, not both')
+      if (p.image !== undefined) imagePick(p.image)
+      break
+    case 'bots.model.setImage':
+      if (p.pick === undefined) throw new DomainRpcError('invalid_params', 'Give the pick, or null')
+      if (p.pick !== null) imagePick(p.pick)
       break
     case 'bots.model.setSlots':
       if ((p.slots === undefined) === (p.oneWork === undefined)) throw new DomainRpcError('invalid_params', 'Give the rows, or oneWork')
@@ -167,7 +179,7 @@ async function handle(method: BotsPersonalV2Method, p: Params, bots: BotChatServ
   const botId = p.botId as string
   switch (method) {
     case 'bots.personal.list': return bots.list()
-    case 'bots.create': return bots.create({ look: p.look as BotLook, ...(typeof p.name === 'string' && p.name.trim() ? { name: p.name } : {}), description: p.description as string, clientRequestId: p.clientRequestId as string, ...(typeof p.model === 'string' ? { model: p.model.trim() } : {}), ...(p.slots !== undefined ? { slots: p.slots as BotModelSlots } : {}) })
+    case 'bots.create': return bots.create({ look: p.look as BotLook, ...(typeof p.name === 'string' && p.name.trim() ? { name: p.name } : {}), description: p.description as string, clientRequestId: p.clientRequestId as string, ...(typeof p.model === 'string' ? { model: p.model.trim() } : {}), ...(p.slots !== undefined ? { slots: p.slots as BotModelSlots } : {}), ...(p.image !== undefined ? { image: p.image as BotModelPick } : {}) })
     case 'bots.get': return bots.get(botId)
     case 'bots.update': return bots.update(botId, { ...(p.name !== undefined ? { name: p.name as string } : {}), ...(p.look !== undefined ? { look: p.look as BotLook } : {}) })
     case 'bots.personal.pause': return bots.pause(botId)
@@ -186,6 +198,7 @@ async function handle(method: BotsPersonalV2Method, p: Params, bots: BotChatServ
     case 'bots.model.choices': return bots.modelChoices()
     case 'bots.model.set': return bots.modelSet(botId, typeof p.model === 'string' ? p.model.trim() : null)
     case 'bots.model.setSlots': return bots.modelSlotsSet(botId, p.oneWork === true ? { oneWork: true } : { slots: p.slots as Partial<BotModelSlots> })
+    case 'bots.model.setImage': return bots.modelImageSet(botId, p.pick as BotModelPick | null)
     case 'bots.schedules.remove': return bots.removeSchedule(botId, p.scheduleId as string)
     // WP6's handlers, over the profile's memory (their own checks: an entry id like m12, a folder that exists).
     case 'bots.memory.list':

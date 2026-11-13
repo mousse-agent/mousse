@@ -60,6 +60,9 @@ export function NewBotDialog({ initialDescription = '', onCreated, onClose }: { 
       // The rows start from the draft's, else the owner's last bot's picks; a pick no longer offered is empty again.
       const providers = next.providers
       if (providers) useBotsStore.getState().seedNewBotRows(next.last, (pick) => Boolean(offeredListing(providers, pick)))
+      // An image model no longer offered is None again (#1088).
+      const image = useBotsStore.getState().newBotDraft.image
+      if (image && !offeredListing(next.imageProviders ?? [], image)) useBotsStore.setState((state) => ({ newBotDraft: { ...state.newBotDraft, image: null } }))
     }, () => { if (live) setChoices((known) => known ?? null) })
     return () => { live = false }
   }, [])
@@ -96,7 +99,9 @@ export function NewBotDialog({ initialDescription = '', onCreated, onClose }: { 
     const slots = drafted && BOT_MODEL_SLOT_KEYS.every((key) => isPinned(drafted[key])) ? drafted as BotModelSlots : null
     if (choices?.providers && !slots) return
     const model = choices && !choices.providers ? state.newBotDraft.model : null
-    const bot = await state.create({ look: state.newBotDraft.look ?? look, description, ...(name ? { name } : {}), ...(slots ? { slots } : model ? { model } : {}) })
+    // The Images row (#1088) only to a service that offers it.
+    const image = choices?.imageProviders && slots ? state.newBotDraft.image : null
+    const bot = await state.create({ look: state.newBotDraft.look ?? look, description, ...(name ? { name } : {}), ...(slots ? { slots } : model ? { model } : {}), ...(image ? { image } : {}) })
     if (bot && onCreated) onCreated(bot)
     else if (bot) await useChatsStore.getState().openBot(bot.id)
     // Refused because a pick is gone: Runs on (where the store returned) offers what is there now, and that row is empty.
@@ -119,6 +124,7 @@ export function NewBotDialog({ initialDescription = '', onCreated, onClose }: { 
         </>}
         {step === 'runsOn' && <div className="bot-new-runs-on-step">
           {choices ? <NewBotRunsOn choices={choices} model={draft.model} onModel={(model) => setNewBotDraft({ model })} rows={draft.slots}
+            image={draft.image} onImage={(image) => setNewBotDraft({ image })}
             onPick={(keys, pick) => setNewBotDraft({ slots: { ...(draft.slots ?? EMPTY_ROWS), ...Object.fromEntries(keys.map((key) => [key, pick])) } })}
             onOneWork={() => { const rows = draft.slots ?? EMPTY_ROWS; setNewBotDraft({ slots: { ...rows, light: rows.medium, hard: rows.medium } }) }} /> : null}
         </div>}
@@ -141,11 +147,13 @@ const EMPTY_ROWS: BotShownRows = { talk: null, light: null, medium: null, hard: 
  * others greyed), then the model rows, Talk and Work (and each kind of work under Advanced), in the app's model picker.
  * An older service without rows has its single Model picker, by usage unless a model is picked.
  */
-function NewBotRunsOn({ choices, model, onModel, rows, onPick, onOneWork }: {
+function NewBotRunsOn({ choices, model, onModel, rows, image, onImage, onPick, onOneWork }: {
   choices: BotRunsOnChoices
   model: string | null
   onModel: (model: string | null) => void
   rows: BotShownRows | null
+  image: BotModelPick | null
+  onImage: (image: BotModelPick | null) => void
   onPick: (keys: readonly BotModelSlotKey[], pick: BotModelPick) => void
   onOneWork: () => void
 }) {
@@ -158,7 +166,9 @@ function NewBotRunsOn({ choices, model, onModel, rows, onPick, onOneWork }: {
         : <span className="bot-new-runs-on-computer" title="This computer. A bot runs on the computer it is made on.">{here?.name ?? 'This computer'}</span>}
     </div>
     {choices.providers
-      ? <BotModelRows name="New bot" providers={choices.providers} slots={rows ?? EMPTY_ROWS} {...(choices.notes ? { notes: choices.notes } : {})} onPick={onPick} onOneWork={onOneWork} />
+      ? <BotModelRows name="New bot" providers={choices.providers} slots={rows ?? EMPTY_ROWS} {...(choices.notes ? { notes: choices.notes } : {})}
+        {...(choices.imageProviders ? { image: { providers: choices.imageProviders, pick: image, ...(choices.imagesMissing ? { missing: choices.imagesMissing } : {}), onPick: onImage } } : {})}
+        onPick={onPick} onOneWork={onOneWork} />
       : <div className="bot-new-row">
         <span>Model</span>
         <BotModelSelect ariaLabel="New bot's model" models={choices.models} value={model} onChange={onModel} />

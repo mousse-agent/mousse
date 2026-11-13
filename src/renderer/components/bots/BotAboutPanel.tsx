@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Bell, Brain, Clock, Shield, X } from '../../lib/icons'
 import type { BotSummary } from '../../../shared/bots/personal/chat'
 import type { BotMemoryEntry } from '../../../shared/bots/personal/memory'
+import type { BotModelPick } from '../../../shared/bots/personal/definition'
 import type { BotShownRows, BotsPersonalV2Result } from '../../../shared/bots/personal/methods'
 import { botFaceState, botsClient, useBotsStore } from '../../stores/botsStore'
 import { useAppStore } from '../../stores/appStore'
@@ -77,6 +78,22 @@ function RunsOn({ botId, name, refresh }: { botId: string; name: string; refresh
     }
     read()
   }
+  // The Images row (#1088): a model to make pictures with, or None.
+  const saveImage = async (image: BotModelPick | null) => {
+    const before = choices
+    setError(null)
+    setChoices({ ...choices, image })
+    saving.current += 1
+    try {
+      await client.setImage(botId, image)
+    } catch (cause) {
+      setChoices(before)
+      setError(errorText(cause))
+    } finally {
+      saving.current -= 1
+    }
+    read()
+  }
   const slots = choices.slots
   return <>
     {slots && choices.providers
@@ -87,6 +104,15 @@ function RunsOn({ botId, name, refresh }: { botId: string; name: string; refresh
           slots={slots}
           {...(choices.named ? { named: choices.named } : {})}
           {...(choices.notes ? { notes: choices.notes } : {})}
+          {...(choices.imageProviders ? {
+            image: {
+              providers: choices.imageProviders,
+              pick: choices.image ?? null,
+              ...(choices.imagesMissing ? { missing: choices.imagesMissing } : {}),
+              ...(choices.images ? { usage: choices.images } : {}),
+              onPick: (image) => void saveImage(image)
+            }
+          } : {})}
           onPick={(rows, picked) => {
             const changed = Object.fromEntries(rows.map((row) => [row, picked])) as Partial<BotShownRows>
             void save({ ...slots, ...changed }, { slots: changed })
