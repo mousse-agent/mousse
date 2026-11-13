@@ -7,6 +7,7 @@ import { LocalMmsClient } from '../src/mms/protocol/client'
 import type { ChatMessage } from '../src/shared/types'
 import { writtenFilePaths, type TurnFileResult } from '../src/shared/turnFiles'
 import { git, gitFoundationFixture } from './fixtures/gitFoundation'
+import { threadWroteFile, turnFilePath } from '../src/mms/git/turnFile'
 
 /**
  * `review.turnFile`: a file a thread's agent wrote, wherever it is, is a diff against its own repository's last commit,
@@ -131,5 +132,22 @@ describe('the files a thread wrote, as the daemon reads them from its transcript
       row('bash', { toolCall: call('Bash', { command: 'echo > /a/shell.txt' }) })
     ]
     expect(writtenFilePaths(messages)).toEqual(['/a/one.ts', 'src/two.ts', 'C:\\x\\three.txt', '/a/four.md'])
+  })
+})
+
+describe('which written file a Windows path names', () => {
+  // Raw strings: the backslashes are the path's own.
+  const folder = String.raw`C:\repo`
+  const written = [String.raw`J:\ryspa\mousse\scratch\mousse-test.txt`, 'src/app.ts']
+  it.each([
+    ['the same path', String.raw`J:\ryspa\mousse\scratch\mousse-test.txt`, true],
+    ['another case of drive and folder', String.raw`j:\RYSPA\mousse\scratch\mousse-test.txt`, true],
+    ['forward slashes', 'J:/ryspa/mousse/scratch/mousse-test.txt', true],
+    ['a relative path inside the thread folder', String.raw`C:\repo\src\app.ts`, true],
+    ['a file the thread did not write', String.raw`J:\ryspa\mousse\scratch\other.txt`, false],
+    ['a path that climbs out to a written name', String.raw`C:\repo\..\src\app.ts`, false],
+  ] as const)('%s', (_name, target, expected) => {
+    const path = turnFilePath(target, folder, 'win32')!
+    expect(threadWroteFile(written, path, folder, 'win32')).toBe(expected)
   })
 })
