@@ -163,6 +163,8 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
   // The last list of each thread with an open edit seen while that thread was not shown: a save that fails there
   // decides on it.
   const hiddenLists = useRef(new Map<string, QueuedMessage[]>())
+  // The queue of a thread being opened (`openingThreadId`): its select sends it before the view that shows the thread.
+  const openingList = useRef<{ threadId: string; items: QueuedMessage[] } | null>(null)
   // A list is kept only while its thread has an open edit: a save, a cancel, a recovery or the thread's deletion
   // drops it, so the lists (and their images) do not pile up over a session.
   useEffect(() => useAppStore.subscribe((state, previous) => {
@@ -273,6 +275,7 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     let settled = false
     const unsub = window.mousse.queue.onUpdated(({ threadId: updatedId, items: next }) => {
       if (updatedId !== threadId) {
+        if (updatedId === useAppStore.getState().openingThreadId) openingList.current = { threadId: updatedId, items: next }
         if (useAppStore.getState().queueEditDrafts[updatedId]) hiddenLists.current.set(updatedId, next)
         reconcileEdit(updatedId, next)
         return
@@ -288,6 +291,13 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
       setItemsThread(updatedId)
     })
     if (!threadId) return unsub
+    const early = openingList.current
+    openingList.current = null
+    if (early?.threadId === threadId) {
+      settled = true
+      setItems(early.items)
+      setItemsThread(threadId)
+    }
     const fallback = window.setTimeout(() => {
       if (!settled) void loadQueue(threadId)
     }, 120)

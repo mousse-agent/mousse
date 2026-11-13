@@ -21,6 +21,7 @@ import {
   type WatchedBrowserUpdate,
   type WatchedBrowserView
 } from '../../browser/watched'
+import type { BrowserWindowDisplay } from '../../browser/window'
 
 /**
  * A bot's own browser as its owner sees it (the live preview in its replies and the split view).
@@ -50,6 +51,11 @@ export interface BotBrowserView extends WatchedBrowserView {
   activationId?: string
   /** The browser is being set up on this computer (its first use): how far, when known. */
   setup?: { percent?: number }
+  /**
+   * This view may open the browser in a real window ("Open in a window"): it is the desktop app on the computer the
+   * browser runs on, and the service there runs on a desktop that can show one.
+   */
+  windowable?: true
 }
 
 /**
@@ -94,6 +100,20 @@ export const BOT_BROWSER_FILES_LIMIT_TEXT = WATCHED_BROWSER_FILES_LIMIT_TEXT
 export interface BotBrowserFilesApi {
   params: { botId: string; viewId: string; holdId: string; paths: string[] }
   result: { token: string; count: number }
+}
+
+/**
+ * The bot's browser as a real window on the screen of the app that asks ("Open in a window"), or back without one.
+ * The app's main process alone calls this (it is not one of the renderer's methods), on the window's own connection,
+ * and on Linux names its own display. The view must hold the browser: the window lasts as long as that hold, and
+ * closing it gives the browser back to the bot. A browser cannot show a window it started without, so it starts again
+ * with one on the same profile: its tabs load again at their addresses, sign-ins kept.
+ */
+export const BOT_BROWSER_WINDOW_METHOD = 'bots.browser.window'
+export const BOTS_BROWSER_WINDOW_CAPABILITY = 'bots.browser.window.v1'
+export interface BotBrowserWindowApi {
+  params: { botId: string; viewId: string; holdId: string; op: 'open' | 'close'; display?: BrowserWindowDisplay }
+  result: { browser: BotBrowserView }
 }
 
 /** The bot-browser methods (`bots.browser.*`), apart from the required Bot UI set: an older daemon lacks them. */

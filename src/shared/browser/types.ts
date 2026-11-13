@@ -313,7 +313,7 @@ export interface BrowserWorkerRequest {
   version: 1
   id: string
   profileId: string
-  method: 'session.open' | 'session.close' | 'tabs.list' | 'tabs.new' | 'tabs.close' | 'tabs.switch' | 'observe' | 'find' | 'act' | 'human.act' | 'wait' | 'extract' | 'control.take' | 'control.release' | 'frame' | 'frame.next' | 'frame.stop' | 'human.input'
+  method: 'session.open' | 'session.close' | 'tabs.list' | 'tabs.new' | 'tabs.close' | 'tabs.switch' | 'observe' | 'find' | 'act' | 'human.act' | 'wait' | 'extract' | 'control.take' | 'control.release' | 'frame' | 'frame.next' | 'frame.stop' | 'human.input' | 'window.open' | 'window.close' | 'window.wait'
   params: Record<string, unknown>
 }
 export interface BrowserWorkerResponse {

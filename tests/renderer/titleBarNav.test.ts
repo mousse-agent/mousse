@@ -80,7 +80,9 @@ function mount(element: ReturnType<typeof createElement>) {
 }
 
 beforeEach(() => {
-  ;(window as unknown as { mousse: unknown }).mousse = { threads: { select: vi.fn(async () => undefined) }, platform: 'darwin' }
+  // Like the main process, a select sends the thread's view, which shows a thread the window had no transcript for.
+  const select = vi.fn(async (threadId: string) => useAppStore.getState().applyThreadView({ threadId, messages: [], agents: [], tasks: [] }))
+  ;(window as unknown as { mousse: unknown }).mousse = { threads: { select }, platform: 'darwin' }
   setStore({ threads, projects, activeThreadId: null, sidebarMode: 'projects', settingsOpen: false, scheduledOpen: false, usageOpen: false, threadsSidebarOpen: true, threadsSidebarView: 'projects' })
   useThreadHistoryStore.setState(EMPTY_THREAD_HISTORY)
   vi.mocked(confirmNavigation).mockResolvedValue(true)

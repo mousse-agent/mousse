@@ -2,7 +2,7 @@ import { useRef } from 'react'
 import { Maximize } from '../../lib/icons'
 import type { BotSummary } from '../../../shared/bots/personal/chat'
 import { BOT_BROWSER_PREVIEW_WATCH, type BotBrowserView } from '../../../shared/bots/personal/browser'
-import { botBrowserKit, useBotBrowserStore, useBotBrowserStream, useBotBrowserWatch, type BotBrowserStream } from '../../stores/botBrowserStore'
+import { botBrowserKit, canOpenBotBrowserWindow, useBotBrowserStore, useBotBrowserStream, useBotBrowserWatch, type BotBrowserStream } from '../../stores/botBrowserStore'
 import { WatchedBrowserFrame } from '../browser/WatchedBrowserFrame'
 import { WatchedBrowserPane, sinceText, useNow, watchedBrowserStatus, type WatchedBrowserStatus } from '../browser/WatchedBrowserPane'
 import './botBrowser.css'
@@ -37,7 +37,8 @@ export function BotBrowserPreview({ bot, view }: { bot: BotSummary; view: BotBro
   const figure = useRef<HTMLElement>(null)
   // The split view shows the same tab larger: while it is open, it alone is watched.
   const paneOpen = useBotBrowserStore((state) => state.pane === bot.id)
-  useBotBrowserWatch(bot.id, figure, view.open && !paneOpen ? BOT_BROWSER_PREVIEW_WATCH : undefined)
+  // A browser open in a window is seen there: nothing is pictured meanwhile.
+  useBotBrowserWatch(bot.id, figure, view.open && !view.windowed && !paneOpen ? BOT_BROWSER_PREVIEW_WATCH : undefined)
   const stream = useBotBrowserStream(bot.id)
   const now = useNow(Boolean(view.open && stream && !stream.live))
   const status = browserStatus(view, stream, bot.name, now)
@@ -59,17 +60,24 @@ export function BotBrowserPreview({ bot, view }: { bot: BotSummary; view: BotBro
  * The split view: the bot's browser beside its chat (the general `WatchedBrowserPane`). The owner
  * watches; Take over hands the browser to this window (the bot's actions wait), and everything they do
  * then reaches the page in order, each input answered; Give back returns it. A closed browser can be
- * opened again here, under the owner's control.
+ * opened again here, under the owner's control. On the computer the browser runs on, Open in a window shows it as a
+ * real window instead, held the same way, until Close window (or the window's own close) gives it back.
  */
 export function BotBrowserPane({ bot, view }: { bot: BotSummary; view: BotBrowserView }) {
   const busy = useBotBrowserStore((state) => state.busy)
   const open = (url: string | undefined) => void useBotBrowserStore.getState().open(bot.id, url)
-  return <WatchedBrowserPane kit={botBrowserKit} browserKey={bot.id} label={`${bot.name}'s browser`} user={bot.name} view={view} open={open}
+  const inWindow = {
+    offered: Boolean(view.windowable) && canOpenBotBrowserWindow(),
+    open: () => void useBotBrowserStore.getState().inWindow(bot.id, 'open'),
+    close: () => void useBotBrowserStore.getState().inWindow(bot.id, 'close')
+  }
+  return <WatchedBrowserPane kit={botBrowserKit} browserKey={bot.id} label={`${bot.name}'s browser`} user={bot.name} view={view} open={open} inWindow={inWindow}
     closed={(typed) => <>
       <p>{view.stopped ? 'The browser stopped.' : `${bot.name}'s browser is closed.`}</p>
       <button type="button" disabled={busy} onClick={() => open(/^https?:\/\//i.test(typed) ? typed : undefined)}>Open it</button>
     </>}
-    line={(holding) => holding === 'this-window' ? `You're using ${bot.name}'s browser. Sites you sign in to stay signed in for it. Give it back when you're done.`
+    line={(holding) => holding === 'window' ? `${bot.name} waits until you close the window.`
+      : holding === 'this-window' ? `You're using ${bot.name}'s browser. Sites you sign in to stay signed in for it. Give it back when you're done.`
       : holding === 'another-window' ? 'Held in another window. Take over to use it here.'
       : holding === 'agent' ? `${bot.name} is using its own browser, apart from your tabs. Take over to click or type in it.`
       : `Only ${bot.name} uses this browser. Open it to sign in to a site for it.`} />

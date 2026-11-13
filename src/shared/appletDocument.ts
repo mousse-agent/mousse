@@ -62,7 +62,7 @@ export function appletDocument(
   for(const [tag,attributes] of iconGeometry[canonical]){const node=document.createElementNS(ns,tag);for(const [key,value] of Object.entries(attributes)){if(key==='key'||key==='strokeWidth')continue;const attr=key.replace(/[A-Z]/g,letter=>'-'+letter.toLowerCase());node.setAttribute(attr,String(value))}svg.appendChild(node)}return svg;
  };
  Object.defineProperty(window,'mousseApplet',{value:Object.freeze({get appearance(){return currentAppearance},icon:makeIcon,iconNames,data:${json(source.data)},state:${json(state)},saveState:value=>send('state',value),resize:height=>send('resize',height),reportError:message=>send('error',String(message).slice(0,2000)),requestConversationInput:text=>send('conversation-input',String(text).slice(0,4000))}),writable:false,configurable:false});
- addEventListener('error',event=>{event.preventDefault();send('error',String(event.message).slice(0,2000))});
+ addEventListener('error',event=>{event.preventDefault();const message=String(event.message);if(message.startsWith('ResizeObserver loop'))return;send('error',message.slice(0,2000))});
  addEventListener('unhandledrejection',event=>{event.preventDefault();send('error','An applet promise failed.')});
  addEventListener('DOMContentLoaded',()=>{
 

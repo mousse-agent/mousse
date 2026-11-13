@@ -25,6 +25,7 @@ import { ExecutionPolicyService } from '../../execution/ExecutionPolicyService'
 import { snapshotBrowserExecutionBinding } from '../../orchestrator/browser/binding'
 import { browserToolCapability } from '../../orchestrator/browser/tools'
 import type { BotBrowserHost, BotTurnBrowser } from '../activation/dispatcher'
+import type { BrowserWindowDisplay } from '../../../shared/browser/window'
 
 /**
  * Each personal bot's own browser ("use the browser", docs/bots.md). A bot gets one managed
@@ -156,6 +157,12 @@ const BOT_TURN_TEXT: BrowserTurnsText = {
 
 /** The line in the bot's chat when the browser comes back to it because the view that held it went away. */
 export const HOLD_EXPIRED_NOTICE = 'I have my browser back: the window you took it over in went away.'
+
+/**
+ * The line in the bot's chat when its browser's real window stopped by itself (a crash, or its process ended from
+ * outside) rather than being closed: what was done in its last moment may not have been kept.
+ */
+export const WINDOW_STOPPED_NOTICE = 'My browser window stopped unexpectedly. I have my browser back; a sign-in from its last second may not have been kept.'
 
 /** The bot's answer when it tries to act, open or load a page while its owner holds the browser. */
 function ownerHolds(): BrowserAutomationError {
@@ -318,6 +325,19 @@ export class BotBrowsers implements BotBrowserHost {
    */
   async chooseFiles(botId: string, viewId: string, holdId: string, paths: string[], connectionId = 'local'): Promise<{ token: string; count: number }> {
     return this.stateFor(botId).viewer.chooseFiles(viewId, holdId, paths, connectionId)
+  }
+
+  /**
+   * The bot's browser as a real window on the screen of the app that asked (`open`; `display`: the app's own, on
+   * Linux), or back without one, given back to the bot (`close`): for the view that holds it, on that connection
+   * (`bots.browser.window`, called by the app's main process alone; `WatchedBrowser.openWindow`).
+   */
+  async window(botId: string, viewId: string, holdId: string, op: 'open' | 'close', display: BrowserWindowDisplay | undefined, connectionId = 'local'): Promise<BotBrowserView> {
+    const state = this.stateFor(botId)
+    const view = op === 'open'
+      ? await state.viewer.openWindow(viewId, holdId, connectionId, display)
+      : await state.viewer.closeWindow(viewId, holdId, connectionId)
+    return this.botView(state, view)
   }
 
   /** An older app's Take over (`owner`) or Give back (`bot`): a hold of that window's connection. */
@@ -707,6 +727,7 @@ export class BotBrowsers implements BotBrowserHost {
       // The bot has its browser again: the view follows a run's tab again.
       givenBack: () => this.refollow(state),
       expired: () => this.notice?.(botId, HOLD_EXPIRED_NOTICE),
+      windowStopped: () => this.notice?.(botId, WINDOW_STOPPED_NOTICE),
       text: { closed: 'The bot\'s browser is closed.', tooManyViews: 'Too many views are watching this bot\'s browser. Close one, then try again.' },
       log: { name: 'bot browser', fields: { botId } },
       now: this.now,

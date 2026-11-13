@@ -93,7 +93,16 @@ export interface WatchedBrowserState<V extends WatchedBrowserView> {
    * them, and the page gets only those, by a one-time token; the paths never pass through here.
    */
   chooseFiles(key: string, chooser: { multiple: boolean; site?: string }): Promise<void>
+  /**
+   * Open in a window (`open`): this window takes the browser over (when it does not hold it yet) and the app opens it
+   * as a real window on this computer's screen, for as long as the hold lasts. Close window (`close`) closes it and
+   * gives the browser back. A bot's only, through the app (`config.window`).
+   */
+  inWindow(key: string, op: 'open' | 'close'): Promise<void>
 }
+
+/** Open in a window and Close window, through the app: the browser's view after, or why it was refused. */
+export type BrowserInWindow<V> = (request: { key: string; viewId: string; holdId: string; op: 'open' | 'close' }) => Promise<{ browser?: V; refused?: string }>
 
 /** One call to the service: method and params as the store names them. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -120,6 +129,8 @@ export interface WatchedBrowserStoreConfig<E extends WatchedBrowserUpdate> {
   frames: WatchedBrowserFrames<E>
   /** This computer's own file dialog, through the app. */
   chooseFiles(): ChooseFiles | undefined
+  /** Open in a window and Close window, through the app (a bot's only). */
+  window?(): BrowserInWindow<WatchedBrowserView> | undefined
 }
 
 /** The service (or this app's bridge) does not know the method. */
@@ -223,6 +234,10 @@ export function createWatchedBrowserStore<V extends WatchedBrowserView, E extend
   let unsubscribeFrames: (() => void) | null = null
   /** When pictures were last known to flow, per browser. */
   const lastGood = new Map<string, number>()
+  /** Holds this window gave back: an answer read before it did (a watch, a poll) never picks one up again. */
+  const givenBack = new Set<string>()
+  /** Holds that opened the browser in a real window: one that ends went back with its window, which is no error. */
+  const windowHolds = new Set<string>()
 
   const call: WatchedBrowserCall = (method, params) => (transport ?? ((m, p) => window.mousse.platformRequest.request(m as never, p)))(method, params)
   const subscribeFrames: WatchedBrowserFrames<E> = (listener) => (frameSource ?? config.frames)(listener)
@@ -294,6 +309,7 @@ export function createWatchedBrowserStore<V extends WatchedBrowserView, E extend
         const hold = get().holds[key]
         // What the person did before Give back reaches the page first.
         await channels.get(key)?.drain(1_500)
+        if (hold && hold.id !== LEGACY_HOLD) givenBack.add(hold.id)
         dropHold(key)
         const legacy = config.methods.legacy
         if (legacy && (!hold || hold.id === LEGACY_HOLD)) return call(legacy.control, params(key, { control: 'bot' }))
@@ -309,6 +325,38 @@ export function createWatchedBrowserStore<V extends WatchedBrowserView, E extend
       open: (key, url) => act(key, () => {
         if (!config.methods.open) throw new Error('This browser opens when its agent uses it.')
         return call(config.methods.open, params(key, { ...(url ? { url } : {}), ...(legacyService ? {} : { viewId: viewId(), platform: viewerPlatform() }) }))
+      }),
+      inWindow: (key, op) => act(key, async () => {
+        const run = config.window?.()
+        if (!run) throw new Error('This app can\'t open the browser in a window.')
+        // Opening takes the browser over first: the window is this person's for as long as they hold it.
+        let taken = false
+        if (op === 'open' && !get().holds[key]) {
+          const answer = await call(config.methods.hold, params(key, { viewId: viewId(), request: { op: 'take', platform: viewerPlatform() } })) as { browser: V; hold?: WatchedBrowserHold }
+          if (answer.hold) adoptHold(key, answer.hold)
+          put(key, answer.browser)
+          taken = Boolean(answer.hold)
+        }
+        const hold = get().holds[key]
+        if (!hold || hold.id === LEGACY_HOLD) throw new Error('Take over first.')
+        // What the person did in the pictures reaches the page before the browser starts again.
+        await channels.get(key)?.drain(1_500)
+        const answer = await run({ key, viewId: viewId(), holdId: hold.id, op })
+        if (answer.refused || !answer.browser) {
+          // Nothing half-open: a hold taken only for the window is given back.
+          if (taken) {
+            givenBack.add(hold.id)
+            dropHold(key)
+            const released = await call(config.methods.hold, params(key, { viewId: viewId(), request: { op: 'release', holdId: hold.id } })).catch(() => undefined) as { browser?: V } | undefined
+            if (released?.browser) put(key, released.browser)
+          }
+          throw new Error(answer.refused ?? 'The window did not open.')
+        }
+        if (op === 'close') {
+          givenBack.add(hold.id)
+          dropHold(key)
+        } else windowHolds.add(hold.id)
+        return { browser: answer.browser as V }
       }),
       async chooseFiles(key, chooser) {
         const hold = get().holds[key]
@@ -353,6 +401,7 @@ export function createWatchedBrowserStore<V extends WatchedBrowserView, E extend
 
   /** This window holds the browser (taken now, or picked up again after a reload): its channel and heartbeat. */
   function adoptHold(key: string, hold: WatchedBrowserHold): void {
+    if (givenBack.has(hold.id)) return
     const known = useStore.getState().holds[key]
     if (known?.id === hold.id && channels.has(key)) return
     dropHold(key)
@@ -380,8 +429,11 @@ export function createWatchedBrowserStore<V extends WatchedBrowserView, E extend
         put(key, answer.browser)
       }, (cause) => {
         if (String((cause as { code?: unknown } | null)?.code ?? '') === 'hold_ended' || /don't hold this browser/i.test(errorText(cause))) {
+          // A browser in a window goes back when its window closes: nothing went wrong, the view reads it again.
+          const inWindow = windowHolds.has(hold.id) || Boolean(useStore.getState().views[key]?.windowed)
           dropHold(key, 'You don\'t hold the browser now')
-          useStore.setState({ error: 'You no longer hold this browser: it went back while this window was away. Take over to use it again.', errorDetail: null })
+          if (inWindow) void useStore.getState().load(key, false)
+          else useStore.setState({ error: 'You no longer hold this browser: it went back while this window was away. Take over to use it again.', errorDetail: null })
         } else unanswered = true
       })
     }
@@ -433,6 +485,8 @@ export function createWatchedBrowserStore<V extends WatchedBrowserView, E extend
   function put(key: string, view: V): void {
     // This window holds it (a window that reloaded picks its hold up again, at the service's last number).
     if (view.holder === 'this-view' && view.hold && !legacyService) adoptHold(key, view.hold)
+    // A hold whose browser is in a window (this app reloaded while it was): it goes back with that window.
+    if (view.windowed && view.hold) windowHolds.add(view.hold.id)
     useStore.setState((state) => {
       const previous = state.views[key]
       const frame = view.frame && previous?.frame && samePicture(view.frame, previous.frame) ? previous.frame : view.frame ?? previous?.frame
@@ -681,6 +735,9 @@ export function createWatchedBrowserStore<V extends WatchedBrowserView, E extend
     frameSource = frames ?? null
     for (const key of [...watches.keys()]) stopWatch(key)
     for (const key of [...channels.keys()]) dropHold(key)
+    // Another service: its holds are its own.
+    givenBack.clear()
+    windowHolds.clear()
     legacyService = false
     unsubscribeFrames?.()
     unsubscribeFrames = null

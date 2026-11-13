@@ -115,6 +115,61 @@ describe('a bot\'s model rows', () => {
     expect(differing.onOneWork).toHaveBeenCalledTimes(1)
   })
 
+  describe('the Images row (#1088)', () => {
+    const IMAGE_PROVIDERS: LlmProviderOption[] = [
+      { id: 'openrouter', instanceId: 'pi:openrouter', label: 'OpenRouter', models: [{ id: 'google/gemini-3.1-flash-image', label: 'Gemini 3.1 Flash Image' }] }
+    ]
+    const opus = { instanceId: 'claude', model: 'opus' }
+    const SAME: BotShownRows = { talk: opus, light: opus, medium: opus, hard: opus }
+    const renderImage = (image: { providers?: LlmProviderOption[]; pick?: { instanceId: string; model: string } | null; missing?: string }) => {
+      const onImage = vi.fn()
+      act(() => root.render(createElement(BotModelRows, {
+        name: 'Pip', providers: PROVIDERS, slots: SAME, onPick: vi.fn(), onOneWork: vi.fn(),
+        image: { providers: image.providers ?? IMAGE_PROVIDERS, pick: image.pick ?? null, ...(image.missing ? { missing: image.missing } : {}), usage: { today: 3, perDay: 20, perTurn: 4 }, onPick: onImage }
+      })))
+      return onImage
+    }
+    const advanced = () => host.querySelector<HTMLButtonElement>('[role="switch"]')!
+
+    it('sits under the work rows in Advanced, one control like the others, starting at None', () => {
+      const onImage = renderImage({})
+      expect(host.querySelector('[data-testid="bot-model-row-image"]')).toBeNull()
+      act(() => advanced().click())
+      expect(rows().map((row) => row.querySelector('.bot-model-row-label')!.textContent)).toEqual(['Talk', 'Light work', 'Medium work', 'Hard work', 'Images'])
+      const row = host.querySelector('[data-testid="bot-model-row-image"]')!
+      expect(row.querySelectorAll('button')).toHaveLength(1)
+      expect(row.querySelector('.settings-model-picker')).not.toBeNull()
+      expect(pickerOf('Images').getAttribute('aria-label')).toBe('Pip\'s Images model: None')
+      pick('Images', 'OpenRouter')
+      expect(onImage).toHaveBeenLastCalledWith({ instanceId: 'pi:openrouter', model: 'google/gemini-3.1-flash-image' })
+    })
+
+    it('opens with a pick, names it with today\'s pictures, and None in the menu takes it away', () => {
+      const onImage = renderImage({ pick: { instanceId: 'pi:openrouter', model: 'google/gemini-3.1-flash-image' } })
+      expect(pickerOf('Images').getAttribute('aria-label')).toBe('Pip\'s Images model: Gemini 3.1 Flash Image')
+      expect(pickerOf('Images').title).toBe('Gemini 3.1 Flash Image on OpenRouter · 3 of 20 today')
+      act(() => pickerOf('Images').click())
+      act(() => [...document.querySelectorAll<HTMLButtonElement>('.model-picker-clear')].find((button) => button.textContent === 'None')!.click())
+      expect(onImage).toHaveBeenLastCalledWith(null)
+    })
+
+    it('says so in one line while no entry can make pictures, with what to add in its tooltip', () => {
+      renderImage({ providers: [], missing: 'Add an OpenRouter entry with an API key in Settings → Providers to pick an image model.' })
+      act(() => advanced().click())
+      expect(pickerOf('Images').getAttribute('aria-label')).toBe('Pip\'s Images model: None available')
+      expect(pickerOf('Images').title).toMatch(/^Add an OpenRouter entry/)
+      expect(pickerOf('Images').disabled).toBe(true)
+    })
+
+    it('a pick no entry offers any more can still be set to None', () => {
+      const onImage = renderImage({ providers: [], pick: { instanceId: 'pi:openrouter', model: 'google/gemini-3.1-flash-image' } })
+      expect(pickerOf('Images').getAttribute('aria-label')).toBe("Pip's Images model: google/gemini-3.1-flash-image · not available")
+      act(() => pickerOf('Images').click())
+      act(() => [...document.querySelectorAll<HTMLButtonElement>('.model-picker-clear')].find((button) => button.textContent === 'None')!.click())
+      expect(onImage).toHaveBeenLastCalledWith(null)
+    })
+  })
+
   it('Advanced can\'t close while the rows differ and Medium work has no pick', () => {
     render({ talk: null, light: { instanceId: 'claude', model: 'opus' }, medium: null, hard: null })
     const advanced = host.querySelector<HTMLButtonElement>('[role="switch"]')!

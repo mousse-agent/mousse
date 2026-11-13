@@ -3,6 +3,7 @@ import type { StoreApi, UseBoundStore } from 'zustand'
 import { ArrowLeft, ArrowRight, Globe, RefreshCw, X } from '../../lib/icons'
 import { WATCHED_BROWSER_PANE, type WatchedBrowserDialog, type WatchedBrowserInput, type WatchedBrowserView } from '../../../shared/browser/watched'
 import { browserProblemForPerson } from '../../../shared/browser/navigation'
+import { BROWSER_WINDOW_LINE, BROWSER_WINDOW_TOOLTIP } from '../../../shared/browser/window'
 import type { WatchedBrowserNeed, WatchedBrowserState, WatchedBrowserStream } from '../../stores/watchedBrowserStore'
 import type { ChannelHealth } from '../../stores/browserInputChannel'
 import { useAppStore } from '../../stores/appStore'
@@ -57,6 +58,7 @@ const PROBLEM_WORD = { unreachable: 'Can\'t reach site', blocked: 'Refused', 'ne
 export function watchedBrowserStatus(view: WatchedBrowserView & { setup?: unknown }, stream: WatchedBrowserStream | undefined, user: string, now: number): WatchedBrowserStatus {
   if (view.setup) return { text: 'Setting up', live: false }
   if (!view.open) return view.stopped ? { text: 'Stopped', detail: 'The browser stopped. It starts again when it is next used.', live: false } : { text: 'Closed', live: false }
+  if (view.windowed) return { text: 'In a window', live: false }
   if (stream && !stream.live) {
     const since = sinceText(stream.since, now)
     return { text: `Not updating · ${since}`, detail: `No new picture for ${since}. Mousse keeps trying.`, live: false, attention: true }
@@ -152,10 +154,20 @@ export interface WatchedBrowserKit<V extends WatchedBrowserView> {
   useStream(key: string): WatchedBrowserStream | undefined
 }
 
-/** Who has the browser, as this window sees it: what the line under the picture says when nothing else is. */
-export type WatchedBrowserHolding = 'this-window' | 'another-window' | 'agent' | 'closed'
+/**
+ * Who has the browser, as this window sees it: what the line under the picture says when nothing else is.
+ * `window`: this window holds it, and it is open in a real window of its own.
+ */
+export type WatchedBrowserHolding = 'this-window' | 'window' | 'another-window' | 'agent' | 'closed'
 
-export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { percent?: number } }>({ kit, browserKey, label, user, view, line, lineDetail, closed, open, className }: {
+/** Open in a window and Close window (a bot's browser on this computer): `offered` when this view may open one. */
+export interface WatchedBrowserWindowControl {
+  offered: boolean
+  open(): void
+  close(): void
+}
+
+export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { percent?: number } }>({ kit, browserKey, label, user, view, line, lineDetail, closed, open, inWindow, className }: {
   kit: WatchedBrowserKit<V>
   /** The browser's key in its store (a bot's id, a thread's id). */
   browserKey: string
@@ -172,6 +184,8 @@ export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { pe
   closed(typed: string): ReactNode
   /** Opens a closed browser at an address (a bot's); without it the address waits for an open browser. */
   open?(url: string | undefined): void
+  /** Open in a window and Close window (a bot's browser on this computer). */
+  inWindow?: WatchedBrowserWindowControl
   className?: string
 }) {
   const busy = kit.useStore((state) => state.busy)
@@ -184,6 +198,9 @@ export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { pe
   // This window holds it: its input goes to the page. Another window may hold it instead.
   const owner = view.open && view.control === 'owner' && Boolean(hold) && view.holder !== 'another-view'
   const elsewhere = view.open && view.control === 'owner' && !owner
+  // In a real window of its own: the person uses it there, and nothing is pictured or sent from here.
+  const windowed = view.open && Boolean(view.windowed)
+  const drives = owner && !windowed
   const url = view.tab?.url ?? ''
   const [address, setAddress] = useState(url)
   const editing = useRef(false)
@@ -193,58 +210,63 @@ export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { pe
   useEffect(() => { if (!editing.current) setAddress(url) }, [url])
   // Watched while on screen: the panel's width up to 960 px, faster while the person holds the browser.
   const width = useStageWidth(stage)
-  kit.useWatch(browserKey, stage, view.open ? { width, fps: owner ? WATCHED_BROWSER_PANE.heldFps : WATCHED_BROWSER_PANE.fps } : undefined)
+  kit.useWatch(browserKey, stage, view.open && !windowed ? { width, fps: owner ? WATCHED_BROWSER_PANE.heldFps : WATCHED_BROWSER_PANE.fps } : undefined)
   const stream = kit.useStream(browserKey)
   const fresh = Boolean(note && Date.now() - note.at < NOTE_MS)
   const now = useNow(Boolean(view.open && stream && !stream.live) || fresh)
   const status = watchedBrowserStatus(view, stream, user, now)
   const quiet = view.open && !status.live && Boolean(status.detail)
   const input = useBrowserInput({
-    owner, view, frame, keys,
+    owner: drives, view, frame, keys,
     send: (entry, picture) => store().send(browserKey, entry, picture),
     note: (text) => kit.useStore.setState((state) => ({ inputNote: { ...state.inputNote, [browserKey]: { text, at: Date.now() } } }))
   })
   // The browser runs on this computer: it is named as the app names this computer everywhere.
   const computer = useAppStore((state) => localDeviceName(state.appInfo?.deviceName))
-  const said = owner ? inputLine(health, note, computer, now) : undefined
+  const said = drives ? inputLine(health, note, computer, now) : undefined
   const send = (entry: WatchedBrowserInput) => { input.send(entry) }
-  const holding: WatchedBrowserHolding = owner ? 'this-window' : elsewhere ? 'another-window' : view.open ? 'agent' : 'closed'
+  const holding: WatchedBrowserHolding = owner ? (windowed ? 'window' : 'this-window') : elsewhere ? 'another-window' : view.open ? 'agent' : 'closed'
 
   const go = () => {
     editing.current = false
     const text = address.trim()
     if (!text) return
     const target = /^https?:\/\//i.test(text) ? text : `https://${text}`
-    if (owner) send({ kind: 'navigate', url: target })
+    if (drives) send({ kind: 'navigate', url: target })
     else if (!view.open) open?.(target)
   }
 
   return <aside className={`watched-browser-pane${className ? ` ${className}` : ''}`} aria-label={label}>
     <header className="watched-browser-bar">
-      <button type="button" aria-label="Back" title="Back" disabled={!owner || busy} onClick={() => send({ kind: 'back' })}><ArrowLeft size={15} /></button>
-      <button type="button" aria-label="Forward" title="Forward" disabled={!owner || busy} onClick={() => send({ kind: 'forward' })}><ArrowRight size={15} /></button>
-      <button type="button" aria-label="Reload" title="Reload" disabled={!owner || busy} onClick={() => send({ kind: 'reload' })}><RefreshCw size={15} /></button>
+      <button type="button" aria-label="Back" title="Back" disabled={!drives || busy} onClick={() => send({ kind: 'back' })}><ArrowLeft size={15} /></button>
+      <button type="button" aria-label="Forward" title="Forward" disabled={!drives || busy} onClick={() => send({ kind: 'forward' })}><ArrowRight size={15} /></button>
+      <button type="button" aria-label="Reload" title="Reload" disabled={!drives || busy} onClick={() => send({ kind: 'reload' })}><RefreshCw size={15} /></button>
       <form className={`watched-browser-address${view.open && view.loading ? ' is-loading' : ''}`} onSubmit={(event) => { event.preventDefault(); go() }}
         aria-busy={view.open && view.loading ? true : undefined}>
         <Globe size={13} aria-hidden />
-        <input aria-label={`${label} address`} value={address} readOnly={view.open ? !owner : !open} placeholder="Enter a web address"
+        <input aria-label={`${label} address`} value={address} readOnly={view.open ? !drives : !open} placeholder="Enter a web address"
           onFocus={() => { editing.current = true }} onBlur={() => { editing.current = false }} onChange={(event) => setAddress(event.target.value)} spellCheck={false} />
       </form>
-      {view.open && (owner
+      {view.open && !windowed && !elsewhere && inWindow?.offered && <button type="button" className="watched-browser-control" disabled={busy} title={BROWSER_WINDOW_TOOLTIP}
+        onClick={() => inWindow.open()}>Open in a window</button>}
+      {view.open && (windowed && owner
+        ? <button type="button" className="watched-browser-control" disabled={busy} title={BROWSER_WINDOW_TOOLTIP} onClick={() => inWindow?.close()}>Close window</button>
+        : owner
         ? <button type="button" className="watched-browser-control" disabled={busy} onClick={() => void store().giveBack(browserKey)}>Give back</button>
         : <button type="button" className="watched-browser-control" disabled={busy} title={elsewhere ? 'Held in another window' : undefined} onClick={() => void store().takeOver(browserKey, elsewhere)}>Take over</button>)}
       <button type="button" aria-label="Close the browser view" title="Close" onClick={() => store().closePane()}><X size={15} /></button>
     </header>
     <div className="watched-browser-stage" ref={stage}>
-      <WatchedBrowserFrame label={label} view={view} frameRef={frame} className={owner ? 'is-held' : undefined} {...input.frameHandlers}>
+      <WatchedBrowserFrame label={label} view={view} frameRef={frame} className={drives ? 'is-held' : undefined} {...(windowed ? {} : input.frameHandlers)}>
         {input.marks.map((mark) => <span key={mark.seq} className={`watched-browser-mark is-${mark.state}`} style={{ left: `${mark.left}%`, top: `${mark.top}%` }} aria-hidden />)}
-        {owner && <textarea ref={keys} className="watched-browser-keys" aria-label={`Type into ${label}`} autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false}
+        {drives && <textarea ref={keys} className="watched-browser-keys" aria-label={`Type into ${label}`} autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false}
           {...input.keyHandlers} />}
-        {view.open && view.dialog && <PageDialog key={`${view.dialog.type}:${view.dialog.message}`} dialog={view.dialog} canAnswer={owner}
+        {view.open && !windowed && view.dialog && <PageDialog key={`${view.dialog.type}:${view.dialog.message}`} dialog={view.dialog} canAnswer={owner}
           answer={(accept, text) => send({ kind: 'dialog', accept, ...(text !== undefined ? { text } : {}) })} />}
-        {owner && !view.dialog && view.chooser && <FileRequest chooser={view.chooser}
+        {drives && !view.dialog && view.chooser && <FileRequest chooser={view.chooser}
           choose={() => void store().chooseFiles(browserKey, view.chooser!)} cancel={() => send({ kind: 'files' })} />}
         {!view.open && !view.setup && <div className="watched-browser-closed">{closed(address.trim())}</div>}
+        {windowed && <div className="watched-browser-closed"><p>{BROWSER_WINDOW_LINE}</p></div>}
       </WatchedBrowserFrame>
     </div>
     {said

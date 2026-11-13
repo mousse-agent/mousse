@@ -9,8 +9,9 @@ import { BOT_THREADS_PERMISSION, botGrantTool } from '../../../shared/bots/perso
 import type { BotOwnerTurn } from '../../../shared/bots/personal/definition'
 import type { PermissionMode } from '../../../shared/permissionMode'
 import type { BotMemoryForgetResult, BotMemoryListing } from '../../../shared/bots/personal/memory'
-import { MAX_BOT_CHAT_PAGE, type BotChatAttachment, type BotModelOption, type BotRunsOnChoices, type BotShownRows } from '../../../shared/bots/personal/methods'
-import { allPinned, isPinned, shownPick, slotsAllOn, UNPICKED_SLOTS, withSlots } from '../../../shared/bots/personal/modelSlots'
+import { MAX_BOT_CHAT_PAGE, type BotChatAttachment, type BotImageUsage, type BotModelOption, type BotRunsOnChoices, type BotShownRows } from '../../../shared/bots/personal/methods'
+import { allPinned, isPinned, shownPick, slotsAllOn, UNPICKED_SLOTS, withImagePick, withSlots } from '../../../shared/bots/personal/modelSlots'
+import type { BotImageOption } from '../images/BotImageMaker'
 import { botPickProviderOptions, type LlmProviderOption } from '../../../shared/settings'
 import { copyBotAttachments, removeBotAttachments, type SavedBotAttachment } from './attachments'
 import { BotEngineError, type BotEngine } from '../activation/BotEngine'
@@ -43,6 +44,42 @@ export interface BotAutomationFacts {
 }
 
 const MODEL_UNAVAILABLE_TEXT = 'The model you picked is not available now. Pick another one.'
+
+/** Runs on's Images row (#1088): the image models on offer now, and a bot's pictures today. */
+export interface BotChatImages {
+  options(): Promise<BotImageOption[]>
+  usage(botId: string): BotImageUsage
+}
+
+/** The Images row's tooltip while no entry of the owner's can make pictures. */
+export const IMAGES_MISSING_TEXT = 'Add an OpenRouter entry with an API key in Settings → Providers to pick an image model.'
+
+/**
+ * The Images row's choices as the app's model picker takes them: each entry with its image models, named and marked as
+ * the app's listing names that entry (its provider for the logo), else by the entry alone.
+ */
+export function imageProviderOptions(listing: readonly LlmProviderOption[], options: readonly BotImageOption[]): LlmProviderOption[] {
+  const byEntry = new Map<string, LlmProviderOption>()
+  for (const option of options) {
+    const listed = listing.find((provider) => provider.instanceId === option.instanceId)
+    const entry = byEntry.get(option.instanceId) ?? {
+      id: listed?.id ?? option.instanceId.split(':').at(-1) ?? option.instanceId,
+      instanceId: option.instanceId,
+      label: listed?.label ?? option.entry,
+      models: []
+    }
+    entry.models.push({ id: option.model, label: option.label })
+    byEntry.set(option.instanceId, entry)
+  }
+  return [...byEntry.values()]
+}
+
+/** An Images row pick on an option offered now, with what the entry is signed in with now; never a reasoning level. */
+function stampedImagePick(options: readonly BotImageOption[], pick: BotModelPick): BotModelPick & { instanceId: string } {
+  const option = options.find((entry) => entry.instanceId === pick.instanceId && entry.model === pick.model)
+  if (!option) throw new BotEngineError('model_unavailable', MODEL_UNAVAILABLE_TEXT)
+  return { instanceId: option.instanceId, model: option.model, ...(option.credential ? { credential: option.credential } : {}), ...(option.account ? { account: option.account } : {}) }
+}
 
 /**
  * A pick on an option offered now, with what the entry is signed in with now (#673): the daemon writes these, never a
@@ -152,6 +189,8 @@ export class BotChatService {
     modelListing?(): Promise<LlmProviderOption[]>
     /** Runs on's line for a bot's row on an entry (`HarnessGateway.botRunsOnNote`): a Codex not checked for bots. */
     runsOnNote?(instanceId: string): { text: string; title: string } | undefined
+    /** Runs on's Images row (#1088). Absent: no Images row. */
+    images?: BotChatImages
     /** This computer's name, as the rest of the app shows it. */
     computerName?(): string
     /** The person's other computers, online or not. */
@@ -187,7 +226,7 @@ export class BotChatService {
    * words, never swapped for another. The bot names itself and says its first message on its Talk pick. An app from
    * before rows sends one `model` by name (on every row), and one from before picks none (by usage).
    */
-  async create(input: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots }): Promise<{ bot: BotSummary }> {
+  async create(input: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots; image?: BotModelPick }): Promise<{ bot: BotSummary }> {
     const description = input.description.trim()
     if (!description || description.length > MAX_BOT_DESCRIPTION_CHARS) throw new BotEngineError('invalid_params', `Say what the bot should do in 1 to ${MAX_BOT_DESCRIPTION_CHARS} characters.`)
     const given = input.name?.trim()
@@ -207,6 +246,12 @@ export class BotChatService {
       if (!option) throw new BotEngineError('model_unavailable', MODEL_UNAVAILABLE_TEXT)
       slots = slotsAllOn(stampedPick(option))
     }
+    // The Images row (#1088), when New bot picked one: offered now, or the create is refused like a row's pick.
+    let image: BotModelPick | undefined
+    if (input.image) {
+      if (!this.options.images || !isPinned(input.image)) throw new BotEngineError('model_unavailable', MODEL_UNAVAILABLE_TEXT)
+      image = stampedImagePick(await this.options.images.options().catch(() => []), input.image)
+    }
     const botId = `bot-${randomUUID().replaceAll('-', '').slice(0, 12)}`
     const named = given ? { name: given, chosen: true } : await this.nameFor(botId, description, slots.talk)
     const name = named.name
@@ -220,7 +265,7 @@ export class BotChatService {
       placement: { kind: 'this_computer' },
       role: description,
       // The rows as About's picker saves them (`setOwnerSlots`), at the default depth.
-      main: withSlots({ key: 'main', title: 'Main', agent: { instructions: '' }, model: { ...DEFAULT_BOT_MODEL } }, slots),
+      main: withImagePick(withSlots({ key: 'main', title: 'Main', agent: { instructions: '' }, model: { ...DEFAULT_BOT_MODEL } }, slots), image ?? null),
       context: [],
       permissions: starterManifest(),
       triggers: { manual: true }
@@ -504,7 +549,7 @@ export class BotChatService {
    * on the computer that holds it, so the others are listed but cannot be picked (`unavailable` says why), and an
    * offline one says so.
    */
-  async modelGet(botId: string): Promise<{ model: string | null; slots: BotShownRows; named?: Partial<Record<BotModelSlotKey, string>> } & BotRunsOnChoices> {
+  async modelGet(botId: string): Promise<{ model: string | null; slots: BotShownRows; named?: Partial<Record<BotModelSlotKey, string>>; image?: BotModelPick | null; images?: BotImageUsage } & BotRunsOnChoices> {
     this.engine.definitionOf(botId)
     const choices = await this.modelChoices()
     // Read after the choices: a change the bot made meanwhile shows.
@@ -514,7 +559,8 @@ export class BotChatService {
       return pick && !isPinned(pick) ? [[row, pick.model]] : []
     })) as Partial<Record<BotModelSlotKey, string>>
     const { last: _last, ...offered } = choices
-    return { model: slots.talk?.model ?? null, slots: shownRows(slots), ...(Object.keys(named).length ? { named } : {}), ...offered }
+    const images = this.options.images ? { image: shownPick(this.engine.imagePick(botId)), images: this.options.images.usage(botId) } : {}
+    return { model: slots.talk?.model ?? null, slots: shownRows(slots), ...(Object.keys(named).length ? { named } : {}), ...images, ...offered }
   }
 
   /**
@@ -556,9 +602,16 @@ export class BotChatService {
         // Nothing to say about it now; the turn is still refused where it starts.
       }
     }
+    // The Images row (#1088): each ready entry's image models, or a line on what to add.
+    let imageChoices: Pick<BotRunsOnChoices, 'imageProviders' | 'imagesMissing'> = {}
+    if (this.options.images) {
+      const imageProviders = imageProviderOptions(listing, await this.options.images.options().catch(() => []))
+      imageChoices = { imageProviders, ...(imageProviders.length ? {} : { imagesMissing: IMAGES_MISSING_TEXT }) }
+    }
     return {
       models,
       providers: botPickProviderOptions(listing, options),
+      ...imageChoices,
       ...(Object.keys(notes).length ? { notes } : {}),
       ...(last ? { last: { talk: offeredNow(last.talk), light: offeredNow(last.light), medium: offeredNow(last.medium), hard: offeredNow(last.hard) } } : {}),
       computer: 'this_computer',
@@ -621,6 +674,18 @@ export class BotChatService {
     }
     if (!Object.keys(saved).length) throw new BotEngineError('invalid_params', 'Pick a model for a row.')
     this.engine.setOwnerSlots(botId, saved)
+    return { bot: this.summaryOf(botId) }
+  }
+
+  /**
+   * `bots.model.setImage` (#1088), from About → Runs on: the Images row's pick, offered now and saved with its entry's
+   * sign-in now, or null, which takes `make_image` away from the bot's next turn.
+   */
+  async modelImageSet(botId: string, pick: BotModelPick | null): Promise<{ bot: BotSummary }> {
+    this.engine.definitionOf(botId)
+    if (!this.options.images) throw new BotEngineError('bots_unavailable', 'Pictures are not available in this build.')
+    const saved = pick ? stampedImagePick(await this.options.images.options().catch(() => []), pick) : null
+    this.engine.setImagePick(botId, saved)
     return { bot: this.summaryOf(botId) }
   }
 
