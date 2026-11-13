@@ -100,6 +100,14 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
     stop: vi.fn((botId) => record('stop', [botId], () => undefined)),
     stopWork: vi.fn((botId, workId) => record('stopWork', [botId, workId], () => undefined)),
     markRead: vi.fn((botId, at) => record('markRead', [botId, at], () => undefined)),
+    react: vi.fn((botId, messageId, emoji) => record('react', [botId, messageId, emoji], () => {
+      const rows = fake.chats[botId] ?? []
+      const at = rows.findIndex((entry) => entry.id === messageId)
+      if (at < 0) throw new Error('No such message')
+      const { reaction: _old, ...rest } = rows[at]!
+      rows[at] = emoji === null ? rest : { ...rest, reaction: emoji }
+      return rows[at]!
+    })),
     answer: vi.fn((botId, askId, answer) => record('answer', [botId, askId, answer], () => {
       const rows = fake.chats[botId] ?? []
       const row = rows.find((entry) => entry.ask?.askId === askId)

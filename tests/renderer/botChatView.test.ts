@@ -348,9 +348,12 @@ describe('the transcript', () => {
       for (const [label, action] of [['Save as…', 'saveCopy'], ['Show in folder', 'showInFolder'], ['Copy image', 'copyImage']] as const) {
         await contextMenu(second)
         expect(menuItems().map((item) => item.textContent)).toEqual(['Open', 'Save as…', 'Show in folder', 'Copy image'])
+        // The tools beside the bubble (reactions, Read aloud, Copy, Reply) step aside while the menu is open.
+        expect(article('b1').classList.contains('is-menu-open')).toBe(true)
         await click(menuItems().find((item) => item.textContent === label))
         expect(localFiles[action]).toHaveBeenCalledWith(picture('b.png'))
         expect(document.querySelector('.bot-picture-menu')).toBeNull()
+        expect(article('b1').classList.contains('is-menu-open')).toBe(false)
       }
       await contextMenu(second)
       await click(menuItems()[0])
@@ -369,6 +372,89 @@ describe('the transcript', () => {
     const codes = [...transcript().querySelectorAll<HTMLElement>('[data-message-id="b1"] code.an-md-code')]
     // Which pieces keep whole is decided here; how a line wraps is checked in screenshots.
     expect(codes.map((code) => [code.textContent, code.classList.contains('is-whole')])).toEqual([['ssd-shortlist.md', true], ['Get-PhysicalDisk | Select-Object FriendlyName, MediaType, Size', false]])
+  })
+
+  it('the owner reacts to a bot message: six quick emoji and +, one reaction shown on the bubble, the same again or its badge removes it', async () => {
+    fake.chats.inbox = [message(1, { id: 'b1', text: 'Here are three SSDs.' }), message(2, { id: 'o1', author: 'owner', text: 'Thanks' })]
+    await open()
+    const reply = () => transcript().querySelector<HTMLElement>('[data-message-id="b1"]')!
+    const bar = () => reply().querySelector<HTMLElement>('[role="toolbar"]')!
+    const badge = () => reply().querySelector<HTMLButtonElement>('.bot-bubble > .bot-reaction')
+    expect(bar().getAttribute('aria-label')).toBe('React to this message')
+    expect([...bar().querySelectorAll('button')].map((choice) => choice.getAttribute('aria-label'))).toEqual(['React 👍', 'React ❤️', 'React 😂', 'React 😮', 'React 😢', 'React 🙏', 'More reactions'])
+    // The owner's own messages take none.
+    expect(transcript().querySelector('[data-message-id="o1"] [role="toolbar"]')).toBeNull()
+
+    await click(button('React ❤️', bar()))
+    expect(fake.calls).toContainEqual(['react', 'inbox', 'b1', '❤️'])
+    expect(badge()?.textContent).toBe('❤️')
+    // A pick puts the bar away: the focus is on the bubble, not on a button that would hold the bar open, and the bar
+    // stays away while the pointer stays; leaving the message, or tabbing back into the bar, brings it back.
+    expect(document.activeElement).toBe(reply().querySelector('.bot-bubble'))
+    expect(reply().classList.contains('is-react-quiet')).toBe(true)
+    await act(async () => { reply().dispatchEvent(new MouseEvent('mouseout', { bubbles: true, relatedTarget: document.body })) })
+    expect(reply().classList.contains('is-react-quiet')).toBe(false)
+    await click(button('React 😂', bar()))
+    expect(reply().classList.contains('is-react-quiet')).toBe(true)
+    await act(async () => { button('React 👍', bar())!.focus() })
+    expect(reply().classList.contains('is-react-quiet')).toBe(false)
+    await click(button('React ❤️', bar()))
+    expect(button('Remove your reaction ❤️', bar())?.getAttribute('aria-pressed')).toBe('true')
+    // Another replaces it: one reaction.
+    await click(button('React 👍', bar()))
+    expect(reply().querySelectorAll('.bot-reaction')).toHaveLength(1)
+    expect(badge()?.textContent).toBe('👍')
+    // The same one again removes it.
+    await click(button('Remove your reaction 👍', bar()))
+    expect(fake.calls.at(-1)).toEqual(['react', 'inbox', 'b1', null])
+    expect(badge()).toBeNull()
+
+    // + opens the composer's grid; a pick sets it, and the badge takes it away again.
+    await click(button('More reactions', bar()))
+    await click(button('🔥', reply().querySelector('.bot-react-grid')!))
+    expect(badge()?.textContent).toBe('🔥')
+    expect(reply().querySelector('.bot-react-grid')).toBeNull()
+    await click(badge())
+    expect(fake.calls.at(-1)).toEqual(['react', 'inbox', 'b1', null])
+    expect(badge()).toBeNull()
+
+    // Refused by the service: shown at once, then put back as it was, with why above the composer.
+    vi.mocked(fake.client.react).mockRejectedValueOnce(new Error('This bot has no such message.'))
+    await click(button('React 😮', bar()))
+    await settle()
+    expect(badge()).toBeNull()
+    expect(composerError()?.textContent).toBe('This bot has no such message.')
+  })
+
+  it('two quick picks the service refuses end where they started, and a service without reactions shows no bar', async () => {
+    fake.chats.inbox = [message(1, { id: 'b1', text: 'Here are three SSDs.', reaction: '❤️' })]
+    await open()
+    const reply = () => transcript().querySelector<HTMLElement>('[data-message-id="b1"]')!
+    const bar = () => reply().querySelector<HTMLElement>('[role="toolbar"]')
+    const badge = () => reply().querySelector<HTMLButtonElement>('.bot-bubble > .bot-reaction')
+    expect(badge()?.textContent).toBe('❤️')
+
+    // Two picks on their way at once, each refused in turn: the first refusal leaves the newest pick shown, the
+    // second puts back the reaction the service last confirmed, not the first pick.
+    const refusals: Array<(error: Error) => void> = []
+    const onTheWay = () => new Promise<never>((_, reject) => { refusals.push(reject) })
+    vi.mocked(fake.client.react).mockImplementationOnce(onTheWay).mockImplementationOnce(onTheWay)
+    await click(button('React 👍', bar()!))
+    await click(button('React 😂', bar()!))
+    expect(badge()?.textContent).toBe('😂')
+    await act(async () => { refusals[0]!(new Error('Busy.')) })
+    expect(badge()?.textContent).toBe('😂')
+    await act(async () => { refusals[1]!(new Error('Busy.')) })
+    expect(badge()?.textContent).toBe('❤️')
+
+    // An older service has no reactions: the pick is put back, the bar goes, and nothing is shown as an error.
+    await act(async () => { useBotsStore.setState({ error: null, errorBotId: null }) })
+    vi.mocked(fake.client.react).mockRejectedValueOnce(Object.assign(new Error('Domain method is unavailable'), { code: 'method_not_available' }))
+    await click(button('React 👍', bar()!))
+    await settle()
+    expect(badge()?.textContent).toBe('❤️')
+    expect(bar()).toBeNull()
+    expect(composerError()).toBeNull()
   })
 
   it('a list of keys and values reads as a small card', async () => {

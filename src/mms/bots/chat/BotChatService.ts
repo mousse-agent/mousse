@@ -424,6 +424,20 @@ export class BotChatService {
     return this.detailOf(botId)
   }
 
+  /**
+   * `bots.chat.react`: the owner's reaction on one of the bot's messages. One per message: a new emoji replaces it,
+   * `null` removes it. It never starts a turn: the bot's next chat turn is told (its situation). The row is published
+   * again, so every window shows it.
+   */
+  react(botId: string, messageId: string, emoji: string | null): { message: BotChatMessage } {
+    this.engine.definitionOf(botId)
+    const row = this.store.message(messageId)
+    if (row?.botId !== botId) throw new BotEngineError('message_not_found', 'This bot has no such message.')
+    if (row.author !== 'bot') throw new BotEngineError('not_reactable', "Only the bot's messages take a reaction.")
+    this.store.setOwnerReaction(messageId, emoji, new Date(this.options.now()).toISOString())
+    return { message: this.engine.chat.republish(messageId)! }
+  }
+
   /** `bots.chat.markRead`: the owner has read up to `seq`. */
   markRead(botId: string, seq: number): Record<string, never> {
     this.engine.markRead(botId, seq)

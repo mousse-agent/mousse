@@ -12,6 +12,7 @@ import { BotSteps } from './BotSteps'
 import { BOT_IMAGES, BotFilePane, BotFilesProvider, BotMarkdown, BotPathChip } from './BotFiles'
 import { BotAppletPane, BotMessageApplets } from './BotApplets'
 import { BotPictureActions, BotReplyMedia } from './BotReplyMedia'
+import { BotReactionBadge, BotReactionBar } from './BotReactions'
 import { replyImages } from './botReplyImages'
 import { BotEmojiButton } from './BotEmoji'
 import { BotAskReplies } from './BotAskReplies'
@@ -222,11 +223,35 @@ const BotMessage = memo(function BotMessage({ bot, message, onAction, browser, q
   const pictures = shownImages.length > 0
   // The steps behind one quiet line: "Worked for 32s" when it is known how long it took, else "Steps", never dropped.
   const ms = workedMs(message, asked)
-  return <article className={`chat-participant-message from-agent bot-message${starts ? ' is-group-start' : ''}`} data-message-id={message.id}>
+  // The owner's reaction: one per message, set, replaced or removed here; the bot is told on its next chat turn.
+  const react = (emoji: string | null) => void store().react(bot.id, message.id, emoji)
+  // After a pick the bar goes, and stays gone while the pointer stays on the message; the focus goes to the bubble.
+  const [reacted, setReacted] = useState(false)
+  const bubble = useRef<HTMLDivElement>(null)
+  const picked = () => {
+    setReacted(true)
+    bubble.current?.focus({ preventScroll: true })
+  }
+  // A service without reactions (an older one) shows no bar.
+  const canReact = useBotsStore((s) => !s.reactionsMissing)
+  // While a picture's menu is open, the tools beside the bubble step aside for it.
+  const [menuOpen, setMenuOpen] = useState(false)
+  // The tools hang off the bubble's right edge: beside a wide bubble they move left, inside the transcript.
+  const tools = useRef<HTMLSpanElement>(null)
+  const clampTools = () => {
+    const element = tools.current
+    const lane = element?.closest('.chat-transcript')
+    if (!element || !lane || !lane.clientWidth) return
+    element.style.removeProperty('--bot-tools-shift')
+    const over = element.getBoundingClientRect().right - (lane.getBoundingClientRect().left + lane.clientWidth - 8)
+    if (over > 0) element.style.setProperty('--bot-tools-shift', `${-Math.ceil(over)}px`)
+  }
+  return <article className={`chat-participant-message from-agent bot-message${starts ? ' is-group-start' : ''}${reacted ? ' is-react-quiet' : ''}${message.reaction ? ' has-reaction' : ''}${menuOpen ? ' is-menu-open' : ''}`} data-message-id={message.id}
+    onMouseEnter={clampTools} onFocus={clampTools} onMouseLeave={reacted ? () => setReacted(false) : undefined}>
     <div className="bot-message-line">
-      <div className={`bot-bubble${pictures ? ' has-media' : ''}${pictures && !media.text && !lostChips.length ? ' is-media-only' : ''}`}>
+      <div ref={bubble} tabIndex={-1} className={`bot-bubble${pictures ? ' has-media' : ''}${pictures && !media.text && !lostChips.length ? ' is-media-only' : ''}`}>
         {quoted && <BotReplyQuote botId={bot.id} quote={message.replyTo!} botName={bot.name} />}
-        <BotReplyMedia images={shownImages} />
+        <BotReplyMedia images={shownImages} onMenuOpen={setMenuOpen} />
         {media.text && <BotMarkdown text={media.text} className="bot-markdown" />}
         {lostChips.length > 0 && <p className="bot-picture-chips">{lostChips.map((image) => <BotPathChip key={image.key} path={image.path!} />)}</p>}
         {openAsk && <p className="bot-bubble-ask"><Shield size={14} aria-hidden /><span>Wants to <strong>{openAsk.title}</strong></span></p>}
@@ -237,10 +262,12 @@ const BotMessage = memo(function BotMessage({ bot, message, onAction, browser, q
           {steps.length > 0 && <WorkedToggle ms={ms} open={stepsOpen} onToggle={() => setStepsOpen((open) => !open)} />}
           <BubbleTime message={message} />
         </div>
+        {message.reaction && <BotReactionBadge emoji={message.reaction} onRemove={() => react(null)} />}
       </div>
       {/* As beside a thread's reply: read it aloud, copy it as written, reply to it. Anchored to the bubble's lower
           right edge and taking no width of its own, so the bubble is as wide with them as without. */}
-      <span className="bot-message-tools">
+      <span ref={tools} className="bot-message-tools">
+        {canReact && <BotReactionBar current={message.reaction} onReact={react} onPicked={picked} onFocus={() => setReacted(false)} />}
         <span className="bot-message-actions">
           {message.text && <ReadAloudButton speechKey={`bot:${message.id}`} markdown={message.text} />}
           {message.text && <CopyButton text={message.text} />}

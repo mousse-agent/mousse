@@ -91,6 +91,8 @@ export interface BotChatMessage {
   replyTo?: BotChatQuote
   /** The owner's message: the request id it was sent with, which matches it to the bubble shown while it was on its way. */
   clientRequestId?: string
+  /** A bot's message: the owner's reaction on it, an emoji (`bots.chat.react`). */
+  reaction?: string
 }
 
 /**

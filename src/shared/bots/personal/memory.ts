@@ -46,7 +46,9 @@ export const BOT_CHAT_PACK_BUDGET = {
   runNotes: 500,
   summary: 1_000,
   window: 8_000,
-  situation: 250
+  situation: 250,
+  /** The owner's reactions since the bot's last chat turn, after the situation's lines and outside their budget. */
+  reactions: 200
 } as const
 /** The whole chat pack stays within about this many tokens. */
 export const BOT_CHAT_PACK_TOKENS = 12_000
