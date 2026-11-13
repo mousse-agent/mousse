@@ -555,14 +555,22 @@
 }
 
 /* On a light surface the accent alone is too faint for text: it is darkened toward the foreground. */
-html[data-theme='light'] .an-markdown {
+html[data-theme='light'] .an-markdown,
+html[data-theme='light'] .chat-user-bubble {
   --an-md-link: color-mix(in srgb, var(--an-primary-color) 70%, var(--an-foreground));
 }
 
 @media (prefers-color-scheme: light) {
-  html[data-theme='system'] .an-markdown {
+  html[data-theme='system'] .an-markdown,
+  html[data-theme='system'] .chat-user-bubble {
     --an-md-link: color-mix(in srgb, var(--an-primary-color) 70%, var(--an-foreground));
   }
+}
+
+.an-markdown .an-md-link-icon {
+  display: inline-block;
+  margin-right: 0.25em;
+  vertical-align: -0.125em;
 }
 
 .an-markdown .an-md-link:hover,
