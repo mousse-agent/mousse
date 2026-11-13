@@ -906,24 +906,27 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
     expect(run.leftBehind()).toEqual([])
   }, 120_000)
 
-  it.skipIf(!hasBinary || !SANDBOX)(`a bot without file access, its commands in Claude Code's sandbox on Linux: they read no removable drive or runtime folder under /run, no other session's command output, nothing of Mousse's start-up pipe, and they still run${NO_BINARY}${NO_SANDBOX}`, async () => {
+  it.skipIf(!hasBinary || !SANDBOX)(`a bot without file access, its commands in Claude Code's sandbox on Linux: they read no removable drive or runtime folder under /run, no other session's command output, nothing of Mousse's start-up pipe or of its folders in the temporary folder, and they still run${NO_BINARY}${NO_SANDBOX}`, async () => {
     const plans: Record<string, Json[]> = { reach: [{ name: 'Bash', input: { command: 'READS', description: 'Try what a bot may not read' } }] }
     const run = await rig(plans)
     const uid = process.getuid!()
     const marker = `reach-${Date.now()}`
     // What the bot must not reach: a file in the user's runtime folder, another session's saved command output in Claude
-    // Code's shared temporary folder, and the folder where Mousse makes the start-up pipe of the owner's MCP servers.
+    // Code's shared temporary folder, the folder where Mousse makes the start-up pipe of the owner's MCP servers, and a
+    // folder Mousse keeps in the temporary folder (a pull request's text).
     const runtime = process.env.XDG_RUNTIME_DIR!
     const inRuntime = join(runtime, `${marker}.txt`)
     const otherSession = join('/tmp', `claude-${uid}`, `-${marker}-owner`, 'session', 'tasks')
     const pipeFolder = join(run.state, 'providers', 'claude-subscription', CLAUDE_MCP_START_FOLDER)
+    const mousseTemp = mkdtempSync(join('/tmp', 'mousse-pr-'))
     mkdirSync(otherSession, { recursive: true })
     mkdirSync(pipeFolder, { recursive: true, mode: 0o700 })
     writeFileSync(inRuntime, 'secret\n')
     writeFileSync(join(otherSession, 'b1.output'), 'secret\n')
     writeFileSync(join(pipeFolder, 'marker'), 'secret\n')
-    cleanups.push(() => { rmSync(inRuntime, { force: true }); rmSync(join('/tmp', `claude-${uid}`, `-${marker}-owner`), { recursive: true, force: true }) })
-    const tries = [inRuntime, join(otherSession, 'b1.output'), join(pipeFolder, 'marker'), '/etc/hostname']
+    writeFileSync(join(mousseTemp, 'body.md'), 'secret\n')
+    cleanups.push(() => { rmSync(inRuntime, { force: true }); rmSync(join('/tmp', `claude-${uid}`, `-${marker}-owner`), { recursive: true, force: true }); rmSync(mousseTemp, { recursive: true, force: true }) })
+    const tries = [inRuntime, join(otherSession, 'b1.output'), join(pipeFolder, 'marker'), join(mousseTemp, 'body.md'), '/etc/hostname']
     const command = [
       ...tries.map((path) => `if cat ${JSON.stringify(path)} >/dev/null 2>&1; then echo "read ${path}"; else echo "denied ${path}"; fi`),
       `if echo x > ${JSON.stringify(join(otherSession, 'b2.output'))} 2>/dev/null; then echo "wrote other"; else echo "denied write"; fi`,
@@ -941,7 +944,7 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
     const text = await run.service.chat({ threadId: 'bot-thread', cwd: run.dirs.files, model: 'claude-sonnet-4-5', prompt: 'PLAN:reach', permissionMode: 'ask', locked, mcp: null, onText: () => undefined })
     expect(text).toContain('done')
     const said = run.anthropic.results('reach').join('\n')
-    for (const path of tries.slice(0, 3)) expect(said).toContain(`denied ${path}`)
+    for (const path of tries.slice(0, 4)) expect(said).toContain(`denied ${path}`)
     expect(said).toContain('read /etc/hostname')
     expect(said).toContain('denied write')
     expect(said).toContain('42')
