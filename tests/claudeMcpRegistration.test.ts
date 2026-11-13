@@ -17,6 +17,8 @@ import {
 } from '../src/mms/harness/vendors/claude/mcpRegistration'
 
 const POSIX = globalThis.process.platform !== 'win32'
+/** Said in the name of a test of the startup channel, which Windows does not have (its user servers go over the input). */
+const NO_CHANNEL = POSIX ? '' : ' [skipped on Windows: no startup channel there]'
 /** Where Mousse makes named pipes: a POSIX system with `mkfifo`. */
 const FIFO = POSIX && !spawnSync('mkfifo', [], { stdio: 'ignore' }).error
 const NO_FIFO = FIFO ? '' : ' [skipped: no mkfifo on this system, so no named pipe is made]'
@@ -118,6 +120,17 @@ describe('registering a turn\'s MCP servers over Claude Code\'s input (#358)', (
     await vi.waitFor(() => expect(done).toHaveBeenCalledExactlyOnceWith(['web']))
   })
 
+  it('a later registration where every server connected reports none: Mousse\'s, sent again unchanged, is not listed as added, and that is no denial', async () => {
+    const warn = warned()
+    const target = process(added(['web']))
+    const done = vi.fn()
+    registerUserServersLater(target, { mousse: servers.mousse! }, { web: servers.web! }, 't', done)
+    await vi.waitFor(() => expect(target.sent).toHaveLength(1))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(done).not.toHaveBeenCalled()
+    expect(warn).not.toHaveBeenCalled()
+  })
+
   /** Runs a real process through `options`' spawn that prints what it reads at `path`, and returns that and its pid. */
   async function readThrough(options: Options, path: string, extra = ''): Promise<{ text: string; pid: number }> {
     const child = options.spawnClaudeCodeProcess!({ command: globalThis.process.execPath, args: ['-e', `${extra}process.stdout.write(require("fs").readFileSync(${JSON.stringify(path)}))`], env: { PATH: globalThis.process.env.PATH }, signal: new AbortController().signal }) as unknown as { stdout: NodeJS.ReadableStream; pid: number }
@@ -126,7 +139,7 @@ describe('registering a turn\'s MCP servers over Claude Code\'s input (#358)', (
     return { text, pid: child.pid }
   }
 
-  it.skipIf(POSIX === false)('gives the user\'s servers through a channel Claude Code reads at its start, never on its command line or in its environment', async () => {
+  it.skipIf(POSIX === false)(`gives the user's servers through a channel Claude Code reads at its start, never on its command line or in its environment${NO_CHANNEL}`, async () => {
     const options = { env: { PATH: '/bin' }, extraArgs: { 'thinking-display': 'summarized' } }
     const user: ClaudeMcpServers = { web: servers.web!, files: { type: 'stdio', command: 'files-mcp', env: { KEY: 'user-env-secret-358' } } }
     const onSpawned = vi.fn()
@@ -168,7 +181,7 @@ describe('registering a turn\'s MCP servers over Claude Code\'s input (#358)', (
     expect(claudeStartupChannel('darwin')).toBe('descriptor')
   })
 
-  it.skipIf(POSIX === false)('a config far larger than a socket or pipe buffer arrives whole, on either channel', async () => {
+  it.skipIf(POSIX === false)(`a config far larger than a socket or pipe buffer arrives whole, on either channel${NO_CHANNEL}`, async () => {
     // About 600 KB: 300 servers with a 2 KB header each.
     const many: ClaudeMcpServers = Object.fromEntries(Array.from({ length: 300 }, (_, index) => [`s${index}`, { type: 'http', url: `http://127.0.0.1:9/${index}`, headers: { 'X-Api-Key': `${index}-`.padEnd(2048, 'k') } }]))
     expect(JSON.stringify(many).length).toBeGreaterThan(600_000)
@@ -186,7 +199,7 @@ describe('registering a turn\'s MCP servers over Claude Code\'s input (#358)', (
     }
   })
 
-  it.skipIf(POSIX === false)('a named pipe nobody opens is removed when the process ends, and one opened by another reader first is gone for everyone after', async () => {
+  it.skipIf(POSIX === false)(`a named pipe nobody opens is removed when the process ends, and one opened by another reader first is gone for everyone after${NO_CHANNEL}`, async () => {
     const root = mkdtempSync(join(tmpdir(), 'mousse-fifo-test-'))
     try {
       const fifo = (await claudeStartupMcpOptions({}, { web: servers.web! }, () => undefined, { channel: 'fifo', fifoRoot: root }))!
@@ -217,7 +230,7 @@ describe('registering a turn\'s MCP servers over Claude Code\'s input (#358)', (
     }
   })
 
-  it.skipIf(POSIX === false)('reads the process\'s error stream to the end, so one that writes a lot of it does not stall, and keeps its redacted end', async () => {
+  it.skipIf(POSIX === false)(`reads the process's error stream to the end, so one that writes a lot of it does not stall, and keeps its redacted end${NO_CHANNEL}`, async () => {
     const tail = new ClaudeStderrTail(() => ['user-secret-358'])
     const started = (await claudeStartupMcpOptions({}, { web: servers.web! }, () => undefined, { channel: globalThis.process.platform === 'darwin' ? 'descriptor' : 'fifo', onStderr: tail }))!
     // 4 MB to its error stream (an unread pipe holds 64 KB), then the secret, then what it read.

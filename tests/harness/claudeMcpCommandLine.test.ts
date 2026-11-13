@@ -9,11 +9,15 @@
  *
  * Where each check runs: everything runs on Linux and macOS. What Claude Code is started with is read at the SDK's
  * spawn seam on every platform, and from the running process as another local process reads it on Linux
- * (`/proc/<pid>/cmdline`, `environ`) and macOS (`ps`). The startup channel of each platform is used by default (the
- * fourth stream on macOS, a named pipe on Linux); on macOS the person's-turn checks also run with the named pipe, so
- * Linux's channel is exercised with the real CLI here too. Windows runs none of the startup-channel checks (Windows
- * registers the user's servers over the input instead) and not the command a bot runs. Without the platform's binary
- * every test is skipped, with the reason in its name.
+ * (`/proc/<pid>/cmdline`, `environ`), macOS (`ps`) and Windows (its command line, `Win32_Process`; Windows has no
+ * query for another process's environment). The startup channel of each platform is used by default (the fourth
+ * stream on macOS, a named pipe on Linux); on macOS the person's-turn checks also run with the named pipe, so Linux's
+ * channel is exercised with the real CLI here too. Windows has no startup channel and registers the user's servers over
+ * the input after Mousse's: the tests of that way run there by default and elsewhere through a user's own
+ * `--mcp-config`. Windows runs none of the startup-channel checks, nor the ones that need a POSIX shell or `sleep` (the
+ * command a bot runs, the error-stream flood, the server that connects late). Without the platform's binary every test
+ * is skipped, with the reason in its name. The folder of each test is removed only once every process it started has
+ * exited, and a process still running then fails the test.
  *
  * Not here: a start Claude Code refuses for its managed policy (`disableSideloadFlags`, `managed-mcp.json`). This
  * Claude Code reads that policy only from a system folder (`/Library/Application Support/ClaudeCode`, `/etc/claude-code`)
@@ -47,6 +51,8 @@ const hasBinary = existsSync(BINARY)
 /** Said in every test's name when it is skipped, so a missing binary never passes as a run. */
 const NO_BINARY = hasBinary ? '' : ` [skipped: no Claude Code binary at ${BINARY}; install the SDK's platform package or set MOUSSE_CLAUDE_EVIDENCE_BINARY]`
 const POSIX = process.platform !== 'win32'
+/** Said in the name of a test that needs a POSIX shell (`sleep`, `env`, a `sh` wrapper), skipped on Windows. */
+const NO_POSIX = POSIX ? '' : ' [skipped on Windows: needs a POSIX shell]'
 /**
  * The startup channel's path on Claude Code's command line: its fourth stream, or a named pipe in a folder of its own;
  * or the user's own config file of a test that sends their servers over the input.
@@ -239,8 +245,12 @@ async function mcpMock() {
   }
 }
 
-/** A stdio MCP server whose one tool says whether it was started with the user's secret value (never the value). */
-const STDIO_SERVER = `const rl = require('readline').createInterface({ input: process.stdin })
+/**
+ * A stdio MCP server whose one tool says whether it was started with the user's secret value (never the value). It
+ * writes its pid to the file it is given, so a test can see it end.
+ */
+const STDIO_SERVER = `if (process.argv[2]) require('fs').writeFileSync(process.argv[2], String(process.pid))
+const rl = require('readline').createInterface({ input: process.stdin })
 const send = (o) => process.stdout.write(JSON.stringify(o) + '\\n')
 rl.on('line', (line) => {
   const msg = JSON.parse(line)
@@ -293,7 +303,17 @@ function seenByOthers(pid: number | undefined): Pick<Started, 'commandLine' | 'e
     return { commandLine: readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').join(' '), environment: readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0').join('\n') }
   if (process.platform === 'darwin')
     return { commandLine: execFileSync('ps', ['-ww', '-o', 'args=', '-p', String(pid)], { encoding: 'utf8' }), environment: execFileSync('ps', ['-Eww', '-o', 'command=', '-p', String(pid)], { encoding: 'utf8' }) }
+  // Windows: the command line as any local process reads it. Another process's environment has no such query (it is
+  // read at the spawn seam only).
+  if (process.platform === 'win32') return { commandLine: windowsCommandLine(pid) }
   return {}
+}
+
+/** The command line Windows shows for `pid` (`Win32_Process`); it must exist, or the check proves nothing. */
+function windowsCommandLine(pid: number): string {
+  const line = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CommandLine`], { encoding: 'utf8', windowsHide: true }).trim()
+  if (!line) throw new Error(`Windows shows no command line for process ${pid}`)
+  return line
 }
 
 /** Files under `dir` (followed into folders, at most 20 MB each) whose bytes hold a fake secret, by path. */
@@ -314,6 +334,8 @@ function secretsUnder(dir: string): string[] {
   return hits
 }
 
+const later = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
 const alive = (pid: number): boolean => {
   try {
     process.kill(pid, 0)
@@ -326,7 +348,16 @@ const alive = (pid: number): boolean => {
 describe('MCP credentials are never on Claude Code\'s command line or in its environment (#358, real CLI)', () => {
   const cleanups: Array<() => Promise<void> | void> = []
   afterEach(async () => {
-    for (const cleanup of cleanups.splice(0).reverse()) await Promise.resolve(cleanup()).catch(() => undefined)
+    // Every cleanup runs; the first that failed (a process the test started still running, say) fails the test.
+    let failed: unknown
+    for (const cleanup of cleanups.splice(0).reverse()) {
+      try {
+        await cleanup()
+      } catch (error) {
+        failed ??= error
+      }
+    }
+    if (failed !== undefined) throw failed
   })
 
   /**
@@ -337,7 +368,16 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
    */
   async function rig(plans: Record<string, Json[]>, options: { locked?: boolean; oneShot?: boolean; debug?: boolean; channel?: ClaudeStartupChannel; viaInput?: boolean; stderrFlood?: boolean } = {}) {
     const base = mkdtempSync(join(tmpdir(), 'mousse-claude-mcp-argv-'))
-    cleanups.push(() => rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }))
+    const started: Started[] = []
+    // Runs after the service has stopped (cleanups run in reverse). A live Claude Code exits a moment after its input
+    // closes, and Windows does not remove a folder that is still a running process's working folder: the folder goes
+    // once every process the test started (Claude Code, and the stdio servers that wrote their pid) has exited.
+    cleanups.push(async () => {
+      const servers = () => existsSync(dirs.pids) ? readdirSync(dirs.pids).map((name) => Number(readFileSync(join(dirs.pids, name), 'utf8'))).filter((pid) => pid > 0) : []
+      const running = () => [...started.flatMap((process) => process.pid === undefined ? [] : [process.pid]), ...servers()].filter(alive)
+      await vi.waitFor(() => expect(running(), 'processes the test started, still running after the service stopped').toEqual([]), { timeout: 15_000, interval: 50 })
+      rmSync(base, { recursive: true, force: true })
+    })
     const dirs = { work: join(base, 'work'), files: join(base, 'files'), root: join(base, 'root'), scratch: join(base, 'scratch'), userHome: join(base, 'user-home'), instanceHome: join(base, 'instance-home'), pids: join(base, 'pids') }
     for (const dir of Object.values(dirs)) mkdirSync(dir, { recursive: true })
     mkdirSync(join(dirs.scratch, 'tmp'), { recursive: true })
@@ -367,7 +407,6 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
     const state = mkdtempSync(join(base, 'state-'))
     mkdirSync(join(state, 'providers', 'claude-subscription'), { recursive: true })
     writeFileSync(join(state, 'providers', 'claude-subscription', 'settings.json'), JSON.stringify({ loginPolicy: 'cli', models: [{ id: 'sonnet', label: 'Sonnet' }] }))
-    const started: Started[] = []
     const sdk = await import('@anthropic-ai/claude-agent-sdk')
     const service = new ClaudeSubscriptionProviderService(state, new UserQuestionService(), {
       probe: () => ({ kind: 'signed_in', account: { label: 'API key', credential: 'api_key' } }),
@@ -434,7 +473,7 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
   const userServers = (run: Rig) => ({
     mcpServers: {
       web: { type: 'http' as const, url: `${run.mcp.url}/user`, headers: { 'X-Api-Key': USER_HEADER } },
-      files: { type: 'stdio' as const, command: process.execPath, args: [run.stdioServer], env: { USER_ENV_SECRET: USER_ENV } }
+      files: { type: 'stdio' as const, command: process.execPath, args: [run.stdioServer, join(run.dirs.pids, 'files')], env: { USER_ENV_SECRET: USER_ENV } }
     },
     proxiedServers: {}, toolRules: {}, warnings: []
   })
@@ -518,6 +557,67 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
     expect(run.mcp.calls.filter((call) => call.path === '/user' && call.method === 'initialize')).toHaveLength(1)
     expect(run.leftBehind()).toEqual([])
     expect(found(run.notices.join('\n'))).toEqual([])
+  }, 120_000)
+
+  it.skipIf(!hasBinary)(`a person's turn with the user's servers over Claude Code's input (Windows' way; elsewhere forced by the user's own --mcp-config): the servers work, none is on the command line or in the environment, the thread is told of no server left out, a new token reaches the running process, and Stop ends Claude Code and its stdio server${NO_BINARY}`, async () => {
+    const plans = {
+      first: [
+        { name: 'ToolSearch', input: { query: 'select:mcp__mousse__ping,mcp__web__ping,mcp__files__secret_seen', max_results: 5 } },
+        { name: 'mcp__mousse__ping', input: {} },
+        { name: 'mcp__web__ping', input: {} },
+        { name: 'mcp__files__secret_seen', input: {} },
+        POSIX ? PRINT_ENV : { name: 'Bash', input: { command: 'env', description: 'Print the environment' } }
+      ],
+      second: [{ name: 'mcp__mousse__ping', input: {} }]
+    }
+    const run = await rig(plans, { viaInput: POSIX })
+    const turn = async (prompt: string, token: string) => {
+      const text = await personTurn(run, prompt, token)
+      run.service.commitConversation('thread', '')
+      return text
+    }
+    expect(await turn('PLAN:first', TOKEN)).toContain('done')
+    expect(run.started).toHaveLength(1)
+    const claude = run.started[0]!
+    clean(claude)
+    // Windows: no --mcp-config at all; elsewhere only the user's own file. The running process's command line was read.
+    if (!POSIX) expect(claude.args).not.toContain('--mcp-config')
+    expect(claude.commandLine).toBeDefined()
+    console.info(`[#358 evidence] over the input: command line of the running process: ${claude.commandLine}; variables at the spawn seam: ${Object.keys(claude.env).sort().join(',')}`)
+    // The bounds on how long the user's servers can hold the first prompt (`CLAUDE_INPUT_MCP_ENV`).
+    expect(claude.env).toMatchObject({ MCP_TIMEOUT: '10000', MCP_SERVER_CONNECTION_BATCH_SIZE: '16' })
+    expect(run.mcp.calls).toEqual(expect.arrayContaining([
+      { path: '/mcp', method: 'tools/call', credential: 'first', tool: 'ping' },
+      { path: '/user', method: 'tools/call', credential: 'user', tool: 'ping' }
+    ]))
+    const results = run.anthropic.results('first').join('\n')
+    expect(results).toContain('pong from /mcp')
+    expect(results).toContain('secret seen: true')
+    // The command saw Claude Code's own environment: no credential in it.
+    expect(results).toContain('CLAUDE_CONFIG_DIR=')
+    expect(found(results)).toEqual([])
+    // Every server connected: none is named as left out (the late registration's answer included).
+    await later(500)
+    expect(run.notices).toEqual([])
+
+    expect(await turn('PLAN:second', TOKEN_2)).toContain('done')
+    expect(run.started).toHaveLength(1)
+    expect(run.mcp.calls.filter((call) => call.path === '/mcp' && call.method === 'tools/call').map((call) => call.credential)).toEqual(['first', 'second'])
+    // The renewal sent the user's servers again unchanged: they stayed connected.
+    expect(run.mcp.calls.filter((call) => call.path === '/user' && call.method === 'initialize')).toHaveLength(1)
+    expect(run.notices).toEqual([])
+    expect(run.leftBehind()).toEqual([])
+
+    // Stop: Claude Code and the stdio server it started both end.
+    const server = Number(readFileSync(join(run.dirs.pids, 'files'), 'utf8'))
+    expect(alive(server)).toBe(true)
+    const stoppedAt = Date.now()
+    expect(run.service.stopThread('thread')).toBe('stopped')
+    await vi.waitFor(() => {
+      expect(alive(claude.pid!), 'Claude Code').toBe(false)
+      expect(alive(server), 'its stdio server').toBe(false)
+    }, { timeout: 15_000, interval: 50 })
+    console.info(`[#358 evidence] over the input: Claude Code and its stdio server ended ${Date.now() - stoppedAt} ms after Stop`)
   }, 120_000)
 
   it.skipIf(!hasBinary)(`a token renewed on a running process: Claude Code reconnects with it, and the server's new tools are added but a tool it dropped is still offered${NO_BINARY}`, async () => {
@@ -605,7 +705,7 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
     expect(run.leftBehind()).toEqual([])
   }, 120_000)
 
-  it.skipIf(!hasBinary || !POSIX)(`a Mousse server Claude Code cannot connect to fails the turn with that cause, and nothing it started is left running${NO_BINARY}`, async () => {
+  it.skipIf(!hasBinary)(`a Mousse server Claude Code cannot connect to fails the turn with that cause, and nothing it started is left running${NO_BINARY}`, async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     cleanups.push(() => vi.restoreAllMocks())
     const run = await rig({ first: [{ name: 'mcp__mousse__ping', input: {} }] })
@@ -619,34 +719,68 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
     expect(run.anthropic.requests).toEqual([])
     expect(run.started).toHaveLength(1)
     clean(run.started[0]!)
-    // Claude Code and the stdio server it started are ended, as Stop ends them.
-    await vi.waitFor(() => expect(existsSync(hungPid)).toBe(true), { timeout: 10_000 })
-    const server = Number(readFileSync(hungPid, 'utf8'))
-    await vi.waitFor(() => {
-      expect(alive(run.started[0]!.pid!), 'Claude Code').toBe(false)
-      expect(alive(server), 'its stdio server').toBe(false)
-    }, { timeout: 15_000, interval: 200 })
+    if (POSIX) {
+      // Claude Code and the stdio server it started are ended, as Stop ends them.
+      await vi.waitFor(() => expect(existsSync(hungPid)).toBe(true), { timeout: 10_000 })
+      const server = Number(readFileSync(hungPid, 'utf8'))
+      await vi.waitFor(() => {
+        expect(alive(run.started[0]!.pid!), 'Claude Code').toBe(false)
+        expect(alive(server), 'its stdio server').toBe(false)
+      }, { timeout: 15_000, interval: 200 })
+    } else {
+      // Windows registers the user's servers only once Mousse's is attached: Claude Code is ended, and never started one.
+      await vi.waitFor(() => expect(alive(run.started[0]!.pid!), 'Claude Code').toBe(false), { timeout: 15_000, interval: 200 })
+      expect(existsSync(hungPid), 'a stdio server of the user\'s was started').toBe(false)
+    }
     expect(run.leftBehind()).toEqual([])
   }, 120_000)
 
-  it.skipIf(!hasBinary || !POSIX)(`a Stop while Claude Code is still connecting to Mousse's server ends it and the stdio servers it started, without waiting for its connect timeout${NO_BINARY}`, async () => {
+  it.skipIf(!hasBinary)(`a Stop while Claude Code is still connecting to Mousse's server ends it and the stdio servers it started, without waiting for its connect timeout${NO_BINARY}`, async () => {
     const run = await rig({ first: [{ name: 'mcp__mousse__ping', input: {} }] })
     const hungPid = join(run.dirs.pids, 'stuck')
     const integrations = { mcpServers: { stuck: { type: 'stdio' as const, command: process.execPath, args: [run.hungServer, hungPid] } }, proxiedServers: {}, toolRules: {}, warnings: [] }
     const stop = new AbortController()
     const turn = personTurn(run, 'PLAN:first', TOKEN_UNANSWERED, { integrations, signal: stop.signal })
+    // Windows registers the user's servers only once Mousse's is attached: none is started while Claude Code connects it.
     await vi.waitFor(() => {
-      expect(existsSync(hungPid)).toBe(true)
+      if (POSIX) expect(existsSync(hungPid)).toBe(true)
       expect(run.mcp.calls.some((call) => call.path === '/mcp' && call.method === 'initialize')).toBe(true)
     }, { timeout: 15_000, interval: 100 })
-    const server = Number(readFileSync(hungPid, 'utf8'))
+    const server = POSIX ? Number(readFileSync(hungPid, 'utf8')) : undefined
+    const stoppedAt = Date.now()
     stop.abort()
     await expect(turn).rejects.toThrow()
     // Claude Code does not read its closed input while it connects (its 30 s connect timeout): Mousse ends its tree.
     await vi.waitFor(() => {
       expect(alive(run.started[0]!.pid!), 'Claude Code').toBe(false)
-      expect(alive(server), 'its stdio server').toBe(false)
+      if (server !== undefined) expect(alive(server), 'its stdio server').toBe(false)
     }, { timeout: 10_000, interval: 200 })
+    console.info(`[#358 evidence] Stop while Claude Code connected Mousse's server: it ended ${Date.now() - stoppedAt} ms after Stop`)
+    if (!POSIX) expect(existsSync(hungPid), 'a stdio server of the user\'s was started').toBe(false)
+    expect(run.anthropic.requests).toEqual([])
+  }, 120_000)
+
+  it.skipIf(!hasBinary)(`a Stop while user stdio servers that hang hold the first prompt (over Claude Code's input, Windows' way) ends Claude Code and every one of them${NO_BINARY}`, async () => {
+    const run = await rig({ first: [{ name: 'mcp__mousse__ping', input: {} }] }, { viaInput: POSIX })
+    const names = ['h1', 'h2']
+    const hung = Object.fromEntries(names.map((name) => [name, { type: 'stdio' as const, command: process.execPath, args: [run.hungServer, join(run.dirs.pids, name)] }]))
+    const stop = new AbortController()
+    const turn = personTurn(run, 'PLAN:first', TOKEN, { integrations: { mcpServers: hung, proxiedServers: {}, toolRules: {}, warnings: [] }, signal: stop.signal })
+    // Mousse's server attached, the user's registered after it, their processes running, and Claude Code holding the prompt.
+    await vi.waitFor(() => {
+      for (const name of names) expect(existsSync(join(run.dirs.pids, name))).toBe(true)
+    }, { timeout: 15_000, interval: 100 })
+    const servers = names.map((name) => Number(readFileSync(join(run.dirs.pids, name), 'utf8')))
+    const stoppedAt = Date.now()
+    // A person's Stop: the turn is cancelled and the thread's process is stopped (the turn's cancel alone keeps it).
+    stop.abort()
+    expect(run.service.stopThread('thread')).toBe('stopped')
+    await expect(turn).rejects.toThrow()
+    await vi.waitFor(() => {
+      expect(alive(run.started[0]!.pid!), 'Claude Code').toBe(false)
+      for (const server of servers) expect(alive(server), 'a stdio server it started').toBe(false)
+    }, { timeout: 15_000, interval: 100 })
+    console.info(`[#358 evidence] Stop while hung servers held the prompt: Claude Code and its servers ended ${Date.now() - stoppedAt} ms after Stop`)
     expect(run.anthropic.requests).toEqual([])
   }, 120_000)
 
@@ -676,6 +810,7 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
     expect(pids).toHaveLength(1)
     expect(run.started).toHaveLength(1)
     clean(run.started[0]!)
+    console.info(`[#358 evidence] bot: command line of the running process: ${run.started[0]!.commandLine}; variables at the spawn seam: ${Object.keys(run.started[0]!.env).sort().join(',')}`)
     // Only Mousse's server was attached, and only the call the grant holds reached it.
     for (const request of run.anthropic.requests) expect(request.tools.filter((tool) => tool.startsWith('mcp__')).sort()).toEqual(request.tools.some((tool) => tool.startsWith('mcp__')) ? ['mcp__mousse__ping', 'mcp__mousse__secret'] : [])
     expect(new Set(run.mcp.calls.map((call) => call.path))).toEqual(new Set(['/mcp']))
@@ -687,7 +822,7 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
     expect(run.leftBehind()).toEqual([])
   }, 120_000)
 
-  it.skipIf(!hasBinary || !POSIX)(`a bot that may run commands, on the owner's entry: its command reads no credential${NO_BINARY}`, async () => {
+  it.skipIf(!hasBinary || !POSIX)(`a bot that may run commands, on the owner's entry: its command reads no credential${NO_BINARY}${NO_POSIX}`, async () => {
     const run = await rig({
       shell: [
         { name: 'ToolSearch', input: { query: 'select:mcp__mousse__ping', max_results: 5 } },
@@ -716,9 +851,9 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
   }, 120_000)
 
   /** Each way the user's servers reach Claude Code: a startup channel, or its input (Windows). */
-  const PATHS = [...CHANNELS.map((channel) => ({ name: channel, options: { channel } })), { name: 'input', options: { viaInput: true } }]
+  const PATHS = [...CHANNELS.map((channel) => ({ name: channel, options: { channel } })), { name: 'input', options: { viaInput: POSIX } }]
 
-  it.skipIf(!hasBinary || !POSIX).each(PATHS)(`a value that still holds \`\${\` reaches its server as Mousse resolved it, never expanded against Claude Code's environment (%s)${NO_BINARY}`, async ({ options }) => {
+  it.skipIf(!hasBinary).each(PATHS)(`a value that still holds \`\${\` reaches its server as Mousse resolved it, never expanded against Claude Code's environment ($name)${NO_BINARY}`, async ({ options }) => {
     const run = await rig({ first: [{ name: 'ToolSearch', input: { query: 'select:mcp__lit__literal', max_results: 5 } }, { name: 'mcp__lit__literal', input: {} }] }, options)
     const integrations = {
       mcpServers: {
@@ -746,7 +881,7 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
     clean(run.started[0]!)
   }, 180_000)
 
-  it.skipIf(!hasBinary || !POSIX)(`a Claude Code that writes a lot to its error stream does not stall: Mousse reads it to the end${NO_BINARY}`, async () => {
+  it.skipIf(!hasBinary || !POSIX)(`a Claude Code that writes a lot to its error stream does not stall: Mousse reads it to the end${NO_BINARY}${NO_POSIX}`, async () => {
     const run = await rig({ first: [{ name: 'ToolSearch', input: { query: 'select:mcp__mousse__ping,mcp__web__ping', max_results: 5 } }, { name: 'mcp__mousse__ping', input: {} }, { name: 'mcp__web__ping', input: {} }] }, { stderrFlood: true })
     expect(await personTurn(run, 'PLAN:first', TOKEN)).toContain('done')
     // Mousse's own spawn ran it (the user's servers came through the startup channel), and nothing but Mousse read the
@@ -756,7 +891,7 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
     expect(run.anthropic.results('first').join('\n')).toContain('pong from /user')
   }, 120_000)
 
-  it.skipIf(!hasBinary || !POSIX)(`a server that connects after the turn started is offered to the model from the next request it makes, in the same turn${NO_BINARY}`, async () => {
+  it.skipIf(!hasBinary || !POSIX)(`a server that connects after the turn started is offered to the model from the next request it makes, in the same turn${NO_BINARY}${NO_POSIX}`, async () => {
     // 6 s: past the 3 s Claude Code's first turn waits for the user's servers.
     const run = await rig({
       first: [{ name: 'Bash', input: { command: 'sleep 8', description: 'Wait' } }, { name: 'Bash', input: { command: 'echo after', description: 'After' } }],
@@ -774,8 +909,8 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
     expect(run.anthropic.results('second').join('\n')).toContain('late but here')
   }, 120_000)
 
-  it.skipIf(!hasBinary || !POSIX)(`over Claude Code's input (Windows), four user stdio servers that hang hold the turn about 10 s, not a minute${NO_BINARY}`, async () => {
-    const run = await rig({ first: [{ name: 'ToolSearch', input: { query: 'select:mcp__mousse__ping', max_results: 5 } }, { name: 'mcp__mousse__ping', input: {} }] }, { viaInput: true })
+  it.skipIf(!hasBinary)(`over Claude Code's input (Windows), four user stdio servers that hang hold the turn about 10 s, not a minute${NO_BINARY}`, async () => {
+    const run = await rig({ first: [{ name: 'ToolSearch', input: { query: 'select:mcp__mousse__ping', max_results: 5 } }, { name: 'mcp__mousse__ping', input: {} }] }, { viaInput: POSIX })
     const hung = Object.fromEntries(['h1', 'h2', 'h3', 'h4'].map((name) => [name, { type: 'stdio' as const, command: process.execPath, args: [run.hungServer, join(run.dirs.pids, name)] }]))
     const startedAt = Date.now()
     expect(await personTurn(run, 'PLAN:first', TOKEN, { integrations: { mcpServers: hung, proxiedServers: {}, toolRules: {}, warnings: [] } })).toContain('done')

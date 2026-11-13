@@ -197,6 +197,8 @@ export class FakeClaudeProcess {
   mcpFail: 'unsupported' | 'throw' | 'hang' | undefined
   /** While set, `setMcpServers` waits for it before it answers. */
   mcpGate: Promise<unknown> | undefined
+  /** Read with each `setMcpServers` call's servers: what that call waits for before it answers (none: undefined). */
+  mcpHold: ((servers: Record<string, unknown>) => Promise<unknown> | undefined) | undefined
   private readonly started = new Set<string>()
   private readonly cancelled = new Set<string>()
   backgrounded = 0
@@ -446,6 +448,7 @@ export class FakeClaudeProcess {
           throw new Error('ProcessTransport is not ready for writing')
         }
         await this.mcpGate
+        await this.mcpHold?.(servers)
         if (this.mcpFail === 'unsupported') throw new Error('Unsupported control request subtype: mcp_set_servers')
         if (this.mcpFail === 'throw') throw new Error('ProcessTransport is not ready for writing')
         if (this.mcpFail === 'hang') await new Promise(() => undefined)
@@ -495,6 +498,8 @@ export class FakeClaudeCli {
   mcpFail: 'unsupported' | 'throw' | 'hang' | undefined
   /** What each new process's `setMcpServers` waits for (`FakeClaudeProcess.mcpGate`). */
   mcpGate: Promise<unknown> | undefined
+  /** What each new process's `setMcpServers` waits for, by the servers sent (`FakeClaudeProcess.mcpHold`). */
+  mcpHold: ((servers: Record<string, unknown>) => Promise<unknown> | undefined) | undefined
 
   /** What each new process given servers through its startup channel writes as it refuses to start with them. */
   startupRefusal: string | undefined
@@ -506,6 +511,7 @@ export class FakeClaudeCli {
     process.mcpErrors = { ...this.mcpErrors }
     process.mcpFail = this.mcpFail
     process.mcpGate = this.mcpGate
+    process.mcpHold = this.mcpHold
     this.processes.push(process)
     return process.asQuery()
   }

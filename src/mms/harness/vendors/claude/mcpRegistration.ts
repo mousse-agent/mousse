@@ -162,6 +162,11 @@ type RegistrationOptions = {
   threadId?: string
   /** What Claude Code wrote to its error stream, redacted (`ClaudeStderrTail`): read when the process ended. */
   explain?: () => Promise<string>
+  /**
+   * Mousse's server is sent again exactly as it was registered and answered before (`registerUserServersLater`): Claude
+   * Code keeps it connected and does not list it as added, which is not a denial.
+   */
+  mousseKept?: boolean
 }
 
 /** The error for a request that failed because the process ended, named from what the process said (`explain`). */
@@ -236,9 +241,10 @@ export async function registerClaudeMcpServers(target: Partial<Pick<Query, 'setM
   }
   const errors = result.errors ?? {}
   const failed = names.filter((name) => Object.prototype.hasOwnProperty.call(errors, name))
-  // Mousse's server is always sent with a header the process does not have yet (a new process, or a new token), so
-  // Claude Code lists it as added; one it left out without an error (a policy that denies it) is missing all the same.
-  const denied = required && !failed.includes(MOUSSE_MCP_SERVER_NAME) && !(result.added ?? []).includes(MOUSSE_MCP_SERVER_NAME)
+  // Mousse's server is sent with a header the process does not have yet (a new process, or a new token), so Claude
+  // Code lists it as added; one it left out without an error (a policy that denies it) is missing all the same. Sent
+  // again unchanged (`mousseKept`), it stays connected and is not listed.
+  const denied = required && !options.mousseKept && !failed.includes(MOUSSE_MCP_SERVER_NAME) && !(result.added ?? []).includes(MOUSSE_MCP_SERVER_NAME)
   for (const name of failed)
     console.warn(`[claude-subscription] MCP server "${name}" could not be attached; it is left out of this turn`, { threadId: options.threadId })
   if (required && failed.includes(MOUSSE_MCP_SERVER_NAME)) throw mousseUnavailable('Claude Code could not connect to Mousse\'s MCP server; try again.')
@@ -255,7 +261,7 @@ export async function registerClaudeMcpServers(target: Partial<Pick<Query, 'setM
 export function registerUserServersLater(target: Partial<Pick<Query, 'setMcpServers'>>, registered: ClaudeMcpServers, users: ClaudeMcpServers, threadId: string, done: (failed: string[]) => void): ClaudeMcpServers {
   const servers = { ...claudeLiteralServers(users, 'input'), ...registered }
   // Never past the turn: an answer that does not come in Claude Code's own connect time is not waited for.
-  void registerClaudeMcpServers(target, servers, { timeoutMs: 10 * 60_000, threadId }).then(
+  void registerClaudeMcpServers(target, servers, { timeoutMs: 10 * 60_000, threadId, mousseKept: true }).then(
     ({ failed }) => { if (failed.length > 0) done(failed) },
     () => done(Object.keys(users))
   )
