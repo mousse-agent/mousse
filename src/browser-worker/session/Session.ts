@@ -86,6 +86,8 @@ type Settled<T> = { ok: true; value: T } | { ok: false; error: unknown }
 const MAX_ATTACHED_FRAMES_PER_OBSERVATION = 32
 /** An observation's warning while its page is still loading (`browser_wait` `document-ready` waits it out). */
 export const PAGE_STILL_LOADING = 'page-still-loading'
+/** What every use of a session hears once its Chromium went away by itself. */
+const BROWSER_STOPPED = 'The browser stopped'
 /** How long a new page or frame is held for its mark before it is let go. A page a site opens without an opener has no renderer yet: it answers only once it runs. */
 const MARK_BEFORE_RUN_MS = 1_000
 /** How long after that its mark may still take before the page is closed: it never runs on unmarked. */
@@ -121,6 +123,8 @@ export class ManagedSession {
   private readonly clock: () => Date
   private closed = false
   private closing = false
+  /** Chromium went away by itself (`browserEnded`). */
+  private ended = false
   private closeWork: Promise<void> | null = null
   private readonly sessionAbort = new AbortController()
   private readonly ops = new Set<Promise<unknown>>()
@@ -237,7 +241,10 @@ export class ManagedSession {
     })
     this.throwIfUnavailable(signal)
     this.chrome.cdp.on('disconnect', () => {
-      if (!this.closed && !this.closing) this.lifecycle = 'disconnected'
+      if (!this.closed && !this.closing) {
+        this.lifecycle = 'disconnected'
+        this.browserEnded()
+      }
     })
     // Every target Chromium attaches on its own (the session's tabs too) waits until `onAttached` marks it and lets it run.
     this.chrome.cdp.on('Target.attachedToTarget', (params: unknown, parentSessionId?: string) => { this.onAttached(params, parentSessionId) })
@@ -407,6 +414,34 @@ export class ManagedSession {
     return this.closeWork
   }
 
+  /**
+   * Chromium went away by itself (it crashed, or the system or someone ended it): whoever waits on
+   * it hears so now (`worker_disconnected`, "The browser stopped"), and once its process is gone the
+   * session lets go of everything it held, the profile's lock too, so the next use starts it again.
+   */
+  private browserEnded(): void {
+    if (this.ended) return
+    this.ended = true
+    this.viewers?.dispose()
+    this.viewers = null
+    const chrome = this.chrome
+    void (async () => {
+      const child = chrome?.process
+      if (child && child.exitCode === null && child.signalCode === null) {
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, 5_000)
+          child.once('exit', () => { clearTimeout(timer); resolve() })
+        })
+      }
+      await this.close()
+    })().catch((error: unknown) => console.warn('a browser that stopped could not be closed', { sessionId: this.id, error: error instanceof Error ? error.message : String(error) }))
+  }
+
+  /** Whether Chromium went away by itself (`browserEnded`). */
+  get browserGone(): boolean {
+    return this.ended
+  }
+
   private async closeOwned(): Promise<void> {
     this.fenceInFlight('cancelled')
     if (!this.sessionAbort.signal.aborted) {
@@ -426,7 +461,7 @@ export class ManagedSession {
     } catch (error) {
       throw error instanceof Error ? error : new Error(String(error))
     }
-    if (chrome && chrome.process.exitCode === null) {
+    if (chrome && chrome.process.exitCode === null && chrome.process.signalCode === null) {
       throw new Error(`Managed Chromium still alive after stop (pid ${chrome.pid})`)
     }
     if (chrome && isProcessAlive(chrome.pid)) {
@@ -986,6 +1021,8 @@ export class ManagedSession {
       waitMs: count(params.waitMs, 0, MAX_WAIT_MS, 20_000),
       signal
     })
+    // The browser stopped while this waited: the watcher hears that, not that nothing changed.
+    if (this.ended) fail('worker_disconnected', BROWSER_STOPPED)
     const cursor = this.tabs.has(tab.publicId) ? this.liveCursor(tab) : undefined
     return { ...update, ...(cursor ? { cursor } : {}) }
   }
@@ -1111,6 +1148,8 @@ export class ManagedSession {
   }
 
   handle(method: BrowserWorkerRequest['method'], params: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> | unknown {
+    // A browser that stopped by itself answers every use with that until it is closed (then the next use starts it again).
+    if (this.ended && method !== 'session.close' && method !== 'frame.stop') fail('worker_disconnected', BROWSER_STOPPED)
     switch (method) {
       case 'session.close': return this.close()
       case 'tabs.list': return { tabs: this.listTabs(), activeTabId: this.activeTabId }
@@ -1534,6 +1573,7 @@ export class ManagedSession {
   }
 
   private requireChrome(): LaunchedChrome {
+    if (this.ended) fail('worker_disconnected', BROWSER_STOPPED)
     if (!this.chrome || this.closed || this.closing || this.lifecycle === 'closed') fail('session_closed', 'Browser session is closed')
     if (this.lifecycle === 'disconnected') fail('worker_disconnected', 'Chromium disconnected')
     return this.chrome

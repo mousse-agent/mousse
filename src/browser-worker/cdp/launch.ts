@@ -196,14 +196,16 @@ export async function launchManagedChrome(options: LaunchChromeOptions): Promise
         tree = rootOnlyTree(pid, { parentHandleAlive: child.exitCode === null, executablePath: options.executablePath })
         writeOwnedProcessRecord(options.userDataDir, tree, options.executablePath)
         try { await cdp.send('Browser.close', {}, { timeoutMs: 3_000 }) } catch { /* ignore */ }
-        if (child.exitCode === null) {
+        // Ended by a signal (killed), a process has no exit code but is gone all the same.
+        const exited = () => child.exitCode !== null || child.signalCode !== null
+        if (!exited()) {
           await stopOwnedProcessTree(tree)
         }
         await Promise.race([
           Promise.all([exitPromise, closePromise]),
           new Promise((_, reject) => setTimeout(() => reject(new Error(`Chromium child handle did not exit (pid ${pid}; exit=${child.exitCode}; signal=${child.signalCode})`)), 8_000))
         ])
-        if (child.exitCode === null || exitCode === undefined) {
+        if (!exited() || exitCode === undefined) {
           throw new Error(`Chromium child handle did not publish exit (pid ${pid})`)
         }
         await cdp.close()

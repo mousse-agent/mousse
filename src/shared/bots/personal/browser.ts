@@ -48,6 +48,8 @@ export interface BotBrowserView {
    * a view says it is not updating until they can. Absent while they can.
    */
   stalled?: string
+  /** It is not open because its process ended by itself (a crash, the system): the next use starts it again. */
+  stopped?: true
 }
 
 /** A person's input in the split view, at the page's CSS pixels. */

@@ -155,6 +155,11 @@ export class SessionManager {
     if (workspaceId && !/^[a-zA-Z0-9:_-]+$/.test(workspaceId)) fail('invalid_action', 'workspaceId is not an identifier')
     let url: string | undefined
     if (params.url !== undefined) url = browserNavigationUrl(params.url)
+    // A session of this profile whose browser stopped by itself lets go of the profile first (it may still be closing).
+    if (persistent) {
+      const stopped = [...this.sessions.values()].filter((entry) => entry.browserGone && entry.profileId === profileId && entry.workspaceId === workspaceId)
+      await Promise.all(stopped.map((entry) => entry.close().catch(() => undefined)))
+    }
     const session = new ManagedSession({
       profileId,
       browserRoot: this.config.browserRoot,
