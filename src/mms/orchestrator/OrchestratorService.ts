@@ -108,8 +108,8 @@ import { piDriver } from '../harness/drivers/pi'
 import { contextGauge, policyOrigin, threadTurnOrigin } from '../harness/policy'
 import type { BotThreads } from '../../shared/bots/personal/authority'
 import { botTurnOffers } from '../../shared/bots/personal/walls'
-import { isBotWallAbort, type BotTurnDispatcher, type PreparedBotTurn } from '../bots/activation/dispatcher'
-import { harnessAppError, isRetriesExhausted, onRetiredBareRoute, type BindPolicy, type ExecutionBinding, type HarnessCaps, type ProviderScope, type RunPolicy, type TurnOrigin } from '../../shared/harness/types'
+import { BOT_COMPACTION_HOLD_MS, isBotRoomAbort, isBotWallAbort, type BotTurnDispatcher, type BotTurnSteer, type PreparedBotTurn } from '../bots/activation/dispatcher'
+import { harnessAppError, isRetriesExhausted, onRetiredBareRoute, PROVIDER_TURN_CAP, providerFailureText, type BindPolicy, type ExecutionBinding, type HarnessCaps, type ProviderScope, type RunPolicy, type TurnOrigin } from '../../shared/harness/types'
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
 import { planWakeNotice, type NoticeContext } from '../run/delegation/notice'
 import { acknowledgeRows } from '../run/terminal'
@@ -123,7 +123,7 @@ import { isRunningSubagent, type BackgroundTaskNoticeItem, type SubagentNoticeIt
 import type { DelegationRequest, ForkPointSeed, ThreadCreation } from '../run/RunEngine'
 import type { HandoffItem } from '../run/handoff/budget'
 import { committedTransfers, TurnHandoffs, type PlannedHandoff } from './turnHandoffs'
-import { nestedUnderSubagentOrBackground, TranscriptAssembler, unshownReplyText } from '../run/transcript/TranscriptAssembler'
+import { nestedUnderSubagentOrBackground, stoppedReplyText, TranscriptAssembler, unshownReplyText } from '../run/transcript/TranscriptAssembler'
 import { forkStrategy, handoffDelivery, mcpAttachable, subagentTargetRefusal, type SubagentRefusal } from '../run/policy/featureGates'
 import { isContextOverflowError, retryContextOverflowOnce } from '../run/transcript/retryContextOverflow'
 import {
@@ -930,14 +930,30 @@ function isContinuationTurnPayload(payload: unknown): payload is ContinuationTur
 const KNOWN_TURN_PAYLOAD_KINDS: readonly string[] = ['wake', 'integration', 'continuation', 'bot']
 
 /**
- * A bot turn's preamble: the bot's role and instructions first, then its context pack (memory and
- * history, built by Mousse and frozen for the activation, Bot Phase 1 §5.3.2), then Mousse's own.
- * Bots that never ask anyone run their app tools with `approvals: 'never'`, so a tool that would
- * ask is refused.
+ * A bot turn's preamble: its context pack (memory and history, built by Mousse and frozen for the activation, Bot
+ * Phase 1 §5.3.2), then Mousse's own. The bot's role and instructions are its system text instead
+ * (`sessionInstructions`), where a compaction of the runtime's context cannot remove them. Bots that never ask anyone
+ * run their app tools with `approvals: 'never'`, so a tool that would ask is refused.
  */
-function withBotInstructions(instructions: string | undefined, preamble: string, pack?: string): string {
-  const parts = [instructions?.trim() ? `Your role and instructions:\n${instructions.trim()}` : '', pack?.trim() ?? '', preamble]
-  return parts.filter(Boolean).join('\n\n')
+function withBotPack(preamble: string, pack?: string): string {
+  return [pack?.trim() ?? '', preamble].filter(Boolean).join('\n\n')
+}
+
+/**
+ * A bot turn's steer as the turn's remote steer source: what the engine offers goes in as an agent's steer (it waits
+ * for a running tool, then goes in at the runtime's next step), each entry kept with the token the engine took it under.
+ */
+function botSteerSource(steer: BotTurnSteer): { externalDrainSteer: () => SteerEntry[] | undefined; externalPeekSteer: () => SteerEntry[] | undefined } {
+  return {
+    externalDrainSteer: () => {
+      const taken = steer.take()
+      return taken ? [{ text: taken.text, byAgent: true, botSteer: taken.token }] : undefined
+    },
+    externalPeekSteer: () => {
+      const text = steer.peek()
+      return text ? [{ text, byAgent: true }] : undefined
+    }
+  }
 }
 
 /** A bot turn's skills: only the granted ones are listed, and only those may be loaded. */
@@ -3684,8 +3700,11 @@ export class OrchestratorService extends EventEmitter {
     const descriptor = typeof turn.mode === 'string' ? this.modeRegistry.getModeSync(turn.mode, { projectPath: turn.projectPath }) : undefined
     // Agent and Plan run natively in the runtime; another mode's own instructions go into the preamble.
     const modePrompt = descriptor && !['agent', 'plan', 'build'].includes(descriptor.id) ? descriptor.prompt : undefined
-    // A bot's turn runs on its own instructions (`botInstructions`, in the preamble): Mousse's
-    // orchestration and applet guidance would point it at tools its grant never holds.
+    // A bot's turn runs on its own instructions (`botInstructions`) as its whole system text: Mousse's orchestration
+    // and applet guidance would point it at tools its grant never holds. Its runtime takes them as its system prompt
+    // (Claude Code's replaced one, Codex's developer instructions, added to Pi's), with none of the owner's own
+    // settings, plugins or servers; a compaction keeps it. The text is the same on every turn of the activation (no
+    // time or per-turn value in it), so the prompt cache holds across them.
     const appletCatalogue = this.appletStore && !turn.bot ? this.appletCatalogue() : undefined
     // Only a profile with an MCP manager can relay; the others start the turn without waiting.
     const relay = this.mcpManager ? await this.relayForTurn(turn) : undefined
@@ -3699,12 +3718,12 @@ export class OrchestratorService extends EventEmitter {
       ...(relay ? { relay } : {}),
       // A definition's turn runs on its own prompt and its granted skills only (`runDefinitionTurn`).
       instructions: (mcpAttached, relayAttached) => turn.definition ? { sessionInstructions: '', turnPreamble: '' } : ({
-        sessionInstructions: turn.bot ? '' : [
+        sessionInstructions: turn.bot ? input.botInstructions?.trim() ?? '' : [
           sessionInstructions({ mcp: mcpAttached, relay: relayAttached, appletGuidance: this.appletStore ? APPLET_GENERATION_GUIDANCE : undefined }),
           // The Automation manager's thread runs the default agent with its own brief (v4 Automations).
           ...(mcpAttached && this.threadStore?.getThread(turn.threadId)?.automationManager ? [AUTOMATION_MANAGER_INSTRUCTIONS] : [])
         ].filter(Boolean).join('\n\n'),
-        turnPreamble: withBotInstructions(input.botInstructions, turnPreamble({
+        turnPreamble: withBotPack(turnPreamble({
           loadedSkills: turn.loadedSkills,
           modePrompt,
           appletCatalogue,
@@ -4716,10 +4735,14 @@ export class OrchestratorService extends EventEmitter {
           runId: payload.runId,
           externalSignal: AbortSignal.any([signal, prepared.authority.time.signal]),
           modelOverride: this.harness.instanceMap.overrideFor({ instanceId: prepared.selection.instanceId, model: prepared.selection.model, ...(prepared.selection.effort ? { effort: prepared.selection.effort } : {}) }),
-          bot: prepared
+          bot: prepared,
+          // What reaches the bot's turn while it runs (the owner's notes, the pack again after a compaction): its own
+          // steer source, never the thread's queue.
+          ...(prepared.steer ? botSteerSource(prepared.steer) : {})
         }
       )
-      text = response.message
+      // A failed turn's message is its error, never the bot's words; a turn its work goes on from hands back what it said.
+      text = response.error ? response.partial : response.message
     } catch (error) {
       const settled = engine.getRun(payload.runId)
       if (!settled || (!TERMINAL_RUN_STATUSES.has(settled.status) && settled.status !== 'queued')) throw error
@@ -11599,7 +11622,7 @@ export class OrchestratorService extends EventEmitter {
     const engineRunId = this.runEngine ? opts?.runId : undefined
     let runTerminalMarked = false
     // `resultText` is the turn's final reply; a delegated child run publishes it (SPEC §14.1).
-    const markRunTerminal = (status: 'completed' | 'interrupted' | 'failed', outcome?: { error?: string; interruptedBy?: 'user' | 'daemon_restart' | 'bot_wall'; usageLimitUntil?: string }, resultText?: string): void => {
+    const markRunTerminal = (status: 'completed' | 'interrupted' | 'failed', outcome?: { error?: string; interruptedBy?: 'user' | 'daemon_restart' | 'bot_wall'; usageLimitUntil?: string; usageLimitKind?: string }, resultText?: string): void => {
       if (runTerminalMarked) return
       runTerminalMarked = true
       this.markRun(engineRunId, (engine, id) => engine.markTerminal(id, status, outcome, { resultText }))
@@ -11717,6 +11740,8 @@ export class OrchestratorService extends EventEmitter {
     let usagePause: RunPause | undefined
     /** A scheduled turn that failed on a usage limit: when it resets (see the catch below). */
     let scheduledLimitUntil: string | undefined
+    /** The window the provider named for that limit (`seven_day_opus`): a bot keeps a family's limit apart. */
+    let scheduledLimitKind: string | undefined
     let failureDiagnostic: Record<string, unknown> | undefined
     let compactionNote: ChatMessage | undefined
     let switchMarker: ChatMessage | undefined
@@ -11912,8 +11937,15 @@ export class OrchestratorService extends EventEmitter {
       const acceptedDrains = new Set<string>()
       // An acceptance with no token (`steerAccepted`, `nativeMessages`) saves every drained item: every taken drain is
       // accepted with it.
+      /** A bot turn's own steers among `entries` were read: its engine marks them delivered, once. */
+      const botSteersRead = (entries: readonly SteerEntry[]): void => {
+        for (const entry of entries) if (entry.botSteer) opts?.bot?.steer?.accepted(entry.botSteer)
+      }
       const acceptTakenDrains = (): void => {
-        for (const token of takenDrains.keys()) acceptedDrains.add(token)
+        for (const [token, entry] of takenDrains) {
+          acceptedDrains.add(token)
+          botSteersRead(entry.entries)
+        }
         takenDrains.clear()
       }
       const drainScope = `${turnId}:${randomUUID().slice(0, 8)}`
@@ -11938,10 +11970,15 @@ export class OrchestratorService extends EventEmitter {
           const asksPerson = this.mousseCallsAskingPerson(session.threadId)
           return asksPerson !== undefined && assembler.ownCallMayAsk(asksPerson)
         },
-        settleMs: this.steerSettleMs ?? release.settleMs
+        settleMs: this.steerSettleMs ?? release.settleMs,
+        // A bot's note waits for a compaction only so long: one whose end is never reported never holds it to the end.
+        ...(opts?.bot?.steer ? { compactionLimitMs: BOT_COMPACTION_HOLD_MS } : {})
       })
       if (engineRunId) this.steerHolds.set(engineRunId, hold)
       turnHold = { hold, runId: engineRunId }
+      // A bot's notes reach its turn as it works on a runtime that takes steers; on one that does not, they wait for the
+      // dispatch's end, as before.
+      if (opts?.bot?.steer && opts.externalDrainSteer && instance.caps.steer !== 'queue_only') opts.bot.steer.attached()
       const steerKeys = new WeakMap<SteerEntry, string>()
       let steerKeySeq = 0
       // An entry's identity in a hold: its queue item, or one it keeps for as long as it exists (a hand-back restores the
@@ -12052,6 +12089,9 @@ export class OrchestratorService extends EventEmitter {
           // A person's steer waits for a compaction the provider runs inside the turn ("Waits for compaction").
           hold.compacting(phase === 'start')
           onCompaction(phase)
+          opts?.bot?.steer?.compacting?.(phase === 'start')
+          // A bot's turn gets its memory pack and its job's brief again right after (at the next safe point).
+          if (phase === 'complete') opts?.bot?.steer?.compacted()
         },
         // The line under Working says it; nothing is saved to the transcript.
         retry: (attempt, detail) => this.setTurnStep(session.threadId, {
@@ -12117,6 +12157,14 @@ export class OrchestratorService extends EventEmitter {
             drained.delete(token)
             takenDrains.delete(token)
             acceptedDrains.add(token)
+            botSteersRead(entry!.entries)
+          } else if (opts?.bot?.steer) {
+            // Without a token every drained item is accepted: a bot turn's too.
+            for (const [drainToken, held] of drained) {
+              acceptedDrains.add(drainToken)
+              botSteersRead(held.entries)
+            }
+            drained.clear()
           }
           this.nativeContext = appendNativeMessage(this.nativeContext, userMessage(text))
           this.nativeContext.acceptedSteerItemIds = Array.from(new Set([
@@ -12212,12 +12260,16 @@ export class OrchestratorService extends EventEmitter {
             drained.delete(token)
             takenDrains.delete(token)
           }
-          // Returned drains go ahead of anything steered since, oldest first.
+          // Returned drains go ahead of anything steered since, oldest first. A bot turn's own steers go back to its engine,
+          // which offers them again or leaves them for the dispatch's end: never to the thread's queue.
           const put = (...items: SteerEntry[]): void => {
-            turn.pendingSteer.splice(returnedAhead, 0, ...items)
-            returnedAhead += items.length
+            const own = items.filter((item) => !item.botSteer)
+            for (const item of items) if (item.botSteer) opts?.bot?.steer?.handedBack(item.botSteer)
+            turn.pendingSteer.splice(returnedAhead, 0, ...own)
+            returnedAhead += own.length
           }
-          if (!entry) return put({ text })
+          // Text with no drain of a bot turn is the engine's (unread, it waits there): nothing is queued for it.
+          if (!entry) return opts?.bot ? undefined : put({ text })
           // The items these entries stand for are not taken: the next acknowledgement must not drop them.
           for (const steer of entry.entries) if (steer.itemId) session.drainedExternalSteerIds.delete(steer.itemId)
           // In the order they were drained: the external steers first, then the thread's own.
@@ -12339,7 +12391,8 @@ export class OrchestratorService extends EventEmitter {
         // A bot turn fails the same way: its engine tries the next model, or pauses the bot until the reset.
         const scheduled = opts?.schedule || opts?.bot ? usageLimitOf(err) : undefined
         if (scheduled) scheduledLimitUntil = (scheduled.estimated ? undefined : boundedResetIso(scheduled.resetsAt, Date.now())) ?? estimatedReset(Date.now())
-        assistantText = `[${providerError.code}] ${providerError.message}`
+        if (scheduled?.limitKind) scheduledLimitKind = scheduled.limitKind
+        assistantText = providerFailureText(providerError)
       }
     } finally {
       // Nothing is held once the provider's turn is over: what is still pending is an unread steer, and the turn's end
@@ -12409,8 +12462,13 @@ export class OrchestratorService extends EventEmitter {
 
     if (providerError) {
       console.error('Orchestrator turn failed', failureDiagnostic ?? errorDiagnostic(providerError, 'orchestrator.chat'))
+      // A bot's turn that reached its runtime's cap on model turns hands back what it said last: its work goes on in the
+      // next dispatch and keeps it (`BotEngine.continueAfterTurnCap`). Any other failure's words are not a reply.
+      const capped = opts?.bot && providerError.code === PROVIDER_TURN_CAP
+        ? stoppedReplyText(stripActionBlocks(this.transcript.openAssistantContent() ?? '').trim(), this.transcript.closedReplies().map((reply) => stripActionBlocks(reply.content)), true)
+        : undefined
       this.transcript.abandonAssistant(this.transcript.openAssistantContent() ?? '', false)
-      const message = `[${providerError.code}] ${providerError.message}`
+      const message = providerFailureText(providerError)
       this.addSystemMessage(message)
       const failure = this.messages.at(-1)!
       failure.error = providerError
@@ -12422,10 +12480,10 @@ export class OrchestratorService extends EventEmitter {
         this.emit('connection-failed', { threadId: session.threadId, error: providerError })
       }
       this.setTurnPhase(session.threadId, 'failed', { error: message, errorDescriptor: providerError })
-      markRunTerminal('failed', { error: message, ...(scheduledLimitUntil ? { usageLimitUntil: scheduledLimitUntil } : {}) })
+      markRunTerminal('failed', { error: message, ...(scheduledLimitUntil ? { usageLimitUntil: scheduledLimitUntil, ...(scheduledLimitKind ? { usageLimitKind: scheduledLimitKind } : {}) } : {}) })
       await checkpointTurn('failed')
       this.persist(true)
-      const response: OrchestratorResponse = { message, actions: [], error: providerError }
+      const response: OrchestratorResponse = { message, actions: [], error: providerError, ...(capped ? { partial: capped } : {}) }
       this.emit('response', response)
       settleOnce(false, true)
       this.releaseSessionExecutionLease(session)
@@ -12466,7 +12524,9 @@ export class OrchestratorService extends EventEmitter {
         restart ? RESTART_INTERRUPTED_TEXT : wall ? 'Paused: waiting for the owner.' : TURN_STOPPED_TEXT,
         turnEnd ? { turnId: engineRunId, turnEnd } : undefined
       )
-      const response: OrchestratorResponse = { message: partial, actions: [] }
+      // Work cut because it ran out of room hands back what it had, even right after a tool call; any other stop its open reply.
+      const outOfRoom = wall && isBotRoomAbort(turn.abort.signal.reason)
+      const response: OrchestratorResponse = { message: stoppedReplyText(partial, replies.map((reply) => stripActionBlocks(reply.content)), outOfRoom), actions: [] }
       this.setTurnPhase(session.threadId, 'stopped')
       markRunTerminal('interrupted', { interruptedBy: restart ? 'daemon_restart' : wall ? 'bot_wall' : 'user' }, partial)
       try {

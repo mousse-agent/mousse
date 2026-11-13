@@ -63,9 +63,16 @@ const systemDeps: ComputerNameDeps = {
 }
 
 let cached: Promise<string> | undefined
+let known: string | undefined
 
 /** The computer name, looked up once. Call early so later callers get the cached answer. */
 export function getComputerName(): Promise<string> {
-  cached ??= resolveComputerName(systemDeps)
+  cached ??= resolveComputerName(systemDeps).then((name) => (known = name))
   return cached
+}
+
+/** The computer name once the lookup has answered, else undefined (and the lookup starts). */
+export function computerNameIfKnown(): string | undefined {
+  void getComputerName()
+  return known
 }

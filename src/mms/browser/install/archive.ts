@@ -15,7 +15,12 @@ export interface SafeExtractLimits {
   allowContainedSymlinks?: boolean
 }
 type EntryKind = 'file' | 'directory' | 'symlink'
-interface ZipEntry { name: string; kind: EntryKind; compressedSize: number; uncompressedSize: number; externalAttributes: number; linkTarget?: string }
+/**
+ * `linkType` is what a link resolves to in the archive's own tree. Windows needs it when it creates the link: guessed
+ * from the disk, a link made before its target (the real macOS archive lists them first) would be a file link to a
+ * folder, which never resolves. Other systems ignore it.
+ */
+interface ZipEntry { name: string; kind: EntryKind; compressedSize: number; uncompressedSize: number; externalAttributes: number; linkTarget?: string; linkType?: 'file' | 'dir' }
 const CENTRAL_SIGNATURE = 0x02014b50
 const LOCAL_SIGNATURE = 0x04034b50
 const END_SIGNATURE = 0x06054b50
@@ -112,27 +117,28 @@ function inflateZipToDisk(archive: Uint8Array, entries: ZipEntry[], destinationR
 function createContainedSymlinks(entries: ZipEntry[], destinationRoot: string, signal?: AbortSignal): void {
   const links = entries.filter((entry) => entry.kind === 'symlink')
   if (!links.length) return
-  const created: string[] = []
+  const created: Array<{ path: string; name: string }> = []
   try {
     for (const entry of links) {
       assertNotAborted(signal)
       const path = resolve(destinationRoot, entry.name)
-      symlinkSync(entry.linkTarget!, path)
-      created.push(path)
+      symlinkSync(entry.linkTarget!, path, entry.linkType)
+      created.push({ path, name: entry.name })
     }
     // Defense in depth: the in-memory check in inspectZip already proved every
     // target stays inside the tree; confirm it against the real filesystem.
+    // Failures name the entry as the archive does, whatever the host's separator.
     const canonicalRoot = realpathSync.native(destinationRoot)
-    for (const path of created) {
+    for (const { path, name } of created) {
       let resolvedPath: string
-      try { resolvedPath = realpathSync.native(path) } catch { throw new Error(`Archive symlink does not resolve inside the extraction root: ${relative(destinationRoot, path)}`) }
+      try { resolvedPath = realpathSync.native(path) } catch { throw new Error(`Archive symlink does not resolve inside the extraction root: ${name}`) }
       const rel = relative(canonicalRoot, resolvedPath)
-      if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) throw new Error(`Archive symlink points outside the extraction root: ${relative(destinationRoot, path)}`)
-      if (isSameOrAncestor(resolvedPath, realpathSync.native(dirname(path)))) throw new Error(`Archive symlink points at its own folder or a folder above it: ${relative(destinationRoot, path)}`)
+      if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) throw new Error(`Archive symlink points outside the extraction root: ${name}`)
+      if (isSameOrAncestor(resolvedPath, realpathSync.native(dirname(path)))) throw new Error(`Archive symlink points at its own folder or a folder above it: ${name}`)
     }
   } catch (error) {
     // Unlink (never follow) what was created so the staging tree holds no links.
-    for (const path of created) {
+    for (const { path } of created) {
       try { if (lstatSync(path).isSymbolicLink()) unlinkSync(path) } catch { /* staging cleanup owns the rest */ }
     }
     throw error
@@ -327,6 +333,8 @@ function assertConsistentTree(entries: ZipEntry[]): void {
       throw new Error(`Archive symlink points at its own folder or a folder above it: ${link.name}`)
     }
     if (foldersHoldingLinks.has(entryKey(resolved.join('/')))) throw new Error(`Archive symlink points at a folder that holds links: ${link.name}`)
+    // What the link resolves to here is what it resolves to on disk (the resolution above follows the archive's own links).
+    link.linkType = nodes.get(entryKey(resolved.join('/')))?.kind === 'directory' ? 'dir' : 'file'
   }
 }
 

@@ -877,3 +877,52 @@ it('finds the original key epoch of a node from retained rosters after many re-k
   expect(a.identity.historicalNodeEpoch(self.user, peer, originalAt)).toBe(1)
   expect(a.identity.historicalNodeEpoch(self.user, peer, originalAt - 1)).toBeUndefined()
 }, 60_000)
+
+describe('selfRemoved', () => {
+  /** A second computer of the authority's user, holding the roster the authority last published. */
+  async function member(a: Awaited<ReturnType<typeof authority>>) {
+    const dir = profile(),
+      keys = new FileKeyStore(dir),
+      node = newId('node')
+    await keys.initialize({ asAuthority: false })
+    a.identity.issueNodeDelegation({ node, keys: keys.nodeKeys(), name: 'Mac mini', caps: ['read'] })
+    const identity = new NetIdentityService({
+      database: database(dir),
+      keys,
+      clock: a.timer.clock,
+      self: { user: a.identity.self()!.user, node }
+    })
+    identity.pinUser(a.identity.self()!.user, a.keys.rootKey()!)
+    identity.acceptRoster(a.identity.roster()!, a.keys.rootKey()!)
+    return { identity, node }
+  }
+
+  it('is false for a live computer and for the authority', async () => {
+    const a = await authority(),
+      m = await member(a)
+    expect(m.identity.self()).toMatchObject({ node: m.node, isAuthority: false })
+    expect(m.identity.selfRemoved()).toBe(false)
+    expect(a.identity.selfRemoved()).toBe(false)
+  })
+
+  it('is false for a computer whose delegation only lapsed', async () => {
+    const a = await authority(),
+      m = await member(a)
+    a.timer.advance(NODE_DELEGATION_TTL_MS + 3 * 24 * 3600000)
+    expect(m.identity.selfRemoved()).toBe(false)
+  })
+
+  it('is true once the computer holds a roster that revokes it, lapsed or not', async () => {
+    const a = await authority(),
+      m = await member(a)
+    a.identity.revoke(m.node)
+    // Until the revoking roster reaches it, the computer does not know.
+    expect(m.identity.selfRemoved()).toBe(false)
+    m.identity.acceptRoster(a.identity.roster()!, a.keys.rootKey()!)
+    expect(m.identity.selfRemoved()).toBe(true)
+    a.timer.advance(NODE_DELEGATION_TTL_MS + 3 * 24 * 3600000)
+    expect(m.identity.selfRemoved()).toBe(true)
+    // The authority's own view is unaffected.
+    expect(a.identity.selfRemoved()).toBe(false)
+  })
+})

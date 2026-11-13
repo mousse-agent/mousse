@@ -47,6 +47,11 @@ export interface SteerHoldOptions {
   asking?: () => boolean
   /** The release window after the last foreground tool (`start` providers). */
   settleMs?: number
+  /**
+   * How long a compaction holds a steer at most: past it, one whose end was never reported holds nothing. Unset: until
+   * its end (a bot's turn sets it, so a note never waits for the whole dispatch).
+   */
+  compactionLimitMs?: number
   now?: () => number
 }
 
@@ -70,6 +75,8 @@ export class SteerHold {
   private atBoundary = false
   /** The provider compacts its context: a steer waits for it, and never stops it (§3.1). */
   private compactingNow = false
+  /** When the compaction started (`compactionLimitMs`). */
+  private compactingSince: number | undefined
   /** Only ever rises within a run (§0). */
   private generation = 0
   private heldKeys: Set<string> | undefined
@@ -137,11 +144,14 @@ export class SteerHold {
   /** A compaction of the turn's context starts (`true`) or ends: while it runs, a held steer waits for it. */
   compacting(active: boolean): void {
     this.compactingNow = active
+    this.compactingSince = active ? this.now() : undefined
   }
 
   foregroundTools(): ForegroundTool[] {
     const tools = this.options.foreground(this.waitingOnPerson)
-    return this.compactingNow ? [{ callId: 'compaction', toolName: 'compaction' }, ...tools] : tools
+    const limit = this.options.compactionLimitMs
+    const compacting = this.compactingNow && (limit === undefined || this.now() - (this.compactingSince ?? 0) < limit)
+    return compacting ? [{ callId: 'compaction', toolName: 'compaction' }, ...tools] : tools
   }
 
   /** The window after the last foreground tool's result is still open (`start` providers only). */

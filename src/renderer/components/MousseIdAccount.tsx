@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { formatCountdown, secondsLeft } from '../lib/plusSignIn'
+import { formatCountdown, REMOVED_FROM_DEVICES, secondsLeft } from '../lib/plusSignIn'
 import { mousseIdName, mousseIdOrigin, mousseIdSignedIn, mousseIdPreparation, mousseIdSetupStep, useMousseId, useMousseIdStore, type SignInStart } from '../stores/mousseIdStore'
 import { MousseIdSection } from './MousseIdSection'
 import { SettingsGroup, SettingsRow } from './settings/SettingsRow'
@@ -49,6 +49,7 @@ export function MousseIdAccount({ onSetUp }: { onSetUp: () => void }) {
     ? [plus.email ?? `Account ${plus.accountId ?? ''}`, plus.plan, host].filter(Boolean).join(' · ')
     : plus?.reconnecting ? [plus.email ?? `Account ${plus.accountId ?? ''}`, 'Reconnecting…'].join(' · ')
       : !loaded ? 'Checking Mousse ID…'
+        : net?.self?.removed ? REMOVED_FROM_DEVICES
         : plus?.configured ? 'Disconnected. Sign in again to reconnect.'
           : 'Optional. Sign in to reach this computer from your phone and from your other computers signed in to it.'
   const setupStep = !signedIn && !pending && loaded && mousseIdPreparation(net) === 'manual' ? mousseIdSetupStep(net) : ''

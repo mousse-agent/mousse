@@ -92,6 +92,7 @@ import { AutomationDrafts } from './automations/AutomationDrafts'
 import { AutomationRuns } from './automations/AutomationRuns'
 import type { AutomationInbox, InboxCounts } from '../shared/automationInbox'
 import { AUTOMATION_MANAGER_NAME, AUTOMATION_MANAGER_THREAD_KEY, automationManagerWorkspace } from './automations/automationManager'
+import { computerNameIfKnown } from './computerName'
 import type { ProfileHost } from './profiles/ProfileHost'
 import {
   createLegacySingleProfileContext,
@@ -111,6 +112,7 @@ import { DomainHandlerRegistry, DomainRpcError } from './protocol/domainRegistry
 import type { ThreadRouterPort } from './protocol/threadRouterPort'
 import type { RoutedTerminalsPort } from './protocol/routedTerminalsPort'
 import type { EditorAsksPort } from './protocol/editorAsksPort'
+import type { BotsSharingPort } from './protocol/botsSharingPort'
 import type { RemoteListsPort } from './protocol/remoteListsPort'
 import type { MmsOptions } from './MmsOptions'
 import { MmsProfilePlatform } from './platform/MmsProfilePlatform'
@@ -295,6 +297,8 @@ export class MmsProfileServices {
   routedTerminals?: RoutedTerminalsPort
   /** The asks other computers made for editor connections, set while Bridge is on. */
   editorAsks?: EditorAsksPort
+  /** "Share bots with other devices" on this computer, set while Bridge is on. */
+  botsSharing?: BotsSharingPort
   /**
    * The threads, projects and statuses of the user's other computers, merged into this computer's lists
    * for windows. Set and cleared with `threadRouter`; empty while routing is off.
@@ -690,6 +694,8 @@ export class MmsProfileServices {
     })
     this.botBrowsers = botBrowsers
     this.platform.onDispose(() => botBrowsers.dispose())
+    // Looked up now, so a bot's Runs on has this computer's name when it is first opened.
+    computerNameIfKnown()
     const opened = openPersonalBots({
       profileHome: homeDir,
       threads: {
@@ -745,7 +751,8 @@ export class MmsProfileServices {
         prompt,
         maxChars: 60
       })).text,
-      instructions: (bot) => botInstructions(bot),
+      // The owner's home folder by its real path: `~` and variables are refused in a bot's paths.
+      instructions: (bot) => botInstructions({ ...bot, homeFolder: homedir() }),
       scheduleLabel: (when) => botScheduleLabel(when),
       providerLabel: (instanceId) => this.botProviderLabel(instanceId),
       // No internet: a bot waits instead of failing (a DNS lookup and a connection, never a model call).
@@ -755,17 +762,13 @@ export class MmsProfileServices {
           return botApiHost(driver, driver === 'pi' ? instanceId.split(':')[1] : undefined)
         }
       }),
-      // By hand (#673): the ready models that can hold a bot here, named by their provider.
-      modelChoices: async () => {
-        const seen = new Set<string>()
-        return (await botModels.holdable()).flatMap(({ instanceId, model }) => {
-          if (seen.has(model)) return []
-          seen.add(model)
-          const family = this.botProviderLabel(instanceId)
-          return [{ model, label: family ? `${family} · ${model}` : model }]
-        })
-      },
-      computerName: () => hostname(),
+      // By hand (#673): each ready entry's models that can hold a bot here, named by the entry, with their reasoning levels,
+      // shown in the app's model picker from its own listing.
+      modelOptions: () => botModels.pickable(),
+      modelListing: () => harness.llmProviders({ kind: 'device' }),
+      // The name the side card and Devices show (macOS's Computer Name, Linux's pretty hostname), else the hostname.
+      // The lookup starts with the bots below and answers in milliseconds; until then the hostname stands in.
+      computerName: () => computerNameIfKnown() || hostname(),
       otherComputers: () => this.remoteAutomations?.computers() ?? [],
       // A run may only ask for a skill this profile has; MCP tools can't be granted to bots yet.
       knownAsk: (permission) => 'skill' in permission && (this.botKnownSkills?.has(permission.skill) ?? true),
@@ -842,6 +845,14 @@ export class MmsProfileServices {
     }
     // Every bot run that ends is settled, whatever path its turn took (no activation stays running).
     if (personalBots) this.runEngine.on('event', (event: ThreadEvent) => {
+      // A call of a bot's live dispatch finished: it was working until now (what a restart charges it up to).
+      if (event.type === 'tool.status') {
+        const call = event.payload as { runId?: unknown; status?: unknown }
+        if (typeof call.runId === 'string' && call.status !== 'started') {
+          try { personalBots.toolCallEnded(call.runId) } catch { /* a record never fails the call */ }
+        }
+        return
+      }
       if (event.type !== 'run.status') return
       const run = event.payload as RunRecord
       if (run.source !== 'bot' || !TERMINAL_RUN_STATUSES.has(run.status)) return
@@ -1068,12 +1079,17 @@ export class MmsProfileServices {
       accepted: () => this.scheduled.wake()
     })
 
+    let netDomainClosed = false
     this.net = new NetService({
       profileDir: this.homeDir,
       editorSsh: { home: homedir(), mousseHome: this.installationHome, profile: this.profileId },
       hosted: mousseIdNetModule,
       onChanged: (status) => this.events.emit({ channel: 'net:updated', data: status }),
       composeRuntime: (runtime) => {
+        // Net closed its earlier runtime without stopping (a removed computer's identity was set
+        // aside): chats over the network work again with the new one.
+        if (netDomainClosed) this.chatNetwork?.resume()
+        netDomainClosed = false
         this.bridgeService = new BridgeProfileService({
           services: this,
           runtime,
@@ -1092,8 +1108,10 @@ export class MmsProfileServices {
             this.chatNetwork?.beginShutdown()
             composition.beginDisable?.()
           },
-          close: () =>
-            Promise.all([this.chatNetwork?.close(), composition.close?.()]).then(() => undefined),
+          close: () => {
+            netDomainClosed = true
+            return Promise.all([this.chatNetwork?.close(), composition.close?.()]).then(() => undefined)
+          },
           activeCount: () =>
             (composition.activeCount?.() ?? 0) + (this.chatNetwork?.activeCount() ?? 0)
         }
@@ -2025,9 +2043,11 @@ export class MmsProfileServices {
     // What its work is doing and what it will say later, so a chat turn answers "how's it going?" without a tool.
     const work = engine.listWork(botId).now
     const reminders = store.waitingReminders(botId).map((reminder) => ({ dueAt: reminder.dueAt, text: reminder.text }))
+    // Work rows whose model can't run (#673): the chat can tell the owner why such work does not start.
+    const blocked = engine.situationLines(botId)
     return {
       ...(ownerName ? { ownerName } : {}), ...(openAsks.length ? { openAsks } : {}), ...(schedules.length ? { schedules } : {}),
-      work, ...(reminders.length ? { reminders } : {})
+      work, ...(reminders.length ? { reminders } : {}), ...(blocked.length ? { blocked } : {})
     }
   }
 

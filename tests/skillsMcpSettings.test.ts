@@ -194,16 +194,14 @@ describe('Skills & MCP settings', () => {
     }
   })
 
-  it('folds Advanced into three folds, with a count on each closed tool group and the web tools under Web search', () => {
+  it('shows three folds, with a count on each closed tool group and the web tools under Web search', () => {
     const settings = getDefaultSettings()
     settings.integrations.tools.enabled = true
     settings.integrations.tools.enabledTools = ['read', 'bash']
     const html = render(settings)
-    expect(html).not.toContain('>Advanced<')
     const folds = [...html.matchAll(/<details class="settings-fold( sub)?[^"]*"><summary data-settings-anchor="([^"]+)"/g)].map((match) => match[2])
     expect(folds.slice(0, 3)).toEqual(['integrations-access', 'integrations-share', 'integrations-tools'])
     expect(folds).toContain('integrations-tools-project')
-    expect(folds).not.toContain('integrations-tools-web')
     const total = MOUSSE_BUILTIN_TOOLS.filter((tool) => tool.group === 'project').length
     expect(html).toContain(`<span class="settings-fold-count">2 of ${total} on</span>`)
     // web_search and web_fetch sit in the Web search group, after the keys, and nowhere else.

@@ -35,6 +35,12 @@ function credentialOf(snapshot: InstanceSnapshot): BotModelCandidate['credential
   return snapshot.auth.credential ?? 'unknown'
 }
 
+/** The signed-in account's id (a salted hash), when the entry can tell it. */
+export function accountOf(snapshot: InstanceSnapshot): string | undefined {
+  const id = snapshot.auth.account?.id
+  return id && id !== 'unknown' ? id : undefined
+}
+
 function namesOf(model: InstanceModel, catalog: ModelCatalog | undefined): string[] {
   const entry = catalogEntryFor(model.id, catalog)
   const names = [model.label, ...(entry ? [entry.id, entry.name, entry.short, ...(entry.family ? [entry.family] : []), ...Object.values(entry.routes).map((route) => route!.id)] : [])]
@@ -46,6 +52,7 @@ export function botModelCandidates(input: BotCandidateInput): BotModelCandidate[
   for (const snapshot of input.snapshots) {
     if (!instanceReady(snapshot)) continue
     const limitedUntil = input.limited?.get(snapshot.instanceId)
+    const account = accountOf(snapshot)
     let order = 0
     for (const model of input.models(snapshot.instanceId)) {
       if (model.hidden) continue
@@ -61,6 +68,7 @@ export function botModelCandidates(input: BotCandidateInput): BotModelCandidate[
         ...(model.capabilities.defaultEffort ? { defaultEffort: model.capabilities.defaultEffort } : {}),
         tier: candidateTier(snapshot.driver, model.id, input.catalog),
         credential: credentialOf(snapshot),
+        ...(account ? { account } : {}),
         ...(entry ? { released: entry.released } : {}),
         ...(limitedUntil ? { limitedUntil } : {}),
         listed,
