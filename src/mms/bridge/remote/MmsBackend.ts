@@ -16,7 +16,7 @@ import { NetError, type NodeId } from '../../../shared/net'
 import { REMOTE_MESSAGE_IMAGES_MAX_CHARS } from './RemoteApi'
 import { normalizePermissionMode, type PermissionMode } from '../../../shared/permissionMode'
 import { newestMessages } from '../../protocol/transcriptPaging'
-import { ROUTED_SNAPSHOT_MESSAGE_BYTES } from '../../../shared/bridge/routed'
+import { PHONE_SNAPSHOT_MESSAGE_BYTES, ROUTED_SNAPSHOT_MESSAGE_BYTES } from '../../../shared/bridge/routed'
 import type { RemoteBackendPort, RemoteChatExtras } from './RemoteApi'
 import { mmsJson } from './jsonOutput'
 import type { BridgeOrdinaryMethod } from './capabilities'
@@ -471,18 +471,17 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     if (!skills.some((skill) => skill.id === skillId || skill.installationId === skillId))
       throw new Error('That skill is not available.')
   }
-  /**
-   * What a reader is given on opening a thread. `newestOnly` is for another computer of the user: a
-   * long transcript is cut to its newest 16 MiB (`earlier` says where the rest begins, and
-   * `thread.messages` pages it), where a phone's snapshot is whole and fails past its bound.
-   */
   async warm(threadId: string): Promise<void> {
     if (this.remoteThread(threadId)) await this.services.threads.warmThread(threadId)
   }
 
+  /**
+   * What a reader is given on opening a thread: the newest part of a long transcript, so a thread of any
+   * length opens. `newestOnly` is for another computer of the user, which gets 16 MiB and pages the rest
+   * with `thread.messages`; a phone gets 8 MiB. `earlier` says where the rest begins and how much is left.
+   */
   snapshot(
     threadId: string,
-    maximumBytes = 25 * 1024 * 1024,
     options: { newestOnly?: boolean; deviceLimit?: PermissionMode; reader?: string } = {}
   ): unknown {
     const s = this.services,
@@ -493,9 +492,10 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     if (!thread) throw new NetError('stream_unknown', 'Thread not found.')
     const pause = s.orchestrator.getTurnState(threadId).pause
     const shown = withImageBudget(s.orchestrator.getMessages(threadId))
-    const kept = options.newestOnly
-      ? newestMessages(shown, ROUTED_SNAPSHOT_MESSAGE_BYTES)
-      : { messages: shown, earlier: undefined }
+    const kept = newestMessages(
+      shown,
+      options.newestOnly ? ROUTED_SNAPSHOT_MESSAGE_BYTES : PHONE_SNAPSHOT_MESSAGE_BYTES
+    )
     return mmsJson(
       {
         thread,
@@ -513,8 +513,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
           ...(pause ? { paused: { runId: pause.runId, until: pause.until, estimated: pause.estimated, autoResume: pause.autoResume, ...(pause.stale ? { stale: true } : {}), ...(pause.limitKind ? { limitKind: pause.limitKind } : {}) } } : {})
         },
         revision: this.revision()
-      },
-      maximumBytes
+      }
     )
   }
   isActive(threadId: string): boolean {

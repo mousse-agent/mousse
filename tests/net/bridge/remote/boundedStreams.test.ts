@@ -125,9 +125,12 @@ describe('thread stream quotas', () => {
     expect(() => f.adapter.activate('thread-17', 'nod_phone')).not.toThrow()
   })
 
-  it('refuses the 17th thread from one caller and not from another', async () => {
+  it('refuses a 17th thread only while the caller reads all 16, and not from another caller', async () => {
     const f = await fixture()
-    for (let i = 1; i <= 16; i++) f.adapter.activate(`thread-${i}`, 'nod_laptop')
+    for (let i = 1; i <= 16; i++) {
+      const descriptor = f.adapter.activate(`thread-${i}`, 'nod_laptop')
+      f.subscribed.add(`${descriptor.id}|nod_laptop`)
+    }
     expect(() => f.adapter.activate('thread-17', 'nod_laptop')).toThrow(
       expect.objectContaining({ code: 'rate_limited' })
     )
@@ -138,21 +141,42 @@ describe('thread stream quotas', () => {
     expect(() => f.adapter.activate('thread-3', 'nod_laptop')).not.toThrow()
   })
 
+  it('lets a caller move through more than 16 threads: the one it opened longest ago and no longer reads gives way', async () => {
+    const f = await fixture()
+    for (let i = 1; i <= 16; i++) {
+      f.adapter.activate(`thread-${i}`, 'nod_laptop')
+      f.clock.advance(1000)
+    }
+    // Long before the holds are idle, a 17th and an 18th open.
+    expect(() => f.adapter.activate('thread-17', 'nod_laptop')).not.toThrow()
+    expect(() => f.adapter.activate('thread-18', 'nod_laptop')).not.toThrow()
+    // Opening thread-1 again needs a hold again, so the next oldest gives way, and so on.
+    expect(() => f.adapter.activate('thread-1', 'nod_laptop')).not.toThrow()
+  })
+
   it('does not count the shared lists stream against a caller', async () => {
     const f = await fixture()
     for (let i = 1; i <= 16; i++) f.adapter.activate(`thread-${i}`, 'nod_laptop')
     expect(() => f.adapter.activate(LISTS_STREAM_THREAD_ID, 'nod_laptop')).not.toThrow()
   })
 
-  it('gives a caller room again when its idle threads are released', async () => {
+  it('gives a caller room again when the threads it reads are released', async () => {
     const f = await fixture({ maxThreadsPerHolder: 2 })
+    for (const id of ['a', 'b']) f.subscribed.add(`${f.adapter.activate(id, 'nod_laptop').id}|nod_laptop`)
+    expect(() => f.adapter.activate('c', 'nod_laptop')).toThrow(
+      expect.objectContaining({ code: 'rate_limited' })
+    )
+    f.subscribed.clear()
+    expect(() => f.adapter.activate('c', 'nod_laptop')).not.toThrow()
+  })
+
+  it('still refuses past the cap when it cannot tell what the caller reads', async () => {
+    const f = await fixture({ maxThreadsPerHolder: 2, isSubscribed: undefined })
     f.adapter.activate('a', 'nod_laptop')
     f.adapter.activate('b', 'nod_laptop')
     expect(() => f.adapter.activate('c', 'nod_laptop')).toThrow(
       expect.objectContaining({ code: 'rate_limited' })
     )
-    f.clock.advance(11 * MINUTE)
-    expect(() => f.adapter.activate('c', 'nod_laptop')).not.toThrow()
   })
 })
 
@@ -208,13 +232,25 @@ describe('idle thread streams', () => {
     expect(f.watching.get('t1')).toBe(1)
   })
 
-  it('makes room under the shared cap by releasing idle streams', async () => {
+  it('makes room under the shared cap from the least recently busy stream no one reads', async () => {
     const f = await fixture({ maxThreads: 2 })
     f.adapter.activate('a')
+    f.clock.advance(1000)
     f.adapter.activate('b')
-    expect(() => f.adapter.activate('c')).toThrow(expect.objectContaining({ code: 'rate_limited' }))
-    f.clock.advance(11 * MINUTE)
     expect(() => f.adapter.activate('c')).not.toThrow()
+    expect(f.watching.get('a')).toBe(0)
+    expect(f.watching.get('b')).toBe(1)
+  })
+
+  it('refuses under the shared cap only when every stream is read or running a turn', async () => {
+    const f = await fixture({ maxThreads: 2 })
+    f.subscribed.add(`${f.adapter.activate('a').id}|nod_laptop`)
+    f.adapter.activate('b')
+    f.running.add('b')
+    expect(() => f.adapter.activate('c')).toThrow(expect.objectContaining({ code: 'rate_limited' }))
+    f.running.clear()
+    expect(() => f.adapter.activate('c')).not.toThrow()
+    expect(f.watching.get('a')).toBe(1)
   })
 
   it('runs no sweep of its own where subscribers cannot be told', async () => {
@@ -403,5 +439,58 @@ describe('thread stream table upgrade', () => {
     })
     second.close()
     expect(columns()).toHaveLength(5)
+  })
+})
+
+describe('long threads', () => {
+  // About 30 nodes a message, like a real transcript row with a tool call.
+  const transcript = (count: number) => ({
+    messages: Array.from({ length: count }, (_, n) => ({
+      id: `m${n}`,
+      role: 'system',
+      kind: 'mcp_tool_call',
+      content: '',
+      toolCall: { title: 'Bash', status: 'complete', input: { command: `echo ${n}`, flags: [1, 2, 3, 4, 5, 6] } },
+      tags: Array.from({ length: 16 }, (_, i) => i)
+    }))
+  })
+
+  it('opens a thread with far more nodes than one wire message carries', async () => {
+    const f = await fixture({
+      source: { snapshot: () => transcript(1000), onThread: () => () => undefined }
+    })
+    const descriptor = f.adapter.activate('long', 'nod_phone')
+    expect(f.records(descriptor.id).map((entry) => entry.type)).toContain('thread.snapshot.end')
+  })
+
+  it('turns an event with more nodes than a record carries into a fresh snapshot instead of failing the stream', async () => {
+    let emit: ((event: { type: string; data: unknown }) => void) | undefined
+    const errors: unknown[] = []
+    const f = await fixture({
+      source: {
+        snapshot: () => ({ kind: 'test' }),
+        onThread: (_threadId, listener) => {
+          emit = listener as never
+          return () => undefined
+        }
+      },
+      onError: (_thread, error) => errors.push(error)
+    })
+    const descriptor = f.adapter.activate('busy', 'nod_phone')
+    // A fresh snapshot replaces the records before it, so the one stored now is a new one.
+    const snapshotId = () =>
+      f
+        .records(descriptor.id)
+        .filter((entry) => entry.type === 'thread.snapshot.end')
+        .map((entry) => (entry.body as { snapshot: string }).snapshot)
+    const before = snapshotId()
+    // Under 48 KiB, but 20,000 nodes.
+    emit!({ type: 'thread.messages', data: { messages: Array.from({ length: 20_000 }, () => 0) } })
+    expect(errors).toEqual([])
+    const after = snapshotId()
+    expect(after).toHaveLength(1)
+    expect(after[0]).not.toBe(before[0])
+    expect(f.records(descriptor.id).map((entry) => entry.type)).not.toContain('thread.event')
+    expect(() => f.adapter.ringStats(descriptor.id)).not.toThrow()
   })
 })

@@ -123,7 +123,7 @@ export class RemoteApi {
     if (context.deadlineAt <= this.clock.now()) throw new NetError('deadline_exceeded')
     if (method === 'thread.snapshot') {
       await this.backend.warm?.(params.threadId as string)
-      return this.backend.snapshot(params.threadId as string, undefined, { reader: context.caller.node })
+      return this.backend.snapshot(params.threadId as string, { reader: context.caller.node })
     }
     if (method === 'attachments.stage') {
       try {

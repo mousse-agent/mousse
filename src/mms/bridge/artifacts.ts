@@ -30,7 +30,7 @@ import type {
   StreamStore,
   SyncSession
 } from '../net/contracts'
-import { canonicalJson, decodeEnvelope, encodeEnvelope } from '../net/sync/codec'
+import { canonicalJson, decodeEnvelope, encodeEnvelope, MAX_DISPLAY_JSON_NODES } from '../net/sync/codec'
 import type { DurableRpcDispatcher } from '../net/sync/rpcDispatcher'
 import type { NetDatabase } from '../net/store/database'
 
@@ -401,7 +401,8 @@ export class BridgeArtifacts implements StreamAuthority {
     } catch {
       throw new NetError('bad_request')
     }
-    if (!Buffer.from(canonicalJson(decoded)).equals(bytes)) throw new NetError('bad_request')
+    // A result goes out as an artifact because it is large: it keeps the display bound, not the wire's.
+    if (!Buffer.from(canonicalJson(decoded, MAX_DISPLAY_JSON_NODES)).equals(bytes)) throw new NetError('bad_request')
     return decoded
   }
   private scope(descriptor: StreamDescriptor, peer: SyncSession['peer']): RpcMethod {
@@ -456,7 +457,7 @@ export class BridgeArtifacts implements StreamAuthority {
     context: RpcContext,
     method: RpcMethod
   ): { result: BridgeArtifactResult; commit(): void } {
-    const bytes = canonicalJson(result)
+    const bytes = canonicalJson(result, MAX_DISPLAY_JSON_NODES)
     const publication = this.preparePublication(bytes, 'application/json', context, method.method)
     return {
       result: {

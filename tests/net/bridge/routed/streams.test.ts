@@ -339,19 +339,21 @@ describe('opening a private stream', () => {
     const onWarning = (warning: Error) => warnings.push(warning.name)
     process.on('warning', onWarning)
     try {
-      // Two shared streams fill the shared cap; private streams are counted apart from it.
+      // Two shared streams fill the shared cap; a third makes room by releasing one no one reads.
       adapter!.activate(threads[0].id)
       adapter!.activate(threads[1].id)
-      expect(() => adapter!.activate(threads[2].id)).toThrow(
-        expect.objectContaining({ code: 'rate_limited' })
-      )
+      expect(() => adapter!.activate(threads[2].id)).not.toThrow()
+      // Private streams are counted apart from it: opening them takes no room from phones, and a full shared
+      // cap never releases one of them.
       const readers = [newId('node'), newId('node'), newId('node')]
-      for (const reader of readers)
-        for (const t of threads) adapter!.openPrivate({ reader, kind: 'thread', subject: t.id })
-      expect(adapter!.privateReaders()).toHaveLength(3)
-      expect(() => adapter!.activate(threads[2].id)).toThrow(
-        expect.objectContaining({ code: 'rate_limited' })
+      const opened = readers.flatMap((reader) =>
+        threads.map((t) => adapter!.openPrivate({ reader, kind: 'thread', subject: t.id }))
       )
+      expect(adapter!.privateReaders()).toHaveLength(3)
+      expect(() => adapter!.activate(threads[3].id)).not.toThrow()
+      expect(() => adapter!.activate(threads[4].id)).not.toThrow()
+      for (const descriptor of opened)
+        expect(adapter!.privateAccess(descriptor.id)).toMatchObject({ open: true })
       // Many streams listen to the same services without the "too many listeners" warning.
       await new Promise((resolve) => setImmediate(resolve))
     } finally {

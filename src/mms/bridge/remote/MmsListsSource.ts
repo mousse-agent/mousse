@@ -3,7 +3,6 @@ import type { BotChip, BotSummary } from '../../../shared/bots/personal/chat'
 import type { Project, Thread, ThreadActivityState, TurnState } from '../../../shared/types'
 import type { MmsProfileServices } from '../../MmsProfileServices'
 import { rollUpActivities, visibleThreads, isLocalOnlyThread } from '../../../shared/threadLineage'
-import { MAX_DISPLAY_JSON_NODES } from '../../net/sync/codec'
 import { mmsJson } from './jsonOutput'
 import { remoteBotSummary } from './RemoteBots'
 import type { BotsSharingPort } from '../../protocol/botsSharingPort'
@@ -393,11 +392,7 @@ export class MmsListsSource {
         status,
         chats,
         bots
-      },
-      undefined,
-      // The larger bound is for another computer of the user. A phone's parser is not known to take more than the
-      // wire's 16,384 nodes, so the lists it reads stay within them (as before).
-      own ? MAX_DISPLAY_JSON_NODES : undefined
+      }
     ) as ListsSnapshot
   }
 
