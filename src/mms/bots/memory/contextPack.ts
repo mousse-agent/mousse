@@ -134,7 +134,8 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
     const lastEnd = store.lastOfKind(botId, 'run_end')
     if (lastEnd) {
       const reason = typeof lastEnd.json?.reason === 'string' ? lastEnd.json.reason : firstLine(lastEnd.text)
-      const guarded = guardPackText(reason, 'mousse').ok ? cut(reason, 80) : 'ended'
+      const screened = guardPackText(reason, 'mousse', '[held back]')
+      const guarded = screened.ok ? cut(screened.text, 80) : 'ended'
       lines.push(`Last run: ${guarded}, ${agoLabel(lastEnd.at, now)}.`)
     }
     return `Situation:\n${withinBudget(lines, BOT_CHAT_PACK_BUDGET.situation).join('\n')}`

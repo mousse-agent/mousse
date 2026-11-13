@@ -101,7 +101,7 @@
 }
 
 .pr-panel-action[aria-busy='true'] svg {
-  animation: pr-panel-spin 1s linear infinite;
+  animation: pr-panel-spin 1s steps(12) infinite;
 }
 
 .pr-panel-action:focus-visible,

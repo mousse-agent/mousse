@@ -41,7 +41,7 @@ it('edits policies, shows usage across machines, and cleans up only after the pl
     expect(review.legacy.notice).toContain('Nothing has changed: only the worktrees of deleted threads are removed automatically.')
     // The notice comes first; then disk usage and cleanup, before the rules.
     expect(review.legacy.order).toEqual(['storage-review-notice', 'storage-usage', 'storage-cleanup', 'storage-worktrees', 'storage-browser'])
-    for (const text of ['Remove worktrees inactive for 30 days', 'Remove worktrees whose work is merged into the default branch', 'Delete saved browser captures after 30 days', 'Never deletes', 'A download saved by an older version with a .png name']) expect(review.dialog, text).toContain(text)
+    for (const text of ['Remove worktrees inactive for 30 days', 'Remove merged worktrees', 'Delete saved browser captures after 30 days', 'Never deletes', 'A download saved by an older version with a .png name']) expect(review.dialog, text).toContain(text)
     expect(review.notNow).toEqual({ configureCalls: 0, notice: true })
     expect(review.turnedOn).toEqual({ saved: { schemaVersion: 1, worktrees: { removeWithDeletedThreads: true, inactiveDays: 30, removeMerged: true }, browser: { captureDays: 30 } }, noticeGone: true })
     expect(review.dismissed).toEqual({ dismissCalls: 1, configureCallsAdded: 0, inactive: '30' })

@@ -58,23 +58,27 @@ describe('Settings → Labs', () => {
     expect(host.textContent).not.toContain('About')
   })
 
-  it('nests the memory table, notices, heap snapshot and agent access under it; the tools only under agent access', () => {
+  it('keeps the memory table in view and folds notices, heap snapshot and agent access under Advanced; the tools only under agent access', () => {
     show()
     act(() => toggle('Profiler')!.click())
     expect(store.get().experimental.profiler.enabled).toBe(true)
-    expect(titles()).toEqual(['Profiler', 'Memory', 'Memory notices', 'Heap snapshot', 'Agent access'])
+    expect(titles()).toEqual(['Profiler', 'Memory', 'Memory notices', 'Heap snapshot', 'Agents can read the profiler'])
     expect(memoryStatus).toHaveBeenCalled()
-    // Nested rows are indented, with no side bars.
-    for (const anchor of ['labs-profiler-memory', 'labs-memory-notices', 'labs-heap-snapshot', 'labs-profiler-agents']) {
-      expect(host.querySelector(`[data-settings-anchor="${anchor}"]`)!.classList.contains('indent')).toBe(true)
+    // Memory sits under the switch; the rest is in a closed Advanced disclosure.
+    expect(host.querySelector('[data-settings-anchor="labs-profiler-memory"]')!.closest('details')).toBeNull()
+    const advanced = host.querySelector<HTMLDetailsElement>('details.settings-advanced')!
+    expect(advanced.open).toBe(false)
+    expect(advanced.querySelector('summary')!.textContent).toBe('Advanced')
+    for (const anchor of ['labs-memory-notices', 'labs-heap-snapshot', 'labs-profiler-agents']) {
+      expect(advanced.querySelector(`[data-settings-anchor="${anchor}"]`)).not.toBeNull()
     }
     expect(host.querySelector('[data-settings-anchor="labs-heap-snapshot"]')!.textContent).toMatch(/thread text, prompts, paths and tokens/)
-    expect(toggle('Agent access')!.getAttribute('aria-checked')).toBe('false')
+    expect(toggle('Agents can read the profiler')!.getAttribute('aria-checked')).toBe('false')
 
-    act(() => toggle('Agent access')!.click())
+    act(() => toggle('Agents can read the profiler')!.click())
     expect(store.get().experimental.profiler.agentAccess).toBe(true)
     const tools = PROFILER_TOOL_NAMES.map((name) => PROFILER_TOOL_LABELS[name].label)
-    expect(titles()).toEqual(['Profiler', 'Memory', 'Memory notices', 'Heap snapshot', 'Agent access', ...tools])
+    expect(titles()).toEqual(['Profiler', 'Memory', 'Memory notices', 'Heap snapshot', 'Agents can read the profiler', ...tools])
     for (const name of PROFILER_TOOL_NAMES) {
       expect(toggle(PROFILER_TOOL_LABELS[name].label)!.getAttribute('aria-checked')).toBe(name === 'profiler_heap_summary' ? 'false' : 'true')
       // What a tool is for is in its tooltip.
@@ -91,6 +95,7 @@ describe('Settings → Labs', () => {
     // Off hides everything again and keeps the choices below it.
     act(() => toggle('Profiler')!.click())
     expect(titles()).toEqual(['Profiler'])
+    expect(host.querySelector('details.settings-advanced')).toBeNull()
     expect(store.get().experimental.profiler).toMatchObject({ enabled: false, agentAccess: true, tools: { profiler_watch: false } })
   })
 

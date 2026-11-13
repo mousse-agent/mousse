@@ -1,4 +1,5 @@
 import type { UserQuestion, UserQuestionAnswers } from '../../../shared/types'
+import { providerReportedError } from '../../orchestrator/providerErrors'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
 import type { AcpClientHandlers } from './connection'
 import type { AcpRequestScope } from './permissions'
@@ -94,8 +95,11 @@ export function xaiStopFailure(label: string, outcome: unknown): Error | undefin
   const result = isRecord(value.agentResult) ? value.agentResult : {}
   const error = value.error ?? result.error
   if (error !== undefined && error !== null) {
-    const message = isRecord(error) && typeof error.message === 'string' ? error.message : typeof error === 'string' ? error : 'an error'
-    return new Error(`${label} stopped with ${message}`)
+    const message = isRecord(error) && typeof error.message === 'string' ? error.message : typeof error === 'string' ? error : ''
+    if (!message.trim()) return new Error(`${label} stopped with an error`)
+    // The provider's own status and message (a rate limit, a refused request), as the transcript shows them.
+    const status = isRecord(error) ? [error.status, error.statusCode, error.code].find((value): value is number => typeof value === 'number' && value >= 400 && value <= 599) : undefined
+    return providerReportedError(message, { provider: 'grok', ...(status !== undefined ? { status } : {}) })
   }
   const reason = value.stopReason
   if (reason === 'refusal') return new Error(`${label} refused this request.`)

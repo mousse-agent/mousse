@@ -1268,6 +1268,14 @@ describe('CodexAdapter', () => {
       expect(decide(managed)).toMatchObject({ action: 'pause', pause: { until: resetsAt, estimated: false } })
     })
 
+    it('a provider refusal shows its status and message on a plain Codex; a usage limit still pauses', async () => {
+      const refused = await turn(failing(new CodexTurnFailure('unexpected status 400 Bad Request: {"error":{"message":"Invalid value for \'tools\'"}}, url: http://127.0.0.1:9841/v1/responses', { message: 'x', codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 400 } } })), false)
+      expect(refused).toMatchObject({ code: 'provider_api_error', message: "400 · Invalid value for 'tools'" })
+      expect(decide(refused)).toBeUndefined()
+      const limited = await turn(failing(usageLimitError({ provider: 'codex', resetsAt, estimated: false }, new CodexTurnFailure('Too many requests', { message: 'Too many requests', codexErrorInfo: { responseTooManyFailedAttempts: { httpStatusCode: 429 } } }))), false)
+      expect(decide(limited)).toMatchObject({ action: 'pause' })
+    })
+
     it('a managed Codex failure that is not a usage limit does not pause', async () => {
       const overloaded = new CodexTurnFailure('Overloaded', { message: 'Overloaded', codexErrorInfo: 'serverOverloaded' })
       const managed = await turn(failing(overloaded), true)

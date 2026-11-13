@@ -44,8 +44,11 @@ export type WallReason =
   | { kind: 'path'; tool: string; path: string; access: 'read' | 'write' }
   /** A path inside Mousse's own data, closed to every bot even with file access: never an ask. */
   | { kind: 'closed'; tool: string; path: string }
-  /** A path the runtime would rewrite before opening (`~`, a variable): never checked, never an ask. */
-  | { kind: 'path_form'; tool: string; path: string }
+  /**
+   * A path the runtime would rewrite before opening (`~`, a variable): never checked, never an ask.
+   * `home`: the owner's home folder, for a `~` or variable path; `full`: the path it stands for.
+   */
+  | { kind: 'path_form'; tool: string; path: string; home?: string; full?: string }
   | { kind: 'skill'; skill: string }
   | { kind: 'mcp'; server: string; tool: string }
   | { kind: 'waiting' }

@@ -4,14 +4,15 @@ import type { MousseSettings, MousseSettingsUpdate } from '../../../shared/setti
 import { Cpu } from '../../lib/icons'
 import { showToast } from '../ui/Toast'
 import { MemoryRows } from './MemoryRows'
-import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
+import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 
 /** What a heap snapshot holds, said before one is written. */
 export const HEAP_SNAPSHOT_WARNING = 'Holds thread text, prompts, paths and tokens. Stays on this computer; never share it.'
 
 /**
- * Settings → Labs. The profiler: one switch, off by default; everything else shows only while it is on. Agent
- * access and each tool's switch show under it, the tools only while agent access is on.
+ * Settings → Labs. The profiler: one switch, off by default; everything else shows only while it is on. The
+ * Memory row stays in view; notices, heap snapshot, agent access and the tools fold under Advanced, the tools only
+ * while agent access is on.
  */
 export function LabsSettings({ settings, onUpdate }: { settings: MousseSettings; onUpdate: (partial: MousseSettingsUpdate) => Promise<void> }) {
   const profiler = settings.experimental.profiler
@@ -27,20 +28,25 @@ export function LabsSettings({ settings, onUpdate }: { settings: MousseSettings;
           description={<span title="Samples every Mousse process about once a minute and keeps a local log of numbers only. Off: nothing samples, logs or shows.">Memory and CPU of every Mousse process.</span>}
           control={<Switch id="labs-profiler" label="Profiler" checked={profiler.enabled} onChange={(enabled) => void set({ enabled })} />}
         />
-        {profiler.enabled && (
-          <ProfilerRows
-            profiler={profiler}
-            set={set}
-            notices={settings.notifications.memoryNotices !== false}
-            setNotices={(memoryNotices) => onUpdate({ notifications: { ...settings.notifications, memoryNotices } })}
-          />
-        )}
+        {profiler.enabled && <MemoryRows />}
       </SettingsGroup>
+      {profiler.enabled && (
+        <SettingsAdvanced>
+          <SettingsGroup>
+            <ProfilerAdvancedRows
+              profiler={profiler}
+              set={set}
+              notices={settings.notifications.memoryNotices !== false}
+              setNotices={(memoryNotices) => onUpdate({ notifications: { ...settings.notifications, memoryNotices } })}
+            />
+          </SettingsGroup>
+        </SettingsAdvanced>
+      )}
     </section>
   )
 }
 
-function ProfilerRows({ profiler, set, notices, setNotices }: {
+function ProfilerAdvancedRows({ profiler, set, notices, setNotices }: {
   profiler: ProfilerSettings
   set: (next: Partial<ProfilerSettings>) => Promise<void>
   notices: boolean
@@ -48,23 +54,20 @@ function ProfilerRows({ profiler, set, notices, setNotices }: {
 }) {
   return (
     <>
-      <MemoryRows />
       <SettingsRow
         title="Memory notices"
         anchor="labs-memory-notices"
         htmlFor="labs-memory-notices"
-        indent
         description={<span title="At most once a day, with Report. The numbers are logged either way.">When memory goes out of bounds.</span>}
         control={<Switch id="labs-memory-notices" label="Memory notices" checked={notices} onChange={(on) => void setNotices(on)} />}
       />
       <HeapSnapshotRow />
       <SettingsRow
-        title="Agent access"
+        title="Agents can read the profiler"
         anchor="labs-profiler-agents"
         htmlFor="labs-profiler-agents"
-        indent
-        description={<span title="Agents in Mousse threads can call the profiler tools turned on below. They return numbers only; thread titles only for this profile's threads.">Agents can read the profiler.</span>}
-        control={<Switch id="labs-profiler-agents" label="Agent access" checked={profiler.agentAccess} onChange={(agentAccess) => void set({ agentAccess })} />}
+        description={<span title="Agents in Mousse threads can call the profiler tools turned on below. They return numbers only; thread titles only for this profile's threads.">Numbers only, through the tools below.</span>}
+        control={<Switch id="labs-profiler-agents" label="Agents can read the profiler" checked={profiler.agentAccess} onChange={(agentAccess) => void set({ agentAccess })} />}
       />
       {profiler.agentAccess && PROFILER_TOOL_NAMES.map((name) => (
         <SettingsRow
@@ -72,7 +75,6 @@ function ProfilerRows({ profiler, set, notices, setNotices }: {
           title={<span title={PROFILER_TOOL_LABELS[name].detail}>{PROFILER_TOOL_LABELS[name].label}</span>}
           htmlFor={`labs-tool-${name}`}
           indent
-          className="indent-2"
           description={<code className="settings-tool-name">{name}</code>}
           control={
             <Switch
@@ -108,7 +110,6 @@ function HeapSnapshotRow() {
     <SettingsRow
       title="Heap snapshot"
       anchor="labs-heap-snapshot"
-      indent
       description={<span className="settings-status-warn" title={`${HEAP_SNAPSHOT_WARNING} Writing one pauses Mousse for a few seconds. Refused while a turn runs.`}>{HEAP_SNAPSHOT_WARNING}</span>}
       control={confirming ? (
         <span className="memory-row-controls">

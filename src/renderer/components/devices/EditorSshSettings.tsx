@@ -5,7 +5,7 @@ import type { EditorSshStatus } from '../../../shared/net/local'
 import { SettingsGroup, SettingsRow, Switch } from '../settings/SettingsRow'
 import { EditorSshNoticeView } from '../sideCard/EditorSshNotice'
 
-const TITLE = 'Let my editor reach my other computers'
+const TITLE = 'Let my editor reach my other devices'
 
 /** The switch and undo for the `Include` line Mousse keeps in `~/.ssh/config`, given the data. */
 export function EditorSshSettingsView({

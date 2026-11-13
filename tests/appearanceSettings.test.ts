@@ -53,6 +53,15 @@ describe('appearance settings', () => {
     expect(normalizeAppearance({ turnChangedFiles: 'cards' as never }).turnChangedFiles).toBe('summary')
   })
 
+  it('keeps the chat at normal width by default and keeps an explicit choice', () => {
+    expect(getDefaultSettings().appearance.chatWidth).toBe('normal')
+    // Settings saved before the option existed read as the default.
+    expect(normalizeAppearance({}).chatWidth).toBe('normal')
+    expect(normalizeAppearance({ chatWidth: 'wide' }).chatWidth).toBe('wide')
+    expect(normalizeAppearance({ chatWidth: 'full' }).chatWidth).toBe('full')
+    expect(normalizeAppearance({ chatWidth: 'huge' as never }).chatWidth).toBe('normal')
+  })
+
   it('tints threads with project colors by default and keeps an explicit choice', () => {
     expect(getDefaultSettings().appearance.threadProjectColors).toBe(true)
     expect(normalizeAppearance({}).threadProjectColors).toBe(true)
@@ -73,6 +82,7 @@ describe('appearance settings', () => {
       threadPathInTitleBar: true,
       animationSpeed: 'normal',
       turnChangedFiles: 'summary',
+      chatWidth: 'normal',
       frostedComposer: false,
       frostedComposerOpacity: 60,
       frostedComposerBlur: 16,

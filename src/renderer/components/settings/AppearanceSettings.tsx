@@ -1,16 +1,10 @@
 import type { CSSProperties } from 'react'
-import { ANIMATION_SPEEDS, FROSTED_COMPOSER_RANGES, type AnimationSpeed, type FrostedComposerSlider, type AppearanceSettings as AppearanceValues, type TurnChangedFilesMode, type MousseSettings, type MousseSettingsUpdate, type SettingsOptions, type ThemeId } from '../../../shared/settings'
-import { Select, type SelectOption } from '../ui/Select'
-import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from './SettingsRow'
+import { ANIMATION_SPEEDS, type AnimationSpeed, type AppearanceSettings as AppearanceValues, type MousseSettings, type MousseSettingsUpdate, type SettingsOptions, type ThemeId } from '../../../shared/settings'
+import { Select } from '../ui/Select'
+import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { FontPicker } from './FontPicker'
 import { onRadioGroupKeyDown, radioTabIndex } from '../../lib/radioGroupKeys'
-import { MessageSquare } from '../../lib/icons'
-
-const TURN_CHANGED_FILES_OPTIONS: readonly SelectOption<TurnChangedFilesMode>[] = [
-  { value: 'summary', label: 'Summary line' },
-  { value: 'list', label: 'Full list' },
-  { value: 'off', label: 'Off' }
-]
+import { AppWindow, Palette, TextFont } from '../../lib/icons'
 
 const ANIMATION_SPEED_LABELS: Record<AnimationSpeed, string> = {
   off: 'Off',
@@ -52,12 +46,6 @@ function ThemePreview({ themeId }: { themeId: ThemeId }) {
   )
 }
 
-const FROSTED_COMPOSER_SLIDERS: readonly { key: FrostedComposerSlider; title: string; id: string; format: (value: number) => string }[] = [
-  { key: 'frostedComposerOpacity', title: 'Opacity', id: 'frosted-composer-opacity', format: (value) => `${value}%` },
-  { key: 'frostedComposerBlur', title: 'Blur', id: 'frosted-composer-blur', format: (value) => `${value}px` },
-  { key: 'frostedComposerSaturation', title: 'Color boost', id: 'frosted-composer-color-boost', format: (value) => `${Math.round((value - 1) * 100)}%` }
-]
-
 /**
  * A patch that sets one font and nothing else. The daemon merges it into the current settings, so
  * a font that finishes downloading later cannot restore other appearance values from an older
@@ -78,15 +66,11 @@ export interface AppearanceSettingsProps {
   onPreviewAcrylicIntensity: (value: number) => void
   /** Saves a glass intensity (debounced by the caller). */
   onCommitAcrylicIntensity: (value: number) => void
-  /** Applies a frosted composer slider locally while it moves. */
-  onPreviewFrostedComposer: (key: FrostedComposerSlider, value: number) => void
-  /** Saves a frosted composer slider (debounced by the caller). */
-  onCommitFrostedComposer: (key: FrostedComposerSlider, value: number) => void
 }
 
 /**
- * Settings → Appearance: theme, accent, fonts, the title-bar path, glass, math, thread colors and animation speed,
- * and the Composer group (the context ring and the frosted composer).
+ * Settings → Appearance in three groups: Colors (theme, accent, project colors), Text (the two fonts) and Window
+ * (the title-bar path, glass and animation speed). How the chat reads and the composer are on Settings → Chat.
  */
 export function AppearanceSettings({
   settings,
@@ -95,9 +79,7 @@ export function AppearanceSettings({
   restartRequired,
   onRestart,
   onPreviewAcrylicIntensity,
-  onCommitAcrylicIntensity,
-  onPreviewFrostedComposer,
-  onCommitFrostedComposer
+  onCommitAcrylicIntensity
 }: AppearanceSettingsProps) {
   const appearance = settings.appearance
   const setTheme = (theme: ThemeId) => { if (theme !== appearance.theme) void onUpdate({ appearance: { ...appearance, theme } }) }
@@ -106,7 +88,7 @@ export function AppearanceSettings({
 
   return (
     <section id="appearance" className="settings-section">
-      <SettingsGroup>
+      <SettingsGroup title="Colors" icon={Palette}>
         <SettingsRow title="Color theme" anchor="appearance-theme">
           <div className="theme-carousel" role="radiogroup" aria-label="Color theme" onKeyDown={onRadioGroupKeyDown}>
             {options.themes.map((theme, index) => {
@@ -158,6 +140,21 @@ export function AppearanceSettings({
           }
         />
         <SettingsRow
+          title="Project colors on threads"
+          anchor="appearance-project-colors"
+          description="Tint threads with their project's color."
+          control={
+            <Switch
+              label="Project colors on threads"
+              checked={appearance.threadProjectColors}
+              onChange={(threadProjectColors) => void onUpdate({ appearance: { ...appearance, threadProjectColors } })}
+            />
+          }
+        />
+      </SettingsGroup>
+
+      <SettingsGroup title="Text" icon={TextFont}>
+        <SettingsRow
           title="Interface font"
           anchor="appearance-interface-font"
           description={<span title="Menus, chat, settings and other text. A Google font downloads once when chosen and then works offline.">Menus, chat and settings.</span>}
@@ -183,6 +180,9 @@ export function AppearanceSettings({
             />
           }
         />
+      </SettingsGroup>
+
+      <SettingsGroup title="Window" icon={AppWindow}>
         <SettingsRow
           title="Thread path in title bar"
           anchor="appearance-thread-path"
@@ -248,119 +248,8 @@ export function AppearanceSettings({
           }
         />
         <SettingsRow
-          title="Render math"
-          anchor="appearance-render-math"
-          description="Show LaTeX in replies and Markdown previews as formatted equations."
-          control={
-            <Switch
-              label="Render math"
-              checked={appearance.renderMath}
-              onChange={(renderMath) => void onUpdate({ appearance: { ...appearance, renderMath } })}
-            />
-          }
-        />
-        <SettingsRow
-          title="Show replies a paragraph at a time"
-          anchor="appearance-reply-pacing"
-          description={<span title="Each finished paragraph, list item or code line fades in; off shows text as it arrives.">Instead of word by word.</span>}
-          control={
-            <Switch
-              label="Show replies a paragraph at a time"
-              checked={appearance.replyPacing}
-              onChange={(replyPacing) => void onUpdate({ appearance: { ...appearance, replyPacing } })}
-            />
-          }
-        />
-        <SettingsRow
-          title="Changed files after each turn"
-          anchor="appearance-turn-changed-files"
-          control={
-            <Select
-              ariaLabel="Changed files after each turn"
-              value={appearance.turnChangedFiles}
-              onChange={(turnChangedFiles) => void onUpdate({ appearance: { ...appearance, turnChangedFiles } })}
-              options={TURN_CHANGED_FILES_OPTIONS}
-            />
-          }
-        />
-        <SettingsRow
-          title="Project colors on threads"
-          anchor="appearance-project-colors"
-          description="Tint threads with their project's color."
-          control={
-            <Switch
-              label="Project colors on threads"
-              checked={appearance.threadProjectColors}
-              onChange={(threadProjectColors) => void onUpdate({ appearance: { ...appearance, threadProjectColors } })}
-            />
-          }
-        />
-      </SettingsGroup>
-
-      <SettingsGroup title="Composer" icon={MessageSquare} anchor="appearance-composer">
-        <SettingsRow
-          title="Context ring in composer"
-          anchor="appearance-context-ring"
-          description="How full the model's context is."
-          control={
-            <Switch
-              label="Context ring in composer"
-              checked={appearance.contextRingInComposer}
-              onChange={(contextRingInComposer) => void onUpdate({ appearance: { ...appearance, contextRingInComposer } })}
-            />
-          }
-        />
-        <SettingsRow
-          title="Frosted composer"
-          anchor="appearance-frosted-composer"
-          description={<span title="Uses more graphics memory.">The chat shows blurred behind the composer.</span>}
-          control={
-            <Switch
-              label="Frosted composer"
-              checked={appearance.frostedComposer}
-              onChange={(frostedComposer) => void onUpdate({ appearance: { ...appearance, frostedComposer } })}
-            />
-          }
-        />
-        {appearance.frostedComposer && FROSTED_COMPOSER_SLIDERS.map(({ key, title, id, format }) => {
-          const range = FROSTED_COMPOSER_RANGES[key]
-          const value = appearance[key]
-          const fill = ((value - range.min) / (range.max - range.min)) * 100
-          return (
-            <SettingsRow
-              key={key}
-              title={title}
-              htmlFor={id}
-              indent
-              control={
-                <>
-                  <input
-                    id={id}
-                    type="range"
-                    className="acrylic-intensity-dial"
-                    min={range.min}
-                    max={range.max}
-                    step={range.step}
-                    value={value}
-                    style={{ '--fill': `${fill}%` } as CSSProperties}
-                    onInput={(e) => {
-                      // onInput only, as for glass intensity: one preview and one save per move.
-                      const next = Number(e.currentTarget.value)
-                      onPreviewFrostedComposer(key, next)
-                      onCommitFrostedComposer(key, next)
-                    }}
-                  />
-                  <span className="acrylic-intensity-value frosted-composer-value">{format(value)}</span>
-                </>
-              }
-            />
-          )
-        })}
-      </SettingsGroup>
-
-      <SettingsAdvanced>
-        <SettingsRow
           title="Animation speed"
+          anchor="appearance-animation-speed"
           description={<span title="Off whenever your system is set to reduce motion.">How fast panels, menus and lists move.</span>}
           control={
             <Select
@@ -371,7 +260,7 @@ export function AppearanceSettings({
             />
           }
         />
-      </SettingsAdvanced>
+      </SettingsGroup>
     </section>
   )
 }

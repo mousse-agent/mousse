@@ -109,7 +109,7 @@ describe('the Settings row', () => {
   it('shows the switch under Editors', () => {
     const out = view({ included: true })
     expect(out).toContain('Editors')
-    expect(out).toContain('Let my editor reach my other computers')
+    expect(out).toContain('Let my editor reach my other devices')
     expect(out).toContain('role="switch"')
     expect(out).toContain('aria-checked="true"')
   })

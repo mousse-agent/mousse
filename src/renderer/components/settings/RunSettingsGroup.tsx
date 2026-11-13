@@ -19,7 +19,7 @@ function capLabel(cap: number): string {
 }
 
 /**
- * Settings → General → Runs: whether a run paused by a usage limit continues by itself, and how often in a row,
+ * Settings → General → Threads: whether a run paused by a usage limit continues by itself, and how often in a row,
  * and when new private threads delete themselves. Resuming is one select: Off, or how many times in a row. Off keeps the
  * saved count, so turning it back on offers the same one.
  */
@@ -30,7 +30,7 @@ export function RunSettingsGroup({ runs, onUpdate }: { runs: MousseSettings['run
     ? `Sends one continue message when the limit resets, at most ${cap} ${cap === 1 ? 'time' : 'times'} in a row; after that the run stops with an error. Runs already paused are not resumed; press Try now.`
     : 'A run paused by a usage limit waits until you press Try now.'
   return (
-    <SettingsGroup title="Runs" icon={Pause}>
+    <SettingsGroup title="Threads" icon={Pause}>
       <SettingsRow
         title="Resume after usage limits reset"
         anchor="general-resume"

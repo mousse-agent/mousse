@@ -67,7 +67,7 @@ import { claudeActionOf, claudeChildToolDenial, claudePermissionKey } from './ch
 import { CancelInProgress, claudeQueryProcess, DEFAULT_LIVE_TIMINGS, LiveSession, noteClaudeQuerySpawn, type ClaudeProcess, type LiveRun, type LiveTimings } from './liveSession'
 import { reapProcessTree, type SpawnedRoot } from '../../stopProcesses'
 import { CLAUDE_TURN_EXTRA_ARGS, TurnFrames } from './turnFrames'
-import { readUsageLimit } from '../../../orchestrator/providerErrors'
+import { providerApiError, readUsageLimit } from '../../../orchestrator/providerErrors'
 import { USAGE_LIMIT_HOLD_MS, usageLimitFromResult, usageLimitFromWindows, type RejectedWindows } from './usageLimit'
 import type { ChildTurnPolicy } from '../../adapter'
 import type { ContinuationInfo, OneShotSpec, ProviderTaskEnd } from '../../driver'
@@ -366,7 +366,7 @@ type Dependencies = {
    * what the instance runs on, read without starting Claude Code.
    */
   probe?: (env: NodeJS.ProcessEnv) => AuthProbe
-  /** The entry pays per token whatever Claude Code reports (an API-key entry): its prompt cache is never kept for an hour. */
+  /** The entry pays per token whatever Claude Code reports (an API-key entry): its prompt cache is kept for an hour only by the user's choice. */
   paysPerToken?: boolean
   /** What a turn says when the instance is not signed in (default: run the sign-in command). */
   signedOutMessage?: () => string
@@ -1382,13 +1382,15 @@ export class ClaudeSubscriptionProviderService {
    *   subscription (only API keys: per token); any other address is unconfirmed;
    * - without one, Claude Code's own subscription sign-in (`claude auth status`) is a subscription,
    *   unless an `ANTHROPIC_AUTH_TOKEN` replaces it.
-   * `userSetting` when the user's own environment or Claude settings choose the lifetime.
+   * `userSetting` when the user's own environment or Claude settings choose the lifetime. A
+   * subscription is always on, so a choice stored for it (from when it had a switch) is ignored.
    */
   promptCacheHour(cwd?: string, env: NodeJS.ProcessEnv = this.environment(), choice?: boolean): PromptCacheHour {
     const options = cwd ? { cwd } : {}
     const basis = this.promptCacheBasis(env, options)
-    const userSetting = basis !== 'per_token' && claudeChoosesCacheTtl(env, options)
-    return { basis, ...(userSetting ? { userSetting: true as const } : {}), ...(choice !== undefined ? { choice } : {}), on: promptCacheHourOn({ basis, ...(userSetting ? { userSetting: true as const } : {}) }, choice) }
+    const userSetting = claudeChoosesCacheTtl(env, options) ? { userSetting: true as const } : {}
+    const chosen = basis !== 'subscription' && choice !== undefined ? { choice } : {}
+    return { basis, ...userSetting, ...chosen, on: promptCacheHourOn({ basis, ...userSetting }, chosen.choice) }
   }
   private promptCacheBasis(env: NodeJS.ProcessEnv, options: { cwd?: string }): PromptCacheHour['basis'] {
     if (this.dependencies.paysPerToken) return 'per_token'
@@ -3447,5 +3449,6 @@ function resultFailure(message: SDKResultMessage): Error | undefined {
       errorInfo: { category: 'unavailable', retryable: true }
     })
   }
-  return new Error(failure)
+  // The provider refused the request (`API Error: 400 …`): the transcript shows its status and message.
+  return providerApiError(failure, 'claude') ?? new Error(failure)
 }

@@ -386,9 +386,10 @@ describe('the composer', () => {
     const sent = transcript().querySelector('.bot-you')!
     expect([...sent.querySelectorAll('.bot-file-pill')].map((pill) => pill.getAttribute('title'))).toEqual([
       '/home/me/.mousse/bots/files/inbox/attachments/2026-11-08/march.pdf',
-      '/home/me/.mousse/bots/files/inbox/attachments/2026-11-08/sheet.csv',
-      expect.stringMatching(/attachments\/2026-11-08\/paste-.*\.png$/)
+      '/home/me/.mousse/bots/files/inbox/attachments/2026-11-08/sheet.csv'
     ])
+    // The pasted screenshot shows as a picture, named on hover.
+    expect([...sent.querySelectorAll('.bot-images .bot-image')].map((tile) => tile.getAttribute('title'))).toEqual([expect.stringMatching(/^paste-.*\.png$/)])
   })
 
   it('sends files alone, and refuses a file over the limit before sending anything', async () => {

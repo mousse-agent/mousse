@@ -192,6 +192,7 @@ export function VendorSettingsSection({ snapshot }: { snapshot: InstanceSnapshot
   return (
     <EditorSection
       title="Claude settings"
+      anchor="providers-claude-settings"
       action={stale ? (
         <button type="button" className="settings-btn" onClick={() => setReloads((count) => count + 1)}>Reload</button>
       ) : view && !view.error && view.addable.length > 0 ? (

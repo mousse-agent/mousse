@@ -1,18 +1,40 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import type { IntegrationPlatformClient } from '../../../shared/integrationPlatform'
-import { MCP_RELAY_RUNTIMES, MOUSSE_BUILTIN_TOOL_GROUPS, MOUSSE_BUILTIN_TOOLS, relayEnabledFor, type McpRelayRuntime } from '../../../shared/integrations'
+import { MCP_RELAY_RUNTIMES, MOUSSE_BUILTIN_TOOL_GROUPS, MOUSSE_BUILTIN_TOOLS, relayEnabledFor, type McpRelayRuntime, type MousseBuiltInToolGroupId, type MousseBuiltInToolInfo } from '../../../shared/integrations'
 import type { AgentTypeId, MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../../../shared/settings'
 import { confirmNavigation } from '../../services/navigationGuards'
 import { IntegrationsWorkspace, type IntegrationPolicy } from '../integrations/IntegrationsWorkspace'
 import type { SkillModelBinding } from '../integrations/SkillModelPicker'
-import { CircleCheck, Globe } from '../../lib/icons'
+import { ChevronRight, CircleCheck, Globe } from '../../lib/icons'
+import { COLLAPSE_DETAILS_CLASS } from '../ui/Collapse'
 import { ConfirmRemoveButton } from './IconButtons'
 import { SecretRow } from './SecretRow'
-import { MoreDetails, SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from './SettingsRow'
+import { MoreDetails, SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { Select } from '../ui/Select'
 
 type WebService = 'exa' | 'parallel'
-const WEB_SERVICES: Array<{ id: WebService; label: string }> = [{ id: 'exa', label: 'Exa' }, { id: 'parallel', label: 'Parallel' }]
+/** `anchor`: where a settings search result lands (lib/settingsSearch.ts), here and in the tables below. */
+const WEB_SERVICES: Array<{ id: WebService; label: string; anchor: string }> = [
+  { id: 'exa', label: 'Exa', anchor: 'integrations-web-exa' },
+  { id: 'parallel', label: 'Parallel', anchor: 'integrations-web-parallel' }
+]
+
+/** The web tools sit with their keys under Web search; Built-in tools lists the other groups. */
+const WEB_TOOLS: Array<{ id: string; anchor: string }> = [
+  { id: 'web_search', anchor: 'integrations-tool-web-search' },
+  { id: 'web_fetch', anchor: 'integrations-tool-web-fetch' }
+]
+
+/** Built-in tool groups in their folds. The development-only group has no search entry. */
+const TOOL_GROUP_FOLDS: Array<{ id: MousseBuiltInToolGroupId; anchor?: string }> = [
+  { id: 'project', anchor: 'integrations-tools-project' },
+  { id: 'interaction', anchor: 'integrations-tools-interaction' },
+  { id: 'tasks', anchor: 'integrations-tools-tasks' },
+  { id: 'actions', anchor: 'integrations-tools-actions' },
+  { id: 'skills', anchor: 'integrations-tools-skills' },
+  { id: 'browser', anchor: 'integrations-tools-browser' },
+  { id: 'devgui' }
+]
 
 /** How the providers page names each runtime that can reach the MCP relay. */
 const RELAY_RUNTIME_LABELS: Record<McpRelayRuntime, string> = {
@@ -93,18 +115,72 @@ export function SkillsMcpSettings({
         />
       } />
       <IntegrationsWorkspace client={client} profileId={profileId} projectId={projectId} policy={policy} skillModel={skillModel} />
-      <WebSearchKeys />
-      <SettingsAdvanced>
-        <MainAgentAvailability settings={live} onUpdate={onUpdate} />
+      <WebSearchKeys settings={live} onUpdate={onUpdate} />
+      <SettingsFold anchor="integrations-access" title="Who can use them">
         <AgentAvailability settings={live} options={options} onUpdate={onUpdate} />
+      </SettingsFold>
+      <SettingsFold anchor="integrations-share" title="Share MCP servers">
         <RelayAvailability settings={live} onUpdate={onUpdate} />
+      </SettingsFold>
+      <SettingsFold anchor="integrations-tools" title="Built-in tools">
         <BuiltInTools settings={live} onUpdate={onUpdate} />
-      </SettingsAdvanced>
+      </SettingsFold>
     </section>
   )
 }
 
-function WebSearchKeys() {
+type SettingsProps = { settings: MousseSettings; onUpdate: (partial: MousseSettingsUpdate) => Promise<void> }
+
+/**
+ * A fold on this page: a heading that opens its rows. Settings search opens it (and any fold around it)
+ * when a result lands inside. `count` shows next to the title while it is closed.
+ */
+function SettingsFold({ title, anchor, count, sub, children }: { title: string; anchor?: string; count?: string; sub?: boolean; children: ReactNode }) {
+  return (
+    <details className={`settings-fold${sub ? ' sub' : ''} ${COLLAPSE_DETAILS_CLASS}`}>
+      <summary data-settings-anchor={anchor}>
+        <ChevronRight size={14} aria-hidden="true" className="settings-advanced-chevron" />
+        <span className="settings-fold-title">{title}</span>
+        {count ? <span className="settings-fold-count">{count}</span> : null}
+      </summary>
+      <div className="settings-fold-body">{children}</div>
+    </details>
+  )
+}
+
+/** Built-in tool switches. A tool reads on only while the hidden tools gate is on; turning one on turns the gate back on. */
+function useBuiltInTools({ settings, onUpdate }: SettingsProps) {
+  const tools = settings.integrations.tools
+  const gateOn = tools.enabled !== false
+  const enabled = new Set(tools.enabledTools)
+  const isOn = (toolId: string) => gateOn && enabled.has(toolId)
+  const toggle = (toolId: string, next: boolean) => {
+    const ids = new Set(enabled)
+    if (next) ids.add(toolId); else ids.delete(toolId)
+    void onUpdate(patch({
+      tools: {
+        enabled: next ? true : tools.enabled,
+        enabledTools: MOUSSE_BUILTIN_TOOLS.map((tool) => tool.id).filter((id) => ids.has(id))
+      }
+    }))
+  }
+  return { isOn, toggle }
+}
+
+function ToolRow({ tool, anchor, isOn, toggle }: { tool: MousseBuiltInToolInfo; anchor?: string } & ReturnType<typeof useBuiltInTools>) {
+  return (
+    <SettingsRow
+      anchor={anchor}
+      title={tool.label}
+      htmlFor={`builtin-tool-${tool.id}`}
+      description={tool.description}
+      control={<Switch id={`builtin-tool-${tool.id}`} label={`${tool.label} tool`} checked={isOn(tool.id)} onChange={(next) => toggle(tool.id, next)} />}
+    />
+  )
+}
+
+function WebSearchKeys(props: SettingsProps) {
+  const tools = useBuiltInTools(props)
   const [configured, setConfigured] = useState<Record<WebService, boolean>>({ exa: false, parallel: false })
   const [removing, setRemoving] = useState<WebService | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -126,9 +202,10 @@ function WebSearchKeys() {
 
   return (
     <SettingsGroup anchor="integrations-web-search" title="Web search" icon={Globe} description="Optional API keys that let agents search the web, kept in the secure credential store.">
-      {WEB_SERVICES.map(({ id, label }) => (
+      {WEB_SERVICES.map(({ id, label, anchor }) => (
         <SecretRow
           key={id}
+          anchor={anchor}
           title={label}
           inputId={`web-search-key-${id}`}
           fieldLabel={`${label} API key`}
@@ -143,77 +220,70 @@ function WebSearchKeys() {
           actions={<ConfirmRemoveButton label="Remove key" disabled={removing !== null} onRemove={() => void remove(id)} />}
         />
       ))}
+      {WEB_TOOLS.map(({ id, anchor }) => {
+        const tool = MOUSSE_BUILTIN_TOOLS.find((item) => item.id === id)
+        return tool ? <ToolRow key={id} tool={tool} anchor={anchor} {...tools} /> : null
+      })}
       {error ? <p className="skills-mcp-error" role="alert">{error}</p> : null}
     </SettingsGroup>
   )
 }
 
-function MainAgentAvailability({ settings, onUpdate }: { settings: MousseSettings; onUpdate: (partial: MousseSettingsUpdate) => Promise<void> }) {
+/**
+ * Who can use the skills and MCP servers that are on: one row per agent, with a Skills and an MCP
+ * switch under column labels, like the notification channels. An agent gets them only when its flag
+ * is true (as the daemon reads it).
+ */
+function AgentAvailability({ settings, options, onUpdate }: SettingsProps & { options: SettingsOptions }) {
   const { skills, mcp } = settings.integrations
-  return (
-    <SettingsGroup anchor="integrations-main-agent" title="Available to main agent">
-      <SettingsRow
-        title="Skills"
-        htmlFor="main-agent-skills"
-        description="Lets the main agent load the skills that are on."
-        control={<Switch id="main-agent-skills" label="Skills available to main agent" checked={skills.enableForMainAgent}
-          onChange={(enableForMainAgent) => void onUpdate(patch({ skills: { enableForMainAgent } }))} />}
-      />
-      <SettingsRow
-        title="MCP servers"
-        htmlFor="main-agent-mcp"
-        description="Lets the main agent use tools from the servers that are on."
-        control={<Switch id="main-agent-mcp" label="MCP servers available to main agent" checked={mcp.enableForMainAgent}
-          onChange={(enableForMainAgent) => void onUpdate(patch({ mcp: { enableForMainAgent } }))} />}
-      />
-    </SettingsGroup>
+  const row = (key: string, label: string, ids: { skills: string; mcp: string }, on: { skills: boolean; mcp: boolean },
+    set: (kind: 'skills' | 'mcp', next: boolean) => void, ariaName: string) => (
+    <SettingsRow
+      key={key}
+      title={label}
+      control={
+        <span className="skills-mcp-access" role="group" aria-label={`What ${label} can use`}>
+          <Switch id={ids.skills} label={`Skills available to ${ariaName}`} checked={on.skills} onChange={(next) => set('skills', next)} />
+          <Switch id={ids.mcp} label={`MCP servers available to ${ariaName}`} checked={on.mcp} onChange={(next) => set('mcp', next)} />
+        </span>
+      }
+    />
   )
-}
-
-function AgentAvailability({ settings, options, onUpdate }: {
-  settings: MousseSettings; options: SettingsOptions; onUpdate: (partial: MousseSettingsUpdate) => Promise<void>
-}) {
-  const { skills, mcp } = settings.integrations
-  if (!options.agentTypes.length) return null
-  // Matches the daemon: an agent gets skills or servers only when its flag is true.
-  const row = (kind: 'skills' | 'mcp', agentId: AgentTypeId, label: string, agentLabel: string) => {
-    const on = (kind === 'skills' ? skills : mcp).enableForAgents[agentId] === true
-    const id = `agent-${kind}-${agentId}`
-    return (
-      <SettingsRow
-        key={id}
-        indent
-        title={label}
-        htmlFor={id}
-        control={<Switch id={id} label={`${label} available to ${agentLabel}`} checked={on}
-          onChange={(next) => void onUpdate(patch({ [kind]: { enableForAgents: { [agentId]: next } } }))} />}
-      />
-    )
-  }
   return (
-    <SettingsGroup title="Available to agents" description="Which agents can use the skills and MCP servers that are on.">
-      {options.agentTypes.map((agent) => [
-        <SettingsRow key={agent.id} title={agent.label} />,
-        row('skills', agent.id, 'Skills', agent.label),
-        row('mcp', agent.id, 'MCP servers', agent.label)
-      ])}
+    <SettingsGroup
+      description="Which agents can use the skills and MCP servers that are on."
+      className="skills-mcp-access-group"
+      action={
+        <span className="skills-mcp-access skills-mcp-access-labels" aria-hidden="true">
+          <span>Skills</span><span>MCP</span>
+        </span>
+      }
+    >
+      {row('main', 'Main agent', { skills: 'main-agent-skills', mcp: 'main-agent-mcp' },
+        { skills: skills.enableForMainAgent, mcp: mcp.enableForMainAgent },
+        (kind, enableForMainAgent) => void onUpdate(patch({ [kind]: { enableForMainAgent } })), 'main agent')}
+      {options.agentTypes.map((agent) => row(agent.id, agent.label,
+        { skills: `agent-skills-${agent.id}`, mcp: `agent-mcp-${agent.id}` },
+        { skills: skills.enableForAgents[agent.id] === true, mcp: mcp.enableForAgents[agent.id] === true },
+        (kind, next) => void onUpdate(patch({ [kind]: { enableForAgents: { [agent.id]: next } } })), agent.label))}
     </SettingsGroup>
   )
 }
 
 /** Which runtimes reach the MCP servers through the MCP relay (`mousse-relay`). Exported for tests. */
-export function RelayAvailability({ settings, onUpdate }: { settings: MousseSettings; onUpdate: (partial: MousseSettingsUpdate) => Promise<void> }) {
+export function RelayAvailability({ settings, onUpdate }: SettingsProps) {
   const { mcp } = settings.integrations
   // The hidden MCP gate shows every runtime as off; there is nothing to share until a server is turned on.
   const disabled = mcp.enabled === false
   return (
     <SettingsGroup
-      anchor="integrations-share"
-      title="Let other agents use your MCP servers"
-      description={<MoreDetails>
-        They reach the servers that are on through Mousse, as the mousse-relay server. Claude Code also keeps the servers Mousse
-        adds to it directly, so their tools can appear twice.
-      </MoreDetails>}
+      description={<>
+        Other agents reach the servers that are on through Mousse.
+        <MoreDetails>
+          They connect to it as the mousse-relay server. Claude Code also keeps the servers Mousse adds to it directly, so their
+          tools can appear twice.
+        </MoreDetails>
+      </>}
       className="skills-mcp-compact"
     >
       {MCP_RELAY_RUNTIMES.map((runtime) => (
@@ -231,38 +301,23 @@ export function RelayAvailability({ settings, onUpdate }: { settings: MousseSett
   )
 }
 
-function BuiltInTools({ settings, onUpdate }: { settings: MousseSettings; onUpdate: (partial: MousseSettingsUpdate) => Promise<void> }) {
-  const tools = settings.integrations.tools
-  const gateOn = tools.enabled !== false
-  const enabled = new Set(tools.enabledTools)
-  const toggle = (toolId: string, next: boolean) => {
-    // The hidden tools gate shows every tool as off; turning one on turns the gate back on.
-    const ids = new Set(enabled)
-    if (next) ids.add(toolId); else ids.delete(toolId)
-    void onUpdate(patch({
-      tools: {
-        enabled: next ? true : tools.enabled,
-        enabledTools: MOUSSE_BUILTIN_TOOLS.map((tool) => tool.id).filter((id) => ids.has(id))
-      }
-    }))
-  }
-  const groups = MOUSSE_BUILTIN_TOOL_GROUPS.filter((group) => SHOW_DEV_TOOLS || group.id !== 'devgui')
+/** One fold per tool group, with how many of its tools are on. */
+function BuiltInTools(props: SettingsProps) {
+  const tools = useBuiltInTools(props)
+  const groups = TOOL_GROUP_FOLDS.filter(({ id }) => SHOW_DEV_TOOLS || id !== 'devgui')
   return <>
-    {groups.map((group) => {
+    {groups.map(({ id, anchor }) => {
+      const group = MOUSSE_BUILTIN_TOOL_GROUPS.find((item) => item.id === id)
+      if (!group) return null
       const groupTools = MOUSSE_BUILTIN_TOOLS.filter((tool) => tool.group === group.id)
       if (!groupTools.length) return null
+      const on = groupTools.filter((tool) => tools.isOn(tool.id)).length
       return (
-        <SettingsGroup key={group.id} title={group.label} description={group.description} className="skills-mcp-compact">
-          {groupTools.map((tool) => (
-            <SettingsRow
-              key={tool.id}
-              title={tool.label}
-              htmlFor={`builtin-tool-${tool.id}`}
-              description={tool.description}
-              control={<Switch id={`builtin-tool-${tool.id}`} label={`${tool.label} tool`} checked={gateOn && enabled.has(tool.id)} onChange={(next) => toggle(tool.id, next)} />}
-            />
-          ))}
-        </SettingsGroup>
+        <SettingsFold key={group.id} sub anchor={anchor} title={group.label} count={`${on} of ${groupTools.length} on`}>
+          <SettingsGroup description={group.description} className="skills-mcp-compact">
+            {groupTools.map((tool) => <ToolRow key={tool.id} tool={tool} {...tools} />)}
+          </SettingsGroup>
+        </SettingsFold>
       )
     })}
   </>

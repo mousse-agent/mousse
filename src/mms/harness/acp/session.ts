@@ -25,7 +25,7 @@ import {
   type PermissionPrompter
 } from './permissions'
 import type { AcpQuirks } from './quirks'
-import { agentCancelledError, promptStopOutcome } from './stopReason'
+import { acpAgentError, agentCancelledError, promptStopOutcome } from './stopReason'
 import { xaiHandlers, xaiStopFailure } from './xai'
 
 /**
@@ -1031,7 +1031,8 @@ export class AcpSessions {
       this.sessions.delete(input.threadId)
       if (steerFailure) throw steerFailure
       if (silenceFailure && !input.signal?.aborted) throw silenceFailure
-      throw this.authRequiredError(current, error) ?? error
+      // A sign-in the agent asks for is a sign-in; any other error the agent answered with is shown in its words.
+      throw this.authRequiredError(current, error) ?? (input.signal?.aborted ? undefined : acpAgentError(error)) ?? error
     } finally {
       clearTimeout(silenceTimer)
       current.activity = undefined

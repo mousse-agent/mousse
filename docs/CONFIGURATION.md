@@ -165,10 +165,20 @@ The agents you connect may send their own usage and error reports (telemetry) to
 
 ## Claude Code prompt cache
 
-Claude Code keeps its prompt cache for 5 minutes unless it knows it runs on a subscription. Each Claude Code provider in Settings → Providers → Advanced has **Keep the prompt cache for 1 hour**. When it is on, Mousse starts that provider's chat turns with `CLAUDE_CODE_PROMPT_CACHE_TTL=1h`, so coming back within an hour reuses the cache instead of re-reading the whole thread. Subagents keep Claude Code's default.
+Claude Code keeps its prompt cache for 5 minutes unless it knows it runs on a subscription. Mousse starts a Claude Code provider's chat turns with `CLAUDE_CODE_PROMPT_CACHE_TTL=1h` when the provider is a confirmed subscription, or when you turn on **Keep the prompt cache for 1 hour** in Settings → Providers → Advanced. Coming back within an hour then reuses the cache instead of re-reading the whole thread. Subagents keep Claude Code's default.
 
-| The provider runs on | Default |
-|----------------------|---------|
+| The provider runs on | 1-hour cache | Switch |
+|----------------------|--------------|--------|
+| Claude Code's own subscription sign-in, with no base URL, `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY` | Always on | Not shown |
+| A local CLIProxyAPI whose credential listing shows only Claude subscription (OAuth) seats | Always on | Not shown |
+| An API key: a Claude Code (API key) provider, an API-key sign-in, `ANTHROPIC_API_KEY`, a proxy listing only API keys, Bedrock, Vertex or Foundry | Off | Shown; turn it on to keep the cache for an hour |
+| Any other base URL, a proxy Mousse cannot list (no management key), or a listing with mixed seats | Off | Shown, with "Couldn't confirm a subscription." |
+
+On per-token billing, 1-hour cache writes can cost more than 5-minute ones. Bedrock, Vertex and Foundry accept the 1-hour lifetime through Claude Code.
+
+Your choice is kept per provider (`promptCacheHour` in its `config`). A confirmed subscription ignores it, including a `false` saved before the switch was removed there. When your own environment or Claude settings already set `CLAUDE_CODE_PROMPT_CACHE_TTL`, `ENABLE_PROMPT_CACHING_1H` or `promptCacheTtl`, Mousse sets nothing and the switch says so. The proxy listing is the one the Usage page reads; Mousse reads it again at most every half hour, and a turn waits at most 2 seconds for it.
+
+----------------------|---------|
 | Claude Code's own subscription sign-in, with no base URL, `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY` | On |
 | A local CLIProxyAPI whose credential listing shows only Claude subscription (OAuth) seats | On |
 | Any other base URL, a proxy Mousse cannot list (no management key), or a listing with mixed seats | Off, with "couldn't confirm a subscription"; you can turn it on |

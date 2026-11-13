@@ -1,7 +1,7 @@
 /**
- * Claude Code keeps the prompt cache for an hour (`CLAUDE_CODE_PROMPT_CACHE_TTL=1h`) on a confirmed
- * subscription: its own sign-in, or a local proxy whose listing shows only subscription seats. An
- * unconfirmed route is off until the user turns it on; anything paid per token never gets it; a
+ * Claude Code always keeps the prompt cache for an hour (`CLAUDE_CODE_PROMPT_CACHE_TTL=1h`) on a
+ * confirmed subscription: its own sign-in, or a local proxy whose listing shows only subscription
+ * seats. Anything paid per token, and an unconfirmed route, is off until the user turns it on; a
  * lifetime the user's own settings or environment choose is left alone; subagents are untouched.
  * No real Claude Code, account or proxy: `claude auth status`, the query and the proxy are fakes.
  */
@@ -10,7 +10,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Options, Query } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { promptCacheHourOn } from '../src/shared/harness/status'
+import { promptCacheHourOn, type InstanceSnapshot, type PromptCacheHour } from '../src/shared/harness/status'
+import { promptCacheHourNote, PromptCacheHourRow } from '../src/renderer/components/providers/CliSections'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
 import { decodeInstanceConfig } from '../src/mms/harness/driver'
 import { asInstanceConfigPatch } from '../src/mms/protocol/validators'
 import { ClaudeSubscriptionProviderService } from '../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
@@ -107,11 +110,11 @@ describe('a confirmed subscription keeps the cache for an hour', () => {
     expect(calls.filter((url) => url.includes('/credentials'))).toHaveLength(1)
   })
 
-  it('the user turning it off wins', async () => {
+  it('a choice stored from when subscriptions had a switch is ignored: still an hour', async () => {
     const { service: claude, turn } = service()
     await claude.status()
-    expect(claude.promptCacheHour(undefined, undefined, false)).toEqual({ basis: 'subscription', choice: false, on: false })
-    expect(await turn(false)).not.toHaveProperty('CLAUDE_CODE_PROMPT_CACHE_TTL')
+    expect(claude.promptCacheHour(undefined, undefined, false)).toEqual({ basis: 'subscription', on: true })
+    expect((await turn(false)).CLAUDE_CODE_PROMPT_CACHE_TTL).toBe('1h')
   })
 })
 
@@ -144,19 +147,24 @@ describe('anything unconfirmed is off until the user turns it on', () => {
   })
 })
 
-describe('what pays per token never keeps it for an hour', () => {
-  it('a proxy listing only API keys, an API-key sign-in, a cloud route, an API-key entry: never, even when chosen', async () => {
+describe('what pays per token keeps it for an hour only when the user turns it on', () => {
+  it('a proxy listing only API keys, an API-key sign-in, ANTHROPIC_API_KEY, Bedrock, Vertex, Foundry, an API-key entry: off, then on when chosen', async () => {
     const cases = [
       service({ authMethod: 'oauth_token', env: PROXY, proxy: proxyFetch(['api_key', 'api_key']).fetch }),
       service({ authMethod: 'api_key' }),
       service({ env: { ANTHROPIC_API_KEY: 'sk-ant-api03-x' } }),
       service({ env: { CLAUDE_CODE_USE_BEDROCK: '1' } }),
+      service({ env: { CLAUDE_CODE_USE_VERTEX: '1' } }),
+      service({ env: { CLAUDE_CODE_USE_FOUNDRY: '1' } }),
       service({ paysPerToken: true })
     ]
     for (const [index, entry] of cases.entries()) {
       await entry.service.status()
-      expect(await entry.turn(true), `case ${index}`).not.toHaveProperty('CLAUDE_CODE_PROMPT_CACHE_TTL')
-      expect(entry.service.promptCacheHour(undefined, undefined, true), `case ${index}`).toEqual({ basis: 'per_token', choice: true, on: false })
+      expect(await entry.turn(), `case ${index}`).not.toHaveProperty('CLAUDE_CODE_PROMPT_CACHE_TTL')
+      expect(entry.service.promptCacheHour(), `case ${index}`).toEqual({ basis: 'per_token', on: false })
+      expect(await entry.turn(false), `case ${index}`).not.toHaveProperty('CLAUDE_CODE_PROMPT_CACHE_TTL')
+      expect((await entry.turn(true)).CLAUDE_CODE_PROMPT_CACHE_TTL, `case ${index}`).toBe('1h')
+      expect(entry.service.promptCacheHour(undefined, undefined, true), `case ${index}`).toEqual({ basis: 'per_token', choice: true, on: true })
     }
   })
 })
@@ -170,6 +178,11 @@ describe("the user's own choice of lifetime is left alone", () => {
 
     const flag = service({ env: { ENABLE_PROMPT_CACHING_1H: '0' } })
     expect(await flag.turn()).not.toHaveProperty('CLAUDE_CODE_PROMPT_CACHE_TTL')
+
+    // On an API key too: the switch turned on does not override their choice.
+    const keyed = service({ env: { ANTHROPIC_API_KEY: 'sk-ant-api03-x', CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' } })
+    expect(keyed.service.promptCacheHour(undefined, undefined, true)).toEqual({ basis: 'per_token', userSetting: true, choice: true, on: false })
+    expect((await keyed.turn(true)).CLAUDE_CODE_PROMPT_CACHE_TTL).toBe('5m')
 
     writeFileSync(join(configDir, 'settings.json'), JSON.stringify({ promptCacheTtl: '5m' }))
     const fromSettings = service()
@@ -199,10 +212,26 @@ describe('the parts', () => {
 
   it('the automatic default and the choice', () => {
     expect(promptCacheHourOn({ basis: 'subscription' }, undefined)).toBe(true)
+    expect(promptCacheHourOn({ basis: 'subscription' }, false)).toBe(true)
     expect(promptCacheHourOn({ basis: 'unconfirmed' }, undefined)).toBe(false)
     expect(promptCacheHourOn({ basis: 'unconfirmed' }, true)).toBe(true)
-    expect(promptCacheHourOn({ basis: 'per_token' }, true)).toBe(false)
+    expect(promptCacheHourOn({ basis: 'per_token' }, undefined)).toBe(false)
+    expect(promptCacheHourOn({ basis: 'per_token' }, true)).toBe(true)
     expect(promptCacheHourOn({ basis: 'subscription', userSetting: true }, true)).toBe(false)
+    expect(promptCacheHourOn({ basis: 'per_token', userSetting: true }, true)).toBe(false)
+  })
+
+  it('the switch: hidden on a subscription, shown off elsewhere, with a note only when one is needed', () => {
+    expect(promptCacheHourNote({ basis: 'per_token', on: false })).toBeUndefined()
+    expect(promptCacheHourNote({ basis: 'per_token', choice: true, on: true })).toBeUndefined()
+    expect(promptCacheHourNote({ basis: 'unconfirmed', on: false })).toBe("Couldn't confirm a subscription.")
+    expect(promptCacheHourNote({ basis: 'unconfirmed', choice: true, on: true })).toBe("Couldn't confirm a subscription.")
+    expect(promptCacheHourNote({ basis: 'per_token', userSetting: true, on: false })).toBe('Your Claude Code settings choose this.')
+    const row = (state: PromptCacheHour) => renderToStaticMarkup(createElement(PromptCacheHourRow, { snapshot: { promptCacheHour: state } as InstanceSnapshot, onSave: async () => {} }))
+    expect(row({ basis: 'subscription', on: true })).toBe('')
+    expect(row({ basis: 'per_token', on: false })).toContain('Keep prompt cache 1 hour')
+    expect(row({ basis: 'per_token', on: false })).not.toMatch(/cost|price|×/i)
+    expect(row({ basis: 'unconfirmed', on: false })).toContain('confirm a subscription')
   })
 
   it('the choice is stored per entry and checked at the protocol', () => {

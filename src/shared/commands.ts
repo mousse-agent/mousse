@@ -60,7 +60,9 @@ export type CommandScope = 'global' | 'surface-picker' | 'model-picker' | 'workf
 /** The kind of overlay that is topmost. While one is open it owns the keyboard. */
 export type OverlayScope = 'modal' | 'palette' | 'model-picker'
 
-export type CommandCategory = 'Thread' | 'View' | 'Go' | 'Surfaces' | 'Model picker' | 'Workflow editor' | 'Editor'
+/** The command groups, in the order the Shortcuts page and the palette list them. */
+export const COMMAND_CATEGORIES = ['Go', 'Threads', 'Composer', 'View', 'Surfaces', 'Model picker', 'Workflow editor', 'Editor'] as const
+export type CommandCategory = (typeof COMMAND_CATEGORIES)[number]
 
 /** Per-profile overrides: a binding string replaces the default, `null` unbinds. */
 export type ShortcutOverrides = Partial<Record<CommandId, string | null>>
@@ -162,7 +164,7 @@ export const COMMANDS: readonly CommandDefinition[] = [
   {
     id: 'thread.new',
     title: 'New thread',
-    category: 'Thread',
+    category: 'Threads',
     searchTerms: ['chat', 'create', 'start'],
     defaultBinding: `${MOD}+N`,
     scope: 'global',
@@ -173,7 +175,7 @@ export const COMMANDS: readonly CommandDefinition[] = [
   {
     id: 'thread.newPrivate',
     title: 'New private thread',
-    category: 'Thread',
+    category: 'Threads',
     searchTerms: ['chat', 'create', 'start', 'private', 'local', 'incognito', 'this computer'],
     defaultBinding: `${MOD}+Shift+N`,
     scope: 'global',
@@ -184,7 +186,7 @@ export const COMMANDS: readonly CommandDefinition[] = [
   {
     id: 'thread.next',
     title: 'Next thread',
-    category: 'Thread',
+    category: 'Threads',
     searchTerms: ['chat', 'switch'],
     defaultBinding: 'Ctrl+Tab',
     scope: 'global',
@@ -195,7 +197,7 @@ export const COMMANDS: readonly CommandDefinition[] = [
   {
     id: 'thread.previous',
     title: 'Previous thread',
-    category: 'Thread',
+    category: 'Threads',
     searchTerms: ['chat', 'switch'],
     defaultBinding: 'Ctrl+Shift+Tab',
     scope: 'global',
@@ -230,7 +232,7 @@ export const COMMANDS: readonly CommandDefinition[] = [
   {
     id: 'threads.search',
     title: 'Search threads',
-    category: 'Thread',
+    category: 'Threads',
     searchTerms: ['find', 'chat', 'messages'],
     defaultBinding: `${MOD}+Shift+O`,
     scope: 'global',
@@ -241,7 +243,7 @@ export const COMMANDS: readonly CommandDefinition[] = [
   {
     id: 'thread.rename',
     title: 'Rename thread',
-    category: 'Thread',
+    category: 'Threads',
     searchTerms: ['title', 'name'],
     defaultBinding: null,
     scope: 'global',
@@ -253,7 +255,7 @@ export const COMMANDS: readonly CommandDefinition[] = [
   {
     id: 'thread.pin',
     title: 'Pin or unpin thread',
-    category: 'Thread',
+    category: 'Threads',
     searchTerms: ['unpin', 'favourite', 'favorite'],
     defaultBinding: null,
     scope: 'global',
@@ -265,7 +267,7 @@ export const COMMANDS: readonly CommandDefinition[] = [
   {
     id: 'thread.archive',
     title: 'Archive thread',
-    category: 'Thread',
+    category: 'Threads',
     searchTerms: ['settle', 'hide', 'done'],
     defaultBinding: null,
     scope: 'global',
@@ -277,7 +279,7 @@ export const COMMANDS: readonly CommandDefinition[] = [
   {
     id: 'project.open',
     title: 'Add project',
-    category: 'Thread',
+    category: 'Threads',
     searchTerms: ['open', 'folder', 'repository'],
     defaultBinding: null,
     scope: 'global',
@@ -290,7 +292,7 @@ export const COMMANDS: readonly CommandDefinition[] = [
     // browser surface keeps the key, and the handler also leaves Monaco its own find widget.
     id: 'chat.findInThread',
     title: 'Find in thread',
-    category: 'Thread',
+    category: 'Threads',
     searchTerms: ['search', 'text', 'messages', 'transcript'],
     defaultBinding: `${MOD}+F`,
     scope: 'global',
@@ -302,7 +304,7 @@ export const COMMANDS: readonly CommandDefinition[] = [
   {
     id: 'run.stop',
     title: 'Stop run',
-    category: 'Thread',
+    category: 'Composer',
     searchTerms: ['interrupt', 'cancel', 'abort', 'halt'],
     defaultBinding: `${MOD}+Shift+Backspace`,
     scope: 'global',
@@ -316,7 +318,7 @@ export const COMMANDS: readonly CommandDefinition[] = [
     // waits and, from the composer, only while the composer is empty (with text, the key sends).
     id: 'approval.allow',
     title: 'Approve request',
-    category: 'Thread',
+    category: 'Composer',
     searchTerms: ['approval', 'permission', 'allow', 'accept'],
     defaultBinding: `${MOD}+Enter`,
     scope: 'global',
@@ -329,7 +331,7 @@ export const COMMANDS: readonly CommandDefinition[] = [
     // No default key, so a slip cannot deny.
     id: 'approval.deny',
     title: 'Deny request',
-    category: 'Thread',
+    category: 'Composer',
     searchTerms: ['approval', 'permission', 'reject', 'refuse'],
     defaultBinding: null,
     scope: 'global',
@@ -420,7 +422,7 @@ export const COMMANDS: readonly CommandDefinition[] = [
   {
     id: 'composer.focus',
     title: 'Focus composer',
-    category: 'Go',
+    category: 'Composer',
     searchTerms: ['input', 'message', 'type'],
     defaultBinding: `${MOD}+Shift+M`,
     scope: 'global',
@@ -546,7 +548,7 @@ export const COMMANDS: readonly CommandDefinition[] = [
     // to Steer it queues it. On a focused queued message it sends that message now.
     id: 'composer.steer',
     title: 'Steer: send into the running reply (queues in Steer mode)',
-    category: 'Thread',
+    category: 'Composer',
     searchTerms: ['steer', 'send now', 'queue'],
     defaultBinding: `${MOD}+Enter`,
     scope: 'global',
@@ -560,7 +562,7 @@ export const COMMANDS: readonly CommandDefinition[] = [
     // enabled only while the composer shows the mode button. It never sends.
     id: 'composer.switchSendMode',
     title: 'Switch send mode (Queue or Steer)',
-    category: 'Thread',
+    category: 'Composer',
     searchTerms: ['steer', 'queue', 'enter', 'send mode'],
     defaultBinding: `${MOD}+Shift+Enter`,
     scope: 'global',
@@ -570,6 +572,26 @@ export const COMMANDS: readonly CommandDefinition[] = [
     when: approvalTarget
   }
 ]
+
+/** Rows that lead their group where commands are listed, in this order; the rest follow in table order. */
+const LEADING_ROWS: readonly CommandId[] = ['palette.open', 'thread.back', 'thread.forward', 'composer.focus', 'composer.steer', 'composer.switchSendMode']
+
+/**
+ * The commands as the Shortcuts page and the palette list them: by group (`COMMAND_CATEGORIES`), the
+ * leading rows first. `COMMANDS` keeps its own order, because it decides which of two commands on one
+ * chord runs; so a custom binding that shares a chord behaves as it did.
+ */
+export const COMMANDS_IN_DISPLAY_ORDER: readonly CommandDefinition[] = COMMANDS
+  .map((command, index) => ({
+    command,
+    rank: [
+      COMMAND_CATEGORIES.indexOf(command.category),
+      LEADING_ROWS.includes(command.id) ? LEADING_ROWS.indexOf(command.id) : LEADING_ROWS.length,
+      index
+    ]
+  }))
+  .sort((a, b) => a.rank[0]! - b.rank[0]! || a.rank[1]! - b.rank[1]! || a.rank[2]! - b.rank[2]!)
+  .map(({ command }) => command)
 
 const COMMAND_BY_ID: ReadonlyMap<CommandId, CommandDefinition> = new Map(COMMANDS.map((command) => [command.id, command]))
 
