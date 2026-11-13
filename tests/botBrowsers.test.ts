@@ -4,7 +4,8 @@
  * agent cursor is held for the owner's view (a frame) and never put into the page; the owner can
  * take the browser over and give it back; an idle browser closes and its sign-ins stay.
  */
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
+import { processRecordPath } from '../src/browser-worker/lifecycle/paths'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -385,6 +386,28 @@ describe.skipIf(!chrome.ok)('watching a bot\'s browser', () => {
     // Closed: the worker is asked for nothing more.
     await sleep(1_000)
     expect(methods.filter((method) => method === 'frame.next')).toEqual([])
+  }, 60_000)
+
+  it('when the browser\'s process ends, a watching view says so within seconds, and the next use starts it again on the same profile', async () => {
+    const { browser, bots, turn, call, origin } = await fixture()
+    const bot = turn(BOT_A, 'act-1')
+    expect((await call(bot, 'browser_open', { url: `${origin}/nav-a.html` })).error).toBeUndefined()
+    const view = viewer()
+    await bots.watch(BOT_A, 'w1', { width: 480, fps: 5, connectionId: 'c1', lifetime: view.lifetime, emit: view.emit })
+    await expect.poll(() => view.frames().length, { timeout: 5_000 }).toBeGreaterThan(0)
+    const { pid } = JSON.parse(await readFile(processRecordPath(browser.workspaceDataDir(botBrowserWorkspace(BOT_A))), 'utf8')) as { pid: number }
+    process.kill(pid, 'SIGKILL')
+    await expect.poll(() => view.events.find((event) => event.stalled)?.stalled, { timeout: 5_000 }).toBe('The browser stopped.')
+    await expect.poll(async () => (await bots.view(BOT_A)).stopped, { timeout: 5_000 }).toBe(true)
+    expect((await bots.view(BOT_A)).open).toBe(false)
+    // The bot's next use starts it again on the same profile, without restarting anything.
+    const again = await call(bot, 'browser_open', { url: `${origin}/nav-b.html` })
+    expect(again.error).toBeUndefined()
+    expect(again.observation?.url).toContain('/nav-b.html')
+    const reopened = await bots.view(BOT_A)
+    expect(reopened.open).toBe(true)
+    expect(reopened.stopped).toBeUndefined()
+    bots.unwatch(BOT_A, 'w1', 'c1')
   }, 60_000)
 
   it('Take over brings the tab the owner takes to the front: their typing lands and shows, and the view never says "on another tab"', async () => {

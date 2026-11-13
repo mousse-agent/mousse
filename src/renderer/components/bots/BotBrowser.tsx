@@ -44,7 +44,7 @@ interface BrowserStatus {
 /** What the view says of the bot's browser: "Live" only while pictures can arrive. */
 export function browserStatus(view: BotBrowserView, stream: BotBrowserStream | undefined, botName: string, now: number): BrowserStatus {
   if (view.setup) return { text: 'Setting up', live: false }
-  if (!view.open) return { text: 'Closed', live: false }
+  if (!view.open) return view.stopped ? { text: 'Stopped', detail: 'The browser stopped. It starts again when it is next used.', live: false } : { text: 'Closed', live: false }
   if (stream && !stream.live) {
     const since = sinceText(stream.since, now)
     return { text: `Not updating · ${since}`, detail: `No new picture for ${since}. Mousse keeps trying.`, live: false }
@@ -232,7 +232,7 @@ export function BotBrowserPane({ bot, view }: { bot: BotSummary; view: BotBrowse
           }
         }}>
         {!view.open && !view.setup && <div className="bot-browser-closed">
-          <p>{bot.name}'s browser is closed.</p>
+          <p>{view.stopped ? 'The browser stopped.' : `${bot.name}'s browser is closed.`}</p>
           <button type="button" disabled={busy} onClick={() => void store().open(bot.id, /^https?:\/\//i.test(address.trim()) ? address.trim() : undefined)}>Open it</button>
         </div>}
       </BrowserFrame>
