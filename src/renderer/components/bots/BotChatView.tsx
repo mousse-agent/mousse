@@ -7,6 +7,7 @@ import { openProvider, openSettingsSection } from '../../lib/settingsNavigation'
 import { Markdown } from '../../chat/components/agent-elements/markdown'
 import { CopyButton } from '../../chat/components/agent-elements/copy-button'
 import { ReadAloudButton } from '../../readAloud/ReadAloudButton'
+import { useMotionScale } from '../../lib/motion'
 import { BotFace } from './face/BotFace'
 import { BotSteps } from './BotSteps'
 import { BOT_IMAGES, BotFilePane, BotFilesProvider, BotMarkdown, BotPathChip } from './BotFiles'
@@ -275,9 +276,37 @@ function BotTyping({ bot, starts, offline }: { bot: BotSummary; starts: boolean;
     <div className="bot-message-line">
       {offline
         ? <p className="bot-bubble bot-status-line">{OFFLINE_TEXT}</p>
-        : <span className="bot-bubble bot-typing-bubble" aria-hidden><i /><i /><i /></span>}
+        : <TypingDots />}
     </div>
   </article>
+}
+
+/** One dot's rise and fade; each dot starts 150 ms after the one before it. */
+const TYPING_DOT: Keyframe[] = [
+  { offset: 0, opacity: 0.35, transform: 'none', easing: 'ease-in-out' },
+  { offset: 0.3, opacity: 0.9, transform: 'translateY(-2px)', easing: 'ease-in-out' },
+  { offset: 0.6, opacity: 0.35, transform: 'none', easing: 'ease-in-out' },
+  { offset: 1, opacity: 0.35, transform: 'none' },
+]
+
+/**
+ * The typing dots move smoothly, every frame, on the compositor (opacity and transform only). They are Web Animations
+ * rather than a CSS loop for the reason Turning gives (lib/turning.tsx): a repeating CSS animation wakes the main thread
+ * at every iteration because React listens for `animationiteration`. With Animation speed Off or reduced motion they
+ * stay still.
+ */
+function TypingDots() {
+  const bubble = useRef<HTMLSpanElement>(null)
+  const still = useMotionScale() === 0
+  useLayoutEffect(() => {
+    const dots = Array.from(bubble.current?.children ?? [])
+    if (still) return
+    const animations = dots.flatMap((dot, at) => typeof dot.animate === 'function'
+      ? [dot.animate(TYPING_DOT, { duration: 1200, delay: at * 150, iterations: Infinity })]
+      : [])
+    return () => animations.forEach((animation) => animation.cancel())
+  }, [still])
+  return <span ref={bubble} className={`bot-bubble bot-typing-bubble${still ? ' is-still' : ''}`} aria-hidden><i /><i /><i /></span>
 }
 
 /**
