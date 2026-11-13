@@ -466,8 +466,8 @@ describe('the same check on other occasions', () => {
 })
 
 describe('a thread with no turn that the window shows idle', () => {
-  // The service stamps a thread with no turn with the time of each read (services before 0.1.4): its idle always
-  // looked newer than the one the window holds.
+  // The service holds no turn for the thread and stamps its idle with the time of each read (services before #1086):
+  // that idle always looked newer than the one the window holds.
   const idleNow = (): TurnState => ({ threadId: 't1', turnId: null, phase: 'idle', updatedAt: new Date().toISOString() })
   beforeEach(async () => {
     service.turn = idleNow()
@@ -476,7 +476,7 @@ describe('a thread with no turn that the window shows idle', () => {
     await vi.advanceTimersByTimeAsync(10_000)
     guiMms.turnStatusForSender.mockImplementation(async (_senderId: number, _threadId: string, clearsGap?: boolean) => {
       if (clearsGap) gapFlag = false
-      return { turnState: idleNow(), activeTurn: { active: false, running: false }, activity: 'idle', revision: service.revision }
+      return { turnState: idleNow(), turnHeld: false, activeTurn: { active: false, running: false }, activity: 'idle', revision: service.revision }
     })
     sent.length = 0
     logLines.length = 0

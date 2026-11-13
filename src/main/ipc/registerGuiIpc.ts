@@ -1459,11 +1459,12 @@ export function registerGuiIpc(
   /**
    * The window was not told the service's turn: it holds none, an older one, or another at the same moment. One newer
    * than the service's answer is not behind: an update sent after the service read its state arrives before the answer.
-   * Idle is the same state on both sides whatever its time: an older service stamps a thread with no turn with the
-   * time of each read, so its idle always looks newer. A turn the window missed ends in another phase, never idle.
+   * An idle state the service does not hold (`turnHeld` false) means no turn ran there since it started: a window
+   * showing idle is current whatever the times, as an older service stamps that state with the time of each read. An
+   * idle state it holds is compared like any other: a paused turn that was cancelled or stopped ends idle (#1086).
    */
-  const turnBehind = (held: TurnState | undefined, service: TurnState): boolean => {
-    if (service.phase === 'idle' && (held?.phase ?? 'idle') === 'idle') return false
+  const turnBehind = (held: TurnState | undefined, service: TurnState, serviceHolds?: boolean): boolean => {
+    if (service.phase === 'idle' && serviceHolds === false && (held?.phase ?? 'idle') === 'idle') return false
     if (!held) return true
     const heldAt = Date.parse(held.updatedAt)
     const serviceAt = Date.parse(service.updatedAt)
@@ -1533,7 +1534,7 @@ export function registerGuiIpc(
       const turnCurrent = !answerApplies(binding.profileId, 'turn', status, activeId)
       const statusCurrent = !answerApplies(binding.profileId, 'activity', status, activeId)
       const behind: string[] = []
-      if (!turnCurrent && (status.turnState ? turnBehind(held, status.turnState) : isTurnStoppable(held) !== serviceActive)) behind.push('turn-differs')
+      if (!turnCurrent && (status.turnState ? turnBehind(held, status.turnState, status.turnHeld) : isTurnStoppable(held) !== serviceActive)) behind.push('turn-differs')
       if (!turnCurrent && !statusCurrent && shownActive && !serviceActive && status.activity !== undefined && !isThreadActivityActive(status.activity as ThreadActivityState)) behind.push('ended')
       if (!behind.length) {
         if (reasons.includes('quiet')) linkLog.write('check.running', { window: senderId, thread: activeId, reasons, phase: status.turnState?.phase ?? null, newer: turnCurrent || undefined })
