@@ -19,6 +19,7 @@ import { hasMoreBelow, revealDelta } from '../lib/sidebarScroll'
 import { SIDEBAR_REVEAL_TIMEOUT_MS, useSidebarRevealStore } from '../lib/sidebarReveal'
 import { setReferenceDragData } from '../../shared/chatReferences'
 import { useAppStore } from '../stores/appStore'
+import { workspaceModeFor } from '../stores/sidebarTabAgreement'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useChatsStore } from '../stores/chatsStore'
 import { createAndSelectProjectThread, createAndSelectThread, selectThread } from '../lib/threadActions'
@@ -405,10 +406,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const workspaceMode = useAppStore((s) => s.sidebarMode)
   const setSidebarView = async (view: SidebarView) => {
     const state = useAppStore.getState()
-    const nextMode = view === 'chats' ? 'chats' : 'projects'
-    if (state.sidebarMode !== nextMode && !await confirmNavigation()) return
-    state.setThreadsSidebarView(view)
-    if (state.sidebarMode !== nextMode) state.setSidebarMode(nextMode)
+    if (state.sidebarMode !== workspaceModeFor(view) && !await confirmNavigation()) return
+    // The workspace follows the tab (`agreeWithTab`).
+    useAppStore.getState().setThreadsSidebarView(view)
   }
 
   // Tab switch motion (sidebar-view-motion.css). The tabs follow `sidebarView` at once; the content shows
