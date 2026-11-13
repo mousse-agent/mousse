@@ -1,19 +1,18 @@
 import type React from "react";
 import {
-  IconSearch as Search,
-  IconFolderSearch as FolderSearch,
   IconGitBranch as GitBranch,
   IconTerminal2 as Terminal,
   IconCircleX as XCircle,
-  IconFileText as FileText,
-  Pencil,
+  Eye,
+  RowEdit,
+  RowSearch,
+  RowSubagent,
+  RowTodo,
+  RowWeb,
   ThinkingIcon,
   IconSparkles as Sparkles,
-  IconGlobe as Globe,
-  IconFilePlus as FilePlus,
-  IconChecklist as ListTodo,
   IconLogout as LogOut,
-  Plug,
+  Wrench,
 } from "../../../../lib/icons";
 import {
   isRefusedSubagentResult,
@@ -122,7 +121,7 @@ function isSubagentCallFailed(part: any): boolean {
 
 export const toolRegistry: Record<string, ToolMeta> = {
   "tool-Subagent": {
-    icon: Sparkles,
+    icon: RowSubagent,
     title: (part) => {
       const titles = SUBAGENT_TOOL_TITLES[part.subagentTool as SubagentToolName];
       if (!titles) return "Subagent";
@@ -141,7 +140,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
     variant: "simple",
   },
   "tool-Task": {
-    icon: Sparkles,
+    icon: RowSubagent,
     title: (part) => {
       const isPending =
         part.state !== "output-available" && part.state !== "output-error";
@@ -158,7 +157,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
   },
   // Agent tool — renamed from "Task" in claude-agent-sdk 0.2.63+
   "tool-Agent": {
-    icon: Sparkles,
+    icon: RowSubagent,
     title: (part) => {
       const isPending =
         part.state !== "output-available" && part.state !== "output-error";
@@ -180,7 +179,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
     variant: "simple",
   },
   "tool-Grep": {
-    icon: Search,
+    icon: RowSearch,
     title: (part) => {
       const isPending =
         part.state !== "output-available" && part.state !== "output-error";
@@ -200,7 +199,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
     variant: "simple",
   },
   "tool-Glob": {
-    icon: FolderSearch,
+    icon: RowSearch,
     title: (part) => {
       const isPending =
         part.state !== "output-available" && part.state !== "output-error";
@@ -215,7 +214,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
     variant: "simple",
   },
   "tool-Read": {
-    icon: FileText,
+    icon: Eye,
     title: (part) => {
       const isPending =
         part.state !== "output-available" && part.state !== "output-error";
@@ -229,7 +228,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
     variant: "simple",
   },
   "tool-Edit": {
-    icon: Pencil,
+    icon: RowEdit,
     title: (part) => {
       const filePath = getFilePathInput(part.input);
       if (!filePath) return "Edit";
@@ -264,7 +263,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
     variant: "simple",
   },
   "tool-Write": {
-    icon: FilePlus,
+    icon: RowEdit,
     title: () => "Create",
     subtitle: (part) => {
       const filePath = getFilePathInput(part.input);
@@ -296,7 +295,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
     variant: "simple",
   },
   "tool-WebFetch": {
-    icon: Globe,
+    icon: RowWeb,
     title: (part) => {
       const isPending =
         part.state !== "output-available" && part.state !== "output-error";
@@ -313,7 +312,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
     variant: "simple",
   },
   "tool-WebSearch": {
-    icon: Globe,
+    icon: RowWeb,
     title: (part) => {
       const isPending =
         part.state !== "output-available" && part.state !== "output-error";
@@ -326,7 +325,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
     variant: "collapsible",
   },
   "tool-TodoWrite": {
-    icon: ListTodo,
+    icon: RowTodo,
     title: (part) => {
       const isPending =
         part.state !== "output-available" && part.state !== "output-error";
@@ -370,7 +369,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
     variant: "simple",
   },
   "tool-NotebookEdit": {
-    icon: Pencil,
+    icon: RowEdit,
     title: (part) => {
       const isPending =
         part.state !== "output-available" && part.state !== "output-error";
@@ -407,7 +406,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
     variant: "simple",
   },
   "tool-ToolSearch": {
-    icon: Plug,
+    icon: Wrench,
     title: (part) => {
       const isPending =
         part.state !== "output-available" && part.state !== "output-error";

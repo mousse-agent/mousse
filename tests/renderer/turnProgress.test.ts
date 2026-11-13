@@ -150,11 +150,11 @@ describe('the line under Working', () => {
     expect(header()).toMatch(/^Working/)
     // No second line under it.
     expect(line()).toBeNull()
-    expect(liveRows()).toEqual(['Thinking The output says the'])
+    expect(liveRows()).toEqual(['The output says the'])
     expect(host.querySelector('.turn-answer svg.thinking-icon.is-thinking')).not.toBeNull()
     // It follows the thought as it streams.
     render([ask(), reply('t1', thought('input-available', '**Reading the test**\n\nThe output says the reminder starts twice.'))], 'streaming', { phase: 'thinking' })
-    expect(liveRows()).toEqual(['Thinking The output says the reminder starts twice.'])
+    expect(liveRows()).toEqual(['The output says the reminder starts twice.'])
   })
 
   it('3. a thought followed by text is done: its row is still and titled with its latest block', () => {
@@ -165,18 +165,18 @@ describe('the line under Working', () => {
     expectLive('Writing…')
   })
 
-  it('3. a long thought shows the end of what is being written, under its label, and folds to its opening once it ends', () => {
+  it('3. a long thought is the row while it is written, showing its end, and folds to its opening once it ends', () => {
     const long = `**Planning** ${'word '.repeat(200)}and the newest words`
     render([ask(), reply('t1', thought('input-available', long))], 'streaming', { phase: 'thinking' })
     const [row] = liveRows()
-    expect(row!.startsWith('Thinking ')).toBe(true)
+    // Its words take the label's place: no "Thinking" once there is text.
+    expect(row!.startsWith('Thinking')).toBe(false)
     expect(row!.endsWith('and the newest words')).toBe(true)
     expect(row!.length).toBeLessThan(700)
     expect(row).toContain('…')
-    // The words sit in a box under the label that keeps its last lines (agent-ui.css), so a long thought hides its
+    // The words sit in a box that keeps its last lines (agent-ui.css), so a long thought hides its
     // oldest words, never the newest; the whole paragraph is the tooltip and what a screen reader gets.
     const words = host.querySelector<HTMLElement>('.turn-answer .an-live-thought')!
-    expect(words.closest('.an-tool-row-line')).toBeNull()
     expect(words.textContent!.endsWith('and the newest words')).toBe(true)
     expect(words.title).toBe(`Planning ${'word '.repeat(200)}and the newest words`.replace(/\s+/g, ' '))
     expect(words.getAttribute('aria-label')).toBe(words.title)
@@ -254,7 +254,7 @@ describe('the line under Working', () => {
     const group = groupHeader('Ran 1 command')!
     expect(group.getAttribute('aria-expanded')).toBe('false')
     expect(group.textContent).not.toContain('Make A due earlier')
-    expect(liveRows()).toEqual(['Thinking Make A due earlier'])
+    expect(liveRows()).toEqual(['Make A due earlier'])
     // The turn moves on to writing. The provider still marks the thought as streaming (it closes it at the turn's
     // end), but with text after it it is done: it joins the group, which keeps its title and stays one row.
     const still = reply('t2', { ...thought('input-available', '**Planning the fix**\n\nMake A due earlier.'), toolCallId: 'th2' })

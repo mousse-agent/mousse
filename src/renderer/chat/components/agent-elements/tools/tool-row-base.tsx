@@ -47,7 +47,7 @@ export type ToolRowBaseProps = {
   failed?: boolean;
   detail?: string;
   /**
-   * The detail is a thought being written: it shows under the label, up to four lines, and its newest words matter,
+   * The detail is a thought being written: it takes the label's place, up to four lines, and its newest words matter,
    * so a longer one loses its oldest lines (`an-live-thought`). `detailTitle` is the full text, for the tooltip and
    * screen readers.
    */
@@ -100,16 +100,19 @@ export function ToolRowBase({
   const { at, recovered = false } = useToolRowInfo();
   const loudFailure = failed && !isAnimating && !recovered;
   const quietFailure = failed && !isAnimating && recovered;
+  // A thought being written is the row itself: its words in place of the label, up to four lines.
+  const liveText = liveDetail && detail ? detail : undefined;
 
   const row = (
     <div
       className={cn(
-        "an-tool-row-line flex items-center w-full max-w-full select-none gap-1 rounded-an-tool-border-radius",
+        "an-tool-row-line flex w-full max-w-full select-none gap-1 rounded-an-tool-border-radius",
+        liveText ? "items-start" : "items-center",
         canToggle ? "cursor-pointer" : "cursor-default",
       )}
     >
       <div
-        className="flex items-center gap-2 min-w-0 text-base leading-[22px] text-muted-foreground"
+        className={cn("flex gap-2 min-w-0 text-base leading-[22px] text-muted-foreground", liveText ? "items-start" : "items-center")}
         // One sweep period for the label's shimmer.
         style={{ "--an-shimmer-duration": `${SHIMMER_DURATION_S}s` } as CSSProperties}
       >
@@ -118,10 +121,15 @@ export function ToolRowBase({
             {icon}
           </ToolStateIcon>
         ) : (
-          <span className="flex items-center justify-center size-[18px] shrink-0">
+          <span className={cn("flex items-center justify-center size-[18px] shrink-0", liveText && "mt-[2px]")}>
             {icon}
           </span>
         ))}
+        {liveText ? (
+          <span className="an-live-thought min-w-0 flex-1" title={detailTitle ?? liveText} aria-label={detailTitle ?? liveText}>
+            <span>{liveText}</span>
+          </span>
+        ) : (
         <span
           className={cn(
             "font-[450] whitespace-nowrap",
@@ -142,6 +150,7 @@ export function ToolRowBase({
             isAnimating && shimmerLabel ? shimmerLabel : completeLabel
           )}
         </span>
+        )}
         {detail && !liveDetail && (
           <span className={cn("font-normal truncate min-w-0 flex-1 text-an-foreground-muted/60", detailClassName)} title={detailTitle}>
             {detail}
@@ -163,15 +172,6 @@ export function ToolRowBase({
     </div>
   );
 
-  const line = detail && liveDetail ? (
-    <div className="flex flex-col w-full min-w-0">
-      {row}
-      <div className="an-live-thought" title={detailTitle ?? detail} aria-label={detailTitle ?? detail}>
-        <span>{detail}</span>
-      </div>
-    </div>
-  ) : row;
-
   // A thought being written is read out now and then, not with every word.
   const announced = useThrottledText(liveDetail && isAnimating ? detailTitle ?? detail ?? "" : "", ANNOUNCE_MS);
   const announcement = liveDetail && isAnimating && announced ? (
@@ -179,7 +179,7 @@ export function ToolRowBase({
   ) : null;
 
   if (!expandable) {
-    return <div className="an-tool-chrome flex flex-col gap-1">{line}{announcement}</div>;
+    return <div className="an-tool-chrome flex flex-col gap-1">{row}{announcement}</div>;
   }
 
   const toggle = () => {
@@ -197,7 +197,7 @@ export function ToolRowBase({
         aria-disabled={!canToggle}
         onClick={toggle}
       >
-        {line}
+        {row}
       </button>
       {announcement}
       {/* The shared Collapse animates a grid row, so the panel content is laid out once at full size and

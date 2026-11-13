@@ -202,19 +202,17 @@
   background-repeat: no-repeat;
 }
 
-/* A thought being written (ToolRowBase `liveDetail`): under its label, in the label's colour, up to four lines.
-   The box keeps its last lines, so a longer thought loses its oldest words, never its newest. */
+/* A thought being written (ToolRowBase `liveDetail`): its words are the row, in the label's colour, up to four
+   lines. The box keeps its last lines, so a longer thought loses its oldest words, never its newest. */
 .an-live-thought {
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
-  max-height: calc(4 * 20px);
+  max-height: calc(4 * 22px);
   overflow: hidden;
-  padding-left: 26px;
-  font-size: 13px;
-  line-height: 20px;
   text-align: left;
   color: var(--an-foreground-muted);
+  font-weight: 400;
   overflow-wrap: anywhere;
   white-space: normal;
 }

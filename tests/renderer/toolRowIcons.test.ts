@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ToolRenderer } from '../../src/renderer/chat/components/agent-elements/tools/tool-renderer'
 import { BashTool } from '../../src/renderer/chat/components/agent-elements/tools/bash-tool'
 import { toolIconFor } from '../../src/renderer/chat/components/agent-elements/tools/tool-icon'
-import { ClipboardList, FilePlus, FileText, FolderSearch, Globe, Pencil, Plug, Search, Terminal, Wrench } from '../../src/renderer/lib/icons'
+import { Eye, RowEdit, RowSearch, RowSubagent, RowTodo, RowWeb, Terminal, Wrench } from '../../src/renderer/lib/icons'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -39,17 +39,19 @@ const rowIcon = () => host.querySelector('.an-tool-icon')
 describe('the icon of each tool', () => {
   it.each([
     ['tool-Bash', Terminal],
-    ['tool-Read', FileText],
-    ['tool-Write', FilePlus],
-    ['tool-Edit', Pencil],
-    ['tool-MultiEdit', Pencil],
-    ['tool-Grep', Search],
-    ['tool-Glob', FolderSearch],
-    ['tool-WebFetch', Globe],
-    ['tool-WebSearch', Globe],
-    ['tool-TodoWrite', ClipboardList],
-    ['tool-ToolSearch', Plug],
-    ['tool-mcp__tracker__search_issues', Plug],
+    ['tool-Read', Eye],
+    ['tool-Write', RowEdit],
+    ['tool-Edit', RowEdit],
+    ['tool-MultiEdit', RowEdit],
+    ['tool-Grep', RowSearch],
+    ['tool-Glob', RowSearch],
+    ['tool-WebFetch', RowWeb],
+    ['tool-WebSearch', RowWeb],
+    ['tool-TodoWrite', RowTodo],
+    ['tool-ToolSearch', Wrench],
+    ['tool-Task', RowSubagent],
+    ['tool-Agent', RowSubagent],
+    ['tool-mcp__tracker__search_issues', Wrench],
     ['tool-SomethingNew', Wrench],
   ] as const)('%s', (type, Icon) => {
     expect(toolIconFor(type)).toBe(Icon)
@@ -57,15 +59,15 @@ describe('the icon of each tool', () => {
 
   it.each([
     ['a command', { type: 'tool-Bash', input: { command: 'npm test' } }, Terminal],
-    ['a read', { type: 'tool-Read', input: { file_path: 'src/app.ts' } }, FileText],
-    ['an edit', { type: 'tool-Edit', input: { file_path: 'src/app.ts', old_string: 'a', new_string: 'b' } }, Pencil],
-    ['a new file', { type: 'tool-Write', input: { file_path: 'src/new.ts', content: 'x' } }, FilePlus],
-    ['a code search', { type: 'tool-Grep', input: { pattern: 'cache' } }, Search],
-    ['a file search', { type: 'tool-Glob', input: { pattern: '**/*.ts' } }, FolderSearch],
-    ['a web search', { type: 'tool-WebSearch', input: { query: 'stale cache' } }, Globe],
-    ['a page fetch', { type: 'tool-WebFetch', input: { url: 'https://example.com/a' } }, Globe],
-    ['a to-do list', { type: 'tool-TodoWrite', input: { todos: [{ content: 'Read', status: 'completed' }, { content: 'Fix', status: 'pending' }] } }, ClipboardList],
-    ['an MCP tool', { type: 'tool-mcp__tracker__search_issues', input: { query: 'crash' } }, Plug],
+    ['a read', { type: 'tool-Read', input: { file_path: 'src/app.ts' } }, Eye],
+    ['an edit', { type: 'tool-Edit', input: { file_path: 'src/app.ts', old_string: 'a', new_string: 'b' } }, RowEdit],
+    ['a new file', { type: 'tool-Write', input: { file_path: 'src/new.ts', content: 'x' } }, RowEdit],
+    ['a code search', { type: 'tool-Grep', input: { pattern: 'cache' } }, RowSearch],
+    ['a file search', { type: 'tool-Glob', input: { pattern: '**/*.ts' } }, RowSearch],
+    ['a web search', { type: 'tool-WebSearch', input: { query: 'stale cache' } }, RowWeb],
+    ['a page fetch', { type: 'tool-WebFetch', input: { url: 'https://example.com/a' } }, RowWeb],
+    ['a to-do list', { type: 'tool-TodoWrite', input: { todos: [{ content: 'Read', status: 'completed' }, { content: 'Fix', status: 'pending' }] } }, RowTodo],
+    ['an MCP tool', { type: 'tool-mcp__tracker__search_issues', input: { query: 'crash' } }, Wrench],
   ] as const)('%s row draws its icon, running then done', (_name, part, Icon) => {
     render({ ...part, toolCallId: 't1', state: 'input-available' }, 'streaming')
     expect(rowIcon()?.getAttribute('data-state')).toBe('running')
@@ -76,7 +78,7 @@ describe('the icon of each tool', () => {
   })
 
   it('a failed call keeps its own icon, in the danger colour', () => {
-    for (const [type, Icon] of [['tool-Read', FileText], ['tool-Grep', Search], ['tool-mcp__tracker__search_issues', Plug], ['tool-Bash', Terminal]] as const) {
+    for (const [type, Icon] of [['tool-Read', Eye], ['tool-Grep', RowSearch], ['tool-mcp__tracker__search_issues', Wrench], ['tool-Bash', Terminal]] as const) {
       render({ type, toolCallId: `f-${type}`, state: 'output-error', input: { file_path: 'a.ts', pattern: 'x', command: 'ls nope' } })
       expect(rowIcon()?.getAttribute('data-state')).toBe('failed')
       expect(shape(rowIcon()?.querySelector('svg'))).toBe(drawingOf(Icon))

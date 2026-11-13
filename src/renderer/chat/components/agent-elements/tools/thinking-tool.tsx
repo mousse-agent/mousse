@@ -41,8 +41,8 @@ export function ThinkingCollapsed({
       icon={<ThinkingIcon size={18} active={isAnimating} />}
       shimmerLabel="Thinking"
       completeLabel={heading || "Thinking"}
-      // While it streams, the thought as it is written shows under the label, up to four lines: its newest words.
-      // Once it ends (the next step starts), the row folds to one line of the thought's opening.
+      // While it streams, the thought as it is written is the row, up to four lines: its newest words ("Thinking"
+      // only until its first words). Once it ends (the next step starts), the row folds to one line of its opening.
       detail={isAnimating ? liveThoughtLine(step.thoughtContent) || undefined : undefined}
       liveDetail
       detailTitle={isAnimating ? liveThoughtText(step.thoughtContent) || undefined : undefined}
