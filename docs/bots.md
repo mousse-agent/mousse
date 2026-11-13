@@ -101,7 +101,7 @@ The same entry is always the same, and so is another entry on the same runtime (
 
 | Runtime, platform | Commands, without file access | Commands, with file access |
 |---|---|---|
-| Claude Code in its sandbox, Linux | system's and bot's folders; writes bot's; no network | everything but Mousse's data; writes the same; no network |
+| Claude Code in its sandbox, Linux | system's and bot's folders, plus `/tmp`; writes bot's; no network | everything but Mousse's data; writes the same; no network |
 | Claude Code in its sandbox, macOS | everything but the home folder; writes bot's; no network | everything but Mousse's data; writes the same; no network |
 | Claude Code without its sandbox (Windows; Linux without bubblewrap or socat) | everything; writes everything; network | the same |
 | Codex, Linux and macOS | system's and bot's folders; writes bot's; no network | everything, Mousse's data included; writes everything but Mousse's data; no network |
@@ -112,11 +112,11 @@ So a subagent runs without commands, though its work has them, in these pairings
 
 | Platform | Without file access | With file access |
 |---|---|---|
-| Linux | Claude Code (sandboxed) or Codex → Pi, or → Claude Code without its sandbox | Claude Code (sandboxed) → Codex, Pi, or Claude Code without its sandbox; Codex → Pi, or → Claude Code without its sandbox |
+| Linux | Claude Code (sandboxed) or Codex → Pi, or → Claude Code without its sandbox; Codex → sandboxed Claude Code (its `/tmp` is readable) | Claude Code (sandboxed) → Codex, Pi, or Claude Code without its sandbox; Codex → Pi, or → Claude Code without its sandbox |
 | macOS | Claude Code → Pi; Codex → Claude Code or Pi | Claude Code → Codex or Pi; Codex → Pi |
 | Windows | Codex → Claude Code or Pi | Codex → Claude Code or Pi |
 
-`tests/bots/botSubagentHold.test.ts` holds this table, and `tests/harness/botSubagentHoldReal.test.ts` checks the hold itself on the real binaries on Linux: a subagent on Codex under work on Claude Code, and on Claude Code under work on Codex, keeps commands that read nothing of the home folder outside the bot's folders; with file access, one on Codex under work on Claude Code is offered no command tool.
+`tests/bots/botSubagentHold.test.ts` holds this table, and `tests/harness/botSubagentHoldReal.test.ts` checks the hold itself on the real binaries on Linux: a subagent on Codex under work on Claude Code, keeps commands that read nothing of the home folder outside the bot's folders; one on Claude Code under work on Codex runs without commands because Claude Code opens `/tmp`; with file access, one on Codex under work on Claude Code is offered no command tool.
 
 ## What a compaction cannot remove
 

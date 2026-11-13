@@ -221,14 +221,15 @@ describe(`a subagent on the other runtime is held as its work is, on the real bi
     expect(said).toContain('read own')
   }, 120_000)
 
-  it.skipIf(!READY)('work on Codex, a subagent on Claude Code: it keeps commands, and in Claude Code\'s sandbox they read nothing of the home folder outside the bot\'s folders', async () => {
+  it.skipIf(!READY)('work on Codex, a subagent on Claude Code: commands are withheld because Claude Code opens the shared temporary folder', async () => {
     const { child, lacks, files, secret, own } = await subagentOf('codex')
-    expect(lacks).toEqual([])
+    expect(lacks).toEqual(['run commands'])
+    expect(child.prepared.authority.tools.has('shell')).toBe(false)
     const run = await claude(reads({ secret, own }))
     expect(await run.turn(child.prepared.authority, files)).toContain('done')
     const said = run.results.join('\n')
-    expect(said).toContain('denied secret')
-    expect(said).toContain('read own')
+    expect(said).not.toContain('read own')
+    expect(said).not.toContain('read secret')
   }, 120_000)
 
   it.skipIf(!READY)('with file access, work on Claude Code: a subagent on Codex is offered no command tool at all', async () => {

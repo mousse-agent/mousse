@@ -40,7 +40,7 @@ const COMMANDS: Record<string, Record<'without files' | 'with files', Partial<Re
     'without files': {
       claude: { claude: S, 'claude, no sandbox': W, codex: S, pi: W },
       'claude, no sandbox': { claude: S, 'claude, no sandbox': S, codex: S, pi: S },
-      codex: { claude: S, 'claude, no sandbox': W, codex: S, pi: W },
+      codex: { claude: W, 'claude, no sandbox': W, codex: S, pi: W },
       pi: { claude: S, 'claude, no sandbox': S, codex: S, pi: S }
     },
     'with files': {

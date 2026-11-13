@@ -35,6 +35,8 @@ export interface BotCommandHold {
   reads: 0 | 1 | 2 | 3
   writes: 0 | 1 | 2
   network: boolean
+  /** Restricted Claude Code on Linux also opens /tmp, which Codex closes. */
+  sharedTemp?: boolean
 }
 
 /** No sandbox at all: what an unknown runtime is taken to be (it fails closed). */
@@ -57,7 +59,7 @@ export function commandHold(hold: BotRuntimeHold | undefined, platform: string, 
   if (hold.runtime === 'claude') {
     if (hold.sandbox !== 'available') return UNSANDBOXED
     if (files) return { reads: 2, writes: 1, network: false }
-    return { reads: platform === 'linux' ? 0 : 1, writes: 0, network: false }
+    return { reads: platform === 'linux' ? 0 : 1, writes: 0, network: false, ...(platform === 'linux' ? { sharedTemp: true } : {}) }
   }
   if (hold.runtime === 'codex') {
     if (files) return { reads: 3, writes: 1, network: false }
@@ -68,7 +70,7 @@ export function commandHold(hold: BotRuntimeHold | undefined, platform: string, 
 
 /** Whether commands held by `sub` reach no further than commands held by `work`, on every measure. */
 export function commandsWithin(sub: BotCommandHold, work: BotCommandHold): boolean {
-  return sub.reads <= work.reads && sub.writes <= work.writes && (!sub.network || work.network)
+  return sub.reads <= work.reads && sub.writes <= work.writes && (!sub.network || work.network) && (!sub.sharedTemp || work.sharedTemp === true || work.reads > 0)
 }
 
 /**
