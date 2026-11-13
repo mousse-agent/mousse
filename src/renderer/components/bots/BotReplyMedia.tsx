@@ -149,6 +149,8 @@ function Carousel({ images, children }: { images: readonly ReplyImage[]; childre
     const all = slides()
     let nearest = 0
     all.forEach((slide, at) => { if (Math.abs(slide.offsetLeft - element.scrollLeft) < Math.abs(all[nearest]!.offsetLeft - element.scrollLeft)) nearest = at })
+    // The last pictures can't reach the start: scrolled to the end, the count is at the last.
+    if (all.length && element.scrollLeft + element.clientWidth >= element.scrollWidth - 2) nearest = all.length - 1
     setIndex(nearest)
     edges()
   }
@@ -161,8 +163,9 @@ function Carousel({ images, children }: { images: readonly ReplyImage[]; childre
   return <div className={`bot-carousel${overflows ? ' is-overflowing' : ''}`} role="group" aria-roledescription="carousel" aria-label={`${images.length} pictures`} tabIndex={0} onKeyDown={keys}>
     <div className={`bot-carousel-strip${fades}`}>
       <div className="bot-carousel-track" ref={track} onScroll={scrolled}>{children}</div>
-      {overflows && index > 0 && <button type="button" className="bot-carousel-arrow is-previous" aria-label="Previous picture" tabIndex={-1} onClick={() => go(index - 1)}><ChevronLeft size={16} aria-hidden /></button>}
-      {overflows && index < images.length - 1 && <button type="button" className="bot-carousel-arrow is-next" aria-label="Next picture" tabIndex={-1} onClick={() => go(index + 1)}><ChevronRight size={16} aria-hidden /></button>}
+      {/* An arrow only where there is more to see. */}
+      {overflows && (index > 0 || more.before) && <button type="button" className="bot-carousel-arrow is-previous" aria-label="Previous picture" tabIndex={-1} onClick={() => go(index - 1)}><ChevronLeft size={16} aria-hidden /></button>}
+      {overflows && more.after && index < images.length - 1 && <button type="button" className="bot-carousel-arrow is-next" aria-label="Next picture" tabIndex={-1} onClick={() => go(index + 1)}><ChevronRight size={16} aria-hidden /></button>}
     </div>
     {/* Under the strip, never on a picture. */}
     {overflows && <span className="bot-carousel-count" aria-live="polite">{index + 1}/{images.length}</span>}

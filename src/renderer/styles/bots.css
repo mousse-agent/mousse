@@ -161,6 +161,8 @@
 /* The bot's: beside its bubble, with Reply (and the reaction bar), as a messenger's hover actions. */
 .bot-message-actions { display: flex; align-items: center; gap: 2px; }
 .bot-message-actions > button, .bot-you-actions > button { color: var(--text-secondary); }
+/* Copy brings its own half opacity (as under a thread's reply); here the group fades as one, so each button is full. */
+.bot-message-actions > button { opacity: 1; color: color-mix(in srgb, var(--text-primary) 70%, transparent); }
 .bot-message-actions > button:hover, .bot-you-actions > button:hover { color: var(--text-primary); background: color-mix(in srgb, var(--text-secondary) 12%, transparent); }
 .bot-you-actions > button:not(.bot-reply-button), .bot-message-actions { opacity: 0; transition: opacity .12s; }
 .chat-participant-message:hover :is(.bot-you-actions > button, .bot-message-actions), .bot-message-actions:focus-within, .bot-you-actions > button:focus-visible { opacity: 1; }
@@ -351,7 +353,7 @@ button.bot-image:focus-visible > img { opacity: 0.82; }
 .bot-conversation button:focus-visible, .bot-about button:focus-visible { outline: none; background-image: var(--ui-focus-layer); }
 
 /* Work beside the chat (docs/plans/bot-always-free.md): a small list under the header's presence, one line each, with Stop. */
-.bot-work { position: absolute; z-index: 40; top: calc(100% + 6px); left: -6px; width: min(380px, 70vw); list-style: none; display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 5px; border-radius: 10px; border: 1px solid var(--ui-line-strong, rgba(255, 255, 255, .14)); background: var(--ui-raised, var(--surface-soft)); box-shadow: var(--ui-raised-shadow, 0 10px 32px rgba(0, 0, 0, .32)); }
+.bot-work { position: absolute; z-index: 40; top: calc(100% + 6px); left: 0; width: min(380px, 70vw); list-style: none; display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 5px; border-radius: 10px; border: 1px solid var(--ui-line-strong, rgba(255, 255, 255, .14)); background: var(--ui-raised, var(--surface-soft)); box-shadow: var(--ui-raised-shadow, 0 10px 32px rgba(0, 0, 0, .32)); }
 .bot-work-line { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 3px 4px 3px 8px; font-size: var(--bot-meta); color: var(--text-secondary); }
 .bot-work-line svg { flex: none; }
 .bot-work-title { flex: none; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); }

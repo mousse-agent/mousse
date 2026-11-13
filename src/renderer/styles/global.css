@@ -86,6 +86,10 @@ html[data-theme='light'] {
 .image-preview-overlay .image-preview-edge:focus-visible {
   background-image: none;
 }
+/* Keyboard focus on an edge: a ring round its arrow, so it reads apart from hover's lighter fill. */
+.image-preview-overlay .image-preview-edge:focus-visible > span {
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, .85);
+}
 /* Headerless highlighted code (quick-action bash preview): the surrounding
    "Action" label already names the block, so the Streamdown language header
    row is hidden — highlighting and the themed border stay. */
