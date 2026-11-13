@@ -119,7 +119,7 @@ export class BotMcp implements BotMcpHost {
   async warm(): Promise<void> {
     if (!this.deps.enabled()) return
     try {
-      await this.deps.catalog.ensure(undefined, BOT_MCP_WARM_MS, { signIn: false })
+      await this.deps.catalog.ensure(undefined, BOT_MCP_WARM_MS, { signIn: false, fresh: true })
     } catch {
       // The listing stays as it was; a turn starts without the tools it could not list.
     }

@@ -298,6 +298,42 @@ describe('Pi: the user MCP proxy on a bot\'s turn (real McpManager, catalogue an
   })
 })
 
+describe('the bots\' listing of the profile\'s servers', () => {
+  it('lists with every relay switch off, follows a removed server at once, and a bot turn waits for a changed listing', async () => {
+    const store = settingsStore((settings) => {
+      settings.integrations.mcp.enabled = true
+      settings.integrations.mcp.enableForMainAgent = true
+      settings.integrations.mcp.enabledServers = ['srv-github', 'srv-notes']
+      settings.integrations.mcp.relay = { runtimes: { claude: false, codex: false, cursor: false, acp: false, antigravity: false, grok: false } }
+    })
+    let servers = [testServerConfig({ id: 'mousse:srv-github', installationId: 'srv-github', name: 'GitHub' }), testServerConfig({ id: 'mousse:srv-notes', installationId: 'srv-notes', name: 'Notes' })]
+    const listeners = new Set<() => void>()
+    const signIns: unknown[] = []
+    const manager = {
+      listConfiguredServers: async () => servers,
+      getEnabledToolsByServer: async (_project?: string, _actor?: unknown, options?: { signIn?: false }) => {
+        signIns.push(options?.signIn)
+        return servers.map((server) => ({ installationId: server.installationId!, serverName: server.name, tools: [{ id: `${server.installationId}:t`, serverId: server.id, serverName: server.name, toolName: 't', providerName: `mcp__${server.name}__t`, installationId: server.installationId }] }))
+      },
+      onDiscoveryInvalidated: (listener: () => void) => { listeners.add(listener); return () => listeners.delete(listener) }
+    }
+    const catalog = new RealRelayCatalog({ manager, settings: () => store.get().integrations.mcp, listProfile: () => true })
+    const mcp = new BotMcp({ catalog, manager: connection().manager, enabled: () => true })
+    await mcp.warm()
+    expect(mcp.servers().map((server) => server.name)).toEqual(['GitHub', 'Notes'])
+    // The owner deletes Notes: the listing is read again at once, never with a sign-in.
+    servers = servers.slice(0, 1)
+    for (const listener of listeners) listener()
+    await vi.waitFor(() => expect(mcp.servers().map((server) => server.name)).toEqual(['GitHub']))
+    expect(signIns.every((value) => value === false)).toBe(true)
+    // A turn starting right after a change waits for the new listing.
+    servers = [...servers, testServerConfig({ id: 'mousse:srv-jira', installationId: 'srv-jira', name: 'Jira' })]
+    catalog.invalidate()
+    await mcp.warm()
+    expect(mcp.servers().map((server) => server.name)).toEqual(['GitHub', 'Jira'])
+  })
+})
+
 describe('what the owner sees of a call', () => {
   it('chips name the server, never the tool or its arguments', () => {
     const call = chipCallOf({ kind: 'mcp', server: 'srv-github', tool: 'create_issue', serverName: 'GitHub', args: { title: 'secret plans' } })

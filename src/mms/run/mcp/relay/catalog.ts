@@ -93,12 +93,14 @@ export class RelayCatalog {
 
   /**
    * A warm scope returns at once (a stale one refreshes in the background); a cold one waits up to the budget. Never
-   * throws. `signIn: false`: a refresh this starts never starts a sign-in (a bot's).
+   * throws. `signIn: false`: a refresh this starts never starts a sign-in (a bot's). `fresh`: a scope whose servers or
+   * settings changed since its last read waits up to the budget too (a bot's turn must not be offered a removed server).
    */
-  async ensure(projectPath?: string, budgetMs: number = RELAY_WARMUP_BUDGET_MS, options: { signIn?: false } = {}): Promise<void> {
+  async ensure(projectPath?: string, budgetMs: number = RELAY_WARMUP_BUDGET_MS, options: { signIn?: false; fresh?: true } = {}): Promise<void> {
     if (this.disposed) return
     const scope = this.scope(projectPath)
-    if (scope.refreshedAt === undefined) {
+    const changed = options.fresh === true && (scope.seen !== this.invalidations || scope.settingsKey !== settingsKey(this.deps.settings()))
+    if (scope.refreshedAt === undefined || changed) {
       const refresh = this.refresh(projectPath, options)
       let timer: ReturnType<typeof setTimeout> | undefined
       const budget = new Promise<void>((resolve) => {
@@ -122,9 +124,14 @@ export class RelayCatalog {
     return scope.refreshing
   }
 
-  /** Marks every scope stale (the manager's discovery cache was invalidated). */
+  /**
+   * Marks every scope stale (the manager's discovery cache was invalidated). The profile's own scope, which personal
+   * bots read (`listProfile`), is read again at once, without a sign-in, so a server removed or added shows in About.
+   */
   invalidate(): void {
     this.invalidations += 1
+    if (!this.disposed && this.deps.listProfile?.() === true && this.scopes.get(scopeKey(undefined))?.refreshedAt !== undefined)
+      void this.refresh(undefined, { signIn: false })
   }
 
   dispose(): void {
