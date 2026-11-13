@@ -321,6 +321,9 @@ export class BotChatService {
           ...(replyTo ? { replyTo: replyTo.id } : {})
         })
         if (!target.continues) refused = this.engine.queueChatInTx(input.botId, key, prompt, target.activationId, owner)
+        // A message from another device that continues a turn waiting at a wall holds the rest of that turn to the
+        // device's limit, written with the message: a restart before the turn continues (`admitWallMessage`) keeps it.
+        else if (owner.limit) this.store.narrowOwnerLimit(target.activationId, owner.limit)
         return posted
       })
     } catch (error) {

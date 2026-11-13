@@ -164,6 +164,36 @@ describe('"use your threads" in the bot engine', () => {
     await finish(f, work.payload, 'completed', { text: 'Done.' })
   })
 
+  it('a phone\'s message that continues a turn at its wall keeps the phone\'s limit when Mousse stops before the turn goes on', async () => {
+    const desk = await chat('From the computer.', 'd1')
+    desk.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'You asked.' })
+    await finish(f, desk.payload, 'completed', { text: 'Asked.' })
+    // The phone's message is saved, then Mousse stops before the turn continues with it.
+    const stopped = vi.spyOn(f.bots, 'continueChatWith').mockRejectedValueOnce(new Error('Mousse stopped'))
+    await expect(f.bots.service.chatSend({ botId, text: 'Go on without it.', clientRequestId: 'phone-1', from: { limit: 'accept_edits' } })).rejects.toThrow('Mousse stopped')
+    stopped.mockRestore()
+    expect(f.store.activation(desk.activation.id)!.status).toBe('waiting_grant')
+    // At the next start the saved message continues the turn, still held to the phone.
+    await f.bots.reconcileOnStartup()
+    expect(f.bots.ownerTurn(desk.activation.id)).toEqual({ limit: 'accept_edits' })
+    const continued = await start(f, desk.activation.id, 2)
+    expect(f.bots.ownerTurn(desk.activation.id)).toEqual({ limit: 'accept_edits' })
+    await finish(f, continued.payload, 'completed', { text: 'OK.' })
+  })
+
+  it('deleting a bot withdraws its messages still waiting in its owner\'s threads, under its name', async () => {
+    const withdrawn = vi.fn()
+    f.host.threadsWithdrawn = withdrawn
+    // A chat turn gives the bot its chat thread, the sender of its messages.
+    const turn = await chat('Hello.', 'm1')
+    await finish(f, turn.payload, 'completed', { text: 'Hi.' })
+    const homeThreadId = f.store.registry(botId)!.homeThreadId
+    expect(homeThreadId).toEqual(expect.any(String))
+    await f.bots.remove(botId)
+    expect(withdrawn).toHaveBeenCalledTimes(1)
+    expect(withdrawn).toHaveBeenCalledWith({ botId, homeThreadId, name: 'Alpha' })
+  })
+
   it('Remove withdraws what the bot sent that has not started; removing another permission does not, and a wait that ends after either is refused', async () => {
     const withdrawn = vi.fn()
     f.host.threadsWithdrawn = withdrawn

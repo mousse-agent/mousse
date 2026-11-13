@@ -1,5 +1,5 @@
 import { closeSync, fstatSync, openSync, readSync } from 'node:fs'
-import { NetError, type NodeCapability } from '../../../shared/net'
+import { NetError, type NodeCapability, type NodeId } from '../../../shared/net'
 import type { BotChatMessage, BotDetail, BotError, BotSummary } from '../../../shared/bots/personal/chat'
 import { MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS } from '../../../shared/bots/personal/definition'
 import type { BotLook } from '../../../shared/bots/personal/look'
@@ -347,6 +347,14 @@ function refusing<T>(check: () => T): T {
   }
 }
 
+/**
+ * `deviceLimit` read from this computer's device settings (Settings, Devices): the device's own limit, and for a device
+ * with no limit on record the device policy's default, Accept edits, the most it may run directly.
+ */
+export function botDeviceLimitFrom(policy: { get(node: NodeId): { maxPermissionMode: PermissionMode } }): (node: string) => PermissionMode {
+  return (node) => policy.get(node as NodeId).maxPermissionMode
+}
+
 export function remoteBotMethods(options: {
   /** The profile's bots; undefined when its `bots.db` could not be opened. */
   bots(): RemoteBotsPort | undefined
@@ -358,8 +366,8 @@ export function remoteBotMethods(options: {
   refusal?(): string | undefined
   /**
    * The most this computer lets the calling device run a turn in (Settings, Devices). A message from it holds what the
-   * bot starts or messages in that chat turn to it, and its Allow of "use your threads" needs Full access. Absent: the
-   * strictest, Ask.
+   * bot starts or messages in that chat turn to it, and its Allow of "use your threads" needs Full access. The service
+   * passes `botDeviceLimitFrom` (a device with none on record: Accept edits). Absent (tests only): the strictest, Ask.
    */
   deviceLimit?(node: string): PermissionMode
 }): RpcMethod[] {

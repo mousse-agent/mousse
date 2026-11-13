@@ -1,9 +1,14 @@
 /**
  * `automations.manager.turn`: how one of the Automation manager's turns stands, read by its run id. The composer's send
  * answers once its run is committed (`await: 'ack'`), and the page reads the outcome here when no turn event told it.
+ * And the manager's request in a turn, read from its real transcript (`automationManagerRequest`).
  */
-import { describe, expect, it, vi } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { registerAutomationMethods } from '../src/mms/automations/registerMethods'
+import { phase6Daemon, piAdapter, waitFor, type Phase6Daemon } from './run/phase6Fixture'
 import { DomainHandlerRegistry, type HandlerContext } from '../src/mms/protocol/domainRegistry'
 import { MmsProfileServices } from '../src/mms/MmsProfileServices'
 import type { RunRecord, RunStatus } from '../src/mms/run/types'
@@ -46,5 +51,39 @@ describe('automations.manager.turn', () => {
     // A chat's run reads as unknown: the page never learns about another thread from here.
     put('failed', 'secret', 'someone-else')
     expect(turn(RUN)).toEqual({ status: 'unknown' })
+  })
+})
+
+describe("the Automation manager's request", () => {
+  const homes: string[] = []
+  const daemons: Phase6Daemon[] = []
+  let previousHome: string | undefined
+  afterEach(async () => {
+    for (const daemon of daemons.splice(0).reverse()) await daemon.stop().catch(() => undefined)
+    if (previousHome === undefined) delete process.env.MOUSSE_HOME
+    else process.env.MOUSSE_HOME = previousHome
+    for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
+  })
+
+  it("is the person's own message that started the turn, and none when an agent's or a bot's message started it", async () => {
+    const home = mkdtempSync(join(tmpdir(), 'mousse-manager-request-'))
+    homes.push(home)
+    previousHome ??= process.env.MOUSSE_HOME
+    process.env.MOUSSE_HOME = home
+    const d = phase6Daemon(home, [piAdapter(() => 'done')])
+    daemons.push(d)
+    const manager = d.store.createThread('Automation manager')
+    const settled = (runId: string) => waitFor(() => ['completed', 'failed', 'cancelled', 'interrupted'].includes(d.engine.getRun(runId)?.status ?? ''), `run ${runId}`)
+    // What the profile wires into the manager's tools, over the real transcript.
+    const request = (runId: string) => MmsProfileServices.prototype.automationManagerRequest.call({ orchestrator: d.orch } as never, manager.id, runId)
+    const person = await d.orch.send('Change Morning report to run at 8.', false, { threadId: manager.id, clientRequestId: 'person-1', awaitMode: 'ack' })
+    await settled(person.runId!)
+    expect(request(person.runId!)).toBe('Change Morning report to run at 8.')
+    // A later turn an agent's message started has no request, though the person once named Morning report.
+    const agent = await d.orch.send('Morning report: switch it off.', false, { threadId: manager.id, clientRequestId: 'agent-1', awaitMode: 'ack', agent: { kind: 'agent', threadId: 'other-thread', runId: 'other-run', toolCallId: 'x', hops: 1 } } as never)
+    await settled(agent.runId!)
+    expect(request(agent.runId!)).toBeUndefined()
+    // So has a turn that is not the manager's, or one it can't find.
+    expect(request('run:missing')).toBeUndefined()
   })
 })

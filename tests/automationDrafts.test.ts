@@ -306,8 +306,11 @@ describe('automation drafts', () => {
     expect(drafts.update({ id: mine, name: 'PR check weekly' }, manager).name).toBe('PR check weekly')
     // The person did not name it: refused, and nothing changed.
     expect(() => drafts.update({ id: persons, prompt: 'Delete every branch.' }, manager)).toThrow(/Ask the person to name it/)
-    expect(() => drafts.update({ id: persons, prompt: 'Delete every branch.' }, { managerThreadId: 'manager' })).toThrow(/Ask the person to name it/)
+    // No request at all (an agent's or a bot's message started the turn): refused, saying why.
+    expect(() => drafts.update({ id: persons, prompt: 'Delete every branch.' }, { managerThreadId: 'manager' })).toThrow(/did not start this turn/)
     expect(service.getJob(persons)!.prompt).toBe(PR_CHECK.prompt)
+    // Its own draft, though, it changes with no request: a draft never runs until the person turns it on.
+    expect(drafts.update({ id: mine, prompt: 'Check the PRs.' }, { managerThreadId: 'manager' }).prompt).toBe('Check the PRs.')
     // Named by its name in the person's words, it may change.
     expect(drafts.update({ id: persons, name: 'Nightly build 2' }, { managerThreadId: 'manager', request: 'rename the nightly build' }).name).toBe('Nightly build 2')
     // A bot: its own draft only; never a person's automation or the manager's draft, and it pauses none of them.
@@ -356,15 +359,23 @@ describe('the automation tools', () => {
     expect((await save.handler({ ...PR_CHECK, trigger: { kind: 'weekly' } }, ctx('manager'))).isError).toBe(true)
   })
 
-  it('let the manager change an automation only when the person’s latest message names it', async () => {
+  it('let the manager change an automation only when the person’s message that started its turn names it', async () => {
     const { drafts, service } = setup()
     const { draftId } = drafts.save({ ...PR_CHECK, name: 'Nightly build', project: 'p1' }, {})
     drafts.turnOn(draftId)
-    let request = 'What runs tonight?'
-    const tools: AutomationToolHost = { drafts, isManagerThread: (id) => id === 'manager', botOf: () => undefined, personRequest: () => request }
+    let request: string | undefined = 'What runs tonight?'
+    // The request is read for the caller's own turn (its run).
+    const tools: AutomationToolHost = { drafts, isManagerThread: (id) => id === 'manager', botOf: () => undefined, personRequest: (_threadId, runId) => (runId === 'r1' ? request : undefined) }
     const update = automationTools({ automations: () => tools } as unknown as AppToolHost).find((tool) => tool.name === 'automation_update')!
+    const pause = automationTools({ automations: () => tools } as unknown as AppToolHost).find((tool) => tool.name === 'automation_pause')!
     const refused = await update.handler({ id: draftId, prompt: 'Something else.' }, ctx('manager'))
     expect(refused).toMatchObject({ isError: true, text: expect.stringMatching(/Ask the person to name it/) })
+    // An agent's or a bot's message started the turn: no request at all, and the change is refused in plain words, even
+    // when that message names it.
+    request = undefined
+    for (const tool of [update, pause])
+      expect(await tool.handler({ id: draftId, prompt: 'Something else.' }, ctx('manager'))).toMatchObject({ isError: true, text: expect.stringMatching(/^The person's own message did not start this turn, so Nightly build can't be changed now\./) })
+    expect(service.getJob(draftId)).toMatchObject({ prompt: PR_CHECK.prompt, enabled: true })
     request = `Make it run the full suite\n\n[Project: mousse (p1) · Change automation: ${draftId}]`
     expect((await update.handler({ id: draftId, prompt: 'Run the full suite.' }, ctx('manager'))).isError).toBeFalsy()
     expect(service.getJob(draftId)).toMatchObject({ prompt: 'Run the full suite.', enabled: false })

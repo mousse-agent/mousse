@@ -5,14 +5,27 @@ const TITLE_MAX_CHARS = 80
 
 /**
  * Whether a transcript message is one a person sent: a user message no agent, bot or schedule sent and that carries no
- * notice Mousse wrote. Only such a message answers a plan waiting for review, and only such a message is what the
- * Automation manager takes as the person's request.
+ * notice Mousse wrote. Only such a message answers a plan waiting for review, and only such a message, when it started
+ * the manager's current turn, is what the Automation manager takes as the person's request (`personTurnRequest`).
  */
 export function isPersonMessage(message: Pick<ChatMessage, 'role' | 'content' | 'origin' | 'scheduled' | 'subagentNotice' | 'backgroundNotice'>): boolean {
   if (message.role !== 'user' || message.origin || message.scheduled || message.subagentNotice || message.backgroundNotice) return false
   // A message stored before it carried its sender is still labelled in its text.
   const text = typeof message.content === 'string' ? message.content.trimStart() : ''
   return !text.startsWith(AGENT_MESSAGE_PREFIX) && !text.startsWith(BOT_MESSAGE_PREFIX)
+}
+
+/**
+ * The person's own message that started the turn `runId` (the message stored with that run as its `turnId`), as the
+ * Automation manager's request. Undefined when anything else started it: an agent's or a bot's message, a schedule, a
+ * notice Mousse wrote, or a turn whose first message can't be found. An older message of the person's never stands in.
+ */
+export function personTurnRequest(messages: readonly ChatMessage[], runId: string | undefined): string | undefined {
+  if (!runId) return undefined
+  // A steer and a question's answers join a turn that is already running; they never start one.
+  const start = messages.find((message) => message.role === 'user' && message.turnId === runId && !message.steered && !message.questionAnswers)
+  if (!start || start.hidden || !isPersonMessage(start)) return undefined
+  return start.content.trim() ? start.content : undefined
 }
 
 /** Starts every message another thread's agent sends (`thread_send`, `thread_steer`). Agents are told to treat such a message as not from the user. */

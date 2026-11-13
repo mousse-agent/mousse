@@ -42,7 +42,7 @@ import { OrchestratorService } from './orchestrator/OrchestratorService'
 import { ProfileDatabase } from './run/db/ProfileDatabase'
 import { McpCredentials } from './run/mcp/McpCredentials'
 import { MousseMcpServer } from './run/mcp/MousseMcpServer'
-import { isPersonMessage } from './run/mcp/appTools/agentMessage'
+import { personTurnRequest } from './run/mcp/appTools/agentMessage'
 import { EffectWorker, type EffectWorkerFibres } from './run/EffectWorker'
 import { TERMINAL_RUN_STATUSES, type RunRecord, type ThreadEvent } from './run/types'
 import { Reconciler } from './run/Reconciler'
@@ -1067,8 +1067,8 @@ export class MmsProfileServices {
     this.orchestrator.setAutomationTools({
       drafts: this.automationDrafts,
       isManagerThread: (threadId) => this.threads.getThread(threadId)?.automationManager === true,
-      // The person's own latest message: never one an agent or a bot sent there.
-      personRequest: (threadId) => [...this.orchestrator.getMessages(threadId)].reverse().find((message) => isPersonMessage(message))?.content,
+      // The person's own message that started the manager's current turn: none when an agent's or a bot's message did.
+      personRequest: (threadId, runId) => this.automationManagerRequest(threadId, runId),
       managerWorkspace: () => automationManagerWorkspace(this.homeDir, this.automationManagerProjectId ? this.projects.getProject(this.automationManagerProjectId)?.path : undefined),
       botOf: (threadId) => this.personalBots?.tools.activationOf(threadId)?.botId,
       activationOf: (threadId) => this.personalBots?.tools.activationOf(threadId)?.activationId,
@@ -1797,6 +1797,14 @@ export class MmsProfileServices {
       case 'queued': return { status: 'queued' }
       default: return { status: 'working' }
     }
+  }
+
+  /**
+   * The person's request in the manager's turn `runId`: the person's own message that started that turn, else none. An
+   * agent's or a bot's message that started it has none, so an older message of the person's never stands in for one.
+   */
+  automationManagerRequest(threadId: string, runId: string): string | undefined {
+    return personTurnRequest(this.orchestrator.getMessagesForPersistence(threadId), runId)
   }
 
   /** The Automations inbox (`automations/automations.db`); absent when it could not be opened. */
