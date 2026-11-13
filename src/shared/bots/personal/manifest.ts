@@ -37,6 +37,13 @@ export const BOT_WORK_TOOLS: readonly string[] = ['work_start', 'work_list', 'wo
  */
 export const BOT_WORK_ONLY_TOOLS: readonly string[] = ['shell', 'web_search', 'web_fetch']
 
+/**
+ * The bot's listing of its owner's MCP servers (`mcp_servers`): each server set up for the whole profile, by name and a
+ * line of Mousse's own, and whether the bot holds its tools. It shows no tool schema and calls nothing, so like memory
+ * it is always on and never grantable, in both lanes: the chat needs it to ask for the right server.
+ */
+export const BOT_MCP_LIST_TOOL = 'mcp_servers'
+
 /** Every new bot's app tools: the web, and its own tools. */
 export const BOT_DEFAULT_APP_TOOLS: readonly string[] = ['web_search', 'web_fetch', ...BOT_OWN_APP_TOOLS]
 
@@ -78,6 +85,7 @@ const BOT_OFFERABLE_APP_TOOLS: ReadonlySet<string> = new Set([
   ...BOT_BROWSER_TOOLS,
   ...BOT_WORK_TOOLS,
   ...BOT_MEMORY_TOOLS,
+  BOT_MCP_LIST_TOOL,
   'list_skills', 'load_skill', 'escalate', 'consult'
 ])
 
@@ -121,6 +129,11 @@ export function botStarterManifest(): BotManifest {
 
 /** One MCP server id or tool name: no separator a qualified name or an identity key could hide. */
 const MCP_PART = /^[A-Za-z0-9](?:[A-Za-z0-9.-]|_(?!_)){0,127}$/
+
+/** Whether `part` can be a granted MCP server id or tool name (`BotManifest.mcp`). */
+export function mcpGrantable(part: string): boolean {
+  return MCP_PART.test(part)
+}
 
 /** The identity of a granted MCP tool: injective in its server and tool. */
 export function mcpIdentity(pair: { serverId: string; tool: string }): string {
@@ -289,7 +302,7 @@ function appToolLine(tool: string): BotPermissionLine {
 }
 
 function mcpLine(pair: { serverId: string; tool: string }): BotPermissionLine {
-  return { kind: 'mcp', text: `Use the ${pair.serverId} tool \`${pair.tool}\`` }
+  return { kind: 'mcp', text: `Use the MCP tool \`${pair.tool}\`` }
 }
 
 function budgetLine(key: (typeof BUDGET_KEYS)[number], limit: number | undefined): BotPermissionLine {

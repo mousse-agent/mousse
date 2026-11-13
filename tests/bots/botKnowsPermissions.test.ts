@@ -167,8 +167,13 @@ describe('the stated permissions match the tools a run is given', () => {
       "- Use the browser (your own): yes, but it can't open on this run",
       '- Skills: none',
       '- Automation tools: none',
+      "- Your owner's MCP servers: none yet (mcp_servers lists the ones you can ask for)",
       'Use what is allowed without asking. Ask with escalate only for something marked no.'
     ])
+    // The servers it holds tools of, by name; the chat is told they are its work's.
+    const chat = botAllowedText({ files: false, shell: false, browser: false, web: true, skills: [], automation: [], mcp: ['GitHub', 'Notes'] }, 'chat')
+    expect(chat).toContain("- Your owner's MCP servers: GitHub, Notes")
+    expect(chat).toContain('In the chat, the web, the browser, commands and MCP tools are for your work: hand jobs that need them to work_start.')
   })
 
   it('a locked Claude Code turn with no sandbox is told commands are allowed but not available, and is offered no Bash', async () => {

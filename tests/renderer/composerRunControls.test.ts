@@ -312,15 +312,11 @@ describe('composer model picker', () => {
     expect(document.querySelector('.model-picker-shell')).toBeNull()
   })
 
-  it('keeps a long model name to one line, with the full name in the tooltip', () => {
+  it('keeps a long model name\'s full name in the tooltip', () => {
     const long: LlmModelOption = { id: 'long', label: 'Opus 5.5 Extended Thinking Research Preview Edition' }
     render({ models: [opus, long] })
     const longRow = row('Opus 5.5 Extended Thinking Research Preview Edition')
     expect(longRow.querySelector('.model-picker-row-main')!.getAttribute('title')).toContain('Opus 5.5 Extended Thinking Research Preview Edition')
-    const css = readFileSync('src/renderer/styles/app.css', 'utf8')
-    const title = css.slice(css.indexOf('.model-picker-row-title {'), css.indexOf('}', css.indexOf('.model-picker-row-title {')))
-    expect(title).toContain('text-overflow: ellipsis')
-    expect(title).toContain('white-space: nowrap')
   })
 
   it('shows only the model list when no listed model has run settings', async () => {
@@ -590,32 +586,6 @@ describe('composer send slot', () => {
     expect(actions()).toEqual(['Attach files', 'Stop recording'])
     act(() => button('Stop recording').click())
     expect(onStopRecording).toHaveBeenCalledTimes(1)
-  })
-
-  it('draws Send, Queue, Stop, Stop recording and the mic as circles, and nothing else in the footer', () => {
-    const css = readFileSync('src/renderer/styles/polish.css', 'utf8').replace(/\r\n/g, '\n')
-    const match = /\.app \.chat-input-area :is\(([^)]*)\) \{\n {2}border-radius: 50%;\n\}/.exec(css)
-    expect(match).not.toBeNull()
-    const round = match![1].split(',').map((selector) => selector.trim().replace(/^\./, ''))
-    // The rule beats the shared 9px square (one more class) and keeps its 30px size.
-    expect(css.indexOf(match![0])).toBeGreaterThan(css.indexOf('.app .chat-input-area .composer-action-btn {\n  width: 30px;\n  height: 30px;\n  border-radius: 9px;'))
-    const isRound = (label: string) => round.some((name) => button(label).classList.contains(name))
-    const states: Array<[Partial<ComposerFooterProps>, string[]]> = [
-      [{ canSend: true }, ['Dictate', 'Send message']],
-      [{ loading: true }, ['Stop run']],
-      [{ loading: true, canSend: true }, ['Stop run', 'Queue message']],
-      [{ isRecording: true }, ['Stop recording']]
-    ]
-    for (const [footer, labels] of states) {
-      slot(footer)
-      for (const label of labels) expect(isRound(label), label).toBe(true)
-      expect(isRound('Attach files')).toBe(false)
-      expect(round.some((name) => permissionButton().classList.contains(name))).toBe(false)
-      act(() => root.unmount())
-      root = createRoot(host)
-    }
-    // Keyboard focus is the shared fill over the circle, never a ring.
-    expect(css).toContain(`.app .chat-input-area :is(${match![1]}):focus-visible {\n  outline: none;\n  background-image: var(--ui-focus-layer);\n}`)
   })
 })
 

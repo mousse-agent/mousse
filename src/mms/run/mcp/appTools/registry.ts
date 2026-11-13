@@ -14,6 +14,7 @@ import type { McpToolCallResult } from '../../../../shared/integrations/results'
 import type { McpManager } from '../../../integrations/mcp/McpManager'
 import type { ModeCeiling } from '../../types'
 import type { RelayAdmission, RelayGrant } from '../relay/types'
+import { callForBot, type BotMcp } from '../../../bots/mcp/BotMcp'
 import type { AppToolTurns } from './turns'
 import { callerThreadOnly } from './thread'
 import {
@@ -124,6 +125,11 @@ export interface ToolRegistryOptions {
    * with `userMcp: 'proxy'`: Pi's agent). Without it no user MCP tool is listed or called.
    */
   userMcp?: UserMcpProxy
+  /**
+   * A personal bot's MCP calls (`BotMcp.call`): on Pi, a bot turn is offered its granted MCP tools through the proxy
+   * above, and each call runs here once its grant allows it. Absent: no bot turn is offered one.
+   */
+  botMcp?: Pick<BotMcp, 'call'>
 }
 
 /** `ToolRegistryOptions.userMcp`: the profile's `McpManager`, as the registry uses it. */
@@ -312,7 +318,15 @@ export class ToolRegistry {
   async userMcpForTurn(threadId: string, runId: string | undefined): Promise<McpToolDescriptor[]> {
     const proxy = this.options.userMcp
     const turn = runId ? this.options.turns?.get(runId) : undefined
-    if (!proxy || !turn || turn.threadId !== threadId || turn.bot) return []
+    if (!proxy || !turn || turn.threadId !== threadId) return []
+    // A bot's turn: only the granted tools it was offered (none in a chat turn), each held to its grant when called.
+    if (turn.bot) {
+      if (!this.options.botMcp) return []
+      return (turn.bot.mcpTools ?? []).filter((tool) => !this.tools.has(tool.providerName)).map((tool) => ({
+        id: `${tool.server}:${tool.tool}`, serverId: tool.server, installationId: tool.server, serverName: tool.serverName, toolName: tool.tool,
+        providerName: tool.providerName, description: tool.description, inputSchema: tool.inputSchema
+      }))
+    }
     let tools: readonly McpToolDescriptor[]
     if (turn.definition) tools = turn.definition.mcpTools ?? []
     else if (turn.modeFacts.build && !turn.subagent) return []
@@ -524,7 +538,7 @@ export class ToolRegistry {
   private async callUserMcp(name: string, args: Record<string, unknown>, at: CallSite): Promise<ToolOutcome> {
     const { active, turn, request } = at
     const proxy = this.options.userMcp!
-    if (turn.bot) throw new McpToolError('mousse_unknown_tool', `No Mousse tool named ${name}.`)
+    if (turn.bot) return this.callBotMcp(turn.bot, name, args, at)
     const tool = this.offeredTool(active, turn, name)
     if (!tool) throw new McpToolError('mousse_unknown_tool', `No Mousse tool named ${name}.`)
     if (turn.definition) {
@@ -543,6 +557,25 @@ export class ToolRegistry {
       if (ledgerId) ledger?.failed(ledgerId)
       return { text: error instanceof Error ? error.message : String(error), isError: true }
     }
+    if (ledgerId) {
+      if (outcome.isError) ledger?.failed(ledgerId)
+      else ledger?.commit(ledgerId)
+    }
+    return outcome
+  }
+
+  /**
+   * A bot turn's call of one of its owner's MCP tools on Pi (`callForBot`): only a tool the turn was offered runs, after
+   * the bot's authority allows it, on the owner's connection, within the turn's stop signal and deadline. Its ledger
+   * row is written like any proxied call's.
+   */
+  private async callBotMcp(bot: NonNullable<AppToolTurn['bot']>, name: string, args: Record<string, unknown>, at: CallSite): Promise<ToolOutcome> {
+    const mcp = this.options.botMcp
+    if (!mcp || !bot.mcpTools?.some((tool) => tool.providerName === name)) throw new McpToolError('mousse_unknown_tool', `No Mousse tool named ${name}.`)
+    const checked = withoutTransportFields(args)
+    const ledger = this.options.toolLedger?.(at.active)
+    const ledgerId = ledger?.start({ type: 'toolCall', id: at.request.toolCallId, name, arguments: checked } as ToolCall)
+    const outcome = await callForBot({ bot, name, args: checked, signal: at.request.signal, mcp, images: at.turn.toolImages === true })
     if (ledgerId) {
       if (outcome.isError) ledger?.failed(ledgerId)
       else ledger?.commit(ledgerId)

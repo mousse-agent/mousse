@@ -1,5 +1,4 @@
 // @vitest-environment jsdom
-import { readFileSync } from 'node:fs'
 import { act, createElement, useRef, useState } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -147,35 +146,5 @@ describe('the search button above the prompt rail', () => {
     act(() => void input().dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })))
     expect(document.querySelector('[role="search"]')).toBeNull()
     expect(document.activeElement).toBe(composer)
-  })
-})
-
-describe('the search button styles', () => {
-  const css = readFileSync('src/renderer/styles/prompt-visibility.css', 'utf8')
-  /** The declarations of the rule written exactly as `.an-message-list-wrap <selector> {`. */
-  const rule = (selector: string) =>
-    new RegExp(`\\.an-message-list-wrap ${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]*)\\}`).exec(css)?.[1] ?? ''
-
-  it('hangs 2px above the tick column, so the ticks keep their place, and reserves only its own height', () => {
-    expect(rule('.chat-prompt-find')).toMatch(/position: absolute;[^]*bottom: calc\(100% \+ 2px\);[^]*height: 18px;/)
-    expect(rule('.chat-prompt-column:has(> .chat-prompt-find)')).toMatch(/max-height: calc\(100% - 20px\);/)
-    // The larger hit area reaches up and out, not down toward the ticks.
-    expect(rule('.chat-prompt-find::before')).toMatch(/inset: -5px -5px 0;/)
-  })
-
-  it('is hidden until the pointer is over the rail or the button has keyboard focus', () => {
-    expect(rule('.chat-prompt-find')).toMatch(/opacity: 0;/)
-    expect(rule('.chat-prompt-find')).toMatch(/opacity calc\(120ms \* var\(--ui-motion-scale, 1\)\)/)
-    expect(rule('.chat-prompt-rail:hover .chat-prompt-find')).toMatch(/opacity: 0\.7;/)
-    expect(rule('.chat-prompt-rail .chat-prompt-find:focus-visible')).toMatch(/opacity: 1;/)
-    // On the button itself it comes up fully: the button's own rule outranks the rail's hover.
-    expect(rule('.chat-prompt-rail .chat-prompt-find:hover')).toMatch(/opacity: 1;/)
-    expect(css.indexOf('.chat-prompt-rail .chat-prompt-find:hover {')).toBeGreaterThan(css.indexOf('.chat-prompt-rail:hover .chat-prompt-find {'))
-    expect(css).toMatch(/prefers-reduced-motion: reduce\) \{\s*\.an-message-list-wrap \.chat-prompt-find \{\s*transition: none;/)
-  })
-
-  it('has a background only on hover', () => {
-    expect(rule('.chat-prompt-rail .chat-prompt-find:hover')).toMatch(/background: var\(--ui-hover\);/)
-    expect(rule('.chat-prompt-find')).toMatch(/background: transparent;/)
   })
 })

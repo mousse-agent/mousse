@@ -74,6 +74,15 @@ function authorityFor(tools: NeutralTool[], workspace: { root: string; scratch: 
 
 type Probe = (options: Options) => Promise<void>
 
+/** The servers each query was given over its input (`setMcpServers`, #358), by its options. */
+const registered = new Map<Options, Record<string, unknown>>()
+const registering = (options: Options) => ({
+  setMcpServers: vi.fn(async (servers: Record<string, unknown>) => {
+    registered.set(options, servers)
+    return { added: Object.keys(servers), removed: [], errors: {} }
+  })
+})
+
 /** A locked entry's service with a fake `query` that runs `probe` on the options before its result. */
 function lockedService(probe: Probe, result: Record<string, unknown> = { type: 'result', subtype: 'success', is_error: false, result: 'done', session_id: 'locked-session' }) {
   const home = temp('claude-locked-profile-')
@@ -91,7 +100,7 @@ function lockedService(probe: Probe, result: Record<string, unknown> = { type: '
       await probe(options)
       yield result
     })()
-    return Object.assign(generator, { close: vi.fn(), interrupt: vi.fn(async () => {}) }) as unknown as Query
+    return Object.assign(generator, { close: vi.fn(), interrupt: vi.fn(async () => {}), ...registering(options) }) as unknown as Query
   }
   const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
     query,
@@ -139,7 +148,7 @@ function ownerService(probe: Probe, result: Record<string, unknown> = { subtype:
       await probe(options)
       yield { type: 'result', ...result, session_id: 'owner-session' }
     })()
-    return Object.assign(generator, { close: vi.fn(), interrupt: vi.fn(async () => {}) }) as unknown as Query
+    return Object.assign(generator, { close: vi.fn(), interrupt: vi.fn(async () => {}), ...registering(options) }) as unknown as Query
   }
   const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
     query,
@@ -161,7 +170,9 @@ describe('a bot on the owner\'s own Claude Code entry', () => {
     const options = captured.find((entry) => entry.hooks)!
     expect(options).toMatchObject({ cwd: root, settingSources: [], strictMcpConfig: true, plugins: [], permissionMode: 'default', tools: ['Read', 'ToolSearch'] })
     for (const name of ['allowDangerouslySkipPermissions', 'additionalDirectories', 'allowedTools', 'sandbox', 'resume', 'spawnClaudeCodeProcess']) expect(options, name).not.toHaveProperty(name)
-    expect(Object.keys(options.mcpServers ?? {})).toEqual(['mousse'])
+    // Mousse's own server only, over Claude Code's input; none on its command line (#358).
+    expect(options.mcpServers).toEqual({})
+    expect(Object.keys(registered.get(options) ?? {})).toEqual(['mousse'])
     // The owner's own sign-in: their entry's environment, not a locked one.
     expect(options.env?.USER_VARIABLE).toBe('from-settings')
     expect(options.env?.CLAUDE_CONFIG_DIR).toBe(process.env.CLAUDE_CONFIG_DIR)
@@ -299,7 +310,7 @@ describe('"run commands" on the owner\'s own Claude Code entry', () => {
       expect(turn).toMatchObject({ ownerEntry: true, shellContained: false, shellOpen: true })
       expect(claudeLockedTools(turn, false).tools).toEqual(['Bash', 'Read'])
       expect(new ClaudeLockedGate({ ...turn, ledger: fakeLedger().ledger }, false).preToolUse('Bash', { command: 'make' })).toEqual({ ok: true })
-      expect(claudeLockedOptions(turn, { env: {}, mcpServers: {}, mousseTools: false })).not.toHaveProperty('sandbox')
+      expect(claudeLockedOptions(turn, { env: {}, mousseTools: false })).not.toHaveProperty('sandbox')
     }
   })
 })
@@ -313,7 +324,8 @@ describe('locked Claude Code: launch options (item 1, 4, 7)', () => {
     const { service, captured, instanceHome } = lockedService(async () => {})
     const authority = authorityFor(['read', 'search'], { root, scratch })
     const locked: ClaudeLockedTurn = { authority, cwd: scratch, shellContained: false, temps: [], systemPrompt: 'You are a bot.', ledger: fakeLedger().ledger }
-    await service.chat({ threadId: 'bot-thread', cwd: scratch, model: 'sonnet', prompt: 'go', permissionMode: 'full', mcp: { url: 'http://127.0.0.1:1/mcp', token: 'bearer' }, mcpTurnToken: 'tok', locked, onText: vi.fn() })
+    // A relay the bridge offered is never attached to a bot's turn.
+    await service.chat({ threadId: 'bot-thread', cwd: scratch, model: 'sonnet', prompt: 'go', permissionMode: 'full', mcp: { url: 'http://127.0.0.1:1/mcp', token: 'bearer', relay: { url: 'http://127.0.0.1:1/mcp/relay', revision: 'r1' } }, mcpTurnToken: 'tok', locked, onText: vi.fn() })
     const options = captured[0]
     // The bot's own system text replaces Claude Code's, rendered fresh on each request (never kept from the first).
     expect(options!.systemPrompt).toEqual({ type: 'custom', prompt: 'You are a bot.', snapshot: false })
@@ -329,7 +341,9 @@ describe('locked Claude Code: launch options (item 1, 4, 7)', () => {
     })
     expect(CLAUDE_LOCKED_MAX_TURNS).toBe(300)
     for (const name of ['allowDangerouslySkipPermissions', 'additionalDirectories', 'allowedTools', 'sandbox', 'resume']) expect(options, name).not.toHaveProperty(name)
-    expect(Object.keys(options.mcpServers ?? {})).toEqual(['mousse'])
+    // Mousse's own server only, without the MCP relay, over Claude Code's input; none on its command line (#358).
+    expect(options.mcpServers).toEqual({})
+    expect(registered.get(options)).toEqual({ mousse: expect.objectContaining({ type: 'http', url: 'http://127.0.0.1:1/mcp', headers: { Authorization: 'Bearer bearer' } }) })
     expect(typeof options.spawnClaudeCodeProcess).toBe('function')
     // Every other built-in is turned off as well (item 4).
     expect(options.disallowedTools).toEqual(CLAUDE_BUILTIN_TOOLS.filter((name) => !['Glob', 'Grep', 'Read', 'ToolSearch'].includes(name)))

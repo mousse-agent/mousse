@@ -31,7 +31,13 @@ describe('askText', () => {
     expect(askText({ tool: 'shell' }).note).toBe('Any command, started in its files folder. Commands can reach other files on this computer.')
     expect(askText({ tool: 'some_tool' }).title).toBe('use the some tool tool')
     expect(askText({ skill: 'release-notes' })).toEqual({ title: 'use the release-notes skill', note: '' })
-    expect(askText({ mcp: { serverId: 'github', tool: 'create_issue' } }).title).toBe('use create_issue from github')
+    // An older row naming one tool still reads plainly; Mousse asks for a server's tools as one ask.
+    expect(askText({ mcp: { serverId: 'srv-1', tool: 'create_issue' } }).title).toBe('use the MCP tool create_issue')
+    expect(askText({ mcp: { serverId: 'srv-1', name: 'GitHub', tools: ['create_issue', 'list_issues'], changes: 'some' } }))
+      .toEqual({ title: 'use your GitHub tools', note: 'GitHub says some of these tools can change things.' })
+    expect(askText({ mcp: { serverId: 'srv-1', name: 'GitHub', tools: ['close_issue'], added: true, changes: 'unknown' } }))
+      .toEqual({ title: 'use GitHub\'s new tools', note: 'GitHub has new tools. GitHub doesn\'t say whether these tools change things.' })
+    expect(askText({ mcp: { serverId: 'srv-1', name: 'Notes', tools: ['read_note'], changes: 'none' } }).note).toBe('Notes says these tools only read.')
   })
 
   it('limits as their new totals when the current ones are known', () => {

@@ -8,7 +8,7 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_ENOUGH_TEXT, BOT_ASK_NOT_YET_TEXT, BOT_ASK_REFUSED_TEXT, BOT_ASK_UNKNOWN_TEXT, BOT_FILES_HELD_TEXT, BOT_MCP_UNAVAILABLE_TEXT, BOT_OFFLINE_WATCH_MS, BOT_WORK_HAS_TEXT } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_ENOUGH_TEXT, BOT_ASK_NOT_NOW_TEXT, BOT_ASK_NOT_YET_TEXT, BOT_ASK_REFUSED_TEXT, BOT_ASK_UNKNOWN_TEXT, BOT_FILES_HELD_TEXT, BOT_MCP_UNAVAILABLE_TEXT, BOT_OFFLINE_WATCH_MS, BOT_WORK_HAS_TEXT } from '../../src/mms/bots/activation/BotEngine'
 import { askFingerprintOf } from '../../src/mms/bots/chat/projection'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
 import { filesAsk } from '../../src/shared/bots/personal/escalation'
@@ -92,7 +92,8 @@ describe('asks in a run', () => {
     expect(message.ask).toMatchObject({ askId, status: 'not_now' })
     f.clock.now += DAY - 60_000
     const second = await run('r2')
-    expect(second.prepared.authority.check(readIn(invoices))).toMatchObject({ ok: false, refused: { text: BOT_ASK_REFUSED_TEXT } })
+    // No card: the bot is told the owner said not now, never that it asked.
+    expect(second.prepared.authority.check(readIn(invoices))).toEqual({ ok: false, refused: { text: BOT_ASK_NOT_NOW_TEXT, askId: '' } })
     await finish(f, second.payload, 'completed', { text: 'Skipped again.' })
     expect(f.store.openAsks(botId)).toEqual([])
     expect(chatOf(f, botId).filter((row) => row.ask)).toHaveLength(1)
@@ -416,7 +417,9 @@ describe('"run commands": one permission, asked for once and remembered', () => 
     expect(message.ask).toMatchObject({ status: 'not_now' })
     expect(f.store.activeGrant(botId)!.manifest.tools).not.toContain('shell')
     const next = await run('r2')
-    expect(next.prepared.authority.check(command('ls'))).toMatchObject({ ok: false, refused: { text: BOT_ASK_REFUSED_TEXT } })
+    expect(next.prepared.authority.check(command('ls'))).toEqual({ ok: false, refused: { text: BOT_ASK_NOT_NOW_TEXT, askId: '' } })
+    // Not now holds for every kind of permission, and escalate says the same, never "Asked the owner".
+    expect(next.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'Again.' })).toBe(BOT_ASK_NOT_NOW_TEXT)
     await finish(f, next.payload, 'completed', { text: 'Skipped.' })
     expect(f.store.openAsks(botId)).toEqual([])
   })

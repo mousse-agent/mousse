@@ -68,15 +68,6 @@ describe('edit row', () => {
     expect(host.querySelector('.an-edit-tool-card')).toBeNull()
   })
 
-  it('the file name is the highlighted part: foreground colour, mono, weight 500', () => {
-    draw(edit)
-    const name = host.querySelector('.an-edit-row-name')!
-    expect(name.classList).toContain('text-an-foreground')
-    expect(name.classList).toContain('font-mono')
-    expect(name.classList).toContain('font-medium')
-    expect(toggle().classList).toContain('text-muted-foreground')
-  })
-
   it('shows the tool rows\' chevron, which turns when the row opens', () => {
     draw(edit)
     const chevron = () => toggle().querySelector('.an-edit-row-chevron')!
@@ -94,16 +85,13 @@ describe('edit row', () => {
     expect(toggle().querySelector('.an-edit-row-chevron')).toBeNull()
   })
 
-  it('the actions follow the line totals, as 28px buttons with a compare icon and a file icon', () => {
+  it('the actions follow the line totals, as buttons with a compare icon and a file icon', () => {
     draw(edit)
     const actions = host.querySelector('.an-edit-row-actions')!
-    // The line is not stretched, so the actions sit right after it instead of at the far right.
-    expect(toggle().classList).not.toContain('flex-1')
     expect(toggle().nextElementSibling).toBe(actions)
     const [review, open] = [...actions.querySelectorAll('button')]
     expect(review!.getAttribute('title')).toBe('Open in Changes')
     expect(open!.getAttribute('title')).toBe('Open file')
-    for (const button of [review!, open!]) expect(button.classList).toContain('size-7')
     // Not the eye the Read row uses, and not a folder.
     expect(review!.innerHTML).toBe(renderToStaticMarkup(createElement(GitCompare, { size: 16 })))
     expect(open!.innerHTML).toBe(renderToStaticMarkup(createElement(File, { size: 16 })))

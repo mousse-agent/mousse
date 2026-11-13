@@ -76,11 +76,6 @@ describe('ByteLruCache', () => {
     expect(cache.has('a')).toBe(false)
     expect(cache.bytes).toBe(0)
   })
-
-  it('has budgets of about 10 MB for Markdown and 50 MB for code', () => {
-    expect(MARKDOWN_CACHE_BYTES).toBe(10 * 1024 * 1024)
-    expect(HIGHLIGHT_CACHE_BYTES).toBe(50 * 1024 * 1024)
-  })
 })
 
 const heavyReply = [

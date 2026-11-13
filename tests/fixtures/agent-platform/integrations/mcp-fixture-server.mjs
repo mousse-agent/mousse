@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Bounded stdio MCP fixture. No network, no credentials.
- * Tools: echo, picture, fail, hang.
+ * Tools: echo, picture, fail, hang (and wedge with MCP_FIXTURE_WEDGE).
  */
 import { Buffer } from 'node:buffer'
 import { appendFileSync } from 'node:fs'
@@ -33,7 +33,15 @@ const tools = [
     name: 'hang',
     description: 'Wait until cancelled or the hang timeout.',
     inputSchema: { type: 'object', properties: { ms: { type: 'number' } } }
-  }
+  },
+  // Only with MCP_FIXTURE_WEDGE, so other tests see the four tools they always did.
+  ...(process.env.MCP_FIXTURE_WEDGE
+    ? [{
+        name: 'wedge',
+        description: 'Block the whole process (no message is read) for ms, then answer.',
+        inputSchema: { type: 'object', properties: { ms: { type: 'number' } } }
+      }]
+    : [])
 ]
 
 const pending = new Map()
@@ -113,6 +121,10 @@ function handleMessage(message) {
       pending.set(message.id, { timer })
       return
     }
+    if (name === 'wedge' && process.env.MCP_FIXTURE_WEDGE) {
+      const end = Date.now() + Number(args.ms ?? 3_000)
+      while (Date.now() < end) { /* stuck: nothing else runs, not even a ping */ }
+    }
     write({ jsonrpc: '2.0', id: message.id, result: callTool(name, args) })
     return
   }
@@ -159,6 +171,7 @@ function callTool(name, args) {
       isError: true
     }
   }
+  if (name === 'wedge' && process.env.MCP_FIXTURE_WEDGE) return { content: [{ type: 'text', text: 'unwedged' }], isError: false }
   return {
     content: [{ type: 'text', text: `Unknown tool ${name}` }],
     isError: true
