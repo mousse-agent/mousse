@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { SettingsRow } from '../settings/SettingsRow'
 import { useDaemonCall } from './useDaemonCall'
-import { openThread } from '../../lib/openThread'
+import { isThreadShownOrOpening, openThread } from '../../lib/openThread'
 import { formatAgo } from '../../lib/formatAgo'
 import { activityHeadline, readsLine, ruleLine, rulesLine, showsActivity } from '../../lib/deviceActivity'
 import { useAppStore } from '../../stores/appStore'
@@ -125,7 +125,7 @@ export function DeviceActivityRows({ device, onLimits, onBlock }: {
   }
   const show = (threadId: string) => {
     void openThread(threadId).then(() => {
-      if (useAppStore.getState().activeThreadId === threadId) useAppStore.getState().setSettingsOpen(false)
+      if (isThreadShownOrOpening(threadId)) useAppStore.getState().setSettingsOpen(false)
     })
   }
 

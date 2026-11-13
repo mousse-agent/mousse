@@ -19,7 +19,7 @@ import {
   type Sort,
   type SortKey
 } from '../../lib/storageUsage'
-import { openThread } from '../../lib/openThread'
+import { isThreadShownOrOpening, openThread } from '../../lib/openThread'
 import { useAppStore } from '../../stores/appStore'
 import { SettingsGroup } from '../settings/SettingsRow'
 import { DelayedLoader } from '../ui/DelayedLoader'
@@ -217,7 +217,7 @@ export function StorageUsageSection({ refreshKey = 0 }: { refreshKey?: number })
     if (target.type === 'policy') {
       document.getElementById(target.anchor)?.scrollIntoView({ block: 'start' })
     } else {
-      void openThread(target.threadId).then(() => { if (useAppStore.getState().activeThreadId === target.threadId) useAppStore.getState().setSettingsOpen(false) })
+      void openThread(target.threadId).then(() => { if (isThreadShownOrOpening(target.threadId)) useAppStore.getState().setSettingsOpen(false) })
     }
   }
   const onSort = (key: SortKey) => setSort((current) => current.key === key ? { key, direction: current.direction === 'asc' ? 'desc' : 'asc' } : { key, direction: key === 'name' || key === 'machine' ? 'asc' : 'desc' })
