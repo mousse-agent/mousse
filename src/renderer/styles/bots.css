@@ -188,9 +188,8 @@ button.bot-image:focus-visible > img { opacity: 0.82; }
 .bot-conversation .chat-transcript > .bot-load-state { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 100%; font-size: var(--bot-meta); color: var(--text-secondary); }
 .bot-load-state.is-failed button { padding: 5px 11px; border-radius: 7px; font-size: 12px; font-weight: 500; color: var(--text-primary); background: color-mix(in srgb, var(--text-secondary) 12%, transparent); }
 .bot-load-state.is-failed button:hover { background: color-mix(in srgb, var(--text-secondary) 18%, transparent); }
-/* A file the bot names: a chip with its name (a picture shows above it), Show in folder on hover. */
-.bot-path { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 4px; max-width: 100%; vertical-align: middle; margin: 1px 0; }
-.bot-path.is-picture { display: flex; margin: 6px 0; }
+/* A file the bot names: a chip with its name, Show in folder on hover. A picture also shows above the reply. */
+.bot-path { display: inline-flex; max-width: 100%; vertical-align: middle; margin: 1px 0; }
 .bot-path-chip { display: inline-flex; align-items: center; max-width: 100%; border-radius: 8px; background: color-mix(in srgb, var(--text-primary) 8%, transparent); }
 .bot-path-open { display: inline-flex; align-items: center; gap: 6px; min-width: 0; padding: 2px 4px 2px 8px; border-radius: 8px; font-size: 12.5px; line-height: 20px; color: var(--text-primary); }
 .bot-path-open > svg { flex: none; color: var(--accent); }
@@ -199,8 +198,35 @@ button.bot-image:focus-visible > img { opacity: 0.82; }
 .bot-path-chip:hover .bot-path-folder, .bot-path-folder:focus-visible { opacity: 1; }
 .bot-path-chip:hover { background: color-mix(in srgb, var(--text-primary) 12%, transparent); }
 .bot-path-folder:hover { color: var(--text-primary); }
-.bot-path-picture { display: block; width: 260px; max-width: 100%; height: 170px; padding: 0; overflow: hidden; border-radius: 12px; background: color-mix(in srgb, var(--text-secondary) 9%, transparent); cursor: zoom-in; }
-.bot-path-picture > img { display: block; width: 100%; height: 100%; object-fit: cover; }
+/* A reply's pictures, above its words: one at a good size in its own shape; several side by side, a carousel that
+   scrolls with snap, its arrows on hover or focus and "2/4" while they don't all fit. A picture still being read keeps
+   its box, so nothing moves when it shows. */
+.bot-reply-media { margin: 2px 0 8px; }
+.bot-bubble.is-media-only { padding: 6px 6px 4px; }
+.bot-bubble.is-media-only .bot-reply-media { margin: 0 0 2px; }
+.bot-bubble.is-media-only .bot-bubble-foot { padding: 0 6px; }
+.bot-picture { position: relative; display: block; flex: none; padding: 0; overflow: hidden; border-radius: 12px; background: color-mix(in srgb, var(--text-secondary) 9%, transparent); cursor: zoom-in; }
+.bot-picture > img { display: block; }
+.bot-picture.is-single > img { max-width: min(420px, 100%); max-height: 420px; width: auto; height: auto; }
+.bot-picture.is-single.is-empty { width: min(320px, 100%); height: 220px; }
+.bot-carousel .bot-picture { height: 220px; scroll-snap-align: start; }
+.bot-carousel .bot-picture > img { height: 100%; width: auto; max-width: 340px; min-width: 120px; object-fit: cover; }
+.bot-carousel .bot-picture.is-empty { width: 220px; }
+.bot-picture.is-failed { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; width: 220px; height: 160px; padding: 10px; font-size: var(--bot-meta, 12.5px); color: var(--text-secondary); cursor: default; }
+.bot-picture.is-failed > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bot-picture:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent); outline-offset: 2px; }
+.bot-carousel { position: relative; max-width: 100%; border-radius: 12px; outline: none; }
+.bot-carousel:focus-visible { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 60%, transparent); }
+.bot-carousel-track { position: relative; display: flex; gap: 6px; overflow-x: auto; scroll-snap-type: x mandatory; scroll-behavior: smooth; scrollbar-width: none; overscroll-behavior-x: contain; }
+.bot-carousel-track::-webkit-scrollbar { display: none; }
+.bot-carousel-arrow { position: absolute; top: 50%; transform: translateY(-50%); display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; color: #fff; background: rgba(0, 0, 0, .5); opacity: 0; transition: opacity .15s; }
+.bot-carousel-arrow.is-previous { left: 8px; }
+.bot-carousel-arrow.is-next { right: 8px; }
+.bot-carousel:hover .bot-carousel-arrow, .bot-carousel:focus-within .bot-carousel-arrow { opacity: 1; }
+.bot-carousel-arrow:hover { background: rgba(0, 0, 0, .7); }
+.bot-carousel-count { position: absolute; top: 8px; right: 8px; padding: 1px 8px; border-radius: 999px; font-size: 11px; line-height: 18px; color: #fff; background: rgba(0, 0, 0, .5); font-variant-numeric: tabular-nums; pointer-events: none; }
+@media (prefers-reduced-motion: reduce) { .bot-carousel-track { scroll-behavior: auto; } .bot-carousel-arrow { transition: none; } }
+.bot-picture-menu { min-width: 170px; }
 /* A list of keys and values ("CPU: …") as a small card. */
 .bot-kv { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 14px; row-gap: 3px; margin: 8px 0; padding: 9px 12px; border-radius: 10px; font-size: var(--bot-meta); line-height: 1.5; background: color-mix(in srgb, var(--text-primary) 5%, transparent); }
 .bot-kv-row { display: contents; }

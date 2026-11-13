@@ -46,7 +46,8 @@ import {
   threadListPayload
 } from '../mms/protocolEventBridge'
 import { SettingsStore } from '../../mms/settings/SettingsStore'
-import { listEditors, openInEditor, openRemoteInEditor, showFileInFolder } from '../editors'
+import { listEditors, openInEditor, openRemoteInEditor } from '../editors'
+import { copyImageFile, saveFileCopy, showFileInFolder } from '../localFiles'
 import { nodeOfThread, remoteRoute } from '../remoteEditorFlow'
 import { EDITOR_PROXY_READY, type RemoteAskResult, type RemoteOpenResult, type RemoteRoute } from '../../shared/remoteEditor'
 import { askForEditorAccess } from '../remoteEditorAsk'
@@ -3220,10 +3221,11 @@ export function registerGuiIpc(
   registerHandler('editors:open', async (_e, editorId: string, path: string) => {
     await openInEditor(editorId, path)
   })
-  // A file of this computer shown selected in its folder; only an existing file by its absolute path.
-  registerHandler('editors:showInFolder', async (_e, path: string) => {
-    await showFileInFolder(path)
-  })
+  // A file of this computer that a bot's chat names (localFiles.ts): only an existing file by its absolute path.
+  registerHandler('localFiles:showInFolder', async (_e, path: unknown) => { await showFileInFolder(path) })
+  registerHandler('localFiles:saveCopy', async (event, path: unknown) =>
+    saveFileCopy(path, BrowserWindow.fromWebContents(event.sender) ?? getWindow(), app.getPath('downloads')))
+  registerHandler('localFiles:copyImage', async (_e, path: unknown) => { await copyImageFile(path) })
   // A thread of another computer: its folder opens in an editor of this one over SSH. The window names the
   // thread only; the folder is the one the owner answers, and the SSH address is read here from this
   // computer's own records.

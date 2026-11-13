@@ -15,44 +15,48 @@ import { isKeyValueList } from './botChatShape'
  * in the Files pane beside the chat; Show in folder opens its folder in the computer's file manager.
  */
 
-/** The chat a chip is in: its bot (for short names in its files folder) and how it opens a file. */
-interface BotFilesHost { botId: string; open(path: string): void }
+/**
+ * The chat a chip or picture is in: its bot (for short names in its files folder), how it opens a file, and how it
+ * says that an action on a file failed (above the composer).
+ */
+interface BotFilesHost { botId: string; open(path: string): void; failed?(message: string): void }
 const BotFilesContext = createContext<BotFilesHost | null>(null)
 
-export function BotFilesProvider({ botId, open, children }: BotFilesHost & { children: ReactNode }) {
-  return <BotFilesContext.Provider value={{ botId, open }}>{children}</BotFilesContext.Provider>
+export function BotFilesProvider({ botId, open, failed, children }: BotFilesHost & { children: ReactNode }) {
+  return <BotFilesContext.Provider value={{ botId, open, ...(failed ? { failed } : {}) }}>{children}</BotFilesContext.Provider>
+}
+
+/** The chat's files host, or null outside a bot's chat. */
+export function useBotFiles(): BotFilesHost | null {
+  return useContext(BotFilesContext)
 }
 
 const IMAGE_FILE = /\.(?:png|jpe?g|gif|webp)$/i
+const reason = (error: unknown) => String((error as { message?: string })?.message ?? error).replace(/^Error invoking remote method '[^']*':\s*(?:Error:\s*)?/, '')
 
-/** Shows the file selected in its folder, in File Explorer, Finder or the Files app. A file that is gone shows nothing. */
-export function showInFolder(path: string): void {
-  void window.mousse.editors.showInFolder(path).catch(() => undefined)
+/**
+ * The actions on a file of this computer (localFiles in the preload): Show in folder selects it in File Explorer,
+ * Finder or the Files app; Save as… copies it where the owner picks; Copy image puts a picture on the clipboard. A
+ * refusal ("That file does not exist.") is said through `failed`.
+ */
+export const fileActions = {
+  showInFolder: (path: string, failed?: (message: string) => void) => { void window.mousse.localFiles.showInFolder(path).catch((error) => failed?.(reason(error))) },
+  saveAs: (path: string, failed?: (message: string) => void) => { void window.mousse.localFiles.saveCopy(path).catch((error) => failed?.(reason(error))) },
+  copyImage: (path: string, failed?: (message: string) => void) => { void window.mousse.localFiles.copyImage(path).catch((error) => failed?.(reason(error))) }
 }
 
-/** A picture's preview above its chip, once it has been read; nothing while it is read or when it can't be. */
-function PathPicture({ path, label, open }: { path: string; label: string; open(): void }) {
-  const image = useFileImage(path)
-  if (!image?.url) return null
-  return <button type="button" className="bot-path-picture" aria-label={`Open ${label}`} onClick={open}>
-    <img src={image.url} alt="" draggable={false} />
-  </button>
-}
-
-/** One file the bot named: its name (a picture shows above it), a click to open it here, and Show in folder. */
+/** One file the bot named: its name, a click to open it here, and Show in folder. A picture also shows above the reply. */
 export function BotPathChip({ path }: { path: string }) {
   const host = useContext(BotFilesContext)
   const label = botPathLabel(path, host?.botId)
-  const picture = IMAGE_FILE.test(path)
-  const Icon = picture ? ImageIcon : FileText
+  const Icon = IMAGE_FILE.test(path) ? ImageIcon : FileText
   const open = () => (host ? host.open(path) : routeLink(`mousse-file://open?path=${encodeURIComponent(path)}`))
-  return <span className={`bot-path${picture ? ' is-picture' : ''}`}>
-    {picture && <PathPicture path={path} label={label} open={open} />}
+  return <span className="bot-path">
     <span className="bot-path-chip">
       <button type="button" className="bot-path-open" title={path} aria-label={`Open ${label}`} onClick={open}>
         <Icon size={13} aria-hidden /><span>{label}</span>
       </button>
-      <button type="button" className="bot-path-folder" title="Show in folder" aria-label={`Show ${label} in folder`} onClick={() => showInFolder(path)}>
+      <button type="button" className="bot-path-folder" title="Show in folder" aria-label={`Show ${label} in folder`} onClick={() => fileActions.showInFolder(path, host?.failed)}>
         <FolderOpen size={13} aria-hidden />
       </button>
     </span>
@@ -162,10 +166,11 @@ function TextPreview({ path }: { path: string }) {
 /** The Files pane beside a bot's chat: the file a chip opened, with Show in folder and Close. */
 export function BotFilePane({ botId, path, onClose }: { botId: string; path: string; onClose(): void }) {
   const label = botPathLabel(path, botId)
+  const host = useContext(BotFilesContext)
   return <aside className="bot-file-pane" aria-label={`File ${label}`}>
     <header className="bot-file-head">
       <span className="bot-file-name" title={path}>{label}</span>
-      <button type="button" className="bot-file-button" title="Show in folder" aria-label="Show in folder" onClick={() => showInFolder(path)}><FolderOpen size={15} aria-hidden /></button>
+      <button type="button" className="bot-file-button" title="Show in folder" aria-label="Show in folder" onClick={() => fileActions.showInFolder(path, host?.failed)}><FolderOpen size={15} aria-hidden /></button>
       <button type="button" className="bot-file-button" title="Close" aria-label="Close file" onClick={onClose}><X size={15} aria-hidden /></button>
     </header>
     <div className="bot-file-body">{IMAGE_FILE.test(path) ? <ImagePreview path={path} /> : <TextPreview key={path} path={path} />}</div>

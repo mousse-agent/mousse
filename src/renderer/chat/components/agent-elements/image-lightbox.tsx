@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
   IconChevronLeft,
@@ -15,6 +15,8 @@ export type LightboxImage = {
   url: string;
   /** Optional filename used for the alt text. */
   filename?: string;
+  /** The image's file on this computer, when it has one (a bot's picture): what `actions` act on. */
+  path?: string;
 };
 
 export type ImageLightboxProps = {
@@ -26,6 +28,8 @@ export type ImageLightboxProps = {
   images: LightboxImage[];
   /** Index in `images` to start on. */
   initialIndex?: number;
+  /** Buttons of the caller's own beside Close, for the image shown (a bot's picture: Save, Show in folder). */
+  actions?: (image: LightboxImage) => ReactNode;
 };
 
 /** How far (px) a two-finger sideways swipe travels before it turns the image. */
@@ -53,6 +57,7 @@ export function ImageLightbox({
   onClose,
   images,
   initialIndex = 0,
+  actions,
 }: ImageLightboxProps) {
   const [currentIndex, setCurrentIndex] = useState(initialIndex);
   const count = images.length;
@@ -194,6 +199,13 @@ export function ImageLightbox({
           <IconX className="size-4" />
         </span>
       </button>
+
+      {actions && (
+        // A click on an action is not a click on the backdrop, which closes the preview.
+        <div className="image-preview-actions absolute top-4 right-16 z-10 flex gap-2" onClick={(event) => event.stopPropagation()}>
+          {actions(currentImage)}
+        </div>
+      )}
 
       {hasPrevious && (
         <button

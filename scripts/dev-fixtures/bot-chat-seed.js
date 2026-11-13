@@ -15,9 +15,12 @@
  *   await botSeed.show('paused')
  *   botSeed.scrollTo('report')                      // brings a message to the top: see botSeed.ids
  *
- * Options, kept between calls: `await botSeed.show('free', { localFile, localImage })` names a real text file and a
- * real PNG on this computer, which the markdown reply links, so the Files pane and a picture preview have something to
- * read (for example `<worktree>/docs/plans/bot-ui.md` and `<worktree>/resources/icon.png`).
+ * Options, kept between calls: `await botSeed.show('free', { localFile, localImage, localImages })` names a real text
+ * file, a real PNG and up to four real pictures (PNG, JPEG, GIF or WebP) on this computer, so the Files pane and the
+ * pictures have something to read: the markdown reply links `localFile` and `localImage`, the picture reply
+ * (`botSeed.scrollTo('picture')`) shows `localImages[0]` alone, and the four-picture reply (`scrollTo('pictures')`) shows
+ * all four in a carousel. For example `<worktree>/docs/plans/bot-ui.md`, `<worktree>/resources/icon.png`, and four of
+ * `git ls-files '*.png' '*.jpg'`.
  *
  * The modules are reached by their dev-server URLs (the renderer's root is src/renderer), so this needs the dev app.
  */
@@ -32,7 +35,8 @@
   const ids = {
     morning: 'seed-morning-1', drawAsk: 'seed-draw-ask', screenshot: 'seed-screenshot', compareAsk: 'seed-compare-ask',
     markdown: 'seed-markdown', commandAsk: 'seed-command-ask', handoff: 'seed-handoff', note: 'seed-note',
-    noteReply: 'seed-note-reply', report: 'seed-report', browserAsk: 'seed-browser-ask', again: 'seed-again'
+    noteReply: 'seed-note-reply', report: 'seed-report', browserAsk: 'seed-browser-ask', again: 'seed-again',
+    pictureAsk: 'seed-picture-ask', picture: 'seed-picture', pictures: 'seed-pictures'
   }
 
   function conversation(scenario) {
@@ -42,6 +46,9 @@
     const quote = (id, text) => ({ id, author: 'owner', text })
     const markdownFile = options.localFile ?? `${FILES}\\notes\\ssd-shortlist.md`
     const picture = options.localImage ?? `${FILES}\\ssd-prices.png`
+    // Pictures it made: in its files folder, linked as the image tool's Markdown line is (`![…](<path>)`).
+    const takes = [0, 1, 2, 3].map((at) => options.localImages?.[at] ?? options.localImage ?? `${FILES}\\images\\take-${at + 1}.png`)
+    const image = (alt, path) => `![${alt}](<${path}>)`
     const rows = [
       // Three bot messages in a row, minutes apart: one group, a time on each.
       bot(ids.morning, today(9, 2), 'Morning! Your 9am is moved to 10.'),
@@ -63,6 +70,10 @@
         { icon: 'edit', text: 'saved 3 files', highlight: 'make.py +2' },
         { icon: 'read', text: 'read files', highlight: 'saved files' }
       ], { replyTo: quote(ids.drawAsk, 'Draw a boy on a chip with clouds behind him, and save the picture and its drawing code.') }),
+      // Pictures: one alone as its own message, then four in a carousel.
+      owner(ids.pictureAsk, today(21, 20), 'Make me a sticker of the boy, then three more takes on it.'),
+      bot(ids.picture, today(21, 21), image('The boy, as a sticker', takes[0]), [{ icon: 'think', text: 'made a picture' }], { replyTo: quote(ids.pictureAsk, 'Make me a sticker of the boy, then three more takes on it.') }),
+      bot(ids.pictures, today(21, 24), `Here are four takes. The second keeps the clouds closest to yours.\n\n${takes.map((path, at) => image(`Take ${at + 1}`, path)).join(' ')}`, [{ icon: 'think', text: 'made 4 pictures' }]),
       // A reply heavy with Markdown.
       owner(ids.compareAsk, today(21, 30), 'Compare three 2 TB SSDs for me, under £150.'),
       bot(ids.markdown, today(21, 31), [

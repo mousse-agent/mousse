@@ -109,7 +109,7 @@ describe('the transcript', () => {
     expect(owner!.querySelector('.bot-you-bubble .chat-markdown')?.textContent).toBe('Send the one to the Lisbon host.')
     // A one-to-one chat: the header says who it is, so the bot's bubbles carry no face or name.
     expect(transcript().querySelector('.bot-face, .chat-message-meta')).toBeNull()
-    expect(reply!.querySelector('.bot-bubble .chat-markdown')?.textContent).toBe('Sent.')
+    expect(reply!.querySelector('.bot-bubble .bot-markdown')?.textContent).toBe('Sent.')
     // No chips under the text: one quiet line, which opens the steps in plain words.
     expect(reply!.querySelector('.bot-chip, .bot-steps')).toBeNull()
     const worked = reply!.querySelector<HTMLButtonElement>('.bot-worked')!
@@ -165,12 +165,12 @@ describe('the transcript', () => {
     expect(log.querySelector('[data-message-id="b3"] .bot-worked')).toBeNull()
   })
 
-  it('a path in a reply is a chip with the file’s name: a click opens it in the Files pane, and Show in folder opens its folder', async () => {
+  it('a path in a reply is a chip with the file’s name: a click opens it in the Files pane, and Show in folder selects it', async () => {
     const folder = 'C:\\Users\\me\\.mousse\\profiles\\d9d018ad-5de0\\bots\\files\\inbox'
     fake.chats.inbox = [message(1, { id: 'b1', text: `Picture: ${folder}\\chip-clouds-boy.png\n\nNotes in \`${folder}\\notes\\plan.md\`.` })]
     const readFile = vi.fn(async () => '# Plan\n\nThree steps.')
-    const openEditor = vi.fn(async () => undefined)
-    installPreload(fake, { app: { setViewedBot }, fs: { readFile, readAsset: vi.fn(async () => { throw new Error('none') }) }, editors: { open: openEditor } })
+    const showInFolder = vi.fn(async () => undefined)
+    installPreload(fake, { app: { setViewedBot }, fs: { readFile, readAsset: vi.fn(async () => { throw new Error('none') }) }, localFiles: { showInFolder } })
     await open()
     const chips = [...transcript().querySelectorAll<HTMLButtonElement>('.bot-path-open')]
     // The name only (inside the bot's files folder, the path there), never the profile's folders; the full path on hover.
@@ -185,10 +185,138 @@ describe('the transcript', () => {
     expect(pane.querySelector('.bot-file-name')?.textContent).toBe('notes/plan.md')
     expect(readFile).toHaveBeenCalledWith('plan.md', undefined, null, `${folder}\\notes`)
     expect(pane.querySelector('.bot-file-body h1')?.textContent).toBe('Plan')
+    // The file itself, selected in its folder; a refusal is said above the composer.
     await click(button('Show notes/plan.md in folder'))
-    expect(openEditor).toHaveBeenCalledWith('files', `${folder}\\notes`)
+    expect(showInFolder).toHaveBeenCalledWith(`${folder}\\notes\\plan.md`)
+    showInFolder.mockRejectedValueOnce(new Error("Error invoking remote method 'localFiles:showInFolder': Error: That file does not exist."))
+    await click(button('Show in folder', pane))
+    await settle()
+    expect(composerError()?.textContent).toBe('That file does not exist.')
     await click(button('Close file'))
     expect(host.querySelector('aside.bot-file-pane')).toBeNull()
+  })
+
+  describe('pictures', () => {
+    const FILES = '/home/me/.mousse/bots/files/inbox'
+    const picture = (name: string) => `${FILES}/${name}`
+    let localFiles: Record<string, ReturnType<typeof vi.fn>>
+    /** Every picture file reads as a PNG, each with its own preview address. */
+    const install = () => {
+      localFiles = { showInFolder: vi.fn(async () => undefined), saveCopy: vi.fn(async () => '/home/me/Downloads/a.png'), copyImage: vi.fn(async () => undefined) }
+      let made = 0
+      URL.createObjectURL = vi.fn(() => `blob:picture-${++made}`)
+      installPreload(fake, { app: { setViewedBot }, fs: { readAsset: vi.fn(async () => ({ mimeType: 'image/png', data: [137, 80, 78, 71] })) }, localFiles })
+    }
+    const article = (id: string) => transcript().querySelector<HTMLElement>(`[data-message-id="${id}"]`)!
+    const contextMenu = async (target: Element) => {
+      await act(async () => { target.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 50 })) })
+    }
+
+    it('one picture is a message of its own above the words, never a preview above its chip; a picture alone is a bubble with no words', async () => {
+      install()
+      fake.chats.inbox = [
+        message(1, { id: 'b1', text: `Here it is: ${picture('boy.png')}` }),
+        message(2, { id: 'b2', text: `![a boy on a chip](file://${picture('made.png')})` })
+      ]
+      await open()
+      await settle()
+      const one = article('b1')
+      expect(one.querySelectorAll('.bot-reply-media .bot-picture.is-single img')).toHaveLength(1)
+      expect(one.querySelector('.bot-carousel')).toBeNull()
+      // The picture comes before the words, whose path stays a plain chip.
+      const bubble = one.querySelector('.bot-bubble')!
+      expect(bubble.querySelector('.bot-reply-media')!.compareDocumentPosition(bubble.querySelector('.bot-markdown')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+      expect(one.querySelector('.bot-path img')).toBeNull()
+      expect(one.querySelector('.bot-path-open')?.textContent).toBe('boy.png')
+      // A picture it made, with nothing else to say: the picture alone, its time under it.
+      const alone = article('b2')
+      expect(alone.querySelector('.bot-bubble')!.classList.contains('is-media-only')).toBe(true)
+      expect(alone.querySelector('.bot-markdown')).toBeNull()
+      expect(alone.querySelector('.bot-picture img')?.getAttribute('alt')).toBe('a boy on a chip')
+    })
+
+    it('several pictures in one reply are one carousel; Left and Right step through it once it overflows, with a count', async () => {
+      install()
+      const names = ['a.png', 'b.png', 'c.png', 'd.png']
+      fake.chats.inbox = [message(1, { id: 'b1', text: `Four takes:\n\n${names.map((name) => `![${name}](${picture(name)})`).join(' ')}` })]
+      // The track is wider than the bubble: the pictures don't all fit.
+      const widths = vi.spyOn(HTMLElement.prototype, 'scrollWidth', 'get').mockImplementation(function (this: HTMLElement) { return this.classList.contains('bot-carousel-track') ? 1000 : 0 })
+      const clients = vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockImplementation(function (this: HTMLElement) { return this.classList.contains('bot-carousel-track') ? 400 : 0 })
+      try {
+        await open()
+        await settle()
+        const carousel = article('b1').querySelector<HTMLElement>('.bot-carousel')!
+        expect(carousel.getAttribute('aria-label')).toBe('4 pictures')
+        expect([...carousel.querySelectorAll('.bot-picture img')].map((image) => image.getAttribute('alt'))).toEqual(names)
+        expect(carousel.querySelector('.bot-carousel-count')?.textContent).toBe('1/4')
+        expect(button('Previous picture', carousel)).toBeUndefined()
+        await act(async () => { carousel.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })) })
+        await act(async () => { carousel.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })) })
+        expect(carousel.querySelector('.bot-carousel-count')?.textContent).toBe('3/4')
+        await click(button('Previous picture', carousel))
+        expect(carousel.querySelector('.bot-carousel-count')?.textContent).toBe('2/4')
+      } finally {
+        widths.mockRestore()
+        clients.mockRestore()
+      }
+    })
+
+    it('pictures that all fit show no count and no arrows', async () => {
+      install()
+      fake.chats.inbox = [message(1, { id: 'b1', text: `![a](${picture('a.png')}) ![b](${picture('b.png')})` })]
+      await open()
+      await settle()
+      const carousel = article('b1').querySelector('.bot-carousel')!
+      expect(carousel.querySelectorAll('.bot-picture')).toHaveLength(2)
+      expect(carousel.querySelector('.bot-carousel-count, .bot-carousel-arrow')).toBeNull()
+    })
+
+    it('a click opens the preview on the reply’s own pictures, with Save and Show in folder for the one shown', async () => {
+      install()
+      fake.chats.inbox = [
+        message(1, { id: 'b0', text: `An older one: ![old](${picture('old.png')})` }),
+        message(2, { id: 'b1', text: `![a](${picture('a.png')}) ![b](${picture('b.png')})` })
+      ]
+      await open()
+      await settle()
+      await click(button('Open picture: b', article('b1')))
+      const preview = document.querySelector<HTMLElement>('[role="dialog"]')!
+      expect(preview.getAttribute('aria-label')).toBe('b')
+      // The reply's two pictures, not the chat's three.
+      expect(preview.textContent).toContain('2 / 2')
+      await click(button('Save', preview))
+      expect(localFiles.saveCopy).toHaveBeenCalledWith(picture('b.png'))
+      await click(button('Previous image (←)', preview))
+      await click(button('Show in folder', preview))
+      expect(localFiles.showInFolder).toHaveBeenCalledWith(picture('a.png'))
+      // The actions are not the backdrop: the preview stays open.
+      expect(document.querySelector('[role="dialog"]')).not.toBeNull()
+      await click(button('Close fullscreen (Esc)', preview))
+    })
+
+    it('a right-click offers Open, Save as…, Show in folder and Copy image, each on that picture', async () => {
+      install()
+      fake.chats.inbox = [message(1, { id: 'b1', text: `![a](${picture('a.png')}) ![b](${picture('b.png')})` })]
+      await open()
+      await settle()
+      const second = button('Open picture: b', article('b1'))!
+      const menuItems = () => [...document.querySelectorAll<HTMLButtonElement>('.bot-picture-menu [role="menuitem"]')]
+      for (const [label, action] of [['Save as…', 'saveCopy'], ['Show in folder', 'showInFolder'], ['Copy image', 'copyImage']] as const) {
+        await contextMenu(second)
+        expect(menuItems().map((item) => item.textContent)).toEqual(['Open', 'Save as…', 'Show in folder', 'Copy image'])
+        await click(menuItems().find((item) => item.textContent === label))
+        expect(localFiles[action]).toHaveBeenCalledWith(picture('b.png'))
+        expect(document.querySelector('.bot-picture-menu')).toBeNull()
+      }
+      await contextMenu(second)
+      await click(menuItems()[0])
+      expect(document.querySelector('[role="dialog"]')?.getAttribute('aria-label')).toBe('b')
+      await click(button('Close fullscreen (Esc)', document.querySelector('[role="dialog"]')!))
+      // Escape closes the menu with nothing done.
+      await contextMenu(second)
+      await act(async () => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
+      expect(document.querySelector('.bot-picture-menu')).toBeNull()
+    })
   })
 
   it('a list of keys and values reads as a small card', async () => {

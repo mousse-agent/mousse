@@ -673,8 +673,6 @@ const api = {
       ipcRenderer.invoke('editors:list', options),
     open: (editorId: string, path: string): Promise<void> =>
       ipcRenderer.invoke('editors:open', editorId, path),
-    /** Shows a file selected in its folder in the computer's file manager; refused for anything but an existing file. */
-    showInFolder: (path: string): Promise<void> => ipcRenderer.invoke('editors:showInFolder', path),
     /** Opens the folder of a thread of another computer in an editor of this one, over SSH. */
     openRemote: (editorId: string, threadId: string): Promise<RemoteOpenResult> =>
       ipcRenderer.invoke('editors:openRemote', editorId, threadId),
@@ -682,6 +680,15 @@ const api = {
     remoteRoute: (threadId: string): Promise<RemoteRoute> => ipcRenderer.invoke('editors:remoteRoute', threadId),
     /** Asks the computer that runs a thread to allow editor connections from this one. A person there answers. */
     askAccess: (threadId: string): Promise<RemoteAskResult> => ipcRenderer.invoke('editors:askAccess', threadId)
+  },
+  /** A file of this computer by its absolute path (a bot's file chip or picture); each refuses anything but an existing file. */
+  localFiles: {
+    /** Shows the file selected in the computer's file manager. */
+    showInFolder: (path: string): Promise<void> => ipcRenderer.invoke('localFiles:showInFolder', path),
+    /** Saves a copy where the person picks; the path it was saved to, or null when they closed the dialog. */
+    saveCopy: (path: string): Promise<string | null> => ipcRenderer.invoke('localFiles:saveCopy', path),
+    /** Puts a picture file on the clipboard as an image. */
+    copyImage: (path: string): Promise<void> => ipcRenderer.invoke('localFiles:copyImage', path)
   },
   inAppBrowser: {
     registerTab: (input) => ipcRenderer.invoke('browser:register-tab', input),

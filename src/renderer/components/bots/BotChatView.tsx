@@ -8,6 +8,8 @@ import { MarkdownPreview } from '../editors/MarkdownPreview'
 import { BotFace } from './face/BotFace'
 import { BotSteps } from './BotSteps'
 import { BotFilePane, BotFilesProvider, BotMarkdown } from './BotFiles'
+import { BotPictureActions, BotReplyMedia } from './BotReplyMedia'
+import { replyImages } from './botReplyImages'
 import { BotEmojiButton } from './BotEmoji'
 import { BotAskReplies } from './BotAskReplies'
 import { BotActivitySticker, BotPresenceLine } from './BotPresence'
@@ -22,6 +24,7 @@ import { botGroupTime, placeMessages } from './messageGroups'
 import { chatRows, stepChips, type BotChatRow, type OwnerMarks } from './botChatShape'
 import { formatDurationLong, formatWorkedFor } from '../../utils/responseTimeline'
 import { ImageGalleryProvider } from '../../chat/components/agent-elements/image-gallery'
+import type { LightboxImage } from '../../chat/components/agent-elements/image-lightbox'
 import { BotImageFiles, BotMarkdownImage, BotOtherFiles, botFileImageUrl } from './BotImages'
 import { botChatImages } from './imageSources'
 
@@ -202,13 +205,17 @@ const BotMessage = memo(function BotMessage({ bot, message, onAction, browser, q
   const [stepsOpen, setStepsOpen] = useState(false)
   const steps = stepChips(message.chips)
   const openAsk = message.ask?.status === 'open' ? message.ask : undefined
+  // Its pictures show above its words, as a messenger's image message; the words keep the rest.
+  const media = useMemo(() => replyImages(message), [message])
+  const pictures = media.images.length > 0
   return <article className={`chat-participant-message from-agent bot-message${starts ? ' is-group-start' : ''}`} data-message-id={message.id}>
     <div className="bot-message-line">
-      <div className="bot-bubble">
+      <div className={`bot-bubble${pictures ? ' has-media' : ''}${pictures && !media.text ? ' is-media-only' : ''}`}>
         {quoted && <BotReplyQuote botId={bot.id} quote={message.replyTo!} botName={bot.name} />}
-        {message.text && <BotMarkdown text={message.text} className="bot-markdown" />}
+        <BotReplyMedia images={media.images} />
+        {media.text && <BotMarkdown text={media.text} className="bot-markdown" />}
         {openAsk && <p className="bot-bubble-ask"><Shield size={14} aria-hidden /><span>Wants to <strong>{openAsk.title}</strong></span></p>}
-        {!!message.attachments?.length && <div className="bot-message-files"><BotImageFiles files={message.attachments} /><BotOtherFiles files={message.attachments} /></div>}
+        {!!message.attachments?.length && <BotOtherFiles files={message.attachments} />}
         {message.error && <BotErrorLine error={message.error} onAction={onAction} />}
         {stepsOpen && <BotSteps chips={steps} />}
         <div className="bot-bubble-foot">
@@ -365,8 +372,11 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   const last = shown.at(-1)
   const typingStarts = !(last?.kind === 'message' && last.message.author === 'bot')
   const toggleAbout = () => useBotsStore.setState({ aboutOpen: !aboutOpen })
+  // An action on a file that the computer refused ("That file does not exist.") is said above the composer.
+  const fileFailed = useCallback((text: string) => useBotsStore.setState({ error: text, errorBotId: bot.id }), [bot.id])
+  const pictureActions = useCallback((image: LightboxImage) => <BotPictureActions image={image} />, [])
 
-  return <ImageGalleryProvider images={chatImages}><BotFilesProvider botId={bot.id} open={openFile}>
+  return <BotFilesProvider botId={bot.id} open={openFile} failed={fileFailed}><ImageGalleryProvider images={chatImages} actions={pictureActions}>
     {/* The bot's colour tints the quotes of its messages. */}
     <section className={`chat-conversation bot-conversation${typing ? ' is-typing' : ''}`} style={{ '--bot-colour': BOT_COLOUR_HEX[normalizeBotLook(bot.look).colour] } as CSSProperties}>
       <header className="chat-conversation-header">
@@ -452,5 +462,5 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
     {file && <BotFilePane botId={bot.id} path={file} onClose={() => setFile(null)} />}
     {paneOpen && browser && <BotBrowserPane bot={bot} view={browser} />}
     {aboutOpen && <BotAboutPanel bot={bot} />}
-  </BotFilesProvider></ImageGalleryProvider>
+  </ImageGalleryProvider></BotFilesProvider>
 }
