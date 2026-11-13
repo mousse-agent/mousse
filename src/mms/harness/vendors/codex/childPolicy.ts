@@ -182,9 +182,9 @@ export const CODEX_BOT_FEATURES_OFF: readonly string[] = [
   'tool_suggest',
   'skill_search',
   'rollout_budget',
-  'context_management',
-  'stable_environment_tools',
-  'code_mode_tool_search',
+  'token_budget',
+  'deferred_executor',
+  'agent_message_board',
   'use_legacy_landlock'
 ]
 
@@ -212,7 +212,6 @@ export const CODEX_BOT_ACCOUNTED_TOOLS: Readonly<Record<string, string>> = {
   'nested:list_mcp_resource_templates': 'the same',
   'nested:read_mcp_resource': 'the same',
   'nested:clock__curr_time': 'the time',
-  'clock.curr_time': 'the time',
   'collaboration.spawn_agent': 'a subagent: inherits the bot\'s tools and sandbox; Mousse answers none of its asks',
   'collaboration.send_message': 'a message to a subagent',
   'collaboration.followup_task': 'more work for a subagent',
