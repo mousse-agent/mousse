@@ -1,5 +1,5 @@
 import { memo } from "react";
-import { CircleAlert } from "../../../lib/icons";
+import { CircleX } from "../../../lib/icons";
 import { cn } from "./utils/cn";
 
 export type ErrorMessageProps = {
@@ -48,7 +48,7 @@ export const ErrorMessage = memo(function ErrorMessage({
   ) : null;
   return (
     <div className={cn("flex items-start gap-2 text-base", className)}>
-      <CircleAlert size={16} className="mt-[3px] shrink-0 text-[var(--danger)]" />
+      <CircleX size={16} className="mt-[3px] shrink-0 text-[var(--danger)]" />
       <div className="min-w-0">
         <div className="font-medium text-[var(--danger)]">{title}</div>
         <div className="an-error-text mt-0.5 text-an-foreground/80 whitespace-pre-wrap [overflow-wrap:anywhere]">

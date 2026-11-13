@@ -191,6 +191,10 @@ html[data-theme='light'] {
 .an-message-list .an-tool-chrome:has(.an-text-shimmer--active) {
   opacity: 1;
 }
+/* A thought being written reads at the label's colour, not dimmed: its words are what the person follows. */
+.an-message-list .an-tool-chrome:has(.thinking-icon.is-thinking) {
+  opacity: 1;
+}
 /* Cards awaiting the user's decision (quick-action approval) stay at full
    opacity — dimming a call to action to 0.55 buries exactly the card that
    needs attention. Cleared when the card decides (attribute removed). */
