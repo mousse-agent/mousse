@@ -7,7 +7,8 @@ import type { NewThreadChoice, Thread } from '../../shared/types'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useAppStore } from '../stores/appStore'
 import { useChatsStore } from '../stores/chatsStore'
-import { orderedThreadIds } from './threadOrder'
+import { orderedThreadIds, threadAfterArchive } from './threadOrder'
+import { fadeOutThreadRows } from './archiveMotion'
 import { loadProviderSnapshots, pickerListsModel, pickerProviders, projectScope, scopeKey, useProviderSnapshotsStore } from './providerSnapshots'
 
 /**
@@ -160,11 +161,47 @@ export async function togglePinOpenThread(): Promise<void> {
   await window.mousse.threads.pin(thread.id, !thread.pinnedAt)
 }
 
-/** Archives the open thread; it stays open. */
+/** Archives the open thread, and opens the next one in its project (see `archiveThread`). */
 export async function archiveOpenThread(): Promise<void> {
   const thread = openStartedThread()
   if (!thread || thread.settledAt) return
-  await window.mousse.threads.settle(thread.id, true)
+  await archiveThread(thread.id)
+}
+
+/** Resolves once the store shows the thread archived (its update arrived), or after a few seconds. */
+function whenSettled(threadId: string): Promise<void> {
+  const settled = () => Boolean(useAppStore.getState().threads.find((thread) => thread.id === threadId)?.settledAt)
+  if (settled()) return Promise.resolve()
+  return new Promise((resolve) => {
+    const done = () => { clearTimeout(timer); unsubscribe(); resolve() }
+    const timer = setTimeout(done, 3000)
+    const unsubscribe = useAppStore.subscribe(() => { if (settled()) done() })
+  })
+}
+
+/**
+ * Archives a thread. Its sidebar rows fade out and close, so the rows below move up into their place. When it is the
+ * thread open in the pane (or the parent of the open subagent thread), the pane then opens the next thread in its
+ * project, or the one before it when it was the last; a project's only thread stays open. A failed archive brings
+ * the rows back and throws.
+ */
+export async function archiveThread(threadId: string): Promise<void> {
+  const { projects, threads, activeThreadId } = useAppStore.getState()
+  const openRow = activeThreadId ? (openSubagentParentRow(activeThreadId, threads) ?? activeThreadId) : null
+  const excluded = new Set(useChatsStore.getState().snapshot.chats.flatMap((chat) => (chat.threadId ? [chat.threadId] : [])))
+  const next = openRow === threadId ? threadAfterArchive({ projects, threads, threadId, excluded }) : null
+  const rows = fadeOutThreadRows(threadId)
+  try {
+    await Promise.all([window.mousse.threads.settle(threadId, true), rows.finished])
+  } catch (error) {
+    rows.restore()
+    throw error
+  }
+  void whenSettled(threadId).then(() => requestAnimationFrame(rows.release))
+  // Only when the person has not moved on to another thread in the meantime.
+  const now = useAppStore.getState().activeThreadId
+  const stillOpen = now ? (openSubagentParentRow(now, useAppStore.getState().threads) ?? now) === threadId : false
+  if (next && stillOpen) await selectThread(next)
 }
 
 /**
