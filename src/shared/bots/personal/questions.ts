@@ -21,11 +21,14 @@ export interface BotQuestionSpec {
   other: boolean
 }
 
-/** How a question was answered: a choice tapped, or words written in reply. `by`: who answered (later PRs add others). */
+/**
+ * How a question was answered: a choice tapped, or words written in reply. `by`: who answered: the owner on the question
+ * itself, or the bot's chat passing on what the owner wrote there to work that waits on it (`question_answer`).
+ */
 export interface BotQuestionAnswer {
   choice?: string
   text?: string
-  by: 'owner'
+  by: 'owner' | 'chat'
   /** Answered by a tap: the bot's label, never the owner's own words. Kept when the answer is forgotten. */
   tapped?: true
 }
@@ -40,6 +43,10 @@ export interface BotChatQuestion {
   answer?: string
   /** Whether the answer was tapped (`choice`) or written (`text`). */
   answeredWith?: 'choice' | 'text'
+  /** The owner answered it in the chat, which passed it on (a question from work): "Answered in chat: …". */
+  by?: 'chat'
+  /** The bot's work waits on it: the work goes on once it is answered. */
+  waits?: true
 }
 
 export const MAX_QUESTION_CHARS = 600
@@ -50,6 +57,8 @@ export const MAX_CHOICE_DETAIL_CHARS = 120
 
 /** At most one question per chat turn (its activation), however many dispatches it takes. */
 export const MAX_QUESTIONS_PER_CHAT_TURN = 1
+/** A piece of work asks one question at a time: it waits on it, and may ask another once it carries on with the answer. */
+export const MAX_OPEN_QUESTIONS_PER_WORK = 1
 /** At most this many of a bot's questions are open at once. */
 export const MAX_OPEN_QUESTIONS_PER_BOT = 6
 /** At most this many new questions per bot in any 24 hours. */
@@ -61,11 +70,47 @@ export const QUESTIONS_ENOUGH_TEXT = "You've asked enough for now. Decide yourse
 /** `ask_owner`'s answer once the question is kept: it shows under the reply. */
 export const QUESTION_ASKED_TEXT = "The owner sees it under your reply, with its buttons. Don't repeat it in your reply; end your turn."
 
+/** `ask_owner`'s answer in work: the question is in the chat now, and the work waits for the answer. */
+export const QUESTION_WORK_ASKED_TEXT = 'Asked: your owner sees it in the chat, with its buttons. Stop here and end your turn now; you carry on in this thread with their answer.'
+
+/** What every call of work's turn after it asked is refused with: the turn ends, and the answer continues the work. */
+export const QUESTION_END_TURN_TEXT = 'You asked your owner a question. End your turn now; you continue with their answer.'
+
 /** `ask_owner` after `escalate` in the same turn: a tap there would count as Not now for the permission. */
 export const QUESTION_AFTER_ASK_TEXT = 'Ask it once the owner has answered your permission ask. Finish your message now.'
 
-/** `ask_owner` outside a chat turn (work, a scheduled run, a consult): not offered there yet. */
-export const QUESTION_CHAT_ONLY_TEXT = "Not yet: carry on and ask in your report."
+/** `ask_owner` where it is never offered (a scheduled run, a consult, a subagent): the question goes in the report. */
+export const QUESTION_NOT_OFFERED_TEXT = "You can't ask your owner from here: carry on, and ask in your report."
+
+/** `question_answer` after the owner forgot what they wrote in that chat turn: nothing of it is passed on. */
+export const QUESTION_ANSWER_FORGOTTEN_TEXT = "Your owner removed what they wrote, so it can't be passed on. The question stays open for them to answer."
+
+/** The owner's Continue on work that waits for their answer: the answer is the way on. */
+export const QUESTION_WORK_WAITING_TEXT = 'This work waits for your answer to its question. Answer it to let it carry on, or stop it.'
+
+/** One line, cut to `max` characters. */
+function quoteOf(value: string, max: number): string {
+  const line = value.replace(/\s+/g, ' ').trim()
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line
+}
+
+/**
+ * How work that waited on its question hears the answer when it carries on: the question, and the owner's answer (or,
+ * from the chat, what the chat passed on of the owner's words there).
+ */
+export function workAnswerLine(question: string, answer: string, by: BotQuestionAnswer['by']): string {
+  return `Your owner answered your question "${quoteOf(question, 200)}"${by === 'chat' ? ' in the chat' : ''}: ${answer.trim()}`
+}
+
+/** The line work posts when it ends because the question it waited on is gone (forgotten, or withdrawn). */
+export function questionGoneText(title: string): string {
+  return `I stopped "${title}": the question I was waiting on is gone. Ask me again if you still want it.`
+}
+
+/** What the chat is told of a question its work waits on (its situation): its words, its answers, and the work's title. */
+export function waitingQuestionLine(input: { questionId: string; question: string; choices: string; title: string }): string {
+  return `"${input.title}" waits for the owner's answer to your question "${quoteOf(input.question, 160)}"${input.choices ? ` (${input.choices})` : ''} [${input.questionId}]. If the owner answers it in the chat, pass it on with question_answer.`
+}
 
 /** How a question's answers read as text (older apps, notifications, the journal): "Flat A · Flat B · Something else". */
 export function plainChoices(spec: Pick<BotQuestionSpec, 'choices' | 'other'>): string {

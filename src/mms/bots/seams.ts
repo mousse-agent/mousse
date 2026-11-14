@@ -98,7 +98,8 @@ export interface BotToolHost {
     list(botId: string): BotWorkList
     stop(botId: string, workId: string): Promise<'stopped' | 'ended' | 'not_found'>
     /** `from`: the chat activation that passes it on (its owner's message is the note's source). */
-    note(botId: string, workId: string, note: string, from?: string): 'noted' | 'held' | 'ended' | 'not_found'
+    /** `question`: the work waits for the owner's answer to its question and takes nothing else until then. */
+    note(botId: string, workId: string, note: string, from?: string): 'noted' | 'held' | 'ended' | 'not_found' | 'question'
     /**
      * When a note reaches the work: `now` (at its next step, while it runs), `after_compaction` (its runtime is making
      * room in its context: once that ends, within minutes), `step_end` (when its current turn ends: its runtime takes no
@@ -109,12 +110,17 @@ export interface BotToolHost {
   /** `mcp_servers`: the owner's MCP servers the bot may ask for, and whether it holds their tools. Absent: none here. */
   mcpServers?(botId: string, lane: BotLane): Promise<BotMcpListing>
   /**
-   * `ask_owner` (issue #1123): a question to the owner with answers to tap, shown under the turn's reply. `asked` is
-   * false, with why, when it was not kept (a cap, a permission asked first, a turn that is not a chat's). Absent: no
-   * questions here.
+   * `ask_owner` (issue #1123): a question to the owner with answers to tap, shown under a chat turn's reply, or at once
+   * from work, which then waits for the answer. `asked` is false, with why, when it was not kept (a cap, a permission
+   * asked first, a turn never offered it). Absent: no questions here.
    */
   questions?: {
     ask(botId: string, activationId: string, spec: BotQuestionSpec): { asked: boolean; text: string }
+    /**
+     * `question_answer`: a chat turn the owner's own message started passes on to work the answer they gave in the chat
+     * to the question it waits on; `title` is the work's.
+     */
+    relay(botId: string, activationId: string, questionId: string, answer: string): { ok: true; title: string } | { ok: false; text: string }
   }
   /** One-off reminders: said at a time, or work started then. */
   reminders: {
@@ -164,7 +170,11 @@ export interface BotWorkStarted {
 
 /** `work_list`'s answer: what runs or waits now, and the last few that ended. */
 export interface BotWorkList {
-  now: Array<{ workId: string; title: string; status: 'running' | 'queued' | 'waiting_for_internet' | 'paused'; startedAt: string; doing?: string; kind: 'work' | 'schedule' }>
+  /**
+   * `waitsFor: 'answer'`: held while it waits for the owner's answer to `question` (`question_answer` passes on an answer
+   * they gave in the chat).
+   */
+  now: Array<{ workId: string; title: string; status: 'running' | 'queued' | 'waiting_for_internet' | 'paused'; startedAt: string; doing?: string; kind: 'work' | 'schedule'; waitsFor?: 'answer'; question?: { questionId: string; question: string } }>
   recent: Array<{ workId: string; title: string; status: 'done' | 'failed' | 'stopped'; endedAt: string; report?: string }>
 }
 

@@ -956,6 +956,30 @@ function scrubMessageChips(tx: BotStoreTx, botId: string, scrub: (chips: unknown
   }
 }
 
+/**
+ * A forgotten question's bubble (`message_id`) or answer (`answer_message`), as copied elsewhere (issue #1123): the line
+ * that carried the answer to its work (`answer_json.sent`, which names it exactly) goes from that work's dispatch prompts
+ * and the journal rows captured from its thread, the rest of each left as it was; the chat's `question_answer` call that
+ * passed the answer on goes, and with the bubble, the work's `ask_owner` call that asked it. Each is found by the
+ * question's id and its activation, never by how long its words are.
+ */
+function redactQuestionCopies(tx: BotStoreTx, has: (table: string) => boolean, botId: string, question: { id: string; activation_id: string; spec_json: string; answer_json: string | null; message_id: string | null; answer_message: string | null }, messageId: string, text: string): void {
+  const sentOf = parseJson(question.answer_json)?.sent as { line?: unknown } | undefined
+  const sent = typeof sentOf?.line === 'string' && sentOf.line ? sentOf.line : undefined
+  if (sent && has('bot_dispatches'))
+    tx.statement("UPDATE bot_dispatches SET prompt_json = json_set(prompt_json, '$.text', replace(json_extract(prompt_json, '$.text'), ?, ?)) WHERE activation_id = ? AND instr(json_extract(prompt_json, '$.text'), ?) > 0")
+      .run(sent, text, question.activation_id, sent)
+  if (!has('bot_journal')) return
+  if (sent) tx.statement('UPDATE bot_journal SET text = replace(text, ?, ?) WHERE bot_id = ? AND activation_id = ? AND instr(text, ?) > 0').run(sent, text, botId, question.activation_id, sent)
+  // A call of Mousse's tool `tool`, as each runtime names it: bare (Pi), or `mcp__<server>__<tool>` (Claude Code, Codex).
+  const redactCalls = (tool: string, where: string, ...params: string[]) =>
+    tx.statement(`UPDATE bot_journal SET text = ?, keys = '', json = NULL, redacted_at = COALESCE(redacted_at, ?) WHERE bot_id = ? AND kind = 'tool_call' AND redacted_at IS NULL
+      AND (json_extract(json, '$.tool') = ? OR substr(json_extract(json, '$.tool'), -length(?)) = ?) AND ${where}`).run(text, new Date().toISOString(), botId, tool, `__${tool}`, `__${tool}`, ...params)
+  if (question.answer_message === messageId) redactCalls('question_answer', "json_extract(json, '$.input.questionId') = ?", question.id)
+  const asked = parseJson(question.spec_json)?.question
+  if (question.message_id === messageId && typeof asked === 'string') redactCalls('ask_owner', "activation_id = ? AND json_extract(json, '$.input.question') = ?", question.activation_id, asked)
+}
+
 function defaultRedactMessage(tx: BotStoreTx, botId: string, messageId: string, text: string): void {
   const has = (table: string) => Boolean(tx.statement("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table))
   if (!has('bot_messages')) return
@@ -984,7 +1008,21 @@ function defaultRedactMessage(tx: BotStoreTx, botId: string, messageId: string, 
   // A question the forgotten message carried keeps no copy of its words or answers, and no longer waits for an answer; an
   // answer the forgotten message gave keeps no copy either (issue #1123).
   if (has('bot_questions')) {
-    tx.statement("UPDATE bot_questions SET spec_json = json_object('question', ?, 'choices', json('[]'), 'other', json('false')), status = CASE WHEN status IN ('open', 'moved_on') THEN 'withdrawn' ELSE status END WHERE bot_id = ? AND message_id = ?").run(text, botId, messageId)
+    // First, while the question and its answer are still whole: the copies its work and the chat made of them, found by
+    // the question, not by its words (an answer may be as short as "Flat B").
+    const touched = tx.statement('SELECT id, activation_id, spec_json, answer_json, message_id, answer_message FROM bot_questions WHERE bot_id = ? AND (message_id = ? OR answer_message = ?)')
+      .all(botId, messageId, messageId) as Array<{ id: string; activation_id: string; spec_json: string; answer_json: string | null; message_id: string | null; answer_message: string | null }>
+    for (const question of touched) redactQuestionCopies(tx, has, botId, question, messageId, text)
+    // The copy of that line kept with the answer quotes the question too: it goes with the bubble.
+    tx.statement("UPDATE bot_questions SET answer_json = json_remove(answer_json, '$.sent') WHERE bot_id = ? AND message_id = ? AND answer_json IS NOT NULL").run(botId, messageId)
+    // Work that waits on the forgotten question, or has its answer still to read, has nothing to go on with: the question
+    // is withdrawn, and the engine ends that work with a line (`settleStrandedWork`).
+    tx.statement(`UPDATE bot_questions SET spec_json = json_object('question', ?, 'choices', json('[]'), 'other', json('false')),
+      status = CASE WHEN status IN ('open', 'moved_on') OR (lane = 'run' AND status = 'answered' AND read_at IS NULL) THEN 'withdrawn' ELSE status END WHERE bot_id = ? AND message_id = ?`).run(text, botId, messageId)
+    // An answer work has not read yet is taken back: the question is open again, and its work waits for an answer again.
+    if (has('bot_activations')) tx.statement(`UPDATE bot_activations SET end_reason = 'question' WHERE status = 'blocked' AND end_reason = 'question_answered'
+      AND id IN (SELECT activation_id FROM bot_questions WHERE bot_id = ? AND answer_message = ? AND lane = 'run' AND status = 'answered' AND read_at IS NULL)`).run(botId, messageId)
+    tx.statement("UPDATE bot_questions SET status = 'open', answer_json = NULL, answer_message = NULL, answered_at = NULL WHERE bot_id = ? AND answer_message = ? AND lane = 'run' AND status = 'answered' AND read_at IS NULL").run(botId, messageId)
     tx.statement("UPDATE bot_questions SET answer_json = CASE WHEN json_extract(answer_json, '$.tapped') OR json_extract(answer_json, '$.choice') IS NOT NULL THEN json_object('by', json_extract(answer_json, '$.by'), 'tapped', json('true'), 'redacted', json('true')) ELSE json_object('by', json_extract(answer_json, '$.by'), 'redacted', json('true')) END WHERE bot_id = ? AND answer_message = ? AND answer_json IS NOT NULL").run(botId, messageId)
   }
   // A note the forgotten message passed to work: gone from the note and from the prompt that carried it.

@@ -162,6 +162,11 @@ export interface BotWorkItem {
   id: string
   title: string
   status: 'running' | 'queued' | 'waiting_for_internet' | 'paused'
+  /**
+   * Why it is held (`paused`): `answer`, it waits for the owner's answer to the question it asked them. Absent from older
+   * services, whose apps show it as held.
+   */
+  waitsFor?: 'answer'
   startedAt: string
   /** A scheduled run rather than work the chat started. */
   scheduled?: true

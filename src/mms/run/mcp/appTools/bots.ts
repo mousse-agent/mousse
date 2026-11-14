@@ -3,9 +3,9 @@ import { Type, type Tool } from '@earendil-works/pi-ai'
 import { BOT_DEPTHS, BOT_WORK_LEVELS, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, MAX_BOT_SCHEDULES, type BotDepth, type BotLane, type BotModelPick, type BotModelSlotKey, type BotModelSlots, type BotSchedule } from '../../../../shared/bots/personal/definition'
 import { entriesOf, modelsNamedBy, namedOn, ownerNamesModel, pickReasonText, plainLabel, workLevelOf, type BotModelRows, type NamedModel } from '../../../../shared/bots/personal/modelSlots'
 import type { BotModelOption, BotWorkChoices } from '../../../../shared/bots/personal/methods'
-import { BOT_IMAGE_TOOL, BOT_MCP_LIST_TOOL, BOT_QUESTION_TOOL, MAX_BOT_SUBAGENTS_AT_ONCE, MAX_BOT_SUBAGENTS_PER_DAY, MAX_BOT_SUBAGENTS_PER_WORK } from '../../../../shared/bots/personal/manifest'
+import { BOT_IMAGE_TOOL, BOT_MCP_LIST_TOOL, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL, MAX_BOT_SUBAGENTS_AT_ONCE, MAX_BOT_SUBAGENTS_PER_DAY, MAX_BOT_SUBAGENTS_PER_WORK } from '../../../../shared/bots/personal/manifest'
 import type { BotSubagentView } from '../../../../shared/bots/personal/authority'
-import { MAX_CHOICE_DETAIL_CHARS, MAX_CHOICE_LABEL_CHARS, MAX_QUESTION_CHARS, MAX_QUESTION_CHOICES, MIN_QUESTION_CHOICES, QUESTION_CHAT_ONLY_TEXT, questionSpecOf } from '../../../../shared/bots/personal/questions'
+import { MAX_CHOICE_DETAIL_CHARS, MAX_CHOICE_LABEL_CHARS, MAX_QUESTION_CHARS, MAX_QUESTION_CHOICES, MIN_QUESTION_CHOICES, QUESTION_NOT_OFFERED_TEXT, questionSpecOf } from '../../../../shared/bots/personal/questions'
 import { shortModelName } from '../../../../shared/modelNames'
 import { botScheduleLabel } from '../../../../shared/scheduleLabel'
 import { botScheduleProblem } from '../../../scheduled/botJobs'
@@ -218,7 +218,7 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: BOT_QUESTION_TOOL,
-    description: `Ask your owner a question they answer with a tap: ${MIN_QUESTION_CHOICES} to ${MAX_QUESTION_CHOICES} short choices (or yesNo), and "Other…" so they can write their own answer. Ask only when the answer changes what you do; settle a minor choice yourself and say what you picked. Never use it for a permission: that is escalate, and a "Yes" here allows nothing. It shows under your reply as its own message: don't repeat the question in your reply, and end your turn. Their answer comes as their next message. One question per message.`,
+    description: `Ask your owner a question they answer with a tap: ${MIN_QUESTION_CHOICES} to ${MAX_QUESTION_CHOICES} short choices (or yesNo), and "Other…" so they can write their own answer. Ask only when the answer changes what you do; settle a minor choice yourself and say what you picked. Never use it for a permission: that is escalate, and a "Yes" here allows nothing. Ask as yourself, in the first person. In the chat it shows under your reply as its own message: don't repeat the question in your reply, and end your turn; their answer comes as their next message. In work it reaches them at once and your work waits for the answer: end your turn, and you carry on in this thread with it. One question at a time.`,
     parameters: Type.Object({
       question: Type.String({ description: `The question, at most ${MAX_QUESTION_CHARS} characters. It must read on its own: the owner may see it in a notification.` }),
       choices: Type.Optional(Type.Array(Type.Union([
@@ -230,6 +230,14 @@ export const BOT_TOOLS: Tool[] = [
       ]), { description: `${MIN_QUESTION_CHOICES} to ${MAX_QUESTION_CHOICES} answers to tap, each different.` })),
       yesNo: Type.Optional(Type.Literal(true, { description: 'The answers are Yes and No (instead of choices).' })),
       other: Type.Optional(Type.Boolean({ description: 'Offer "Other…" for an answer in their own words. Default true.' }))
+    })
+  },
+  {
+    name: BOT_QUESTION_ANSWER_TOOL,
+    description: 'When the owner answers in the chat a question your work waits on (your situation lists each one, with its id), pass their answer on to that work: it carries on with it. Only their answer, in their words; never your own guess. If their words could answer more than one question, ask them which first.',
+    parameters: Type.Object({
+      questionId: Type.String({ description: 'The question\'s id, from your situation.' }),
+      answer: Type.String({ description: 'The owner\'s answer, in their words.' })
     })
   },
   {
@@ -388,6 +396,8 @@ const NOT_A_BOT = 'Only a bot can use this.'
 const NO_PICTURES_HERE = "Pictures can't be made here. Nothing was made."
 const NO_IMAGE_MODEL_LINE = "Your owner hasn't picked an image model for you. Tell them they can pick one in About → Runs on, in the Images row."
 const CHAT_ONLY = 'Only your chat hands out work and sets reminders. In a run, do the work yourself and say in your report what should happen next.'
+/** `question_answer` outside the chat: only the chat hears the owner's words to pass on. */
+const ANSWER_CHAT_ONLY = 'Only your chat passes on your owner\'s answers to your work.'
 const OWNER_ONLY = 'Only the owner can change this, in your chat. Suggest it in your report instead.'
 const error = (text: string): ToolOutcome => ({ text, isError: true })
 
@@ -430,7 +440,7 @@ function workTitleOf(call: BotCall, workId: string): string | undefined {
  * owner is in the first person ("I'll use that tab from here on") rather than about a job that "knows" something. A
  * note that came too late, or to work that stopped part-way, says so, and offers to do the job again.
  */
-export function workNoteAnswer(outcome: 'now' | 'after_compaction' | 'step_end' | 'start' | 'ended' | 'held', note: string, title?: string): string {
+export function workNoteAnswer(outcome: 'now' | 'after_compaction' | 'step_end' | 'start' | 'ended' | 'held' | 'question', note: string, title?: string): string {
   const job = title ? `"${title}"` : 'that job'
   const line = note.replace(/\s+/g, ' ').trim()
   const cut = line.length > 300 ? `${line.slice(0, 299).trimEnd()}…` : line
@@ -444,6 +454,7 @@ export function workNoteAnswer(outcome: 'now' | 'after_compaction' | 'step_end' 
     case 'start': return `When you start on ${job} (or carry on with it), you also do this: ${said} ${speak} ("I'll … when I get to it").`
     case 'ended': return `You had already finished ${job} before the owner said this, so it was not used. Tell them so as yourself, and offer to do it again with this ("I'd already finished it; want me to do it again with that?").`
     case 'held': return `You stopped part-way on ${job} and it can't go on as it is, so this can't be used there. Tell them so as yourself, and offer to stop it and start again with this.`
+    case 'question': return `${job.charAt(0).toUpperCase()}${job.slice(1)} waits for the owner's answer to the question you asked them, and takes nothing else until then, so this was not added. If their words answer that question, pass them on with question_answer (its id is in your situation). Otherwise tell them, as yourself, that you need their answer to it first.`
   }
 }
 
@@ -851,18 +862,37 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         handler: async (args, ctx) => {
           const call = botCall(deps, ctx)
           if (isOutcome(call)) return call
-          // Work, a scheduled run and a consult are not offered it in this build; their questions go in the report.
-          if (call.lane !== 'chat' || !call.deps.host.questions) return error(QUESTION_CHAT_ONLY_TEXT)
+          // A chat turn and work the owner asked for; a scheduled run, a consult and a subagent put theirs in the report.
+          if (!call.deps.host.questions) return error(QUESTION_NOT_OFFERED_TEXT)
           const spec = questionSpecOf(args)
           if ('problem' in spec) return error(spec.problem)
           const asked = call.deps.host.questions.ask(call.botId, call.activationId, spec)
           return asked.asked ? json({ asked: true, note: asked.text }) : error(asked.text)
         }
       }),
-      // A chat turn holds it (`compileBotThread`); work, a consult and a subagent never list it.
+      // A chat turn and work hold it (`compileBotThread`); a scheduled run, a consult and a subagent never list it.
       listed: (listing) => listing.botRole === 'activation' && Boolean(listing.botTurnTools?.has(BOT_QUESTION_TOOL)),
-      available: (turn) => (turn.bot?.appTools.has(BOT_QUESTION_TOOL) && deps?.() ? true : QUESTION_CHAT_ONLY_TEXT),
+      available: (turn) => (turn.bot?.appTools.has(BOT_QUESTION_TOOL) && deps?.() ? true : QUESTION_NOT_OFFERED_TEXT),
       offered: (turn) => Boolean(turn.bot?.appTools.has(BOT_QUESTION_TOOL) && deps?.())
+    },
+    {
+      ...ownTool(byName.get(BOT_QUESTION_ANSWER_TOOL)!, deps, {
+        class: 'mutation',
+        describe: () => 'Pass on an answer',
+        handler: async (args, ctx) => {
+          const call = botCall(deps, ctx)
+          if (isOutcome(call)) return call
+          if (call.lane !== 'chat' || !call.deps.host.questions) return error(ANSWER_CHAT_ONLY)
+          if (typeof args.questionId !== 'string' || !args.questionId || typeof args.answer !== 'string' || !args.answer.trim()) return error('question_answer needs the question\'s id and the owner\'s answer.')
+          const relayed = call.deps.host.questions.relay(call.botId, call.activationId, args.questionId, args.answer)
+          if (!relayed.ok) return error(relayed.text)
+          return json({ ok: true, note: `"${relayed.title}" carries on with their answer. Tell the owner in a few words, as yourself, that you're on it again ("Got it, carrying on with the flats").` })
+        }
+      }),
+      // Only a chat turn holds it, with `ask_owner`.
+      listed: (listing) => listing.botRole === 'activation' && Boolean(listing.botTurnTools?.has(BOT_QUESTION_ANSWER_TOOL)),
+      available: (turn) => (turn.bot?.appTools.has(BOT_QUESTION_ANSWER_TOOL) && deps?.() ? true : ANSWER_CHAT_ONLY),
+      offered: (turn) => Boolean(turn.bot?.appTools.has(BOT_QUESTION_ANSWER_TOOL) && deps?.())
     },
     ownTool(byName.get('use_model')!, deps, {
       class: 'mutation',

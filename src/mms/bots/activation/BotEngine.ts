@@ -68,7 +68,7 @@ import { addedPermissions, intersectManifest, manifestSubset, narrowManifest } f
 import { BOT_COMPUTER_OPEN, BOT_COMPUTER_SHUT, limitCutLead, notOnThisComputerText, stoppedForLimitText, switchedOff, whatToAskText, withinComputerLimit, type BotComputerLimit, type BotComputerSwitch } from '../../../shared/bots/personal/computerLimit'
 import { allPinned, copyPick, imagePickOf, isPinned, limitFamilyOf, limitOnPick, pickProblemText, plainLabel, rowName, samePick, samePickTarget, sameStoredPick, slotsOf, slotsWith, startDepthOf, stuckRowsOf, turnModelOf, UNPICKED_SLOTS, withImagePick, withSlots, type BotPickMiss, type BotStuckEntry, type BotTurnModel } from '../../../shared/bots/personal/modelSlots'
 import type { BotModelOption } from '../../../shared/bots/personal/methods'
-import { MAX_NEW_QUESTIONS_PER_DAY, MAX_OPEN_QUESTIONS_PER_BOT, MAX_QUESTIONS_PER_CHAT_TURN, QUESTION_AFTER_ASK_TEXT, QUESTION_ASKED_TEXT, QUESTION_CHAT_ONLY_TEXT, QUESTIONS_ENOUGH_TEXT, type BotQuestionSpec } from '../../../shared/bots/personal/questions'
+import { MAX_NEW_QUESTIONS_PER_DAY, MAX_OPEN_QUESTIONS_PER_BOT, MAX_OPEN_QUESTIONS_PER_WORK, MAX_QUESTIONS_PER_CHAT_TURN, plainChoices, QUESTION_AFTER_ASK_TEXT, QUESTION_ASKED_TEXT, QUESTION_END_TURN_TEXT, QUESTION_ANSWER_FORGOTTEN_TEXT, QUESTION_NOT_OFFERED_TEXT, QUESTION_WORK_ASKED_TEXT, QUESTION_WORK_WAITING_TEXT, questionGoneText, QUESTIONS_ENOUGH_TEXT, waitingQuestionLine, workAnswerLine, type BotQuestionAnswer, type BotQuestionSpec } from '../../../shared/bots/personal/questions'
 import type { LlmProviderOption } from '../../../shared/settings'
 import { botAllowedOf, type BotAllowed } from '../instructions'
 import { isProviderTurnCap, type Enforceability, type HarnessError, type ProviderSelection, type RunPolicy } from '../../../shared/harness/types'
@@ -77,7 +77,7 @@ import type { RunEngine } from '../../run/RunEngine'
 import { TERMINAL_RUN_STATUSES, type BotTurnPayload, type RunRecord } from '../../run/types'
 import { PATH_ARGUMENTS as BOT_PATH_ARGUMENTS, createBotAuthority } from '../authority/botAuthority'
 import { assertInsideRoots } from '../../agents/WorkspaceAccessPolicy'
-import { type BotChatImages, BotChatService, messageInput } from '../chat/BotChatService'
+import { type BotChatImages, BotChatService, chatInput, messageInput } from '../chat/BotChatService'
 import { askFingerprintOf, BotChatProjection, clockTime, starterManifest } from '../chat/projection'
 import { BotDefinitionError, upgradeDefinitionV1, type BotDefinitionEntry, type BotDefinitionStore } from '../definitions/BotDefinitionStore'
 import { chipCallOf } from '../activity/BotActivitySink'
@@ -87,7 +87,7 @@ import { toolArgsDigest } from '../../run/tools/argsDigest'
 import { isCodexBotRefusal } from '../../../shared/harness/codexBotVersion'
 import { BOT_RUN_REPORT_LINE } from '../memory/contextPack'
 import type { BotActivityContext, BotActivitySink, BotContextProvider, BotDispatchEnd, BotJournal, BotJournalInput, BotMcpListing, BotMemoryAdmin, BotModelChange, BotModelProblem, BotModelResolution, BotModelResolver, BotProcessSupervision, BotToolHost, BotWorkList, BotWorkModel, BotWorkStarted } from '../seams'
-import { workWaits, type BotActivationRow, type BotDispatchRow, type BotSubagentSpec, type BotEntryLimit, type BotEscalationRow, type BotMessageRow, type BotModelState, type BotReminderRow, type BotStore, type BotStoredError } from '../store/BotStore'
+import { workWaits, type BotActivationRow, type BotDispatchRow, type BotSubagentSpec, type BotEntryLimit, type BotEscalationRow, type BotMessageRow, type BotModelState, type BotQuestionRow, type BotReminderRow, type BotStore, type BotStoredError } from '../store/BotStore'
 import { BotCounterScope, BotSpendScope, type ActivationLimits } from '../store/scopes'
 import { isConnectionFailure, type BotConnectivity } from './connectivity'
 import { BotScheduleError, type BotScheduleBook, type BotScheduleEntry } from '../../scheduled/botJobs'
@@ -480,6 +480,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * chips, and their last words for a message that has none of its own (`continueAfterTurnCap`). Kept in memory.
    */
   private readonly carried = new Map<string, { chips: BotChip[]; text?: string }>()
+  /**
+   * Work that asked its owner a question (`ask_owner`), by activation: the main dispatch it asked in. Every later call of
+   * that dispatch is refused so the turn ends (`QUESTION_END_TURN_TEXT`), and the answer continues the work. In memory
+   * only: after a restart that dispatch has ended.
+   */
+  private readonly askedIn = new Map<string, number>()
   /**
    * `changed` with `{botId?, activationId?}` after every change (`bots.changed`), `message` with
    * `{botId, message}` for every new or changed chat row (`bots.message`), `activity` with
@@ -1407,7 +1413,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         console.warn('a bot\'s models could not be checked', { botId, error: error instanceof Error ? error.message : String(error) })
       }
     }
-    // Waiting work that nothing would wake or end ends now, with a line.
+    // Waiting work that nothing would wake or end (its ask's answer lost, its question forgotten) ends now, with a line.
     this.settleStrandedWork()
     for (const botId of this.waitingBots()) {
       try {
@@ -1443,6 +1449,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     })
     this.clearInternetCheck(activationId)
     await this.stopRun(row)
+    // The question waiting work had asked was withdrawn with it: its bubble shows that in every window.
+    this.republishWorkQuestions(row)
     // A run waiting for the internet has no turn whose end would clean up after it.
     if (row.status !== 'running') this.cleanup(row)
     else if (row.offline && !this.live.has(activationId)) {
@@ -1495,12 +1503,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * The owner's work that waits for a run slot now, outside the queue: work allowed to go on (more room, or its usage
-   * limit's reset) whose last turn is still letting go. A scheduled run leaves the last free slot to it.
+   * The owner's work that waits for a run slot now, outside the queue: work allowed to go on (more room, its question
+   * answered, or its usage limit's reset) whose last turn is still letting go. A scheduled run leaves the last free slot
+   * to it.
    */
   private ownerWorkWaits(botId: string, except?: string): boolean {
-    return this.store.laneActivations(botId, 'run', ['blocked']).some((row) => row.id !== except && workWaits(row) && runRank(row) === 0 &&
-      (row.endReason === 'room_allowed' || (row.endReason === 'usage_limit' && this.usageResumable(row))))
+    return this.store.laneActivations(botId, 'run', ['blocked']).some((row) => row.id !== except && workWaits(row) && runRank(row) === 0 && this.mayGoOn(row))
+  }
+
+  /** Whether waiting work may go on now: more room was allowed, its question was answered, or its usage limit reset. */
+  private mayGoOn(row: BotActivationRow): boolean {
+    return row.endReason === 'room_allowed' || row.endReason === 'question_answered' || (row.endReason === 'usage_limit' && this.usageResumable(row))
   }
 
   /**
@@ -1536,8 +1549,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (!stuck.has(row.botId)) stuck.set(row.botId, this.store.registry(row.botId)?.error?.code === 'bot_journal_failed')
       return !stuck.get(row.botId) && this.runSlotFree(row)
     }
-    const waiting = this.store.activationsWith(['blocked']).filter((row) => row.lane === 'run' && !tried.has(row.id) && workWaits(row) && this.allRunsEnded(row) &&
-      (row.endReason === 'room_allowed' || (row.endReason === 'usage_limit' && this.usageResumable(row)))).sort(runOrder)
+    const waiting = this.store.activationsWith(['blocked']).filter((row) => row.lane === 'run' && !tried.has(row.id) && workWaits(row) && this.allRunsEnded(row) && this.mayGoOn(row)).sort(runOrder)
     const resume = waiting.find(may)
     if (resume) return { resume }
     const queued = this.store.activationsWith(['queued']).filter((row) => row.lane === 'run').sort(runOrder).find(may)
@@ -2171,7 +2183,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // A chat turn is the bot's front desk: it hands what takes long to work (docs/plans/bot-always-free.md).
       // The owner's threads: reading in every lane; starting, messaging and stopping only in a chat turn the owner's own
       // message started (`chat:`), never in work, a reminder's work, a schedule or the bot's first message.
-      botTools: { escalate: true, consult: definition.context.length > 0, memory: true, frontDesk: row.lane === 'chat', threads: ownerChatTurn(row) ? 'all' : 'read', images: this.imagePick(row.botId) !== null, applets: true, subagents: row.lane === 'run', questions: row.lane === 'chat' },
+      botTools: { escalate: true, consult: definition.context.length > 0, memory: true, frontDesk: row.lane === 'chat', threads: ownerChatTurn(row) ? 'all' : 'read', images: this.imagePick(row.botId) !== null, applets: true, subagents: row.lane === 'run', questions: asksOwner(row) },
       limit
     })
     if (!compiled.ok) return this.block(row, 'policy_unenforceable', compiled.error.reason ?? compiled.error.message)
@@ -2864,8 +2876,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // A subagent asks nobody: what its work lacks is refused with no card and no count against the asks, and it says so in
     // its result. A wall of the activation's state (ended, paused, revoked) or this computer's limit stays as it is.
     const subagent = input.role === 'subagent'
+    // Work that asked its owner a question in this dispatch ends its turn: every later call is refused (never a wall,
+    // which would cut the turn as an interruption), and the answer continues it. It only refuses; it never allows.
+    const endTurn = (): string | undefined => (input.role === 'activation' && this.askedIn.get(row.id) === input.mainN ? QUESTION_END_TURN_TEXT : undefined)
     const check = (call: NormalisedCall): BotCheck => {
       this.progress(row.id)
+      const stop = endTurn()
+      if (stop) return { ok: false, refused: { text: stop, askId: '' } }
       const decided = base.check(call)
       if (decided.ok) {
         observe(call)
@@ -2913,6 +2930,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       },
       checkAny: (calls: readonly NormalisedCall[]) => {
         this.progress(row.id)
+        const stop = endTurn()
+        if (stop) return { ok: false, refused: { text: stop, askId: '' } }
         let refused: BotCheckDenied | undefined
         for (const call of calls) {
           const decided = base.check(call)
@@ -2927,6 +2946,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       },
       escalate: (request) => {
         this.progress(row.id)
+        const stop = endTurn()
+        if (stop) return stop
         const problem = askProblem(request.permission)
         if (problem) return `${problem} ${whatToAskText(this.limit())}`
         // A new bot's first message answers no request: it asks once the owner wants something that needs more.
@@ -3476,10 +3497,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /**
    * Ends work that waits to go on (inside the caller's transaction): failed with `reason`, journaled, and, when `line`
-   * is given, one plain chat line that says why, answering the message that asked for it.
+   * is given, one plain chat line that says why, answering the message that asked for it. `from`: the statuses it may end
+   * from (work whose question was forgotten may still be running its asking turn).
    */
-  private endWaitingInTx(row: BotActivationRow, reason: string, line?: string): BotActivationRow | undefined {
-    if (!this.store.moveActivation(row.id, ['blocked'], 'failed', { endReason: reason })) return undefined
+  private endWaitingInTx(row: BotActivationRow, reason: string, line?: string, from: readonly BotActivationRow['status'][] = ['blocked']): BotActivationRow | undefined {
+    if (!this.store.moveActivation(row.id, from, 'failed', { endReason: reason })) return undefined
     this.roomKeys.delete(row.id)
     this.usageWaits.delete(row.id)
     if (line) this.chat.post({
@@ -3519,6 +3541,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         } else if (row.endReason === 'usage_limit') {
           const registry = this.store.registry(row.botId)
           stranded = registry?.pausedReason === 'usage_limit' && !registry.pausedUntil
+        } else if (row.endReason === 'question' || row.endReason === 'question_answered') {
+          // Its question forgotten or withdrawn: nothing would carry it on, and it says so.
+          if (!this.store.workQuestion(row.id)) {
+            const ended = this.recorded(row, () => this.endWaitingInTx(row, 'question_gone', questionGoneText(this.workTitle(row))))
+            if (ended) this.afterEnd(ended)
+          }
+          continue
         }
         if (!stranded) continue
         const ended = this.recorded(row, () => this.endWaitingInTx(row, 'nothing_to_wait_for', `I stopped "${this.workTitle(row)}": nothing could let it carry on any more. Ask me again if you still want it.`))
@@ -3527,6 +3556,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         console.warn('waiting bot work could not be checked', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
       }
     }
+  }
+
+  /** After the owner forgot something: work whose question went with it ends now, with its line (`settleStrandedWork`). */
+  afterForget(): void {
+    this.settleStrandedWork()
   }
 
   /** When work started to wait: its last turn's end (or start), else when it was asked for (its first turn never went out). */
@@ -3569,6 +3603,16 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private async resumeWork(row: BotActivationRow): Promise<void> {
     // A permission the owner allowed after the work was refused it reaches it now, and the work is told.
     const allowed = this.allowedSinceRefused(row)
+    // Its question answered: it goes on with the answer (`continueWith` sends it once). One whose question is gone ends.
+    if (row.endReason === 'question_answered') {
+      if (!this.store.workQuestion(row.id)) {
+        const ended = this.recorded(row, () => this.endWaitingInTx(row, 'question_gone', questionGoneText(this.workTitle(row))))
+        if (ended) this.afterEnd(ended)
+        return
+      }
+      await this.continueWith(row.id, ['blocked'], { questionAnswered: true, ...(allowed.length ? { allowed } : {}) })
+      return
+    }
     if (row.endReason !== 'usage_limit') {
       await this.continueWith(row.id, ['blocked'], { moreRoom: true, ...(allowed.length ? { allowed } : {}) })
       return
@@ -4283,11 +4327,20 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const next = this.recorded(row, () => {
         noted = !reload && run.status === 'completed' && ((row.lane === 'run' && this.store.pendingWorkNotes(row.id).length > 0) || allowed.length > 0) && (this.remainingMs(row) ?? 0) >= 2 * ACTIVE_TIME_CHUNK_MS
         const unknown = this.store.unknownCalls(row.id).some((call) => !call.acknowledged)
+        // Work that asked its owner a question (`ask_owner`) waits for the answer, holding no run slot, and never reports
+        // now: its question's bubble is what the owner sees. Answered while its turn was ending, it goes on at once.
+        const question = !reload && run.status === 'completed' && row.lane === 'run' ? this.store.workQuestion(row.id) : undefined
+        // Its question forgotten while this turn was still ending: the work has nothing to go on with, and ends saying so.
+        const forgotten = !reload && run.status === 'completed' && row.lane === 'run' && !question && this.store.forgottenWorkQuestion(row.id) !== undefined
         if (unknown || run.status === 'uncertain') {
           this.store.moveActivation(row.id, ['running'], 'paused', { endReason: run.status === 'uncertain' && !unknown ? 'uncertain' : 'unknown_calls', ...(text !== undefined ? { result: text } : {}) })
         } else if (openWalls.length) {
           // The chat turn asked (`escalate`): it waits for the owner with every card on its message.
           this.store.moveActivation(row.id, ['running'], 'waiting_grant', { endReason: 'wall', ...(text !== undefined ? { result: text } : {}) })
+        } else if (question) {
+          this.store.moveActivation(row.id, ['running'], 'blocked', { endReason: question.status === 'open' ? 'question' : 'question_answered' })
+        } else if (forgotten) {
+          this.endWaitingInTx(row, 'question_gone', questionGoneText(this.workTitle(row)), ['running'])
         } else if (noted) {
           // What this turn found is its result for now: a late final message replaces it, never an older turn's text.
           this.store.moveActivation(row.id, ['running'], 'running', { result: text ?? '' })
@@ -4303,6 +4356,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         return this.store.activation(row.id)!
       })
       if (!next) return
+      if (next.status === 'blocked' && workWaits(next)) return this.parkForQuestion(next, main)
+      // Ended because its question was forgotten: its line says so, and the turn's last words are not posted.
+      if (next.endReason === 'question_gone') {
+        this.drained.delete(`${row.id}:${main.n}`)
+        this.lateTexts.delete(`${row.id}:${main.n}`)
+        return this.afterEnd(next)
+      }
       // What it has is posted first, so a continuation that fails or is stopped never loses it; then the notes continue
       // the same thread, and its report follows with the change.
       this.postReply(next, main, text, options.expectText === true)
@@ -4437,6 +4497,45 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       console.warn('a bot message could not be saved', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
       if (isJournalFailure(error)) this.journalFailed(row)
     }
+  }
+
+  /**
+   * How work hears the answer to its question (`workAnswerLine`): the label tapped, the owner's words with the files they
+   * sent (rebuilt from their message, as a chat input is), or what the chat passed on of what they wrote there.
+   */
+  private workAnswerOf(question: BotQuestionRow): string {
+    const answer = question.answer
+    const from = answer?.by === 'owner' && answer.choice === undefined && question.answerMessage ? this.store.message(question.answerMessage) : undefined
+    const words = answer?.redacted ? '(the owner has since removed their answer)' : answer?.choice ?? (from ? chatInput(from.text, from.attachments ?? undefined) : answer?.text) ?? ''
+    const line = workAnswerLine(question.spec.question, words, answer?.by ?? 'owner')
+    return /[.!?…)"”]$/.test(line) ? line : `${line}.`
+  }
+
+  /**
+   * Work that asked its owner a question and stopped (`advance`, or a continuation that found it still open): it waits
+   * without holding a run slot (`question`), or goes on once one is free when it was answered meanwhile
+   * (`question_answered`, `pump`). The turn's last words are not posted, as its question's bubble is what the owner sees;
+   * its chips go with its next message (`carried`), as after the turn cap.
+   */
+  private parkForQuestion(row: BotActivationRow, main?: BotDispatchRow): void {
+    if (main) {
+      const key = `${row.id}:${main.n}`
+      const before = this.carried.get(row.id)
+      const stoppedChip = this.reportChips.get(key)
+      const chips = [...(before?.chips ?? []), ...(this.drained.get(key) ?? []), ...(stoppedChip ? [stoppedChip] : [])]
+      if (chips.length || before?.text) this.carried.set(row.id, { chips, ...(before?.text ? { text: before.text } : {}) })
+      this.reportChips.delete(key)
+      this.drained.delete(key)
+      this.lateTexts.delete(key)
+    }
+    this.askedIn.delete(row.id)
+    this.letGoOfBrowser(row)
+    this.packs.delete(row.id)
+    // Its question's bubble says the work waits on it now.
+    const bubble = this.store.workQuestion(row.id)?.messageId
+    if (bubble) this.chat.republish(bubble)
+    this.changed({ botId: row.botId, activationId: row.id })
+    this.pumpLater(row.botId)
   }
 
   /**
@@ -4645,7 +4744,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * Continue) and the remaining time (under 15 s is a budget wall), then writes the dispatch; the
    * run follows through `sendWithStart`, continuing the previous main run.
    */
-  private async continueWith(activationId: string, from: readonly BotActivationRow['status'][], input: { answers?: BotEscalationRow[]; restart?: boolean; acknowledgeUncertain?: boolean; reload?: boolean; usageRetry?: boolean; ownerText?: string; network?: boolean; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean; limitCut?: BotComputerSwitch[] }): Promise<'sent' | 'paused' | 'wall' | 'none'> {
+  private async continueWith(activationId: string, from: readonly BotActivationRow['status'][], input: { answers?: BotEscalationRow[]; restart?: boolean; acknowledgeUncertain?: boolean; reload?: boolean; usageRetry?: boolean; ownerText?: string; network?: boolean; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean; limitCut?: BotComputerSwitch[]; questionAnswered?: boolean }): Promise<'sent' | 'paused' | 'wall' | 'none'> {
     const row = this.store.activation(activationId)
     if (!row || !from.includes(row.status)) return 'none'
     const definition = this.host.definitions.revision(row.botId, row.revision)
@@ -4657,7 +4756,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const uncertain = previousRun?.status === 'uncertain'
     const effective = definition && grant ? this.effectiveManifest(row, definition.permissions, grant.manifest) : undefined
     const answers = input.answers ?? []
-    const decided = this.store.db.transaction((): { kind: 'paused' | 'wall' | 'blocked' | 'budget' | 'none' } | { kind: 'fail'; reason: string } | { kind: 'sent'; dispatch: BotDispatchRow } => {
+    const decided = this.store.db.transaction((): { kind: 'paused' | 'wall' | 'blocked' | 'budget' | 'none' | 'question' | 'gone' } | { kind: 'fail'; reason: string } | { kind: 'sent'; dispatch: BotDispatchRow } => {
       const current = this.store.activation(row.id)
       if (!current || !from.includes(current.status)) return { kind: 'none' }
       // One that holds no slot of its lane (it waited, or was paused) goes on only into a free one (`slotFree`); a scheduled
@@ -4669,6 +4768,18 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         if (current.lane === 'run' && current.status === 'running') return { kind: 'fail', reason: 'bot_grant_revoked' }
         this.store.moveActivation(row.id, [current.status], 'blocked', { endReason: 'bot_grant_revoked' })
         return { kind: 'blocked' }
+      }
+      // Work never goes on while the question it asked its owner is still open (after a restart, a reload, the turn cap,
+      // more room or the internet back): it waits for the answer instead, holding no run slot.
+      const question = current.lane === 'run' && !input.usageRetry ? this.store.workQuestion(row.id) : undefined
+      if (question?.status === 'open') {
+        this.store.moveActivation(row.id, [current.status], 'blocked', { endReason: 'question' })
+        return { kind: 'question' }
+      }
+      // Its question was forgotten before it carried on with the answer: it has nothing to go on with, and ends saying so.
+      if (current.lane === 'run' && !input.usageRetry && this.store.forgottenWorkQuestion(row.id)) {
+        this.endWaitingInTx(current, 'question_gone', questionGoneText(this.workTitle(current)), [current.status])
+        return { kind: 'gone' }
       }
       // A denied limit is not asked again: the activation ends blocked.
       if (answers.some((answer) => answer.status === 'denied' && 'budget' in answer.permission)) {
@@ -4692,7 +4803,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           this.store.moveActivation(row.id, [current.status], 'blocked', { endReason: 'budget_exhausted' })
           return { kind: 'none' }
         }
-        if (input.usageReset) {
+        // Work answered with no time left ends at its limit with its ask, as above; the answer waits, unread, for the
+        // continuation that more room brings.
+        if (input.usageReset || input.questionAnswered) {
           this.store.moveActivation(row.id, [current.status], 'running', { endReason: null })
           return { kind: 'budget' }
         }
@@ -4707,13 +4820,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // A chat turn that asked a question and then for a permission: its question was never shown, so it asks again now.
       const again = answers.length && current.lane === 'chat' && !input.usageRetry ? this.store.questionsToAskAgain(row.id) : []
       if (again.length) this.store.markQuestionsRead(again.map((question) => question.id))
+      // Work's question its owner answered goes with whatever continues it, once (`read_at`).
+      const answered = question?.status === 'answered' ? this.workAnswerOf(question) : undefined
+      // The line is kept with the answer, so forgetting the answer (or the question) finds this copy (`answer_json.sent`).
+      if (answered) this.store.markAnswerSent(question!.id, n, answered)
       const dispatch = {
         activationId: row.id,
         n,
         kind: 'continue' as const,
         clientRequestId: `${row.id}:d${n}`,
         threadId: current.threadId!,
-        prompt: { text: input.usageRetry && previous ? `[Mousse] The last try did not go through. Answer this again:\n\n${previous.prompt.text}` : this.continuationPrompt(row, { ...input, answers, ...(notes ? { notes: notes.text } : {}), ...(again.length ? { askAgain: again.map((question) => question.spec.question) } : {}) }, neverRan) },
+        prompt: { text: input.usageRetry && previous ? `[Mousse] The last try did not go through. Answer this again:\n\n${previous.prompt.text}` : this.continuationPrompt(row, { ...input, answers, ...(notes ? { notes: notes.text } : {}), ...(again.length ? { askAgain: again.map((question) => question.spec.question) } : {}), ...(answered ? { answered } : {}) }, neverRan) },
         policyDigest: grant.digest,
         // Kept with the intent, so a resend after a crash sends exactly this.
         send: input.usageRetry
@@ -4734,6 +4851,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     if (decided.kind === 'fail') {
       this.failActivation(this.store.activation(row.id) ?? row, decided.reason)
+      return 'none'
+    }
+    if (decided.kind === 'question') {
+      this.parkForQuestion(this.store.activation(row.id) ?? row)
+      return 'none'
+    }
+    if (decided.kind === 'gone') {
+      this.afterEnd(this.store.activation(row.id) ?? row)
       return 'none'
     }
     if (decided.kind === 'wall') {
@@ -4757,7 +4882,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return 'sent'
   }
 
-  private continuationPrompt(row: BotActivationRow, input: { answers: BotEscalationRow[]; restart?: boolean; reload?: boolean; ownerText?: string; network?: boolean; notes?: string; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean; limitCut?: BotComputerSwitch[]; askAgain?: string[] }, neverRan?: string): string {
+  private continuationPrompt(row: BotActivationRow, input: { answers: BotEscalationRow[]; restart?: boolean; reload?: boolean; ownerText?: string; network?: boolean; notes?: string; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean; limitCut?: BotComputerSwitch[]; askAgain?: string[]; questionAnswered?: boolean; answered?: string }, neverRan?: string): string {
     const answerLine = (answer: BotEscalationRow): string => {
       const title = this.chat.card(answer).title
       if (answer.status === 'denied') return input.ownerText !== undefined
@@ -4770,8 +4895,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return `The owner allowed: ${title}.`
     }
     const depth = row.modelOverride?.depth
-    const lead = input.answers.length
+    const reason = input.answers.length
       ? [...input.answers.map(answerLine), ...(input.askAgain ?? []).map(askAgainLine)].join(' ')
+      : input.questionAnswered && input.answered ? input.answered
       : input.limitCut ? (this.store.disabledPermissions(row.botId).length ? 'Your owner switched off a permission while you worked. Your turn stopped; carry on without it and do not ask for it.' : limitCutLead(input.limitCut))
       : input.reload ? (depth === 'deep' ? 'You now have more time to think.' : depth === 'quick' ? 'You now answer more quickly.' : 'Your settings changed.')
         : input.restart ? 'Mousse restarted while you were working.'
@@ -4781,6 +4907,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           : input.network ? 'The internet connection dropped while you were working; it is back now.'
             : input.afterReport ? 'The owner added something while you worked; what you had so far was already sent to them.'
               : input.notes ? 'The owner added something while you worked.' : 'The owner asked you to continue.'
+    // Work's question answered while it waited for something else (more room, say): the answer comes with why it goes on.
+    const lead = input.answered && reason !== input.answered ? `${reason} ${input.answered}` : reason
+    const carryOn = input.moreRoom || input.questionAnswered
     const calls = this.store.unknownCalls(row.id)
     // A subagent's run is kept as a consult's in bots.db: it is named as what it is.
     const roleOf = (call: { role: string; runId: string }) => call.role === 'consult' && this.store.dispatchByRun(call.runId)?.kind === 'subagent' ? 'subagent' : call.role
@@ -4789,11 +4918,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       : '') + this.stoppedSubagentsLine(row)
     // A turn that the owner allowed something while it ran (issue #983): this turn has it (`allowedSinceRefused`). Work
     // that goes on after it waited, or after the turn cap, hears it with why it goes on.
-    if (input.allowed?.length && (input.moreRoom || input.usageReset || input.turnCap))
-      return `[Mousse] ${lead} The owner also allowed you to ${input.allowed.join(' and ')}; you have it now.${interrupted}${input.notes ? `\n\n${input.notes}\n\nTake it into account as you continue.` : ''} ${input.moreRoom ? 'Carry on where you left off' : 'Continue where you left off'}, and do what you skipped without it.`
+    if (input.allowed?.length && (carryOn || input.usageReset || input.turnCap))
+      return `[Mousse] ${lead} The owner also allowed you to ${input.allowed.join(' and ')}; you have it now.${interrupted}${input.notes ? `\n\n${input.notes}\n\nTake it into account as you continue.` : ''} ${carryOn ? 'Carry on where you left off' : 'Continue where you left off'}, and do what you skipped without it.`
     if (input.allowed?.length) {
       if (row.lane === 'chat') return `[Mousse] The owner allowed you to ${input.allowed.join(' and ')} while you answered; you have it now. Your reply so far was already sent.${interrupted}\n\nDo now what you skipped without it, and tell the owner what you found.`
-      const allowedLine = `The owner allowed you to ${input.allowed.join(' and ')} while you worked; you have it now.`
+      const allowedLine = `${input.answered ? `${input.answered} ` : ''}The owner allowed you to ${input.allowed.join(' and ')} while you worked; you have it now.`
       const notes = input.notes ? `\n\n${input.notes}` : ''
       const sent = input.afterReport ? ' What you had so far was already sent to them.' : ''
       return `[Mousse] ${allowedLine}${sent}${interrupted}${notes}\n\nDo now what you skipped without it${notes ? ', and take the owner\'s notes into account' : ''}. Your last message is your updated report: lead with what changed, in plain words.`
@@ -4804,7 +4933,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (input.ownerText !== undefined) return `[Mousse] ${lead}${interrupted}\n\n${input.ownerText}`
     // The walled dispatch never ran (a time wall before it started): its own prompt is sent now.
     if (neverRan !== undefined) return `[Mousse] ${lead}${interrupted}\n\n${neverRan}`
-    return `[Mousse] ${lead} ${input.moreRoom ? 'Carry on where you left off.' : input.limitCut ? `Continue where you left off, without ${input.limitCut.length > 1 ? 'them' : 'it'}.` : input.reload || input.usageReset ? 'Continue where you left off.' : 'Continue.'}${interrupted}`
+    return `[Mousse] ${lead} ${carryOn ? 'Carry on where you left off.' : input.limitCut ? `Continue where you left off, without ${input.limitCut.length > 1 ? 'them' : 'it'}.` : input.reload || input.usageReset ? 'Continue where you left off.' : 'Continue.'}${interrupted}`
   }
 
   /**
@@ -4864,9 +4993,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (workWaits(row)) {
       throw new BotEngineError('bot_work_waiting', row.endReason === 'usage_limit'
         ? 'This work waits for a usage limit to reset. It carries on then, or press Resume to try now.'
-        : row.endReason === 'room_allowed'
-          ? 'This work already has more room. It carries on when the work before it is done.'
-          : 'This work ran out of room. Answer its ask to let it carry on, or stop it.')
+        : row.endReason === 'room_allowed' ? 'This work already has more room. It carries on when the work before it is done.'
+          : row.endReason === 'question_answered' ? 'This work has your answer. It carries on when the work before it is done.'
+            : row.endReason === 'question' ? QUESTION_WORK_WAITING_TEXT
+              : 'This work ran out of room. Answer its ask to let it carry on, or stop it.')
     }
     if (!row.threadId || !this.store.lastMainDispatch(row.id)) throw new BotEngineError('bot_not_started', 'This activation never started; run the bot again.')
     if (!(row.lane === 'run' ? this.runSlotFree(row) : this.slotFree(row.botId, row.lane, row.id)))
@@ -5889,6 +6019,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     void this.pump(botId).catch((error) => console.warn('next bot activation could not start', { botId, error: error instanceof Error ? error.message : String(error) }))
   }
 
+  /** The bubbles of the questions a piece of work asked, published again as they are now (withdrawn, once it ended). */
+  private republishWorkQuestions(row: Pick<BotActivationRow, 'id' | 'lane'>): void {
+    if (row.lane !== 'run') return
+    for (const question of this.store.activationQuestions(row.id)) if (question.messageId) this.chat.republish(question.messageId)
+  }
+
   /** The scratch folder goes when the activation has ended (it stays while it waits or is paused). */
   private cleanup(row: BotActivationRow): void {
     if (!ENDED_ACTIVATION_STATUSES.has(row.status)) return
@@ -5904,6 +6040,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.roomKeys.delete(row.id)
     this.carried.delete(row.id)
     this.offeredNotes.delete(row.id)
+    this.askedIn.delete(row.id)
+    // A question its work asked was withdrawn when the work ended (`moveActivation`): its bubble shows it in every window.
+    this.republishWorkQuestions(row)
     // Its browser tabs close too, and the bot's browser once nothing else uses it.
     try {
       this.host.browser?.activationEnded({ botId: row.botId, activationId: row.id })
@@ -6331,6 +6470,20 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return
     }
     if (run.status !== 'interrupted') return
+    // Work that asked its owner a question (`ask_owner`) before Mousse stopped had ended its work for now: it waits for the
+    // answer (or goes on with it when a slot is free), never carried on as if cut mid-work.
+    // Its question forgotten before Mousse stopped: it ends with the same line as waiting work, never carried on without it.
+    if (row.lane === 'run' && this.store.forgottenWorkQuestion(row.id)) {
+      const ended = this.recorded(row, () => this.endWaitingInTx(row, 'question_gone', questionGoneText(this.workTitle(row)), ['running']))
+      if (ended) this.afterEnd(ended)
+      return
+    }
+    const question = row.lane === 'run' ? this.store.workQuestion(row.id) : undefined
+    if (question) {
+      if (this.store.moveActivation(row.id, ['running'], 'blocked', { endReason: question.status === 'open' ? 'question' : 'question_answered' }))
+        this.parkForQuestion(this.store.activation(row.id) ?? row, main)
+      return
+    }
     // Row 10: under 15 s of work time left after P3 (it worked up to its deadline): a budget wall, as at a
     // deadline (work the owner asked for waits for the answer with what it had).
     const remaining = this.remainingMs(row)
@@ -6585,7 +6738,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       reach: (botId, workId) => this.noteReach(botId, workId)
     },
     questions: {
-      ask: (botId, activationId, spec) => this.askOwner(botId, activationId, spec)
+      ask: (botId, activationId, spec) => this.askOwner(botId, activationId, spec),
+      relay: (botId, activationId, questionId, answer) => this.relayAnswer(botId, activationId, questionId, answer)
     },
     reminders: {
       add: (botId, from, input) => this.addReminder(botId, from, input),
@@ -6634,12 +6788,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * the turn's reply when the turn ends (`postReply`); nothing waits on it, and it grants nothing. A turn that asked for a
    * permission first (`escalate`) asks it once the owner answered that: a tap at a wall would count as Not now. At most
    * `MAX_QUESTIONS_PER_CHAT_TURN` per chat turn, `MAX_OPEN_QUESTIONS_PER_BOT` open and `MAX_NEW_QUESTIONS_PER_DAY` a day;
-   * over a cap the bot decides for itself. Work, scheduled runs and consults are not offered it yet.
+   * over a cap the bot decides for itself. Work the owner asked for asks too, and waits for the answer (`askFromWork`);
+   * scheduled runs, consults and subagents are never offered it.
    */
   askOwner(botId: string, activationId: string, spec: BotQuestionSpec): { asked: boolean; text: string } {
     const row = this.store.activation(activationId)
     if (!row || row.botId !== botId) return { asked: false, text: 'Only a bot can use this.' }
-    if (row.lane !== 'chat') return { asked: false, text: QUESTION_CHAT_ONLY_TEXT }
+    if (!asksOwner(row)) return { asked: false, text: QUESTION_NOT_OFFERED_TEXT }
+    if (row.lane === 'run') return this.askFromWork(row, spec)
     const result = this.store.db.transaction((): 'asked' | 'after_ask' | 'enough' | 'ended' => {
       const current = this.store.activation(activationId)
       if (current?.status === 'waiting_grant') return 'after_ask'
@@ -6655,6 +6811,105 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (result === 'after_ask') return { asked: false, text: QUESTION_AFTER_ASK_TEXT }
     if (result === 'enough') return { asked: false, text: QUESTIONS_ENOUGH_TEXT }
     return { asked: false, text: 'This message has ended; nothing was asked.' }
+  }
+
+  /**
+   * `ask_owner` in work (issue #1123): in one transaction the question is kept and its bubble posted at once, a notice
+   * that answers the owner's message that asked for the work. The rest of this dispatch refuses every call so the turn
+   * ends (`askedIn`), and the work then waits for the answer without holding a run slot (`advance`: `blocked`,
+   * `question`); the answer carries it on in the same thread (`question_answered`, `resumeWork`). One question at a time
+   * per piece of work, within the bot's caps.
+   */
+  private askFromWork(row: BotActivationRow, spec: BotQuestionSpec): { asked: boolean; text: string } {
+    const n = this.live.get(row.id)?.n ?? this.store.lastMainDispatch(row.id)?.n ?? 1
+    const result = this.recorded(row, (): 'asked' | 'enough' | 'ended' => {
+      const current = this.store.activation(row.id)
+      if (current?.status !== 'running') return 'ended'
+      const since = new Date(this.now() - 24 * 60 * 60_000).toISOString()
+      if ((this.store.workQuestion(row.id) ? 1 : 0) >= MAX_OPEN_QUESTIONS_PER_WORK || this.store.countOpenQuestions(row.botId) >= MAX_OPEN_QUESTIONS_PER_BOT ||
+          this.store.countQuestions(row.botId, { since }) >= MAX_NEW_QUESTIONS_PER_DAY) return 'enough'
+      const id = `q_${randomUUID()}`
+      this.store.insertQuestion({ id, botId: row.botId, activationId: row.id, dispatchN: n, lane: 'run', spec, createdAt: this.store.now() })
+      // Its bubble: the bot's words from its work, under the owner's message that asked for it. Its id is its place among
+      // the work's questions, so it is written once.
+      const place = this.store.activationQuestions(row.id).length
+      this.chat.post({
+        id: `bm_${row.id}_q${place}`, botId: row.botId, author: 'bot', kind: 'notice', text: spec.question, questionId: id, activationId: row.id, lane: 'run',
+        ...(row.trigger.kind === 'work' && row.trigger.replyTo ? { replyTo: row.trigger.replyTo } : {})
+      })
+      return 'asked'
+    })
+    if (result === 'asked') {
+      this.askedIn.set(row.id, n)
+      this.changed({ botId: row.botId, activationId: row.id })
+      return { asked: true, text: QUESTION_WORK_ASKED_TEXT }
+    }
+    if (result === 'enough') return { asked: false, text: QUESTIONS_ENOUGH_TEXT }
+    return { asked: false, text: 'This work has ended; nothing was asked.' }
+  }
+
+  /**
+   * The owner answers a question work waits on (a tap, a reply on its bubble, or the chat passing on what they wrote
+   * there, `by: 'chat'`), inside the caller's transaction: the question is answered, and work that waits on it goes on
+   * once a run slot is free (`question_answered`). Work still ending the turn that asked takes the answer when it does
+   * (`advance`). False when the question is no longer open (answered on another device, or withdrawn).
+   */
+  answerWorkInTx(questionId: string, answer: BotQuestionAnswer, messageId: string): boolean {
+    const question = this.store.question(questionId)
+    if (!question || question.lane !== 'run' || question.status !== 'open') return false
+    if (!this.store.answerQuestion(questionId, answer, messageId, ['open'])) return false
+    this.store.wakeWork(question.activationId)
+    return true
+  }
+
+  /** After a work question was answered (`answerWorkInTx` committed): its bubble shows it, and the work goes on. */
+  afterWorkAnswer(questionId: string): void {
+    const question = this.store.question(questionId)
+    if (!question) return
+    for (const row of this.store.messagesForQuestion(questionId)) if (row.author === 'bot') this.chat.republish(row.id)
+    this.changed({ botId: question.botId, activationId: question.activationId })
+    this.pumpLater(question.botId)
+  }
+
+  /**
+   * `question_answer` (issue #1123): a chat turn passes on to work an answer the owner gave in plain words in the chat
+   * ("go with the second flat"). Only a chat turn the owner's own message started (`ownerChatTurn`), and only for a
+   * question work of this bot waits on. The answer keeps the owner's message it came from (`answer_message`), so Forget
+   * reaches it, and the bubble reads "Answered in chat".
+   */
+  relayAnswer(botId: string, activationId: string, questionId: string, answer: string): { ok: true; title: string } | { ok: false; text: string } {
+    const row = this.store.activation(activationId)
+    if (!row || row.botId !== botId || !ownerChatTurn(row)) return { ok: false, text: 'Only a chat turn your owner\'s own message started can pass on their answer.' }
+    const text = answer.replace(/\s+/g, ' ').trim().slice(0, MAX_WORK_NOTE_CHARS)
+    if (!text) return { ok: false, text: 'question_answer needs the owner\'s answer, in their words.' }
+    const question = this.store.question(questionId)
+    const work = question ? this.store.activation(question.activationId) : undefined
+    if (!question || question.botId !== botId || question.lane !== 'run' || !work) return { ok: false, text: 'No work of yours waits on that question. See your situation for the questions your work waits on.' }
+    const from = this.ownerMessageOf(activationId)
+    if (!from) return { ok: false, text: 'Only a chat turn your owner\'s own message started can pass on their answer.' }
+    // The owner forgot what they wrote in this turn: nothing of it is passed on, and the question stays open.
+    if (this.ownerMessageForgotten(activationId)) return { ok: false, text: QUESTION_ANSWER_FORGOTTEN_TEXT }
+    const answered = this.recorded(row, () => this.answerWorkInTx(questionId, { text, by: 'chat' }, from))
+    if (!answered) return { ok: false, text: question.status === 'open' ? 'It could not be passed on. Try again.' : 'That question was already answered, or is no longer open.' }
+    this.afterWorkAnswer(questionId)
+    return { ok: true, title: this.workTitle(work) }
+  }
+
+  /** Whether the owner forgot any message of theirs that this chat activation holds (its journal row is redacted). */
+  private ownerMessageForgotten(activationId: string): boolean {
+    return Boolean(this.store.get(`SELECT 1 FROM bot_messages m JOIN bot_journal j ON j.bot_id = m.bot_id AND j.source_key = 'bm:' || m.id
+      WHERE m.activation_id = ? AND m.author = 'owner' AND j.redacted_at IS NOT NULL LIMIT 1`, activationId))
+  }
+
+  /**
+   * What the chat is told of the questions its work waits on (its situation), one line each: the work, the question and
+   * its answers, and its id for `question_answer`.
+   */
+  questionLines(botId: string): string[] {
+    return this.store.waitingQuestions(botId).flatMap((question) => {
+      const work = this.store.activation(question.activationId)
+      return work ? [waitingQuestionLine({ questionId: question.id, question: question.spec.question, choices: plainChoices(question.spec), title: this.workTitle(work) })] : []
+    })
   }
 
   /** What a run is about, in a few words: the work's title, else its request's first line. */
@@ -6708,14 +6963,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // Work that waits to go on is listed too: held while it waits for the owner, waiting its turn once allowed.
     const now = this.store.laneActivations(botId, 'run', ['running', 'waiting_grant', 'queued', 'paused', 'blocked']).filter((row) => row.status !== 'blocked' || workWaits(row)).sort(workOrder).map((row) => {
       const chip = this.liveChips.get(row.id)?.chip
-      const status = row.status === 'queued' || row.endReason === 'room_allowed' ? 'queued' as const : row.status === 'paused' || row.status === 'blocked' ? 'paused' as const : row.offline ? 'waiting_for_internet' as const : 'running' as const
+      const status = row.status === 'queued' || row.endReason === 'room_allowed' || row.endReason === 'question_answered' ? 'queued' as const : row.status === 'paused' || row.status === 'blocked' ? 'paused' as const : row.offline ? 'waiting_for_internet' as const : 'running' as const
+      // Held for the owner's answer to its question, which the chat can pass on.
+      const question = row.status === 'blocked' && row.endReason === 'question' ? this.store.workQuestion(row.id) : undefined
       return {
         workId: row.id,
         title: this.workTitle(row),
         status,
         startedAt: row.createdAt,
-        ...(chip ? { doing: `${chip.text}${chip.highlight ? ` ${chip.highlight}` : ''}` } : {}),
-        kind: row.trigger.kind === 'schedule' ? 'schedule' as const : 'work' as const
+        ...(chip && !question ? { doing: `${chip.text}${chip.highlight ? ` ${chip.highlight}` : ''}` } : {}),
+        kind: row.trigger.kind === 'schedule' ? 'schedule' as const : 'work' as const,
+        ...(question ? { waitsFor: 'answer' as const, question: { questionId: question.id, question: question.spec.question } } : {})
       }
     })
     const recent = this.store.all(
@@ -6743,15 +7001,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /**
    * `work_note`: something the owner added, for work that runs or waits. Waiting work gets it with its request. Running
    * work gets it at its turn's next step when its runtime takes notes while it runs (`steerFor`), else when its current
-   * turn ends, before it reports (`advance`); `noteReach` says which. Ended work can't take it.
+   * turn ends, before it reports (`advance`); `noteReach` says which. Ended work can't take it, nor work that waits for
+   * the owner's answer to its question: the answer is the way on (`question_answer`).
    */
-  noteWork(botId: string, workId: string, note: string, from?: string): 'noted' | 'held' | 'ended' | 'not_found' {
+  noteWork(botId: string, workId: string, note: string, from?: string): 'noted' | 'held' | 'ended' | 'not_found' | 'question' {
     const text = note.trim().slice(0, MAX_WORK_NOTE_CHARS)
     const row = this.store.activation(workId)
     if (!row || row.botId !== botId || row.lane !== 'run' || !text) return 'not_found'
     return this.store.db.transaction(() => {
       const current = this.store.activation(workId)
       if (!current || ENDED_ACTIVATION_STATUSES.has(current.status)) return 'ended' as const
+      if (current.status === 'blocked' && current.endReason === 'question') return 'question' as const
       // Only work that will take it: waiting, running, or waiting to go on. Other paused or blocked work may never continue.
       if (!['queued', 'running', 'waiting_grant'].includes(current.status) && !workWaits(current)) return 'held' as const
       // The note keeps the owner's message it came from (the chat turn's), so a forget of that message reaches it.
@@ -7447,6 +7707,15 @@ function heldAlready(authority: Pick<BotAuthority, 'tools' | 'appTools' | 'skill
 export function askAgainLine(question: string): string {
   const line = question.replace(/\s+/g, ' ').trim()
   return `Your question "${line.length > 200 ? `${line.slice(0, 199)}…` : line}" was not shown to the owner, because you also asked for a permission. Ask it again with ask_owner if you still need to know.`
+}
+
+/**
+ * Whether the activation may ask its owner a question (`ask_owner`, issue #1123): a chat turn, and work the owner asked
+ * for (trigger `work`: `work_start` and a reminder's work), which waits for the answer. Never a scheduled run or a run
+ * started by hand, which nobody waits on, nor a consult or a subagent (they compile their own tools).
+ */
+export function asksOwner(row: Pick<BotActivationRow, 'lane' | 'trigger'>): boolean {
+  return row.lane === 'chat' || (row.lane === 'run' && row.trigger.kind === 'work')
 }
 
 /**

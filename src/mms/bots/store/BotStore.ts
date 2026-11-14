@@ -365,9 +365,10 @@ export const BOT_OFFLINE_REASON = 'waiting_for_internet'
  * Work the owner asked for that stopped short and goes on later in the same thread is `blocked` (it does not hold the
  * run lane) with one of these end reasons, like the internet wait, so an older build still reads `bots.db`:
  * `budget_exhausted` waits for the owner's answer to its limit ask, `room_allowed` was allowed more and goes on when
- * the run lane is free, `usage_limit` goes on when the bot's usage pause ends.
+ * the run lane is free, `usage_limit` goes on when the bot's usage pause ends, `question` waits for the owner's answer
+ * to the question it asked (`ask_owner`), and `question_answered` was answered and goes on when the run lane is free.
  */
-export const BOT_WORK_WAIT_REASONS: ReadonlySet<string> = new Set(['budget_exhausted', 'room_allowed', 'usage_limit'])
+export const BOT_WORK_WAIT_REASONS: ReadonlySet<string> = new Set(['budget_exhausted', 'room_allowed', 'usage_limit', 'question', 'question_answered'])
 
 /** Whether an activation is work that waits to go on (`BOT_WORK_WAIT_REASONS`). */
 export function workWaits(row: Pick<BotActivationRow, 'status' | 'lane' | 'trigger' | 'endReason'>): boolean {
@@ -487,7 +488,8 @@ export interface BotQuestionRow {
   lane: BotLane
   spec: BotQuestionSpec
   status: BotQuestionStatus
-  answer: (BotQuestionAnswer & { redacted?: true }) | null
+  /** `sent`: work's answer went out with dispatch `n`, as `line` in its prompt (`markAnswerSent`); a forget drops it. */
+  answer: (BotQuestionAnswer & { redacted?: true; sent?: { n: number; line: string } }) | null
   /** The owner's message that answered it, or that moved past it (`moved_on`). */
   answerMessage: string | null
   answeredAt: string | null
@@ -1098,12 +1100,14 @@ export class BotStore {
   /**
    * Compare-and-set of an activation's status; false when it was not in `from`. Only a running activation waits for the
    * internet. One that fails or is cancelled (a Stop, a failure, the bot deleted) withdraws the questions it asked and never
-   * posted, in the same statement's transaction: no reply carries them now.
+   * posted, in the same statement's transaction: no reply carries them now. Work that ends, however it ends, withdraws
+   * the question it still waited on: nothing would carry on with its answer.
    */
   moveActivation(id: string, from: readonly BotActivationStatus[], to: BotActivationStatus, patch: { endReason?: string | null; result?: string | null; threadId?: string; scratch?: string } = {}): boolean {
-    if (to === 'failed' || to === 'cancelled') return this.db.transaction(() => {
+    if (to === 'failed' || to === 'cancelled' || to === 'done') return this.db.transaction(() => {
       const moved = this.moveActivationRow(id, from, to, patch)
-      if (moved) this.withdrawUnpostedQuestions(id)
+      if (moved && to !== 'done') this.withdrawUnpostedQuestions(id)
+      if (moved) this.withdrawWorkQuestions(id)
       return moved
     })
     return this.moveActivationRow(id, from, to, patch)
@@ -1678,6 +1682,51 @@ export class BotStore {
   withdrawStrandedQuestions(): number {
     return this.run(`UPDATE bot_questions SET status = 'withdrawn', answered_at = ? WHERE status = 'open' AND message_id IS NULL
       AND activation_id IN (SELECT id FROM bot_activations WHERE status IN ('done', 'failed', 'cancelled'))`, this.now())
+  }
+
+  /** Work ended: the question it still waited on is withdrawn (its bubble then says it is no longer needed). */
+  withdrawWorkQuestions(activationId: string): number {
+    return this.run("UPDATE bot_questions SET status = 'withdrawn', answered_at = ? WHERE activation_id = ? AND lane = 'run' AND status = 'open'", this.now(), activationId)
+  }
+
+  /**
+   * The question work asked and has not carried on from yet: open, or answered with the answer not yet sent to it
+   * (`read_at`). At most one (`MAX_OPEN_QUESTIONS_PER_WORK`); the newest when an older build left more.
+   */
+  workQuestion(activationId: string): BotQuestionRow | undefined {
+    const row = this.get("SELECT * FROM bot_questions WHERE activation_id = ? AND lane = 'run' AND read_at IS NULL AND status IN ('open', 'answered') ORDER BY created_at DESC, rowid DESC LIMIT 1", activationId)
+    return row ? questionOf(row) : undefined
+  }
+
+  /**
+   * A question work asked that the owner forgot before the work carried on with it (Forget withdrew it, unread): the work
+   * has nothing to go on with. Only Forget withdraws a question of work that has not ended.
+   */
+  forgottenWorkQuestion(activationId: string): BotQuestionRow | undefined {
+    const row = this.get("SELECT * FROM bot_questions WHERE activation_id = ? AND lane = 'run' AND status = 'withdrawn' AND read_at IS NULL ORDER BY created_at DESC, rowid DESC LIMIT 1", activationId)
+    return row ? questionOf(row) : undefined
+  }
+
+  /**
+   * Work's answered question went out with dispatch `n`, as `line` in its prompt: read once, and the line kept with the
+   * answer, so a forget finds that copy by the question, not by its words (`answer_json.sent`).
+   */
+  markAnswerSent(questionId: string, n: number, line: string): void {
+    this.run("UPDATE bot_questions SET read_at = ?, answer_json = json_set(answer_json, '$.sent', json_object('n', ?, 'line', ?)) WHERE id = ? AND read_at IS NULL", this.now(), n, line, questionId)
+  }
+
+  /** The bot's questions that work waits on now (the work is `blocked` with `question`), oldest first. */
+  waitingQuestions(botId: string): BotQuestionRow[] {
+    return this.all(`SELECT q.* FROM bot_questions q JOIN bot_activations a ON a.id = q.activation_id WHERE q.bot_id = ? AND q.lane = 'run'
+      AND q.status = 'open' AND q.message_id IS NOT NULL AND a.status = 'blocked' AND a.end_reason = 'question' ORDER BY q.created_at, q.rowid`, botId).map(questionOf)
+  }
+
+  /**
+   * Work that waits on its question goes on once the run lane is free (`question` to `question_answered`), in the
+   * caller's transaction; false when it does not wait on one now (it is still ending its turn, or it ended).
+   */
+  wakeWork(activationId: string): boolean {
+    return this.run("UPDATE bot_activations SET end_reason = 'question_answered' WHERE id = ? AND status = 'blocked' AND end_reason = 'question'", activationId) > 0
   }
 
   // -- Reminders (bot_reminders, v6): a bot's one-off times; repeating ones are schedules in the shared store --------

@@ -5,7 +5,9 @@ import type { BotChatQuestion } from '../../../shared/bots/personal/chat'
  * A bot's question as a messenger's quick replies under its bubble (issue #1123), in the ask's look (`BotAskReplies`):
  * one button per answer (its detail on a second line), and "Other…", which puts the question above the composer to
  * answer in the owner's own words. A tap is the owner's reply; once the question is answered the chat shows a quiet line
- * instead (botChatShape.ts). A question the owner moved past keeps its buttons, quieter: a tap still answers it.
+ * instead (botChatShape.ts). A question the owner moved past keeps its buttons, quieter: a tap still answers it. One
+ * the owner answered in the chat (the chat passed it on to the work that asked) or that is no longer needed (the work
+ * that asked ended) says so in a quiet line under it.
  */
 export function BotQuestionReplies({ question, onAnswer, onOther }: {
   question: BotChatQuestion
@@ -14,6 +16,9 @@ export function BotQuestionReplies({ question, onAnswer, onOther }: {
   onOther(): void
 }) {
   const [sending, setSending] = useState<string | undefined>()
+  if (question.status === 'answered' && question.by === 'chat')
+    return <p className="bot-question-settled">{question.answer ? `Answered in chat: ${question.answer}` : 'Answered in chat'}</p>
+  if (question.status === 'withdrawn') return <p className="bot-question-settled">No longer needed</p>
   if (question.status !== 'open' && question.status !== 'moved_on') return null
   const tap = async (choice: string) => {
     if (sending !== undefined) return
