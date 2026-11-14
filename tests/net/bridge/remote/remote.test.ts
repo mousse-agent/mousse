@@ -709,6 +709,8 @@ describe('P3 real MMS remote Bridge', () => {
     }
     p.mms.threads.mutateThreadData(thread.id, () => ({ messages: [message] }))
     p.mms.orchestrator.getOrCreateSession(thread.id).messages = [message]
+    // The change reaches the stream as the app sends it: an event too large for one record makes a fresh snapshot.
+    p.mms.orchestrator.emit('thread-messages', { threadId: thread.id, messages: [message] })
     const large = allRecords(adapter, descriptor.id)
     expect(
       large.filter(
@@ -778,8 +780,9 @@ describe('P3 real MMS remote Bridge', () => {
     }
     p.mms.threads.mutateThreadData(thread.id, () => ({ messages: [message] }))
     p.mms.orchestrator.getOrCreateSession(thread.id).messages = [message]
-    // Opening a snapshot refreshes the display, which truncates the stale history.
-    adapter.store.openSnapshot(descriptor.id).close()
+    // The change reaches the stream as the app sends it: the event is too large for one record, so the display gets
+    // a fresh snapshot, which truncates the stale history.
+    p.mms.orchestrator.emit('thread-messages', { threadId: thread.id, messages: [message] })
     p.bStore.createStream(descriptor, 1)
     const live = await p.connect(adapter.store)
     publish = (stream, record) => live.a.publishRecord(stream, record)
