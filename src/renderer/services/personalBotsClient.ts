@@ -38,6 +38,7 @@ export interface PersonalBotsClient {
    * lacks it and rejects; the owner answers with Reply there.
    */
   answerQuestion(botId: string, questionId: string, choice: string, clientRequestId: string): Promise<BotsPersonalV2Result<'bots.questions.answer'>>
+  setPermission(botId: string, permissionId: string, enabled: boolean): Promise<BotDetail>
   revokePermission(botId: string, permissionId: string): Promise<BotDetail>
   addSchedule(botId: string, when: BotSchedule['when'], prompt: string, model?: string): Promise<BotDetail>
   /** The bot's rows (`slots`, absent from an older service), its Talk model by name, and the computers it can run on (#673). */
@@ -88,6 +89,7 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
     react: async (botId, messageId, emoji) => (await call('bots.chat.react', { botId, messageId, emoji })).message,
     answer: async (botId, askId, answer) => (await call('bots.asks.answer', { botId, askId, answer })).message,
     answerQuestion: (botId, questionId, choice, clientRequestId) => call('bots.questions.answer', { botId, questionId, choice, clientRequestId }),
+    setPermission: (botId, permissionId, enabled) => call('bots.permissions.set', { botId, permissionId, enabled }),
     revokePermission: (botId, permissionId) => call('bots.permissions.revoke', { botId, permissionId }),
     addSchedule: (botId, when, prompt, model) => call('bots.schedules.add', { botId, when, prompt, ...(model ? { model } : {}) }),
     model: (botId) => call('bots.model.get', { botId }),

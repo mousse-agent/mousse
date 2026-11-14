@@ -965,6 +965,21 @@ export class BotStore {
     return row ? { botId, digest: row.digest as string, manifest: JSON.parse(row.manifest_json as string) as BotManifest, approvedAt: row.approved_at as string } : undefined
   }
 
+  /** Inactive grant snapshots: older builds exclude these through their existing revoked_at check. */
+  disabledPermissions(botId: string): Array<{ id: string; manifest: BotManifest }> {
+    return this.all("SELECT revoked_at, manifest_json FROM bot_grants WHERE bot_id = ? AND revoked_at LIKE 'off:%'", botId)
+      .map((row) => ({ id: (row.revoked_at as string).slice(4), manifest: JSON.parse(row.manifest_json as string) as BotManifest }))
+  }
+
+  keepDisabledPermission(botId: string, id: string, manifest: BotManifest): void {
+    this.forgetDisabledPermission(botId, id)
+    this.run('INSERT INTO bot_grants(bot_id, digest, manifest_json, approved_at, revoked_at) VALUES(?, ?, ?, ?, ?)', botId, '', JSON.stringify(manifest), this.now(), `off:${id}`)
+  }
+
+  forgetDisabledPermission(botId: string, id: string): void {
+    this.run('DELETE FROM bot_grants WHERE bot_id = ? AND revoked_at = ?', botId, `off:${id}`)
+  }
+
   /** Records an approval, in canonical form; it replaces the earlier grant, if any. */
   approve(botId: string, digest: string, given: BotManifest): BotGrantRow {
     // One form for what is granted: what approval showed is exactly what later answers build on.

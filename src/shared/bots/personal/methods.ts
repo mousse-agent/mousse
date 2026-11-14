@@ -128,6 +128,7 @@ export const BOTS_PERSONAL_V2_METHODS = [
   'bots.chat.stop',
   'bots.chat.markRead',
   'bots.asks.answer',
+  'bots.permissions.set',
   'bots.permissions.revoke',
   'bots.schedules.add',
   'bots.schedules.remove',
@@ -202,6 +203,7 @@ export interface BotsPersonalV2Api {
    */
   'bots.questions.answer': { params: { botId: string; questionId: string; choice: string; clientRequestId: string }; result: { message: BotChatMessage; question?: BotChatMessage } }
   /** `permissionId` is a `BotDetail.permissions` item's id (its fingerprint). */
+  'bots.permissions.set': { params: { botId: string; permissionId: string; enabled: boolean }; result: BotDetail }
   'bots.permissions.revoke': { params: { botId: string; permissionId: string }; result: BotDetail }
   /**
    * The owner adds a schedule (the Automations page's create row, with the bot as Who). `model`: one picked by hand for

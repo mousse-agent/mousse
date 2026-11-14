@@ -4,7 +4,7 @@ import type { BotAskCard, BotAskStatus, BotChatApplet, BotChatMessage, BotChatQu
 import { BOT_MODEL_SLOT_KEYS, type BotDefinition, type BotLane, type BotManifest } from '../../../shared/bots/personal/definition'
 import { isPinned, limitOnPick, slotsOf, stuckRowsOf } from '../../../shared/bots/personal/modelSlots'
 import { askFingerprint, filesAsk, filesAskOf, isSpecialAsk, mcpAskTools, type BotAskRequest, type BotEscalationStatus, type BotPermissionRequest } from '../../../shared/bots/personal/escalation'
-import { botStarterManifest, canonicalManifest, isOwnBotAppTool } from '../../../shared/bots/personal/manifest'
+import { BOT_THREADS_PERMISSION, botStarterManifest, canonicalManifest, isOwnBotAppTool } from '../../../shared/bots/personal/manifest'
 import { BOT_OFF_HERE_MARK, offHereNote, switchedOff, type BotComputerLimit } from '../../../shared/bots/personal/computerLimit'
 import type { BotJournalKind } from '../../../shared/bots/personal/memory'
 import { botState } from '../../../shared/bots/personal/state'
@@ -475,7 +475,10 @@ export class BotChatProjection {
     ))
     return {
       summary: this.summary(definition, now),
-      permissions: grant ? this.permissionItems(definition.id, grant.manifest, grant.approvedAt) : [],
+      permissions: grant ? [
+        ...this.permissionItems(definition.id, grant.manifest, grant.approvedAt).filter((item) => !this.store.disabledPermissions(definition.id).some((off) => off.id === item.id)).map((item) => ({ ...item, enabled: true })),
+        ...this.store.disabledPermissions(definition.id).flatMap((off) => this.permissionItems(definition.id, off.manifest, grant.approvedAt).filter((item) => item.id === off.id).map((item) => ({ ...item, enabled: false, note: `Switched off for this bot. ${item.note}` })))
+      ] : [],
       runs,
       reminders
     }
@@ -489,7 +492,7 @@ export class BotChatProjection {
    */
   permissionItems(botId: string, manifest: BotManifest, approvedAt: string): BotPermissionItem[] {
     const limit = this.options.computerLimit?.()
-    return grantedPermissions(manifest).map((permission) => {
+    return grantedPermissions(manifest).map((permission): BotPermissionItem => {
       const id = permissionId(permission)
       const allowed = this.store.allowedAsk(botId, id)
       const grantedAt = allowed?.answeredAt ?? approvedAt
@@ -511,9 +514,9 @@ export class BotChatProjection {
       const text = askText(permission, { budget: starterManifest().budget })
       // Kept in the grant, but this computer has it switched off: it gives nothing here until it is switched on.
       const off = limit ? switchedOff(limit, permission) : undefined
-      if (limit && off) return { id, title: text.title, note: offHereNote(off, limit), grantedAt, mark: BOT_OFF_HERE_MARK }
+      if (limit && off) return { id, title: text.title, note: offHereNote(off, limit), grantedAt, mark: BOT_OFF_HERE_MARK, ...('tool' in permission && permission.tool === BOT_THREADS_PERMISSION ? { needsFullAccess: true as const } : {}) }
       // About's tooltip says what it gives in full, as the card's does ("use your threads": full access).
-      return { id, title: text.title, note: text.tip ?? text.note, grantedAt }
+      return { id, title: text.title, note: text.tip ?? text.note, grantedAt, ...('tool' in permission && permission.tool === BOT_THREADS_PERMISSION ? { needsFullAccess: true as const } : {}) }
     })
   }
 }

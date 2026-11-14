@@ -450,6 +450,18 @@ States are idle, working ("Waiting for internet" while it waits for it), needs y
 - **Three failed runs in a row** pause the schedules, with one notice. A run that ends done resets the count, even with refused asks. Usage limits, waiting for the internet, stops and chat failures never count.
 - **Resume** (`bots.personal.resume`) clears every pause, the failure count, the stuck error and the usage limits a picked bot met on its entries. A row whose pick can't run is not a pause: Resume checks it again, and it stays stuck until its pick can run or the owner picks again.
 
+## Switching a bot's permissions off
+
+About → Can use has a switch and Remove on each permission row, including each MCP server. Off keeps the permission listed but gives the bot none of it. On restores it on the next turn, without another ask or card. Remove forgets it; giving it back needs an ask again. The bot's own always-on tools and its starter permissions have no rows or switches.
+
+A permission works only while both the bot's switch and the computer's limit allow it. “Off on this computer” still shows when that limit holds it back; the bot's own switch stays usable. The tooltip names what holds it back.
+
+Switching commands or file access off stops this bot's running turns, consults and subagents that opened it, and the work carries on in a new turn without it. Other permissions are refused at the next call. The chat quietly says what changed. Off also holds back reminders, scheduled work, restarts and Allow this time. An older ask card cannot turn it on, and the bot makes no new card for it while it is off.
+
+The off state is kept in existing `bots.db` grant rows with `revoked_at = off:<permission id>`; the row remembers the permission, while the active grant and published definition are narrowed. No database migration is needed. **An older build gives nothing from these inactive rows** and sees the narrower active grant. It cannot show or restore the disabled permission; it can ask for a fresh explicit Allow. On a newer build the switch remains off even after that older build's Allow. A downgrade does not silently give access back.
+
+The app window can flip the switch. A device within the bot's Devices choice may switch it off; switching it on follows the same rule as Allow on its card (Use your threads requires a Full access device). A device outside that choice gets the missing-bot answer. Bot, agent and MCP tools cannot flip it.
+
 ## Two layers: which devices reach a bot, and what bots may do here
 
 A bot is held on two sides, both set on the computer that holds it (its home computer) and kept there:

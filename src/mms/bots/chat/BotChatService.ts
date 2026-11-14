@@ -610,12 +610,21 @@ export class BotChatService {
   }
 
   /** `bots.permissions.revoke`: About → Can use → Remove narrows the grant (no consent needed). */
+  setPermission(botId: string, id: string, enabled: boolean): BotDetail {
+    this.engine.setPermission(botId, id, enabled)
+    return this.detailOf(botId)
+  }
+
   revokePermission(botId: string, id: string): BotDetail {
     this.engine.definitionOf(botId)
+    const off = this.store.disabledPermissions(botId).find((item) => item.id === id)
     const grant = this.store.activeGrant(botId)
-    const permission = grant ? grantedPermissions(grant.manifest).find((item) => permissionId(item) === id) : undefined
+    const permission = grant ? grantedPermissions(off?.manifest ?? grant.manifest).find((item) => permissionId(item) === id) : undefined
     if (!permission) throw new BotEngineError('permission_not_found', 'This bot doesn\'t have that permission.')
-    this.engine.narrowGrant(botId, (manifest) => withoutPermission(manifest, permission))
+    this.store.db.transaction(() => {
+      this.engine.narrowGrant(botId, (manifest) => withoutPermission(manifest, permission))
+      this.store.forgetDisabledPermission(botId, id)
+    })
     // Its messages that wait in the owner's threads go with it: none of them starts after Remove.
     if ('tool' in permission && botGrantTool(permission.tool) === BOT_THREADS_PERMISSION) this.engine.withdrawThreadMessages(botId)
     return this.detailOf(botId)

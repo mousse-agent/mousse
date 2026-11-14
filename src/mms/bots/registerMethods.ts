@@ -1,3 +1,4 @@
+import { connectionIsLocal } from '../protocol/threadVisibility'
 import { BOTS_PERSONAL_V2_CAPABILITY, BOTS_PERSONAL_V2_METHODS, BOTS_WORK_METHODS, MAX_BOT_CHAT_ATTACHMENTS, MAX_BOT_CHAT_PAGE, type BotChatAttachment, type BotsPersonalV2Method } from '../../shared/bots/personal/methods'
 import { MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_MODEL_CHARS, MAX_BOT_NAME_CHARS, type BotModelPick, type BotModelSlots, type BotSchedule } from '../../shared/bots/personal/definition'
 import { modelPickProblem, modelRowsProblem } from '../../shared/bots/personal/modelSlots'
@@ -35,6 +36,7 @@ const KEYS: Record<BotsPersonalV2Method, readonly string[]> = {
   'bots.chat.react': ['botId', 'messageId', 'emoji'],
   'bots.asks.answer': ['botId', 'askId', 'answer'],
   'bots.questions.answer': ['botId', 'questionId', 'choice', 'clientRequestId'],
+  'bots.permissions.set': ['botId', 'permissionId', 'enabled'],
   'bots.permissions.revoke': ['botId', 'permissionId'],
   'bots.schedules.add': ['botId', 'when', 'prompt', 'model'],
   'bots.schedules.remove': ['botId', 'scheduleId'],
@@ -168,6 +170,9 @@ function validate(method: BotsPersonalV2Method, value: unknown): Params {
       if (typeof p.questionId !== 'string' || !QUESTION_ID.test(p.questionId)) throw new DomainRpcError('invalid_params', 'A question id is required')
       if (!text(p.choice, MAX_CHOICE_LABEL_CHARS)) throw new DomainRpcError('invalid_params', 'The choice is one of the question\'s answers')
       break
+    case 'bots.permissions.set':
+      if (typeof p.enabled !== 'boolean') throw new DomainRpcError('invalid_params', 'enabled must be true or false')
+      // Same permission id as Remove.
     case 'bots.permissions.revoke':
       if (!text(p.permissionId, 4096)) throw new DomainRpcError('invalid_params', 'A permission id is required')
       break
@@ -221,6 +226,7 @@ async function handle(method: BotsPersonalV2Method, p: Params, bots: BotChatServ
     case 'bots.chat.react': return bots.react(botId, p.messageId as string, p.emoji as string | null)
     case 'bots.asks.answer': return bots.answer(botId, p.askId as string, p.answer as 'allow' | 'not_now')
     case 'bots.questions.answer': return bots.answerQuestion({ botId, questionId: p.questionId as string, choice: p.choice as string, clientRequestId: p.clientRequestId as string })
+    case 'bots.permissions.set': return bots.setPermission(botId, p.permissionId as string, p.enabled as boolean)
     case 'bots.permissions.revoke': return bots.revokePermission(botId, p.permissionId as string)
     case 'bots.schedules.add': return bots.addSchedule(botId, p.when as BotSchedule['when'], p.prompt as string, typeof p.model === 'string' ? p.model : undefined)
     case 'bots.model.get': return bots.modelGet(botId)
@@ -246,6 +252,8 @@ export function registerPersonalBotMethods(domains: DomainHandlerRegistry, botsF
       capability: BOTS_PERSONAL_V2_CAPABILITY,
       validate: (params) => validate(method, params),
       async handle(_context, params, binding) {
+        if (method === 'bots.permissions.set' && (!connectionIsLocal(_context.connection) || _context.connection?.bridgeCaller))
+          throw new DomainRpcError('forbidden', 'Change permissions in the app window.')
         try {
           const bots = await botsForProfile(binding!.profileId)
           // The profile's bots.db could not be opened: bots are unavailable, nothing else is affected.

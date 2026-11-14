@@ -1,7 +1,7 @@
 import { realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
-import type { ActiveTimeScope, BotAllowedObserver, BotAuthority, BotThreadRole, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
+import type { ActiveTimeScope, BotAllowedObserver, BotAuthority, BotCheck, BotThreadRole, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
 import { BOT_COMPUTER_OPEN, type BotComputerLimit } from '../../../shared/bots/personal/computerLimit'
 import { BOT_BROWSER_PERMISSION, BOT_THREADS_PERMISSION, botGrantTool } from '../../../shared/bots/personal/manifest'
 import type { CounterScope } from '../../../shared/harness/counters'
@@ -49,6 +49,7 @@ export interface BotAuthorityInput {
    * What this computer lets bots do now (Settings → What bots may do here), read on every call, so a switch turned off
    * refuses the next call of a turn already running. Absent: everything. Must not throw.
    */
+  disabled?(call: NormalisedCall): string | undefined
   limit?(): BotComputerLimit
 }
 
@@ -84,7 +85,7 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
     counters: input.counters,
     time: input.time,
     spend: input.spend,
-    check(call: NormalisedCall): { ok: true } | { ok: false; wall: WallReason } {
+    check(call: NormalisedCall): BotCheck {
       const decided = decide(call)
       if (decided.ok && input.onAllowed) {
         try {
@@ -107,7 +108,9 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
   }
   return authority
 
-  function decide(call: NormalisedCall): { ok: true } | { ok: false; wall: WallReason } {
+  function decide(call: NormalisedCall): BotCheck {
+    const disabled = input.disabled?.(call)
+    if (disabled) return { ok: false, refused: { text: disabled, askId: '' } }
     const ended = input.live?.() ?? (input.time.signal.aborted ? { kind: 'ended' as const } : undefined)
     if (ended) return { ok: false, wall: ended }
     if (input.waiting()) return { ok: false, wall: { kind: 'waiting' } }

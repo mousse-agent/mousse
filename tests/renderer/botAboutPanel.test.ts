@@ -38,7 +38,7 @@ beforeEach(() => {
       b1: {
         summary: bot,
         permissions: [
-          { id: 'fp1', title: 'use files on this computer', note: "Read and change any file or folder, except Mousse's own data.", grantedAt: '2026-11-06T10:00:00.000Z' },
+          { id: 'fp1', enabled: true, title: 'use files on this computer', note: "Read and change any file or folder, except Mousse's own data.", grantedAt: '2026-11-06T10:00:00.000Z' },
           { id: 'fp2', title: 'use the pdf skill', note: '', grantedAt: '2026-11-06T11:00:00.000Z' }
         ],
         runs: [{ id: 's1', label: 'every weekday · 09:00', kind: 'schedule' }]
@@ -60,6 +60,19 @@ afterEach(() => {
 })
 
 describe('About this bot', () => {
+  it('switches a permission off and on and still removes it', async () => {
+    await show()
+    const toggle = () => host.querySelector<HTMLButtonElement>('[role="switch"][aria-label="use files on this computer"]')!
+    expect(toggle().getAttribute('aria-checked')).toBe('true')
+    expect(button('Remove use files on this computer')).toBeTruthy()
+    await click(toggle())
+    expect(toggle().getAttribute('aria-checked')).toBe('false')
+    await click(toggle())
+    expect(toggle().getAttribute('aria-checked')).toBe('true')
+    await click(button('Remove use files on this computer'))
+    expect(toggle()).toBeNull()
+    expect(fake.details.b1.permissions.some((item) => item.id === 'fp1')).toBe(false)
+  })
   it('shows the whole mouse, the name and the description', async () => {
     await show()
     const head = host.querySelector('.bot-about-head')!

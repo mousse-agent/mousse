@@ -160,6 +160,7 @@ interface BotsState {
   resume(botId: string): Promise<void>
   remove(botId: string): Promise<boolean>
   loadDetail(botId: string): Promise<void>
+  setPermission(botId: string, permissionId: string, enabled: boolean): Promise<void>
   revokePermission(botId: string, permissionId: string): Promise<void>
   removeSchedule(botId: string, scheduleId: string): Promise<void>
   cancelReminder(botId: string, reminderId: string): Promise<void>
@@ -651,6 +652,14 @@ export const useBotsStore = create<BotsState>((set, get) => {
       try {
         const detail = await bots().get(botId)
         if (owner === epoch && !removed.has(botId)) set((state) => ({ details: { ...state.details, [botId]: detail }, bots: replaceBot(state.bots, detail.summary) }))
+      } catch (cause) { fail(owner, cause, botId) }
+    },
+
+    async setPermission(botId, permissionId, enabled) {
+      const owner = epoch
+      try {
+        const detail = await bots().setPermission(botId, permissionId, enabled)
+        if (owner === epoch) set((state) => ({ details: { ...state.details, [botId]: detail } }))
       } catch (cause) { fail(owner, cause, botId) }
     },
 
