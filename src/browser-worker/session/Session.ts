@@ -1504,6 +1504,11 @@ export class ManagedSession {
       },
       hits: (cdpSessionId) => this.readHits(cdpSessionId),
       page: () => ({ width: this.page.width, height: this.page.height, scale: this.page.scale, seq: this.sizeSeq }),
+      // A window keeps its own size.
+      resize: async (cdpSessionId) => {
+        const tab = [...this.tabs.values()].find((entry) => entry.cdpSessionId === cdpSessionId)
+        if (tab && !this.windowed) await this.sizeTab(tab)
+      },
       now: () => this.clock().getTime()
     })
     return this.viewers

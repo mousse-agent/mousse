@@ -42,6 +42,13 @@ export const SETTLE_MS = 300
 export const MAX_SETTLE_MS = 4_800
 /** A still picture replaced sooner than this was not worth taking: the next wait is twice as long. */
 const STILL_STANDS_MS = 2_000
+/**
+ * A resize can be lost: with two resizes a moment apart, while the first one's still was being taken, Chromium kept
+ * the page at the first size for good (seen on managed Chromium without a window; sending the size again applies it at
+ * once). The still that shows the resized page finds it at its old size, and lays it out at the new one again (`resize`), at most
+ * `RESIZE_READS` times; a resize that leaves the size as it was (a new pixel ratio alone) is then pictured as it is.
+ */
+const RESIZE_READS = 5
 /** Screencast pictures this soon after a screenshot that repeat a recent picture are its echo. */
 const ECHO_MS = 250
 /** How many of a tab's recent pictures a repeat is looked for in. */
@@ -144,6 +151,8 @@ export interface ViewerCapturesOptions {
    * each picture is marked with that count, or -1 when it shows a size the page had already left.
    */
   page?(): { width: number; height: number; scale: number; seq: number }
+  /** Lays the tab's page out at the session's size again (nothing for a browser with a window of its own). */
+  resize?(cdpSessionId: string): Promise<unknown>
   now?: () => number
   settleMs?: number
   leaseMs?: number
@@ -219,6 +228,8 @@ interface TabCapture {
    * before the resize, so it is shown and places nothing until a still (always the page as it is) is taken.
    */
   resizedUnseen?: boolean
+  /** The page's size as last read before the resize not yet pictured, and how many reads since found it unchanged. */
+  resizedFrom?: { width: number; height: number; reads: number }
   /** What was on top at a grid of points when last read, while a person holds the browser. */
   hits?: BrowserPictureHits
   /** The latest picture's scroll and grid are being read (the read under way): it is handed to no watcher before they are. */
@@ -406,6 +417,7 @@ export class ViewerCaptures {
       this.forgetRecent(capture)
       capture.settleMs = this.settleMs
       capture.resizedUnseen = true
+      capture.resizedFrom = { ...capture.viewport, reads: 0 }
       if (capture.latest) capture.latest = { ...capture.latest, sharp: false }
       void this.readViewport(capture).then(() => this.armSettle(capture, 0))
     }
@@ -847,6 +859,15 @@ export class ViewerCaptures {
       const viewportChanged = this.applyViewport(capture, metrics)
       const visual = metrics.cssVisualViewport ?? {}
       const { width, height } = capture.viewport
+      // Resized, and the page still has the size from before: the resize was lost, and a still now would show the
+      // old layout as the new one. The page is laid out at the new size again, and the still taken after that.
+      const from = capture.resizedFrom
+      if (from && width === from.width && height === from.height && from.reads < RESIZE_READS && this.options.resize && this.options.page?.().seq === sizedAt?.seq) {
+        from.reads += 1
+        await this.options.resize(sessionId)
+        capture.stillAgain = true
+        return
+      }
       // The clip's scale is of CSS pixels: the page's pixel ratio multiplies it.
       const ratio = sizedAt?.scale ?? 1
       let scale = Math.min(1, capture.width / (width * ratio), SCREENCAST_MAX_HEIGHT / (height * ratio))
@@ -874,7 +895,10 @@ export class ViewerCaptures {
       // Resized while it was taken: it may show either size, so it places nothing. Otherwise it is the page as it is.
       const kept = !sizedAt || this.options.page?.().seq === sizedAt.seq
       capture.latestSize = sizedAt ? (kept ? sizedAt.seq : -1) : 0
-      if (kept) capture.resizedUnseen = false
+      if (kept) {
+        capture.resizedUnseen = false
+        capture.resizedFrom = undefined
+      }
       capture.latest = { data: shot.data, width: Math.round(width * scale * ratio), height: Math.round(height * scale * ratio), viewport: { width, height }, at: this.now(), sharp: true, ...this.spot(capture) }
       capture.lastStill = shot
       capture.shownCast = over
