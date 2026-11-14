@@ -13,16 +13,26 @@ import { noteWebGlContext } from '../../../lib/webglCount'
  *
  * Cost control, for a budget of 4 ms per tick with 20 faces:
  * - Only faces on screen in a visible document are drawn (an IntersectionObserver and
- *   `visibilitychange`). With none due, the loop stops.
+ *   `visibilitychange`). With none moving or waiting to draw, the loop stops.
  * - The pixel ratio is capped at 2. Small faces (below 56 px) are drawn at 2x whatever the ratio
  *   and scaled down into their canvas, so their edges stay smooth; this is cheaper than taking
  *   2×2 samples in the shader, whose loop slows every pixel.
- * - Each face has its own frame rate (30 fps for the busy states, 20 for idle, 15 for paused),
- *   staggered so the faces don't all draw on the same tick. Ticks draw at most 60 times a second.
+ * - Faces draw on shared ticks, 30 a second on one grid of the renderer's clock (`SHARED_TICK`):
+ *   the busy states every tick, idle and paused every other tick (15 a second). Faces due at a time
+ *   draw on the same tick, so the window presents a frame only when faces change, and no face
+ *   presents one of its own between ticks. Their poses stay their own (`FaceMotion` per face).
+ *   Only a face that is new, changed, resized or newly on screen draws at once, then joins the grid.
+ * - Between ticks the loop sleeps on a timer and asks for a display frame just before the next
+ *   tick (`WAKE_LEAD_MS`), instead of running a frame on every display frame. On a 100 Hz Mac (M4),
+ *   one working bot's chat (two live faces) went from 100 frames run, 41 presented, 51 ms of
+ *   renderer main thread and 121 mW of GPU a second, when each face kept its own phase and a frame
+ *   was asked for every display frame, to 40 run (30 that draw), 30 presented, 36 ms and 31 mW.
+ *   With six live faces, frames run and presented fall the same way and CPU time by about a third,
+ *   but GPU power does not fall (206 against 188 mW).
  * - A tick draws at most `SAMPLE_BUDGET` shader samples (drawn pixels), blank faces first,
- *   then the most overdue; the rest wait for the next tick. Many faces then lower the frame rate,
- *   not the frame time. A blank face never waits: past the budget it is drawn anyway, a still one
- *   as a one-sample draft that a later tick draws clean.
+ *   then the most overdue; the rest wait for the next shared tick. Many faces then lower the
+ *   frame rate, not the frame time. A blank face never waits: past the budget it is drawn anyway,
+ *   a still one as a one-sample draft that a later tick draws clean.
  * - Still faces (reduced motion, `still`, settled faces) draw once, with 2×2 samples for clean
  *   edges (counted four times against the budget). Their frame is cached per look, state, view
  *   and pixel size, so a long list of the same still face costs one draw. Live faces take one
@@ -190,17 +200,35 @@ export const SAVED_HOLD_MS = 60
 /** Changes when the way a frame is drawn or copied out changes, outside the shader and the poses. */
 const FRAME_FORMAT = 1
 
-/** Seconds between frames, by state. */
-const FRAME_INTERVAL: Record<BotFaceState, number> = {
-  working: 1 / 30,
-  needs_you: 1 / 30,
-  stuck: 1 / 30,
-  happy: 1 / 30,
-  idle: 1 / 20,
-  paused: 1 / 15
+/**
+ * Seconds between shared ticks. Every live face's frame times are multiples of this on the
+ * renderer's clock, so the faces due at a time draw on one tick, into one presented frame.
+ */
+const SHARED_TICK = 1 / 30
+/** Shared ticks between a face's frames, by state: 30 a second for the busy states, 15 for idle and paused. */
+const FRAME_TICKS: Record<BotFaceState, number> = {
+  working: 1,
+  needs_you: 1,
+  stuck: 1,
+  happy: 1,
+  idle: 2,
+  paused: 2
 }
-/** Ticks come at the display rate; a frame due within this much of a tick draws on it. */
+/** Display frames come every few milliseconds; a frame due within this much of one draws on it. */
 const FRAME_SLACK = 1 / 240
+/**
+ * A renderer with nothing due sleeps on a timer, which asks for a display frame this long before
+ * the first one that may draw the next due face. Which display frame draws a tick is then decided
+ * by the frame's own time, as when a frame is asked for every display frame, and not by when the
+ * timer happened to run: a timer that runs early only costs a display frame that draws nothing, and
+ * one runs late enough to move a tick only when it is later than this.
+ */
+export const WAKE_LEAD_MS = 2
+
+/** The first frame time on the grid of `interval` seconds after a tick at `t`. */
+function gridAfter(t: number, interval: number): number {
+  return (Math.floor((t + FRAME_SLACK) / interval) + 1) * interval
+}
 
 export function facePixelRatio(raw: number): number {
   return Math.min(MAX_PIXEL_RATIO, Number.isFinite(raw) && raw > 0 ? raw : 1)
@@ -249,7 +277,10 @@ interface Slot {
   visible: boolean
   /** Wants a frame whatever its timing: new or changed. */
   dirty: boolean
+  /** When its next frame is due, in seconds: a time on the shared grid. */
   nextAt: number
+  /** Deferred by a tick's sample budget: not drawn before this shared tick, in seconds. */
+  heldTill: number
   lastT: number | null
   /** Side of the face's canvas, in device pixels. */
   px: number
@@ -296,6 +327,8 @@ export class FaceRenderer {
   private readonly listeners = new Set<() => void>()
   private readonly random: () => number
   private frameId: number | null = null
+  /** The timer a sleeping loop waits on, and when it asks for a frame (env ms). */
+  private wake: { at: number; cancel: () => void } | null = null
   private failed = false
   private ready = false
   private readonly createdAt: number
@@ -410,7 +443,8 @@ export class FaceRenderer {
       motion: new FaceMotion(spec.state, this.random),
       visible: !this.observer,
       dirty: true,
-      nextAt: t + this.random() * FRAME_INTERVAL[spec.state],
+      nextAt: t,
+      heldTill: -Infinity,
       lastT: null,
       px: 0,
       drawPx: 0,
@@ -466,9 +500,9 @@ export class FaceRenderer {
     this.stat = { ticks: 0, lastFaces: 0, averageMs: 0, maxMs: 0, gpuMs: 0, gpuMaxMs: 0 }
   }
 
-  /** Whether a frame is scheduled. */
+  /** Whether the loop runs: a frame is asked for, or a timer will ask for one. */
   get running(): boolean {
-    return this.frameId !== null
+    return this.frameId !== null || this.wake !== null
   }
 
   /** Shrinks the shared drawing buffer while no face shows; the context and the compiled shader stay. */
@@ -505,6 +539,7 @@ export class FaceRenderer {
     if (prev.state !== next.state || prev.still !== next.still) slot.changedAt = this.env.now() / 1000
     if (prev.state !== next.state) slot.motion.set(next.state, slot.changedAt)
     slot.dirty = true
+    slot.heldTill = -Infinity
     this.sizeCanvas(slot)
     if (!this.live()) this.showSaved(slot)
     this.schedule()
@@ -526,6 +561,7 @@ export class FaceRenderer {
       slot.canvas.height = px
       slot.picture = null
       slot.drawn = false
+      slot.heldTill = -Infinity
     }
     slot.dirty = true
   }
@@ -555,12 +591,60 @@ export class FaceRenderer {
     return false
   }
 
+  /**
+   * Asks for a frame when a face is due now, or sleeps on a timer until the next shared tick that
+   * draws one, so no display frame runs for nothing in between.
+   */
   private schedule(): void {
-    if (this.frameId !== null || !this.wanted()) return
+    if (this.frameId !== null) return
+    if (!this.wanted()) return this.cancelWake()
+    const at = this.wakeTime()
+    if (at !== null && this.env.setTimer) {
+      if (this.wake && this.wake.at <= at) return
+      this.cancelWake()
+      // Whole milliseconds, as `setTimeout` takes them: rounded down, so it doesn't run later than `at`.
+      const delay = Math.floor(at - this.env.now())
+      const cancel = this.env.setTimer(() => {
+        this.wake = null
+        this.schedule()
+      }, delay)
+      this.wake = { at, cancel }
+      return
+    }
+    this.cancelWake()
     this.frameId = this.env.requestFrame((now) => this.tick(now))
   }
 
+  /**
+   * When to ask for the frame that draws the next due face (env ms), or null to ask now: a face is
+   * new, changed, resized, newly on screen or settling, or the loop isn't drawing live (compiling,
+   * lost, no timers), where a frame is asked for every display frame as before.
+   */
+  private wakeTime(): number | null {
+    if (!this.ready || this.failed || !this.env.setTimer) return null
+    const now = this.env.now()
+    const t = now / 1000
+    let due = Infinity
+    for (const slot of this.slots.values()) {
+      if (!slot.visible) continue
+      const still = this.still(slot, t)
+      if (still && slot.drawnStill && !slot.dirty) continue
+      const held = slot.heldTill > t + FRAME_SLACK
+      if ((slot.dirty || still !== slot.drawnStill) && !held) return null
+      due = Math.min(due, Math.max(slot.dirty || still ? -Infinity : slot.nextAt, slot.heldTill))
+    }
+    if (due === Infinity) return null
+    const at = Math.max(due - FRAME_SLACK, this.lastDraw + MIN_TICK) * 1000 - WAKE_LEAD_MS
+    return at - now >= 1 ? at : null
+  }
+
+  private cancelWake(): void {
+    this.wake?.cancel()
+    this.wake = null
+  }
+
   private stop(): void {
+    this.cancelWake()
     if (this.frameId === null) return
     this.env.cancelFrame(this.frameId)
     this.frameId = null
@@ -766,6 +850,8 @@ export class FaceRenderer {
       // A face that settles draws its still pose once.
       if (still && !slot.drawnStill) slot.dirty = true
       slot.drawnStill = still
+      // Deferred by the budget: waits for the next shared tick, not a display frame of its own.
+      if (slot.heldTill > t + FRAME_SLACK) continue
       if (still ? slot.dirty : slot.dirty || t + FRAME_SLACK >= slot.nextAt) due.push({ slot, at: slot.dirty ? -Infinity : slot.nextAt })
     }
     if (due.length === 0) return this.schedule()
@@ -803,7 +889,10 @@ export class FaceRenderer {
       }
       let cost = slot.drawPx * slot.drawPx * samples * samples
       if (spent > 0 && spent + cost > SAMPLE_BUDGET) {
-        if (!blank) continue
+        if (!blank) {
+          slot.heldTill = gridAfter(t, SHARED_TICK)
+          continue
+        }
         // A blank face never waits for the budget. A still one is drawn now as a one-sample draft,
         // and its clean frame (the one kept and saved) on a later tick.
         if (cacheKey) {
@@ -822,10 +911,10 @@ export class FaceRenderer {
         continue
       }
       const dt = slot.lastT === null ? 1 / 30 : Math.min(0.1, Math.max(0, t - slot.lastT))
-      const interval = FRAME_INTERVAL[spec.state]
       slot.lastT = t
-      // Keep each face's phase, unless it fell a whole frame behind.
-      slot.nextAt = slot.nextAt + interval < t ? t + interval : slot.nextAt + interval
+      // Every face's next frame is on the shared grid, whenever this one was drawn, so faces due
+      // together draw together; a face that fell behind skips the ticks it missed.
+      slot.nextAt = gridAfter(t, SHARED_TICK * FRAME_TICKS[spec.state])
       jobs.push({ slot, uniforms: faceUniforms(spec.look, slot.motion.frame(t, dt), view), x: 0, y: 0 })
     }
     // A moving face's still pose is drawn once too, with what the budget leaves, and saved: a later

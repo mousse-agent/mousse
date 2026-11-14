@@ -2,7 +2,7 @@
 import { act, createElement, type ReactElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { BotFace, BotFaceStill, normalizeFaceProps } from '../../src/renderer/components/bots/face/BotFace'
+import { BotFace, BotFaceStill, normalizeFaceProps, type BotFaceState } from '../../src/renderer/components/bots/face/BotFace'
 import { FaceMotion, faceUniforms, hop, stillPose, type FaceUniforms } from '../../src/renderer/components/bots/face/facePoses'
 import {
   createWebGlGpu,
@@ -20,6 +20,7 @@ import {
   sharedFaceRendererStatus,
   stillFrameKey,
   UNFOCUSED_LIVE_SECONDS,
+  WAKE_LEAD_MS,
   softwareWebGl,
   warmFaceRenderer,
   warmFaceRendererAfterPaint,
@@ -110,11 +111,18 @@ function fakeEnv(options: {
   pixelRatio?: number
   focus?: boolean
   saved?: FakeSaved
+  /** The clock's start, in ms. */
+  start?: number
+  /** No `setTimer`: the renderer asks for a frame every display frame, as it did before shared ticks. */
+  noTimers?: boolean
+  /** Milliseconds each timer runs late (negative: early). */
+  timerLate?: () => number
 } = {}) {
   const frames = new Map<number, (now: number) => void>()
   let id = 0
-  let now = 1000
-  const draws: { side: number; uniforms: FaceUniforms }[] = []
+  let now = options.start ?? 1000
+  /** Each face drawn, with the time of the frame that drew it. */
+  const draws: { side: number; uniforms: FaceUniforms; at: number }[] = []
   const lost = new Set<() => void>()
   const restored = new Set<() => void>()
   const timers = new Map<number, { at: number; callback: () => void }>()
@@ -131,7 +139,7 @@ function fakeEnv(options: {
       buffer.width = Math.max(buffer.width, width)
       buffer.height = Math.max(buffer.height, height)
     }),
-    draw: (_x, _y, side, uniforms) => draws.push({ side, uniforms }),
+    draw: (_x, _y, side, uniforms) => draws.push({ side, uniforms, at: now }),
     finish: vi.fn(),
     onRestored: (listener) => restored.add(listener),
     onLost: (listener) => lost.add(listener),
@@ -167,26 +175,57 @@ function fakeEnv(options: {
     document,
     IntersectionObserver: options.observer ? (FakeObserver as unknown as typeof IntersectionObserver) : undefined,
     random: () => 0.5,
-    setTimer: (callback, ms) => {
-      const timer = ++id
-      timers.set(timer, { at: now + ms, callback })
-      return () => timers.delete(timer)
-    },
+    ...(options.noTimers
+      ? {}
+      : {
+          setTimer: (callback: () => void, ms: number) => {
+            const timer = ++id
+            timers.set(timer, { at: now + ms + (options.timerLate?.() ?? 0), callback })
+            return () => timers.delete(timer)
+          }
+        }),
     frames: options.saved?.store,
     log
   }
+  /** Runs the timers due before `end` at their own times, in order, as the event loop does between display frames. */
+  const runTimers = (end: number) => {
+    for (;;) {
+      let next: [number, { at: number; callback: () => void }] | undefined
+      for (const entry of timers) if (entry[1].at <= end && (!next || entry[1].at < next[1].at)) next = entry
+      if (!next) return
+      timers.delete(next[0])
+      now = Math.max(now, next[1].at)
+      next[1].callback()
+    }
+  }
+  /** Advances the clock by `ms`, running the timers due on the way, then one display frame at the end. */
   const tick = (ms = 1000 / 30) => {
-    now += ms
-    const due = [...frames.values()]
-    frames.clear()
+    const end = now + ms
     act(() => {
+      runTimers(end)
+      now = end
+      const due = [...frames.values()]
+      frames.clear()
       for (const callback of due) callback(now)
-      for (const [timer, { at, callback }] of [...timers]) {
-        if (at > now) continue
-        timers.delete(timer)
-        callback()
-      }
     })
+  }
+  /** Runs a display at `hz` for `ms`: timers at their own times, a frame every display frame. Returns the frame times that ran a frame callback. */
+  const display = (ms: number, hz: number) => {
+    const period = 1000 / hz
+    const woke: number[] = []
+    const frameCount = Math.round(ms / period)
+    for (let i = 0; i < frameCount; i++) {
+      const end = now + period
+      act(() => {
+        runTimers(end)
+        now = end
+        const due = [...frames.values()]
+        frames.clear()
+        if (due.length > 0) woke.push(now)
+        for (const callback of due) callback(now)
+      })
+    }
+    return woke
   }
   const lose = () => act(() => lost.forEach((listener) => listener()))
   const restore = () => act(() => restored.forEach((listener) => listener()))
@@ -198,7 +237,12 @@ function fakeEnv(options: {
     focused = next
     act(() => focusListeners.forEach((listener) => listener()))
   }
-  return { env, gpu, draws, buffer, log, tick, lose, restore, setRatio, setFocus, pending: () => frames.size, timers: () => timers.size }
+  return {
+    env, gpu, draws, buffer, log, tick, display, lose, restore, setRatio, setFocus,
+    now: () => now,
+    pending: () => frames.size,
+    timers: () => timers.size
+  }
 }
 
 /** Lets promise callbacks run (the saved frames' loads, decodes and writes). */
@@ -362,7 +406,9 @@ describe('BotFace fallback', () => {
     fake.tick(LOST_CONTEXT_TIMEOUT_MS)
     expect(renderer.status()).toBe('ready')
     expect(fake.draws).toHaveLength(2)
-    expect(fake.timers()).toBe(0)
+    // The wait for a lost context is gone; the one timer left asks for the next tick.
+    expect(fake.timers()).toBe(1)
+    expect(fake.pending()).toBe(0)
     renderer.dispose()
   })
 
@@ -1002,7 +1048,10 @@ describe('the shared renderer', () => {
     const handle = renderer.register(document.createElement('canvas'), spec())!
     const ticks = Math.ceil((IDLE_LIVE_SECONDS * 1000) / 50) + 1
     for (let i = 0; i < ticks; i++) fake.tick(50)
+    // Stopped completely: no frame asked for and no timer to ask for one.
     expect(renderer.running).toBe(false)
+    expect(fake.pending()).toBe(0)
+    expect(fake.timers()).toBe(0)
     expect(fake.draws.at(-1)!.uniforms).toEqual(faceUniforms(spec().look, stillPose('idle'), { view: 'head', size: 40, samples: 2 }))
     const drawn = fake.draws.length
     fake.tick(1000)
@@ -1023,6 +1072,8 @@ describe('the shared renderer', () => {
     const ticks = Math.ceil((UNFOCUSED_LIVE_SECONDS * 1000) / 50) + 1
     for (let i = 0; i < ticks; i++) fake.tick(50)
     expect(renderer.running).toBe(false)
+    expect(fake.pending()).toBe(0)
+    expect(fake.timers()).toBe(0)
     expect(fake.draws.at(-1)!.uniforms).toEqual(faceUniforms(spec().look, stillPose('working'), { view: 'head', size: 40, samples: 2 }))
     const drawn = fake.draws.length
     fake.setFocus(true)
@@ -1101,6 +1152,172 @@ describe('the shared renderer', () => {
     expect(fake.draws[0]!.side).toBe(208)
     // Whiskers show from 56 px up.
     expect(fake.draws[0]!.uniforms.uV[3]).toBe(0)
+    renderer.dispose()
+  })
+})
+
+describe('shared ticks', () => {
+  const colours = ['coral', 'orange', 'yellow', 'green', 'teal', 'blue', 'purple', 'pink'] as const
+  const face = (i: number, state: BotFaceState) => spec({ look: { colour: colours[i]!, accessory: 'none' }, state })
+  const colourOf = (i: number) => faceUniforms({ colour: colours[i]!, accessory: 'none' }, stillPose('idle'), { view: 'head', size: 40, samples: 1 }).uCol.join()
+  /** The frame times face `i` was drawn at, from draw `from` on. */
+  const drawnAt = (fake: ReturnType<typeof fakeEnv>, i: number, from = 0) =>
+    fake.draws.slice(from).filter((draw) => draw.uniforms.uCol.join() === colourOf(i)).map((draw) => draw.at)
+  const gaps = (times: number[]) => times.slice(1).map((at, i) => Math.round(at - times[i]!))
+
+  it('draws faces registered at different times on the same ticks, and every face due on a tick', () => {
+    const fake = fakeEnv()
+    const renderer = new FaceRenderer(fake.env)
+    renderer.register(document.createElement('canvas'), face(0, 'working'))
+    fake.display(37, 100)
+    renderer.register(document.createElement('canvas'), face(1, 'working'))
+    fake.display(53, 100)
+    renderer.register(document.createElement('canvas'), face(2, 'idle'))
+    fake.display(21, 100)
+    renderer.register(document.createElement('canvas'), face(3, 'paused'))
+    fake.display(100, 100)
+    const from = fake.draws.length
+    fake.display(1000, 100)
+    const busy = drawnAt(fake, 0, from)
+    expect(drawnAt(fake, 1, from)).toEqual(busy)
+    expect(drawnAt(fake, 3, from)).toEqual(drawnAt(fake, 2, from))
+    for (const at of drawnAt(fake, 2, from)) expect(busy).toContain(at)
+    // No frame of its own between ticks: every frame that drew is a busy tick, 30 or 40 ms apart on a 100 Hz display.
+    expect(new Set(fake.draws.slice(from).map((draw) => draw.at))).toEqual(new Set(busy))
+    expect(new Set(gaps(busy))).toEqual(new Set([30, 40]))
+    renderer.dispose()
+  })
+
+  it('moves the busy states 30 times a second, idle and paused 15', () => {
+    const states: BotFaceState[] = ['working', 'needs_you', 'stuck', 'happy', 'idle', 'paused']
+    const fake = fakeEnv()
+    const renderer = new FaceRenderer(fake.env)
+    states.forEach((state, i) => {
+      renderer.register(document.createElement('canvas'), face(i, state))
+      fake.display(13, 100)
+    })
+    const from = fake.draws.length
+    fake.display(3000, 100)
+    // Within the seconds an idle or paused face moves before it settles (`IDLE_LIVE_SECONDS`).
+    expect(states.map((_, i) => drawnAt(fake, i, from).length)).toEqual([90, 90, 90, 90, 45, 45])
+    renderer.dispose()
+  })
+
+  it('sleeps between ticks: no frame is asked for while nothing is due, and a timer asks for the next tick', () => {
+    const fake = fakeEnv()
+    const renderer = new FaceRenderer(fake.env)
+    renderer.register(document.createElement('canvas'), face(0, 'working'))
+    renderer.register(document.createElement('canvas'), face(1, 'idle'))
+    fake.display(100, 100)
+    const from = fake.draws.length
+    const woke: number[] = []
+    for (let i = 0; i < 100; i++) {
+      const drawn = fake.draws.length
+      woke.push(...fake.display(10, 100))
+      if (fake.draws.length === drawn) continue
+      // Right after a drawing tick: asleep until the next.
+      expect(fake.pending()).toBe(0)
+      expect(fake.timers()).toBe(1)
+      expect(renderer.running).toBe(true)
+    }
+    const ticks = [...new Set(fake.draws.slice(from).map((draw) => draw.at))]
+    expect(ticks).toHaveLength(30)
+    // A frame that draws nothing is asked for at most one display frame before a tick, never every frame.
+    for (const at of woke) expect(ticks.includes(at) || ticks.includes(at + 10)).toBe(true)
+    expect(woke.length).toBeLessThanOrEqual(40)
+    renderer.dispose()
+  })
+
+  it('asks for a frame at once for a face that is new on screen, changed or resized', () => {
+    const fake = fakeEnv({ observer: true })
+    const renderer = new FaceRenderer(fake.env)
+    const a = document.createElement('canvas')
+    const handle = renderer.register(a, face(0, 'working'))!
+    FakeObserver.last!.fire(true, a)
+    // Asleep, and far enough from the last tick that the next may draw (ticks are `MIN_TICK` apart).
+    const asleep = () => {
+      const ready = () => fake.pending() === 0 && fake.timers() === 1 && fake.now() - fake.draws.at(-1)!.at >= 20
+      for (let i = 0; i < 10 && !ready(); i++) fake.display(10, 100)
+      expect(ready()).toBe(true)
+    }
+    const drawsNextFrame = (i: number) => {
+      expect(fake.pending()).toBe(1)
+      expect(fake.timers()).toBe(0)
+      const before = drawnAt(fake, i).length
+      fake.display(10, 100)
+      expect(drawnAt(fake, i)).toHaveLength(before + 1)
+      expect(drawnAt(fake, i).at(-1)).toBe(fake.now())
+    }
+    asleep()
+    const b = document.createElement('canvas')
+    renderer.register(b, face(1, 'working'))
+    // Not known to be on screen yet.
+    expect(fake.pending()).toBe(0)
+    FakeObserver.last!.fire(true, b)
+    drawsNextFrame(1)
+    asleep()
+    handle.update(face(0, 'happy'))
+    drawsNextFrame(0)
+    asleep()
+    handle.update({ ...face(0, 'happy'), size: 48 })
+    drawsNextFrame(0)
+    renderer.dispose()
+  })
+
+  it('defers faces past the sample budget to the next shared tick, most overdue first, never to a frame of their own', () => {
+    const fake = fakeEnv()
+    const renderer = new FaceRenderer(fake.env)
+    const canvases = Array.from({ length: 20 }, () => document.createElement('canvas'))
+    const drawnIn = new Map<number, Set<HTMLCanvasElement>>()
+    for (const canvas of canvases) {
+      renderer.register(canvas, face(0, 'working'))
+      vi.mocked(canvas.getContext('2d')!.drawImage).mockImplementation(() => {
+        const set = drawnIn.get(fake.now()) ?? new Set()
+        drawnIn.set(fake.now(), set.add(canvas))
+      })
+    }
+    const perTick = Math.floor(SAMPLE_BUDGET / (faceDrawSide(40, 1) ** 2))
+    fake.display(1000, 100)
+    const ticks = [...drawnIn.keys()]
+    // The first frame draws every blank face at once; then each tick its budget, on the shared ticks only.
+    expect(drawnIn.get(ticks[0]!)!.size).toBe(20)
+    expect(new Set(gaps(ticks.slice(1)))).toEqual(new Set([30, 40]))
+    const later = ticks.slice(1).map((at) => drawnIn.get(at)!)
+    for (const set of later) expect(set.size).toBe(perTick)
+    // Those the budget deferred draw on the next tick: no face draws on two ticks running.
+    for (let i = 1; i < later.length; i++) for (const canvas of later[i]!) expect(later[i - 1]!.has(canvas)).toBe(false)
+    for (let i = 2; i < later.length; i++) expect(new Set([...later[i - 2]!, ...later[i - 1]!, ...later[i]!]).size).toBe(Math.min(20, perTick * 3))
+    renderer.dispose()
+  })
+
+  it('draws on the same display frames as asking for a frame every display frame, at 60 and 100 Hz, with timers early or late within WAKE_LEAD_MS', () => {
+    const late = [-0.9, 0, WAKE_LEAD_MS - 0.1, 0.7, -0.4, 1.5]
+    for (const hz of [60, 100]) {
+      for (let offset = 0; offset < 1000 / hz; offset += 0.5) {
+        const run = (options: Parameters<typeof fakeEnv>[0]) => {
+          const fake = fakeEnv({ start: 1000 + offset, ...options })
+          const renderer = new FaceRenderer(fake.env)
+          renderer.register(document.createElement('canvas'), face(0, 'working'))
+          fake.display(17, hz)
+          renderer.register(document.createElement('canvas'), face(1, 'idle'))
+          fake.display(1000, hz)
+          renderer.dispose()
+          return fake.draws.map((draw) => `${draw.at} ${draw.uniforms.uCol.join()}`)
+        }
+        let n = 0
+        const asleep = run({ timerLate: () => late[n++ % late.length]! })
+        const everyFrame = run({ noTimers: true })
+        expect(asleep, `${hz} Hz, offset ${offset} ms`).toEqual(everyFrame)
+      }
+    }
+  })
+
+  it('asks for a frame every display frame without timers', () => {
+    const fake = fakeEnv({ noTimers: true })
+    const renderer = new FaceRenderer(fake.env)
+    renderer.register(document.createElement('canvas'), face(0, 'working'))
+    expect(fake.display(500, 100)).toHaveLength(50)
+    expect(new Set(fake.draws.map((draw) => draw.at)).size).toBe(16)
     renderer.dispose()
   })
 })
