@@ -64,9 +64,9 @@
 .chat-primary-button { border-radius: 8px; padding: 9px 14px; font-size: 12px; font-weight: 600; }
 .chat-error { color: var(--error, #e79090); font-size: 12px; line-height: 1.5; }
 .chat-composer-error { padding: 0 20px; }
-.chat-dialog-backdrop { position: fixed; z-index: 1000; inset: 0; background: #0008; display: grid; place-items: center; }
-/* The edge and shadow every app dialog has (.modal): no light border. */
-.chat-dialog { width: min(420px, calc(100vw - 40px)); max-height: 85vh; overflow: auto; border: 0; border-radius: 14px; background: var(--bg-secondary, #201d23); color: var(--text-primary); padding: 20px; box-shadow: var(--ui-dialog-edge), var(--ui-dialog-drop); }
+/* The dim, blur, surface, edge and shadow every app dialog has (.modal): solid, so nothing behind shows through, also with acrylic. */
+.chat-dialog-backdrop { position: fixed; z-index: 1000; inset: 0; background: var(--ui-dialog-dim); backdrop-filter: var(--ui-dialog-blur); -webkit-backdrop-filter: var(--ui-dialog-blur); display: grid; place-items: center; }
+.chat-dialog { width: min(420px, calc(100vw - 40px)); max-height: 85vh; overflow: auto; border: 0; border-radius: 14px; background: var(--ui-raised, #201d23); color: var(--text-primary); padding: 20px; box-shadow: var(--ui-dialog-edge), var(--ui-dialog-drop); }
 .chat-dialog-heading { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
 .chat-dialog h2 { font-size: 17px; margin: 0; }
 .chat-dialog button { color: inherit; }
@@ -136,8 +136,8 @@
 .chat-network-actions > div { position: absolute; right: 0; top: 28px; max-height: 65vh; overflow: auto; }
 .chat-network-publish[open] { position: absolute; right: 20px; top: 18px; }
 .chat-network-publish p, .chat-network-actions p, .chat-network-dialog p { line-height: 1.6; margin: 10px 0; }
-.chat-network-dialog-backdrop { position: fixed; z-index: 1000; inset: 0; display: grid; place-items: center; background: #0008; }
-.chat-network-dialog { width: min(440px, calc(100vw - 36px)); max-height: 85vh; overflow: auto; padding: 22px; border-radius: 14px; border: 1px solid rgba(var(--accent-pale-rgb), .2); background: var(--bg-secondary, #201d23); color: var(--text-primary); font-size: 12px; }
+.chat-network-dialog-backdrop { position: fixed; z-index: 1000; inset: 0; display: grid; place-items: center; background: var(--ui-dialog-dim); backdrop-filter: var(--ui-dialog-blur); -webkit-backdrop-filter: var(--ui-dialog-blur); }
+.chat-network-dialog { width: min(440px, calc(100vw - 36px)); max-height: 85vh; overflow: auto; padding: 22px; border-radius: 14px; border: 1px solid rgba(var(--accent-pale-rgb), .2); background: var(--ui-raised, #201d23); color: var(--text-primary); font-size: 12px; }
 .chat-network-dialog h2 { margin: 0; font-size: 17px; }
 .chat-network-dialog label, .chat-network-actions label { display: flex; flex-direction: column; gap: 6px; margin: 12px 0; font-size: 12px; }
 .chat-network-dialog input, .chat-network-dialog select, .chat-network-dialog textarea, .chat-network-actions input, .chat-network-actions select, .chat-network-actions textarea { width: 100%; min-width: 0; background: #0002; color: var(--text-primary); border: 1px solid rgba(var(--accent-pale-rgb), .2); border-radius: 6px; padding: 8px; }
