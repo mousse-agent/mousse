@@ -4,7 +4,7 @@ import { ProviderIcon } from '../../lib/providerIcons'
 import { Check, CircleArrowUp, Copy, Folder, Layers, RefreshCw, RotateCcw } from '../../lib/icons'
 import { Switch } from '../settings/SettingsRow'
 import { ipcErrorMessage } from '../../utils/voiceErrors'
-import type { ModelsFreshness, SwitchState } from './providerView'
+import type { SwitchState } from './providerView'
 
 /** Only warning and error show a dot. */
 export function needsAttention(status: StatusDescription): boolean {
@@ -39,10 +39,14 @@ export function useAsyncAction() {
  * below the row (a terminal sign-in's message names the command it asks for).
  */
 export function statusText(status: StatusDescription): string {
-  const headline = status.headline
+  const detail = statusDetail(status)
+  return detail ? `${status.headline} · ${detail}` : status.headline
+}
+
+/** The detail after the headline, unless it only repeats the headline or the next step's command. */
+function statusDetail(status: StatusDescription): string | null {
   const command = status.nextStep?.command
-  const detail = status.detail && status.detail !== status.headline && !(command && status.detail.includes(command)) ? status.detail : null
-  return detail ? `${headline} · ${detail}` : headline
+  return status.detail && status.detail !== status.headline && !(command && status.detail.includes(command)) ? status.detail : null
 }
 
 /** The headline alone, for the provider list: "Signed in", "Not found", "Checking". */
@@ -61,11 +65,22 @@ export function CompactStatus({ status }: { status: StatusDescription }) {
   )
 }
 
-/** "Not signed in · Run claude to sign in", in the tone's colour (the editor's Setup → Status). */
-export function StatusLine({ status }: { status: StatusDescription }) {
+/** The editor's Setup → Status: the headline in a badge of the tone's colour, the detail under it. */
+export function StatusLine({ status, title }: { status: StatusDescription; title?: string }) {
   return (
-    <span className={`prov-status-text is-${status.tone}`} aria-live="polite">
-      {statusText(status)}
+    <span className={`prov-status-text is-${status.tone}`} title={title} aria-live="polite">
+      <span className="prov-status-badge">{status.headline}</span>
+      {statusDetail(status) && <span className="prov-status-detail">{statusDetail(status)}</span>}
+    </span>
+  )
+}
+
+/** A text field with its one icon action (browse, remove) inside its right end, like a select's chevron. */
+export function FieldWithAction({ children, action }: { children: ReactNode; action: ReactNode }) {
+  return (
+    <span className="prov-field">
+      {children}
+      <span className="prov-field-action">{action}</span>
     </span>
   )
 }
@@ -190,16 +205,6 @@ function OverrideInheritance({ projectEnabled, deviceEnabled }: { projectEnabled
   )
 }
 
-/** "Models updated 2 h ago", ticking, or "Models: cached list" when no update time is known. */
-export function ModelsFreshnessLine({ freshness }: { freshness: ModelsFreshness }) {
-  return freshness.kind === 'updated' ? <ModelsUpdated at={freshness.at} /> : <span className="prov-item-models">Models: cached list</span>
-}
-
-function ModelsUpdated({ at }: { at: number }) {
-  const ago = useRelativeTime(at)
-  return <span className="prov-item-models">Models updated {ago}</span>
-}
-
 /**
  * A provider in the list pane: logo, name and version, then the status
  * line; the enable switch on the right. Selection is a background fill only. Switched off, the row
@@ -212,7 +217,6 @@ export function ProviderListRow({
   version,
   update,
   status,
-  models,
   toggle,
   selected,
   onSelect,
@@ -225,8 +229,6 @@ export function ProviderListRow({
   /** An update is available: a small button takes the version's place, off while it runs. */
   update?: { label: string; busy?: boolean; onClick: () => void }
   status: StatusDescription
-  /** How fresh the model list is, when the row has something to say about it. */
-  models?: ModelsFreshness | null
   toggle: SwitchState
   selected: boolean
   onSelect: () => void
@@ -267,7 +269,6 @@ export function ProviderListRow({
             )}
           </span>
           <CompactStatus status={status} />
-          {models && <ModelsFreshnessLine freshness={models} />}
           {toggle.overridden && onReset && (
             <span className="prov-item-override">
               <OverrideInheritance projectEnabled={toggle.checked} deviceEnabled={toggle.deviceEnabled} />

@@ -7,13 +7,13 @@ import { ProviderIcon } from '../../lib/providerIcons'
 import { confirmNavigation } from '../../services/navigationGuards'
 import { useAppStore } from '../../stores/appStore'
 import { Segmented, SettingsAdvanced, SettingsRow } from '../settings/SettingsRow'
-import { AccountRow, ArgsRow, EnvRow, ExecutableRow, PromptCacheHourRow, SetupRow, TelemetryRow, UpdateRow, type InstanceActions } from './CliSections'
+import { ArgsRow, EnvRow, ExecutableRow, PromptCacheHourRow, SetupRow, TelemetryRow, UpdateChip, type InstanceActions } from './CliSections'
 import { ProviderInfoSection, agentInfoRows, apiInfoRows } from './ProviderInfo'
 import { VendorSettingsSection } from './VendorSettings'
 import { ProviderModelsSection, modelsSummary } from './ProviderModelsSection'
-import { EditorSection, RemoveButton, useAsyncAction } from './parts'
+import { EditorSection, RemoveButton, useAsyncAction, useRelativeTime } from './parts'
 import { DownloadedFilesRow, RegistrySourceRow, RemoveWithFilesButton, type RemoveOptions } from './RegistryAgents'
-import { DRIVER_INFO, formatVersion, iconIdOf, isManagedSetup } from './providerView'
+import { DRIVER_INFO, formatVersion, iconIdOf, isManagedSetup, modelsFreshness } from './providerView'
 
 /**
  * Provider setup is per machine: only the on/off switch has a project override. In
@@ -34,16 +34,19 @@ function deviceWideNote(snapshot: InstanceSnapshot): string | undefined {
 }
 
 /**
- * The editor's heading: the provider's logo and name, its version and delete on the
- * right. The status lives in Setup → Status; renaming lives under Advanced → General.
+ * The editor's heading: the provider's logo and name, an available update, its version and delete
+ * on the right. The status and the name live in Setup.
  */
 export function EditorHeader({
   snapshot,
   removeLabel,
   removeHint,
-  onRemove
+  onRemove,
+  update
 }: {
   snapshot: InstanceSnapshot
+  /** An available update's chip, beside the version. */
+  update?: ReactNode
   removeLabel?: string
   removeHint?: string
   onRemove?: (options: RemoveOptions) => Promise<void>
@@ -63,6 +66,7 @@ export function EditorHeader({
           {removal.error && <p className="settings-group-desc prov-error">{removal.error}</p>}
         </div>
         <div className="settings-group-action">
+          {update}
           {version && <code className="prov-version">{version}</code>}
           {onRemove && removeLabel && (
             <span title={removeHint}>
@@ -79,14 +83,9 @@ export function EditorHeader({
   )
 }
 
-/** The editable settings under Advanced: one compact list of rows, no section headings. */
-function AdvancedList({ note, children }: { note?: string; children: ReactNode }) {
-  return (
-    <section className="settings-group prov-editor-section prov-advanced-list" data-testid="prov-advanced-list">
-      {note && <p className="settings-group-desc">{note}</p>}
-      <div className="settings-group-rows">{children}</div>
-    </section>
-  )
+/** Whether the Behavior group under Advanced has a row to show (Telemetry, or the prompt cache switch). */
+function hasBehaviorRows(snapshot: InstanceSnapshot): boolean {
+  return Boolean(snapshot.telemetry || (snapshot.promptCacheHour && snapshot.promptCacheHour.basis !== 'subscription'))
 }
 
 /** Renames the instance; empty clears it back to the default. */
@@ -123,9 +122,9 @@ function DisplayNameRow({ snapshot, onRename }: { snapshot: InstanceSnapshot; on
 }
 
 /**
- * The editor of one agent instance: Setup (status, next step, account, an available update) and
- * Models up front; the rest (its name, telemetry, the executable Mousse resolved, path and
- * arguments, home, environment) under a collapsed Advanced, so most people never meet it.
+ * The editor of one agent instance: an available update beside the version in the heading; Setup
+ * (status with the account's Usage and Sign out, next step, its name), then Models; the rest (telemetry, the executable Mousse resolved, path and arguments,
+ * environment) under a collapsed Advanced in titled groups, so most people never meet it.
  */
 export function AgentEditor({
   snapshot,
@@ -170,32 +169,37 @@ export function AgentEditor({
                 : 'Deletes this provider from Mousse. Your CLI and its sign-in stay; add it again any time.'
         }
         onRemove={onRemove}
+        update={info.bundled ? undefined : <UpdateChip snapshot={snapshot} operation={operation} actions={actions} />}
       />
       <EditorSection title="Setup">
-        <SetupRow snapshot={snapshot} status={status} operation={operation?.kind === 'update' ? undefined : operation} actions={actions} updateRow={!info.bundled} />
+        <SetupRow snapshot={snapshot} status={status} operation={operation?.kind === 'update' ? undefined : operation} actions={actions} updateRow={!info.bundled} onOpenUsage={USAGE_DRIVERS.has(snapshot.driver) ? openUsagePage : undefined} />
         {source && <RegistrySourceRow snapshot={snapshot} source={source} actions={actions} />}
-        <AccountRow snapshot={snapshot} actions={actions} onOpenUsage={USAGE_DRIVERS.has(snapshot.driver) ? openUsagePage : undefined} />
-        {/* A newer version: the one place to update, with its progress. */}
-        {!info.bundled && <UpdateRow snapshot={snapshot} operation={operation} actions={actions} />}
+        <DisplayNameRow snapshot={snapshot} onRename={(displayName) => actions.configure({ displayName })} />
       </EditorSection>
       <ModelsEditorSection snapshot={snapshot} onSave={onSaveModelPrefs} onRefresh={onRefreshModels} reveal={revealModels} />
-      {/* Advanced: what the user can change first, in one compact list; the read-only facts last, in Info. */}
+      {/* Advanced: what the user can change, in titled groups; the read-only facts last, in Info. */}
       <SettingsAdvanced>
-        <AdvancedList note={deviceWideNote(snapshot)}>
-          <DisplayNameRow snapshot={snapshot} onRename={(displayName) => actions.configure({ displayName })} />
-          <TelemetryRow snapshot={snapshot} onSave={(telemetry) => actions.configure({ telemetry })} />
-          <PromptCacheHourRow snapshot={snapshot} onSave={(promptCacheHour) => actions.configure({ promptCacheHour })} />
-          {/* A runtime that ships with Mousse has no executable, arguments, home or variables to set. */}
-          {!info.bundled && (
-            <>
-              {downloaded && <DownloadedFilesRow snapshot={snapshot} bytes={downloaded.bytes} onRemoveInstall={actions.removeInstall} />}
-              {/* A managed entry runs only the Codex Mousse downloaded, with Mousse's own settings. */}
-              {!managed && <ExecutableRow snapshot={snapshot} label={info.label} onSave={(binaryPath) => actions.configure({ binaryPath })} />}
-              {!managed && <ArgsRow snapshot={snapshot} onSave={(args) => actions.configure({ args })} />}
-              {!managed && <EnvRow snapshot={snapshot} onSave={(env) => actions.configure({ env })} />}
-            </>
-          )}
-        </AdvancedList>
+        {deviceWideNote(snapshot) && <p className="settings-group-desc prov-advanced-note">{deviceWideNote(snapshot)}</p>}
+        {hasBehaviorRows(snapshot) && (
+          <EditorSection title="Behavior">
+            <TelemetryRow snapshot={snapshot} onSave={(telemetry) => actions.configure({ telemetry })} />
+            <PromptCacheHourRow snapshot={snapshot} onSave={(promptCacheHour) => actions.configure({ promptCacheHour })} />
+          </EditorSection>
+        )}
+        {/* A runtime that ships with Mousse has no executable, arguments, home or variables to set;
+            a managed entry runs only the Codex Mousse downloaded, with Mousse's own settings. */}
+        {!info.bundled && (downloaded || !managed) && (
+          <EditorSection title="Runtime">
+            {downloaded && <DownloadedFilesRow snapshot={snapshot} bytes={downloaded.bytes} onRemoveInstall={actions.removeInstall} />}
+            {!managed && <ExecutableRow snapshot={snapshot} label={info.label} onSave={(binaryPath) => actions.configure({ binaryPath })} />}
+            {!managed && <ArgsRow snapshot={snapshot} onSave={(args) => actions.configure({ args })} />}
+          </EditorSection>
+        )}
+        {!info.bundled && !managed && (
+          <EditorSection title="Environment">
+            <EnvRow snapshot={snapshot} onSave={(env) => actions.configure({ env })} />
+          </EditorSection>
+        )}
         <VendorSettingsSection snapshot={snapshot} />
         <ProviderInfoSection rows={agentInfoRows(snapshot)} />
       </SettingsAdvanced>
@@ -224,13 +228,18 @@ export function ModelsEditorSection({
   useEffect(() => {
     if (reveal && ref.current) ref.current.open = true
   }, [reveal])
+  // How fresh the list is, in the summary's tooltip rather than on the page.
+  const freshness = modelsFreshness(snapshot)
+  const ago = useRelativeTime(freshness?.kind === 'updated' ? freshness.at : null)
+  const freshnessTitle = !freshness ? undefined : freshness.kind === 'updated' ? `Updated ${ago}` : 'Cached list'
+
   // Collapsed by default, like Advanced; the summary keeps the counts in view while it is closed.
   return (
     <details ref={ref} className={`settings-advanced prov-models-section ${COLLAPSE_DETAILS_CLASS}`}>
       <summary>
         <ChevronRight size={14} aria-hidden="true" className="settings-advanced-chevron" />
         Models
-        <span className="prov-models-summary">{modelsSummary(snapshot.models.entries)}</span>
+        <span className="prov-models-summary" title={freshnessTitle}>{modelsSummary(snapshot.models.entries)}</span>
       </summary>
       <div className="settings-advanced-body">
         <section className="settings-group prov-editor-section" data-settings-anchor="providers-models">
@@ -295,9 +304,9 @@ export function ApiEditor({
       <ModelsEditorSection snapshot={snapshot} onSave={onSaveModelPrefs} onRefresh={onRefreshModels} reveal={revealModels} />
       <SettingsAdvanced>
         {onSaveTelemetry && snapshot.telemetry && (
-          <AdvancedList>
+          <EditorSection title="Behavior">
             <TelemetryRow snapshot={snapshot} onSave={onSaveTelemetry} />
-          </AdvancedList>
+          </EditorSection>
         )}
         <ProviderInfoSection rows={apiInfoRows(snapshot)} />
       </SettingsAdvanced>

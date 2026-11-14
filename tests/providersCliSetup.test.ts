@@ -5,10 +5,10 @@ import { describeStatus, type InstanceSnapshot } from '../src/shared/harness/sta
 import type { ProviderAddOption } from '../src/shared/harness/types'
 import { AgentConnectStep, CustomCommandStep, addChoices, onFoldedKey, type AddChoice } from '../src/renderer/components/providers/AddProviderDialog'
 import { moveTargets } from '../src/renderer/components/providers/MoveProviderDialog'
-import { AccountRow, SetupRow, UpdateRow, type InstanceActions } from '../src/renderer/components/providers/CliSections'
+import { SetupRow, UpdateChip, type InstanceActions } from '../src/renderer/components/providers/CliSections'
 import { agentInfoRows } from '../src/renderer/components/providers/ProviderInfo'
 import { ProviderModelsSection, bulkVisibilityPatch, capabilityChips, displayModels, modelsSummary, movedOrder, nextOrder } from '../src/renderer/components/providers/ProviderModelsSection'
-import { AgentEditor, allowsCustomModels } from '../src/renderer/components/providers/ProviderEditor'
+import { AgentEditor, ModelsEditorSection, allowsCustomModels } from '../src/renderer/components/providers/ProviderEditor'
 import { ProviderListRow, StatusLine, shortStatus } from '../src/renderer/components/providers/parts'
 import { offersRedirectPaste, refusedText } from '../src/renderer/components/providers/SignInDialog'
 import { commandLabel, modelsFreshness, parseEnvLines, switchStateOf } from '../src/renderer/components/providers/providerView'
@@ -74,7 +74,7 @@ describe('Setup row: the status and its one next step', () => {
     expect(buttons(setupRow({ ...managed, auth: { state: 'signed_out', account: undefined } }))).toEqual(['Continue with ChatGPT'])
     // Usage lives on the usage page, never in provider settings: the card only links there.
     const editor = renderToStaticMarkup(createElement(AgentEditor, { snapshot: snapshot(managed), status: describeStatus(snapshot(managed)), actions, onSaveModelPrefs: noop, onRefreshModels: noop }))
-    expect(editor.replace(/<button[^>]*data-testid="prov-account-usage"[^>]*>Usage<\/button>/, '')).not.toMatch(/usage/i)
+    expect(editor.replace(/<button[^>]*data-testid="prov-account-usage"[^>]*>.*?Usage<\/button>/, '')).not.toMatch(/usage/i)
   })
 
   it('offers Sign in for an agent whose account is not checked but that offers its sign-in', () => {
@@ -138,38 +138,22 @@ describe('Runtime rows', () => {
     expect(agentInfoRows(snapshot({ binary: undefined }))).toContainEqual({ label: 'Executable', value: 'Not found' })
   })
 
-  it('offers a one-click update only with a proven owner', () => {
-    const html = renderToStaticMarkup(createElement(UpdateRow, {
-      snapshot: snapshot({ update: { kind: 'one_click', owner: 'npm', latestVersion: '2.2.0' } }), actions
-    }))
-    expect(html).toContain('is-one-click')
-    expect(html).toContain('Update to v2.2.0')
-    expect(buttons(html)).toEqual(['Update now'])
-  })
-
-  it('updates an install its owner made with one click, and keeps the owner command to copy', () => {
-    const html = renderToStaticMarkup(createElement(UpdateRow, {
-      snapshot: snapshot({ update: { kind: 'advisory', command: 'npm i -g @anthropic-ai/claude-code', latestVersion: '2.2.0' } }), actions
-    }))
-    expect(html).toContain('is-advisory')
-    expect(html).toContain('Update to v2.2.0')
-    expect(html).toContain('npm i -g @anthropic-ai/claude-code')
-    expect(buttons(html)).toContain('Update now')
-    expect(labels(html)).toContain('Copy update command')
-  })
-
-  it('shows a newer version with no command and no button when the owner is not proven', () => {
-    const html = renderToStaticMarkup(createElement(UpdateRow, {
-      snapshot: snapshot({ update: { kind: 'notice', latestVersion: '2.2.0' } }), actions
-    }))
-    expect(html).toContain('is-notice')
-    expect(html).toContain('v2.2.0 is available')
-    expect(buttons(html)).toEqual([])
-    expect(labels(html)).toEqual([])
+  it('offers a one-click update as Update now, with the target version in its name', () => {
+    const chip = (update: NonNullable<SnapshotOverrides['update']>) => renderToStaticMarkup(createElement(UpdateChip, { snapshot: snapshot({ update }), actions }))
+    for (const update of [
+      { kind: 'one_click' as const, owner: 'npm' as const, latestVersion: '2.2.0' },
+      { kind: 'advisory' as const, command: 'npm i -g @anthropic-ai/claude-code', latestVersion: '2.2.0' }
+    ]) {
+      expect(buttons(chip(update))).toEqual(['Update now'])
+      expect(labels(chip(update))).toContain('Update now, v2.2.0')
+    }
+    // Mousse can't run these: the chip only names the update.
+    expect(buttons(chip({ kind: 'notice', latestVersion: '2.2.0' }))).toEqual(['Update available'])
+    expect(buttons(chip({ kind: 'advisory', command: 'sudo npm i -g x', latestVersion: '2.2.0', manual: true }))).toEqual(['Update available'])
   })
 
   it('renders nothing without an update', () => {
-    expect(renderToStaticMarkup(createElement(UpdateRow, { snapshot: snapshot(), actions }))).toBe('')
+    expect(renderToStaticMarkup(createElement(UpdateChip, { snapshot: snapshot(), actions }))).toBe('')
   })
 })
 
@@ -244,32 +228,39 @@ describe('Model list freshness', () => {
   const NOW = Date.parse('2026-10-27T12:00:00.000Z')
   const listed = { entries: [model('a')] }
   afterEach(() => vi.useRealTimers())
-  const row = (entry: InstanceSnapshot) => {
+  const at = <T,>(render: () => T): T => {
     vi.useFakeTimers({ toFake: ['Date'] })
     vi.setSystemTime(NOW)
-    return renderToStaticMarkup(createElement(ProviderListRow, {
-      iconId: 'claude', name: entry.displayName, status: describeStatus(entry), models: modelsFreshness(entry),
-      toggle: switchStateOf(entry, { kind: 'device' }), selected: false, onSelect: () => undefined, onToggle: noop
-    }))
+    return render()
   }
+  // The age sits in the tooltip of the editor's Models summary, not on the page.
+  const summaryTitle = (entry: InstanceSnapshot) => at(() => {
+    const html = renderToStaticMarkup(createElement(ModelsEditorSection, { snapshot: entry, onSave: noop, onRefresh: noop }))
+    return /class="prov-models-summary"(?: title="([^"]*)")?/.exec(html)?.[1]
+  })
+  const row = (entry: InstanceSnapshot) => at(() => renderToStaticMarkup(createElement(ProviderListRow, {
+    iconId: 'claude', name: entry.displayName, status: describeStatus(entry),
+    toggle: switchStateOf(entry, { kind: 'device' }), selected: false, onSelect: () => undefined, onToggle: noop
+  })))
 
-  it('says when the list was updated, from the time the daemon kept with it', () => {
+  it('says when the list was updated, from the time the daemon kept with it, in the Models tooltip only', () => {
     const entry = snapshot({ models: { ...listed, source: 'live', refreshedAt: new Date(NOW - 2 * 3_600_000).toISOString() } })
     expect(modelsFreshness(entry)).toEqual({ kind: 'updated', at: NOW - 2 * 3_600_000 })
-    expect(row(entry)).toContain('Models updated 2 h ago')
+    expect(summaryTitle(entry)).toBe('Updated 2 h ago')
+    expect(row(entry)).not.toContain('Models')
   })
 
   it('calls a list with no update time the cached list', () => {
     const entry = snapshot({ models: { ...listed, source: 'cached' } })
     expect(modelsFreshness(entry)).toEqual({ kind: 'cached' })
-    expect(row(entry)).toContain('Models: cached list')
+    expect(summaryTitle(entry)).toBe('Cached list')
   })
 
   it('says nothing for a model API, which keeps its own refresh cycle', () => {
     const api = snapshot({ instanceId: 'pi:openai', driver: 'pi', displayName: 'OpenAI', models: { ...listed, source: 'cached' } })
     expect(modelsFreshness(api)).toBeNull()
     expect(modelsFreshness({ ...api, models: { ...api.models, refreshedAt: new Date(NOW - 3_600_000).toISOString() } })).toBeNull()
-    expect(row(api)).not.toContain('Models')
+    expect(summaryTitle(api)).toBeUndefined()
   })
 
   it('says nothing for a provider that is off, not signed in, lists nothing, or whose list is not a refreshable one', () => {
@@ -277,7 +268,7 @@ describe('Model list freshness', () => {
     expect(modelsFreshness(snapshot({ models: { ...listed, source: 'cached' }, auth: { state: 'signed_out' } }))).toBeNull()
     expect(modelsFreshness(snapshot({ models: { entries: [], source: 'none' } }))).toBeNull()
     expect(modelsFreshness(snapshot({ models: { ...listed, source: 'manifest' } }))).toBeNull()
-    expect(row(snapshot({ models: { entries: [], source: 'none' } }))).not.toContain('Models')
+    expect(summaryTitle(snapshot({ models: { entries: [], source: 'none' } }))).toBeUndefined()
   })
 })
 
@@ -299,54 +290,59 @@ describe('Providers page toolbar', () => {
 })
 
 describe('Agent editor layout', () => {
-  it('keeps Setup to status and account, with the name and telemetry under Advanced', () => {
+  it('keeps the name in Setup beside the status, with telemetry in Advanced under Behavior', () => {
     const entry = snapshot({ telemetry: { setting: 'off', defaultSetting: 'off', variables: ['DISABLE_TELEMETRY'] } })
     const html = renderToStaticMarkup(createElement(AgentEditor, { snapshot: entry, status: describeStatus(entry), actions, onSaveModelPrefs: noop, onRefreshModels: noop }))
     const advanced = html.indexOf('Advanced</summary>')
     expect(advanced).toBeGreaterThan(html.indexOf('>Setup<'))
-    expect(html.indexOf('Display name')).toBeGreaterThan(advanced)
-    expect(html.indexOf('aria-label="Telemetry"')).toBeGreaterThan(advanced)
+    expect(html.indexOf('Display name')).toBeGreaterThan(html.indexOf('>Status<'))
+    expect(html.indexOf('Display name')).toBeLessThan(advanced)
+    expect(html.indexOf('>Behavior<')).toBeGreaterThan(advanced)
+    expect(html.indexOf('aria-label="Telemetry"')).toBeGreaterThan(html.indexOf('>Behavior<'))
     expect(html.indexOf('>Status<')).toBeLessThan(advanced)
   })
 
-  it('shows an available update in Setup, not under Advanced', () => {
+  it('shows an available update in the heading, before Setup', () => {
     const entry = snapshot({ update: { kind: 'one_click', owner: 'npm', latestVersion: '2.2.0' } })
     const html = renderToStaticMarkup(createElement(AgentEditor, { snapshot: entry, status: describeStatus(entry), actions, onSaveModelPrefs: noop, onRefreshModels: noop }))
-    const update = html.indexOf('Update to v2.2.0')
-    expect(update).toBeGreaterThan(html.indexOf('>Setup<'))
-    expect(update).toBeLessThan(html.indexOf('Models'))
-    expect(update).toBeLessThan(html.indexOf('Advanced</summary>'))
-    expect(html.match(/Update to v2\.2\.0/g)).toHaveLength(1)
+    const update = html.indexOf('Update now, v2.2.0')
+    expect(update).toBeGreaterThan(-1)
+    expect(update).toBeLessThan(html.indexOf('>Setup<'))
+    expect(html).not.toContain('Update available: 2.2.0')
   })
 
-  it('offers the update once: on its row, not again on the status', () => {
+  it('offers the update once: on its chip, not again on the status', () => {
     for (const compatibility of [{ state: 'tested' as const }, { state: 'known_broken' as const, knownProblem: { reason: 'Breaks sign-in.', fixedIn: '2.2.0' } }]) {
       const entry = snapshot({ compatibility, update: { kind: 'advisory', command: 'npm i -g @anthropic-ai/claude-code', latestVersion: '2.2.0' } })
       const status = describeStatus(entry)
       expect(status.nextStep?.action).toBe('update')
       const html = renderToStaticMarkup(createElement(AgentEditor, { snapshot: entry, status, actions, onSaveModelPrefs: noop, onRefreshModels: noop }))
       expect(buttons(html).filter((label) => /^Update/.test(label))).toEqual(['Update now'])
-      expect(html.match(/class="prov-command-text"/g)).toHaveLength(1)
     }
   })
 })
 
-describe('Sign-out', () => {
-  const accountRow = (overrides: SnapshotOverrides) =>
-    renderToStaticMarkup(createElement(AccountRow, { snapshot: snapshot(overrides), actions }))
-
+describe('Sign-out, on the Status row', () => {
   it('follows the daemon: offered only when the snapshot says Mousse owns the sign-in', () => {
-    expect(buttons(accountRow({}))).toEqual([])
-    expect(buttons(accountRow({ auth: { canSignOut: false } }))).toEqual([])
-    expect(buttons(accountRow({ auth: { canSignOut: true } }))).toEqual(['Sign out'])
-    expect(accountRow({ auth: { state: 'signed_out', account: undefined, canSignOut: true } })).toBe('')
+    const signOut = (overrides: SnapshotOverrides) => buttons(setupRow(overrides)).filter((label) => label === 'Sign out')
+    expect(signOut({})).toEqual([])
+    expect(signOut({ auth: { canSignOut: false } })).toEqual([])
+    expect(signOut({ auth: { canSignOut: true } })).toEqual(['Sign out'])
+    expect(signOut({ auth: { state: 'signed_out', account: undefined, canSignOut: true } })).toEqual([])
   })
 
   it('shows the account by its label, never its hashed id', () => {
-    expect(accountRow({ auth: { account: { id: 'h4sh', label: 'ChatGPT Plus' }, methodLabel: 'ChatGPT sign-in' } })).toContain('ChatGPT Plus · ChatGPT sign-in')
-    const unlabelled = accountRow({ auth: { account: { id: 'h4sh' }, methodLabel: 'Claude Code sign-in' } })
+    expect(setupRow({ auth: { account: { id: 'h4sh', label: 'ChatGPT Plus' }, methodLabel: 'ChatGPT sign-in' } })).toContain('ChatGPT Plus · ChatGPT sign-in')
+    const unlabelled = setupRow({ auth: { account: { id: 'h4sh' }, methodLabel: 'Claude Code sign-in' } })
     expect(unlabelled).not.toContain('h4sh')
     expect(unlabelled).toContain('Claude Code sign-in')
+  })
+
+  it('has no separate Account row', () => {
+    const entry = snapshot({ auth: { canSignOut: true } })
+    const html = renderToStaticMarkup(createElement(AgentEditor, { snapshot: entry, status: describeStatus(entry), actions, onSaveModelPrefs: noop, onRefreshModels: noop }))
+    expect(html).not.toContain('>Account<')
+    expect(buttons(html)).toContain('Sign out')
   })
 })
 

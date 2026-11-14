@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
-import type { InstanceSnapshot, StatusDescription } from '../../../shared/harness/status'
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import { updateAvailableDetail, type InstanceSnapshot, type StatusDescription } from '../../../shared/harness/status'
 import type { InstanceConfigPatch, ProviderOperationEvent, RemoveInstallResult, TelemetrySetting } from '../../../shared/harness/types'
 import { Select } from '../ui/Select'
-import { Download, Plus, RotateCcw, X } from '../../lib/icons'
-import { SettingsRow, Switch } from '../settings/SettingsRow'
-import { BrowseButton, CommandBox, RefreshButton, StatusLine, useAsyncAction } from './parts'
+import { FloatingPortal, useFloatingPosition } from '../../lib/floatingLayer'
+import { Download, Gauge, Logout, Plus, RotateCcw, X } from '../../lib/icons'
+import { SettingsRow } from '../settings/SettingsRow'
+import { BrowseButton, CommandBox, FieldWithAction, RefreshButton, StatusLine, useAsyncAction } from './parts'
 import {
   binaryOverrideOf,
   formatArgs,
@@ -50,24 +51,36 @@ function progressText(snapshot: InstanceSnapshot, operation: ProviderOperationEv
   return `${progress.message}${percent}`
 }
 
+/** The status without "Update available", which the heading's update chip already says (where it shows one). */
+function withoutUpdateDetail(status: StatusDescription, snapshot: InstanceSnapshot): StatusDescription {
+  const latest = snapshot.update?.latestVersion
+  return latest && status.detail === updateAvailableDetail(latest) ? { ...status, detail: null } : status
+}
+
 /**
  * The Setup row: the status and the one next step it names. Buttons follow the
  * snapshot, so Install and Sign in are ready as soon as the instance's own state is known.
+ * A signed-in account adds Usage (where `onOpenUsage` is given: the numbers live on the Usage
+ * page, never here) and Sign out (only where the daemon says Mousse owns the sign-in). The
+ * account's label shows on the status; its id is an opaque hash, never shown.
  */
 export function SetupRow({
   snapshot,
   status,
   operation,
   actions,
-  updateRow
+  updateRow,
+  onOpenUsage
 }: {
   snapshot: InstanceSnapshot
   status: StatusDescription
   /** The install or update this page saw start, for live progress. */
   operation?: ProviderOperationEvent
   actions: InstanceActions
-  /** An Update row follows in Setup, so the status offers no update of its own. */
+  /** The heading shows the update, so the status offers no update of its own. */
   updateRow?: boolean
+  /** Opens the Subscription usage page, for agents it covers. */
+  onOpenUsage?: () => void
 }) {
   const { busy, error, run } = useAsyncAction()
   const step = status.nextStep
@@ -147,14 +160,32 @@ export function SetupRow({
     <RefreshButton label="Check again" busy={busy === 'recheck'} disabled={!idle} onClick={() => void run('recheck', actions.recheck)} />
   )
 
+  const { auth } = snapshot
+  const account = auth.state === 'signed_in' || auth.state === 'expired'
+  const accountLine = account ? [auth.account?.label, auth.methodLabel].filter(Boolean).join(' \u00b7 ') : ''
+  const usage = account && auth.state === 'signed_in' && onOpenUsage && (
+    <button type="button" className="settings-btn" data-testid="prov-account-usage" onClick={onOpenUsage}>
+      <Gauge size={14} />
+      Usage
+    </button>
+  )
+  const signOut = account && auth.canSignOut && (
+    <button type="button" className="settings-btn" disabled={!idle} onClick={() => void run('signout', actions.signOut)}>
+      <Logout size={14} />
+      Sign out
+    </button>
+  )
+
   return (
     <>
       <SettingsRow
         title="Status"
         anchor="providers-status"
-        description={withError(progress ?? <StatusLine status={status} />, error)}
+        description={withError(progress ?? <StatusLine status={updateRow ? withoutUpdateDetail(status, snapshot) : status} title={accountLine || undefined} />, error)}
         control={
           <>
+            {usage}
+            {signOut}
             {recheck}
             {control}
             {allow}
@@ -188,84 +219,91 @@ function OlderSettingsRow({ notice, actions }: { notice: NonNullable<InstanceSna
 }
 
 /**
- * The signed-in account by its label (the id is an opaque hash, never shown); sign-out only where
- * the daemon says Mousse owns the sign-in.
+ * An available update, as a small chip beside the version in the editor's heading. Mousse's own
+ * install and an owner's command update in one click; pointing at the chip (or focusing it) opens a
+ * card with the target version and, where there is one, the command to copy for a terminal. An
+ * update that needs administrator rights, or a copy whose owner is unknown, only opens the card.
  */
-/**
- * The signed-in account. `onOpenUsage` adds a plain link to the Subscription usage page: the
- * numbers live there, never here.
- */
-export function AccountRow({ snapshot, actions, onOpenUsage }: { snapshot: InstanceSnapshot; actions: InstanceActions; onOpenUsage?: () => void }) {
+export function UpdateChip({ snapshot, operation, actions }: { snapshot: InstanceSnapshot; operation?: ProviderOperationEvent; actions: InstanceActions }) {
   const { busy, error, run } = useAsyncAction()
-  const { auth } = snapshot
-  if (auth.state !== 'signed_in' && auth.state !== 'expired') return null
-  const description = [auth.account?.label, auth.methodLabel].filter(Boolean).join(' · ') || 'Signed in'
-  const usage = onOpenUsage && auth.state === 'signed_in'
-    ? <button type="button" className="prov-link" data-testid="prov-account-usage" onClick={onOpenUsage}>Usage</button>
-    : undefined
-  const signOut = auth.canSignOut
-    ? <button type="button" className="settings-btn" disabled={busy !== null} onClick={() => void run('signout', actions.signOut)}>
-        Sign out
-      </button>
-    : undefined
-  return (
-    <SettingsRow
-      title="Account"
-      description={withError(description, error)}
-      control={usage || signOut ? <span className="prov-account-actions">{usage}{signOut}</span> : undefined}
-    />
-  )
-}
-
-/**
- * An available update. Mousse's own install updates in place; one its owner made runs the owner's
- * command, shown in its own box to copy as well. A copy whose owner is unknown only names the version.
- */
-export function UpdateRow({ snapshot, operation, actions }: { snapshot: InstanceSnapshot; operation?: ProviderOperationEvent; actions: InstanceActions }) {
-  const { busy, error, run } = useAsyncAction()
+  const [open, setOpen] = useState(false)
+  const anchorRef = useRef<HTMLSpanElement>(null)
+  const cardRef = useRef<HTMLDivElement>(null)
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const cardId = useId()
+  const style = useFloatingPosition({ open, anchorRef, contentRef: cardRef, placement: 'below-end', gap: 6 })
+  useEffect(() => { if (error) setOpen(true) }, [error])
+  useEffect(() => () => clearTimeout(closeTimer.current), [])
   const update = snapshot.update
   if (!update) return null
+
+  const show = () => {
+    clearTimeout(closeTimer.current)
+    setOpen(true)
+  }
+  // A short grace period, so the pointer can cross from the chip to the card.
+  const hide = () => {
+    clearTimeout(closeTimer.current)
+    closeTimer.current = setTimeout(() => setOpen(false), 150)
+  }
   const target = formatVersion(update.latestVersion)
   const updating = operation?.kind === 'update' && (operation.phase === 'progress' || operation.phase === 'prompt')
-  if (update.kind === 'notice') {
-    return (
-      <SettingsRow
-        className="prov-update is-notice"
-        anchor="providers-update"
-        title={target ? `${target} is available` : 'Update available'}
-        description="Mousse can't tell how this copy was installed. Update it the way you installed it."
-      />
-    )
-  }
-  if (update.kind === 'advisory' && update.manual) {
-    return (
-      <SettingsRow
-        className="prov-update is-advisory"
-        anchor="providers-update"
-        title={target ? `Update to ${target}` : 'Update available'}
-        description="Needs administrator rights. Run it yourself in a terminal:"
-      >
-        <CommandBox command={update.command} label="Copy update command" />
-      </SettingsRow>
-    )
-  }
-  const advisory = update.kind === 'advisory'
-  const idleText = advisory ? 'Mousse runs this, or run it yourself in a terminal:' : 'Mousse updates it the way it was installed.'
+  const canRun = update.kind === 'one_click' || (update.kind === 'advisory' && !update.manual)
+  const command = update.kind === 'advisory' ? update.command : undefined
+  const note = updating && operation?.phase === 'progress'
+    ? operation.message
+    : update.kind === 'notice'
+      ? "Mousse can't tell how this copy was installed. Update it the way you installed it."
+      : update.kind === 'advisory' && update.manual
+        ? 'Needs administrator rights. Run it yourself in a terminal:'
+        : command
+          ? 'Mousse runs this, or run it yourself in a terminal:'
+          : 'Mousse updates it the way it was installed.'
+  const label = updating ? 'Updating…' : canRun ? 'Update now' : 'Update available'
+  const title = target ? `Update to ${target}` : 'Update available'
   return (
-    <SettingsRow
-      className={`prov-update ${advisory ? 'is-advisory' : 'is-one-click'}`}
-      anchor="providers-update"
-      title={target ? `Update to ${target}` : 'Update available'}
-      description={withError(updating && operation?.phase === 'progress' ? operation.message : idleText, error)}
-      control={
-        <button type="button" className="settings-btn prov-update-btn" disabled={busy !== null || updating} onClick={() => void run('update', actions.update)}>
-          <Download size={14} />
-          {updating ? 'Updating…' : 'Update now'}
-        </button>
-      }
+    <span
+      ref={anchorRef}
+      className="prov-update-chip-wrap"
+      data-settings-anchor="providers-update"
+      onMouseEnter={show}
+      onMouseLeave={hide}
+      onFocus={show}
+      onBlur={hide}
+      onKeyDown={(event) => { if (event.key === 'Escape') setOpen(false) }}
     >
-      {advisory && <CommandBox command={update.command} label="Copy update command" />}
-    </SettingsRow>
+      <button
+        type="button"
+        className={`prov-update-chip${canRun ? ' is-runnable' : ''}`}
+        aria-label={target ? `${label}, ${target}` : label}
+        aria-describedby={open ? cardId : undefined}
+        disabled={canRun && (busy !== null || updating)}
+        onClick={() => (canRun ? void run('update', actions.update) : setOpen((was) => !was))}
+      >
+        <Download size={12} />
+        {label}
+      </button>
+      {open && (
+        <FloatingPortal>
+          <div
+            ref={cardRef}
+            id={cardId}
+            role="dialog"
+            aria-label={title}
+            className="prov-update-card settings-scope"
+            style={style}
+            onMouseEnter={show}
+            onMouseLeave={hide}
+            onFocus={show}
+            onBlur={hide}
+          >
+            <span className="prov-update-card-title">{title}</span>
+            <span className={error ? 'prov-error' : 'prov-update-card-note'}>{error ?? note}</span>
+            {command && <CommandBox command={command} label="Copy update command" />}
+          </div>
+        </FloatingPortal>
+      )}
+    </span>
   )
 }
 
@@ -300,28 +338,33 @@ export function ExecutableRow({
               <RotateCcw size={14} />
             </button>
           )}
-          <input
-            className="settings-input prov-mono prov-wide"
-            value={draft}
-            disabled={busy !== null}
-            placeholder={resolved ?? 'Path to the executable'}
-            title={resolved}
-            aria-label="Executable path"
-            aria-invalid={error ? true : undefined}
-            spellCheck={false}
-            onChange={(event) => setDraft(event.target.value)}
-            onBlur={commit}
-            onKeyDown={blurOnEnter}
-          />
-          <BrowseButton
-            title={`Choose the ${label} executable`}
-            defaultPath={draft.trim() || resolved}
-            disabled={busy !== null}
-            onPick={(path) => {
-              setDraft(path)
-              if (path !== saved) save(path)
-            }}
-          />
+          <FieldWithAction
+            action={
+              <BrowseButton
+                title={`Choose the ${label} executable`}
+                defaultPath={draft.trim() || resolved}
+                disabled={busy !== null}
+                onPick={(path) => {
+                  setDraft(path)
+                  if (path !== saved) save(path)
+                }}
+              />
+            }
+          >
+            <input
+              className="settings-input prov-mono prov-wide"
+              value={draft}
+              disabled={busy !== null}
+              placeholder={resolved ?? 'Path to the executable'}
+              title={resolved}
+              aria-label="Executable path"
+              aria-invalid={error ? true : undefined}
+              spellCheck={false}
+              onChange={(event) => setDraft(event.target.value)}
+              onBlur={commit}
+              onKeyDown={blurOnEnter}
+            />
+          </FieldWithAction>
         </span>
       }
     />
@@ -411,6 +454,12 @@ export function promptCacheHourNote(state: NonNullable<InstanceSnapshot['promptC
   return undefined
 }
 
+/** An on/off setting as a dropdown, so turning it on or off is a deliberate choice. */
+const ON_OFF_OPTIONS: Array<{ value: 'off' | 'on'; label: string }> = [
+  { value: 'off', label: 'Off' },
+  { value: 'on', label: 'On' }
+]
+
 /**
  * Claude Code: keep the prompt cache for an hour instead of five minutes. Off by default, for an
  * entry that pays per token or that Mousse could not confirm as a subscription. Not shown on a
@@ -427,12 +476,13 @@ export function PromptCacheHourRow({ snapshot, onSave }: { snapshot: InstanceSna
       htmlFor="providers-prompt-cache-hour"
       description={withError(promptCacheHourNote(state), error)}
       control={
-        <Switch
+        <Select
           id="providers-prompt-cache-hour"
-          label="Keep prompt cache 1 hour"
-          checked={state.on}
+          ariaLabel="Keep prompt cache 1 hour"
+          value={state.on ? 'on' : 'off'}
           disabled={state.userSetting === true}
-          onChange={(on) => void run('promptCacheHour', () => onSave(on))}
+          onChange={(next) => { if ((next === 'on') !== state.on) void run('promptCacheHour', () => onSave(next === 'on')) }}
+          options={ON_OFF_OPTIONS}
         />
       }
     />

@@ -29,7 +29,7 @@ import type { InstanceActions } from './CliSections'
 import { MoveNotice } from './MoveProviderDialog'
 import { AgentEditor, ApiEditor } from './ProviderEditor'
 import { ProviderListRow, errorText, useAsyncAction, useRelativeTime } from './parts'
-import { formatVersion, iconIdOf, isApiInstance, lastCheckedAt, modelsFreshness, switchStateOf, usedByLabel } from './providerView'
+import { formatVersion, iconIdOf, isApiInstance, lastCheckedAt, switchStateOf, usedByLabel } from './providerView'
 import { SignInDialog } from './SignInDialog'
 import '../../styles/providers.css'
 
@@ -492,7 +492,6 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
                     : undefined
                 }
                 status={describeStatus(snapshot)}
-                models={modelsFreshness(snapshot)}
                 toggle={switchStateOf(snapshot, scope)}
                 selected={selected?.instanceId === snapshot.instanceId}
                 onSelect={() => {
