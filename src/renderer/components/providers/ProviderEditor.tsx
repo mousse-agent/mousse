@@ -11,9 +11,9 @@ import { ArgsRow, EnvRow, ExecutableRow, PromptCacheHourRow, SetupRow, Telemetry
 import { ProviderInfoSection, agentInfoRows, apiInfoRows } from './ProviderInfo'
 import { VendorSettingsSection } from './VendorSettings'
 import { ProviderModelsSection, modelsSummary } from './ProviderModelsSection'
-import { EditorSection, RemoveButton, useAsyncAction } from './parts'
+import { EditorSection, RemoveButton, useAsyncAction, useRelativeTime } from './parts'
 import { DownloadedFilesRow, RegistrySourceRow, RemoveWithFilesButton, type RemoveOptions } from './RegistryAgents'
-import { DRIVER_INFO, formatVersion, iconIdOf, isManagedSetup } from './providerView'
+import { DRIVER_INFO, formatVersion, iconIdOf, isManagedSetup, modelsFreshness } from './providerView'
 
 /**
  * Provider setup is per machine: only the on/off switch has a project override. In
@@ -228,13 +228,18 @@ export function ModelsEditorSection({
   useEffect(() => {
     if (reveal && ref.current) ref.current.open = true
   }, [reveal])
+  // How fresh the list is, in the summary's tooltip rather than on the page.
+  const freshness = modelsFreshness(snapshot)
+  const ago = useRelativeTime(freshness?.kind === 'updated' ? freshness.at : null)
+  const freshnessTitle = !freshness ? undefined : freshness.kind === 'updated' ? `Updated ${ago}` : 'Cached list'
+
   // Collapsed by default, like Advanced; the summary keeps the counts in view while it is closed.
   return (
     <details ref={ref} className={`settings-advanced prov-models-section ${COLLAPSE_DETAILS_CLASS}`}>
       <summary>
         <ChevronRight size={14} aria-hidden="true" className="settings-advanced-chevron" />
         Models
-        <span className="prov-models-summary">{modelsSummary(snapshot.models.entries)}</span>
+        <span className="prov-models-summary" title={freshnessTitle}>{modelsSummary(snapshot.models.entries)}</span>
       </summary>
       <div className="settings-advanced-body">
         <section className="settings-group prov-editor-section" data-settings-anchor="providers-models">

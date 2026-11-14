@@ -8,7 +8,7 @@ import { moveTargets } from '../src/renderer/components/providers/MoveProviderDi
 import { SetupRow, UpdateChip, type InstanceActions } from '../src/renderer/components/providers/CliSections'
 import { agentInfoRows } from '../src/renderer/components/providers/ProviderInfo'
 import { ProviderModelsSection, bulkVisibilityPatch, capabilityChips, displayModels, modelsSummary, movedOrder, nextOrder } from '../src/renderer/components/providers/ProviderModelsSection'
-import { AgentEditor, allowsCustomModels } from '../src/renderer/components/providers/ProviderEditor'
+import { AgentEditor, ModelsEditorSection, allowsCustomModels } from '../src/renderer/components/providers/ProviderEditor'
 import { ProviderListRow, StatusLine, shortStatus } from '../src/renderer/components/providers/parts'
 import { offersRedirectPaste, refusedText } from '../src/renderer/components/providers/SignInDialog'
 import { commandLabel, modelsFreshness, parseEnvLines, switchStateOf } from '../src/renderer/components/providers/providerView'
@@ -228,32 +228,39 @@ describe('Model list freshness', () => {
   const NOW = Date.parse('2026-10-27T12:00:00.000Z')
   const listed = { entries: [model('a')] }
   afterEach(() => vi.useRealTimers())
-  const row = (entry: InstanceSnapshot) => {
+  const at = <T,>(render: () => T): T => {
     vi.useFakeTimers({ toFake: ['Date'] })
     vi.setSystemTime(NOW)
-    return renderToStaticMarkup(createElement(ProviderListRow, {
-      iconId: 'claude', name: entry.displayName, status: describeStatus(entry), models: modelsFreshness(entry),
-      toggle: switchStateOf(entry, { kind: 'device' }), selected: false, onSelect: () => undefined, onToggle: noop
-    }))
+    return render()
   }
+  // The age sits in the tooltip of the editor's Models summary, not on the page.
+  const summaryTitle = (entry: InstanceSnapshot) => at(() => {
+    const html = renderToStaticMarkup(createElement(ModelsEditorSection, { snapshot: entry, onSave: noop, onRefresh: noop }))
+    return /class="prov-models-summary"(?: title="([^"]*)")?/.exec(html)?.[1]
+  })
+  const row = (entry: InstanceSnapshot) => at(() => renderToStaticMarkup(createElement(ProviderListRow, {
+    iconId: 'claude', name: entry.displayName, status: describeStatus(entry),
+    toggle: switchStateOf(entry, { kind: 'device' }), selected: false, onSelect: () => undefined, onToggle: noop
+  })))
 
-  it('says when the list was updated, from the time the daemon kept with it', () => {
+  it('says when the list was updated, from the time the daemon kept with it, in the Models tooltip only', () => {
     const entry = snapshot({ models: { ...listed, source: 'live', refreshedAt: new Date(NOW - 2 * 3_600_000).toISOString() } })
     expect(modelsFreshness(entry)).toEqual({ kind: 'updated', at: NOW - 2 * 3_600_000 })
-    expect(row(entry)).toContain('Models updated 2 h ago')
+    expect(summaryTitle(entry)).toBe('Updated 2 h ago')
+    expect(row(entry)).not.toContain('Models')
   })
 
   it('calls a list with no update time the cached list', () => {
     const entry = snapshot({ models: { ...listed, source: 'cached' } })
     expect(modelsFreshness(entry)).toEqual({ kind: 'cached' })
-    expect(row(entry)).toContain('Models: cached list')
+    expect(summaryTitle(entry)).toBe('Cached list')
   })
 
   it('says nothing for a model API, which keeps its own refresh cycle', () => {
     const api = snapshot({ instanceId: 'pi:openai', driver: 'pi', displayName: 'OpenAI', models: { ...listed, source: 'cached' } })
     expect(modelsFreshness(api)).toBeNull()
     expect(modelsFreshness({ ...api, models: { ...api.models, refreshedAt: new Date(NOW - 3_600_000).toISOString() } })).toBeNull()
-    expect(row(api)).not.toContain('Models')
+    expect(summaryTitle(api)).toBeUndefined()
   })
 
   it('says nothing for a provider that is off, not signed in, lists nothing, or whose list is not a refreshable one', () => {
@@ -261,7 +268,7 @@ describe('Model list freshness', () => {
     expect(modelsFreshness(snapshot({ models: { ...listed, source: 'cached' }, auth: { state: 'signed_out' } }))).toBeNull()
     expect(modelsFreshness(snapshot({ models: { entries: [], source: 'none' } }))).toBeNull()
     expect(modelsFreshness(snapshot({ models: { ...listed, source: 'manifest' } }))).toBeNull()
-    expect(row(snapshot({ models: { entries: [], source: 'none' } }))).not.toContain('Models')
+    expect(summaryTitle(snapshot({ models: { entries: [], source: 'none' } }))).toBeUndefined()
   })
 })
 
