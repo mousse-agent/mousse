@@ -14,6 +14,9 @@ import { peekDiagram, renderDiagram, type DiagramOutcome } from "./mermaid-diagr
 const ACTION_BUTTON =
   "cursor-pointer p-1 text-xs text-muted-foreground transition-all hover:text-foreground";
 
+/** A drawing taller than this starts clipped to it, with an Expand action. Matches the CSS cap. */
+export const DIAGRAM_MAX_HEIGHT = 480;
+
 type Drawn = { source: string; outcome: DiagramOutcome };
 
 /** Draws `source` once `enabled`; `retry` draws again after a failed load. */
@@ -113,6 +116,7 @@ function DiagramFailure({
 // shows the fence as code until it closes, then draws it once per distinct source.
 const MermaidBlock = memo(function MermaidBlock({ code, isIncomplete }: CustomRendererProps) {
   const [showCode, setShowCode] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const { outcome, retry } = useDiagram(code, !isIncomplete);
 
   if (isIncomplete || !outcome) {
@@ -124,16 +128,23 @@ const MermaidBlock = memo(function MermaidBlock({ code, isIncomplete }: CustomRe
   }
 
   if (outcome.status === "ready" && !showCode) {
+    const tall = outcome.height > DIAGRAM_MAX_HEIGHT;
     return (
       <div className="an-md-diagram" data-find-ignore data-mermaid-state="ready">
         <CodeBlockContainer language="mermaid">
           <CodeBlockHeader language="mermaid" />
           <Actions>
+            {tall ? (
+              <ToggleButton onClick={() => setExpanded((open) => !open)}>
+                {expanded ? "Collapse" : "Expand"}
+              </ToggleButton>
+            ) : null}
             <ToggleButton onClick={() => setShowCode(true)}>Show code</ToggleButton>
             <CodeBlockCopyButton code={code} />
           </Actions>
           <div
             className="an-md-diagram-body"
+            data-clipped={tall && !expanded ? "" : undefined}
             dangerouslySetInnerHTML={{ __html: outcome.svg }}
           />
         </CodeBlockContainer>

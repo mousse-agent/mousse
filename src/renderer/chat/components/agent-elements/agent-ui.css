@@ -381,19 +381,20 @@
 }
 
 /* Mermaid diagrams. Pele reads its colors from `--pele-*`, so the SVG follows
-   the app theme through these tokens without being redrawn on a theme change. */
+   the app theme through these tokens without being redrawn on a theme change.
+   Node fills are a tint of the text colour over whatever is behind them, so they
+   read in light and dark themes and stay see-through under acrylic. */
 .an-markdown .an-md-diagram {
   --pele-bg: var(--an-background);
   --pele-fg: var(--an-foreground);
   --pele-muted: var(--an-foreground-muted);
   --pele-line: var(--an-foreground-muted);
-  --pele-surface: var(--an-tool-background);
-  --pele-surface-alt: var(--an-background-secondary);
+  --pele-surface: color-mix(in srgb, var(--an-foreground) 7%, transparent);
+  --pele-surface-alt: color-mix(in srgb, var(--an-foreground) 12%, transparent);
   --pele-border: color-mix(in srgb, var(--an-foreground) 28%, var(--an-border-color));
   --pele-accent: var(--an-primary-color);
   --pele-error: var(--an-diff-removed-text);
   --pele-critical: var(--an-diff-removed-text);
-  --pele-font: inherit;
   --pele-radius: 6px;
 }
 
@@ -405,10 +406,22 @@
   white-space: normal;
 }
 
+/* Drawn at its natural size, never larger; shrunk only when wider than the message. */
 .an-markdown .an-md-diagram-body svg {
   flex: none;
   max-width: 100%;
   height: auto;
+  /* Labels in the reply's own font, which mermaid-diagram.ts also measures them with. This
+     overrides Pele's inline `var(--pele-font, sans-serif)`, which otherwise falls back to Arial. */
+  font-family: inherit !important;
+}
+
+/* A tall diagram starts at 480px of drawing (DIAGRAM_MAX_HEIGHT) plus the body's padding,
+   fading out at the bottom until Expand is pressed. */
+.an-markdown .an-md-diagram-body[data-clipped] {
+  max-height: calc(480px + 24px);
+  overflow: hidden;
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 56px), transparent);
 }
 
 .an-markdown .an-md-diagram-error {
