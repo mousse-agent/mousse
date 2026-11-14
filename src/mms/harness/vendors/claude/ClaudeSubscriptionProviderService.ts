@@ -1129,8 +1129,8 @@ export class ClaudeSubscriptionProviderService {
    * compaction: the next turn starts a new session with the full history in the prompt.
    */
   /**
-   * Compacts the thread's session with Claude Code's `/compact`, under the client name its last turn ran with
-   * (`SavedSession.entrypoint`), so a warm cache still matches. With the cache gone cold (`cacheCold`), the history is
+   * Compacts the thread's session with Claude Code's `/compact`, under the client name its last turn ran with while the
+   * route still allows it (`compactionEntrypoint`), so a warm cache still matches. With the cache gone cold (`cacheCold`), the history is
    * read uncached either way: prompt caching is off for this one process, so it is not written back to a cache the
    * summary replaces at once (a one-hour write costs twice an uncached read). The next turn caches as usual.
    */
@@ -1171,7 +1171,7 @@ export class ClaudeSubscriptionProviderService {
       query = await this.createQuery(`/compact${focus ? ` ${focus}` : ''}`, {
         ...this.options(saved.cwd, controller, this.finalEnv({
           ...this.environment(),
-          ...(saved.entrypoint ? { CLAUDE_CODE_ENTRYPOINT: saved.entrypoint } : {}),
+          ...this.compactionEntrypoint(saved),
           ...(options.cacheCold ? { DISABLE_PROMPT_CACHING: '1' } : {})
         })),
         resume: saved.sessionId,
@@ -1501,7 +1501,27 @@ export class ClaudeSubscriptionProviderService {
     const baseUrl = variable('ANTHROPIC_BASE_URL')
     if (baseUrl && !isAnthropicApi(baseUrl)) return {}
     if (claudeUsesApiKeyHelper(env, options)) return {}
+    // Settings the entry passes in its launch arguments (`--settings`) can route Claude Code anywhere and are not read
+    // here, so they keep the default.
+    if (this.launchArgsCarrySettings()) return {}
     return this.promptCacheBasis(env, options) === 'subscription' ? { CLAUDE_CODE_ENTRYPOINT: MOUSSE_CLAUDE_ENTRYPOINT } : {}
+  }
+  /** The entry's launch arguments pass Claude Code a settings file or JSON of their own (`--settings`). */
+  private launchArgsCarrySettings(): boolean {
+    try {
+      return 'settings' in claudeExtraArgs(storedCliArgs(this.launchSettings()))
+    } catch {
+      return true
+    }
+  }
+  /**
+   * The client name a compaction of a session runs under: the one its turns ran with (`saved`), so a warm cache still
+   * matches, but only while the route still allows Mousse's name (`entrypointEnv`); a user's own name always applies.
+   */
+  private compactionEntrypoint(saved: SavedSession): Record<string, string> {
+    const allowed = this.entrypointEnv(this.environment(), false, saved.cwd).CLAUDE_CODE_ENTRYPOINT
+    if (allowed !== MOUSSE_CLAUDE_ENTRYPOINT) return allowed ? { CLAUDE_CODE_ENTRYPOINT: allowed } : {}
+    return saved.entrypoint === MOUSSE_CLAUDE_ENTRYPOINT ? { CLAUDE_CODE_ENTRYPOINT: MOUSSE_CLAUDE_ENTRYPOINT } : {}
   }
   /**
    * The Claude Code permission mode a live process may be switched to in place: Auto on a process that runs under

@@ -41,7 +41,7 @@ function fakeQuery(prompt: unknown): Query {
   return Object.assign((async function* () { yield* frames })(), { close: () => {}, interrupt: async () => {}, supportedModels: async () => [] }) as unknown as Query
 }
 
-type Setup = { authMethod?: string; env?: Record<string, string>; inherited?: Record<string, string>; paysPerToken?: boolean; userSettings?: Record<string, unknown>; projectSettings?: Record<string, unknown> }
+type Setup = { authMethod?: string; env?: Record<string, string>; args?: string[]; inherited?: Record<string, string>; paysPerToken?: boolean; userSettings?: Record<string, unknown>; projectSettings?: Record<string, unknown> }
 
 function service(options: Setup = {}) {
   const home = tempDir('mousse-entrypoint-')
@@ -56,6 +56,8 @@ function service(options: Setup = {}) {
     mkdirSync(join(home, '.claude'))
     writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify(options.projectSettings))
   }
+  /** The entry's variables; a test changes them to move the route between turns. */
+  const launchEnv: Record<string, string> = { ...options.env }
   /** What `claude auth status` answers; a test replaces it to make the check fail. */
   let auth = (): string => JSON.stringify({ loggedIn: true, authMethod: options.authMethod ?? 'claude.ai', apiProvider: 'firstParty' })
   const created = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
@@ -64,7 +66,7 @@ function service(options: Setup = {}) {
       started.push(input)
       return fakeQuery(input.prompt)
     },
-    launchConfig: () => ({ binaryPath: binary, ...(options.env ? { env: options.env } : {}) }),
+    launchConfig: () => ({ binaryPath: binary, ...(options.env ? { env: launchEnv } : {}), ...(options.args ? { args: options.args } : {}) }),
     ...(options.inherited ? { baseEnv: () => ({ ...process.env, ...options.inherited }) } : {}),
     ...(options.paysPerToken ? { paysPerToken: true } : {})
   })
@@ -75,7 +77,7 @@ function service(options: Setup = {}) {
     return started.at(-1)!.options.env!
   }
   const failAuth = (answer: string) => { auth = () => answer }
-  return { service: created, turn, started, home, failAuth }
+  return { service: created, turn, started, home, failAuth, launchEnv }
 }
 
 describe('the client name of a turn', () => {
@@ -99,6 +101,8 @@ describe('the client name of a turn', () => {
     ['gateway', { authMethod: 'oauth_token', env: { ANTHROPIC_BASE_URL: 'https://gateway.example/anthropic' } }, 'full', undefined],
     ['Bedrock', { env: { CLAUDE_CODE_USE_BEDROCK: '1' } }, 'full', undefined],
     ['an entry that pays per token', { paysPerToken: true }, 'full', undefined],
+    // Settings passed in launch arguments are not read, so they may route anywhere.
+    ["a settings file in the entry's launch arguments", { args: ['--settings', '/somewhere/proxy.json'] }, 'full', undefined],
     ["a proxy set in the user's Claude settings", { userSettings: { env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8317' } } }, 'full', undefined],
     ["a proxy set in the project's Claude settings", { projectSettings: { env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8317' } } }, 'full', undefined],
     ["an API key in the project's Claude settings", { projectSettings: { env: { ANTHROPIC_API_KEY: 'sk-ant-api03-x' } } }, 'full', undefined],
@@ -166,6 +170,18 @@ describe('compaction', () => {
     expect((await compacted('full', true)).DISABLE_PROMPT_CACHING).toBe('1')
     expect(await compacted('full', false)).not.toHaveProperty('DISABLE_PROMPT_CACHING')
     expect(await compacted('full')).not.toHaveProperty('DISABLE_PROMPT_CACHING')
+  })
+
+  it('drops the saved name when the route no longer allows it: a proxy or an API key set since', async () => {
+    for (const route of [{ ANTHROPIC_BASE_URL: 'http://127.0.0.1:8317', ANTHROPIC_AUTH_TOKEN: 'proxy-token' }, { ANTHROPIC_API_KEY: 'sk-ant-api03-x' }]) {
+      const fixture = service({ env: {} })
+      await fixture.turn('full', 'thread')
+      fixture.service.commitConversation('thread', 'history')
+      Object.assign(fixture.launchEnv, route)
+      await fixture.service.compactConversation('thread', 'history', undefined, undefined, new AbortController().signal)
+      expect(fixture.started.at(-1)!.prompt).toBe('/compact')
+      expect(fixture.started.at(-1)!.options.env!.CLAUDE_CODE_ENTRYPOINT, Object.keys(route).join()).toBeUndefined()
+    }
   })
 
   it('the next turn after a cold compaction caches as usual', async () => {
