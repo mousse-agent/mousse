@@ -50,7 +50,7 @@ export const ToolApprovalFooter = memo(function ToolApprovalFooter({
   }, [decision, isPending]);
 
   return (
-    <div className="flex items-center justify-between py-1 pl-3 pr-2 border-t border-border bg-an-tool-background">
+    <div className="flex items-center justify-between py-1 pl-3 pr-2 border-t border-border bg-an-tool-background" data-mousse-decision={decision ? undefined : ""}>
       {statusConfig ? (
         <span className="text-sm text-an-tool-color-muted">
           {statusConfig.label}

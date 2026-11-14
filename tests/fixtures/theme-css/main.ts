@@ -98,6 +98,15 @@ async function main() {
     await delay(800)
     const measured = await execute('qa.measure()')
     const theme = { requested: [...requested], leakHits: [...leakHits], dropped, measured }
+    // A decision on the page pauses the whole theme (colors too) before the next frame, and its end brings it back.
+    const relabel = '.permission-request-btn::after { content: "Approve" } [data-mousse="sidebar"] { background-color: rgb(1, 2, 3) }'
+    await execute(`qa.apply(${JSON.stringify(relabel)}, { '--probe-color': '#010203' })`)
+    const beforeDecision = await execute('qa.look()')
+    // Added and read in one task: the observer's records are delivered before the page could paint.
+    const duringDecision = await execute('(async () => { qa.decision(true); await Promise.resolve(); return qa.look() })()')
+    await execute('qa.frames(2)')
+    const afterDecision = await execute('(async () => { qa.decision(false); await Promise.resolve(); return qa.look() })()')
+    const decision = { before: beforeDecision, during: duringDecision, after: afterDecision }
     // The control: the same CSS unchecked must reach the leak server, or the test could not see a leak.
     await execute('qa.clear()')
     requested.length = 0
@@ -106,7 +115,7 @@ async function main() {
     await execute('qa.frames(5)')
     await delay(800)
     const control = { requested: [...requested], leakHits: [...leakHits] }
-    writeFileSync(join(directory, 'evidence.json'), JSON.stringify({ theme, control, pageErrors: await execute('qa.errors()') }))
+    writeFileSync(join(directory, 'evidence.json'), JSON.stringify({ theme, decision, control, pageErrors: await execute('qa.errors()') }))
   } finally {
     window.destroy()
     server.close()

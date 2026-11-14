@@ -141,6 +141,24 @@ describe('user themes in Settings → Appearance', () => {
   })
 })
 
+describe('turning a theme off while its editor is open', () => {
+  it('leaves the theme off after a preview, rather than putting the editor\'s last theme back', async () => {
+    ;(window as unknown as { mousse: unknown }).mousse = { platform: 'darwin', settings: { get: async () => store.get() } }
+    store.set({ appearance: { userThemes: [{ id: 'user-x', name: 'X', base: 'dark', accent: '', colors: {}, css: '' }], userTheme: 'user-x' } } as MousseSettingsUpdate)
+    show()
+    typeInto(host.querySelector<HTMLTextAreaElement>('#user-theme-css')!, 'body { display: none }')
+    await act(async () => { await new Promise((done) => setTimeout(done, 200)) })
+    expect(document.documentElement.dataset.userTheme).toBe('user-x')
+
+    // View → Turn off custom theme, from another window or the menu: the page redraws without the editor.
+    store.set({ appearance: { userTheme: '' } } as MousseSettingsUpdate)
+    show()
+    await act(async () => { await new Promise((done) => setTimeout(done, 0)) })
+    expect(host.querySelector('#user-theme-css')).toBeNull()
+    expect(document.documentElement.dataset.userTheme).toBeUndefined()
+  })
+})
+
 describe('View → Turn off custom theme', () => {
   it('turns the user theme off through settings, from the menu', async () => {
     const set = vi.fn(async (partial: MousseSettingsUpdate) => store.set(partial))

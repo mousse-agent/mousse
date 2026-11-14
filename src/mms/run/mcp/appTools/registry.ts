@@ -1,5 +1,6 @@
 import type { ToolCall } from '@earendil-works/pi-ai'
 import { PERMISSION_KEYS } from '../../../../shared/permissionKeys'
+import { APPROVALS_REFUSED_MESSAGE } from '../../../../shared/harness/types'
 import { permissionModeAllows, type PermissionMode } from '../../../../shared/permissionMode'
 import type { PendingUserQuestions, UserQuestionAnswers } from '../../../../shared/types'
 import type { ApprovalTag } from '../../../orchestrator/UserQuestionService'
@@ -464,7 +465,7 @@ export class ToolRegistry {
     // definition run is held to its own grants above); a rejection ends the call before its handler
     // runs and writes no ledger row.
     if ((tool.access === 'editsWorkspace' || tool.access === 'changesSettings') && !turn.definition) {
-      const refusal = await this.askBeforeEditing(tool, caller, request.signal, args)
+      const refusal = await this.askBeforeEditing(tool, caller, request.signal, args, undefined, turn.approvals === 'never')
       if (refusal) return refusal
     }
     const ctx: ToolCallContext = { caller, turn, toolCallId: request.toolCallId, signal: request.signal, transport: 'mcp', level: this.effectiveLevel(caller.accessLevel), ...(scope ? { scope } : {}) }
@@ -712,11 +713,13 @@ export class ToolRegistry {
   /**
    * The outcome a rejected `editsWorkspace` or `changesSettings` call gets instead of running: null when the call may go
    * ahead (the run's permission mode allows edits, or the user allowed it once). An owner that cannot
-   * ask rejects: nothing runs unapproved.
+   * ask rejects, and so does a run nobody answers: nothing runs unapproved.
    */
-  private async askBeforeEditing(tool: MousseTool, caller: McpCaller, signal: AbortSignal, args: Record<string, unknown>, turnMode?: PermissionMode): Promise<ToolOutcome | null> {
+  private async askBeforeEditing(tool: MousseTool, caller: McpCaller, signal: AbortSignal, args: Record<string, unknown>, turnMode?: PermissionMode, unattended = false): Promise<ToolOutcome | null> {
     const mode = turnMode ?? this.options.permissionModeFor?.(caller.runId)
     if (mode === undefined || permissionModeAllows(mode, 'edit')) return null
+    // A run nobody answers (`approvals: 'never'`) is refused at once rather than waiting for a person.
+    if (unattended) return { text: APPROVALS_REFUSED_MESSAGE, isError: true }
     const rejected: ToolOutcome = { text: `The user did not approve ${tool.name}, so it did not run. Do not retry it unless they ask.`, isError: true }
     if (!this.options.askApproval) return rejected
     try {

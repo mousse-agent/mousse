@@ -1,4 +1,5 @@
 import { externalLoadIn, THEME_CSS_MAX_LENGTH } from '../../shared/themes/cssSafety'
+import { isThemeColorValue, isThemeTokenName } from '../../shared/themes/userThemes'
 
 /** A rule or declaration left out of a theme, and why. */
 export interface DroppedCss {
@@ -118,23 +119,72 @@ export function sanitizeThemeCss(css: string): SanitizedThemeCss {
   return { css: second, dropped }
 }
 
-let themeSheet: CSSStyleSheet | null = null
+/** `#rgb` or `#rrggbb` as `r, g, b`; null for any other color. */
+function hexChannels(value: string): string | null {
+  const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(value.trim())?.[1]
+  if (!hex) return null
+  const full = hex.length === 3 ? hex.split('').map((c) => c + c).join('') : hex
+  return [0, 2, 4].map((at) => parseInt(full.slice(at, at + 2), 16)).join(', ')
+}
 
 /**
- * Puts theme CSS on the page after the app's own styles (an adopted sheet comes after the document's), cleaned by
- * `sanitizeThemeCss`; empty CSS takes it off. Returns what was dropped.
+ * A theme's color tokens as one `:root` rule. `!important`, so they win over the base theme's values, which Mousse sets
+ * inline. A surface's `r, g, b` twin (`--surface-base-rgb`) follows a hex color unless the theme sets it.
  */
-export function applyThemeCss(css: string, doc: Document = document): DroppedCss[] {
-  const { css: safe, dropped } = sanitizeThemeCss(css)
-  // A page without constructable sheets (a test DOM) gets no theme CSS at all.
+export function themeTokensCss(colors: Record<string, string>): string {
+  const declarations: string[] = []
+  for (const [name, value] of Object.entries(colors)) {
+    if (!isThemeTokenName(name) || !isThemeColorValue(value)) continue
+    declarations.push(`${name}: ${value.trim()} !important;`)
+    const channels = hexChannels(value)
+    if (channels && !(`${name}-rgb` in colors)) declarations.push(`${name}-rgb: ${channels} !important;`)
+  }
+  return declarations.length ? `:root { ${declarations.join(' ')} }` : ''
+}
+
+/**
+ * While a person is asked to decide something (approve or deny a tool, allow a bot, a device or a browser), the page
+ * shows Mousse as it is, without any theme: those controls carry `data-mousse-decision`, and while one is on the page
+ * the theme sheet is off. A theme could otherwise relabel, hide, move or cover Approve and Deny.
+ */
+export const DECISION_SELECTOR = '[data-mousse-decision]'
+
+let themeSheet: CSSStyleSheet | null = null
+let guard: MutationObserver | null = null
+
+/** Turns the theme sheet off while a decision is on the page, and on again once none is. */
+function syncDecisionPause(doc: Document): void {
+  if (!themeSheet) return
+  const paused = doc.querySelector(DECISION_SELECTOR) !== null
+  if (themeSheet.disabled !== paused) themeSheet.disabled = paused
+  doc.documentElement.toggleAttribute('data-user-theme-paused', paused)
+}
+
+/**
+ * Puts a theme on the page after the app's own styles (an adopted sheet comes after the document's): its color tokens
+ * and its CSS, cleaned by `sanitizeThemeCss`. Empty takes it off. A mutation observer pauses it before the next frame
+ * whenever a decision appears (mutation records are delivered before the page paints). Returns what was dropped.
+ */
+export function applyThemeCss(css: string, options: { tokens?: Record<string, string> } = {}, doc: Document = document): DroppedCss[] {
+  const tokens = themeTokensCss(options.tokens ?? {})
+  const { css: safe, dropped } = sanitizeThemeCss(tokens ? `${tokens}\n${css}` : css)
+  // A page without constructable sheets (a test DOM) gets no theme at all.
   if (!Array.isArray(doc.adoptedStyleSheets)) return dropped
   const others = doc.adoptedStyleSheets.filter((sheet) => sheet !== themeSheet)
   if (!safe) {
     if (others.length !== doc.adoptedStyleSheets.length) doc.adoptedStyleSheets = others
+    guard?.disconnect()
+    guard = null
+    doc.documentElement.removeAttribute('data-user-theme-paused')
     return dropped
   }
   themeSheet ??= new CSSStyleSheet()
   themeSheet.replaceSync(safe)
+  syncDecisionPause(doc)
   if (!doc.adoptedStyleSheets.includes(themeSheet)) doc.adoptedStyleSheets = [...others, themeSheet]
+  if (!guard && typeof MutationObserver === 'function') {
+    guard = new MutationObserver(() => syncDecisionPause(doc))
+    guard.observe(doc.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ['data-mousse-decision'] })
+  }
   return dropped
 }

@@ -25,7 +25,7 @@ describe('theme_read and theme_set', () => {
     home = undefined
   })
 
-  const setup = async (options: { mode?: 'ask' | 'accept_edits' | 'full'; answer?: 'allow' | 'reject'; readOnlyTurn?: boolean; readOnlyChild?: boolean; ceiling?: 'plan' | 'default'; subagent?: boolean } = {}) => {
+  const setup = async (options: { mode?: 'ask' | 'accept_edits' | 'full'; answer?: 'allow' | 'reject'; readOnlyTurn?: boolean; readOnlyChild?: boolean; ceiling?: 'plan' | 'default'; subagent?: boolean; unattended?: boolean } = {}) => {
     home = mkdtempSync(join(tmpdir(), 'mousse-theme-tools-'))
     const settings = new SettingsStore(MousseConfigStore.load(home))
     const saves: unknown[] = []
@@ -52,6 +52,7 @@ describe('theme_read and theme_set', () => {
     const ceiling = options.ceiling ?? 'default'
     turns.register(appTurn({
       threadId: 'parent', runId: run.runId, modeCeiling: ceiling, subagent: options.subagent ?? false,
+      ...(options.unattended ? { approvals: 'never' as const } : {}),
       ...(options.readOnlyTurn ? { mode: 'plan', modeFacts: { readOnly: true, agent: false, build: false } } : {})
     }))
     const call = (name: string, args: Record<string, unknown> = {}) =>
@@ -164,6 +165,19 @@ describe('theme_read and theme_set', () => {
     const allowed = await setup({ mode: 'ask', answer: 'allow' })
     await expect(allowed.call('theme_set', { theme: 'light' })).resolves.not.toMatchObject({ isError: true })
     expect(allowed.settings.get().appearance.theme).toBe('light')
+  })
+
+  it('a run nobody answers is refused under Ask without asking, and runs where its mode allows edits', async () => {
+    const ask = await setup({ mode: 'ask', unattended: true })
+    await expect(ask.call('theme_set', { theme: 'light' })).resolves.toMatchObject({ isError: true, text: expect.stringContaining('refused') })
+    expect(ask.asked).toEqual([])
+    expect(ask.saves).toEqual([])
+    fx?.dispose()
+    fx = undefined
+
+    const edits = await setup({ mode: 'accept_edits', unattended: true })
+    await expect(edits.call('theme_set', { theme: 'light' })).resolves.not.toMatchObject({ isError: true })
+    expect(edits.settings.get().appearance.theme).toBe('light')
   })
 
   it.each(['accept_edits', 'full'] as const)('runs without asking under %s', async (mode) => {

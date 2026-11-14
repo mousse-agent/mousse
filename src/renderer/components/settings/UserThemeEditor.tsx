@@ -46,7 +46,7 @@ export interface UserThemeEditorProps {
 /**
  * Edits the user theme in use: name, base, a few colors and its CSS. Every change shows at once on the whole window
  * (the page's own theme pipeline, `applyAppearance`, with the draft in place of the saved theme); Save keeps it, and
- * leaving or Discard puts the saved theme back.
+ * leaving or Discard puts what is saved back.
  */
 export function UserThemeEditor({ theme, appearance, onSave, onDelete, onExport }: UserThemeEditorProps) {
   const [draft, setDraft] = useState<UserTheme>(theme)
@@ -60,16 +60,22 @@ export function UserThemeEditor({ theme, appearance, onSave, onDelete, onExport 
   useEffect(() => { setDraft(theme) }, [savedKey])
 
   // Live preview: the draft over the saved settings, a moment after the last keystroke.
+  const previewed = useRef(false)
   useEffect(() => {
     if (!dirty) return
     const timer = window.setTimeout(() => {
+      previewed.current = true
       applyAppearance({ ...saved.current, userThemes: saved.current.userThemes.map((entry) => (entry.id === draft.id ? draft : entry)), userTheme: draft.id })
     }, 120)
     return () => window.clearTimeout(timer)
   }, [draft, dirty])
 
-  // Leaving with an unsaved draft shows the saved theme again.
-  useEffect(() => () => applyAppearance(saved.current), [])
+  // Leaving after a preview shows what is saved now, read again: the editor also closes because the theme was turned
+  // off (View → Turn off custom theme, an agent), and its last props would put that theme back.
+  useEffect(() => () => {
+    if (!previewed.current) return
+    void window.mousse.settings.get().then((settings) => applyAppearance(settings.appearance)).catch(() => {})
+  }, [])
 
   const dropped = useMemo(() => sanitizeThemeCss(draft.css).dropped, [draft.css])
   const update = (patch: Partial<UserTheme>): void => setDraft((current) => ({ ...current, ...patch }))
@@ -77,6 +83,7 @@ export function UserThemeEditor({ theme, appearance, onSave, onDelete, onExport 
     setDraft((current) => (key === 'accent' ? { ...current, accent: value } : { ...current, colors: { ...current.colors, [key]: value } }))
   const discard = (): void => {
     setDraft(theme)
+    previewed.current = false
     applyAppearance(saved.current)
   }
 

@@ -48,3 +48,28 @@ describe('stable theme selectors', () => {
     for (const entry of THEME_SELECTORS) expect(themeStylingGuide()).toContain(entry.selector)
   })
 })
+
+/**
+ * Where a person approves or denies something. Each carries `data-mousse-decision` while the decision is open, and the
+ * theme is off while one is on the page (tests/renderer/theme-css-electron.test.ts shows the pause). A new kind of
+ * decision must be added here and marked, or a theme could relabel its buttons.
+ */
+const DECISIONS: Record<string, string> = {
+  'a thread\'s permission request': 'src/renderer/chat/components/agent-elements/tools/permission-request.tsx',
+  'a tool\'s approval footer': 'src/renderer/chat/components/agent-elements/tools/tool-approval-footer.tsx',
+  'an agent-made quick action': 'src/renderer/chat/components/agent-elements/tools/quick-action-tool.tsx',
+  'a question or approval in the composer': 'src/renderer/components/ComposerQuestionModal.tsx',
+  'Needs you asks (bots, workflows, first-creation)': 'src/renderer/components/asks/AskCard.tsx',
+  'a bot\'s ask in its chat': 'src/renderer/components/bots/BotAskReplies.tsx',
+  'a bot owner\'s permission decision': 'src/renderer/components/chats/BotPermissionDecision.tsx',
+  'browser access for agents': 'src/renderer/components/chats/ChatBrowserAccess.tsx',
+  'a device enrollment request': 'src/renderer/components/EnrollmentRequestPrompt.tsx',
+  'an editor access request': 'src/renderer/components/EditorAskPrompt.tsx',
+  'an SSH route approval': 'src/renderer/components/devices/ApproveSshRouteDialog.tsx'
+}
+
+describe('decisions pause the theme', () => {
+  it.each(Object.entries(DECISIONS))('%s is marked data-mousse-decision', (_what, file) => {
+    expect(readFileSync(file, 'utf8')).toContain('data-mousse-decision')
+  })
+})

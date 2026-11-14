@@ -21,7 +21,19 @@ function computeAll(): void {
 
 ;(window as unknown as { qa: unknown }).qa = {
   /** Applies theme CSS the way the app does; returns the number of rules or declarations it dropped. */
-  apply: (css: string): number => { const dropped = applyThemeCss(css).length; computeAll(); return dropped },
+  apply: (css: string, tokens?: Record<string, string>): number => { const dropped = applyThemeCss(css, { tokens }).length; computeAll(); return dropped },
+  /** Puts a pending decision (an approval's buttons) on the page, or takes it off. */
+  decision: (on: boolean): void => {
+    if (on) { const element = document.createElement('div'); element.id = 'decision'; element.setAttribute('data-mousse-decision', ''); element.innerHTML = '<button class="permission-request-btn">Deny</button><button class="permission-request-btn">Approve</button>'; document.body.append(element) }
+    else document.getElementById('decision')?.remove()
+  },
+  /** What a decision's button shows and the theme's sidebar and token, in the same task as the change. */
+  look: () => ({
+    sidebar: style('[data-mousse="sidebar"]', 'background-color'),
+    token: getComputedStyle(document.documentElement).getPropertyValue('--probe-color').trim(),
+    buttonAfter: style('#decision .permission-request-btn', 'content', '::after'),
+    paused: document.documentElement.hasAttribute('data-user-theme-paused')
+  }),
   /** The control: the same CSS straight into a style element, unchecked. */
   raw: (css: string): void => { const element = document.createElement('style'); element.textContent = css; document.head.append(element); computeAll() },
   clear: (): void => { applyThemeCss(''); document.querySelectorAll('style[data-raw]').forEach((element) => element.remove()) },

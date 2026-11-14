@@ -41,7 +41,7 @@ export function AskCard({ line, lineText, note, tip, details, allowOff, answered
     return <div className="ask-card-answer" role="status">{answered.allowed && <CircleCheck size={13} aria-hidden />}{answered.text}</div>
   }
   if (layout === 'row' && row) {
-    return <div className="automation-row" data-testid="automation-row" data-key={row.key} data-kind={row.kind} data-ask="" role="option" aria-selected={false}>
+    return <div className="automation-row" data-testid="automation-row" data-key={row.key} data-kind={row.kind} data-ask="" data-mousse-decision="" role="option" aria-selected={false}>
       <span className="automation-glyph needs" data-glyph="needs" title="Needs you" role="img" aria-label="Needs you">⚠</span>
       <button type="button" className="automation-row-main" data-row-button="" title={tip ?? (note || undefined)} onClick={row.onOpen}>
         <span className="automation-row-name">{row.name}</span>
@@ -59,7 +59,7 @@ export function AskCard({ line, lineText, note, tip, details, allowOff, answered
       <p>{details.items.join(', ')}</p>
       {details.more && <p>{details.more}</p>}
     </details>}
-    <div className="ask-card-actions">
+    <div className="ask-card-actions" data-mousse-decision="">
       <button type="button" className="bot-ghost-button" disabled={busy} onClick={() => void answer('not_now')}>Not now</button>
       <button type="button" className="chat-primary-button" disabled={busy || allowOff !== undefined} title={allowOff} onClick={() => void answer('allow')}>Allow</button>
     </div>
