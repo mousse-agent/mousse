@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PermissionMode } from '../src/shared/permissionMode'
 import { ClaudeSubscriptionProviderService, MOUSSE_CLAUDE_ENTRYPOINT } from '../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
+import { readLocalProxySeats, resetLocalProxyDetection, type ProxyFetch } from '../src/mms/harness/vendors/claude/localProxyUsage'
 
 const dirs: string[] = []
 const tempDir = (prefix: string) => {
@@ -24,6 +25,8 @@ const tempDir = (prefix: string) => {
 const ROUTE = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY', 'CLAUDE_CODE_ENTRYPOINT', 'DISABLE_PROMPT_CACHING', 'CLIPROXY_MANAGEMENT_KEY', 'CLI_PROXY_API_MANAGEMENT_KEY', 'MANAGEMENT_PASSWORD']
 let configDir: string
 beforeEach(() => {
+  vi.stubEnv('MOUSSE_CLAUDE_NATIVE_PROXY_URL', undefined)
+  resetLocalProxyDetection()
   for (const name of ROUTE) vi.stubEnv(name, undefined)
   configDir = tempDir('mousse-entrypoint-config-')
   vi.stubEnv('CLAUDE_CONFIG_DIR', configDir)
@@ -41,7 +44,7 @@ function fakeQuery(prompt: unknown): Query {
   return Object.assign((async function* () { yield* frames })(), { close: () => {}, interrupt: async () => {}, supportedModels: async () => [] }) as unknown as Query
 }
 
-type Setup = { authMethod?: string; env?: Record<string, string>; args?: string[]; inherited?: Record<string, string>; paysPerToken?: boolean; userSettings?: Record<string, unknown>; projectSettings?: Record<string, unknown> }
+type Setup = { seats?: string[]; authMethod?: string; env?: Record<string, string>; args?: string[]; inherited?: Record<string, string>; paysPerToken?: boolean; userSettings?: Record<string, unknown>; projectSettings?: Record<string, unknown> }
 
 function service(options: Setup = {}) {
   const home = tempDir('mousse-entrypoint-')
@@ -61,6 +64,12 @@ function service(options: Setup = {}) {
   /** What `claude auth status` answers; a test replaces it to make the check fail. */
   let auth = (): string => JSON.stringify({ loggedIn: true, authMethod: options.authMethod ?? 'claude.ai', apiProvider: 'firstParty' })
   const created = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
+    proxySeats: (input) => readLocalProxySeats({ ...input, fetch: (async (url) => ({
+      status: 200,
+      text: async () => JSON.stringify(new URL(url).pathname === '/' ? { message: 'CLI Proxy API Server' } : {
+        files: (options.seats ?? []).map((kind, index) => ({ id: `c${index}`, provider: 'claude', account_type: kind, auth_index: `i${index}` }))
+      })
+    })) as ProxyFetch }),
     runAuth: async () => auth(),
     query: (input: { prompt: unknown; options: Options }) => {
       started.push(input)
@@ -147,6 +156,63 @@ describe('the client name of a turn', () => {
     expect((await service().turn('auto', undefined, { child: { readOnly: true } })).CLAUDE_CODE_ENTRYPOINT).toBe(MOUSSE_CLAUDE_ENTRYPOINT)
   })
 
+})
+
+describe('an explicitly configured native subscription proxy', () => {
+  const base = 'http://127.0.0.1:8317'
+  const env = { ANTHROPIC_BASE_URL: base, ANTHROPIC_AUTH_TOKEN: 'fixture', CLIPROXY_MANAGEMENT_KEY: 'fixture', MOUSSE_CLAUDE_NATIVE_PROXY_URL: base }
+  const setup: Setup = { env, authMethod: 'oauth_token', seats: ['oauth'] }
+  // Claim: only the operator's chosen route, confirmed subscription-only, may use Mousse's name.
+  const rows: Array<[string, Setup, PermissionMode, string | undefined]> = [
+    ['opted-in subscription proxy', setup, 'full', 'mousse'],
+    ['Auto retains SDK identity', setup, 'auto', undefined],
+    ['API seats', { ...setup, seats: ['api_key'] }, 'full', undefined],
+    ['mixed seats', { ...setup, seats: ['oauth', 'api_key'] }, 'full', undefined],
+    ['unknown seats', { ...setup, seats: [] }, 'full', undefined],
+    ['per-token entry', { ...setup, paysPerToken: true }, 'full', undefined],
+    ['API key variable', { ...setup, env: { ...env, ANTHROPIC_API_KEY: 'fixture' } }, 'full', undefined],
+    ['API helper', { ...setup, userSettings: { apiKeyHelper: 'echo fixture' } }, 'full', undefined],
+    ['uninspected settings', { ...setup, args: ['--settings', 'other.json'] }, 'full', undefined],
+    ['no opt-in', { ...setup, env: { ...env, MOUSSE_CLAUDE_NATIVE_PROXY_URL: '' } }, 'full', undefined],
+    ['different path', { ...setup, env: { ...env, ANTHROPIC_BASE_URL: `${base}/other` } }, 'full', undefined],
+    ['project opt-in', { ...setup, env: { ...env, MOUSSE_CLAUDE_NATIVE_PROXY_URL: '' }, projectSettings: { env: { MOUSSE_CLAUDE_NATIVE_PROXY_URL: base } } }, 'full', undefined],
+    ['user settings opt-in', { ...setup, env: { ...env, MOUSSE_CLAUDE_NATIVE_PROXY_URL: '' }, userSettings: { env: { MOUSSE_CLAUDE_NATIVE_PROXY_URL: base } } }, 'full', 'mousse'],
+    ['explicit entrypoint still wins', { ...setup, env: { ...env, CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' } }, 'full', 'sdk-ts'],
+    ['cloud route', { ...setup, env: { ...env, CLAUDE_CODE_USE_BEDROCK: '1' } }, 'full', undefined]
+  ]
+  it.each(rows)('%s', async (_name, options, mode, expected) => {
+    expect((await service(options).turn(mode)).CLAUDE_CODE_ENTRYPOINT).toBe(expected)
+  })
+
+  it('keeps the saved identity for compaction, including a session started before opt-in', async () => {
+    const fixture = service({ ...setup, env: { ...env, MOUSSE_CLAUDE_NATIVE_PROXY_URL: '' } })
+    expect((await fixture.turn('full', 'thread')).CLAUDE_CODE_ENTRYPOINT).toBeUndefined()
+    fixture.service.commitConversation('thread', 'history')
+    fixture.launchEnv.MOUSSE_CLAUDE_NATIVE_PROXY_URL = base
+    await fixture.service.compactConversation('thread', 'history', undefined, undefined, new AbortController().signal)
+    expect(fixture.started.at(-1)!.options.env!.CLAUDE_CODE_ENTRYPOINT).toBeUndefined()
+    expect((await fixture.turn('full', 'new-thread', { mode: 'plan' })).CLAUDE_CODE_ENTRYPOINT).toBe('mousse')
+    expect((fixture.started.at(-1)!.options.settings as Record<string, unknown>).useAutoModeDuringPlan).toBe(false)
+    fixture.service.commitConversation('new-thread', 'new-history')
+    await fixture.service.compactConversation('new-thread', 'new-history', undefined, undefined, new AbortController().signal)
+    expect(fixture.started.at(-1)!.options.env!.CLAUDE_CODE_ENTRYPOINT).toBe('mousse')
+    fixture.launchEnv.MOUSSE_CLAUDE_NATIVE_PROXY_URL = ''
+    await fixture.service.compactConversation('new-thread', 'new-history', undefined, undefined, new AbortController().signal)
+    expect(fixture.started.at(-1)!.options.env!.CLAUDE_CODE_ENTRYPOINT).toBeUndefined()
+  })
+
+  it('one-shots use the confirmed opt-in, but a stale listing no longer permits a named compaction', async () => {
+    const fixture = service(setup)
+    await fixture.turn('full', 'thread')
+    fixture.service.commitConversation('thread', 'history')
+    await fixture.service.oneShot({ model: 'sonnet', prompt: 'Name this chat', onActivity: () => {} }, new AbortController().signal)
+    expect(fixture.started.at(-1)!.options.env!.CLAUDE_CODE_ENTRYPOINT).toBe('mousse')
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 31 * 60_000)
+    try {
+      await fixture.service.compactConversation('thread', 'history', undefined, undefined, new AbortController().signal)
+      expect(fixture.started.at(-1)!.options.env!.CLAUDE_CODE_ENTRYPOINT).toBeUndefined()
+    } finally { clock.mockRestore() }
+  })
 })
 
 describe('compaction', () => {
