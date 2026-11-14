@@ -2,13 +2,15 @@
 /**
  * Decisions that are reached another way than their first prompt still pause a theme (#1142): the host key every SSH
  * dialog confirms (adding a device, renaming an address, approving a route), and an editor request answered in
- * Settings → Devices after its dialog was dismissed. The pause itself is tests/renderer/theme-css-electron.test.ts.
+ * Settings → Devices after its dialog was dismissed, and the composer's permission menu, whose Full access row a theme
+ * could otherwise show as "Ask before acting". The pause itself is tests/renderer/theme-css-electron.test.ts.
  */
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { HostKeyConfirm } from '../../src/renderer/components/devices/HostKeyConfirm'
 import { DeviceAccessView } from '../../src/renderer/components/devices/DeviceAccessRows'
+import { PermissionModeSection, permissionChoice } from '../../src/renderer/components/ComposerPermissionPicker'
 
 const marked = (html: string) => /data-mousse-decision=""/.test(html)
 
@@ -25,5 +27,12 @@ describe('decision markers on shared and left-behind prompts', () => {
     expect(asking).toContain('Allow')
     expect(marked(asking)).toBe(true)
     expect(marked(renderToStaticMarkup(createElement(DeviceAccessView, props)))).toBe(false)
+  })
+
+  it('the composer\'s permission menu, Full access row included, is a decision', () => {
+    const control = { mode: 'ask' as const, agent: 'Claude Code', onSelect: () => {} }
+    const html = renderToStaticMarkup(createElement(PermissionModeSection, { control, choice: permissionChoice(control), onPicked: () => {} }))
+    expect(html).toContain('aria-label="Full access.')
+    expect(marked(html)).toBe(true)
   })
 })

@@ -76,7 +76,26 @@ const DECISIONS: Record<string, string> = {
   'an SSH route approval': 'src/renderer/components/devices/ApproveSshRouteDialog.tsx',
   'an SSH host key to trust (every dialog that shows one)': 'src/renderer/components/devices/HostKeyConfirm.tsx',
   'trusting a repository\'s Git settings': 'src/renderer/components/ThreadsContextMenu.tsx',
-  'Settings pages other than Appearance': 'src/renderer/components/SettingsPage.tsx'
+  'Settings pages other than Appearance': 'src/renderer/components/SettingsPage.tsx',
+  'the composer\'s permission mode menu': 'src/renderer/components/ComposerPermissionPicker.tsx',
+  'the Automations page (permission modes, schedules)': 'src/renderer/components/AutomationsPage.tsx',
+  'an automation draft, also in a chat': 'src/renderer/components/automations/DraftCard.tsx',
+  'an agent definition (grants, scripts)': 'src/renderer/components/agentDefinitions/AgentEditor.tsx',
+  'a device\'s limits': 'src/renderer/components/devices/DeviceLimitsDialog.tsx'
+}
+
+/**
+ * Files that use permission modes without a marker of their own, each reviewed: it chooses no mode, or it is only shown
+ * on a page that is already paused. A new file that uses permission modes must be marked or added here with its reason.
+ */
+const PERMISSION_MODE_REVIEWED: Record<string, string> = {
+  'src/renderer/lib/permissionModeIcon.tsx': 'icons only',
+  'src/renderer/components/ComposerFooter.tsx': 'shows the chip; the menu is ComposerPermissionPicker',
+  'src/renderer/components/ComposerEffortPicker.tsx': 'hosts the menu; the choices are ComposerPermissionPicker',
+  'src/renderer/components/OrchestratorChat.tsx': 'the handler, no control',
+  'src/renderer/components/settings/GeneralSettings.tsx': 'Settings → General, paused with the page',
+  'src/renderer/components/automations/AutomationDetail.tsx': 'only on the Automations page, paused with it',
+  'src/renderer/components/automations/inbox/EditDetailsPane.tsx': 'only on the Automations page, paused with it'
 }
 
 /** A button whose visible label is a decision word. */
@@ -85,6 +104,14 @@ const DECISION_BUTTON = /(?:>|\/>|<\/[A-Za-z]+>)\s*(?:Allow|Approve|Deny|Reject|
 describe('decisions pause the theme', () => {
   it.each(Object.entries(DECISIONS))('%s is marked data-mousse-decision', (_what, file) => {
     expect(readFileSync(file, 'utf8')).toContain('data-mousse-decision')
+  })
+
+  it('every file that uses permission modes is marked or reviewed', () => {
+    const unreviewed = sourceFiles('src/renderer').filter((file) => file.endsWith('.tsx')).filter((file) => {
+      const text = readFileSync(file, 'utf8')
+      return /shared\/permissionMode'/.test(text) && !text.includes('data-mousse-decision') && !(file in PERMISSION_MODE_REVIEWED)
+    })
+    expect(unreviewed).toEqual([])
   })
 
   it('every file with an Allow, Approve, Deny, Reject or Trust button marks its decision', () => {

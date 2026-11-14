@@ -108,7 +108,7 @@ export function DraftCard({ item, context, projects, bots, now, onWhen, onWho, o
     ...(item.where && !projects.some((project) => project.id === item.where!.projectId) ? [{ value: item.where.projectId, label: item.where.name }] : [])
   ]
   return (
-    <section className="inbox-draft" data-testid={`${testIdPrefix}-card`} data-key={item.key} data-fresh={fresh || undefined} aria-label={`Draft: ${item.name}`}>
+    <section className="inbox-draft" data-mousse-decision="" data-testid={`${testIdPrefix}-card`} data-key={item.key} data-fresh={fresh || undefined} aria-label={`Draft: ${item.name}`}>
       <div className="inbox-draft-head">
         <strong>{item.name}</strong>
         {fresh ? <span className="inbox-draft-tag">New</span> : null}

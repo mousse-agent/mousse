@@ -42,7 +42,7 @@ export function DeviceLimitsDialog({ node, name, policy, onClose, onDone }: {
       onClose={onClose}
       footer={<button type="button" className={`${btn} primary`} disabled={busy || !changed} onClick={() => void save()}>Save</button>}
     >
-      <div className="devices-dialog">
+      <div className="devices-dialog" data-mousse-decision="">
         <p className="settings-muted">These apply here only. {name} keeps its own limits for what this computer may do there.</p>
         <label className="devices-field">
           <span>Highest permission mode</span>

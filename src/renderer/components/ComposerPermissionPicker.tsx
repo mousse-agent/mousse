@@ -103,7 +103,8 @@ export function PermissionModeSection({ control, choice, onPicked }: {
     if (approvesItself) return `${agent} approves tools itself.`
     return modeDescription(mode, agent, limits?.sandboxOffInFull === true)
   }
-  return <div className="composer-mode-menu-section composer-permission-modes" role="group" aria-label="Permissions">
+  // Choosing a permission mode grants access: the menu pauses a theme while it is open.
+  return <div className="composer-mode-menu-section composer-permission-modes" data-mousse-decision="" role="group" aria-label="Permissions">
     {offered.map((entry) => {
       const Icon = permissionModeIcon(entry)
       const name = describePermissionMode(entry)

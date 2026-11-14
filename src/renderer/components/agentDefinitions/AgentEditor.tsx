@@ -376,6 +376,7 @@ export function AgentEditor({
   return (
     <div
       className="agent-defs agent-editor"
+      data-mousse-decision={active ? '' : undefined}
       data-agent-editor=""
       data-dirty={dirty ? 'true' : 'false'}
       data-layout={desktop ? 'desktop' : 'narrow'}
