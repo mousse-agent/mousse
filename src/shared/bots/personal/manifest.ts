@@ -102,6 +102,13 @@ export const BOT_QUESTION_TOOL = 'ask_owner'
  */
 export const BOT_QUESTION_ANSWER_TOOL = 'question_answer'
 
+/**
+ * Attaching a small card to the turn's next message (`show_card`, issue #1123): facts, a checklist, progress or a
+ * gallery of pictures from the bot's files folder, drawn by the app from fixed components. It grants nothing, so it is
+ * always on and never grantable. A bot's main turns get it in both lanes; never a consult or a subagent.
+ */
+export const BOT_CARD_TOOL = 'show_card'
+
 /** Every new bot's app tools: the web, and its own tools. */
 export const BOT_DEFAULT_APP_TOOLS: readonly string[] = ['web_search', 'web_fetch', ...BOT_OWN_APP_TOOLS]
 
@@ -177,6 +184,7 @@ const BOT_OFFERABLE_APP_TOOLS: ReadonlySet<string> = new Set([
   BOT_APPLET_TOOL,
   BOT_QUESTION_TOOL,
   BOT_QUESTION_ANSWER_TOOL,
+  BOT_CARD_TOOL,
   'list_skills', 'load_skill', 'escalate', 'consult'
 ])
 

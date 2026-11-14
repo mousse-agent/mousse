@@ -3,9 +3,10 @@ import { Type, type Tool } from '@earendil-works/pi-ai'
 import { BOT_DEPTHS, BOT_WORK_LEVELS, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, MAX_BOT_SCHEDULES, type BotDepth, type BotLane, type BotModelPick, type BotModelSlotKey, type BotModelSlots, type BotSchedule } from '../../../../shared/bots/personal/definition'
 import { entriesOf, modelsNamedBy, namedOn, ownerNamesModel, pickReasonText, plainLabel, workLevelOf, type BotModelRows, type NamedModel } from '../../../../shared/bots/personal/modelSlots'
 import type { BotModelOption, BotWorkChoices } from '../../../../shared/bots/personal/methods'
-import { BOT_IMAGE_TOOL, BOT_MCP_LIST_TOOL, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL, MAX_BOT_SUBAGENTS_AT_ONCE, MAX_BOT_SUBAGENTS_PER_DAY, MAX_BOT_SUBAGENTS_PER_WORK } from '../../../../shared/bots/personal/manifest'
+import { BOT_CARD_TOOL, BOT_IMAGE_TOOL, BOT_MCP_LIST_TOOL, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL, MAX_BOT_SUBAGENTS_AT_ONCE, MAX_BOT_SUBAGENTS_PER_DAY, MAX_BOT_SUBAGENTS_PER_WORK } from '../../../../shared/bots/personal/manifest'
 import type { BotSubagentView } from '../../../../shared/bots/personal/authority'
 import { DEFAULT_ANSWER_AFTER_MINUTES, DEFAULT_NUDGE_AFTER_MINUTES, MAX_CHOICE_DETAIL_CHARS, MAX_CHOICE_LABEL_CHARS, MAX_FOLLOW_UP_MINUTES, MAX_QUESTION_CHARS, MAX_QUESTION_CHOICES, MIN_FOLLOW_UP_MINUTES, MIN_QUESTION_CHOICES, QUESTION_NOT_OFFERED_TEXT, questionFollowOf, questionSpecOf } from '../../../../shared/bots/personal/questions'
+import { cardOf, MAX_CARD_TITLE_CHARS, MAX_CARDS_PER_MESSAGE, MAX_CHECKLIST_ITEMS, MAX_CHECKLIST_TEXT_CHARS, MAX_FACT_LABEL_CHARS, MAX_FACT_ROWS, MAX_FACT_VALUE_CHARS, MAX_GALLERY_CAPTION_CHARS, MAX_GALLERY_FILES, MAX_PROGRESS_LABEL_CHARS, MAX_PROGRESS_NOTE_CHARS } from '../../../../shared/bots/personal/cards'
 import { shortModelName } from '../../../../shared/modelNames'
 import { botScheduleLabel } from '../../../../shared/scheduleLabel'
 import { botScheduleProblem } from '../../../scheduled/botJobs'
@@ -57,6 +58,43 @@ const WHEN = Type.Union([
 ])
 
 const SCOPE = Type.Union([Type.Literal('now'), Type.Literal('always')], { description: 'now: for this conversation or run only; always: from now on.' })
+
+const CARD_TITLE = Type.Optional(Type.String({ description: `A short title, at most ${MAX_CARD_TITLE_CHARS} characters.` }))
+
+/** A card's four kinds (`cardOf` checks each strictly: its own fields only, within their limits). */
+const card = (description?: string) => Type.Union([
+  Type.Object({
+    type: Type.Literal('facts'),
+    title: CARD_TITLE,
+    rows: Type.Array(Type.Object({
+      label: Type.String({ description: `At most ${MAX_FACT_LABEL_CHARS} characters.` }),
+      value: Type.String({ description: `At most ${MAX_FACT_VALUE_CHARS} characters, one line. Links, **bold** and \`code\` only.` })
+    }), { description: `1 to ${MAX_FACT_ROWS} rows of a label and its value.` })
+  }, { description: 'Facts: keys and their values, such as a product\'s specs or a booking\'s details.' }),
+  Type.Object({
+    type: Type.Literal('checklist'),
+    title: CARD_TITLE,
+    items: Type.Array(Type.Object({
+      text: Type.String({ description: `At most ${MAX_CHECKLIST_TEXT_CHARS} characters.` }),
+      state: Type.Union([Type.Literal('done'), Type.Literal('doing'), Type.Literal('todo'), Type.Literal('skipped')])
+    }), { description: `1 to ${MAX_CHECKLIST_ITEMS} items. The owner can't tick them.` })
+  }, { description: 'A checklist: steps and where each stands.' }),
+  Type.Object({
+    type: Type.Literal('progress'),
+    label: Type.String({ description: `What is counted, at most ${MAX_PROGRESS_LABEL_CHARS} characters.` }),
+    done: Type.Integer({ description: 'How many are done, from 0 to total.' }),
+    total: Type.Integer({ description: 'How many there are, at least 1.' }),
+    note: Type.Optional(Type.String({ description: `A line more, at most ${MAX_PROGRESS_NOTE_CHARS} characters.` }))
+  }, { description: 'Progress as it is now: "3 of 5 · pages checked".' }),
+  Type.Object({
+    type: Type.Literal('gallery'),
+    title: CARD_TITLE,
+    files: Type.Array(Type.Object({
+      path: Type.String({ description: 'A PNG, JPEG, GIF or WebP in your files folder: its full path, or one relative to the folder. Never a web address.' }),
+      caption: Type.Optional(Type.String({ description: `At most ${MAX_GALLERY_CAPTION_CHARS} characters.` }))
+    }), { description: `1 to ${MAX_GALLERY_FILES} pictures.` })
+  }, { description: 'Pictures from your files folder: ones you made, saved or a tool handed you.' })
+], description ? { description } : {})
 
 export const BOT_TOOLS: Tool[] = [
   {
@@ -232,8 +270,14 @@ export const BOT_TOOLS: Tool[] = [
       other: Type.Optional(Type.Boolean({ description: 'Offer "Other…" for an answer in their own words. Default true.' })),
       ifNoAnswer: Type.Optional(Type.Union([Type.Literal('nudge'), Type.Literal('default')], { description: "If they don't answer: 'nudge' (default) reminds them and keeps waiting; 'default' goes with default after the time. Use 'default' only for a minor choice that is easy to undo." })),
       after: Type.Optional(Type.Number({ description: `Minutes before the first reminder or the default, ${MIN_FOLLOW_UP_MINUTES} to ${MAX_FOLLOW_UP_MINUTES}. Default ${DEFAULT_NUDGE_AFTER_MINUTES} for a nudge, ${DEFAULT_ANSWER_AFTER_MINUTES} for a default.` })),
-      default: Type.Optional(Type.String({ description: "The label of the choice you go with if they don't answer (with ifNoAnswer 'default')." }))
+      default: Type.Optional(Type.String({ description: "The label of the choice you go with if they don't answer (with ifNoAnswer 'default')." })),
+      card: Type.Optional(card('One card for context, shown above the answers: the options as facts, or pictures to pick from.'))
     })
+  },
+  {
+    name: BOT_CARD_TOOL,
+    description: `Show a small card with your next message: facts (keys and values), a checklist, progress, or a gallery of pictures from your files folder. Use one when it reads better than prose, such as specs to compare, steps and where each stands, or pictures you made or saved. Don't repeat what the card says in your words. At most ${MAX_CARDS_PER_MESSAGE} cards per message. Text only: no HTML, and never a web address for a picture.`,
+    parameters: Type.Object({ card: card() })
   },
   {
     name: BOT_QUESTION_ANSWER_TOOL,
@@ -401,6 +445,8 @@ const NO_IMAGE_MODEL_LINE = "Your owner hasn't picked an image model for you. Te
 const CHAT_ONLY = 'Only your chat hands out work and sets reminders. In a run, do the work yourself and say in your report what should happen next.'
 /** `question_answer` outside the chat: only the chat hears the owner's words to pass on. */
 const ANSWER_CHAT_ONLY = 'Only your chat passes on your owner\'s answers to your work.'
+/** `show_card` where it is never offered (a consult, a subagent): what it would show goes in words. */
+const CARDS_OFF = "You can't show cards from here: say it in words."
 const OWNER_ONLY = 'Only the owner can change this, in your chat. Suggest it in your report instead.'
 const error = (text: string): ToolOutcome => ({ text, isError: true })
 
@@ -879,6 +925,25 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
       listed: (listing) => listing.botRole === 'activation' && Boolean(listing.botTurnTools?.has(BOT_QUESTION_TOOL)),
       available: (turn) => (turn.bot?.appTools.has(BOT_QUESTION_TOOL) && deps?.() ? true : QUESTION_NOT_OFFERED_TEXT),
       offered: (turn) => Boolean(turn.bot?.appTools.has(BOT_QUESTION_TOOL) && deps?.())
+    },
+    {
+      ...ownTool(byName.get(BOT_CARD_TOOL)!, deps, {
+        class: 'mutation',
+        describe: () => 'Show a card',
+        handler: async (args, ctx) => {
+          const call = botCall(deps, ctx)
+          if (isOutcome(call)) return call
+          if (!call.deps.host.cards) return error(CARDS_OFF)
+          const card = cardOf(args.card)
+          if ('problem' in card) return error(card.problem)
+          const shown = call.deps.host.cards.show(call.botId, call.activationId, card)
+          return shown.shown ? json({ shown: true, note: shown.text }) : error(shown.text)
+        }
+      }),
+      // A bot's main turns hold it, in both lanes (`compileBotThread`); a consult and a subagent never list it.
+      listed: (listing) => listing.botRole === 'activation' && Boolean(listing.botTurnTools?.has(BOT_CARD_TOOL)),
+      available: (turn) => (turn.bot?.appTools.has(BOT_CARD_TOOL) && turn.bot.role !== 'subagent' && deps?.() ? true : CARDS_OFF),
+      offered: (turn) => Boolean(turn.bot?.appTools.has(BOT_CARD_TOOL) && turn.bot.role !== 'subagent' && deps?.())
     },
     {
       ...ownTool(byName.get(BOT_QUESTION_ANSWER_TOOL)!, deps, {

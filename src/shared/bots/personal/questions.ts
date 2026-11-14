@@ -4,6 +4,8 @@
  * a question grants nothing. Browser-safe.
  */
 
+import { cardOf, type BotCard } from './cards'
+
 /** Where a question stands. `moved_on`: the owner wrote something else first (a chat question); its buttons still answer it. */
 export type BotQuestionStatus = 'open' | 'answered' | 'defaulted' | 'moved_on' | 'withdrawn'
 
@@ -19,6 +21,8 @@ export interface BotQuestionSpec {
   choices: BotQuestionChoice[]
   /** "Other…" is offered: the owner answers in their own words. */
   other: boolean
+  /** One card for context (a few options as facts, a gallery), shown on the question's bubble above its answers. */
+  card?: BotCard
 }
 
 /**
@@ -266,9 +270,13 @@ export function questionSpecOf(args: Record<string, unknown>): BotQuestionSpec |
   if (args.yesNo !== undefined && args.yesNo !== true) return { problem: 'yesNo is true, or left out.' }
   if (args.other !== undefined && typeof args.other !== 'boolean') return { problem: 'other is true or false.' }
   const other = args.other !== false
+  // One card for context, checked as `show_card` checks it.
+  const card = args.card === undefined ? undefined : cardOf(args.card)
+  if (card && 'problem' in card) return { problem: `card: ${card.problem}` }
+  const carded = card ? { card } : {}
   if (args.yesNo === true) {
     if (args.choices !== undefined) return { problem: 'Give choices or yesNo, not both.' }
-    return { question, choices: [{ label: 'Yes' }, { label: 'No' }], other }
+    return { question, choices: [{ label: 'Yes' }, { label: 'No' }], other, ...carded }
   }
   if (!Array.isArray(args.choices)) return { problem: `Give ${MIN_QUESTION_CHOICES} to ${MAX_QUESTION_CHOICES} choices, or yesNo.` }
   if (args.choices.length < MIN_QUESTION_CHOICES || args.choices.length > MAX_QUESTION_CHOICES)
@@ -285,5 +293,5 @@ export function questionSpecOf(args: Record<string, unknown>): BotQuestionSpec |
     if (choices.some((choice) => choice.label.toLowerCase() === label.toLowerCase())) return { problem: 'Give each choice a different label.' }
     choices.push({ label, ...(detail ? { detail } : {}) })
   }
-  return { question, choices, other }
+  return { question, choices, other, ...carded }
 }
