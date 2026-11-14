@@ -1,4 +1,5 @@
 import { useEffect } from 'react'
+import type { MousseSettingsUpdate } from '../../shared/settings'
 import { applySideCardToggle, deriveSideCardState, nextSideCardToggleState } from '../components/sideCard/sideCardLogic'
 import { openThreadRenameDialog } from '../components/ThreadRenameDialog'
 import { openRailPage } from '../lib/railPages'
@@ -70,6 +71,8 @@ export function useAppCommands(): void {
     state.setMainAreaOpen(!state.mainAreaOpen)
   })
   useCommand('terminal.open', () => openSurface('terminal'))
+  // The built-in theme under the user theme stays on; only the user theme's colors and CSS go.
+  useCommand('theme.builtIn', () => void window.mousse.settings.set({ appearance: { userTheme: '' } } as MousseSettingsUpdate).catch(logFailure('Turning off the custom theme')))
   useCommand('settings.open', () => void openRailPage('settings'))
   useCommand('automations.open', () => void openRailPage('automations'))
   useCommand('usage.open', () => void openRailPage('usage'))

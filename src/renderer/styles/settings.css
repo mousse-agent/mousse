@@ -1106,6 +1106,90 @@ html[data-theme='high-contrast'] .settings-seg button.on {
   font-weight: 550;
 }
 
+/* "New": a card like the others, its thumbnail an empty frame with a plus. */
+button.theme-card {
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: inherit;
+}
+
+button.theme-card:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.theme-preview-new {
+  align-items: center;
+  justify-content: center;
+  border-style: dashed;
+  color: var(--text-secondary);
+}
+
+/* A user theme's editor: swatches in one row, the CSS full width under its title, then Save and the file actions. */
+.user-theme-swatches {
+  display: flex;
+  gap: var(--space-8);
+}
+
+.user-theme-swatch {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--ui-line-strong);
+  border-radius: 50%;
+  background: none;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.user-theme-swatch::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.user-theme-swatch::-webkit-color-swatch {
+  border: none;
+  border-radius: 50%;
+}
+
+.user-theme-css {
+  display: block;
+  width: 100%;
+  min-height: 160px;
+  margin-top: var(--space-8);
+  padding: var(--space-8);
+  resize: vertical;
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-control-radius);
+  background: transparent;
+  color: var(--text-primary);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--settings-fs-small);
+  line-height: 1.5;
+  tab-size: 2;
+}
+
+.user-theme-css:focus-visible {
+  outline: none;
+  background-image: var(--ui-focus-layer);
+}
+
+.user-theme-dropped {
+  color: var(--warning);
+}
+
+.user-theme-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  padding-block: var(--space-8);
+}
+
+.user-theme-actions-spacer {
+  flex: 1;
+}
+
 .theme-restart-link {
   font-size: inherit;
   color: var(--warning);

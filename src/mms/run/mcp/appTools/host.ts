@@ -16,6 +16,7 @@ import type { ApprovalRefusal } from '../../approvalRights'
 import type { RunEngine } from '../../RunEngine'
 import type { AnsweredBy } from '../../ThreadApprovals'
 import type { AgentActor, ModeCeiling } from '../../types'
+import type { AppearanceToolHost } from './appearance'
 import type { DelegationToolsHost } from './delegation'
 import type { LiveRunGate } from './registry'
 import type { ToolLedger } from './types'
@@ -329,6 +330,8 @@ export interface AppToolHost extends DelegationToolsHost {
   automations?(): import('./automations').AutomationToolHost | undefined
   /** The profiler's tools (Settings → Labs), read at every call; absent: they are never listed. */
   profiler?(): import('./profiler').ProfilerToolHost | undefined
+  /** The profile's appearance settings (`theme_read`, `theme_set`), read at every call; absent: the tools say themes are unavailable. */
+  appearance?(): AppearanceToolHost | undefined
   /** The request `requestId` in any state, or undefined when nobody asked it. */
   approvalRequest?(requestId: string): ApprovalRequestInfo | undefined
   /**

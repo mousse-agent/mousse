@@ -16,6 +16,8 @@ import { setThreadPathInTitleBar } from '../lib/threadPathSetting'
 import { setContextRingInComposer } from '../lib/contextRingSetting'
 import { setAnimationSpeed } from '../lib/motion'
 import { applyFrostedComposer } from '../lib/frostedComposer'
+import { applyThemeCss } from '../lib/themeCss'
+import { activeUserTheme, type UserTheme } from '../../shared/themes/userThemes'
 
 const FIXED_SURFACE_VARS = [
   ...new Set(Object.values(FIXED_SURFACE_THEMES).flatMap((vars) => Object.keys(vars ?? {})))
@@ -189,11 +191,50 @@ function applyLayoutTokens(theme: ThemeId): void {
   }
 }
 
+/** `#rgb` or `#rrggbb` as `r, g, b`; null for any other color. */
+function hexChannels(value: string): string | null {
+  const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(value.trim())?.[1]
+  if (!hex) return null
+  const full = hex.length === 3 ? hex.split('').map((c) => c + c).join('') : hex
+  return [0, 2, 4].map((at) => parseInt(full.slice(at, at + 2), 16)).join(', ')
+}
+
+/** The color tokens the user theme in use set inline, so the next theme starts without them. */
+let userTokenNames: string[] = []
+
+/**
+ * A user theme over its base: its tokens inline after the base's (so they win over theme CSS), its CSS as an adopted
+ * sheet after the app's, and `data-user-theme` on the root. No theme takes all of it off.
+ */
+function applyUserTheme(theme: UserTheme | undefined): void {
+  const root = document.documentElement
+  if (theme) {
+    const set = (name: string, value: string): void => {
+      root.style.setProperty(name, value)
+      userTokenNames.push(name)
+    }
+    for (const [name, value] of Object.entries(theme.colors)) {
+      set(name, value)
+      // Surfaces are also read as `r, g, b` channels (`rgba(var(--surface-base-rgb), 0.6)`): keep the pair in step.
+      const channels = hexChannels(value)
+      if (channels && !(`${name}-rgb` in theme.colors)) set(`${name}-rgb`, channels)
+    }
+    root.setAttribute('data-user-theme', theme.id)
+  } else {
+    root.removeAttribute('data-user-theme')
+  }
+  applyThemeCss(theme?.css ?? '')
+}
+
 function applyAppearance(appearance: AppearanceSettings): void {
   const normalized = normalizeAppearance(appearance)
+  const userTheme = activeUserTheme(normalized)
+  // The last user theme's tokens go first, so the base's own inline values below are not removed after they are set.
+  for (const name of userTokenNames) document.documentElement.style.removeProperty(name)
+  userTokenNames = []
   applyTheme(normalized.theme)
   clearFixedSurfaces()
-  applyAccent(normalized.accentColor)
+  applyAccent(userTheme?.accent || normalized.accentColor)
   applyFixedSurfaces(normalized.theme)
   applyLightSurfaces(normalized.theme)
   applyVsCodeTheme(normalized.theme)
@@ -203,6 +244,7 @@ function applyAppearance(appearance: AppearanceSettings): void {
   setAnimationSpeed(normalized.animationSpeed)
   applyFrostedComposer(normalized)
   applyChatWidth(normalized.chatWidth)
+  applyUserTheme(userTheme)
 }
 
 /** Display settings that live under appearance: math, reply pacing, the changed-files summary, the title-bar path and the context ring. */

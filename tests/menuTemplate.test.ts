@@ -35,7 +35,9 @@ describe('the application menu template', () => {
     ])
     expect(submenu(template, 'View').filter((item) => item.id).map((item) => [item.id, item.accelerator])).toEqual([
       ['sideCard.toggle', 'CommandOrControl+Shift+D'],
-      ['terminal.open', 'CommandOrControl+J']
+      ['terminal.open', 'CommandOrControl+J'],
+      // No key: a menu item that works even when a theme's CSS hides the window.
+      ['theme.builtIn', undefined]
     ])
     expect(submenu(template, 'Go').map((item) => [item.id, item.accelerator])).toEqual([
       ['thread.back', 'Alt+Left'],

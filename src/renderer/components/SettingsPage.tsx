@@ -461,7 +461,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
 
   if (!settings || !options) {
     return (
-      <div className="settings-page overlay-page" hidden={!settingsOpen} data-page-hue={activeSectionInfo.hue}>
+      <div data-mousse="settings" className="settings-page overlay-page" hidden={!settingsOpen} data-page-hue={activeSectionInfo.hue}>
         {settingsHeader}
         <div className="settings-body">
           {settingsNav}
@@ -483,7 +483,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   }
 
   return (
-    <div className="settings-page overlay-page" hidden={!settingsOpen} data-page-hue={activeSectionInfo.hue}>
+    <div data-mousse="settings" className="settings-page overlay-page" hidden={!settingsOpen} data-page-hue={activeSectionInfo.hue}>
       {settingsHeader}
 
       <div className="settings-body">

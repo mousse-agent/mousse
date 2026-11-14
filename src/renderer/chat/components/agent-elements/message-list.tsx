@@ -2053,6 +2053,7 @@ export const MessageList = memo(function MessageList({
       onTouchMove={cancelPromptScroll}
       onPointerDown={cancelPromptScroll}
       data-windowed={windowed || undefined}
+      data-mousse="transcript"
       className={cn(
         "an-message-list flex-1 min-h-0 overflow-y-auto overscroll-contain",
         className,
@@ -2621,7 +2622,7 @@ const TurnRow = memo(function TurnRow({
                 endYieldsToNotice={isLastTurn && Boolean(turn.userMsg)}
                 fold={hasFold ? { open: workOpen, onToggle: () => onToggleWork(turnKey) } : undefined}
               />
-              <div className="turn-answer flex flex-col gap-3">
+              <div data-mousse="assistant-message" className="turn-answer flex flex-col gap-3">
                 <TurnIdContext.Provider value={(turn.userMsg as { turnId?: string } | undefined)?.turnId}>
                   {rows.map((row, index) => (folded[index] && !workOpen ? null : row.node))}
                 </TurnIdContext.Provider>
@@ -2672,7 +2673,7 @@ const TurnRow = memo(function TurnRow({
             startedAt={liveStartedAt ?? readCreatedAt(turn.userMsg)}
             durationMs={null}
           />
-          <div className="turn-answer flex flex-col gap-3">
+          <div data-mousse="assistant-message" className="turn-answer flex flex-col gap-3">
             <TurnProgressRow messages={turn.assistantMsgs} standalone />
           </div>
         </div>

@@ -10,7 +10,7 @@ import {
 /** The registry commands the menu lists, by menu. Scoped and fixed commands are not menu items. */
 export const MENU_COMMANDS = {
   Thread: ['thread.new', 'thread.newPrivate', 'thread.next', 'thread.previous', 'threads.search', 'run.stop'],
-  View: ['sideCard.toggle', 'terminal.open'],
+  View: ['sideCard.toggle', 'terminal.open', 'theme.builtIn'],
   Go: ['thread.back', 'thread.forward', 'palette.open', 'composer.focus']
 } as const satisfies Record<string, readonly CommandId[]>
 

@@ -59,7 +59,7 @@ export function TitleBar() {
 
   return (
     <>
-    <header className="titlebar">
+    <header data-mousse="titlebar" className="titlebar">
       {/* Double-click maximize is handled natively by -webkit-app-region: drag.
           Do not also call maximize() here — that toggles and undoes the OS maximize. */}
       <div className="titlebar-drag">

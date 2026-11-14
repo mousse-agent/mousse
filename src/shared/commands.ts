@@ -28,6 +28,7 @@ export type CommandId =
   | 'sidebar.toggle'
   | 'mainArea.toggle'
   | 'terminal.open'
+  | 'theme.builtIn'
   | 'settings.open'
   | 'automations.open'
   | 'usage.open'
@@ -384,6 +385,18 @@ export const COMMANDS: readonly CommandDefinition[] = [
     scope: 'global',
     textInput: 'allow',
     terminal: 'deny',
+    guest: 'allow'
+  },
+  {
+    // Reachable from the View menu even when a theme's CSS hides the window, so a broken theme can always be undone.
+    id: 'theme.builtIn',
+    title: 'Turn off custom theme',
+    category: 'View',
+    searchTerms: ['theme', 'appearance', 'css', 'reset', 'default'],
+    defaultBinding: null,
+    scope: 'global',
+    textInput: 'allow',
+    terminal: 'allow',
     guest: 'allow'
   },
   {

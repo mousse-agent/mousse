@@ -1695,7 +1695,7 @@ export function OrchestratorChat() {
   }
 
   return (
-    <div className={`chat${emptyThread ? ' chat--empty' : ''}`} style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+    <div data-mousse="chat" className={`chat${emptyThread ? ' chat--empty' : ''}`} style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       {emptyThread && <AmbientGlow />}
       <SubagentParentBar />
       <ThreadComputerBar />

@@ -265,7 +265,7 @@ export class ToolRegistry {
     return this.list().filter((tool) => {
       if (tool.hidden) return false
       if (listing.readOnly && tool.access !== 'reads' && tool.access !== 'readsOthers' && !tool.readOnlySafe) return false
-      if (listing.modeCeiling === 'plan' && tool.access === 'startsThreads') return false
+      if (listing.modeCeiling === 'plan' && (tool.access === 'startsThreads' || tool.access === 'changesSettings')) return false
       // A bot's main thread lists the thread tools whatever its access level (a bot's is lineage): "use your threads", not
       // the profile's agent access, is what lets it use them. Only those its turn holds now are listed (none without the
       // permission, with the switch off, or in a turn that only reads), and every call is held to it again. A consult
@@ -463,7 +463,7 @@ export class ToolRegistry {
     // A tool that changes the workspace asks first unless the run's permission mode allows edits (a
     // definition run is held to its own grants above); a rejection ends the call before its handler
     // runs and writes no ledger row.
-    if (tool.access === 'editsWorkspace' && !turn.definition) {
+    if ((tool.access === 'editsWorkspace' || tool.access === 'changesSettings') && !turn.definition) {
       const refusal = await this.askBeforeEditing(tool, caller, request.signal, args)
       if (refusal) return refusal
     }
@@ -617,6 +617,8 @@ export class ToolRegistry {
     if (tool.access === 'writesThreads' || tool.access === 'editsWorkspace') callerThreadOnly(args, caller)
     if (tool.access === 'startsThreads' && caller.modeCeiling === 'plan')
       throw new McpToolError('mousse_ceiling_exceeded', `${tool.name} starts threads; a plan ceiling cannot.`)
+    if (tool.access === 'changesSettings' && caller.modeCeiling === 'plan')
+      throw new McpToolError('mousse_ceiling_exceeded', `${tool.name} changes settings; a plan ceiling cannot.`)
     return tool.access === 'readsOthers' || tool.access === 'managesOthers' ? this.checkOthers(tool, args, caller) : undefined
   }
 
@@ -708,7 +710,7 @@ export class ToolRegistry {
   }
 
   /**
-   * The outcome a rejected `editsWorkspace` call gets instead of running: null when the call may go
+   * The outcome a rejected `editsWorkspace` or `changesSettings` call gets instead of running: null when the call may go
    * ahead (the run's permission mode allows edits, or the user allowed it once). An owner that cannot
    * ask rejects: nothing runs unapproved.
    */
@@ -722,9 +724,9 @@ export class ToolRegistry {
         caller.threadId,
         [{
           id: 'permission',
-          prompt: tool.name === 'thread_merge_back'
+          prompt: tool.approvalPrompt ?? (tool.name === 'thread_merge_back'
             ? "Allow Mousse to hand this fork's work back to the thread it was forked from?"
-            : 'Allow this Mousse tool to change files in this workspace?',
+            : 'Allow this Mousse tool to change files in this workspace?'),
           options: [{ id: 'allow', label: 'Allow once' }, { id: 'reject', label: 'Reject' }]
         }],
         {

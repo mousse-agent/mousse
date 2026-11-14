@@ -33,6 +33,7 @@ const TOOL_GROUP_FOLDS: Array<{ id: MousseBuiltInToolGroupId; anchor?: string }>
   { id: 'actions', anchor: 'integrations-tools-actions' },
   { id: 'skills', anchor: 'integrations-tools-skills' },
   { id: 'browser', anchor: 'integrations-tools-browser' },
+  { id: 'appearance', anchor: 'integrations-tools-appearance' },
   { id: 'devgui' }
 ]
 

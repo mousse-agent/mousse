@@ -243,7 +243,7 @@ export interface MousseToolsSettings {
   knownTools?: string[]
 }
 
-export type MousseBuiltInToolGroupId = 'project' | 'interaction' | 'tasks' | 'actions' | 'skills' | 'web' | 'browser' | 'devgui'
+export type MousseBuiltInToolGroupId = 'project' | 'interaction' | 'tasks' | 'actions' | 'skills' | 'web' | 'browser' | 'devgui' | 'appearance'
 
 export interface MousseBuiltInToolGroupInfo {
   id: MousseBuiltInToolGroupId
@@ -259,7 +259,8 @@ export const MOUSSE_BUILTIN_TOOL_GROUPS: MousseBuiltInToolGroupInfo[] = [
   { id: 'skills', label: 'Skill helpers', description: 'List and load agent skills.' },
   { id: 'web', label: 'Web', description: 'Search and fetch public web content.' },
   { id: 'browser', label: 'Browser', description: 'Host-selected in-app tab or managed browser tools.' },
-  { id: 'devgui', label: 'Dev GUI', description: 'Development-only self-inspection of the Electron window.' }
+  { id: 'devgui', label: 'Dev GUI', description: 'Development-only self-inspection of the Electron window.' },
+  { id: 'appearance', label: 'Appearance', description: 'Read and change how Mousse looks.' }
 ]
 
 export interface MousseBuiltInToolInfo {
@@ -304,7 +305,9 @@ export const MOUSSE_BUILTIN_TOOLS: MousseBuiltInToolInfo[] = [
   { id: 'mousse_gui_reload', label: 'mousse_gui_reload', description: 'Dev only: reload the renderer (Ctrl+R).', group: 'devgui' },
   { id: 'mousse_gui_devtools', label: 'mousse_gui_devtools', description: 'Dev only: open/close/toggle DevTools.', group: 'devgui' },
   { id: 'mousse_gui_evaluate', label: 'mousse_gui_evaluate', description: 'Dev only: run JS in the renderer (DOM inspection).', group: 'devgui' },
-  { id: 'mousse_gui_status', label: 'mousse_gui_status', description: 'Dev only: check dev-window attach state (instant).', group: 'devgui' }
+  { id: 'mousse_gui_status', label: 'mousse_gui_status', description: 'Dev only: check dev-window attach state (instant).', group: 'devgui' },
+  { id: 'theme_read', label: 'theme_read', description: 'Read the themes and a short styling guide.', group: 'appearance' },
+  { id: 'theme_set', label: 'theme_set', description: 'Create or update a theme and switch to it, or switch themes.', group: 'appearance' }
 ]
 
 export const MOUSSE_BUILTIN_TOOL_IDS: string[] = MOUSSE_BUILTIN_TOOLS.map((tool) => tool.id)

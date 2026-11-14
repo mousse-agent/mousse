@@ -185,6 +185,9 @@ export class SettingsStore {
       current as unknown as Record<string, unknown>,
       partial as Partial<Record<string, unknown>>
     ) as unknown as MousseSettings
+    // Choosing a built-in theme without naming a user theme turns the user theme off (the CLI's `appearance.theme`).
+    if (partial.appearance && Object.hasOwn(partial.appearance, 'theme') && !Object.hasOwn(partial.appearance, 'userTheme'))
+      merged.appearance = { ...merged.appearance, userTheme: '' }
     // A default chosen by provider name alone must not keep the instance of an earlier choice.
     if (partial.provider?.llmProvider !== undefined && partial.provider.instanceId === undefined)
       merged.provider = { ...merged.provider, instanceId: undefined }

@@ -1,4 +1,5 @@
 import type { RunEngine } from '../../RunEngine'
+import { appearanceTools } from './appearance'
 import { appletTools } from './applets'
 import { botMemoryTools, type BotMemoryToolHost } from './botMemory'
 import { botTools, type BotAppToolDeps } from './bots'
@@ -26,6 +27,7 @@ export type { AgentActionDetails, AgentApprovalResult, AgentCreatedThread, Agent
 export { AGENT_MESSAGE_END, AGENT_MESSAGE_PREFIX, agentMessageText, BOT_MESSAGE_END, BOT_MESSAGE_PREFIX, botMessageText, isPersonMessage, personTurnRequest } from './agentMessage'
 export type { BotAppToolDeps } from './bots'
 export { AUTOMATION_TOOL_NAMES, type AutomationToolHost } from './automations'
+export { THEME_READ_TOOL, THEME_SET_TOOL, type AppearanceToolHost } from './appearance'
 export type { BotMemoryToolHost } from './botMemory'
 export { projectGitToolDefinitions, runProjectGitTool } from './projectGit'
 export type { ProfilerToolHost } from './profiler'
@@ -43,7 +45,7 @@ export {
 } from './delegation'
 
 /** The tool families in the order runtimes are sent them, after the delegation tools. */
-export const APP_TOOL_FAMILIES = ['skills', 'plans', 'tasks', 'quickActions', 'devGui', 'web', 'browser', 'applets', 'delegation', 'thread', 'schedules', 'bots', 'projectGit', 'profiler'] as const
+export const APP_TOOL_FAMILIES = ['skills', 'plans', 'tasks', 'quickActions', 'devGui', 'web', 'browser', 'applets', 'delegation', 'thread', 'schedules', 'bots', 'projectGit', 'profiler', 'appearance'] as const
 export type AppToolFamily = (typeof APP_TOOL_FAMILIES)[number]
 
 /**
@@ -124,5 +126,6 @@ export function createAppToolRegistry(input: {
   add('bots', [...botTools(input.bots), ...(input.botMemory ? botMemoryTools(input.botMemory) : [])])
   add('projectGit', projectGitTools(host))
   add('profiler', profilerTools(host))
+  add('appearance', appearanceTools(host))
   return { registry, families }
 }

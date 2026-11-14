@@ -98,6 +98,7 @@ import { QueueCommands, type QueueIntent } from '../run/QueueCommands'
 import type { PlannedQueueCommand, QueueEffects } from '../queue/queueJournal'
 import { modeFactsFor, prepareSkills, sessionInstructions, settingsToolEnabled, turnPreamble } from '../run/mcp/appTools/assemble'
 import type { AutomationToolHost } from '../run/mcp/appTools/automations'
+import type { AppearanceToolHost } from '../run/mcp/appTools/appearance'
 import { AUTOMATION_MANAGER_INSTRUCTIONS } from '../automations/automationManager'
 import { questionApproval } from '../run/mcp/appTools/quickActions'
 import { RelayCatalog, relayTurnContext } from '../run/mcp/relay/catalog'
@@ -1148,6 +1149,9 @@ export class OrchestratorService extends EventEmitter {
   /** The automation drafts the Automation manager and granted bots write (`automation_*`). */
   private automationTools?: AutomationToolHost
   setAutomationTools(tools: AutomationToolHost | undefined): void { this.automationTools = tools }
+  /** The profile's appearance settings, for the agents' `theme_read` and `theme_set`. */
+  private appearanceTools?: AppearanceToolHost
+  setAppearanceTools(tools: AppearanceToolHost | undefined): void { this.appearanceTools = tools }
   /**
    * The Automations inbox's hooks: each scheduled run's hidden first message (the report levels, the automation's
    * context and Tuning notes), and each request's usage on a thread, which the inbox adds to the run going there.
@@ -3910,7 +3914,8 @@ export class OrchestratorService extends EventEmitter {
       steerRun: (threadId, runId, text, options) => this.steerRunAsAgent(threadId, runId, text, options),
       approvalRequest: (requestId) => this.approvalRequestInfo(requestId),
       answerApproval: (threadId, requestId, answers, options) => this.answerApprovalAsAgent(threadId, requestId, answers, options),
-      automations: () => this.automationTools
+      automations: () => this.automationTools,
+      appearance: () => this.appearanceTools
     }
   }
 
