@@ -124,7 +124,14 @@ export function AppearanceSettings({
   }
   const atLimit = userThemes.length >= USER_THEME_LIMITS.themes
   const themeChosen = Boolean(userTheme) || options.themes.some((theme) => theme.id === appearance.theme)
-  const accentChosen = options.accentColors.some((color) => color.value === appearance.accentColor)
+  // A user theme with its own accent shows and changes that accent; otherwise the profile's.
+  const themeAccent = userTheme?.accent || ''
+  const shownAccent = themeAccent || appearance.accentColor
+  const pickAccent = (accentColor: string) => {
+    if (userTheme && themeAccent) saveUserTheme({ ...userTheme, accent: accentColor.toLowerCase() })
+    else void onUpdate({ appearance: { ...appearance, accentColor } })
+  }
+  const accentChosen = options.accentColors.some((color) => color.value.toLowerCase() === shownAccent.toLowerCase())
 
   return (
     <section id="appearance" className="settings-section">
@@ -202,7 +209,7 @@ export function AppearanceSettings({
           control={
             <div className="accent-grid" role="radiogroup" aria-label="Accent color" onKeyDown={onRadioGroupKeyDown}>
               {options.accentColors.map((color, index) => {
-                const selected = appearance.accentColor === color.value
+                const selected = shownAccent.toLowerCase() === color.value.toLowerCase()
                 return (
                   <button
                     key={color.id}
@@ -214,7 +221,7 @@ export function AppearanceSettings({
                     aria-label={color.label}
                     aria-checked={selected}
                     tabIndex={radioTabIndex(selected, index, accentChosen)}
-                    onClick={() => { if (!selected) void onUpdate({ appearance: { ...appearance, accentColor: color.value } }) }}
+                    onClick={() => { if (!selected) pickAccent(color.value) }}
                   />
                 )
               })}

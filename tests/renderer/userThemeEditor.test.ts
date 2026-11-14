@@ -100,6 +100,21 @@ describe('user themes in Settings → Appearance', () => {
     expect(checked()).toEqual(['Dark'])
   })
 
+  it('an accent swatch changes the user theme\'s own accent while it has one, and the profile\'s otherwise', () => {
+    const accents = () => [...host.querySelectorAll<HTMLElement>('[role="radiogroup"][aria-label="Accent color"] [role="radio"]')]
+    store.set({ appearance: { accentColor: '#123456', userThemes: [{ id: 'user-x', name: 'X', base: 'dark', accent: '#3ddc84', colors: {}, css: '' }], userTheme: 'user-x' } } as MousseSettingsUpdate)
+    show()
+    // The theme's green is not one of the swatches: none shows as chosen.
+    expect(accents().filter((swatch) => swatch.getAttribute('aria-checked') === 'true')).toEqual([])
+    act(() => accents().find((swatch) => swatch.getAttribute('aria-label') === 'Lilac')!.click())
+    expect(store.get().appearance.userThemes[0]!.accent).toBe('#a78bfa')
+    expect(store.get().appearance.accentColor).toBe('#123456')
+
+    store.set({ appearance: { accentColor: '#a78bfa', userThemes: [{ id: 'user-x', name: 'X', base: 'dark', accent: '', colors: {}, css: '' }], userTheme: 'user-x' } } as MousseSettingsUpdate)
+    show()
+    expect(accents().find((swatch) => swatch.getAttribute('aria-checked') === 'true')?.getAttribute('aria-label')).toBe('Lilac')
+  })
+
   it('Delete removes the theme and goes back to its base', () => {
     show()
     act(() => button('New').click())
