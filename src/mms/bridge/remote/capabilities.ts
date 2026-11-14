@@ -7,6 +7,10 @@ export const BRIDGE_REMOTE_METHODS = {
   'threads.get': { capability: 'read', mutating: false },
   'threads.search': { capability: 'read', mutating: false },
   'thread.snapshot': { capability: 'read', mutating: false },
+  // A page of older messages, and a page of a reply too large for one RPC reply. Neither is kept in the ledger:
+  // a transcript never goes to net.db, and a retry reads again.
+  'thread.messages': { capability: 'read', mutating: false, ephemeral: true },
+  'reply.page': { capability: 'read', mutating: false, ephemeral: true },
   'threads.create': { capability: 'write', mutating: true },
   // Which of this machine's projects is the same Git repository; answers an id, never a path.
   'projects.match': { capability: 'read', mutating: false },
@@ -34,7 +38,7 @@ export const BRIDGE_REMOTE_METHODS = {
   'queue.promoteToSteer': { capability: 'chat', mutating: true },
   // Disk usage totals by project, thread and kind: ids, names and byte counts only, never a path. Cached; a remote caller cannot force a rescan.
   'storage.usage': { capability: 'read', mutating: false }
-} as const satisfies Record<string, { capability: NodeCapability; mutating: boolean }>
+} as const satisfies Record<string, { capability: NodeCapability; mutating: boolean; ephemeral?: boolean }>
 export type BridgeRemoteMethod = keyof typeof BRIDGE_REMOTE_METHODS
 export type BridgeOrdinaryMethod = Exclude<
   BridgeRemoteMethod,
@@ -42,5 +46,7 @@ export type BridgeOrdinaryMethod = Exclude<
   | 'orchestrator.steer'
   | 'orchestrator.abort'
   | 'thread.snapshot'
+  | 'thread.messages'
+  | 'reply.page'
   | 'attachments.stage'
 >

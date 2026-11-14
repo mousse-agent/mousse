@@ -15,15 +15,16 @@ import { dispatchMethod } from '../../protocol/handlers'
 import { NetError, type NodeId } from '../../../shared/net'
 import { REMOTE_MESSAGE_IMAGES_MAX_CHARS } from './RemoteApi'
 import { normalizePermissionMode, type PermissionMode } from '../../../shared/permissionMode'
-import { newestMessages } from '../../protocol/transcriptPaging'
-import { PHONE_SNAPSHOT_MESSAGE_BYTES, ROUTED_SNAPSHOT_MESSAGE_BYTES } from '../../../shared/bridge/routed'
+import { messagesBefore, newestMessages, type EarlierMessages } from '../../protocol/transcriptPaging'
+import { isOpenActivityRow } from '../../run/restartNote'
+import { PHONE_MESSAGES_PAGE_BYTES, PHONE_SNAPSHOT_MESSAGE_BYTES, ROUTED_SNAPSHOT_MESSAGE_BYTES } from '../../../shared/bridge/routed'
 import type { RemoteBackendPort, RemoteChatExtras } from './RemoteApi'
 import { mmsJson } from './jsonOutput'
 import type { BridgeOrdinaryMethod } from './capabilities'
 import { COMPOSER_COMMANDS } from '../../../shared/composerCommands'
 import { withHiddenBots } from './botReach'
 import { resolveThreadProjectPath } from '../../data/resolveActiveProjectPath'
-import type { OrchestratorSendRequest, QueuedMessage, Thread } from '../../../shared/types'
+import type { ChatMessage, OrchestratorSendRequest, QueuedMessage, Thread } from '../../../shared/types'
 import { defaultIntegrationActor } from '../../../shared/integrations/actor'
 import { resolveEffectiveSkills } from '../../integrations/catalog/EffectiveIntegrationResolver'
 
@@ -473,6 +474,28 @@ export class MmsRemoteBackend implements RemoteBackendPort {
   }
   async warm(threadId: string): Promise<void> {
     if (this.remoteThread(threadId)) await this.services.threads.warmThread(threadId)
+  }
+
+  /**
+   * A phone's page of the messages before the cursor `before`, images included (within the budget a snapshot has),
+   * read the way a window reads one: an index range of thread.db in the read worker when the thread is not loaded.
+   * A page showing work still running loads the thread, which settles work a previous service left running.
+   */
+  async messagesBefore(threadId: string, before: string, limit: number): Promise<unknown> {
+    if (!this.remoteThread(threadId)) throw new NetError('stream_unknown', 'Thread not found.')
+    const s = this.services
+    const fromDatabase = !s.orchestrator.hasSession(threadId) && s.threads.usesThreadDb(threadId)
+    let page: { messages: ChatMessage[]; earlier?: EarlierMessages } | undefined = fromDatabase
+      ? await s.threads.readMessagePage(threadId, { before, limit, maxBytes: PHONE_MESSAGES_PAGE_BYTES, images: true })
+      : undefined
+    const settle = page !== undefined && page.messages.some(isOpenActivityRow)
+    if (!fromDatabase || settle) {
+      await s.threads.warmThread(threadId)
+      if (settle) s.orchestrator.getOrCreateSession(threadId)
+      page = messagesBefore(s.orchestrator.getMessages(threadId), before, limit, PHONE_MESSAGES_PAGE_BYTES)
+    }
+    if (!page) throw new NetError('snapshot_required', 'That message is no longer in this thread.')
+    return mmsJson({ messages: withImageBudget(page.messages), ...(page.earlier ? { earlier: page.earlier } : {}) })
   }
 
   /**

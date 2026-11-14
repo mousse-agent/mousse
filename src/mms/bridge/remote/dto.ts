@@ -20,6 +20,8 @@ const COMMIT_HASH = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/
 const UPLOAD_ID = /^[A-Za-z0-9_-]{8,64}$/
 const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/
 const BUILT_IN_MODES = new Set(['agent', 'plan', 'build'])
+/** Most messages a phone may ask for in one page of older messages. */
+export const PHONE_MESSAGES_PAGE_MAX = 500
 
 export function validateRemoteParams(
   method: BridgeRemoteMethod,
@@ -130,6 +132,18 @@ export function validateRemoteParams(
     case 'orchestrator.contextUsage':
       keys(['threadId'])
       text('threadId')
+      break
+    case 'thread.messages':
+      keys(['threadId', 'before'], ['limit'])
+      text('threadId')
+      // A cursor is a message id, with which copy of it when the id repeats (`pageCursor`).
+      text('before', 320)
+      if (Object.hasOwn(p, 'limit')) integer('limit', 1, PHONE_MESSAGES_PAGE_MAX)
+      break
+    case 'reply.page':
+      keys(['id', 'index'])
+      text('id', 64)
+      integer('index', 0, 4096)
       break
     case 'threads.search':
       keys(['query'], ['limit'])

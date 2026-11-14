@@ -50,6 +50,17 @@ export interface BridgeRemoteParams {
   'thread.snapshot': {
     threadId: string
   }
+  /** A phone's page of the messages before `before` (the `earlier.before` of a snapshot or of the previous page). */
+  'thread.messages': {
+    threadId: string
+    before: string
+    limit?: number
+  }
+  /** One page of a reply too large for one RPC reply (`{ paged }`), held for a minute for the caller that got it. */
+  'reply.page': {
+    id: string
+    index: number
+  }
   'threads.create': {
     name: string
     projectId?: string

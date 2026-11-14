@@ -7,6 +7,9 @@ import {
   type BridgeRemoteMethod
 } from './capabilities'
 import { REMOTE_ATTACHMENT_MAX_CHARS, validateRemoteParams } from './dto'
+import { canonicalJson } from '../../net/sync/codec'
+import { ReplyPages } from '../routed/pages'
+import type { RoutedPaged } from '../../../shared/bridge/routed'
 
 /** A chat mode a remote node may pick: built-in, or one skill. */
 export type RemoteChatMode = string | { type: 'skill'; skillId: string }
@@ -29,6 +32,8 @@ export interface RemoteBackendPort {
   snapshot(threadId: string, options?: { reader?: string }): unknown
   /** Reads a thread kept in thread.db off the event loop, so the snapshot that follows finds it in memory. */
   warm?(threadId: string): Promise<void>
+  /** A page of the messages before the cursor `before`, images included; `earlier` names what is older still. */
+  messagesBefore?(threadId: string, before: string, limit: number): Promise<unknown>
   /**
    * Must bind signal to this exact admitted run and return only after its lease/turn settles.
    * `onAccepted` is called once the message is stored on the thread, never for a turn that was
@@ -45,6 +50,11 @@ export interface RemoteBackendPort {
   /** Whether the thread has a turn running that is not a remote run (the desktop's, the CLI's, a channel's, a schedule's). */
   isActive?(threadId: string): boolean
 }
+
+/** Messages in a phone's page of older messages when it does not say. */
+const MESSAGES_PAGE_DEFAULT = 100
+/** A reply larger than this goes out in pages (`reply.page`): one RPC reply carries 63 KiB. */
+const REPLY_INLINE_BYTES = 60 * 1024
 
 /** How long a staged image waits for the send that uses it. */
 export const STAGED_UPLOAD_TTL_MS = 10 * 60 * 1000
@@ -95,10 +105,14 @@ export class RemoteApi {
   /** Images staged chunk by chunk, keyed by caller node and upload id; memory only. */
   private uploads = new Map<string, StagedUpload>()
   private sweepTimer: { cancel(): void } | undefined
+  /** Replies too large for one RPC reply, held in memory for a minute while their caller fetches the pages. */
+  private readonly pages: ReplyPages
   constructor(
     private readonly backend: RemoteBackendPort,
     private readonly clock: Clock
-  ) {}
+  ) {
+    this.pages = new ReplyPages(clock)
+  }
   register(dispatcher: RpcDispatcher): void {
     for (const method of this.methods()) dispatcher.register(method)
   }
@@ -124,6 +138,20 @@ export class RemoteApi {
     if (method === 'thread.snapshot') {
       await this.backend.warm?.(params.threadId as string)
       return this.backend.snapshot(params.threadId as string, { reader: context.caller.node })
+    }
+    if (method === 'thread.messages') {
+      if (!this.backend.messagesBefore) throw new NetError('forbidden')
+      const page = await this.backend.messagesBefore(
+        params.threadId as string,
+        params.before as string,
+        (params.limit as number | undefined) ?? MESSAGES_PAGE_DEFAULT
+      )
+      return this.fitted(page, context)
+    }
+    if (method === 'reply.page') {
+      const page = this.pages.page(context.caller.node, params.id as string, params.index as number)
+      if (!page) throw new NetError('snapshot_required', 'That reply is no longer held. Ask for it again.')
+      return page
     }
     if (method === 'attachments.stage') {
       try {
@@ -252,6 +280,20 @@ export class RemoteApi {
     // A thread remembers the device that created it, so every device can list it; and a thread a bot started names the
     // bot only to a device that reaches it, so every result knows who asks.
     return this.backend.execute(method, params, { node: context.caller.node })
+  }
+  /**
+   * A reply as it is, or, when it is larger than one RPC reply, where to fetch it in pages: `{ paged }`, with its size,
+   * page count and hash. The pages are held for this caller for a minute, in memory only.
+   */
+  private fitted(reply: unknown, context: RpcContext): unknown | { paged: RoutedPaged } {
+    let bytes: number
+    try {
+      bytes = canonicalJson(reply).byteLength
+    } catch (error) {
+      if (!(error instanceof NetError) || error.code !== 'too_large') throw error
+      bytes = Number.POSITIVE_INFINITY
+    }
+    return bytes <= REPLY_INLINE_BYTES ? reply : { paged: this.pages.hold(context.caller.node, reply) }
   }
   close(): void {
     for (const run of this.runs.values()) run.abort.abort()

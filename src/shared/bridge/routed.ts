@@ -729,6 +729,11 @@ export const ROUTED_MESSAGES_PAGE_BYTES = 8 * 1024 * 1024
  * assembles it, and keeps a saved copy of up to 8 MiB; `earlier` counts the older messages left on the computer.
  */
 export const PHONE_SNAPSHOT_MESSAGE_BYTES = 8 * 1024 * 1024
+/**
+ * Most a phone's page of older messages (`thread.messages`) carries, images included; the newest message before the
+ * cursor always comes, whatever its size. A page larger than one RPC reply comes as a paged reply (`reply.page`).
+ */
+export const PHONE_MESSAGES_PAGE_BYTES = 512 * 1024
 
 /**
  * A reply too large for one RPC reply. The owner keeps the whole `RoutedReply` for a minute; the
