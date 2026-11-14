@@ -94,6 +94,10 @@ export function chatRows(messages: readonly BotChatMessage[], botName: string, a
       rows.push({ kind: 'system', id: `${message.id}:answered`, at: message.at, text: tappedAnswerLine(message.text), of: message.id, ...(question ? { title: question } : {}) })
       continue
     }
+    if (message.systemLine) {
+      rows.push({ kind: 'system', id: message.id, at: message.at, text: message.text, of: message.id })
+      continue
+    }
     const signals = workSignalsOf(message)
     if (signals) {
       const target = message.replyTo?.author === 'owner' ? message.replyTo.id : lastOwner

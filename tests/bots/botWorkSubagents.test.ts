@@ -263,13 +263,24 @@ describe('a bot\'s work and its subagents', () => {
     expect(f.bots.service.get(botId).summary.work).toBeUndefined()
   })
 
-  it('commands switched off on this computer stop the work and its subagents at once', async () => {
+  it.each(['computer', 'bot'] as const)('commands switched off on this computer stop the work and its subagents at once', async (source) => {
+    if (source === 'bot') {
+      const initial = await work('permission')
+      initial.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'Run commands.' })
+      await finish(f, initial.payload, 'completed', { text: 'Asked.' })
+      for (const ask of f.store.openAsks(botId)) await f.bots.service.answer(botId, ask.id, 'allow')
+    }
     const job = await work('w1', { shell: true })
     await job.prepared.authority.subagents!.start({ title: 'Builder', brief: 'Run the build.' })
     const builder = await start(f, job.id, subagentNs(job.id)[0])
     expect(builder.prepared.authority.check(command)).toEqual({ ok: true })
-    limit = { ...limit, shell: false }
-    f.bots.computerLimitChanged()
+    if (source === 'computer') {
+      limit = { ...limit, shell: false }
+      f.bots.computerLimitChanged()
+    } else {
+      const id = f.bots.service.get(botId).permissions.find((item) => item.title === 'run commands')!.id
+      f.bots.service.setPermission(botId, id, false)
+    }
     expect(job.prepared.authority.time.signal.aborted).toBe(true)
     expect(builder.prepared.authority.time.signal.aborted).toBe(true)
     expect(builder.prepared.authority.check(command)).toMatchObject({ ok: false })

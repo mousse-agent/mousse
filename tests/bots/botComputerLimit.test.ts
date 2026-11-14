@@ -172,6 +172,165 @@ describe('a bot on this computer', () => {
     expect(f.bots.service.get(botId).permissions.map((item) => item.title).sort()).toEqual(['run commands', 'use files on this computer', 'use the browser'])
   }
 
+  it('a bot switch stops commands, continues without them, and restores without a card; old builds see no power', async () => {
+    await allowAll()
+    const id = f.bots.service.get(botId).permissions.find((item) => item.title === 'run commands')!.id
+    const work = await run('switch-work')
+    expect(work.prepared.authority.check(command('ls')).ok).toBe(true)
+    f.bots.service.setPermission(botId, id, false)
+    expect(work.prepared.authority.time.signal.aborted).toBe(true)
+    expect(chatOf(f, botId).at(-1)).toMatchObject({ systemLine: true, author: 'bot' })
+    expect(f.bots.service.get(botId).permissions.find((item) => item.id === id)?.enabled).toBe(false)
+    // This is the query an older build uses; neither its grant nor the published definition contains commands.
+    const old = f.store.get('SELECT manifest_json FROM bot_grants WHERE bot_id = ? AND revoked_at IS NULL ORDER BY grant_id DESC LIMIT 1', botId)!
+    expect(JSON.parse(old.manifest_json as string).tools).not.toContain('shell')
+    expect(f.bots.definitionOf(botId).permissions.tools).not.toContain('shell')
+    await finish(f, work.payload, 'interrupted', { outcome: { interruptedBy: 'bot_wall' } })
+    const next = await start(f, work.id, 2)
+    expect(next.prepared.policy.tools!.allow).not.toContain('bash')
+    expect(next.prepared.authority.check(command('ls')).ok).toBe(false)
+    expect(next.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'Run it' })).toMatch(/switched.*off/)
+    expect(next.prepared.instructions).not.toContain('You can ask for "run commands"')
+    await finish(f, next.payload, 'completed', { text: 'Skipped it.' })
+    const before = cards().length
+    f.bots.service.setPermission(botId, id, true)
+    const again = await run('switch-again')
+    expect(again.prepared.policy.tools!.allow).toContain('bash')
+    expect(again.prepared.authority.check(command('ls')).ok).toBe(true)
+    expect(cards()).toHaveLength(before)
+    await finish(f, again.payload, 'completed', { text: 'Ran it.' })
+    f.bots.service.setPermission(botId, id, false)
+    f.bots.service.revokePermission(botId, id)
+    expect(f.bots.service.get(botId).permissions.some((item) => item.id === id)).toBe(false)
+    expect(() => f.bots.service.setPermission(botId, id, true)).toThrow()
+  })
+
+  it('a bot browser switch refuses an already running call and ask without stopping unrelated work', async () => {
+    await allowAll()
+    const id = f.bots.service.get(botId).permissions.find((item) => item.title === 'use the browser')!.id
+    const work = await run('browser-switch')
+    expect(work.prepared.authority.check(app('browser_open')).ok).toBe(true)
+    const before = cards().length
+    f.bots.service.setPermission(botId, id, false)
+    expect(work.prepared.authority.time.signal.aborted).toBe(false)
+    expect(work.prepared.authority.check(app('browser_open')).ok).toBe(false)
+    expect(work.prepared.authority.escalate!({ permission: { tool: 'browser' }, reason: 'Open it' })).toMatch(/switched.*off/)
+    expect(cards()).toHaveLength(before)
+    expect(work.prepared.authority.check(command('ls')).ok).toBe(true)
+    f.bots.service.setPermission(botId, id, true)
+    expect(work.prepared.authority.check(app('browser_open')).ok).toBe(false)
+    f.bots.service.setPermission(botId, id, false)
+    f.bots.service.revokePermission(botId, id)
+    expect(work.prepared.authority.check(app('browser_open')).ok).toBe(false)
+    // Give it back through an explicit ask, then the same computer-limit combination still holds.
+    await finish(f, work.payload, 'completed', { text: 'Skipped the browser.' })
+    const asking = await run('browser-ask-again')
+    asking.prepared.authority.escalate!({ permission: { tool: 'browser' }, reason: 'Open it again.' })
+    await finish(f, asking.payload, 'completed', { text: 'Asked again.' })
+    for (const ask of f.store.openAsks(botId)) await f.bots.service.answer(botId, ask.id, 'allow')
+    limit = { ...limit, browser: false }
+    f.bots.service.setPermission(botId, id, true)
+    expect(f.bots.service.get(botId).permissions.find((item) => item.id === id)).toMatchObject({ enabled: true, mark: BOT_OFF_HERE_MARK })
+    const again = await run('browser-computer-off')
+    expect(again.prepared.authority.check(app('browser_open')).ok).toBe(false)
+    await finish(f, again.payload, 'completed', { text: 'Still off here.' })
+  })
+
+  it('a disabled permission survives reopening the service and refuses an old Allow card', async () => {
+    await allowAll()
+    const id = f.bots.service.get(botId).permissions.find((item) => item.title === 'run commands')!.id
+    f.bots.service.setPermission(botId, id, false)
+    f.bots.close()
+    f.bots = new BotEngine(f.host)
+    await f.bots.reconcileOnStartup()
+    expect(f.bots.service.get(botId).permissions.find((item) => item.id === id)?.enabled).toBe(false)
+    const work = await run('after-switch-restart')
+    expect(work.prepared.policy.tools!.allow).not.toContain('bash')
+    expect(work.prepared.authority.check(command('ls')).ok).toBe(false)
+    expect(work.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'Run' })).toMatch(/switched.*off/)
+    await finish(f, work.payload, 'completed', { text: 'No command.' })
+  })
+
+  it('an old ask and Allow this time cannot restore a disabled permission', async () => {
+    const work = await run('old-card')
+    work.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'Run it.' })
+    await finish(f, work.payload, 'completed', { text: 'Asked.' })
+    const ask = f.store.openAsks(botId)[0]!
+    // A card left by an older build, whose grant was widened without settling that card.
+    const definition = f.bots.definitionOf(botId)
+    const manifest = { ...definition.permissions, tools: [...definition.permissions.tools, 'shell' as const] }
+    const revision = f.host.definitions.publishRevision({ ...definition, permissions: manifest })
+    f.store.setPublished(botId, revision.revision!)
+    f.store.approve(botId, botManifestDigest(manifest), manifest)
+    const id = f.bots.service.get(botId).permissions.find((item) => item.title === 'run commands')!.id
+    f.bots.service.setPermission(botId, id, false)
+    await expect(f.bots.service.answer(botId, ask.id, 'allow')).rejects.toMatchObject({ code: 'permission_off' })
+    f.store.run("UPDATE bot_activations SET status = 'waiting_grant' WHERE id = ?", work.id)
+    await expect(f.bots.respond({ escalationId: ask.id, answer: 'allow_once' })).rejects.toMatchObject({ code: 'permission_off' })
+    f.store.run("UPDATE bot_activations SET status = 'done' WHERE id = ?", work.id)
+    const later = await f.bots.activate({ botId, input: 'Run', clientRequestId: 'old-overlay' })
+    f.store.putOverlay(later.id, 'old-overlay', { tool: 'shell' })
+    const turn = await start(f, later.id)
+    expect(turn.prepared.policy.tools!.allow).not.toContain('bash')
+    expect(turn.prepared.authority.check(command('ls')).ok).toBe(false)
+    await finish(f, turn.payload, 'completed', { text: 'Skipped.' })
+  })
+
+  it('a skill switched off is neither listed nor loaded from a running turn, even by its name', async () => {
+    const initial = await run('skill-grant')
+    initial.prepared.authority.escalate!({ permission: { skill: 'review' }, reason: 'Review' })
+    await finish(f, initial.payload, 'completed', { text: 'Asked.' })
+    for (const ask of f.store.openAsks(botId)) await f.bots.service.answer(botId, ask.id, 'allow')
+    const permission = f.bots.service.get(botId).permissions.find((item) => item.id.includes('review'))!
+    const work = await run('skill-work')
+    const fx = delegationFixture()
+    try {
+      const running = await fx.runningRun('bot-skill')
+      const descriptor = { id: 'review', installationId: 'inst-review', name: 'Review changes', description: 'Review', rootPath: '/skills/review', skillPath: '/skills/review/SKILL.md', scope: 'global' as const, source: 'mousse-profile' as const, managed: true }
+      const readSkill = vi.fn(async () => ({ skill: descriptor, content: 'Review instructions' }))
+      const { registry, turns, request } = appToolRegistry(fx.engine, fakeAppToolHost({ skills: () => ({ readSkill }) as never }).host)
+      turns.register(appTurn({ threadId: 'bot-skill', runId: running.runId, bot: work.prepared.authority, enabledSkills: [descriptor] }))
+      const call = (name: string, args = {}) => registry.call(name, args, request({ threadId: 'bot-skill', runId: running.runId }))
+      expect(await call('load_skill', { skill: 'Review changes' })).toMatchObject({ text: 'Review instructions' })
+      f.bots.service.setPermission(botId, permission.id, false)
+      expect(await call('list_skills')).toMatchObject({ text: '[]' })
+      expect(await call('load_skill', { skill: 'Review changes' })).toMatchObject({ isError: true })
+      expect(readSkill).toHaveBeenCalledTimes(1)
+      expect(f.store.openAsks(botId)).toHaveLength(0)
+    } finally { fx.dispose() }
+    await finish(f, work.payload, 'completed', { text: 'Skipped the skill.' })
+    f.bots.service.setPermission(botId, permission.id, true)
+    const again = await run('skill-restored')
+    expect(again.prepared.authority.check({ kind: 'skill', skill: 'review' }).ok).toBe(true)
+    expect(f.store.openAsks(botId)).toHaveLength(0)
+    await finish(f, again.payload, 'completed', { text: 'Reviewed.' })
+  })
+
+  it.each(['web_search', 'web_fetch'] as const)('the %s row restores both the native and app tool with no ask', async (tool) => {
+    const initial = await run('web-grant')
+    initial.prepared.authority.escalate!({ permission: { tool }, reason: 'Use the web.' })
+    await finish(f, initial.payload, 'completed', { text: 'Asked.' })
+    // Older grants can hold the same web tool in both lists. Keep both when restoring it.
+    const definition = f.bots.definitionOf(botId)
+    const manifest = { ...definition.permissions, tools: [...definition.permissions.tools, tool] }
+    const revision = f.host.definitions.publishRevision({ ...definition, permissions: manifest })
+    f.store.setPublished(botId, revision.revision!)
+    f.store.approve(botId, botManifestDigest(manifest), manifest)
+    const item = f.bots.service.get(botId).permissions.find((item) => item.id.includes(tool))!
+    f.bots.service.setPermission(botId, item.id, false)
+    const off = await run('web-off')
+    expect(off.prepared.authority.check(app(tool)).ok).toBe(false)
+    expect(off.prepared.authority.check({ kind: 'builtin', tool, nativeName: tool, args: {} }).ok).toBe(false)
+    await finish(f, off.payload, 'completed', { text: 'Skipped.' })
+    const before = cards().length
+    f.bots.service.setPermission(botId, item.id, true)
+    const on = await run('web-on')
+    expect(on.prepared.authority.check(app(tool)).ok).toBe(true)
+    expect(on.prepared.authority.check({ kind: 'builtin', tool, nativeName: tool, args: {} }).ok).toBe(true)
+    expect(cards()).toHaveLength(before)
+    await finish(f, on.payload, 'completed', { text: 'Read it.' })
+  })
+
   it('commands switched off: running work\'s next command is refused with no card; later turns have none; on again, they are back with no new ask', async () => {
     await allowAll()
     const before = cards().length
@@ -311,22 +470,23 @@ describe('a bot on this computer', () => {
     expect(cards()).toHaveLength(1)
   })
 
-  it('a consult is under the same ceiling', async () => {
+  it.each(['computer', 'bot'] as const)('a consult is under the same ceiling', async (source) => {
     await allowAll()
     const definitions = f.host.definitions
     const current = definitions.revision(botId, f.store.registry(botId)!.revision!)!
     const published = definitions.publishRevision({ ...current, context: [{ key: 'docs', title: 'Docs expert', agent: { instructions: 'You know the docs.' }, model: { mode: 'auto', depth: 'normal' } }] })
     f.store.setPublished(botId, published.revision!)
-    limit = { ...BOT_COMPUTER_SHUT }
+    if (source === 'computer') limit = { ...BOT_COMPUTER_SHUT }
+    else for (const permission of f.bots.service.get(botId).permissions) f.bots.service.setPermission(botId, permission.id, false)
     const turn = await chat('What does the doc say?', 'm1')
     const asked = turn.prepared.authority.consult!({ context: 'docs', question: 'What does it say?' })
     await flush()
     const consultN = f.store.dispatches(turn.activation.id).find((dispatch) => dispatch.kind === 'consult')!.n
     const consult = f.bots.prepare(payloadOf(f, turn.activation.id, consultN))
     if ('refused' in consult) throw new Error(consult.refused)
-    expect(consult.authority.check(command('ls'))).toMatchObject({ ok: false, wall: { kind: 'computer', off: 'shell' } })
-    expect(consult.authority.check(read(join(f.base, 'a.md')))).toMatchObject({ ok: false, wall: { kind: 'computer', off: 'files' } })
-    expect(consult.authority.escalate!({ permission: { tool: 'shell' }, reason: 'To run it.' })).toMatch(NOT_HERE)
+    expect(consult.authority.check(command('ls'))).toMatchObject({ ok: false })
+    expect(consult.authority.check(read(join(f.base, 'a.md')))).toMatchObject({ ok: false })
+    expect(consult.authority.escalate!({ permission: { tool: 'shell' }, reason: 'To run it.' })).toMatch(source === 'computer' ? NOT_HERE : /switched.*off/)
     expect(consult.instructions).not.toContain('You can ask for "run commands"')
     void asked.catch(() => undefined)
   })
@@ -347,20 +507,21 @@ describe('a bot on this computer', () => {
     expect(prepared.policy.tools!.allow!.filter((name) => name.startsWith('browser_'))).toEqual([])
     expect(prepared.authority.workspace?.computer).toBeUndefined()
     expect(prepared.browser).toBeUndefined()
-    expect(prepared.authority.check(command('ls'))).toMatchObject({ ok: false, wall: { kind: 'computer', off: 'shell' } })
+    expect(prepared.authority.check(command('ls')).ok).toBe(false)
     expect(prepared.authority.check(read(join(f.base, 'a.md')))).toMatchObject({ ok: false, wall: { kind: 'computer', off: 'files' } })
   }
 
-  it('a scheduled run and a reminder\'s work start under the same ceiling, with no card', async () => {
+  it.each(['computer', 'bot'] as const)('a scheduled run and a reminder\'s work start under the same ceiling, with no card', async (source) => {
     await allowAll()
     const before = cards().length
-    limit = { ...BOT_COMPUTER_SHUT }
+    if (source === 'computer') limit = { ...BOT_COMPUTER_SHUT }
+    else for (const permission of f.bots.service.get(botId).permissions) f.bots.service.setPermission(botId, permission.id, false)
     const scheduled = f.bots.runScheduledOccurrence({ botId, scheduleId: 'sched-1', prompt: 'Tidy the notes.', occurrenceAt: new Date(f.clock.now).toISOString() })
     if (scheduled.kind !== 'started') throw new Error(`not started: ${scheduled.kind}`)
     await flush()
     const run = await start(f, scheduled.activationId)
     heldToNothing(run.prepared)
-    expect(run.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'To tidy.' })).toMatch(NOT_HERE)
+    expect(run.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'To tidy.' })).toMatch(source === 'computer' ? NOT_HERE : /switched.*off/)
     await finish(f, run.payload, 'completed', { text: 'Tidied what I could.' })
 
     const turn = await chat('Remind me in a minute and check the weather then', 'm1')
@@ -375,14 +536,15 @@ describe('a bot on this computer', () => {
     expect(cards()).toHaveLength(before)
   })
 
-  it('a turn resumed after Mousse restarts is held to what this computer allows now', async () => {
+  it.each(['computer', 'bot'] as const)('a turn resumed after Mousse restarts is held to what this computer allows now', async (source) => {
     await allowAll()
     const work = await run('w1')
     expect(work.prepared.authority.check(command('ls'))).toEqual({ ok: true })
     // Mousse stops mid-turn; while it is down the owner switches everything off.
     f.runs.markTerminal(work.payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
     f.bots.close()
-    limit = { ...BOT_COMPUTER_SHUT }
+    if (source === 'computer') limit = { ...BOT_COMPUTER_SHUT }
+    else for (const item of f.bots.service.get(botId).permissions) f.bots.service.setPermission(botId, item.id, false)
     f.bots = new BotEngine(f.host)
     await f.bots.reconcileOnStartup()
     await flush(12)
@@ -470,17 +632,20 @@ describe('a bot on this computer', () => {
     f.store.setPublished(botId, published.revision!)
   }
 
-  it('commands switched off: a consult that holds them is stopped with its chat turn, which holds none, and the command it started holds nothing up', async () => {
+  it.each(['computer', 'bot'] as const)('commands switched off: a consult that holds them is stopped with its chat turn, which holds none, and the command it started holds nothing up', async (source) => {
     await allowAll()
+    const id = f.bots.service.get(botId).permissions.find((item) => item.title === 'run commands')!.id
+    const flip = (enabled: boolean) => {
+      if (source === 'computer') { limit = { ...limit, shell: enabled }; f.bots.computerLimitChanged() }
+      else f.bots.service.setPermission(botId, id, enabled)
+    }
     withDocsContext()
     const turn = await chat('What does the doc say?', 'm1')
     const stopped = () => turn.prepared.authority.time.signal.aborted
     expect(turn.prepared.policy.tools!.allow).not.toContain('bash')
     // Off and on again before any consult: the chat turn holds no commands, so nothing stops.
-    limit = { ...limit, shell: false }
-    f.bots.computerLimitChanged()
-    limit = { ...limit, shell: true }
-    f.bots.computerLimitChanged()
+    flip(false)
+    flip(true)
     expect(stopped()).toBe(false)
     // The consult starts now, with commands, and runs one.
     const asked = turn.prepared.authority.consult!({ context: 'docs', question: 'What does it say?' })
@@ -491,17 +656,16 @@ describe('a bot on this computer', () => {
     expect(consult.prepared.authority.check(command('ls'))).toEqual({ ok: true })
     f.runs.tools.start({ invocationId: 'inv-consult-bash', runId: consult.payload.runId, attemptId: f.runs.getRun(consult.payload.runId)!.activeAttemptId!, tool: 'bash', argsDigest: 'd', now: 'n', idempotent: false })
     // Off again: the consult, and its turn with it, stop at once.
-    limit = { ...limit, shell: false }
-    f.bots.computerLimitChanged()
+    flip(false)
     expect(consult.prepared.authority.time.signal.aborted).toBe(true)
     expect(stopped()).toBe(true)
-    expect(chatOf(f, botId).filter((message) => message.kind === 'notice').at(-1)).toMatchObject({ text: 'Stopped: "run commands" was switched off on this computer.' })
+    expect(chatOf(f, botId).filter((message) => message.kind === 'notice').at(-1)).toMatchObject(source === 'computer' ? { text: 'Stopped: "run commands" was switched off on this computer.' } : { systemLine: true })
     await finish(f, consult.payload, 'interrupted', { outcome: { interruptedBy: 'bot_wall' } })
     await finish(f, turn.payload, 'interrupted', { outcome: { interruptedBy: 'bot_wall' } })
     // The consult's cut-off command was the switch's: the chat goes on in a new turn, told it was interrupted.
     expect(f.store.activation(turn.activation.id)!.status).toBe('running')
     const next = await start(f, turn.activation.id, f.store.lastMainDispatch(turn.activation.id)!.n)
-    expect(next.prepared.prompt).toMatch(/switched off on this computer while you worked.*Interrupted tool calls .*bash \(consult run/s)
+    expect(next.prepared.prompt).toMatch(source === 'computer' ? /switched off on this computer while you worked.*Interrupted tool calls .*bash \(consult run/s : /owner switched off.*Interrupted tool calls .*bash \(consult run/s)
     await finish(f, next.payload, 'completed', { text: 'Here is what I know.' })
   })
 

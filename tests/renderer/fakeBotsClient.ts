@@ -131,6 +131,11 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
       fake.chats[botId] = [...rows.map((entry) => (entry.id === bubble.id ? next : entry)), reply]
       return { message: reply, question: next }
     })),
+    setPermission: vi.fn((botId, permissionId, enabled) => record('setPermission', [botId, permissionId, enabled], () => {
+      const next = { ...detail(botId), permissions: detail(botId).permissions.map((item) => item.id === permissionId ? { ...item, enabled } : item) }
+      fake.details[botId] = next
+      return next
+    })),
     revokePermission: vi.fn((botId, permissionId) => record('revokePermission', [botId, permissionId], () => {
       const next = { ...detail(botId), permissions: detail(botId).permissions.filter((item) => item.id !== permissionId) }
       fake.details[botId] = next

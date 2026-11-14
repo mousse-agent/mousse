@@ -5,6 +5,7 @@ import type { BotMemoryEntry } from '../../../shared/bots/personal/memory'
 import type { BotModelPick } from '../../../shared/bots/personal/definition'
 import type { BotShownRows, BotsPersonalV2Result } from '../../../shared/bots/personal/methods'
 import { botFaceState, botsClient, useBotsStore } from '../../stores/botsStore'
+import { Switch } from '../settings/SettingsRow'
 import { useAppStore } from '../../stores/appStore'
 import { errorText } from '../../services/personalBotsClient'
 import { BotComputerSelect, BotModelRows, BotModelSelect } from './BotRunsOn'
@@ -189,8 +190,9 @@ export function BotAboutPanel({ bot }: { bot: BotSummary }) {
     </div>
     <h3>CAN USE</h3>
     {detail?.permissions.length
-      ? detail.permissions.map((item) => <div className="bot-about-row" key={item.id}>
+      ? detail.permissions.map((item) => <div className="bot-about-row bot-about-permission" key={item.id}>
         <Shield size={14} aria-hidden /><span title={item.note || undefined}>{item.title.charAt(0).toUpperCase() + item.title.slice(1)}{(item.mark || item.gone) && <small className="bot-about-next" data-testid="bot-about-gone">{item.mark ?? 'Gone from Mousse'}</small>}</span>
+        {item.enabled !== undefined && <div title={item.note}><Switch label={item.title} checked={item.enabled} onChange={(enabled) => void store().setPermission(bot.id, item.id, enabled)} /></div>}
         <button type="button" aria-label={`Remove ${item.title}`} onClick={() => void store().revokePermission(bot.id, item.id)}>Remove</button>
       </div>)
       : <p className="bot-about-empty">{detail ? 'Nothing yet. It asks in the chat the first time it needs something.' : 'Loading…'}</p>}

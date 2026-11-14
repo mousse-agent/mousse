@@ -80,6 +80,8 @@ export interface BotChatMessage {
   at: string
   author: 'owner' | 'bot'
   kind: BotMessageKind
+  /** A quiet service line; older apps show its notice as a message. */
+  systemLine?: true
   /** Markdown. */
   text: string
   chips: BotChip[]
@@ -177,6 +179,10 @@ export interface BotWorkItem {
 
 /** One thing a bot may use, in About → Can use. `id` is the permission's fingerprint. */
 export interface BotPermissionItem {
+  /** Absent on older services, which cannot switch permissions. */
+  enabled?: boolean
+  /** Devices need Full access to allow this permission. */
+  needsFullAccess?: true
   id: string
   title: string
   note: string

@@ -40,6 +40,7 @@ export const REMOTE_BOT_METHODS = {
   'bots.update': { capability: 'write', mutating: true },
   'bots.reminders.cancel': { capability: 'write', mutating: true },
   'bots.schedules.remove': { capability: 'write', mutating: true },
+  'bots.permissions.set': { capability: 'write', mutating: true },
   'bots.permissions.revoke': { capability: 'write', mutating: true },
   'bots.memory.forget': { capability: 'write', mutating: true }
 } as const satisfies Record<string, { capability: NodeCapability; mutating: boolean }>
@@ -64,6 +65,7 @@ export interface RemoteBotsPort {
   update(botId: string, change: { name?: string; look?: BotLook }): { bot: BotSummary }
   reminderCancel(botId: string, reminderId: string): BotDetail
   removeSchedule(botId: string, scheduleId: string): BotDetail
+  setPermission(botId: string, id: string, enabled: boolean): BotDetail
   revokePermission(botId: string, id: string): BotDetail
   memoryList(botId: string, history?: boolean): BotMemoryListing
   memoryForget(botId: string, id: string): BotMemoryForgetResult
@@ -88,6 +90,7 @@ const KEYS: Record<RemoteBotMethod, { required: readonly string[]; optional?: re
   'bots.update': { required: ['botId'], optional: ['name', 'look'] },
   'bots.reminders.cancel': { required: ['botId', 'reminderId'] },
   'bots.schedules.remove': { required: ['botId', 'scheduleId'] },
+  'bots.permissions.set': { required: ['botId', 'permissionId', 'enabled'] },
   'bots.permissions.revoke': { required: ['botId', 'permissionId'] },
   'bots.memory.forget': { required: ['botId', 'id'] }
 }
@@ -234,6 +237,8 @@ export function validateRemoteBotParams(method: RemoteBotMethod, value: unknown)
     case 'bots.schedules.remove':
       ok(typeof p.scheduleId === 'string' && SCHEDULE_ID.test(p.scheduleId))
       break
+    case 'bots.permissions.set':
+      ok(typeof p.enabled === 'boolean')
     case 'bots.permissions.revoke':
       ok(text(p.permissionId, 4096))
       break
@@ -621,6 +626,17 @@ export function remoteBotMethods(options: {
       async (p, port) => remoteBotDetail(port.removeSchedule(botId(p), p.scheduleId as string)),
       first((p, port) => {
         if (!port.get(botId(p)).runs.some((item) => item.id === p.scheduleId)) gone('This schedule')
+      })
+    ),
+    method(
+      'bots.permissions.set',
+      async (p, port) => remoteBotDetail(port.setPermission(botId(p), p.permissionId as string, p.enabled as boolean)),
+      first((p, port, context) => {
+        const permission = port.get(botId(p)).permissions.find((item) => item.id === p.permissionId)
+        if (!permission) gone('This permission')
+        // Same rule as Allow on its card. The fingerprint is the permission's canonical request.
+        if (p.enabled && limitOf(context) !== 'full' && permission?.needsFullAccess === true)
+          throw new NetError('forbidden', 'Allow this on the computer.')
       })
     ),
     method(

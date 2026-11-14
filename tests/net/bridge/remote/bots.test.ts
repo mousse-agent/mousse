@@ -195,6 +195,35 @@ describe('bot methods on a real bot', () => {
     expect(JSON.stringify(detail)).not.toMatch(/instanceId|some\/model/)
   })
 
+  it('a device switches a permission off and restores it without another ask', async () => {
+    const work = await f.bots.activate({ botId, input: 'Run', clientRequestId: 'switch-grant' })
+    const turn = await start(f, work.id)
+    turn.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'Run' })
+    await finish(f, turn.payload, 'completed', { text: 'Asked.' })
+    for (const ask of f.store.openAsks(botId)) await f.bots.service.answer(botId, ask.id, 'allow')
+    const permissionId = f.bots.service.get(botId).permissions.find((item) => item.title === 'run commands')!.id
+    await call(methods, 'bots.permissions.set', { botId, permissionId, enabled: false })
+    expect(f.store.activeGrant(botId)!.manifest.tools).not.toContain('shell')
+    await call(methods, 'bots.permissions.set', { botId, permissionId, enabled: true })
+    expect(f.store.activeGrant(botId)!.manifest.tools).toContain('shell')
+    expect(f.store.openAsks(botId)).toHaveLength(0)
+  })
+
+  it('only a Full access device can switch Use your threads on; any reachable device can switch it off', async () => {
+    const work = await f.bots.activate({ botId, input: 'Threads', clientRequestId: 'threads-switch-grant' })
+    const turn = await start(f, work.id)
+    turn.prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'Threads' })
+    await finish(f, turn.payload, 'completed', { text: 'Asked.' })
+    for (const ask of f.store.openAsks(botId)) await f.bots.service.answer(botId, ask.id, 'allow')
+    const permissionId = f.bots.service.get(botId).permissions.find((item) => item.title === 'use your threads')!.id
+    await call(methods, 'bots.permissions.set', { botId, permissionId, enabled: false })
+    expect((await refused(() => call(methods, 'bots.permissions.set', { botId, permissionId, enabled: true }))).code).toBe('forbidden')
+    expect(f.bots.service.get(botId).permissions.find((item) => item.id === permissionId)?.enabled).toBe(false)
+    const full = remoteBotMethods({ bots: () => f.bots.service, deviceLimit: () => 'full' })
+    await call(full, 'bots.permissions.set', { botId, permissionId, enabled: true })
+    expect(f.bots.service.get(botId).permissions.find((item) => item.id === permissionId)?.enabled).toBe(true)
+  })
+
   it('pauses, resumes and creates a bot', async () => {
     expect(await call(methods, 'bots.personal.pause', { botId })).toMatchObject({ bot: { id: botId, state: 'paused' } })
     expect(await call(methods, 'bots.personal.resume', { botId })).toMatchObject({ bot: { id: botId } })
@@ -386,6 +415,7 @@ describe('"Share bots with other devices"', () => {
       'bots.update': { botId: BOT, name: 'Pip' },
       'bots.reminders.cancel': { botId: BOT, reminderId: 'rem_00000000-0000-0000-0000-000000000000' },
       'bots.schedules.remove': { botId: BOT, scheduleId: 'daily' },
+      'bots.permissions.set': { botId: BOT, permissionId: 'p1', enabled: false },
       'bots.permissions.revoke': { botId: BOT, permissionId: 'p1' },
       'bots.memory.forget': { botId: BOT, id: 'm1' }
     }

@@ -9,7 +9,7 @@
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { fakeBots, installPreload, message, summary, type FakeBots } from './fakeBotsClient'
+import { AT, fakeBots, installPreload, message, summary, type FakeBots } from './fakeBotsClient'
 import { setAnimationSpeed } from '../../src/renderer/lib/motion'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -75,6 +75,14 @@ async function open(bot = inbox) {
   await act(async () => root.render(createElement(ChatWorkspace)))
   await act(async () => useChatsStore.getState().openBot(bot.id))
 }
+
+it('shows a permission switch notice as one quiet line', async () => {
+  fake.chats[inbox.id] = [{ seq: 1, id: 'bm_permission_check', at: AT, author: 'bot', kind: 'notice', text: "I can't run commands for now.", chips: [], systemLine: true }]
+  await open()
+  const line = [...host.querySelectorAll('[role="note"]')].find((item) => item.textContent?.includes("I can't run commands"))
+  expect(line).toBeTruthy()
+  expect(host.querySelector('[data-message-id="bm_permission_check"] button')).toBeNull()
+})
 
 beforeEach(() => {
   fake = fakeBots()

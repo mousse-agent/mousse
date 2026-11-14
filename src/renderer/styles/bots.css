@@ -459,3 +459,6 @@ button.bot-reaction:hover, button.bot-reaction:focus-visible { background: color
   user-select: text;
   -webkit-user-select: text;
 }
+
+.bot-about-permission > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bot-about-permission .bot-about-next { display: inline; margin-left: 6px; }
