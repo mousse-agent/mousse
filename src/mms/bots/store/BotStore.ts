@@ -9,7 +9,7 @@ import type { BotAskMode, BotAskRequest, BotEscalationStatus, BotPermissionReque
 import type { BotChatApplet, BotChip, BotError, BotMessageKind } from '../../../shared/bots/personal/chat'
 import type { ProviderSelection } from '../../../shared/harness/types'
 import type { BotStuckRows } from '../../../shared/bots/personal/modelSlots'
-import type { BotQuestionAnswer, BotQuestionSpec, BotQuestionStatus } from '../../../shared/bots/personal/questions'
+import type { BotQuestionAnswer, BotQuestionFollow, BotQuestionLateAnswer, BotQuestionSpec, BotQuestionStatus } from '../../../shared/bots/personal/questions'
 import { BOT_MEMORY_SCHEMA_SQL } from '../memory/schema'
 import { narrowPermissionMode, type PermissionMode } from '../../../shared/permissionMode'
 
@@ -498,6 +498,19 @@ export interface BotQuestionRow {
   /** The bubble that carries it; null until the turn's reply is posted. */
   messageId: string | null
   createdAt: string
+  /** What happens if the owner doesn't answer (`follow_json`); null for a question an earlier build kept with none. */
+  follow: BotQuestionFollow | null
+  /** When the next nudge, or the default, is due; null when none is (it is not open, or it nudged all it may). */
+  nextAt: string | null
+  /** How many nudges were posted for it. */
+  nudges: number
+}
+
+/** A question's follow-up as kept, or null for none (`{}`, an earlier build's). */
+function followOf(value: unknown): BotQuestionFollow | null {
+  const follow = json<Partial<BotQuestionFollow>>(value)
+  if (!follow || (follow.kind !== 'nudge' && follow.kind !== 'default') || typeof follow.afterMs !== 'number') return null
+  return { kind: follow.kind, afterMs: follow.afterMs, ...(typeof follow.default === 'string' ? { default: follow.default } : {}) }
 }
 
 function questionOf(row: Row): BotQuestionRow {
@@ -514,7 +527,10 @@ function questionOf(row: Row): BotQuestionRow {
     answeredAt: str(row.answered_at),
     readAt: str(row.read_at),
     messageId: str(row.message_id),
-    createdAt: row.created_at as string
+    createdAt: row.created_at as string,
+    follow: followOf(row.follow_json),
+    nextAt: str(row.next_at),
+    nudges: num(row.nudges) ?? 0
   }
 }
 
@@ -1590,11 +1606,11 @@ export class BotStore {
 
   // -- Questions (bot_questions, v8): a bot's questions to its owner, with answers to tap --------------------------
 
-  insertQuestion(row: Pick<BotQuestionRow, 'id' | 'botId' | 'activationId' | 'dispatchN' | 'lane' | 'spec' | 'createdAt'>): void {
-    // No follow-up in this build: `follow_json` is empty, `next_at` stays null.
+  /** A new open question; its follow-up is timed once its bubble is shown (`setQuestionMessage`). */
+  insertQuestion(row: Pick<BotQuestionRow, 'id' | 'botId' | 'activationId' | 'dispatchN' | 'lane' | 'spec' | 'createdAt'> & { follow?: BotQuestionFollow }): void {
     this.run(
-      "INSERT INTO bot_questions(id, bot_id, activation_id, dispatch_n, lane, spec_json, follow_json, status, created_at) VALUES(?, ?, ?, ?, ?, ?, '{}', 'open', ?)",
-      row.id, row.botId, row.activationId, row.dispatchN, row.lane, JSON.stringify(row.spec), row.createdAt
+      "INSERT INTO bot_questions(id, bot_id, activation_id, dispatch_n, lane, spec_json, follow_json, status, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, 'open', ?)",
+      row.id, row.botId, row.activationId, row.dispatchN, row.lane, JSON.stringify(row.spec), JSON.stringify(row.follow ?? {}), row.createdAt
     )
   }
 
@@ -1627,9 +1643,58 @@ export class BotStore {
     return this.all("SELECT * FROM bot_questions WHERE bot_id = ? AND lane = 'chat' AND status = 'open' AND message_id IS NOT NULL ORDER BY created_at, rowid", botId).map(questionOf)
   }
 
-  /** The bubble carrying a question is posted. */
-  setQuestionMessage(id: string, messageId: string): void {
-    this.run('UPDATE bot_questions SET message_id = ? WHERE id = ? AND message_id IS NULL', messageId, id)
+  /** The bubble carrying a question is posted; `nextAt`: when its first follow-up is due (null: none). */
+  setQuestionMessage(id: string, messageId: string, nextAt: string | null = null): void {
+    this.run("UPDATE bot_questions SET message_id = ?, next_at = CASE WHEN status = 'open' THEN ? END WHERE id = ? AND message_id IS NULL", messageId, nextAt, id)
+  }
+
+  /** Every bot's open questions whose next follow-up is due at or before `at`, soonest first. */
+  dueQuestions(at: string): BotQuestionRow[] {
+    return this.all("SELECT * FROM bot_questions WHERE status = 'open' AND next_at IS NOT NULL AND next_at <= ? AND message_id IS NOT NULL ORDER BY next_at, rowid", at).map(questionOf)
+  }
+
+  /** The open question of any bot whose follow-up is due soonest. */
+  nextQuestionDue(): BotQuestionRow | undefined {
+    const row = this.get("SELECT * FROM bot_questions WHERE status = 'open' AND next_at IS NOT NULL AND message_id IS NOT NULL ORDER BY next_at, rowid LIMIT 1")
+    return row ? questionOf(row) : undefined
+  }
+
+  /** An open question's follow-up moves to `nextAt` (quiet hours, the nudge budget, an owner's turn running); false when it is not open. */
+  setQuestionNext(id: string, nextAt: string | null): boolean {
+    return this.run("UPDATE bot_questions SET next_at = ? WHERE id = ? AND status = 'open'", nextAt, id) > 0
+  }
+
+  /** A nudge for an open question was posted, its `nudges`th (compare-and-set on the count before); `nextAt` the next one's time, or null. */
+  recordNudge(id: string, nudges: number, nextAt: string | null): boolean {
+    return this.run("UPDATE bot_questions SET nudges = ?, next_at = ? WHERE id = ? AND status = 'open' AND nudges = ?", nudges, nextAt, id, nudges - 1) > 0
+  }
+
+  /** When a bot's nudges were posted (its rows that carry a question and are not its bubble), since `since`. */
+  nudgeTimes(botId: string, since: string): string[] {
+    return this.all(`SELECT m.at FROM bot_messages m JOIN bot_questions q ON q.id = m.question_id
+      WHERE m.bot_id = ? AND m.author = 'bot' AND m.id <> q.message_id AND m.at > ? ORDER BY m.at`, botId, since).map((row) => row.at as string)
+  }
+
+  /** Compare-and-set of an open question to `defaulted`: nobody answered in time, and the bot goes with its own default. */
+  defaultQuestion(id: string, answer: BotQuestionAnswer): boolean {
+    return this.run("UPDATE bot_questions SET status = 'defaulted', answer_json = ?, answered_at = ?, next_at = NULL WHERE id = ? AND status = 'open'", JSON.stringify(answer), this.now(), id) > 0
+  }
+
+  /**
+   * The owner answered a question the bot had gone ahead on with its default (`late`, once): kept with the default, and
+   * their message as the one that answered it, so Forget reaches it. False when it is not defaulted or already has one.
+   */
+  lateAnswer(id: string, late: BotQuestionLateAnswer, messageId: string): boolean {
+    return this.run("UPDATE bot_questions SET answer_json = json_set(answer_json, '$.late', json(?)), answer_message = ? WHERE id = ? AND status = 'defaulted' AND json_extract(answer_json, '$.late') IS NULL",
+      JSON.stringify(late), messageId, id) > 0
+  }
+
+  /**
+   * The chat's turn for a question's default was queued with `line` as its input: kept with the answer, as work's
+   * answer line is (`markAnswerSent`), so forgetting the bubble finds that copy in that turn.
+   */
+  markDefaultSent(questionId: string, activationId: string, line: string): void {
+    this.run("UPDATE bot_questions SET answer_json = json_set(answer_json, '$.sent', json_object('activationId', ?, 'line', ?)) WHERE id = ? AND status = 'defaulted'", activationId, line, questionId)
   }
 
   /** Every message about a question: its bubble, and the owner's message that answered it. */
@@ -1643,7 +1708,7 @@ export class BotStore {
    */
   answerQuestion(id: string, answer: BotQuestionAnswer, messageId: string, from: readonly BotQuestionStatus[] = ['open', 'moved_on']): boolean {
     const marks = from.map(() => '?').join(', ')
-    return this.run(`UPDATE bot_questions SET status = 'answered', answer_json = ?, answer_message = ?, answered_at = ? WHERE id = ? AND status IN (${marks})`,
+    return this.run(`UPDATE bot_questions SET status = 'answered', answer_json = ?, answer_message = ?, answered_at = ?, next_at = NULL WHERE id = ? AND status IN (${marks})`,
       JSON.stringify(answer), messageId, this.now(), id, ...from) > 0
   }
 
@@ -1651,17 +1716,17 @@ export class BotStore {
   moveOnQuestions(botId: string, byMessage: string, except?: string): BotQuestionRow[] {
     const open = this.openChatQuestions(botId).filter((question) => question.id !== except)
     const at = this.now()
-    return open.filter((question) => this.run("UPDATE bot_questions SET status = 'moved_on', answer_message = ?, answered_at = ? WHERE id = ? AND status = 'open'", byMessage, at, question.id) > 0)
+    return open.filter((question) => this.run("UPDATE bot_questions SET status = 'moved_on', answer_message = ?, answered_at = ?, next_at = NULL WHERE id = ? AND status = 'open'", byMessage, at, question.id) > 0)
   }
 
   /** An activation's questions it never posted are withdrawn (it ended without a reply, or stopped at a wall). */
   withdrawUnpostedQuestions(activationId: string): number {
-    return this.run("UPDATE bot_questions SET status = 'withdrawn', answered_at = ? WHERE activation_id = ? AND status = 'open' AND message_id IS NULL", this.now(), activationId)
+    return this.run("UPDATE bot_questions SET status = 'withdrawn', answered_at = ?, next_at = NULL WHERE activation_id = ? AND status = 'open' AND message_id IS NULL", this.now(), activationId)
   }
 
   /** Every open or moved-on question of a bot is withdrawn (it was deleted). */
   withdrawQuestions(botId: string): number {
-    return this.run("UPDATE bot_questions SET status = 'withdrawn', answered_at = ? WHERE bot_id = ? AND status IN ('open', 'moved_on')", this.now(), botId)
+    return this.run("UPDATE bot_questions SET status = 'withdrawn', answered_at = ?, next_at = NULL WHERE bot_id = ? AND status IN ('open', 'moved_on')", this.now(), botId)
   }
 
   /**
@@ -1680,21 +1745,22 @@ export class BotStore {
 
   /** Open questions no reply will ever carry: never posted, of an activation that ended (Mousse stopped in between). */
   withdrawStrandedQuestions(): number {
-    return this.run(`UPDATE bot_questions SET status = 'withdrawn', answered_at = ? WHERE status = 'open' AND message_id IS NULL
+    return this.run(`UPDATE bot_questions SET status = 'withdrawn', answered_at = ?, next_at = NULL WHERE status = 'open' AND message_id IS NULL
       AND activation_id IN (SELECT id FROM bot_activations WHERE status IN ('done', 'failed', 'cancelled'))`, this.now())
   }
 
   /** Work ended: the question it still waited on is withdrawn (its bubble then says it is no longer needed). */
   withdrawWorkQuestions(activationId: string): number {
-    return this.run("UPDATE bot_questions SET status = 'withdrawn', answered_at = ? WHERE activation_id = ? AND lane = 'run' AND status = 'open'", this.now(), activationId)
+    return this.run("UPDATE bot_questions SET status = 'withdrawn', answered_at = ?, next_at = NULL WHERE activation_id = ? AND lane = 'run' AND status = 'open'", this.now(), activationId)
   }
 
   /**
-   * The question work asked and has not carried on from yet: open, or answered with the answer not yet sent to it
-   * (`read_at`). At most one (`MAX_OPEN_QUESTIONS_PER_WORK`); the newest when an older build left more.
+   * The question work asked and has not carried on from yet: open, or answered (by the owner, or with its default) with
+   * the answer not yet sent to it (`read_at`). At most one (`MAX_OPEN_QUESTIONS_PER_WORK`); the newest when an older build
+   * left more.
    */
   workQuestion(activationId: string): BotQuestionRow | undefined {
-    const row = this.get("SELECT * FROM bot_questions WHERE activation_id = ? AND lane = 'run' AND read_at IS NULL AND status IN ('open', 'answered') ORDER BY created_at DESC, rowid DESC LIMIT 1", activationId)
+    const row = this.get("SELECT * FROM bot_questions WHERE activation_id = ? AND lane = 'run' AND read_at IS NULL AND status IN ('open', 'answered', 'defaulted') ORDER BY created_at DESC, rowid DESC LIMIT 1", activationId)
     return row ? questionOf(row) : undefined
   }
 

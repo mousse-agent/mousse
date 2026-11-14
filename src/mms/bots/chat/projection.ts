@@ -121,20 +121,29 @@ function appletsOf(row: Pick<BotMessageRow, 'attachments'>): BotChatApplet[] {
 const ANSWER_SHOWN_CHARS = 120
 
 /**
- * A question as its bubble shows it: its answers, where it stands, and the answer once there is one; for one from work,
- * whether the work waits on it (`waits`) and whether the chat passed the answer on (`by: 'chat'`).
+ * A question as its bubble (or a nudge of it) shows it: its answers, where it stands, and the answer once there is one;
+ * for one from work, whether the work waits on it (`waits`) and whether the chat passed the answer on (`by: 'chat'`). An
+ * open one with a default says what it goes with, and when; a defaulted one says what the bot went with, and what the
+ * owner answered after.
  */
-function questionView(question: BotQuestionRow, waits: boolean): BotChatQuestion {
-  const answer = question.status === 'answered' && !question.answer?.redacted ? question.answer : undefined
-  const words = answer?.choice ?? (answer?.text ? oneLine(answer.text, ANSWER_SHOWN_CHARS) : undefined)
+function questionView(question: BotQuestionRow, waits: boolean, nudge: boolean): BotChatQuestion {
+  const answered = (question.status === 'answered' || question.status === 'defaulted') && !question.answer?.redacted ? question.answer : undefined
+  const words = answered?.choice ?? (answered?.text ? oneLine(answered.text, ANSWER_SHOWN_CHARS) : undefined)
+  const late = question.status === 'defaulted' ? question.answer?.late : undefined
+  const lateWords = late?.choice ?? (late?.text ? oneLine(late.text, ANSWER_SHOWN_CHARS) : undefined)
+  const goesWith = question.status === 'open' && question.follow?.kind === 'default' && question.follow.default && question.nextAt ? question.follow : undefined
   return {
     questionId: question.id,
     choices: question.spec.choices,
     other: question.spec.other,
     status: question.status,
-    ...(words ? { answer: words, answeredWith: answer?.choice !== undefined ? 'choice' as const : 'text' as const } : {}),
+    ...(words ? { answer: words, answeredWith: answered?.choice !== undefined ? 'choice' as const : 'text' as const } : {}),
     ...(question.status === 'answered' && question.answer?.by === 'chat' ? { by: 'chat' as const } : {}),
-    ...(waits ? { waits: true as const } : {})
+    ...(question.status === 'defaulted' ? { by: 'default' as const } : {}),
+    ...(waits ? { waits: true as const } : {}),
+    ...(goesWith ? { default: goesWith.default!, defaultAt: question.nextAt! } : {}),
+    ...(lateWords ? { late: lateWords } : {}),
+    ...(nudge ? { nudge: true as const } : {})
   }
 }
 
@@ -156,6 +165,8 @@ export class BotChatProjection {
     mcpWhere?(serverId: string): BotMcpWhere | undefined
     /** What this computer lets bots do (Settings → What bots may do here), for About → Can use. Absent: everything. */
     computerLimit?(): BotComputerLimit
+    /** When a question's first follow-up is due, its bubble shown at `shownAt` (`BotEngine.firstFollowUpAt`); null for none. */
+    followUpAt?(question: BotQuestionRow, shownAt: string): string | null
   }) {}
 
   private get store(): BotStore {
@@ -197,8 +208,10 @@ export class BotChatProjection {
       if (existing) return { row: existing, inserted: false }
       const at = this.store.now()
       const shown = this.shown(input)
-      // A question's bubble is journaled with its answers as text, so the chat pack, search and Forget see them.
-      const asked = input.questionId && input.author === 'bot' ? this.store.question(input.questionId) : undefined
+      // A question's bubble is journaled with its answers as text, so the chat pack, search and Forget see them. A nudge
+      // of it (a later row carrying it) is journaled as its own fixed line: a copy of the answers would outlive a forget.
+      const carried = input.questionId && input.author === 'bot' ? this.store.question(input.questionId) : undefined
+      const asked = carried && carried.messageId === null ? carried : undefined
       if (asked) shown.journal = `${shown.journal}\n\n${plainChoices(asked.spec)}`
       this.store.insertMessage({
         id,
@@ -217,7 +230,8 @@ export class BotChatProjection {
         ...(input.questionId ? { questionId: input.questionId } : {})
       })
       if (input.askId) this.store.setEscalationMessage(input.askId, id)
-      if (asked) this.store.setQuestionMessage(asked.id, id)
+      // Its follow-up counts from when the owner sees it.
+      if (asked) this.store.setQuestionMessage(asked.id, id, this.options.followUpAt?.(asked, at) ?? null)
       // The journal row joins this transaction: a chat row is never kept without it (bot-context.md §4).
       this.options.journal?.appendInTx(this.store.db, {
         botId: input.botId,
@@ -267,8 +281,9 @@ export class BotChatProjection {
   toMessage(row: BotMessageRow): BotChatMessage {
     const escalation = row.askId ? this.store.escalation(row.askId) : undefined
     const question = row.questionId ? this.store.question(row.questionId) : undefined
-    // A question's bubble: its words, then its answers as plain text for an app that doesn't draw them (`plainFrom`).
-    const asks = question && row.author === 'bot' && question.messageId === row.id ? question : undefined
+    // A question's bubble, or a nudge of it (any other bot row that carries it): its words, then its answers as plain text
+    // for an app that doesn't draw them (`plainFrom`).
+    const asks = question && row.author === 'bot' && question.messageId ? question : undefined
     const plain = asks && asks.spec.choices.length ? plainChoices(asks.spec) : ''
     return {
       seq: row.seq,
@@ -280,9 +295,12 @@ export class BotChatProjection {
       ...(row.kind === 'notice' && row.id.startsWith('bm_permission_') ? { systemLine: true as const } : {}),
       text: plain ? `${row.text}\n\n${plain}` : row.text,
       ...(plain ? { plainFrom: row.text.length } : {}),
-      ...(asks ? { question: questionView(asks, asks.lane === 'run' && asks.status === 'open' && this.store.activation(asks.activationId)?.endReason === 'question') } : {}),
+      ...(asks ? { question: questionView(asks, asks.lane === 'run' && asks.status === 'open' && this.store.activation(asks.activationId)?.endReason === 'question', asks.messageId !== row.id) } : {}),
       ...(question && row.author === 'owner' && question.answerMessage === row.id && question.status === 'answered'
         ? { answers: { questionId: question.id, tapped: question.answer?.choice !== undefined } } : {}),
+      // The owner's answer after the bot went with its default.
+      ...(question && row.author === 'owner' && question.answerMessage === row.id && question.status === 'defaulted' && question.answer?.late
+        ? { answers: { questionId: question.id, tapped: question.answer.late.tapped === true } } : {}),
       chips: row.chips,
       ...(escalation ? { ask: this.card(escalation) } : {}),
       ...(row.error ? { error: row.error } : {}),

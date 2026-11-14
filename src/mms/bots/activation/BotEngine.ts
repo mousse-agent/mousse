@@ -68,7 +68,8 @@ import { addedPermissions, intersectManifest, manifestSubset, narrowManifest } f
 import { BOT_COMPUTER_OPEN, BOT_COMPUTER_SHUT, limitCutLead, notOnThisComputerText, stoppedForLimitText, switchedOff, whatToAskText, withinComputerLimit, type BotComputerLimit, type BotComputerSwitch } from '../../../shared/bots/personal/computerLimit'
 import { allPinned, copyPick, imagePickOf, isPinned, limitFamilyOf, limitOnPick, pickProblemText, plainLabel, rowName, samePick, samePickTarget, sameStoredPick, slotsOf, slotsWith, startDepthOf, stuckRowsOf, turnModelOf, UNPICKED_SLOTS, withImagePick, withSlots, type BotPickMiss, type BotStuckEntry, type BotTurnModel } from '../../../shared/bots/personal/modelSlots'
 import type { BotModelOption } from '../../../shared/bots/personal/methods'
-import { MAX_NEW_QUESTIONS_PER_DAY, MAX_OPEN_QUESTIONS_PER_BOT, MAX_OPEN_QUESTIONS_PER_WORK, MAX_QUESTIONS_PER_CHAT_TURN, plainChoices, QUESTION_AFTER_ASK_TEXT, QUESTION_ASKED_TEXT, QUESTION_END_TURN_TEXT, QUESTION_ANSWER_FORGOTTEN_TEXT, QUESTION_NOT_OFFERED_TEXT, QUESTION_WORK_ASKED_TEXT, QUESTION_WORK_WAITING_TEXT, questionGoneText, QUESTIONS_ENOUGH_TEXT, waitingQuestionLine, workAnswerLine, type BotQuestionAnswer, type BotQuestionSpec } from '../../../shared/bots/personal/questions'
+import { defaultChatInput, defaultWorkLine, lateWorkNote, MAX_NEW_QUESTIONS_PER_DAY, MAX_NUDGES_PER_QUESTION, MAX_OPEN_QUESTIONS_PER_BOT, MAX_OPEN_QUESTIONS_PER_WORK, MAX_QUESTIONS_PER_CHAT_TURN, NUDGE_AGAIN_MS, NUDGE_TEXT, plainChoices, QUESTION_AFTER_ASK_TEXT, QUESTION_ASKED_TEXT, QUESTION_END_TURN_TEXT, QUESTION_ANSWER_FORGOTTEN_TEXT, QUESTION_NOT_OFFERED_TEXT, QUESTION_WORK_ASKED_TEXT, QUESTION_WORK_WAITING_TEXT, questionGoneText, QUESTIONS_ENOUGH_TEXT, waitingQuestionLine, workAnswerLine, type BotQuestionAnswer, type BotQuestionFollow, type BotQuestionSpec } from '../../../shared/bots/personal/questions'
+import { afterQuietHours, nudgeSlot } from './questionFollowUps'
 import type { LlmProviderOption } from '../../../shared/settings'
 import { botAllowedOf, type BotAllowed } from '../instructions'
 import { isProviderTurnCap, type Enforceability, type HarnessError, type ProviderSelection, type RunPolicy } from '../../../shared/harness/types'
@@ -162,6 +163,8 @@ export interface BotEngineHost {
   /** Monotonic milliseconds, for measured active time (default: `performance.now`). */
   monotonic?(): number
   setTimer?(fn: () => void, ms: number): { clear(): void }
+  /** The owner's time zone, for the quiet hours of question follow-ups (default: this computer's). */
+  timeZone?(): string | undefined
 
   // -- Bot Phase 1 seams (docs/plans/bot-architecture.md §7.1); each is optional so a package can land alone.
 
@@ -311,8 +314,10 @@ const REMINDER_REARM_MS = 6 * 60 * 60_000
 /** The outcome chips of `work_start` (`chips.ts`): a chat turn that shows one handed work off. */
 const WORK_STARTED_CHIPS: ReadonlySet<string> = new Set(['started', 'will start'])
 
-/** How long a reminder that failed to be said waits before it is tried again. */
+/** How long a reminder (or a question's follow-up) that failed waits before it is tried again. */
 const REMINDER_RETRY_MS = 60_000
+/** How long a work question's default waits, at a time, for a chat turn the owner's own message started to end. */
+const DEFAULT_OWNER_TURN_WAIT_MS = 60_000
 /** A reminder said later than this (Mousse was off) says what time it was for. */
 const REMINDER_LATE_MS = 2 * 60_000
 /** How long a dispatch's reply waits for the executor's final message before it is posted without it. */
@@ -517,11 +522,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private readonly pendingReplies = new Map<string, { post(text?: string): void; timer: { clear(): void } }>()
   /** The live chip of each working activation (`bots.chat.list`'s `live`). */
   private readonly liveChips = new Map<string, { botId: string; chip: BotChip | null }>()
-  /** The one timer for the soonest reminder of any bot (`armReminders`). */
+  /** The one timer for the soonest reminder or question follow-up of any bot (`armDue`). */
   private reminderTimer: { clear(): void } | undefined
   private delivering: Promise<void> | undefined
   /** Until when a reminder that failed to be said is not tried again (`REMINDER_RETRY_MS`), so a failure never spins. */
   private readonly reminderRetryAt = new Map<string, number>()
+  /** The same for a question's follow-up (a nudge or a default) that failed. */
+  private readonly questionRetryAt = new Map<string, number>()
   private closed = false
   /** Final messages the executor delivered while the dispatch's end was still being recorded, by `<activationId>:<n>`. */
   private readonly lateTexts = new Map<string, string>()
@@ -602,7 +609,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         if (host.mcp.where) return host.mcp.where(serverId)
         const live = host.mcp.servers().find((server) => server.serverId === serverId || server.installationId === serverId)
         return live ? { state: 'on', server: live } : { state: 'gone' }
-      }
+      },
+      // A question's follow-up counts from when its bubble is shown, and never falls in the owner's quiet hours.
+      followUpAt: (question, shownAt) => this.firstFollowUpAt(question, shownAt)
     })
     this.service = new BotChatService(this, {
       store: host.store,
@@ -4072,7 +4081,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   async admitWallMessage(message: BotMessageRow): Promise<void> {
     if (message.author !== 'owner' || message.kind !== 'text' || !message.activationId) return
     const walled = this.openChatWalls(message.botId).some((wall) => wall.activationId === message.activationId && wall.createdAt <= message.at)
-    if (walled) await this.continueChatWith(message.botId, messageInput(message, (id) => this.store.message(id)))
+    if (walled) await this.continueChatWith(message.botId, messageInput(message, (id) => this.store.message(id), (id) => this.store.question(id)))
   }
 
   /**
@@ -4086,7 +4095,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!denied.length) return undefined
     const owned = this.store.all("SELECT id FROM bot_messages WHERE activation_id = ? AND author = 'owner' AND kind = 'text' ORDER BY seq", row.id)
       .map((entry) => this.store.message(entry.id as string)).filter((message): message is BotMessageRow => message !== undefined)
-    const input = (message: BotMessageRow) => messageInput(message, (id) => this.store.message(id))
+    const input = (message: BotMessageRow) => messageInput(message, (id) => this.store.message(id), (id) => this.store.question(id))
     // The message that started the activation is its request, not a reply to its wall: found by its request id, as
     // its rebuilt input can differ from the one sent (a quoted message forgotten since).
     if (owned[0] && (row.idempotencyKey === `chat:${owned[0].clientRequestId}` || row.idempotencyKey === `answer:${owned[0].clientRequestId}` || input(owned[0]) === row.trigger.input)) owned.shift()
@@ -4493,6 +4502,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         for (const question of questions)
           this.chat.post({ id: `bm_${row.id}_q${asked.indexOf(question) + 1}`, botId: row.botId, author: 'bot', kind: 'text', text: question.spec.question, questionId: question.id, activationId: row.id, lane: 'chat' })
       })
+      // Their follow-ups are timed now that they are shown.
+      if (questions.length) this.armDue()
     } catch (error) {
       console.warn('a bot message could not be saved', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
       if (isJournalFailure(error)) this.journalFailed(row)
@@ -4505,6 +4516,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   private workAnswerOf(question: BotQuestionRow): string {
     const answer = question.answer
+    // Nobody answered in time: the bot's own default, never the owner's words.
+    if (question.status === 'defaulted') {
+      const choice = answer?.redacted ? '(the choice you named, since removed by your owner)' : answer?.choice ?? question.follow?.default ?? ''
+      return defaultWorkLine(question.spec.question, choice, question.follow?.afterMs ?? 0, answer?.dueAt ? clockTime(answer.dueAt) : undefined)
+    }
     const from = answer?.by === 'owner' && answer.choice === undefined && question.answerMessage ? this.store.message(question.answerMessage) : undefined
     const words = answer?.redacted ? '(the owner has since removed their answer)' : answer?.choice ?? (from ? chatInput(from.text, from.attachments ?? undefined) : answer?.text) ?? ''
     const line = workAnswerLine(question.spec.question, words, answer?.by ?? 'owner')
@@ -4820,8 +4836,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // A chat turn that asked a question and then for a permission: its question was never shown, so it asks again now.
       const again = answers.length && current.lane === 'chat' && !input.usageRetry ? this.store.questionsToAskAgain(row.id) : []
       if (again.length) this.store.markQuestionsRead(again.map((question) => question.id))
-      // Work's question its owner answered goes with whatever continues it, once (`read_at`).
-      const answered = question?.status === 'answered' ? this.workAnswerOf(question) : undefined
+      // Work's question its owner answered (or that it goes on with its default for) goes with whatever continues it, once
+      // (`read_at`).
+      const answered = question?.status === 'answered' || question?.status === 'defaulted' ? this.workAnswerOf(question) : undefined
       // The line is kept with the answer, so forgetting the answer (or the question) finds this copy (`answer_json.sent`).
       if (answered) this.store.markAnswerSent(question!.id, n, answered)
       const dispatch = {
@@ -6738,7 +6755,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       reach: (botId, workId) => this.noteReach(botId, workId)
     },
     questions: {
-      ask: (botId, activationId, spec) => this.askOwner(botId, activationId, spec),
+      ask: (botId, activationId, spec, follow) => this.askOwner(botId, activationId, spec, follow),
       relay: (botId, activationId, questionId, answer) => this.relayAnswer(botId, activationId, questionId, answer)
     },
     reminders: {
@@ -6749,7 +6766,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         if (!reminder || reminder.botId !== botId) return false
         const cancelled = this.store.settleReminder(reminderId, 'cancelled')
         if (cancelled) {
-          this.armReminders()
+          this.armDue()
           this.changed({ botId })
         }
         return cancelled
@@ -6778,7 +6795,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const row = this.store.activation(activationId)
     if (!row || row.botId !== botId || row.lane !== 'chat') return ''
     const rows = this.store.all(`SELECT m.text FROM bot_messages m WHERE m.activation_id = ? AND m.author = 'owner'
-      AND NOT EXISTS (SELECT 1 FROM bot_questions q WHERE q.answer_message = m.id AND q.status = 'answered' AND (json_extract(q.answer_json, '$.choice') IS NOT NULL OR json_extract(q.answer_json, '$.tapped')))
+      AND NOT EXISTS (SELECT 1 FROM bot_questions q WHERE q.answer_message = m.id AND ((q.status = 'answered' AND (json_extract(q.answer_json, '$.choice') IS NOT NULL OR json_extract(q.answer_json, '$.tapped')))
+        OR (q.status = 'defaulted' AND json_extract(q.answer_json, '$.late.tapped'))))
       ORDER BY m.seq`, activationId)
     return rows.map((message) => (typeof message.text === 'string' ? message.text : '')).join('\n')
   }
@@ -6791,11 +6809,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * over a cap the bot decides for itself. Work the owner asked for asks too, and waits for the answer (`askFromWork`);
    * scheduled runs, consults and subagents are never offered it.
    */
-  askOwner(botId: string, activationId: string, spec: BotQuestionSpec): { asked: boolean; text: string } {
+  askOwner(botId: string, activationId: string, spec: BotQuestionSpec, follow?: BotQuestionFollow): { asked: boolean; text: string } {
     const row = this.store.activation(activationId)
     if (!row || row.botId !== botId) return { asked: false, text: 'Only a bot can use this.' }
     if (!asksOwner(row)) return { asked: false, text: QUESTION_NOT_OFFERED_TEXT }
-    if (row.lane === 'run') return this.askFromWork(row, spec)
+    if (row.lane === 'run') return this.askFromWork(row, spec, follow)
     const result = this.store.db.transaction((): 'asked' | 'after_ask' | 'enough' | 'ended' => {
       const current = this.store.activation(activationId)
       if (current?.status === 'waiting_grant') return 'after_ask'
@@ -6804,7 +6822,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const since = new Date(this.now() - 24 * 60 * 60_000).toISOString()
       if (this.store.countQuestions(botId, { activationId }) >= MAX_QUESTIONS_PER_CHAT_TURN || this.store.countOpenQuestions(botId) >= MAX_OPEN_QUESTIONS_PER_BOT ||
           this.store.countQuestions(botId, { since }) >= MAX_NEW_QUESTIONS_PER_DAY) return 'enough'
-      this.store.insertQuestion({ id: `q_${randomUUID()}`, botId, activationId, dispatchN: this.store.lastMainDispatch(activationId)?.n ?? 1, lane: 'chat', spec, createdAt: this.store.now() })
+      this.store.insertQuestion({ id: `q_${randomUUID()}`, botId, activationId, dispatchN: this.store.lastMainDispatch(activationId)?.n ?? 1, lane: 'chat', spec, createdAt: this.store.now(), ...(follow ? { follow } : {}) })
       return 'asked'
     })
     if (result === 'asked') return { asked: true, text: QUESTION_ASKED_TEXT }
@@ -6820,7 +6838,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * `question`); the answer carries it on in the same thread (`question_answered`, `resumeWork`). One question at a time
    * per piece of work, within the bot's caps.
    */
-  private askFromWork(row: BotActivationRow, spec: BotQuestionSpec): { asked: boolean; text: string } {
+  private askFromWork(row: BotActivationRow, spec: BotQuestionSpec, follow?: BotQuestionFollow): { asked: boolean; text: string } {
     const n = this.live.get(row.id)?.n ?? this.store.lastMainDispatch(row.id)?.n ?? 1
     const result = this.recorded(row, (): 'asked' | 'enough' | 'ended' => {
       const current = this.store.activation(row.id)
@@ -6829,7 +6847,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if ((this.store.workQuestion(row.id) ? 1 : 0) >= MAX_OPEN_QUESTIONS_PER_WORK || this.store.countOpenQuestions(row.botId) >= MAX_OPEN_QUESTIONS_PER_BOT ||
           this.store.countQuestions(row.botId, { since }) >= MAX_NEW_QUESTIONS_PER_DAY) return 'enough'
       const id = `q_${randomUUID()}`
-      this.store.insertQuestion({ id, botId: row.botId, activationId: row.id, dispatchN: n, lane: 'run', spec, createdAt: this.store.now() })
+      this.store.insertQuestion({ id, botId: row.botId, activationId: row.id, dispatchN: n, lane: 'run', spec, createdAt: this.store.now(), ...(follow ? { follow } : {}) })
       // Its bubble: the bot's words from its work, under the owner's message that asked for it. Its id is its place among
       // the work's questions, so it is written once.
       const place = this.store.activationQuestions(row.id).length
@@ -6841,6 +6859,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     })
     if (result === 'asked') {
       this.askedIn.set(row.id, n)
+      // Its follow-up is timed now that its bubble is shown.
+      this.armDue()
       this.changed({ botId: row.botId, activationId: row.id })
       return { asked: true, text: QUESTION_WORK_ASKED_TEXT }
     }
@@ -6856,9 +6876,26 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   answerWorkInTx(questionId: string, answer: BotQuestionAnswer, messageId: string): boolean {
     const question = this.store.question(questionId)
-    if (!question || question.lane !== 'run' || question.status !== 'open') return false
-    if (!this.store.answerQuestion(questionId, answer, messageId, ['open'])) return false
+    if (!question || question.lane !== 'run') return false
+    // Its default not yet carried on with (the work waits for a run slot): the owner's answer takes its place.
+    const unreadDefault = question.status === 'defaulted' && question.readAt === null && !question.answer?.late
+    if (question.status !== 'open' && !unreadDefault) return false
+    if (!this.store.answerQuestion(questionId, answer, messageId, [question.status])) return false
     this.store.wakeWork(question.activationId)
+    return true
+  }
+
+  /**
+   * The owner answers late a work question the bot already went on with its default for, while the work still runs or
+   * waits: their row belongs to the work, the answer is kept with the default (`late`), and the work gets it as a note
+   * (its steer), so it can change course. Inside the caller's transaction; false when it can't (not defaulted, read, or
+   * answered late already).
+   */
+  lateWorkAnswerInTx(questionId: string, late: { choice?: string; text?: string; tapped?: true }, messageId: string): boolean {
+    const question = this.store.question(questionId)
+    if (!question || question.lane !== 'run' || question.status !== 'defaulted' || question.readAt === null || question.answer?.late) return false
+    if (!this.store.lateAnswer(questionId, late, messageId)) return false
+    this.store.addWorkNote(question.activationId, question.botId, lateWorkNote((late.choice ?? late.text ?? '').slice(0, MAX_WORK_NOTE_CHARS)), messageId)
     return true
   }
 
@@ -6908,7 +6945,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   questionLines(botId: string): string[] {
     return this.store.waitingQuestions(botId).flatMap((question) => {
       const work = this.store.activation(question.activationId)
-      return work ? [waitingQuestionLine({ questionId: question.id, question: question.spec.question, choices: plainChoices(question.spec), title: this.workTitle(work) })] : []
+      // The default it goes with, and when, if the owner doesn't answer first.
+      const fallback = question.follow?.kind === 'default' && question.follow.default && question.nextAt ? { default: question.follow.default, defaultAt: clockTime(question.nextAt) } : {}
+      return work ? [waitingQuestionLine({ questionId: question.id, question: question.spec.question, choices: plainChoices(question.spec), title: this.workTitle(work), ...fallback })] : []
     })
   }
 
@@ -7058,21 +7097,28 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const reminderId = `rem_${randomUUID()}`
     const dueAt = new Date(Math.max(due, this.now())).toISOString()
     this.store.insertReminder({ id: reminderId, botId, dueAt, text, work, replyTo, createdAt: this.store.now() })
-    this.armReminders()
+    this.armDue()
     this.changed({ botId })
     return { reminderId, dueAt }
   }
 
-  /** Arms the one timer for the soonest waiting reminder (long waits re-arm, so a far timer never overflows). */
-  private armReminders(): void {
+  /**
+   * Arms the one timer for the soonest waiting reminder or question follow-up of any bot (long waits re-arm, so a far
+   * timer never overflows).
+   */
+  private armDue(): void {
     this.reminderTimer?.clear()
     this.reminderTimer = undefined
     if (!this.startupPassed || this.closed) return
-    const next = this.store.nextReminder()
-    if (!next) return
-    // One that failed waits for its retry time; the others behind it are said at the next pass.
-    const at = Math.max(Date.parse(next.dueAt), this.reminderRetryAt.get(next.id) ?? 0)
-    const wait = Math.min(Math.max(0, at - this.now()), REMINDER_REARM_MS)
+    const reminder = this.store.nextReminder()
+    const question = this.store.nextQuestionDue()
+    // One that failed waits for its retry time; the others behind it are settled at the next pass.
+    const times = [
+      ...(reminder ? [Math.max(Date.parse(reminder.dueAt), this.reminderRetryAt.get(reminder.id) ?? 0)] : []),
+      ...(question?.nextAt ? [Math.max(Date.parse(question.nextAt), this.questionRetryAt.get(question.id) ?? 0)] : [])
+    ]
+    if (!times.length) return
+    const wait = Math.min(Math.max(0, Math.min(...times) - this.now()), REMINDER_REARM_MS)
     this.reminderTimer = (this.host.setTimer ?? defaultTimer)(() => {
       this.reminderTimer = undefined
       void this.deliverDueReminders().catch((error: unknown) => {
@@ -7082,9 +7128,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * Says every reminder that is due (one pass at a time), then arms the next. A message reminder is written with no
-   * model call, in the same transaction that marks it delivered, so it is said once. A work reminder starts its work.
-   * One that fell due while Mousse was off says when it was for.
+   * Says every reminder that is due and follows up every question that is (one pass at a time), then arms the next. A
+   * message reminder is written with no model call, in the same transaction that marks it delivered, so it is said once.
+   * A work reminder starts its work. One that fell due while Mousse was off says when it was for. Questions:
+   * `followUpQuestion`.
    */
   async deliverDueReminders(now: Date = new Date(this.now())): Promise<void> {
     if (!this.startupPassed) return
@@ -7107,9 +7154,21 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
             console.warn('a bot reminder could not be delivered; trying again in a minute', { reminderId: reminder.id, error: error instanceof Error ? error.message : String(error) })
           }
         }
+        // Questions answered, withdrawn or purged since their follow-up failed are no longer tried.
+        for (const id of this.questionRetryAt.keys()) if (this.store.question(id)?.status !== 'open') this.questionRetryAt.delete(id)
+        for (const question of this.store.dueQuestions(now.toISOString())) {
+          if ((this.questionRetryAt.get(question.id) ?? 0) > now.getTime()) continue
+          try {
+            await this.followUpQuestion(question, now)
+            this.questionRetryAt.delete(question.id)
+          } catch (error) {
+            this.questionRetryAt.set(question.id, now.getTime() + REMINDER_RETRY_MS)
+            console.warn('a bot question could not be followed up; trying again in a minute', { questionId: question.id, error: error instanceof Error ? error.message : String(error) })
+          }
+        }
       } finally {
         if (this.delivering === pass) this.delivering = undefined
-        this.armReminders()
+        this.armDue()
       }
     })()
     this.delivering = pass
@@ -7154,6 +7213,129 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return true
     })
     if (posted) this.changed({ botId: reminder.botId })
+  }
+
+  // -- Follow-ups when the owner doesn't answer a question (issue #1123) -------------------------------------------
+  //
+  // The bot chose one when it asked (`BotQuestionFollow`): Mousse nudges the owner, or the bot goes with its default.
+  // Both run on the reminders' timer (`armDue`, `deliverDueReminders`, `maintain`) from `next_at` in `bots.db`, so they
+  // survive a restart; only an open question is ever followed up, so one the owner answered or moved on from, or that
+  // was withdrawn or forgotten, never is.
+
+  /** The owner's time zone: the quiet hours are theirs. */
+  private zone(): string {
+    return this.host.timeZone?.() || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+  }
+
+  /** When a question's first follow-up is due, its bubble shown at `shownAt`: after its time, out of the quiet hours. */
+  private firstFollowUpAt(question: Pick<BotQuestionRow, 'follow'>, shownAt: string): string | null {
+    if (!question.follow) return null
+    return new Date(afterQuietHours(Date.parse(shownAt) + question.follow.afterMs, this.zone())).toISOString()
+  }
+
+  /**
+   * A question whose follow-up is due: in the quiet hours it moves to the morning; otherwise Mousse nudges the owner, or
+   * the bot goes with its default. A bot that is gone, or a question with nothing to follow up, is left be.
+   */
+  private async followUpQuestion(question: BotQuestionRow, now: Date): Promise<void> {
+    const registry = this.store.registry(question.botId)
+    if (!registry || registry.deletedAt || !question.follow) {
+      this.store.setQuestionNext(question.id, null)
+      return
+    }
+    const morning = afterQuietHours(now.getTime(), this.zone())
+    if (morning > now.getTime()) {
+      this.moveFollowUp(question, morning)
+      return
+    }
+    if (question.follow.kind === 'nudge') this.nudge(question, now)
+    else await this.goWithDefault(question, question.follow, now)
+  }
+
+  /** A question's follow-up moves later; a bubble that says when its default goes ahead shows the new time. */
+  private moveFollowUp(question: BotQuestionRow, at: number): void {
+    if (!this.store.setQuestionNext(question.id, new Date(at).toISOString())) return
+    if (question.follow?.kind === 'default') for (const row of this.store.messagesForQuestion(question.id)) if (row.author === 'bot') this.chat.republish(row.id)
+  }
+
+  /**
+   * A nudge: one fixed line from Mousse, with no model call, as a reply to the question's bubble that carries the
+   * question again, so its answers are at the bottom of the chat; answering either answers both. At most
+   * `MAX_NUDGES_PER_QUESTION`, the next about a day later, then none. The bot's nudges, all its questions together, wait
+   * for a free time (`nudgeSlot`): one an hour, three a day. One overdue after a restart is posted once, never as a
+   * backlog: the next counts from now.
+   */
+  private nudge(question: BotQuestionRow, now: Date): void {
+    const at = now.getTime()
+    const zone = this.zone()
+    const slot = nudgeSlot(at, this.store.nudgeTimes(question.botId, new Date(at - 24 * 60 * 60_000).toISOString()).map((time) => Date.parse(time)), zone)
+    if (slot > at) {
+      this.moveFollowUp(question, slot)
+      return
+    }
+    const bubble = question.messageId ? this.store.message(question.messageId) : undefined
+    if (!bubble) {
+      this.store.setQuestionNext(question.id, null)
+      return
+    }
+    const count = question.nudges + 1
+    const next = count < MAX_NUDGES_PER_QUESTION ? new Date(afterQuietHours(at + NUDGE_AGAIN_MS, zone)).toISOString() : null
+    const posted = this.store.db.transaction(() => {
+      if (!this.store.recordNudge(question.id, count, next)) return false
+      this.chat.post({
+        id: `bm_${question.id}_n${count}`, botId: question.botId, author: 'bot', kind: bubble.kind, text: NUDGE_TEXT, replyTo: bubble.id, questionId: question.id, lane: question.lane,
+        ...(question.lane === 'run' ? { activationId: question.activationId } : {})
+      })
+      return true
+    })
+    if (posted) this.changed({ botId: question.botId })
+  }
+
+  /**
+   * The owner didn't answer in time: the question is answered with the bot's own default (`defaulted`, `by: 'default'`),
+   * never the owner's words and never a grant, and the bot goes on and says so. Work that waits on it carries on with
+   * "…so go with "A", as you said you would, and say so in your report." (`question_answered`, `resumeWork`); a chat
+   * question queues a chat turn of its own, not the owner's (`question:<id>:default`), that goes with it and says so in a
+   * line. A work question's default waits while a chat turn the owner's own message started is queued or running: that
+   * turn may pass on their answer (`question_answer`). One applied after its time says when it was due.
+   */
+  private async goWithDefault(question: BotQuestionRow, follow: BotQuestionFollow, now: Date): Promise<void> {
+    const choice = follow.default
+    if (!choice || !question.nextAt) {
+      this.store.setQuestionNext(question.id, null)
+      return
+    }
+    const late = now.getTime() - Date.parse(question.nextAt) > REMINDER_LATE_MS
+    const answer: BotQuestionAnswer = { choice, by: 'default', ...(late ? { dueAt: question.nextAt } : {}) }
+    if (question.lane === 'run') {
+      if (this.store.laneActivations(question.botId, 'chat', ['queued', 'running']).some(ownerChatTurn)) {
+        this.store.setQuestionNext(question.id, new Date(now.getTime() + DEFAULT_OWNER_TURN_WAIT_MS).toISOString())
+        return
+      }
+      const applied = this.store.db.transaction(() => {
+        if (!this.store.defaultQuestion(question.id, answer)) return false
+        this.store.wakeWork(question.activationId)
+        return true
+      })
+      if (applied) this.afterWorkAnswer(question.id)
+      return
+    }
+    const line = defaultChatInput(question.spec.question, choice, follow.afterMs, late ? clockTime(question.nextAt) : undefined)
+    const activationId = newActivationId()
+    let refused: BotEngineError | undefined
+    const applied = this.store.db.transaction(() => {
+      if (!this.store.defaultQuestion(question.id, answer)) return false
+      // Not the owner's turn: no owner, keyed `question:`, so it can't act on their threads or models.
+      refused = this.queueChatInTx(question.botId, `question:${question.id}:default`, line, activationId)
+      // The line quotes the question: kept with the answer, so forgetting the bubble finds that copy.
+      if (!refused) this.store.markDefaultSent(question.id, activationId, line)
+      return true
+    })
+    if (!applied) return
+    for (const row of this.store.messagesForQuestion(question.id)) if (row.author === 'bot') this.chat.republish(row.id)
+    this.changed({ botId: question.botId })
+    // A bot that can't run now still went with its default: its bubble says so.
+    if (!refused) await this.startQueuedChat(question.botId, activationId)
   }
 
   /**

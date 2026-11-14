@@ -5,7 +5,7 @@ import { entriesOf, modelsNamedBy, namedOn, ownerNamesModel, pickReasonText, pla
 import type { BotModelOption, BotWorkChoices } from '../../../../shared/bots/personal/methods'
 import { BOT_IMAGE_TOOL, BOT_MCP_LIST_TOOL, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL, MAX_BOT_SUBAGENTS_AT_ONCE, MAX_BOT_SUBAGENTS_PER_DAY, MAX_BOT_SUBAGENTS_PER_WORK } from '../../../../shared/bots/personal/manifest'
 import type { BotSubagentView } from '../../../../shared/bots/personal/authority'
-import { MAX_CHOICE_DETAIL_CHARS, MAX_CHOICE_LABEL_CHARS, MAX_QUESTION_CHARS, MAX_QUESTION_CHOICES, MIN_QUESTION_CHOICES, QUESTION_NOT_OFFERED_TEXT, questionSpecOf } from '../../../../shared/bots/personal/questions'
+import { DEFAULT_ANSWER_AFTER_MINUTES, DEFAULT_NUDGE_AFTER_MINUTES, MAX_CHOICE_DETAIL_CHARS, MAX_CHOICE_LABEL_CHARS, MAX_FOLLOW_UP_MINUTES, MAX_QUESTION_CHARS, MAX_QUESTION_CHOICES, MIN_FOLLOW_UP_MINUTES, MIN_QUESTION_CHOICES, QUESTION_NOT_OFFERED_TEXT, questionFollowOf, questionSpecOf } from '../../../../shared/bots/personal/questions'
 import { shortModelName } from '../../../../shared/modelNames'
 import { botScheduleLabel } from '../../../../shared/scheduleLabel'
 import { botScheduleProblem } from '../../../scheduled/botJobs'
@@ -218,7 +218,7 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: BOT_QUESTION_TOOL,
-    description: `Ask your owner a question they answer with a tap: ${MIN_QUESTION_CHOICES} to ${MAX_QUESTION_CHOICES} short choices (or yesNo), and "Other…" so they can write their own answer. Ask only when the answer changes what you do; settle a minor choice yourself and say what you picked. Never use it for a permission: that is escalate, and a "Yes" here allows nothing. Ask as yourself, in the first person. In the chat it shows under your reply as its own message: don't repeat the question in your reply, and end your turn; their answer comes as their next message. In work it reaches them at once and your work waits for the answer: end your turn, and you carry on in this thread with it. One question at a time.`,
+    description: `Ask your owner a question they answer with a tap: ${MIN_QUESTION_CHOICES} to ${MAX_QUESTION_CHOICES} short choices (or yesNo), and "Other…" so they can write their own answer. Ask only when the answer changes what you do; settle a minor choice yourself and say what you picked. Never use it for a permission: that is escalate, and a "Yes" here allows nothing. Ask as yourself, in the first person. In the chat it shows under your reply as its own message: don't repeat the question in your reply, and end your turn; their answer comes as their next message. In work it reaches them at once and your work waits for the answer: end your turn, and you carry on in this thread with it. One question at a time. If they don't answer, Mousse reminds them (ifNoAnswer 'nudge', the default: at most twice, never at night). Only for a minor choice that is easy to undo, you may instead name a default, one of your choices: if they haven't answered within after minutes, you go with it and say so. Never default on anything that spends money, can't be undone, or speaks for your owner.`,
     parameters: Type.Object({
       question: Type.String({ description: `The question, at most ${MAX_QUESTION_CHARS} characters. It must read on its own: the owner may see it in a notification.` }),
       choices: Type.Optional(Type.Array(Type.Union([
@@ -229,7 +229,10 @@ export const BOT_TOOLS: Tool[] = [
         })
       ]), { description: `${MIN_QUESTION_CHOICES} to ${MAX_QUESTION_CHOICES} answers to tap, each different.` })),
       yesNo: Type.Optional(Type.Literal(true, { description: 'The answers are Yes and No (instead of choices).' })),
-      other: Type.Optional(Type.Boolean({ description: 'Offer "Other…" for an answer in their own words. Default true.' }))
+      other: Type.Optional(Type.Boolean({ description: 'Offer "Other…" for an answer in their own words. Default true.' })),
+      ifNoAnswer: Type.Optional(Type.Union([Type.Literal('nudge'), Type.Literal('default')], { description: "If they don't answer: 'nudge' (default) reminds them and keeps waiting; 'default' goes with default after the time. Use 'default' only for a minor choice that is easy to undo." })),
+      after: Type.Optional(Type.Number({ description: `Minutes before the first reminder or the default, ${MIN_FOLLOW_UP_MINUTES} to ${MAX_FOLLOW_UP_MINUTES}. Default ${DEFAULT_NUDGE_AFTER_MINUTES} for a nudge, ${DEFAULT_ANSWER_AFTER_MINUTES} for a default.` })),
+      default: Type.Optional(Type.String({ description: "The label of the choice you go with if they don't answer (with ifNoAnswer 'default')." }))
     })
   },
   {
@@ -866,7 +869,9 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
           if (!call.deps.host.questions) return error(QUESTION_NOT_OFFERED_TEXT)
           const spec = questionSpecOf(args)
           if ('problem' in spec) return error(spec.problem)
-          const asked = call.deps.host.questions.ask(call.botId, call.activationId, spec)
+          const follow = questionFollowOf(args, spec)
+          if ('problem' in follow) return error(follow.problem)
+          const asked = call.deps.host.questions.ask(call.botId, call.activationId, spec, follow)
           return asked.asked ? json({ asked: true, note: asked.text }) : error(asked.text)
         }
       }),

@@ -1,7 +1,7 @@
 import type { BotChip } from '../../shared/bots/personal/chat'
 import type { BotDepth, BotLane, BotModelPick, BotModelSlotKey, BotModelSlots, BotSchedule, BotWorkLevel, BotWorkModelName } from '../../shared/bots/personal/definition'
 import type { BotModelRows, BotPickMiss } from '../../shared/bots/personal/modelSlots'
-import type { BotQuestionSpec } from '../../shared/bots/personal/questions'
+import type { BotQuestionFollow, BotQuestionSpec } from '../../shared/bots/personal/questions'
 import type { BotJournalKind, BotJournalWho, BotMemoryForgetResult, BotMemoryListing } from '../../shared/bots/personal/memory'
 import type { Enforceability, ProviderSelection, RunPolicy } from '../../shared/harness/types'
 import type { BotStoreTx } from './store/BotStore'
@@ -115,7 +115,8 @@ export interface BotToolHost {
    * asked first, a turn never offered it). Absent: no questions here.
    */
   questions?: {
-    ask(botId: string, activationId: string, spec: BotQuestionSpec): { asked: boolean; text: string }
+    /** `follow`: what happens if the owner doesn't answer (absent: nothing, as an earlier build kept it). */
+    ask(botId: string, activationId: string, spec: BotQuestionSpec, follow?: BotQuestionFollow): { asked: boolean; text: string }
     /**
      * `question_answer`: a chat turn the owner's own message started passes on to work the answer they gave in the chat
      * to the question it waits on; `title` is the work's.

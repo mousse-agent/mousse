@@ -2,7 +2,7 @@ import { realpathSync } from 'node:fs'
 import { sep } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { BotChatMessage, BotChip, BotDetail, BotSummary } from '../../../shared/bots/personal/chat'
-import { BOT_MODEL_SLOT_KEYS, DEFAULT_BOT_MODEL, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, type BotDefinition, type BotModelPick, type BotModelSlotKey, type BotModelSlots, type BotSchedule } from '../../../shared/bots/personal/definition'
+import { BOT_MODEL_SLOT_KEYS, DEFAULT_BOT_MODEL, ENDED_ACTIVATION_STATUSES, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, type BotDefinition, type BotModelPick, type BotModelSlotKey, type BotModelSlots, type BotSchedule } from '../../../shared/bots/personal/definition'
 import { normalizeBotLook, type BotLook } from '../../../shared/bots/personal/look'
 import { isSpecialAsk } from '../../../shared/bots/personal/escalation'
 import { BOT_THREADS_PERMISSION, botGrantTool } from '../../../shared/bots/personal/manifest'
@@ -17,7 +17,7 @@ import { copyBotAttachments, removeBotAttachments, type SavedBotAttachment } fro
 import { BotEngineError, type BotEngine } from '../activation/BotEngine'
 import type { BotMemoryAdmin } from '../seams'
 import type { BotQuestionRow, BotStore } from '../store/BotStore'
-import { plainChoices, type BotQuestionSpec } from '../../../shared/bots/personal/questions'
+import { lateAnsweringLine, plainChoices, type BotQuestionLateAnswer, type BotQuestionSpec } from '../../../shared/bots/personal/questions'
 import { grantedPermissions, permissionId, starterManifest, withoutPermission } from './projection'
 
 /**
@@ -164,11 +164,20 @@ export function chatInput(text: string, attachments: readonly SavedBotAttachment
  * message of the same chat (the question line when it answers the question that message carries), its text, and its
  * files. Rebuilt from the rows after a restart, so it must match.
  */
-export function messageInput(row: { botId: string; text: string; attachments: readonly SavedBotAttachment[] | null; replyTo: string | null; questionId?: string }, quoted: (id: string) => { botId: string; author: 'owner' | 'bot'; text: string; questionId?: string } | undefined): string {
+export function messageInput(
+  row: { id?: string; botId: string; text: string; attachments: readonly SavedBotAttachment[] | null; replyTo: string | null; questionId?: string },
+  quoted: (id: string) => { botId: string; author: 'owner' | 'bot'; text: string; questionId?: string } | undefined,
+  question?: (id: string) => Pick<BotQuestionRow, 'status' | 'spec' | 'answer' | 'answerMessage' | 'follow'> | undefined
+): string {
   const body = chatInput(row.text, row.attachments ?? undefined)
   const reply = row.replyTo ? quoted(row.replyTo) : undefined
   if (!reply || reply.botId !== row.botId) return body
-  return `${row.questionId && reply.author === 'bot' && reply.questionId === row.questionId ? answeringLine(reply.text) : replyLine(reply)}\n\n${body}`
+  if (!row.questionId || reply.author !== 'bot' || reply.questionId !== row.questionId) return `${replyLine(reply)}\n\n${body}`
+  // It answers the question that message carries (its bubble, or a nudge of it): the question's own words, and, after
+  // the bot went ahead with its default, that it did.
+  const asked = question?.(row.questionId)
+  if (asked?.status === 'defaulted' && row.id && asked.answerMessage === row.id) return `${lateAnsweringLine(asked.spec.question, asked.answer?.choice ?? asked.follow?.default ?? '')}\n\n${body}`
+  return `${answeringLine(asked?.spec.question ?? reply.text)}\n\n${body}`
 }
 
 /** The line before the owner's answer to a question the bot asked: the question, so the bot knows what it answers. */
@@ -375,15 +384,33 @@ export class BotChatService {
     const question = this.questionToAnswer(input.botId, input.questionId)
     const choice = question.spec.choices.find((entry) => entry.label === input.choice)
     if (!choice) throw new BotEngineError('invalid_params', 'Pick one of the question\'s answers.')
-    // A question the bot's work waits on: the tap answers the work, which goes on with it; no chat turn starts.
+    // A question the bot's work waits on: the tap answers the work, which goes on with it; no chat turn starts. Once the
+    // work ended (it went on with its default), a late tap is an ordinary reply to the chat (below).
     if (question.lane === 'run') {
       const message = this.answerWork({ botId: input.botId, text: choice.label, clientRequestId: input.clientRequestId }, question, choice.label)
-      if (message) return { message, ...this.bubbleOf(question.id) }
-      const withdrawn = this.store.question(question.id)?.status === 'withdrawn'
-      throw new BotEngineError(withdrawn ? 'question_closed' : 'question_answered', withdrawn ? 'This question is no longer open.' : 'This was already answered.')
+      if (message && message !== 'chat') return { message, ...this.bubbleOf(question.id) }
+      if (!message) {
+        const withdrawn = this.store.question(question.id)?.status === 'withdrawn'
+        throw new BotEngineError(withdrawn ? 'question_closed' : 'question_answered', withdrawn ? 'This question is no longer open.' : 'This was already answered.')
+      }
     }
     const { message } = await this.send({ botId: input.botId, text: choice.label, clientRequestId: input.clientRequestId, replyTo: question.messageId!, ...(input.from ? { from: input.from } : {}) }, { questionId: question.id, choice: choice.label })
     return { message, ...this.bubbleOf(question.id) }
+  }
+
+  /**
+   * How the owner's answer to a work question lands, read in the answering transaction: `answer` (open, or its default
+   * not yet carried on with: the answer takes its place), `late` (the work went on with its default and still runs or
+   * waits: a note to it), `chat` (it went on with its default and ended: an ordinary reply to the chat), or undefined
+   * (answered, answered late already, or withdrawn).
+   */
+  private workAnswerMode(question: BotQuestionRow): 'answer' | 'late' | 'chat' | undefined {
+    if (question.lane !== 'run' || !question.messageId) return undefined
+    if (question.status === 'open') return 'answer'
+    if (question.status !== 'defaulted' || question.answer?.late) return undefined
+    const work = this.store.activation(question.activationId)
+    if (!work || ENDED_ACTIVATION_STATUSES.has(work.status)) return 'chat'
+    return question.readAt === null ? 'answer' : 'late'
   }
 
   /**
@@ -391,17 +418,23 @@ export class BotChatService {
    * on its bubble. It is their answer to that work, not a chat message: their row belongs to the work (its activation,
    * lane run), no chat turn starts, and no chat question is moved past. In one transaction the question is answered and
    * the work goes on once a run slot is free (`answerWorkInTx`); answering one question wakes only its own work. A tap
-   * stays the bot's label, never the owner's own words, and grants nothing. `undefined` when the question is no longer
-   * open (answered on another device, or withdrawn): nothing is written.
+   * stays the bot's label, never the owner's own words, and grants nothing. After the work went on with its default, the
+   * answer reaches it as a note while it still runs or waits (`lateWorkAnswerInTx`), and `chat` says it ended: the
+   * answer is then an ordinary reply to the chat. `undefined` when the question is no longer open (answered on another
+   * device, or withdrawn): nothing is written.
    */
-  private answerWork(input: { botId: string; text: string; attachments?: BotChatAttachment[]; clientRequestId: string }, question: BotQuestionRow, choice?: string): BotChatMessage | undefined {
+  private answerWork(input: { botId: string; text: string; attachments?: BotChatAttachment[]; clientRequestId: string }, question: BotQuestionRow, choice?: string): BotChatMessage | 'chat' | undefined {
+    if (this.workAnswerMode(question) === 'chat') return 'chat'
     const saved = input.attachments?.length ? copyBotAttachments(this.engine.filesFolder(input.botId), input.attachments, this.options.now()) : []
     const closed = new Error('question no longer open')
+    const toChat = new Error('work ended')
     let messageId: string
     try {
       messageId = this.store.db.transaction(() => {
         const current = this.store.question(question.id)
-        if (current?.status !== 'open' || current.lane !== 'run' || !current.messageId) throw closed
+        const mode = current ? this.workAnswerMode(current) : undefined
+        if (mode === 'chat') throw toChat
+        if (!current?.messageId || !mode) throw closed
         const posted = this.engine.chat.post({
           botId: input.botId,
           author: 'owner',
@@ -414,12 +447,16 @@ export class BotChatService {
           replyTo: current.messageId,
           questionId: current.id
         })
-        if (!this.engine.answerWorkInTx(current.id, choice !== undefined ? { choice, by: 'owner', tapped: true } : { text: input.text, by: 'owner' }, posted.id)) throw closed
+        const answered = mode === 'answer'
+          ? this.engine.answerWorkInTx(current.id, choice !== undefined ? { choice, by: 'owner', tapped: true } : { text: input.text, by: 'owner' }, posted.id)
+          : this.engine.lateWorkAnswerInTx(current.id, choice !== undefined ? { choice, tapped: true } : { text: input.text }, posted.id)
+        if (!answered) throw closed
         return posted.id
       })
     } catch (error) {
       removeBotAttachments(saved)
       if (error === closed) return undefined
+      if (error === toChat) return 'chat'
       if (error instanceof BotEngineError) throw error
       const code = (error as { code?: unknown } | null)?.code
       if (code !== 'bot_journal_failed' && code !== 'storage_full') throw error
@@ -439,11 +476,14 @@ export class BotChatService {
     this.questionToAnswer(botId, questionId)
   }
 
-  /** A question of this bot whose bubble is shown and that a tap may answer: open, or (a chat's) moved on. */
+  /**
+   * A question of this bot whose bubble is shown and that a tap may answer: open, (a chat's) moved on, or one the bot went
+   * ahead on with its default and the owner hasn't answered late yet.
+   */
   private questionToAnswer(botId: string, questionId: string): BotQuestionRow {
     const question = this.store.question(questionId)
     if (!question || question.botId !== botId || !question.messageId) throw new BotEngineError('question_not_found', 'This bot has no such question.')
-    if (question.status === 'answered' || question.status === 'defaulted') throw new BotEngineError('question_answered', 'This was already answered.')
+    if (question.status === 'answered' || (question.status === 'defaulted' && question.answer?.late)) throw new BotEngineError('question_answered', 'This was already answered.')
     if (question.status === 'withdrawn') throw new BotEngineError('question_closed', 'This question is no longer open.')
     return question
   }
@@ -470,13 +510,15 @@ export class BotChatService {
       await this.engine.admitWallMessage(existing)
       return { message: this.engine.chat.toMessage(this.store.message(existing.id) ?? existing) }
     }
-    // A reply on the bubble of a question the bot's work waits on is the owner's answer to that work, in their words. Once
-    // that question is no longer open (answered elsewhere), the reply is an ordinary message to the chat.
+    // A reply on the bubble of a question the bot's work waits on (or on a nudge of it) is the owner's answer to that work,
+    // in their words; after the work went on with its default, their late answer to it while it still runs. Once that
+    // question is no longer open (answered elsewhere), or its work ended, the reply is an ordinary message to the chat.
     const onWork = !tap && input.replyTo ? this.store.message(input.replyTo) : undefined
     const workQuestion = onWork?.botId === input.botId && onWork.author === 'bot' && onWork.questionId ? this.store.question(onWork.questionId) : undefined
-    if (workQuestion?.lane === 'run' && workQuestion.status === 'open' && workQuestion.messageId === onWork!.id) {
+    const workMode = workQuestion ? this.workAnswerMode(workQuestion) : undefined
+    if (workQuestion && (workMode === 'answer' || workMode === 'late')) {
       const answered = this.answerWork({ botId: input.botId, text, ...(input.attachments ? { attachments: input.attachments } : {}), clientRequestId: input.clientRequestId }, workQuestion)
-      if (answered) return { message: answered }
+      if (answered && answered !== 'chat') return { message: answered }
     }
     // The activation this message belongs to: its row and journal row say so (the chat pack then
     // leaves it out, as it is the request). A tap starts a turn of its own: it never answers a permission ask a chat
@@ -498,11 +540,15 @@ export class BotChatService {
     let touched: BotQuestionRow[] = []
     try {
       messageId = this.store.db.transaction(() => {
-        // The question this message answers: the one tapped, or the one its reply names (its bubble), when a tap could
-        // still answer it. Read in the transaction, so a tap on another device is never answered twice.
+        // The question this message answers: the one tapped, or the one its reply names (its bubble, or a nudge of it),
+        // when a tap could still answer it. Read in the transaction, so a tap on another device is never answered twice.
         const asked = tap ? this.store.question(tap.questionId) : replyTo?.questionId && replyTo.author === 'bot' ? this.store.question(replyTo.questionId) : undefined
-        const answering = asked && asked.lane === 'chat' && asked.messageId === replyTo?.id && (asked.status === 'open' || asked.status === 'moved_on') ? asked : undefined
-        if (tap && !answering) throw new BotEngineError(asked?.status === 'withdrawn' ? 'question_closed' : 'question_answered', asked?.status === 'withdrawn' ? 'This question is no longer open.' : 'This was already answered.')
+        const answering = asked && asked.lane === 'chat' && (asked.status === 'open' || asked.status === 'moved_on') ? asked : undefined
+        // A question the bot already went ahead on with its default (a chat's, or one whose work ended): the owner's late
+        // answer, kept with the default, and the bot hears that it had gone ahead.
+        const late = !answering && asked?.status === 'defaulted' && !asked.answer?.late && (asked.lane === 'chat' || this.workAnswerMode(asked) === 'chat') ? asked : undefined
+        if (tap && !answering && !late) throw new BotEngineError(asked?.status === 'withdrawn' ? 'question_closed' : 'question_answered', asked?.status === 'withdrawn' ? 'This question is no longer open.' : 'This was already answered.')
+        const answers = answering ?? late
         const posted = this.engine.chat.post({
           botId: input.botId,
           author: 'owner',
@@ -513,13 +559,14 @@ export class BotChatService {
           activationId: target.activationId,
           lane: 'chat',
           ...(replyTo ? { replyTo: replyTo.id } : {}),
-          ...(answering ? { questionId: answering.id } : {})
+          ...(answers ? { questionId: answers.id } : {})
         })
         if (answering) this.store.answerQuestion(answering.id, tap ? { choice: tap.choice, by: 'owner', tapped: true } : { text, by: 'owner' }, posted.id)
+        if (late) this.store.lateAnswer(late.id, tap ? { choice: tap.choice, tapped: true } satisfies BotQuestionLateAnswer : { text }, posted.id)
         // Any other question still open is moved past: the owner wrote something else, and the bot hears what it had asked.
         const moved = this.store.moveOnQuestions(input.botId, posted.id, answering?.id)
-        touched = [...(answering ? [answering] : []), ...moved]
-        const body = messageInput({ botId: input.botId, text, attachments: saved, replyTo: replyTo?.id ?? null, ...(answering ? { questionId: answering.id } : {}) }, (id) => this.store.message(id))
+        touched = [...(answers ? [answers] : []), ...moved]
+        const body = messageInput({ id: posted.id, botId: input.botId, text, attachments: saved, replyTo: replyTo?.id ?? null, ...(answers ? { questionId: answers.id } : {}) }, (id) => this.store.message(id), (id) => this.store.question(id))
         prompt = [...moved.map((question) => movedOnLine(question.spec)), body].join('\n\n')
         if (!target.continues) refused = this.engine.queueChatInTx(input.botId, key, prompt, target.activationId, owner)
         // A message from another device that continues a turn waiting at a wall holds the rest of that turn to the
