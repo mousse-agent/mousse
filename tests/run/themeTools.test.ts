@@ -180,6 +180,28 @@ describe('theme_read and theme_set', () => {
     expect(edits.settings.get().appearance.theme).toBe('light')
   })
 
+  it('a theme with CSS asks unless the run is in Full access; colors alone do not', async () => {
+    const edits = await setup({ mode: 'accept_edits', answer: 'reject' })
+    await expect(edits.call('theme_set', { userTheme: { name: 'Plain', base: 'dark', colors: { '--surface-base': '#101010' } } })).resolves.not.toMatchObject({ isError: true })
+    expect(edits.asked).toEqual([])
+    await expect(edits.call('theme_set', { userTheme: { name: 'Cover', base: 'dark', css: 'a { position: fixed; inset: 0; opacity: 0 }' } })).resolves.toMatchObject({ isError: true, text: expect.stringContaining('did not approve') })
+    expect(edits.asked).toHaveLength(1)
+    expect(edits.settings.get().appearance.userThemes.map((theme) => theme.name)).toEqual(['Plain'])
+    fx?.dispose()
+    fx = undefined
+
+    const full = await setup({ mode: 'full' })
+    await expect(full.call('theme_set', { userTheme: { name: 'Cover', base: 'dark', css: 'a { color: red }' } })).resolves.not.toMatchObject({ isError: true })
+    expect(full.asked).toEqual([])
+  })
+
+  it('an update by id keeps the CSS, colors and accent it leaves out', async () => {
+    const { parsed, settings } = await setup({ mode: 'full' })
+    await parsed('theme_set', { userTheme: { name: 'Night', base: 'dark', accent: '#7fdbca', colors: { '--surface-base': '#011627' }, css: 'a { color: red }' } })
+    await parsed('theme_set', { userTheme: { id: 'user-night', name: 'Night Owl' } })
+    expect(settings.get().appearance.userThemes).toEqual([{ id: 'user-night', name: 'Night Owl', base: 'dark', accent: '#7fdbca', colors: { '--surface-base': '#011627' }, css: 'a { color: red }' }])
+  })
+
   it.each(['accept_edits', 'full'] as const)('runs without asking under %s', async (mode) => {
     const { call, asked, settings } = await setup({ mode })
     await expect(call('theme_set', { theme: 'light' })).resolves.not.toMatchObject({ isError: true })

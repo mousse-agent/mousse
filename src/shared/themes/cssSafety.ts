@@ -68,7 +68,9 @@ function urlArgument(text: string, open: number): string {
     if (text[end] === '(') depth++
     else if (text[end] === ')') depth--
   }
-  return text.slice(open, depth === 0 ? end - 1 : end).trim().replace(/^["']|["']$/g, '').trim()
+  // Only the whitespace CSS and the URL parser strip: a no-break space or BOM before `data:` makes a relative address.
+  const ascii = (value: string): string => value.replace(/^[\t\n\f\r ]+|[\t\n\f\r ]+$/g, '')
+  return ascii(ascii(text.slice(open, depth === 0 ? end - 1 : end)).replace(/^["']|["']$/g, ''))
 }
 
 /** Why `text` could load something from outside Mousse, or null when it cannot. */

@@ -717,7 +717,8 @@ export class ToolRegistry {
    */
   private async askBeforeEditing(tool: MousseTool, caller: McpCaller, signal: AbortSignal, args: Record<string, unknown>, turnMode?: PermissionMode, unattended = false): Promise<ToolOutcome | null> {
     const mode = turnMode ?? this.options.permissionModeFor?.(caller.runId)
-    if (mode === undefined || permissionModeAllows(mode, 'edit')) return null
+    const needs = tool.runsWithoutAsking?.(args) ?? 'edit'
+    if (mode === undefined || (needs === 'full' ? mode === 'full' : permissionModeAllows(mode, 'edit'))) return null
     // A run nobody answers (`approvals: 'never'`) is refused at once rather than waiting for a person.
     if (unattended) return { text: APPROVALS_REFUSED_MESSAGE, isError: true }
     const rejected: ToolOutcome = { text: `The user did not approve ${tool.name}, so it did not run. Do not retry it unless they ask.`, isError: true }

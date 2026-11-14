@@ -120,7 +120,7 @@ export function appearanceTools(host: AppToolHost): MousseTool[] {
     {
       name: THEME_SET_TOOL,
       description:
-        `Change how Mousse looks. Either theme: switch to a built-in theme (${builtIns}; "system" follows the computer's light or dark mode) or an existing user theme id. Or userTheme: create a user theme (no id) or update one (its id) and switch to it. Read theme_read first for the tokens and selectors. CSS that could load anything from outside Mousse is dropped.`,
+        `Change how Mousse looks. Either theme: switch to a built-in theme (${builtIns}; "system" follows the computer's light or dark mode) or an existing user theme id. Or userTheme: create a user theme (no id) or update one (its id; fields left out keep their values) and switch to it. Theme CSS asks the person unless the run is in Full access. Read theme_read first for the tokens and selectors. CSS that could load anything from outside Mousse is dropped.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -130,13 +130,12 @@ export function appearanceTools(host: AppToolHost): MousseTool[] {
             description: 'A user theme to save and switch to.',
             properties: {
               id: { type: 'string', description: 'An existing user theme id to update; leave out to create one.' },
-              name: { type: 'string', description: `A short name (at most ${USER_THEME_LIMITS.name} characters).` },
-              base: { type: 'string', enum: [...USER_THEME_BASES], description: 'The built-in theme it starts from: dark or light, usually.' },
+              name: { type: 'string', description: `A short name (at most ${USER_THEME_LIMITS.name} characters). Needed for a new theme.` },
+              base: { type: 'string', enum: [...USER_THEME_BASES], description: 'The built-in theme it starts from: dark or light, usually. Needed for a new theme.' },
               accent: { type: 'string', description: 'Accent color as #rrggbb; leave out to keep the person\'s accent.' },
               colors: { type: 'object', additionalProperties: { type: 'string' }, description: 'Color tokens by name (--surface-base: "#101418"). Plain colors only.' },
               css: { type: 'string', description: 'Extra CSS, using the stable selectors from theme_read.' }
             },
-            required: ['name', 'base']
           }
         }
       },
@@ -144,6 +143,12 @@ export function appearanceTools(host: AppToolHost): MousseTool[] {
       permissionKey: PERMISSION_KEYS.mousseAppearance,
       class: 'mutation',
       approvalPrompt: 'Allow this agent to change how Mousse looks?',
+      // CSS can lay anything over the window (an invisible link or control under every click): it asks unless the run is
+      // in Full access. Switching themes and colors asks like any edit.
+      runsWithoutAsking: (args) => {
+        const css = args.userTheme && typeof args.userTheme === 'object' ? (args.userTheme as Record<string, unknown>).css : undefined
+        return typeof css === 'string' && css.trim() ? 'full' : 'edit'
+      },
       listed: () => Boolean(host.appearance?.()),
       available: mayChangeSettings,
       describe: (args) => (args.userTheme ? 'Save and use a theme' : 'Switch theme'),
@@ -161,19 +166,20 @@ export function appearanceTools(host: AppToolHost): MousseTool[] {
           return json({ ...state(tools.set({ userTheme: id })) })
         }
         const input = args.userTheme && typeof args.userTheme === 'object' ? args.userTheme as Record<string, unknown> : {}
-        if (!isUserThemeBase(input.base)) return { text: `base must be one of ${USER_THEME_BASES.join(', ')}.`, isError: true }
+        const existing = typeof input.id === 'string' ? appearance.userThemes.find((theme) => theme.id === input.id) : undefined
+        if (typeof input.id === 'string' && !existing) return { text: `No user theme ${input.id}; leave id out to create one.`, isError: true }
+        if ((input.base !== undefined || !existing) && !isUserThemeBase(input.base)) return { text: `base must be one of ${USER_THEME_BASES.join(', ')}.`, isError: true }
         const colors = input.colors && typeof input.colors === 'object' ? input.colors as Record<string, unknown> : {}
         const badColor = Object.entries(colors).find(([name, value]) => !isThemeTokenName(name) || !isThemeColorValue(value))
         if (badColor) return { text: `colors["${badColor[0]}"] is not a plain color token (a lower-case --name and a hex, rgb(), hsl() or named color).`, isError: true }
         if (input.accent !== undefined && input.accent !== '' && !(typeof input.accent === 'string' && /^#[0-9a-f]{6}$/i.test(input.accent)))
           return { text: 'accent must be #rrggbb.', isError: true }
         if (typeof input.css === 'string' && input.css.length > USER_THEME_LIMITS.css) return { text: `css is longer than ${USER_THEME_LIMITS.css} characters.`, isError: true }
-        const existing = typeof input.id === 'string' ? appearance.userThemes.find((theme) => theme.id === input.id) : undefined
-        if (typeof input.id === 'string' && !existing) return { text: `No user theme ${input.id}; leave id out to create one.`, isError: true }
         if (!existing && appearance.userThemes.length >= USER_THEME_LIMITS.themes)
           return { text: `There are already ${USER_THEME_LIMITS.themes} user themes; update one instead.`, isError: true }
         const id = existing?.id ?? userThemeIdFor(typeof input.name === 'string' ? input.name : '', appearance.userThemes.map((theme) => theme.id))
-        const theme = normalizeUserTheme({ ...input, id })
+        // An update keeps what it leaves out (its CSS, colors, accent), so a change of name or base loses nothing.
+        const theme = normalizeUserTheme({ ...(existing ?? {}), ...input, id })
         if (!theme) return { text: 'The theme needs a name.', isError: true }
         const userThemes = existing
           ? appearance.userThemes.map((entry) => (entry.id === theme.id ? theme : entry))

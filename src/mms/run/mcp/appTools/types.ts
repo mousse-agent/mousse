@@ -228,6 +228,11 @@ export interface MousseTool {
   permissionKey?: string
   /** The question an `editsWorkspace` or `changesSettings` tool asks the person when the permission mode does not allow it. */
   approvalPrompt?: string
+  /**
+   * The permission mode a call runs in without asking: `edit` (default: any mode that allows edits) or `full` (only Full
+   * access; every other mode asks).
+   */
+  runsWithoutAsking?(args: Record<string, unknown>): 'edit' | 'full'
   class: ToolClass
   /**
    * A read-only (`shared`) delegated child may call this although it is not a `reads` tool: it

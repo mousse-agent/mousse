@@ -181,7 +181,8 @@ export function BotAboutPanel({ bot }: { bot: BotSummary }) {
   useEffect(() => { void useBotsStore.getState().loadDetail(bot.id) }, [bot.id])
   const store = useBotsStore.getState
   const paused = bot.state === 'paused'
-  return <aside className="bot-about" aria-label={`About ${bot.name}`}>
+  // What the bot may use and which devices reach it are changed here: the panel pauses a theme while it is open.
+  return <aside className="bot-about" data-mousse-decision="" aria-label={`About ${bot.name}`}>
     <div className="bot-about-close"><button type="button" className="bot-close" aria-label="Close About" onClick={() => useBotsStore.setState({ aboutOpen: false })}><X size={14} /></button></div>
     <div className="bot-about-head">
       <BotFace look={bot.look} state={botFaceState(bot, happy)} size={88} view="full" />

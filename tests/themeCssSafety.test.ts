@@ -39,7 +39,10 @@ describe('externalLoadIn', () => {
     ['@namespace', '@namespace url(https://evil.example/ns);'],
     // Inside url() a comment is part of the address: this is a relative URL, not data:.
     ['comment inside url()', 'a { background: url(data/**/:x) }'],
-    ['data: url next to a remote one', 'a { background: url(data:image/png;base64,AA), url(https://evil.example/x) }']
+    ['data: url next to a remote one', 'a { background: url(data:image/png;base64,AA), url(https://evil.example/x) }'],
+    // The URL parser keeps a no-break space or BOM, so these are relative addresses, not data: or #id.
+    ['no-break space before data:', 'a { background: url("\\a0 data:x") }'],
+    ['BOM before #id', 'a { background: url("\\feff#x") }']
   ]
   it.each(loads)('refuses %s', (_name, css) => {
     expect(externalLoadIn(css)).not.toBeNull()

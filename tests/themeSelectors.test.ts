@@ -81,7 +81,8 @@ const DECISIONS: Record<string, string> = {
   'the Automations page (permission modes, schedules)': 'src/renderer/components/AutomationsPage.tsx',
   'an automation draft, also in a chat': 'src/renderer/components/automations/DraftCard.tsx',
   'an agent definition (grants, scripts)': 'src/renderer/components/agentDefinitions/AgentEditor.tsx',
-  'a device\'s limits': 'src/renderer/components/devices/DeviceLimitsDialog.tsx'
+  'a device\'s limits': 'src/renderer/components/devices/DeviceLimitsDialog.tsx',
+  'a bot\'s About panel (what it may use, which devices reach it)': 'src/renderer/components/bots/BotAboutPanel.tsx'
 }
 
 /**
