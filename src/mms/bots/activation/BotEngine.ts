@@ -69,6 +69,8 @@ import { BOT_COMPUTER_OPEN, BOT_COMPUTER_SHUT, limitCutLead, notOnThisComputerTe
 import { allPinned, copyPick, imagePickOf, isPinned, limitFamilyOf, limitOnPick, pickProblemText, plainLabel, rowName, samePick, samePickTarget, sameStoredPick, slotsOf, slotsWith, startDepthOf, stuckRowsOf, turnModelOf, UNPICKED_SLOTS, withImagePick, withSlots, type BotPickMiss, type BotStuckEntry, type BotTurnModel } from '../../../shared/bots/personal/modelSlots'
 import type { BotModelOption } from '../../../shared/bots/personal/methods'
 import { defaultChatInput, defaultWorkLine, lateWorkNote, MAX_NEW_QUESTIONS_PER_DAY, MAX_NUDGES_PER_QUESTION, MAX_OPEN_QUESTIONS_PER_BOT, MAX_OPEN_QUESTIONS_PER_WORK, MAX_QUESTIONS_PER_CHAT_TURN, NUDGE_AGAIN_MS, NUDGE_TEXT, plainChoices, QUESTION_AFTER_ASK_TEXT, QUESTION_ASKED_TEXT, QUESTION_END_TURN_TEXT, QUESTION_ANSWER_FORGOTTEN_TEXT, QUESTION_NOT_OFFERED_TEXT, QUESTION_WORK_ASKED_TEXT, QUESTION_WORK_WAITING_TEXT, questionGoneText, QUESTIONS_ENOUGH_TEXT, waitingQuestionLine, workAnswerLine, type BotQuestionAnswer, type BotQuestionFollow, type BotQuestionSpec } from '../../../shared/bots/personal/questions'
+import { CARD_SHOWN_TEXT, type BotCard } from '../../../shared/bots/personal/cards'
+import { checkedCard, hasReplyCards, keepReplyCard } from '../chat/replyCards'
 import { afterQuietHours, nudgeSlot } from './questionFollowUps'
 import type { LlmProviderOption } from '../../../shared/settings'
 import { botAllowedOf, type BotAllowed } from '../instructions'
@@ -2192,7 +2194,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // A chat turn is the bot's front desk: it hands what takes long to work (docs/plans/bot-always-free.md).
       // The owner's threads: reading in every lane; starting, messaging and stopping only in a chat turn the owner's own
       // message started (`chat:`), never in work, a reminder's work, a schedule or the bot's first message.
-      botTools: { escalate: true, consult: definition.context.length > 0, memory: true, frontDesk: row.lane === 'chat', threads: ownerChatTurn(row) ? 'all' : 'read', images: this.imagePick(row.botId) !== null, applets: true, subagents: row.lane === 'run', questions: asksOwner(row) },
+      botTools: { escalate: true, consult: definition.context.length > 0, memory: true, frontDesk: row.lane === 'chat', threads: ownerChatTurn(row) ? 'all' : 'read', images: this.imagePick(row.botId) !== null, applets: true, subagents: row.lane === 'run', questions: asksOwner(row), cards: true },
       limit
     })
     if (!compiled.ok) return this.block(row, 'policy_unenforceable', compiled.error.reason ?? compiled.error.message)
@@ -4471,9 +4473,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const body = handedOff ? sayOnce((text ?? '').trim()) : (text ?? '').trim()
     // Only the last turn of a run reports; an earlier one (work that went on with the owner's notes) is an update.
     const report = row.lane === 'run' && row.status === 'done' && (this.store.lastMainDispatch(row.id)?.n ?? dispatch.n) === dispatch.n
-    if (!body && !chips.length && !asks.length && !report && !waiting && !questions.length) return
+    // Cards the turn made (`show_card`) go on its message, even one with no words.
+    const cards = hasReplyCards(row.id)
+    if (!body && !chips.length && !asks.length && !report && !waiting && !questions.length && !cards) return
     // A turn that asked and said nothing else shows its question alone.
-    const reply = Boolean(body || chips.length || asks.length || report || waiting)
+    const reply = Boolean(body || chips.length || asks.length || report || waiting || cards)
     const kind = row.lane === 'chat' ? 'text' : report ? 'run_report' : 'notice'
     const name = this.host.definitions.revision(row.botId, row.revision)?.name ?? 'This bot'
     const room = waiting ? this.roomAskOf(row) : undefined
@@ -6758,6 +6762,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       ask: (botId, activationId, spec, follow) => this.askOwner(botId, activationId, spec, follow),
       relay: (botId, activationId, questionId, answer) => this.relayAnswer(botId, activationId, questionId, answer)
     },
+    cards: {
+      show: (botId, activationId, card) => this.showCard(botId, activationId, card)
+    },
     reminders: {
       add: (botId, from, input) => this.addReminder(botId, from, input),
       list: (botId) => this.store.waitingReminders(botId).map((reminder) => ({ reminderId: reminder.id, dueAt: reminder.dueAt, text: reminder.text, ...(reminder.work ? { work: reminder.work.title } : {}) })),
@@ -6809,10 +6816,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * over a cap the bot decides for itself. Work the owner asked for asks too, and waits for the answer (`askFromWork`);
    * scheduled runs, consults and subagents are never offered it.
    */
-  askOwner(botId: string, activationId: string, spec: BotQuestionSpec, follow?: BotQuestionFollow): { asked: boolean; text: string } {
+  askOwner(botId: string, activationId: string, given: BotQuestionSpec, follow?: BotQuestionFollow): { asked: boolean; text: string } {
     const row = this.store.activation(activationId)
     if (!row || row.botId !== botId) return { asked: false, text: 'Only a bot can use this.' }
     if (!asksOwner(row)) return { asked: false, text: QUESTION_NOT_OFFERED_TEXT }
+    // Its card, a gallery's pictures checked as `show_card` checks them.
+    const card = given.card ? checkedCard(this.filesFolder(botId), given.card) : undefined
+    if (card && 'problem' in card) return { asked: false, text: `card: ${card.problem}` }
+    const spec: BotQuestionSpec = card ? { ...given, card } : given
     if (row.lane === 'run') return this.askFromWork(row, spec, follow)
     const result = this.store.db.transaction((): 'asked' | 'after_ask' | 'enough' | 'ended' => {
       const current = this.store.activation(activationId)
@@ -6866,6 +6877,22 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     if (result === 'enough') return { asked: false, text: QUESTIONS_ENOUGH_TEXT }
     return { asked: false, text: 'This work has ended; nothing was asked.' }
+  }
+
+  /**
+   * `show_card` (issue #1123): a small card for the turn's next message (its reply, or its work's report), kept until that
+   * message is posted (`replyCards`). A gallery's pictures must be pictures in the bot's files folder. At most
+   * `MAX_CARDS_PER_MESSAGE` cards and `MAX_CARDS_JSON_BYTES` per message. A main turn only: a consult and a subagent are
+   * never offered it.
+   */
+  showCard(botId: string, activationId: string, given: BotCard): { shown: boolean; text: string } {
+    const row = this.store.activation(activationId)
+    if (!row || row.botId !== botId) return { shown: false, text: 'Only a bot can use this.' }
+    if (row.status !== 'running') return { shown: false, text: 'This message has ended; nothing was shown.' }
+    const card = checkedCard(this.filesFolder(botId), given)
+    if ('problem' in card) return { shown: false, text: card.problem }
+    const kept = keepReplyCard(activationId, card)
+    return 'problem' in kept ? { shown: false, text: kept.problem } : { shown: true, text: CARD_SHOWN_TEXT }
   }
 
   /**

@@ -2,6 +2,7 @@ import type { BotChip } from '../../shared/bots/personal/chat'
 import type { BotDepth, BotLane, BotModelPick, BotModelSlotKey, BotModelSlots, BotSchedule, BotWorkLevel, BotWorkModelName } from '../../shared/bots/personal/definition'
 import type { BotModelRows, BotPickMiss } from '../../shared/bots/personal/modelSlots'
 import type { BotQuestionFollow, BotQuestionSpec } from '../../shared/bots/personal/questions'
+import type { BotCard } from '../../shared/bots/personal/cards'
 import type { BotJournalKind, BotJournalWho, BotMemoryForgetResult, BotMemoryListing } from '../../shared/bots/personal/memory'
 import type { Enforceability, ProviderSelection, RunPolicy } from '../../shared/harness/types'
 import type { BotStoreTx } from './store/BotStore'
@@ -122,6 +123,14 @@ export interface BotToolHost {
      * to the question it waits on; `title` is the work's.
      */
     relay(botId: string, activationId: string, questionId: string, answer: string): { ok: true; title: string } | { ok: false; text: string }
+  }
+  /**
+   * `show_card` (issue #1123): a small card, already checked for shape (`cardOf`), kept for the turn's next message. A
+   * gallery's pictures are checked here to be pictures in the bot's files folder. `shown` is false, with why, when it was
+   * not kept. Absent: no cards here.
+   */
+  cards?: {
+    show(botId: string, activationId: string, card: BotCard): { shown: boolean; text: string }
   }
   /** One-off reminders: said at a time, or work started then. */
   reminders: {

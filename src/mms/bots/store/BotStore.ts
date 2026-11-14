@@ -10,6 +10,7 @@ import type { BotChatApplet, BotChip, BotError, BotMessageKind } from '../../../
 import type { ProviderSelection } from '../../../shared/harness/types'
 import type { BotStuckRows } from '../../../shared/bots/personal/modelSlots'
 import type { BotQuestionAnswer, BotQuestionFollow, BotQuestionLateAnswer, BotQuestionSpec, BotQuestionStatus } from '../../../shared/bots/personal/questions'
+import { cardOf, type BotCard } from '../../../shared/bots/personal/cards'
 import { BOT_MEMORY_SCHEMA_SQL } from '../memory/schema'
 import { narrowPermissionMode, type PermissionMode } from '../../../shared/permissionMode'
 
@@ -466,9 +467,10 @@ export interface BotMessageRow {
   activationId: string | null
   /**
    * The message's files, then the applets its reply shows (each with `applet`, an empty `path` and its title as `name`),
-   * so a file's index never moves and `bots.db` keeps its version; an older build shows an applet as its title.
+   * so a file's index never moves and `bots.db` keeps its version; an older build shows an applet as its title. A picture
+   * a gallery card shows is also one of its files (`card`), so another device or an older app reads it as any file.
    */
-  attachments: Array<{ name: string; path: string; applet?: BotChatApplet }> | null
+  attachments: Array<{ name: string; path: string; applet?: BotChatApplet; card?: true }> | null
   clientRequestId: string | null
   /** The message this one answers (a reply to the owner, or the owner's reply to the bot); null for none. */
   replyTo: string | null
@@ -476,6 +478,8 @@ export interface BotMessageRow {
   ownerReaction?: { emoji: string; at: string }
   /** The question this bot message carries, or the one this owner message answered (v8); absent for none. */
   questionId?: string
+  /** A bot message's cards (`show_card`, a question's card), as the bot made them (`cards_json`, v8); absent for none. */
+  cards?: BotCard[]
 }
 
 /** One of a bot's questions to its owner (`bot_questions`, v8). */
@@ -587,8 +591,17 @@ function messageOf(row: Row): BotMessageRow {
     clientRequestId: str(row.client_request_id),
     replyTo: str(row.reply_to),
     ...(str(row.owner_reaction) && str(row.owner_reaction_at) ? { ownerReaction: { emoji: row.owner_reaction as string, at: row.owner_reaction_at as string } } : {}),
-    ...(str(row.question_id) ? { questionId: row.question_id as string } : {})
+    ...(str(row.question_id) ? { questionId: row.question_id as string } : {}),
+    ...(cardsOf(row.cards_json) ? { cards: cardsOf(row.cards_json)! } : {})
   }
+}
+
+/** A message's kept cards: each read again as the bot's arguments are, so a damaged or unknown one is dropped. */
+function cardsOf(value: unknown): BotCard[] | undefined {
+  const kept = json<unknown[]>(value)
+  if (!Array.isArray(kept)) return undefined
+  const cards = kept.map(cardOf).filter((card): card is BotCard => !('problem' in card))
+  return cards.length ? cards : undefined
 }
 
 /** One of a bot's schedules (`bot_schedules`), the only place schedules live. */
@@ -1528,9 +1541,10 @@ export class BotStore {
    */
   insertMessage(row: Omit<BotMessageRow, 'seq'>): boolean {
     return this.run(
-      'INSERT INTO bot_messages(id, bot_id, at, author, kind, text, chips_json, ask_id, error_json, activation_id, attachments_json, client_request_id, reply_to, question_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING',
+      'INSERT INTO bot_messages(id, bot_id, at, author, kind, text, chips_json, ask_id, error_json, activation_id, attachments_json, client_request_id, reply_to, question_id, cards_json) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING',
       row.id, row.botId, row.at, row.author, row.kind, row.text, JSON.stringify(row.chips), row.askId, row.error ? JSON.stringify(row.error) : null,
-      row.activationId, row.attachments ? JSON.stringify(row.attachments) : null, row.clientRequestId, row.replyTo ?? null, row.questionId ?? null
+      row.activationId, row.attachments ? JSON.stringify(row.attachments) : null, row.clientRequestId, row.replyTo ?? null, row.questionId ?? null,
+      row.cards?.length ? JSON.stringify(row.cards) : null
     ) > 0
   }
 

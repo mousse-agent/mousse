@@ -116,6 +116,13 @@ function botRows(message: ChatMessage, ref: BotThreadRef): CapturedRow[] {
       const refs = memoryRefsOf(input)
       return [{ ...base, kind: 'tool_call', sourceKey: key, who: 'bot', text: [memory, ...refs].join(' '), json: { tool: memory, ...(refs.length ? { refs } : {}) } }]
     }
+    // A card is kept by its kind alone: its words are on the message it went with, whose row Forget removes; a copy here
+    // would outlive that. Its result says nothing of it.
+    if (/(?:^|__)show_card$/.test(tool)) {
+      const type = (input as { card?: { type?: unknown } } | undefined)?.card?.type
+      const kind = typeof type === 'string' && /^[a-z]{1,20}$/.test(type) ? type : undefined
+      return [{ ...base, kind: 'tool_call', sourceKey: key, who: 'bot', text: ['show_card', ...(kind ? [kind] : [])].join(' '), json: { tool: 'show_card', ...(kind ? { card: kind } : {}) } }]
+    }
     const inputText = input === undefined ? '' : safeJson(input)
     const rows: CapturedRow[] = [{
       ...base,

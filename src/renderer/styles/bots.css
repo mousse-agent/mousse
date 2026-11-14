@@ -274,6 +274,28 @@ button.bot-image:focus-visible > img { opacity: 0.82; }
 .bot-kv-row { display: contents; }
 .bot-kv dt { color: var(--text-secondary); white-space: nowrap; }
 .bot-kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.bot-kv-title { grid-column: 1 / -1; margin-bottom: 2px; font-weight: 600; color: var(--text-primary); }
+/* Cards a bot attached (`show_card`): the key-value card's box, for a checklist, progress or pictures. */
+.bot-cards { display: flex; flex-direction: column; }
+.bot-cards > .bot-kv, .bot-card { margin: 8px 0; }
+.bot-cards:last-child > :last-child { margin-bottom: 2px; }
+.bot-card { padding: 9px 12px; border-radius: 10px; font-size: var(--bot-meta); line-height: 1.5; background: color-mix(in srgb, var(--text-primary) 5%, transparent); }
+.bot-card-title { margin: 0 0 4px; font-weight: 600; color: var(--text-primary); }
+.bot-checklist ul { display: flex; flex-direction: column; gap: 3px; margin: 0; padding: 0; list-style: none; }
+.bot-checklist li { display: flex; align-items: flex-start; gap: 8px; min-width: 0; overflow-wrap: anywhere; }
+.bot-checklist li > svg { flex: none; margin-top: 2px; color: var(--text-secondary); }
+.bot-checklist li.is-done > svg { color: var(--accent); }
+.bot-checklist li.is-doing > svg { color: var(--text-primary); }
+.bot-checklist li.is-skipped > span { color: var(--text-secondary); text-decoration: line-through; }
+.bot-progress { min-width: min(260px, 100%); }
+.bot-progress-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 0 0 6px; }
+.bot-progress-label { min-width: 0; overflow-wrap: anywhere; color: var(--text-primary); }
+.bot-progress-count { flex: none; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.bot-progress-track { height: 6px; border-radius: 999px; overflow: hidden; background: color-mix(in srgb, var(--text-primary) 10%, transparent); }
+.bot-progress-fill { height: 100%; border-radius: inherit; background: var(--accent); }
+.bot-progress-note { margin: 6px 0 0; color: var(--text-secondary); overflow-wrap: anywhere; }
+.bot-gallery { padding-bottom: 4px; }
+.bot-gallery .bot-reply-media { margin: 2px 0 4px; }
 
 /* Asking for something, inside the bot's message; the approval look (#590). */
 .ask-card { margin-top: 12px; max-width: 520px; padding: 12px 14px; border-radius: 12px; border: 1px solid rgba(var(--accent-rgb), .28); background: rgba(var(--accent-rgb), .06); }

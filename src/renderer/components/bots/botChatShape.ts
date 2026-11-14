@@ -37,7 +37,7 @@ export function workSignalsOf(message: BotChatMessage): { titles: string[]; queu
   const noted = message.chips.some(isNotePassed)
   if (!starts.length && !noted) return null
   const text = message.text.trim()
-  const only = message.kind === 'text' && !message.ask && !message.error && !message.attachments?.length &&
+  const only = message.kind === 'text' && !message.ask && !message.error && !message.attachments?.length && !message.cards?.length &&
     message.chips.every((chip) => isWorkStart(chip) || isNotePassed(chip)) &&
     text.length < HANDOFF_TEXT_MAX && !/\n\s*\n|```|^\s*[#|>-]/m.test(text)
   const details = message.chips.filter((chip) => isWorkStart(chip) || isNotePassed(chip)).flatMap((chip) => (chip.title ? [chip.title] : []))

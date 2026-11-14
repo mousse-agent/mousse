@@ -67,19 +67,28 @@ export function BotPathChip({ path }: { path: string }) {
   </span>
 }
 
+/**
+ * Keys and their values as a small card: what a list of bold keys in a reply reads as, and a facts card
+ * (`show_card`), so both look the same. `title`: a facts card's title, above its rows.
+ */
+export function KeyValueRows({ rows, title }: { rows: ReadonlyArray<{ key: string | number; label: ReactNode; value: ReactNode }>; title?: string }) {
+  return <dl className="bot-kv" {...(title ? { 'aria-label': title } : {})}>
+    {title && <div className="bot-kv-title">{title}</div>}
+    {rows.map((row) => <div key={row.key} className="bot-kv-row"><dt>{row.label}</dt><dd>{row.value}</dd></div>)}
+  </dl>
+}
+
 /** A list of bold keys and their values ("**CPU:** AMD Ryzen 9") as a small card; its items as they were drawn. */
 function KeyValueCard({ children }: { children: ReactNode }) {
-  const rows = Children.toArray(children).filter(isValidElement) as Array<ReactElement<{ children?: ReactNode }>>
-  return <dl className="bot-kv">
-    {rows.map((row, index) => {
-      const parts = Children.toArray(row.props.children).filter((part) => typeof part !== 'string' || part.trim())
-      const [key, ...rest] = parts
-      const name = isValidElement<{ children?: ReactNode }>(key) ? Children.toArray(key.props.children).join('').replace(/:\s*$/, '') : ''
-      // `**RAM**: 19.7 GB`: the colon after the key belongs to it, and the space before the value goes.
-      const value = rest.map((part, at) => (at === 0 && typeof part === 'string' ? part.replace(/^\s*:?\s*/, '') : part))
-      return <div key={index} className="bot-kv-row"><dt>{name}</dt><dd>{value}</dd></div>
-    })}
-  </dl>
+  const items = Children.toArray(children).filter(isValidElement) as Array<ReactElement<{ children?: ReactNode }>>
+  return <KeyValueRows rows={items.map((row, index) => {
+    const parts = Children.toArray(row.props.children).filter((part) => typeof part !== 'string' || part.trim())
+    const [key, ...rest] = parts
+    const name = isValidElement<{ children?: ReactNode }>(key) ? Children.toArray(key.props.children).join('').replace(/:\s*$/, '') : ''
+    // `**RAM**: 19.7 GB`: the colon after the key belongs to it, and the space before the value goes.
+    const value = rest.map((part, at) => (at === 0 && typeof part === 'string' ? part.replace(/^\s*:?\s*/, '') : part))
+    return { key: index, label: name, value }
+  })} />
 }
 
 /** The path a link opens, when it names a file of this computer by its full path. */
@@ -104,15 +113,18 @@ export const BOT_IMAGES: MarkdownImages = { Image: BotMarkdownImage }
  * values a card, and short inline code stays whole. Its images follow `BOT_IMAGES`, which no element here replaces.
  * Kept for the module's life (see `Markdown`).
  */
+/** A link in a bot's message: a file of this computer is its chip, a link the app refuses is plain text. */
+export function BotLink({ href, children, ...props }: { href?: string; children?: ReactNode } & Record<string, unknown>) {
+  const path = linkedPath(href)
+  if (path) return <BotPathChip path={path} />
+  if (!href || classifyLink(href).kind === 'reject') return <span>{children}</span>
+  return <a {...props} href={href} className="an-md-link" onClick={(event) => { event.preventDefault(); routeLink(href) }}>
+    <LinkLabel href={href}>{children}</LinkLabel>
+  </a>
+}
+
 const botMarkdownComponents: Partial<Components> = {
-  a: ({ href, children, ...props }) => {
-    const path = linkedPath(href)
-    if (path) return <BotPathChip path={path} />
-    if (!href || classifyLink(href).kind === 'reject') return <span>{children}</span>
-    return <a {...props} href={href} className="an-md-link" onClick={(event) => { event.preventDefault(); routeLink(href) }}>
-      <LinkLabel href={href}>{children}</LinkLabel>
-    </a>
-  },
+  a: ({ href, children, node: _node, ...props }) => <BotLink href={href} {...props}>{children}</BotLink>,
   // Inline code stays inline, so the punctuation after it stays with it. A short piece without spaces never breaks
   // inside (a file name or a flag reads whole); a longer one wraps anywhere. Inline math is drawn as a thread draws it.
   inlineCode: ({ children, node: _node, ...props }) => {

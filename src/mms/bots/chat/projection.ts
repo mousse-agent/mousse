@@ -14,8 +14,11 @@ import type { BotJournal } from '../seams'
 import type { BotMcpWhere } from '../mcp/BotMcp'
 import { workWaits, type BotActivationRow, type BotEscalationRow, type BotMessageRow, type BotQuestionRow, type BotStore } from '../store/BotStore'
 import { plainChoices, type BotChatQuestion } from '../../../shared/bots/personal/questions'
+import { cardFileName, plainCards, type BotCard, type BotChatCard } from '../../../shared/bots/personal/cards'
+import { MAX_BOT_CHAT_ATTACHMENTS } from '../../../shared/bots/personal/methods'
 import { replyApplets } from './replyApplets'
 import { takeToolImages } from './toolImages'
+import { takeReplyCards } from './replyCards'
 import type { AppletReference } from '../../../shared/applets'
 
 /**
@@ -94,6 +97,11 @@ export interface PostInput {
   /** A bot's message: the question it carries (its bubble). The owner's: the question it answered. */
   questionId?: string
   /**
+   * A bot's message: cards to show with it, checked already (`cardOf`, a gallery's pictures in its files folder). A
+   * message of a dispatch also takes the cards its turn made (`show_card`), and a question's bubble its question's card.
+   */
+  cards?: BotCard[]
+  /**
    * For the owner's eyes only (#673: a picked model that can't run, by name): journaled as a hidden kind, which no
    * pack, search or read gives the bot, so it never learns a model's or an entry's name from its own chat.
    */
@@ -115,6 +123,30 @@ function filesOf(row: Pick<BotMessageRow, 'attachments'>): Array<{ name: string;
 
 function appletsOf(row: Pick<BotMessageRow, 'attachments'>): BotChatApplet[] {
   return (row.attachments ?? []).flatMap((file) => (file.applet ? [file.applet] : []))
+}
+
+/** A message's cards as the app draws them: a gallery's pictures named by their files. */
+function chatCards(cards: readonly BotCard[] | undefined): BotChatCard[] {
+  return (cards ?? []).map((card) => card.type === 'gallery'
+    ? { ...card, files: card.files.map((file) => ({ path: file.path, name: cardFileName(file.path), ...(file.caption ? { caption: file.caption } : {}) })) }
+    : card)
+}
+
+/**
+ * The pictures a message's galleries show, as its files too (`card`), so a phone reads them through
+ * `bots.chat.attachment` and an older app shows them: each once, after the files it has, while there is room.
+ */
+function galleryFiles(cards: readonly BotCard[], files: ReadonlyArray<{ path: string }>): Array<{ name: string; path: string; card: true }> {
+  const added: Array<{ name: string; path: string; card: true }> = []
+  for (const card of cards) {
+    if (card.type !== 'gallery') continue
+    for (const file of card.files) {
+      if (files.length + added.length >= MAX_BOT_CHAT_ATTACHMENTS) return added
+      if (files.some((kept) => kept.path === file.path) || added.some((kept) => kept.path === file.path)) continue
+      added.push({ name: cardFileName(file.path), path: file.path, card: true })
+    }
+  }
+  return added
 }
 
 /** The longest part of a written answer a question's bubble shows. */
@@ -190,17 +222,23 @@ export class BotChatProjection {
    * pictures a tool handed the activation since its last message, as files. Its journal keeps the words with each applet
    * named, never an applet's source. Anything else is kept as given.
    */
-  private shown(input: PostInput): { text: string; journal: string; attachments: NonNullable<BotMessageRow['attachments']> } {
+  private shown(input: PostInput, question?: BotQuestionRow): { text: string; journal: string; attachments: NonNullable<BotMessageRow['attachments']>; cards: BotCard[] } {
     const files = input.attachments ?? []
-    if (input.author !== 'bot' || input.kind === 'error' || input.hidden) return { text: input.text, journal: input.text, attachments: [...files] }
+    if (input.author !== 'bot' || input.kind === 'error' || input.hidden) return { text: input.text, journal: input.text, attachments: [...files], cards: [] }
     const parts = this.replyParts
     const made = input.threadId && parts ? replyApplets(input.text, input.threadId, () => parts.published(input.threadId!)) : undefined
-    // A message of a dispatch (its thread is named) shows what that activation's tools handed it.
+    // A message of a dispatch (its thread is named) shows what that activation's tools handed it: pictures, and cards.
     const images = input.threadId ? takeToolImages(input.activationId) : []
+    const cards = [...(input.cards ?? []), ...(input.threadId ? takeReplyCards(input.activationId) : []), ...(question?.spec.card ? [question.spec.card] : [])]
+    const kept = [...files, ...images]
+    // Its journal row holds the cards as text after its words, so the chat pack, search and Forget see them.
+    const words = made?.journal ?? input.text
+    const plain = plainCards(cards)
     return {
       text: made?.text ?? input.text,
-      journal: made?.journal ?? input.text,
-      attachments: [...files, ...images, ...(made?.applets ?? []).map((applet) => ({ name: applet.reference.title, path: '', applet }))]
+      journal: plain ? (words ? `${words}\n\n${plain}` : plain) : words,
+      attachments: [...kept, ...galleryFiles(cards, kept), ...(made?.applets ?? []).map((applet) => ({ name: applet.reference.title, path: '', applet }))],
+      cards
     }
   }
 
@@ -214,11 +252,11 @@ export class BotChatProjection {
       const existing = this.store.message(id) ?? (input.clientRequestId ? this.store.messageByRequest(input.clientRequestId) : undefined)
       if (existing) return { row: existing, inserted: false }
       const at = this.store.now()
-      const shown = this.shown(input)
-      // A question's bubble is journaled with its answers as text, so the chat pack, search and Forget see them. A nudge
-      // of it (a later row carrying it) is journaled as its own fixed line: a copy of the answers would outlive a forget.
+      // A question's bubble is journaled with its card and its answers as text, so the chat pack, search and Forget see
+      // them. A nudge of it (a later row carrying it) is journaled as its own fixed line: a copy would outlive a forget.
       const carried = input.questionId && input.author === 'bot' ? this.store.question(input.questionId) : undefined
       const asked = carried && carried.messageId === null ? carried : undefined
+      const shown = this.shown(input, asked)
       if (asked) shown.journal = `${shown.journal}\n\n${plainChoices(asked.spec)}`
       this.store.insertMessage({
         id,
@@ -234,7 +272,8 @@ export class BotChatProjection {
         attachments: shown.attachments.length ? shown.attachments : null,
         clientRequestId: input.clientRequestId ?? null,
         replyTo: input.replyTo ?? null,
-        ...(input.questionId ? { questionId: input.questionId } : {})
+        ...(input.questionId ? { questionId: input.questionId } : {}),
+        ...(shown.cards.length ? { cards: shown.cards } : {})
       })
       if (input.askId) this.store.setEscalationMessage(input.askId, id)
       // Its follow-up counts from when the owner sees it.
@@ -291,7 +330,9 @@ export class BotChatProjection {
     // A question's bubble, or a nudge of it (any other bot row that carries it): its words, then its answers as plain text
     // for an app that doesn't draw them (`plainFrom`).
     const asks = question && row.author === 'bot' && question.messageId ? question : undefined
-    const plain = asks && asks.spec.choices.length ? plainChoices(asks.spec) : ''
+    // Its cards as plain text first, then the question's answers: an app that draws them stops at `plainFrom`.
+    const cards = row.author === 'bot' ? chatCards(row.cards) : []
+    const plain = [plainCards(cards), asks && asks.spec.choices.length ? plainChoices(asks.spec) : ''].filter(Boolean).join('\n\n')
     return {
       seq: row.seq,
       id: row.id,
@@ -300,8 +341,9 @@ export class BotChatProjection {
       kind: row.kind,
       // Reserved ids keep permission switch lines quiet after a restart without a message schema change.
       ...(row.kind === 'notice' && row.id.startsWith('bm_permission_') ? { systemLine: true as const } : {}),
-      text: plain ? `${row.text}\n\n${plain}` : row.text,
+      text: plain ? (row.text ? `${row.text}\n\n${plain}` : plain) : row.text,
       ...(plain ? { plainFrom: row.text.length } : {}),
+      ...(cards.length ? { cards } : {}),
       ...(asks ? { question: questionView(asks, asks.lane === 'run' && asks.status === 'open' && this.store.activation(asks.activationId)?.endReason === 'question', row.id) } : {}),
       ...(question && row.author === 'owner' && question.answerMessage === row.id && question.status === 'answered'
         ? { answers: { questionId: question.id, tapped: question.answer?.choice !== undefined } } : {}),
@@ -325,7 +367,7 @@ export class BotChatProjection {
     const quoted = this.store.message(messageId)
     if (!quoted) return { id: messageId, author: 'owner', text: '', gone: true }
     // A message with no words is quoted by its files' and applets' names.
-    const text = oneLine(quoted.text || quoted.error?.text || (quoted.attachments?.length ? quoted.attachments.map((file) => file.name).join(', ') : ''), 160)
+    const text = oneLine(quoted.text || quoted.error?.text || plainCards(quoted.cards) || (quoted.attachments?.length ? quoted.attachments.map((file) => file.name).join(', ') : ''), 160)
     return { id: quoted.id, author: quoted.author, text }
   }
 
@@ -465,7 +507,7 @@ export class BotChatProjection {
       : state === 'stuck' ? `Needs you: ${error!.text}`
         : state === 'needs_you' ? (asks[0] ? `Wants to ${this.card(asks[0]).title}` : `Asked: ${oneLine(waitingOn[0]!.spec.question, 80)}`)
           : state === 'working' ? (offline ? 'Waiting for internet' : chatTurn || !work.length ? 'Working…' : workingOn(work))
-            : last ? oneLine(last.text || last.error?.text || '') : ''
+            : last ? oneLine(last.text || last.error?.text || plainCards(last.cards)) : ''
     return {
       id: definition.id,
       name: definition.name,
@@ -475,7 +517,8 @@ export class BotChatProjection {
       stateText,
       ...(offline ? { waiting: 'internet' as const } : {}),
       ...(error ? { error } : {}),
-      ...(last ? { last: { text: oneLine(last.text || last.error?.text || last.attachments?.map((file) => file.name).join(', ') || '', 200), at: last.at, author: last.author } } : {}),
+      // A message of cards alone reads as its first card's plain text.
+      ...(last ? { last: { text: oneLine(last.text || last.error?.text || plainCards(last.cards) || last.attachments?.map((file) => file.name).join(', ') || '', 200), at: last.at, author: last.author } } : {}),
       ...(ended ? { lastOutcome: ended.status === 'done' ? 'ok' as const : ended.status === 'failed' ? 'failed' as const : 'stopped' as const } : {}),
       unread: this.store.unread(definition.id, registry?.readSeq ?? 0),
       createdAt: registry?.createdAt ?? new Date(now).toISOString(),

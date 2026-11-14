@@ -18,6 +18,7 @@ import { replyImages } from './botReplyImages'
 import { BotEmojiButton } from './BotEmoji'
 import { BotAskReplies } from './BotAskReplies'
 import { BotQuestionReplies } from './BotQuestionReplies'
+import { BotCards, galleryPaths } from './BotCards'
 import { BotActivitySticker, BotPresenceLine } from './BotPresence'
 import { askAnswerLine } from '../asks/AskCard'
 import { BotMenu } from './BotMenu'
@@ -217,7 +218,15 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, brows
   // questions can't be answered here keeps that copy, and the owner answers with Reply.
   const canAnswer = useBotsStore((s) => !s.questionsMissing)
   const question = canAnswer ? row.question : undefined
-  const message = useMemo(() => (question && row.plainFrom !== undefined ? { ...row, text: row.text.slice(0, row.plainFrom).trimEnd() } : row), [question, row])
+  // Its cards are drawn under its words, so those stop at their plain copy too; the pictures a gallery shows are its
+  // files as well (for other devices), which the gallery shows instead of the picture strip above the words.
+  const cards = row.cards?.length ? row.cards : undefined
+  const message = useMemo(() => {
+    if ((!question && !cards) || row.plainFrom === undefined) return row
+    const inGallery = galleryPaths(cards)
+    const attachments = row.attachments?.filter((file) => !inGallery.has(file.path))
+    return { ...row, text: row.text.slice(0, row.plainFrom).trimEnd(), ...(row.attachments ? { attachments } : {}) }
+  }, [question, cards, row])
   const quoted = quote && message.replyTo
   const [stepsOpen, setStepsOpen] = useState(false)
   const steps = message.chips
@@ -257,10 +266,11 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, brows
   return <article className={`chat-participant-message from-agent bot-message${starts ? ' is-group-start' : ''}${reacted ? ' is-react-quiet' : ''}${message.reaction ? ' has-reaction' : ''}${menuOpen ? ' is-menu-open' : ''}`} data-message-id={message.id}
     onMouseEnter={clampTools} onFocus={clampTools} onMouseLeave={reacted ? () => setReacted(false) : undefined}>
     <div className="bot-message-line">
-      <div ref={bubble} tabIndex={-1} className={`bot-bubble${pictures ? ' has-media' : ''}${pictures && !media.text && !lostChips.length ? ' is-media-only' : ''}`}>
+      <div ref={bubble} tabIndex={-1} className={`bot-bubble${pictures ? ' has-media' : ''}${pictures && !media.text && !lostChips.length && !cards ? ' is-media-only' : ''}`}>
         {quoted && <BotReplyQuote botId={bot.id} quote={message.replyTo!} botName={bot.name} />}
         <BotReplyMedia images={shownImages} onMenuOpen={setMenuOpen} />
         {media.text && <BotMarkdown text={media.text} className="bot-markdown" />}
+        {cards && <BotCards cards={cards} />}
         {lostChips.length > 0 && <p className="bot-picture-chips">{lostChips.map((image) => <BotPathChip key={image.key} path={image.path!} />)}</p>}
         {openAsk && <p className="bot-bubble-ask"><Shield size={14} aria-hidden /><span>Wants to <strong>{openAsk.title}</strong></span></p>}
         {!!message.attachments?.length && <BotOtherFiles files={message.attachments} />}
@@ -278,7 +288,8 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, brows
         {canReact && <BotReactionBar current={message.reaction} onReact={react} onPicked={picked} onFocus={() => setReacted(false)} />}
         <span className="bot-message-actions">
           {message.text && <ReadAloudButton speechKey={`bot:${message.id}`} markdown={message.text} />}
-          {message.text && <CopyButton text={message.text} />}
+          {/* Copy takes its cards too, as text. */}
+          {(cards ? row.text : message.text) && <CopyButton text={cards ? row.text : message.text} />}
           <ReplyButton onReply={() => onReply(message)} />
         </span>
       </span>

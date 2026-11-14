@@ -1,6 +1,6 @@
 import { closeSync, fstatSync, openSync, readSync } from 'node:fs'
 import { NetError, type NodeCapability, type NodeId } from '../../../shared/net'
-import type { BotChatMessage, BotDetail, BotError, BotSummary } from '../../../shared/bots/personal/chat'
+import type { BotChatCard, BotChatMessage, BotDetail, BotError, BotSummary } from '../../../shared/bots/personal/chat'
 import { MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS } from '../../../shared/bots/personal/definition'
 import { MAX_CHOICE_LABEL_CHARS } from '../../../shared/bots/personal/questions'
 import type { BotLook } from '../../../shared/bots/personal/look'
@@ -277,22 +277,38 @@ export interface RemoteBotFile {
   image?: true
 }
 
+/**
+ * A card as another device sees it: a gallery's pictures by name, each with its place among the message's files
+ * (`index`, read with `bots.chat.attachment`) when it is one of them, never its path on this computer.
+ */
+export type RemoteBotCard = Exclude<BotChatCard, { type: 'gallery' }> | { type: 'gallery'; title?: string; files: Array<{ name: string; caption?: string; index?: number }> }
+
 /** A chat row as another device sees it. */
-export type RemoteBotMessage = Omit<BotChatMessage, 'attachments' | 'applets'> & { attachments?: RemoteBotFile[] }
+export type RemoteBotMessage = Omit<BotChatMessage, 'attachments' | 'applets' | 'cards'> & { attachments?: RemoteBotFile[]; cards?: RemoteBotCard[] }
 
 /**
  * A chat row as another device sees it: a file's name and type without its path on this computer, an error without an
- * instance id, and an applet as one line naming it (it runs only in this computer's app, from the bot's thread here).
+ * instance id, an applet as one line naming it (it runs only in this computer's app, from the bot's thread here), and a
+ * gallery card's pictures by their files.
  */
 export function remoteBotMessage(message: BotChatMessage): RemoteBotMessage {
-  const { attachments, error, applets, ...rest } = message
+  const { attachments, error, applets, cards, ...rest } = message
   // The title is the bot's words: plain, so it can't add a link or an image to the line.
   const named = applets?.map((applet) => `_Applet: ${applet.reference.title.replace(/[\\`*_[\]()<>!#|~]/g, '').trim()}. It opens on the computer._`).join('\n')
+  const remoteCards = cards?.map((card): RemoteBotCard => card.type !== 'gallery' ? card : {
+    type: 'gallery',
+    ...(card.title ? { title: card.title } : {}),
+    files: card.files.map((file) => {
+      const index = attachments?.findIndex((attached) => attached.path === file.path) ?? -1
+      return { name: file.name, ...(file.caption ? { caption: file.caption } : {}), ...(index >= 0 ? { index } : {}) }
+    })
+  })
   return {
     ...rest,
     ...(named ? { text: rest.text ? `${rest.text}\n\n${named}` : named } : {}),
     ...(error ? { error: remoteBotError(error) } : {}),
-    ...(attachments ? { attachments: attachments.map((file) => ({ name: file.name, ...remoteFileType(file.path || file.name) })) } : {})
+    ...(attachments ? { attachments: attachments.map((file) => ({ name: file.name, ...remoteFileType(file.path || file.name) })) } : {}),
+    ...(remoteCards?.length ? { cards: remoteCards } : {})
   }
 }
 

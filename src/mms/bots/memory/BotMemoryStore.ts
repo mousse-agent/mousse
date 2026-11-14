@@ -1000,6 +1000,21 @@ function defaultRedactMessage(tx: BotStoreTx, botId: string, messageId: string, 
   const has = (table: string) => Boolean(tx.statement("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table))
   if (!has('bot_messages')) return
   tx.statement('UPDATE bot_messages SET text = ? WHERE id = ? AND bot_id = ?').run(text, messageId, botId)
+  // Nor its cards (issue #1123), with the pictures a gallery of them added to its files: found by the message, not by how
+  // its words read. The pictures themselves stay in the bot's files folder.
+  if (tx.statement("SELECT 1 FROM pragma_table_info('bot_messages') WHERE name = 'cards_json'").get()) {
+    const row = tx.statement('SELECT attachments_json FROM bot_messages WHERE id = ? AND bot_id = ? AND cards_json IS NOT NULL').get(messageId, botId) as { attachments_json: string | null } | undefined
+    if (row) {
+      let files: unknown = []
+      try {
+        files = row.attachments_json ? JSON.parse(row.attachments_json) : []
+      } catch {
+        files = []
+      }
+      const kept = Array.isArray(files) ? (files as Array<{ card?: unknown } | null>).filter((file) => !file?.card) : []
+      tx.statement('UPDATE bot_messages SET cards_json = NULL, attachments_json = ? WHERE id = ? AND bot_id = ?').run(kept.length ? JSON.stringify(kept) : null, messageId, botId)
+    }
+  }
   // A forgotten message keeps no reaction, so the bot is never told of one on it.
   const reactions = Boolean(tx.statement("SELECT 1 FROM pragma_table_info('bot_messages') WHERE name = 'owner_reaction'").get())
   const clearReaction = (id: string) => {

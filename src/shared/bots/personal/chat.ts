@@ -1,8 +1,10 @@
 import type { AppletReference } from '../../applets'
 import type { BotLook } from './look'
 import type { BotChatQuestion } from './questions'
+import type { BotChatCard } from './cards'
 
 export type { BotChatQuestion } from './questions'
+export type { BotChatCard } from './cards'
 
 /**
  * What the Bot UI sees of a bot (Bot Phase 1 §5.1.1, bot-ui C2–C8): its state, its chat as rows of
@@ -106,8 +108,14 @@ export interface BotChatMessage {
   /** The owner's message answered a question (by a tap or in their own words): which one. */
   answers?: { questionId: string; tapped: boolean }
   /**
-   * Where `text`'s plain copy of the question's answers starts ("Flat A · Flat B"), for an app that doesn't draw them: an
-   * app that does shows `text` up to here, then the buttons. Absent when the text has none.
+   * Small cards the bot attached (`show_card`, or a question's card), drawn under its words from the app's own
+   * components. Absent from older services.
+   */
+  cards?: BotChatCard[]
+  /**
+   * Where `text`'s plain copy of the message's cards and its question's answers starts ("Flat A · Flat B"), for an app
+   * that doesn't draw them: an app that does shows `text` up to here, then the cards and the buttons. Absent when the
+   * text has none.
    */
   plainFrom?: number
 }
