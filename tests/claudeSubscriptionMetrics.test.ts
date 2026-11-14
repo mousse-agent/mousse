@@ -256,6 +256,29 @@ describe('Claude prompt cache lifetime', () => {
     }
   })
 
+  it('dates the cache from when the request started streaming, not when a long reply was answered', () => {
+    const start = (id: string, parent: string | null = null) =>
+      ({ type: 'stream_event', parent_tool_use_id: parent, uuid: `s-${id}`, session_id: 'session', event: { type: 'message_start', message: { id } } }) as unknown as SDKMessage
+    vi.useFakeTimers({ now: new Date('2026-11-09T10:00:00Z') })
+    try {
+      const collector = new ClaudeMetricsCollector()
+      collector.observe(start('a1'))
+      // A subagent's request starting later does not move the main conversation's clock.
+      vi.setSystemTime(new Date('2026-11-09T10:01:00Z'))
+      collector.observe(start('a1', 'task-1'))
+      vi.setSystemTime(new Date('2026-11-09T10:04:00Z'))
+      collector.observe(written('a1', { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 17_089 }, 17_089))
+      expect(collector.report().promptCache).toEqual({ at: Date.parse('2026-11-09T10:00:00Z'), ttlMs: 60 * 60_000 })
+      // The next request of the turn moves it to that request's start.
+      collector.observe(start('a2'))
+      vi.setSystemTime(new Date('2026-11-09T10:06:00Z'))
+      collector.observe(written('a2', { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 }))
+      expect(collector.report().promptCache?.at).toBe(Date.parse('2026-11-09T10:04:00Z'))
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('reads a five-minute write, and keeps the longest lifetime the turn wrote', () => {
     const collector = new ClaudeMetricsCollector()
     collector.observe(written('a1', { ephemeral_5m_input_tokens: 900, ephemeral_1h_input_tokens: 0 }, 900))

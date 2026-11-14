@@ -31,6 +31,7 @@ import {
 } from '../../shared/settings'
 import { piInstanceId, piProviderIdOf, PROVIDER_INSTANCE_ERROR_CODES, type ModelOverride } from '../../shared/providerInstances'
 import { parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
+import { promptCacheGoneCold } from '../../shared/promptCacheCold'
 import type { Api, Model } from '@earendil-works/pi-ai'
 import { customModelDefinition } from '../harness/catalog'
 import { OwnedWorkBarrier, type OwnedWorkEntry } from '../execution/OwnedWorkBarrier'
@@ -14652,10 +14653,15 @@ export class OrchestratorService extends EventEmitter {
       native = false
       instanceId = this.turnSelection(session, DEFAULT_CHAT_MODE).instanceId
       if (instanceId) {
+        // Cold only when the cache record is this instance's and its lifetime ran out; with no such record nothing is
+        // known, and the runtime keeps caching (a warm history read uncached costs ten times its cached read).
+        const cache = promptCacheOf(session.nativeContext)
+        const cacheCold = cache?.instanceId === instanceId && promptCacheGoneCold(cache, Date.now()) === true
         try {
           native = await this.harness.compactConversation({
             threadId, instanceId, focus,
             history: nativeAgentHistory(session.nativeContext),
+            ...(cacheCold ? { cacheCold: true } : {}),
             signal: stop.signal
           })
         } catch (error) {

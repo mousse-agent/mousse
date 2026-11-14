@@ -52,7 +52,7 @@ import {
   type StoredCliConfig
 } from '../../cliConfig'
 import { resolveWindowsShim } from '../../resolveWindowsShim'
-import { claudeAccountSubject, claudeAutoModeDisabled, claudeBypassDisabled, claudeChoosesCacheTtl, claudeEffectiveEnvironment, claudeEffectiveVariable, claudeSignInEnvironment, claudeTurnVariable } from './accountSubject'
+import { claudeAccountSubject, claudeAutoModeDisabled, claudeBypassDisabled, claudeChoosesCacheTtl, claudeEffectiveEnvironment, claudeEffectiveVariable, claudeSignInEnvironment, claudeTurnVariable, claudeUsesApiKeyHelper } from './accountSubject'
 import {
   ClaudeMetricsCollector,
   ClaudeNativeEditCounter,
@@ -160,6 +160,8 @@ type SavedSession = {
    * session named `sessionId`, so the source session is never changed.
    */
   fork?: { from: string; at: string }
+  /** The client name (`CLAUDE_CODE_ENTRYPOINT`) the session last ran under; absent for the Agent SDK default. A compaction resumes with it, so a warm cache still matches. */
+  entrypoint?: string
 }
 type Settings = {
   /**
@@ -775,6 +777,12 @@ export function claudeSubscriptionEnvironment(source: NodeJS.ProcessEnv = proces
 
 /** Variables that send Claude Code's requests to a cloud provider, billed per token. */
 const CLAUDE_CLOUD_ROUTES = ['CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY']
+/**
+ * The client name (`CLAUDE_CODE_ENTRYPOINT`) Claude Code reports for the processes Mousse starts on a Claude
+ * subscription. Without one it reports the Agent SDK's `sdk-ts`, which Anthropic meters against the 5-hour limit at
+ * a higher rate per token than the interactive CLI (anthropics/claude-code#97074).
+ */
+export const MOUSSE_CLAUDE_ENTRYPOINT = 'mousse'
 /** A turn waits this long at most for a proxy's seat listing before it starts. */
 const PROXY_SEATS_TURN_WAIT_MS = 2_000
 /** A proxy's seat listing stands this long before a turn or a snapshot reads it again. */
@@ -1120,7 +1128,13 @@ export class ClaudeSubscriptionProviderService {
    * (a process stopped mid-way cannot say), so the saved session is dropped unless Claude Code answered without a
    * compaction: the next turn starts a new session with the full history in the prompt.
    */
-  async compactConversation(threadId: string, history: string, instanceId: string | undefined, focus: string | undefined, signal: AbortSignal): Promise<boolean> {
+  /**
+   * Compacts the thread's session with Claude Code's `/compact`, under the client name its last turn ran with while the
+   * route still allows it (`compactionEntrypoint`), so a warm cache still matches. With the cache gone cold (`cacheCold`), the history is
+   * read uncached either way: prompt caching is off for this one process, so it is not written back to a cache the
+   * summary replaces at once (a one-hour write costs twice an uncached read). The next turn caches as usual.
+   */
+  async compactConversation(threadId: string, history: string, instanceId: string | undefined, focus: string | undefined, signal: AbortSignal, options: { cacheCold?: boolean } = {}): Promise<boolean> {
     const saved = this.settings.sessions?.[threadId]
     if (!saved || !sessionBoundTo(saved, instanceId ?? CLAUDE_INSTANCE_ID) || saved.historyKey !== historyKey(history)) return false
     if (this.activeThreads.has(threadId)) throw new Error('A Claude turn is already running for this thread')
@@ -1155,7 +1169,11 @@ export class ClaudeSubscriptionProviderService {
       }
       sent = true
       query = await this.createQuery(`/compact${focus ? ` ${focus}` : ''}`, {
-        ...this.options(saved.cwd, controller, this.finalEnv(this.environment())),
+        ...this.options(saved.cwd, controller, this.finalEnv({
+          ...this.environment(),
+          ...this.compactionEntrypoint(saved),
+          ...(options.cacheCold ? { DISABLE_PROMPT_CACHING: '1' } : {})
+        })),
         resume: saved.sessionId,
         ...(saved.model ? { model: saved.model } : {}),
         includePartialMessages: false,
@@ -1245,7 +1263,7 @@ export class ClaudeSubscriptionProviderService {
   private oneShotOptions(controller: AbortController): Options {
     const base = this.dependencies.lockedEnv
       ? this.housekeepingOptions(this.standaloneWorkspace('one-shot'), controller)
-      : this.options(this.standaloneWorkspace('one-shot'), controller, this.finalEnv(claudeSignInEnvironment(this.environment())))
+      : this.options(this.standaloneWorkspace('one-shot'), controller, this.finalEnv({ ...claudeSignInEnvironment(this.environment()), ...this.entrypointEnv(this.environment(), false) }))
     return {
       ...base,
       settingSources: [],
@@ -1458,6 +1476,61 @@ export class ClaudeSubscriptionProviderService {
     const credential = this.account()?.credential
     if (credential === 'api_key' || credential === 'ambient') return 'per_token'
     return credential === 'subscription' && !variable('ANTHROPIC_AUTH_TOKEN') ? 'subscription' : 'unconfirmed'
+  }
+  /**
+   * The client name a Claude Code process starts with (`MOUSSE_CLAUDE_ENTRYPOINT`), as a variable to add to its
+   * environment; none leaves the Agent SDK's default (`sdk-ts`):
+   * - one the user set (the entry's variables, or the `env` of their own or the managed Claude settings) is passed
+   *   on: Claude Code reads the name only from its process environment, and Mousse removes an inherited one. A
+   *   project's settings cannot set it: a cloned folder would otherwise pass every check below;
+   * - otherwise Mousse's own, only on Claude Code's own subscription sign-in, straight to Anthropic. An API key (an
+   *   `apiKeyHelper` too), a cloud route or a sign-in through a gateway or proxy keeps the default: credit-only API
+   *   accounts refuse an unknown client name, and proxies rewrite requests from one they don't recognise (a turn runs
+   *   only after a sign-in check that answered, so the account is known here);
+   * - never for a process that runs in Auto (`runsAuto`): under an unknown client name Claude Code's auto mode
+   *   checks each tool call with a billed request of its own instead of Anthropic's server-side check. A process
+   *   with Mousse's name never runs in Auto (`liveModeFor`), and its plan mode never takes auto semantics
+   *   (`useAutoModeDuringPlan` off in its flag settings).
+   */
+  private entrypointEnv(env: NodeJS.ProcessEnv, runsAuto: boolean, cwd?: string): Record<string, string> {
+    const options = cwd ? { cwd } : {}
+    const own = claudeEffectiveVariable(env, 'CLAUDE_CODE_ENTRYPOINT')
+    if (own) return { CLAUDE_CODE_ENTRYPOINT: own }
+    if (runsAuto) return {}
+    const variable = (name: string) => claudeTurnVariable(env, name, options)
+    const baseUrl = variable('ANTHROPIC_BASE_URL')
+    if (baseUrl && !isAnthropicApi(baseUrl)) return {}
+    if (claudeUsesApiKeyHelper(env, options)) return {}
+    // Settings the entry passes in its launch arguments (`--settings`) can route Claude Code anywhere and are not read
+    // here, so they keep the default.
+    if (this.launchArgsCarrySettings()) return {}
+    return this.promptCacheBasis(env, options) === 'subscription' ? { CLAUDE_CODE_ENTRYPOINT: MOUSSE_CLAUDE_ENTRYPOINT } : {}
+  }
+  /** The entry's launch arguments pass Claude Code a settings file or JSON of their own (`--settings`). */
+  private launchArgsCarrySettings(): boolean {
+    try {
+      return 'settings' in claudeExtraArgs(storedCliArgs(this.launchSettings()))
+    } catch {
+      return true
+    }
+  }
+  /**
+   * The client name a compaction of a session runs under: the one its turns ran with (`saved`), so a warm cache still
+   * matches, but only while the route still allows Mousse's name (`entrypointEnv`); a user's own name always applies.
+   */
+  private compactionEntrypoint(saved: SavedSession): Record<string, string> {
+    const allowed = this.entrypointEnv(this.environment(), false, saved.cwd).CLAUDE_CODE_ENTRYPOINT
+    if (allowed !== MOUSSE_CLAUDE_ENTRYPOINT) return allowed ? { CLAUDE_CODE_ENTRYPOINT: allowed } : {}
+    return saved.entrypoint === MOUSSE_CLAUDE_ENTRYPOINT ? { CLAUDE_CODE_ENTRYPOINT: MOUSSE_CLAUDE_ENTRYPOINT } : {}
+  }
+  /**
+   * The Claude Code permission mode a live process may be switched to in place: Auto on a process that runs under
+   * Mousse's client name would check each tool call with a billed request of its own (`entrypointEnv`), so that
+   * process runs the turn as Auto-accept edits instead. Only a process kept for its background work, or Claude's own
+   * turn after it, gets there: any other is restarted, because the name is part of its launch settings.
+   */
+  private liveModeFor(live: LiveSession<TurnContext>, mode: PermissionMode): PermissionMode {
+    return mode === 'auto' && live.meta.entrypoint === MOUSSE_CLAUDE_ENTRYPOINT ? 'acceptEdits' : mode
   }
   /** The variable that keeps a turn's prompt cache for an hour, when `promptCacheHourOn` says so. */
   private promptCacheEnv(choice: boolean | undefined, cwd: string | undefined): Record<string, string> {
@@ -2283,7 +2356,7 @@ export class ClaudeSubscriptionProviderService {
    */
   private async acquireLive(
     threadId: string,
-    key: { hard: readonly unknown[]; soft: string; mode: PermissionMode; flags: LiveFlags; historyNow: string },
+    key: { hard: readonly unknown[]; soft: string; mode: PermissionMode; flags: LiveFlags; historyNow: string; entrypoint?: string },
     resume: string | undefined,
     create: (live: LiveSession<TurnContext>) => Options,
     mcp: { servers: () => TurnMcp; mousse: McpAttachment | null; timeoutMs: number; signal?: AbortSignal; leftOut(names: string[]): void; policy(names: string[]): void }
@@ -2373,7 +2446,7 @@ export class ClaudeSubscriptionProviderService {
       },
       timings
     )
-    created.meta = { hardParts: key.hard, softKey: key.soft, permissionMode: key.mode, flags: key.flags }
+    created.meta = { hardParts: key.hard, softKey: key.soft, permissionMode: key.mode, flags: key.flags, entrypoint: key.entrypoint }
     this.live.set(threadId, created)
     try {
       // Before its output is read or a prompt pushed (#358): the SDK takes Claude Code's answer by itself.
@@ -2799,11 +2872,21 @@ export class ClaudeSubscriptionProviderService {
     // A bot turn on the owner's own entry runs in that entry's environment (their sign-in), without
     // the variables of the user's MCP servers, which it never gets. It loads no settings files, so
     // the `env` of the owner's Claude settings, where a proxy sign-in often lives, is applied here.
-    const turnEnv = locked && !locked.ownerEntry
-      ? this.finalEnv({ ...this.dependencies.lockedEnv!(locked.cwd), ...compaction })
+    // The client name follows the owner's sign-in (`entrypointEnv`); another entry's locked environment keeps the default.
+    const baseEnv = locked && !locked.ownerEntry
+      ? this.dependencies.lockedEnv!(locked.cwd)
       : locked
-        ? this.finalEnv({ ...claudeEffectiveEnvironment(this.environment()), ...compaction })
-        : this.finalEnv({ ...this.environment(), ...compaction })
+        ? claudeEffectiveEnvironment(this.environment())
+        : this.environment()
+    // Whether the thread runs Claude Code's Auto, as the turn's mode below decides it: not a read-only child or a bot turn,
+    // and not an Auto that Claude Code's settings turn off (that runs as Auto-accept edits). A plan turn in an Auto thread
+    // counts as Auto, so it keeps the process of the thread's other turns instead of restarting it under another name.
+    const runsAuto = !locked && input.child?.readOnly !== true &&
+      normalizePermissionMode(input.permissionMode) === 'auto' && !claudeAutoModeDisabled(this.environment(), { cwd: input.cwd })
+    const entrypoint = locked && !locked.ownerEntry
+      ? {}
+      : this.entrypointEnv(baseEnv, runsAuto, locked ? undefined : input.cwd)
+    const turnEnv = this.finalEnv({ ...baseEnv, ...compaction, ...entrypoint })
     // A bot turn's commands without file access (Linux): Claude Code keeps its temporary files in a private folder, and
     // the shared one, which holds every session's command output, is closed to them (`claudeBotTemp`).
     const botTemp = locked ? claudeBotTemp(locked.authority, turnEnv, locked.cwd) : undefined
@@ -2896,6 +2979,14 @@ export class ClaudeSubscriptionProviderService {
     /** The id of the prompt this turn pushed (none for a turn Claude started). */
     let promptId: string | undefined
     /** The turns of the session this turn ran on, before it: a cut's kept ones, the saved ones of the session it continued, none of a new one. */
+    /**
+     * The client name of the process this turn ran on (a kept live process keeps the one it started with), which a
+     * compaction resumes the session with; `previous` when the turn started no process at all.
+     */
+    const ranEntrypoint = (previous?: string): { entrypoint?: string } => {
+      const name = live ? live.meta.entrypoint as string | undefined : query ? env.CLAUDE_CODE_ENTRYPOINT : previous
+      return name ? { entrypoint: name } : {}
+    }
     const turnsBefore = (sessionId: string): SessionTurn[] =>
       branch ? branch.turns : saved?.sessionId === sessionId ? saved.turns ?? [] : []
     const withTurn = (sessionId: string): SessionTurn[] =>
@@ -3093,6 +3184,9 @@ export class ClaudeSubscriptionProviderService {
       // What a live process is keyed on besides `hard`: the settings without Ultracode, which switches in place.
       const launchSettings = turnSettings
       if (ultracode && !locked) turnSettings = { ...turnSettings, ultracode: true }
+      // Plan mode takes auto mode's semantics by default when auto mode is available: under Mousse's client name that
+      // would check tool calls with billed requests of their own (`entrypointEnv`), so a process with it never does.
+      if (env.CLAUDE_CODE_ENTRYPOINT === MOUSSE_CLAUDE_ENTRYPOINT) turnSettings = { ...turnSettings, useAutoModeDuringPlan: false } as SdkSettings
       const flags: LiveFlags = { model: selected.baseId, effort: effort ?? null, ultracode: ultracode && !locked }
       // The thread's permission mode, in Claude Code's own terms: Ask asks about everything it would
       // not allow itself, Auto-accept edits lets edits through, Auto hands the decision to Claude Code's
@@ -3260,9 +3354,11 @@ export class ClaudeSubscriptionProviderService {
         live.current = turn
         // The user may have changed the thread's mode since the turn that left this work running: the
         // process must not carry on in the wider one. If it cannot be switched, the turn fails.
-        if (live.meta.permissionMode !== permissionMode) {
-          await live.setPermissionMode(permissionMode)
-          live.meta.permissionMode = permissionMode
+        const liveMode = this.liveModeFor(live, permissionMode)
+        if (liveMode !== permissionMode) turn.permissionMode = 'accept_edits'
+        if (live.meta.permissionMode !== liveMode) {
+          await live.setPermissionMode(liveMode)
+          live.meta.permissionMode = liveMode
         }
         // The same for a model or effort changed since: the turn runs on the thread's current choice. Claude's own turn
         // has nothing to restart into, so one that cannot switch goes on with what the process has.
@@ -3281,7 +3377,7 @@ export class ClaudeSubscriptionProviderService {
         metrics.beginQuery(live.sessionId, saved?.usageBaseline)
         liveRun.attach(observe)
       } else {
-        const key = { hard, soft: this.launchKey(env, integrations, launchSettings, input.mcp?.relay ?? null), mode: permissionMode, flags, historyNow }
+        const key = { hard, soft: this.launchKey(env, integrations, launchSettings, input.mcp?.relay ?? null), mode: permissionMode, flags, historyNow, entrypoint: env.CLAUDE_CODE_ENTRYPOINT }
         try {
           // A bot's process is never kept warm: a locked turn is one query.
           live = locked ? undefined : await this.acquireLive(input.threadId, key, resume, (created) => {
@@ -3320,9 +3416,12 @@ export class ClaudeSubscriptionProviderService {
           if (live) {
             live.current = turn
             // The permission mode follows the composer: a live query switches it for this turn.
-            if (live.meta.permissionMode !== permissionMode) {
-              await live.setPermissionMode(permissionMode)
-              live.meta.permissionMode = permissionMode
+            // A process kept under Mousse's client name runs Auto as Auto-accept edits (`liveModeFor`).
+            const liveMode = this.liveModeFor(live, permissionMode)
+            if (liveMode !== permissionMode) turn.permissionMode = 'accept_edits'
+            if (live.meta.permissionMode !== liveMode) {
+              await live.setPermissionMode(liveMode)
+              live.meta.permissionMode = liveMode
               controller.signal.throwIfAborted()
             }
             liveRun = live.beginRun(observe)
@@ -3518,7 +3617,7 @@ export class ClaudeSubscriptionProviderService {
       if (!success || !sessionId) throw new Error('Claude Code ended before completing the turn')
       this.settings.sessions = {
         ...this.settings.sessions,
-        [input.threadId]: { sessionId, cwd: resolve(input.cwd), model: selected.baseId, usageBaseline: metrics.snapshot(), instanceId, turns: withTurn(sessionId) }
+        [input.threadId]: { sessionId, cwd: resolve(input.cwd), model: selected.baseId, usageBaseline: metrics.snapshot(), instanceId, turns: withTurn(sessionId), ...ranEntrypoint() }
       }
       this.save()
       this.readyToCommit.add(input.threadId)
@@ -3572,7 +3671,7 @@ export class ClaudeSubscriptionProviderService {
         if (savedSessionId && this.configured()) {
           const current = this.settings.sessions?.[input.threadId]
           // A fork's branch Claude Code made is the thread's session now, whatever became of the turn.
-          const { fork: _made, ...kept }: Partial<SavedSession> = current?.sessionId === savedSessionId ? current : {}
+          const { fork: _made, entrypoint: _ranWith, ...kept }: Partial<SavedSession> = current?.sessionId === savedSessionId ? current : {}
           // The prompt of a turn that did not finish but reached the session is a turn of it: a later cut
           // leaves it out with the turns after it. A finished turn saved its own above.
           const reached = promptId !== undefined && (stopped || (liveRun !== undefined && liveRun.ids.size > 0))
@@ -3589,7 +3688,8 @@ export class ClaudeSubscriptionProviderService {
               // The model the turn ran on, which a compaction resumes the session with.
               model: parseThinkingSuffixFromModelId(input.model).baseId,
               ...(baseline ? { usageBaseline: baseline } : {}),
-              instanceId
+              instanceId,
+              ...ranEntrypoint(_ranWith)
             }
           }
           this.save()

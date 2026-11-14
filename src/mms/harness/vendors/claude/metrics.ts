@@ -20,7 +20,10 @@ export type ClaudeSubscriptionMetrics = {
     contextWindow?: number
     modelName?: string
   }
-  /** When the main conversation's last request was answered, and the longest cache lifetime it wrote this turn. */
+  /**
+   * When the main conversation's last request started streaming (its `message_start`; when it was answered if no
+   * stream was seen), and the longest cache lifetime it wrote this turn. The cache lives from the request, not its end.
+   */
   promptCache?: { at: number; ttlMs?: number }
 }
 export type ClaudeUsageBaseline = {
@@ -92,6 +95,8 @@ export class ClaudeMetricsCollector {
   private readonly pendingAssistants = new Map<string, AssistantMessage['usage']>()
   private latestContext?: ClaudeSubscriptionMetrics['context']
   private lastRequestAt?: number
+  /** When each main-conversation request of this query started streaming, by message id. */
+  private readonly requestStarts = new Map<string, number>()
   private cacheTtlMs?: number
   private realModelName?: string
   constructor(resume?: string, baseline?: ClaudeUsageBaseline) {
@@ -103,14 +108,20 @@ export class ClaudeMetricsCollector {
     this.baseline = resume && baseline?.sessionId === resume ? structuredClone(baseline) : undefined
   }
   observe(message: SDKMessage): void {
+    if (message.type === 'stream_event' && !message.parent_tool_use_id && message.event.type === 'message_start') {
+      // Read defensively: a frame without its message only leaves the clock at the answer.
+      const id = (message.event as { message?: { id?: unknown } }).message?.id
+      if (typeof id === 'string' && id) this.requestStarts.set(id, Date.now())
+    }
     if (message.type === 'assistant' && !message.parent_tool_use_id && message.message.usage) {
       const assistantId = message.message.id || message.uuid
       if (this.settledAssistantIds.has(assistantId)) return
       const usage = nativeUsage(message.message.usage)
-      // The cache this request read or wrote lives from now; the longest lifetime written this turn applies.
+      // The cache this request read or wrote lives from when the request started, which a long reply can be minutes
+      // before its answer arrives; the longest lifetime written this turn applies.
       const written = (message.message.usage as NativeUsage).cache_creation
       this.cacheTtlMs = longerTtl(this.cacheTtlMs, writtenCacheTtl({ oneHour: written?.ephemeral_1h_input_tokens, fiveMinute: written?.ephemeral_5m_input_tokens }))
-      this.lastRequestAt = Date.now()
+      this.lastRequestAt = (message.message.id ? this.requestStarts.get(message.message.id) : undefined) ?? Date.now()
       const modelName = message.message.model || undefined
       if (modelName) this.realModelName = modelName
       this.latestContext = {

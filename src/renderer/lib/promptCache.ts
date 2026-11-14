@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
 import type { IdleCompactionSetting } from '../../shared/settings'
 import { CONTEXT_DRAFT_CATEGORY, type ContextPromptCache, type ContextUsageSnapshot } from '../../shared/types'
+import { IDLE_COLD_MS } from '../../shared/promptCacheCold'
 
-/** Without a lifetime from the provider, a thread idle this long is treated as cold. */
-export const IDLE_COLD_MS = 60 * 60_000
+export { IDLE_COLD_MS }
 /**
  * Below this, compacting saves too little to suggest. It is the whole request, system prompt and tools included
  * (about 15–20K on Claude Code), so a thread reaches it with some 20K of history: enough for a summary to save half.

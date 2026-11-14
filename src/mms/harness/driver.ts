@@ -266,6 +266,11 @@ export interface NativeCompactRequest {
   instanceId: string
   /** What the summary should keep, in the user's words. */
   focus?: string
+  /**
+   * The thread's prompt cache has gone cold (`promptCacheGoneCold`): the compaction reads the whole history uncached
+   * anyway, so a runtime may skip writing it back to a cache the summary is about to replace.
+   */
+  cacheCold?: boolean
   signal: AbortSignal
 }
 
