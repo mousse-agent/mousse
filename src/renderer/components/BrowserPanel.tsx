@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { isRepeatClick } from '../lib/repeatClick'
 import {
   ArrowLeft,
   ArrowRight,
@@ -423,6 +424,8 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
   // Turning agent access on from the toolbar asks first in the same bar as an agent's request, which pauses a theme,
   // so no theme can turn a click elsewhere into a grant. Turning it off needs no question.
   const [confirmingAccess, setConfirmingAccess] = useState(false)
+  // A change made elsewhere (another window, an agent's request answered) ends the question asked here.
+  useEffect(() => { setConfirmingAccess(false) }, [access.allowed])
   const askingAccess = Boolean(pendingAccess) || (confirmingAccess && !access.allowed)
   useEffect(() => {
     let disposed = false
@@ -696,7 +699,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
       <KeepMounted active preserveLayout className="keep-mounted-pane browser-manual-surface">
       {askingAccess && <div className="browser-agent-controls" data-mousse-decision="" role="region" aria-label="Agent browser access request">
         <span>Allow access to all browser tabs?</span>
-        <button type="button" disabled={browserBusy} onClick={() => { setConfirmingAccess(false); void changeAccess(true, pendingAccess?.requestId) }}>Allow</button>
+        <button type="button" disabled={browserBusy} onClick={(event) => { if (isRepeatClick(event)) return; setConfirmingAccess(false); void changeAccess(true, pendingAccess?.requestId) }}>Allow</button>
         <button type="button" disabled={browserBusy} onClick={() => { setConfirmingAccess(false); if (pendingAccess) void changeAccess(false, pendingAccess.requestId) }}>Deny</button>
       </div>}
       {/* The thread agent's browser without a window, when it has one open: its line, and its view over the tabs. */}

@@ -12,6 +12,7 @@ import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
 import { SettingsStore } from '../../src/mms/settings/SettingsStore'
 import type { AppearanceToolHost } from '../../src/mms/run/mcp/appTools'
 import type { MousseSettingsUpdate } from '../../src/shared/settings'
+import { canAnswerApproval } from '../../src/mms/run/approvalRights'
 import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
@@ -158,6 +159,8 @@ describe('theme_read and theme_set', () => {
     const rejected = await setup({ mode: 'ask', answer: 'reject' })
     await expect(rejected.call('theme_set', { theme: 'light' })).resolves.toMatchObject({ isError: true, text: expect.stringContaining('did not approve') })
     expect(rejected.asked).toEqual([{ prompt: 'Allow this agent to change how Mousse looks?', approval: expect.objectContaining({ action: 'edit', permissionKey: 'mousse:appearance' }) }])
+    // Switching themes is an edit like any other: an agent allowed to answer edits may answer it.
+    expect((rejected.asked[0]!.approval as { reason?: string }).reason).toBeUndefined()
     expect(rejected.saves).toEqual([])
     fx?.dispose()
     fx = undefined
@@ -187,6 +190,11 @@ describe('theme_read and theme_set', () => {
     await expect(edits.call('theme_set', { userTheme: { name: 'Cover', base: 'dark', css: 'a { position: fixed; inset: 0; opacity: 0 }' } })).resolves.toMatchObject({ isError: true, text: expect.stringContaining('did not approve') })
     expect(edits.asked).toHaveLength(1)
     expect(edits.settings.get().appearance.userThemes.map((theme) => theme.name)).toEqual(['Plain'])
+    // The person's alone: another agent, even one in Full access with the right to answer approvals, cannot allow it.
+    const asked = edits.asked[0]!.approval as { action: 'edit'; permissionKey: string; reason?: string }
+    expect(asked.reason).toBeTruthy()
+    const agent = { kind: 'agent' as const, threadId: 'other', runId: 'run-other', permissionMode: 'full' as const, access: { level: 'manage' as const, answerApprovals: true, projectAllowed: () => true } }
+    expect(canAnswerApproval({ threadId: 'parent', ...asked }, agent as never, { decision: 'allow', scope: 'once' }, () => undefined)).toMatchObject({ ok: false, code: 'person_only' })
     fx?.dispose()
     fx = undefined
 

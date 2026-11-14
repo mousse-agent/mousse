@@ -1,4 +1,5 @@
 import type { HarnessCaps } from '../../shared/harness/types'
+import { isRepeatClick } from '../lib/repeatClick'
 import {
   describePermissionMode,
   effectivePermissionMode,
@@ -119,8 +120,8 @@ export function PermissionModeSection({ control, choice, onPicked }: {
         aria-disabled={why ? true : undefined}
         aria-label={`${name}. ${line}`}
         className={`composer-permission-mode${on ? ' selected' : ''}${why ? ' is-disabled' : ''}`}
-        onClick={() => {
-          if (why) return
+        onClick={(event) => {
+          if (why || isRepeatClick(event)) return
           onPicked()
           if (entry !== selected) control.onSelect(entry)
         }}

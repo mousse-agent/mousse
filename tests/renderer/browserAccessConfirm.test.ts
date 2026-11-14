@@ -77,4 +77,16 @@ describe('agent access from the browser toolbar', () => {
     expect(sets()).toEqual([false])
     expect(bar()).toBeNull()
   })
+
+  it('ignores the second click of a double click on Allow, aimed at what was there before the bar opened', async () => {
+    act(() => root.render(createElement(BrowserPanel)))
+    await settle()
+    await act(async () => toggle().click())
+    await act(async () => { button('Allow').dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 2 })) })
+    expect(sets()).toEqual([])
+    expect(bar()).not.toBeNull()
+    await act(async () => { button('Allow').dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 })) })
+    await settle()
+    expect(sets()).toEqual([true])
+  })
 })

@@ -7,7 +7,9 @@
  */
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { describe, expect, it } from 'vitest'
+import { act } from 'react'
+import { createRoot } from 'react-dom/client'
+import { describe, expect, it, vi } from 'vitest'
 import { HostKeyConfirm } from '../../src/renderer/components/devices/HostKeyConfirm'
 import { DeviceAccessView } from '../../src/renderer/components/devices/DeviceAccessRows'
 import { PermissionModeSection, permissionChoice } from '../../src/renderer/components/ComposerPermissionPicker'
@@ -34,5 +36,22 @@ describe('decision markers on shared and left-behind prompts', () => {
     const html = renderToStaticMarkup(createElement(PermissionModeSection, { control, choice: permissionChoice(control), onPicked: () => {} }))
     expect(html).toContain('aria-label="Full access.')
     expect(marked(html)).toBe(true)
+  })
+
+  it('the permission menu ignores the second click of a double click, and takes a single one', () => {
+    ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+    const onSelect = vi.fn()
+    const control = { mode: 'ask' as const, agent: 'Claude Code', onSelect }
+    const host = document.createElement('div')
+    document.body.append(host)
+    const root = createRoot(host)
+    act(() => root.render(createElement(PermissionModeSection, { control, choice: permissionChoice(control), onPicked: () => {} })))
+    const full = host.querySelector<HTMLButtonElement>('button[aria-label^="Full access."]')!
+    act(() => { full.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 2 })) })
+    expect(onSelect).not.toHaveBeenCalled()
+    act(() => { full.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 })) })
+    expect(onSelect).toHaveBeenCalledWith('full')
+    act(() => root.unmount())
+    host.remove()
   })
 })

@@ -739,7 +739,9 @@ export class ToolRegistry {
             action: 'edit',
             permissionKey: tool.permissionKey ?? PERMISSION_KEYS.mousseIntegrate,
             options: [{ id: 'allow', decision: 'allow', scope: 'once' }, { id: 'reject', decision: 'reject' }],
-            tool: { name: tool.name, input: args }
+            tool: { name: tool.name, input: args },
+            // A call that needs Full access to run unasked is the person's alone: no agent answers it for them.
+            ...(needs === 'full' ? { reason: 'Only you can allow this: it needs Full access to run without asking.' } : {})
           }
         }
       )
