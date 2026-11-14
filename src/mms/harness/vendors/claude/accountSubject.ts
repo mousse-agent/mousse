@@ -189,6 +189,14 @@ export function claudeChoosesCacheTtl(env: NodeJS.ProcessEnv, options: AccountSu
   })
 }
 
+/**
+ * Whether a settings file Claude Code reads for a turn in `options.cwd` sets `apiKeyHelper`: its requests then carry
+ * the key that command prints, whatever `claude auth status` reports.
+ */
+export function claudeUsesApiKeyHelper(env: NodeJS.ProcessEnv, options: AccountSubjectOptions & { cwd?: string } = {}): boolean {
+  return anyClaudeSettings(env, options, (settings) => typeof settings.apiKeyHelper === 'string' && settings.apiKeyHelper.trim() !== '')
+}
+
 /** Whether `test` holds for any settings file Claude Code reads for a turn in `options.cwd`; an unreadable file holds nothing. */
 function anyClaudeSettings(env: NodeJS.ProcessEnv, options: AccountSubjectOptions & { cwd?: string }, test: (settings: Record<string, unknown>) => boolean): boolean {
   const readText = options.readText ?? ((path: string) => readFileSync(path, 'utf8'))

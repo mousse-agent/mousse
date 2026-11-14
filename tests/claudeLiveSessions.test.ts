@@ -4,7 +4,7 @@
  * writes the frames a real Claude Code process would.
  */
 import { spawn, type ChildProcess } from 'node:child_process'
-import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -542,6 +542,36 @@ describe('a live Claude query', () => {
     expect(f.cli.processes).toHaveLength(2)
   })
 
+  it("a process under Mousse's client name never runs Auto: idle, Auto restarts it without the name; kept for background work, it runs Auto as Auto-accept edits", async () => {
+    // A direct subscription sign-in, whatever this machine routes through.
+    for (const name of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_ENTRYPOINT']) vi.stubEnv(name, undefined)
+    const f = fixture()
+    const named = (index: number) => f.cli.processes[index].options.env?.CLAUDE_CODE_ENTRYPOINT
+    await f.turn({ permissionMode: 'full' })
+    expect(named(0)).toBe('mousse')
+    expect((f.cli.processes[0].options.settings as Record<string, unknown> | undefined)?.useAutoModeDuringPlan).toBe(false)
+    // Idle: Auto needs the default name, so the process is replaced.
+    await f.turn({ permissionMode: 'auto' })
+    expect(f.cli.processes).toHaveLength(2)
+    expect(named(1)).toBeUndefined()
+    expect((f.cli.processes[1].options.settings as Record<string, unknown> | undefined)?.useAutoModeDuringPlan).toBeUndefined()
+    // Back in Full access, a named process again; it starts background work and is kept for it.
+    await f.turn({ permissionMode: 'full' })
+    expect(f.cli.processes).toHaveLength(3)
+    expect(named(2)).toBe('mousse')
+    f.cli.reply = (message, process) => {
+      process.emit(roster({ id: 'bash-1' }))
+      process.answer(String(message.uuid), 'started')
+    }
+    await f.turn({ permissionMode: 'full' })
+    f.cli.reply = (message, process) => process.answer(String(message.uuid), 'again')
+    // The Auto turn runs on the kept process, switched to Auto-accept edits instead of Auto.
+    expect(await f.turn({ permissionMode: 'auto' })).toBe('again')
+    expect(f.cli.processes).toHaveLength(3)
+    expect(f.cli.last.permissionModes).not.toContain('auto')
+    expect(f.cli.last.permissionModes.at(-1)).toBe('acceptEdits')
+  })
+
   it('moves a steer into the live query as an immediate message and never interrupts, so helpers keep running', async () => {
     const { cli, service, chat, host } = fixture()
     silent(cli)
@@ -1020,6 +1050,25 @@ describe('Stop and process lifetime', () => {
     f.cli.reply = (message, process) => process.answer(String(message.uuid), 'new rules')
     expect(await f.chat({ systemPromptAppend: 'new rules', history: '' })).toBe('new rules')
     expect(f.cli.processes).toHaveLength(2)
+  })
+
+  it('a change refused for background work keeps the name the session ran with, for a later compaction', async () => {
+    for (const name of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_ENTRYPOINT']) vi.stubEnv(name, undefined)
+    const f = fixture()
+    const saved = () => JSON.parse(readFileSync(join(f.home, 'providers', 'claude-subscription', 'settings.json'), 'utf8')).sessions?.thread
+    // The result carries usage, as Claude Code's does: the session keeps a baseline, which a later failed turn saves from.
+    const usage = { modelUsage: { sonnet: { inputTokens: 1, outputTokens: 1, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, webSearchRequests: 0, costUSD: 0 } }, usage: { input_tokens: 1, output_tokens: 1 } }
+    f.cli.reply = (message, process) => {
+      process.emit(roster({ id: 'bash-1' }), textDelta('started', String(message.uuid)), { ...resultFrame({ uuids: [String(message.uuid)], text: 'started' }), ...usage })
+    }
+    await f.turn({ permissionMode: 'full' })
+    expect(saved().entrypoint).toBe('mousse')
+    f.cli.reply = undefined
+    // An Auto turn with new instructions while the background work runs: refused before any process starts.
+    await expect(f.chat({ history: '', permissionMode: 'auto', systemPromptAppend: 'new rules' })).rejects.toMatchObject({ code: 'claude_background_work_blocks_change' })
+    expect(f.cli.processes).toHaveLength(1)
+    expect(saved().sessionId).toBeDefined()
+    expect(saved().entrypoint).toBe('mousse')
   })
 
   it('a process that dies ends its obligations and the next turn starts a new one that resumes the session', async () => {

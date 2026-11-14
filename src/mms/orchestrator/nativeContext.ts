@@ -114,18 +114,22 @@ export function promptCacheOf(context: NativeLlmContext): NativePromptCache | un
 }
 
 /**
- * The record after a turn whose last request was answered at `at`: the lifetime its requests wrote, or,
+ * The record after a turn whose last request was made at `at`: the lifetime its requests wrote, or,
  * when they only read the cache (or the provider reports none), the lifetime recorded before. A read
- * keeps what the earlier write said; the provider refreshes the lifetime on every hit.
+ * keeps what the earlier write said; the provider refreshes the lifetime on every hit. A shorter write
+ * does not shorten a longer lifetime still live at `at`: the history written before it is cached for that
+ * long, and reading it uncached (`promptCacheGoneCold` turning caching off) costs ten times its cached read.
  */
 export function nextPromptCache(
   context: NativeLlmContext,
   turn: { at: number; ttlMs?: number; modelKey?: string; instanceId?: string }
 ): NativePromptCache {
-  const previous = isNativePromptCache(context.promptCache) && context.promptCache.modelKey === turn.modelKey && context.promptCache.instanceId === turn.instanceId
-    ? context.promptCache.ttlMs
+  const record = isNativePromptCache(context.promptCache) && context.promptCache.modelKey === turn.modelKey && context.promptCache.instanceId === turn.instanceId
+    ? context.promptCache
     : undefined
-  const ttlMs = turn.ttlMs ?? previous
+  const previous = record?.ttlMs
+  const previousLive = previous !== undefined && record!.lastRequestAt + previous > turn.at
+  const ttlMs = turn.ttlMs !== undefined && previousLive && previous! > turn.ttlMs ? previous : turn.ttlMs ?? previous
   return {
     lastRequestAt: turn.at,
     ...(ttlMs ? { ttlMs } : {}),
