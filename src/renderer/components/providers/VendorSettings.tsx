@@ -5,7 +5,7 @@ import { X } from '../../lib/icons'
 import { SettingsRow } from '../settings/SettingsRow'
 import { Modal } from '../ui/Modal'
 import { Select } from '../ui/Select'
-import { EditorSection, errorText, useAsyncAction } from './parts'
+import { EditorSection, FieldWithAction, errorText, useAsyncAction } from './parts'
 
 /**
  * The provider's own settings (Claude Code's `settings.json`): the API base URL, key or token,
@@ -64,7 +64,7 @@ function TextSettingRow({ entry, save, autoFocus, onDiscard }: { entry: VendorSe
       title={entry.label}
       description={message ? <span className="prov-error">{message}</span> : undefined}
       control={
-        <span className="settings-icon-actions">
+        <FieldWithAction action={<RemoveSetting entry={entry} disabled={busy !== null} onRemove={() => (onDiscard ? onDiscard() : void run('remove', () => save(entry.key, null)))} />}>
           <input
             className="settings-input prov-mono prov-wide"
             value={draft}
@@ -77,8 +77,7 @@ function TextSettingRow({ entry, save, autoFocus, onDiscard }: { entry: VendorSe
             onBlur={commit}
             onKeyDown={blurOnEnter}
           />
-          <RemoveSetting entry={entry} disabled={busy !== null} onRemove={() => (onDiscard ? onDiscard() : void run('remove', () => save(entry.key, null)))} />
-        </span>
+        </FieldWithAction>
       }
     />
   )
