@@ -4,14 +4,21 @@ import { readStartupAppearanceArgument } from '../src/shared/startupAppearance'
 const startup = vi.hoisted(() => {
   let ready!: (value: unknown) => void
   const pending = new Promise(done => { ready = done })
-  return { pending, ready, ipc: false, chrome: false, windows: [] as Array<any>, controller: null as any, controllers: [] as Array<any>, ipcDeps: null as any, failLoads: 0 }
+  // A feature someone passed on the command line, which the app must keep.
+  const switches = new Map([['enable-features', 'FeatureFromCommandLine']])
+  return { pending, ready, ipc: false, chrome: false, windows: [] as Array<any>, controller: null as any, controllers: [] as Array<any>, ipcDeps: null as any, failLoads: 0, switches, featuresWhenReady: undefined as string | undefined }
 })
 
 vi.mock('electron', async () => {
   const { EventEmitter } = await import('node:events')
   const app = Object.assign(new EventEmitter(), {
-    whenReady: () => Promise.resolve(), requestSingleInstanceLock: () => true,
-    quit: vi.fn(), isPackaged: false, name: 'Mousse', getVersion: () => 'test'
+    whenReady: () => { startup.featuresWhenReady ??= startup.switches.get('enable-features'); return Promise.resolve() },
+    requestSingleInstanceLock: () => true,
+    quit: vi.fn(), isPackaged: false, name: 'Mousse', getVersion: () => 'test',
+    commandLine: {
+      getSwitchValue: (name: string) => startup.switches.get(name) ?? '',
+      appendSwitch: (name: string, value = '') => { startup.switches.set(name, value) }
+    }
   })
   class BrowserWindow extends EventEmitter {
     readonly webContents = Object.assign(new EventEmitter(), {
@@ -112,6 +119,9 @@ it('loads and shows only the real main window while MMS readiness remains withhe
   expect(startup.controller.request).not.toHaveBeenCalled()
   startup.ready({ instanceId: 'ready' })
   await vi.waitFor(() => expect(startup.controller.request).toHaveBeenCalledWith('settings.get'))
+  // Compiled WebGL programs (the bot face shader) are kept on disk. Chromium reads the switch only
+  // before `ready`, and a feature already on the command line stays.
+  expect(startup.featuresWhenReady).toBe('FeatureFromCommandLine,ANGLEPerContextBlobCache')
 })
 
 it('a startup retry after the first window fails keeps the one service connection IPC uses', async () => {
