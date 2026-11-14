@@ -16,12 +16,12 @@ export const MAX_MESSAGE_BYTES = REPLAY_BATCH_BYTES
 export const MAX_JSON_DEPTH = 32
 export const MAX_JSON_NODES = 16_384
 /**
- * The node bound of a display snapshot (a thread's, or a computer's lists): a document of up to 32 MiB that
- * its own computer wrote and signed, assembled from verified records. The wire bound above is far too small
- * for it (a list of about 700 threads is 16,384 nodes); this one still stops a document that is mostly
- * structure, at a few tens of megabytes of memory.
+ * The node bound of a document a computer of the user builds for the user's own devices: a thread or lists
+ * snapshot, a display event, an RPC result before it goes out as an artifact. Real threads take 30-130 bytes a
+ * node, so the 32 MiB byte bound always binds first; this one still stops a document that is mostly structure.
+ * What arrives from the wire keeps `MAX_JSON_NODES`.
  */
-export const MAX_DISPLAY_JSON_NODES = 262_144
+export const MAX_DISPLAY_JSON_NODES = 4_194_304
 const encoder = new TextEncoder()
 const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
 const fail = (message: string): never => {

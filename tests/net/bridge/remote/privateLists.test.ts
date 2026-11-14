@@ -111,6 +111,39 @@ describe('the snapshot an owner sends', () => {
     expect(small.snapshot().threads).toHaveLength(50)
   })
 
+  it('opens a long thread for a phone: past the wire bound, and cut to its newest 8 MiB with a count of the rest', () => {
+    const shown = row(1)
+    let messages: unknown[] = []
+    const fake = {
+      projects: { listProjects: () => [] },
+      threads: { listAllThreads: () => [shown] },
+      orchestrator: { getTurnSnapshot: () => ({}), getTurnState: () => ({}), getMessages: () => messages, listQueue: () => [], isTurnActive: () => false, isActiveTurnRunning: () => false },
+      threadRuntimes: { getActivitySnapshot: () => ({}) },
+      questions: { listPendingForThread: () => [] },
+      platform: { chats: { snapshot: () => ({ chats: [] }), onChange: () => () => undefined } }
+    } as never
+    const backend = new MmsRemoteBackend(fake)
+    // 1,000 messages of about 30 nodes each: the 485-message thread that once failed had 16,384+.
+    messages = Array.from({ length: 1000 }, (_, n) => ({
+      id: `m${n}`,
+      role: 'assistant',
+      content: `reply ${n}`,
+      timestamp: '2026-11-13T00:00:00.000Z',
+      tags: Array.from({ length: 24 }, (_, i) => i)
+    }))
+    const whole = backend.snapshot(shown.id) as { messages: unknown[]; earlier?: unknown }
+    expect(whole.messages).toHaveLength(1000)
+    expect(whole.earlier).toBeUndefined()
+    // 12 MiB of messages: a phone gets the newest 8 MiB, another computer all of it (its bound is 16 MiB).
+    messages = Array.from({ length: 12 }, (_, n) => ({ id: `big${n}`, role: 'assistant', content: 'x'.repeat(1024 * 1024) }))
+    const phone = backend.snapshot(shown.id) as { messages: Array<{ id: string }>; earlier?: { count: number } }
+    expect(phone.messages.length).toBeLessThan(12)
+    expect(phone.messages.at(-1)!.id).toBe('big11')
+    expect(phone.earlier?.count).toBe(12 - phone.messages.length)
+    const computer = backend.snapshot(shown.id, { newestOnly: true }) as { messages: unknown[]; earlier?: unknown }
+    expect(computer.messages).toHaveLength(12)
+  })
+
   it('lists no personal bot thread, nor its state, for a phone or another computer, and reads none', async () => {
     const shown = row(1)
     const bot = row(2, { botOwned: true, name: 'Alpha bot' })
@@ -134,14 +167,12 @@ describe('the snapshot an owner sends', () => {
     await expect(backend.stop(bot.id)).rejects.toMatchObject({ code: 'stream_unknown' })
   })
 
-  it('keeps a phone’s lists within the wire bound as before: a phone is not known to parse more', () => {
-    // A phone's list is its own: no trimming, and no larger node bound.
+  it('gives a phone its whole list past the wire bound: a phone parses it with plain JSON.parse', () => {
+    // A phone's list is its own: no trimming. It used to stop at the wire's 16,384 nodes (about 700 threads).
     const few = Array.from({ length: 400 }, (_, n) => row(n))
     expect(new MmsListsSource(services(few), undefined).snapshot().threads).toHaveLength(400)
     const many = Array.from({ length: 2000 }, (_, n) => row(n))
-    expect(() => new MmsListsSource(services(many), undefined).snapshot()).toThrow(
-      expect.objectContaining({ code: 'too_large' })
-    )
+    expect(new MmsListsSource(services(many), undefined).snapshot().threads).toHaveLength(2000)
     // The private lists of another computer of the user take the same threads.
     expect(
       new MmsListsSource(services(many), undefined, { private: true }).snapshot().threads

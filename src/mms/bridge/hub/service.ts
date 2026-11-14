@@ -35,7 +35,7 @@ import type {
   SyncSession
 } from '../../net/contracts'
 import { NetDatabase, json } from '../../net/store/database'
-import { canonicalJson, decodeEnvelope } from '../../net/sync/codec'
+import { canonicalJson, decodeEnvelope, MAX_DISPLAY_JSON_NODES } from '../../net/sync/codec'
 import { systemClock } from '../../net/clock'
 import { ThreadDisplayProjection, type ThreadDisplayUpdate } from '../remote'
 import { HUB_METHODS, validateHubParams } from './validation'
@@ -640,7 +640,7 @@ export class BridgeHub {
       : value
     this.session(request.target, request.method)
     if (signal?.aborted) return fail('cancelled')
-    if (canonicalJson(result).length > 25 * 1024 * 1024) return fail('too_large')
+    if (canonicalJson(result, MAX_DISPLAY_JSON_NODES).length > 25 * 1024 * 1024) return fail('too_large')
     if (request.method === 'bridge.dispatch') {
       const signed = result as Signed
       if (!signed || typeof signed.payload !== 'string') return fail('bad_request')

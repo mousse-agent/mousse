@@ -255,7 +255,8 @@ describe('P3 real MMS remote Bridge', () => {
     ).rejects.toMatchObject({ code: 'bad_request' })
     await expect(
       b.rpc('threads.get', { threadId: '../../outside' }, { id: newId('rpc'), deadlineMs: 2000 })
-    ).rejects.toMatchObject({ code: 'outcome_uncertain' })
+      // A read that fails changed nothing: the caller gets the real reason, not "may have partly happened".
+    ).rejects.toMatchObject({ code: 'stream_unknown' })
     expect(p.mms.threads.listAllThreads()).toHaveLength(1)
   })
   it('enforces current read-only capability and closes an actual active TLS session on revoke', async () => {

@@ -39,7 +39,6 @@ export class MmsThreadSource implements ThreadSourcePort {
   snapshot(threadId: string): unknown {
     return this.backend.snapshot(
       threadId,
-      32 * 1024 * 1024,
       this.options.private
         ? { newestOnly: true, deviceLimit: this.options.private.limit(), ...(this.options.private.reader ? { reader: this.options.private.reader } : {}) }
         : undefined

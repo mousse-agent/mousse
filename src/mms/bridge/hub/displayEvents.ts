@@ -4,6 +4,7 @@ import { NetError } from '../../../shared/net'
 import {
   BRIDGE_DISPLAY_CHUNK_BYTES,
   BRIDGE_DISPLAY_MAX_BYTES,
+  BRIDGE_DISPLAY_MAX_NODES,
   displayJson,
   displayHash,
   displayBase64,
@@ -30,7 +31,7 @@ export async function* bridgeDisplayParts(
     yield part
     return
   }
-  const bytes = displayJson(update.value)
+  const bytes = displayJson(update.value, BRIDGE_DISPLAY_MAX_NODES)
   if (bytes.length > BRIDGE_DISPLAY_MAX_BYTES) throw new NetError('too_large')
   if (bytes.length <= BRIDGE_DISPLAY_CHUNK_BYTES) {
     const part = validateDisplayPart(event)
@@ -111,7 +112,7 @@ export class BridgeDisplayEmitter {
     let bytes: Uint8Array
     try {
       validateDisplayEvent(event)
-      bytes = displayJson(event.update)
+      bytes = displayJson(event.update, BRIDGE_DISPLAY_MAX_NODES)
       if (bytes.length > BRIDGE_DISPLAY_MAX_BYTES + 1024) throw new NetError('too_large')
     } catch (error) {
       return Promise.reject(error)

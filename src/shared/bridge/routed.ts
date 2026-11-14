@@ -724,6 +724,11 @@ export const ROUTED_PTY_MAX_ROWS = 256
 /** Newest part of a transcript a snapshot carries, and the most a page of older messages carries. */
 export const ROUTED_SNAPSHOT_MESSAGE_BYTES = 16 * 1024 * 1024
 export const ROUTED_MESSAGES_PAGE_BYTES = 8 * 1024 * 1024
+/**
+ * Newest part of a transcript a phone's snapshot carries. A phone holds 8-10 times a snapshot's size while it
+ * assembles it, and keeps a saved copy of up to 8 MiB; `earlier` counts the older messages left on the computer.
+ */
+export const PHONE_SNAPSHOT_MESSAGE_BYTES = 8 * 1024 * 1024
 
 /**
  * A reply too large for one RPC reply. The owner keeps the whole `RoutedReply` for a minute; the
