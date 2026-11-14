@@ -46,12 +46,25 @@ const NO_MARKS = new Map<string, OwnerMarks>()
 const OFFLINE_TEXT = 'Waiting for internet'
 const ignore = () => {}
 
-/** The one red line of a bot's error, with its one way out (bot-ui §4.9). */
-export function BotErrorLine({ error, onAction }: { error: BotError; onAction(action: NonNullable<BotError['action']>): void }) {
-  return <div className="bot-error" role="status">
+/**
+ * The one red line of a bot's error, with its one way out (bot-ui §4.9). `settled`: what it said is over (a pause that
+ * has ended, or an older line of one that still holds), so it reads quietly, without its button.
+ */
+export function BotErrorLine({ error, onAction, settled }: { error: BotError; onAction(action: NonNullable<BotError['action']>): void; settled?: boolean }) {
+  return <div className={settled ? 'bot-error is-settled' : 'bot-error'} role="status">
     <CircleAlert size={15} aria-hidden /><span>{error.text}</span>
-    {error.action && <button type="button" onClick={() => onAction(error.action!)}>{error.action.label}</button>}
+    {error.action && !settled && <button type="button" onClick={() => onAction(error.action!)}>{error.action.label}</button>}
   </div>
+}
+
+/**
+ * The one chat line whose Resume still works: the newest one of a usage limit, while the bot is paused. Older ones,
+ * and every one once the bot runs again (at the reset, or after Resume), are settled.
+ */
+export function liveResumeLine(messages: readonly BotChatMessage[], bot: Pick<BotSummary, 'state'>): string | undefined {
+  if (bot.state !== 'paused') return undefined
+  for (let index = messages.length - 1; index >= 0; index--) if (messages[index]!.error?.action?.kind === 'resume') return messages[index]!.id
+  return undefined
 }
 
 const messageElement = (id: string) => {
@@ -195,7 +208,7 @@ const OwnerMessage = memo(function OwnerMessage({ botId, message, pending, botNa
 
 /** A bot message uses only the bot's id, name and look, so a change of its state does not render it again. */
 const sameBotMessage = (a: BotMessageProps, b: BotMessageProps) => a.message === b.message && a.asked === b.asked && a.onAction === b.onAction && a.browser === b.browser &&
-  a.quote === b.quote && a.starts === b.starts && a.onReply === b.onReply && a.onApplet === b.onApplet &&
+  a.quote === b.quote && a.starts === b.starts && a.onReply === b.onReply && a.onApplet === b.onApplet && a.settled === b.settled &&
   a.bot.id === b.bot.id && a.bot.name === b.bot.name
 
 /**
@@ -204,7 +217,7 @@ const sameBotMessage = (a: BotMessageProps, b: BotMessageProps) => a.message ===
  * above it. `asked`: the message it answers, when loaded (how long it took). `onApplet`: opens one of its applets beside
  * the chat.
  */
-interface BotMessageProps { bot: BotSummary; message: BotChatMessage; onAction(action: NonNullable<BotError['action']>): void; browser?: ReactNode; quote: boolean; starts: boolean; onReply(message: BotChatMessage): void; asked?: BotChatMessage; onApplet(applet: BotChatApplet): void }
+interface BotMessageProps { bot: BotSummary; message: BotChatMessage; onAction(action: NonNullable<BotError['action']>): void; settled?: boolean; browser?: ReactNode; quote: boolean; starts: boolean; onReply(message: BotChatMessage): void; asked?: BotChatMessage; onApplet(applet: BotChatApplet): void }
 
 /**
  * A reply's tools hang off its bubble's right edge: beside a wide bubble they move left, inside the transcript. Measured
@@ -252,7 +265,7 @@ function useReclampOpenTools(transcript: RefObject<HTMLDivElement | null>) {
  * ones a tool handed it among them). Every chip of its work folds behind "Worked for", none dropped. Read aloud, Copy and
  * Reply show beside it on hover; its applets sit under it; an open ask is quick replies under it.
  */
-const BotMessage = memo(function BotMessage({ bot, message: row, onAction, browser, quote, starts, onReply, asked, onApplet }: BotMessageProps) {
+const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settled, browser, quote, starts, onReply, asked, onApplet }: BotMessageProps) {
   const store = useBotsStore.getState
   // A question's answers are buttons under it, so its words stop where their plain copy starts; a service whose
   // questions can't be answered here keeps that copy, and the owner answers with Reply.
@@ -309,7 +322,7 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, brows
         {lostChips.length > 0 && <p className="bot-picture-chips">{lostChips.map((image) => <BotPathChip key={image.key} path={image.path!} />)}</p>}
         {openAsk && <p className="bot-bubble-ask"><Shield size={14} aria-hidden /><span>Wants to <strong>{openAsk.title}</strong></span></p>}
         {!!message.attachments?.length && <BotOtherFiles files={message.attachments} />}
-        {message.error && <BotErrorLine error={message.error} onAction={onAction} />}
+        {message.error && <BotErrorLine error={message.error} onAction={onAction} settled={settled} />}
         {stepsOpen && <BotSteps chips={steps} />}
         <div className="bot-bubble-foot">
           {steps.length > 0 && <WorkedToggle ms={ms} open={stepsOpen} onToggle={() => setStepsOpen((open) => !open)} />}
@@ -505,6 +518,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   }
   // A pinned line hides while its full message is on screen, so it never shows twice.
   const pinned = useMemo(() => pinnedOf(messages, bot), [messages, bot])
+  const resumeOn = useMemo(() => liveResumeLine(messages, bot), [messages, bot])
   const [onScreen, setOnScreen] = useState('')
   const measure = useCallback(() => {
     const element = transcript.current
@@ -592,7 +606,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
             {day}
             {message.author === 'owner'
               ? <OwnerMessage botId={bot.id} message={message} pending={sending} botName={bot.name} quote={quote} starts={place.starts} marks={(marks ?? NO_MARKS).get(message.id)} onReply={sending ? undefined : reply} />
-              : <BotMessage bot={bot} message={message} onAction={act} browser={message.id === previewOn ? preview : undefined} quote={quote} starts={place.starts} onReply={reply} onApplet={openApplet}
+              : <BotMessage bot={bot} message={message} onAction={act} settled={message.error?.action?.kind === 'resume' && message.id !== resumeOn} browser={message.id === previewOn ? preview : undefined} quote={quote} starts={place.starts} onReply={reply} onApplet={openApplet}
                 asked={message.replyTo ? byId.get(message.replyTo.id) : undefined} />}
           </Fragment>
         })}

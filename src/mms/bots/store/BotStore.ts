@@ -1077,10 +1077,27 @@ export class BotStore {
     return this.all(`SELECT * FROM bot_activations WHERE bot_id = ? AND lane = ? AND status IN (${marks}) ORDER BY created_at, id`, botId, lane, ...statuses).map(activationOf)
   }
 
+  /** A lane's newest activation, in the order they were made (two made in the same millisecond keep it). */
+  newestActivation(botId: string, lane: BotLane): BotActivationRow | undefined {
+    const row = this.get('SELECT * FROM bot_activations WHERE bot_id = ? AND lane = ? ORDER BY created_at DESC, rowid DESC LIMIT 1', botId, lane)
+    return row ? activationOf(row) : undefined
+  }
+
   /** The bot's most recent activation that ended, if any. */
   lastEndedActivation(botId: string): BotActivationRow | undefined {
     const row = this.get("SELECT * FROM bot_activations WHERE bot_id = ? AND status IN ('done', 'failed', 'cancelled') ORDER BY ended_at DESC, created_at DESC LIMIT 1", botId)
     return row ? activationOf(row) : undefined
+  }
+
+  /**
+   * The owner's words of an ended chat turn move to the turn that answers them again (Resume after a usage limit): its
+   * chat pack leaves them out of the recent chat, as they are its request.
+   */
+  moveOwnerRows(botId: string, from: string, to: string): void {
+    this.run("UPDATE bot_messages SET activation_id = ? WHERE bot_id = ? AND activation_id = ? AND author = 'owner'", to, botId, from)
+    // The journal is the memory store's table, absent where bots run without memory.
+    if (this.get("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bot_journal'"))
+      this.run("UPDATE bot_journal SET activation_id = ? WHERE bot_id = ? AND activation_id = ? AND kind = 'owner_msg'", to, botId, from)
   }
 
   setActivationSelection(id: string, selection: ProviderSelection | null): void {

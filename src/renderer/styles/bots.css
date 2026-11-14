@@ -319,6 +319,7 @@ button.bot-image:focus-visible > img { opacity: 0.82; }
 /* Something went wrong: one red line and one way out. */
 .bot-error { display: flex; align-items: center; gap: 10px; margin-top: 10px; max-width: 520px; padding: 10px 14px; border-radius: 10px; background: color-mix(in srgb, var(--error, #e79090) 12%, transparent); color: var(--error, #e79090); font-size: var(--bot-meta, 12.5px); }
 .bot-error span { flex: 1; }
+.bot-error.is-settled { background: color-mix(in srgb, var(--text-secondary) 8%, transparent); color: var(--text-secondary); }
 .bot-error button { color: var(--text-primary); font-weight: 500; font-size: 12px; padding: 6px 10px; border-radius: 7px; background: color-mix(in srgb, var(--text-secondary) 14%, transparent); }
 .bot-paused-line { margin: 16px 0 0; font-size: var(--bot-meta, 12.5px); color: var(--text-secondary); }
 .bot-paused-line button { color: var(--accent); font-weight: 500; }

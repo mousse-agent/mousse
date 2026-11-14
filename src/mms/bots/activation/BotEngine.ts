@@ -6737,10 +6737,18 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.entry(botId)
     // The usage limits this bot met on its entries go too, here and in the model choice: the next turn tries again.
     const limited = Object.values(this.store.registry(botId)?.model?.limits ?? {}).map((limit) => limit.instanceId)
+    // The owner's last message a usage limit left unanswered is answered now: a new chat turn takes it, and either
+    // replies or meets the limit again and says so. A chat turn ends at a limit, so without this Resume did nothing.
+    const retry = this.chatToRetry(botId)
     this.store.db.transaction(() => {
       this.store.setPaused(botId, null)
       this.store.setError(botId, null)
       if (limited.length) this.updateModelStateInTx(botId, (state) => ({ ...state, limits: {} }))
+      if (retry && !this.store.activationByKey(retry.key)) {
+        const id = newActivationId()
+        this.insertQueued(botId, id, retry.key, retry.row.trigger, 'chat', retry.admitted)
+        this.store.moveOwnerRows(botId, retry.row.id, id)
+      }
     })
     for (const instanceId of new Set(limited)) {
       try { this.host.models?.clearLimited?.(instanceId) } catch { /* the next limit marks it again */ }
@@ -6752,6 +6760,21 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // A row that can't run is not paused: it clears when its pick can run again, which is checked now too.
     await this.recheckStuck(botId).catch(() => {})
     await this.pump(botId)
+  }
+
+  /**
+   * The chat turn Resume answers again: the newest one, when a usage limit ended it and nothing in the chat lane runs
+   * or waits. None when the bot can't run now (its approval, its thread in the trash): Resume still clears the pause.
+   */
+  private chatToRetry(botId: string): { row: BotActivationRow; key: string; admitted: ReturnType<BotEngine['admissible']> } | undefined {
+    if (this.store.laneActivations(botId, 'chat', ['queued', 'running', 'waiting_grant']).length) return undefined
+    const row = this.store.newestActivation(botId, 'chat')
+    if (!row || row.status !== 'failed' || row.endReason !== 'usage_limit' || row.trigger.kind !== 'manual') return undefined
+    try {
+      return { row, key: `resume:${row.id}`, admitted: this.admissible(botId) }
+    } catch {
+      return undefined
+    }
   }
 
   /** The owner's message could not start the chat: an error row says why. */
