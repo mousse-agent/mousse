@@ -357,7 +357,7 @@ export class BotChatService {
   }
 
   /** `bots.chat.list`: a page of the chat (oldest first), and the live chip of a working activation. */
-  chatList(botId: string, page: { beforeSeq?: number; limit?: number } = {}): { messages: BotChatMessage[]; live?: { activationId: string; chip?: BotChip } } {
+  chatList(botId: string, page: { beforeSeq?: number; limit?: number } = {}): { messages: BotChatMessage[]; live?: { activationId: string; chip?: BotChip; status?: string } } {
     this.engine.definitionOf(botId)
     const limit = Math.max(1, Math.min(MAX_BOT_CHAT_PAGE, page.limit ?? 50))
     const messages = this.store.messages(botId, { ...(page.beforeSeq !== undefined ? { beforeSeq: page.beforeSeq } : {}), limit }).map((row) => this.engine.chat.toMessage(row))

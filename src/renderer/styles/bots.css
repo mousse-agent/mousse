@@ -103,10 +103,21 @@
 .bot-step-open { padding: 0 7px; border-radius: 6px; font-size: 12px; line-height: 18px; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
 .bot-step-open:hover { background: color-mix(in srgb, var(--accent) 20%, transparent); }
 /* While the chat's turn runs: three dots in a bubble, the only thing that moves (TypingDots in BotChatView.tsx moves
-   them; with Animation speed Off or reduced motion they hold still a little brighter). */
-.bot-typing-bubble { display: inline-flex; align-items: center; gap: 4px; padding: 11px 14px; }
-.bot-typing-bubble > i { width: 6px; height: 6px; border-radius: 50%; background: var(--text-secondary); opacity: .35; }
-.bot-typing-bubble.is-still > i { opacity: .6; }
+   them; with Animation speed Off or reduced motion they hold still a little brighter). Beside them, what the bot said
+   it is doing now, in full (it wraps), with a light band that runs on from the dots' wave through the words: a bright
+   copy of them, seen through a band as wide as they are whose mask is bright only in its middle third. TypingDots moves
+   the band across and the copy against it, so the copy's letters stay on the words. Still, the words are plain. */
+.bot-typing-bubble { display: inline-flex; align-items: center; padding: 11px 14px; }
+.bot-typing-bubble.has-status { align-items: flex-start; gap: 8px; padding: 7px 13px; }
+.bot-typing-dots { display: inline-flex; flex: none; align-items: center; gap: 4px; }
+.bot-typing-bubble.has-status .bot-typing-dots { height: 18px; }
+.bot-typing-dots > i { width: 6px; height: 6px; border-radius: 50%; background: var(--text-secondary); opacity: .35; }
+.bot-typing-bubble.is-still .bot-typing-dots > i { opacity: .6; }
+.bot-typing-status { position: relative; min-width: 0; font-size: var(--bot-meta); line-height: 18px; color: var(--text-secondary); overflow-wrap: anywhere; }
+.bot-typing-glint { position: absolute; inset: 0; pointer-events: none; user-select: none; transform: translateX(-100%);
+  -webkit-mask-image: linear-gradient(90deg, transparent 32%, #000 50%, transparent 68%); mask-image: linear-gradient(90deg, transparent 32%, #000 50%, transparent 68%); }
+.bot-typing-glint > span { position: absolute; inset: 0; color: var(--text-primary); transform: translateX(100%); }
+@media (forced-colors: active) { .bot-typing-glint { display: none; } }
 .bot-status-line { margin: 0; padding: 7px 13px; font-size: var(--bot-meta); color: var(--text-secondary); }
 @media (prefers-reduced-motion: reduce) { .bot-worked-chevron { transition: none; } }
 /* An open ask: quick replies under the bubble, the details on demand. */

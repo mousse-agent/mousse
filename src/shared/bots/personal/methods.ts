@@ -183,7 +183,8 @@ export interface BotsPersonalV2Api {
   'bots.delete': { params: { botId: string }; result: { purgeAt: string } }
   'bots.chat.list': {
     params: { botId: string; beforeSeq?: number; limit?: number }
-    result: { messages: BotChatMessage[]; live?: { activationId: string; chip?: BotChip } }
+    /** `live`: the working activation, its live chip and its status (the bot's latest line before a step). */
+    result: { messages: BotChatMessage[]; live?: { activationId: string; chip?: BotChip; status?: string } }
   }
   'bots.chat.send': { params: { botId: string; text: string; attachments?: BotChatAttachment[]; clientRequestId: string; replyTo?: string }; result: { message: BotChatMessage } }
   'bots.chat.stop': { params: { botId: string }; result: Record<string, never> }
@@ -268,6 +269,9 @@ export interface BotsPersonalV2EventData {
   'bots.changed': { botId: string }
   /** A new or changed chat row: chat push and notifications (titled with `botName`, absent on older daemons). */
   'bots.message': { botId: string; message: BotChatMessage; botName?: string }
-  /** The live chip of a working activation; null clears it. */
-  'bots.activity': { botId: string; activationId: string; chip: BotChip | null }
+  /**
+   * The live chip of a working activation; null clears it. `status`: what the bot said it is doing now, its latest line
+   * before a step ("Checking prices at Indian stores now"); absent when it said none. Absent from older services.
+   */
+  'bots.activity': { botId: string; activationId: string; chip: BotChip | null; status?: string }
 }

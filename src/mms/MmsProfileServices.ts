@@ -54,6 +54,7 @@ import type { BotEngine } from './bots/activation/BotEngine'
 import { openPersonalBots } from './bots/activation/open'
 import { botApiHost, createBotConnectivity } from './bots/activation/connectivity'
 import { createBotActivitySink } from './bots/activity/BotActivitySink'
+import { isStepMessage } from './bots/activity/statusLine'
 import { BotBrowsers } from './bots/browser/BotBrowsers'
 import { publishedApplets } from './bots/chat/replyApplets'
 import { botFilesFolder } from './bots/grants/compile'
@@ -934,6 +935,12 @@ export class MmsProfileServices {
       const stop = watchLaunchedThreads({ runs: this.runEngine, questions: this.questions, thread: (id) => this.threads.getThread(id), changed: (creator) => personalBots.launchedThreadChanged(creator) })
       this.platform.onDispose(stop)
     }
+    // A step of a bot's turn began: its words just before it are what it is doing now, beside its typing dots.
+    if (personalBots) this.orchestrator.on('thread-message', (payload: { threadId?: unknown; message?: ChatMessage }) => {
+      if (typeof payload?.threadId !== 'string' || !payload.message || !isStepMessage(payload.message)) return
+      const threadId = payload.threadId
+      try { personalBots.stepStarted(threadId, () => this.orchestrator.liveMessagesForSave(threadId)) } catch { /* a status never fails the call */ }
+    })
     this.orchestrator.setBotDispatcher(personalBots)
     this.orchestrator.setWorkflowChatExecutor(this.platform.workflowChat)
     this.orchestrator.setFeatureFlags(this.config.get().features)

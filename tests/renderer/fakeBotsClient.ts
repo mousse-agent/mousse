@@ -27,7 +27,7 @@ export interface FakeBots {
   bots: BotSummary[]
   chats: Record<string, BotChatMessage[]>
   details: Record<string, BotDetail>
-  live: Record<string, { activationId: string; chip?: BotChip }>
+  live: Record<string, { activationId: string; chip?: BotChip; status?: string }>
   /** Each bot's memory entries, as `bots.memory.list` returns them. */
   memory: Record<string, BotMemoryEntry[]>
   /** Each bot's Devices (`bots.devices.get`); a bot without one reaches every device and has none to pick. */
@@ -38,12 +38,13 @@ export interface FakeBots {
     /** The window's service connection was opened again (`bots:changed` with `reread`). */
     reread(): void
     message(botId: string, message: BotChatMessage): void
-    activity(botId: string, chip: BotChip | null, activationId?: string): void
+    /** `status`: what the activation said it is doing now; absent clears it. */
+    activity(botId: string, chip: BotChip | null, activationId?: string, status?: string): void
   }
 }
 
 export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, BotChatMessage[]>; details?: Record<string, BotDetail>; memory?: Record<string, BotMemoryEntry[]> } = {}): FakeBots {
-  const listeners = { changed: new Set<(e: { botId?: string; reread?: boolean }) => void>(), message: new Set<(e: { botId: string; message: BotChatMessage }) => void>(), activity: new Set<(e: { botId: string; activationId: string; chip: BotChip | null }) => void>() }
+  const listeners = { changed: new Set<(e: { botId?: string; reread?: boolean }) => void>(), message: new Set<(e: { botId: string; message: BotChatMessage }) => void>(), activity: new Set<(e: { botId: string; activationId: string; chip: BotChip | null; status?: string }) => void>() }
   const fake: FakeBots = {
     bots: [...(initial.bots ?? [])],
     chats: { ...(initial.chats ?? {}) },
@@ -64,7 +65,7 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
       changed: (botId) => { for (const cb of listeners.changed) cb({ botId }) },
       reread: () => { for (const cb of listeners.changed) cb({ reread: true }) },
       message: (botId, row) => { for (const cb of listeners.message) cb({ botId, message: row }) },
-      activity: (botId, chip, activationId = 'act1') => { for (const cb of listeners.activity) cb({ botId, activationId, chip }) }
+      activity: (botId, chip, activationId = 'act1', status) => { for (const cb of listeners.activity) cb({ botId, activationId, chip, ...(status ? { status } : {}) }) }
     }
   }
   const find = (botId: string) => {
