@@ -381,6 +381,8 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   const searching = navQuery.trim() !== ''
   const results = useMemo(() => searchSettings(navQuery, searchPages(mousseId), searchIndex(mousseId)), [navQuery, mousseId])
   const sectionOf = (id: SettingsSectionId) => SETTINGS_SECTIONS.find((section) => section.id === id)!
+  // Settings grants access (devices, agents, bots, phones): only Appearance, where themes are edited, shows a theme.
+  const themePaused = settingsOpen && activeSection !== 'appearance' ? '' : undefined
   const activeSectionInfo = sectionOf(activeSection)
   const activeSectionLabel = activeSectionInfo.label
   /** Up and Down move through the results; Up from the first goes back to the search field. */
@@ -468,7 +470,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
 
   if (!settings || !options) {
     return (
-      <div data-mousse="settings" className="settings-page overlay-page" hidden={!settingsOpen} data-page-hue={activeSectionInfo.hue}>
+      <div data-mousse="settings" data-mousse-decision={themePaused} className="settings-page overlay-page" hidden={!settingsOpen} data-page-hue={activeSectionInfo.hue}>
         {settingsHeader}
         <div className="settings-body">
           {settingsNav}
@@ -490,7 +492,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   }
 
   return (
-    <div data-mousse="settings" className="settings-page overlay-page" hidden={!settingsOpen} data-page-hue={activeSectionInfo.hue}>
+    <div data-mousse="settings" data-mousse-decision={themePaused} className="settings-page overlay-page" hidden={!settingsOpen} data-page-hue={activeSectionInfo.hue}>
       {settingsHeader}
 
       <div className="settings-body">

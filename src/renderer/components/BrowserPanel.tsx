@@ -690,7 +690,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
     >
       <KeepMountedStack>
       <KeepMounted active preserveLayout className="keep-mounted-pane browser-manual-surface">
-      {pendingAccess && <div className="browser-agent-controls" role="region" aria-label="Agent browser access request">
+      {pendingAccess && <div className="browser-agent-controls" data-mousse-decision="" role="region" aria-label="Agent browser access request">
         <span>Allow access to all browser tabs?</span>
         <button type="button" disabled={browserBusy} onClick={() => void changeAccess(true, pendingAccess.requestId)}>Allow</button>
         <button type="button" disabled={browserBusy} onClick={() => void changeAccess(false, pendingAccess.requestId)}>Deny</button>

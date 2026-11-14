@@ -353,6 +353,7 @@ export function ThreadsContextMenu({
               className="threads-context-menu-item"
               role="menuitem"
               title="Mousse runs this repository's own Git filters (git-crypt, a local Git LFS) only as they were when you added it. Use this after you changed one yourself."
+              data-mousse-decision=""
               onClick={onTrustGitSettings}
             >
               <ShieldCheck />

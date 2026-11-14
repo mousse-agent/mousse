@@ -196,7 +196,7 @@ export const THEME_SELECTORS: ReadonlyArray<{ selector: string; part: string }> 
   { selector: '[data-mousse="composer"]', part: 'the message box' },
   { selector: '[data-mousse="project-icon"]', part: 'a project\'s icon (an image, or a wrapper around its folder glyph or initials)' },
   { selector: '[data-mousse="side-card"]', part: 'the thread details card' },
-  { selector: '[data-mousse="settings"]', part: 'the Settings page' }
+  { selector: '[data-mousse="settings"]', part: 'the Settings page (themed on Appearance only)' }
 ]
 
 /** The short styling guide the theme tools give an agent. */
@@ -208,6 +208,7 @@ export function themeStylingGuide(): string {
     ...THEME_TOKENS.map((token) => `  ${token.name}: ${token.use}`),
     'Stable selectors (other class names change without notice):',
     ...THEME_SELECTORS.map((entry) => `  ${entry.selector}: ${entry.part}`),
+    'Where a person decides something (an approval, an ask, a host key) and on Settings pages other than Appearance, the theme is off.',
     'Rules: nothing may load from outside. @import, image-set(), src(), attr() and any url() that is not data: or #id are dropped, rule by rule; invalid CSS is dropped by the browser rule by rule. Keep text readable (4.5:1 contrast) and do not hide controls.'
   ].join('\n')
 }

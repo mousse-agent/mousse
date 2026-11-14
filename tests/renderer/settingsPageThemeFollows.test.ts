@@ -98,4 +98,11 @@ describe('an open Settings page and a theme an agent changes', () => {
     await elsewhere({ appearance: { theme: 'light' } } as MousseSettingsUpdate)
     expect(checked()).toEqual(['Light'])
   })
+
+  it('pauses the theme on every Settings page but Appearance, where themes are edited', async () => {
+    const page = () => host.querySelector('[data-mousse="settings"]:not([hidden])')!
+    expect(page().hasAttribute('data-mousse-decision')).toBe(false)
+    await act(async () => { window.dispatchEvent(new CustomEvent('mousse:settings-section', { detail: 'agents' })) })
+    expect(page().hasAttribute('data-mousse-decision')).toBe(true)
+  })
 })

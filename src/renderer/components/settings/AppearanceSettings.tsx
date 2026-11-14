@@ -243,7 +243,7 @@ export function AppearanceSettings({
       </SettingsGroup>
 
       {userTheme && (
-        <SettingsGroup title={userTheme.name} icon={Code2} anchor="appearance-custom-theme" className="user-theme-group">
+        <SettingsGroup title={userTheme.name} icon={Code2} className="user-theme-group">
           <UserThemeEditor
             theme={userTheme}
             appearance={appearance}

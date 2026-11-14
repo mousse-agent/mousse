@@ -46,7 +46,7 @@ export function DeviceAccessView({ name, policy, busy, ask, onSetTerminal, onSet
       control={<>
         {ask && <>
           <button type="button" className="settings-btn" data-action="decline-editor-ask" disabled={busy} onClick={onNotNow}>Not now</button>
-          <button type="button" className="settings-btn" data-action="allow-editor-ask" disabled={busy} onClick={onAllow}>Allow</button>
+          <button type="button" className="settings-btn" data-action="allow-editor-ask" disabled={busy} data-mousse-decision="" onClick={onAllow}>Allow</button>
         </>}
         <Switch checked={policy.editor} label={`Editor connections from ${name}`} disabled={busy} onChange={onSetEditor} />
       </>}

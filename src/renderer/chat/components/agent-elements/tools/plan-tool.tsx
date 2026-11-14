@@ -251,6 +251,7 @@ export const PlanTool = memo(function PlanTool({
               {!isAlreadyApproved && (
                 <button
                   type="button"
+                  data-mousse-decision=""
                   onClick={() => void handleApprove()}
                   disabled={isSending}
                   className={approveButtonClass}
@@ -295,6 +296,7 @@ export const PlanTool = memo(function PlanTool({
               {!isAlreadyApproved && (
                 <button
                   type="button"
+                  data-mousse-decision=""
                   onClick={() => void handleApprove()}
                   disabled={isSending}
                   className={approveButtonClass}

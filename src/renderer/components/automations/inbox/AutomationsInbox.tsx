@@ -352,7 +352,7 @@ function AskRow({ item }: { item: AutomationItem }) {
     }).catch((cause) => useInboxStore.setState({ actionError: cause instanceof Error ? cause.message : String(cause) })).finally(() => { setBusy(false); void refreshInbox() })
   }
   return (
-    <div className="inbox-ask-row" data-testid="inbox-ask">
+    <div className="inbox-ask-row" data-testid="inbox-ask" data-mousse-decision="">
       <span className="inbox-row-summary" title={item.attention?.text}>{item.attention?.text ?? item.name}</span>
       <button type="button" className="inbox-text-btn" disabled={busy} onClick={() => answer(true)}>Allow</button>
       <button type="button" className="inbox-text-btn muted" disabled={busy} onClick={() => answer(false)}>Not now</button>
