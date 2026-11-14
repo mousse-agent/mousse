@@ -16,7 +16,7 @@ export function workElapsed(startedAt: string, now = Date.now()): string {
 function workDoing(item: BotWorkItem, chip: BotChip | undefined): string {
   if (item.status === 'queued') return 'queued'
   if (item.status === 'waiting_for_internet') return 'waiting for internet'
-  if (item.status === 'paused') return 'held'
+  if (item.status === 'paused') return item.waitsFor === 'answer' ? 'waiting on you' : 'held'
   return chip ? `${chip.text}${chip.highlight ? ` ${chip.highlight}` : ''}` : 'working'
 }
 

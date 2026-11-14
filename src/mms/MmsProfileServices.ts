@@ -2112,9 +2112,11 @@ export class MmsProfileServices {
     const reminders = store.waitingReminders(botId).map((reminder) => ({ dueAt: reminder.dueAt, text: reminder.text }))
     // Work rows whose model can't run (#673): the chat can tell the owner why such work does not start.
     const blocked = engine.situationLines(botId)
+    // Questions its work waits on (#1123): the chat can talk about them and pass on an answer the owner gives there.
+    const questions = engine.questionLines(botId)
     return {
       ...(ownerName ? { ownerName } : {}), ...(openAsks.length ? { openAsks } : {}), ...(schedules.length ? { schedules } : {}),
-      work, ...(reminders.length ? { reminders } : {}), ...(blocked.length ? { blocked } : {})
+      work, ...(reminders.length ? { reminders } : {}), ...(blocked.length ? { blocked } : {}), ...(questions.length ? { questions } : {})
     }
   }
 

@@ -147,6 +147,20 @@ describe('a question in the bot chat', () => {
     expect(fake.calls.filter(([name]) => name === 'answerQuestion')).toEqual([['answerQuestion', 'flats', 'q_1', 'Flat A']])
   })
 
+  it('a question from work is answered with a tap the same way; answered in the chat, or no longer needed, it says so under the bubble', async () => {
+    await open([
+      bubble({ id: 'qr', kind: 'notice', activationId: 'act_w1' }),
+      bubble({ id: 'qc', seq: 3, kind: 'notice', question: { questionId: 'q_2', choices: [{ label: 'Yes' }, { label: 'No' }], other: false, status: 'answered', answer: 'The second one', answeredWith: 'text', by: 'chat' } }),
+      bubble({ id: 'qn', seq: 4, kind: 'notice', question: { questionId: 'q_3', choices: [{ label: 'Yes' }, { label: 'No' }], other: false, status: 'withdrawn' } })
+    ])
+    expect(answers(transcript().querySelector('[data-message-id="qr"]')!)).toEqual(['Flat A2 bed, Hackney, £1,900', 'Flat B', 'Other…'])
+    expect(transcript().querySelector('[data-message-id="qc"] .bot-question-settled')?.textContent).toBe('Answered in chat: The second one')
+    expect(transcript().querySelector('[data-message-id="qn"] .bot-question-settled')?.textContent).toBe('No longer needed')
+    await click(button('Flat B', transcript().querySelector('[data-message-id="qr"]')!))
+    await settle()
+    expect(fake.calls.filter(([name]) => name === 'answerQuestion')).toEqual([['answerQuestion', 'flats', 'q_1', 'Flat B']])
+  })
+
   it('a service with no questions sends the text alone, and the chat shows it all, answers included', async () => {
     await open([message(2, { id: 'old', text: `${QUESTION_TEXT}\n\n${PLAIN}` })])
     expect(transcript().querySelector('[data-message-id="old"] .bot-bubble')?.textContent).toContain(PLAIN)

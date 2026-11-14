@@ -984,7 +984,14 @@ function defaultRedactMessage(tx: BotStoreTx, botId: string, messageId: string, 
   // A question the forgotten message carried keeps no copy of its words or answers, and no longer waits for an answer; an
   // answer the forgotten message gave keeps no copy either (issue #1123).
   if (has('bot_questions')) {
-    tx.statement("UPDATE bot_questions SET spec_json = json_object('question', ?, 'choices', json('[]'), 'other', json('false')), status = CASE WHEN status IN ('open', 'moved_on') THEN 'withdrawn' ELSE status END WHERE bot_id = ? AND message_id = ?").run(text, botId, messageId)
+    // Work that waits on the forgotten question, or has its answer still to read, has nothing to go on with: the question
+    // is withdrawn, and the engine ends that work with a line (`settleStrandedWork`).
+    tx.statement(`UPDATE bot_questions SET spec_json = json_object('question', ?, 'choices', json('[]'), 'other', json('false')),
+      status = CASE WHEN status IN ('open', 'moved_on') OR (lane = 'run' AND status = 'answered' AND read_at IS NULL) THEN 'withdrawn' ELSE status END WHERE bot_id = ? AND message_id = ?`).run(text, botId, messageId)
+    // An answer work has not read yet is taken back: the question is open again, and its work waits for an answer again.
+    if (has('bot_activations')) tx.statement(`UPDATE bot_activations SET end_reason = 'question' WHERE status = 'blocked' AND end_reason = 'question_answered'
+      AND id IN (SELECT activation_id FROM bot_questions WHERE bot_id = ? AND answer_message = ? AND lane = 'run' AND status = 'answered' AND read_at IS NULL)`).run(botId, messageId)
+    tx.statement("UPDATE bot_questions SET status = 'open', answer_json = NULL, answer_message = NULL, answered_at = NULL WHERE bot_id = ? AND answer_message = ? AND lane = 'run' AND status = 'answered' AND read_at IS NULL").run(botId, messageId)
     tx.statement("UPDATE bot_questions SET answer_json = CASE WHEN json_extract(answer_json, '$.tapped') OR json_extract(answer_json, '$.choice') IS NOT NULL THEN json_object('by', json_extract(answer_json, '$.by'), 'tapped', json('true'), 'redacted', json('true')) ELSE json_object('by', json_extract(answer_json, '$.by'), 'redacted', json('true')) END WHERE bot_id = ? AND answer_message = ? AND answer_json IS NOT NULL").run(botId, messageId)
   }
   // A note the forgotten message passed to work: gone from the note and from the prompt that carried it.

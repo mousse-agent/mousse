@@ -1006,6 +1006,16 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
     expect(fake.calls).toContainEqual(['stopWork', 'inbox', 'act_w1'])
   })
 
+  it('work held for the owner’s answer to its question says it waits on them; other held work says held', async () => {
+    const asked = { id: 'act_w3', title: 'Flat hunt', status: 'paused' as const, waitsFor: 'answer' as const, startedAt: new Date(Date.now() - 4 * 60_000).toISOString() }
+    const held = { id: 'act_w4', title: 'Vacuums', status: 'paused' as const, startedAt: new Date(Date.now() - 4 * 60_000).toISOString() }
+    await open({ ...working, state: 'needs_you', stateText: 'Asked: Which flat?', work: [asked, held] })
+    await click(presence())
+    expect([...host.querySelectorAll('.bot-work-line')].map((line) => line.textContent)).toEqual(['Flat huntwaiting on you · 4 min', 'Vacuumsheld · 4 min'])
+    await click(button('Stop Flat hunt'))
+    expect(fake.calls).toContainEqual(['stopWork', 'inbox', 'act_w3'])
+  })
+
   it('one piece of work is named alone, never "+0", and the browser shows as its sticker', async () => {
     await open({ ...working, work: [working.work![0]!] })
     expect(presence().textContent).toBe('Vacuum comparison')

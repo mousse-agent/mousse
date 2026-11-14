@@ -32,11 +32,13 @@ export interface BotSituation {
   /** The bot's schedules, by label. */
   schedules?: Array<{ label: string; nextAt?: string }>
   /** Work running or waiting (docs/plans/bot-always-free.md): its title, since when, and what it is doing. */
-  work?: Array<{ workId: string; title: string; status: string; startedAt: string; doing?: string }>
+  work?: Array<{ workId: string; title: string; status: string; startedAt: string; doing?: string; waitsFor?: 'answer' }>
   /** One-off reminders still to come. */
   reminders?: Array<{ dueAt: string; text: string }>
   /** Work rows whose model can't run (#673), each as one line: work for them is not started. */
   blocked?: string[]
+  /** Questions the bot's work waits on (issue #1123), each as one line with its id, for `question_answer`. */
+  questions?: string[]
 }
 
 export interface BotContextPackOptions {
@@ -170,8 +172,9 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
     if (facts.schedules?.length)
       lines.push(`Schedules: ${facts.schedules.map((s) => `${s.label}${s.nextAt ? ` (next ${timeLabel(s.nextAt, tz)})` : ''}`).join('; ')}.`)
     if (chat && facts.work?.length)
-      lines.push(`Your work now: ${facts.work.map((w) => `${cut(w.title, 60)} (${w.workId}, ${w.status === 'queued' ? 'waiting its turn' : w.status === 'running' ? `started ${agoLabel(w.startedAt, now)}` : w.status.replaceAll('_', ' ')}${w.doing ? `, ${cut(w.doing, 50)}` : ''})`).join('; ')}.`)
+      lines.push(`Your work now: ${facts.work.map((w) => `${cut(w.title, 60)} (${w.workId}, ${w.status === 'queued' ? 'waiting its turn' : w.status === 'running' ? `started ${agoLabel(w.startedAt, now)}` : w.waitsFor === 'answer' ? "waiting for the owner's answer" : w.status.replaceAll('_', ' ')}${w.doing ? `, ${cut(w.doing, 50)}` : ''})`).join('; ')}.`)
     else if (chat) lines.push('Your work now: nothing running.')
+    if (chat && facts.questions?.length) lines.push(...facts.questions)
     if (chat && facts.blocked?.length) lines.push(...facts.blocked)
     if (chat && facts.reminders?.length)
       lines.push(`Reminders: ${facts.reminders.slice(0, 5).map((r) => `${timeLabel(r.dueAt, tz)}: ${cut(r.text, 50)}`).join('; ')}${facts.reminders.length > 5 ? `; and ${facts.reminders.length - 5} more` : ''}.`)

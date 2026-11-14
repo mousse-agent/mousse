@@ -120,8 +120,11 @@ function appletsOf(row: Pick<BotMessageRow, 'attachments'>): BotChatApplet[] {
 /** The longest part of a written answer a question's bubble shows. */
 const ANSWER_SHOWN_CHARS = 120
 
-/** A question as its bubble shows it: its answers, where it stands, and the answer once there is one. */
-function questionView(question: BotQuestionRow): BotChatQuestion {
+/**
+ * A question as its bubble shows it: its answers, where it stands, and the answer once there is one; for one from work,
+ * whether the work waits on it (`waits`) and whether the chat passed the answer on (`by: 'chat'`).
+ */
+function questionView(question: BotQuestionRow, waits: boolean): BotChatQuestion {
   const answer = question.status === 'answered' && !question.answer?.redacted ? question.answer : undefined
   const words = answer?.choice ?? (answer?.text ? oneLine(answer.text, ANSWER_SHOWN_CHARS) : undefined)
   return {
@@ -129,7 +132,9 @@ function questionView(question: BotQuestionRow): BotChatQuestion {
     choices: question.spec.choices,
     other: question.spec.other,
     status: question.status,
-    ...(words ? { answer: words, answeredWith: answer?.choice !== undefined ? 'choice' as const : 'text' as const } : {})
+    ...(words ? { answer: words, answeredWith: answer?.choice !== undefined ? 'choice' as const : 'text' as const } : {}),
+    ...(question.status === 'answered' && question.answer?.by === 'chat' ? { by: 'chat' as const } : {}),
+    ...(waits ? { waits: true as const } : {})
   }
 }
 
@@ -275,7 +280,7 @@ export class BotChatProjection {
       ...(row.kind === 'notice' && row.id.startsWith('bm_permission_') ? { systemLine: true as const } : {}),
       text: plain ? `${row.text}\n\n${plain}` : row.text,
       ...(plain ? { plainFrom: row.text.length } : {}),
-      ...(asks ? { question: questionView(asks) } : {}),
+      ...(asks ? { question: questionView(asks, asks.lane === 'run' && asks.status === 'open' && this.store.activation(asks.activationId)?.endReason === 'question') } : {}),
       ...(question && row.author === 'owner' && question.answerMessage === row.id && question.status === 'answered'
         ? { answers: { questionId: question.id, tapped: question.answer?.choice !== undefined } } : {}),
       chips: row.chips,
@@ -411,14 +416,18 @@ export class BotChatProjection {
       .map((row) => ({
         id: row.id,
         title: row.trigger.kind === 'work' ? row.trigger.title : oneLine(row.trigger.input, 60),
-        status: row.status === 'queued' || row.endReason === 'room_allowed' ? 'queued' as const : row.status === 'paused' || row.status === 'blocked' ? 'paused' as const : row.offline ? 'waiting_for_internet' as const : 'running' as const,
+        status: row.status === 'queued' || row.endReason === 'room_allowed' || row.endReason === 'question_answered' ? 'queued' as const : row.status === 'paused' || row.status === 'blocked' ? 'paused' as const : row.offline ? 'waiting_for_internet' as const : 'running' as const,
+        // Held for the owner's answer to the question it asked them: an older app shows "held", a new one "waiting on you".
+        ...(row.status === 'blocked' && row.endReason === 'question' ? { waitsFor: 'answer' as const } : {}),
         startedAt: row.createdAt,
         ...(row.trigger.kind === 'schedule' ? { scheduled: true as const } : {}),
         // A model the owner asked for this work alone, not the bot's usual one: named on its line.
         ...(row.trigger.kind === 'work' && row.trigger.model?.name ? { model: { name: row.trigger.model.name, detail: workModelDetail(row.trigger.model) } } : {}),
         ...this.runningSubagents(row.id)
       }))
-    const state = botState({ paused, ...(error ? { error } : {}), openAsks: asks.length, liveActivations: live })
+    // Questions the bot's work waits on need the owner too ("Asked: Which flat…?"); a permission ask's words come first.
+    const waitingOn = this.store.waitingQuestions(definition.id)
+    const state = botState({ paused, ...(error ? { error } : {}), openAsks: asks.length + waitingOn.length, liveActivations: live })
     // Working, but every running activation waits for the internet.
     const running = liveRows.filter((row) => row.status === 'running')
     const offline = state === 'working' && running.length > 0 && running.every((row) => row.offline)
@@ -429,7 +438,7 @@ export class BotChatProjection {
         ? registry?.pausedReason === 'usage_limit' && registry.pausedUntil ? `Paused until ${clockTime(registry.pausedUntil)}` : 'Paused'
         : `Paused until ${clockTime(limitedUntil!)}`
       : state === 'stuck' ? `Needs you: ${error!.text}`
-        : state === 'needs_you' ? `Wants to ${this.card(asks[0]!).title}`
+        : state === 'needs_you' ? (asks[0] ? `Wants to ${this.card(asks[0]).title}` : `Asked: ${oneLine(waitingOn[0]!.spec.question, 80)}`)
           : state === 'working' ? (offline ? 'Waiting for internet' : chatTurn || !work.length ? 'Working…' : workingOn(work))
             : last ? oneLine(last.text || last.error?.text || '') : ''
     return {

@@ -375,8 +375,59 @@ export class BotChatService {
     const question = this.questionToAnswer(input.botId, input.questionId)
     const choice = question.spec.choices.find((entry) => entry.label === input.choice)
     if (!choice) throw new BotEngineError('invalid_params', 'Pick one of the question\'s answers.')
+    // A question the bot's work waits on: the tap answers the work, which goes on with it; no chat turn starts.
+    if (question.lane === 'run') {
+      const message = this.answerWork({ botId: input.botId, text: choice.label, clientRequestId: input.clientRequestId }, question, choice.label)
+      if (message) return { message, ...this.bubbleOf(question.id) }
+      const withdrawn = this.store.question(question.id)?.status === 'withdrawn'
+      throw new BotEngineError(withdrawn ? 'question_closed' : 'question_answered', withdrawn ? 'This question is no longer open.' : 'This was already answered.')
+    }
     const { message } = await this.send({ botId: input.botId, text: choice.label, clientRequestId: input.clientRequestId, replyTo: question.messageId!, ...(input.from ? { from: input.from } : {}) }, { questionId: question.id, choice: choice.label })
     return { message, ...this.bubbleOf(question.id) }
+  }
+
+  /**
+   * The owner answers a question the bot's work waits on (issue #1123): a tap (`choice`), or a reply in their own words
+   * on its bubble. It is their answer to that work, not a chat message: their row belongs to the work (its activation,
+   * lane run), no chat turn starts, and no chat question is moved past. In one transaction the question is answered and
+   * the work goes on once a run slot is free (`answerWorkInTx`); answering one question wakes only its own work. A tap
+   * stays the bot's label, never the owner's own words, and grants nothing. `undefined` when the question is no longer
+   * open (answered on another device, or withdrawn): nothing is written.
+   */
+  private answerWork(input: { botId: string; text: string; attachments?: BotChatAttachment[]; clientRequestId: string }, question: BotQuestionRow, choice?: string): BotChatMessage | undefined {
+    const saved = input.attachments?.length ? copyBotAttachments(this.engine.filesFolder(input.botId), input.attachments, this.options.now()) : []
+    const closed = new Error('question no longer open')
+    let messageId: string
+    try {
+      messageId = this.store.db.transaction(() => {
+        const current = this.store.question(question.id)
+        if (current?.status !== 'open' || current.lane !== 'run' || !current.messageId) throw closed
+        const posted = this.engine.chat.post({
+          botId: input.botId,
+          author: 'owner',
+          kind: 'text',
+          text: input.text,
+          ...(saved.length ? { attachments: saved } : {}),
+          clientRequestId: input.clientRequestId,
+          activationId: current.activationId,
+          lane: 'run',
+          replyTo: current.messageId,
+          questionId: current.id
+        })
+        if (!this.engine.answerWorkInTx(current.id, choice !== undefined ? { choice, by: 'owner', tapped: true } : { text: input.text, by: 'owner' }, posted.id)) throw closed
+        return posted.id
+      })
+    } catch (error) {
+      removeBotAttachments(saved)
+      if (error === closed) return undefined
+      if (error instanceof BotEngineError) throw error
+      const code = (error as { code?: unknown } | null)?.code
+      if (code !== 'bot_journal_failed' && code !== 'storage_full') throw error
+      this.engine.journalFailedFor(input.botId)
+      throw new BotEngineError('bot_journal_failed', 'I can\'t save my work. Free some disk space.')
+    }
+    this.engine.afterWorkAnswer(question.id)
+    return this.engine.chat.toMessage(this.store.message(messageId)!)
   }
 
   /**
@@ -388,10 +439,10 @@ export class BotChatService {
     this.questionToAnswer(botId, questionId)
   }
 
-  /** A chat question of this bot whose bubble is shown and that a tap may answer: open, or moved on. */
+  /** A question of this bot whose bubble is shown and that a tap may answer: open, or (a chat's) moved on. */
   private questionToAnswer(botId: string, questionId: string): BotQuestionRow {
     const question = this.store.question(questionId)
-    if (!question || question.botId !== botId || question.lane !== 'chat' || !question.messageId) throw new BotEngineError('question_not_found', 'This bot has no such question.')
+    if (!question || question.botId !== botId || !question.messageId) throw new BotEngineError('question_not_found', 'This bot has no such question.')
     if (question.status === 'answered' || question.status === 'defaulted') throw new BotEngineError('question_answered', 'This was already answered.')
     if (question.status === 'withdrawn') throw new BotEngineError('question_closed', 'This question is no longer open.')
     return question
@@ -419,6 +470,14 @@ export class BotChatService {
       await this.engine.admitWallMessage(existing)
       return { message: this.engine.chat.toMessage(this.store.message(existing.id) ?? existing) }
     }
+    // A reply on the bubble of a question the bot's work waits on is the owner's answer to that work, in their words. Once
+    // that question is no longer open (answered elsewhere), the reply is an ordinary message to the chat.
+    const onWork = !tap && input.replyTo ? this.store.message(input.replyTo) : undefined
+    const workQuestion = onWork?.botId === input.botId && onWork.author === 'bot' && onWork.questionId ? this.store.question(onWork.questionId) : undefined
+    if (workQuestion?.lane === 'run' && workQuestion.status === 'open' && workQuestion.messageId === onWork!.id) {
+      const answered = this.answerWork({ botId: input.botId, text, ...(input.attachments ? { attachments: input.attachments } : {}), clientRequestId: input.clientRequestId }, workQuestion)
+      if (answered) return { message: answered }
+    }
     // The activation this message belongs to: its row and journal row say so (the chat pack then
     // leaves it out, as it is the request). A tap starts a turn of its own: it never answers a permission ask a chat
     // waits at (as Not now), so it waits its turn behind it.
@@ -442,7 +501,7 @@ export class BotChatService {
         // The question this message answers: the one tapped, or the one its reply names (its bubble), when a tap could
         // still answer it. Read in the transaction, so a tap on another device is never answered twice.
         const asked = tap ? this.store.question(tap.questionId) : replyTo?.questionId && replyTo.author === 'bot' ? this.store.question(replyTo.questionId) : undefined
-        const answering = asked && asked.messageId === replyTo?.id && (asked.status === 'open' || asked.status === 'moved_on') ? asked : undefined
+        const answering = asked && asked.lane === 'chat' && asked.messageId === replyTo?.id && (asked.status === 'open' || asked.status === 'moved_on') ? asked : undefined
         if (tap && !answering) throw new BotEngineError(asked?.status === 'withdrawn' ? 'question_closed' : 'question_answered', asked?.status === 'withdrawn' ? 'This question is no longer open.' : 'This was already answered.')
         const posted = this.engine.chat.post({
           botId: input.botId,
@@ -847,7 +906,10 @@ export class BotChatService {
   }
 
   memoryForget(botId: string, id: string): BotMemoryForgetResult {
-    return this.memoryFor(botId).forget(botId, id)
+    const result = this.memoryFor(botId).forget(botId, id)
+    // Work that waited on a question the owner just forgot ends now, and says so.
+    this.engine.afterForget()
+    return result
   }
 
   memoryExport(botId: string, dir: string): Promise<{ files: string[] }> {

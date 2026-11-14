@@ -7,7 +7,7 @@
  * - states: open, moved on, answered, withdrawn (stopped turn, wall), redacted (Forget)
  * - actors: a tap, a typed reply, another message, a second tap (or another device), Stop, escalate before and after
  * - owner's words: a tapped label never counts as theirs (threads, models); a typed answer does
- * - limits: one per chat turn, six open per bot, twenty a day; work is not offered it
+ * - limits: one per chat turn, six open per bot, twenty a day (questions from work: botWorkQuestions.test.ts)
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { registerPersonalBotMethods } from '../../src/mms/bots/registerMethods'
@@ -20,7 +20,7 @@ import type { MousseTool, ToolCallContext } from '../../src/mms/run/mcp/appTools
 import type { BotChatMessage } from '../../src/shared/bots/personal/chat'
 import type { BotModelOption } from '../../src/shared/bots/personal/methods'
 import type { PreparedBotTurn } from '../../src/mms/bots/activation/dispatcher'
-import { QUESTION_AFTER_ASK_TEXT, QUESTION_ASKED_TEXT, QUESTION_CHAT_ONLY_TEXT, QUESTIONS_ENOUGH_TEXT } from '../../src/shared/bots/personal/questions'
+import { QUESTION_AFTER_ASK_TEXT, QUESTION_ASKED_TEXT, QUESTIONS_ENOUGH_TEXT } from '../../src/shared/bots/personal/questions'
 import { BOT_ASK_DEFERRED_TEXT } from '../../src/mms/bots/activation/BotEngine'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -249,16 +249,6 @@ describe('what a question never does', () => {
     expect(JSON.parse((await tool('ask_owner', later.prepared, later.payload.threadId, FLATS)).text).asked).toBe(true)
   })
 
-  it('is offered to a chat turn, never to work, and work that calls it is told to ask in its report', async () => {
-    const turn = await chatTurn('Look into flats', 'o1')
-    expect(turn.prepared.authority.appTools.has('ask_owner')).toBe(true)
-    const started = await f.bots.tools.work.start(botId, turn.activation.id, { title: 'Flats', brief: 'Find flats.', key: 'k1' })
-    await finish(f, turn.payload, 'completed', { text: 'On it.' })
-    const work = await start(f, started.workId)
-    expect(work.prepared.authority.appTools.has('ask_owner')).toBe(false)
-    expect(await tool('ask_owner', work.prepared, work.payload.threadId, FLATS)).toEqual({ text: QUESTION_CHAT_ONLY_TEXT, isError: true })
-    expect(f.store.countQuestions(botId, {})).toBe(0)
-  })
 })
 
 describe('forgetting, deleting and exporting', () => {
