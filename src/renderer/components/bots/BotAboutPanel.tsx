@@ -104,6 +104,7 @@ function RunsOn({ botId, name, refresh }: { botId: string; name: string; refresh
           name={name}
           providers={choices.providers}
           slots={slots}
+          borrows
           {...(choices.named ? { named: choices.named } : {})}
           {...(choices.notes ? { notes: choices.notes } : {})}
           {...(choices.imageProviders ? {

@@ -1,7 +1,7 @@
 import { useEffect, useId, useState } from 'react'
 import type { BotModelPick, BotModelSlotKey } from '../../../shared/bots/personal/definition'
 import type { BotComputerChoice, BotImageUsage, BotRunsOnChoices, BotShownRows } from '../../../shared/bots/personal/methods'
-import { isPinned, workRowsDiffer } from '../../../shared/bots/personal/modelSlots'
+import { isPinned, pickSourceOf, rowName, workRowsDiffer } from '../../../shared/bots/personal/modelSlots'
 import { modelLabel } from '../../../shared/modelChoice'
 import { shortModelName } from '../../../shared/modelNames'
 import type { LlmProviderOption } from '../../../shared/settings'
@@ -74,6 +74,25 @@ export function botRowTitle(providers: readonly LlmProviderOption[], pick: BotMo
   return undefined
 }
 
+/** What a row with no pick shows: the row whose model it runs on (Same as Talk), or undefined when none is picked. */
+export function borrowedRow(slots: BotShownRows, key: BotModelSlotKey): BotModelSlotKey | undefined {
+  if (isPinned(slots[key])) return undefined
+  const source = pickSourceOf(slots, key)
+  return source && source !== key ? source : undefined
+}
+
+/** A borrowing row's placeholder ("Same as Talk"). */
+export function sameAsLabel(source: BotModelSlotKey): string {
+  return `Same as ${rowName(source)}`
+}
+
+/** A borrowing row's tooltip: the model it runs on, from which row, and how to change it. */
+export function borrowedRowTitle(providers: readonly LlmProviderOption[], slots: BotShownRows, source: BotModelSlotKey): string {
+  const runs = botRowTitle(providers, slots[source])
+  const on = isPinned(slots[source]) && offeredListing(providers, slots[source]) ? `Runs on ${runs}, ${rowName(source)}'s model` : `Runs on ${rowName(source)}'s model, which is not available now`
+  return `${on}. Pick a model to change it.`
+}
+
 /** The Images row's control while no entry of the owner's can make pictures (its tooltip says what to add). */
 export const NO_IMAGE_MODELS = 'None available'
 /** The Images row with no pick: the bot makes no pictures. */
@@ -131,11 +150,11 @@ const ROWS_OF: Record<RowSpec['key'], readonly BotModelSlotKey[]> = { talk: ['ta
 /**
  * A bot's model rows (#673), for About → Runs on and New bot: Talk and Work, and with Advanced, Light, Medium and Hard
  * work, each the app's model picker fed the bot's choices (each ready entry's models that can hold a bot). A row with no
- * pick says Pick a model; on a bot from before picks its tooltip says Mousse chooses until then. Advanced starts open
+ * pick says Pick a model, or in About (`borrows`) the row whose model it runs on ("Same as Talk"). Advanced starts open
  * when the work rows differ; closing it puts Medium work's pick on all work (`onOneWork`), and is refused while Medium
  * work has no pick and the rows differ. Controlled: `onPick` gets the rows a pick goes on (Work is all three).
  */
-export function BotModelRows({ name, providers, slots, named, notes, image, onPick, onOneWork, disabled }: {
+export function BotModelRows({ name, providers, slots, named, notes, image, borrows, onPick, onOneWork, disabled }: {
   /** The bot's name for the controls' labels ("Pip's Talk model"); New bot passes "New bot". */
   name: string
   providers: readonly LlmProviderOption[]
@@ -146,6 +165,11 @@ export function BotModelRows({ name, providers, slots, named, notes, image, onPi
   notes?: BotRunsOnChoices['notes']
   /** The Images row, under the work rows in Advanced (#1088). */
   image?: BotImageRow
+  /**
+   * A saved bot's rows (About): a row with no pick runs on another row's model, and says which ("Same as Talk"). New
+   * bot leaves it off: every row must be picked there.
+   */
+  borrows?: boolean
   onPick: (rows: readonly BotModelSlotKey[], pick: BotModelPick & { instanceId: string }) => void
   onOneWork: () => void
   disabled?: boolean
@@ -170,9 +194,12 @@ export function BotModelRows({ name, providers, slots, named, notes, image, onPi
   }
   return <div className="bot-model-picker" data-testid="bot-model-rows"><div className="bot-model-rows">
     {rows.map((row) => {
-      const pick = slots[row.key === 'work' ? 'medium' : row.key]
+      const key: BotModelSlotKey = row.key === 'work' ? 'medium' : row.key
+      const pick = slots[key]
       const listing = offeredListing(providers, pick)
       const shown = listing && pick ? pick : null
+      // A row with no pick runs on another row's model (Medium work's, else Talk's): it says which.
+      const source = borrows ? borrowedRow(slots, key) : undefined
       return <div className="bot-model-row" key={row.key} data-testid={`bot-model-row-${row.key}`}>
         <span className="bot-model-row-label" title={row.hint}>{row.label}</span>
         <SettingsModelPicker
@@ -182,8 +209,8 @@ export function BotModelRows({ name, providers, slots, named, notes, image, onPi
           instanceId={shown?.instanceId}
           modelId={shown?.model ?? ''}
           effort={shown?.effort}
-          placeholder={isPinned(pick) && !listing ? `${shortModelName(pick.model)} · not available` : PICK_A_MODEL}
-          title={botRowTitle(providers, pick, named?.[row.key === 'work' ? 'medium' : row.key])}
+          placeholder={isPinned(pick) && !listing ? `${shortModelName(pick.model)} · not available` : source ? sameAsLabel(source) : PICK_A_MODEL}
+          title={source ? borrowedRowTitle(providers, slots, source) : botRowTitle(providers, pick, named?.[key])}
           entry={entries && listing ? listing.label : undefined}
           disabled={disabled}
           // Every pick is sent, also the one the row has: saving it again accepts an entry whose sign-in changed.
