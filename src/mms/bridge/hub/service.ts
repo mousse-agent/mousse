@@ -53,11 +53,24 @@ interface Request extends BridgeHubRequestStatus {
   deadlineMs: number
   wireResult?: unknown
 }
+/** A listener that cannot take the news does not end the others. */
+function notifyCatchUp(listener: DisplayListener, caught: boolean): void {
+  try {
+    listener.catchUp?.(caught)
+  } catch {
+    /* Independent local subscribers. */
+  }
+}
 interface DisplayListener {
   update: (value: ThreadDisplayUpdate, position: BridgeDisplayPosition) => void | Promise<void>
   error?: (code: NetErrorCode) => void
   /** A display-only note from a private stream (a streaming message, the pending questions...). */
   delta?: (type: string, data: unknown) => void
+  /**
+   * `false` when the stream starts to replay what it has to catch up (the copy on disk, then what the owner has
+   * that the copy lacks), and `true` once every record of that has been given to `update`. Records after it are live.
+   */
+  catchUp?: (caught: boolean) => void
 }
 /**
  * How a thread is attached. A private attachment reads the stream only this computer may read
@@ -86,6 +99,8 @@ interface Attachment {
   offClosed?: () => void
   offEphemeral?: () => void
   listeners: Set<DisplayListener>
+  /** The subscription has caught up with the owner since the last rebuild. */
+  caught: boolean
   /** Set on a private attachment: it is reopened the same way after a reconnect. */
   options?: HubAttachOptions
 }
@@ -884,7 +899,8 @@ export class BridgeHub {
     update: (value: ThreadDisplayUpdate, position: BridgeDisplayPosition) => void | Promise<void>,
     error?: (code: NetErrorCode) => void,
     options?: HubAttachOptions,
-    delta?: (type: string, data: unknown) => void
+    delta?: (type: string, data: unknown) => void,
+    catchUp?: (caught: boolean) => void
   ): Promise<{
     close(): void
     descriptor: StreamDescriptor
@@ -893,11 +909,12 @@ export class BridgeHub {
     if (!options?.open) validateHubParams('bridge.thread.open', { threadId: ref.entityId })
     if (!isId('node', ref.nodeId)) return fail('bad_request')
     const key = this.attachmentKey(ref, options),
-      listener: DisplayListener = { update, error, ...(delta ? { delta } : {}) },
+      listener: DisplayListener = { update, error, ...(delta ? { delta } : {}), ...(catchUp ? { catchUp } : {}) },
       existing = this.attachments.get(key)
     if (existing) {
       this.session(ref.nodeId, 'bridge.thread.open')
       existing.listeners.add(listener)
+      notifyCatchUp(listener, false)
       try {
         await this.rebuild({
           ...existing,
@@ -908,6 +925,8 @@ export class BridgeHub {
         existing.listeners.delete(listener)
         throw error
       }
+      // Otherwise it is told with the others when the subscription catches up.
+      if (existing.caught) notifyCatchUp(listener, true)
       return { descriptor: existing.descriptor, close: () => this.release(ref, listener, options) }
     }
     if (this.attaching.has(key)) return fail('conflict')
@@ -982,18 +1001,32 @@ export class BridgeHub {
         bytes: 0,
         stopped: false,
         listeners: new Set([listener]),
+        caught: false,
         ...(options ? { options } : {})
       }
       this.attachments.set(key, attachment)
       try {
+        notifyCatchUp(listener, false)
         await this.rebuild(attachment)
         if (attachment.stopped) return fail('cancelled')
         attachment.subscription = session.subscribe(opened.descriptor.id, {
           onRecord: (record) => this.enqueue(attachment, record),
-          onCaughtUp() {},
+          // After the records queued before it have been displayed.
+          onCaughtUp: () => {
+            attachment.pending = attachment.pending.then(() => {
+              if (attachment.stopped || attachment.caught) return
+              attachment.caught = true
+              for (const each of attachment.listeners) notifyCatchUp(each, true)
+            })
+          },
           onSnapshotInstalled: () => {
             attachment.pending = attachment.pending
-              .then(() => this.rebuild(attachment))
+              .then(() => {
+                // The new snapshot is replayed from the start; the subscription catches up again after it.
+                attachment.caught = false
+                for (const each of attachment.listeners) notifyCatchUp(each, false)
+                return this.rebuild(attachment)
+              })
               .catch((e) => this.attachmentError(attachment, e))
           },
           onError: (code) => {
@@ -1131,7 +1164,7 @@ export class BridgeHub {
       if (!first) continue
       this.detach(previous.ref, previous.options)
       try {
-        await this.attach(previous.ref, first.update, first.error, previous.options, first.delta)
+        await this.attach(previous.ref, first.update, first.error, previous.options, first.delta, first.catchUp)
         const fresh = this.attachments.get(this.attachmentKey(previous.ref, previous.options))
         if (fresh) {
           fresh.listeners = new Set(listeners)
