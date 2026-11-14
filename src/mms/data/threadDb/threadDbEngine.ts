@@ -14,6 +14,7 @@ import { compose, decompose, normalizedForCompare, rowFields, type StoredThreadD
 import { legacyFingerprint, readLegacyThreadData, sameFingerprint, type FileStamp } from '../legacyThreadData'
 import { skeletonOf } from './jsonSkeleton'
 import { formatCursor, parseCursor } from '../../../shared/pageCursor'
+import { keepImagesWithin } from '../../protocol/transcriptPaging'
 import { ThreadIndex, type IndexHit, type IndexSearchRequest, type IndexTarget } from './threadIndex'
 import { estimateMessage, withoutMissingImages, type MessageEstimate } from '../../orchestrator/contextEstimate'
 import type { Message } from '../../../shared/transcript'
@@ -57,7 +58,18 @@ export interface ThreadDbGauge { context?: string; estimates: MessageEstimate[];
 /** How many of the newest transcript messages the gauge looks through for the newest token count. */
 export const GAUGE_TOKEN_LOOKBACK = 500
 
-export interface MessagePageRequest { before?: string; after?: string; limit: number; maxBytes: number; images?: boolean }
+export interface MessagePageRequest {
+  before?: string
+  after?: string
+  limit: number
+  maxBytes: number
+  images?: boolean
+  /**
+   * With `images`: the base64 characters of image data the page keeps, newest image first (`keepImagesWithin`); older
+   * images keep only their name and type, and a message is measured as it is returned. For a newest page only.
+   */
+  imageBudget?: number
+}
 export interface MessagePage {
   info: DbInfo
   /** Message payloads (JSON), oldest first. */
@@ -481,9 +493,15 @@ export class ThreadDbEngine {
       const statement = db.prepare(`SELECT rid, coll, ord, msg_id, payload, blob_paths FROM items WHERE coll = 'm' AND hidden = 0 ${where} ${order} LIMIT ?`)
       const kept: Array<DbRow & { msg_id: string | null }> = []
       let bytes = 0
+      let imageChars = request.images === true && !cursor ? request.imageBudget : undefined
       // Measured as returned: blobs put back, in UTF-8.
       for (const raw of statement.iterate(...args, request.limit) as Iterable<DbRow & { msg_id: string | null; blob_paths: string | null }>) {
         const row = hydrateRows(dir, [raw], { images: request.images === true })[0]!
+        if (imageChars !== undefined && row.payload.includes('"images"')) {
+          const budgeted = keepImagesWithin(JSON.parse(row.payload) as { images?: Array<{ name: string; mimeType: string; data?: string }> }, imageChars)
+          imageChars = budgeted.remaining
+          if (Array.isArray(budgeted.message.images)) row.payload = JSON.stringify(budgeted.message)
+        }
         const size = Buffer.byteLength(row.payload)
         if (kept.length && bytes + size > request.maxBytes) break
         bytes += size

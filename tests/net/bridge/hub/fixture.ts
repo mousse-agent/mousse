@@ -192,7 +192,7 @@ export async function fixture(
     mutating: false,
     validate: (value) => validateHubParams('bridge.thread.open', value),
     handle: async (value) => {
-      const descriptor = adapter!.activate((value as { threadId: string }).threadId)
+      const descriptor = await adapter!.open((value as { threadId: string }).threadId)
       return { descriptor, head: adapter!.store.head(descriptor.id) }
     }
   })

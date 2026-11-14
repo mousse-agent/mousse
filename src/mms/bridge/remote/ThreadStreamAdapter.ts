@@ -74,6 +74,11 @@ export type ThreadSourceEvent =
   | { snapshot: true }
 export interface ThreadSourcePort {
   snapshot(threadId: string): unknown
+  /**
+   * Reads what the next `snapshot` of the thread needs off the event loop (the newest page of its database), so that
+   * snapshot does not load the whole thread. `ThreadStreamAdapter.open` awaits it before a stream is opened.
+   */
+  warm?(threadId: string): Promise<void>
   onThread(
     threadId: string,
     listener: (event: ThreadSourceEvent) => void,
@@ -107,6 +112,12 @@ interface ActiveThread {
   lastBusyAt: number
   /** A terminal's output that arrived within a few milliseconds of each other, not yet signed and stored. */
   batch?: { bodies: unknown[]; bytes: number; timer?: { cancel(): void } }
+  /**
+   * Where the snapshot the stream published last begins, while a reader that opens the stream can still be served it:
+   * the store holds it whole (no trim cut into it) and no display-only delta went out since, which a new reader would
+   * not get. Undefined otherwise, and a reader's open publishes a fresh snapshot first.
+   */
+  published?: { begin: number }
 }
 export interface ThreadStreamOptions {
   db: NetDatabase
@@ -270,7 +281,8 @@ export class ThreadStreamAdapter {
         if (key === 'openSnapshot')
           return (stream: StreamId) => {
             const thread = this.active.get(stream)
-            if (thread) this.refreshSnapshot(thread)
+            // The snapshot already published, with the records after it, is what a fresh one would show.
+            if (thread && !thread.published) this.refreshSnapshot(thread)
             return target.openSnapshot(stream)
           }
         const value = Reflect.get(target, key, target)
@@ -288,6 +300,25 @@ export class ThreadStreamAdapter {
     // A private stream is opened for its reader only (`openPrivate`); no caller names its key.
     if (typeof threadId === 'string' && isPrivateKey(threadId)) throw new NetError('bad_request')
     return this.activateKey(threadId, holder)
+  }
+
+  /**
+   * Opens the thread's display stream as `activate` does. A stream not open yet first has its source read what the
+   * snapshot needs off the event loop (`ThreadSourcePort.warm`); the snapshot is then built once, from that.
+   */
+  async open(threadId: string, holder?: string): Promise<StreamDescriptor> {
+    if (
+      typeof threadId === 'string' &&
+      !isPrivateKey(threadId) &&
+      ![...this.active.values()].some((thread) => thread.threadId === threadId)
+    ) {
+      try {
+        await this.options.source.warm?.(threadId)
+      } catch {
+        // Reading ahead is only to spare the event loop; the snapshot reads what it needs itself.
+      }
+    }
+    return this.activate(threadId, holder)
   }
 
   /**
@@ -446,8 +477,9 @@ export class ThreadStreamAdapter {
     }
     if (this.options.db.database.isTransaction)
       throw new NetError('forbidden', 'Display generations must commit before publication.')
-    // Validate the actual source exists before allocating a permanent stream identity.
-    this.options.source.snapshot(threadId)
+    // The snapshot is built before a permanent stream identity is allocated, which also checks that the source
+    // exists, and published once the stream is: nothing runs in between, so no event can come before it.
+    const first = this.buildSnapshot(threadId)
     const self = this.options.identity.self()
     if (!self) throw new NetError('not_enrolled')
     let descriptor!: StreamDescriptor
@@ -505,7 +537,7 @@ export class ThreadStreamAdapter {
     }
     if (spec) this.privateBindings.set(descriptor.id, { reader: spec.reader, kind: spec.kind })
     else if (holder !== undefined && this.metered(threadId)) thread.holders.set(holder, now)
-    this.refreshSnapshot(thread)
+    this.refreshSnapshot(thread, first)
     this.active.set(thread.stream, thread)
     this.scheduleSweep()
     const fail = (error: unknown): void => {
@@ -542,6 +574,8 @@ export class ThreadStreamAdapter {
           this.flushBatch(thread)
           if (event.ephemeral) {
             if (!deltaTypes.includes(event.type)) throw new NetError('bad_request')
+            // A delta is never stored: a reader that opens the stream later is given a fresh snapshot that has it.
+            thread.published = undefined
             const key = deltaKey(event)
             if (!key) return
             const size = wireSize(body)
@@ -656,15 +690,15 @@ export class ThreadStreamAdapter {
     thread.deltaTimer = undefined
     thread.deltas.clear()
   }
-  private append(thread: ActiveThread, type: string, body: unknown): void {
-    this.appendMany(thread, type, [body])
+  private append(thread: ActiveThread, type: string, body: unknown): StoredRecord {
+    return this.appendMany(thread, type, [body])[0]!
   }
   /**
    * Signs and stores records, one after another in one transaction: the roster and this computer's delegation are
    * checked once, each record is signed on its own, and the records are published after the commit. Each body is
    * its own record, in the order given, so nothing about a record changes by being stored with others.
    */
-  private appendMany(thread: ActiveThread, type: string, bodies: readonly unknown[]): void {
+  private appendMany(thread: ActiveThread, type: string, bodies: readonly unknown[]): StoredRecord[] {
     if (this.options.db.database.isTransaction)
       throw new NetError('forbidden', 'Display records cannot escape an enclosing transaction.')
     const identity = this.options.identity,
@@ -729,18 +763,26 @@ export class ThreadStreamAdapter {
       }
       this.options.onRecord?.(thread.stream, record)
     }
+    return records
   }
-  private refreshSnapshot(thread: ActiveThread): void {
-    // What is waiting was printed before this snapshot was read: it goes first, then the snapshot replaces it.
-    this.flushBatch(thread)
-    const bytes = canonicalJson(this.options.source.snapshot(thread.threadId), MAX_DISPLAY_JSON_NODES)
+  /** The thread's display snapshot from its source, as the bytes its records carry. */
+  private buildSnapshot(threadId: string): Uint8Array {
+    const bytes = canonicalJson(this.options.source.snapshot(threadId), MAX_DISPLAY_JSON_NODES)
     if (bytes.byteLength > SNAPSHOT_MAX)
       throw new NetError('too_large', 'Display snapshot exceeds 32 MiB.')
+    return bytes
+  }
+  /** Publishes a snapshot (`built`, or one built now) and lets go of the records before it. */
+  private refreshSnapshot(thread: ActiveThread, built?: Uint8Array): void {
+    // What is waiting was printed before this snapshot was read: it goes first, then the snapshot replaces it.
+    this.flushBatch(thread)
+    thread.published = undefined
+    const bytes = built ?? this.buildSnapshot(thread.threadId)
     const snapshot = randomUUID(),
       sha256 = createHash('sha256').update(bytes).digest('base64url'),
       chunks = Math.max(1, Math.ceil(bytes.length / CHUNK_BYTES)),
       previous = this.options.store.head(thread.stream).seq
-    this.append(thread, 'thread.snapshot.begin', {
+    const begin = this.append(thread, 'thread.snapshot.begin', {
       threadId: thread.subject,
       snapshot,
       totalBytes: bytes.length,
@@ -758,10 +800,14 @@ export class ThreadStreamAdapter {
       })
     this.append(thread, 'thread.snapshot.end', { threadId: thread.subject, snapshot, sha256 })
     if (previous) this.options.store.truncate(thread.stream, previous, { forgetIds: true })
+    thread.published = { begin: begin.seq }
   }
   private trim(thread: ActiveThread): void {
-    if (thread.ring.length && thread.ring[0].seq > 1)
-      this.options.store.truncate(thread.stream, thread.ring[0].seq - 1, { forgetIds: true })
+    if (!thread.ring.length || thread.ring[0].seq <= 1) return
+    const through = thread.ring[0].seq - 1
+    this.options.store.truncate(thread.stream, through, { forgetIds: true })
+    // A snapshot larger than the ring loses its first records here; a reader that opens the stream needs a new one.
+    if (thread.published && through >= thread.published.begin) thread.published = undefined
   }
   deactivate(threadId: string): void {
     for (const [stream, thread] of this.active)

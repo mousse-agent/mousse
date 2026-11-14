@@ -281,6 +281,11 @@ export class BridgeProfileService {
           const reader = readerOfListsKey(threadId)
           return reader ? listsOf(reader).snapshot() : threadSource.snapshot(threadId)
         },
+        // A phone's thread reads its newest messages before its stream opens; the lists are small.
+        warm: async (threadId) => {
+          if (!isPrivateKey(threadId) && threadId !== LISTS_STREAM_THREAD_ID && !readerOfListsKey(threadId))
+            await threadSource.warm(threadId)
+        },
         onThread: (threadId, listener, onError) => {
           if (isPrivateKey(threadId)) return privateSources.onThread(threadId, listener, onError)
           if (threadId === LISTS_STREAM_THREAD_ID) return listsSource.watch(() => listener({ snapshot: true }), onError)
@@ -341,7 +346,7 @@ export class BridgeProfileService {
         const threadId = (value as { threadId: string }).threadId
         // The lists open with bridge.lists.open, each device its own; no id opens another device's.
         if (threadId === LISTS_STREAM_THREAD_ID || readerOfListsKey(threadId) !== undefined) throw new NetError('stream_unknown')
-        const descriptor = this.threads.activate(threadId, context.caller.node)
+        const descriptor = await this.threads.open(threadId, context.caller.node)
         return { descriptor, head: this.threads.store.head(descriptor.id) }
       }
     })
