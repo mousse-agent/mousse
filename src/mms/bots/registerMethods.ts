@@ -1,4 +1,3 @@
-import { connectionIsLocal } from '../protocol/threadVisibility'
 import { BOTS_PERSONAL_V2_CAPABILITY, BOTS_PERSONAL_V2_METHODS, BOTS_WORK_METHODS, MAX_BOT_CHAT_ATTACHMENTS, MAX_BOT_CHAT_PAGE, type BotChatAttachment, type BotsPersonalV2Method } from '../../shared/bots/personal/methods'
 import { MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_MODEL_CHARS, MAX_BOT_NAME_CHARS, type BotModelPick, type BotModelSlots, type BotSchedule } from '../../shared/bots/personal/definition'
 import { modelPickProblem, modelRowsProblem } from '../../shared/bots/personal/modelSlots'
@@ -252,7 +251,7 @@ export function registerPersonalBotMethods(domains: DomainHandlerRegistry, botsF
       capability: BOTS_PERSONAL_V2_CAPABILITY,
       validate: (params) => validate(method, params),
       async handle(_context, params, binding) {
-        if (method === 'bots.permissions.set' && (!connectionIsLocal(_context.connection) || _context.connection?.bridgeCaller))
+        if (method === 'bots.permissions.set' && (_context.connection?.clientType !== 'gui' || _context.connection?.bridgeCaller))
           throw new DomainRpcError('forbidden', 'Change permissions in the app window.')
         try {
           const bots = await botsForProfile(binding!.profileId)

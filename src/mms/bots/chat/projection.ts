@@ -271,6 +271,8 @@ export class BotChatProjection {
       at: row.at,
       author: row.author,
       kind: row.kind,
+      // Reserved ids keep permission switch lines quiet after a restart without a message schema change.
+      ...(row.kind === 'notice' && row.id.startsWith('bm_permission_') ? { systemLine: true as const } : {}),
       text: plain ? `${row.text}\n\n${plain}` : row.text,
       ...(plain ? { plainFrom: row.text.length } : {}),
       ...(asks ? { question: questionView(asks) } : {}),
@@ -574,6 +576,22 @@ export function withoutPermission(manifest: BotManifest, permission: BotPermissi
     const key = permission.budget.key
     if (starter.budget[key] === undefined) delete next.budget[key]
     else next.budget[key] = starter.budget[key]!
+  }
+  return canonicalManifest(next)
+}
+
+/** Restore exactly what this row kept, including older grants that hold a web tool in both lists. */
+export function restorePermission(manifest: BotManifest, remembered: BotManifest, permission: BotPermissionRequest): BotManifest {
+  const next = withoutPermission(manifest, permission)
+  if ('path' in permission) next.workspace = remembered.workspace
+  else if ('tool' in permission) {
+    next.tools.push(...remembered.tools.filter((tool) => tool === permission.tool))
+    next.appTools.push(...remembered.appTools.filter((tool) => tool === permission.tool))
+  } else if ('skill' in permission) next.skills.push(permission.skill)
+  else if ('mcp' in permission) next.mcp.push(...remembered.mcp.filter((pair) => pair.serverId === permission.mcp.serverId))
+  else {
+    const value = remembered.budget[permission.budget.key]
+    if (value !== undefined) next.budget[permission.budget.key] = value
   }
   return canonicalManifest(next)
 }

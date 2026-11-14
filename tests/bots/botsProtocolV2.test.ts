@@ -59,6 +59,29 @@ async function created(): Promise<string> {
   return bot.id
 }
 
+it('only the local app window can flip a permission through the local protocol', async () => {
+  const botId = await created()
+  const activation = await f.bots.activate({ botId, input: 'Run', clientRequestId: 'grant-command' })
+  const turn = await start(f, activation.id)
+  turn.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'Run' })
+  await finish(f, turn.payload, 'completed', { text: 'Asked.' })
+  for (const ask of f.store.openAsks(botId)) await f.bots.service.answer(botId, ask.id, 'allow')
+  const permissionId = f.bots.service.get(botId).permissions.find((item) => item.title === 'run commands')!.id
+  const params = { botId, permissionId, enabled: false }
+  for (const clientType of ['cli', 'agent', 'mcp', undefined]) {
+    const caller = { connection: { ...context.connection, clientType } } as unknown as HandlerContext
+    await expect(domains.dispatch(caller, 'bots.permissions.set', params)).rejects.toMatchObject({ code: 'forbidden' })
+    expect(f.store.activeGrant(botId)!.manifest.tools).toContain('shell')
+  }
+  const gui = { connection: { ...context.connection, clientType: 'gui' } } as unknown as HandlerContext
+  await domains.dispatch(gui, 'bots.permissions.set', params)
+  expect(f.store.activeGrant(botId)!.manifest.tools).not.toContain('shell')
+  await domains.dispatch(gui, 'bots.permissions.set', { ...params, enabled: true })
+  expect(f.store.activeGrant(botId)!.manifest.tools).toContain('shell')
+  const routed = { connection: { ...gui.connection, bridgeCaller: { node: 'phone' } } } as unknown as HandlerContext
+  await expect(domains.dispatch(routed, 'bots.permissions.set', params)).rejects.toMatchObject({ code: 'forbidden' })
+})
+
 describe('validation', () => {
   it('registers exactly the v2 methods', () => {
     for (const method of BOTS_PERSONAL_V2_METHODS) expect(domains.has(method)).toBe(true)

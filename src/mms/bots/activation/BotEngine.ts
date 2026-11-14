@@ -1,4 +1,4 @@
-import { grantedPermissions, permissionId, withoutPermission } from '../chat/projection'
+import { grantedPermissions, permissionId, restorePermission, withoutPermission } from '../chat/projection'
 import { computerSwitchOf } from '../../../shared/bots/personal/computerLimit'
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
@@ -543,6 +543,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private mcpWatch?: { mcp: BotMcpHost; stop: () => void }
   /** What this computer let bots do at the last settings save (`computerLimitChanged`). */
   private lastLimit: BotComputerLimit | undefined
+  /** A running turn never gets a permission back after Off, even if On or Remove follows before its next call. */
+  private readonly permissionSwitches = new Map<string, Map<string, number>>()
   /**
    * Turns this engine stopped because this computer switched off what they started with, by activation, and which
    * switches: each goes on in a new turn under the new limit (`advance`), told why.
@@ -2778,6 +2780,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     mcpTools?: readonly BotMcpTool[]
   }): BotAuthority {
     const { row, controller } = input
+    const switchedAtStart = new Map(this.permissionSwitches.get(row.botId))
     const activity: BotActivityContext = { botId: row.botId, activationId: row.id, dispatchId: input.dispatchId }
     const base = createBotAuthority({
       activationId: row.id,
@@ -2817,8 +2820,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       },
       disabled: (call) => {
         const asked = call.kind === 'skill' ? { skill: call.skill } : call.kind === 'mcp' ? { mcp: { serverId: call.server, tool: call.tool } } : { tool: botGrantTool(call.tool) }
-        return this.permissionOff(row.botId, asked)
-          ? this.offText() : undefined
+        if (this.permissionOff(row.botId, asked)) return this.offText()
+        const id = permissionId(filesAskOf(grantRequestOf(asked)))
+        if ((this.permissionSwitches.get(row.botId)?.get(id) ?? 0) !== (switchedAtStart.get(id) ?? 0))
+          return 'That permission changed while you worked. Carry on without it until your next turn.'
+        return undefined
       }
     })
     const observe = (call: NormalisedCall): void => {
@@ -4060,16 +4066,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * thread is checked as at approval; the rest of the grant is not approved again. Unfinished
    * activations move to the wider grant. The draft gets the same permission; its other edits stay.
    */
-  private allowForBot(botId: string, permission: BotPermissionRequest, amount: number | undefined): void {
+  private allowForBot(botId: string, permission: BotPermissionRequest, amount: number | undefined, remembered?: BotManifest): void {
     const entry = this.entry(botId)
     const published = entry.published
     const grant = this.store.activeGrant(botId)
     if (!published || !grant) throw new BotEngineError('bot_approval_required', 'Approve this bot\'s permissions first.')
     if (this.permissionOff(botId, permission)) throw new BotEngineError('permission_off', this.offText())
-    const wider = withPermission(grant.manifest, permission, amount)
+    const widen = (manifest: BotManifest) => remembered ? restorePermission(manifest, remembered, permission) : withPermission(manifest, permission, amount)
+    const wider = widen(grant.manifest)
     const problem = manifestProblem(wider)
     if (problem) throw new BotEngineError('invalid_answer', problem)
-    const next: BotDefinition = { ...published, permissions: withPermission(published.permissions, permission, amount) }
+    const next: BotDefinition = { ...published, permissions: widen(published.permissions) }
     const refused = [next.main, ...next.context].map((thread) => this.checkThread(thread, wider, botId)).find((check) => !check.ok)
     if (refused) throw new BotEngineError('policy_unenforceable', refused.reason ?? 'A thread of this bot cannot hold its permissions.', { thread: refused.key })
     let revision: BotDefinition
@@ -4087,7 +4094,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.store.regrant(botId, grant.digest, digest, revision.revision!)
     })
     try {
-      const draft = entry.draftHash === published.revision ? next : { ...entry.draft, permissions: withPermission(entry.draft.permissions, permission, amount) }
+      const draft = entry.draftHash === published.revision ? next : { ...entry.draft, permissions: widen(entry.draft.permissions) }
       this.host.definitions.save(draft, entry.draftHash)
     } catch (error) {
       console.warn('the bot draft was left as it was', { botId, error: error instanceof Error ? error.message : String(error) })
@@ -4121,12 +4128,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.store.db.transaction(() => {
       if (enabled) {
         this.store.forgetDisabledPermission(botId, id)
-        this.allowForBot(botId, permission, 'budget' in permission ? permission.budget.amount : undefined)
+        this.allowForBot(botId, permission, undefined, off!.manifest)
       } else {
         this.store.keepDisabledPermission(botId, id, grant.manifest)
         this.narrowGrant(botId, (held) => withoutPermission(held, permission), true)
       }
     })
+    if (!enabled) {
+      const switches = this.permissionSwitches.get(botId) ?? new Map<string, number>()
+      switches.set(id, (switches.get(id) ?? 0) + 1)
+      this.permissionSwitches.set(botId, switches)
+    }
     const title = askText(permission).title
     let stopped = false
     if (!enabled) {
@@ -4140,7 +4152,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       }
       if (which === 'threads') this.withdrawThreadMessages(botId)
     }
-    this.store.db.transaction(() => this.chat.post({ botId, author: 'bot', kind: 'notice', text: stopped ? `I stopped: "${title}" was switched off for now.` : `I ${enabled ? 'can' : "can't"} ${title}${enabled ? ' again' : ' for now'}.` }))
+    this.store.db.transaction(() => this.chat.post({ id: `bm_permission_${randomUUID()}`, botId, author: 'bot', kind: 'notice', text: stopped ? `I stopped: "${title}" was switched off for now.` : `I ${enabled ? 'can' : "can't"} ${title}${enabled ? ' again' : ' for now'}.` }))
     this.changed({ botId })
   }
 

@@ -113,6 +113,30 @@ describe('one ask per server', () => {
     expect(about).toEqual([expect.objectContaining({ title: 'use your GitHub tools', note: '2 tools: create_issue, list_issues' })])
   })
 
+  it('the server switch takes every tool away, refuses stale calls and asks, and restores on a new turn without a card', async () => {
+    await allowGitHub()
+    const work = await run('server-switch')
+    const call = { kind: 'mcp' as const, server: 'srv-github', tool: 'list_issues', args: {} }
+    expect(work.prepared.authority.check(call).ok).toBe(true)
+    const before = cards().length
+    f.bots.service.setPermission(botId, github, false)
+    expect(work.prepared.authority.time.signal.aborted).toBe(false)
+    for (const tool of ['list_issues', 'create_issue']) expect(work.prepared.authority.check({ ...call, tool }).ok).toBe(false)
+    expect(work.prepared.authority.escalate!({ permission: { mcp: { serverId: 'srv-github' } }, reason: 'Use it' })).toMatch(/switched.*off/)
+    expect(cards()).toHaveLength(before)
+    await finish(f, work.payload, 'completed', { text: 'Skipped GitHub.' })
+    const off = await run('server-still-off')
+    expect(off.prepared.authority.mcpTools).toBeUndefined()
+    expect(off.prepared.authority.check(call).ok).toBe(false)
+    await finish(f, off.payload, 'completed', { text: 'Still off.' })
+    f.bots.service.setPermission(botId, github, true)
+    const on = await run('server-back-on')
+    expect(on.prepared.authority.mcpTools!.map((item) => item.name)).toContain('GitHub__list_issues')
+    expect(on.prepared.authority.check(call).ok).toBe(true)
+    expect(cards()).toHaveLength(before)
+    await finish(f, on.payload, 'completed', { text: 'Read it.' })
+  })
+
   it('work is offered the granted tools, a chat turn none; the authority allows a granted pair and asks for another server', async () => {
     await allowGitHub()
     const work = await run('r1')

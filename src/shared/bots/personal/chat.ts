@@ -80,6 +80,8 @@ export interface BotChatMessage {
   at: string
   author: 'owner' | 'bot'
   kind: BotMessageKind
+  /** A quiet service line; older apps show its notice as a message. */
+  systemLine?: true
   /** Markdown. */
   text: string
   chips: BotChip[]
