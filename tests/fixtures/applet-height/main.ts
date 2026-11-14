@@ -80,7 +80,17 @@ async function main() {
       result[name] = reports.get(name)!
       manager.unmount(name)
     }
-    writeFileSync(join(directory, 'evidence.json'), JSON.stringify({ reports: result, errors }))
+    // The page itself is unpainted in the app, so the chat behind it shows through; what the applet paints stays.
+    const backdrop: Record<string, number[]> = {}
+    for (const [name, html] of Object.entries({ plain: '<p>Plain</p>', painted: '<div style="height:200px;background:#123456">Painted</div>' })) {
+      await manager.mount({ runtimeId: name, threadId: 'thread', revisionId: `rev-${name}`, source: { html, css: '', js: '' }, bounds: frame(200), clip })
+      let image = await manager.capture(name)
+      for (let tries = 0; tries < 20 && (image.isEmpty() || image.getSize().height < 150); tries++) { await delay(100); image = await manager.capture(name) }
+      const size = image.getSize(), bitmap = image.toBitmap()
+      backdrop[name] = Array.from(bitmap.subarray(((size.height - 20) * size.width + size.width - 20) * 4, ((size.height - 20) * size.width + size.width - 20) * 4 + 4))
+      manager.unmount(name)
+    }
+    writeFileSync(join(directory, 'evidence.json'), JSON.stringify({ reports: result, errors, backdrop }))
   } finally {
     manager.destroy()
     window.destroy()

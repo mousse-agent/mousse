@@ -1,5 +1,6 @@
 import {
   APPLET_APPEARANCE_TOKENS,
+  isAppletAppearanceValue,
   validateAppletAppearance,
   type AppletAppearance
 } from '../../../shared/appletAppearance'
@@ -21,12 +22,14 @@ export function readAppletAppearance(): AppletAppearance {
       if (next === value) break
       value = next
     }
-    return value
+    // A theme may write a value across lines (`0,\n 0,\n 0`); the applet only takes one-line values.
+    return value.replace(/\s+/g, ' ')
   }
   const tokens: AppletAppearance['tokens'] = {}
   for (const name of APPLET_APPEARANCE_TOKENS) {
     const value = resolve(name)
-    if (value && !value.includes('var(')) tokens[name] = value
+    // A value the applet would refuse is left out, so one odd theme value cannot stop every applet.
+    if (value && !value.includes('var(') && isAppletAppearanceValue(value)) tokens[name] = value
   }
   const solid = {
     '--bg-primary': '--surface-base',

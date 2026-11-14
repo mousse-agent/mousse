@@ -23,12 +23,16 @@ export const APPLET_EVENT_PREFIX = '__MOUSSE_APPLET_EVENT__'
  * to the frame), at once on first layout and then 100 ms after it settles, so the frame can shrink as well as grow.
  * A frame that only changed height, with nothing in the page changed since the last report, must not move the
  * report: such content is sized to the frame (`vh`, `height:100%`), and following it would grow the frame forever.
+ *
+ * Backdrop: `transparent` (the app) leaves the page itself unpainted, so the chat or panel behind it shows through,
+ * its theme surface or the acrylic window, as behind a reply. A standalone export keeps the opaque theme surface.
  */
 export function appletDocument(
   source: AppletSource,
   state?: unknown,
   appearance?: AppletAppearance,
-  scrollPositions?: Array<{path:number[];top:number;left:number}>
+  scrollPositions?: Array<{path:number[];top:number;left:number}>,
+  options: { transparent?: boolean } = {}
 ): string {
   const nonce = Array.from(globalThis.crypto.getRandomValues(new Uint8Array(24)), (value) =>
     value.toString(16).padStart(2, '0')
@@ -38,7 +42,7 @@ export function appletDocument(
   const script = source.js.replace(/<\/script/gi, '<\\/script')
   const css = source.css.replace(/<\/style/gi, '<\\/style')
   const policy = `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; img-src data:; font-src 'none'; connect-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; base-uri 'none'; form-action 'none'`
-  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${policy}"><meta name="viewport" content="width=device-width,initial-scale=1"><style>@layer mousse-applet-scrollbars;</style><style>${css}</style><style id="mousse-applet-host-style">${APPLET_HOST_STYLES}</style><script nonce="${nonce}">
+  return `<!doctype html><html${options.transparent ? ' data-mousse-backdrop="transparent"' : ''}><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${policy}"><meta name="viewport" content="width=device-width,initial-scale=1"><style>@layer mousse-applet-scrollbars;</style><style>${css}</style><style id="mousse-applet-host-style">${APPLET_HOST_STYLES}</style><script nonce="${nonce}">
 (()=>{
  for(const key of ['RTCPeerConnection','webkitRTCPeerConnection','RTCDataChannel','WebTransport'])Object.defineProperty(window,key,{value:undefined,writable:false,configurable:false});
  for(const [key,value] of Object.entries({alert:()=>{},confirm:()=>false,prompt:()=>null,print:()=>{}}))Object.defineProperty(window,key,{value,writable:false,configurable:false});
