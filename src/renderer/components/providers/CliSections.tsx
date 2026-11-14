@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
-import type { InstanceSnapshot, StatusDescription } from '../../../shared/harness/status'
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import { updateAvailableDetail, type InstanceSnapshot, type StatusDescription } from '../../../shared/harness/status'
 import type { InstanceConfigPatch, ProviderOperationEvent, RemoveInstallResult, TelemetrySetting } from '../../../shared/harness/types'
 import { Select } from '../ui/Select'
+import { FloatingPortal, useFloatingPosition } from '../../lib/floatingLayer'
 import { Download, Plus, RotateCcw, X } from '../../lib/icons'
 import { SettingsRow } from '../settings/SettingsRow'
 import { BrowseButton, CommandBox, FieldWithAction, RefreshButton, StatusLine, useAsyncAction } from './parts'
@@ -48,6 +49,12 @@ function progressText(snapshot: InstanceSnapshot, operation: ProviderOperationEv
   if (!progress) return null
   const percent = progress.fraction !== undefined ? ` (${Math.round(progress.fraction * 100)}%)` : ''
   return `${progress.message}${percent}`
+}
+
+/** The status without "Update available", which the heading's update chip already says (where it shows one). */
+function withoutUpdateDetail(status: StatusDescription, snapshot: InstanceSnapshot): StatusDescription {
+  const latest = snapshot.update?.latestVersion
+  return latest && status.detail === updateAvailableDetail(latest) ? { ...status, detail: null } : status
 }
 
 /**
@@ -152,7 +159,7 @@ export function SetupRow({
       <SettingsRow
         title="Status"
         anchor="providers-status"
-        description={withError(progress ?? <StatusLine status={status} />, error)}
+        description={withError(progress ?? <StatusLine status={updateRow ? withoutUpdateDetail(status, snapshot) : status} />, error)}
         control={
           <>
             {recheck}
@@ -218,54 +225,91 @@ export function AccountRow({ snapshot, actions, onOpenUsage }: { snapshot: Insta
 }
 
 /**
- * An available update. Mousse's own install updates in place; one its owner made runs the owner's
- * command, shown in its own box to copy as well. A copy whose owner is unknown only names the version.
+ * An available update, as a small chip beside the version in the editor's heading. Mousse's own
+ * install and an owner's command update in one click; pointing at the chip (or focusing it) opens a
+ * card with the target version and, where there is one, the command to copy for a terminal. An
+ * update that needs administrator rights, or a copy whose owner is unknown, only opens the card.
  */
-export function UpdateRow({ snapshot, operation, actions }: { snapshot: InstanceSnapshot; operation?: ProviderOperationEvent; actions: InstanceActions }) {
+export function UpdateChip({ snapshot, operation, actions }: { snapshot: InstanceSnapshot; operation?: ProviderOperationEvent; actions: InstanceActions }) {
   const { busy, error, run } = useAsyncAction()
+  const [open, setOpen] = useState(false)
+  const anchorRef = useRef<HTMLSpanElement>(null)
+  const cardRef = useRef<HTMLDivElement>(null)
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const cardId = useId()
+  const style = useFloatingPosition({ open, anchorRef, contentRef: cardRef, placement: 'below-end', gap: 6 })
+  useEffect(() => { if (error) setOpen(true) }, [error])
+  useEffect(() => () => clearTimeout(closeTimer.current), [])
   const update = snapshot.update
   if (!update) return null
+
+  const show = () => {
+    clearTimeout(closeTimer.current)
+    setOpen(true)
+  }
+  // A short grace period, so the pointer can cross from the chip to the card.
+  const hide = () => {
+    clearTimeout(closeTimer.current)
+    closeTimer.current = setTimeout(() => setOpen(false), 150)
+  }
   const target = formatVersion(update.latestVersion)
   const updating = operation?.kind === 'update' && (operation.phase === 'progress' || operation.phase === 'prompt')
-  if (update.kind === 'notice') {
-    return (
-      <SettingsRow
-        className="prov-update is-notice"
-        anchor="providers-update"
-        title={target ? `${target} is available` : 'Update available'}
-        description="Mousse can't tell how this copy was installed. Update it the way you installed it."
-      />
-    )
-  }
-  if (update.kind === 'advisory' && update.manual) {
-    return (
-      <SettingsRow
-        className="prov-update is-advisory"
-        anchor="providers-update"
-        title={target ? `Update to ${target}` : 'Update available'}
-        description="Needs administrator rights. Run it yourself in a terminal:"
-      >
-        <CommandBox command={update.command} label="Copy update command" />
-      </SettingsRow>
-    )
-  }
-  const advisory = update.kind === 'advisory'
-  const idleText = advisory ? 'Mousse runs this, or run it yourself in a terminal:' : 'Mousse updates it the way it was installed.'
+  const canRun = update.kind === 'one_click' || (update.kind === 'advisory' && !update.manual)
+  const command = update.kind === 'advisory' ? update.command : undefined
+  const note = updating && operation?.phase === 'progress'
+    ? operation.message
+    : update.kind === 'notice'
+      ? "Mousse can't tell how this copy was installed. Update it the way you installed it."
+      : update.kind === 'advisory' && update.manual
+        ? 'Needs administrator rights. Run it yourself in a terminal:'
+        : command
+          ? 'Mousse runs this, or run it yourself in a terminal:'
+          : 'Mousse updates it the way it was installed.'
+  const label = updating ? 'Updating…' : canRun ? 'Update now' : 'Update available'
+  const title = target ? `Update to ${target}` : 'Update available'
   return (
-    <SettingsRow
-      className={`prov-update ${advisory ? 'is-advisory' : 'is-one-click'}`}
-      anchor="providers-update"
-      title={target ? `Update to ${target}` : 'Update available'}
-      description={withError(updating && operation?.phase === 'progress' ? operation.message : idleText, error)}
-      control={
-        <button type="button" className="settings-btn prov-update-btn" disabled={busy !== null || updating} onClick={() => void run('update', actions.update)}>
-          <Download size={14} />
-          {updating ? 'Updating…' : 'Update now'}
-        </button>
-      }
+    <span
+      ref={anchorRef}
+      className="prov-update-chip-wrap"
+      data-settings-anchor="providers-update"
+      onMouseEnter={show}
+      onMouseLeave={hide}
+      onFocus={show}
+      onBlur={hide}
+      onKeyDown={(event) => { if (event.key === 'Escape') setOpen(false) }}
     >
-      {advisory && <CommandBox command={update.command} label="Copy update command" />}
-    </SettingsRow>
+      <button
+        type="button"
+        className={`prov-update-chip${canRun ? ' is-runnable' : ''}`}
+        aria-label={target ? `${label}, ${target}` : label}
+        aria-describedby={open ? cardId : undefined}
+        disabled={canRun && (busy !== null || updating)}
+        onClick={() => (canRun ? void run('update', actions.update) : setOpen((was) => !was))}
+      >
+        <Download size={12} />
+        {label}
+      </button>
+      {open && (
+        <FloatingPortal>
+          <div
+            ref={cardRef}
+            id={cardId}
+            role="dialog"
+            aria-label={title}
+            className="prov-update-card"
+            style={style}
+            onMouseEnter={show}
+            onMouseLeave={hide}
+            onFocus={show}
+            onBlur={hide}
+          >
+            <span className="prov-update-card-title">{title}</span>
+            <span className={error ? 'prov-error' : 'prov-update-card-note'}>{error ?? note}</span>
+            {command && <CommandBox command={command} label="Copy update command" />}
+          </div>
+        </FloatingPortal>
+      )}
+    </span>
   )
 }
 

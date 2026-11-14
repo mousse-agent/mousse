@@ -40,6 +40,11 @@ export type UpdateAffordance =
   /** A newer version is known, but Mousse cannot say how this copy was installed: no command, no action. */
   | { kind: 'notice'; latestVersion: string; untested?: boolean }
 
+/** The status detail for a known newer version; the provider editor shows its own update chip instead. */
+export function updateAvailableDetail(latestVersion: string): string {
+  return `Update available: ${latestVersion}.`
+}
+
 export type NextStepAction =
   | 'enable'
   | 'install'
@@ -482,7 +487,7 @@ export function describeStatus(snapshot: InstanceSnapshot): StatusDescription {
   const detail = allowed ?? (compatibility.state === 'newer_than_tested'
     ? `Newer than the versions Mousse was tested with${compatibility.testedRange ? ` (${compatibility.testedRange})` : ''}.`
     : snapshot.update?.latestVersion
-      ? `Update available: ${snapshot.update.latestVersion}.`
+      ? updateAvailableDetail(snapshot.update.latestVersion)
       : null)
   return {
     headline,

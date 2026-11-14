@@ -5,7 +5,7 @@ import { describeStatus, type InstanceSnapshot } from '../src/shared/harness/sta
 import type { ProviderAddOption } from '../src/shared/harness/types'
 import { AgentConnectStep, CustomCommandStep, addChoices, onFoldedKey, type AddChoice } from '../src/renderer/components/providers/AddProviderDialog'
 import { moveTargets } from '../src/renderer/components/providers/MoveProviderDialog'
-import { AccountRow, SetupRow, UpdateRow, type InstanceActions } from '../src/renderer/components/providers/CliSections'
+import { AccountRow, SetupRow, UpdateChip, type InstanceActions } from '../src/renderer/components/providers/CliSections'
 import { agentInfoRows } from '../src/renderer/components/providers/ProviderInfo'
 import { ProviderModelsSection, bulkVisibilityPatch, capabilityChips, displayModels, modelsSummary, movedOrder, nextOrder } from '../src/renderer/components/providers/ProviderModelsSection'
 import { AgentEditor, allowsCustomModels } from '../src/renderer/components/providers/ProviderEditor'
@@ -138,38 +138,22 @@ describe('Runtime rows', () => {
     expect(agentInfoRows(snapshot({ binary: undefined }))).toContainEqual({ label: 'Executable', value: 'Not found' })
   })
 
-  it('offers a one-click update only with a proven owner', () => {
-    const html = renderToStaticMarkup(createElement(UpdateRow, {
-      snapshot: snapshot({ update: { kind: 'one_click', owner: 'npm', latestVersion: '2.2.0' } }), actions
-    }))
-    expect(html).toContain('is-one-click')
-    expect(html).toContain('Update to v2.2.0')
-    expect(buttons(html)).toEqual(['Update now'])
-  })
-
-  it('updates an install its owner made with one click, and keeps the owner command to copy', () => {
-    const html = renderToStaticMarkup(createElement(UpdateRow, {
-      snapshot: snapshot({ update: { kind: 'advisory', command: 'npm i -g @anthropic-ai/claude-code', latestVersion: '2.2.0' } }), actions
-    }))
-    expect(html).toContain('is-advisory')
-    expect(html).toContain('Update to v2.2.0')
-    expect(html).toContain('npm i -g @anthropic-ai/claude-code')
-    expect(buttons(html)).toContain('Update now')
-    expect(labels(html)).toContain('Copy update command')
-  })
-
-  it('shows a newer version with no command and no button when the owner is not proven', () => {
-    const html = renderToStaticMarkup(createElement(UpdateRow, {
-      snapshot: snapshot({ update: { kind: 'notice', latestVersion: '2.2.0' } }), actions
-    }))
-    expect(html).toContain('is-notice')
-    expect(html).toContain('v2.2.0 is available')
-    expect(buttons(html)).toEqual([])
-    expect(labels(html)).toEqual([])
+  it('offers a one-click update as Update now, with the target version in its name', () => {
+    const chip = (update: NonNullable<SnapshotOverrides['update']>) => renderToStaticMarkup(createElement(UpdateChip, { snapshot: snapshot({ update }), actions }))
+    for (const update of [
+      { kind: 'one_click' as const, owner: 'npm' as const, latestVersion: '2.2.0' },
+      { kind: 'advisory' as const, command: 'npm i -g @anthropic-ai/claude-code', latestVersion: '2.2.0' }
+    ]) {
+      expect(buttons(chip(update))).toEqual(['Update now'])
+      expect(labels(chip(update))).toContain('Update now, v2.2.0')
+    }
+    // Mousse can't run these: the chip only names the update.
+    expect(buttons(chip({ kind: 'notice', latestVersion: '2.2.0' }))).toEqual(['Update available'])
+    expect(buttons(chip({ kind: 'advisory', command: 'sudo npm i -g x', latestVersion: '2.2.0', manual: true }))).toEqual(['Update available'])
   })
 
   it('renders nothing without an update', () => {
-    expect(renderToStaticMarkup(createElement(UpdateRow, { snapshot: snapshot(), actions }))).toBe('')
+    expect(renderToStaticMarkup(createElement(UpdateChip, { snapshot: snapshot(), actions }))).toBe('')
   })
 })
 
@@ -311,24 +295,22 @@ describe('Agent editor layout', () => {
     expect(html.indexOf('>Status<')).toBeLessThan(advanced)
   })
 
-  it('shows an available update in Setup, not under Advanced', () => {
+  it('shows an available update in the heading, before Setup', () => {
     const entry = snapshot({ update: { kind: 'one_click', owner: 'npm', latestVersion: '2.2.0' } })
     const html = renderToStaticMarkup(createElement(AgentEditor, { snapshot: entry, status: describeStatus(entry), actions, onSaveModelPrefs: noop, onRefreshModels: noop }))
-    const update = html.indexOf('Update to v2.2.0')
-    expect(update).toBeGreaterThan(html.indexOf('>Setup<'))
-    expect(update).toBeLessThan(html.indexOf('Models'))
-    expect(update).toBeLessThan(html.indexOf('Advanced</summary>'))
-    expect(html.match(/Update to v2\.2\.0/g)).toHaveLength(1)
+    const update = html.indexOf('Update now, v2.2.0')
+    expect(update).toBeGreaterThan(-1)
+    expect(update).toBeLessThan(html.indexOf('>Setup<'))
+    expect(html).not.toContain('Update available: 2.2.0')
   })
 
-  it('offers the update once: on its row, not again on the status', () => {
+  it('offers the update once: on its chip, not again on the status', () => {
     for (const compatibility of [{ state: 'tested' as const }, { state: 'known_broken' as const, knownProblem: { reason: 'Breaks sign-in.', fixedIn: '2.2.0' } }]) {
       const entry = snapshot({ compatibility, update: { kind: 'advisory', command: 'npm i -g @anthropic-ai/claude-code', latestVersion: '2.2.0' } })
       const status = describeStatus(entry)
       expect(status.nextStep?.action).toBe('update')
       const html = renderToStaticMarkup(createElement(AgentEditor, { snapshot: entry, status, actions, onSaveModelPrefs: noop, onRefreshModels: noop }))
       expect(buttons(html).filter((label) => /^Update/.test(label))).toEqual(['Update now'])
-      expect(html.match(/class="prov-command-text"/g)).toHaveLength(1)
     }
   })
 })

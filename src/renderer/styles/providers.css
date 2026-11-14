@@ -328,20 +328,12 @@
   gap: 6px;
   max-width: 100%;
   min-height: 22px;
-  padding: 2px 10px 2px 8px;
+  padding: 2px 10px;
   border-radius: 999px;
   background: color-mix(in srgb, var(--prov-tone) 13%, transparent);
   color: var(--prov-tone);
   font-weight: 500;
   line-height: 1.3;
-}
-
-.prov-status-badge-dot {
-  width: 6px;
-  height: 6px;
-  flex-shrink: 0;
-  border-radius: 50%;
-  background: currentColor;
 }
 
 .prov-status-detail {
@@ -453,7 +445,8 @@ html[data-theme='high-contrast'] .prov-status-badge {
   width: 13px;
 }
 
-/* Editor sections: heading, then rows flat on the pane. Inside the pane they sit closer together. */
+/* Editor sections: heading, then its rows in one minimal card. Setup, Models and Advanced head the
+   page at heading size; the groups inside Advanced (Behavior, Runtime...) are a step smaller. */
 
 .prov-editor > .prov-editor-section {
   padding-top: var(--space-24);
@@ -464,21 +457,29 @@ html[data-theme='high-contrast'] .prov-status-badge {
 }
 
 .prov-editor .settings-group-title {
-  font-size: var(--settings-fs-row);
-}
-
-.prov-editor > .prov-editor-section:first-child .settings-group-title {
   font-size: var(--settings-fs-heading);
 }
 
-/* The pane is the provider's one surface (rule 2): its sections' rows sit flat on it, split by
-   their hairlines, with no surface or hover fill of their own. */
+.prov-editor > .prov-editor-section:first-child .settings-group-title {
+  font-size: 18px;
+}
+
+.prov-editor .settings-advanced-body > .prov-editor-section .settings-group-title {
+  font-size: var(--settings-fs-row);
+}
+
+/* Each section's rows sit in a minimal card: a faint fill and rounded corners, no edge, no
+   hairlines between the rows. */
 .prov-editor .settings-group-rows {
-  --settings-surface-x: 0px;
-  padding: 0;
-  border-radius: 0;
-  background: none;
+  --settings-surface-x: var(--space-16);
+  padding: var(--space-4) var(--settings-surface-x);
+  border-radius: var(--ui-card-radius);
+  background: color-mix(in srgb, var(--text-primary) 3%, transparent);
   box-shadow: none;
+}
+
+.prov-editor .settings-group-rows > .settings-item {
+  border-top: 0;
 }
 
 .prov-editor .settings-group-rows > .settings-item:hover {
@@ -495,12 +496,12 @@ html[data-theme='high-contrast'] .prov-status-badge {
 }
 
 .prov-editor .settings-advanced > summary {
-  font-size: var(--settings-fs-row);
+  font-size: var(--settings-fs-heading);
 }
 
 /* A group's rows sit close under its heading; groups sit well apart, so each reads as one block. */
 .prov-editor .prov-editor-section .settings-group-head {
-  margin-bottom: 0;
+  margin-bottom: var(--space-8);
 }
 
 .prov-editor .settings-advanced-body > .prov-editor-section {
@@ -928,8 +929,75 @@ html[data-theme='high-contrast'] .prov-status-badge {
 /* Runtime: the executable in use, and updates. A one-click update is a button; an update Mousse
    cannot run itself is a command to copy, in its own box, so the two never look alike. */
 
-.prov-update.is-one-click .prov-update-btn {
+/* An available update: a small chip beside the version. Pointing at it opens a card with the
+   target version and the command to copy. */
+.prov-update-chip-wrap {
+  display: inline-flex;
+}
+
+.prov-update-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  height: 22px;
+  padding: 0 var(--space-8);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.prov-update-chip.is-runnable {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
   color: var(--accent);
+}
+
+.prov-update-chip:hover:not(:disabled) {
+  background: var(--ui-hover);
+}
+
+.prov-update-chip.is-runnable:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.prov-update-chip:focus-visible {
+  outline: none;
+  background-image: var(--ui-focus-layer);
+}
+
+.prov-update-chip:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+html[data-theme='high-contrast'] .prov-update-chip {
+  outline: 1px solid currentColor;
+}
+
+.prov-update-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  box-sizing: border-box;
+  width: max-content;
+  max-width: min(420px, calc(100vw - 16px));
+  padding: var(--space-12);
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-menu-radius);
+  background: var(--ui-raised);
+  color: var(--text-primary);
+  box-shadow: var(--ui-specular), var(--ui-menu-drop);
+  font-size: var(--settings-fs-small);
+}
+
+.prov-update-card-title {
+  font-weight: 600;
+}
+
+.prov-update-card-note {
+  color: var(--text-secondary);
 }
 
 .prov-command {

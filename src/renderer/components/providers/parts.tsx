@@ -69,10 +69,7 @@ export function CompactStatus({ status }: { status: StatusDescription }) {
 export function StatusLine({ status }: { status: StatusDescription }) {
   return (
     <span className={`prov-status-text is-${status.tone}`} aria-live="polite">
-      <span className="prov-status-badge">
-        <span className="prov-status-badge-dot" aria-hidden="true" />
-        {status.headline}
-      </span>
+      <span className="prov-status-badge">{status.headline}</span>
       {statusDetail(status) && <span className="prov-status-detail">{statusDetail(status)}</span>}
     </span>
   )
