@@ -129,9 +129,7 @@ it('serves signed real thread snapshots and actual profile metadata events witho
   caller.bridge.hub.detachOwner('fixture-connection')
 }, 20000)
 
-it.each(['snapshot', 'source-event'])(
-  'closes only the failed authoritative display when its real %s exceeds the bound',
-  async (failure) => {
+it('closes only the failed authoritative display when its real snapshot exceeds the bound', async () => {
     const { target, caller, node } = await linked(),
       broken = target.threads.createThread('bounded source'),
       healthy = target.threads.createThread('unrelated source')
@@ -165,15 +163,11 @@ it.each(['snapshot', 'source-event'])(
       content: 'x'.repeat(33 * 1024 * 1024),
       timestamp: new Date().toISOString()
     }
-    if (failure === 'snapshot') {
-      target.threads.mutateThreadData(broken.id, () => ({ messages: [message] }))
-      target.orchestrator.getOrCreateSession(broken.id).messages = [message]
-    }
+    target.threads.mutateThreadData(broken.id, () => ({ messages: [message] }))
+    target.orchestrator.getOrCreateSession(broken.id).messages = [message]
     target.orchestrator.emit('thread-messages', {
       threadId: broken.id,
-      messages: [
-        { ...message, content: 'x'.repeat(failure === 'snapshot' ? 49 * 1024 : 26 * 1024 * 1024) }
-      ]
+      messages: [{ ...message, content: 'x'.repeat(49 * 1024) }]
     })
     await vi.waitFor(() => expect(errors).toEqual(['too_large']))
     expect(caller.net.session(node).state()).toBe('open')
@@ -187,6 +181,35 @@ it.each(['snapshot', 'source-event'])(
     )
     caller.bridge.hub.detachOwner('broken-source-owner')
     caller.bridge.hub.detachOwner('healthy-source-owner')
-  },
-  20000
-)
+}, 20000)
+
+it('replaces an event too large to send with a fresh snapshot of the thread, and keeps the display open', async () => {
+  const { target, caller, node } = await linked(),
+    thread = target.threads.createThread('bounded event')
+  const errors: string[] = [],
+    views: Array<{ kind?: string }> = []
+  await caller.bridge.hub.attachFor(
+    'event-owner',
+    { nodeId: node, entityId: thread.id },
+    (view) => {
+      views.push(view as { kind?: string })
+    },
+    (code) => {
+      errors.push(code)
+    }
+  )
+  await vi.waitFor(() => expect(views.some((view) => view.kind === 'snapshot')).toBe(true))
+  const snapshots = () => views.filter((view) => view.kind === 'snapshot').length
+  const before = snapshots()
+  // An event larger than a record may carry (26 MiB): the thread itself is small, so its snapshot carries it.
+  target.orchestrator.emit('thread-messages', {
+    threadId: thread.id,
+    messages: [{ id: 'oversized-event', role: 'assistant' as const, content: 'x'.repeat(26 * 1024 * 1024), timestamp: new Date().toISOString() }]
+  })
+  await vi.waitFor(() => expect(snapshots()).toBeGreaterThan(before), { timeout: 15_000 })
+  await dispatchMethod({ mms: target, globalSequence: () => 0 }, 'threads.rename', { threadId: thread.id, name: 'still live after the large event' })
+  await vi.waitFor(() => expect(JSON.stringify(views)).toContain('still live after the large event'))
+  expect(errors).toEqual([])
+  expect(caller.net.session(node).state()).toBe('open')
+  caller.bridge.hub.detachOwner('event-owner')
+}, 30000)
