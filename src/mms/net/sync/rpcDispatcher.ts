@@ -13,6 +13,25 @@ import type {
 import type { NetDatabase } from '../store/database'
 import { canonicalJson } from './codec'
 import type { SessionRpcPort } from './session'
+import { ROUTED_METHODS, routedMethodOf } from '../../../shared/bridge/routed'
+import type { TeamAccessDecision, TeamDirectory } from '../../../shared/teams/types'
+import { DENY_ALL_TEAM_DIRECTORY, teamAccess } from '../../teams/access'
+
+/**
+ * What the access decision for a call from another person reads (`mms/teams/access.ts`). Without it, or with
+ * the flag off, every such call is refused as it always was.
+ */
+export interface TeamAccessPort {
+  /** The `netTeams` flag, read on every call. */
+  enabled(): boolean
+  /** Default: knows no team, so nobody else is let in. */
+  directory?: TeamDirectory
+  /**
+   * Whether the thread is kept on this computer only (`Thread.localOnly`). Without it every thread counts as
+   * kept here, so nothing is shared.
+   */
+  localOnly?(threadId: string): boolean
+}
 
 /** Settled request rows and their aliases are kept this long; no retry window comes close. */
 export const LEDGER_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
@@ -58,6 +77,8 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
         peer: SyncSession['peer'],
         capability: NodeCapability
       ): void
+      /** Calls from another person (a teammate); absent refuses them all. */
+      teams?: TeamAccessPort
     }
   ) {
     options.db.database.exec(
@@ -179,7 +200,7 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
     if (!method) throw new NetError('forbidden')
     params = method.validate ? method.validate(params) : params
     const capability = method.capabilityFor?.(params) ?? method.capability
-    this.authorize(name, context.caller, capability)
+    this.authorize(name, context.caller, capability, params)
     method.authorize?.(params, context)
     if (method.mutating && !method.sequenced && (!idem || idem.length > 256))
       throw new NetError('bad_request', 'Mutations need durable idempotency.')
@@ -189,7 +210,7 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
     if (context.signal.aborted) throw new NetError('cancelled')
     if (method.ephemeral || method.sequenced) {
       const returned = await method.handle(params, context)
-      this.authorize(name, context.caller, capability)
+      this.authorize(name, context.caller, capability, params)
       const result = returned === undefined ? null : returned
       if (canonicalJson(result).byteLength > 63 * 1024) throw new NetError('too_large')
       return result
@@ -224,7 +245,7 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
     context.signal.addEventListener('abort', abort, { once: true })
     this.running.set(id, { controller, caller: context.caller.node })
     try {
-      this.authorize(name, context.caller, capability)
+      this.authorize(name, context.caller, capability, params)
       method.authorize?.(params, context)
       method.authorizeNew?.(params, context)
       if (context.signal.aborted) throw new NetError('cancelled')
@@ -243,7 +264,7 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
         })
         throw new NetError('outcome_uncertain')
       }
-      this.authorize(name, context.caller, capability)
+      this.authorize(name, context.caller, capability, params)
       let publication: { result: unknown; commit(): void } | undefined
       if (bytes.byteLength > 63 * 1024) {
         if (!this.resultPublisher)
@@ -349,15 +370,26 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
       | { method: string; payload_hash: string; execution: string; capability?: NodeCapability }
       | undefined
   }
+  /**
+   * `params` is the call's, when there is one: a call from another person is let in only for a call that names
+   * the thread it acts on, so looking up a result or cancelling (which carry no params) refuses that person.
+   */
   private authorize(
     name: string,
     peer: SyncSession['peer'],
-    capability?: NodeCapability
+    capability?: NodeCapability,
+    params?: unknown
   ): RpcMethod {
     const method = this.registry.get(name),
       identity = this.options.identity,
       self = identity.self()
-    if (!method || !self || peer.user !== self.user) throw new NetError('forbidden')
+    if (!method || !self) throw new NetError('forbidden')
+    // The same-person check. Another person gets the same `forbidden` as always unless the one access decision
+    // lets them in; then their computer is held to their own roster below, like one of ours.
+    // Still same-person only, for a later change: the Bridge hub service, artifacts, `nodeAuthority`, and the
+    // session admission in `NetService`.
+    if (peer.user !== self.user && this.teamDecision(method, peer, self, params) !== 'allow')
+      throw new NetError('forbidden')
     const root = identity.pinnedRootKey(peer.user),
       signed = identity.roster(peer.user)
     if (!root || !signed || identity.rosterState(peer.user) !== 'ok')
@@ -390,6 +422,33 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
       throw new NetError('forbidden', undefined, { details: { reason: 'capability' } })
     this.options.authorizeMethod?.(method, peer, required)
     return method
+  }
+  private teamDecision(
+    method: RpcMethod,
+    peer: SyncSession['peer'],
+    self: { user: SyncSession['peer']['user']; node: NodeId },
+    params: unknown
+  ): TeamAccessDecision['kind'] {
+    const teams = this.options.teams
+    if (!teams) return 'deny'
+    const routed = method.family === 'routed' ? routedMethodOf(method.method) : undefined
+    const row = routed !== undefined && Object.hasOwn(ROUTED_METHODS, routed) ? ROUTED_METHODS[routed] : undefined
+    const named =
+      row && params && typeof params === 'object'
+        ? (params as Record<string, unknown>)[row.threadIds?.[0] ?? 'threadId']
+        : undefined
+    const target =
+      typeof named === 'string'
+        ? { threadId: named, localOnly: teams.localOnly ? teams.localOnly(named) : true }
+        : undefined
+    return teamAccess({
+      peer,
+      self,
+      row,
+      target,
+      flags: { netTeams: teams.enabled() },
+      directory: teams.directory ?? DENY_ALL_TEAM_DIRECTORY
+    }).kind
   }
   private terminal(record: ExecutionRecord): unknown {
     if (record.state === 'completed') {

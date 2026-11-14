@@ -64,6 +64,12 @@ export interface NetFeatureFlags {
    * only while `netBridge` is on.
    */
   netBridgeThreads: boolean
+  /**
+   * Teammates may reach the threads the team shares on this computer (`mms/teams/access.ts`). Off by default and
+   * absent means off; it has an effect only while `netBridge` is on. Stored only while it is on, so an earlier
+   * build, which rejects any other key, still loads the profile's Net configuration.
+   */
+  netTeams?: boolean
 }
 export const DEFAULT_NET_FEATURE_FLAGS: Readonly<NetFeatureFlags> = Object.freeze({
   netBridge: false,
