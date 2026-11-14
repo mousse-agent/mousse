@@ -15,8 +15,10 @@ import { dispatchMethod } from '../../protocol/handlers'
 import { NetError, type NodeId } from '../../../shared/net'
 import { REMOTE_MESSAGE_IMAGES_MAX_CHARS } from './RemoteApi'
 import { normalizePermissionMode, type PermissionMode } from '../../../shared/permissionMode'
-import { messagesBefore, newestMessages, type EarlierMessages } from '../../protocol/transcriptPaging'
+import { keepImagesWithin, messagesBefore, newestMessages, type EarlierMessages } from '../../protocol/transcriptPaging'
 import { isOpenActivityRow } from '../../run/restartNote'
+import { listPendingQueue } from '../../queue/ThreadMessageQueue'
+import type { MessagePageResult } from '../../data/ThreadDataStore'
 import { PHONE_MESSAGES_PAGE_BYTES, PHONE_SNAPSHOT_MESSAGE_BYTES, ROUTED_SNAPSHOT_MESSAGE_BYTES } from '../../../shared/bridge/routed'
 import type { RemoteBackendPort, RemoteChatExtras } from './RemoteApi'
 import { mmsJson } from './jsonOutput'
@@ -72,21 +74,9 @@ export function withImageBudget<T extends { images?: unknown }>(items: T[]): T[]
   let remaining = REMOTE_MESSAGE_IMAGES_MAX_CHARS
   const trimmed = items.slice()
   for (let index = trimmed.length - 1; index >= 0; index -= 1) {
-    const item = trimmed[index]
-    if (!Array.isArray(item?.images)) continue
-    const images = (item.images as RemoteImage[]).slice()
-    for (let at = images.length - 1; at >= 0; at -= 1) {
-      const image = images[at]
-      const size = typeof image.data === 'string' ? image.data.length : 0
-      if (size <= remaining) {
-        remaining -= size
-      } else {
-        // Once one image does not fit, every older one goes without data too.
-        remaining = 0
-        images[at] = { name: image.name, mimeType: image.mimeType }
-      }
-    }
-    trimmed[index] = { ...item, images }
+    const kept = keepImagesWithin(trimmed[index] as { images?: RemoteImage[] }, remaining)
+    trimmed[index] = kept.message as T
+    remaining = kept.remaining
   }
   return trimmed
 }
@@ -107,6 +97,9 @@ export function remoteThreadEventData(data: unknown): unknown {
   }
 }
 
+/** Newest pages read ahead by `warm` and not yet taken by a snapshot; each is at most 16 MiB. */
+const WARM_PAGES_MAX = 4
+
 /** Projects looked at for one match; a profile with more is matched against the first ones. */
 const MATCH_PROJECT_LIMIT = 256
 /** Folders read at once for a match. */
@@ -120,12 +113,19 @@ function isNetworkOrDevicePath(path: string): boolean {
   return process.platform === 'win32' && /^[\\/]{2}/.test(path)
 }
 
+/** The bytes of messages a snapshot holds: 16 MiB for another computer of the user (`newestOnly`), 8 MiB for a phone. */
+function snapshotBudget(options: { newestOnly?: boolean }): number {
+  return options.newestOnly ? ROUTED_SNAPSHOT_MESSAGE_BYTES : PHONE_SNAPSHOT_MESSAGE_BYTES
+}
+
 function failure(error: unknown): { ok: false; error: string } {
   return { ok: false, error: error instanceof Error ? error.message : String(error) }
 }
 
 /** Adapts the actual profile services, never a client-supplied ingress/profile/path. */
 export class MmsRemoteBackend implements RemoteBackendPort {
+  /** The newest page of a thread `warm` read from its database, by thread and byte budget, for the next snapshot. */
+  private readonly pages = new Map<string, MessagePageResult>()
   constructor(
     private readonly services: MmsProfileServices,
     private readonly revision: () => number = () => 0,
@@ -472,8 +472,50 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     if (!skills.some((skill) => skill.id === skillId || skill.installationId === skillId))
       throw new Error('That skill is not available.')
   }
-  async warm(threadId: string): Promise<void> {
-    if (this.remoteThread(threadId)) await this.services.threads.warmThread(threadId)
+  /**
+   * Reads what the next `snapshot` of the thread needs off the event loop. A thread that is not loaded and keeps its
+   * history in thread.db has its newest messages read in the read worker, as a window's newest page is, and is not
+   * loaded. Any other is read whole, so the snapshot finds it in memory. `newestOnly` as for `snapshot`.
+   */
+  async warm(threadId: string, options: { newestOnly?: boolean } = {}): Promise<void> {
+    const s = this.services
+    if (!this.remoteThread(threadId) || s.orchestrator.hasSession(threadId)) return
+    if (s.threads.usesThreadDb(threadId)) {
+      const budget = snapshotBudget(options)
+      const page = await s.threads.readMessagePage(threadId, {
+        limit: Number.MAX_SAFE_INTEGER,
+        maxBytes: budget,
+        images: true,
+        imageBudget: REMOTE_MESSAGE_IMAGES_MAX_CHARS
+      })
+      // A page showing work still running loads the thread after all: loading it settles work a previous daemon
+      // left running.
+      if (page && !page.messages.some(isOpenActivityRow)) {
+        const key = `${budget}:${threadId}`
+        this.pages.delete(key)
+        this.pages.set(key, page)
+        for (const stale of this.pages.keys()) {
+          if (this.pages.size <= WARM_PAGES_MAX) break
+          this.pages.delete(stale)
+        }
+        return
+      }
+    }
+    await s.threads.warmThread(threadId)
+  }
+
+  /**
+   * The page `warm` read for this snapshot, while it is still the thread's newest: the thread was not loaded since
+   * (a loaded thread may hold what its database does not yet) and its database has not changed.
+   */
+  private warmPage(threadId: string, budget: number): MessagePageResult | undefined {
+    const key = `${budget}:${threadId}`
+    const page = this.pages.get(key)
+    if (!page) return undefined
+    this.pages.delete(key)
+    if (this.services.orchestrator.hasSession(threadId)) return undefined
+    const now = this.services.threads.threadDbPosition(threadId)
+    return now && now.seq === page.seq && now.epoch === page.epoch ? page : undefined
   }
 
   /**
@@ -514,17 +556,21 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     const thread = found && withHiddenBots(found, s.botReach?.hiddenFor(options.reader))
     if (!thread) throw new NetError('stream_unknown', 'Thread not found.')
     const pause = s.orchestrator.getTurnState(threadId).pause
-    const shown = withImageBudget(s.orchestrator.getMessages(threadId))
-    const kept = newestMessages(
-      shown,
-      options.newestOnly ? ROUTED_SNAPSHOT_MESSAGE_BYTES : PHONE_SNAPSHOT_MESSAGE_BYTES
-    )
+    const budget = snapshotBudget(options)
+    // The newest page `warm` read is the same messages, image budget and `earlier` as the loaded thread would give.
+    const page = this.warmPage(threadId, budget)
+    const kept = page
+      ? { messages: page.messages, ...(page.earlier ? { earlier: page.earlier } : {}) }
+      : newestMessages(withImageBudget(s.orchestrator.getMessages(threadId)), budget)
+    const queue = page
+      ? listPendingQueue(s.threads.loadMessageQueue(threadId)).filter((item) => !item.internal)
+      : s.orchestrator.listQueue(threadId)
     return mmsJson(
       {
         thread,
         messages: kept.messages,
         ...(kept.earlier ? { earlier: kept.earlier } : {}),
-        queue: s.orchestrator.listQueue(threadId).map(withoutImageData),
+        queue: queue.map(withoutImageData),
         // A phone's cards have no "Always for this thread"; another computer's keep it where its limit allows the rule.
         pendingQuestions: options.deviceLimit
           ? s.questions.listPendingForDevice(threadId, options.deviceLimit)

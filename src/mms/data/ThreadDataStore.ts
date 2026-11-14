@@ -472,7 +472,7 @@ export class ThreadDataStore extends EventEmitter {
    * just before or after a message. `undefined` when the cursor message is not in the thread. `seq`/`epoch` are
    * where `changesSince` continues from.
    */
-  async readMessagePage(id: string, request: { before?: string; after?: string; limit: number; maxBytes: number; images?: boolean }): Promise<MessagePageResult | undefined> {
+  async readMessagePage(id: string, request: { before?: string; after?: string; limit: number; maxBytes: number; images?: boolean; imageBudget?: number }): Promise<MessagePageResult | undefined> {
     const page = await this.threadDb().client.call('page', this.getThreadDir(id), request)
     if (page.missing) return undefined
     return {

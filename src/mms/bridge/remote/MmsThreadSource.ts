@@ -44,6 +44,9 @@ export class MmsThreadSource implements ThreadSourcePort {
         : undefined
     )
   }
+  warm(threadId: string): Promise<void> {
+    return this.backend.warm(threadId, this.options.private ? { newestOnly: true } : {})
+  }
   onThread(
     threadId: string,
     listener: (event: ThreadSourceEvent) => void,
