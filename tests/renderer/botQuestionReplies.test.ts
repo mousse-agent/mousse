@@ -180,12 +180,16 @@ describe('a question in the bot chat', () => {
     expect(fake.calls.filter(([name]) => name === 'answerQuestion')).toEqual([['answerQuestion', 'flats', 'q_2', 'Flat B']])
   })
 
-  it('a nudge carries the buttons while the question waits, and nothing once it is answered', async () => {
+  it('a nudge takes the buttons over while the question waits, and shows nothing once it is answered', async () => {
     const choices = [{ label: 'Flat A' }, { label: 'Flat B' }]
     await open([
-      bubble({ id: 'qn1', text: 'Still need your answer on this one.\n\nFlat A · Flat B · Something else', plainFrom: 35, replyTo: { id: 'qb', author: 'bot', text: QUESTION_TEXT }, question: { questionId: 'q_1', choices, other: true, status: 'open', nudge: true } }),
-      bubble({ id: 'qn2', seq: 3, text: 'Still need your answer on this one.', plainFrom: undefined, question: { questionId: 'q_2', choices, other: true, status: 'answered', answer: 'Flat A', answeredWith: 'choice', nudge: true } })
+      bubble({ question: { questionId: 'q_1', choices, other: true, status: 'open', nudged: true } }),
+      bubble({ id: 'qn1', seq: 3, text: 'Still need your answer on this one.\n\nFlat A · Flat B · Something else', plainFrom: 35, replyTo: { id: 'qb', author: 'bot', text: QUESTION_TEXT }, question: { questionId: 'q_1', choices, other: true, status: 'open', nudge: true } }),
+      bubble({ id: 'qn2', seq: 4, text: 'Still need your answer on this one.', plainFrom: undefined, question: { questionId: 'q_2', choices, other: true, status: 'answered', answer: 'Flat A', answeredWith: 'choice', nudge: true } })
     ])
+    // The question's own bubble keeps its words, and the nudge under it has the answers: they show once.
+    expect(transcript().querySelector('[data-message-id="qb"] .bot-bubble')?.textContent).toContain(QUESTION_TEXT)
+    expect(answers(transcript().querySelector('[data-message-id="qb"]')!)).toEqual([])
     expect(transcript().querySelector('[data-message-id="qn1"] .bot-bubble')?.textContent).not.toContain('Flat B')
     expect(answers(transcript().querySelector('[data-message-id="qn1"]')!)).toEqual(['Flat A', 'Flat B', 'Other…'])
     expect(transcript().querySelector('[data-message-id="qn2"] .bot-question-replies, [data-message-id="qn2"] .bot-question-settled')).toBeNull()

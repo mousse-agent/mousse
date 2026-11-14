@@ -125,14 +125,21 @@ describe('a nudge', () => {
     const activations = f.store.listActivations(botId).length
     await reach(shown + HOUR - 1)
     expect(nudgesOf(questionId)).toEqual([])
+    const sent: BotChatMessage[] = []
+    f.bots.events.on('message', (payload: unknown) => sent.push((payload as { message: BotChatMessage }).message))
     await reach(shown + HOUR)
     const [first] = nudgesOf(questionId)
     expect(first).toMatchObject({ author: 'bot', text: `${NUDGE_TEXT}\n\nFlat A · Flat B · Something else`, plainFrom: NUDGE_TEXT.length, replyTo: { id: bubble.id }, question: { questionId, status: 'open', nudge: true, choices: [{ label: 'Flat A' }, { label: 'Flat B' }] } })
+    expect(first!.question?.nudged).toBeUndefined()
     expect(botNotificationKind(first!, Date.parse(first!.at))).toBe('question')
     expect(f.resolved.length).toBe(models)
     expect(f.store.listActivations(botId)).toHaveLength(activations)
+    // The nudge takes the buttons over: the bubble shows them no more, in open windows too.
+    expect(bubbleNow(bubble.id).question?.nudged).toBe(true)
+    expect(sent.filter((message) => message.id === bubble.id).at(-1)?.question?.nudged).toBe(true)
     await reach(shown + HOUR + 24 * HOUR)
     expect(nudgesOf(questionId)).toHaveLength(2)
+    expect(nudgesOf(questionId).map((nudge) => nudge.question?.nudged)).toEqual([true, undefined])
     await reach(shown + 10 * 24 * HOUR)
     expect(nudgesOf(questionId)).toHaveLength(2)
     expect(f.store.question(questionId)).toMatchObject({ status: 'open', nudges: 2, nextAt: null })

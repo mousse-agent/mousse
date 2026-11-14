@@ -7288,7 +7288,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       })
       return true
     })
-    if (posted) this.changed({ botId: question.botId })
+    if (!posted) return
+    // The rows before it hand their answers to it: they show them again in every window, without the buttons.
+    for (const row of this.store.messagesForQuestion(question.id)) if (row.author === 'bot' && row.id !== `bm_${question.id}_n${count}`) this.chat.republish(row.id)
+    this.changed({ botId: question.botId })
   }
 
   /**

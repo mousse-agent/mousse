@@ -83,6 +83,8 @@ export interface BotChatQuestion {
   late?: string
   /** This message reminds the owner of the question (a nudge); the question itself is the message it replies to. */
   nudge?: true
+  /** A later nudge carries the question's answers while it waits: this row (its bubble, or an earlier nudge) shows none. */
+  nudged?: true
 }
 
 export const MAX_QUESTION_CHARS = 600

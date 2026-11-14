@@ -10,7 +10,8 @@ import { botGroupTime } from './messageGroups'
  * the owner answered in the chat (the chat passed it on to the work that asked) or that is no longer needed (the work
  * that asked ended) says so in a quiet line under it. One the bot goes with a default on says what and when; once it
  * went with it, it says so and keeps its buttons, quieter, for a late answer. A nudge (Mousse's reminder of the
- * question) carries the buttons while the question waits, and nothing after: the question's own bubble says how it went.
+ * question) takes the buttons over while the question waits, so they are only ever under the latest row that carries it,
+ * and shows nothing after: the question's own bubble says how it went.
  */
 export function BotQuestionReplies({ question, onAnswer, onOther }: {
   question: BotChatQuestion
@@ -20,7 +21,9 @@ export function BotQuestionReplies({ question, onAnswer, onOther }: {
 }) {
   const [sending, setSending] = useState<string | undefined>()
   const waiting = question.status === 'open' || question.status === 'moved_on'
+  // A nudge says nothing once the question is settled; while it waits, only the latest row carrying it has the buttons.
   if (question.nudge && !waiting) return null
+  if (question.nudged && waiting) return null
   if (question.status === 'answered' && question.by === 'chat')
     return <p className="bot-question-settled">{question.answer ? `Answered in chat: ${question.answer}` : 'Answered in chat'}</p>
   if (question.status === 'withdrawn') return <p className="bot-question-settled">No longer needed</p>

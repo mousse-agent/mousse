@@ -126,7 +126,8 @@ const ANSWER_SHOWN_CHARS = 120
  * open one with a default says what it goes with, and when; a defaulted one says what the bot went with, and what the
  * owner answered after.
  */
-function questionView(question: BotQuestionRow, waits: boolean, nudge: boolean): BotChatQuestion {
+function questionView(question: BotQuestionRow, waits: boolean, rowId: string): BotChatQuestion {
+  const nudge = rowId !== question.messageId
   const answered = (question.status === 'answered' || question.status === 'defaulted') && !question.answer?.redacted ? question.answer : undefined
   const words = answered?.choice ?? (answered?.text ? oneLine(answered.text, ANSWER_SHOWN_CHARS) : undefined)
   const late = question.status === 'defaulted' ? question.answer?.late : undefined
@@ -143,8 +144,14 @@ function questionView(question: BotQuestionRow, waits: boolean, nudge: boolean):
     ...(waits ? { waits: true as const } : {}),
     ...(goesWith ? { default: goesWith.default!, defaultAt: question.nextAt! } : {}),
     ...(lateWords ? { late: lateWords } : {}),
-    ...(nudge ? { nudge: true as const } : {})
+    ...(nudge ? { nudge: true as const } : {}),
+    ...(rowId !== latestCarrier(question) ? { nudged: true as const } : {})
   }
+}
+
+/** The row that carries a question's answers while it waits: its latest nudge, else its bubble. */
+function latestCarrier(question: Pick<BotQuestionRow, 'id' | 'messageId' | 'nudges'>): string | null {
+  return question.nudges > 0 ? `bm_${question.id}_n${question.nudges}` : question.messageId
 }
 
 /** The chat rows of every bot of a profile, and the summaries built from `bots.db`. */
@@ -295,7 +302,7 @@ export class BotChatProjection {
       ...(row.kind === 'notice' && row.id.startsWith('bm_permission_') ? { systemLine: true as const } : {}),
       text: plain ? `${row.text}\n\n${plain}` : row.text,
       ...(plain ? { plainFrom: row.text.length } : {}),
-      ...(asks ? { question: questionView(asks, asks.lane === 'run' && asks.status === 'open' && this.store.activation(asks.activationId)?.endReason === 'question', asks.messageId !== row.id) } : {}),
+      ...(asks ? { question: questionView(asks, asks.lane === 'run' && asks.status === 'open' && this.store.activation(asks.activationId)?.endReason === 'question', row.id) } : {}),
       ...(question && row.author === 'owner' && question.answerMessage === row.id && question.status === 'answered'
         ? { answers: { questionId: question.id, tapped: question.answer?.choice !== undefined } } : {}),
       // The owner's answer after the bot went with its default.
