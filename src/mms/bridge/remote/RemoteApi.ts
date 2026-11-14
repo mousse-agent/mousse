@@ -26,7 +26,7 @@ export interface RemoteBackendPort {
   /** `queue.enqueue` params carry resolved `images` instead of staged `attachments`. */
   execute(method: BridgeOrdinaryMethod, params: Record<string, unknown>, caller?: { node: NodeId }): Promise<unknown>
   /** `reader`: the device asking; a thread a bot started names the bot only if that device reaches it. */
-  snapshot(threadId: string, maximumBytes?: number, options?: { reader?: string }): unknown
+  snapshot(threadId: string, options?: { reader?: string }): unknown
   /** Reads a thread kept in thread.db off the event loop, so the snapshot that follows finds it in memory. */
   warm?(threadId: string): Promise<void>
   /**
