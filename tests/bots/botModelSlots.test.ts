@@ -509,9 +509,12 @@ describe('the engine on rows', () => {
     // A bot that still runs by usage: the automation's model by name, as before.
     expect(f.bots.definitionOf(other).main.slots).toBeUndefined()
     f.bots.addSchedule(other, { when: { kind: 'interval', minutes: 30 }, prompt: 'Headlines', model: 'grok' }, 'owner')
-    const { inserted: [old] } = await f.tickSchedules(new Date(f.clock.now + 31 * 60_000))
+    // The first bot's automation is due in the same tick: the run that matters is the other bot's.
+    const asked = f.resolved.length
+    const { inserted } = await f.tickSchedules(new Date(f.clock.now + 31 * 60_000))
+    const old = inserted.find((id) => f.store.activation(id)?.botId === other)
     await start(f, old!)
-    expect(f.resolved.at(-1)?.pick).toEqual({ model: 'grok' })
+    expect(f.resolved.slice(asked).map((entry) => entry.pick)).toContainEqual({ model: 'grok' })
   })
 
   it('a usage limit on one of two entries holds only the rows on it: the others keep their schedules; said once; Resume clears it', async () => {
