@@ -163,6 +163,7 @@
 
 .prov-item.is-selected {
   background: var(--ui-selected);
+  box-shadow: var(--ui-specular);
 }
 
 .prov-item-main {
@@ -468,14 +469,14 @@ html[data-theme='high-contrast'] .prov-status-badge {
   font-size: var(--settings-fs-row);
 }
 
-/* Each section's rows sit in a minimal card: a faint fill and rounded corners, no edge, no
-   hairlines between the rows. */
+/* Each section's rows sit in a minimal card: a faint fill, rounded corners and the settings
+   surface's specular edge, as on the other pages; no hairlines between the rows. */
 .prov-editor .settings-group-rows {
   --settings-surface-x: var(--space-16);
   padding: var(--space-4) var(--settings-surface-x);
   border-radius: var(--ui-card-radius);
   background: color-mix(in srgb, var(--text-primary) 3%, transparent);
-  box-shadow: none;
+  box-shadow: var(--settings-surface-edge);
 }
 
 .prov-editor .settings-group-rows > .settings-item {
@@ -1060,13 +1061,6 @@ html[data-theme='high-contrast'] .prov-update-chip {
   text-decoration-color: var(--ui-line-strong);
   text-underline-offset: 2px;
   cursor: pointer;
-}
-
-.prov-account-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-12);
-  font-size: var(--settings-fs-small);
 }
 
 .settings-group-rows .settings-input.prov-wide {

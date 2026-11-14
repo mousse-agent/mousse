@@ -5,7 +5,7 @@ import { describeStatus, type InstanceSnapshot } from '../src/shared/harness/sta
 import type { ProviderAddOption } from '../src/shared/harness/types'
 import { AgentConnectStep, CustomCommandStep, addChoices, onFoldedKey, type AddChoice } from '../src/renderer/components/providers/AddProviderDialog'
 import { moveTargets } from '../src/renderer/components/providers/MoveProviderDialog'
-import { AccountRow, SetupRow, UpdateChip, type InstanceActions } from '../src/renderer/components/providers/CliSections'
+import { SetupRow, UpdateChip, type InstanceActions } from '../src/renderer/components/providers/CliSections'
 import { agentInfoRows } from '../src/renderer/components/providers/ProviderInfo'
 import { ProviderModelsSection, bulkVisibilityPatch, capabilityChips, displayModels, modelsSummary, movedOrder, nextOrder } from '../src/renderer/components/providers/ProviderModelsSection'
 import { AgentEditor, allowsCustomModels } from '../src/renderer/components/providers/ProviderEditor'
@@ -74,7 +74,7 @@ describe('Setup row: the status and its one next step', () => {
     expect(buttons(setupRow({ ...managed, auth: { state: 'signed_out', account: undefined } }))).toEqual(['Continue with ChatGPT'])
     // Usage lives on the usage page, never in provider settings: the card only links there.
     const editor = renderToStaticMarkup(createElement(AgentEditor, { snapshot: snapshot(managed), status: describeStatus(snapshot(managed)), actions, onSaveModelPrefs: noop, onRefreshModels: noop }))
-    expect(editor.replace(/<button[^>]*data-testid="prov-account-usage"[^>]*>Usage<\/button>/, '')).not.toMatch(/usage/i)
+    expect(editor.replace(/<button[^>]*data-testid="prov-account-usage"[^>]*>.*?Usage<\/button>/, '')).not.toMatch(/usage/i)
   })
 
   it('offers Sign in for an agent whose account is not checked but that offers its sign-in', () => {
@@ -315,22 +315,27 @@ describe('Agent editor layout', () => {
   })
 })
 
-describe('Sign-out', () => {
-  const accountRow = (overrides: SnapshotOverrides) =>
-    renderToStaticMarkup(createElement(AccountRow, { snapshot: snapshot(overrides), actions }))
-
+describe('Sign-out, on the Status row', () => {
   it('follows the daemon: offered only when the snapshot says Mousse owns the sign-in', () => {
-    expect(buttons(accountRow({}))).toEqual([])
-    expect(buttons(accountRow({ auth: { canSignOut: false } }))).toEqual([])
-    expect(buttons(accountRow({ auth: { canSignOut: true } }))).toEqual(['Sign out'])
-    expect(accountRow({ auth: { state: 'signed_out', account: undefined, canSignOut: true } })).toBe('')
+    const signOut = (overrides: SnapshotOverrides) => buttons(setupRow(overrides)).filter((label) => label === 'Sign out')
+    expect(signOut({})).toEqual([])
+    expect(signOut({ auth: { canSignOut: false } })).toEqual([])
+    expect(signOut({ auth: { canSignOut: true } })).toEqual(['Sign out'])
+    expect(signOut({ auth: { state: 'signed_out', account: undefined, canSignOut: true } })).toEqual([])
   })
 
   it('shows the account by its label, never its hashed id', () => {
-    expect(accountRow({ auth: { account: { id: 'h4sh', label: 'ChatGPT Plus' }, methodLabel: 'ChatGPT sign-in' } })).toContain('ChatGPT Plus · ChatGPT sign-in')
-    const unlabelled = accountRow({ auth: { account: { id: 'h4sh' }, methodLabel: 'Claude Code sign-in' } })
+    expect(setupRow({ auth: { account: { id: 'h4sh', label: 'ChatGPT Plus' }, methodLabel: 'ChatGPT sign-in' } })).toContain('ChatGPT Plus · ChatGPT sign-in')
+    const unlabelled = setupRow({ auth: { account: { id: 'h4sh' }, methodLabel: 'Claude Code sign-in' } })
     expect(unlabelled).not.toContain('h4sh')
     expect(unlabelled).toContain('Claude Code sign-in')
+  })
+
+  it('has no separate Account row', () => {
+    const entry = snapshot({ auth: { canSignOut: true } })
+    const html = renderToStaticMarkup(createElement(AgentEditor, { snapshot: entry, status: describeStatus(entry), actions, onSaveModelPrefs: noop, onRefreshModels: noop }))
+    expect(html).not.toContain('>Account<')
+    expect(buttons(html)).toContain('Sign out')
   })
 })
 

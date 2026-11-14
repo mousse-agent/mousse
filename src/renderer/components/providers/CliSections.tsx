@@ -3,7 +3,7 @@ import { updateAvailableDetail, type InstanceSnapshot, type StatusDescription } 
 import type { InstanceConfigPatch, ProviderOperationEvent, RemoveInstallResult, TelemetrySetting } from '../../../shared/harness/types'
 import { Select } from '../ui/Select'
 import { FloatingPortal, useFloatingPosition } from '../../lib/floatingLayer'
-import { Download, Plus, RotateCcw, X } from '../../lib/icons'
+import { Download, Gauge, Logout, Plus, RotateCcw, X } from '../../lib/icons'
 import { SettingsRow } from '../settings/SettingsRow'
 import { BrowseButton, CommandBox, FieldWithAction, RefreshButton, StatusLine, useAsyncAction } from './parts'
 import {
@@ -60,21 +60,27 @@ function withoutUpdateDetail(status: StatusDescription, snapshot: InstanceSnapsh
 /**
  * The Setup row: the status and the one next step it names. Buttons follow the
  * snapshot, so Install and Sign in are ready as soon as the instance's own state is known.
+ * A signed-in account adds Usage (where `onOpenUsage` is given: the numbers live on the Usage
+ * page, never here) and Sign out (only where the daemon says Mousse owns the sign-in). The
+ * account's label shows on the status; its id is an opaque hash, never shown.
  */
 export function SetupRow({
   snapshot,
   status,
   operation,
   actions,
-  updateRow
+  updateRow,
+  onOpenUsage
 }: {
   snapshot: InstanceSnapshot
   status: StatusDescription
   /** The install or update this page saw start, for live progress. */
   operation?: ProviderOperationEvent
   actions: InstanceActions
-  /** An Update row follows in Setup, so the status offers no update of its own. */
+  /** The heading shows the update, so the status offers no update of its own. */
   updateRow?: boolean
+  /** Opens the Subscription usage page, for agents it covers. */
+  onOpenUsage?: () => void
 }) {
   const { busy, error, run } = useAsyncAction()
   const step = status.nextStep
@@ -154,14 +160,32 @@ export function SetupRow({
     <RefreshButton label="Check again" busy={busy === 'recheck'} disabled={!idle} onClick={() => void run('recheck', actions.recheck)} />
   )
 
+  const { auth } = snapshot
+  const account = auth.state === 'signed_in' || auth.state === 'expired'
+  const accountLine = account ? [auth.account?.label, auth.methodLabel].filter(Boolean).join(' \u00b7 ') : ''
+  const usage = account && auth.state === 'signed_in' && onOpenUsage && (
+    <button type="button" className="settings-btn" data-testid="prov-account-usage" onClick={onOpenUsage}>
+      <Gauge size={14} />
+      Usage
+    </button>
+  )
+  const signOut = account && auth.canSignOut && (
+    <button type="button" className="settings-btn" disabled={!idle} onClick={() => void run('signout', actions.signOut)}>
+      <Logout size={14} />
+      Sign out
+    </button>
+  )
+
   return (
     <>
       <SettingsRow
         title="Status"
         anchor="providers-status"
-        description={withError(progress ?? <StatusLine status={updateRow ? withoutUpdateDetail(status, snapshot) : status} />, error)}
+        description={withError(progress ?? <StatusLine status={updateRow ? withoutUpdateDetail(status, snapshot) : status} title={accountLine || undefined} />, error)}
         control={
           <>
+            {usage}
+            {signOut}
             {recheck}
             {control}
             {allow}
@@ -190,36 +214,6 @@ function OlderSettingsRow({ notice, actions }: { notice: NonNullable<InstanceSna
           Use the older settings
         </button>
       )}
-    />
-  )
-}
-
-/**
- * The signed-in account by its label (the id is an opaque hash, never shown); sign-out only where
- * the daemon says Mousse owns the sign-in.
- */
-/**
- * The signed-in account. `onOpenUsage` adds a plain link to the Subscription usage page: the
- * numbers live there, never here.
- */
-export function AccountRow({ snapshot, actions, onOpenUsage }: { snapshot: InstanceSnapshot; actions: InstanceActions; onOpenUsage?: () => void }) {
-  const { busy, error, run } = useAsyncAction()
-  const { auth } = snapshot
-  if (auth.state !== 'signed_in' && auth.state !== 'expired') return null
-  const description = [auth.account?.label, auth.methodLabel].filter(Boolean).join(' · ') || 'Signed in'
-  const usage = onOpenUsage && auth.state === 'signed_in'
-    ? <button type="button" className="prov-link" data-testid="prov-account-usage" onClick={onOpenUsage}>Usage</button>
-    : undefined
-  const signOut = auth.canSignOut
-    ? <button type="button" className="settings-btn" disabled={busy !== null} onClick={() => void run('signout', actions.signOut)}>
-        Sign out
-      </button>
-    : undefined
-  return (
-    <SettingsRow
-      title="Account"
-      description={withError(description, error)}
-      control={usage || signOut ? <span className="prov-account-actions">{usage}{signOut}</span> : undefined}
     />
   )
 }

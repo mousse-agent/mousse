@@ -66,9 +66,9 @@ export function CompactStatus({ status }: { status: StatusDescription }) {
 }
 
 /** The editor's Setup → Status: the headline in a badge of the tone's colour, the detail under it. */
-export function StatusLine({ status }: { status: StatusDescription }) {
+export function StatusLine({ status, title }: { status: StatusDescription; title?: string }) {
   return (
-    <span className={`prov-status-text is-${status.tone}`} aria-live="polite">
+    <span className={`prov-status-text is-${status.tone}`} title={title} aria-live="polite">
       <span className="prov-status-badge">{status.headline}</span>
       {statusDetail(status) && <span className="prov-status-detail">{statusDetail(status)}</span>}
     </span>

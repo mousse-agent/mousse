@@ -7,7 +7,7 @@ import { ProviderIcon } from '../../lib/providerIcons'
 import { confirmNavigation } from '../../services/navigationGuards'
 import { useAppStore } from '../../stores/appStore'
 import { Segmented, SettingsAdvanced, SettingsRow } from '../settings/SettingsRow'
-import { AccountRow, ArgsRow, EnvRow, ExecutableRow, PromptCacheHourRow, SetupRow, TelemetryRow, UpdateChip, type InstanceActions } from './CliSections'
+import { ArgsRow, EnvRow, ExecutableRow, PromptCacheHourRow, SetupRow, TelemetryRow, UpdateChip, type InstanceActions } from './CliSections'
 import { ProviderInfoSection, agentInfoRows, apiInfoRows } from './ProviderInfo'
 import { VendorSettingsSection } from './VendorSettings'
 import { ProviderModelsSection, modelsSummary } from './ProviderModelsSection'
@@ -123,7 +123,7 @@ function DisplayNameRow({ snapshot, onRename }: { snapshot: InstanceSnapshot; on
 
 /**
  * The editor of one agent instance: an available update beside the version in the heading; Setup
- * (status, next step, account, its name), then Models; the rest (telemetry, the executable Mousse resolved, path and arguments,
+ * (status with the account's Usage and Sign out, next step, its name), then Models; the rest (telemetry, the executable Mousse resolved, path and arguments,
  * environment) under a collapsed Advanced in titled groups, so most people never meet it.
  */
 export function AgentEditor({
@@ -172,9 +172,8 @@ export function AgentEditor({
         update={info.bundled ? undefined : <UpdateChip snapshot={snapshot} operation={operation} actions={actions} />}
       />
       <EditorSection title="Setup">
-        <SetupRow snapshot={snapshot} status={status} operation={operation?.kind === 'update' ? undefined : operation} actions={actions} updateRow={!info.bundled} />
+        <SetupRow snapshot={snapshot} status={status} operation={operation?.kind === 'update' ? undefined : operation} actions={actions} updateRow={!info.bundled} onOpenUsage={USAGE_DRIVERS.has(snapshot.driver) ? openUsagePage : undefined} />
         {source && <RegistrySourceRow snapshot={snapshot} source={source} actions={actions} />}
-        <AccountRow snapshot={snapshot} actions={actions} onOpenUsage={USAGE_DRIVERS.has(snapshot.driver) ? openUsagePage : undefined} />
         <DisplayNameRow snapshot={snapshot} onRename={(displayName) => actions.configure({ displayName })} />
       </EditorSection>
       <ModelsEditorSection snapshot={snapshot} onSave={onSaveModelPrefs} onRefresh={onRefreshModels} reveal={revealModels} />
