@@ -19,6 +19,10 @@ export const BRIDGE_REMOTE_METHODS = {
   'threads.rename': { capability: 'write', mutating: true },
   'threads.pin': { capability: 'write', mutating: true },
   'threads.settle': { capability: 'write', mutating: true },
+  // The thread menu's Regenerate title and Delete after: the same handlers as a window here. Delete itself is not
+  // exposed: only the computer that runs a thread deletes it.
+  'threads.regenerateTitle': { capability: 'write', mutating: true },
+  'threads.setExpiry': { capability: 'write', mutating: true },
   'orchestrator.send': { capability: 'chat', mutating: true },
   'orchestrator.steer': { capability: 'chat', mutating: true },
   'orchestrator.abort': { capability: 'chat', mutating: true },
@@ -40,6 +44,13 @@ export const BRIDGE_REMOTE_METHODS = {
   'storage.usage': { capability: 'read', mutating: false }
 } as const satisfies Record<string, { capability: NodeCapability; mutating: boolean; ephemeral?: boolean }>
 export type BridgeRemoteMethod = keyof typeof BRIDGE_REMOTE_METHODS
+/**
+ * The methods a phone may call here, as `net.info` reports them, so a phone shows an action only to a computer
+ * that has it. An older computer reports none.
+ */
+export function bridgeRemoteMethodNames(): BridgeRemoteMethod[] {
+  return Object.keys(BRIDGE_REMOTE_METHODS) as BridgeRemoteMethod[]
+}
 export type BridgeOrdinaryMethod = Exclude<
   BridgeRemoteMethod,
   | 'orchestrator.send'

@@ -12,6 +12,7 @@ import { repositoryIdentitiesFor } from './repositoryIdentity'
 import { withoutStandingRules } from '../../orchestrator/UserQuestionService'
 import type { MmsProfileServices } from '../../MmsProfileServices'
 import { dispatchMethod } from '../../protocol/handlers'
+import { DomainRpcError } from '../../protocol/domainRegistry'
 import { NetError, type NodeId } from '../../../shared/net'
 import { REMOTE_MESSAGE_IMAGES_MAX_CHARS } from './RemoteApi'
 import { normalizePermissionMode, type PermissionMode } from '../../../shared/permissionMode'
@@ -191,18 +192,29 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     const composer = await this.composer(method, params, caller)
     if (composer !== undefined) return mmsJson(composer)
     if (method === 'threads.create') return mmsJson(await this.createThread(params, caller))
-    return mmsJson(
-      await dispatchMethod(
-        {
-          mms: this.services,
-          globalSequence: this.revision,
-          emitEvent: (type, data) => {
-            if (type === 'threads.updated') this.services.events.broadcast('threads:updated', data)
-          }
-        },
-        method,
-        params
-      )
+    if (method === 'threads.regenerateTitle' || method === 'threads.setExpiry') {
+      // An expected refusal (no title came back, an expired thread, a time out of range) reaches the phone in words,
+      // as `{ ok: false, error }`: a mutating call that throws reports only that it may have happened.
+      try {
+        return mmsJson(await this.dispatch(method, params))
+      } catch (error) {
+        if (error instanceof DomainRpcError) return failure(error)
+        throw error
+      }
+    }
+    return mmsJson(await this.dispatch(method, params))
+  }
+  private dispatch(method: BridgeOrdinaryMethod, params: Record<string, unknown>): Promise<unknown> {
+    return dispatchMethod(
+      {
+        mms: this.services,
+        globalSequence: this.revision,
+        emitEvent: (type, data) => {
+          if (type === 'threads.updated') this.services.events.broadcast('threads:updated', data)
+        }
+      },
+      method,
+      params
     )
   }
   /**
