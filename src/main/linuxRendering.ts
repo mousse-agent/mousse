@@ -1,3 +1,5 @@
+import { addToSwitchList, type SwitchCommandLine } from '../shared/chromiumSwitches'
+
 interface LinuxAppLauncher { relaunch(options: { args: string[] }): void; exit(code: number): void }
 
 /** Client-side resizing needs global cursor/bounds support, which Wayland denies.
@@ -35,7 +37,7 @@ export function configureLinuxGraphics(
 /** Xwayland may advertise GLX_OML_sync_control but fail its timing queries.
  * Disable that ANGLE extension, keeping accelerated composition and rendering. */
 export function configureLinuxVsync(
-  app: { commandLine: { getSwitchValue(name: string): string; appendSwitch(name: string, value: string): void } },
+  app: { commandLine: SwitchCommandLine },
   platform: NodeJS.Platform, env: NodeJS.ProcessEnv, argv: readonly string[] = process.argv
 ): boolean {
   if (platform !== 'linux' || !env.DISPLAY || !env.WAYLAND_DISPLAY) return false
@@ -44,7 +46,6 @@ export function configureLinuxVsync(
   const feature = 'disableSyncControlSupport'
   const disabled = app.commandLine.getSwitchValue('disable-angle-features').split(',')
   if (disabled.includes(feature)) return false
-  const enabled = app.commandLine.getSwitchValue('enable-angle-features').split(',').filter(Boolean)
-  if (!enabled.includes(feature)) app.commandLine.appendSwitch('enable-angle-features', [...enabled, feature].join(','))
+  addToSwitchList(app.commandLine, 'enable-angle-features', feature)
   return true
 }

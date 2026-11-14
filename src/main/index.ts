@@ -58,6 +58,7 @@ import { openExternalSafely } from './safeExternalUrl'
 import { attachDevGuiConsoleCapture, isDevGuiMainEnabled } from './devgui/devGuiMain'
 import { startDevGuiPoller } from './devgui/devGuiPoller'
 import { configureLinuxGraphics, configureLinuxVsync, configureLinuxWindowing, linuxTransparencyOptions } from './linuxRendering'
+import { addToSwitchList, KEEP_GPU_PROGRAMS_FEATURE } from '../shared/chromiumSwitches'
 
 function configureBrowserPopupPolicy(contents: WebContents, parent: BrowserWindow): void {
   contents.setWindowOpenHandler(({ url }) => {
@@ -144,6 +145,8 @@ function startGuiApp(): void {
   if (configureLinuxWindowing(app, process.platform, process.env)) return
   configureLinuxGraphics(app, process.platform, process.env)
   configureLinuxVsync(app, process.platform, process.env)
+  // Keeps compiled WebGL programs (the bot face shader) on disk between launches; see the constant.
+  addToSwitchList(app.commandLine, 'enable-features', KEEP_GPU_PROGRAMS_FEATURE)
   let mainWindow: BrowserWindow | null = null
   let guiMms: GuiMmsController | null = null
   let connectionLog: GuiConnectionLog | undefined
