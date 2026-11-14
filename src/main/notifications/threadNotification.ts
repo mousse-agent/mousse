@@ -6,6 +6,7 @@ import {
   type ThreadNotificationEvent
 } from '../../shared/settings'
 import type { BotChatMessage } from '../../shared/bots/personal/chat'
+import { nudgeNotificationText } from '../../shared/bots/personal/questions'
 import type { RunEndState } from '../../shared/automations'
 
 export type ThreadNotificationKind = ThreadNotificationEvent
@@ -120,14 +121,16 @@ export function botNotificationKind(
 /** The words of a bot notification: the bot's name as the title, then what it wants or said. */
 export function botNotificationContent(
   botName: string | undefined,
-  message: Pick<BotChatMessage, 'text' | 'ask' | 'error' | 'question' | 'plainFrom'>
+  message: Pick<BotChatMessage, 'text' | 'ask' | 'error' | 'question' | 'plainFrom' | 'replyTo'>
 ): { title: string; body: string } {
   const title = botName?.trim() || 'Your bot'
   if (message.ask) return { title, body: `Wants to ${message.ask.title}` }
   if (message.error) return { title, body: message.error.text }
-  // A question: its words and its answers, "Which flat? — Flat A / Flat B".
+  // A question: its words and its answers, "Which flat? — Flat A / Flat B". A nudge names the question it reminds of,
+  // from the bubble it replies to as that is now: "Still need your answer: Which flat? — Flat A / Flat B".
   if (message.question) {
-    const asked = (message.plainFrom !== undefined ? message.text.slice(0, message.plainFrom) : message.text).replace(/\s+/g, ' ').trim()
+    const reminds = message.question.nudge && message.replyTo && !message.replyTo.gone && message.replyTo.text.trim() ? nudgeNotificationText(message.replyTo.text) : undefined
+    const asked = reminds ?? (message.plainFrom !== undefined ? message.text.slice(0, message.plainFrom) : message.text).replace(/\s+/g, ' ').trim()
     const answers = message.question.choices.map((choice) => choice.label).join(' / ')
     const body = answers ? `${asked} — ${answers}` : asked
     return { title, body: body.length > 140 ? `${body.slice(0, 139)}…` : body || 'New message' }

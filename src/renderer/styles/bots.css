@@ -122,7 +122,8 @@
 .bot-question-replies .bot-ask-buttons button[aria-pressed="true"] .bot-question-detail { color: inherit; }
 .bot-question-replies .bot-ask-buttons .bot-question-other { color: var(--text-secondary); font-weight: 400; }
 .bot-question-settled { margin: 0; padding: 0 4px; font-size: var(--bot-meta); line-height: 16px; color: var(--text-secondary); overflow-wrap: anywhere; }
-.bot-question-replies[data-status="moved_on"] .bot-ask-buttons button { color: var(--text-secondary); font-weight: 400; background: color-mix(in srgb, var(--text-secondary) 7%, transparent); }
+.bot-question-replies[data-status="moved_on"] .bot-ask-buttons button,
+.bot-question-replies[data-status="defaulted"] .bot-ask-buttons button { color: var(--text-secondary); font-weight: 400; background: color-mix(in srgb, var(--text-secondary) 7%, transparent); }
 
 /* The owner's are right-aligned bubbles; in a group, the bubbles under the first square their top corner. */
 .chat-participant-message.bot-you { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; padding-left: 14%; }

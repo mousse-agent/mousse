@@ -35,6 +35,18 @@ describe('what a bot row announces', () => {
     expect(botNotificationKind(row({ kind: 'text', question: { ...question, status: 'answered', answer: 'Flat B' } }), NOW)).toBeNull()
   })
 
+  it('announces a nudge with the question it reminds of, cut to fit, so it reads on its own', () => {
+    const question = { questionId: 'q_1', choices: [{ label: 'Flat A' }, { label: 'Flat B' }], other: true, status: 'open' as const, nudge: true as const }
+    const long = 'I found two flats that fit what you asked for, both close to the station and under budget, and both free on Saturday. Which one should I book a viewing for?'
+    const nudge = row({ kind: 'text', text: 'Still need your answer on this one.\n\nFlat A · Flat B · Something else', plainFrom: 35, question, replyTo: { id: 'qb', author: 'bot', text: long } })
+    const { body } = botNotificationContent('Flat Finder', nudge)
+    expect(body.startsWith(`Still need your answer: ${long.slice(0, 80)}`)).toBe(true)
+    expect(body).toMatch(/… — Flat A \/ Flat B$/)
+    expect(body.length).toBeLessThanOrEqual(140)
+    // The bubble it replies to is gone: the nudge's own line.
+    expect(botNotificationContent('Flat Finder', { ...nudge, replyTo: { id: 'qb', author: 'bot', text: '', gone: true } }).body).toBe('Still need your answer on this one. — Flat A / Flat B')
+  })
+
   it('never announces the owner’s own messages or an old row that changed', () => {
     expect(botNotificationKind(row({ author: 'owner', kind: 'text' }), NOW)).toBeNull()
     expect(botNotificationKind(row({ at: '2026-11-06T09:00:00.000Z' }), NOW)).toBeNull()

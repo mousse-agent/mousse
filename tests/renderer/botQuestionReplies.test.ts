@@ -161,6 +161,43 @@ describe('a question in the bot chat', () => {
     expect(fake.calls.filter(([name]) => name === 'answerQuestion')).toEqual([['answerQuestion', 'flats', 'q_1', 'Flat B']])
   })
 
+  it('one the bot goes with a default on says what and when; once it went with it, says so and still takes a late tap; answered late, says both', async () => {
+    const choices = [{ label: 'Flat A' }, { label: 'Flat B' }]
+    const at = '2026-11-07T15:30:00.000Z'
+    await open([
+      bubble({ id: 'qd', question: { questionId: 'q_1', choices, other: true, status: 'open', default: 'Flat A', defaultAt: at } }),
+      bubble({ id: 'qg', seq: 3, question: { questionId: 'q_2', choices, other: true, status: 'defaulted', by: 'default', answer: 'Flat A', answeredWith: 'choice' } }),
+      bubble({ id: 'ql', seq: 4, question: { questionId: 'q_3', choices, other: true, status: 'defaulted', by: 'default', answer: 'Flat A', answeredWith: 'choice', late: 'Flat B' } })
+    ])
+    const time = new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+    expect(transcript().querySelector('[data-message-id="qd"] .bot-question-settled')?.textContent).toBe(`Goes with Flat A at ${time} if you don't answer`)
+    expect(transcript().querySelector('[data-message-id="qg"] .bot-question-settled')?.textContent).toBe('No answer · went with Flat A')
+    expect(answers(transcript().querySelector('[data-message-id="qg"]')!)).toEqual(['Flat A', 'Flat B', 'Other…'])
+    expect(transcript().querySelector('[data-message-id="ql"] .bot-question-settled')?.textContent).toBe('Went with Flat A · you said Flat B')
+    expect(answers(transcript().querySelector('[data-message-id="ql"]')!)).toEqual([])
+    await click(button('Flat B', transcript().querySelector('[data-message-id="qg"]')!))
+    await settle()
+    expect(fake.calls.filter(([name]) => name === 'answerQuestion')).toEqual([['answerQuestion', 'flats', 'q_2', 'Flat B']])
+  })
+
+  it('a nudge takes the buttons over while the question waits, and shows nothing once it is answered', async () => {
+    const choices = [{ label: 'Flat A' }, { label: 'Flat B' }]
+    await open([
+      bubble({ question: { questionId: 'q_1', choices, other: true, status: 'open', nudged: true } }),
+      bubble({ id: 'qn1', seq: 3, text: 'Still need your answer on this one.\n\nFlat A · Flat B · Something else', plainFrom: 35, replyTo: { id: 'qb', author: 'bot', text: QUESTION_TEXT }, question: { questionId: 'q_1', choices, other: true, status: 'open', nudge: true } }),
+      bubble({ id: 'qn2', seq: 4, text: 'Still need your answer on this one.', plainFrom: undefined, question: { questionId: 'q_2', choices, other: true, status: 'answered', answer: 'Flat A', answeredWith: 'choice', nudge: true } })
+    ])
+    // The question's own bubble keeps its words, and the nudge under it has the answers: they show once.
+    expect(transcript().querySelector('[data-message-id="qb"] .bot-bubble')?.textContent).toContain(QUESTION_TEXT)
+    expect(answers(transcript().querySelector('[data-message-id="qb"]')!)).toEqual([])
+    expect(transcript().querySelector('[data-message-id="qn1"] .bot-bubble')?.textContent).not.toContain('Flat B')
+    expect(answers(transcript().querySelector('[data-message-id="qn1"]')!)).toEqual(['Flat A', 'Flat B', 'Other…'])
+    expect(transcript().querySelector('[data-message-id="qn2"] .bot-question-replies, [data-message-id="qn2"] .bot-question-settled')).toBeNull()
+    await click(button('Flat A', transcript().querySelector('[data-message-id="qn1"]')!))
+    await settle()
+    expect(fake.calls.filter(([name]) => name === 'answerQuestion')).toEqual([['answerQuestion', 'flats', 'q_1', 'Flat A']])
+  })
+
   it('a service with no questions sends the text alone, and the chat shows it all, answers included', async () => {
     await open([message(2, { id: 'old', text: `${QUESTION_TEXT}\n\n${PLAIN}` })])
     expect(transcript().querySelector('[data-message-id="old"] .bot-bubble')?.textContent).toContain(PLAIN)

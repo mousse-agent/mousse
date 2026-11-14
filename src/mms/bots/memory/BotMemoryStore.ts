@@ -961,16 +961,32 @@ function scrubMessageChips(tx: BotStoreTx, botId: string, scrub: (chips: unknown
  * that carried the answer to its work (`answer_json.sent`, which names it exactly) goes from that work's dispatch prompts
  * and the journal rows captured from its thread, the rest of each left as it was; the chat's `question_answer` call that
  * passed the answer on goes, and with the bubble, the work's `ask_owner` call that asked it. Each is found by the
- * question's id and its activation, never by how long its words are.
+ * question's id and its activation, never by how long its words are. A default's line (the bot went with its own choice)
+ * quotes the question, so it goes with the bubble: work's from its thread, a chat question's from the chat turn it
+ * queued (`sent.activationId`), its request included. An owner's late answer to a default wrote no such line, but the chat
+ * turn it started was told, quoting the question and the default (`answer_json.copies`): those go with the bubble too.
  */
-function redactQuestionCopies(tx: BotStoreTx, has: (table: string) => boolean, botId: string, question: { id: string; activation_id: string; spec_json: string; answer_json: string | null; message_id: string | null; answer_message: string | null }, messageId: string, text: string): void {
-  const sentOf = parseJson(question.answer_json)?.sent as { line?: unknown } | undefined
-  const sent = typeof sentOf?.line === 'string' && sentOf.line ? sentOf.line : undefined
-  if (sent && has('bot_dispatches'))
-    tx.statement("UPDATE bot_dispatches SET prompt_json = json_set(prompt_json, '$.text', replace(json_extract(prompt_json, '$.text'), ?, ?)) WHERE activation_id = ? AND instr(json_extract(prompt_json, '$.text'), ?) > 0")
-      .run(sent, text, question.activation_id, sent)
+function redactQuestionCopies(tx: BotStoreTx, has: (table: string) => boolean, botId: string, question: { id: string; activation_id: string; status: string; spec_json: string; answer_json: string | null; message_id: string | null; answer_message: string | null }, messageId: string, text: string): void {
+  const answer = parseJson(question.answer_json)
+  const sentOf = answer?.sent as { line?: unknown; activationId?: unknown } | undefined
+  const lateOnly = question.status === 'defaulted' && question.message_id !== messageId
+  // A line that quoted the question, and the activation it went to: its prompts, its request and its captured rows.
+  const lines: Array<{ line: string; activationId: string }> = []
+  if (!lateOnly && typeof sentOf?.line === 'string' && sentOf.line)
+    lines.push({ line: sentOf.line, activationId: typeof sentOf.activationId === 'string' && sentOf.activationId ? sentOf.activationId : question.activation_id })
+  if (question.message_id === messageId && Array.isArray(answer?.copies))
+    for (const copy of answer.copies as Array<{ line?: unknown; activationId?: unknown }>)
+      if (typeof copy?.line === 'string' && copy.line && typeof copy.activationId === 'string' && copy.activationId) lines.push({ line: copy.line, activationId: copy.activationId })
+  for (const { line, activationId } of lines) {
+    if (has('bot_dispatches'))
+      tx.statement("UPDATE bot_dispatches SET prompt_json = json_set(prompt_json, '$.text', replace(json_extract(prompt_json, '$.text'), ?, ?)) WHERE activation_id = ? AND instr(json_extract(prompt_json, '$.text'), ?) > 0")
+        .run(line, text, activationId, line)
+    if (activationId !== question.activation_id && has('bot_activations'))
+      tx.statement("UPDATE bot_activations SET trigger_json = json_set(trigger_json, '$.input', replace(json_extract(trigger_json, '$.input'), ?, ?)) WHERE id = ? AND instr(json_extract(trigger_json, '$.input'), ?) > 0")
+        .run(line, text, activationId, line)
+    if (has('bot_journal')) tx.statement('UPDATE bot_journal SET text = replace(text, ?, ?) WHERE bot_id = ? AND activation_id = ? AND instr(text, ?) > 0').run(line, text, botId, activationId, line)
+  }
   if (!has('bot_journal')) return
-  if (sent) tx.statement('UPDATE bot_journal SET text = replace(text, ?, ?) WHERE bot_id = ? AND activation_id = ? AND instr(text, ?) > 0').run(sent, text, botId, question.activation_id, sent)
   // A call of Mousse's tool `tool`, as each runtime names it: bare (Pi), or `mcp__<server>__<tool>` (Claude Code, Codex).
   const redactCalls = (tool: string, where: string, ...params: string[]) =>
     tx.statement(`UPDATE bot_journal SET text = ?, keys = '', json = NULL, redacted_at = COALESCE(redacted_at, ?) WHERE bot_id = ? AND kind = 'tool_call' AND redacted_at IS NULL
@@ -1010,27 +1026,36 @@ function defaultRedactMessage(tx: BotStoreTx, botId: string, messageId: string, 
   if (has('bot_questions')) {
     // First, while the question and its answer are still whole: the copies its work and the chat made of them, found by
     // the question, not by its words (an answer may be as short as "Flat B").
-    const touched = tx.statement('SELECT id, activation_id, spec_json, answer_json, message_id, answer_message FROM bot_questions WHERE bot_id = ? AND (message_id = ? OR answer_message = ?)')
-      .all(botId, messageId, messageId) as Array<{ id: string; activation_id: string; spec_json: string; answer_json: string | null; message_id: string | null; answer_message: string | null }>
+    const touched = tx.statement('SELECT id, activation_id, status, spec_json, answer_json, message_id, answer_message FROM bot_questions WHERE bot_id = ? AND (message_id = ? OR answer_message = ?)')
+      .all(botId, messageId, messageId) as Array<{ id: string; activation_id: string; status: string; spec_json: string; answer_json: string | null; message_id: string | null; answer_message: string | null }>
     for (const question of touched) redactQuestionCopies(tx, has, botId, question, messageId, text)
     // The copy of that line kept with the answer quotes the question too: it goes with the bubble.
-    tx.statement("UPDATE bot_questions SET answer_json = json_remove(answer_json, '$.sent') WHERE bot_id = ? AND message_id = ? AND answer_json IS NOT NULL").run(botId, messageId)
-    // Work that waits on the forgotten question, or has its answer still to read, has nothing to go on with: the question
-    // is withdrawn, and the engine ends that work with a line (`settleStrandedWork`).
-    tx.statement(`UPDATE bot_questions SET spec_json = json_object('question', ?, 'choices', json('[]'), 'other', json('false')),
-      status = CASE WHEN status IN ('open', 'moved_on') OR (lane = 'run' AND status = 'answered' AND read_at IS NULL) THEN 'withdrawn' ELSE status END WHERE bot_id = ? AND message_id = ?`).run(text, botId, messageId)
+    tx.statement("UPDATE bot_questions SET answer_json = json_remove(answer_json, '$.sent', '$.copies') WHERE bot_id = ? AND message_id = ? AND answer_json IS NOT NULL").run(botId, messageId)
+    // A default is one of the question's choices: its label goes with the bubble, from the follow-up and the answer.
+    tx.statement("UPDATE bot_questions SET follow_json = json_remove(follow_json, '$.default') WHERE bot_id = ? AND message_id = ?").run(botId, messageId)
+    tx.statement("UPDATE bot_questions SET answer_json = json_set(json_remove(answer_json, '$.choice'), '$.redacted', json('true')) WHERE bot_id = ? AND message_id = ? AND json_extract(answer_json, '$.by') = 'default'").run(botId, messageId)
+    // Work that waits on the forgotten question, or has its answer (or its default) still to read, has nothing to go on
+    // with: the question is withdrawn, with no follow-up, and the engine ends that work with a line (`settleStrandedWork`).
+    tx.statement(`UPDATE bot_questions SET spec_json = json_object('question', ?, 'choices', json('[]'), 'other', json('false')), next_at = NULL,
+      status = CASE WHEN status IN ('open', 'moved_on') OR (lane = 'run' AND status IN ('answered', 'defaulted') AND read_at IS NULL) THEN 'withdrawn' ELSE status END WHERE bot_id = ? AND message_id = ?`).run(text, botId, messageId)
     // An answer work has not read yet is taken back: the question is open again, and its work waits for an answer again.
     if (has('bot_activations')) tx.statement(`UPDATE bot_activations SET end_reason = 'question' WHERE status = 'blocked' AND end_reason = 'question_answered'
       AND id IN (SELECT activation_id FROM bot_questions WHERE bot_id = ? AND answer_message = ? AND lane = 'run' AND status = 'answered' AND read_at IS NULL)`).run(botId, messageId)
-    tx.statement("UPDATE bot_questions SET status = 'open', answer_json = NULL, answer_message = NULL, answered_at = NULL WHERE bot_id = ? AND answer_message = ? AND lane = 'run' AND status = 'answered' AND read_at IS NULL").run(botId, messageId)
+    tx.statement("UPDATE bot_questions SET status = 'open', answer_json = NULL, answer_message = NULL, answered_at = NULL, next_at = NULL WHERE bot_id = ? AND answer_message = ? AND lane = 'run' AND status = 'answered' AND read_at IS NULL").run(botId, messageId)
+    // The owner's late answer to a question the bot went on with its default for: it goes, and the default stays.
+    tx.statement("UPDATE bot_questions SET answer_json = json_remove(answer_json, '$.late'), answer_message = NULL WHERE bot_id = ? AND answer_message = ? AND status = 'defaulted'").run(botId, messageId)
     tx.statement("UPDATE bot_questions SET answer_json = CASE WHEN json_extract(answer_json, '$.tapped') OR json_extract(answer_json, '$.choice') IS NOT NULL THEN json_object('by', json_extract(answer_json, '$.by'), 'tapped', json('true'), 'redacted', json('true')) ELSE json_object('by', json_extract(answer_json, '$.by'), 'redacted', json('true')) END WHERE bot_id = ? AND answer_message = ? AND answer_json IS NOT NULL").run(botId, messageId)
   }
-  // A note the forgotten message passed to work: gone from the note and from the prompt that carried it.
+  // A note the forgotten message passed to work: gone from the note, from the prompt that carried it, and from the rows
+  // captured from that work's thread (a note reaches running work as a steer), found by the message and the work, never
+  // by how long its words are: a note may carry an answer as short as "Flat B".
   if (has('bot_work_notes')) {
     const notes = tx.statement('SELECT activation_id, text FROM bot_work_notes WHERE bot_id = ? AND from_message = ?').all(botId, messageId) as Array<{ activation_id: string; text: string }>
     for (const note of notes) {
       if (has('bot_dispatches') && note.text.trim())
         tx.statement("UPDATE bot_dispatches SET prompt_json = json_set(prompt_json, '$.text', replace(json_extract(prompt_json, '$.text'), ?, ?)) WHERE activation_id = ?").run(note.text, text, note.activation_id)
+      if (has('bot_journal') && note.text.trim())
+        tx.statement('UPDATE bot_journal SET text = replace(text, ?, ?) WHERE bot_id = ? AND activation_id = ? AND instr(text, ?) > 0').run(note.text, text, botId, note.activation_id, note.text)
       tx.statement('UPDATE bot_work_notes SET text = ? WHERE bot_id = ? AND from_message = ?').run(text, botId, messageId)
     }
   }
