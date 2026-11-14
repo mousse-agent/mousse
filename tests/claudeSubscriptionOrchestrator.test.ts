@@ -254,6 +254,47 @@ it('shows the prompt cache a Claude turn left, until the history changes or is c
   }
 }, 60_000)
 
+it('compacts without re-caching the history only once the thread\'s prompt cache has gone cold', async () => {
+  const home = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-claude-cold-compact-'))
+  vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
+  const main = await MousseMainService.create({ homeDir: home, headless: true, ownerKind: 'test' })
+  await main.start()
+  try {
+    main.settings.set({ provider: { llmProvider: 'claude-subscription', model: 'opus' } })
+    const thread = main.threads.createThread('Cold compaction')
+    const hour = 60 * 60_000
+    let promptCache: { at: number; ttlMs?: number } = { at: Date.now() - 10 * 60_000, ttlMs: hour }
+    vi.spyOn(main.claudeSubscription, 'chat').mockImplementation(async (input) => {
+      input.onText('answer')
+      input.onMetrics?.({ totalResponseTimeMs: 1000, usage: null, context: { input: 10, cacheRead: 0, cacheWrite: 90_000, contextWindow: 200000 }, promptCache })
+      return 'answer'
+    })
+    const compact = vi.spyOn(main.claudeSubscription, 'compactConversation').mockResolvedValue(true)
+    const coldOf = () => (compact.mock.calls.at(-1)?.[5] as { cacheCold?: boolean } | undefined)?.cacheCold
+    // Ten minutes into an hour-long cache: warm, the compaction reads it cached.
+    await main.orchestrator.send({ content: 'first', mode: 'agent' }, false, { threadId: thread.id })
+    expect(await main.orchestrator.compactConversationContext(thread.id)).toBe('native')
+    expect(coldOf()).toBe(false)
+    // Two hours after a five-minute write: cold.
+    promptCache = { at: Date.now() - 2 * hour, ttlMs: 5 * 60_000 }
+    await main.orchestrator.send({ content: 'second', mode: 'agent' }, false, { threadId: thread.id })
+    expect(await main.orchestrator.compactConversationContext(thread.id)).toBe('native')
+    expect(coldOf()).toBe(true)
+    // No lifetime reported: cold after an hour idle, warm before.
+    promptCache = { at: Date.now() - 2 * hour }
+    await main.orchestrator.send({ content: 'third', mode: 'agent' }, false, { threadId: thread.id })
+    await main.orchestrator.compactConversationContext(thread.id)
+    expect(coldOf()).toBe(true)
+    // Right after a compaction nothing is known of the cache: the runtime keeps caching.
+    await main.orchestrator.compactConversationContext(thread.id)
+    expect(coldOf()).toBe(false)
+  } finally {
+    await main.stop()
+    vi.restoreAllMocks()
+    rmSync(home, { recursive: true, force: true })
+  }
+}, 60_000)
+
 it('undoes a compaction whose result could not be saved: the next turn resumes no compacted session and has the full history', async () => {
   const home = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-claude-compact-failed-'))
   vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
