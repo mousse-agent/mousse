@@ -85,6 +85,12 @@ export interface RoutedRow {
    * the call, so a staged call is held to the row's keys exactly like an inline one.
    */
   stageable?: readonly string[]
+  /**
+   * Another person (a teammate, not another of the user's own computers) may call the row, once the access
+   * decision allows it (`mms/teams/access.ts`). Absent means refused: the table stays deny-by-default for people.
+   * Set only through `CROSS_USER_METHODS`.
+   */
+  crossUser?: true
 }
 
 const FOLDER = ['threadId', 'projectId'] as const
@@ -151,7 +157,41 @@ export const ROUTED_FORBIDDEN_KEYS = [
   'root'
 ] as const
 
-export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze({
+/**
+ * The rows a teammate may call on a shared thread, once `netTeams` is on and the access decision allows it:
+ * reading the thread, sending, steering, stopping, answering its questions, its queue and its review diff.
+ * Terminals, the editor, Undo and Publish are not here. `tests/net/bridge/routed/table.test.ts` holds this list.
+ */
+export const CROSS_USER_METHODS: readonly string[] = Object.freeze([
+  'threads.get',
+  'thread.snapshot',
+  'thread.messages',
+  'thread.changesSince',
+  'thread.messageImage',
+  'orchestrator.send',
+  'orchestrator.steer',
+  'orchestrator.abort',
+  'orchestrator.answerQuestions',
+  'queue.list',
+  'queue.enqueue',
+  'queue.edit',
+  'queue.reorder',
+  'queue.remove',
+  'queue.promoteToSteer',
+  'review.files',
+  'review.file'
+])
+
+function withCrossUser(table: Record<string, RoutedRow>): Record<string, RoutedRow> {
+  for (const method of CROSS_USER_METHODS) {
+    const marked = table[method]
+    if (!marked) throw new Error(`${method} is not a routed row`)
+    marked.crossUser = true
+  }
+  return table
+}
+
+export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze(withCrossUser({
   // ---------------------------------------------------------------- thread reads
   'threads.get': read('thread', ['threadId']),
   // A window of the caller opened the thread: its Done clears on the owner, and so in every window. Anyone who may
@@ -621,7 +661,7 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   'scheduled.pause': write('computer', ['id', 'reason', 'until'], { required: ['id'] }),
   'scheduled.resume': write('computer', ['id'], { required: ['id'] }),
   'scheduled.delete': write('computer', ['id'], { required: ['id'] })
-} as Record<string, RoutedRow>)
+} as Record<string, RoutedRow>))
 
 /** The routed rows that name one automation (a scheduled job) of the owner by `id`. */
 export const ROUTED_JOB_METHODS: readonly string[] = [

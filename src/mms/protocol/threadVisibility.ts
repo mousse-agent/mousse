@@ -1,5 +1,8 @@
 import type { Project, Thread, ThreadActivitySnapshot } from '../../shared/types'
 import { isLocalOnlyThread, visibleThreads } from '../../shared/threadLineage'
+import type { UserId } from '../../shared/net/ids'
+import type { TeamDirectory, TeamId } from '../../shared/teams/types'
+import { personMaySeeThread } from '../teams/access'
 import type { RemoteListsPort } from './remoteListsPort'
 import type { ProtocolClientType, ProtocolEvent } from './types'
 
@@ -39,16 +42,47 @@ export function withoutBotThreads<T extends Pick<Thread, 'botOwned'>>(threads: r
 }
 
 /**
+ * A caller who is another person (a teammate), with what this computer knows of its team. Reached only through
+ * the access decision for teams (`mms/teams/access.ts`), which refuses everyone while `netTeams` is off.
+ */
+export interface TeamPerson {
+  readonly user: UserId
+  /** This computer's team, if it is in one. */
+  readonly team: TeamId | undefined
+  readonly directory: TeamDirectory
+}
+
+/**
+ * `threads` that `person` may see: only those the team directory opens to them, and never one kept on this
+ * computer only (`Thread.localOnly`, including a subagent of such a thread), whatever the connection.
+ */
+export function threadsForPerson<T extends Pick<Thread, 'id' | 'localOnly' | 'lineage'>>(
+  person: TeamPerson,
+  threads: readonly T[],
+  inventory: readonly Pick<Thread, 'id' | 'localOnly'>[] = threads as unknown as readonly Pick<Thread, 'id' | 'localOnly'>[]
+): T[] {
+  return threads.filter((thread) =>
+    personMaySeeThread(person.directory, person.team, person.user, {
+      id: thread.id,
+      localOnly: isLocalOnlyThread(thread, inventory)
+    })
+  )
+}
+
+/**
  * `threads` as `connection` should see them. `inventory` is the complete list parents are looked up
  * in; give it whenever `threads` is a slice (one project), so a slice never makes a parent look
  * missing and a subagent look orphaned. Filtering happens here, before any limit a caller applies.
+ * `person` is given only for a caller who is another person (`threadsForPerson`).
  */
 export function visibleThreadsFor(
   connection: { readonly clientType?: ProtocolClientType } | undefined,
   threads: readonly Thread[],
-  inventory: readonly Thread[] = threads
+  inventory: readonly Thread[] = threads,
+  person?: TeamPerson
 ): Thread[] {
-  const shared = withoutLocalOnlyFor(connection, withoutBotThreads(threads), inventory)
+  const listed = withoutLocalOnlyFor(connection, withoutBotThreads(threads), inventory)
+  const shared = person ? threadsForPerson(person, listed, inventory) : listed
   return connectionSeesSubagents(connection) ? shared : visibleThreads(shared, inventory)
 }
 
