@@ -296,7 +296,7 @@ export function UpdateChip({ snapshot, operation, actions }: { snapshot: Instanc
             id={cardId}
             role="dialog"
             aria-label={title}
-            className="prov-update-card"
+            className="prov-update-card settings-scope"
             style={style}
             onMouseEnter={show}
             onMouseLeave={hide}
