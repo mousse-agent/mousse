@@ -59,14 +59,14 @@ export function appletDocument(
   document.dispatchEvent(new CustomEvent('mousse-appearance-change',{detail:currentAppearance}));return true;
  };
  Object.defineProperty(window,${json(APPLET_APPLY_APPEARANCE)},{value:applyAppearance,writable:false,configurable:false});applyAppearance(${json(initialAppearance)});
- const iconGeometry=${json(APPLET_ICON_GEOMETRY)},iconAliases=${json(APPLET_ICON_ALIASES)},iconNames=Object.freeze(Object.keys(iconGeometry));
+ const iconGeometry=${json(APPLET_ICON_GEOMETRY)},missingIcon=[["circle",{cx:12,cy:12,r:8,strokeDasharray:"2 3"}]],iconAliases=${json(APPLET_ICON_ALIASES)},iconNames=Object.freeze(Object.keys(iconGeometry));
  const makeIcon=(name,options={})=>{
-  const canonical=Object.hasOwn(iconGeometry,name)?name:iconAliases[name];if(!canonical||!Object.hasOwn(iconGeometry,canonical))throw new Error('Unknown Mousse icon.');
+  const known=Object.hasOwn(iconGeometry,name)?name:Object.hasOwn(iconAliases,name)?iconAliases[name]:undefined,canonical=known&&Object.hasOwn(iconGeometry,known)?known:undefined;
   const size=typeof options.size==='number'&&Number.isFinite(options.size)?Math.min(128,Math.max(8,options.size)):16;
   const stroke=typeof options.strokeWidth==='number'&&Number.isFinite(options.strokeWidth)?Math.min(4,Math.max(.5,options.strokeWidth)):1.5;
-  const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg');for(const [key,value] of Object.entries({width:size,height:size,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor','stroke-width':stroke,'stroke-linecap':'round','stroke-linejoin':'round','data-icon-library':'hugeicons','data-mousse-icon-name':canonical,class:'mousse-icon',focusable:'false'}))svg.setAttribute(key,String(value));
+  const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg');for(const [key,value] of Object.entries({width:size,height:size,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor','stroke-width':stroke,'stroke-linecap':'round','stroke-linejoin':'round','data-icon-library':'hugeicons','data-mousse-icon-name':canonical??'missing',class:'mousse-icon',focusable:'false'}))svg.setAttribute(key,String(value));
   const label=typeof options.label==='string'?options.label.slice(0,160):'';if(label){svg.setAttribute('role','img');svg.setAttribute('aria-label',label)}else svg.setAttribute('aria-hidden','true');
-  for(const [tag,attributes] of iconGeometry[canonical]){const node=document.createElementNS(ns,tag);for(const [key,value] of Object.entries(attributes)){if(key==='key'||key==='strokeWidth')continue;const attr=key.replace(/[A-Z]/g,letter=>'-'+letter.toLowerCase());node.setAttribute(attr,String(value))}svg.appendChild(node)}return svg;
+  for(const [tag,attributes] of canonical?iconGeometry[canonical]:missingIcon){const node=document.createElementNS(ns,tag);for(const [key,value] of Object.entries(attributes)){if(key==='key'||key==='strokeWidth')continue;const attr=key.replace(/[A-Z]/g,letter=>'-'+letter.toLowerCase());node.setAttribute(attr,String(value))}svg.appendChild(node)}return svg;
  };
  Object.defineProperty(window,'mousseApplet',{value:Object.freeze({get appearance(){return currentAppearance},icon:makeIcon,iconNames,data:${json(source.data)},state:${json(state)},saveState:value=>send('state',value),resize:height=>send('resize',height),reportError:message=>send('error',String(message).slice(0,2000)),requestConversationInput:text=>send('conversation-input',String(text).slice(0,4000))}),writable:false,configurable:false});
  addEventListener('error',event=>{event.preventDefault();const message=String(event.message);if(message.startsWith('ResizeObserver loop'))return;send('error',message.slice(0,2000))});

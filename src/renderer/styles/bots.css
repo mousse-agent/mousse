@@ -180,8 +180,8 @@
 .bot-you-actions > button:not(.bot-reply-button), .bot-message-actions { opacity: 0; transition: opacity .12s; }
 .chat-participant-message:hover :is(.bot-you-actions > button, .bot-message-actions), .bot-message-actions:focus-within, .bot-you-actions > button:focus-visible { opacity: 1; }
 .bot-message-actions:has([data-read-aloud='loading'], [data-read-aloud='playing'], [data-read-aloud='paused']) { opacity: 1; }
-/* A reply's applets: the thread's card, under its words. */
-.bot-message-applets { display: flex; flex-direction: column; gap: 12px; margin-top: 10px; }
+/* A reply's applets: the thread's card, under its words, as wide as the message (the message shrinks to its bubble). */
+.bot-message-applets { display: flex; flex-direction: column; gap: 12px; margin-top: 10px; align-self: stretch; min-width: 0; }
 /* An applet opened beside the chat: the thread's panel, filling the pane. */
 .bot-applet-pane { flex: 1 1 0; min-width: 320px; display: flex; flex-direction: column; border-left: 1px solid rgba(var(--accent-pale-rgb), .12); }
 .bot-applet-pane > .document-panel { flex: 1; min-height: 0; }
