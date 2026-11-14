@@ -536,14 +536,15 @@ describe('a bot on this computer', () => {
     expect(cards()).toHaveLength(before)
   })
 
-  it('a turn resumed after Mousse restarts is held to what this computer allows now', async () => {
+  it.each(['computer', 'bot'] as const)('a turn resumed after Mousse restarts is held to what this computer allows now', async (source) => {
     await allowAll()
     const work = await run('w1')
     expect(work.prepared.authority.check(command('ls'))).toEqual({ ok: true })
     // Mousse stops mid-turn; while it is down the owner switches everything off.
     f.runs.markTerminal(work.payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
     f.bots.close()
-    limit = { ...BOT_COMPUTER_SHUT }
+    if (source === 'computer') limit = { ...BOT_COMPUTER_SHUT }
+    else for (const item of f.bots.service.get(botId).permissions) f.bots.service.setPermission(botId, item.id, false)
     f.bots = new BotEngine(f.host)
     await f.bots.reconcileOnStartup()
     await flush(12)
@@ -631,17 +632,20 @@ describe('a bot on this computer', () => {
     f.store.setPublished(botId, published.revision!)
   }
 
-  it('commands switched off: a consult that holds them is stopped with its chat turn, which holds none, and the command it started holds nothing up', async () => {
+  it.each(['computer', 'bot'] as const)('commands switched off: a consult that holds them is stopped with its chat turn, which holds none, and the command it started holds nothing up', async (source) => {
     await allowAll()
+    const id = f.bots.service.get(botId).permissions.find((item) => item.title === 'run commands')!.id
+    const flip = (enabled: boolean) => {
+      if (source === 'computer') { limit = { ...limit, shell: enabled }; f.bots.computerLimitChanged() }
+      else f.bots.service.setPermission(botId, id, enabled)
+    }
     withDocsContext()
     const turn = await chat('What does the doc say?', 'm1')
     const stopped = () => turn.prepared.authority.time.signal.aborted
     expect(turn.prepared.policy.tools!.allow).not.toContain('bash')
     // Off and on again before any consult: the chat turn holds no commands, so nothing stops.
-    limit = { ...limit, shell: false }
-    f.bots.computerLimitChanged()
-    limit = { ...limit, shell: true }
-    f.bots.computerLimitChanged()
+    flip(false)
+    flip(true)
     expect(stopped()).toBe(false)
     // The consult starts now, with commands, and runs one.
     const asked = turn.prepared.authority.consult!({ context: 'docs', question: 'What does it say?' })
@@ -652,17 +656,16 @@ describe('a bot on this computer', () => {
     expect(consult.prepared.authority.check(command('ls'))).toEqual({ ok: true })
     f.runs.tools.start({ invocationId: 'inv-consult-bash', runId: consult.payload.runId, attemptId: f.runs.getRun(consult.payload.runId)!.activeAttemptId!, tool: 'bash', argsDigest: 'd', now: 'n', idempotent: false })
     // Off again: the consult, and its turn with it, stop at once.
-    limit = { ...limit, shell: false }
-    f.bots.computerLimitChanged()
+    flip(false)
     expect(consult.prepared.authority.time.signal.aborted).toBe(true)
     expect(stopped()).toBe(true)
-    expect(chatOf(f, botId).filter((message) => message.kind === 'notice').at(-1)).toMatchObject({ text: 'Stopped: "run commands" was switched off on this computer.' })
+    expect(chatOf(f, botId).filter((message) => message.kind === 'notice').at(-1)).toMatchObject(source === 'computer' ? { text: 'Stopped: "run commands" was switched off on this computer.' } : { systemLine: true })
     await finish(f, consult.payload, 'interrupted', { outcome: { interruptedBy: 'bot_wall' } })
     await finish(f, turn.payload, 'interrupted', { outcome: { interruptedBy: 'bot_wall' } })
     // The consult's cut-off command was the switch's: the chat goes on in a new turn, told it was interrupted.
     expect(f.store.activation(turn.activation.id)!.status).toBe('running')
     const next = await start(f, turn.activation.id, f.store.lastMainDispatch(turn.activation.id)!.n)
-    expect(next.prepared.prompt).toMatch(/switched off on this computer while you worked.*Interrupted tool calls .*bash \(consult run/s)
+    expect(next.prepared.prompt).toMatch(source === 'computer' ? /switched off on this computer while you worked.*Interrupted tool calls .*bash \(consult run/s : /owner switched off.*Interrupted tool calls .*bash \(consult run/s)
     await finish(f, next.payload, 'completed', { text: 'Here is what I know.' })
   })
 

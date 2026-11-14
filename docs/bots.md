@@ -452,9 +452,9 @@ States are idle, working ("Waiting for internet" while it waits for it), needs y
 
 ## Switching a bot's permissions off
 
-About → Can use has a switch and Remove on each permission row, including each MCP server. Off keeps the permission listed but gives the bot none of it. On restores it on the next turn, without another ask or card. Remove forgets it; giving it back needs an ask again. The bot's own always-on tools and its starter permissions have no rows or switches.
+About → Can use has a switch and Remove on each permission row, including each MCP server. Off keeps the permission listed but gives the bot none of it. On restores it on the next turn, without another ask or card. Remove forgets it; giving it back needs an ask again. The bot's own always-on tools and its starter permissions have no rows or switches. This includes the starter web tools; an older grant's extra native web permission still has its row.
 
-A permission works only while both the bot's switch and the computer's limit allow it. “Off on this computer” still shows when that limit holds it back; the bot's own switch stays usable. The tooltip names what holds it back.
+A permission works only while both the bot's switch and the computer's limit allow it. “Off on this computer” still shows when that limit holds it back; the bot's own switch stays usable. The tooltip names what holds it back. The existing runtime limits still apply: commands may reach other files while file access is off where the runtime has no file sandbox. Switch commands off too to stop them.
 
 Switching commands or file access off stops this bot's running turns, consults and subagents that opened it, and the work carries on in a new turn without it. Other permissions are refused at the next call. The chat quietly says what changed. Off also holds back reminders, scheduled work, restarts and Allow this time. An older ask card cannot turn it on, and the bot makes no new card for it while it is off.
 
