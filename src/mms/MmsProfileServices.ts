@@ -47,6 +47,7 @@ import { MousseMcpServer } from './run/mcp/MousseMcpServer'
 import { personTurnRequest } from './run/mcp/appTools/agentMessage'
 import { EffectWorker, type EffectWorkerFibres } from './run/EffectWorker'
 import { TERMINAL_RUN_STATUSES, type RunRecord, type ThreadEvent } from './run/types'
+import { launchedThreadsOf, watchLaunchedThreads } from './bots/launchedThreads'
 import { Reconciler } from './run/Reconciler'
 import { RunEngine } from './run/RunEngine'
 import type { BotEngine } from './bots/activation/BotEngine'
@@ -746,6 +747,8 @@ export class MmsProfileServices {
         }
       },
       runs: () => this.runEngine,
+      // The threads a bot started that still work (a run not ended), hidden ones too: the bot is busy managing them.
+      launchedThreads: (creators) => launchedThreadsOf({ creators, runs: this.runEngine.store.listNonTerminalRuns(), thread: (id) => this.threads.getThread(id), asks: (id) => this.questions.listPendingForThread(id).length > 0 }),
       harness,
       notifyEffects: () => this.orchestrator.notifyEffects(),
       stopThread: (threadId) => this.orchestrator.stopThread(threadId, 'user', { clientRequestId: `bot-stop:${threadId}:${Date.now()}` }),
@@ -919,6 +922,11 @@ export class MmsProfileServices {
         try { personalBots.settleRun(run.runId) } catch (error) { console.warn('bot dispatch could not be settled', { runId: run.runId, error: error instanceof Error ? error.message : String(error) }) }
       })
     })
+    // A thread a bot started began, was held, asks the owner or ended: that bot's header reads busy or free again.
+    if (personalBots) {
+      const stop = watchLaunchedThreads({ runs: this.runEngine, questions: this.questions, thread: (id) => this.threads.getThread(id), changed: (creator) => personalBots.launchedThreadChanged(creator) })
+      this.platform.onDispose(stop)
+    }
     this.orchestrator.setBotDispatcher(personalBots)
     this.orchestrator.setWorkflowChatExecutor(this.platform.workflowChat)
     this.orchestrator.setFeatureFlags(this.config.get().features)

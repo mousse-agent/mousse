@@ -3,7 +3,7 @@
  * note on, the presence under the name and its sticker, and lists that read as a card.
  */
 import { describe, expect, it } from 'vitest'
-import type { BotChatMessage, BotChip, BotWorkItem } from '../../src/shared/bots/personal/chat'
+import type { BotChatMessage, BotChip, BotLaunchedThread, BotWorkItem } from '../../src/shared/bots/personal/chat'
 import { chatRows, isKeyValueList, presenceOf, stickerOf, workSignalsOf } from '../../src/renderer/components/bots/botChatShape'
 
 const started = (title: string, text = 'started'): BotChip => ({ icon: 'think', text, highlight: title })
@@ -80,6 +80,22 @@ describe('presence and sticker', () => {
     const presence = presenceOf({ state, work }, { typing, offline })
     expect(presence.text).toBe(text)
     expect(stickerOf(presence, undefined)).toBe(sticker)
+  })
+
+  it('threads the bot started and still manages keep it busy, alone or beside its work', () => {
+    const thread = (threadId: string, title: string): BotLaunchedThread => ({ threadId, title, status: 'running', startedAt: '2026-11-13T21:40:00.000Z' })
+    const threads = [thread('t1', 'Dictation mock-ups'), thread('t2', 'Typing dots shimmer')]
+    const rows: Array<[string, BotWorkItem[], BotLaunchedThread[], string, string | undefined]> = [
+      ['one thread alone names it', [], threads.slice(0, 1), 'Managing Dictation mock-ups', 'working'],
+      ['several threads are counted', [], threads, 'Managing 2 threads', 'working'],
+      ['work leads, threads add to +N', one, threads, 'System check +2', 'working'],
+      ['none left: free', [], [], 'free', undefined]
+    ]
+    for (const [what, work, launched, text, sticker] of rows) {
+      const presence = presenceOf({ state: launched.length || work.length ? 'working' : 'idle', work, threads: launched }, { typing: false, offline: false })
+      expect([what, presence.text, stickerOf(presence, undefined)]).toEqual([what, text, sticker])
+    }
+    expect(presenceOf({ state: 'paused', threads }, { typing: false, offline: false }).text).toBe('paused')
   })
 
   it('shows the lead work’s live activity, and "working" for a kind with no picture', () => {

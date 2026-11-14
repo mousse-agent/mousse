@@ -17,7 +17,7 @@ import { RunEngine } from '../../src/mms/run/RunEngine'
 import { RunStore } from '../../src/mms/run/RunStore'
 import { ToolInvocations } from '../../src/mms/run/ToolInvocations'
 import { isBotTurnPayload, type BotTurnPayload, type RunOutcome } from '../../src/mms/run/types'
-import type { BotChip } from '../../src/shared/bots/personal/chat'
+import type { BotChip, BotLaunchedThread } from '../../src/shared/bots/personal/chat'
 import type { BotDepth, BotModelPick } from '../../src/shared/bots/personal/definition'
 import type { ProviderSelection } from '../../src/shared/harness/types'
 import type { PreparedBotTurn } from '../../src/mms/bots/activation/dispatcher'
@@ -53,6 +53,8 @@ export interface BotFixture {
   resolved: Array<{ pick: BotModelPick | null; depth: BotDepth }>
   /** A pick that can't run, and why (the resolver then answers `pick_unavailable` with `missed`). */
   pickMiss?: (pick: BotModelPick) => BotPickMiss | undefined
+  /** The threads the bot's threads started that still work (`BotEngineHost.launchedThreads`); absent: none. */
+  launched?: (creators: ReadonlySet<string>) => BotLaunchedThread[]
   journal: BotJournalInput[]
   /** Journal rows written outside a transaction (must stay empty). */
   outsideTx: BotJournalInput[]
@@ -96,6 +98,7 @@ export function botFixture(): BotFixture {
     definitions: new BotDefinitionStore(store.directory, (botId) => store.registry(botId)?.revision ?? null),
     threads: { ensureExecutionThread: (key) => ({ id: `thread:${key}` }) },
     runs: () => runs,
+    launchedThreads: (creators) => fixture.launched?.(creators) ?? [],
     harness: {
       checkPolicy: () => ({ ok: true }),
       nativeToolNames: (_instanceId, tools) => ({ ok: true, names: tools.flatMap((tool) => [...(PI_NATIVE_TOOLS[tool] ?? [tool])]) })

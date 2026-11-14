@@ -135,17 +135,24 @@ export function leadWork(work: readonly BotWorkItem[]): BotWorkItem | undefined 
 
 /**
  * The bot's presence under its name: "typing…" while its chat turn writes, "System check +1" while work runs or waits
- * (the work running longest, and how many more; never "+0"), "paused", "waiting for internet", and "free" otherwise.
- * Typing wins over work; the line still opens the work's list.
+ * (the work running longest, and how many more, threads it manages included; never "+0"), "Managing Dictation mock-ups"
+ * or "Managing 2 threads" while only threads it started still work, "paused", "waiting for internet", and "free"
+ * otherwise. Typing wins over work; the line still opens the work's list.
  */
-export function presenceOf(bot: Pick<BotSummary, 'state' | 'work'>, chat: { typing: boolean; offline: boolean }): BotPresence {
+export function presenceOf(bot: Pick<BotSummary, 'state' | 'work' | 'threads'>, chat: { typing: boolean; offline: boolean }): BotPresence {
   if (bot.state === 'paused') return { kind: 'paused', text: 'paused' }
   if (chat.offline) return { kind: 'offline', text: 'waiting for internet' }
   if (chat.typing) return { kind: 'typing', text: 'typing…' }
   const work = bot.work ?? []
+  const threads = bot.threads ?? []
   const lead = leadWork(work)
-  if (!lead) return { kind: 'free', text: 'free' }
-  return { kind: 'busy', text: work.length > 1 ? `${lead.title} +${work.length - 1}` : lead.title, lead }
+  if (lead) {
+    const more = work.length - 1 + threads.length
+    return { kind: 'busy', text: more > 0 ? `${lead.title} +${more}` : lead.title, lead }
+  }
+  if (threads.length === 1) return { kind: 'busy', text: `Managing ${threads[0]!.title}` }
+  if (threads.length) return { kind: 'busy', text: `Managing ${threads.length} threads` }
+  return { kind: 'free', text: 'free' }
 }
 
 /** What the sticker on the header's face shows. */

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { askText } from '../../../shared/bots/personal/askText'
-import type { BotAskCard, BotAskStatus, BotChatApplet, BotChatMessage, BotChatQuote, BotWorkItem, BotChip, BotDetail, BotError, BotMessageKind, BotPermissionItem, BotReminderItem, BotRunItem, BotSummary } from '../../../shared/bots/personal/chat'
+import type { BotAskCard, BotAskStatus, BotChatApplet, BotChatMessage, BotChatQuote, BotLaunchedThread, BotWorkItem, BotChip, BotDetail, BotError, BotMessageKind, BotPermissionItem, BotReminderItem, BotRunItem, BotSummary } from '../../../shared/bots/personal/chat'
 import { BOT_MODEL_SLOT_KEYS, type BotDefinition, type BotLane, type BotManifest } from '../../../shared/bots/personal/definition'
 import { isPinned, limitOnPick, slotsOf, stuckRowsOf } from '../../../shared/bots/personal/modelSlots'
 import { askFingerprint, filesAsk, filesAskOf, isSpecialAsk, mcpAskTools, type BotAskRequest, type BotEscalationStatus, type BotPermissionRequest } from '../../../shared/bots/personal/escalation'
@@ -69,6 +69,12 @@ function workingOn(work: readonly BotWorkItem[]): string {
   const running = work.filter((item) => item.status !== 'queued')
   if (running.length === 1 && work.length === 1) return `Working on ${running[0]!.title}`
   return `Working on ${work.length} things`
+}
+
+/** The Recent line of a bot that manages threads it started: "Managing Dictation mock-ups", "Managing 2 threads: A, B". */
+export function managingLine(threads: readonly BotLaunchedThread[]): string {
+  if (threads.length === 1) return `Managing ${threads[0]!.title}`
+  return oneLine(`Managing ${threads.length} threads: ${threads.map((thread) => thread.title).join(', ')}`, 120)
 }
 
 /** One line of text for a list ("Recent"): the first line, cut. */
@@ -206,6 +212,8 @@ export class BotChatProjection {
     computerLimit?(): BotComputerLimit
     /** When a question's first follow-up is due, its bubble shown at `shownAt` (`BotEngine.firstFollowUpAt`); null for none. */
     followUpAt?(question: BotQuestionRow, shownAt: string): string | null
+    /** The threads the bot started that still work, hidden ones too, oldest first (`BotEngine.launchedThreads`). */
+    launched?(botId: string): BotLaunchedThread[]
   }) {}
 
   private get store(): BotStore {
@@ -494,7 +502,9 @@ export class BotChatProjection {
       }))
     // Questions the bot's work waits on need the owner too ("Asked: Which flat…?"); a permission ask's words come first.
     const waitingOn = this.store.waitingQuestions(definition.id)
-    const state = botState({ paused, ...(error ? { error } : {}), openAsks: asks.length + waitingOn.length, liveActivations: live })
+    // Threads it started that still work keep it busy: it manages them.
+    const threads = this.launchedOf(definition.id)
+    const state = botState({ paused, ...(error ? { error } : {}), openAsks: asks.length + waitingOn.length, liveActivations: live + threads.length })
     // Working, but every running activation waits for the internet.
     const running = liveRows.filter((row) => row.status === 'running')
     const offline = state === 'working' && running.length > 0 && running.every((row) => row.offline)
@@ -506,7 +516,7 @@ export class BotChatProjection {
         : `Paused until ${clockTime(limitedUntil!)}`
       : state === 'stuck' ? `Needs you: ${error!.text}`
         : state === 'needs_you' ? (asks[0] ? `Wants to ${this.card(asks[0]).title}` : `Asked: ${oneLine(waitingOn[0]!.spec.question, 80)}`)
-          : state === 'working' ? (offline ? 'Waiting for internet' : chatTurn || !work.length ? 'Working…' : workingOn(work))
+          : state === 'working' ? (offline ? 'Waiting for internet' : chatTurn ? 'Working…' : work.length ? workingOn(work) : threads.length ? managingLine(threads) : 'Working…')
             : last ? oneLine(last.text || last.error?.text || plainCards(last.cards)) : ''
     return {
       id: definition.id,
@@ -524,7 +534,17 @@ export class BotChatProjection {
       createdAt: registry?.createdAt ?? new Date(now).toISOString(),
       ...(registry?.homeThreadId ? { homeThreadId: registry.homeThreadId } : {}),
       ...(chatTurn ? { chat: { activationId: chatTurn.id, ...(chatTurn.offline ? { offline: true as const } : {}) } } : {}),
-      ...(work.length ? { work } : {})
+      ...(work.length ? { work } : {}),
+      ...(threads.length ? { threads } : {})
+    }
+  }
+
+  /** `launched`, never failing the summary: a lookup that throws reads as no thread. */
+  private launchedOf(botId: string): BotLaunchedThread[] {
+    try {
+      return this.options.launched?.(botId) ?? []
+    } catch {
+      return []
     }
   }
 

@@ -1,8 +1,9 @@
 import { Fragment, memo, useEffect, useRef, useState, type ReactNode } from 'react'
-import { Activity, AppWindow, Brain, ChevronDown, Clock, FileText, Globe, Moon, Pencil, Search, TerminalSquare, X } from '../../lib/icons'
-import type { BotChip, BotSummary, BotWorkItem } from '../../../shared/bots/personal/chat'
+import { Activity, AppWindow, ArrowUpRight, Brain, ChevronDown, Clock, FileText, Globe, Moon, Pencil, Search, TerminalSquare, X } from '../../lib/icons'
+import type { BotChip, BotLaunchedThread, BotSummary, BotWorkItem } from '../../../shared/bots/personal/chat'
 import { useBotsStore } from '../../stores/botsStore'
 import { presenceOf, stickerOf, type BotStickerKind } from './botChatShape'
+import { openThread } from './BotSteps'
 
 /** How long work has run, in plain words: "just now", "4 min", "1 h 20 min". */
 export function workElapsed(startedAt: string, now = Date.now()): string {
@@ -55,6 +56,29 @@ const WorkLine = memo(function WorkLine({ botId, item }: { botId: string; item: 
   </li>
 })
 
+/** What a thread the bot started is doing now, in a few words. */
+export function threadDoing(status: BotLaunchedThread['status']): string {
+  if (status === 'queued') return 'queued'
+  if (status === 'paused') return 'held'
+  if (status === 'needs_input') return 'waiting on you'
+  return 'working'
+}
+
+/** A thread the bot started that still works, in the header's list: its title, what it does, for how long, and Open. */
+const ThreadLine = memo(function ThreadLine({ thread }: { thread: BotLaunchedThread }) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 30_000)
+    return () => window.clearInterval(timer)
+  }, [])
+  const details = ['thread', threadDoing(thread.status), ...(thread.status === 'queued' ? [] : [workElapsed(thread.startedAt, now)])]
+  return <li className={`bot-work-line${thread.status === 'running' ? ' is-running' : ''}`}>
+    <span className="bot-work-title">{thread.title}</span>
+    <span className="bot-work-doing">{details.join(' · ')}</span>
+    <button type="button" aria-label={`Open ${thread.title}`} title="Open this thread" onClick={() => openThread(thread.threadId)}><ArrowUpRight size={13} aria-hidden /></button>
+  </li>
+})
+
 const STICKER_ICONS: Record<BotStickerKind, { icon: typeof Pencil; label: string }> = {
   typing: { icon: Pencil, label: 'Typing' },
   browser: { icon: AppWindow, label: 'Using the browser' },
@@ -82,15 +106,18 @@ export function BotActivitySticker({ bot, typing, offline }: { bot: BotSummary; 
 }
 
 /**
- * Under the bot's name in the header: "typing…", "System check +1", "paused", "free". While work runs or waits the line
- * opens the list of that work (title, time, Stop; queued pieces last), which closes on a click away or Escape.
+ * Under the bot's name in the header: "typing…", "System check +1", "Managing 2 threads", "paused", "free". While work
+ * runs or waits, or threads it started still work, the line opens their list (work with Stop, queued pieces last; then
+ * threads with Open), which closes on a click away or Escape.
  */
 export function BotPresenceLine({ bot, typing, offline }: { bot: BotSummary; typing: boolean; offline: boolean }) {
   const presence = presenceOf(bot, { typing, offline })
   const work = bot.work ?? []
+  const threads = bot.threads ?? []
+  const listed = work.length + threads.length
   const [open, setOpen] = useState(false)
   const root = useRef<HTMLDivElement>(null)
-  useEffect(() => { if (!work.length) setOpen(false) }, [work.length])
+  useEffect(() => { if (!listed) setOpen(false) }, [listed])
   useEffect(() => {
     if (!open) return
     const away = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) setOpen(false) }
@@ -99,13 +126,13 @@ export function BotPresenceLine({ bot, typing, offline }: { bot: BotSummary; typ
     document.addEventListener('keydown', escape)
     return () => { document.removeEventListener('pointerdown', away); document.removeEventListener('keydown', escape) }
   }, [open])
-  if (!work.length) return <span className="bot-presence" data-kind={presence.kind} role="status">{presence.text}</span>
+  if (!listed) return <span className="bot-presence" data-kind={presence.kind} role="status">{presence.text}</span>
   // Running work first, then what waits, each in the order it came.
   const ordered = [...work.filter((item) => item.status !== 'queued'), ...work.filter((item) => item.status === 'queued')]
   return <div className="bot-presence-root" ref={root}>
     <button type="button" className="bot-presence is-button" data-kind={presence.kind} aria-expanded={open} aria-haspopup="true" onClick={() => setOpen((was) => !was)}>
       <span role="status">{presence.text}</span><ChevronDown size={12} aria-hidden />
     </button>
-    {open && <ul className="bot-work" aria-label={`${bot.name}'s work`}>{ordered.map((item) => <WorkLine key={item.id} botId={bot.id} item={item} />)}</ul>}
+    {open && <ul className="bot-work" aria-label={`${bot.name}'s work`}>{ordered.map((item) => <WorkLine key={item.id} botId={bot.id} item={item} />)}{threads.map((thread) => <ThreadLine key={thread.threadId} thread={thread} />)}</ul>}
   </div>
 }

@@ -11,6 +11,7 @@ import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
 import { botManifestDigest } from '../../src/mms/bots/grants/compile'
 import { isBotRoomAbort, isBotWallAbort } from '../../src/mms/bots/activation/dispatcher'
 import { botFixture, chatOf, createBot, finish, flush, runDispatch, start, type BotFixture } from './botFixture'
+import type { BotLaunchedThread } from '../../src/shared/bots/personal/chat'
 
 let f: BotFixture
 let botId: string
@@ -996,5 +997,32 @@ describe('long work', () => {
       expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'notice', text: 'I ran out of room for this. Pip wants to work for up to 2 hours per run.' })
       expect(chatOf(f, botId).at(-1)!.ask!.carriesOn).toBeUndefined()
     })
+  })
+})
+
+describe('threads it started ("use your threads")', () => {
+  const thread = (threadId: string, title: string, status: BotLaunchedThread['status'] = 'running'): BotLaunchedThread => ({ threadId, title, status, startedAt: '2026-11-14T09:00:00.000Z' })
+
+  it('is busy while threads it started still work, names them, and is free again once they end', () => {
+    const home = f.store.registry(botId)!.homeThreadId!
+    let working: BotLaunchedThread[] = [thread('t1', 'Dictation mock-ups'), thread('t2', 'Typing dots shimmer', 'needs_input')]
+    // Only threads its own threads started count: the lookup is asked about the bot's threads, its chat among them.
+    f.launched = (creators) => (creators.has(home) ? working : [])
+    expect(summary()).toMatchObject({ state: 'working', stateText: 'Managing 2 threads: Dictation mock-ups, Typing dots shimmer', threads: working })
+    working = [thread('t1', 'Dictation mock-ups')]
+    expect(summary()).toMatchObject({ state: 'working', stateText: 'Managing Dictation mock-ups' })
+    working = []
+    expect(summary().state).toBe('idle')
+    expect(summary().threads).toBeUndefined()
+  })
+
+  it('reads its summary again when a thread it started changes, and not for a thread another thread started', () => {
+    const home = f.store.registry(botId)!.homeThreadId!
+    const changed: unknown[] = []
+    f.bots.events.on('changed', (event) => changed.push(event))
+    f.bots.launchedThreadChanged('someone-else')
+    expect(changed).toEqual([])
+    f.bots.launchedThreadChanged(home)
+    expect(changed).toEqual([{ botId }])
   })
 })

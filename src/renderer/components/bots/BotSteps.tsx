@@ -3,7 +3,7 @@ import { selectThread } from '../../lib/threadActions'
 import { useAppStore } from '../../stores/appStore'
 
 /** Shows a thread the bot started, messaged or stopped, with its project's threads in the sidebar. */
-function openThread(threadId: string): void {
+export function openThread(threadId: string): void {
   useAppStore.getState().setThreadsSidebarView('projects')
   void selectThread(threadId).catch(() => undefined)
 }

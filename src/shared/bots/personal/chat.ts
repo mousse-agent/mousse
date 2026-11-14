@@ -163,6 +163,22 @@ export interface BotSummary {
   chat?: { activationId: string; offline?: true }
   /** Work that runs or waits beside the chat (docs/plans/bot-always-free.md), oldest first. */
   work?: BotWorkItem[]
+  /**
+   * The owner's threads the bot started ("use your threads") that are still working, hidden ones too, oldest first: the
+   * bot is busy while it manages them. Absent from older services and while none works.
+   */
+  threads?: BotLaunchedThread[]
+}
+
+/**
+ * A thread the bot started that still works: its title, and whether its run runs, waits its turn, is held (a usage
+ * limit), or waits on the owner (a question or approval in that thread).
+ */
+export interface BotLaunchedThread {
+  threadId: string
+  title: string
+  status: 'running' | 'queued' | 'paused' | 'needs_input'
+  startedAt: string
 }
 
 /** One piece of work in the line above the composer: what it is about, and whether it runs, waits or is held. */
