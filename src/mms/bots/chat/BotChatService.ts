@@ -176,8 +176,13 @@ export function messageInput(
   // It answers the question that message carries (its bubble, or a nudge of it): the question's own words, and, after
   // the bot went ahead with its default, that it did.
   const asked = question?.(row.questionId)
-  if (asked?.status === 'defaulted' && row.id && asked.answerMessage === row.id) return `${lateAnsweringLine(asked.spec.question, asked.answer?.choice ?? asked.follow?.default ?? '')}\n\n${body}`
+  if (asked?.status === 'defaulted' && row.id && asked.answerMessage === row.id) return `${lateLineOf(asked)}\n\n${body}`
   return `${answeringLine(asked?.spec.question ?? reply.text)}\n\n${body}`
+}
+
+/** The line before the owner's late answer to a question the bot went on with its default for: the question, and the default. */
+function lateLineOf(question: Pick<BotQuestionRow, 'spec' | 'answer' | 'follow'>): string {
+  return lateAnsweringLine(question.spec.question, question.answer?.choice ?? question.follow?.default ?? '')
 }
 
 /** The line before the owner's answer to a question the bot asked: the question, so the bot knows what it answers. */
@@ -567,6 +572,9 @@ export class BotChatService {
         const moved = this.store.moveOnQuestions(input.botId, posted.id, answering?.id)
         touched = [...(answers ? [answers] : []), ...moved]
         const body = messageInput({ id: posted.id, botId: input.botId, text, attachments: saved, replyTo: replyTo?.id ?? null, ...(answers ? { questionId: answers.id } : {}) }, (id) => this.store.message(id), (id) => this.store.question(id))
+        // The late answer's line quotes the question and the default: kept with the question, so forgetting the bubble
+        // finds it in the turn this message starts or continues.
+        if (late) this.store.recordQuestionCopy(late.id, target.activationId, lateLineOf(this.store.question(late.id) ?? late))
         prompt = [...moved.map((question) => movedOnLine(question.spec)), body].join('\n\n')
         if (!target.continues) refused = this.engine.queueChatInTx(input.botId, key, prompt, target.activationId, owner)
         // A message from another device that continues a turn waiting at a wall holds the rest of that turn to the

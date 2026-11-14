@@ -1690,6 +1690,15 @@ export class BotStore {
   }
 
   /**
+   * A chat turn was told `line`, which quotes the question (an owner's late answer to its default): kept with the answer,
+   * so forgetting the bubble finds that copy in that turn's request, prompts and captured rows.
+   */
+  recordQuestionCopy(questionId: string, activationId: string, line: string): void {
+    this.run(`UPDATE bot_questions SET answer_json = json_set(answer_json, '$.copies',
+      json_insert(COALESCE(json_extract(answer_json, '$.copies'), '[]'), '$[#]', json_object('activationId', ?, 'line', ?))) WHERE id = ? AND answer_json IS NOT NULL`, activationId, line, questionId)
+  }
+
+  /**
    * The chat's turn for a question's default was queued with `line` as its input: kept with the answer, as work's
    * answer line is (`markAnswerSent`), so forgetting the bubble finds that copy in that turn.
    */

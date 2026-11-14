@@ -59,7 +59,10 @@ describe('a bot’s nudge budget (nudgeSlot)', () => {
     ['one an hour ago: now', [at - HOUR], at],
     ['three in the last day: once the oldest is a day old', [at - 20 * HOUR, at - 10 * HOUR, at - 2 * HOUR], at + 4 * HOUR],
     ['two in the last day: now', [at - 20 * HOUR, at - 2 * HOUR], at],
-    ['a free time at night: the morning', [at - 14 * HOUR, at - 10 * HOUR, at - 2 * HOUR], Date.parse('2026-11-08T08:00:00Z')]
+    ['a free time at night: the morning', [at - 14 * HOUR, at - 10 * HOUR, at - 2 * HOUR], Date.parse('2026-11-08T08:00:00Z')],
+    // The clock was set back: a nudge "posted" after now still counts, in the hour and in the day.
+    ['one posted half an hour from now: an hour after it', [at + 30 * MIN], at + 90 * MIN],
+    ['three in the day, one of them from later: once the oldest is a day old', [at - 20 * HOUR, at - 3 * HOUR, at + 2 * HOUR], at + 4 * HOUR]
   ])('%s', (_name, nudges, expected) => {
     expect(nudgeSlot(at, nudges, 'UTC')).toBe(expected)
   })

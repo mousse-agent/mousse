@@ -147,6 +147,14 @@ export const QUIET_UNTIL_HOUR = 8
 /** A nudge: one fixed line from Mousse (no model call), as a reply to the question's bubble, with its answers again. */
 export const NUDGE_TEXT = 'Still need your answer on this one.'
 
+/**
+ * A nudge's notification, which a phone shows with no chat around it: the question it reminds of, cut to fit. Built
+ * from the question's bubble when it is shown, never stored, so forgetting the bubble leaves no copy of it.
+ */
+export function nudgeNotificationText(question: string): string {
+  return `Still need your answer: ${quoteOf(question, 90)}`
+}
+
 /** "30 minutes", "1 hour", "90 minutes". */
 export function waitLabel(ms: number): string {
   const minutes = Math.round(ms / 60_000)

@@ -46,16 +46,17 @@ export function afterQuietHours(at: number, zone: string): number {
 
 /**
  * The first time from `at` a bot may post a nudge: an hour after its last one, once fewer than three fall in the 24 hours
- * before, and out of the quiet hours. `nudges`: when the bot's earlier nudges were posted.
+ * before, and out of the quiet hours. `nudges`: when the bot's earlier nudges were posted. One posted "later" than `at`
+ * (the clock was set back since) counts as just posted, in both budgets: a clock change never frees a slot.
  */
 export function nudgeSlot(at: number, nudges: readonly number[], zone: string): number {
   let slot = at
   // Each rule can only move it later, so this settles in a few rounds.
   for (let round = 0; round < 8; round += 1) {
     const before = slot
-    const close = nudges.filter((time) => time > slot - NUDGE_SPACING_MS && time <= slot)
+    const close = nudges.filter((time) => time > slot - NUDGE_SPACING_MS)
     if (close.length) slot = Math.max(...close) + NUDGE_SPACING_MS
-    const day = nudges.filter((time) => time > slot - DAY_MS && time <= slot).sort((a, b) => a - b)
+    const day = nudges.filter((time) => time > slot - DAY_MS).sort((a, b) => a - b)
     if (day.length >= MAX_NUDGES_PER_DAY) slot = day[day.length - MAX_NUDGES_PER_DAY]! + DAY_MS
     slot = afterQuietHours(slot, zone)
     if (slot === before) break

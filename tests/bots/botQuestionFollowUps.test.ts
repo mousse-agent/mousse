@@ -17,8 +17,10 @@
  * - Forget: the default's line goes from the work's prompt and from the chat turn it queued
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BotEngine } from '../../src/mms/bots/activation/BotEngine'
+import { BotEngine, noteSteerText } from '../../src/mms/bots/activation/BotEngine'
 import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
+import { capturedRows } from '../../src/mms/bots/memory/capture'
+import type { ChatMessage } from '../../src/shared/types'
 import { registerPersonalBotMethods } from '../../src/mms/bots/registerMethods'
 import { DomainHandlerRegistry } from '../../src/mms/protocol/domainRegistry'
 import type { HandlerContext } from '../../src/mms/protocol/handlers'
@@ -26,7 +28,7 @@ import { botTools } from '../../src/mms/run/mcp/appTools/bots'
 import type { MousseTool, ToolCallContext } from '../../src/mms/run/mcp/appTools/types'
 import type { PreparedBotTurn } from '../../src/mms/bots/activation/dispatcher'
 import { clockTime } from '../../src/mms/bots/chat/projection'
-import { botNotificationKind } from '../../src/main/notifications/threadNotification'
+import { botNotificationContent, botNotificationKind } from '../../src/main/notifications/threadNotification'
 import type { BotChatMessage } from '../../src/shared/bots/personal/chat'
 import { defaultChatInput, defaultWorkLine, lateAnsweringLine, lateWorkNote, NUDGE_TEXT } from '../../src/shared/bots/personal/questions'
 import { botFixture, chatOf, createBot, finish, flush, payloadOf, start, type BotFixture } from './botFixture'
@@ -390,5 +392,74 @@ describe('Forget', () => {
     memory.forget(botId, { refs: [journaled(memory, bubble, 'chat')], by: 'owner_ui' })
     expect(JSON.stringify(f.store.activation(turn.id)!.trigger)).not.toMatch(/flat/i)
     expect(JSON.stringify(f.store.dispatches(turn.id).map((dispatch) => dispatch.prompt))).not.toMatch(/flat/i)
+  })
+
+  /** A thread message copied into the journal as capture copies it: its journal row's seq. */
+  function captured(memory: BotMemoryStore, ref: { threadId: string; lane: 'chat' | 'run'; activationId: string }, id: string, role: 'user' | 'assistant', content: string): number {
+    const rows = capturedRows({ id, role, content, timestamp: f.store.now() } as ChatMessage, { botId, ...ref })
+    f.store.db.transaction(() => { for (const { at, ...row } of rows) memory.appendInTx(f.store.db, row, at) })
+    return f.store.get('SELECT seq FROM bot_journal WHERE source_key = ?', rows[0]!.sourceKey)!.seq as number
+  }
+  const journalText = (seq: number) => (f.store.get('SELECT text FROM bot_journal WHERE seq = ?', seq) as { text: string }).text
+
+  it('of the bubble takes the question and the default from the chat turn an owner’s late answer started', async () => {
+    const memory = memoryStore()
+    const { workId, bubble, questionId } = await workAsks(DEFAULT_A)
+    await reach(Date.parse(bubble.at) + 30 * MIN)
+    const resumed = await start(f, workId, mainDispatches(workId).at(-1)!.n)
+    await finish(f, resumed.payload, 'completed', { text: 'I booked a viewing of the first one.' })
+    await tap(questionId, 'Flat B')
+    const late = f.store.laneActivations(botId, 'chat', ['running', 'queued']).at(-1)!
+    expect(late.trigger).toMatchObject({ input: `${lateAnsweringLine(FLATS.question, 'Flat A')}\n\nFlat B` })
+    const asked = f.store.dispatches(late.id)[0]!
+    const copy = captured(memory, { threadId: asked.threadId, lane: 'chat', activationId: late.id }, 'late-in', 'user', asked.prompt.text)
+    memory.forget(botId, { refs: [journaled(memory, bubble, 'run')], by: 'owner_ui' })
+    // The owner's own tap stays; the question's words and the bot's default go, from the request, its prompt and its copy.
+    const request = (f.store.activation(late.id)!.trigger as { input: string }).input
+    expect(request).toContain('Flat B')
+    for (const kept of [request, f.store.dispatch(late.id, asked.n)!.prompt.text, journalText(copy)]) {
+      expect(kept).not.toMatch(/which flat/i)
+      expect(kept).not.toContain('Flat A')
+    }
+  })
+
+  it('of an owner’s late answer takes the note it passed to running work from the rows captured from that work', async () => {
+    const memory = memoryStore()
+    const { workId, bubble, questionId } = await workAsks(DEFAULT_A)
+    await reach(Date.parse(bubble.at) + 30 * MIN)
+    const resumed = await start(f, workId, mainDispatches(workId).at(-1)!.n)
+    const { message } = await tap(questionId, 'Flat B')
+    // The note reaches the running work as a steer, and capture copies it from the work's thread.
+    const note = f.store.pendingWorkNotes(workId)[0]!.text
+    const steer = captured(memory, { threadId: resumed.payload.threadId, lane: 'run', activationId: workId }, 'steer', 'user', noteSteerText([note]))
+    const report = captured(memory, { threadId: resumed.payload.threadId, lane: 'run', activationId: workId }, 'rep', 'assistant', 'I switched the viewing to Flat B.')
+    expect(journalText(steer)).toContain('Flat B')
+    memory.forget(botId, { refs: [journaledOwner(memory, message)], by: 'owner_ui' })
+    // "Flat B" is shorter than any copy the journal looks for by its words: the note is found by the message and the work.
+    expect(journalText(steer)).not.toContain('Flat B')
+    expect(journalText(steer)).toContain('The owner added this to your job')
+    // What the bot wrote itself stays.
+    expect(journalText(report)).toBe('I switched the viewing to Flat B.')
+  })
+
+  function journaledOwner(memory: BotMemoryStore, message: BotChatMessage): string {
+    f.store.db.transaction(() => memory.appendInTx(f.store.db, { botId, kind: 'owner_msg', lane: 'run', sourceKey: `bm:${message.id}`, who: 'owner', text: message.text, ...(message.activationId ? { activationId: message.activationId } : {}) }))
+    return `j${f.store.get('SELECT seq FROM bot_journal WHERE source_key = ?', `bm:${message.id}`)!.seq as number}`
+  }
+
+  it('of the bubble leaves a nudge’s notification nothing of the question, and the nudge no longer notifies', async () => {
+    const memory = memoryStore()
+    const { bubble, questionId } = await workAsks(FLATS)
+    await reach(Date.parse(bubble.at) + HOUR)
+    const [nudge] = nudgesOf(questionId)
+    // On its own, as a phone shows it: the question it reminds of, and its answers.
+    expect(botNotificationContent('Pip', nudge!).body).toBe(`Still need your answer: ${FLATS.question} — Flat A / Flat B`)
+    // Nothing of the question is kept with the nudge: its words come from the bubble each time.
+    expect(f.store.message(nudge!.id)!.text).toBe(NUDGE_TEXT)
+    expect(f.journal.find((row) => row.sourceKey === `bm:${nudge!.id}`)?.text).toBe(NUDGE_TEXT)
+    memory.forget(botId, { refs: [journaled(memory, bubble, 'run')], by: 'owner_ui' })
+    const after = chatOf(f, botId).find((message) => message.id === nudge!.id)!
+    expect(botNotificationKind(after, Date.parse(after.at))).toBeNull()
+    expect(botNotificationContent('Pip', after).body).not.toMatch(/which flat|flat a/i)
   })
 })
