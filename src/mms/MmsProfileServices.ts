@@ -6,6 +6,7 @@ import { homedir, hostname } from 'os'
 import { MousseConfigStore } from './config/MousseConfigStore'
 import { MmsEventBus } from './events'
 import { onSettingsSaved, SettingsStore } from './settings/SettingsStore'
+import type { MousseSettingsUpdate } from '../shared/settings'
 import { rewriteMovedDefaults } from './settings/movedDefaults'
 import { ProviderAuthService } from './providers/ProviderAuthService'
 import { AppletStore } from './applets/AppletStore'
@@ -1050,6 +1051,15 @@ export class MmsProfileServices {
       threads: this.threads
     })
     this.agentJobAsks = new AgentJobAskStore(homeDir)
+    // The agents' theme tools: a change is saved like one made in Settings and reaches every window of the profile.
+    this.orchestrator.setAppearanceTools({
+      get: () => this.settings.get().appearance,
+      set: (patch) => {
+        const settings = this.settings.set({ appearance: patch } as MousseSettingsUpdate)
+        this.events.emit({ channel: 'protocol:event', data: { type: 'settings.changed', data: { settings } } })
+        return settings.appearance
+      }
+    })
     this.orchestrator.setScheduledJobs({
       // A thread whose first ask the person allowed; a profile that turned the old switch on lets every thread add them.
       threadAllowed: (threadId) => config.agentJobsEnabled() || this.agentJobAsks.threadAllowed(threadId),

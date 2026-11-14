@@ -139,7 +139,7 @@ export function MousseIdSection({
           control={
             <>
               <button type="button" className="settings-btn" disabled={busy} onClick={() => void decide(row.id, false)}><X size={14} />Deny</button>
-              <button type="button" className="settings-btn" disabled={busy} onClick={() => void decide(row.id, true)}>
+              <button type="button" className="settings-btn" disabled={busy} data-mousse-decision="" onClick={() => void decide(row.id, true)}>
                 <Check size={14} className="settings-status-ok" />Approve
               </button>
             </>

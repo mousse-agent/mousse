@@ -1,5 +1,6 @@
 import type { ToolCall } from '@earendil-works/pi-ai'
 import { PERMISSION_KEYS } from '../../../../shared/permissionKeys'
+import { APPROVALS_REFUSED_MESSAGE } from '../../../../shared/harness/types'
 import { permissionModeAllows, type PermissionMode } from '../../../../shared/permissionMode'
 import type { PendingUserQuestions, UserQuestionAnswers } from '../../../../shared/types'
 import type { ApprovalTag } from '../../../orchestrator/UserQuestionService'
@@ -265,7 +266,7 @@ export class ToolRegistry {
     return this.list().filter((tool) => {
       if (tool.hidden) return false
       if (listing.readOnly && tool.access !== 'reads' && tool.access !== 'readsOthers' && !tool.readOnlySafe) return false
-      if (listing.modeCeiling === 'plan' && tool.access === 'startsThreads') return false
+      if (listing.modeCeiling === 'plan' && (tool.access === 'startsThreads' || tool.access === 'changesSettings')) return false
       // A bot's main thread lists the thread tools whatever its access level (a bot's is lineage): "use your threads", not
       // the profile's agent access, is what lets it use them. Only those its turn holds now are listed (none without the
       // permission, with the switch off, or in a turn that only reads), and every call is held to it again. A consult
@@ -463,8 +464,8 @@ export class ToolRegistry {
     // A tool that changes the workspace asks first unless the run's permission mode allows edits (a
     // definition run is held to its own grants above); a rejection ends the call before its handler
     // runs and writes no ledger row.
-    if (tool.access === 'editsWorkspace' && !turn.definition) {
-      const refusal = await this.askBeforeEditing(tool, caller, request.signal, args)
+    if ((tool.access === 'editsWorkspace' || tool.access === 'changesSettings') && !turn.definition) {
+      const refusal = await this.askBeforeEditing(tool, caller, request.signal, args, undefined, turn.approvals === 'never')
       if (refusal) return refusal
     }
     const ctx: ToolCallContext = { caller, turn, toolCallId: request.toolCallId, signal: request.signal, transport: 'mcp', level: this.effectiveLevel(caller.accessLevel), ...(scope ? { scope } : {}) }
@@ -617,6 +618,8 @@ export class ToolRegistry {
     if (tool.access === 'writesThreads' || tool.access === 'editsWorkspace') callerThreadOnly(args, caller)
     if (tool.access === 'startsThreads' && caller.modeCeiling === 'plan')
       throw new McpToolError('mousse_ceiling_exceeded', `${tool.name} starts threads; a plan ceiling cannot.`)
+    if (tool.access === 'changesSettings' && caller.modeCeiling === 'plan')
+      throw new McpToolError('mousse_ceiling_exceeded', `${tool.name} changes settings; a plan ceiling cannot.`)
     return tool.access === 'readsOthers' || tool.access === 'managesOthers' ? this.checkOthers(tool, args, caller) : undefined
   }
 
@@ -708,13 +711,16 @@ export class ToolRegistry {
   }
 
   /**
-   * The outcome a rejected `editsWorkspace` call gets instead of running: null when the call may go
+   * The outcome a rejected `editsWorkspace` or `changesSettings` call gets instead of running: null when the call may go
    * ahead (the run's permission mode allows edits, or the user allowed it once). An owner that cannot
-   * ask rejects: nothing runs unapproved.
+   * ask rejects, and so does a run nobody answers: nothing runs unapproved.
    */
-  private async askBeforeEditing(tool: MousseTool, caller: McpCaller, signal: AbortSignal, args: Record<string, unknown>, turnMode?: PermissionMode): Promise<ToolOutcome | null> {
+  private async askBeforeEditing(tool: MousseTool, caller: McpCaller, signal: AbortSignal, args: Record<string, unknown>, turnMode?: PermissionMode, unattended = false): Promise<ToolOutcome | null> {
     const mode = turnMode ?? this.options.permissionModeFor?.(caller.runId)
-    if (mode === undefined || permissionModeAllows(mode, 'edit')) return null
+    const needs = tool.runsWithoutAsking?.(args) ?? 'edit'
+    if (mode === undefined || (needs === 'full' ? mode === 'full' : permissionModeAllows(mode, 'edit'))) return null
+    // A run nobody answers (`approvals: 'never'`) is refused at once rather than waiting for a person.
+    if (unattended) return { text: APPROVALS_REFUSED_MESSAGE, isError: true }
     const rejected: ToolOutcome = { text: `The user did not approve ${tool.name}, so it did not run. Do not retry it unless they ask.`, isError: true }
     if (!this.options.askApproval) return rejected
     try {
@@ -722,9 +728,9 @@ export class ToolRegistry {
         caller.threadId,
         [{
           id: 'permission',
-          prompt: tool.name === 'thread_merge_back'
+          prompt: tool.approvalPrompt ?? (tool.name === 'thread_merge_back'
             ? "Allow Mousse to hand this fork's work back to the thread it was forked from?"
-            : 'Allow this Mousse tool to change files in this workspace?',
+            : 'Allow this Mousse tool to change files in this workspace?'),
           options: [{ id: 'allow', label: 'Allow once' }, { id: 'reject', label: 'Reject' }]
         }],
         {
@@ -733,7 +739,9 @@ export class ToolRegistry {
             action: 'edit',
             permissionKey: tool.permissionKey ?? PERMISSION_KEYS.mousseIntegrate,
             options: [{ id: 'allow', decision: 'allow', scope: 'once' }, { id: 'reject', decision: 'reject' }],
-            tool: { name: tool.name, input: args }
+            tool: { name: tool.name, input: args },
+            // A call that needs Full access to run unasked is the person's alone: no agent answers it for them.
+            ...(needs === 'full' ? { reason: 'Only you can allow this: it needs Full access to run without asking.' } : {})
           }
         }
       )

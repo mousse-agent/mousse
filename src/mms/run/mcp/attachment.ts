@@ -135,7 +135,7 @@ export function mousseServerToolOf(toolName: string): { server: 'mousse' | 'rela
 /**
  * While the thread has a question pending, whether a call named `toolName` may be the one asking it: a relayed tool
  * (its approval), or a Mousse tool that asks the person (`asksUser`: `ask_user`, a quick action's approval) or asks
- * before it edits (`editsWorkspace`), by its exact name in `lookup`. A tool `lookup` does not know counts only in the
+ * before it edits (`editsWorkspace`, `changesSettings`), by its exact name in `lookup`. A tool `lookup` does not know counts only in the
  * exact MCP form (`mcp__mousse__<tool>`, a Mousse tool newer than the registry); in a looser form, or as a bare name,
  * an unknown tool is no Mousse call, and it runs as any call does.
  */
@@ -147,7 +147,7 @@ export function mousseCallAsksPerson(
   if (served?.server === 'relay') return true
   const tool = lookup(served ? served.tool : toolName)
   if (!tool) return served?.exact === true
-  return Boolean(tool.asksUser) || tool.access === 'editsWorkspace'
+  return Boolean(tool.asksUser) || tool.access === 'editsWorkspace' || tool.access === 'changesSettings'
 }
 
 /** A tool of a server Mousse serves (`mcp__mousse__*` or `mcp__mousse-relay__*`): its calls reach Mousse. */
@@ -160,7 +160,7 @@ export function isMousseServerTool(toolName: string): boolean {
  * the listed `reads` and `readsOthers` tools and the `readOnlySafe` ones of the app-tool registry (a test keeps them equal).
  * Runtimes that decide per tool name use it; the server refuses the rest in any case.
  */
-export const READ_ONLY_MOUSSE_TOOLS: ReadonlySet<string> = new Set(['thread_read', 'thread_list', 'thread_search', 'thread_wait', 'queue_list', 'ask_user', 'present_plan', 'delegate_task', 'continue_subagent', 'answer_subagent', 'task_status', 'task_cancel', 'list_subagents', 'list_computers', 'list_models', 'list_skills', 'load_skill', 'web_search', 'web_fetch', 'git_status', 'git_diff', ...PROFILER_TOOL_NAMES])
+export const READ_ONLY_MOUSSE_TOOLS: ReadonlySet<string> = new Set(['thread_read', 'thread_list', 'thread_search', 'thread_wait', 'queue_list', 'ask_user', 'present_plan', 'delegate_task', 'continue_subagent', 'answer_subagent', 'task_status', 'task_cancel', 'list_subagents', 'list_computers', 'list_models', 'list_skills', 'load_skill', 'web_search', 'web_fetch', 'git_status', 'git_diff', 'theme_read', ...PROFILER_TOOL_NAMES])
 
 export type AcpMcpServer =
   | { name: string; type: 'http'; url: string; headers: Array<{ name: string; value: string }> }

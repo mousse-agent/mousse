@@ -32,7 +32,7 @@ export function AutomationsPage() {
     restoreRequest(profileId)
   }, [profileId])
   return (
-    <div ref={pageRef} className="automations-page" hidden={!open} tabIndex={-1} data-automations-workspace="" data-view="inbox" data-thread={showsThread || undefined}>
+    <div ref={pageRef} className="automations-page" hidden={!open} tabIndex={-1} data-mousse-decision={open ? '' : undefined} data-automations-workspace="" data-view="inbox" data-thread={showsThread || undefined}>
       <div className="automations-page-body">
         <AutomationsInbox key={profileId} active={open} />
       </div>

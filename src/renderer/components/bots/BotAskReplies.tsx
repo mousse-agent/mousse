@@ -31,7 +31,7 @@ export function BotAskReplies({ ask, onAnswer, onExport }: {
   const allowOff = ask.loading ? 'Its tools are still loading' : refused
   const more = Boolean(ask.note || ask.tip || ask.details?.items.length)
   return <div className="bot-ask-replies">
-    <div className="bot-ask-buttons" role="group" aria-label={`Answer: ${ask.title}`}>
+    <div className="bot-ask-buttons" data-mousse-decision="" role="group" aria-label={`Answer: ${ask.title}`}>
       <button type="button" className="is-primary" disabled={busy || allowOff !== undefined} title={allowOff} onClick={() => void answer('allow')}>Allow</button>
       <button type="button" disabled={busy} onClick={() => void answer('not_now')}>Not now</button>
       {more && <button type="button" aria-expanded={details} onClick={() => setDetails((open) => !open)}>Details</button>}

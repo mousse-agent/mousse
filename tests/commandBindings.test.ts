@@ -456,7 +456,7 @@ describe('the command table', () => {
     expect(new Set(COMMANDS.map((command) => command.id)).size).toBe(COMMANDS.length)
     const unbound = COMMANDS.filter((command) => command.defaultBinding === null).map((command) => command.id)
     // Palette-only commands and Deny (a slip of the hand must not deny) ship without a key.
-    expect(unbound).toEqual(['thread.rename', 'thread.pin', 'thread.archive', 'project.open', 'approval.deny', 'automations.open', 'usage.open'])
+    expect(unbound).toEqual(['thread.rename', 'thread.pin', 'thread.archive', 'project.open', 'approval.deny', 'theme.builtIn', 'automations.open', 'usage.open'])
     for (const command of COMMANDS) {
       for (const platform of ['win32', 'darwin']) {
         const binding = defaultBindingFor(command.id, platform)

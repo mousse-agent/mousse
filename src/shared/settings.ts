@@ -9,6 +9,7 @@ import { DEFAULT_PERMISSION_MODE, normalizePermissionMode, type PermissionMode }
 import { generateRandomUsername } from './randomUsername'
 import type { ShortcutOverrides } from './commands'
 import { DEFAULT_FONT_CHOICE, normalizeFontChoice, type FontChoice } from './fontSettings'
+import { normalizeUserThemes, type UserTheme } from './themes/userThemes'
 
 /** Color themes only — acrylic is a separate appearance toggle. */
 export type ThemeId =
@@ -44,7 +45,12 @@ export interface AgentModelOption {
 }
 
 export interface AppearanceSettings {
+  /** The built-in theme in use: the active user theme's base while one is on. */
   theme: ThemeId
+  /** Themes the person or an agent made (`src/shared/themes/userThemes.ts`). */
+  userThemes: UserTheme[]
+  /** The id of the user theme in use; empty when a built-in theme is. */
+  userTheme: string
   accentColor: string
   /** Windows acrylic / translucent glass over any theme. */
   acrylic: boolean
@@ -973,6 +979,8 @@ export function getDefaultSettings(): MousseSettings {
     },
     appearance: {
       theme: 'blacksphere-plus',
+      userThemes: [],
+      userTheme: '',
       accentColor: '#a785c7',
       acrylic: false,
       acrylicIntensity: ACRYLIC_INTENSITY_DEFAULT,
@@ -1098,6 +1106,11 @@ export function normalizeAppearance(
     acrylic = defaults.acrylic
   }
 
+  // A user theme in use sets the built-in theme to its base, so everything that reads `theme` sees the right one.
+  const userThemes = normalizeUserThemes(raw.userThemes)
+  const active = typeof raw.userTheme === 'string' ? userThemes.find((entry) => entry.id === raw.userTheme) : undefined
+  if (active) theme = active.base
+
   const accentColor =
     typeof raw.accentColor === 'string' && raw.accentColor.trim()
       ? raw.accentColor.trim()
@@ -1105,6 +1118,8 @@ export function normalizeAppearance(
 
   return {
     theme: theme as ThemeId,
+    userThemes,
+    userTheme: active?.id ?? '',
     accentColor,
     acrylic,
     acrylicIntensity: clampAcrylicIntensity(

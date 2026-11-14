@@ -807,7 +807,7 @@ export function ChatComposer({
   }
 
   return (
-    <div className="composer" onDragOver={handleDragOver} onDrop={handleDrop}>
+    <div data-mousse="composer" className="composer" onDragOver={handleDragOver} onDrop={handleDrop}>
       {banner}
       {(hasAttachments || isRecording || transcribing) && (
         <div className="composer-attachments">

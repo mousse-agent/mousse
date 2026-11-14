@@ -27,10 +27,13 @@ import type { DelegationToolHost } from './delegation'
  *   the registry checks the caller's agent access level before the handler runs and the handler
  *   limits what it returns by `ctx.scope`.
  * - `managesOthers`: changes threads other than the caller's own; needs the `manage` level.
+ * - `changesSettings`: changes the profile's settings (the theme). Like a change in Settings it needs a turn that may
+ *   edit: refused for a read-only child and under a Plan ceiling, and it asks the thread's user first unless the
+ *   caller's permission mode allows edits.
  */
-export type ToolAccess = 'reads' | 'actsAsCaller' | 'writesThreads' | 'startsThreads' | 'editsWorkspace' | 'readsOthers' | 'managesOthers'
+export type ToolAccess = 'reads' | 'actsAsCaller' | 'writesThreads' | 'startsThreads' | 'editsWorkspace' | 'readsOthers' | 'managesOthers' | 'changesSettings'
 
-export const ACCESS_CLASSES: ReadonlySet<string> = new Set<ToolAccess>(['reads', 'actsAsCaller', 'writesThreads', 'startsThreads', 'editsWorkspace', 'readsOthers', 'managesOthers'])
+export const ACCESS_CLASSES: ReadonlySet<string> = new Set<ToolAccess>(['reads', 'actsAsCaller', 'writesThreads', 'startsThreads', 'editsWorkspace', 'readsOthers', 'managesOthers', 'changesSettings'])
 
 /**
  * How a caller reaches the thread a `readsOthers` or `managesOthers` call targets: its own thread, a
@@ -221,8 +224,15 @@ export interface MousseTool {
   /** Plain JSON Schema (no TypeBox symbols), byte-identical to `definition`'s parameters. */
   inputSchema: JsonSchema
   access: ToolAccess
-  /** The permission key an `editsWorkspace` tool asks under (`src/shared/permissionKeys.ts`). */
+  /** The permission key an `editsWorkspace` or `changesSettings` tool asks under (`src/shared/permissionKeys.ts`). */
   permissionKey?: string
+  /** The question an `editsWorkspace` or `changesSettings` tool asks the person when the permission mode does not allow it. */
+  approvalPrompt?: string
+  /**
+   * The permission mode a call runs in without asking: `edit` (default: any mode that allows edits) or `full` (only Full
+   * access; every other mode asks).
+   */
+  runsWithoutAsking?(args: Record<string, unknown>): 'edit' | 'full'
   class: ToolClass
   /**
    * A read-only (`shared`) delegated child may call this although it is not a `reads` tool: it

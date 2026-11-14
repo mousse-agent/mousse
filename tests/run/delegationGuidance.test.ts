@@ -44,6 +44,7 @@ describe('subagent guidance', () => {
       - Browser: when the browser_* tools are usable in a turn, Mousse binds them to the browser the user chose; open or observe a page before acting on it, and act on the refs an observation returns.
       - Applets: publish an offline HTML/CSS/JS applet with publish_applet rather than a mousse-applet fence when the tool is usable.
       - Skills: list_skills shows the Skills the user enabled and load_skill loads one; a skill the user invoked explicitly (/name) is already in the turn's instructions.
+      - Themes: when the user asks to change how Mousse looks ("dark mode", "make it look like X"), read theme_read (themes, tokens, stable selectors), then theme_set to switch themes or save a user theme and switch to it.
       - What a turn may use depends on its mode, the browser binding and Settings; a Mousse tool that is not usable now returns why instead of running.
       - Never ask for passwords, API keys, tokens or other secrets in chat, and never repeat a secret you were given."
     `)

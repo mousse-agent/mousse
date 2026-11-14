@@ -489,7 +489,7 @@ export function ComposerQuestionModal({ pending, onSubmit, onDismiss, handleRef,
           />
         </div>
       </div>
-      <div className="composer-question-modal-footer">
+      <div className="composer-question-modal-footer" data-mousse-decision="">
         <button type="button" className="composer-question-btn is-quiet" onClick={() => { cancelAdvance(); onDismiss() }}>
           Skip
         </button>

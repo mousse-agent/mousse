@@ -29,7 +29,8 @@ export interface SettingsSearchEntry {
 
 /** Every setting the search finds. Rows that exist once per item (a provider, a shortcut, a device) are found by their page. */
 export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
-  { title: 'Color theme', section: 'appearance', anchor: 'appearance-theme', keywords: ['appearance', 'dark', 'light', 'high contrast'] },
+  { title: 'Color theme', section: 'appearance', anchor: 'appearance-theme', keywords: ['appearance', 'dark', 'light', 'high contrast', 'custom theme', 'import theme'] },
+  { title: 'Custom CSS', section: 'appearance', anchor: 'appearance-custom-css', keywords: ['theme', 'css', 'stylesheet', 'custom theme'] },
   { title: 'Accent color', section: 'appearance', anchor: 'appearance-accent', keywords: ['colour', 'appearance'] },
   { title: 'Thread path in title bar', section: 'appearance', anchor: 'appearance-thread-path', keywords: ['breadcrumb', 'back', 'forward', 'history', 'navigation', 'subagent', 'parent'] },
   { title: 'Acrylic glass', section: 'appearance', anchor: 'appearance-acrylic', keywords: ['translucent', 'transparent', 'blur', 'window'] },

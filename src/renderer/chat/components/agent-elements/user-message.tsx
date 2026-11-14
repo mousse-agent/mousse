@@ -174,7 +174,7 @@ export const UserMessage = memo(function UserMessage({
 
   return (
     <div className={cn("flex flex-col items-end gap-1", className)}>
-      <div className="chat-user-bubble max-w-[80%] p-3 rounded-an-message bg-an-user-message-bg text-an-user-message-text">
+      <div data-mousse="user-message" className="chat-user-bubble max-w-[80%] p-3 rounded-an-message bg-an-user-message-bg text-an-user-message-text">
       {images.length > 0 && <div className="chat-user-image-carousel" role="region" aria-label="Attached images" tabIndex={0}>
         {images.map(({ url, name }, i) => {
           const label = name ?? `Image ${i + 1}`;

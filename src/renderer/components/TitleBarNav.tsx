@@ -426,7 +426,7 @@ export function TitleBarNav() {
   const enabled = useThreadPathInTitleBar()
   if (!enabled) return null
   return (
-    <div className="titlebar-nav">
+    <div data-mousse="chat-header" className="titlebar-nav">
       <HistoryButtons />
       <ThreadPath />
     </div>

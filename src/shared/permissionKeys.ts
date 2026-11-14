@@ -13,7 +13,8 @@ export const PERMISSION_KEYS = {
   piCommand: 'pi:command',
   piEdit: 'pi:edit',
   mousseIntegrate: 'mousse:integrate',
-  mousseMergeBack: 'mousse:merge_back'
+  mousseMergeBack: 'mousse:merge_back',
+  mousseAppearance: 'mousse:appearance'
 } as const
 
 /** The option an approval card adds so a user can allow the same request again in this thread. */
@@ -68,6 +69,7 @@ export function actionOf(key: string): PermissionAction {
     case PERMISSION_KEYS.piEdit:
     case PERMISSION_KEYS.mousseIntegrate:
     case PERMISSION_KEYS.mousseMergeBack:
+    case PERMISSION_KEYS.mousseAppearance:
       return 'edit'
   }
   if (key.startsWith('acp:')) {

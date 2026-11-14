@@ -16,6 +16,8 @@ import { setThreadPathInTitleBar } from '../lib/threadPathSetting'
 import { setContextRingInComposer } from '../lib/contextRingSetting'
 import { setAnimationSpeed } from '../lib/motion'
 import { applyFrostedComposer } from '../lib/frostedComposer'
+import { applyThemeCss } from '../lib/themeCss'
+import { activeUserTheme, type UserTheme } from '../../shared/themes/userThemes'
 
 const FIXED_SURFACE_VARS = [
   ...new Set(Object.values(FIXED_SURFACE_THEMES).flatMap((vars) => Object.keys(vars ?? {})))
@@ -189,11 +191,23 @@ function applyLayoutTokens(theme: ThemeId): void {
   }
 }
 
+/**
+ * A user theme over its base: its color tokens and CSS as one adopted sheet after the app's (`applyThemeCss`, which
+ * also pauses it while a decision is on screen), and `data-user-theme` on the root. No theme takes it off.
+ */
+function applyUserTheme(theme: UserTheme | undefined): void {
+  const root = document.documentElement
+  if (theme) root.setAttribute('data-user-theme', theme.id)
+  else root.removeAttribute('data-user-theme')
+  applyThemeCss(theme?.css ?? '', { tokens: theme?.colors ?? {} })
+}
+
 function applyAppearance(appearance: AppearanceSettings): void {
   const normalized = normalizeAppearance(appearance)
+  const userTheme = activeUserTheme(normalized)
   applyTheme(normalized.theme)
   clearFixedSurfaces()
-  applyAccent(normalized.accentColor)
+  applyAccent(userTheme?.accent || normalized.accentColor)
   applyFixedSurfaces(normalized.theme)
   applyLightSurfaces(normalized.theme)
   applyVsCodeTheme(normalized.theme)
@@ -203,6 +217,7 @@ function applyAppearance(appearance: AppearanceSettings): void {
   setAnimationSpeed(normalized.animationSpeed)
   applyFrostedComposer(normalized)
   applyChatWidth(normalized.chatWidth)
+  applyUserTheme(userTheme)
 }
 
 /** Display settings that live under appearance: math, reply pacing, the changed-files summary, the title-bar path and the context ring. */

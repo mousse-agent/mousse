@@ -367,7 +367,7 @@ function ApprovalForm({
       approved
     }))
   return (
-    <div className="wf-banner" data-approval="" data-approval-id={approval.approvalId}>
+    <div className="wf-banner" data-approval="" data-approval-id={approval.approvalId} data-mousse-decision="">
       <p>
         Approval {approval.approvalId} for run {approval.runId}, node {approval.nodeId}, attempt {approval.attempt}.
       </p>

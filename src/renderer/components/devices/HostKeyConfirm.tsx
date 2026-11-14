@@ -19,7 +19,7 @@ export function HostKeyConfirm({ hostKey, busy, onConfirm }: {
   const ready = canTrustHostKey(hostKey) && (!changed || acknowledged)
   const others = hostKey.knownByOtherTypes?.filter(Boolean) ?? []
   return (
-    <div className="devices-host-key">
+    <div className="devices-host-key" data-mousse-decision="">
       {hostKey.state === 'trusted' && <p className="settings-status-ok">Host key already trusted.</p>}
       {hostKey.state === 'revoked' && <p role="alert" className="chat-error">This host key was revoked. Mousse will not connect to this machine.</p>}
       {hostKey.state === 'unknown' && <p>Mousse has not seen this machine before. Check that the host key fingerprint matches the remote machine before you trust it.</p>}

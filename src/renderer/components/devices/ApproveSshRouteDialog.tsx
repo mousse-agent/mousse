@@ -49,7 +49,7 @@ export function ApproveSshRouteDialog({ node, name, endpoint: offered, title, in
       : <button type="button" className={`${btn} primary`} disabled={busy || !endpoint} onClick={() => void approve()}>{result ? 'Retry' : 'Check and approve'}</button>
   return (
     <Modal open title={title ?? `Use SSH route to ${name}`} onClose={onClose} footer={footer}>
-      <div className="devices-dialog">
+      <div className="devices-dialog" data-mousse-decision="">
         <p>{intro ?? `${name} offers an SSH address. Use an address that reaches it from this computer, then Mousse checks the host key and the login before it approves the route.`}</p>
         <label className="devices-field">
           <span>SSH address</span>

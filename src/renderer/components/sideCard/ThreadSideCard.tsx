@@ -137,6 +137,7 @@ export function ThreadSideCard() {
       {mounted && (
         <section
           ref={cardRef}
+          data-mousse="side-card"
           className="thread-side-card"
           aria-label="Thread details"
           role={overlay ? 'dialog' : undefined}
