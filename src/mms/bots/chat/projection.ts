@@ -12,7 +12,8 @@ import { normalizeBotLook } from '../../../shared/bots/personal/look'
 import { workModelDetail } from '../../../shared/bots/personal/chips'
 import type { BotJournal } from '../seams'
 import type { BotMcpWhere } from '../mcp/BotMcp'
-import { workWaits, type BotActivationRow, type BotEscalationRow, type BotMessageRow, type BotStore } from '../store/BotStore'
+import { workWaits, type BotActivationRow, type BotEscalationRow, type BotMessageRow, type BotQuestionRow, type BotStore } from '../store/BotStore'
+import { plainChoices, type BotChatQuestion } from '../../../shared/bots/personal/questions'
 import { replyApplets } from './replyApplets'
 import { takeToolImages } from './toolImages'
 import type { AppletReference } from '../../../shared/applets'
@@ -90,6 +91,8 @@ export interface PostInput {
   threadId?: string
   /** The message this one answers. */
   replyTo?: string
+  /** A bot's message: the question it carries (its bubble). The owner's: the question it answered. */
+  questionId?: string
   /**
    * For the owner's eyes only (#673: a picked model that can't run, by name): journaled as a hidden kind, which no
    * pack, search or read gives the bot, so it never learns a model's or an entry's name from its own chat.
@@ -112,6 +115,22 @@ function filesOf(row: Pick<BotMessageRow, 'attachments'>): Array<{ name: string;
 
 function appletsOf(row: Pick<BotMessageRow, 'attachments'>): BotChatApplet[] {
   return (row.attachments ?? []).flatMap((file) => (file.applet ? [file.applet] : []))
+}
+
+/** The longest part of a written answer a question's bubble shows. */
+const ANSWER_SHOWN_CHARS = 120
+
+/** A question as its bubble shows it: its answers, where it stands, and the answer once there is one. */
+function questionView(question: BotQuestionRow): BotChatQuestion {
+  const answer = question.status === 'answered' && !question.answer?.redacted ? question.answer : undefined
+  const words = answer?.choice ?? (answer?.text ? oneLine(answer.text, ANSWER_SHOWN_CHARS) : undefined)
+  return {
+    questionId: question.id,
+    choices: question.spec.choices,
+    other: question.spec.other,
+    status: question.status,
+    ...(words ? { answer: words, answeredWith: answer?.choice !== undefined ? 'choice' as const : 'text' as const } : {})
+  }
 }
 
 /** The chat rows of every bot of a profile, and the summaries built from `bots.db`. */
@@ -173,6 +192,9 @@ export class BotChatProjection {
       if (existing) return { row: existing, inserted: false }
       const at = this.store.now()
       const shown = this.shown(input)
+      // A question's bubble is journaled with its answers as text, so the chat pack, search and Forget see them.
+      const asked = input.questionId && input.author === 'bot' ? this.store.question(input.questionId) : undefined
+      if (asked) shown.journal = `${shown.journal}\n\n${plainChoices(asked.spec)}`
       this.store.insertMessage({
         id,
         botId: input.botId,
@@ -186,9 +208,11 @@ export class BotChatProjection {
         activationId: input.activationId ?? null,
         attachments: shown.attachments.length ? shown.attachments : null,
         clientRequestId: input.clientRequestId ?? null,
-        replyTo: input.replyTo ?? null
+        replyTo: input.replyTo ?? null,
+        ...(input.questionId ? { questionId: input.questionId } : {})
       })
       if (input.askId) this.store.setEscalationMessage(input.askId, id)
+      if (asked) this.store.setQuestionMessage(asked.id, id)
       // The journal row joins this transaction: a chat row is never kept without it (bot-context.md §4).
       this.options.journal?.appendInTx(this.store.db, {
         botId: input.botId,
@@ -206,7 +230,8 @@ export class BotChatProjection {
           ...(input.chips?.length ? { chips: input.chips } : {}),
           ...(filesOf(shown).length ? { attachments: filesOf(shown) } : {}),
           ...(input.error ? { error: input.error } : {}),
-          ...(input.replyTo ? { replyTo: input.replyTo } : {})
+          ...(input.replyTo ? { replyTo: input.replyTo } : {}),
+          ...(input.questionId ? { questionId: input.questionId } : {})
         }
       })
       return { row: this.store.message(id)!, inserted: true }
@@ -236,13 +261,21 @@ export class BotChatProjection {
 
   toMessage(row: BotMessageRow): BotChatMessage {
     const escalation = row.askId ? this.store.escalation(row.askId) : undefined
+    const question = row.questionId ? this.store.question(row.questionId) : undefined
+    // A question's bubble: its words, then its answers as plain text for an app that doesn't draw them (`plainFrom`).
+    const asks = question && row.author === 'bot' && question.messageId === row.id ? question : undefined
+    const plain = asks && asks.spec.choices.length ? plainChoices(asks.spec) : ''
     return {
       seq: row.seq,
       id: row.id,
       at: row.at,
       author: row.author,
       kind: row.kind,
-      text: row.text,
+      text: plain ? `${row.text}\n\n${plain}` : row.text,
+      ...(plain ? { plainFrom: row.text.length } : {}),
+      ...(asks ? { question: questionView(asks) } : {}),
+      ...(question && row.author === 'owner' && question.answerMessage === row.id && question.status === 'answered'
+        ? { answers: { questionId: question.id, tapped: question.answer?.choice !== undefined } } : {}),
       chips: row.chips,
       ...(escalation ? { ask: this.card(escalation) } : {}),
       ...(row.error ? { error: row.error } : {}),

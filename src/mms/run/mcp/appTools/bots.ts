@@ -3,8 +3,9 @@ import { Type, type Tool } from '@earendil-works/pi-ai'
 import { BOT_DEPTHS, BOT_WORK_LEVELS, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, MAX_BOT_SCHEDULES, type BotDepth, type BotLane, type BotModelPick, type BotModelSlotKey, type BotModelSlots, type BotSchedule } from '../../../../shared/bots/personal/definition'
 import { entriesOf, modelsNamedBy, namedOn, ownerNamesModel, pickReasonText, plainLabel, workLevelOf, type BotModelRows, type NamedModel } from '../../../../shared/bots/personal/modelSlots'
 import type { BotModelOption, BotWorkChoices } from '../../../../shared/bots/personal/methods'
-import { BOT_IMAGE_TOOL, BOT_MCP_LIST_TOOL, MAX_BOT_SUBAGENTS_AT_ONCE, MAX_BOT_SUBAGENTS_PER_DAY, MAX_BOT_SUBAGENTS_PER_WORK } from '../../../../shared/bots/personal/manifest'
+import { BOT_IMAGE_TOOL, BOT_MCP_LIST_TOOL, BOT_QUESTION_TOOL, MAX_BOT_SUBAGENTS_AT_ONCE, MAX_BOT_SUBAGENTS_PER_DAY, MAX_BOT_SUBAGENTS_PER_WORK } from '../../../../shared/bots/personal/manifest'
 import type { BotSubagentView } from '../../../../shared/bots/personal/authority'
+import { MAX_CHOICE_DETAIL_CHARS, MAX_CHOICE_LABEL_CHARS, MAX_QUESTION_CHARS, MAX_QUESTION_CHOICES, MIN_QUESTION_CHOICES, QUESTION_CHAT_ONLY_TEXT, questionSpecOf } from '../../../../shared/bots/personal/questions'
 import { shortModelName } from '../../../../shared/modelNames'
 import { botScheduleLabel } from '../../../../shared/scheduleLabel'
 import { botScheduleProblem } from '../../../scheduled/botJobs'
@@ -214,6 +215,22 @@ export const BOT_TOOLS: Tool[] = [
     name: 'reminder_cancel',
     description: 'Cancel one of your reminders by its id (see reminder_list).',
     parameters: Type.Object({ reminderId: Type.String() })
+  },
+  {
+    name: BOT_QUESTION_TOOL,
+    description: `Ask your owner a question they answer with a tap: ${MIN_QUESTION_CHOICES} to ${MAX_QUESTION_CHOICES} short choices (or yesNo), and "Other…" so they can write their own answer. Ask only when the answer changes what you do; settle a minor choice yourself and say what you picked. Never use it for a permission: that is escalate, and a "Yes" here allows nothing. It shows under your reply as its own message: don't repeat the question in your reply, and end your turn. Their answer comes as their next message. One question per message.`,
+    parameters: Type.Object({
+      question: Type.String({ description: `The question, at most ${MAX_QUESTION_CHARS} characters. It must read on its own: the owner may see it in a notification.` }),
+      choices: Type.Optional(Type.Array(Type.Union([
+        Type.String({ description: `A short label, at most ${MAX_CHOICE_LABEL_CHARS} characters.` }),
+        Type.Object({
+          label: Type.String({ description: `At most ${MAX_CHOICE_LABEL_CHARS} characters.` }),
+          detail: Type.Optional(Type.String({ description: `A line more on it, at most ${MAX_CHOICE_DETAIL_CHARS} characters.` }))
+        })
+      ]), { description: `${MIN_QUESTION_CHOICES} to ${MAX_QUESTION_CHOICES} answers to tap, each different.` })),
+      yesNo: Type.Optional(Type.Literal(true, { description: 'The answers are Yes and No (instead of choices).' })),
+      other: Type.Optional(Type.Boolean({ description: 'Offer "Other…" for an answer in their own words. Default true.' }))
+    })
   },
   {
     name: BOT_IMAGE_TOOL,
@@ -826,6 +843,26 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
       listed: (listing) => listing.botRole === 'activation' && Boolean(listing.botTurnTools?.has(BOT_IMAGE_TOOL)),
       available: (turn) => (turn.bot?.appTools.has(BOT_IMAGE_TOOL) && deps?.()?.images ? true : NO_IMAGE_MODEL_LINE),
       offered: (turn) => Boolean(turn.bot?.appTools.has(BOT_IMAGE_TOOL) && deps?.()?.images)
+    },
+    {
+      ...ownTool(byName.get(BOT_QUESTION_TOOL)!, deps, {
+        class: 'mutation',
+        describe: () => 'Ask the owner',
+        handler: async (args, ctx) => {
+          const call = botCall(deps, ctx)
+          if (isOutcome(call)) return call
+          // Work, a scheduled run and a consult are not offered it in this build; their questions go in the report.
+          if (call.lane !== 'chat' || !call.deps.host.questions) return error(QUESTION_CHAT_ONLY_TEXT)
+          const spec = questionSpecOf(args)
+          if ('problem' in spec) return error(spec.problem)
+          const asked = call.deps.host.questions.ask(call.botId, call.activationId, spec)
+          return asked.asked ? json({ asked: true, note: asked.text }) : error(asked.text)
+        }
+      }),
+      // A chat turn holds it (`compileBotThread`); work, a consult and a subagent never list it.
+      listed: (listing) => listing.botRole === 'activation' && Boolean(listing.botTurnTools?.has(BOT_QUESTION_TOOL)),
+      available: (turn) => (turn.bot?.appTools.has(BOT_QUESTION_TOOL) && deps?.() ? true : QUESTION_CHAT_ONLY_TEXT),
+      offered: (turn) => Boolean(turn.bot?.appTools.has(BOT_QUESTION_TOOL) && deps?.())
     },
     ownTool(byName.get('use_model')!, deps, {
       class: 'mutation',

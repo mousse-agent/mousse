@@ -9,6 +9,7 @@ import type { BotAskMode, BotAskRequest, BotEscalationStatus, BotPermissionReque
 import type { BotChatApplet, BotChip, BotError, BotMessageKind } from '../../../shared/bots/personal/chat'
 import type { ProviderSelection } from '../../../shared/harness/types'
 import type { BotStuckRows } from '../../../shared/bots/personal/modelSlots'
+import type { BotQuestionAnswer, BotQuestionSpec, BotQuestionStatus } from '../../../shared/bots/personal/questions'
 import { BOT_MEMORY_SCHEMA_SQL } from '../memory/schema'
 import { narrowPermissionMode, type PermissionMode } from '../../../shared/permissionMode'
 
@@ -321,6 +322,39 @@ ALTER TABLE bot_messages ADD COLUMN owner_reaction TEXT;
 ALTER TABLE bot_messages ADD COLUMN owner_reaction_at TEXT;
 CREATE INDEX bot_messages_reactions ON bot_messages(bot_id, owner_reaction_at) WHERE owner_reaction IS NOT NULL;
 `
+  },
+  {
+    // A bot's questions to its owner, with answers to tap (issue #1123): their own table, apart from permission asks,
+    // since a question grants nothing. `follow_json`, `next_at`, `nudges` and `read_at` are for follow-ups and work that
+    // waits on an answer; `cards_json` is for small cards on a message. A message carries a question's bubble, or is the
+    // owner's answer to one (`question_id`). An older build refuses this bots.db (downgrade_unsupported).
+    version: 8,
+    sql: `
+CREATE TABLE bot_questions(
+  id TEXT PRIMARY KEY,
+  bot_id TEXT NOT NULL,
+  activation_id TEXT NOT NULL,
+  dispatch_n INTEGER NOT NULL,
+  lane TEXT NOT NULL CHECK(lane IN ('chat','run')),
+  spec_json TEXT NOT NULL,
+  follow_json TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('open','answered','defaulted','moved_on','withdrawn')),
+  answer_json TEXT,
+  answer_message TEXT,
+  answered_at TEXT,
+  read_at TEXT,
+  next_at TEXT,
+  nudges INTEGER NOT NULL DEFAULT 0,
+  message_id TEXT,
+  created_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX bot_questions_due ON bot_questions(status, next_at);
+CREATE INDEX bot_questions_bot ON bot_questions(bot_id, status);
+CREATE INDEX bot_questions_activation ON bot_questions(activation_id);
+ALTER TABLE bot_messages ADD COLUMN question_id TEXT;
+ALTER TABLE bot_messages ADD COLUMN cards_json TEXT;
+CREATE INDEX bot_messages_question ON bot_messages(question_id);
+`
   }
 ]
 
@@ -439,6 +473,47 @@ export interface BotMessageRow {
   replyTo: string | null
   /** The owner's reaction on a bot's message (an emoji) and when it was set; absent for none. */
   ownerReaction?: { emoji: string; at: string }
+  /** The question this bot message carries, or the one this owner message answered (v8); absent for none. */
+  questionId?: string
+}
+
+/** One of a bot's questions to its owner (`bot_questions`, v8). */
+export interface BotQuestionRow {
+  id: string
+  botId: string
+  /** The chat turn (or work) that asked. */
+  activationId: string
+  dispatchN: number
+  lane: BotLane
+  spec: BotQuestionSpec
+  status: BotQuestionStatus
+  answer: (BotQuestionAnswer & { redacted?: true }) | null
+  /** The owner's message that answered it, or that moved past it (`moved_on`). */
+  answerMessage: string | null
+  answeredAt: string | null
+  /** A continuation told the turn about it (a question withdrawn at a wall: "ask it again"). */
+  readAt: string | null
+  /** The bubble that carries it; null until the turn's reply is posted. */
+  messageId: string | null
+  createdAt: string
+}
+
+function questionOf(row: Row): BotQuestionRow {
+  return {
+    id: row.id as string,
+    botId: row.bot_id as string,
+    activationId: row.activation_id as string,
+    dispatchN: num(row.dispatch_n) ?? 0,
+    lane: (str(row.lane) ?? 'chat') as BotLane,
+    spec: JSON.parse(row.spec_json as string) as BotQuestionSpec,
+    status: row.status as BotQuestionStatus,
+    answer: json<BotQuestionRow['answer']>(row.answer_json),
+    answerMessage: str(row.answer_message),
+    answeredAt: str(row.answered_at),
+    readAt: str(row.read_at),
+    messageId: str(row.message_id),
+    createdAt: row.created_at as string
+  }
 }
 
 /** One one-off reminder (`bot_reminders`): a message at a time, or work started then. */
@@ -493,7 +568,8 @@ function messageOf(row: Row): BotMessageRow {
     attachments: json<BotMessageRow['attachments']>(row.attachments_json),
     clientRequestId: str(row.client_request_id),
     replyTo: str(row.reply_to),
-    ...(str(row.owner_reaction) && str(row.owner_reaction_at) ? { ownerReaction: { emoji: row.owner_reaction as string, at: row.owner_reaction_at as string } } : {})
+    ...(str(row.owner_reaction) && str(row.owner_reaction_at) ? { ownerReaction: { emoji: row.owner_reaction as string, at: row.owner_reaction_at as string } } : {}),
+    ...(str(row.question_id) ? { questionId: row.question_id as string } : {})
   }
 }
 
@@ -1004,8 +1080,21 @@ export class BotStore {
       : this.run("UPDATE bot_activations SET end_reason = NULL WHERE id = ? AND status = 'running' AND end_reason = ?", id, BOT_OFFLINE_REASON) > 0
   }
 
-  /** Compare-and-set of an activation's status; false when it was not in `from`. Only a running activation waits for the internet. */
+  /**
+   * Compare-and-set of an activation's status; false when it was not in `from`. Only a running activation waits for the
+   * internet. One that fails or is cancelled (a Stop, a failure, the bot deleted) withdraws the questions it asked and never
+   * posted, in the same statement's transaction: no reply carries them now.
+   */
   moveActivation(id: string, from: readonly BotActivationStatus[], to: BotActivationStatus, patch: { endReason?: string | null; result?: string | null; threadId?: string; scratch?: string } = {}): boolean {
+    if (to === 'failed' || to === 'cancelled') return this.db.transaction(() => {
+      const moved = this.moveActivationRow(id, from, to, patch)
+      if (moved) this.withdrawUnpostedQuestions(id)
+      return moved
+    })
+    return this.moveActivationRow(id, from, to, patch)
+  }
+
+  private moveActivationRow(id: string, from: readonly BotActivationStatus[], to: BotActivationStatus, patch: { endReason?: string | null; result?: string | null; threadId?: string; scratch?: string }): boolean {
     const marks = from.map(() => '?').join(', ')
     const ended = to === 'done' || to === 'failed' || to === 'cancelled'
     return this.run(
@@ -1404,9 +1493,9 @@ export class BotStore {
    */
   insertMessage(row: Omit<BotMessageRow, 'seq'>): boolean {
     return this.run(
-      'INSERT INTO bot_messages(id, bot_id, at, author, kind, text, chips_json, ask_id, error_json, activation_id, attachments_json, client_request_id, reply_to) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING',
+      'INSERT INTO bot_messages(id, bot_id, at, author, kind, text, chips_json, ask_id, error_json, activation_id, attachments_json, client_request_id, reply_to, question_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING',
       row.id, row.botId, row.at, row.author, row.kind, row.text, JSON.stringify(row.chips), row.askId, row.error ? JSON.stringify(row.error) : null,
-      row.activationId, row.attachments ? JSON.stringify(row.attachments) : null, row.clientRequestId, row.replyTo ?? null
+      row.activationId, row.attachments ? JSON.stringify(row.attachments) : null, row.clientRequestId, row.replyTo ?? null, row.questionId ?? null
     ) > 0
   }
 
@@ -1476,7 +1565,104 @@ export class BotStore {
     this.run('DELETE FROM bot_contexts WHERE bot_id = ?', botId)
     this.run('DELETE FROM bot_reminders WHERE bot_id = ?', botId)
     this.run('DELETE FROM bot_work_notes WHERE bot_id = ?', botId)
+    this.run('DELETE FROM bot_questions WHERE bot_id = ?', botId)
     this.run('UPDATE bot_registry SET model_json = NULL, error_json = NULL WHERE bot_id = ?', botId)
+  }
+
+  // -- Questions (bot_questions, v8): a bot's questions to its owner, with answers to tap --------------------------
+
+  insertQuestion(row: Pick<BotQuestionRow, 'id' | 'botId' | 'activationId' | 'dispatchN' | 'lane' | 'spec' | 'createdAt'>): void {
+    // No follow-up in this build: `follow_json` is empty, `next_at` stays null.
+    this.run(
+      "INSERT INTO bot_questions(id, bot_id, activation_id, dispatch_n, lane, spec_json, follow_json, status, created_at) VALUES(?, ?, ?, ?, ?, ?, '{}', 'open', ?)",
+      row.id, row.botId, row.activationId, row.dispatchN, row.lane, JSON.stringify(row.spec), row.createdAt
+    )
+  }
+
+  question(id: string): BotQuestionRow | undefined {
+    const row = this.get('SELECT * FROM bot_questions WHERE id = ?', id)
+    return row ? questionOf(row) : undefined
+  }
+
+  /** An activation's questions, in the order it asked them. */
+  activationQuestions(activationId: string): BotQuestionRow[] {
+    return this.all('SELECT * FROM bot_questions WHERE activation_id = ? ORDER BY created_at, rowid', activationId).map(questionOf)
+  }
+
+  /**
+   * How many questions a bot asked: in one activation, or since a time. One withdrawn before it was shown (its turn
+   * stopped at a wall, and its continuation asks it again) is not counted.
+   */
+  countQuestions(botId: string, input: { activationId?: string; since?: string }): number {
+    return Number(this.get("SELECT COUNT(*) AS n FROM bot_questions WHERE bot_id = ? AND (? IS NULL OR activation_id = ?) AND created_at >= ? AND NOT (status = 'withdrawn' AND message_id IS NULL)",
+      botId, input.activationId ?? null, input.activationId ?? null, input.since ?? '')?.n ?? 0)
+  }
+
+  /** How many of a bot's questions are open (a chat turn's still waiting for its reply included). */
+  countOpenQuestions(botId: string): number {
+    return Number(this.get("SELECT COUNT(*) AS n FROM bot_questions WHERE bot_id = ? AND status = 'open'", botId)?.n ?? 0)
+  }
+
+  /** The bot's chat questions that are open and shown (their bubble is posted), oldest first. */
+  openChatQuestions(botId: string): BotQuestionRow[] {
+    return this.all("SELECT * FROM bot_questions WHERE bot_id = ? AND lane = 'chat' AND status = 'open' AND message_id IS NOT NULL ORDER BY created_at, rowid", botId).map(questionOf)
+  }
+
+  /** The bubble carrying a question is posted. */
+  setQuestionMessage(id: string, messageId: string): void {
+    this.run('UPDATE bot_questions SET message_id = ? WHERE id = ? AND message_id IS NULL', messageId, id)
+  }
+
+  /** Every message about a question: its bubble, and the owner's message that answered it. */
+  messagesForQuestion(questionId: string): BotMessageRow[] {
+    return this.all('SELECT * FROM bot_messages WHERE question_id = ? ORDER BY seq', questionId).map(messageOf)
+  }
+
+  /**
+   * Compare-and-set of a question to `answered` from `from` (open, or moved on: its buttons still answer it), with the
+   * owner's message that answered it; false when it was in neither (answered meanwhile, or withdrawn).
+   */
+  answerQuestion(id: string, answer: BotQuestionAnswer, messageId: string, from: readonly BotQuestionStatus[] = ['open', 'moved_on']): boolean {
+    const marks = from.map(() => '?').join(', ')
+    return this.run(`UPDATE bot_questions SET status = 'answered', answer_json = ?, answer_message = ?, answered_at = ? WHERE id = ? AND status IN (${marks})`,
+      JSON.stringify(answer), messageId, this.now(), id, ...from) > 0
+  }
+
+  /** The owner wrote something else: the bot's open, shown chat questions (but `except`) are moved on; the ones moved. */
+  moveOnQuestions(botId: string, byMessage: string, except?: string): BotQuestionRow[] {
+    const open = this.openChatQuestions(botId).filter((question) => question.id !== except)
+    const at = this.now()
+    return open.filter((question) => this.run("UPDATE bot_questions SET status = 'moved_on', answer_message = ?, answered_at = ? WHERE id = ? AND status = 'open'", byMessage, at, question.id) > 0)
+  }
+
+  /** An activation's questions it never posted are withdrawn (it ended without a reply, or stopped at a wall). */
+  withdrawUnpostedQuestions(activationId: string): number {
+    return this.run("UPDATE bot_questions SET status = 'withdrawn', answered_at = ? WHERE activation_id = ? AND status = 'open' AND message_id IS NULL", this.now(), activationId)
+  }
+
+  /** Every open or moved-on question of a bot is withdrawn (it was deleted). */
+  withdrawQuestions(botId: string): number {
+    return this.run("UPDATE bot_questions SET status = 'withdrawn', answered_at = ? WHERE bot_id = ? AND status IN ('open', 'moved_on')", this.now(), botId)
+  }
+
+  /**
+   * Questions a chat turn asked and then stopped at a wall before showing (withdrawn, no bubble), that no continuation
+   * told it of yet: the next one says to ask again.
+   */
+  questionsToAskAgain(activationId: string): BotQuestionRow[] {
+    return this.all("SELECT * FROM bot_questions WHERE activation_id = ? AND lane = 'chat' AND status = 'withdrawn' AND message_id IS NULL AND read_at IS NULL ORDER BY created_at, rowid", activationId).map(questionOf)
+  }
+
+  /** A continuation told the turn about these questions. */
+  markQuestionsRead(ids: readonly string[]): void {
+    const at = this.now()
+    for (const id of ids) this.run('UPDATE bot_questions SET read_at = ? WHERE id = ? AND read_at IS NULL', at, id)
+  }
+
+  /** Open questions no reply will ever carry: never posted, of an activation that ended (Mousse stopped in between). */
+  withdrawStrandedQuestions(): number {
+    return this.run(`UPDATE bot_questions SET status = 'withdrawn', answered_at = ? WHERE status = 'open' AND message_id IS NULL
+      AND activation_id IN (SELECT id FROM bot_activations WHERE status IN ('done', 'failed', 'cancelled'))`, this.now())
   }
 
   // -- Reminders (bot_reminders, v6): a bot's one-off times; repeating ones are schedules in the shared store --------

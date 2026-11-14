@@ -1,6 +1,7 @@
 import type { BotChip } from '../../shared/bots/personal/chat'
 import type { BotDepth, BotLane, BotModelPick, BotModelSlotKey, BotModelSlots, BotSchedule, BotWorkLevel, BotWorkModelName } from '../../shared/bots/personal/definition'
 import type { BotModelRows, BotPickMiss } from '../../shared/bots/personal/modelSlots'
+import type { BotQuestionSpec } from '../../shared/bots/personal/questions'
 import type { BotJournalKind, BotJournalWho, BotMemoryForgetResult, BotMemoryListing } from '../../shared/bots/personal/memory'
 import type { Enforceability, ProviderSelection, RunPolicy } from '../../shared/harness/types'
 import type { BotStoreTx } from './store/BotStore'
@@ -107,6 +108,14 @@ export interface BotToolHost {
   }
   /** `mcp_servers`: the owner's MCP servers the bot may ask for, and whether it holds their tools. Absent: none here. */
   mcpServers?(botId: string, lane: BotLane): Promise<BotMcpListing>
+  /**
+   * `ask_owner` (issue #1123): a question to the owner with answers to tap, shown under the turn's reply. `asked` is
+   * false, with why, when it was not kept (a cap, a permission asked first, a turn that is not a chat's). Absent: no
+   * questions here.
+   */
+  questions?: {
+    ask(botId: string, activationId: string, spec: BotQuestionSpec): { asked: boolean; text: string }
+  }
   /** One-off reminders: said at a time, or work started then. */
   reminders: {
     add(botId: string, from: string, input: { dueAt: string; text: string; work?: { title: string; brief: string } }): { reminderId: string; dueAt: string }

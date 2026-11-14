@@ -49,7 +49,7 @@ A bot's chat shows a reply as a thread's transcript does, through the same compo
 | Pictures a tool returned | Shown with the bot's next message, from its files folder, as its picture message (one large, several in a carousel) |
 | Copy, Read aloud | Same buttons |
 | Reply to a message | The bot's chat has it; a thread doesn't yet (#1049) |
-| Tool rows, diffs and changed files, thinking, plans, questions, model names and token counts | Kept from bots: a reply's steps fold behind its "Worked for" line in plain words, its presence and work are in the header, asks are quick replies, and a model is named only on work that runs on one of its own (above) |
+| Tool rows, diffs and changed files, thinking, plans, questions, model names and token counts | Kept from bots: a reply's steps fold behind its "Worked for" line in plain words, its presence and work are in the header, asks are quick replies, and a model is named only on work that runs on one of its own (above). A runtime's own question tools stay refused; a bot asks with `ask_owner`, whose answers are quick replies too (see Questions) |
 | Edit, Retry and Fork of a prompt | Kept from bots: the chat is one conversation kept with the bot's memory, with no branches |
 | Opening a linked file | A Files pane beside the chat, from a path's chip, with Show in folder |
 | Find in the conversation; revising an applet in a later turn; a picture from the bot's browser shared on purpose; voice clips and thread references in the composer | Not yet |
@@ -147,6 +147,23 @@ Work that takes long is held to the bot's own budget, its work time per activati
 ## Replies
 
 Every bot message can name the message it answers (`bot_messages.reply_to`, bots.db v6): a chat reply the owner's message its turn holds (`ownerMessageOf`), a work report and a reminder the message that asked for them. The chat shows a short quote of it (who wrote it and its first line, `BotChatQuote`) when it is not the message right above; clicking it scrolls there. The owner can reply to any message (Reply on hover): `bots.chat.send` carries `replyTo`, a message of the same bot only, and the bot's input starts with `(Replying to your message: "…")` (`messageInput`, which also rebuilds the input from the row after a restart).
+
+## Questions
+
+A chat turn can ask its owner a question with answers to tap (`ask_owner`, #1123): 2 to 5 short choices, each with an optional line of detail, or yes/no, and "Other…" for an answer in the owner's own words. It is the bot's way to ask an ordinary question. A permission is still an ask (`escalate`), and a "Yes" to a question grants nothing; the bot's instructions and the tool's description say so.
+
+- **Apart from asks.** Questions live in `bot_questions` (`bots.db` v8), not in `bot_escalations`, so none of the permission paths (walls, one open ask per permission, the ask caps, Allow) reads them. Like memory, `ask_owner` is always on and never grantable. Only a chat turn is offered it for now (`compileBotThread`'s `questions`); work that calls it is told "Not yet: carry on and ask in your report", and scheduled runs, consults and subagents never have it.
+- **Caps.** One per chat turn, at most 6 open per bot and 20 new per bot in 24 hours (`src/shared/bots/personal/questions.ts`). Over a cap the tool answers "You've asked enough for now. Decide yourself and say what you assumed."
+- **Shown under the reply.** The question is kept when the bot asks and posted when its turn ends, as a bubble of its own under the reply (`bm_<activation>_q<n>`, with `bot_messages.question_id`), in the reply's transaction (`postReply`); the startup pass posts it with a reply Mousse stopped before writing. Nothing waits on it: the turn ends as before. A turn that is stopped or fails withdraws a question it never showed (`BotStore.moveActivation`), and the startup pass withdraws any other that no reply will carry.
+- **A tap** (`bots.questions.answer`, an optional method: the app sends it only to a service that showed a question) is the owner's reply to the bubble, written with the label as its text, in one transaction with the question answered. It starts or continues a chat turn as a message does, and the bot's input starts with `(Answering your question: "…")` (`messageInput`). Its turn is keyed `answer:`, not `chat:`: the label is the bot's words, so that turn can't start, message or stop the owner's threads (`ownerChatTurn`), and `use_model` and work on a model of its own leave a tapped answer out of the owner's words (`ownerWords`). A question already answered (on another device, or by a second tap) is refused before anything is written (`question_answered`). A tap never answers a permission ask the chat waits at (a message sent there counts as Not now): its turn waits behind that ask.
+- **A typed answer** is Reply on the bubble, or "Other…", which puts the question above the composer: an ordinary `bots.chat.send` with `replyTo`, which answers the question with the owner's words. Those count as the owner's own, as any message's do.
+- **Moving on.** Any other message from the owner moves the bot's open questions on (`moved_on`), in the transaction that writes the message, and the bot's input starts with `(You had asked: "…" (A · B · Something else). If this message answers it, go on from there; if you still need to know, ask again.)`. The buttons stay, quieter, and a later tap still answers the question.
+- **A question and a permission ask in one turn.** `ask_owner` after `escalate` in the same turn is refused ("Ask it once the owner has answered your permission ask."). `escalate` after `ask_owner` wins: the turn waits at its wall, its question is withdrawn without being shown (a tap there would count as Not now), and the wall's continuation tells the bot to ask again (`askAgainLine`).
+- **What the chat shows.** The question's bubble with its answers under it as quick replies, in the ask's look (`BotQuestionReplies`); a tapped answer as a quiet line, "You answered “Flat B”", where the owner's bubble would be (the question on hover); a typed answer as the owner's bubble quoting the question. A message's `text` also carries the answers as plain text after the question ("Flat A · Flat B · Something else", from `plainFrom` on), for an app that doesn't draw them, for notifications and for the journal, so the chat pack shows the bot its own choices. An app whose service lacks the method shows that text and no buttons, and the owner answers with Reply.
+- **Other devices** answer with the same method (`REMOTE_BOT_METHODS`), under the same rules as `bots.chat.send`: the device must reach the bot, and the turn is held to the device's limit.
+- **Forget, delete and export.** Forgetting the bubble redacts the question and its answers, and withdraws it if it was waiting; forgetting the owner's answer redacts the answer. Deleting a bot withdraws its questions, and the purge removes them. An export of the bot's memory adds `questions.jsonl`.
+
+Follow-ups when the owner doesn't answer, questions from work and small cards on a message are planned in #1123 and not built yet.
 
 ## Reminders
 
@@ -498,7 +515,7 @@ Mousse keeps an append-only **bot journal** in `bots.db` of everything it sees a
 
 `bots.delete` archives at once and purges after 30 days:
 
-- **At once:** activations stop, asks are withdrawn, the grant is revoked, the bot leaves every list, and its threads are settled (archived). Scratch folders go when nothing runs in them.
+- **At once:** activations stop, asks and questions are withdrawn, the grant is revoked, the bot leaves every list, and its threads are settled (archived). Scratch folders go when nothing runs in them.
 - **After 30 days:** a daily sweep (`BotEngine.sweepDeleted`) deletes the definition, the threads for good, the chat, the schedules, the files folder and the memory rows (`BotMemoryAdmin.purge`). Run history in the Run Engine database and runtimes' session files are not purged; the log says so.
 - There is no restore in Phase 1.
 
@@ -525,6 +542,7 @@ Mousse keeps an append-only **bot journal** in `bots.db` of everything it sees a
 | Bot app tools | `src/mms/run/mcp/appTools/bots.ts`, `src/mms/run/mcp/appTools/botMemory.ts` |
 | Work and reminders | `BotEngine` (`startWork`, `listWork`, `noteWork`, `addReminder`, `deliverDueReminders`), `src/mms/bots/grants/compile.ts` (`frontDeskManifest`) |
 | Subagents of work | `BotEngine` (`startSubagent`, `compileSubagent`, `holdOf`, `prepareSubagent`, `settleSubagent`, `rearmDeadline`, `acknowledgeReportStops`), `src/shared/bots/personal/subagentHold.ts` (the hold rule), `HarnessDriver.botHold`, `src/mms/bots/grants/compile.ts` (`subagentManifest`), `subagent_*` in `src/mms/run/mcp/appTools/bots.ts` |
+| Questions (`ask_owner`, taps, moving on) | `src/shared/bots/personal/questions.ts`, `BotEngine.askOwner` and `postReply`, `BotChatService.answerQuestion` and `send`, `src/renderer/components/bots/BotQuestionReplies.tsx` |
 | The bot's own browser, its methods | `src/mms/bots/browser/`, `src/shared/bots/personal/browser.ts` |
 | Open in a window: the restart, who may open it, the app's screen | `src/browser-worker/session/Session.ts` (`openWindow`, `restart`), `src/shared/browser/window.ts`, `src/mms/browser/windowDesktop.ts`, `src/main/ipc/botBrowserWindow.ts` |
 | The owner's MCP tools: servers, offered tools, the per-server ask, calls | `src/mms/bots/mcp/BotMcp.ts`, `src/mms/run/mcp/relay/handler.ts` (`callForBot`), `ToolRegistry.callBotMcp` |

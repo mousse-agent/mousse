@@ -105,6 +105,8 @@ interface BotsState {
   replyingTo: Record<string, BotChatQuote>
   /** The service has no `bots.chat.react` (an older one): messages show no reaction bar. */
   reactionsMissing: boolean
+  /** The service has no `bots.questions.answer`: questions show no buttons, and the owner answers with Reply. */
+  questionsMissing: boolean
   error: string | null
   /** The bot `error` is about; null when it is about none (a new bot). Only that bot's chat shows it. */
   errorBotId: string | null
@@ -129,6 +131,11 @@ interface BotsState {
   /** Stops one piece of work (the line above the composer); the chat goes on. */
   stopWork(botId: string, workId: string): Promise<void>
   answer(botId: string, askId: string, answer: 'allow' | 'not_now'): Promise<void>
+  /**
+   * The owner taps one of a question's answers: it is their reply to the question, which the bot answers. False when it
+   * was not sent (the error says why, or the service has no buttons for questions).
+   */
+  answerQuestion(botId: string, questionId: string, choice: string): Promise<boolean>
   /**
    * The owner's reaction on one of the bot's messages: shown at once, and put back as it was when the service refuses
    * it. `null` removes it. It never starts a turn.
@@ -281,7 +288,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
 
   return {
     profileId: null, bots: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, replyingTo: {},
-    reactionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null,
+    reactionsMissing: false, questionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null,
 
     activate(profileId) {
       if (get().profileId === profileId) return
@@ -296,7 +303,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
       removed.clear()
       reactions.clear()
       set({ profileId, bots: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, replyingTo: {},
-        reactionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null })
+        reactionsMissing: false, questionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null })
       subscribe()
     },
 
@@ -483,6 +490,28 @@ export const useBotsStore = create<BotsState>((set, get) => {
         putMessages(botId, [message])
         void get().refresh()
       } catch (cause) { fail(owner, cause, botId) }
+    },
+
+    async answerQuestion(botId, questionId, choice) {
+      const owner = epoch
+      set({ error: null })
+      try {
+        // A tap is sent once: a second tap while it is on its way is the component's to hold off.
+        const { message, question } = await bots().answerQuestion(botId, questionId, choice, crypto.randomUUID())
+        if (owner !== epoch) return false
+        putMessages(botId, question ? [question, message] : [message])
+        void get().refresh()
+        return true
+      } catch (cause) {
+        if (owner !== epoch) return false
+        // An older service has no buttons for questions: they go, and the owner answers with Reply.
+        if (missingMethod(cause)) set({ questionsMissing: true })
+        else fail(owner, cause, botId)
+        // Answered meanwhile (on another device) or no longer open: the chat reads the question as it is now.
+        const code = String((cause as { code?: unknown } | null)?.code ?? '')
+        if (code === 'question_answered' || code === 'question_closed') void get().loadChat(botId)
+        return false
+      }
     },
 
     async react(botId, messageId, emoji) {

@@ -33,6 +33,11 @@ export interface PersonalBotsClient {
   /** The owner's reaction on one of the bot's messages: an emoji, or `null` to remove it. The message as it is now. */
   react(botId: string, messageId: string, emoji: string | null): Promise<BotChatMessage>
   answer(botId: string, askId: string, answer: 'allow' | 'not_now'): Promise<BotChatMessage>
+  /**
+   * The owner taps one of a question's answers: their reply, and the question's bubble as it is now. An older service
+   * lacks it and rejects; the owner answers with Reply there.
+   */
+  answerQuestion(botId: string, questionId: string, choice: string, clientRequestId: string): Promise<BotsPersonalV2Result<'bots.questions.answer'>>
   revokePermission(botId: string, permissionId: string): Promise<BotDetail>
   addSchedule(botId: string, when: BotSchedule['when'], prompt: string, model?: string): Promise<BotDetail>
   /** The bot's rows (`slots`, absent from an older service), its Talk model by name, and the computers it can run on (#673). */
@@ -82,6 +87,7 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
     markRead: async (botId, seq) => { await call('bots.chat.markRead', { botId, seq }) },
     react: async (botId, messageId, emoji) => (await call('bots.chat.react', { botId, messageId, emoji })).message,
     answer: async (botId, askId, answer) => (await call('bots.asks.answer', { botId, askId, answer })).message,
+    answerQuestion: (botId, questionId, choice, clientRequestId) => call('bots.questions.answer', { botId, questionId, choice, clientRequestId }),
     revokePermission: (botId, permissionId) => call('bots.permissions.revoke', { botId, permissionId }),
     addSchedule: (botId, when, prompt, model) => call('bots.schedules.add', { botId, when, prompt, ...(model ? { model } : {}) }),
     model: (botId) => call('bots.model.get', { botId }),

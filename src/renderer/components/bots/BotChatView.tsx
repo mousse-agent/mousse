@@ -17,6 +17,7 @@ import { BotReactionBadge, BotReactionBar } from './BotReactions'
 import { replyImages } from './botReplyImages'
 import { BotEmojiButton } from './BotEmoji'
 import { BotAskReplies } from './BotAskReplies'
+import { BotQuestionReplies } from './BotQuestionReplies'
 import { BotActivitySticker, BotPresenceLine } from './BotPresence'
 import { askAnswerLine } from '../asks/AskCard'
 import { BotMenu } from './BotMenu'
@@ -210,8 +211,13 @@ interface BotMessageProps { bot: BotSummary; message: BotChatMessage; onAction(a
  * ones a tool handed it among them). Every chip of its work folds behind "Worked for", none dropped. Read aloud, Copy and
  * Reply show beside it on hover; its applets sit under it; an open ask is quick replies under it.
  */
-const BotMessage = memo(function BotMessage({ bot, message, onAction, browser, quote, starts, onReply, asked, onApplet }: BotMessageProps) {
+const BotMessage = memo(function BotMessage({ bot, message: row, onAction, browser, quote, starts, onReply, asked, onApplet }: BotMessageProps) {
   const store = useBotsStore.getState
+  // A question's answers are buttons under it, so its words stop where their plain copy starts; a service whose
+  // questions can't be answered here keeps that copy, and the owner answers with Reply.
+  const canAnswer = useBotsStore((s) => !s.questionsMissing)
+  const question = canAnswer ? row.question : undefined
+  const message = useMemo(() => (question && row.plainFrom !== undefined ? { ...row, text: row.text.slice(0, row.plainFrom).trimEnd() } : row), [question, row])
   const quoted = quote && message.replyTo
   const [stepsOpen, setStepsOpen] = useState(false)
   const steps = message.chips
@@ -286,13 +292,17 @@ const BotMessage = memo(function BotMessage({ bot, message, onAction, browser, q
         return after.errorBotId === bot.id && after.error ? after.error : undefined
       }}
       onExport={() => store().exportMemory(bot.id, openAsk.askId)} />}
+    {question && <BotQuestionReplies question={question}
+      onAnswer={(choice) => store().answerQuestion(bot.id, question.questionId, choice)}
+      onOther={() => onReply(row)} />}
     {browser}
   </article>
 }, sameBotMessage)
 
 /** A quiet centred line between messages: work the bot started, an ask answered. */
 function SystemLine({ row }: { row: Extract<BotChatRow, { kind: 'system' }> }) {
-  return <p className="bot-system-line" role="note" {...(row.title ? { title: row.title } : {})}><span>{row.text}</span></p>
+  // A line standing in for a message (a tapped answer) carries its id, so a quote of that message scrolls to it.
+  return <p className="bot-system-line" role="note" {...(row.title ? { title: row.title } : {})} {...(row.of ? { 'data-message-id': row.of } : {})}><span>{row.text}</span></p>
 }
 
 /**
@@ -505,7 +515,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
           const sending = index >= rows.length
           // A reply shows what it answers unless that is the message right above it.
           const above = shown[index - 1]
-          const quote = Boolean(message.replyTo) && (sending || !(above?.kind === 'message' && above.message.id === message.replyTo!.id))
+          const quote = Boolean(message.replyTo) && (sending || !((above?.kind === 'message' && above.message.id === message.replyTo!.id) || (above?.kind === 'system' && above.of === message.replyTo!.id)))
           return <Fragment key={message.id}>
             {day}
             {message.author === 'owner'

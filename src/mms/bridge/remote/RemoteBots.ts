@@ -2,6 +2,7 @@ import { closeSync, fstatSync, openSync, readSync } from 'node:fs'
 import { NetError, type NodeCapability, type NodeId } from '../../../shared/net'
 import type { BotChatMessage, BotDetail, BotError, BotSummary } from '../../../shared/bots/personal/chat'
 import { MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS } from '../../../shared/bots/personal/definition'
+import { MAX_CHOICE_LABEL_CHARS } from '../../../shared/bots/personal/questions'
 import type { BotLook } from '../../../shared/bots/personal/look'
 import type { BotMemoryForgetResult, BotMemoryListing } from '../../../shared/bots/personal/memory'
 import { MAX_BOT_CHAT_ATTACHMENTS, MAX_BOT_CHAT_PAGE, type BotsPersonalV2Api } from '../../../shared/bots/personal/methods'
@@ -32,6 +33,7 @@ export const REMOTE_BOT_METHODS = {
   'bots.work.stop': { capability: 'chat', mutating: true },
   'bots.chat.markRead': { capability: 'chat', mutating: true },
   'bots.asks.answer': { capability: 'chat', mutating: true },
+  'bots.questions.answer': { capability: 'chat', mutating: true },
   'bots.personal.pause': { capability: 'write', mutating: true },
   'bots.personal.resume': { capability: 'write', mutating: true },
   'bots.create': { capability: 'write', mutating: true },
@@ -54,6 +56,8 @@ export interface RemoteBotsPort {
   markRead(botId: string, seq: number): Record<string, never>
   askKind(botId: string, askId: string): 'permission' | 'export_memory' | 'threads'
   answer(botId: string, askId: string, answer: 'allow' | 'not_now'): Promise<{ message: BotChatMessage }>
+  questionCheck(botId: string, questionId: string): void
+  answerQuestion(input: { botId: string; questionId: string; choice: string; clientRequestId: string; from?: { limit: PermissionMode; node?: string } }): Promise<{ message: BotChatMessage; question?: BotChatMessage }>
   pause(botId: string): { bot: BotSummary }
   resume(botId: string): Promise<{ bot: BotSummary }>
   create(input: { look: BotLook; name?: string; description: string; clientRequestId: string }): Promise<{ bot: BotSummary }>
@@ -77,6 +81,7 @@ const KEYS: Record<RemoteBotMethod, { required: readonly string[]; optional?: re
   'bots.work.stop': { required: ['botId', 'workId'] },
   'bots.chat.markRead': { required: ['botId', 'seq'] },
   'bots.asks.answer': { required: ['botId', 'askId', 'answer'] },
+  'bots.questions.answer': { required: ['botId', 'questionId', 'choice', 'clientRequestId'] },
   'bots.personal.pause': { required: ['botId'] },
   'bots.personal.resume': { required: ['botId'] },
   'bots.create': { required: ['look', 'description', 'clientRequestId'], optional: ['name'] },
@@ -89,6 +94,7 @@ const KEYS: Record<RemoteBotMethod, { required: readonly string[]; optional?: re
 
 const REQUEST_ID = /^[A-Za-z0-9._:-]{1,128}$/
 const ASK_ID = /^esc_[0-9a-f-]{36}$/
+const QUESTION_ID = /^q_[0-9a-f-]{36}$/
 const WORK_ID = /^act_[0-9a-f-]{36}$/
 const REMINDER_ID = /^rem_[0-9a-f-]{36}$/
 const SCHEDULE_ID = /^[a-z0-9][a-z0-9-]{0,31}$/
@@ -207,6 +213,10 @@ export function validateRemoteBotParams(method: RemoteBotMethod, value: unknown)
     case 'bots.asks.answer':
       ok(typeof p.askId === 'string' && ASK_ID.test(p.askId))
       ok(p.answer === 'allow' || p.answer === 'not_now')
+      break
+    case 'bots.questions.answer':
+      ok(typeof p.questionId === 'string' && QUESTION_ID.test(p.questionId))
+      ok(text(p.choice, MAX_CHOICE_LABEL_CHARS))
       break
     case 'bots.create':
       ok(lookOf(p.look))
@@ -550,6 +560,23 @@ export function remoteBotMethods(options: {
         if (kind === 'threads' && p.answer === 'allow' && limitOf(context) !== 'full')
           throw new NetError('forbidden', 'Allow this on the computer.')
       })
+    ),
+    // A tap on a question's answer is the owner's chat message, as `bots.chat.send` is: held to the device's limit and
+    // dropped with the device. It grants nothing, so any device that may chat may answer. One already answered (on
+    // another device) or no longer open is refused before anything is written.
+    method(
+      'bots.questions.answer',
+      async (p, port, context) => {
+        const { message, question } = await port.answerQuestion({
+          botId: botId(p),
+          questionId: p.questionId as string,
+          choice: p.choice as string,
+          clientRequestId: p.clientRequestId as string,
+          from: { limit: limitOf(context), node: context.caller.node }
+        })
+        return { message: fitted(remoteBotMessage(message)), ...(question ? { question: fitted(remoteBotMessage(question)) } : {}) }
+      },
+      first((p, port) => port.questionCheck(botId(p), p.questionId as string))
     ),
     method('bots.personal.pause', async (p, port) => ({ bot: remoteBotSummary(port.pause(botId(p)).bot) })),
     method('bots.personal.resume', async (p, port) => ({ bot: remoteBotSummary((await port.resume(botId(p))).bot) })),

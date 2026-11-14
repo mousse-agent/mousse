@@ -314,10 +314,53 @@ describe('set_profile', () => {
   })
 })
 
+describe('ask_owner (#1123)', () => {
+  /** The bot's tools with a question host that keeps what it is asked. */
+  function asking(lane: BotLane) {
+    const bots = fakeBots(lane)
+    const asked: unknown[] = []
+    const deps = { host: { ...{} as BotToolHost, activationOf: (threadId: string) => (threadId === 'home' ? { botId: 'b1', activationId: 'a1', lane } : undefined), questions: { ask: (_botId: string, _activationId: string, spec: unknown) => { asked.push(spec); return { asked: true, text: 'Shown under your reply.' } } } } as BotToolHost }
+    const tool = botTools(() => deps).find((entry) => entry.name === 'ask_owner')!
+    return { asked, call: (args: Record<string, unknown>) => tool.handler(args, bots.ctx()) }
+  }
+
+  // What the tool takes, and what it refuses with a reason the bot can act on. Nothing refused reaches the host.
+  const ROWS: Array<[string, Record<string, unknown>, unknown]> = [
+    ['choices as labels', { question: 'Which flat?', choices: ['A', 'B'] }, { question: 'Which flat?', choices: [{ label: 'A' }, { label: 'B' }], other: true }],
+    ['choices with a detail, no Other', { question: 'Which?', choices: [{ label: 'A', detail: '2 bed' }, 'B'], other: false }, { question: 'Which?', choices: [{ label: 'A', detail: '2 bed' }, { label: 'B' }], other: false }],
+    ['yes or no', { question: 'Shall I?', yesNo: true }, { question: 'Shall I?', choices: [{ label: 'Yes' }, { label: 'No' }], other: true }],
+    ['no question', { choices: ['A', 'B'] }, 'refused'],
+    ['one choice', { question: 'Q?', choices: ['A'] }, 'refused'],
+    ['six choices', { question: 'Q?', choices: ['A', 'B', 'C', 'D', 'E', 'F'] }, 'refused'],
+    ['the same label twice', { question: 'Q?', choices: ['A', 'a'] }, 'refused'],
+    ['a label over 40 characters', { question: 'Q?', choices: ['A'.repeat(41), 'B'] }, 'refused'],
+    ['choices and yesNo', { question: 'Q?', choices: ['A', 'B'], yesNo: true }, 'refused'],
+    ['neither choices nor yesNo', { question: 'Q?' }, 'refused'],
+    ['a question over 600 characters', { question: 'Q'.repeat(601), yesNo: true }, 'refused']
+  ]
+  it.each(ROWS)('%s', async (_name, args, expected) => {
+    const { asked, call } = asking('chat')
+    const outcome = await call(args)
+    if (expected === 'refused') {
+      expect(outcome.isError).toBe(true)
+      expect(asked).toEqual([])
+    } else {
+      expect(outcome.isError).toBeFalsy()
+      expect(asked).toEqual([expected])
+    }
+  })
+
+  it('in a run it asks nothing, and says to ask in the report', async () => {
+    const { asked, call } = asking('run')
+    expect(await call({ question: 'Which flat?', choices: ['A', 'B'] })).toEqual({ text: 'Not yet: carry on and ask in your report.', isError: true })
+    expect(asked).toEqual([])
+  })
+})
+
 describe('registration', () => {
   it('lists the bot tools in the bots family, and WP6\'s memory tools beside them', () => {
     const { families } = createAppToolRegistry({ host: fakeAppToolHost().host, bots: () => undefined })
-    expect(families.bots).toEqual(['escalate', 'consult', 'bot_schedule_add', 'bot_schedule_remove', 'bot_schedule_list', 'mcp_servers', 'set_profile', 'set_depth', 'work_start', 'work_models', 'work_list', 'work_stop', 'work_note', 'remind', 'reminder_list', 'reminder_cancel', 'make_image', 'use_model', 'subagent_start', 'subagent_send', 'subagent_wait', 'subagent_result', 'subagent_stop'])
+    expect(families.bots).toEqual(['escalate', 'consult', 'bot_schedule_add', 'bot_schedule_remove', 'bot_schedule_list', 'mcp_servers', 'set_profile', 'set_depth', 'work_start', 'work_models', 'work_list', 'work_stop', 'work_note', 'remind', 'reminder_list', 'reminder_cancel', 'make_image', 'ask_owner', 'use_model', 'subagent_start', 'subagent_send', 'subagent_wait', 'subagent_result', 'subagent_stop'])
     // With `botMemory`, WP6's memory tools follow them in the same family.
     const withMemory = createAppToolRegistry({ host: fakeAppToolHost().host, botMemory: { activationOf: () => undefined } })
     expect(withMemory.families.bots.slice(0, families.bots.length)).toEqual(families.bots)

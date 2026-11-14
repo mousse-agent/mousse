@@ -104,7 +104,7 @@ export type { ThreadToastPayload } from '../../shared/threadToast'
  * a forgotten memory's blanked text) announce nothing. Chips never notify: they are not rows.
  */
 export function botNotificationKind(
-  message: Pick<BotChatMessage, 'author' | 'at' | 'ask'>,
+  message: Pick<BotChatMessage, 'author' | 'at' | 'ask' | 'question'>,
   now = Date.now(),
   maxAgeMs = 10 * 60_000
 ): ThreadNotificationKind | null {
@@ -112,17 +112,26 @@ export function botNotificationKind(
   const at = Date.parse(message.at)
   if (Number.isFinite(at) && now - at > maxAgeMs) return null
   if (message.ask) return message.ask.status === 'open' ? 'question' : null
+  // A bot's question with answers to tap (`ask_owner`) is announced as a question, as an ask is.
+  if (message.question) return message.question.status === 'open' ? 'question' : null
   return 'completed'
 }
 
 /** The words of a bot notification: the bot's name as the title, then what it wants or said. */
 export function botNotificationContent(
   botName: string | undefined,
-  message: Pick<BotChatMessage, 'text' | 'ask' | 'error'>
+  message: Pick<BotChatMessage, 'text' | 'ask' | 'error' | 'question' | 'plainFrom'>
 ): { title: string; body: string } {
   const title = botName?.trim() || 'Your bot'
   if (message.ask) return { title, body: `Wants to ${message.ask.title}` }
   if (message.error) return { title, body: message.error.text }
+  // A question: its words and its answers, "Which flat? — Flat A / Flat B".
+  if (message.question) {
+    const asked = (message.plainFrom !== undefined ? message.text.slice(0, message.plainFrom) : message.text).replace(/\s+/g, ' ').trim()
+    const answers = message.question.choices.map((choice) => choice.label).join(' / ')
+    const body = answers ? `${asked} — ${answers}` : asked
+    return { title, body: body.length > 140 ? `${body.slice(0, 139)}…` : body || 'New message' }
+  }
   const line = message.text
     .split('\n')
     .map((part) => part.replace(/[*_`#>[\]]/g, '').replace(/^\s*(?:[-+]|\d+\.)\s+/, '').trim())

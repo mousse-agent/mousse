@@ -108,6 +108,7 @@ describe('bot method params', () => {
       'bots.get': { capability: 'read', mutating: false },
       'bots.chat.send': { capability: 'chat', mutating: true },
       'bots.asks.answer': { capability: 'chat', mutating: true },
+      'bots.questions.answer': { capability: 'chat', mutating: true },
       'bots.personal.pause': { capability: 'write', mutating: true },
       'bots.create': { capability: 'write', mutating: true }
     })
@@ -281,6 +282,32 @@ describe('bot methods on a real bot', () => {
     expect(answered.message.ask).toMatchObject({ status: 'not_now' })
   })
 
+  it('answers a question with a tap, as a message from that device, and refuses one answered elsewhere before anything is written', async () => {
+    methods = remoteBotMethods({ bots: () => f.bots.service, deviceLimit: () => 'accept_edits' })
+    await f.bots.service.chatSend({ botId, text: 'Find me a flat', clientRequestId: 'q-1' })
+    const activation = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    const { payload } = await start(f, activation.id)
+    expect(f.bots.tools.questions!.ask(botId, activation.id, { question: 'Which flat?', choices: [{ label: 'Flat A' }, { label: 'Flat B' }], other: true }).asked).toBe(true)
+    await finish(f, payload, 'completed', { text: 'Two to pick from.' })
+    const bubble = chatOf(f, botId).find((message) => message.question)!
+    const questionId = bubble.question!.questionId
+    const tapped = (await call(methods, 'bots.questions.answer', { botId, questionId, choice: 'Flat B', clientRequestId: 'phone-q1' })) as { message: BotChatMessage; question: BotChatMessage }
+    expect(tapped.message).toMatchObject({ author: 'owner', text: 'Flat B', answers: { questionId, tapped: true } })
+    expect(tapped.question.question).toMatchObject({ status: 'answered', answer: 'Flat B' })
+    // Its turn is the device's message: held to the device's limit, and dropped if the device loses the bot.
+    const turn = f.store.activation(tapped.message.activationId!)!
+    expect(turn.trigger).toMatchObject({ kind: 'manual', owner: { limit: 'accept_edits', node: 'n' } })
+    // Answered: another device's tap is refused plainly, and nothing more is written.
+    const rows = chatOf(f, botId).length
+    const error = await refused(() => call(methods, 'bots.questions.answer', { botId, questionId, choice: 'Flat A', clientRequestId: 'phone-q2' }))
+    expect(error).toMatchObject({ code: 'conflict', message: 'This was already answered.' })
+    expect(chatOf(f, botId)).toHaveLength(rows)
+    const missing = await refused(() => call(methods, 'bots.questions.answer', { botId, questionId: 'q_00000000-0000-0000-0000-000000000000', choice: 'Flat A', clientRequestId: 'phone-q3' }))
+    expect(missing.code).toBe('stream_unknown')
+    expect(() => validateRemoteBotParams('bots.questions.answer', { botId, questionId, choice: 'x'.repeat(41), clientRequestId: 'r' })).toThrow(NetError)
+    expect(() => validateRemoteBotParams('bots.questions.answer', { botId, questionId: 'nope', choice: 'Flat A', clientRequestId: 'r' })).toThrow(NetError)
+  })
+
   it('answers a permission ask', async () => {
     await f.bots.service.chatSend({ botId, text: 'Read my invoices', clientRequestId: 'm2' })
     const activation = f.store.laneActivations(botId, 'chat', ['running'])[0]!
@@ -352,6 +379,7 @@ describe('"Share bots with other devices"', () => {
       'bots.work.stop': { botId: BOT, workId: 'act_00000000-0000-0000-0000-000000000000' },
       'bots.chat.markRead': { botId: BOT, seq: 1 },
       'bots.asks.answer': { botId: BOT, askId: ASK, answer: 'allow' },
+      'bots.questions.answer': { botId: BOT, questionId: 'q_00000000-0000-0000-0000-000000000000', choice: 'Yes', clientRequestId: 'r-q' },
       'bots.personal.pause': { botId: BOT },
       'bots.personal.resume': { botId: BOT },
       'bots.create': { look: { colour: 'teal', accessory: 'cap' }, description: 'Tidy', clientRequestId: 'c1' },

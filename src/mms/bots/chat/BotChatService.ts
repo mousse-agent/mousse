@@ -16,7 +16,8 @@ import { botPickProviderOptions, type LlmProviderOption } from '../../../shared/
 import { copyBotAttachments, removeBotAttachments, type SavedBotAttachment } from './attachments'
 import { BotEngineError, type BotEngine } from '../activation/BotEngine'
 import type { BotMemoryAdmin } from '../seams'
-import type { BotStore } from '../store/BotStore'
+import type { BotQuestionRow, BotStore } from '../store/BotStore'
+import { plainChoices, type BotQuestionSpec } from '../../../shared/bots/personal/questions'
 import { grantedPermissions, permissionId, starterManifest, withoutPermission } from './projection'
 
 /**
@@ -160,12 +161,34 @@ export function chatInput(text: string, attachments: readonly SavedBotAttachment
 
 /**
  * An owner's message row as the bot's input, as `chatSend` built it: the reply line when it answers an earlier
- * message of the same chat, its text, and its files. Rebuilt from the rows after a restart, so it must match.
+ * message of the same chat (the question line when it answers the question that message carries), its text, and its
+ * files. Rebuilt from the rows after a restart, so it must match.
  */
-export function messageInput(row: { botId: string; text: string; attachments: readonly SavedBotAttachment[] | null; replyTo: string | null }, quoted: (id: string) => { botId: string; author: 'owner' | 'bot'; text: string } | undefined): string {
+export function messageInput(row: { botId: string; text: string; attachments: readonly SavedBotAttachment[] | null; replyTo: string | null; questionId?: string }, quoted: (id: string) => { botId: string; author: 'owner' | 'bot'; text: string; questionId?: string } | undefined): string {
   const body = chatInput(row.text, row.attachments ?? undefined)
   const reply = row.replyTo ? quoted(row.replyTo) : undefined
-  return reply && reply.botId === row.botId ? `${replyLine(reply)}\n\n${body}` : body
+  if (!reply || reply.botId !== row.botId) return body
+  return `${row.questionId && reply.author === 'bot' && reply.questionId === row.questionId ? answeringLine(reply.text) : replyLine(reply)}\n\n${body}`
+}
+
+/** The line before the owner's answer to a question the bot asked: the question, so the bot knows what it answers. */
+export function answeringLine(question: string): string {
+  return `(Answering your question: "${cutQuote(question)}")`
+}
+
+/**
+ * The line before an owner's message that did not answer the bot's open question (it moved on): what was asked, and
+ * that the bot asks again if it still needs to know.
+ */
+export function movedOnLine(spec: Pick<BotQuestionSpec, 'question' | 'choices' | 'other'>): string {
+  const choices = plainChoices(spec)
+  return `(You had asked: "${cutQuote(spec.question)}"${choices ? ` (${choices})` : ''}. If this message answers it, go on from there; if you still need to know, ask again.)`
+}
+
+/** A quoted message as one line, cut to `REPLY_QUOTE_CHARS`. */
+function cutQuote(value: string): string {
+  const text = value.replace(/\s+/g, ' ').trim()
+  return text.length > REPLY_QUOTE_CHARS ? `${text.slice(0, REPLY_QUOTE_CHARS - 1)}…` : text
 }
 
 /** The longest part of a quoted message the bot is shown with a reply. */
@@ -176,8 +199,7 @@ const REPLY_QUOTE_CHARS = 600
  * about: the bot's own message, or one the owner wrote before.
  */
 export function replyLine(quoted: { author: 'owner' | 'bot'; text: string }): string {
-  const text = quoted.text.replace(/\s+/g, ' ').trim()
-  const cut = text.length > REPLY_QUOTE_CHARS ? `${text.slice(0, REPLY_QUOTE_CHARS - 1)}…` : text
+  const cut = cutQuote(quoted.text)
   return quoted.author === 'bot' ? `(Replying to your message: "${cut}")` : `(About their earlier message: "${cut}")`
 }
 
@@ -333,6 +355,61 @@ export class BotChatService {
    * one never reached.
    */
   async chatSend(input: { botId: string; text: string; attachments?: BotChatAttachment[]; clientRequestId: string; replyTo?: string; from?: { limit: PermissionMode; node?: string } }): Promise<{ message: BotChatMessage }> {
+    return this.send(input)
+  }
+
+  /**
+   * `bots.questions.answer`: the owner taps one of a question's answers. It is their reply to the question's bubble, the
+   * same as writing it (it answers the question, moves past any other open one and starts or continues a chat turn), but
+   * the turn it starts is not one the owner's own words started (`answer:`, not `chat:`): the label is the bot's words,
+   * so it never lets the bot start, message or stop a thread, or switch models. A question already answered, or no
+   * longer open, is refused before anything is written. A repeat of `clientRequestId` returns the first answer.
+   */
+  async answerQuestion(input: { botId: string; questionId: string; choice: string; clientRequestId: string; from?: { limit: PermissionMode; node?: string } }): Promise<{ message: BotChatMessage; question?: BotChatMessage }> {
+    this.engine.definitionOf(input.botId)
+    const existing = this.store.messageByRequest(input.clientRequestId)
+    if (existing) {
+      if (existing.botId !== input.botId) throw new BotEngineError('client_request_id_conflict', 'This request belongs to another bot.')
+      return { message: (await this.send({ botId: input.botId, text: existing.text, clientRequestId: input.clientRequestId })).message, ...this.bubbleOf(input.questionId) }
+    }
+    const question = this.questionToAnswer(input.botId, input.questionId)
+    const choice = question.spec.choices.find((entry) => entry.label === input.choice)
+    if (!choice) throw new BotEngineError('invalid_params', 'Pick one of the question\'s answers.')
+    const { message } = await this.send({ botId: input.botId, text: choice.label, clientRequestId: input.clientRequestId, replyTo: question.messageId!, ...(input.from ? { from: input.from } : {}) }, { questionId: question.id, choice: choice.label })
+    return { message, ...this.bubbleOf(question.id) }
+  }
+
+  /**
+   * The checks `answerQuestion` makes before it writes anything, without answering: for a caller that must refuse plainly
+   * first (another device). Throws `question_not_found`, `question_answered` or `question_closed`.
+   */
+  questionCheck(botId: string, questionId: string): void {
+    this.engine.definitionOf(botId)
+    this.questionToAnswer(botId, questionId)
+  }
+
+  /** A chat question of this bot whose bubble is shown and that a tap may answer: open, or moved on. */
+  private questionToAnswer(botId: string, questionId: string): BotQuestionRow {
+    const question = this.store.question(questionId)
+    if (!question || question.botId !== botId || question.lane !== 'chat' || !question.messageId) throw new BotEngineError('question_not_found', 'This bot has no such question.')
+    if (question.status === 'answered' || question.status === 'defaulted') throw new BotEngineError('question_answered', 'This was already answered.')
+    if (question.status === 'withdrawn') throw new BotEngineError('question_closed', 'This question is no longer open.')
+    return question
+  }
+
+  /** The question's bubble as it is now. */
+  private bubbleOf(questionId: string): { question?: BotChatMessage } {
+    const id = this.store.question(questionId)?.messageId
+    const row = id ? this.store.message(id) : undefined
+    return row ? { question: this.engine.chat.toMessage(row) } : {}
+  }
+
+  /**
+   * The owner's message, written or tapped (`tap`): its row and journal row first, in one transaction with what it does
+   * to the bot's questions (it answers the one its reply names, or the one tapped, and moves past any other open one)
+   * and with the chat turn it queues; then a chat waiting at a wall continues with it, or the queued turn starts.
+   */
+  private async send(input: { botId: string; text: string; attachments?: BotChatAttachment[]; clientRequestId: string; replyTo?: string; from?: { limit: PermissionMode; node?: string } }, tap?: { questionId: string; choice: string }): Promise<{ message: BotChatMessage }> {
     const definition = this.engine.definitionOf(input.botId)
     const text = input.text.trim()
     if (!text && !input.attachments?.length) throw new BotEngineError('invalid_params', 'The message is empty.')
@@ -343,22 +420,30 @@ export class BotChatService {
       return { message: this.engine.chat.toMessage(this.store.message(existing.id) ?? existing) }
     }
     // The activation this message belongs to: its row and journal row say so (the chat pack then
-    // leaves it out, as it is the request).
-    const target = this.engine.chatActivationFor(input.botId)
+    // leaves it out, as it is the request). A tap starts a turn of its own: it never answers a permission ask a chat
+    // waits at (as Not now), so it waits its turn behind it.
+    const target = this.engine.chatActivationFor(input.botId, tap ? { joinWall: false } : {})
     // The files are copied into the bot's files folder first: the bot reads its copies, so its grant needs nothing more.
     const saved = input.attachments?.length ? copyBotAttachments(this.engine.filesFolder(input.botId), input.attachments, this.options.now()) : []
     // A reply names a message of this bot's chat; any other id is dropped, never shown or sent.
     const quoted = input.replyTo ? this.store.message(input.replyTo) : undefined
     const replyTo = quoted && quoted.botId === input.botId ? quoted : undefined
-    const prompt = messageInput({ botId: input.botId, text, attachments: saved, replyTo: replyTo?.id ?? null }, (id) => this.store.message(id))
-    const key = `chat:${input.clientRequestId}`
+    // A tap is the owner's reply too, but not their own words: its turn can't act on their threads or models.
+    const key = `${tap ? 'answer' : 'chat'}:${input.clientRequestId}`
     // The owner wrote this: the turn it starts or continues may start, message and stop their threads, held to the
     // limit of the device it came from (`BotOwnerTurn`; absent: this computer's own window).
     const owner: BotOwnerTurn = input.from ? { limit: input.from.limit, ...(input.from.node ? { node: input.from.node } : {}) } : {}
-    let message: BotChatMessage
+    let messageId: string
+    let prompt = ''
     let refused: BotEngineError | undefined
+    let touched: BotQuestionRow[] = []
     try {
-      message = this.store.db.transaction(() => {
+      messageId = this.store.db.transaction(() => {
+        // The question this message answers: the one tapped, or the one its reply names (its bubble), when a tap could
+        // still answer it. Read in the transaction, so a tap on another device is never answered twice.
+        const asked = tap ? this.store.question(tap.questionId) : replyTo?.questionId && replyTo.author === 'bot' ? this.store.question(replyTo.questionId) : undefined
+        const answering = asked && asked.messageId === replyTo?.id && (asked.status === 'open' || asked.status === 'moved_on') ? asked : undefined
+        if (tap && !answering) throw new BotEngineError(asked?.status === 'withdrawn' ? 'question_closed' : 'question_answered', asked?.status === 'withdrawn' ? 'This question is no longer open.' : 'This was already answered.')
         const posted = this.engine.chat.post({
           botId: input.botId,
           author: 'owner',
@@ -368,25 +453,36 @@ export class BotChatService {
           clientRequestId: input.clientRequestId,
           activationId: target.activationId,
           lane: 'chat',
-          ...(replyTo ? { replyTo: replyTo.id } : {})
+          ...(replyTo ? { replyTo: replyTo.id } : {}),
+          ...(answering ? { questionId: answering.id } : {})
         })
+        if (answering) this.store.answerQuestion(answering.id, tap ? { choice: tap.choice, by: 'owner', tapped: true } : { text, by: 'owner' }, posted.id)
+        // Any other question still open is moved past: the owner wrote something else, and the bot hears what it had asked.
+        const moved = this.store.moveOnQuestions(input.botId, posted.id, answering?.id)
+        touched = [...(answering ? [answering] : []), ...moved]
+        const body = messageInput({ botId: input.botId, text, attachments: saved, replyTo: replyTo?.id ?? null, ...(answering ? { questionId: answering.id } : {}) }, (id) => this.store.message(id))
+        prompt = [...moved.map((question) => movedOnLine(question.spec)), body].join('\n\n')
         if (!target.continues) refused = this.engine.queueChatInTx(input.botId, key, prompt, target.activationId, owner)
         // A message from another device that continues a turn waiting at a wall holds the rest of that turn to the
         // device's limit, written with the message: a restart before the turn continues (`admitWallMessage`) keeps it.
         else if (owner.limit) this.store.narrowOwnerLimit(target.activationId, owner.limit)
-        return posted
+        return posted.id
       })
     } catch (error) {
       removeBotAttachments(saved)
+      if (error instanceof BotEngineError) throw error
       // The message and its journal row are written together or not at all: the bot never runs unrecorded.
       const code = (error as { code?: unknown } | null)?.code
       if (code !== 'bot_journal_failed' && code !== 'storage_full') throw error
       this.engine.journalFailedFor(input.botId)
       throw new BotEngineError('bot_journal_failed', 'I can\'t save my work. Free some disk space.')
     }
+    // The bubbles of the questions it answered or moved past show it, in every window.
+    for (const question of touched) for (const row of this.store.messagesForQuestion(question.id)) if (row.author === 'bot') this.engine.chat.republish(row.id)
+    const message = this.engine.chat.toMessage(this.store.message(messageId)!)
     try {
-      // A limit answered Not now ends its walled turn first; the queued activation then starts.
-      const continued = await this.engine.continueChatWith(input.botId, prompt, owner)
+      // A limit answered Not now ends its walled turn first; the queued activation then starts. A tap leaves the wall be.
+      const continued = tap ? false : await this.engine.continueChatWith(input.botId, prompt, owner)
       if (target.continues) {
         if (continued) return { message }
         // The wall was answered meanwhile: the message starts a chat of its own.

@@ -918,6 +918,27 @@ export class BotMemoryStore {
   allVersions(botId: string): BotMemoryVersion[] {
     return this.all('SELECT * FROM bot_memories WHERE bot_id = ? ORDER BY row_id', botId).map(versionOf)
   }
+
+  /**
+   * Every question a bot asked its owner, oldest first (export): what it asked, its answers, where it stands and the
+   * answer given, as `bots.db` keeps them (Forget's redactions included). None where `bots.db` has no questions table.
+   */
+  questions(botId: string): Array<Record<string, unknown>> {
+    if (!this.get("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bot_questions'")) return []
+    return this.all('SELECT id, activation_id, lane, spec_json, status, answer_json, answer_message, answered_at, message_id, created_at FROM bot_questions WHERE bot_id = ? ORDER BY created_at, rowid', botId)
+      .map((row) => ({
+        id: row.id,
+        activationId: row.activation_id,
+        lane: row.lane,
+        ...(parseJson(row.spec_json) ?? {}),
+        status: row.status,
+        ...(row.answer_json ? { answer: parseJson(row.answer_json) } : {}),
+        ...(row.answer_message ? { answerMessage: row.answer_message } : {}),
+        ...(row.answered_at ? { answeredAt: row.answered_at } : {}),
+        ...(row.message_id ? { messageId: row.message_id } : {}),
+        createdAt: row.created_at
+      }))
+  }
 }
 
 /** Rewrites the chips of a bot's chat rows that `scrub` changes (when `bot_messages` exists). */
@@ -959,6 +980,12 @@ function defaultRedactMessage(tx: BotStoreTx, botId: string, messageId: string, 
       clearReaction(row.message_id)
       redactJournal(`bm:${row.message_id}`)
     }
+  }
+  // A question the forgotten message carried keeps no copy of its words or answers, and no longer waits for an answer; an
+  // answer the forgotten message gave keeps no copy either (issue #1123).
+  if (has('bot_questions')) {
+    tx.statement("UPDATE bot_questions SET spec_json = json_object('question', ?, 'choices', json('[]'), 'other', json('false')), status = CASE WHEN status IN ('open', 'moved_on') THEN 'withdrawn' ELSE status END WHERE bot_id = ? AND message_id = ?").run(text, botId, messageId)
+    tx.statement("UPDATE bot_questions SET answer_json = CASE WHEN json_extract(answer_json, '$.tapped') OR json_extract(answer_json, '$.choice') IS NOT NULL THEN json_object('by', json_extract(answer_json, '$.by'), 'tapped', json('true'), 'redacted', json('true')) ELSE json_object('by', json_extract(answer_json, '$.by'), 'redacted', json('true')) END WHERE bot_id = ? AND answer_message = ? AND answer_json IS NOT NULL").run(botId, messageId)
   }
   // A note the forgotten message passed to work: gone from the note and from the prompt that carried it.
   if (has('bot_work_notes')) {

@@ -120,6 +120,17 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
       fake.chats[botId] = rows.map((entry) => (entry.id === row.id ? next : entry))
       return next
     })),
+    // A tap: the owner's reply (the label) to the question's bubble, and the bubble answered.
+    answerQuestion: vi.fn((botId, questionId, choice, clientRequestId) => record('answerQuestion', [botId, questionId, choice], () => {
+      const rows = fake.chats[botId] ?? []
+      const bubble = rows.find((entry) => entry.question?.questionId === questionId)
+      if (!bubble?.question) throw Object.assign(new Error('This bot has no such question.'), { code: 'question_not_found' })
+      if (bubble.question.status === 'answered') throw Object.assign(new Error('This was already answered.'), { code: 'question_answered' })
+      const next = { ...bubble, question: { ...bubble.question, status: 'answered' as const, answer: choice, answeredWith: 'choice' as const } }
+      const reply = message(++seq, { id: `sent:${clientRequestId}`, author: 'owner', text: choice, clientRequestId, replyTo: { id: bubble.id, author: 'bot', text: bubble.text.slice(0, bubble.plainFrom).trim() }, answers: { questionId, tapped: true } })
+      fake.chats[botId] = [...rows.map((entry) => (entry.id === bubble.id ? next : entry)), reply]
+      return { message: reply, question: next }
+    })),
     revokePermission: vi.fn((botId, permissionId) => record('revokePermission', [botId, permissionId], () => {
       const next = { ...detail(botId), permissions: detail(botId).permissions.filter((item) => item.id !== permissionId) }
       fake.details[botId] = next

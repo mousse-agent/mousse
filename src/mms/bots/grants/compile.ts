@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
 import { existsSync, readdirSync, realpathSync } from 'node:fs'
 import { foldersOf, type BotManifest, type BotThreadSpec } from '../../../shared/bots/personal/definition'
-import { BOT_APP_TOOLS, BOT_APPLET_TOOL, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest, BOT_SUBAGENT_APP_TOOLS, BOT_SUBAGENT_TOOLS } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_APPLET_TOOL, BOT_QUESTION_TOOL, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest, BOT_SUBAGENT_APP_TOOLS, BOT_SUBAGENT_TOOLS } from '../../../shared/bots/personal/manifest'
 import { BOT_MEMORY_TOOLS } from '../../../shared/bots/personal/memory'
 import { withinComputerLimit, type BotComputerLimit } from '../../../shared/bots/personal/computerLimit'
 import type { NeutralTool } from '../../../shared/harness/tools'
@@ -111,6 +111,8 @@ export interface CompileInput {
      * the rest of `botTools` says: no asks, memory, schedules, reminders, pictures, work, threads or subagents of its own.
      */
     subagent?: true
+    /** `ask_owner` (`BOT_QUESTION_TOOL`): a question with answers to tap; it grants nothing. A chat turn only, in this build. */
+    questions?: boolean
   }
   /**
    * What this computer lets bots do (Settings → What bots may do here): what it has switched off is taken out of the
@@ -256,6 +258,7 @@ export function compileBotThread(input: CompileInput): CompileResult {
     ...(own?.frontDesk ? BOT_WORK_TOOLS : []),
     ...(own?.images ? [BOT_IMAGE_TOOL] : []),
     ...(own?.applets ? [BOT_APPLET_TOOL] : []),
+    ...(own?.questions ? [BOT_QUESTION_TOOL] : []),
     // A run's main turn splits its job among subagents, on models from the same list the chat picks work's from.
     ...(own?.subagents && !own.frontDesk ? [...BOT_SUBAGENT_TOOLS, 'work_models'] : [])
   ])].sort()
