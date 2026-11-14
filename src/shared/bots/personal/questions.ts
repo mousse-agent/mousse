@@ -82,6 +82,9 @@ export const QUESTION_AFTER_ASK_TEXT = 'Ask it once the owner has answered your 
 /** `ask_owner` where it is never offered (a scheduled run, a consult, a subagent): the question goes in the report. */
 export const QUESTION_NOT_OFFERED_TEXT = "You can't ask your owner from here: carry on, and ask in your report."
 
+/** `question_answer` after the owner forgot what they wrote in that chat turn: nothing of it is passed on. */
+export const QUESTION_ANSWER_FORGOTTEN_TEXT = "Your owner removed what they wrote, so it can't be passed on. The question stays open for them to answer."
+
 /** The owner's Continue on work that waits for their answer: the answer is the way on. */
 export const QUESTION_WORK_WAITING_TEXT = 'This work waits for your answer to its question. Answer it to let it carry on, or stop it.'
 

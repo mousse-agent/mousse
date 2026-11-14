@@ -488,7 +488,8 @@ export interface BotQuestionRow {
   lane: BotLane
   spec: BotQuestionSpec
   status: BotQuestionStatus
-  answer: (BotQuestionAnswer & { redacted?: true }) | null
+  /** `sent`: work's answer went out with dispatch `n`, as `line` in its prompt (`markAnswerSent`); a forget drops it. */
+  answer: (BotQuestionAnswer & { redacted?: true; sent?: { n: number; line: string } }) | null
   /** The owner's message that answered it, or that moved past it (`moved_on`). */
   answerMessage: string | null
   answeredAt: string | null
@@ -1695,6 +1696,23 @@ export class BotStore {
   workQuestion(activationId: string): BotQuestionRow | undefined {
     const row = this.get("SELECT * FROM bot_questions WHERE activation_id = ? AND lane = 'run' AND read_at IS NULL AND status IN ('open', 'answered') ORDER BY created_at DESC, rowid DESC LIMIT 1", activationId)
     return row ? questionOf(row) : undefined
+  }
+
+  /**
+   * A question work asked that the owner forgot before the work carried on with it (Forget withdrew it, unread): the work
+   * has nothing to go on with. Only Forget withdraws a question of work that has not ended.
+   */
+  forgottenWorkQuestion(activationId: string): BotQuestionRow | undefined {
+    const row = this.get("SELECT * FROM bot_questions WHERE activation_id = ? AND lane = 'run' AND status = 'withdrawn' AND read_at IS NULL ORDER BY created_at DESC, rowid DESC LIMIT 1", activationId)
+    return row ? questionOf(row) : undefined
+  }
+
+  /**
+   * Work's answered question went out with dispatch `n`, as `line` in its prompt: read once, and the line kept with the
+   * answer, so a forget finds that copy by the question, not by its words (`answer_json.sent`).
+   */
+  markAnswerSent(questionId: string, n: number, line: string): void {
+    this.run("UPDATE bot_questions SET read_at = ?, answer_json = json_set(answer_json, '$.sent', json_object('n', ?, 'line', ?)) WHERE id = ? AND read_at IS NULL", this.now(), n, line, questionId)
   }
 
   /** The bot's questions that work waits on now (the work is `blocked` with `question`), oldest first. */

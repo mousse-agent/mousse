@@ -8,7 +8,9 @@
  * - answers: a tap, a reply in the owner's words on the bubble, the chat passing on what they wrote there
  *   (`question_answer`, only from a chat turn their own message started), a second answer from another device
  * - ends: Stop, the grant revoked, a full queue, the question's bubble forgotten; each withdraws the question and says so
- * - Forget of the answer: before the work read it (it waits again), after (it stays with the work)
+ * - Forget of the answer: before the work read it (it waits again), after (it stays with the work, and its copies in the
+ *   work's prompt, the captured continuation and the chat's relay call go); of the bubble while the asking turn still
+ *   runs, or before a restart (the work ends); a relay of words the owner forgot is refused
  * - restarts: while it waits, between the answer and the resume, right after `ask_owner` with its dispatch cut
  * - several pieces each waiting: an answer wakes only its own
  * - where it is never offered: a scheduled run, a consult (subagents: botWorkSubagents.test.ts)
@@ -25,7 +27,9 @@ import type { MousseTool, ToolCallContext } from '../../src/mms/run/mcp/appTools
 import type { PreparedBotTurn } from '../../src/mms/bots/activation/dispatcher'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
 import type { BotChatMessage } from '../../src/shared/bots/personal/chat'
-import { QUESTION_END_TURN_TEXT, QUESTION_NOT_OFFERED_TEXT, QUESTION_WORK_ASKED_TEXT, QUESTION_WORK_WAITING_TEXT, QUESTIONS_ENOUGH_TEXT, questionGoneText } from '../../src/shared/bots/personal/questions'
+import { QUESTION_ANSWER_FORGOTTEN_TEXT, QUESTION_END_TURN_TEXT, QUESTION_NOT_OFFERED_TEXT, QUESTION_WORK_ASKED_TEXT, QUESTION_WORK_WAITING_TEXT, QUESTIONS_ENOUGH_TEXT, questionGoneText } from '../../src/shared/bots/personal/questions'
+import { capturedRows } from '../../src/mms/bots/memory/capture'
+import type { ChatMessage } from '../../src/shared/types'
 import { botFixture, chatOf, createBot, finish, flush, payloadOf, start, type BotFixture } from './botFixture'
 
 const context = { connection: { id: 'c', binding: { profileId: 'p1', epoch: 1 }, capabilities: new Set<string>() } } as unknown as HandlerContext
@@ -104,6 +108,23 @@ function published(): (id: string) => BotChatMessage | undefined {
   return (id) => sent.filter((message) => message.id === id).at(-1)
 }
 const mainDispatches = (workId: string) => f.store.dispatches(workId).filter((dispatch) => dispatch.kind === 'start' || dispatch.kind === 'continue')
+
+/** A real memory store over the fixture's `bots.db` (the fixture's journal is a stand-in). */
+const memoryStore = () => new BotMemoryStore({ db: f.store.db, clock: () => f.clock.now, timeZone: () => 'UTC' })
+
+/** A real journal row for a chat message, as `chat.post` writes it, and its ref for Forget. */
+function journaled(memory: BotMemoryStore, message: BotChatMessage, kind: 'owner_msg' | 'notice', lane: 'chat' | 'run' = 'run'): string {
+  f.store.db.transaction(() => memory.appendInTx(f.store.db, { botId, kind, lane, sourceKey: `bm:${message.id}`, who: kind === 'owner_msg' ? 'owner' : 'bot', text: message.text, ...(message.activationId ? { activationId: message.activationId } : {}) }))
+  return `j${f.store.get('SELECT seq FROM bot_journal WHERE source_key = ?', `bm:${message.id}`)!.seq as number}`
+}
+
+/** Thread messages copied into the journal as capture copies them (`capturedRows`); their journal rows' seqs. */
+function captured(memory: BotMemoryStore, ref: { threadId: string; lane: 'chat' | 'run'; activationId: string }, messages: ChatMessage[]): number[] {
+  const rows = messages.flatMap((message) => capturedRows(message, { botId, ...ref }))
+  f.store.db.transaction(() => { for (const { at, ...row } of rows) memory.appendInTx(f.store.db, row, at) })
+  return rows.map((row) => f.store.get('SELECT seq FROM bot_journal WHERE source_key = ?', row.sourceKey)!.seq as number)
+}
+const journalText = (seq: number) => f.store.get('SELECT text, redacted_at FROM bot_journal WHERE seq = ?', seq) as { text: string; redacted_at: string | null }
 
 /** Restarts Mousse over the same `bots.db` and run database. */
 async function restart() {
@@ -248,6 +269,22 @@ describe('the chat passes on an answer (question_answer)', () => {
     const again = await chat('Actually the first', 'c3')
     expect(await tool('question_answer', again.prepared, again.payload.threadId, { questionId, answer: 'Flat A' })).toMatchObject({ isError: true })
   })
+
+  it('never passes on what the owner forgot, even from the turn their message started and while it still runs', async () => {
+    const memory = memoryStore()
+    const { workId, work, questionId } = await workThatAsks()
+    await endTurn(work)
+    const own = await chat('Go with the second one', 'c1')
+    // The owner forgets their message while the turn that holds it still runs (its model already read it).
+    memory.forget(botId, { refs: [journaled(memory, own.message, 'owner_msg', 'chat')], by: 'owner_ui' })
+    expect(await tool('question_answer', own.prepared, own.payload.threadId, { questionId, answer: 'The second one' })).toEqual({ text: QUESTION_ANSWER_FORGOTTEN_TEXT, isError: true })
+    expect(f.store.question(questionId)).toMatchObject({ status: 'open', answer: null })
+    expect(f.store.activation(workId)).toMatchObject({ status: 'blocked', endReason: 'question' })
+    // The control: the same relay from a turn whose message is kept goes through.
+    await finish(f, own.payload, 'completed', { text: 'OK.' })
+    const kept = await chat('Go with the second one', 'c2')
+    expect(JSON.parse((await tool('question_answer', kept.prepared, kept.payload.threadId, { questionId, answer: 'The second one' })).text)).toMatchObject({ ok: true })
+  })
 })
 
 describe('nothing is left waiting', () => {
@@ -300,12 +337,6 @@ describe('nothing is left waiting', () => {
 })
 
 describe('Forget', () => {
-  /** A real journal row for a chat message, as capture writes it, and its ref. */
-  const journaled = (memory: BotMemoryStore, message: BotChatMessage, kind: 'owner_msg' | 'notice') => {
-    f.store.db.transaction(() => memory.appendInTx(f.store.db, { botId, kind, lane: 'run', sourceKey: `bm:${message.id}`, who: kind === 'owner_msg' ? 'owner' : 'bot', text: message.text }))
-    return `j${f.store.get('SELECT seq FROM bot_journal WHERE source_key = ?', `bm:${message.id}`)!.seq as number}`
-  }
-  const memoryStore = () => new BotMemoryStore({ db: f.store.db, clock: () => f.clock.now, timeZone: () => 'UTC' })
   /** Fills the bot's three run slots, so answered work waits for one. */
   const fillSlots = async () => [await handOff('Train times', 'f1'), await handOff('Weather', 'f2'), await handOff('Recipes', 'f3')]
 
@@ -324,6 +355,82 @@ describe('Forget', () => {
     await f.bots.maintain()
     expect(mainDispatches(workId)).toHaveLength(1)
     expect(f.store.activation(workId)).toMatchObject({ status: 'blocked', endReason: 'question' })
+  })
+
+  it('of a tapped answer the work already read: the line that carried it goes from the work’s prompt and its captured copy, the rest stays', async () => {
+    const memory = memoryStore()
+    const { workId, work, questionId } = await workThatAsks()
+    await endTurn(work)
+    const { message } = await tap(questionId, 'Flat B')
+    await flush()
+    const resumed = mainDispatches(workId).at(-1)!
+    expect(resumed.prompt.text).toContain(': Flat B.')
+    // Capture copies the continuation from the work's thread, as it does after every dispatch, and the report that follows.
+    const ref = { threadId: resumed.threadId, lane: 'run' as const, activationId: workId }
+    const [copy, report] = captured(memory, ref, [
+      { id: 'cont', role: 'user', content: resumed.prompt.text, timestamp: f.store.now() } as ChatMessage,
+      { id: 'rep', role: 'assistant', content: 'I booked a viewing of Flat B for Saturday.', timestamp: f.store.now() } as ChatMessage
+    ])
+    expect(journalText(copy!).text).toContain('Flat B')
+    memory.forget(botId, { refs: [journaled(memory, message, 'owner_msg')], by: 'owner_ui' })
+    // "Flat B" is short; the copies are found by the question, not by their length.
+    const scrubbed = f.store.dispatch(workId, resumed.n)!.prompt.text
+    expect(scrubbed).not.toContain('Flat B')
+    expect(scrubbed).toContain('Carry on where you left off.')
+    expect(journalText(copy!).text).not.toContain('Flat B')
+    expect(journalText(copy!).text).toContain('Carry on where you left off.')
+    expect(JSON.stringify(f.store.question(questionId)!.answer)).not.toContain('Flat B')
+    // What the bot wrote itself is not a copy of the answer: it stays, as with notes.
+    expect(journalText(report!).text).toBe('I booked a viewing of Flat B for Saturday.')
+  })
+
+  it('of the owner’s words the chat passed on: the chat’s question_answer call and the work’s copy go; of the question’s bubble: its ask_owner call and the line that quoted it', async () => {
+    const memory = memoryStore()
+    const { workId, work, questionId, bubble } = await workThatAsks()
+    await endTurn(work)
+    const own = await chat('Go with the second one', 'c1')
+    await tool('question_answer', own.prepared, own.payload.threadId, { questionId, answer: 'The second one, Flat B' })
+    await finish(f, own.payload, 'completed', { text: 'Got it.' })
+    await flush()
+    const resumed = mainDispatches(workId).at(-1)!
+    const [askCall] = captured(memory, { threadId: mainDispatches(workId)[0]!.threadId, lane: 'run', activationId: workId }, [
+      { id: 'ask', role: 'assistant', kind: 'tool_call', content: '', timestamp: f.store.now(), toolCall: { title: 'ask_owner', summary: '', details: [], status: 'complete', toolName: 'mcp__mousse__ask_owner', input: { question: FLATS.question, choices: FLATS.choices } } } as ChatMessage
+    ])
+    const [relayCall] = captured(memory, { threadId: own.payload.threadId, lane: 'chat', activationId: own.activation.id }, [
+      { id: 'relay', role: 'assistant', kind: 'tool_call', content: '', timestamp: f.store.now(), toolCall: { title: 'question_answer', summary: '', details: [], status: 'complete', toolName: 'mcp__mousse__question_answer', input: { questionId, answer: 'The second one, Flat B' } } } as ChatMessage
+    ])
+    const [copy] = captured(memory, { threadId: resumed.threadId, lane: 'run', activationId: workId }, [{ id: 'cont', role: 'user', content: resumed.prompt.text, timestamp: f.store.now() } as ChatMessage])
+    memory.forget(botId, { refs: [journaled(memory, own.message, 'owner_msg', 'chat')], by: 'owner_ui' })
+    expect(journalText(relayCall!)).toMatchObject({ redacted_at: expect.any(String) })
+    expect(journalText(relayCall!).text).not.toContain('Flat B')
+    expect(f.store.dispatch(workId, resumed.n)!.prompt.text).not.toContain('Flat B')
+    expect(journalText(copy!).text).not.toContain('Flat B')
+    // The question itself is not forgotten yet: its ask_owner call stays.
+    expect(journalText(askCall!).redacted_at).toBeNull()
+    memory.forget(botId, { refs: [journaled(memory, bubble, 'notice')], by: 'owner_ui' })
+    expect(journalText(askCall!)).toMatchObject({ redacted_at: expect.any(String) })
+    expect(journalText(askCall!).text).not.toMatch(/flat/i)
+  })
+
+  it('of the bubble while the work’s asking turn still runs: the work ends with its line when the turn ends, and never reports', async () => {
+    const memory = memoryStore()
+    const { workId, work, bubble, asked } = await workThatAsks()
+    memory.forget(botId, { refs: [journaled(memory, bubble, 'notice')], by: 'owner_ui' })
+    await endTurn(work)
+    expect(f.store.activation(workId)).toMatchObject({ status: 'failed', endReason: 'question_gone' })
+    expect(chatOf(f, botId).at(-1)).toMatchObject({ text: questionGoneText('Flat hunt'), replyTo: { id: asked.id } })
+    expect(chatOf(f, botId).some((message) => message.text.includes('I asked which flat'))).toBe(false)
+  })
+
+  it('of the bubble, then a restart cut the asking turn: the work ends with its line instead of carrying on', async () => {
+    const memory = memoryStore()
+    const { workId, work, bubble } = await workThatAsks()
+    memory.forget(botId, { refs: [journaled(memory, bubble, 'notice')], by: 'owner_ui' })
+    f.runs.markTerminal(work.payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+    await restart()
+    expect(f.store.activation(workId)).toMatchObject({ status: 'failed', endReason: 'question_gone' })
+    expect(mainDispatches(workId)).toHaveLength(1)
+    expect(chatOf(f, botId).at(-1)?.text).toBe(questionGoneText('Flat hunt'))
   })
 
   it('of the answer after the work read it: it stays with the work, and the bubble keeps no copy of it', async () => {
