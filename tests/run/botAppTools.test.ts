@@ -115,6 +115,13 @@ describe('schedule tools', () => {
     expect(bots.activity.drain('d1')).toEqual([{ icon: 'schedule', text: 'every weekday · 09:00' }])
   })
 
+  it('passes a fixed line and its end through the schedule tool', async () => {
+    const bots = fakeBots()
+    const result = await bots.call('bot_schedule_add', { when: { kind: 'interval', minutes: 60 }, say: 'Take your pills', until: '2030-11-21' })
+    expect(result.isError).toBeFalsy()
+    expect(bots.schedules[0]).toMatchObject({ say: 'Take your pills', until: '2030-11-21' })
+  })
+
   it('bot_schedule_add from a chat turn hands the turn to the host, which shows the automation as a card; no chip repeats it', async () => {
     const bots = fakeBots('chat', { cards: true })
     bots.activity.onAllowed({ botId: 'b1', activationId: 'a1', dispatchId: 'd1' }, { tool: 'bot_schedule_add', input: { when: { kind: 'interval', minutes: 30 }, prompt: 'Check the build' } })

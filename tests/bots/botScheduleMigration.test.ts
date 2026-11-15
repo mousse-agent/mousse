@@ -197,6 +197,20 @@ describe('going back to an older build and coming back', () => {
     expect(jobs.getJob('bot-a--news')?.bot).toEqual({ botId: 'bot-a', scheduleId: 'news', createdBy: 'owner' })
   })
 
+  it('restores a fixed line when an older build kept the bot link but lost its new keys', () => {
+    move()
+    const job = jobs.getJob('bot-a--news')!
+    jobs.updateJob(job.id, { bot: { ...job.bot!, say: 'Take your pills' } } as never)
+    const inside = jobs as unknown as { config: MousseConfigStore }
+    inside.config.updateScheduledSection({ jobs: jobs.listJobs().map((row) => {
+      const definition = jobToDefinition(row)
+      if (row.id === job.id) delete (definition.bot as { say?: string }).say
+      return definition
+    }) })
+    expect(jobs.restoreDroppedFields()).toContain(job.id)
+    expect(jobs.getJob(job.id)!.bot).toMatchObject({ say: 'Take your pills' })
+  })
+
   it('puts back every field an older build’s save dropped: a bot’s link, a draft, keys, Tell me and a CLI name', () => {
     move()
     const draft = jobs.createJob({ name: 'Draft', prompt: 'x', schedule: { kind: 'interval', minutes: 30 }, draft: { draft: true, draftId: 'd1' } })

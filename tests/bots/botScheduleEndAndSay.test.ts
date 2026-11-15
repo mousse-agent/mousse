@@ -25,3 +25,39 @@ it('runs before its end, never after, leaves About and says once that it ended',
   expect(f.book.list(botId)).toEqual([])
   expect(chatOf(f, botId).filter((row) => row.text === '‘Inbox check’ ended, as planned.')).toHaveLength(1)
 })
+
+it.each([undefined, 'usage_limit', 'owner'] as const)('says once without a run with pause %s', async (pause) => {
+  const entry = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 60 }, say: 'Take your pills' } as never, 'owner')
+  expect(f.scheduler.getJob(entry.jobId)).toMatchObject({ prompt: 'Say exactly: Take your pills', bot: { say: 'Take your pills' } })
+  expect(f.bots.listSchedules(botId)[0]!.label).toBe('Says “Take your pills” · every 60 minutes')
+  await f.bots.reconcileOnStartup()
+  if (pause) f.store.setPaused(botId, pause as never)
+  const before = f.store.listActivations(botId).map((row) => row.id)
+  await f.tickSchedules(new Date(T0 + 60 * MIN))
+  expect(f.store.listActivations(botId).map((row) => row.id)).toEqual(before)
+  const lines = () => chatOf(f, botId).filter((row) => row.text === 'Take your pills')
+  expect(lines()).toHaveLength(pause === 'owner' ? 0 : 1)
+  f.bots.runScheduledOccurrence({ botId, scheduleId: entry.scheduleId, say: 'Take your pills', prompt: 'Say exactly: Take your pills', occurrenceAt: new Date(T0 + 60 * MIN).toISOString() } as never)
+  expect(lines()).toHaveLength(pause === 'owner' ? 0 : 1)
+})
+
+it.each(['', 'a'.repeat(501), 'hello\u200bworld'])('refuses empty, long or hidden say text', (say) => {
+  expect(() => f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, say } as never, 'owner')).toThrow()
+})
+
+it('refuses both prompt and say', () => {
+  expect(() => f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Check', say: 'Hello' } as never, 'owner')).toThrow(/prompt|say/i)
+})
+
+it.each([[10, true], [30, false], [40, false]])('after downtime at %i minutes late, says %s', async (late, said) => {
+  const { recordTickerHeartbeat } = await import('../../src/mms/scheduled/ScheduledJobStore')
+  const { join } = await import('node:path')
+  const entry = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 60 }, say: 'Take your pills' } as never, 'owner')
+  await f.bots.reconcileOnStartup()
+  recordTickerHeartbeat(false, join(f.base, 'mousse-home'), new Date(T0))
+  await f.tickSchedules(new Date(T0 + (60 + late) * MIN))
+  const messages = chatOf(f, botId).filter((row) => row.text.includes('Take your pills'))
+  expect(messages).toHaveLength(said ? 1 : 0)
+  if (said) expect(messages[0]!.text).toMatch(/^\(For \d\d:\d\d\) Take your pills$/)
+  else expect(f.book.get(botId, entry.scheduleId)!.skip?.reason).toContain('Missed')
+})
