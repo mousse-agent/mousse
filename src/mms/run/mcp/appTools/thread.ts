@@ -12,7 +12,7 @@ import type { BotAppToolDeps } from './bots'
 import { threadLink } from '../../../../shared/threadLink'
 import { ROUTED_AGENT_BODY_MAX } from '../../../../shared/bridge/routed'
 import { isQualifiedId, parseQualifiedId } from '../../../../shared/threadRef'
-import { RemoteThreadRefusal, type RemoteTarget, type RemoteWaitResult } from '../../../orchestrator/RemoteLaunchedThreads'
+import { RemoteThreadRefusal, SEARCH_MS, type RemoteComputerReach, type RemoteTarget, type RemoteWaitResult } from '../../../orchestrator/RemoteLaunchedThreads'
 import { cutEnd, messageRows, textOffsetProblem, type MessageRow } from './messageRows'
 import type { BotActivityContext, BotActivitySink } from '../../../bots/seams'
 import {
@@ -658,7 +658,19 @@ function localTarget(args: Record<string, unknown>, caller: McpCaller): { thread
 /** A refusal about a thread on another computer, as the tool returns it: its code says which reason it was. */
 function remoteRefusal(error: unknown): ToolOutcome | undefined {
   if (!(error instanceof RemoteThreadRefusal)) return undefined
-  return { text: JSON.stringify({ ok: false, code: error.code, ...(error.computer ? { computer: error.computer } : {}), message: error.message }), isError: true }
+  // What else the refusal names: the reach that computer gave this one (outside_agent_reach), the computers a name could be.
+  const details = (error.details ?? {}) as { reach?: unknown; computers?: unknown }
+  return {
+    text: JSON.stringify({
+      ok: false,
+      code: error.code,
+      ...(error.computer ? { computer: error.computer } : {}),
+      ...(details.reach !== undefined ? { reach: details.reach } : {}),
+      ...(details.computers !== undefined ? { computers: details.computers } : {}),
+      message: error.message
+    }),
+    isError: true
+  }
 }
 
 /**
@@ -718,7 +730,10 @@ function remoteWaitView(threadId: string, computer: string, result: RemoteWaitRe
 }
 
 /** What the descriptions of the five tools say about a thread on another computer. */
-const REMOTE_REACH = 'A thread your thread (or a thread of its lineage) launched on another computer is reached by its qualified id (<computer id>:<thread id>, from thread_create with computer); any other thread there is refused. A refusal there names its reason in code: computer_offline, computer_not_shared, computer_outdated, computer_not_allowed, not_launched_here or remote_thread_gone.'
+const REMOTE_REACH = 'A thread on another of the user\'s computers is reached by its qualified id (<computer id>:<thread id>, from thread_create, thread_list or thread_search with computer), when the user lets agents work on that computer (or your thread launched it there). Reading it works as that computer shares it with this one; a change there (send, steer, Stop) is decided by that computer: its person chose which threads this computer\'s agents may change there (only the threads they started, by default; all threads; or none), and a refusal of that (outside_agent_reach) is final: tell the user, never try again. A refusal there names its reason in code: computer_offline, computer_not_shared, computer_outdated, computer_not_allowed, outside_agent_reach, remote_from_remote, private_thread, unknown_computer or remote_thread_gone.'
+
+/** What `thread_list` and `thread_search` say about `computer`. */
+const REMOTE_LISTS = 'computer (a name or id from list_computers) lists or searches another of the user\'s computers instead, when the user lets agents work there (Settings → Agents → Agent access) and your thread is not private nor started from another device: its threads come with qualified ids (<computer id>:<thread id>) and links, and never a private thread of that computer.'
 
 /** How a `thread_wait` ended before its result was read. */
 type WaitEnd = { kind: 'finished' } | { kind: 'timeout' } | { kind: 'caller_ended' } | { kind: 'refused'; text: string }
@@ -895,7 +910,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     if (view !== 'events' && view !== 'messages') throw new Error("view must be 'events' or 'messages'")
     const target = remoteTarget(threadId, ctx, 'thread_read')
     const remote = host.remoteThreads!
-    const envelope = { threadId: target.threadId, link: threadLink(target.threadId), computer: target.computer, view, scope: 'launched' }
+    const envelope = { threadId: target.threadId, link: threadLink(target.threadId), computer: target.computer, view, scope: target.record ? 'launched' : 'computer' }
     if (view === 'messages') {
       const afterIndex = boundedInt(args.afterIndex, 'afterIndex', 0, Number.MAX_SAFE_INTEGER, 0)
       const limit = boundedInt(args.limit, 'limit', 1, THREAD_MESSAGES_MAX_LIMIT, THREAD_MESSAGES_DEFAULT_LIMIT)
@@ -983,10 +998,94 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     if (result.status === 'uncertain') return json({ ok: false, status: 'uncertain', threadId: target.threadId, computer: target.computer, message: result.message })
     if (result.status === 'left') {
       if (result.left === 'not_started_by_this_computer')
-        throw new McpToolError('mousse_scope_denied', `Run ${runId} on ${target.computer} was not started by an agent of this computer (a person there has taken the thread over), so it was left running. Only a person there stops it.`, { conflict: 'not_started_by_this_computer' })
+        throw new McpToolError('mousse_scope_denied', target.record
+          ? `Run ${runId} on ${target.computer} was not started by an agent of this computer (a person there has taken the thread over), so it was left running. Only a person there stops it.`
+          : `Run ${runId} on ${target.computer} was not started by an agent of this computer, so it was left running: an agent here stops only runs this computer's agents started there. Only a person there stops it.`, { conflict: 'not_started_by_this_computer' })
       throw new McpToolError('mousse_conflict', `Run ${runId} is not the thread's active (or paused) run on ${target.computer}; nothing was stopped. Read the thread again.`, { conflict: 'run_not_active', expectedRunId: runId })
     }
     return json({ threadId: target.threadId, computer: target.computer, runId: result.runId ?? runId, stopped: true })
+  })
+  /** The computer `thread_list` or `thread_search` names, as the caller may list it now; a refusal is thrown with its code. */
+  const listedComputer = (args: Record<string, unknown>, ctx: ToolCallContext, tool: string): Extract<RemoteComputerReach, { ok: true }> => {
+    if (typeof args.computer !== 'string' || !args.computer.trim()) throw new Error('computer must be a non-empty string: a name from list_computers')
+    if (ctx.turn.bot) throw new McpToolError('mousse_scope_denied', `A personal bot's ${tool} reaches only threads on this computer.`)
+    if (!host.remoteThreads)
+      throw new RemoteThreadRefusal('remote_unavailable', 'Threads on other computers need Mousse to be connected to your other computers (Settings → Devices).')
+    const found = host.remoteThreads.computerFor(ctx.caller.threadId, args.computer)
+    if (!found.ok) throw new RemoteThreadRefusal(found.code, found.message, found.computer, found.computers ? { computers: found.computers } : undefined)
+    return found
+  }
+  /**
+   * `thread_list` with `computer`: the threads that computer shares with this one, read there at this call, filtered and
+   * cut as here (`limit`, and #1222's byte cap), every id qualified.
+   */
+  const listOnComputer = (args: Record<string, unknown>, ctx: ToolCallContext): Promise<ToolOutcome> => onComputer(async () => {
+    if (args.projectId !== undefined && (typeof args.projectId !== 'string' || !args.projectId)) throw new Error('projectId must be a non-empty string')
+    if (args.status !== undefined && args.status !== 'active' && args.status !== 'idle' && args.status !== 'awaiting_input')
+      throw new Error('status must be active, idle or awaiting_input')
+    for (const key of ['includeUnstarted', 'includeSettled', 'includeSubagents'] as const)
+      if (args[key] !== undefined && typeof args[key] !== 'boolean') throw new Error(`${key} must be a boolean`)
+    const limit = boundedInt(args.limit, 'limit', 1, THREAD_LIST_MAX_LIMIT, THREAD_LIST_DEFAULT_LIMIT)
+    const computer = listedComputer(args, ctx, 'thread_list')
+    if (!computer.online) throw new RemoteThreadRefusal('computer_offline', `${computer.computer} is offline, so its threads cannot be listed.`, computer.computer)
+    const listed = await host.remoteThreads!.list(ctx.caller.threadId, computer, typeof args.projectId === 'string' ? { projectId: args.projectId } : {})
+    const known = new Set(listed.threads.map((thread) => thread.id))
+    const projectNames = new Map(listed.projects.map((project) => [project.id, project.name]))
+    const statusOf = (id: string): 'active' | 'idle' | 'awaiting_input' => {
+      const state = listed.activity[id]
+      return state === 'awaiting_input' ? 'awaiting_input' : state === 'processing' || state === 'waiting' || state === 'paused' ? 'active' : 'idle'
+    }
+    const rows = listed.threads
+      .filter((thread) => {
+        // A subagent is folded under its parent there, as here, unless asked for.
+        if (args.includeSubagents !== true && thread.subagent && thread.parentThreadId && known.has(thread.parentThreadId)) return false
+        if (!thread.launchedByYou && args.includeUnstarted !== true && !thread.startedAt) return false
+        if (!thread.launchedByYou && args.includeSettled !== true && thread.settledAt) return false
+        return args.status === undefined || statusOf(thread.id) === args.status
+      })
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      .slice(0, limit)
+      .map((thread) => ({
+        id: thread.id,
+        link: threadLink(thread.id),
+        name: thread.name,
+        computer: computer.computer,
+        projectId: thread.projectId ?? null,
+        projectName: (thread.projectId && projectNames.get(thread.projectId)) || null,
+        startedAt: thread.startedAt ?? null,
+        updatedAt: thread.updatedAt,
+        settledAt: thread.settledAt ?? null,
+        status: statusOf(thread.id),
+        ...(thread.subagent && thread.parentThreadId ? { lineage: { parentThreadId: thread.parentThreadId } } : {}),
+        ...(thread.launchedByYou ? { startedByYou: true } : thread.startedByAgentHere ? { startedByAnAgentHere: true } : {})
+      }))
+    const envelope = { computer: computer.computer, computerId: computer.node, projects: listed.projects }
+    const { taken, capped } = fitPage(rows, envelope)
+    return json({
+      ...envelope,
+      threads: taken,
+      ...(capped ? { capped: true, hint: `This list stopped at ${THREAD_READ_MAX_BYTES / 1024} KB after ${taken.length} threads; narrow it with projectId or status, or ask for fewer with limit.` } : {})
+    })
+  })
+  /**
+   * `thread_search` with `computer`: that computer's own search, bounded there (its newest transcripts only) and here (a
+   * deadline). A computer that cannot be reached or does not answer in time is named as not searched, not refused.
+   */
+  const searchOnComputer = (query: string, limit: number, ctx: ToolCallContext, manage: boolean, args: Record<string, unknown>): Promise<ToolOutcome> => onComputer(async () => {
+    const computer = listedComputer(args, ctx, 'thread_search')
+    const found = await host.remoteThreads!.search(computer, query, limit)
+    const envelope = { computer: computer.computer, computerId: computer.node }
+    if (!found.searched) return json({ ...envelope, results: [], notSearched: { code: found.code, message: found.message } })
+    const rows = found.results
+      .filter((hit) => typeof hit.threadId === 'string' && (manage || hit.matchType !== 'message'))
+      .slice(0, limit)
+      .map(({ snippet, ...hit }) => ({ ...hit, link: threadLink(hit.threadId as string), computer: computer.computer, ...(manage && snippet !== undefined ? { snippet } : {}) }))
+    const { taken, capped } = fitPage(rows, envelope)
+    return json({
+      ...envelope,
+      results: taken,
+      ...(capped ? { capped: true, hint: `These results stopped at ${THREAD_READ_MAX_BYTES / 1024} KB after ${taken.length}; search with more words, or ask for fewer with limit.` } : {})
+    })
   })
   /**
    * `thread_read` for a personal bot: `summary` (default), one line on the thread and its last reply; or `messages`, the
@@ -1108,11 +1207,12 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_list',
-      description: 'List the profile\'s threads with their project, activity and what is waiting on them. Subagent threads are folded under their parents unless includeSubagents. Threads you launched are always listed.',
+      description: `List the profile's threads with their project, activity and what is waiting on them. Subagent threads are folded under their parents unless includeSubagents. Threads you launched are always listed. ${REMOTE_LISTS} It is read there at this call; a response holds at most ${THREAD_READ_MAX_BYTES / 1024} KB (capped: true says rows were left out).`,
       inputSchema: {
         type: 'object',
         properties: {
-          projectId: { type: 'string', description: 'Only this project.' },
+          computer: { type: 'string', description: 'List another of the user\'s computers: a name or id from list_computers.' },
+          projectId: { type: 'string', description: 'Only this project (with computer: a project id from that computer\'s list).' },
           status: { type: 'string', enum: ['active', 'idle', 'awaiting_input'], description: 'active: a run of it or of a subagent below it is going; awaiting_input: a question in it or below it waits for an answer; idle: neither. A row whose own turn ended while its subagents still work or ask says waitingOnSubagents.' },
           includeUnstarted: { type: 'boolean', description: 'Include empty drafts (default false).' },
           includeSettled: { type: 'boolean', description: 'Include archived threads (default false).' },
@@ -1123,8 +1223,10 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       access: 'readsOthers',
       class: 'read',
       offered: () => false,
-      target: (args) => ({ projectId: typeof args.projectId === 'string' && args.projectId ? args.projectId : undefined }),
+      // computer's projects are not this computer's.
+      target: (args) => ({ projectId: args.computer === undefined && typeof args.projectId === 'string' && args.projectId ? args.projectId : undefined }),
       handler: (args, ctx) => {
+        if (args.computer !== undefined) return listOnComputer(args, ctx)
         if (!host.listThreads || !host.listProjects) return notAvailable('thread_list')
         if (args.projectId !== undefined && (typeof args.projectId !== 'string' || !args.projectId)) throw new Error('projectId must be a non-empty string')
         if (args.status !== undefined && args.status !== 'active' && args.status !== 'idle' && args.status !== 'awaiting_input')
@@ -1208,11 +1310,12 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_search',
-      description: 'Search thread titles, project names and message text; message matches carry a snippet. Subagent threads are not searched.',
+      description: `Search thread titles, project names and message text; message matches carry a snippet. Subagent threads are not searched. ${REMOTE_LISTS} That computer searches the messages of its newest threads only, and a computer that is offline, stopped sharing its threads or does not answer within ${SEARCH_MS / 1000} s is named in notSearched (with code and why) instead of results.`,
       inputSchema: {
         type: 'object',
         properties: {
           query: { type: 'string' },
+          computer: { type: 'string', description: 'Search another of the user\'s computers: a name or id from list_computers.' },
           limit: { type: 'integer', minimum: 1, maximum: THREAD_SEARCH_MAX_LIMIT, description: `Default ${THREAD_SEARCH_DEFAULT_LIMIT}.` }
         },
         required: ['query']
@@ -1228,6 +1331,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         const bot = ctx.turn.bot
         const limit = bot ? boundedInt(args.limit, 'limit', 1, BOT_SEARCH_MAX, BOT_SEARCH_DEFAULT) : boundedInt(args.limit, 'limit', 1, THREAD_SEARCH_MAX_LIMIT, THREAD_SEARCH_DEFAULT_LIMIT)
         const manage = ctx.scope === 'manage'
+        if (args.computer !== undefined) return searchOnComputer(args.query, limit, ctx, manage, args)
         // Who may be seen is decided by the host before it applies the limit or reads any transcript; transcripts are
         // scanned for the most recent threads only.
         const callerPrivate = host.threadMeta?.(ctx.caller.threadId)?.localOnly === true
@@ -1470,7 +1574,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_interrupt',
-      description: 'Stop a run of another thread: the run you name, which must still be the thread\'s active (or paused) run, and the subagents below it, as a Stop in the app does. Queued messages a person sent stay. Name the run you read; if it has ended or another run started, nothing is stopped and you are told which run is active. A paused run is ended too. ' + REMOTE_REACH + ' There it stops only a run an agent of this computer started: a thread a person there took over is left running.',
+      description: 'Stop a run of another thread: the run you name, which must still be the thread\'s active (or paused) run, and the subagents below it, as a Stop in the app does. Queued messages a person sent stay. Name the run you read; if it has ended or another run started, nothing is stopped and you are told which run is active. A paused run is ended too. ' + REMOTE_REACH + ' There it stops only a run an agent of this computer started (yours, or one a message from an agent here started): a run a person there started is left running, whatever that computer lets this one\'s agents change, and only a person there stops it.',
       inputSchema: {
         type: 'object',
         properties: {

@@ -36,8 +36,11 @@ export interface RemoteWatchReads {
 export interface RemoteSettleHost {
   /** The routed reads; undefined while this computer has no run engine attached. */
   reads(): RemoteWatchReads | undefined
-  /** The launched thread as its launch recorded it: the computer's name and the thread's title. */
-  launched(node: string, remoteThreadId: string): { computer: string; title: string } | undefined
+  /**
+   * The thread there as this computer knows it: for a thread its agents launched, the computer's name and the title the
+   * launch recorded; for any other thread there, the computer's name from the device list and no title.
+   */
+  launched(node: string, remoteThreadId: string): { computer: string; title?: string } | undefined
   /** Why agents here may not work on that computer now (the person turned it off since); undefined when they may. */
   denial(node: string, computer: string): { code: string; message: string } | undefined
   /**

@@ -104,7 +104,9 @@ export function redactSecrets(text: unknown, secrets: Iterable<string> = []): st
 
 const ERROR_DETAIL_KEYS = new Set(['supportId', 'operation', 'operationId', 'requestId', 'provider', 'status', 'attempt', 'projectId', 'profileId', 'profileRef', 'taskId', 'threadId', 'runId', 'epoch', 'expectedEpoch', 'actualEpoch', 'expectedRevision', 'actualRevision', 'expectedGeneration', 'actualGeneration', 'capability', 'revision', 'expected', 'actual', 'state', 'path', 'label', 'reason', 'pointer', 'pointers', 'runtimeKind', 'hostBindings', 'workspace', 'projectBound', 'issues', 'diagnostics', 'code', 'severity', 'location', 'field', 'index', 'limit', 'count', 'retryAfterMs', 'resetsAt', 'estimated', 'limitKind', 'missing', 'kind', 'retriesExhausted', 'files', 'conflict', 'discard',
   // A browser page that failed (`BrowserProblem`): its class, the site's host name and why the browser can't start.
-  'problem', 'host', 'cause'])
+  'problem', 'host', 'cause',
+  // Which threads a device's agents may change on the computer that refused (`agent_reach`): none, launched or all.
+  'reach'])
 
 /** Explicit safe detail vocabulary. New domain fields need an audited addition. */
 export function safeErrorDetails(value: unknown): unknown {

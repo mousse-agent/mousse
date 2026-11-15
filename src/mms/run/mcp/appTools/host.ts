@@ -3,10 +3,10 @@ import type { AgentJobLimits } from '../../../../shared/agentJobLimits'
 import type { PermissionMode } from '../../../../shared/permissionMode'
 import type { ModelOverride } from '../../../../shared/providerInstances'
 import type { ApprovalTag } from '../../../orchestrator/UserQuestionService'
-import type { RemoteReach, RemoteTarget, RemoteUncertain, RemoteWaitResult } from '../../../orchestrator/RemoteLaunchedThreads'
+import type { RemoteComputerReach, RemoteListedThread, RemoteReach, RemoteSearchResult, RemoteTarget, RemoteUncertain, RemoteWaitResult } from '../../../orchestrator/RemoteLaunchedThreads'
 import type { MessageRow } from './messageRows'
 import type { ThreadEvent } from '../../types'
-import type { ChatMessage, CreateScheduledJobInput, PendingUserQuestions, QueuedMessage, ScheduledJob, Thread, UserQuestion, UserQuestionAnswers, UserQuestionAttachments } from '../../../../shared/types'
+import type { ChatMessage, ThreadActivityState, CreateScheduledJobInput, PendingUserQuestions, QueuedMessage, ScheduledJob, Thread, UserQuestion, UserQuestionAnswers, UserQuestionAttachments } from '../../../../shared/types'
 import type { ScheduledJobOptionsInput } from '../../../scheduled/validateJobOptions'
 import type { DevGuiTools } from '../../../devgui/DevGuiTools'
 import type { SkillsRegistry } from '../../../integrations/skills/SkillsRegistry'
@@ -122,6 +122,12 @@ export type AgentRemoteThreadResult =
  */
 export interface RemoteThreadsHost {
   reach(callerThreadId: string, threadId: string): RemoteReach
+  /** `thread_list` and `thread_search` with `computer`: the computer it names, as the caller may list it now, or why not. */
+  computerFor(callerThreadId: string, computer: string): RemoteComputerReach
+  /** The threads that computer shares with this one; a refusal is thrown with its code. */
+  list(callerThreadId: string, target: { node: string; computer: string }, filter: { projectId?: string }): Promise<{ threads: RemoteListedThread[]; projects: Array<{ id: string; name: string }>; activity: Record<string, ThreadActivityState> }>
+  /** That computer's search, or why it was not searched. */
+  search(target: { node: string; computer: string; online: boolean }, query: string, limit: number): Promise<RemoteSearchResult>
   events(target: RemoteTarget, page: { afterSeq: number; limit: number }): Promise<{ events: ThreadEvent[]; maxSeq: number }>
   messages(target: RemoteTarget, page: { afterIndex: number; limit: number; textOffset: number; textMax: number }): Promise<{ messages: MessageRow[]; total: number }>
   wait(target: RemoteTarget, request: { runId?: string; timeoutMs: number; signal?: AbortSignal }): Promise<RemoteWaitResult>
