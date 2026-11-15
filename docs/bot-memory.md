@@ -8,6 +8,7 @@ Every bot has an append-only **journal** in `bots.db` (`bot_journal`). It holds 
 
 - `BotJournal.appendInTx` writes a row inside the caller's `bots.db` transaction, so a `bot_messages` row and its journal row commit together. Rows are idempotent on `(bot_id, source_key)`: `bm:<message id>`, `<threadId>:<messageId>`, `act:<id>:start` …
 - **Capture** (`capture.ts`) copies a bot thread's rows through `ThreadDataStore.loadThreadData`, from a per-thread cursor in `bot_memory_state`. The engine runs it after every dispatch (`afterDispatch`) and for every bot thread at startup (`catchUp`). A tool call still running when copied is marked partial and replaced once by its final form.
+- Outside text in a request (command output, matching lines, event reasons, pull request and thread titles) stays inside fixed data frames. Capture and `run_start` replace each frame with a short placeholder and keep its content as an external tool-result row, keyed `frame:<activationId>:<n>`. Both writers share the key, so recapture adds no copy and never restores a row removed by Forget. At first open, a one-time pass marks older notices and run starts containing frame markers as external without splitting them. No database version changes.
 - Owner and bot messages are never cut. Tool rows keep at most 16 KB, head and tail, with the full text's hash.
 - A failed journal write is `BotJournalError` (`bot_journal_failed`): the bot goes stuck with "I can't save my work. Free some disk space."
 - The journal holds what Mousse observes. It does not hold a runtime's hidden reasoning, or files the bot never named.
@@ -47,6 +48,7 @@ Every bot has an append-only **journal** in `bots.db` (`bot_journal`). It holds 
 Both FTS5 indexes use `porter unicode61 remove_diacritics 2`. `bot_journal_fts` is an external-content index; `bot_memories_fts` indexes versions that still have text. Triggers keep them in the writer's transaction.
 
 - `memory_search`: memory hits first, then journal rows, by bm25 with recency breaking ties, filtered to the bot before the limit. Every word must match first; when that finds too few, any word may. Query text is reduced to quoted words, so no FTS syntax passes through. `model_change`, `memory_op` and `redaction` rows are never returned.
+- Outside text from a request is searchable and readable as external data from a tool, rather than as a Mousse notice. Older framed rows keep their original kind and carry the external mark.
 - `memory_read`: rows around a hit, an entry's versions, or one activation page by page (about 8k tokens a page).
 - Zero-hit searches and turns with three searches and no read are counted in `search_stats`, locally.
 - At open, a failed integrity check rebuilds an index; `BotMemoryAdmin.reindex` rebuilds both.
