@@ -86,6 +86,7 @@ const tap = (questionId: string, choice: string, clientRequestId = `tap-${Math.r
 describe('a question in the chat', () => {
   it('shows as its own bubble under the reply, with its answers to tap and, for an app that does not draw them, as text', async () => {
     const { turn, bubble } = await asked()
+    expect(f.store.message(bubble.id)?.tell).toBe('now')
     const rows = chatOf(f, botId).filter((message) => message.activationId === turn.activation.id && message.author === 'bot')
     expect(rows.map((message) => message.text.split('\n')[0])).toEqual(['I found two.', 'Which flat should I book a viewing for?'])
     expect(bubble.question).toMatchObject({ choices: [{ label: 'Flat A', detail: '2 bed, Hackney, £1,900' }, { label: 'Flat B' }], other: true, status: 'open' })
@@ -311,4 +312,18 @@ describe('forgetting, deleting and exporting', () => {
       rmSync(dir, { recursive: true, force: true })
     }
   })
+})
+
+it('an answered question awaiting release is marked told silently', async () => {
+  await f.bots.reconcileOnStartup()
+  const { bubble } = await asked()
+  await tap(bubble.question!.questionId, 'Flat B')
+  f.store.run('UPDATE bot_messages SET told_at = ?', f.store.now())
+  f.store.run('UPDATE bot_messages SET told_at = NULL WHERE id = ?', bubble.id)
+  const tellings: unknown[] = []
+  f.bots.events.on('tell', event => tellings.push(event))
+  f.bots.setTellingWindows(1)
+  await f.bots.deliverDueReminders()
+  expect(tellings).toHaveLength(0)
+  expect(f.store.message(bubble.id)?.toldAt).toBe(f.store.now())
 })

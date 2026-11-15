@@ -71,6 +71,8 @@ describe('the chat is the front desk', () => {
     await finish(f, work.payload, 'completed', { text: 'The Roborock Q7 is the pick.' })
     const report = chatOf(f, botId).at(-1)!
     expect(report).toMatchObject({ kind: 'run_report', text: 'The Roborock Q7 is the pick.', replyTo: { id: first.message.id, author: 'owner', text: 'Research vacuums under £250' } })
+    expect(f.store.message(report.id)?.tell).toBe('soon')
+    expect(f.store.message(chatOf(f, botId).find(m => m.text === 'Added.')!.id)?.tell).toBe('now')
     expect(f.store.activation(workId)).toMatchObject({ status: 'done' })
     expect(summary().work).toBeUndefined()
   })
@@ -996,6 +998,7 @@ describe('long work', () => {
       expect(f.store.activation(activation.id)).toMatchObject({ status: 'failed', endReason: 'budget_exhausted' })
       expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'notice', text: 'I ran out of room for this. Pip wants to work for up to 2 hours per run.' })
       expect(chatOf(f, botId).at(-1)!.ask!.carriesOn).toBeUndefined()
+      expect(f.store.message(chatOf(f, botId).at(-1)!.id)?.tell).toBe('soon')
     })
   })
 })

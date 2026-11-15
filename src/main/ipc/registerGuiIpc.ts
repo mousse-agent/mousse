@@ -1,3 +1,4 @@
+import type { BotTelling } from '../../shared/bots/personal/telling'
 import { registerAppletIpc } from '../applets/registerAppletIpc'
 import { registerMemoryDiagnosticsIpc } from '../diagnostics/memoryIpc'
 import { AppError, type AppErrorShape, errorDiagnostic, knownAppError, normalizeAppError, serializeAppError } from '../../shared/errors'
@@ -655,6 +656,37 @@ export function registerGuiIpc(
 
   // The bot whose chat each window shows, so that bot's rows only sound while it is on screen.
   const viewedBots = new Map<number, string | null>()
+  const tellingBanners = new Map<string, Notification>()
+  const tellingDeliveries = new Map<string, number>()
+  const notifyTelling = (telling: BotTelling, win: BrowserWindow, profileSettings: MousseSettings, profileId: string, sequence: number, instance?: string): void => {
+    const audience = `${instance ?? ''}:${profileId}`
+    const key = `${audience}:${telling.id}`
+    // One protocol event reaches each window; only the first shows this revision.
+    if ((tellingDeliveries.get(audience) ?? -1) >= sequence) return
+    tellingDeliveries.set(audience, sequence)
+    tellingBanners.get(key)?.close()
+    tellingBanners.delete(key)
+    if (!telling.rows.length) return
+    const botId = telling.rows[0]!.botId
+    const channels = { ...threadNotificationChannels(profileSettings.notifications, telling.kind), toast: false }
+    channels.sound &&= telling.sound
+    const viewing = BrowserWindow.getAllWindows().some(w => !w.isDestroyed() && w.isFocused() &&
+      guiMms.getWindowBindingForSender(w.webContents.id)?.profileId === profileId && viewedBots.get(w.webContents.id) === botId)
+    const plan = planThreadNotification(channels, { windowFocused: viewing, viewingThread: viewing, systemSupported: Notification.isSupported() })
+    if (!plan.system) { if (plan.playSound) playThreadCompletionSound(); return }
+    const audible = channels.sound
+    const notification = new Notification({ title: telling.title, body: telling.body,
+      silent: !audible || process.platform === 'win32', ...(audible && process.platform === 'darwin' ? { sound: 'Ping' } : {}) })
+    notification.on('click', () => {
+      if (win.isDestroyed()) return
+      if (win.isMinimized()) win.restore()
+      win.show(); win.focus(); win.webContents.send('notifications:openBot', botId)
+    })
+    tellingBanners.set(key, notification)
+    notification.on('close', () => { if (tellingBanners.get(key) === notification) tellingBanners.delete(key) })
+    notification.show()
+    if (audible && process.platform === 'win32') playThreadCompletionSound()
+  }
   registerHandler('notifications:viewBot', async (event, botId: unknown) => {
     viewedBots.set(event.sender.id, typeof botId === 'string' && botId ? botId : null)
   })
@@ -1169,7 +1201,8 @@ export function registerGuiIpc(
         )
       }
     }
-    if (event.type === 'bots.message' && !replay) notifyBot(event.data, win, windowSettings.get(senderId) ?? settings.get(), binding.profileId)
+    if (event.type === 'bots.tell' && !replay) notifyTelling(event.data as BotTelling, win, windowSettings.get(senderId) ?? settings.get(), binding.profileId, event.sequence, instance)
+    if (event.type === 'bots.message' && !replay && !guiMms.tellsForSender?.(senderId)) notifyBot(event.data, win, windowSettings.get(senderId) ?? settings.get(), binding.profileId)
     if (event.type === 'scheduled.runEnded' && !replay) notifyAutomationRun(event.data, win, presentationForSender(senderId).getActiveThreadId(), windowSettings.get(senderId) ?? settings.get())
     if (event.type === 'questions.pending' && event.threadId && isThreadActivityActive(tracker.getState(event.threadId))) {
       tracker.setState(event.threadId, 'awaiting_input')

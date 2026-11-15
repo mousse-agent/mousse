@@ -1342,12 +1342,13 @@ function defaultRedactMessage(tx: BotStoreTx, botId: string, messageId: string, 
       tx.statement('UPDATE bot_messages SET cards_json = NULL, attachments_json = ? WHERE id = ? AND bot_id = ?').run(kept.length ? JSON.stringify(kept) : null, messageId, botId)
     }
   }
-  // A forgotten message keeps no reaction, so the bot is never told of one on it.
+  // A forgotten message keeps neither a reaction nor its legacy notification receipt.
   const reactions = Boolean(tx.statement("SELECT 1 FROM pragma_table_info('bot_messages') WHERE name = 'owner_reaction'").get())
-  const clearReaction = (id: string) => {
+  const clearMessageState = (id: string) => {
+    if (has('bot_memory_state')) tx.statement('DELETE FROM bot_memory_state WHERE bot_id = ? AND key = ?').run(botId, `cursor:telling-legacy:${id}`)
     if (reactions) tx.statement('UPDATE bot_messages SET owner_reaction = NULL, owner_reaction_at = NULL WHERE id = ? AND bot_id = ?').run(id, botId)
   }
-  clearReaction(messageId)
+  clearMessageState(messageId)
   // A held draft can quote even a one-word owner message. Drop the whole draft by its turn,
   // before removing other copies, rather than guessing from the length of the quoted text.
   if (has('bot_memory_state')) tx.statement(`DELETE FROM bot_memory_state WHERE bot_id = ? AND key IN
@@ -1363,7 +1364,7 @@ function defaultRedactMessage(tx: BotStoreTx, botId: string, messageId: string, 
     const said = tx.statement('SELECT message_id FROM bot_reminders WHERE bot_id = ? AND reply_to = ? AND message_id IS NOT NULL').all(botId, messageId) as Array<{ message_id: string }>
     for (const row of said) {
       tx.statement('UPDATE bot_messages SET text = ? WHERE id = ? AND bot_id = ?').run(text, row.message_id, botId)
-      clearReaction(row.message_id)
+      clearMessageState(row.message_id)
       redactJournal(`bm:${row.message_id}`)
     }
   }

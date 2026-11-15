@@ -1,3 +1,4 @@
+import { BOT_TELLING_CAPABILITY } from '../../shared/bots/personal/telling'
 /**
  * Versioned MMS local protocol envelopes (transport-independent).
  * No Electron imports.
@@ -510,6 +511,7 @@ export const PROTOCOL_METHODS = [
 export type ProtocolMethod = (typeof PROTOCOL_METHODS)[number]
 
 export const PROTOCOL_CAPABILITIES = [
+  BOT_TELLING_CAPABILITY,
   MMS_PROTOCOL_CHUNK_CAPABILITY,
   'errors.v1',
   'health',

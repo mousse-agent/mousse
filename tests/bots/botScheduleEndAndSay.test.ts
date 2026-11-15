@@ -26,6 +26,7 @@ it('runs before its end, never after, leaves About and says once that it ended',
   const ended = chatOf(f, botId).filter((row) => row.text === '‘Inbox check’ ended, as planned.')
   expect(ended).toHaveLength(1)
   expect(ended[0]!.systemLine).toBe(true)
+  expect(f.store.message(ended[0]!.id)?.tell).toBeNull()
 })
 
 it.each([undefined, 'usage_limit', 'owner'] as const)('says once without a run with pause %s', async (pause) => {
@@ -203,5 +204,7 @@ it('an explicitly non-owner fixed line is kept paused with an actionable reason'
   await f.bots.reconcileOnStartup()
   await f.tickSchedules(new Date(T0 + 5 * MIN))
   expect(chatOf(f, botId).some(row => row.text === 'Hello')).toBe(false)
+  expect(f.bots.runScheduledOccurrence({ botId, scheduleId: entry.scheduleId, say: 'Hello', ownerAsked: false, prompt: 'Say exactly: Hello', occurrenceAt: f.store.now() })).toEqual({ kind: 'skipped', reason: 'say_owner_required' })
+  expect(chatOf(f, botId).some(row => row.text === 'Hello' && f.store.message(row.id)?.tell === 'now')).toBe(false)
   expect(f.scheduler.getJob(entry.jobId)).toMatchObject({ state: 'paused', bot: { say: 'Hello', ownerAsked: false }, pausedReason: expect.stringMatching(/owner|prompt/i) })
 })

@@ -1,3 +1,4 @@
+import type { BotTelling } from './telling'
 import type { BotCustomSlot, BotModelPick, BotModelSlotKey, BotModelSlots, BotPickCredential, BotSchedule } from './definition'
 import type { BotChatMessage, BotChip, BotDetail, BotSummary } from './chat'
 import type { BotLook } from './look'
@@ -293,10 +294,12 @@ export type BotsPersonalV2Result<M extends BotsPersonalV2Method> = BotsPersonalV
  * Events of the v2 methods. `bots.message` with an `ask` replaces `bots.escalation`, which is no
  * longer bridged to clients.
  */
-export const BOTS_PERSONAL_V2_EVENTS = ['bots.changed', 'bots.message', 'bots.activity'] as const
+export const BOTS_PERSONAL_V2_EVENTS = ['bots.changed', 'bots.message', 'bots.activity', 'bots.tell'] as const
 export type BotsPersonalV2Event = (typeof BOTS_PERSONAL_V2_EVENTS)[number]
 
 export interface BotsPersonalV2EventData {
+  /** A service-decided banner or withdrawal, only for windows that negotiated telling. */
+  'bots.tell': BotTelling
   /** The list and the bot's state need refreshing. */
   'bots.changed': { botId: string }
   /** A new or changed chat row: chat push and notifications (titled with `botName`, absent on older daemons). */

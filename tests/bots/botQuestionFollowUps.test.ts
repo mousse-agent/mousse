@@ -131,6 +131,7 @@ describe('a nudge', () => {
     const [first] = nudgesOf(questionId)
     expect(first).toMatchObject({ author: 'bot', text: `${NUDGE_TEXT}\n\nFlat A · Flat B · Something else`, plainFrom: NUDGE_TEXT.length, replyTo: { id: bubble.id }, question: { questionId, status: 'open', nudge: true, choices: [{ label: 'Flat A' }, { label: 'Flat B' }] } })
     expect(first!.question?.nudged).toBeUndefined()
+    expect(f.store.message(first!.id)?.tell).toBe('soon')
     expect(botNotificationKind(first!, Date.parse(first!.at))).toBe('question')
     expect(f.resolved.length).toBe(models)
     expect(f.store.listActivations(botId)).toHaveLength(activations)
