@@ -506,17 +506,36 @@ export function foldTurnWork(rows: FoldRow[]): boolean[] {
  * when absent); consecutive subagent-card messages form one card list,
  * outside any group; everything else renders message by message. Narration
  * (a reply row) between calls ends a group.
+ *
+ * With `cardBurst`, subagents started in quick succession share one card list
+ * even with thinking between them: a card message joins the list before it
+ * when only `quiet` messages (thoughts) lie between them and `join` accepts the
+ * pair; those thoughts render just above the list. Anything else between them
+ * (tool work, narration) starts a new list.
  */
+export type CardBurst = {
+  /** A message that may sit between two starts of one burst (a thought). */
+  quiet: (msgIndex: number) => boolean;
+  /** Whether the card message `next` joins the list whose last card message is `last`. */
+  join: (last: number, next: number) => boolean;
+};
+
+/** Starts at most this far apart join one card. A start waits for the call before it to return, about 10 s. */
+export const SUBAGENT_BURST_GAP_MS = 30_000;
+
 export function partitionTurnSegments(
   toolsOnlyFlags: boolean[],
   cardsOnlyFlags: boolean[] = [],
   callCounts: number[] = [],
   /** Whether a run of fewer calls still folds into a group (while the turn runs, one with a call still running). */
   groupSmallRun?: (msgIndices: number[]) => boolean,
+  cardBurst?: CardBurst,
 ): TurnSegment[] {
   const segments: TurnSegment[] = [];
   let run: number[] = [];
   let cards: number[] = [];
+  // Thoughts after the open card list, held until it is known whether the next start joins that list.
+  let held: number[] = [];
   const flush = () => {
     const calls = run.reduce((sum, msgIndex) => sum + (callCounts[msgIndex] ?? 1), 0);
     if (run.length > 0 && (calls >= 2 || groupSmallRun?.(run))) {
@@ -530,21 +549,43 @@ export function partitionTurnSegments(
     if (cards.length > 0) segments.push({ kind: "cards", msgIndices: cards });
     cards = [];
   };
-  toolsOnlyFlags.forEach((flag, msgIndex) => {
-    if (cardsOnlyFlags[msgIndex]) {
-      flush();
-      cards.push(msgIndex);
-      return;
-    }
-    flushCards();
-    if (flag) {
+  const place = (msgIndex: number) => {
+    if (toolsOnlyFlags[msgIndex]) {
       run.push(msgIndex);
     } else {
       flush();
       segments.push({ kind: "message", msgIndex });
     }
+  };
+  const release = () => {
+    const thoughts = held;
+    held = [];
+    thoughts.forEach(place);
+  };
+  toolsOnlyFlags.forEach((_flag, msgIndex) => {
+    if (cardsOnlyFlags[msgIndex]) {
+      const last = cards[cards.length - 1];
+      if (last !== undefined && cardBurst && !cardBurst.join(last, msgIndex)) {
+        flushCards();
+        release();
+      } else if (held.length > 0) {
+        // The start joins the list: the thoughts that came between render above it.
+        release();
+      }
+      flush();
+      cards.push(msgIndex);
+      return;
+    }
+    if (cards.length > 0 && cardBurst?.quiet(msgIndex)) {
+      held.push(msgIndex);
+      return;
+    }
+    flushCards();
+    release();
+    place(msgIndex);
   });
-  flush();
   flushCards();
+  release();
+  flush();
   return segments;
 }

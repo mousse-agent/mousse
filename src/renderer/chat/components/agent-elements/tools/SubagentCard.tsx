@@ -287,10 +287,9 @@ export const SubagentTool = memo(function SubagentTool({ part, chatStatus }: { p
 });
 
 /**
- * Consecutive subagent cards. Two or more fold into one group headed by their provider icons, how many
- * there are, a coloured count of what they are doing and how long they have run. The group is open
- * while any task is going and folded once all have finished, until the user opens or folds it.
- * A single card stands alone.
+ * Subagents started in quick succession. Two or more share one card headed by their provider icons, how
+ * many there are ("3 subagents"), a coloured count of what they are doing and how long they have run.
+ * It lists their rows, each opening its subagent, until the user folds it. A single card stands alone.
  */
 export function SubagentCardGroup({ toolCallIds, children }: { toolCallIds: readonly string[]; children: ReactNode }) {
   const cards = useSubagentCards();
@@ -300,7 +299,8 @@ export function SubagentCardGroup({ toolCallIds, children }: { toolCallIds: read
   const now = useTick(running);
   const [chosenOpen, setChosenOpen] = useState<boolean | null>(null);
   if (models.length < 2) return <div className="subagent-cards">{children}</div>;
-  const open = chosenOpen ?? running;
+  // Open, so the card lists its subagents, until the user folds it.
+  const open = chosenOpen ?? true;
   const { title, parts } = cardGroupSummary(models);
   const stack = cardIconStack(models);
   const elapsed = cardGroupElapsedLabel(models, now);
