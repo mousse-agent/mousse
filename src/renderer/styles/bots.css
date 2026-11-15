@@ -274,7 +274,7 @@ button.bot-image:focus-visible > img { opacity: 0.82; }
 .bot-carousel-count { display: block; margin-top: 6px; text-align: right; font-size: 11.5px; line-height: 16px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 @media (prefers-reduced-motion: reduce) { .bot-carousel-track { scroll-behavior: auto; } .bot-carousel-arrow { transition: none; } }
 .bot-picture-menu { min-width: 170px; }
-/* A list of keys and values ("CPU: …") as a small card. */
+/* A facts card (`show_card`): keys and their values. */
 .bot-kv { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 14px; row-gap: 3px; margin: 8px 0; padding: 9px 12px; border-radius: 10px; font-size: var(--bot-meta); line-height: 1.5; background: color-mix(in srgb, var(--text-primary) 5%, transparent); }
 .bot-kv-row { display: contents; }
 .bot-kv dt { color: var(--text-secondary); white-space: nowrap; }

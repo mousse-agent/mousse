@@ -475,12 +475,13 @@ describe('the transcript', () => {
     expect(composerError()).toBeNull()
   })
 
-  it('a list of keys and values reads as a small card', async () => {
-    fake.chats.inbox = [message(1, { id: 'b1', kind: 'run_report', text: 'Your PC looks healthy.\n\n- **CPU:** Ryzen 9 7900X\n- **RAM**: 19.7 GB free\n\nAnd a list:\n\n- one\n- two' })]
+  it('a list of bold labels stays a plain list, its labels inline', async () => {
+    fake.chats.inbox = [message(1, { id: 'b1', kind: 'run_report', text: 'Your PC looks healthy.\n\n- **CPU:** Ryzen 9 7900X\n- **RAM**: 19.7 GB free' })]
     await open()
-    const card = transcript().querySelector('.bot-kv')!
-    expect([...card.querySelectorAll('.bot-kv-row')].map((row) => [row.querySelector('dt')?.textContent, row.querySelector('dd')?.textContent])).toEqual([['CPU', 'Ryzen 9 7900X'], ['RAM', '19.7 GB free']])
-    expect([...transcript().querySelectorAll('ul li')].map((item) => item.textContent)).toEqual(['one', 'two'])
+    const items = [...transcript().querySelectorAll('ul li')]
+    expect(items.map((item) => item.textContent)).toEqual(['CPU: Ryzen 9 7900X', 'RAM: 19.7 GB free'])
+    expect(items.map((item) => item.querySelector('strong')?.textContent)).toEqual(['CPU:', 'RAM'])
+    expect(transcript().querySelector('dl')).toBeNull()
   })
 
   it('groups one sender’s messages within ten minutes, with a time on every message and a day line per day', async () => {

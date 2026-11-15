@@ -1,4 +1,4 @@
-import { Children, createContext, isValidElement, useContext, useEffect, useState, type ReactElement, type ReactNode } from 'react'
+import { Children, createContext, useContext, useEffect, useState, type ReactNode } from 'react'
 import type { Components } from 'streamdown'
 import { FileText, FolderOpen, Image as ImageIcon, X } from '../../lib/icons'
 import { Markdown, restoreMousseHref, type MarkdownImages } from '../../chat/components/agent-elements/markdown'
@@ -8,7 +8,6 @@ import { fileLocation, isAbsolutePath } from '../../utils/filesBrowse'
 import { parseMousseFileLink } from '../../../shared/chatReferences'
 import { BotMarkdownImage, useFileImage } from './BotImages'
 import { botPathLabel, joinCodeToPunctuation, linkBotPaths, pathName } from './botPaths'
-import { isKeyValueList } from './botChatShape'
 import { MathInline } from '../../markdown/math/MathView'
 import { readMathClass } from '../../markdown/math/math-markup'
 
@@ -68,27 +67,14 @@ export function BotPathChip({ path }: { path: string }) {
 }
 
 /**
- * Keys and their values as a small card: what a list of bold keys in a reply reads as, and a facts card
- * (`show_card`), so both look the same. `title`: a facts card's title, above its rows.
+ * Keys and their values as a small card: a facts card (`show_card`). `title`: the card's title, above its rows. A list
+ * of bold keys in a reply ("- **Left:** …") stays a plain list: only a card the bot attached is drawn as one.
  */
 export function KeyValueRows({ rows, title }: { rows: ReadonlyArray<{ key: string | number; label: ReactNode; value: ReactNode }>; title?: string }) {
   return <dl className="bot-kv" {...(title ? { 'aria-label': title } : {})}>
     {title && <div className="bot-kv-title">{title}</div>}
     {rows.map((row) => <div key={row.key} className="bot-kv-row"><dt>{row.label}</dt><dd>{row.value}</dd></div>)}
   </dl>
-}
-
-/** A list of bold keys and their values ("**CPU:** AMD Ryzen 9") as a small card; its items as they were drawn. */
-function KeyValueCard({ children }: { children: ReactNode }) {
-  const items = Children.toArray(children).filter(isValidElement) as Array<ReactElement<{ children?: ReactNode }>>
-  return <KeyValueRows rows={items.map((row, index) => {
-    const parts = Children.toArray(row.props.children).filter((part) => typeof part !== 'string' || part.trim())
-    const [key, ...rest] = parts
-    const name = isValidElement<{ children?: ReactNode }>(key) ? Children.toArray(key.props.children).join('').replace(/:\s*$/, '') : ''
-    // `**RAM**: 19.7 GB`: the colon after the key belongs to it, and the space before the value goes.
-    const value = rest.map((part, at) => (at === 0 && typeof part === 'string' ? part.replace(/^\s*:?\s*/, '') : part))
-    return { key: index, label: name, value }
-  })} />
 }
 
 /** The path a link opens, when it names a file of this computer by its full path. */
@@ -109,8 +95,8 @@ function linkedPath(href: string | undefined): string | undefined {
 export const BOT_IMAGES: MarkdownImages = { Image: BotMarkdownImage }
 
 /**
- * A bot message's Markdown elements that differ from a thread's: a file link is the file's chip, a list of keys and
- * values a card, and short inline code stays whole. Its images follow `BOT_IMAGES`, which no element here replaces.
+ * A bot message's Markdown elements that differ from a thread's: a file link is the file's chip, and short inline
+ * code stays whole. Its images follow `BOT_IMAGES`, which no element here replaces.
  * Kept for the module's life (see `Markdown`).
  */
 /** A link in a bot's message: a file of this computer is its chip, a link the app refuses is plain text. */
@@ -133,10 +119,7 @@ const botMarkdownComponents: Partial<Components> = {
     const text = Children.toArray(children).join('')
     if (math) return <MathInline tex={text} display={math.display} delimiter={math.delimiter} />
     return <code {...props} className={`an-md-code${text.length <= WHOLE_CODE && !/\s/.test(text) ? ' is-whole' : ''}`}>{children}</code>
-  },
-  ul: ({ node, children, ...props }) => isKeyValueList(node as Parameters<typeof isKeyValueList>[0])
-    ? <KeyValueCard>{children}</KeyValueCard>
-    : <ul className="an-md-ul list-outside" {...props}>{children}</ul>
+  }
 }
 
 /** A bot message's text, drawn as a thread's reply is (headings, lists, tables, code), with its paths as chips. */
