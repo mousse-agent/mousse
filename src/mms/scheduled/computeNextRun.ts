@@ -96,6 +96,25 @@ function matchesCron(fields: Array<Set<number>>, date: Date): boolean {
   )
 }
 
+/** At a forward clock jump, fixed-hour jobs in the missing minutes share its first valid minute. */
+function matchesSkippedCron(fields: Array<Set<number>>, date: Date): boolean {
+  // Hourly (and more frequent) jobs keep their normal minute cadence through the jump.
+  if (fields[1]!.size === 24) return false
+  const previous = new Date(date.getTime() - 60_000)
+  const gapMinutes = previous.getTimezoneOffset() - date.getTimezoneOffset()
+  if (gapMinutes <= 0) return false
+
+  // Read the absent wall-clock minutes as UTC, since constructing them in the local zone normalizes them away.
+  const wall = date.getTime() - date.getTimezoneOffset() * 60_000
+  for (let minute = gapMinutes; minute > 0; minute -= 1) {
+    const missing = new Date(wall - minute * 60_000)
+    if (fields[0]!.has(missing.getUTCMinutes()) && fields[1]!.has(missing.getUTCHours()) &&
+        fields[2]!.has(missing.getUTCDate()) && fields[3]!.has(missing.getUTCMonth() + 1) &&
+        fields[4]!.has(missing.getUTCDay())) return true
+  }
+  return false
+}
+
 function recoverableOneshotRunAt(schedule: JobSchedule, now: Date, lastRunAt?: string | null): string | null {
   const runAt = schedule.runAt
   if (!runAt) return null
@@ -127,7 +146,12 @@ function nextCronRun(expr: string, base: Date): Date | null {
 
   const limit = base.getTime() + CRON_SEARCH_YEARS * 366 * 24 * 60 * 60 * 1000
   while (candidate.getTime() <= limit) {
-    if (matchesCron(fields, candidate)) return new Date(candidate.getTime())
+    // Local setters choose the first instance of a repeated time. Never return an instant before the base,
+    // or the second instance of a minute already covered by the first hour.
+    const firstInstance = new Date(candidate.getTime())
+    firstInstance.setMinutes(candidate.getMinutes())
+    if (candidate.getTime() > base.getTime() && firstInstance.getTime() === candidate.getTime() &&
+        (matchesCron(fields, candidate) || matchesSkippedCron(fields, candidate))) return new Date(candidate.getTime())
     const before = candidate.getTime()
     if (!fields[3]!.has(candidate.getMonth() + 1)) {
       candidate.setMonth(candidate.getMonth() + 1, 1)
