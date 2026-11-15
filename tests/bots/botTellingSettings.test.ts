@@ -104,7 +104,7 @@ it.each(['off', { from: '23:00', to: '06:00' }] as const)('keeps bot quiet hours
   f.host.settings.set({ notifications: { quietHours: { from: '22:00', to: '08:00' } } } as any)
   // Two already-open windows receive the same IPC payload as the real settings subscription.
   const windows = [f.host.settings.get(), f.host.settings.get()]
-  ;(f.host as any).settingsChanged = (settings: import('../../src/shared/settings').MousseSettings) => {
+  f.host.settingsChanged = (settings: import('../../src/shared/settings').MousseSettings) => {
     bridgeProtocolEvent({ type: 'settings.changed', data: { settings } }, (channel, data) => {
       expect(channel).toBe('settings:changed')
       windows.forEach((_, index) => { windows[index] = structuredClone(data as typeof settings) })

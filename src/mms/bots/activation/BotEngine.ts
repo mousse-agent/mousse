@@ -168,6 +168,7 @@ export class BotEngineError extends Error {
 export interface BotEngineHost {
   profileHome: string
   settings?: Pick<SettingsStore, 'get' | 'set'>
+  settingsChanged?(settings: ReturnType<SettingsStore['get']>): void
   store: BotStore
   definitions: BotDefinitionStore
   threads: {
@@ -7753,7 +7754,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (change.quietHours !== undefined && !this.host.settings) throw new BotEngineError('unavailable', 'Quiet hours cannot be changed here.')
     if ((change.schedules || change.scheduleId) && !this.host.schedules?.setTelling) throw new BotEngineError('unavailable', 'Automations cannot be changed here.')
     if (change.schedules || change.scheduleId) this.host.schedules!.setTelling!(botId, { ...(change.schedules ? { tellMe: change.tellMe } : {}), ...(change.scheduleId ? { scheduleId: change.scheduleId, canWakeMe: change.canWakeMe } : {}) })
-    if (change.quietHours !== undefined) this.host.settings!.set({ notifications: { quietHours: change.quietHours === 'off' ? undefined : change.quietHours } } as Parameters<SettingsStore['set']>[0])
+    if (change.quietHours !== undefined) {
+      const settings = this.host.settings!.set({ notifications: { quietHours: change.quietHours === 'off' ? undefined : change.quietHours } } as Parameters<SettingsStore['set']>[0])
+      this.host.settingsChanged?.(settings)
+    }
     this.store.db.transaction(() => {
       const previous = readBotTelling(this.store.registry(botId)?.tellJson)
       this.store.run('UPDATE bot_registry SET tell_json = ? WHERE bot_id = ?', JSON.stringify({ ...previous, ...(change.tellMe !== undefined ? { tellMe: change.tellMe } : {}), ...(!change.scheduleId && change.canWakeMe !== undefined ? { canWakeMe: change.canWakeMe } : {}) }), botId)

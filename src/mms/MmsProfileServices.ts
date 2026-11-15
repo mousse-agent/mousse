@@ -789,6 +789,7 @@ export class MmsProfileServices {
       stopThread: (threadId) => this.orchestrator.stopThread(threadId, 'user', { clientRequestId: `bot-stop:${threadId}:${Date.now()}` }),
       // A resumed bot's due schedules are claimed at once; before the scheduler started this does nothing.
       settings: this.settings,
+      settingsChanged: (settings) => this.events.emit({ channel: 'protocol:event', data: { type: 'settings.changed', data: { settings } } }),
       schedulesChanged: () => { this.scheduled?.wake() },
       // The shared store, through the book made once the scheduler exists below (nothing reads it before that).
       schedules: {
