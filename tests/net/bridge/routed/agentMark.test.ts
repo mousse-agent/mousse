@@ -149,6 +149,17 @@ describe('a routed call marked as an agent\'s (issue #1160)', () => {
     expect((startTurn.mock.calls.at(-1)![0] as Loose).agent).toMatchObject({ kind: 'agent', from: { node: t.callerNode, thread: 'sender-thread' } })
   }, 120_000)
 
+  it('holds a sender on another computer to the queue caps every agent has: three waiting per sender, counted by computer and thread', async () => {
+    const id = await launched()
+    vi.spyOn(t.owner.orchestrator, 'enqueueAndDrain').mockImplementation(((threadId: string, input: never, source: string, opts: never) =>
+      t.owner.orchestrator.enqueueForThread(threadId, input, source as never, opts)) as never)
+    for (const n of [1, 2, 3]) await call('queue.enqueue', { threadId: id, content: `task ${n}`, requestId: `cap-${n}`, agent: mark() })
+    expect(await refusal(call('queue.enqueue', { threadId: id, content: 'task 4', requestId: 'cap-4', agent: mark() }))).toBe('agent_queue_full_per_sender')
+    // Another thread on the same computer is another sender.
+    await call('queue.enqueue', { threadId: id, content: 'from elsewhere', requestId: 'cap-5', agent: mark({ thread: 'other-sender' }) })
+    expect(t.owner.orchestrator.listQueue(id)).toHaveLength(4)
+  }, 120_000)
+
   it('takes the larger hop count: its own count of agent runs in a row, not only what the caller says', async () => {
     standInForTurns()
     policy.set(t.callerNode, { agentReach: 'all' })
@@ -195,9 +206,11 @@ describe('a routed call marked as an agent\'s (issue #1160)', () => {
     expect(t.owner.threads.getThread(id)!.permissionMode).toBe('ask')
     // Across computers a message is 16,000 characters at most.
     expect(await refusal(call('orchestrator.send', { threadId: id, content: 'x'.repeat(16_001), clientRequestId: 'long', agent: mark() }))).toBe('agent_message_too_long')
-    // The same words from the same sender moments later are refused with the reason, not dropped.
+    // The same words from the same sender moments later are refused with the reason, not dropped: the repeat check every
+    // agent's message has, with this sender counted by its computer and thread. Another thread there may say the same.
     await call('orchestrator.send', { threadId: id, content: 'same words', clientRequestId: 'same-1', agent: mark() })
-    expect(await refusal(call('orchestrator.send', { threadId: id, content: 'same words', clientRequestId: 'same-2', agent: mark() }))).toBe('agent_message_repeated')
+    expect(await refusal(call('orchestrator.send', { threadId: id, content: 'same words', clientRequestId: 'same-2', agent: mark() }))).toBe('duplicate_message')
+    await call('orchestrator.send', { threadId: id, content: 'same words', clientRequestId: 'same-3', agent: mark({ thread: 'other-sender' }) })
     // A person's own call from the device keeps what it may do: the mark only narrows.
     await call('threads.setPermissionMode', { threadId: id, mode: 'accept_edits' })
   }, 120_000)
