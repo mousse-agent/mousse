@@ -148,6 +148,12 @@ describe('network CLI validation', () => {
         )
       )
     ).toEqual({ method: 'bridge.policy', params: { node: nodeId, terminal: true, editor: true } })
+    // What the device's agents may change here.
+    for (const reach of ['none', 'launched', 'all'])
+      expect(prepareNetCommand(args('bridge', 'limits', [nodeId], [['agent-reach', reach]]))).toEqual({
+        method: 'bridge.policy',
+        params: { node: nodeId, agentReach: reach }
+      })
     expect(
       prepareNetCommand(args('bridge', 'caps', [nodeId], [['caps', 'read,chat,write,settings']]))
     ).toEqual({
@@ -165,6 +171,8 @@ describe('network CLI validation', () => {
       args('bridge', 'limits', [nodeId], [['max-mode', 'root']]),
       args('bridge', 'limits', [nodeId], [['terminal', 'maybe']]),
       args('bridge', 'limits', [nodeId], [['editor', 'maybe']]),
+      args('bridge', 'limits', [nodeId], [['agent-reach', 'everything']]),
+      args('bridge', 'block', [nodeId], [['agent-reach', 'all']]),
       args('bridge', 'block', [nodeId], [['editor', 'on']]),
       args('bridge', 'caps', [nodeId]),
       args('bridge', 'caps', [nodeId], [['caps', 'read,read']]),

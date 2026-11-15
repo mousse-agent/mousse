@@ -7099,9 +7099,9 @@ export class OrchestratorService extends EventEmitter {
   private remoteSubagentDenial(node: string, name: string): { code: string; message: string } | undefined {
     const access = this.agentAccessSettings()
     if (!access.remoteSubagents)
-      return { code: 'remote_subagents_off', message: 'The user has not allowed agents to create subagents on other devices. They can turn it on in Settings → Agents → Agent access.' }
+      return { code: 'remote_subagents_off', message: 'The user has not turned on "Let agents work on your other devices". They can turn it on in Settings → Agents → Agent access.' }
     if (!access.computers.includes(node))
-      return { code: 'computer_not_allowed', message: `The user has not allowed agents to start subagents on ${name}. They can allow it in Settings → Agents → Agent access.` }
+      return { code: 'computer_not_allowed', message: `The user has not turned on ${name} under "Let agents work on your other devices". They can turn it on in Settings → Agents → Agent access.` }
     return undefined
   }
 
@@ -7190,7 +7190,7 @@ export class OrchestratorService extends EventEmitter {
       return { computers: [], note: 'This computer is not connected to the user\'s other computers.' }
     const access = this.agentAccessSettings()
     if (!access.remoteSubagents)
-      return { computers: [], note: 'The user has not allowed agents to create subagents on other devices (Settings → Agents → Agent access).' }
+      return { computers: [], note: 'The user has not turned on "Let agents work on your other devices" (Settings → Agents → Agent access).' }
     const allowed = new Set(access.computers)
     const projectId = this.threadStore?.getThread(parentThreadId)?.projectId
     const projectPath = projectId ? this.projectManager?.getProject(projectId)?.path : undefined

@@ -90,6 +90,7 @@ function entryOf(
     outcome: string
     thread?: string
     project?: string
+    actor?: 'agent'
   }
 ): DeviceActivityEntry {
   const entry: DeviceActivityEntry = {
@@ -98,6 +99,7 @@ function entryOf(
     kind: row.kind,
     outcome: row.outcome
   }
+  if (row.actor === 'agent') entry.actor = 'agent'
   if (row.thread) entry.thread = { id: row.thread, name: threadHere(services, row.thread)?.name ?? null }
   if (row.project && !isHashedPath(row.project))
     entry.project = { name: services.projects.getProject(row.project)?.name ?? null }
