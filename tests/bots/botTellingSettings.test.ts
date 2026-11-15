@@ -29,7 +29,7 @@ it('omits an unset line and uses the owner’s clock format', () => {
 it.each([
   ['chat:message', true], ['answer:question', true], ['chat:after:message', true],
   ['wake:event', false], ['question:q:default', false], ['botmsg:sender:message', false],
-  ['reminder:r:work', false], ['create:bot', false], ['future:start', false]
+  ['outside:request', false], ['reminder:r:work', false], ['create:bot', false], ['future:start', false]
 ])('telling_set checks the source of %s', async (key, accepted) => {
   const { botTools } = await import('../../src/mms/run/mcp/appTools/bots')
   const { start, flush } = await import('./botFixture')
@@ -89,7 +89,10 @@ it.each(['text', 'run_report', 'error'] as const)('applies every bot level to an
   const turn = await f.bots.enqueueChat(botId, 'chat:level', 'Set my level')
   for (const tellMe of ['needs_you', 'look', 'fyi', 'every'] as const) {
     f.bots.setTelling(botId, turn.id, { tellMe })
+    const events: any[] = []
+    f.bots.events.once('message', event => events.push(event))
     const message = f.bots.chat.post({ botId, author: 'bot', kind, text: 'Update' })
+    expect(events[0]?.quiet === true).toBe(kind !== 'error' && tellMe === 'needs_you')
     expect(f.store.message(message.id)?.tell).toBe(kind !== 'error' && tellMe === 'needs_you' ? 'later' : 'soon')
   }
 })

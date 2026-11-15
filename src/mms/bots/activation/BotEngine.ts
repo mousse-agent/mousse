@@ -682,7 +682,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // The bot's name rides along: a notification for a new bot's first row comes before any list names it. A run
       // report its schedule's Tell me keeps quiet says so (`quiet`): it is in the chat, without a notification.
       emit: (event) => {
-        this.events.emit('message', { ...event, ...this.nameFor(event.botId), ...(this.quietReport(event.botId, event.message) ? { quiet: true } : {}) })
+        this.events.emit('message', { ...event, ...this.nameFor(event.botId), ...(this.store.message(event.message.id)?.tell === 'later' ? { quiet: true } : {}) })
         this.tellings.read()
         this.armDue()
       },
@@ -745,14 +745,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /** A scheduled report below Tell me stays quiet; failure error rows always notify. */
   private quietReport(botId: string, message: { kind?: string; activationId?: string } | undefined): boolean {
-    if (!message || message.kind === 'error') return false
-    const activation = message.activationId ? this.store.activation(message.activationId) : undefined
-    if (activation && memoryLaneOf(activation) === 'chat') return false
-    if (activation?.trigger.kind !== 'schedule') {
-      const tellMe = readBotTelling(this.store.registry(botId)?.tellJson).tellMe
-      return !!tellMe && !tellMeNotifies(tellMe, 'done', activation ? this.host.runLevel?.(activation.id) : undefined)
-    }
-    if (message.kind !== 'run_report' || !message.activationId) return false
+    if (message?.kind !== 'run_report' || !message.activationId) return false
     try {
       const row = this.store.activation(message.activationId)
       if (row?.trigger.kind !== 'schedule') return false
