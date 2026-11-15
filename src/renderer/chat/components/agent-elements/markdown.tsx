@@ -9,6 +9,7 @@ import { MessageImage } from "./message-image";
 import { codeHighlighter } from "./code-highlighter";
 import { classifyLink, routeLink, safeMarkdownUrl } from "../../../utils/chatLinks";
 import { LinkLabel } from "./link-label-view";
+import { THREAD_LINK_PREFIX } from "../../../../shared/threadLink";
 import { copyMathAsTex } from "../../../markdown/math/copyMathAsTex";
 import {
   hideUnclosedMathFence,
@@ -36,11 +37,34 @@ function collapseLooseListGaps(text: string): string {
 
 /** Preserve fenced code exactly while normalizing prose and list whitespace. */
 const MOUSSE_FILE_MARKER = "/__mousse_file_open__?";
+const MOUSSE_THREAD_MARKER = "/__mousse_thread__/";
 
-function restoreMousseFileHref(href: string): string {
-  return href.startsWith(MOUSSE_FILE_MARKER)
-    ? `mousse-file://open?${href.slice(MOUSSE_FILE_MARKER.length)}`
-    : href;
+/** The `mousse-file:` or `mousse://thread/` address a link's marker stands for (see `normalizeMarkdown`). */
+export function restoreMousseHref(href: string): string {
+  if (href.startsWith(MOUSSE_FILE_MARKER)) return `mousse-file://open?${href.slice(MOUSSE_FILE_MARKER.length)}`;
+  if (href.startsWith(MOUSSE_THREAD_MARKER)) return `${THREAD_LINK_PREFIX}${href.slice(MOUSSE_THREAD_MARKER.length)}`;
+  return href;
+}
+
+/** A thread address: in a link's target, as `<…>`, inside a link's text (`[`), or bare in prose. */
+const THREAD_ADDRESS = /(\]\(\s*<?|<|\[)?mousse:\/\/thread\/([A-Za-z0-9_-]+)\/?(>)?/gi;
+
+/**
+ * A thread's address (`mousse://thread/<id>`) becomes a link to the thread's marker, which the anchor restores: in a
+ * link's target, and written bare or as `<…>`, where its text stays the address (the anchor labels it with the
+ * thread's title). Inline code is left as written.
+ */
+function linkThreadAddresses(text: string): string {
+  if (!/mousse:\/\/thread\//i.test(text)) return text;
+  return text
+    .split(/(`[^`\n]*`)/g)
+    .map((piece, index) => index % 2 === 1 ? piece : piece.replace(THREAD_ADDRESS, (match, before: string | undefined, id: string, after: string | undefined) => {
+      if (before?.startsWith("]")) return `${before}${MOUSSE_THREAD_MARKER}${id}${after ?? ""}`;
+      if (before === "[") return match;
+      const link = `[${THREAD_LINK_PREFIX}${id}](${MOUSSE_THREAD_MARKER}${id})`;
+      return before === "<" && after === ">" ? link : `${before ?? ""}${link}${after ?? ""}`;
+    }))
+    .join("");
 }
 
 /** Characters that mean nothing to Markdown, so a backslash before one is part of the text. */
@@ -125,7 +149,7 @@ export function normalizeMarkdown(text: string): string {
       // Streamdown rejects custom schemes before its component/urlTransform
       // hooks run. A same-origin marker survives sanitation and is restored by
       // the anchor renderer; fenced examples remain byte-identical.
-      const protectedLinks = part.replace(/mousse-file:\/\/open\?/gi, MOUSSE_FILE_MARKER);
+      const protectedLinks = linkThreadAddresses(part.replace(/mousse-file:\/\/open\?/gi, MOUSSE_FILE_MARKER));
       return collapseLooseListGaps(fixNumberedListBreaks(keepLiteralBackslashes(protectedLinks))).replace(
         /\n{3,}/g,
         "\n\n",
@@ -404,7 +428,7 @@ const markdownComponents: Components = {
   ),
   a: ({ href, children, ...props }) => {
     if (!href) return <span>{children}</span>;
-    const routedHref = restoreMousseFileHref(href);
+    const routedHref = restoreMousseHref(href);
     if (classifyLink(routedHref).kind === "reject") return <span>{children}</span>;
     return (
       <a

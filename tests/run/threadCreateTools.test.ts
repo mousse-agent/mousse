@@ -161,7 +161,7 @@ describe('thread_create (SPEC §15.1)', () => {
       const result = await call('manage', {
         projectId: 'p1', title: '  Fix the build  ', workspace: 'new_worktree', instanceId: ' claude ', model: 'sonnet', firstMessage: 'Please fix it', mode: 'plan'
       }, { toolCallId: 'mcp:create-1' })
-      expect(JSON.parse(result.text)).toMatchObject({ threadId: 'new-1', replayed: false })
+      expect(JSON.parse(result.text)).toMatchObject({ threadId: 'new-1', link: 'mousse://thread/new-1', replayed: false })
       expect(host.createThread).toHaveBeenLastCalledWith(
         { projectId: 'p1', title: 'Fix the build', workspace: 'new_worktree', instanceId: 'claude', model: 'sonnet', firstMessage: 'Please fix it', mode: 'plan' },
         { clientRequestId: 'thread_create:caller:mcp:create-1', actor: { kind: 'agent', threadId: 'caller', runId: callerRun.runId, toolCallId: 'mcp:create-1' }, accessLevel: 'manage' }
