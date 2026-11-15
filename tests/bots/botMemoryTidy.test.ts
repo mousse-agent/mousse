@@ -68,3 +68,16 @@ it('continues other bots upkeep after a memory store error', async () => {
   expect(memory.versions(botId, 'm2').at(-1)?.status).toBe('active')
   warn.mockRestore()
 })
+
+it('leaves a bot paused by its pinned model limit alone until that limit clears', async () => {
+  const { botId, firstActivation, memory } = await setup()
+  f.bots.setModel(botId, firstActivation, 'always', { pick: { instanceId: 'pi:openrouter', model: 'some/model', name: 'Test model' } })
+  f.store.setModel(botId, { limits: { provider: { instanceId: 'pi:openrouter', until: new Date(f.clock.now + 3_600_000).toISOString() } } })
+  expect(f.bots.service.get(botId).summary.state).toBe('paused')
+  expect(f.store.registry(botId)?.pausedReason).toBeNull()
+  await f.bots.maintain(new Date(f.clock.now))
+  expect(memory.versions(botId, 'm2').at(-1)?.status).toBe('active')
+  f.store.setModel(botId, null)
+  await f.bots.maintain(new Date(f.clock.now))
+  expect(memory.versions(botId, 'm2').at(-1)?.status).toBe('superseded')
+})

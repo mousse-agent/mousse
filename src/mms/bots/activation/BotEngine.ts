@@ -1572,6 +1572,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       try {
         const registry = this.store.registry(botId)
         if (!registry || registry.deletedAt || registry.pausedReason || !this.isIdle(botId)) continue
+        // A pinned row's limit also shows as paused, without a registry-wide pause.
+        if (registry.model?.limits) {
+          const slots = slotsOf(this.published(botId).main)
+          if (BOT_MODEL_SLOT_KEYS.some((key) => {
+            const pick = slots[key]
+            return pick && isPinned(pick) && limitOnPick(registry.model?.limits, pick, now.getTime())
+          })) continue
+        }
         // The same posted asks and questions as projection.summary's needsOwner, without
         // building a whole summary (threads, watchers, model slots and work) every tick.
         if (this.store.openAsks(botId).some((ask) => ask.messageId !== null)
