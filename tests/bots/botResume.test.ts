@@ -79,21 +79,52 @@ describe('bot timers after sleep', () => {
     }
   })
 
-  it('shares a running scheduler pass with other ticks and repeated resume checks', async () => {
+  it('delivers later timers and reruns upkeep at the newest queued tick after a slow pass', async () => {
+    const { botId } = await createBot(f, { reply: 'Hello.' })
+    await f.bots.service.chatSend({ botId, text: 'Watch this PR and remind me.', clientRequestId: 'slow-tick' })
+    const activation = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    const turn = await start(f, activation.id)
+    const before = Date.now()
+    f.bots.tools.reminders.add(botId, activation.id, { dueAt: new Date(before + 60_000).toISOString(), text: 'Due during the slow read.' })
+    f.host.pullRequestState = async () => ({ state: 'open' })
+    await f.bots.tools.wakes!.add(botId, activation.id, { brief: 'Watch deploy.', event: { kind: 'pr', repo: 'acme/app', number: 1 } })
+    await finish(f, turn.payload, 'completed', { text: 'Will do.' })
     let release!: () => void
-    const pending = new Promise<void>((resolve) => { release = resolve })
-    const due = vi.spyOn(f.bots, 'deliverDueReminders').mockReturnValue(pending)
-    const first = f.bots.maintain()
+    const read = new Promise<{ state: 'open' }>((resolve) => { release = () => resolve({ state: 'open' }) })
+    const network = vi.fn<NonNullable<typeof f.host.pullRequestState>>()
+      .mockImplementationOnce(() => read).mockResolvedValue({ state: 'open' })
+    f.host.pullRequestState = network
+    const first = f.bots.maintain(new Date(before))
     await flush()
-    const second = f.bots.maintain()
-    for (let i = 0; i < 2; i++) {
-      vi.setSystemTime(Date.now() + 120_000)
-      await vi.advanceTimersByTimeAsync(10_000)
+    expect(network).toHaveBeenCalledTimes(1)
+    // The first pass has already checked pauses and pumped its work queue.
+    f.store.setPaused(botId, 'usage_limit', new Date(before + 120_000).toISOString())
+    // A persisted work row arrives after this pass has already visited its queue.
+    const work = { workId: 'act_00000000-0000-4000-8000-000000000008' }
+    const from = f.store.activation(activation.id)!
+    f.store.db.transaction(() => f.store.insertActivation({
+      ...from, id: work.workId, lane: 'run', status: 'queued', idempotencyKey: 'work:queued-during-upkeep',
+      trigger: { kind: 'work', input: 'Start queued work.', title: 'Queued work', from: activation.id }
+    }, {}))
+    expect(f.store.activation(work.workId)?.status).toBe('queued')
+    vi.setSystemTime(before + 60_000)
+    f.clock.now = Date.now()
+    const second = f.bots.maintain(new Date(Date.now()))
+    vi.setSystemTime(before + 180_000)
+    f.clock.now = Date.now()
+    const third = f.bots.maintain(new Date(Date.now()))
+    try {
+      await flush()
+      expect.soft(chatOf(f, botId).some((row) => row.text.includes('Due during the slow read.'))).toBe(true)
+      expect(network).toHaveBeenCalledTimes(1)
+    } finally {
+      release()
+      await Promise.all([first, second, third])
     }
-    const calls = due.mock.calls.length
-    release()
-    await Promise.all([first, second])
-    expect(calls).toBe(1)
+    // One extra pass uses the newest tick, ending the pause and starting the queued work without another tick.
+    expect.soft(f.store.activation(work.workId)?.status).toBe('running')
+    expect.soft(f.store.registry(botId)?.pausedReason).toBeNull()
+    expect(network).toHaveBeenCalledTimes(2)
   })
 
   it('stops checking when the engine closes', async () => {
