@@ -227,17 +227,13 @@ describe('the row menu', () => {
 })
 
 describe('archive and delete', () => {
-  it('archives with an "Archived · Undo" toast; Undo unarchives', async () => {
+  it('archives without a toast', async () => {
     show([thread('a', 'Fix tests')])
     openProject()
     click(host.querySelector('[aria-label="More actions for Fix tests"]')!)
     click(menuItem('Archive'))
     await flush()
     expect(threadsApi.settle).toHaveBeenCalledWith('a', true)
-    expect(toast()?.textContent).toContain('Archived')
-    click(toastButton('undo'))
-    await flush()
-    expect(threadsApi.settle).toHaveBeenLastCalledWith('a', false)
     expect(toast()).toBeNull()
   })
 
