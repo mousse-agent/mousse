@@ -180,6 +180,19 @@ export interface BotSummary {
    * The bot is busy while any is active (`launchedActive`). Absent from older services and while it started none.
    */
   threads?: BotLaunchedThread[]
+  /** Background commands it runs now (`watch_start`), oldest first: the chat's Background work, each with Stop. Absent from older services and while none runs. */
+  watchers?: BotWatcherItem[]
+}
+
+/** A background command a bot runs now: its title, the command, when it started and when its time limit ends. */
+export interface BotWatcherItem {
+  id: string
+  title: string
+  command: string
+  startedAt: string
+  until: string
+  /** Its last line of output, cut. */
+  lastLine?: string
 }
 
 /** How many of the threads a bot started that ended or sit idle its summary carries, the most recently updated. */

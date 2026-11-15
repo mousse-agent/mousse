@@ -1,11 +1,60 @@
 import { useEffect, useState } from 'react'
-import { ChevronRight, Clock, Pause, Play } from '../../lib/icons'
-import type { BotAutomationCard } from '../../../shared/bots/personal/cards'
+import { ChevronRight, Clock, Pause, Play, TerminalSquare, X } from '../../lib/icons'
+import type { BotAutomationCard, BotWatcherCard } from '../../../shared/bots/personal/cards'
 import { useBotsStore, watchBotDetail } from '../../stores/botsStore'
 import { openAutomationRuns } from '../automations/inbox/inboxStore'
 import '../../chat/components/agent-elements/tools/subagent-card.css'
 import '../subagentAvatar.css'
 import './botStartedCards.css'
+
+/** "4m", "1h 12m": how long a background command has run. */
+export function runningFor(startedAt: string, now: number): string {
+  const minutes = Math.max(0, Math.floor((now - Date.parse(startedAt)) / 60_000))
+  if (minutes < 60) return `${minutes}m`
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
+}
+
+/**
+ * A background command the bot started (`watch_start`), in the same row: its title, and while it runs how long it has
+ * run, with Stop (the command line on hover); once it ended, "Ended" (the bot was woken with what happened).
+ */
+export function BotWatcherRow({ botId, card }: { botId: string; card: BotWatcherCard }) {
+  const running = useBotsStore((s) => s.bots.find((bot) => bot.id === botId)?.watchers?.find((watcher) => watcher.id === card.watcherId))
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!running) return
+    const timer = window.setInterval(() => setNow(Date.now()), 30_000)
+    return () => window.clearInterval(timer)
+  }, [running])
+  const [busy, setBusy] = useState(false)
+  const stop = () => {
+    if (busy) return
+    setBusy(true)
+    void useBotsStore.getState().stopWork(botId, card.watcherId).finally(() => setBusy(false))
+  }
+  return (
+    <div className="bot-started-card" data-testid="bot-watcher-card" data-state={running ? 'running' : 'ended'}>
+      <div className="subagent-card bot-started-static" title={card.command}>
+        <span className="subagent-avatar is-chip" aria-hidden="true"><TerminalSquare size={14} /></span>
+        <span className="subagent-card-body">
+          <span className="subagent-card-head">
+            <span className="subagent-card-title">{card.title}</span>
+            <span className="subagent-card-model">Background</span>
+          </span>
+          <span className="subagent-card-line">
+            <span className="subagent-card-result">{running ? `Running · ${runningFor(running.startedAt, now)}` : 'Ended'}</span>
+          </span>
+        </span>
+      </div>
+      {running && (
+        <button type="button" className="bot-started-action" disabled={busy} title="Stop it; the bot is not woken for it" aria-label={`Stop ${card.title}`} onClick={stop}>
+          <X size={13} aria-hidden />
+          <span>Stop</span>
+        </button>
+      )}
+    </div>
+  )
+}
 
 /**
  * What a bot started that keeps going on its own, as a card on the message of the turn that started it, in the same

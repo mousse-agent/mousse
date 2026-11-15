@@ -1,10 +1,11 @@
 import { Fragment, memo, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
 import { Activity, AppWindow, Brain, ChevronDown, ChevronRight, Circle, CircleAlert, CircleCheck, CircleDotDashed, CircleX, Clock, FileText, Globe, Moon, Pencil, Search, TerminalSquare, X } from '../../lib/icons'
-import type { BotChip, BotLaunchedThread, BotSummary, BotWorkItem } from '../../../shared/bots/personal/chat'
+import type { BotChip, BotLaunchedThread, BotSummary, BotWatcherItem, BotWorkItem } from '../../../shared/bots/personal/chat'
 import { formatAgo } from '../../lib/formatAgo'
 import { useBotsStore } from '../../stores/botsStore'
 import { launchedGroups, launchedLook, presenceOf, stickerOf, type BotStickerKind, type LaunchedTone } from './botChatShape'
 import { openThread } from './BotSteps'
+import { runningFor } from './BotStartedCards'
 
 /** How long work has run, in plain words: "just now", "4 min", "1 h 20 min". */
 export function workElapsed(startedAt: string, now = Date.now()): string {
@@ -53,6 +54,15 @@ const WorkLine = memo(function WorkLine({ botId, item }: { botId: string; item: 
   return <li className={`bot-work-line${running ? ' is-running' : ''}`}>
     <span className="bot-work-title">{item.title}</span>
     <span className="bot-work-doing">{details.map((part, index) => <Fragment key={index}>{index > 0 && ' · '}{part}</Fragment>)}</span>
+    <button type="button" data-nav aria-label={`Stop ${item.title}`} title="Stop" onClick={() => void useBotsStore.getState().stopWork(botId, item.id)}><X size={13} aria-hidden /></button>
+  </li>
+})
+
+/** A background command in the header's list: its title, how long it has run, its last line; Stop. */
+const WatcherLine = memo(function WatcherLine({ botId, item, now }: { botId: string; item: BotWatcherItem; now: number }) {
+  return <li className="bot-work-line is-running" title={item.command}>
+    <span className="bot-work-title">{item.title}</span>
+    <span className="bot-work-doing">{[runningFor(item.startedAt, now), item.lastLine].filter(Boolean).join(' · ')}</span>
     <button type="button" data-nav aria-label={`Stop ${item.title}`} title="Stop" onClick={() => void useBotsStore.getState().stopWork(botId, item.id)}><X size={13} aria-hidden /></button>
   </li>
 })
@@ -126,8 +136,9 @@ export function BotActivitySticker({ bot, typing, offline }: { bot: BotSummary; 
 export function BotPresenceLine({ bot, typing, offline }: { bot: BotSummary; typing: boolean; offline: boolean }) {
   const presence = presenceOf(bot, { typing, offline })
   const work = bot.work ?? []
+  const watchers = bot.watchers ?? []
   const { going, ended } = launchedGroups(bot.threads ?? [])
-  const listed = work.length + going.length + ended.length
+  const listed = work.length + watchers.length + going.length + ended.length
   const quiet = !work.length && !going.length
   const [open, setOpen] = useState(false)
   const [doneOpen, setDoneOpen] = useState<boolean | undefined>(undefined)
@@ -168,6 +179,10 @@ export function BotPresenceLine({ bot, typing, offline }: { bot: BotSummary; typ
     </button>
     {open && <div className="bot-work" ref={list} role="dialog" aria-label={`What ${bot.name} is running`} onKeyDown={moveFocus}>
       {ordered.length > 0 && <ul className="bot-work-list" aria-label="Work">{ordered.map((item) => <WorkLine key={item.id} botId={bot.id} item={item} />)}</ul>}
+      {watchers.length > 0 && <>
+        <p className="bot-work-heading">Background work</p>
+        <ul className="bot-work-list" aria-label="Background work">{watchers.map((item) => <WatcherLine key={item.id} botId={bot.id} item={item} now={now} />)}</ul>
+      </>}
       {going.length > 0 && <ul className="bot-work-list" aria-label="Threads it started">{going.map((thread) => <ThreadLine key={thread.threadId} thread={thread} now={now} onOpen={close} />)}</ul>}
       {ended.length > 0 && <>
         <button type="button" className="bot-thread-fold" data-nav aria-expanded={showDone} onClick={() => setDoneOpen(!showDone)}>

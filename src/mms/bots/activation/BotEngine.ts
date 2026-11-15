@@ -3,6 +3,7 @@ import { computerSwitchOf } from '../../../shared/bots/personal/computerLimit'
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { existsSync, mkdirSync, rmSync } from 'node:fs'
+import type { ChildProcess, SpawnOptions } from 'node:child_process'
 import { join } from 'node:path'
 import { askNoticeText, askText } from '../../../shared/bots/personal/askText'
 import { lookFields } from '../../../shared/bots/personal/look'
@@ -70,6 +71,8 @@ import { defaultChatInput, defaultWorkLine, lateWorkNote, MAX_NEW_QUESTIONS_PER_
 import { CARD_SHOWN_TEXT, type BotCard } from '../../../shared/bots/personal/cards'
 import { checkedCard, hasReplyCards, keepMousseCard, keepReplyCard } from '../chat/replyCards'
 import { afterQuietHours, inQuietHours, nudgeSlot } from './questionFollowUps'
+import { BotWatchers, DEFAULT_WATCHER_MINUTES, MAX_WATCHER_COMMAND_CHARS, MAX_WATCHER_MINUTES, MAX_WATCHERS_PER_BOT, watcherMatchProblem, type WatcherEnd, type WatcherSpec, type WatcherView } from '../watchers'
+import { lockedEnv } from '../../harness/env'
 import { DEFAULT_EVENT_WAKE_HOURS, MAX_EVENT_WAKE_HOURS, MAX_WAKE_BRIEF_CHARS, MAX_WAKE_CHAIN, MAX_WAKES_PER_DAY, WAKE_LINE_PREFIX, wakeEventLabel, wakeFiredLabel, wakeInput, type BotWakeEvent, type BotWakeFired } from '../../../shared/bots/personal/wakes'
 import type { LlmProviderOption } from '../../../shared/settings'
 import { botAllowedOf, type BotAllowed } from '../instructions'
@@ -146,6 +149,8 @@ export interface BotEngineHost {
    * no project is; `problem` when it could not be read. Absent: no wakes on pull requests here.
    */
   pullRequestState?(repo: string, number: number): Promise<{ state: 'open' | 'closed' | 'merged'; title?: string } | { none: true } | { problem: string }>
+  /** Starts a watcher's command (tests); default `child_process.spawn`. */
+  spawnWatcher?: (command: string, options: SpawnOptions) => ChildProcess
   harness: {
     checkPolicy(instanceId: string, policy: RunPolicy, model?: string): Enforceability
     /** Reads the instance's policy facts again (`HarnessGateway.refreshPolicyFacts`). */
@@ -556,6 +561,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private readonly questionRetryAt = new Map<string, number>()
   /** When each waiting wake on a pull request last read it (`PR_WAKE_READ_MS`). */
   private readonly wakeReadAt = new Map<string, number>()
+  /** The bots' background commands (`watch_start`), each a wake on a `watcher` event; they end with this process. */
+  private readonly watchers: BotWatchers
+  private checkingWatchers = false
   private closed = false
   /** Final messages the executor delivered while the dispatch's end was still being recorded, by `<activationId>:<n>`. */
   private readonly lateTexts = new Map<string, string>()
@@ -609,6 +617,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private readonly reportChips = new Map<string, BotChip>()
 
   constructor(private readonly host: BotEngineHost) {
+    this.watchers = new BotWatchers({
+      onEnd: (spec, end, tail) => this.watcherEnded(spec, end, tail),
+      ...(host.spawnWatcher ? { spawn: host.spawnWatcher } : {}),
+      now: () => this.now(),
+      ...(host.setTimer ? { setTimer: host.setTimer } : {})
+    })
     this.chat = new BotChatProjection({
       store: host.store,
       ...(host.journal ? { journal: host.journal } : {}),
@@ -618,6 +632,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       schedules: (botId) => this.schedulesOf(botId).map((schedule) => ({ scheduleId: schedule.scheduleId, label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}), jobId: schedule.jobId, paused: schedule.paused })),
       // The threads it started that still work: it is busy while it manages them.
       launched: (botId) => this.launchedThreads(botId),
+      watchers: (botId) => this.watchers.list(botId).map((view) => ({ id: view.id, title: view.title, command: view.command, startedAt: view.startedAt, until: view.until, ...(view.lastLine ? { lastLine: view.lastLine } : {}) })),
       // About marks a permission this computer has switched off.
       computerLimit: () => this.limit(),
       // Where each granted MCP server stands now, for About (on, switched off, changed, gone, or MCP off). Before the
@@ -689,6 +704,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   private changed(event: { botId?: string; activationId?: string }): void {
+    // A change may take "run commands" away (a Remove, a switch, this computer's limit): background commands stop with it.
+    if (this.watchers?.size && !this.checkingWatchers) {
+      this.checkingWatchers = true
+      try {
+        this.stopUnheldWatchers()
+      } catch (error) {
+        console.warn('bot background commands could not be checked', { error: error instanceof Error ? error.message : String(error) })
+      } finally {
+        this.checkingWatchers = false
+      }
+    }
     try {
       this.host.changed?.(event)
       this.events.emit('changed', event)
@@ -829,6 +855,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.store.revoke(botId)
       this.store.markDeleted(botId)
       // A deleted bot says nothing more: its reminders are cancelled with it, and its questions no longer wait for an answer.
+      this.watchers.stopBot(botId)
       this.store.cancelReminders(botId)
       this.store.withdrawQuestions(botId)
       return running
@@ -6713,6 +6740,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   pauseBot(botId: string): void {
     this.entry(botId)
     this.store.setPaused(botId, 'owner')
+    // A paused bot runs nothing in the background either.
+    this.stopWatchersOf(botId)
     this.changed({ botId })
   }
 
@@ -6821,6 +6850,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     },
     wakes: {
       add: (botId, from, input) => this.addWake(botId, from, input)
+    },
+    watchers: {
+      start: (botId, from, input) => this.startWatcher(botId, from, input),
+      list: (botId) => this.listWatchers(botId).map(({ botId: _bot, ...view }) => view),
+      stop: (botId, watcherId) => this.stopWatcher(botId, watcherId)
     },
     reminders: {
       add: (botId, from, input) => this.addReminder(botId, from, input),
@@ -7177,6 +7211,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /** `work_stop` (and the work line's Stop): one run of this bot ends; the chat is never stopped this way. */
   async stopWork(botId: string, workId: string): Promise<'stopped' | 'ended' | 'not_found'> {
+    // A background command is work too: its line in the chat stops it the same way.
+    if (this.watchers.has(workId)) return this.stopWatcher(botId, workId) ? 'stopped' : 'not_found'
     const row = this.store.activation(workId)
     if (!row || row.botId !== botId || row.lane !== 'run') return 'not_found'
     if (ENDED_ACTIVATION_STATUSES.has(row.status)) return 'ended'
@@ -7262,14 +7298,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.entry(botId)
     const brief = input.brief.trim().slice(0, MAX_WAKE_BRIEF_CHARS)
     if (!brief) throw new BotEngineError('invalid_params', 'A wake-up needs a brief: what you will do then.')
-    const setting = this.store.activation(from)
-    if (!setting || setting.botId !== botId || setting.lane !== 'chat') throw new BotEngineError('invalid_params', 'Only your chat sets wake-ups.')
-    const chain = this.wakeChainOf(setting) + 1
-    if (chain > MAX_WAKE_CHAIN)
-      throw new BotEngineError('wake_chain', `You have already followed up ${MAX_WAKE_CHAIN} times in a row without your owner. Don't set another: tell your owner where things stand, and carry on when they write.`)
-    if (this.store.wakesSince(botId, new Date(this.now() - 24 * HOUR_MS).toISOString()) >= MAX_WAKES_PER_DAY)
-      throw new BotEngineError('wake_limit', `You have set ${MAX_WAKES_PER_DAY} wake-ups in the last 24 hours, the most a bot may. Tell your owner what you would have followed up on instead.`)
-    if (this.store.waitingReminders(botId).length >= MAX_WAITING_REMINDERS) throw new BotEngineError('reminder_limit', `You already have ${MAX_WAITING_REMINDERS} reminders and wake-ups waiting. Cancel one first.`)
+    const chain = this.wakeAllowance(botId, from)
     let dueAt: string
     let event: BotWakeEvent | null = null
     if (input.event) {
@@ -7289,6 +7318,142 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.armDue()
     this.changed({ botId })
     return { wakeId, dueAt, label: event ? wakeEventLabel(event) : '' }
+  }
+
+  /**
+   * The chain a new wake set from chat turn `from` is in, once the wake limits allow it (a watcher is a wake too): set from
+   * a chat turn only, at most `MAX_WAKE_CHAIN` in a row with no owner's message between them, `MAX_WAKES_PER_DAY` in any
+   * 24 hours, and the waiting reminders' cap. Throws, in words for the bot, when not.
+   */
+  private wakeAllowance(botId: string, from: string): number {
+    const setting = this.store.activation(from)
+    if (!setting || setting.botId !== botId || setting.lane !== 'chat') throw new BotEngineError('invalid_params', 'Only your chat sets wake-ups.')
+    const chain = this.wakeChainOf(setting) + 1
+    if (chain > MAX_WAKE_CHAIN)
+      throw new BotEngineError('wake_chain', `You have already followed up ${MAX_WAKE_CHAIN} times in a row without your owner. Don't set another: tell your owner where things stand, and carry on when they write.`)
+    if (this.store.wakesSince(botId, new Date(this.now() - 24 * HOUR_MS).toISOString()) >= MAX_WAKES_PER_DAY)
+      throw new BotEngineError('wake_limit', `You have set ${MAX_WAKES_PER_DAY} wake-ups in the last 24 hours, the most a bot may. Tell your owner what you would have followed up on instead.`)
+    if (this.store.waitingReminders(botId).length >= MAX_WAITING_REMINDERS) throw new BotEngineError('reminder_limit', `You already have ${MAX_WAITING_REMINDERS} reminders and wake-ups waiting. Cancel one first.`)
+    return chain
+  }
+
+  // -- Background commands (`watch_start`) ---------------------------------------------------------------------------
+
+  /**
+   * `watch_start`: a command that runs in the background, from the bot's files folder, in the locked environment (as a
+   * Pi bot's commands run), while the bot holds "run commands" here. It ends when it exits, prints a line that matches
+   * `match`, or reaches its time limit (default an hour, at most six), and then the bot wakes in its chat with what
+   * happened: it is a wake on a `watcher` event, so the chain, the daily budget and the quiet hours hold. At most
+   * `MAX_WATCHERS_PER_BOT` run at once. Its card shows on the turn's reply.
+   */
+  startWatcher(botId: string, from: string, input: { command: string; brief: string; title?: string; match?: string; minutes?: number }): { watcherId: string; until: string } {
+    this.entry(botId)
+    const command = input.command.trim()
+    if (!command) throw new BotEngineError('invalid_params', 'watch_start needs a command.')
+    if (command.length > MAX_WATCHER_COMMAND_CHARS) throw new BotEngineError('invalid_params', `Keep the command to ${MAX_WATCHER_COMMAND_CHARS} characters.`)
+    const brief = input.brief.trim().slice(0, MAX_WAKE_BRIEF_CHARS)
+    if (!brief) throw new BotEngineError('invalid_params', 'watch_start needs a brief: what you will do when it ends.')
+    const match = input.match?.trim() || undefined
+    const problem = match ? watcherMatchProblem(match) : undefined
+    if (problem) throw new BotEngineError('invalid_params', problem)
+    const minutes = input.minutes === undefined ? DEFAULT_WATCHER_MINUTES : input.minutes
+    if (!Number.isFinite(minutes) || minutes < 1 || minutes > MAX_WATCHER_MINUTES) throw new BotEngineError('invalid_params', `minutes is its time limit: 1 to ${MAX_WATCHER_MINUTES}.`)
+    if (this.store.registry(botId)?.pausedReason) throw new BotEngineError('bot_paused', 'You are paused, so nothing runs in the background.')
+    if (!this.holdsCommands(botId)) throw new BotEngineError('permission_required', 'Background commands need "run commands". Ask for it with escalate (the tool shell), then start it again.')
+    if (this.watchers.list(botId).length >= MAX_WATCHERS_PER_BOT) throw new BotEngineError('watcher_limit', `You already have ${MAX_WATCHERS_PER_BOT} background commands running. Stop one first (watch_list, watch_stop).`)
+    const chain = this.wakeAllowance(botId, from)
+    const title = (input.title?.trim() || summarise(command)).slice(0, MAX_WORK_TITLE_CHARS)
+    const event: BotWakeEvent = { kind: 'watcher', title, command, ...(match ? { match } : {}), minutes }
+    const watcherId = `rem_${randomUUID()}`
+    const limitMs = minutes * 60_000
+    // Its wake gives up a little after the time limit, as a backstop for a process that never reported.
+    const dueAt = new Date(this.now() + limitMs + 2 * 60_000).toISOString()
+    this.store.insertReminder({ id: watcherId, botId, dueAt, text: brief, work: null, replyTo: this.ownerMessageOf(from) ?? null, createdAt: this.store.now(), wake: true, event, chain })
+    const scratch = join(this.store.directory, 'scratch', `watch-${watcherId}`)
+    try {
+      mkdirSync(join(scratch, 'tmp'), { recursive: true, mode: 0o700 })
+      mkdirSync(this.filesFolder(botId), { recursive: true, mode: 0o700 })
+      const env = lockedEnv({ platform: process.platform, base: process.env, driver: 'pi', credential: 'api_key', scratch })
+      this.watchers.start({ id: watcherId, botId, title, command, ...(match ? { match } : {}), limitMs, cwd: this.filesFolder(botId), env })
+    } catch (error) {
+      this.store.settleReminder(watcherId, 'cancelled')
+      rmSync(scratch, { recursive: true, force: true })
+      throw new BotEngineError('watcher_failed', `The command could not start: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    keepMousseCard(from, { type: 'watcher', watcherId, title, command })
+    this.armDue()
+    this.changed({ botId })
+    return { watcherId, until: new Date(this.now() + limitMs).toISOString() }
+  }
+
+  /** The bot's background commands running now (`watch_list`, the chat's Background work). */
+  listWatchers(botId: string): WatcherView[] {
+    return this.watchers.list(botId)
+  }
+
+  /** Stops one of the bot's background commands (the bot's `watch_stop`, or the owner's Stop); no wake follows. */
+  stopWatcher(botId: string, watcherId: string): boolean {
+    const row = this.store.reminder(watcherId)
+    if (!row || row.botId !== botId || !this.watchers.has(watcherId)) return false
+    this.watchers.stop(watcherId)
+    this.store.settleReminder(watcherId, 'cancelled')
+    this.armDue()
+    this.changed({ botId })
+    return true
+  }
+
+  /** Stops every background command of a bot (it is paused, deleted, or no longer holds "run commands"). */
+  private stopWatchersOf(botId: string): void {
+    for (const id of this.watchers.stopBot(botId)) this.store.settleReminder(id, 'cancelled')
+  }
+
+  /** Whether the bot holds "run commands" now: its revision inside the grant, less what is switched off, under this computer's limit. */
+  private holdsCommands(botId: string): boolean {
+    const grant = this.store.activeGrant(botId)
+    if (!grant) return false
+    let published: BotDefinition
+    try {
+      published = this.published(botId)
+    } catch {
+      return false
+    }
+    let manifest = intersectManifest(published.permissions, grant.manifest)
+    for (const off of this.store.disabledPermissions(botId)) {
+      const permission = grantedPermissions(off.manifest).find((item) => permissionId(item) === off.id)
+      if (permission) manifest = withoutPermission(manifest, permission)
+    }
+    return withinComputerLimit(manifest, this.limit()).tools.includes('shell')
+  }
+
+  /** Background commands of bots that no longer hold "run commands" stop (a Remove, a switch, this computer's limit). */
+  private stopUnheldWatchers(): void {
+    for (const botId of new Set(this.watchers.list().map((view) => view.botId))) {
+      if (this.holdsCommands(botId)) continue
+      this.stopWatchersOf(botId)
+      this.changed({ botId })
+    }
+  }
+
+  /**
+   * A watcher ended: its wake fires now with how it ended, the matched line and the end of its output (its turn still waits
+   * out the quiet hours). One the bot or the owner stopped fires nothing.
+   */
+  private watcherEnded(spec: WatcherSpec, end: WatcherEnd, tail: string): void {
+    rmSync(join(this.store.directory, 'scratch', `watch-${spec.id}`), { recursive: true, force: true })
+    if (end.kind === 'stopped') return
+    const fired: BotWakeFired = {
+      kind: 'watcher',
+      title: spec.title,
+      how: end.kind,
+      ...(end.kind === 'exit' ? { exitCode: end.code } : {}),
+      ...(end.kind === 'match' ? { line: end.line } : {}),
+      ...(end.kind === 'failed' ? { message: end.message.slice(0, 300) } : {}),
+      tail: tail.slice(-1_500)
+    }
+    if (this.store.fireWake(spec.id, fired, new Date(this.now()).toISOString())) {
+      this.changed({ botId: spec.botId })
+      this.armDue()
+    }
   }
 
   /** How many wakes in a row led to the chat turn `row`: 0 for one the owner (or anything but a wake) started. */
@@ -7312,6 +7477,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return { kind: 'thread', threadId: event.threadId, ...(seen.title ? { title: seen.title.slice(0, 120) } : {}) }
     }
     if (!this.host.pullRequestState) throw new BotEngineError('invalid_params', 'Wake-ups on pull requests can\'t be set here.')
+    // A watcher is started by `watch_start`, never set as a wake.
+    if (event.kind === 'watcher') throw new BotEngineError('invalid_params', 'Start a background command with watch_start.')
     const read = await this.host.pullRequestState(event.repo, event.number)
     if ('none' in read) throw new BotEngineError('invalid_params', `${event.repo} is not one of your owner's projects in Mousse, so its pull requests can't be watched.`)
     if ('problem' in read) throw new BotEngineError('invalid_params', `${event.repo}#${event.number} couldn't be read: ${read.problem}`)
@@ -7349,6 +7516,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /** What happened to a wake's event by now, or undefined while it is still to come. */
   private async wakeEventNow(wake: BotReminderRow, event: BotWakeEvent, now: Date): Promise<BotWakeFired | undefined> {
+    // A watcher fires from its process (`watcherEnded`); one that no longer runs here was ended by a restart.
+    if (event.kind === 'watcher') return this.watchers.has(wake.id) ? undefined : { kind: 'ended', reason: 'restart' }
     if (event.kind === 'thread') {
       const home = this.store.registry(wake.botId)?.homeThreadId
       const seen = home ? this.host.wakeThread?.(home, event.threadId) : undefined
@@ -7986,6 +8155,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * next start carries its activation on with the time it really has left.
    */
   close(): void {
+    // Background commands end with this process; at the next start each one's bot is told (`wakeEventNow`).
+    this.watchers.close()
     for (const [activationId, live] of this.live) {
       live.timer?.clear()
       live.watch?.clear()

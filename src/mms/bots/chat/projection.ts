@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { askText } from '../../../shared/bots/personal/askText'
-import { launchedActive, withAppletNames, type BotAskCard, type BotAskStatus, type BotChatApplet, type BotChatMessage, type BotChatQuote, type BotLaunchedThread, type BotWorkItem, type BotChip, type BotDetail, type BotError, type BotMessageKind, type BotPermissionItem, type BotReminderItem, type BotRunItem, type BotSummary } from '../../../shared/bots/personal/chat'
+import { launchedActive, withAppletNames, type BotAskCard, type BotAskStatus, type BotChatApplet, type BotChatMessage, type BotChatQuote, type BotLaunchedThread, type BotWatcherItem, type BotWorkItem, type BotChip, type BotDetail, type BotError, type BotMessageKind, type BotPermissionItem, type BotReminderItem, type BotRunItem, type BotSummary } from '../../../shared/bots/personal/chat'
 import { BOT_MODEL_SLOT_KEYS, type BotDefinition, type BotLane, type BotManifest } from '../../../shared/bots/personal/definition'
 import { isPinned, limitOnPick, slotsOf, stuckRowsOf } from '../../../shared/bots/personal/modelSlots'
 import { askFingerprint, isSpecialAsk, mcpAskTools, type BotAskRequest, type BotEscalationStatus, type BotPermissionRequest } from '../../../shared/bots/personal/escalation'
@@ -215,6 +215,8 @@ export class BotChatProjection {
     followUpAt?(question: BotQuestionRow, shownAt: string): string | null
     /** The threads the bot started, hidden ones too, and how each stands (`BotEngine.launchedThreads`). */
     launched?(botId: string): BotLaunchedThread[]
+    /** The bot's background commands running now. */
+    watchers?(botId: string): BotWatcherItem[]
   }) {}
 
   private get store(): BotStore {
@@ -507,6 +509,7 @@ export class BotChatProjection {
     const waitingOn = this.store.waitingQuestions(definition.id)
     // Threads it started that still work keep it busy: it manages them. Those that ended are listed, never counted.
     const threads = this.launchedOf(definition.id)
+    const watchers = this.options.watchers?.(definition.id) ?? []
     const managing = threads.filter(launchedActive)
     const state = botState({ paused, ...(error ? { error } : {}), openAsks: asks.length + waitingOn.length, liveActivations: live + managing.length })
     // Working, but every running activation waits for the internet.
@@ -539,7 +542,8 @@ export class BotChatProjection {
       ...(registry?.homeThreadId ? { homeThreadId: registry.homeThreadId } : {}),
       ...(chatTurn ? { chat: { activationId: chatTurn.id, ...(chatTurn.offline ? { offline: true as const } : {}) } } : {}),
       ...(work.length ? { work } : {}),
-      ...(threads.length ? { threads } : {})
+      ...(threads.length ? { threads } : {}),
+      ...(watchers.length ? { watchers } : {})
     }
   }
 

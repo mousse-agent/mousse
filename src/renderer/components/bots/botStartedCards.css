@@ -10,6 +10,11 @@
   flex: 1 1 auto;
 }
 
+/* A row with nothing to open (a background command): no hover tint. */
+.bot-started-card > .subagent-card.bot-started-static:hover {
+  background: transparent;
+}
+
 .bot-started-card .subagent-avatar.is-chip {
   width: 24px;
   height: 24px;

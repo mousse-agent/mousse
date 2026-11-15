@@ -100,6 +100,21 @@ describe('presence and sticker', () => {
     expect(presenceOf({ state: 'paused', threads }, { typing: false, offline: false }).text).toBe('paused')
   })
 
+  it('background commands add to +N beside work or threads, and alone say what it waits on, still free', () => {
+    const watcher = (id: string, title: string) => ({ id, title, command: 'make', startedAt: '2026-11-13T21:40:00.000Z', until: '2026-11-13T22:40:00.000Z' })
+    const thread: BotLaunchedThread = { threadId: 't1', title: 'Dictation mock-ups', status: 'running', startedAt: '2026-11-13T21:40:00.000Z', updatedAt: '2026-11-13T21:40:00.000Z' }
+    const rows: Array<[string, BotWorkItem[], BotLaunchedThread[], ReturnType<typeof watcher>[], string, string]> = [
+      ['work leads', one, [], [watcher('w1', 'Nightly')], 'System check +1', 'busy'],
+      ['a thread leads', [], [thread], [watcher('w1', 'Nightly')], 'Managing Dictation mock-ups +1', 'busy'],
+      ['one alone names it', [], [], [watcher('w1', 'Nightly')], 'Waiting on Nightly', 'free'],
+      ['several alone are counted', [], [], [watcher('w1', 'Nightly'), watcher('w2', 'Tests')], 'Waiting on 2 things', 'free']
+    ]
+    for (const [what, work, threads, watchers, text, kind] of rows) {
+      const presence = presenceOf({ state: 'idle', work, threads, watchers }, { typing: false, offline: false })
+      expect([what, presence.text, presence.kind]).toEqual([what, text, kind])
+    }
+  })
+
   it("splits the threads it started into those going (working, then waiting on the owner) and the rest (idle, then ended), each with its tint and word", () => {
     const thread = (threadId: string, status: BotLaunchedThread['status']): BotLaunchedThread => ({ threadId, title: threadId, status, startedAt: '2026-11-13T21:40:00.000Z', updatedAt: '2026-11-13T21:40:00.000Z' })
     const statuses: Array<[BotLaunchedThread['status'], string, string]> = [

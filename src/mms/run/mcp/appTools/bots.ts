@@ -11,6 +11,7 @@ import { shortModelName } from '../../../../shared/modelNames'
 import { botScheduleLabel } from '../../../../shared/scheduleLabel'
 import { botScheduleProblem } from '../../../scheduled/botJobs'
 import { DEFAULT_EVENT_WAKE_HOURS, MAX_EVENT_WAKE_HOURS, MAX_WAKE_CHAIN, MAX_WAKES_PER_DAY, pullRequestOf } from '../../../../shared/bots/personal/wakes'
+import { DEFAULT_WATCHER_MINUTES, MAX_WATCHER_MINUTES, MAX_WATCHERS_PER_BOT } from '../../../bots/watchers'
 import type { BotActivityContext, BotActivitySink, BotToolHost, BotWorkModel } from '../../../bots/seams'
 import type { BotImageMaker } from '../../../bots/images/BotImageMaker'
 import { json, plainSchema, truncateForModel, type MousseTool, type ToolCallContext, type ToolOutcome } from './types'
@@ -257,6 +258,27 @@ export const BOT_TOOLS: Tool[] = [
     })
   },
   {
+    name: 'watch_start',
+    description: `Run a command in the background and wake up here when it is done, instead of waiting or checking again and again: for example a build, a test run, \`gh run watch\` on a nightly, or \`gh pr checks 12 --watch\`. It runs in a shell (${process.platform === 'win32' ? 'cmd on Windows' : 'sh'}) from your files folder, as your commands do, and needs "run commands". You wake when it exits (with its exit code), when a line of its output matches match (a regular expression; it is stopped then), or when it reaches its time limit (minutes, default ${DEFAULT_WATCHER_MINUTES}, at most ${MAX_WATCHER_MINUTES}; it is stopped then); you get the line that matched and the end of its output. brief is what you will do then, standing on its own. It counts as a wake-up (at most ${MAX_WAKE_CHAIN} in a row without your owner, ${MAX_WAKES_PER_DAY} a day) and waits out your owner's night. At most ${MAX_WATCHERS_PER_BOT} run at once; a restart of Mousse stops them, and you are told. Tell your owner in a few words what you are waiting on.`,
+    parameters: Type.Object({
+      command: Type.String({ description: 'The command line.' }),
+      brief: Type.String({ description: 'What you will do when it ends, standing on its own, as a note to yourself.' }),
+      title: Type.Optional(Type.String({ description: 'A few words your owner will recognise, like "Nightly build". Left out: the start of the command.' })),
+      match: Type.Optional(Type.String({ description: 'Wake as soon as a line of output matches this regular expression, like "build (passed|failed)". No nested repeats or back-references.' })),
+      minutes: Type.Optional(Type.Number({ description: `Its time limit in minutes (default ${DEFAULT_WATCHER_MINUTES}, at most ${MAX_WATCHER_MINUTES}).` }))
+    })
+  },
+  {
+    name: 'watch_list',
+    description: 'Your background commands running now: id, title, command, when each started, its time limit and its last line of output.',
+    parameters: Type.Object({})
+  },
+  {
+    name: 'watch_stop',
+    description: 'Stop one of your background commands by its id (see watch_list), when it is no longer needed. You are not woken for it.',
+    parameters: Type.Object({ watcherId: Type.String() })
+  },
+  {
     name: 'reminder_list',
     description: 'Your reminders and wake-ups still to come: id, time and text. A wake-up says what it waits for (its time is then when it gives up).',
     parameters: Type.Object({})
@@ -456,7 +478,7 @@ export function ownerModelChoice(owner: string, options: readonly BotModelOption
 const NOT_A_BOT = 'Only a bot can use this.'
 const NO_PICTURES_HERE = "Pictures can't be made here. Nothing was made."
 const NO_IMAGE_MODEL_LINE = "Your owner hasn't picked an image model for you. Tell them they can pick one in About → Runs on, in the Images row."
-const CHAT_ONLY = 'Only your chat hands out work and sets reminders and wake-ups. In a run, do the work yourself and say in your report what should happen next.'
+const CHAT_ONLY = 'Only your chat hands out work, sets reminders and wake-ups, and starts background commands. In a run, do the work yourself and say in your report what should happen next.'
 /** `question_answer` outside the chat: only the chat hears the owner's words to pass on. */
 const ANSWER_CHAT_ONLY = 'Only your chat passes on your owner\'s answers to your work.'
 /** `show_card` where it is never offered (a consult, a subagent): what it would show goes in words. */
@@ -897,6 +919,57 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         } catch (failure) {
           return error(failure instanceof Error ? failure.message : String(failure))
         }
+      }
+    }),
+    ownTool(byName.get('watch_start')!, deps, {
+      class: 'mutation',
+      describe: () => 'Start a background command',
+      handler: async (args, ctx) => {
+        const call = botCall(deps, ctx)
+        if (isOutcome(call)) return call
+        if (call.lane !== 'chat') return error(CHAT_ONLY)
+        const watchers = call.deps.host.watchers
+        if (!watchers) return error("Background commands can't run here.")
+        if (typeof args.command !== 'string' || !args.command.trim()) return error('watch_start needs the command to run.')
+        if (typeof args.brief !== 'string' || !args.brief.trim()) return error('watch_start needs a brief: what you will do when it ends.')
+        if (args.match !== undefined && typeof args.match !== 'string') return error('match is a regular expression, as text.')
+        if (args.minutes !== undefined && typeof args.minutes !== 'number') return error('minutes is a number.')
+        try {
+          const started = watchers.start(call.botId, call.activationId, {
+            command: args.command,
+            brief: args.brief,
+            ...(typeof args.title === 'string' ? { title: args.title } : {}),
+            ...(typeof args.match === 'string' ? { match: args.match } : {}),
+            ...(typeof args.minutes === 'number' ? { minutes: args.minutes } : {})
+          })
+          const result = { watcherId: started.watcherId, stopsBy: reminderLabel(new Date(started.until)) }
+          call.deps.activity?.onAppResult(call.activity, 'watch_start', result)
+          return json(result)
+        } catch (failure) {
+          return error(failure instanceof Error ? failure.message : String(failure))
+        }
+      }
+    }),
+    ownTool(byName.get('watch_list')!, deps, {
+      class: 'read',
+      describe: () => 'List background commands',
+      handler: async (_args, ctx) => {
+        const call = botCall(deps, ctx)
+        if (isOutcome(call)) return call
+        return json((call.deps.host.watchers?.list(call.botId) ?? []).map((view) => ({ ...view, stopsBy: reminderLabel(new Date(view.until)) })))
+      }
+    }),
+    ownTool(byName.get('watch_stop')!, deps, {
+      class: 'mutation',
+      describe: () => 'Stop a background command',
+      handler: async (args, ctx) => {
+        const call = botCall(deps, ctx)
+        if (isOutcome(call)) return call
+        if (call.lane !== 'chat') return error(CHAT_ONLY)
+        if (typeof args.watcherId !== 'string' || !call.deps.host.watchers?.stop(call.botId, args.watcherId)) return error('You have no background command running with that id. See watch_list.')
+        const result = { stopped: true as const }
+        call.deps.activity?.onAppResult(call.activity, 'watch_stop', result)
+        return json(result)
       }
     }),
     ownTool(byName.get('reminder_list')!, deps, {

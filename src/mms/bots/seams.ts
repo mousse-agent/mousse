@@ -149,6 +149,16 @@ export interface BotToolHost {
   wakes?: {
     add(botId: string, from: string, input: { brief: string; dueAt?: string; event?: BotWakeEvent; hours?: number }): Promise<{ wakeId: string; dueAt: string; label: string }>
   }
+  /**
+   * Background commands (`watch_start`, `watch_list`, `watch_stop`): a command that runs beside the bot and wakes it in its
+   * chat when it exits, prints a line matching `match`, or reaches its time limit (`minutes`). `from` is the chat turn that
+   * starts it. Throws, with why in words for the bot, when it can't start. Absent: none here.
+   */
+  watchers?: {
+    start(botId: string, from: string, input: { command: string; brief: string; title?: string; match?: string; minutes?: number }): { watcherId: string; until: string }
+    list(botId: string): Array<{ id: string; title: string; command: string; match?: string; startedAt: string; until: string; lastLine?: string }>
+    stop(botId: string, watcherId: string): boolean
+  }
 }
 
 /**

@@ -32,6 +32,7 @@ const ROWS_ON_SUB: BotModelSlots = { talk: ON_SUB, light: ON_SUB, medium: ON_SUB
 function fakeBots(lane: BotLane = 'chat', options: { owner?: string; changes?: boolean; rows?: BotModelSlots; choices?: BotModelOption[]; work?: Partial<BotToolHost['work']>; cards?: boolean } = {}) {
   const schedules: Array<{ scheduleId: string; when: BotSchedule['when']; prompt: string; label: string; from?: string }> = []
   const wakes: Array<{ from: string; input: Parameters<NonNullable<BotToolHost['wakes']>['add']>[2] }> = []
+  const watched: Array<{ from: string; input: Parameters<NonNullable<BotToolHost['watchers']>['start']>[2] }> = []
   const profiles: Array<{ name?: string; description?: string }> = []
   const models: Array<{ scope: 'now' | 'always'; choice: BotModelChange }> = []
   const works: Array<{ title: string; brief: string; key: string; level?: string }> = []
@@ -60,6 +61,15 @@ function fakeBots(lane: BotLane = 'chat', options: { owner?: string; changes?: b
     setModel: (_botId, _activationId, scope, choice) => {
       models.push({ scope, choice })
       return { changed: options.changes ?? true }
+    },
+    watchers: {
+      start: (_botId, from, input) => {
+        if (input.match === '(a+)+') throw new Error('match may not repeat a group that repeats itself, such as (a+)+.')
+        watched.push({ from, input })
+        return { watcherId: `rem_w${watched.length}`, until: '2026-11-08T10:00:00.000Z' }
+      },
+      list: () => watched.map((entry, index) => ({ id: `rem_w${index + 1}`, title: entry.input.title ?? 'x', command: entry.input.command, startedAt: '2026-11-08T09:00:00.000Z', until: '2026-11-08T10:00:00.000Z' })),
+      stop: (_botId, watcherId) => watcherId === 'rem_w1'
     },
     wakes: {
       add: async (_botId, from, input) => {
@@ -92,7 +102,7 @@ function fakeBots(lane: BotLane = 'chat', options: { owner?: string; changes?: b
     const outcome = await (tools.get(name) as MousseTool).handler(args, context)
     return { ...outcome, value: outcome.isError ? undefined : JSON.parse(outcome.text) }
   }
-  return { schedules, profiles, models, works, wakes, activity, call, ctx }
+  return { schedules, profiles, models, works, wakes, watched, activity, call, ctx }
 }
 
 describe('schedule tools', () => {
@@ -368,7 +378,7 @@ describe('ask_owner (#1123)', () => {
 describe('registration', () => {
   it('lists the bot tools in the bots family, and WP6\'s memory tools beside them', () => {
     const { families } = createAppToolRegistry({ host: fakeAppToolHost().host, bots: () => undefined })
-    expect(families.bots).toEqual(['escalate', 'consult', 'bot_schedule_add', 'bot_schedule_remove', 'bot_schedule_list', 'mcp_servers', 'set_profile', 'set_depth', 'work_start', 'work_models', 'work_list', 'work_stop', 'work_note', 'remind', 'wake', 'reminder_list', 'reminder_cancel', 'make_image', 'ask_owner', 'show_card', 'question_answer', 'use_model', 'subagent_start', 'subagent_send', 'subagent_wait', 'subagent_result', 'subagent_stop'])
+    expect(families.bots).toEqual(['escalate', 'consult', 'bot_schedule_add', 'bot_schedule_remove', 'bot_schedule_list', 'mcp_servers', 'set_profile', 'set_depth', 'work_start', 'work_models', 'work_list', 'work_stop', 'work_note', 'remind', 'wake', 'watch_start', 'watch_list', 'watch_stop', 'reminder_list', 'reminder_cancel', 'make_image', 'ask_owner', 'show_card', 'question_answer', 'use_model', 'subagent_start', 'subagent_send', 'subagent_wait', 'subagent_result', 'subagent_stop'])
     // With `botMemory`, WP6's memory tools follow them in the same family.
     const withMemory = createAppToolRegistry({ host: fakeAppToolHost().host, botMemory: { activationOf: () => undefined } })
     expect(withMemory.families.bots.slice(0, families.bots.length)).toEqual(families.bots)
@@ -412,5 +422,34 @@ describe('wake', () => {
     const bots = fakeBots('run')
     expect(await bots.call('wake', { brief: 'x', inMinutes: 5 })).toMatchObject({ isError: true, text: expect.stringContaining('Only your chat') })
     expect(bots.wakes).toEqual([])
+  })
+})
+
+describe('background commands', () => {
+  it('watch_start hands the command, brief, title, match and time limit to the engine from the chat turn; list and stop by id', async () => {
+    const bots = fakeBots()
+    const started = await bots.call('watch_start', { command: 'gh run watch 123', brief: 'Tell them if the nightly passed.', title: 'Nightly', match: 'completed', minutes: 90 })
+    expect(started.value).toMatchObject({ watcherId: 'rem_w1', stopsBy: expect.any(String) })
+    expect(bots.watched).toEqual([{ from: 'a1', input: { command: 'gh run watch 123', brief: 'Tell them if the nightly passed.', title: 'Nightly', match: 'completed', minutes: 90 } }])
+    expect((await bots.call('watch_list', {})).value).toEqual([expect.objectContaining({ id: 'rem_w1', command: 'gh run watch 123', stopsBy: expect.any(String) })])
+    expect((await bots.call('watch_stop', { watcherId: 'rem_w1' })).value).toEqual({ stopped: true })
+    expect(await bots.call('watch_stop', { watcherId: 'rem_w9' })).toMatchObject({ isError: true, text: expect.stringContaining('watch_list') })
+  })
+
+  it.each([
+    ['no command', { brief: 'x' }, 'command'],
+    ['no brief', { command: 'make' }, 'brief'],
+    ['a match the engine refuses', { command: 'make', brief: 'x', match: '(a+)+' }, 'repeats itself']
+  ])('watch_start refuses %s', async (_name, args, words) => {
+    const bots = fakeBots()
+    expect(await bots.call('watch_start', args)).toMatchObject({ isError: true, text: expect.stringContaining(words) })
+    expect(bots.watched).toEqual([])
+  })
+
+  it('work never starts or stops one', async () => {
+    const bots = fakeBots('run')
+    expect(await bots.call('watch_start', { command: 'make', brief: 'x' })).toMatchObject({ isError: true, text: expect.stringContaining('Only your chat') })
+    expect(await bots.call('watch_stop', { watcherId: 'rem_w1' })).toMatchObject({ isError: true, text: expect.stringContaining('Only your chat') })
+    expect(bots.watched).toEqual([])
   })
 })

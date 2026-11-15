@@ -34,7 +34,7 @@ export interface BotChipCall {
 type ChipKind =
   | 'search' | 'fetch' | 'browse' | 'read' | 'change' | 'save' | 'draft' | 'lookback' | 'consult' | 'skill' | 'tool' | 'mcp' | 'schedules'
   | 'schedule' | 'unschedule' | 'remember' | 'forget' | 'depth' | 'profile' | 'model'
-  | 'work' | 'work_stop' | 'work_note' | 'remind' | 'unremind' | 'work_look' | 'wake'
+  | 'work' | 'work_stop' | 'work_note' | 'remind' | 'unremind' | 'work_look' | 'wake' | 'watch' | 'unwatch'
   | 'threads_look' | 'profiler' | 'thread_wait' | 'thread_start' | 'thread_send' | 'thread_stop' | 'thread_archive' | 'picture'
   | 'subagent' | 'subagent_wait' | 'subagent_look'
 
@@ -184,6 +184,9 @@ function classify(tool: string, input: unknown, ctx: BotChipContext): Classified
     case 'work_models': return { kind: 'work_look', icon: 'think', live: 'looking at your models' }
     case 'remind': return { kind: 'remind', icon: 'schedule', live: 'setting a reminder' }
     case 'wake': return { kind: 'wake', icon: 'schedule', live: 'setting a wake-up' }
+    case 'watch_start': return { kind: 'watch', icon: 'schedule', live: 'starting a background command' }
+    case 'watch_stop': return { kind: 'unwatch', icon: 'schedule', live: 'stopping a background command' }
+    case 'watch_list': return { kind: 'work_look', icon: 'think', live: 'checking its background work' }
     case 'reminder_cancel': return { kind: 'unremind', icon: 'schedule', live: 'cancelling a reminder' }
     case 'reminder_list': return { kind: 'schedules', icon: 'schedule', live: 'checking its reminders' }
     // The owner's threads ("use your threads"): what it read rolls up into one chip; each start, message and stop is its
@@ -292,6 +295,9 @@ function outcomeChip(kind: ChipKind, call: BotChipCall): BotChip | null {
       return { icon: 'schedule', text: 'reminder', ...(label ? { highlight: label } : {}) }
     }
     case 'unremind': return { icon: 'schedule', text: 'cancelled a reminder' }
+    // A background command shows as a card on the message instead.
+    case 'watch': return null
+    case 'unwatch': return { icon: 'schedule', text: 'stopped a background command' }
     // A wake: what it waits for ("when acme/app#12 merges") or its time.
     case 'wake': {
       const label = str(result.waitsFor) ?? str(result.when)
@@ -364,7 +370,7 @@ function groupChip(kind: ChipKind, icon: BotChipIcon, calls: readonly Classified
 }
 
 /** Kinds whose every successful call is its own chip. */
-const OUTCOME_KINDS: ReadonlySet<ChipKind> = new Set(['schedule', 'remember', 'forget', 'work', 'work_stop', 'work_note', 'remind', 'unremind', 'wake', 'model', 'thread_start', 'thread_send', 'thread_stop', 'thread_archive'])
+const OUTCOME_KINDS: ReadonlySet<ChipKind> = new Set(['schedule', 'remember', 'forget', 'work', 'work_stop', 'work_note', 'remind', 'unremind', 'wake', 'watch', 'unwatch', 'model', 'thread_start', 'thread_send', 'thread_stop', 'thread_archive'])
 /** Kinds that settle to one chip for the last call only. */
 const LAST_KINDS: ReadonlySet<ChipKind> = new Set(['profile'])
 /** Kinds that settle to nothing: a look at its own schedules is not worth a chip. */

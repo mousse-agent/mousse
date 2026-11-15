@@ -5,7 +5,7 @@ import type { BotChecklistCard, BotChecklistState, BotChatGalleryCard, BotFactsC
 import { BotLink, KeyValueRows } from './BotFiles'
 import { BotReplyMedia } from './BotReplyMedia'
 import type { ReplyImage } from './botReplyImages'
-import { BotAutomationRow } from './BotStartedCards'
+import { BotAutomationRow, BotWatcherRow } from './BotStartedCards'
 
 /**
  * The cards on a bot's message (`show_card`, issue #1123), each drawn from the app's own components: the bot sends text
@@ -81,6 +81,7 @@ export function BotCards({ cards, botId }: { cards: readonly BotChatCard[]; botI
   return <div className="bot-cards">
     {cards.map((card, index) => {
       if (card.type === 'automation') return botId ? <BotAutomationRow key={index} botId={botId} card={card} /> : null
+      if (card.type === 'watcher') return botId ? <BotWatcherRow key={index} botId={botId} card={card} /> : null
       if (card.type === 'facts') return <FactsCard key={index} card={card} />
       if (card.type === 'checklist') return <ChecklistCard key={index} card={card} />
       if (card.type === 'progress') return <ProgressCard key={index} card={card} />

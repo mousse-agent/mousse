@@ -176,3 +176,31 @@ describe('an automation the bot created', () => {
     expect(button('Open automation')).toBeUndefined()
   })
 })
+
+describe('a background command the bot started', () => {
+  const WATCHER: BotChatCard = { type: 'watcher', watcherId: 'rem_w1', title: 'Nightly build', command: 'gh run watch 123' }
+  const card = () => bubbleOf('c1').querySelector<HTMLElement>('[data-testid="bot-watcher-card"]')!
+
+  it('shows as a row that says it runs, with Stop and the command on hover; Stop stops it', async () => {
+    fake.bots = [shop]
+    shop.watchers = [{ id: 'rem_w1', title: 'Nightly build', command: 'gh run watch 123', startedAt: new Date(Date.now() - 4 * 60_000).toISOString(), until: new Date(Date.now() + 56 * 60_000).toISOString() }]
+    try {
+      await open([carded(1, "I'll tell you when it's done.", [WATCHER])])
+      expect(card().dataset.state).toBe('running')
+      expect(card().textContent).toContain('Nightly build')
+      expect(card().textContent).toContain('Running · 4m')
+      expect(card().querySelector('[title="gh run watch 123"]')).not.toBeNull()
+      await act(async () => { card().querySelector<HTMLButtonElement>('button[aria-label="Stop Nightly build"]')!.click() })
+      expect(fake.calls).toContainEqual(['stopWork', 'shop', 'rem_w1'])
+    } finally {
+      delete shop.watchers
+    }
+  })
+
+  it('once it no longer runs, says Ended, with nothing to press', async () => {
+    await open([carded(1, "I'll tell you when it's done.", [WATCHER])])
+    expect(card().dataset.state).toBe('ended')
+    expect(card().textContent).toContain('Ended')
+    expect(card().querySelector('button')).toBeNull()
+  })
+})
