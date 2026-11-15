@@ -84,6 +84,15 @@ describe('next due time', () => {
     expect(f.bots.nextDueAt(botId)).toBe(at(0))
   })
 
+  it.each(['reminder', 'wake', 'question'])('arms the existing delivery timer at the %s time', async (source) => {
+    if (source === 'question') question('q', 20)
+    else reminder('r', 20, source === 'wake')
+    // Arming after a delivery pass uses the same due-source list as nextDueAt.
+    f.timers.length = 0
+    await f.bots.deliverDueReminders()
+    expect(f.timers.at(-1)?.ms).toBe(20 * MIN)
+  })
+
   it('leaves an overdue schedule to the shared scheduler without arming a delivery loop', async () => {
     const entry = schedule()
     f.clock.now = Date.parse(entry.nextAt!) + MIN
