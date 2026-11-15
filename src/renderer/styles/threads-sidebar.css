@@ -1193,10 +1193,34 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 }
 
 /* More rows below the fold: the last rows fade out and the scrollbar stays drawn, so the list reads as one
-   that scrolls even with overlay scrollbars. */
-.threads-sidebar-scroll[data-more-below] {
+   that scrolls even with overlay scrollbars. Over the solid pane the fade is a band in the pane's colour laid
+   over the list's last 28px, scrollbar included (anchored to the list's box, outside its scrolled content); a
+   mask would make the GPU keep a list-sized copy of the list, its mask and their tiles (about 16 MB). In a
+   see-through (acrylic) window the mask stays. */
+html[data-acrylic='true'] .threads-sidebar-scroll[data-more-below] {
   -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent);
   mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent);
+}
+
+html:not([data-acrylic='true']) .threads-sidebar {
+  anchor-scope: --threads-list;
+}
+
+html:not([data-acrylic='true']) .threads-sidebar-scroll[data-more-below] {
+  anchor-name: --threads-list;
+}
+
+html:not([data-acrylic='true']) .threads-sidebar:has(> .threads-sidebar-scroll[data-more-below])::after {
+  content: '';
+  position: absolute;
+  position-anchor: --threads-list;
+  left: anchor(left);
+  right: anchor(right);
+  bottom: anchor(bottom);
+  z-index: 1;
+  height: 28px;
+  background: linear-gradient(to bottom, transparent, var(--pane-backdrop));
+  pointer-events: none;
 }
 
 .threads-sidebar-scroll[data-more-below]::-webkit-scrollbar { width: 6px; }

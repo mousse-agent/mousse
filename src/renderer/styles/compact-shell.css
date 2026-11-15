@@ -31,9 +31,12 @@ html:not(.platform-darwin) .app {
 .overlay-titlebar h1 { font-size: 18px; }
 .app .titlebar-controls { gap: 1px; }
 
+/* `--pane-backdrop` is the pane's colour; the transcript's and the thread list's fades paint it too (polish.css,
+   threads-sidebar.css). */
 .app .threads-sidebar,
 .app .sidebar {
-  background: var(--vscode-sideBar-background, var(--surface-strong));
+  --pane-backdrop: var(--vscode-sideBar-background, var(--surface-strong));
+  background: var(--pane-backdrop);
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
 }
