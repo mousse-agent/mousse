@@ -2181,8 +2181,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (hasReplyCards(row.id) || hasToolImages(row.id) || (text && extractAppletParts(text, true).some(part => part.type !== 'text'))) return false
     if (row.lane !== 'chat' || this.chatDraft(row) || !this.store.pendingWorkNotes(row.id).length) return false
     if (this.store.get("SELECT 1 FROM bot_messages WHERE activation_id = ? AND author = 'bot' AND kind = 'text'", row.id)) return false
-    const runs = this.host.runs()
-    return Boolean(this.replyEffects.get(`${row.id}:${main.n}`) === false && runs && main.runId && runs.tools.listForRun(main.runId).every((call) => DRAFT_READ_ONLY_TOOLS.has(call.tool)))
+    return this.replyEffects.get(`${row.id}:${main.n}`) === false
   }
 
   /** End and startup recovery share this consumption path; posting and deleting the key are one transaction. */

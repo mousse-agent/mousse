@@ -78,15 +78,11 @@ describe('messages sent one after another', () => {
   })
 
   // Inputs: no calls / reads / mutations; success / Stop / failure / restart; third message.
-  it.each(['none', 'thread_read', 'memory_list', 'work_start', 'memory_save', 'new_unknown_tool'])('unread follow-up after %s keeps the right replies and quotes', async (tool) => {
+  it.each(['none', 'thread_read', 'memory_list', 'work_start', 'memory_save', 'set_profile'])('unread follow-up after %s keeps the right replies and quotes', async (tool) => {
     const first = await f.bots.service.chatSend({ botId, text: 'hi', clientRequestId: 'm1' })
     const turn = first.message.activationId!
-    const { payload } = await start(f, turn)
-    if (tool !== 'none') {
-      const now = new Date(f.clock.now).toISOString()
-      f.runs.tools.start({ invocationId: 'call', runId: payload.runId, attemptId: f.runs.store.getRun(payload.runId)!.activeAttemptId!, tool, argsDigest: 'test', now })
-      f.runs.tools.commit('call', now)
-    }
+    const { payload, prepared: firstPrepared } = await start(f, turn)
+    if (tool !== 'none') expect(firstPrepared.authority.check({ kind: 'app', tool, args: {} })).toMatchObject({ ok: true })
     if (tool === 'thread_read') f.chips.set(`${turn}:d1`, [{ icon: 'read', text: 'read your threads' }])
     const second = await f.bots.service.chatSend({ botId, text: 'check the flat', clientRequestId: 'm2' })
     f.bots.service.markRead(botId, second.message.seq)
