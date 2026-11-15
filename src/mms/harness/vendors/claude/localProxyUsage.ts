@@ -371,6 +371,15 @@ export function resetLocalProxyDetection(): void {
   seatReads.clear()
 }
 
+/**
+ * Whether the last check of the local address `baseUrl` points at found CLIProxyAPI there (its root,
+ * which needs no key); undefined when Mousse has not checked it, or it is not a local address. Reads nothing.
+ */
+export function detectedCliProxy(baseUrl: string | undefined): boolean | undefined {
+  const origin = localProxyOrigin(baseUrl)
+  return origin ? detected.get(origin)?.proxy : undefined
+}
+
 async function isProxy(origin: string, options: ProxyUsageOptions, fetchImpl: ProxyFetch): Promise<boolean> {
   const now = options.now?.() ?? Date.now()
   const cached = detected.get(origin)

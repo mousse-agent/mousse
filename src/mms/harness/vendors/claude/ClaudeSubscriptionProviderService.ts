@@ -60,7 +60,7 @@ import {
   type ClaudeUsageBaseline
 } from './metrics'
 import { parseClaudeSubscriptionUsage } from './usage'
-import { checkProxyKey, listedProxySeats, localProxyOrigin, previewLocalProxyClaudeAccounts, PROXY_KEY_VARIABLES, readLocalProxyClaudeAccount, readLocalProxyClaudeUsage, readLocalProxySeats, type ProxyUsage, type ProxyUsageOptions } from './localProxyUsage'
+import { checkProxyKey, detectedCliProxy, listedProxySeats, localProxyOrigin, previewLocalProxyClaudeAccounts, PROXY_KEY_VARIABLES, readLocalProxyClaudeAccount, readLocalProxyClaudeUsage, readLocalProxySeats, type ProxyUsage, type ProxyUsageOptions } from './localProxyUsage'
 import { UsageProxyKeyStore } from '../../../providers/usageProxyKeys'
 import { claudeMcpToolBlocked, claudeProxiedMcpServer, type ClaudeTurnIntegrations } from './integrations'
 import {
@@ -1483,11 +1483,11 @@ export class ClaudeSubscriptionProviderService {
    * - one the user set (the entry's variables, or the `env` of their own or the managed Claude settings) is passed
    *   on: Claude Code reads the name only from its process environment, and Mousse removes an inherited one. A
    *   project's settings cannot set it: a cloned folder would otherwise pass every check below;
-   * - otherwise Mousse's own, on a direct subscription or an explicitly opted-in subscription proxy. An API key (an
-   *   `apiKeyHelper` too), a cloud route or an unconfirmed gateway keeps the default: credit-only API
-   *   accounts refuse an unknown client name, and proxies rewrite requests from one they don't recognise. A proxy
-   *   needs the operator's route-bound native-passthrough opt-in and a fresh subscription-only seat listing (a turn runs
-   *   only after a sign-in check that answered, so the account is known here);
+   * - otherwise Mousse's own, on a direct subscription or through CLIProxyAPI. An API key (an `apiKeyHelper` too), a
+   *   cloud route, proxy seats listed as API keys or any other gateway keep the default: credit-only API accounts
+   *   refuse an unknown client name. CLIProxyAPI passes a name its configuration allows (`native-entrypoints`)
+   *   through unchanged and serves any other on a subscription seat as Claude Code's own CLI, so it needs no setting
+   *   in Mousse (a turn runs only after a sign-in check that answered, so the account is known here);
    * - never for a process that runs in Auto (`runsAuto`): under an unknown client name Claude Code's auto mode
    *   checks each tool call with a billed request of its own instead of Anthropic's server-side check. A process
    *   with Mousse's name never runs in Auto (`liveModeFor`), and never enters Claude Code's plan mode (its plan tools
@@ -1500,23 +1500,21 @@ export class ClaudeSubscriptionProviderService {
     if (runsAuto) return {}
     const variable = (name: string) => claudeTurnVariable(env, name, options)
     const baseUrl = variable('ANTHROPIC_BASE_URL')
-    if (baseUrl && !isAnthropicApi(baseUrl)) {
-      // This is an operator assertion of native passthrough, not discovery from a private address or seat listing.
-      // Bind it to the complete route; a project can neither opt in nor redirect it to another gateway/path.
-      if (claudeEffectiveVariable(env, 'MOUSSE_CLAUDE_NATIVE_PROXY_URL') !== baseUrl) return {}
-      try {
-        const url = new URL(baseUrl)
-        if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) return {}
-      } catch { return {} }
-      if (variable('ANTHROPIC_API_KEY')) return {}
-      const listing = listedProxySeats(baseUrl)
-      if (listing?.seats !== 'subscription' || Date.now() - listing.at >= PROXY_SEATS_FRESH_MS) return {}
+    const proxy = Boolean(baseUrl && !isAnthropicApi(baseUrl))
+    if (proxy) {
+      // Only CLIProxyAPI, found at its key-free root (`refreshProxySeats` checks before each turn), is known to handle
+      // client names; another gateway keeps the default. Seats a listing showed to be API keys (all or some) keep it
+      // too; no listing at all (no management key) is not a reason to.
+      if (detectedCliProxy(baseUrl) !== true || variable('ANTHROPIC_API_KEY')) return {}
+      const seats = listedProxySeats(baseUrl)?.seats
+      if (seats === 'api_key' || seats === 'mixed') return {}
     }
     if (claudeUsesApiKeyHelper(env, options)) return {}
     // Settings the entry passes in its launch arguments (`--settings`) can route Claude Code anywhere and are not read
     // here, so they keep the default.
     if (this.launchArgsCarrySettings()) return {}
-    return this.promptCacheBasis(env, options) === 'subscription' ? { CLAUDE_CODE_ENTRYPOINT: MOUSSE_CLAUDE_ENTRYPOINT } : {}
+    const basis = this.promptCacheBasis(env, options)
+    return basis === 'subscription' || (proxy && basis === 'unconfirmed') ? { CLAUDE_CODE_ENTRYPOINT: MOUSSE_CLAUDE_ENTRYPOINT } : {}
   }
   /** The entry's launch arguments pass Claude Code a settings file or JSON of their own (`--settings`). */
   private launchArgsCarrySettings(): boolean {
