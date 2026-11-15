@@ -429,8 +429,9 @@ export class BotMemoryStore {
   // -- Search and read ---------------------------------------------------------------------------
 
   /**
-   * `memory_search` (bot-context.md §6): memory hits first, then journal rows, each ranked by bm25
-   * with recency breaking ties, filtered to the bot before the limit. Every word must match first;
+   * `memory_search` (bot-context.md §6): memory hits first, then journal rows. Queried searches
+   * inspect a bounded recent window; credential-bearing windows rank visible words then recency,
+   * otherwise FTS relevance is preserved within the inspected pages. Every word must match first;
    * when that finds too few, any word may. No query: the latest by date.
    */
   search(botId: string, input: BotMemorySearchInput): BotMemoryHit[] {
@@ -446,17 +447,7 @@ export class BotMemoryStore {
     const hits: BotMemoryHit[] = []
     const seen = new Set<string>()
     // The same text twice (a reply as the chat row and as the copied thread row) is one hit.
-    const push = (hit: BotMemoryHit, text: unknown, allWords = true) => {
-      if (terms.length && typeof text === 'string') {
-        const masked = maskMemoryCredentials(text)
-        if (masked !== text) {
-          // Raw FTS matches are only candidates: neither a hit nor its count may confirm
-          // words inside a held-back credential. Check the full masked text, not its snippet.
-          const words = new Set(masked.normalize('NFKC').toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? [])
-          const matches = terms.map((term) => words.has(term.slice(1, -1)))
-          if (!(allWords ? matches.every(Boolean) : matches.some(Boolean))) return
-        }
-      }
+    const push = (hit: BotMemoryHit, text: unknown) => {
       const key = `t:${sha256(typeof text === 'string' ? text.trim() : '')}`
       if (hits.length >= limit || seen.has(key) || seen.has(hit.ref)) return
       seen.add(key)
@@ -496,19 +487,64 @@ export class BotMemoryStore {
           push(journalHit(row), row.text)
       return hits
     }
-    for (const allWords of terms.length > 1 ? [true, false] : [true]) {
+    // Page by date, independently of raw FTS matches. A hidden match must not consume
+    // a slot, change which page is fetched, or pull a row into a relevance-ranked cutoff.
+    // The fixed ceiling also makes the candidate window independent of credential guesses.
+    const batchSize = 128
+    const maxCandidates = 1024
+    const candidates = (memory: boolean, allWords: boolean): Row[] => {
+      const table = memory ? 'bot_memories' : 'bot_journal'
+      const index = memory ? 'bot_memories_fts' : 'bot_journal_fts'
+      const id = memory ? 'row_id' : 'seq'
+      const date = memory ? 'learned_at' : 'at'
+      const where = memory
+        ? "bot_id = ? AND status IN ('active','expired') AND learned_at >= ? AND learned_at <= ?"
+        : journalWhere
       const match = terms.join(allWords ? ' AND ' : ' OR ')
+      const kept: Array<{ row: Row; visible: number; score: number }> = []
+      const unique = new Set<string>()
+      let credentials = false
+      for (let offset = 0; offset < maxCandidates; offset += batchSize) {
+        const page = this.all(`SELECT * FROM (
+          SELECT * FROM ${table} WHERE bot_id = ? ORDER BY ${id} DESC LIMIT ${maxCandidates}
+        ) j WHERE ${where} ORDER BY ${id} DESC LIMIT ? OFFSET ?`, botId, botId, since, until, batchSize, offset)
+        if (!page.length) break
+        // Raw FTS preserves stemming and highlighting for credential-free rows only.
+        // Its scores never order, count or cut credential-bearing rows.
+        const matches = new Map(this.all(`SELECT rowid AS hit_id,
+          snippet(${index}, 0, '«', '»', '…', 16) AS snip, bm25(${index}) AS score
+          FROM ${index} WHERE ${index} MATCH ? AND rowid IN (${page.map(() => '?').join(',')})`,
+        match, ...page.map((row) => row[id])).map((row) => [num(row.hit_id)!, row]))
+        for (const row of page) {
+          const text = row.text as string
+          // Do not let the replacement marker itself count as the owner's visible words.
+          const visibleText = maskMemoryCredentials(text, '')
+          const masked = visibleText !== text
+          credentials ||= masked
+          const words = new Set(visibleText.normalize('NFKC').toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? [])
+          const visible = terms.filter((term) => words.has(term.slice(1, -1))).length
+          const raw = matches.get(num(row[id])!)
+          if (masked ? (allWords ? visible !== terms.length : !visible) : !raw) continue
+          const ref = memory ? memoryRef(row.id as string, num(row.version)!) : `j${num(row.seq)!}`
+          const key = `t:${sha256(text.trim())}`
+          if (seen.has(ref) || seen.has(key) || unique.has(key)) continue
+          unique.add(key)
+          kept.push({ row: { ...row, snip: masked ? null : raw?.snip }, visible, score: masked ? 0 : Number(raw?.score ?? 0) })
+        }
+        if (kept.length >= limit - hits.length || page.length < batchSize) break
+      }
+      kept.sort((a, b) => {
+        const rank = credentials ? b.visible - a.visible : a.score - b.score
+        return rank || String(b.row[date]).localeCompare(String(a.row[date])) || num(b.row[id])! - num(a.row[id])!
+      })
+      return kept.map(({ row }) => row)
+    }
+    for (const allWords of terms.length > 1 ? [true, false] : [true]) {
       if (hits.length >= limit) break
       if (kinds.has('memory'))
-        for (const row of this.all(`SELECT m.*, snippet(bot_memories_fts, 0, '«', '»', '…', 16) AS snip, bm25(bot_memories_fts) AS score
-          FROM bot_memories_fts JOIN bot_memories m ON m.row_id = bot_memories_fts.rowid
-          WHERE bot_memories_fts MATCH ? AND m.bot_id = ? AND m.status IN ('active','expired') AND m.learned_at >= ? AND m.learned_at <= ?
-          ORDER BY score, m.learned_at DESC LIMIT ?`, match, botId, since, until, limit)) push(memoryHit(row), row.text, allWords)
-      if (journalKinds.length)
-        for (const row of this.all(`SELECT j.*, snippet(bot_journal_fts, 0, '«', '»', '…', 16) AS snip, bm25(bot_journal_fts) AS score
-          FROM bot_journal_fts JOIN bot_journal j ON j.seq = bot_journal_fts.rowid
-          WHERE bot_journal_fts MATCH ? AND ${journalWhere} ORDER BY score, j.seq DESC LIMIT ?`, match, botId, since, until, limit * 2))
-          push(journalHit(row), row.text, allWords)
+        for (const row of candidates(true, allWords)) push(memoryHit(row), row.text)
+      if (hits.length < limit && journalKinds.length)
+        for (const row of candidates(false, allWords)) push(journalHit(row), row.text)
     }
     return hits
   }
