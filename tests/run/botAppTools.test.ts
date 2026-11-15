@@ -40,7 +40,7 @@ function fakeBots(lane: BotLane = 'chat', options: { owner?: string; changes?: b
     // The owner's message the chat turn holds.
     ownerWords: () => options.owner ?? 'Please use Opus 4.6 from now on',
     rows: () => options.rows ?? ROWS_ON_SUB,
-    activationOf: (threadId) => (threadId === 'home' ? { botId: 'b1', activationId: 'a1', lane } : undefined),
+    activationOf: (threadId) => (threadId === 'home' ? { botId: 'b1', activationId: 'a1', lane, memoryLane: lane } : undefined),
     schedules: {
       add: (_botId, s, from) => {
         const entry = { scheduleId: `s${schedules.length + 1}`, ...s, label: botScheduleLabel(s.when), ...(options.cards && from ? { from } : {}) }
@@ -113,6 +113,13 @@ describe('schedule tools', () => {
     expect(added.value).toEqual({ scheduleId: 's1', label: 'every weekday · 09:00' })
     expect(bots.schedules).toEqual([{ scheduleId: 's1', when: { kind: 'cron', expr: '0 9 * * 1-5' }, prompt: 'Go through my inbox', label: 'every weekday · 09:00' }])
     expect(bots.activity.drain('d1')).toEqual([{ icon: 'schedule', text: 'every weekday · 09:00' }])
+  })
+
+  it('passes a fixed line and its end through the schedule tool', async () => {
+    const bots = fakeBots()
+    const result = await bots.call('bot_schedule_add', { when: { kind: 'interval', minutes: 60 }, say: 'Take your pills', until: '2030-11-21' })
+    expect(result.isError).toBeFalsy()
+    expect(bots.schedules[0]).toMatchObject({ say: 'Take your pills', until: '2030-11-21' })
   })
 
   it('bot_schedule_add from a chat turn hands the turn to the host, which shows the automation as a card; no chip repeats it', async () => {
@@ -343,7 +350,7 @@ describe('ask_owner (#1123)', () => {
   function asking(lane: BotLane) {
     const bots = fakeBots(lane)
     const asked: unknown[] = []
-    const deps = { host: { ...{} as BotToolHost, activationOf: (threadId: string) => (threadId === 'home' ? { botId: 'b1', activationId: 'a1', lane } : undefined), questions: { ask: (_botId: string, _activationId: string, spec: unknown) => { asked.push(spec); return { asked: true, text: 'Shown under your reply.' } } } } as BotToolHost }
+    const deps = { host: { ...{} as BotToolHost, activationOf: (threadId: string) => (threadId === 'home' ? { botId: 'b1', activationId: 'a1', lane, memoryLane: lane } : undefined), questions: { ask: (_botId: string, _activationId: string, spec: unknown) => { asked.push(spec); return { asked: true, text: 'Shown under your reply.' } } } } as BotToolHost }
     const tool = botTools(() => deps).find((entry) => entry.name === 'ask_owner')!
     return { asked, call: (args: Record<string, unknown>) => tool.handler(args, bots.ctx()) }
   }

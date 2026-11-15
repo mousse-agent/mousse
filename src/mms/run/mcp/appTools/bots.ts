@@ -10,7 +10,7 @@ import { DEFAULT_ANSWER_AFTER_MINUTES, DEFAULT_NUDGE_AFTER_MINUTES, MAX_CHOICE_D
 import { cardOf, MAX_CARD_TITLE_CHARS, MAX_CARDS_PER_MESSAGE, MAX_CHECKLIST_ITEMS, MAX_CHECKLIST_TEXT_CHARS, MAX_FACT_LABEL_CHARS, MAX_FACT_ROWS, MAX_FACT_VALUE_CHARS, MAX_GALLERY_CAPTION_CHARS, MAX_GALLERY_FILES, MAX_PROGRESS_LABEL_CHARS, MAX_PROGRESS_NOTE_CHARS } from '../../../../shared/bots/personal/cards'
 import { shortModelName } from '../../../../shared/modelNames'
 import { botScheduleLabel } from '../../../../shared/scheduleLabel'
-import { botScheduleProblem } from '../../../scheduled/botJobs'
+import { botScheduleProblem, schedulePrompt } from '../../../scheduled/botJobs'
 import { BOT_LIST_TOOL, BOT_SEND_TOOL, MAX_BOT_MESSAGE_CHAIN, MAX_BOT_MESSAGE_CHARS, MAX_BOT_MESSAGES_PER_DAY } from '../../../../shared/bots/personal/botMessages'
 import { DEFAULT_EVENT_WAKE_HOURS, MAX_EVENT_WAKE_HOURS, MAX_WAKE_CHAIN, MAX_WAKES_PER_DAY, pullRequestOf } from '../../../../shared/bots/personal/wakes'
 import { DEFAULT_WATCHER_MINUTES, MAX_WATCHER_MINUTES, MAX_WATCHERS_PER_BOT } from '../../../bots/watchers'
@@ -118,10 +118,12 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'bot_schedule_add',
-    description: `Run yourself on a schedule: each time, you get the prompt as your task. At most ${MAX_BOT_SCHEDULES} schedules, at most once a minute. Returns the schedule's id and its label; confirm it to the owner in words.`,
+    description: `Run yourself on a schedule: each time, you get the prompt as your task. At most ${MAX_BOT_SCHEDULES} schedules, at most once a minute. A line you only need to say needs no run: use say instead of prompt. A schedule that should stop on a date takes until. Returns the schedule's id and its label; confirm it to the owner in words.`,
     parameters: Type.Object({
       when: WHEN,
-      prompt: Type.String({ description: 'What to do on each run, in your own words. If it has an end condition, state it here.' })
+      prompt: Type.Optional(Type.String({ description: 'What to do on each run, in your own words. Give prompt or say. If it has an end condition, state it here.' })),
+      say: Type.Optional(Type.String({ maxLength: 500, description: 'A fixed line to say with no model run, in place of prompt.' })),
+      until: Type.Optional(Type.String({ description: 'A local date (through that day) or date and time on this computer, such as 2026-11-21 or 2026-11-21T18:00.' }))
     })
   },
   {
@@ -515,6 +517,7 @@ interface BotCall {
   botId: string
   activationId: string
   lane: BotLane
+  memoryLane: BotLane
   activity: BotActivityContext
 }
 
@@ -530,6 +533,7 @@ function botCall(deps: (() => BotAppToolDeps | undefined) | undefined, ctx: Tool
     botId: activation.botId,
     activationId: activation.activationId,
     lane: activation.lane,
+    memoryLane: activation.memoryLane ?? 'run',
     // App tools know the activation; the sink finds its current dispatch.
     activity: { botId: activation.botId, activationId: activation.activationId, dispatchId: '' }
   }
@@ -672,14 +676,16 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         const call = botCall(deps, ctx)
         if (isOutcome(call)) return call
         if (call.lane !== 'chat') return error(OWNER_ONLY)
-        const prompt = typeof args.prompt === 'string' ? args.prompt.trim() : ''
+        if (args.say !== undefined && call.memoryLane !== 'chat') return error('Only a turn your owner’s message or tap started can set a fixed line. Use prompt instead of say here.')
+        let prompt: string
+        try { prompt = schedulePrompt(args as { prompt?: string; say?: string }) } catch (failure) { return error(failure instanceof Error ? failure.message : String(failure)) }
         const problem = botScheduleProblem(args.when, prompt)
         if (problem) return error(problem)
         if (call.deps.host.schedules.list(call.botId).length >= MAX_BOT_SCHEDULES)
           return error(`You already have ${MAX_BOT_SCHEDULES} schedules, the most a bot can have. Remove one first.`)
         const when = args.when as BotSchedule['when']
         try {
-          const added = call.deps.host.schedules.add(call.botId, { when: when.kind === 'interval' ? { kind: 'interval', minutes: when.minutes } : { kind: 'cron', expr: when.expr.trim() }, prompt }, call.activationId)
+          const added = call.deps.host.schedules.add(call.botId, { when: when.kind === 'interval' ? { kind: 'interval', minutes: when.minutes } : { kind: 'cron', expr: when.expr.trim() }, ...(args.say !== undefined ? { say: args.say as string } : { prompt }), ...(args.until !== undefined ? { until: args.until as string } : {}) }, call.activationId)
           const result = { scheduleId: added.scheduleId, label: added.label || botScheduleLabel(when) }
           // A card on the message shows it (`card`), so no chip repeats it.
           call.deps.activity?.onAppResult(call.activity, 'bot_schedule_add', { ...result, ...(added.card ? { card: true } : {}) })
