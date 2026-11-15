@@ -129,3 +129,12 @@ it('includes tellings in the shared due sources without spinning a closed-window
   expect(f.bots.nextDueAt(botId)).toBe(f.store.message(m.id)?.tellAt)
   expect(f.timers.at(-1)?.ms).toBe(0)
 })
+it('keeps later notices behind reports in a fold', async () => {
+  f.bots.setTellingWindows(1)
+  const events: any[] = []; f.bots.events.on('tell', e => events.push(e))
+  f.bots.chat.post({ id: 'bm_x_sched_dropped_day', botId, author: 'bot', kind: 'error', text: '', error: { text: 'Dropping scheduled runs' } })
+  f.bots.chat.post({ botId, author: 'bot', kind: 'run_report', text: 'New report' })
+  await f.bots.deliverDueReminders()
+  expect(events[0].body).toBe('New report')
+  expect(events[0].rows.at(-1).tell).toBe('later')
+})

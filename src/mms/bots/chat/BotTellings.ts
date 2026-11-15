@@ -78,7 +78,8 @@ export class BotTellings {
   }
   private announce(rows: BotMessageRow[], sound: boolean, id = `bt_${randomUUID()}`, closed = false): void {
     rows = rows.map(r => this.store.message(r.id)!).filter(Boolean)
-    rows.sort((a, b) => Number(!!(b.askId || b.questionId || b.error)) - Number(!!(a.askId || a.questionId || a.error)) || a.seq - b.seq)
+    const priority = (row: BotMessageRow): number => row.tell === 'later' ? 0 : row.askId || row.questionId || row.error ? 2 : 1
+    rows.sort((a, b) => priority(b) - priority(a) || a.seq - b.seq)
     const first = this.chat.toMessage(rows[0]!)
     const names = [...new Set(rows.map(r => this.name(r.botId)))]
     const line = (first.error?.text ?? (first.ask ? `Wants to ${first.ask.title}` : first.text)).split('\n').map(s => s.replace(/[*_`#>[\]]/g, '').trim()).find(Boolean) ?? 'New message'

@@ -315,6 +315,7 @@ describe('forgetting, deleting and exporting', () => {
 })
 
 it('an answered question awaiting release is marked told silently', async () => {
+  await f.bots.reconcileOnStartup()
   const { bubble } = await asked()
   await tap(bubble.question!.questionId, 'Flat B')
   f.store.run('UPDATE bot_messages SET told_at = ?', f.store.now())

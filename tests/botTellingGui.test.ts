@@ -17,7 +17,7 @@ const inert = (base: object = {}): any => new Proxy(base, { get: (t, k) => k in 
 beforeAll(() => {
   const window = { isDestroyed: () => false, isFocused: () => false, webContents: { id: 1, send() {} } }
   h.windows.push(window)
-  const guiMms = inert({ request: async () => ({}), on: (e: string, f: Function) => h.events.set(e, f), getWindowBindingForSender: () => ({ profileId: 'p' }), tellsForSender: () => h.supported })
+  const guiMms = inert({ runWithSender: (_sender: unknown, run: () => unknown) => run(), request: async () => ({}), on: (e: string, f: Function) => h.events.set(e, f), getWindowBindingForSender: () => ({ profileId: 'p' }), tellsForSender: () => h.supported })
   registerGuiIpc({ guiMms, presentation: new PresentationState(), settings: inert({ get: () => ({ notifications: { events: { completed: { system: h.system, sound: h.sound }, question: { system: h.system, sound: h.sound } } } }) }), browserView: inert(), repoRoot: '' } as GuiIpcServices, () => window as any)
 })
 it('shows and replaces the service banner, ignores the message path, and withdraws after a read in any window', () => {
