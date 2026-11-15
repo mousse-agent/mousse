@@ -48,6 +48,7 @@ import type {
 } from '../../shared/net/local'
 import type { PermissionMode } from '../../shared/permissionMode'
 import { routedVersions } from '../../shared/bridge/routed'
+import { bridgeRemoteMethodNames } from '../bridge/remote/capabilities'
 import type { NodePolicy } from './store/nodePolicy'
 import type {
   AddonRecordStore,
@@ -621,7 +622,9 @@ export class NetService {
           protoMinor: NET_PROTO_MINOR,
           // The version of each routed method this computer accepts, so a caller sends only keys it knows
           // and says "update Mousse" for the one action that needs more. Absent: an older computer.
-          routed: routedVersions()
+          routed: routedVersions(),
+          // The methods a phone may call here, so it offers only the actions this computer has. Absent: an older computer.
+          remote: bridgeRemoteMethodNames()
         })
       })
       this.state = {

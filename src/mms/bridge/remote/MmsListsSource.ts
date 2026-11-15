@@ -90,6 +90,8 @@ export interface ListsSnapshot {
       | 'settledAt'
       | 'startedAt'
       | 'worktreeEnabled'
+      | 'expiresAt'
+      | 'expiryStopsRun'
     > &
       /** Only in a private lists stream: the subagent rows' place in the tree, and what the thread runs with. */
       Partial<
@@ -379,6 +381,9 @@ export class MmsListsSource {
           settledAt: thread.settledAt,
           startedAt: thread.startedAt,
           worktreeEnabled: thread.worktreeEnabled,
+          // When it deletes itself, for the menu's Delete after (a phone keeps "stop a running turn" when it changes the time).
+          ...(thread.expiresAt ? { expiresAt: thread.expiresAt } : {}),
+          ...(thread.expiresAt && thread.expiryStopsRun ? { expiryStopsRun: true } : {}),
           ...(own
             ? {
                 lineage: thread.lineage,

@@ -176,6 +176,17 @@ export function validateRemoteParams(
       text('threadId')
       boolean('settled')
       break
+    case 'threads.regenerateTitle':
+      keys(['threadId'])
+      text('threadId')
+      break
+    case 'threads.setExpiry':
+      // An ISO time, or null to keep the thread; the handler checks the time is a minute to a year away.
+      keys(['threadId', 'expiresAt'], ['stopsRun'])
+      text('threadId')
+      if (p.expiresAt !== null) text('expiresAt', 64)
+      boolean('stopsRun', true)
+      break
     case 'orchestrator.send':
     case 'queue.enqueue':
       keys(['threadId', 'content'], ['mode', 'attachments'])
