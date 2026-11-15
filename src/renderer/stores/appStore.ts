@@ -237,7 +237,9 @@ export function sameThreadSnapshot(a: Thread[], b: Thread[]): boolean {
       left.modelOverride?.name !== right.modelOverride?.name ||
       // The goal (`/goal`) is saved without touching `updatedAt`; each change of it moves its own time.
       left.goal?.setAt !== right.goal?.setAt ||
-      left.goal?.updatedAt !== right.goal?.updatedAt
+      left.goal?.updatedAt !== right.goal?.updatedAt ||
+      // Hidden or shown again (`Thread.hidden`) is saved without touching `updatedAt` too.
+      left.hidden !== right.hidden
     ) {
       return false
     }

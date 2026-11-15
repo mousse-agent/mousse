@@ -114,6 +114,16 @@ describe('a thread a bot keeps out of the sidebar', () => {
     setStore({ projects, threads: [...threads, { ...hidden, hidden: undefined }], threadActivity: {}, threadsSidebarView: 'threads' })
     expect(titlesIn(sidebar())).toContain('Quick check')
   })
+
+  it('a pushed list that only hides or shows a thread reaches the store, though the thread kept its time', () => {
+    const shown = { ...hidden, hidden: undefined }
+    useAppStore.getState().setThreads([...threads, shown])
+    // The bot's thread_hide (or Show in sidebar elsewhere) changes nothing else of the thread.
+    useAppStore.getState().setThreads([...threads, hidden])
+    expect(useAppStore.getState().threads.find((thread) => thread.id === 'h')?.hidden).toBe(true)
+    useAppStore.getState().setThreads([...threads, shown])
+    expect(useAppStore.getState().threads.find((thread) => thread.id === 'h')?.hidden).toBeUndefined()
+  })
 })
 
 describe('the project row', () => {
