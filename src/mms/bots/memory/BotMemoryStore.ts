@@ -780,7 +780,10 @@ export class BotMemoryStore {
       }, at)
       // The next dispatch of every activation, a resumed one too, carries the new entry.
       this.dropPacks(botId)
-      return { id, version, ref: memoryRef(id, version), gauge: this.gauge(botId, input.lane) }
+      return {
+        id, version, ref: memoryRef(id, version), gauge: this.gauge(botId, input.lane),
+        ...(absorbed.size ? { absorbed: [...absorbed.values()].map((entry) => ({ ref: memoryRef(entry.id, entry.version), text: entry.text ?? '' })) } : {})
+      }
     })
   }
 
@@ -908,8 +911,11 @@ export class BotMemoryStore {
       if (!Array.isArray(chips)) return undefined
       let changed = false
       const next = chips.map((chip) => {
-        const value = chip as { icon?: unknown; highlight?: unknown }
-        if (value?.icon !== 'memory' || value.highlight !== highlight) return chip
+        const value = chip as { icon?: unknown; highlight?: unknown; title?: unknown }
+        const matches = value.highlight === highlight
+          || (typeof value.highlight === 'string' && value.highlight.startsWith(`${highlight} · put away `))
+          || (typeof value.title === 'string' && value.title.split('\n').includes(highlight))
+        if (value?.icon !== 'memory' || !matches) return chip
         changed = true
         return { icon: 'memory', text: 'remembered something' }
       })

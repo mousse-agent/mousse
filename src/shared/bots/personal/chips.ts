@@ -264,7 +264,15 @@ function outcomeChip(kind: ChipKind, call: BotChipCall): BotChip | null {
     }
     case 'remember': {
       const text = str(input.text) ?? str(result.text)
-      return text ? { icon: 'memory', text: 'remembered', highlight: shortChipText(text) } : { icon: 'memory', text: 'remembered something' }
+      const absorbed = Array.isArray(result.absorbed) ? result.absorbed.flatMap((entry) => {
+        const text = str(record(entry).text)
+        return text ? [shortChipText(text)] : []
+      }) : []
+      return text ? {
+        icon: 'memory', text: 'remembered',
+        highlight: `${shortChipText(text)}${absorbed.length ? ` · put away ${absorbed.length}` : ''}`,
+        ...(absorbed.length ? { title: `Put away:\n${absorbed.join('\n')}` } : {})
+      } : { icon: 'memory', text: 'remembered something' }
     }
     // Never the forgotten text: the chip is stored with the message (`chips_json`), and the owner asked for it to go.
     case 'forget': return { icon: 'memory', text: 'forgot something you asked me to' }
