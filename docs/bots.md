@@ -235,6 +235,10 @@ A bot's main turns, chat and work (scheduled runs too), can attach a small card 
 
 A deleted bot's reminders are cancelled at once and purged with it. Forgetting the owner's message that asked for a reminder or work (`memory_forget`, Forget in About) cancels the reminder and removes its words, and the work's brief and notes. Repeating reminders are schedules.
 
+The engine's `nextDueAt(botId)` reads one list of due sources: waiting reminders and wakes, shown open question follow-ups, and active schedules' next times. Omitting the bot reads the profile. Settled, cancelled and deleted rows and paused schedules do not count. The delivery timer uses that list with its existing retry backoff, excluding schedules: the shared scheduler still claims and starts those. The wake-from-sleep watchdog and single upkeep pass are unchanged.
+
+`isIdle(botId, { within })` is an internal check with no callers outside tests yet. It requires no unfinished activation in either lane, no unread joined chat messages, and nothing due within the window (milliseconds, 30 minutes by default, including the boundary).
+
 ## Wakes
 
 A wake is the bot's own follow-up: `wake({ brief, inMinutes | at | thread | pr, hours? })` from a chat turn. It is the third kind of reminder, in the same `bot_reminders` table (v9 adds `wake`, `event_json`, `fired_json`, `chain`), on the same timer, listed and cancelled with `reminder_list` and `reminder_cancel` and in About → Runs ("Follows up when acme/app#12 merges", with when it gives up on hover). It is never an automation and never on the Automations page.
