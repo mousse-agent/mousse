@@ -527,7 +527,11 @@ A bot's models are **rows** (#673, `src/shared/bots/personal/modelSlots.ts`): **
 
 ## States and pausing
 
-States are idle, working ("Waiting for internet" while it waits for it), needs you (an open ask), stuck (an error with one action, such as Sign in or Set up a provider), and paused (`src/shared/bots/personal/state.ts`). "Done" is only an animation of the face.
+States are idle, working ("Waiting for internet" while it waits for it), needs you (a shown open permission ask, a shown open chat question, or work waiting on an answer), stuck (an error with one action, such as Sign in or Set up a provider), and paused (`src/shared/bots/personal/state.ts`). "Done" is only an animation of the face.
+
+The Chats tab's bot faces, Recent lines and the bot's header use this same summary, including open chat questions ("Asked: …"). A question the owner moved on from stays tappable but quiet; answered, defaulted and withdrawn questions no longer show needs you.
+
+The dock or taskbar badge and the title bar's count include threads and bots waiting on the owner, one per bot however many asks or questions it has open. A paused or deleted bot does not count. An error alone does not count, but a bot with an error and an open ask or question does (`BotSummary.needsOwner`, independent of the state whose error takes priority). Answering in any window or device updates the count through the pushed bot list. The title bar keeps that list current even before Chats is opened.
 
 - **Pause** stops schedules only; chat still works. The owner pauses from the menu (`bots.personal.pause`).
 - **Three failed runs in a row** pause the schedules, with one notice. A run that ends done resets the count, even with refused asks. Usage limits, waiting for the internet, stops and chat failures never count.
