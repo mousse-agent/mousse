@@ -239,10 +239,6 @@ describe('the thread tools on a thread launched on another computer (issue #1160
     const again = await tool('thread_send', { threadId: id, content: 'Now run the integration tests.', clientRequestId: 'send-1' })
     expect(again.body).toMatchObject({ runId: sent.body.runId })
     expect(t.owner.runEngine.listRuns(far, { limit: 10 })).toHaveLength(1)
-    // notify does not reach another computer yet: refused, and nothing is sent.
-    const notify = await tool('thread_send', { threadId: id, content: 'And tell me.', notify: true })
-    expect(notify).toMatchObject({ isError: true, text: expect.stringMatching(/notify does not reach a thread on another computer yet, so the message was not sent/) })
-    expect(t.owner.runEngine.listRuns(far, { limit: 10 })).toHaveLength(1)
   }, 120_000)
 
   it('refuses a steer into a run there that is looser than the agent', async () => {

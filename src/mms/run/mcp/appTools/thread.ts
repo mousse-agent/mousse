@@ -11,7 +11,7 @@ import type { AgentCreatedThread, AgentQueueCommand, AgentQueueResult, AgentRunC
 import type { BotAppToolDeps } from './bots'
 import { threadLink } from '../../../../shared/threadLink'
 import { ROUTED_AGENT_BODY_MAX } from '../../../../shared/bridge/routed'
-import { isQualifiedId } from '../../../../shared/threadRef'
+import { isQualifiedId, parseQualifiedId } from '../../../../shared/threadRef'
 import { RemoteThreadRefusal, type RemoteTarget, type RemoteWaitResult } from '../../../orchestrator/RemoteLaunchedThreads'
 import { cutEnd, messageRows, textOffsetProblem, type MessageRow } from './messageRows'
 import type { BotActivityContext, BotActivitySink } from '../../../bots/seams'
@@ -739,8 +739,8 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
    * `notify`: one watch for the message sent with `messageKey` (a retry keeps it), and what the result says next. The
    * sender's turn is told to end rather than poll; Mousse writes the notice into its queue (SPEC §15.1).
    */
-  const watchSent = (threadId: string, messageKey: string, actor: AgentActor, runId: string, ctx: ToolCallContext): { notify: { watchId: string; next: string } } => {
-    const { watchId } = host.watchSettle!({ messageKey, watcherThreadId: ctx.caller.threadId, watcherRunId: actor.runId, targetThreadId: threadId, runId })
+  const watchSent = (threadId: string, messageKey: string, actor: AgentActor, runId: string, ctx: ToolCallContext, on?: { node: string }): { notify: { watchId: string; next: string } } => {
+    const { watchId } = host.watchSettle!({ messageKey, watcherThreadId: ctx.caller.threadId, watcherRunId: actor.runId, targetThreadId: threadId, runId, ...(on ? { targetNode: on.node } : {}) })
     return { notify: { watchId, next: NOTIFY_NEXT } }
   }
   /** Messages each run has sent to other threads, in memory: a restart gives every run a fresh count. */
@@ -820,9 +820,9 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     if (args.mode !== undefined && args.mode !== 'agent' && args.mode !== 'plan') throw new Error('mode must be agent or plan')
     if (args.mode !== undefined && args.firstMessage === undefined) throw new Error('mode is the mode of firstMessage: give a firstMessage, or leave mode out.')
     if (args.hidden !== undefined) throw new Error('hidden is for personal bots: a thread an agent starts always shows in the sidebar.')
-    // Watching a thread on another computer is not built yet: refused rather than ignored, so nobody waits for a notice.
-    if (args.notify !== undefined && args.notify !== false)
-      throw new Error('notify does not reach a thread on another computer yet: leave it out, and read the thread there when you need its result.')
+    const notify = notifyArg(args, ctx)
+    if (notify && args.firstMessage === undefined) throw new Error('notify tells you when the work of firstMessage settles: give a firstMessage, or leave notify out.')
+    if (notify && !host.watchSettle) return notAvailable('thread_create with notify')
     const actor = actorOf(ctx)
     const requestKey = `thread_create:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`
     // A retry of a stored launch takes no new place under the cap.
@@ -853,8 +853,12 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     if (result.status === 'uncertain') return json({ ok: false, status: 'uncertain', computer: result.computer, message: result.message })
     if (!uncounted && result.replayed) releaseCreation(actor.runId)
     const { status: _status, ...launched } = result
+    // Watched there once its first message is: a retry with the same key keeps the watch, or makes it once the message went.
+    const there = notify && launched.firstMessage === 'sent' && launched.runId ? parseQualifiedId(launched.threadId) : undefined
+    const watched = there ? watchSent(there.id, requestKey, actor, launched.runId!, ctx, { node: there.node }) : {}
     return json({
       ...launched,
+      ...watched,
       link: threadLink(launched.threadId),
       note: launched.firstMessage === 'failed'
         ? `The thread exists on ${launched.computer}, but its first message was not delivered: ${launched.firstMessageReason ?? 'refused'}.`
@@ -922,9 +926,8 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     if (typeof args.content !== 'string' || !args.content.trim()) throw new Error('thread_send requires content')
     if (args.mode !== undefined && args.mode !== 'agent' && args.mode !== 'plan') throw new Error('mode must be agent or plan')
     const mode = (args.mode as 'agent' | 'plan' | undefined) ?? 'agent'
-    // Following a thread on another computer to its end is not built yet: refused, so nobody waits for a notice.
-    if (args.notify !== undefined && args.notify !== false)
-      throw new Error('notify does not reach a thread on another computer yet, so the message was not sent. Send it again without notify; when this turn needs the result, call thread_wait.')
+    const notify = notifyArg(args, ctx)
+    if (notify && !host.watchSettle) return notAvailable('thread_send with notify')
     if (mode === 'agent' && ctx.caller.modeCeiling === 'plan') throw new McpToolError('mousse_ceiling_exceeded', 'A plan-ceiling caller can only send plan turns.')
     if (args.content.length > ROUTED_AGENT_BODY_MAX)
       throw new Error(`A message to another computer is at most ${ROUTED_AGENT_BODY_MAX.toLocaleString('en-US')} characters; this one has ${args.content.length.toLocaleString('en-US')}. Nothing was sent.`)
@@ -943,7 +946,9 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     if (sent.status === 'uncertain') return json({ ok: false, status: 'uncertain', threadId: target.threadId, computer: target.computer, message: sent.message })
     if (sent.replayed) releaseSend(actor.runId)
     const { status: _status, ...rest } = sent
-    return json({ threadId: target.threadId, computer: target.computer, ...rest, delivery: deliveryOf(sent) })
+    // Watched there: Mousse follows that computer's run with reads and tells this thread when it settles.
+    const watched = notify && sent.runId ? watchSent(target.remoteThreadId, requestKey, actor, sent.runId, ctx, { node: target.node }) : {}
+    return json({ threadId: target.threadId, computer: target.computer, ...rest, delivery: deliveryOf(sent), ...watched })
   })
   /** `thread_steer` into the running turn of a thread this thread launched on another computer. */
   const steerOnComputer = (threadId: string, args: Record<string, unknown>, ctx: ToolCallContext): Promise<ToolOutcome> => onComputer(async () => {
@@ -1256,7 +1261,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_send',
-      description: `Send a message to another thread. The thread's model receives it labelled as a message from an agent in your thread, not from the user, and runs it under your permission mode when that is stricter than the thread's own; it never gets more than the thread itself allows. It starts a turn when the thread is idle and queues behind the running turn otherwise (it never steers the running turn). A thread kept in Plan takes it as a plan turn. Refused while the thread waits for the user to answer a question or approval, is paused by a usage limit, or is archived, when it already has ${AGENT_QUEUE_MAX_PER_SENDER} messages from your thread or ${AGENT_QUEUE_MAX_PER_THREAD} from agents in all waiting, when you sent it the same text in the last ${AGENT_REPEAT_WINDOW_MS / 60_000} minutes, and when it would be more than a few agent messages in a row without a person in between; each refusal names its limit (data.conflict). You may send ${THREAD_SEND_MAX_PER_RUN} messages per run (a personal bot has no such count). Set notify when you need the result: Mousse then tells you when the work settles (and once before that if it waits for a person), and you end your turn instead of waiting. Returns the run it created and delivery: started (a turn began with it) or queued (it waits behind the running turn). Subagents are reached with continue_subagent. ${REMOTE_REACH} A message there is at most ${ROUTED_AGENT_BODY_MAX.toLocaleString('en-US')} characters; status uncertain means that computer did not confirm it (call again with the same clientRequestId: it is never sent twice); notify does not reach it yet.`,
+      description: `Send a message to another thread. The thread's model receives it labelled as a message from an agent in your thread, not from the user, and runs it under your permission mode when that is stricter than the thread's own; it never gets more than the thread itself allows. It starts a turn when the thread is idle and queues behind the running turn otherwise (it never steers the running turn). A thread kept in Plan takes it as a plan turn. Refused while the thread waits for the user to answer a question or approval, is paused by a usage limit, or is archived, when it already has ${AGENT_QUEUE_MAX_PER_SENDER} messages from your thread or ${AGENT_QUEUE_MAX_PER_THREAD} from agents in all waiting, when you sent it the same text in the last ${AGENT_REPEAT_WINDOW_MS / 60_000} minutes, and when it would be more than a few agent messages in a row without a person in between; each refusal names its limit (data.conflict). You may send ${THREAD_SEND_MAX_PER_RUN} messages per run (a personal bot has no such count). Set notify when you need the result: Mousse then tells you when the work settles (and once before that if it waits for a person), and you end your turn instead of waiting. Returns the run it created and delivery: started (a turn began with it) or queued (it waits behind the running turn). Subagents are reached with continue_subagent. ${REMOTE_REACH} A message there is at most ${ROUTED_AGENT_BODY_MAX.toLocaleString('en-US')} characters; status uncertain means that computer did not confirm it (call again with the same clientRequestId: it is never sent twice); notify works there too: Mousse follows that computer's run and tells you when it settles.`,
       inputSchema: {
         type: 'object',
         properties: {

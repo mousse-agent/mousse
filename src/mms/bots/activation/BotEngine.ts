@@ -89,7 +89,7 @@ import { isProviderTurnCap, type Enforceability, type HarnessError, type Provide
 import type { NeutralTool } from '../../../shared/harness/tools'
 import type { RunEngine } from '../../run/RunEngine'
 import { TERMINAL_RUN_STATUSES, type BotTurnPayload, type RunRecord } from '../../run/types'
-import { createBotAuthority } from '../authority/botAuthority'
+import { createBotAuthority, type BotFileReadState } from '../authority/botAuthority'
 import { type BotChatImages, BotChatService, chatInput, messageInput } from '../chat/BotChatService'
 import { askFingerprintOf, BotChatProjection, clockTime, starterManifest } from '../chat/projection'
 import { BotDefinitionError, upgradeDefinitionV1, type BotDefinitionEntry, type BotDefinitionStore } from '../definitions/BotDefinitionStore'
@@ -578,6 +578,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   readonly chat: BotChatProjection
   /** The Bot UI's methods (`bots.*` v2). */
   readonly service: BotChatService
+  /** Pi file versions, shared by the activation's dispatches and discarded when it ends. */
+  private readonly fileReads = new Map<string, Map<string, BotFileReadState>>()
   /** Each activation's context pack as its latest main dispatch read it (frozen by the provider, bot-context.md §5). */
   private readonly packs = new Map<string, string>()
   /**
@@ -2999,7 +3001,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const { row, controller } = input
     const switchedAtStart = new Map(this.permissionSwitches.get(row.botId))
     const activity: BotActivityContext = { botId: row.botId, activationId: row.id, dispatchId: input.dispatchId }
+    let fileReads = this.fileReads.get(row.id)
+    if (!fileReads) this.fileReads.set(row.id, fileReads = new Map())
     const base = createBotAuthority({
+      fileReads,
       activationId: row.id,
       role: input.role,
       permissions: input.permissions,
@@ -6283,6 +6288,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** The scratch folder goes when the activation has ended (it stays while it waits or is paused). */
   private cleanup(row: BotActivationRow): void {
     if (!ENDED_ACTIVATION_STATUSES.has(row.status)) return
+    this.fileReads.delete(row.id)
     this.postChatDraft(row)
     for (const key of this.replyEffects.keys()) if (key.startsWith(`${row.id}:`)) this.replyEffects.delete(key)
     this.refusedAsks.delete(row.id)
