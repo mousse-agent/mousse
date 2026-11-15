@@ -10,6 +10,7 @@ import type { BotContextProvider, BotJournal } from '../seams'
 import { saveMissedWishes, WISH_OVER_CAP_KEY } from './standingWish'
 import { BotJournalError, type BotJournalRow, type BotMemoryStore } from './BotMemoryStore'
 import { guardPackText } from './guard'
+import { availableHistoryLines } from './availableHistory'
 import { type ChatSummaryState, OUTSIDE_SPEAKER, firstLine, foldChatSummary, packText, speaker, withinBudget } from './chatSummary'
 import { agoLabel, cut, renderMemoryBlocks, timeLabel } from './render'
 import { BOT_CHANGELOG_LATEST, changelogBlock, unseenChanges } from '../changelog'
@@ -55,6 +56,8 @@ export function customSlotsLine(slots: ReadonlyArray<{ name: string; description
 
 export interface BotContextPackOptions {
   store: BotMemoryStore
+  /** Persistent files folder; names and dates only are listed in the volatile situation. */
+  filesFolder?: (botId: string) => string
   journal: Pick<BotJournal, 'syncThread'>
   /** The owner's time zone (settings); absent: the daemon's. */
   timeZone?: () => string | undefined
@@ -208,7 +211,10 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
     }
     // The custom slots' line and `extra` (the reactions) are bounded on their own: a full situation never pushes them out.
     const slots = chat && facts.slots?.length ? [customSlotsLine(facts.slots)] : []
-    return `Situation:\n${[...withinBudget(lines, BOT_CHAT_PACK_BUDGET.situation), ...slots, ...extra].join('\n')}`
+    const index = availableHistoryLines({
+      folder: options.filesFolder?.(botId), history: store.messageHistory(botId), budget: chat ? 300 : 200, timeZone: tz
+    })
+    return `Situation:\n${[...withinBudget(lines, BOT_CHAT_PACK_BUDGET.situation), ...slots, ...extra, ...index].join('\n')}`
   }
 
   /**
