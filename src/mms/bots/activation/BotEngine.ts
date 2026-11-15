@@ -7809,7 +7809,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const now = this.now()
       this.armResumeWatch()
       if (now - expected > RESUME_LATE_MS) {
-        void this.maintain(new Date(now)).catch((error: unknown) => {
+        // Due timers must not wait for pull-request reads or a maintenance pass already doing them.
+        const at = new Date(now)
+        void this.deliverDueReminders(at).then(() => this.maintain(at)).catch((error: unknown) => {
           console.warn('bot timers could not be checked after resume', { error: error instanceof Error ? error.message : String(error) })
         })
       }
