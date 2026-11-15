@@ -65,7 +65,7 @@ describe('showAttentionCount', () => {
   it('puts a dot over the taskbar button on Windows and takes it away at zero', () => {
     onPlatform('win32')
     showAttentionCount(3)
-    expect(electron.setOverlayIcon).toHaveBeenCalledWith({ kind: 'dot' }, '3 threads need you')
+    expect(electron.setOverlayIcon).toHaveBeenCalledWith({ kind: 'dot' }, '3 items need you')
     showAttentionCount(0)
     expect(electron.setOverlayIcon).toHaveBeenLastCalledWith(null, '')
     expect(electron.setBadgeCount).not.toHaveBeenCalled()

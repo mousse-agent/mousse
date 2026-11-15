@@ -77,7 +77,7 @@ export interface BotFixture {
   close(): void
 }
 
-export function botFixture(): BotFixture {
+export function botFixture(options: Pick<BotEngineHost, 'spawnWatcher'> = {}): BotFixture {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-bot-p1-')))
   const profile = join(base, 'profile')
   mkdirSync(profile, { recursive: true })
@@ -97,6 +97,7 @@ export function botFixture(): BotFixture {
   } as unknown as BotFixture
   const host: BotEngineHost = {
     profileHome: profile,
+    ...options,
     store,
     definitions: new BotDefinitionStore(store.directory, (botId) => store.registry(botId)?.revision ?? null),
     threads: { ensureExecutionThread: (key) => ({ id: `thread:${key}` }) },

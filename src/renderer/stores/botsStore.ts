@@ -368,6 +368,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
         reactionsMissing: false, snoozeMissing: false, questionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null,
     memory: {}, memoryError: {}, memoryOpen: null, memoryEditMissing: false, notes: {}, modelInfo: {} })
       subscribe()
+      void get().refresh()
     },
 
     async refresh() {

@@ -161,6 +161,8 @@ export interface BotSummary {
   promptEdited?: true
   look: BotLook
   state: BotState
+  /** A shown open ask or question needs an answer; absent while paused, independent of errors. */
+  needsOwner?: true
   /** The Recent line: "Working…", "Waiting for internet", "Wants to read files in …", "Paused". */
   stateText: string
   /** Set while the bot works but waits for the internet (its state is `working`). */
