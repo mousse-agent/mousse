@@ -1,5 +1,4 @@
 // @vitest-environment jsdom
-import { readFileSync } from 'node:fs'
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -12,12 +11,12 @@ import {
   answerWithMessage,
   isQuestionAnswered,
   nextUnansweredStep,
-  questionComposerSend,
+  questionComposerSendLabel,
   questionDialogLabel,
   resolveQuestionAnswers,
   type QuestionCardHandle
 } from '../src/renderer/components/ComposerQuestionModal'
-import type { UserQuestion, UserQuestionAnswers } from '../src/shared/types'
+import type { ChatImageAttachment, UserQuestion, UserQuestionAnswers, UserQuestionAttachments } from '../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -129,7 +128,9 @@ describe('ComposerQuestionModal', () => {
   let root: Root
   let host: HTMLElement
   let submitted: UserQuestionAnswers[]
+  let submittedImages: UserQuestionAttachments[]
   let dismissed: number
+  let skippedAndSent: number
 
   beforeEach(() => {
     vi.useFakeTimers()
@@ -137,7 +138,9 @@ describe('ComposerQuestionModal', () => {
     document.body.append(host)
     root = createRoot(host)
     submitted = []
+    submittedImages = []
     dismissed = 0
+    skippedAndSent = 0
   })
 
   afterEach(() => {
@@ -148,20 +151,24 @@ describe('ComposerQuestionModal', () => {
 
   let card: { current: QuestionCardHandle | null }
   let submits: boolean[]
-  const open = (questions: UserQuestion[]) => {
+  const open = (questions: UserQuestion[], options: { composerHasMessage?: boolean } = {}) => {
     card = { current: null }
     submits = []
     act(() => root.render(createElement(ComposerQuestionModal, {
       pending: { requestId: 'r1', questions },
-      onSubmit: (answers) => submitted.push(answers),
+      onSubmit: (answers, attachments) => {
+        submitted.push(answers)
+        submittedImages.push(attachments)
+      },
       onDismiss: () => { dismissed += 1 },
+      ...(options.composerHasMessage ? { onSkipAndSend: () => { skippedAndSent += 1 } } : {}),
       handleRef: card,
       onComposerSubmitsChange: (value) => submits.push(value)
     })))
   }
-  const sendFromComposer = (message: string) => {
-    let result: UserQuestionAnswers | null = null
-    act(() => { result = card.current!.answerWithMessage(message) })
+  const sendFromComposer = (message: string, images: ChatImageAttachment[] = []) => {
+    let result: { answers: UserQuestionAnswers; attachments: UserQuestionAttachments } | null = null
+    act(() => { result = card.current!.answerWithMessage(message, images) })
     return result
   }
   const prompts = () => [...host.querySelectorAll('.composer-question-prompt')].map((node) => node.textContent)
@@ -322,7 +329,10 @@ describe('ComposerQuestionModal', () => {
     expect(sendFromComposer('And the API')).toBeNull()
     expect(prompts()).toEqual(['How big?'])
     expect(submits.at(-1)).toBe(true)
-    expect(sendFromComposer('Small for now')).toEqual({ scope: 'Start with the reader', areas: ['db', 'And the API'], size: 'Small for now' })
+    expect(sendFromComposer('Small for now')).toEqual({
+      answers: { scope: 'Start with the reader', areas: ['db', 'And the API'], size: 'Small for now' },
+      attachments: {}
+    })
     // The caller submits those answers; the card does not submit them a second time.
     expect(submitted).toEqual([])
   })
@@ -334,33 +344,67 @@ describe('ComposerQuestionModal', () => {
     click(button('Submit'))
     expect(submitted).toEqual([{ scope: 'Start with the reader', areas: ['ui'] }])
   })
+
+  it('images from the composer answer the shown question, alone or with text, and each question keeps its own', () => {
+    const screen = { name: 'screen.png', mimeType: 'image/png', data: 'AAAA' }
+    const header = { name: 'header.png', mimeType: 'image/png', data: 'BBBB' }
+    open([single, multi, third])
+    // An image with no text is an answer: the card moves on and fills the dot.
+    expect(sendFromComposer('', [screen])).toBeNull()
+    expect(prompts()).toEqual(['Which areas?'])
+    expect(dots().map((dot) => dot.className.includes('is-answered'))).toEqual([true, false, false])
+    expect(sendFromComposer('The header', [header])).toBeNull()
+    expect(sendFromComposer('Small')).toEqual({
+      answers: { scope: '', areas: ['The header'], size: 'Small' },
+      attachments: { scope: [screen], areas: [header] }
+    })
+  })
+
+  it('going back to a question shows its images, which can be removed, and Submit sends each with its question', () => {
+    const screen = { name: 'screen.png', mimeType: 'image/png', data: 'AAAA' }
+    open([single, multi])
+    sendFromComposer('', [screen])
+    click(option('UI'))
+    click(button('Back'))
+    expect(host.querySelector('.composer-question-attached')?.textContent).toContain('Image attached')
+    click(button('Next'))
+    click(button('Submit'))
+    expect(submitted).toEqual([{ scope: '', areas: ['ui'] }])
+    expect(submittedImages).toEqual([{ scope: [screen] }])
+
+    act(() => root.unmount())
+    root = createRoot(host)
+    open([single, multi])
+    sendFromComposer('', [screen])
+    click(button('Back'))
+    click(host.querySelector<HTMLButtonElement>('[aria-label="Remove the attached image"]')!)
+    // Without its image the question has no answer again.
+    expect(dots().map((dot) => dot.className.includes('is-answered'))).toEqual([false, false])
+  })
+
+  it('"Skip questions and send" is offered only while the composer holds a message, and skips nothing by itself', () => {
+    open([single])
+    expect(footer()).not.toContain('Skip questions and send')
+    open([single], { composerHasMessage: true })
+    click(button('Skip questions and send'))
+    expect(skippedAndSent).toBe(1)
+    expect(dismissed).toBe(0)
+    expect(submitted).toEqual([])
+  })
 })
 
 describe('a message sent from the composer while questions are open', () => {
   it('answers the shown question as its "Other…" text; a picked single choice gives way, picked choices stay', () => {
     const empty = { scope: '', areas: [], size: '' }
     expect(answerWithMessage([single, multi, third], 0, { ...empty, scope: 'api' }, {}, 'Mine'))
-      .toEqual({ answers: { ...empty, scope: '' }, customs: { scope: 'Mine' }, complete: false })
+      .toEqual({ answers: { ...empty, scope: '' }, customs: { scope: 'Mine' }, attachments: {}, complete: false })
     expect(answerWithMessage([single, multi], 1, { scope: 'api', areas: ['ui'] }, {}, 'Also docs'))
-      .toEqual({ answers: { scope: 'api', areas: ['ui'] }, customs: { areas: 'Also docs' }, complete: true })
+      .toEqual({ answers: { scope: 'api', areas: ['ui'] }, customs: { areas: 'Also docs' }, attachments: {}, complete: true })
   })
 
-  it('says it answers this question, or answers and submits on the last; with images it skips and sends', () => {
-    expect(questionComposerSend(false, false)).toEqual({ answers: true, label: 'Answer this question' })
-    expect(questionComposerSend(false, true)).toEqual({ answers: true, label: 'Answer and submit' })
-    expect(questionComposerSend(true, false)).toEqual({ answers: false, label: 'Skip questions and send' })
-    expect(questionComposerSend(true, true)).toEqual({ answers: false, label: 'Skip questions and send' })
+  it('says it answers this question, or answers and submits on the last, whatever is attached', () => {
+    expect(questionComposerSendLabel(false)).toBe('Answer this question')
+    expect(questionComposerSendLabel(true)).toBe('Answer and submit')
     expect(QUESTION_COMPOSER_PLACEHOLDER).toBe('Or reply in your own words')
-  })
-
-  it('the composer stays mounted and usable beside the card, and its message answers the questions', () => {
-    const source = readFileSync('src/renderer/components/OrchestratorChat.tsx', 'utf8')
-    // The card renders before (above) the composer in the same composer column, and nothing hides the composer.
-    expect(source.indexOf('<ComposerQuestionModal')).toBeLessThan(source.indexOf('<ChatComposer'))
-    expect(source).not.toMatch(/composer-collapse|inert: true/)
-    expect(source).toMatch(/placeholder=\{[^}]*questionsTakeMessage \? QUESTION_COMPOSER_PLACEHOLDER/)
-    expect(source).toMatch(/sendLabel=\{questionsTakeMessage\s*\?\s*questionComposerSend\([^\n]*, questionAnswerSubmits\)\.label/)
-    expect(source).toMatch(/const answers = card\.answerWithMessage\(text\)\s*if \(!answers\) \{\s*clearComposer\(\)\s*return/)
-    expect(source).toMatch(/answerQuestionsDetailed\(\s*asked\.requestId,\s*answers,/)
   })
 })

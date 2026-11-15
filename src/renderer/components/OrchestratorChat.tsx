@@ -41,7 +41,7 @@ import {
   ComposerQuestionModal,
   QUESTION_COMPOSER_PLACEHOLDER,
   describeAnswerOutcome,
-  questionComposerSend,
+  questionComposerSendLabel,
   type QuestionCardHandle
 } from './ComposerQuestionModal'
 import { filesToImagePayloads, isImageMimeType } from '../utils/imageAttachments'
@@ -1218,7 +1218,7 @@ export function OrchestratorChat() {
     openRename: (threadId) => !window.dispatchEvent(new CustomEvent('mousse:rename-thread', { detail: { threadId }, cancelable: true }))
   })
 
-  const handleSend = async (skillMode?: SkillChatMode, options?: { steer?: boolean }) => {
+  const handleSend = async (skillMode?: SkillChatMode, options?: { steer?: boolean; skipQuestions?: boolean }) => {
     if (!useAppStore.getState().workspaceReady) return
     // A file is sent as its path on this computer, which the agent of a thread on another computer can't read.
     if (remoteNode && fileAttachments(attachedFiles).length) {
@@ -1363,21 +1363,22 @@ export function OrchestratorChat() {
 
     if (!text && images.length === 0) return
 
-    // Questions open above the composer: the message answers the question the card shows, and the card
-    // moves on to the next unanswered one. Answering the last one submits all the answers, once.
-    // A message with images cannot be an answer; it is sent as usual, which skips the questions.
-    const asked = questionsTakeMessage ? pendingQuestions : null
+    // Questions open above the composer: the message, with its images and files, answers the question the card
+    // shows, and the card moves on to the next unanswered one. Answering the last one submits all the answers, once,
+    // each question with its own images. The card's "Skip questions and send" sends it as usual instead.
+    const asked = questionsTakeMessage && !options?.skipQuestions ? pendingQuestions : null
     const card = questionCardRef.current
-    if (asked && card && text && questionComposerSend(images.length > 0, false).answers) {
-      const answers = card.answerWithMessage(text)
-      if (!answers) {
+    if (asked && card && (text || images.length > 0)) {
+      const answered = card.answerWithMessage(text, images)
+      if (!answered) {
         clearComposer()
         return
       }
       const outcome = await window.mousse.orchestrator.answerQuestionsDetailed(
         asked.requestId,
-        answers,
-        questionAnswerThreadId(asked, activeThreadId)
+        answered.answers,
+        questionAnswerThreadId(asked, activeThreadId),
+        answered.attachments
       )
       setPendingQuestions((current) => (current?.requestId === asked.requestId ? null : current))
       if (outcome.ok) {
@@ -1759,10 +1760,10 @@ export function OrchestratorChat() {
                 pending={questionsSnapshot}
                 handleRef={questionCardRef}
                 onComposerSubmitsChange={setQuestionAnswerSubmits}
-                onSubmit={(answers) => {
+                onSubmit={(answers, attachments) => {
                   const requestId = questionsSnapshot.requestId
                   const threadId = questionAnswerThreadId(questionsSnapshot, activeThreadId)
-                  void window.mousse.orchestrator.answerQuestionsDetailed(requestId, answers, threadId).then((outcome) => {
+                  void window.mousse.orchestrator.answerQuestionsDetailed(requestId, answers, threadId, attachments).then((outcome) => {
                     // The daemon accepted the answers or no longer knows this
                     // question (answered elsewhere / expired / preempted) —
                     // either way the prompt is settled: drop it so a decided
@@ -1781,6 +1782,7 @@ export function OrchestratorChat() {
                   void window.mousse.orchestrator.dismissQuestions(questionsSnapshot.requestId, questionAnswerThreadId(questionsSnapshot, activeThreadId))
                   setPendingQuestions(null)
                 }}
+                {...(composerHasContent ? { onSkipAndSend: () => void handleSend(undefined, { skipQuestions: true }) } : {})}
               />
             )}
           </div>
@@ -1842,7 +1844,7 @@ export function OrchestratorChat() {
                 : questionsTakeMessage ? QUESTION_COMPOSER_PLACEHOLDER
                   : approvalWaiting ? APPROVAL_COMPOSER_PLACEHOLDER : undefined}
               sendLabel={questionsTakeMessage
-                ? questionComposerSend(attachedFiles.some((attached) => isImageMimeType(attached.file.type)), questionAnswerSubmits).label
+                ? questionComposerSendLabel(questionAnswerSubmits)
                 : approvalWaiting ? DENY_AND_SEND_LABEL : undefined}
               onSend={(skillMode, options) => void handleSend(skillMode, options)}
               onSteerQueued={() => {

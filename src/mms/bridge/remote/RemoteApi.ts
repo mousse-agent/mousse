@@ -183,6 +183,34 @@ export class RemoteApi {
       this.settle(resolved.keys, (result as { ok?: unknown } | undefined)?.ok !== false)
       return result
     }
+    if (method === 'orchestrator.answerQuestions' && params.attachments) {
+      // An answer's images, staged like a message's, go to the owner as images by question.
+      const { attachments: byQuestion, ...rest } = params
+      const groups = Object.entries(byQuestion as Record<string, string[]>)
+      let resolved: ResolvedExtras
+      try {
+        resolved = this.extras({ attachments: groups.flatMap(([, ids]) => ids) }, context)
+      } catch (error) {
+        if (error instanceof RemoteInputError) return { ok: false, error: error.message }
+        throw error
+      }
+      const images = resolved.extras.images ?? []
+      const attachments: Record<string, RemoteImage[]> = {}
+      let at = 0
+      for (const [questionId, ids] of groups) {
+        attachments[questionId] = images.slice(at, at + ids.length)
+        at += ids.length
+      }
+      let result: unknown
+      try {
+        result = await this.backend.execute(method, { ...rest, attachments })
+      } catch (error) {
+        this.release(resolved.keys)
+        throw error
+      }
+      this.settle(resolved.keys, (result as { ok?: unknown } | undefined)?.ok !== false)
+      return result
+    }
     if (method === 'orchestrator.send') {
       const threadId = params.threadId as string
       if (this.runs.size >= 64) throw new NetError('rate_limited', 'Remote run capacity is full.')

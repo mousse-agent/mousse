@@ -257,6 +257,7 @@ describe('the routed method table', () => {
     const staging = Object.entries(ROUTED_METHODS).filter(([, row]) => row.stageable)
     expect(staging.map(([method]) => method).sort()).toEqual([
       'files.write',
+      'orchestrator.answerQuestions',
       'orchestrator.send',
       'orchestrator.steer',
       'queue.edit',
@@ -270,7 +271,7 @@ describe('the routed method table', () => {
       for (const key of row.stageable!) expect(row.keys, `${method} stages ${key}`).toContain(key)
       // Only content-like values are staged, never an id, a path or a mode.
       for (const key of row.stageable!)
-        expect(['content', 'images', 'text'], `${method} stages ${key}`).toContain(key)
+        expect(['attachments', 'content', 'images', 'text'], `${method} stages ${key}`).toContain(key)
     }
     for (const [method, row] of Object.entries(ROUTED_METHODS))
       if (!row.stageable) expect(row.keys, method).not.toContain(ROUTED_STAGED_KEY)

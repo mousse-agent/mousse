@@ -640,11 +640,18 @@ export interface PendingUserQuestions {
 
 export type UserQuestionAnswers = Record<string, string | string[]>
 
-/** One answered question as the transcript keeps it: the prompt, the labels of the options chosen, and any text typed instead. */
+/** Images sent with an answer, by the id of the question each one answers. */
+export type UserQuestionAttachments = Record<string, ChatImageAttachment[]>
+
+/**
+ * One answered question as the transcript keeps it: the prompt, the labels of the options chosen, any text typed
+ * instead, and the images sent with it (indexes into the answer message's `images`).
+ */
 export interface AnsweredQuestion {
   prompt: string
   chosen: string[]
   reply?: string
+  images?: number[]
 }
 
 /**

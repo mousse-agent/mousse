@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { MousseMainService } from '../../../../src/mms/MousseMainService'
@@ -240,6 +240,43 @@ describe('remote pending questions', () => {
       )
     ).toEqual({ ok: true })
     await expect(dismissed).resolves.toMatch(/dismissed/)
+  })
+
+  it('a phone answers with images it staged: each question gets its own, saved and named in its answer', async () => {
+    const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=='
+    const p = await setup(),
+      { b } = await p.connect(),
+      thread = p.mms.threads.createThread('Asks with a picture')
+    const answered = p.mms.questions.requestAnswers(
+      [
+        { id: 'q1', prompt: 'Which screen?', options: [{ id: 'a', label: 'Alpha' }] },
+        { id: 'q2', prompt: 'Anything else?', options: [{ id: 'n', label: 'No' }] }
+      ],
+      thread.id
+    )
+    const requestId = p.mms.questions.listPendingForThread(thread.id)[0].requestId
+    const stage = { upload: 'shot-0001', index: 0, total: 1, name: 'shot.png', mimeType: 'image/png', data: PNG }
+    expect(await b.rpc('attachments.stage', stage, rpc('stage'))).toMatchObject({ ok: true })
+    // Ids that were never staged, or the same id twice, are refused before anything is answered.
+    for (const attachments of [{ q1: ['missing-01'] }, { q1: ['shot-0001'], q2: ['shot-0001'] }, { q1: [] }, { q1: 'shot-0001' }]) {
+      const result = await b.rpc('orchestrator.answerQuestions', { threadId: thread.id, requestId, answers: { q1: 'a', q2: 'n' }, attachments }, rpc('bad-' + newId('rpc')))
+        .catch((error: { code?: string }) => ({ code: error.code }))
+      expect(result).toMatchObject(attachments.q1?.[0] === 'missing-01' ? { ok: false } : { code: 'bad_request' })
+    }
+    expect(p.mms.questions.getPending(requestId)).not.toBeNull()
+
+    expect(await b.rpc(
+      'orchestrator.answerQuestions',
+      { threadId: thread.id, requestId, answers: { q1: 'a', q2: 'n' }, attachments: { q1: ['shot-0001'] } },
+      rpc('answer-with-image')
+    )).toEqual({ ok: true })
+    const answers = await answered
+    expect(answers.q2).toBe('n')
+    const path = /\[Image attached: ([^\]]+)\]/.exec(String(answers.q1))?.[1]
+    expect(path && readFileSync(path).equals(Buffer.from(PNG, 'base64'))).toBe(true)
+    const message = p.mms.orchestrator.getMessages(thread.id).find((each) => each.questionAnswers?.length)!
+    expect(message.images?.map((image) => image.data)).toEqual([PNG])
+    expect(message.questionAnswers?.map((answer) => answer.images)).toEqual([[0], undefined])
   })
 
   it('lets a read-only phone see questions but not answer them', async () => {
