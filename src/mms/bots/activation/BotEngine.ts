@@ -42,11 +42,13 @@ import {
   BOT_DEPTHS,
   BOT_MODEL_SLOT_KEYS,
   ENDED_ACTIVATION_STATUSES,
+  MAX_BOT_CUSTOM_SLOTS,
   MAX_BOT_SCHEDULES,
   MAX_QUEUED_ACTIVATIONS,
   type BotAcknowledgement,
   type BotActivationSummary,
   type BotActivationTrigger,
+  type BotCustomSlot,
   type BotOwnerTurn,
   type BotDefinition,
   type BotLane,
@@ -65,7 +67,7 @@ import {
 } from '../../../shared/bots/personal/definition'
 import { addedPermissions, intersectManifest, manifestSubset, narrowManifest } from '../../../shared/bots/personal/manifest'
 import { BOT_COMPUTER_OPEN, BOT_COMPUTER_SHUT, limitCutLead, notOnThisComputerText, stoppedForLimitText, switchedOff, WHAT_TO_ASK_TEXT, withinComputerLimit, type BotComputerLimit, type BotComputerSwitch } from '../../../shared/bots/personal/computerLimit'
-import { allPinned, copyPick, imagePickOf, isPinned, limitFamilyOf, limitOnPick, pickProblemText, plainLabel, rowName, samePick, samePickTarget, sameStoredPick, slotsOf, slotsWith, startDepthOf, stuckRowsOf, turnModelOf, UNPICKED_SLOTS, withImagePick, withSlots, type BotPickMiss, type BotStuckEntry, type BotTurnModel } from '../../../shared/bots/personal/modelSlots'
+import { allPinned, copyPick, customSlotsOf, imagePickOf, isPinned, limitFamilyOf, limitOnPick, pickProblemText, plainLabel, rowName, samePick, samePickTarget, sameStoredPick, slotsOf, slotsWith, startDepthOf, stuckRowsOf, turnModelOf, UNPICKED_SLOTS, withCustomSlot, withImagePick, withSlots, type BotPickMiss, type BotStuckEntry, type BotTurnModel } from '../../../shared/bots/personal/modelSlots'
 import type { BotModelOption } from '../../../shared/bots/personal/methods'
 import { defaultChatInput, defaultWorkLine, lateWorkNote, MAX_NEW_QUESTIONS_PER_DAY, MAX_NUDGES_PER_QUESTION, MAX_OPEN_QUESTIONS_PER_BOT, MAX_OPEN_QUESTIONS_PER_WORK, MAX_QUESTIONS_PER_CHAT_TURN, NUDGE_AGAIN_MS, NUDGE_TEXT, plainChoices, QUESTION_AFTER_ASK_TEXT, QUESTION_ASKED_TEXT, QUESTION_END_TURN_TEXT, QUESTION_ANSWER_FORGOTTEN_TEXT, QUESTION_NOT_OFFERED_TEXT, QUESTION_WORK_ASKED_TEXT, QUESTION_WORK_WAITING_TEXT, questionGoneText, QUESTIONS_ENOUGH_TEXT, waitingQuestionLine, workAnswerLine, type BotQuestionAnswer, type BotQuestionFollow, type BotQuestionSpec } from '../../../shared/bots/personal/questions'
 import { CARD_SHOWN_TEXT, type BotCard } from '../../../shared/bots/personal/cards'
@@ -6843,6 +6845,116 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
   }
 
+  // -- The owner's fresh starts (`/clear`, `/forget`, `/reset`) -----------------------------------------------------
+
+  /**
+   * Ends `rows` at once, as a delete does: each is cancelled with its walls in one transaction (with `alsoInTx`), so
+   * none starts in a freed slot meanwhile, and their runs are stopped (bounded). Scratch folders go once nothing runs in
+   * them.
+   */
+  private async endAll(rows: readonly BotActivationRow[], endReason: string, alsoInTx?: () => void): Promise<void> {
+    const ended = this.store.db.transaction(() => {
+      const moved = rows.filter((row) => {
+        if (!this.store.moveActivation(row.id, [row.status], 'cancelled', { endReason })) return false
+        this.store.closeEscalations(row.id, 'cancelled')
+        return true
+      })
+      alsoInTx?.()
+      return moved
+    })
+    for (const row of ended) {
+      this.clearInternetCheck(row.id)
+      this.usageWaits.delete(row.id)
+    }
+    const quiet = await this.stopAndWait(ended)
+    for (const row of ended) {
+      if (quiet || row.status !== 'running') this.cleanup({ ...row, status: 'cancelled' })
+      this.packs.delete(row.id)
+    }
+  }
+
+  /**
+   * `bots.chat.clear` (`/clear`): the chat's turns end (one that waits its turn too), and so does work that waits for the
+   * owner's answer (at a wall, or on its question): its card goes with the chat, so nothing could answer it. Every open
+   * ask and question is withdrawn, and every chat message is deleted. The journal and memory stay, so the bot still
+   * remembers what was said. Other work goes on, and its report is posted into the cleared chat.
+   */
+  async clearChat(botId: string): Promise<void> {
+    this.entry(botId)
+    const asking = new Set(this.store.openAsks(botId).map((ask) => ask.activationId))
+    const waiting = this.store.laneActivations(botId, 'run', [...NOT_ENDED]).filter((row) =>
+      row.status === 'waiting_grant' || (row.status === 'blocked' && (asking.has(row.id) || row.endReason === 'question')))
+    await this.endAll([...this.store.laneActivations(botId, 'chat', [...NOT_ENDED]), ...waiting], 'stopped', () => {
+      this.store.withdrawAsks(botId)
+      this.store.withdrawQuestions(botId)
+    })
+    // Deleted once the turns stopped, so a turn ending meanwhile adds no row to the cleared chat.
+    this.store.deleteMessages(botId)
+    this.changed({ botId })
+    await this.pump(botId)
+  }
+
+  /**
+   * `bots.memory.wipe` (`/forget`): every current entry is forgotten, each as the owner's Forget does one. With
+   * `keep: 'saved'` (`/forget history`) the chat is cleared as `/clear` clears it, and the bot's history goes: its
+   * journal, chat summary, search rows and run notes; the owner's entries and the bot's notes stay. The count of entries
+   * that went.
+   */
+  async wipeMemory(botId: string, keep?: 'saved'): Promise<number> {
+    this.entry(botId)
+    const memory = this.host.memory
+    if (!memory) throw new BotEngineError('bots_unavailable', 'Bot memory is not available in this build.')
+    if (keep !== 'saved') {
+      const forgotten = memory.forgetAll(botId)
+      // Work that waited on a question whose words were forgotten ends now, and says so.
+      this.afterForget()
+      this.changed({ botId })
+      return forgotten
+    }
+    // The chat turn is stopped first, so it copies nothing more into the history once it is gone.
+    await this.clearChat(botId)
+    const removed = memory.wipeHistory(botId)
+    this.changed({ botId })
+    return removed
+  }
+
+  /**
+   * `bots.reset` (`/reset`): a fresh start. Everything of the bot that runs or waits ends (the chat, its work, scheduled
+   * runs, their subagents, its background commands and its messages waiting in the owner's threads); every ask and
+   * question is withdrawn and every reminder and wake cancelled, in one transaction as a delete does. Then its schedules
+   * leave the shared store, its chat is deleted, its memory goes, and the pause, failure count, stuck error and usage
+   * limits are cleared as Resume clears them. Its name, look, permissions, model rows and custom slots stay.
+   */
+  async resetBot(botId: string): Promise<void> {
+    this.entry(botId)
+    await this.endAll(this.store.activationsIn(botId, [...NOT_ENDED]), 'stopped', () => {
+      this.store.withdrawAsks(botId)
+      this.stopWatchersOf(botId)
+      this.store.cancelReminders(botId)
+      this.store.withdrawQuestions(botId)
+    })
+    this.withdrawThreadMessages(botId)
+    // Its schedules in the shared store go before the rest: a reset stopped after this leaves nothing that runs.
+    this.host.schedules?.removeAll(botId)
+    for (const [activationId, wait] of this.usageWaits) if (wait.botId === botId) this.usageWaits.delete(activationId)
+    const limited = Object.values(this.store.registry(botId)?.model?.limits ?? {}).map((limit) => limit.instanceId)
+    this.store.db.transaction(() => {
+      this.store.deleteMessages(botId)
+      this.store.setPaused(botId, null)
+      this.store.setError(botId, null)
+      if (limited.length) this.updateModelStateInTx(botId, (state) => ({ ...state, limits: {} }))
+    })
+    for (const instanceId of new Set(limited)) {
+      try { this.host.models?.clearLimited?.(instanceId) } catch { /* the next limit marks it again */ }
+    }
+    this.host.memory?.reset(botId)
+    this.armDue()
+    this.changed({ botId })
+    try { this.host.schedulesChanged?.() } catch { /* the next tick reads it */ }
+    // A row that can't run is not a pause: it clears when its pick can run again, which is checked now too.
+    await this.recheckStuck(botId).catch(() => {})
+  }
+
   /** `bots.chat.markRead`: the unread count drops to what follows `seq`. */
   markRead(botId: string, seq: number): void {
     this.entry(botId)
@@ -7181,13 +7293,23 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * what it waits behind: the bot's own running pieces and what starts before it, or, when the bot has room but the
    * profile does not, the other bots' work.
    */
-  async startWork(botId: string, from: string, input: { title: string; brief: string; key: string; level?: BotWorkLevel; model?: BotWorkModel }): Promise<BotWorkStarted> {
+  async startWork(botId: string, from: string, input: { title: string; brief: string; key: string; level?: BotWorkLevel; model?: BotWorkModel; slot?: string }): Promise<BotWorkStarted> {
     const brief = input.brief.trim()
     if (!brief) throw new BotEngineError('invalid_params', 'work_start needs a brief.')
     const title = input.title.replace(/\s+/g, ' ').trim().slice(0, MAX_WORK_TITLE_CHARS) || summarise(brief)
+    // A custom slot the owner set up for jobs like this one: it needs no words of the owner's, since the owner made it
+    // for this. One the bot doesn't have starts nothing, and the bot is told which it has.
+    const slot = input.slot?.trim().toLowerCase()
+    if (input.slot !== undefined) {
+      const slots = this.customSlots(botId)
+      if (!slot || !slots.some((entry) => entry.name === slot))
+        throw new BotEngineError('invalid_params', slots.length
+          ? `Your owner has no slot named "${plainLabel(input.slot, 40)}". Their slots: ${slots.map((entry) => entry.name).join(', ')}. Nothing was started.`
+          : 'Your owner has set up no custom slots: leave slot out. Nothing was started.')
+    }
     const replyTo = this.ownerMessageOf(from)
-    // Its level picks its Work row (#673); absent, the bot's standing level.
-    const trigger: Extract<BotActivationTrigger, { kind: 'work' }> = { kind: 'work', input: brief, title, ...(replyTo ? { replyTo } : {}), from, ...(input.level ? { level: input.level } : {}) }
+    // Its level picks its Work row (#673); absent, the bot's standing level. A slot it was routed to comes before its row.
+    const trigger: Extract<BotActivationTrigger, { kind: 'work' }> = { kind: 'work', input: brief, title, ...(replyTo ? { replyTo } : {}), from, ...(input.level ? { level: input.level } : {}), ...(slot ? { slot } : {}) }
     // A model the owner asked for this work alone is its own pick for good, kept on its activation; the work line names
     // it when it is not the row's.
     let own: BotModelOverride | undefined
@@ -7982,6 +8104,31 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   setImagePick(botId: string, pick: BotModelPick | null): void {
     this.entry(botId)
     this.publishProfile(botId, (next) => ({ ...next, main: withImagePick(next.main, pick) }))
+  }
+
+  /** The owner's custom slots (`/model <name> …`), from the published definition; none when it can't be read. */
+  customSlots(botId: string): BotCustomSlot[] {
+    try {
+      return customSlotsOf(this.published(botId).main)
+    } catch {
+      return []
+    }
+  }
+
+  /**
+   * The owner adds, changes or removes (null) a custom slot: a revision with the same grant, like the other rows. A
+   * changed slot keeps its description when none is given (`undefined`); an empty one takes it away. A new slot beyond
+   * `MAX_BOT_CUSTOM_SLOTS`, and removing one the bot doesn't have, are refused before anything is saved.
+   */
+  setCustomSlot(botId: string, name: string, pick: BotModelPick | null, description?: string): void {
+    this.entry(botId)
+    this.publishProfile(botId, (next) => {
+      const slots = customSlotsOf(next.main)
+      const known = slots.find((slot) => slot.name === name)
+      if (!pick && !known) throw new BotEngineError('invalid_params', `No slot named ${name}.`)
+      if (pick && !known && slots.length >= MAX_BOT_CUSTOM_SLOTS) throw new BotEngineError('invalid_params', `A bot keeps at most ${MAX_BOT_CUSTOM_SLOTS} custom slots. Remove one first.`)
+      return { ...next, main: withCustomSlot(next.main, name, pick, (description ?? known?.description) || undefined) }
+    })
   }
 
   /** The bot's rows, upgraded on read (`slotsOf`): a bot from before rows has its one model on each. */

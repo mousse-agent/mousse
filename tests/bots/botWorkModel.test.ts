@@ -188,6 +188,30 @@ describe('work on a model the owner named', () => {
     expect((await start(f, later.id)).prepared.selection).toEqual({ instanceId: 'claude', model: 'sonnet' })
   })
 
+  it('work_start with a custom slot runs on that slot\'s model with no words of the owner\'s; an unknown slot starts nothing, and a model the owner named wins', async () => {
+    const IOS = { instanceId: 'claude', model: 'opus', effort: 'high', credential: 'subscription' as const }
+    f.bots.setCustomSlot(botId, 'iosdev', IOS, 'iOS apps, Swift, Xcode')
+    // A first greeting has no owner message: a slot still routes its work, as the owner set it up for this.
+    const greeting = await f.bots.enqueueChat(botId, 'hello-again', 'Say hello.')
+    const hello = await start(f, greeting.id)
+    const routed = await call(greeting.id, 'work_start', { title: 'Build the app', brief: 'Fix the Xcode build.', slot: 'iOSDev' })
+    expect(routed.value).toMatchObject({ status: 'started' })
+    expect(f.store.activation(routed.value.workId)!.trigger).toMatchObject({ kind: 'work', slot: 'iosdev' })
+    expect((await start(f, routed.value.workId)).prepared.selection).toEqual({ instanceId: 'claude', model: 'opus', effort: 'high' })
+    // A slot the bot doesn't have: nothing starts, and the bot is told the slots there are.
+    const before = runs().length
+    expect((await call(greeting.id, 'work_start', { title: 'Docs', brief: 'Write docs.', slot: 'docs' })).text).toBe('Your owner has no slot named "docs". Their slots: iosdev. Nothing was started.')
+    expect(runs()).toHaveLength(before)
+    await finish(f, hello.payload, 'completed', { text: 'Hello again.' })
+    // The owner names a model for this one work: it wins over the slot.
+    const turn = await chat('Do the Swift job with the cheap one on OpenRouter', 'm1')
+    const both = await call(turn.activation.id, 'work_start', { title: 'Swift job', brief: 'Do it.', slot: 'iosdev', model: { instanceId: 'pi:openrouter', model: 'cheap/model' } })
+    expect((await start(f, both.value.workId)).prepared.selection).toEqual({ instanceId: 'pi:openrouter', model: 'cheap/model' })
+    // Without slots, the bot is told to leave slot out.
+    f.bots.setCustomSlot(botId, 'iosdev', null)
+    expect((await call(turn.activation.id, 'work_start', { title: 'Swift', brief: 'Do it.', slot: 'iosdev' })).text).toBe('Your owner has set up no custom slots: leave slot out. Nothing was started.')
+  })
+
   it('the work chip names the model, with the details on hover', () => {
     const chips = rollUpChips([
       { tool: 'work_start', input: { title: 'Vacuum comparison' }, result: { status: 'started', model: { name: 'Opus 5.5', entry: 'Claude Code', effort: 'high' } } },

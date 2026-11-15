@@ -248,8 +248,9 @@ export interface BotsPersonalV2Api {
   /**
    * A custom slot (`BotCustomSlot`, the bot chat's `/model <name> <model> [description]`): `pick`, a model among
    * `providers` saved with the entry's sign-in now (`model_unavailable` when it is not offered), adds the slot or
-   * replaces its pick and description; null removes it. A base slot's name or a malformed one is refused
-   * (`invalid_params`), as is a 13th slot. A revision with the same grant.
+   * replaces its pick and description (left out, the slot keeps its description); null removes it. A base slot's name
+   * or a malformed one is refused (`invalid_params`), as is a 13th slot and removing a slot the bot doesn't have. The
+   * name is taken in lower case. A revision with the same grant.
    */
   'bots.model.setCustom': { params: { botId: string; name: string; pick: BotModelPick | null; description?: string }; result: { bot: BotSummary } }
   /**

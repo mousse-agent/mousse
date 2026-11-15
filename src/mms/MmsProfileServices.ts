@@ -2219,9 +2219,12 @@ export class MmsProfileServices {
     const blocked = engine.situationLines(botId)
     // Questions its work waits on (#1123): the chat can talk about them and pass on an answer the owner gives there.
     const questions = engine.questionLines(botId)
+    // The owner's custom slots: the chat routes work whose job matches one to it (`work_start`'s `slot`).
+    const slots = engine.customSlots(botId).map((slot) => ({ name: slot.name, ...(slot.description ? { description: slot.description } : {}) }))
     return {
       ...(ownerName ? { ownerName } : {}), ...(openAsks.length ? { openAsks } : {}), ...(schedules.length ? { schedules } : {}),
-      work, ...(reminders.length ? { reminders } : {}), ...(blocked.length ? { blocked } : {}), ...(questions.length ? { questions } : {})
+      work, ...(reminders.length ? { reminders } : {}), ...(blocked.length ? { blocked } : {}), ...(questions.length ? { questions } : {}),
+      ...(slots.length ? { slots } : {})
     }
   }
 

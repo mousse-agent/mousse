@@ -94,10 +94,11 @@ export interface BotToolHost {
    * The chat's work (docs/plans/bot-always-free.md): runs beside the chat that report back. `from` is the chat
    * activation that hands it off; `key` makes a repeated call start nothing new; `level` is how hard the job is (#673).
    * `model`: the model the owner asked for this work alone, one of the Runs on choices, kept with the work as its own
-   * pick (`BotWorkModel`); the bot's rows stay as they are.
+   * pick (`BotWorkModel`); the bot's rows stay as they are. `slot`: one of the owner's custom slots, which it runs on
+   * instead of its level's row; one the bot doesn't have is refused and nothing starts.
    */
   work: {
-    start(botId: string, from: string, input: { title: string; brief: string; key: string; level?: BotWorkLevel; model?: BotWorkModel }): Promise<BotWorkStarted>
+    start(botId: string, from: string, input: { title: string; brief: string; key: string; level?: BotWorkLevel; model?: BotWorkModel; slot?: string }): Promise<BotWorkStarted>
     list(botId: string): BotWorkList
     stop(botId: string, workId: string): Promise<'stopped' | 'ended' | 'not_found'>
     /** `from`: the chat activation that passes it on (its owner's message is the note's source). */
@@ -287,4 +288,16 @@ export interface BotMemoryAdmin {
   reindex(botId?: string): Promise<void>
   /** Removes every memory row of the bot, and nothing of another bot (the 30-day purge). */
   purge(botId: string): Promise<void>
+  /** Forgets every current entry of the bot, each as Forget does one (`bots.memory.wipe`); how many were forgotten. */
+  forgetAll(botId: string): number
+  /**
+   * The bot's history goes (`bots.memory.wipe` with `keep: 'saved'`): its journal, chat summary, search rows and run
+   * notes; the owner's entries and the bot's notes stay. How many run notes went.
+   */
+  wipeHistory(botId: string): number
+  /**
+   * Every memory row of the bot goes (`bots.reset`), but the capture cursors of its threads, which stay so their old
+   * rows are never copied back in.
+   */
+  reset(botId: string): void
 }

@@ -173,7 +173,8 @@ export const BOT_TOOLS: Tool[] = [
         instanceId: Type.String({ description: 'The entry\'s instanceId from work_models.' }),
         model: Type.String({ description: 'The model\'s id from work_models.' }),
         effort: Type.Optional(Type.String({ description: 'One of that model\'s reasoning levels from work_models, when the owner asked for one. Left out: the model\'s default.' }))
-      }, { description: 'Only when the owner, in their message, asked for this work to run on a particular model: that model, from work_models. It is for this work only; never pick one yourself. Left out: your usual model for the level.' }))
+      }, { description: 'Only when the owner, in their message, asked for this work to run on a particular model: that model, from work_models. It is for this work only; never pick one yourself. Left out: your usual model for the level.' })),
+      slot: Type.Optional(Type.String({ description: 'A custom slot of the owner\'s whose name or description matches this job; it runs on that slot\'s model.' }))
     })
   },
   {
@@ -778,8 +779,11 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
             name: { name: modelName(option), entry: plainLabel(option.entry, 40), ...(effort ? { effort } : {}) }
           }
         }
+        // A custom slot needs no words of the owner's: the owner set it up for jobs like this. The engine checks it is one.
+        if (args.slot !== undefined && args.slot !== null && typeof args.slot !== 'string') return error('slot is the name of one of the owner\'s custom slots.')
+        const slot = typeof args.slot === 'string' ? args.slot : undefined
         try {
-          const started = await call.deps.host.work.start(call.botId, call.activationId, { title, brief, key: `${call.activationId}:${ctx.toolCallId ?? randomUUID()}`, ...(level ? { level } : {}), ...(model ? { model } : {}) })
+          const started = await call.deps.host.work.start(call.botId, call.activationId, { title, brief, key: `${call.activationId}:${ctx.toolCallId ?? randomUUID()}`, ...(level ? { level } : {}), ...(model ? { model } : {}), ...(slot !== undefined ? { slot } : {}) })
           const where = model ? ` It runs on ${model.name.name} on ${model.name.entry}${model.name.effort ? `, ${model.name.effort} reasoning` : ''}, for this work only.` : ''
           const result = { ...started, note: (started.status === 'queued' ? `You start on it when there is room, after: ${started.ahead.join('; ')}. Tell the owner you'll get to it after that.` : started.status === 'ended' ? 'You already did this and finished; work_list has the start of your report.' : 'You are on it now, beside anything else you are working on. Tell the owner in one short line that you are on it; when you finish, your report reaches them by itself.') + where }
           call.deps.activity?.onAppResult(call.activity, 'work_start', started)

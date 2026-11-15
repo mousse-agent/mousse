@@ -1,11 +1,16 @@
 import {
+  BOT_BASE_SLOT_NAMES,
+  BOT_CUSTOM_SLOT_NAME,
   BOT_DEPTHS,
   BOT_MODEL_SLOT_KEYS,
   BOT_WORK_LEVELS,
   DEPTH_LEVEL,
   LEVEL_DEPTH,
+  MAX_BOT_CUSTOM_SLOT_DESCRIPTION,
+  MAX_BOT_CUSTOM_SLOTS,
   MAX_BOT_MODEL_CHARS,
   type BotActivationTrigger,
+  type BotCustomSlot,
   type BotDepth,
   type BotLane,
   type BotModelChoice,
@@ -142,6 +147,54 @@ export function withImagePick<T extends Pick<BotThreadSpec, 'model' | 'slots'>>(
   return storedRows(spec, slotsOf(spec), later)
 }
 
+/** Whether `name` is one a custom slot may have: lower case, the right shape, and no base slot's. */
+export function isCustomSlotName(name: string): boolean {
+  return BOT_CUSTOM_SLOT_NAME.test(name) && !(BOT_BASE_SLOT_NAMES as readonly string[]).includes(name)
+}
+
+/**
+ * The owner's custom slots, in the order they were added: read only while the rows are live, as the Images row is. A
+ * slot that is malformed (a bad name, a base slot's name, a name seen before, a pick not on an entry, a description
+ * that is not one short line) is skipped, and so is any beyond `MAX_BOT_CUSTOM_SLOTS`.
+ */
+export function customSlotsOf(spec: Pick<BotThreadSpec, 'model' | 'slots'>): BotCustomSlot[] {
+  if (!liveSlots(spec)) return []
+  const raw = (spec.slots as Record<string, unknown> | undefined)?.custom
+  if (!Array.isArray(raw)) return []
+  const slots: BotCustomSlot[] = []
+  for (const entry of raw) {
+    const slot = entry as { name?: unknown; pick?: unknown; description?: unknown } | null
+    if (!slot || typeof slot !== 'object' || typeof slot.name !== 'string' || !isCustomSlotName(slot.name) || slots.some((seen) => seen.name === slot.name)) continue
+    if (modelPickProblem(slot.pick)) continue
+    const pick = copyPick(slot.pick as BotModelPick)
+    if (!isPinned(pick)) continue
+    const description = slot.description
+    if (description !== undefined && (typeof description !== 'string' || description.length > MAX_BOT_CUSTOM_SLOT_DESCRIPTION || /[\r\n]/.test(description))) continue
+    slots.push({ name: slot.name, pick, ...(description ? { description } : {}) })
+    if (slots.length === MAX_BOT_CUSTOM_SLOTS) break
+  }
+  return slots
+}
+
+/**
+ * `spec` with the custom slot `name` set to `pick` and `description` (added at the end, or changed in place), or taken
+ * away (null). The model rows, the Images row and the other slots stay as they are; a pick keeps what its entry was
+ * signed in with, as a row's does.
+ */
+export function withCustomSlot<T extends Pick<BotThreadSpec, 'model' | 'slots'>>(spec: T, name: string, pick: BotModelPick | null, description?: string): T {
+  const later = { ...laterRows(spec) }
+  const slots = customSlotsOf(spec)
+  const at = slots.findIndex((slot) => slot.name === name)
+  if (pick) {
+    const slot: BotCustomSlot = { name, pick: copyPick(pick), ...(description ? { description } : {}) }
+    if (at >= 0) slots[at] = slot
+    else slots.push(slot)
+  } else if (at >= 0) slots.splice(at, 1)
+  if (slots.length) later.custom = slots
+  else delete later.custom
+  return storedRows(spec, slotsOf(spec), later)
+}
+
 /** A pick with only the fields this build knows. */
 export function copyPick(pick: BotModelPick): BotModelPick {
   return {
@@ -237,9 +290,15 @@ export function startDepthOf(spec: Pick<BotThreadSpec, 'model'>, activation: { l
   return level ? LEVEL_DEPTH[level] : spec.model.depth
 }
 
-/** What one turn runs on (#673): its row, the pick on it (null: Mousse chooses), and the depth that picks the row. */
+/** The key a turn on a custom slot is kept under (`BotTurnModel.slot`): `custom:<name>`. */
+export type BotCustomSlotKey = `custom:${string}`
+
+/**
+ * What one turn runs on (#673): its row, or the custom slot its work was routed to (`custom:<name>`), the pick on it
+ * (null: Mousse chooses), and the depth that picks the row.
+ */
 export interface BotTurnModel {
-  slot: BotModelSlotKey
+  slot: BotModelSlotKey | BotCustomSlotKey
   pick: BotModelPick | null
   depth: BotDepth
 }
@@ -263,8 +322,9 @@ export function pickSourceOf(slots: BotModelSlots, key: BotModelSlotKey): BotMod
  * run, else the level its work names (`work_start`), else the bot's standing level (`set_depth always`, medium unless
  * changed). A row with no pick runs on the row it borrows from (`pickSourceOf`), and `slot` names that row, so its
  * stuck state and usage limit are the ones checked. An activation's own pick (`use_model now`, an automation's model
- * by hand) replaces the row. A pick keeps its model and reasoning level whatever the depth; only a row on which Mousse
- * chooses follows it.
+ * by hand) replaces the row. Work the bot routed to one of the owner's custom slots (`work_start`'s `slot`) runs on that
+ * slot's pick while `spec` has the slot, else on its level's row; its own pick still comes first. A pick keeps its model
+ * and reasoning level whatever the depth; only a row on which Mousse chooses follows it.
  */
 export function turnModelOf(spec: Pick<BotThreadSpec, 'model' | 'slots'>, activation: { lane: BotLane; trigger: BotActivationTrigger; modelOverride?: BotModelOverride | null }): BotTurnModel {
   const override = activation.modelOverride ?? undefined
@@ -274,6 +334,10 @@ export function turnModelOf(spec: Pick<BotThreadSpec, 'model' | 'slots'>, activa
     ? copyPick({ model: override.model, ...(override.instanceId ? { instanceId: override.instanceId } : {}), ...(override.effort ? { effort: override.effort } : {}), ...(override.credential ? { credential: override.credential } : {}), ...(override.account ? { account: override.account } : {}) })
     : null
   if (own) return { slot: level, pick: own, depth }
+  const routed = activation.lane === 'run' && activation.trigger.kind === 'work' && activation.trigger.slot
+    ? customSlotsOf(spec).find((slot) => slot.name === (activation.trigger as { slot?: string }).slot)
+    : undefined
+  if (routed) return { slot: `custom:${routed.name}`, pick: routed.pick, depth }
   const slots = slotsOf(spec)
   const slot = pickSourceOf(slots, level) ?? level
   return { slot, pick: slots[slot], depth }
@@ -532,7 +596,8 @@ export function limitOnPick<T extends BotPickLimit>(limits: Record<string, T> | 
     .sort((a, b) => Date.parse(b.until) - Date.parse(a.until))[0]
 }
 
-/** A row's name for the owner and the bot: "Talk", "Light work". */
-export function rowName(key: BotModelSlotKey): string {
+/** A row's name for the owner and the bot: "Talk", "Light work"; a custom slot's is its own ("iosdev work"). */
+export function rowName(key: BotModelSlotKey | BotCustomSlotKey): string {
+  if (key.startsWith('custom:')) return `${key.slice('custom:'.length)} work`
   return key === 'talk' ? 'Talk' : `${key.charAt(0).toUpperCase()}${key.slice(1)} work`
 }

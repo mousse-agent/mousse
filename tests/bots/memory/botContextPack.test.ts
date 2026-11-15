@@ -216,6 +216,19 @@ describe('the chat pack', () => {
     await expect(failing.afterDispatch({ botId: 'ada', activationId: 'act-1', dispatchId: 'd1', lane: 'run', threadId: 'r', endedBy: 'failed' }))
       .rejects.toMatchObject({ code: 'bot_journal_failed' })
   })
+
+  it('names the owner\'s custom slots after a full situation, in the chat only; without slots the pack is as before', async () => {
+    const fx = memoryFixture()
+    const busy = { schedules: Array.from({ length: 30 }, (_, n) => ({ label: `schedule number ${n} every weekday` })) }
+    const slots = [{ name: 'iosdev', description: 'iOS apps, Swift, Xcode' }, { name: 'docs' }]
+    const plain = await provider(fx, { situation: () => busy }).packs.chatPreamble({ botId: 'ada', activationId: 'act-1' })
+    const withSlots = provider(fx, { situation: () => ({ ...busy, slots }) }).packs
+    const chatPack = await withSlots.chatPreamble({ botId: 'ada', activationId: 'act-2' })
+    expect(chatPack).toContain('Your owner\'s slots for work: iosdev (iOS apps, Swift, Xcode); docs. Start work whose job matches a slot\'s name or description with work_start\'s slot set to it')
+    expect(plain).not.toContain('slots for work')
+    expect(prefix(chatPack)).toBe(prefix(plain))
+    expect(await withSlots.runPreamble({ botId: 'ada', activationId: 'act-3', input: 'Go' })).not.toContain('slots for work')
+  })
 })
 
 describe('the run pack', () => {

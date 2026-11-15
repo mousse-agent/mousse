@@ -3,7 +3,8 @@
  * its own statements. `BotMemoryStore` is the only module that reads or writes them.
  *
  * - `bot_journal`: the append-only record of everything Mousse observed of a bot. Rows are never
- *   deleted except by the 30-day purge; a forget redacts a row's text in place.
+ *   deleted except by the 30-day purge and the owner's wipes (`/forget history`, `/reset`); a
+ *   forget redacts a row's text in place.
  * - `bot_journal_fts`: an external-content FTS5 index over the journal, kept in step by triggers in
  *   the writer's transaction, and rebuildable (`'rebuild'`).
  * - `bot_memories`: memory entries, one row per version; a forgotten entry keeps its hash only.
