@@ -84,7 +84,7 @@ import { delegationRequestKey, followUpRequestKey, narrowCeiling } from '../run/
 import { CommandRejection, RunStoreError } from '../run/db/RunStoreError'
 import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
 import { steerReleaseWindow, stopStrategy, type SteerDelivery } from '../run/CommandPolicy'
-import { agentMessage, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentArchiveResult, type AgentCreatedThread, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
+import { agentMessage, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentArchiveResult, type AgentCreatedThread, type AgentRemoteThreadRequest, type AgentRemoteThreadResult, type RemoteProjectCandidate, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
 import { AGENT_QUEUE_MAX_PER_SENDER, AGENT_QUEUE_MAX_PER_THREAD, AGENT_REPEAT_WINDOW_MS, botRequestPrefix, THREAD_CREATE_MAX_ACTIVE_PER_THREAD } from '../run/mcp/appTools/thread'
 import { botMessageText } from '../run/mcp/appTools/agentMessage'
@@ -132,6 +132,10 @@ import { acknowledgeRows } from '../run/terminal'
 import { cancelQueuedWakes } from '../run/delegation/wake'
 import { taskCheckpoint } from '../run/delegation/checkpoint'
 import { remoteSubagentPreamble, subagentPreamble, withoutSubagentPreamble } from '../run/delegation/guidance'
+import { qualifyId } from '../../shared/threadRef'
+import { RemoteThreadLaunches, type RemoteLaunchOutcome } from './RemoteThreadLaunches'
+import { REMOTE_THREAD_COMMAND, remoteThreadFingerprint, remoteThreadRefusal } from './remoteThreadRequest'
+import type { RemoteLaunchRecord } from '../run/delegation/remoteLaunches'
 import { RemoteSubagents } from './RemoteSubagents'
 import type { RemoteComputersPort } from '../protocol/remoteComputersPort'
 import { MAX_REMOTE_MINUTES } from '../run/mcp/appTools/delegation'
@@ -1186,6 +1190,7 @@ export class OrchestratorService extends EventEmitter {
   async shutdown(timeoutMs = 30_000): Promise<void> {
     this.beginShutdown()
     this.remoteSubagents?.close()
+    this.remoteLaunches?.close()
     await this.lifecycle.waitForIdle(timeoutMs)
     for (const timer of this.persistTimers.values()) clearTimeout(timer)
     this.persistTimers.clear()
@@ -1261,6 +1266,8 @@ export class OrchestratorService extends EventEmitter {
   private remoteComputers?: RemoteComputersPort
   /** Remote subagents' tasks on other computers (issue #469); present while a run engine is attached. */
   private remoteSubagents?: RemoteSubagents
+  /** Threads agents here launched on other computers (`thread_create` with `computer`, issue #1160); likewise. */
+  private remoteLaunches?: RemoteThreadLaunches
 
   /**
    * The user's other computers, for remote subagents (issue #469). Composed with Bridge, which sets it
@@ -1268,7 +1275,10 @@ export class OrchestratorService extends EventEmitter {
    */
   setRemoteComputers(port: RemoteComputersPort | undefined): void {
     this.remoteComputers = port
-    if (port) this.remoteSubagents?.start()
+    if (port) {
+      this.remoteSubagents?.start()
+      this.remoteLaunches?.start()
+    }
   }
 
   private browserRuntime?: BrowserRuntimePort
@@ -1729,6 +1739,8 @@ export class OrchestratorService extends EventEmitter {
   private readonly agentCreations = new Map<string, { fingerprint: string; task: Promise<AgentCreatedThread> }>()
   /** Agents' messages of the last `AGENT_REPEAT_WINDOW_MS`, by `agentRepeatKey`, oldest first: the repeat check of `thread_send`. */
   private readonly recentAgentMessages = new Map<string, { at: number }>()
+  /** `thread_create` calls with `computer` in progress, by request key, likewise. */
+  private readonly remoteCreations = new Map<string, { fingerprint: string; task: Promise<AgentRemoteThreadResult> }>()
 
   /** The profile's bot threads, for the origin of their turns; null: none. */
   setBotThreads(threads: BotThreads | null): void {
@@ -2366,6 +2378,8 @@ export class OrchestratorService extends EventEmitter {
     this.unbindApprovals()
     this.remoteSubagents?.close()
     this.remoteSubagents = undefined
+    this.remoteLaunches?.close()
+    this.remoteLaunches = undefined
     this.runEngine = engine
     this.installQueueJournal()
     if (!engine) return
@@ -2381,6 +2395,14 @@ export class OrchestratorService extends EventEmitter {
     // Tasks left open by the previous daemon go on: their runs on the other computers did not stop with it.
     // Without Bridge the passes reach no computer, but a task's time limit still ends it here.
     this.remoteSubagents.start()
+    this.remoteLaunches = new RemoteThreadLaunches({
+      records: engine.remoteLaunches,
+      port: () => this.remoteComputers,
+      allowed: (node) => !this.remoteThreadDenial(node, node),
+      launched: (record) => this.noteRemoteLaunch(record)
+    })
+    // Launches a restart cut off are finished (or archived there) once that computer can be reached.
+    this.remoteLaunches.start()
     this.installTitleGuard()
     this.attachInFlightCanceller()
     // Input (4) of the hold predicate: synchronous, in memory, never throws (it is read inside transactions).
@@ -4106,6 +4128,7 @@ export class OrchestratorService extends EventEmitter {
       },
       createThread: (input, options) => this.createThreadAsAgent(input, options),
       creationStarted: (clientRequestId) => this.agentCreationStarted(clientRequestId),
+      createRemoteThread: (input, options) => this.createRemoteThreadAsAgent(input, options),
       noteOnThread: (threadId, text, launched) => this.noteAgentLaunch(threadId, text, launched),
       stopRun: (threadId, runId, options) => this.stopRunAsAgent(threadId, runId, options),
       setThreadArchived: (threadId, archived, options) => this.setThreadArchivedAsAgent(threadId, archived, options),
@@ -4659,7 +4682,225 @@ export class OrchestratorService extends EventEmitter {
 
   /** The key has a stored creation: a retry finishes that one thread and needs no new place under the caller's cap. */
   private agentCreationStarted(clientRequestId: string): boolean {
-    return readAgentThreadReceipt(this.requireRunEngine().store.getReceipt(clientRequestId)) !== undefined
+    const engine = this.requireRunEngine()
+    return readAgentThreadReceipt(engine.store.getReceipt(clientRequestId)) !== undefined || engine.remoteLaunches.get(clientRequestId) !== null
+  }
+
+  /**
+   * `thread_create` with `computer` (issue #1160): a top-level thread on another of the user's computers, in its project
+   * that is this thread's repository. Everything that can be checked here is checked before anything is recorded: the
+   * caller may reach other computers (not private, not itself started from another device, the switch on and that
+   * computer ticked), the computer is online, knows the agent mark and has the repository, the caps and the hop count.
+   * Then the launch is recorded with its receipt, and `RemoteThreadLaunches` runs it: a retry with the same key continues
+   * that one launch, and one a restart cut off is finished later. Refusals are returned with their code.
+   */
+  private createRemoteThreadAsAgent(input: AgentRemoteThreadRequest, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRemoteThreadResult> {
+    const key = options.clientRequestId
+    const fingerprint = remoteThreadFingerprint(input)
+    const running = this.remoteCreations.get(key)
+    if (running) {
+      if (running.fingerprint !== fingerprint) return Promise.reject(this.creationKeyConflict(key))
+      return running.task.then((result) => (result.status === 'launched' ? { ...result, replayed: true } : result))
+    }
+    const entry = { fingerprint, task: undefined as unknown as Promise<AgentRemoteThreadResult> }
+    entry.task = this.createRemoteThreadOnce(input, fingerprint, options).finally(() => this.remoteCreations.delete(key))
+    this.remoteCreations.set(key, entry)
+    return entry.task
+  }
+
+  private async createRemoteThreadOnce(input: AgentRemoteThreadRequest, fingerprint: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRemoteThreadResult> {
+    const engine = this.requireRunEngine()
+    const key = options.clientRequestId
+    const callerThreadId = options.actor.threadId
+    const refuse = (code: string, message: string, extra: Omit<Extract<AgentRemoteThreadResult, { status: 'refused' }>, 'status' | 'code' | 'message'> = {}): AgentRemoteThreadResult =>
+      ({ status: 'refused', code, message, ...extra })
+    // Read at every call, a retry's too: a computer the user turned off since is not reached again.
+    if (this.isLocalOnly(callerThreadId)) return refuse('private_thread', 'This is a private thread: it stays on this computer, so it cannot start threads on other computers.')
+    const launches = this.remoteLaunches
+    if (!launches || !this.remoteComputers)
+      return refuse('remote_unavailable', 'Threads on other computers need Mousse to be connected to your other computers (Settings → Devices).')
+    const stored = engine.remoteLaunches.get(key)
+    if (stored) {
+      const receipt = engine.store.getReceipt(key)
+      const earlier = receipt?.commandKind === REMOTE_THREAD_COMMAND ? (receipt.result as { fingerprint?: unknown } | null)?.fingerprint : undefined
+      if (receipt?.threadId !== callerThreadId || earlier !== fingerprint) throw this.creationKeyConflict(key)
+      const denied = this.remoteThreadDenial(stored.node, stored.computerName)
+      if (denied) return refuse(denied.code, denied.message, { computer: stored.computerName })
+      const before = stored.state
+      return this.remoteThreadResult(await launches.launch(key), before === 'launched' || before === 'abandoned')
+    }
+    if (engine.store.getReceipt(key)) throw this.creationKeyConflict(key)
+    // A chain stays one computer deep: work another device started here never reaches a third computer.
+    const caller = this.threadStore?.getThread(callerThreadId)
+    const root = caller?.lineage ? this.threadStore?.getThread(caller.lineage.rootThreadId) : caller
+    if (root?.startedFrom) return refuse('remote_from_remote', 'A thread another device started cannot start threads on other computers.')
+    const found = this.findComputer(input.computer)
+    if (!found.ok) return refuse(found.code, found.message, found.extra as { computers?: Array<{ id: string; name: string }> })
+    const computer = found.computer
+    const at = { computer: computer.name }
+    const denied = this.remoteThreadDenial(computer.node, computer.name)
+    if (denied) return refuse(denied.code, denied.message, at)
+    if (!computer.online) return refuse('computer_offline', `${computer.name} is offline.`, at)
+    // Never an unmarked call: a computer that does not know the agent mark would take the launch as a person's.
+    try {
+      if (!(await this.remoteComputers.takesAgentMark(computer.node, AbortSignal.timeout(20_000))))
+        return refuse('computer_outdated', `Update Mousse on ${computer.name} to start threads there: it does not know calls an agent makes.`, at)
+    } catch (error) {
+      const failed = remoteThreadRefusal(error, computer.name)
+      return refuse(failed.code, failed.message, at)
+    }
+    // However many runs this thread has made, only so many of the threads it launched may be working at once.
+    const working = this.launchedThreadsWorking(callerThreadId)
+    if (working >= THREAD_CREATE_MAX_ACTIVE_PER_THREAD)
+      return refuse('creation_limit', `${working} of the threads this thread launched are still working (the limit is ${THREAD_CREATE_MAX_ACTIVE_PER_THREAD}); wait for some to finish before launching more.`, at)
+    // The first message counts as the next agent message in a row: a launch cannot start a chain the limit would stop.
+    let hops = (engine.getRun(options.actor.runId)?.outcome?.agentHops ?? 0) + 1
+    if (input.firstMessage !== undefined) {
+      try {
+        hops = this.withAgentHops(options.actor).hops ?? hops
+      } catch (error) {
+        return refuse('agent_hops_exceeded', error instanceof Error ? error.message : String(error), at)
+      }
+    }
+    if (Boolean(input.model) !== Boolean(input.instanceId))
+      return refuse('selection_incomplete', `On another computer a model is named with its agent: pass both instanceId and model (from list_models with computer), or leave both out to use ${computer.name}'s default.`, at)
+    if (input.model) {
+      const listed = await this.remoteModelEntries(computer)
+      const choice = listed.ok
+        ? agentModelRefusal(listed.entries, { instanceId: input.instanceId!, model: input.model, ...(input.effort ? { effort: input.effort } : {}) }, computer.name, { unlisted: 'refuse' })
+        : undefined
+      if (choice) return refuse(choice.code, choice.message.replace('Nothing was started.', 'No thread was created.'), at)
+    }
+    const project = await this.remoteProjectFor(callerThreadId, computer, input.projectId)
+    if (!project.ok) return refuse(project.code, project.message, { ...at, ...(project.candidates ? { candidates: project.candidates } : {}) })
+    // The launcher's own mode, never looser than its run; that computer narrows it to the limit it set for this one.
+    const permissionMode = narrowPermissionMode(this.requestedPermissionMode(callerThreadId), this.runPermissionMode(options.actor.runId))
+    const title = input.title?.trim() || 'New Thread'
+    engine.store.db.transaction(() => {
+      engine.store.putReceipt({
+        clientRequestId: key,
+        threadId: callerThreadId,
+        commandKind: REMOTE_THREAD_COMMAND,
+        status: 'accepted',
+        result: { computer: computer.node, fingerprint },
+        createdAt: new Date().toISOString()
+      })
+      engine.remoteLaunches.create({
+        creationKey: key,
+        launcherThreadId: callerThreadId,
+        launcherRunId: options.actor.runId,
+        node: computer.node,
+        computerName: computer.name,
+        title,
+        remoteProjectId: project.projectId,
+        worktree: input.workspace === 'new_worktree',
+        instanceId: input.instanceId ?? null,
+        // That computer's `threads.setModel` reads a level packed with the model, as every computer does.
+        model: input.model ? agentModelId(input.model, input.effort) : null,
+        permissionMode,
+        firstMessage: input.firstMessage === undefined ? null : { content: input.firstMessage, mode: input.mode ?? 'agent' },
+        mark: { thread: callerThreadId, run: options.actor.runId, title: this.titleOf(callerThreadId) ?? '', hops, mode: permissionMode }
+      })
+    })
+    return this.remoteThreadResult(await launches.launch(key), false)
+  }
+
+  /** Why an agent may not start a thread on `node` now: the switch in Agent access is off, or that computer is not ticked. */
+  private remoteThreadDenial(node: string, name: string): { code: string; message: string } | undefined {
+    const access = this.agentAccessSettings()
+    if (!access.remoteSubagents)
+      return { code: 'computer_not_allowed', message: 'The user has not turned on "Let agents work on your other devices". They can turn it on in Settings → Agents → Agent access.' }
+    if (!access.computers.includes(node))
+      return { code: 'computer_not_allowed', message: `The user has not turned on ${name} under "Let agents work on your other devices". They can turn it on in Settings → Agents → Agent access.` }
+    return undefined
+  }
+
+  /** The threads `launcherThreadId` launched that are working: here, with a run going, and on other computers, while their launch is open. */
+  private launchedThreadsWorking(launcherThreadId: string): number {
+    const engine = this.requireRunEngine()
+    const busy = new Set(engine.store.listNonTerminalRuns().map((run) => run.threadId))
+    const here = this.threadStore?.listAllThreads().filter((thread) => thread.createdByThreadId === launcherThreadId && busy.has(thread.id)).length ?? 0
+    const there = engine.remoteLaunches.listForLauncher(launcherThreadId).filter((launch) =>
+      launch.state === 'starting' || launch.state === 'created' || launch.firstMessageState === 'pending' || launch.firstMessageState === 'uncertain').length
+    return here + there
+  }
+
+  /**
+   * The project of `computer` the thread starts in: the one that is the caller's repository, or `wanted` among those
+   * that may be. No strong match, or several, refuses with the candidates; nothing is cloned there (#484).
+   */
+  private async remoteProjectFor(callerThreadId: string, computer: { node: string; name: string }, wanted: string | undefined):
+    Promise<{ ok: true; projectId: string } | { ok: false; code: string; message: string; candidates?: RemoteProjectCandidate[] }> {
+    const projectId = this.threadStore?.getThread(callerThreadId)?.projectId
+    const projectPath = projectId ? this.projectManager?.getProject(projectId)?.path : undefined
+    if (!projectPath) return { ok: false, code: 'no_matching_project', message: `This thread has no project, so there is no repository to find on ${computer.name}.` }
+    let found: Awaited<ReturnType<RemoteComputersPort['projectCandidates']>>
+    try {
+      found = await this.remoteComputers!.projectCandidates(computer.node, projectPath, AbortSignal.timeout(30_000))
+    } catch (error) {
+      return { ok: false, ...remoteThreadRefusal(error, computer.name) }
+    }
+    if (!found) return { ok: false, code: 'no_matching_project', message: 'This thread\'s project is not a Git repository, so it cannot be matched on another computer.' }
+    const strong = found.match && !found.match.weak ? [found.match.projectId] : found.candidates.filter((entry) => !entry.weak).map((entry) => entry.projectId)
+    const candidates: RemoteProjectCandidate[] = found.match
+      ? [{ projectId: found.match.projectId, ...(found.match.weak ? { weak: true } : {}) }]
+      : found.candidates
+    if (wanted !== undefined) {
+      if (strong.includes(wanted)) return { ok: true, projectId: wanted }
+      return { ok: false, code: 'no_matching_project', message: `Project ${wanted} of ${computer.name} is not a checkout of this repository that Mousse can tell apart from a fork.`, ...(candidates.length ? { candidates } : {}) }
+    }
+    if (strong.length === 1) return { ok: true, projectId: strong[0]! }
+    if (strong.length > 1)
+      return { ok: false, code: 'several_matching_projects', message: `${computer.name} has several checkouts of this repository; name one with projectId.`, candidates }
+    return {
+      ok: false,
+      code: 'no_matching_project',
+      message: candidates.length
+        ? `${computer.name} has a project that shares this repository's first commit but not its remotes, so it may be another repository. Open the same repository there first.`
+        : `${computer.name} has no project for this repository. Open (or clone) it there first.`,
+      ...(candidates.length ? { candidates } : {})
+    }
+  }
+
+  /** What `thread_create` with `computer` returns for a launch's outcome. */
+  private remoteThreadResult(outcome: RemoteLaunchOutcome, replayed: boolean): AgentRemoteThreadResult {
+    const { record } = outcome
+    if (outcome.ok === false) {
+      const failed = remoteThreadRefusal(new DomainRpcError(outcome.code, outcome.message), record.computerName)
+      return { status: 'refused', code: failed.code, message: `${record.computerName} did not start the thread: ${failed.message}`, computer: record.computerName }
+    }
+    if (outcome.ok === 'pending' || !record.remoteThreadId)
+      return { status: 'uncertain', computer: record.computerName, message: `${record.computerName} has not confirmed the thread yet (${outcome.ok === 'pending' ? outcome.message : 'no answer'}). Mousse keeps trying; call thread_create again with the same clientRequestId to learn the thread, never with a new one.` }
+    const first = record.firstMessageState
+    return {
+      status: 'launched',
+      threadId: qualifyId(record.node, record.remoteThreadId),
+      computer: record.computerName,
+      title: record.title,
+      permissionMode: record.remoteMode,
+      model: record.instanceId && record.model ? { instanceId: record.instanceId, model: record.model } : null,
+      ...(record.remoteRunId ? { runId: record.remoteRunId } : {}),
+      ...(first === 'none' ? {} : { firstMessage: first === 'sent' || first === 'failed' ? first : 'uncertain' }),
+      ...(record.lastError && first !== 'sent' && first !== 'none' ? { firstMessageReason: record.lastError } : {}),
+      replayed
+    }
+  }
+
+  /**
+   * The launcher's note of a thread it launched on another computer, once it exists there: drawn as a chip with the
+   * thread's live status, named by its qualified id. Written once, by the call or by the pass that finished the launch.
+   */
+  private noteRemoteLaunch(record: RemoteLaunchRecord): void {
+    if (!record.remoteThreadId) return
+    const threadId = qualifyId(record.node, record.remoteThreadId)
+    const model = record.instanceId && record.model ? `${record.instanceId} / ${record.model}` : `${record.computerName}'s default model`
+    const first = record.firstMessageState === 'none' ? '' : record.firstMessageState === 'sent' ? ', first message sent' : record.firstMessageState === 'failed' ? ', first message not sent' : ', first message not confirmed yet'
+    const summary = `on ${record.computerName}: ${model}, ${record.remoteMode ?? record.permissionMode} mode${first}`
+    try {
+      this.noteAgentLaunch(record.launcherThreadId, `Created thread «${record.title}» (${threadId}) ${summary}.`, { threadId, summary })
+    } catch (error) {
+      console.warn('the launcher\'s note of a thread on another computer could not be written', { error: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   /**
