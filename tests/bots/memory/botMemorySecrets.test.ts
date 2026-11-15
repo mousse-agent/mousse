@@ -178,6 +178,15 @@ describe('held-back credentials', () => {
       if (count > 8) expect(wrong).not.toContain(secret)
     })
 
+    it('puts ordinary survivors first and credential-bearing survivors in date order', () => {
+      const fx = fixture()
+      const ordinary = fx.add(`wifi ${'ordinary text '.repeat(20)}`)
+      const older = fx.add('wifi wifi wifi\npassword: sunflower')
+      const newer = fx.add(`wifi ${'more context '.repeat(40)}\npassword: sunflowers`)
+      for (const guess of ['tulip7', 'sunflower', 'sunflowers'])
+        expect(fx.search(`wifi ${guess}`)).toEqual([ordinary, newer, older])
+    })
+
     it('discarded secret-only matches do not consume slots or change the any-word fallback', () => {
       const fx = fixture()
       const visible: string[] = []
