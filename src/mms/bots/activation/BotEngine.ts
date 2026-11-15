@@ -99,7 +99,7 @@ import { workWaits, type BotActivationRow, type BotDispatchRow, type BotSubagent
 import { BotCounterScope, BotSpendScope, type ActivationLimits } from '../store/scopes'
 import { isConnectionFailure, type BotConnectivity } from './connectivity'
 import { BotScheduleError, type BotScheduleBook, type BotScheduleEntry } from '../../scheduled/botJobs'
-import { isSilentOutput } from '../../scheduled/computeNextRun'
+import { isSilentOutput, MISSED_OCCURRENCES_CAP } from '../../scheduled/computeNextRun'
 import { tellMeNotifies } from '../../../shared/automations'
 import type { RunLevel } from '../../../shared/automationInbox'
 import { statusLineOf } from '../activity/statusLine'
@@ -1710,8 +1710,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           const notes = this.workNotes(row)
           if (notes) this.store.applyWorkNotes(notes.ids)
           const skipped = row.trigger.kind === 'schedule' && row.trigger.missed ? Math.max(0, row.trigger.missed.count - 1) : 0
+          const capped = row.trigger.kind === 'schedule' && (row.trigger.missed?.count ?? 0) >= MISSED_OCCURRENCES_CAP
           const late = row.trigger.kind === 'schedule' && row.trigger.missed
-            ? `\n\nThis run was due at ${scheduledDueTime(row.trigger.occurrenceAt, this.now())}; this computer was off or asleep${skipped ? `, and ${skipped} ${skipped === 1 ? 'run was' : 'runs were'} skipped` : ''}.` : ''
+            ? `\n\nThis run was due at ${scheduledDueTime(row.trigger.occurrenceAt, this.now())}; this computer was off or asleep${skipped ? `, and ${capped ? 'over ' : ''}${skipped} ${skipped === 1 ? 'run was' : 'runs were'} skipped` : ''}.` : ''
           const text = row.lane === 'run' ? `${row.trigger.input}${late}${notes ? `\n\n${notes.text}` : ''}\n\n${BOT_RUN_REPORT_LINE}` : `${row.trigger.input}${notes ? `\n\n${notes.text}` : ''}`
           this.store.insertDispatch({ activationId: row.id, n: 1, kind: 'start', clientRequestId, threadId, prompt: { text }, policyDigest: row.grantDigest })
           if (row.lane === 'run') this.journalInTx({
