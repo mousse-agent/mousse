@@ -5,7 +5,6 @@ import { realpathSync } from 'node:fs'
 import type { BotManifest, BotThreadSpec } from '../../../shared/bots/personal/definition'
 import { BOT_APP_TOOLS, BOT_APPLET_TOOL, BOT_CARD_TOOL, BOT_MESSAGE_TOOLS, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_PROFILER_CHAT_TOOLS, BOT_PROFILER_PERMISSION, BOT_PROFILER_TOOLS, BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest, BOT_SUBAGENT_APP_TOOLS, BOT_SUBAGENT_TOOLS } from '../../../shared/bots/personal/manifest'
 import { BOT_MEMORY_TOOLS } from '../../../shared/bots/personal/memory'
-import { withinComputerLimit, type BotComputerLimit } from '../../../shared/bots/personal/computerLimit'
 import type { NeutralTool } from '../../../shared/harness/tools'
 import type { BindPolicy, HarnessCaps, HarnessError } from '../../../shared/harness/types'
 import { stableStringify } from '../../run/json'
@@ -128,11 +127,6 @@ export interface CompileInput {
      */
     bots?: boolean
   }
-  /**
-   * What this computer lets bots do (Settings → What bots may do here): what it has switched off is taken out of the
-   * thread's permissions before anything is compiled, whatever the grant holds. Absent: everything.
-   */
-  limit?: BotComputerLimit
 }
 
 export type CompileResult =
@@ -164,9 +158,7 @@ export function systemTempDirs(): string[] {
 }
 
 export function compileBotThread(input: CompileInput): CompileResult {
-  const narrowed = narrowManifest(input.revision ? intersectManifest(input.revision, input.grant) : input.grant, input.thread.narrow)
-  // This computer's ceiling, before the tools, the sandbox's folders and the browser are compiled from it.
-  const held = input.limit ? withinComputerLimit(narrowed, input.limit) : narrowed
+  const held = narrowManifest(input.revision ? intersectManifest(input.revision, input.grant) : input.grant, input.thread.narrow)
   // A subagent is the work, never more: what the work holds, less what is the bot's alone, and none of the bot's tools.
   const subagent = input.botTools?.subagent === true
   const own = subagent ? undefined : input.botTools
