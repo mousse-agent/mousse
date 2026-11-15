@@ -111,7 +111,7 @@ describe('a watcher ends and wakes the bot once', () => {
     const pid = await pidOf(pidFile)
     const prompt = await woken(watcherId)
     expect(prompt).toContain('printed a line that matched')
-    expect(prompt).toContain('The line that matched: build passed in 12s')
+    expect(prompt).toContain('The line that matched: [data from matching command line]\nbuild passed in 12s\n[end of data]')
     await until(() => !alive(pid))
   })
 
