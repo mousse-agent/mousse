@@ -1352,7 +1352,6 @@ export const MessageList = memo(function MessageList({
   const rowsRef = useRef<HTMLDivElement>(null);
   // What is drawn after the turns (the queued messages): the next turn starts from it.
   const afterTurnsRef = useRef<HTMLDivElement>(null);
-  const chatContainerObserverRef = useRef<ResizeObserver | null>(null);
   // Follow the end of the thread, or leave it alone. Changed only by what the
   // user does (see `virtual/follow-mode.ts`), never by a scroll position.
   const followModeRef = useRef<FollowMode>(
@@ -1479,19 +1478,7 @@ export const MessageList = memo(function MessageList({
 
     containerCleanupRef.current?.();
     containerCleanupRef.current = null;
-    if (chatContainerObserverRef.current) {
-      chatContainerObserverRef.current.disconnect();
-      chatContainerObserverRef.current = null;
-    }
     if (el) {
-      el.style.setProperty("--chat-container-height", `${el.clientHeight}px`);
-      const observer = new ResizeObserver((entries) => {
-        const height = entries[0]?.contentRect.height ?? 0;
-        el.style.setProperty("--chat-container-height", `${height}px`);
-      });
-      observer.observe(el);
-      chatContainerObserverRef.current = observer;
-
       // Attached when the element mounts: no timers, no retries.
       const overflowing = () => el.scrollHeight > el.clientHeight;
       const onWheel = (event: WheelEvent) =>
@@ -1568,13 +1555,6 @@ export const MessageList = memo(function MessageList({
         document.removeEventListener("keydown", onKeyDown);
       };
     }
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      if (chatContainerObserverRef.current)
-        chatContainerObserverRef.current.disconnect();
-    };
   }, []);
 
   // Timestamp of the last programmatic scrollTop write (streaming follow,
