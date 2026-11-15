@@ -116,3 +116,25 @@ it('a failed message transaction leaves no occurrence record and can be retried'
   expect(f.bots.runScheduledOccurrence(input).kind).toBe('said')
   expect(chatOf(f, botId).filter((row) => row.text === 'Take your pills')).toHaveLength(1)
 })
+
+it.each(['clear', 'reset'] as const)('the planned-end line stays gone after %s', async (action) => {
+  const entry = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Inbox check', until: '2026-11-08' }, 'owner')
+  await f.bots.reconcileOnStartup()
+  await f.tickSchedules(new Date(2026, 10, 9))
+  expect(chatOf(f, botId).some((row) => row.text.includes('ended, as planned'))).toBe(true)
+  if (action === 'clear') await f.bots.clearChat(botId)
+  else await f.bots.resetBot(botId)
+  await f.tickSchedules(new Date(2026, 10, 10))
+  expect(chatOf(f, botId).filter((row) => row.text.includes('ended, as planned'))).toEqual([])
+})
+
+it.each(['removeAll', 'reset', 'purge'] as const)('finished schedules leave Automations on %s', async (action) => {
+  const entry = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Inbox check', until: '2026-11-08' }, 'owner')
+  await f.bots.reconcileOnStartup()
+  await f.tickSchedules(new Date(2026, 10, 9))
+  expect(f.scheduler.getJob(entry.jobId)?.state).toBe('completed')
+  if (action === 'removeAll') f.book.removeAll(botId)
+  else if (action === 'reset') await f.bots.resetBot(botId)
+  else { await f.bots.remove(botId); await f.bots.purge(botId) }
+  expect(f.scheduler.listJobs().filter((job) => job.bot?.botId === botId)).toEqual([])
+})

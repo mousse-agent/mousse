@@ -300,3 +300,18 @@ describe('forgetting a message with a card', () => {
     expect(JSON.stringify(rows)).not.toContain('4417')
   })
 })
+
+it.each([
+  ['chat:owner', true], ['answer:owner', true], ['wake:timer', false],
+  ['botmsg:other', false], ['create:first', false], ['question:q:default', false]
+])('a fixed line needs owner words: %s', async (key, allowed) => {
+  const turn = await chatTurn('Say hello every hour.', 'owner-line')
+  f.store.run('UPDATE bot_activations SET idempotency_key = ? WHERE id = ?', key, turn.activation.id)
+  const result = await tool('bot_schedule_add', turn.prepared, turn.payload.threadId, { when: { kind: 'interval', minutes: 60 }, say: 'Hello' })
+  expect(Boolean(result.isError)).toBe(!allowed)
+  if (!allowed) {
+    expect(result.text).toMatch(/prompt/)
+    expect(f.book.list(botId)).toEqual([])
+    expect((await tool('bot_schedule_add', turn.prepared, turn.payload.threadId, { when: { kind: 'interval', minutes: 60 }, prompt: 'Say hello' })).isError).toBeFalsy()
+  }
+})
