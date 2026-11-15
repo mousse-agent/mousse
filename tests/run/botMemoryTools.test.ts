@@ -255,6 +255,10 @@ describe('memory tools', () => {
       fx.clock.now += 2 * 24 * 60 * 60 * 1000
       fx.store.expireMemories('ada')
     }
+    const restoredResult = onAppResult.mock.calls.find(([, , result]) => result.ref === restored)![2]
+    const restoreChip = rollUpChips([{ tool: 'memory_save', input: { text: state === 'corrected' ? 'The owner prefers tea.' : 'Door 4471, flat 4B.' }, result: restoredResult }])[0]
+    expect(restoreChip?.highlight).not.toContain('put away')
+    expect(restoreChip).not.toHaveProperty('title')
     const admin = createBotMemoryAdmin({ store: fx.store })
     const history = (await call('memory_list', 'ada-home', { history: true })).value.entries as Array<Record<string, unknown>>
     expect(history.find(e => e.id === restored)).toMatchObject({ status: 'active' })
@@ -278,7 +282,7 @@ describe('memory tools', () => {
       expect(refused.isError).toBe(true)
       expect(refused.text).toContain(restored)
       expect(refused.text).toContain(m5)
-      expect(() => admin.forget('ada', ref)).toThrow()
+      expect(() => admin.forget('ada', ref)).toThrow(refused.text)
     }
     expect({ versions: fx.store.allVersions('ada'), journal: fx.store.journal('ada') }).toEqual(before)
     expect((await call('memory_forget', 'ada-home', { id: restored, refs: [m5], reason: 'Forget these details together.' })).isError).toBeUndefined()

@@ -87,10 +87,10 @@ export const BOT_MEMORY_TOOL_DEFINITIONS: Record<BotMemoryTool, Tool> = {
   },
   memory_forget: {
     name: 'memory_forget',
-    description: 'Forget something the owner asked you to forget: a memory entry (id m12) and the history rows that say it (refs from memory_search, like j123). Only in a chat turn the owner\'s message or tapped answer started. Afterwards say what you removed and offer to look for other mentions. Copies in app transcripts outside your memory are not covered: say so if asked.',
+    description: 'Forget something the owner asked you to forget: a memory entry (id m12) and the history rows that say it (refs from memory_search, like j123). Only in a chat turn the owner\'s message or tapped answer started. If an entry has been combined, Forget may refuse with all active or expired holders. Name all listed memory refs together in id and refs, then save again what should stay. Afterwards say what you removed and offer to look for other mentions. Copies in app transcripts outside your memory are not covered: say so if asked.',
     parameters: Type.Object({
       id: Type.Optional(Type.String({ description: 'The memory entry: m12.' })),
-      refs: Type.Optional(Type.Array(Type.String(), { description: 'History rows to remove: j123.' })),
+      refs: Type.Optional(Type.Array(Type.String(), { description: 'History rows to remove: j123. Also accepts memory refs to name all holders listed by a Forget refusal together.' })),
       reason: Type.String({ description: 'Why, in a few words.' })
     })
   }
