@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { botTools } from '../../src/mms/run/mcp/appTools/bots'
 import type { ToolCallContext } from '../../src/mms/run/mcp/appTools/types'
 import { appTurn } from '../run/appToolsFixture'
-import { botFixture, chatOf, createBot, finish, start, T0, type BotFixture } from './botFixture'
+import { botFixture, chatOf, createBot, finish, start, flush, T0, type BotFixture } from './botFixture'
 
 let f: BotFixture
 let botId: string
@@ -123,4 +123,63 @@ it('refuses ordinary threads even when they call the handler directly', async ()
   expect(s.tool.offered?.(ctx.turn)).toBe(false)
   expect(await s.tool.handler({ why: 'Finished.' }, ctx)).toMatchObject({ isError: true })
   expect(f.book.list(botId)).toHaveLength(2)
+})
+
+// Review B9.1: continuations remain part of the executing run after its schedule ends.
+it.each(['turn cap', 'restart', 'wall', 'owner removal'] as const)('keeps the report after %s', async path => {
+  const s = await scheduled()
+  if (path === 'owner removal') f.bots.removeSchedule(botId, s.own.scheduleId)
+  else await s.tool.handler({ why: 'Reached the end condition.' }, s.ctx)
+  if (path === 'restart') {
+    f.runs.markTerminal(s.payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+    await f.bots.reconcileOnStartup()
+  } else if (path === 'wall') {
+    f.bots.raiseWall(s.row.id, { dispatchN: 1, kind: 'gate', permission: { tool: 'write' }, reason: 'Need write.' })
+    await f.bots.activate({ botId, input: 'Other work', clientRequestId: 'other' })
+    expect(f.store.activation(s.row.id)!.status).toBe('waiting_grant')
+    await finish(f, s.payload, 'completed', { text: 'Waiting for permission.' })
+    const wall = f.bots.listEscalations(s.row.id).find(ask => ask.status === 'open')!
+    await f.bots.respond({ escalationId: wall.id, answer: 'allow_once' })
+  } else {
+    await finish(f, s.payload, 'failed', { outcome: { error: '[provider_turn_cap] Claude Code reached the most steps one turn may take.' } })
+  }
+  expect(f.store.activation(s.row.id)!.status).toBe('running')
+  const next = await start(f, s.row.id, 2)
+  await finish(f, next.payload, 'completed', { text: 'Price is low.' })
+  expect(chatOf(f, botId).some(row => row.kind === 'run_report' && row.text === 'Price is low.')).toBe(true)
+  const lines = chatOf(f, botId).filter(row => row.systemLine)
+  expect(lines).toHaveLength(path === 'owner removal' ? 0 : 1)
+})
+
+it('finishes startup and refuses completed schedules while the shared store cannot remove them', async () => {
+  const s = await scheduled()
+  vi.spyOn(f.book, 'remove').mockImplementation(() => { throw new Error('store is read only') })
+  await s.tool.handler({ why: 'Finished.' }, s.ctx)
+  await expect(f.bots.reconcileOnStartup()).resolves.toBeUndefined()
+  expect(f.bots.findScheduledOccurrence({ botId, scheduleId: s.own.scheduleId, occurrenceKey: s.row.trigger.kind === 'schedule' ? s.row.trigger.occurrenceAt : '' })).toBeUndefined()
+  expect(f.bots.runScheduledOccurrence({ botId, scheduleId: s.own.scheduleId, prompt: 'Do not run', occurrenceAt: new Date(T0 + 10 * 60_000).toISOString() })).toMatchObject({ kind: 'skipped', reason: 'schedule_completed' })
+  await f.tickSchedules(new Date(T0 + 10 * 60_000))
+  expect(f.book.get(botId, s.own.scheduleId)?.skip?.reason).toBe('schedule_completed')
+  expect(f.bots.runScheduledOccurrence({ botId, scheduleId: s.other.scheduleId, prompt: 'Other check', occurrenceAt: new Date(T0 + 60 * 60_000).toISOString() }).kind).not.toBe('not_ready')
+})
+
+it('posts the report followed by one stopped line even when removal keeps failing', async () => {
+  const s = await scheduled()
+  vi.spyOn(f.book, 'remove').mockImplementation(() => { throw new Error('store is read only') })
+  await s.tool.handler({ why: 'Finished.' }, s.ctx)
+  await finish(f, s.payload, 'completed', { text: 'Price is low.' })
+  const rows = chatOf(f, botId)
+  const report = rows.findIndex(row => row.kind === 'run_report')
+  const line = rows.findIndex(row => row.systemLine)
+  expect(report).toBeGreaterThan(-1)
+  expect(line).toBeGreaterThan(report)
+})
+
+it.each(['failed', 'stopped'] as const)('posts one completion line when the run ends %s', async path => {
+  const s = await scheduled()
+  await s.tool.handler({ why: 'Finished.' }, s.ctx)
+  if (path === 'failed') await finish(f, s.payload, 'failed', { outcome: { error: 'Provider failure' } })
+  else await f.bots.stop(s.row.id)
+  await flush()
+  expect(chatOf(f, botId).filter(row => row.systemLine)).toHaveLength(1)
 })
