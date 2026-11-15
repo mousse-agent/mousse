@@ -7224,13 +7224,17 @@ export class OrchestratorService extends EventEmitter {
         if (!child) return undefined
         const actions = new ThreadActionService(childDirectory).list()
         // The task's own checkpoint, not the worktree as it is now: the subagent may have worked on since.
-        const resultSha = taskCheckpoint(actions, delegation.result?.runId ?? delegation.childRunId)
+        const taskRunId = delegation.result?.runId ?? delegation.childRunId
+        const resultSha = taskCheckpoint(actions, taskRunId)
         if (!resultSha) return undefined
+        // The subagent removed its worktree before its task ended: the result is the last snapshot recorded, and the report says so.
+        const removed = actions.some((action) => action.turnId === taskRunId && action.workspaceRemoved)
         // Where the subagent's worktree started: everything it holds is measured from there.
         const baseSha = [...actions].sort((a, b) => a.createdAt.localeCompare(b.createdAt)).find((action) => action.scope !== 'conversation' && action.startSha)?.startSha ?? child.baseSha
         const cwd = existsSync(child.worktreePath) ? child.worktreePath : project
         if (!cwd) return undefined
-        built = { repositoryId: child.repositoryId, report: buildSubagentResultReport({ cwd, workedIn: child.worktreePath, shared: false, baseSha, resultSha, pins }) }
+        const report = buildSubagentResultReport({ cwd, workedIn: child.worktreePath, shared: false, baseSha, resultSha, pins })
+        built = { repositoryId: child.repositoryId, report: removed ? { ...report, workspaceRemoved: true } : report }
       }
       writeSubagentResults(path, [...saved, { delegationId: delegation.delegationId, repositoryId: built.repositoryId, report: built.report }])
       return built.report
