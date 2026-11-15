@@ -547,6 +547,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** The Bot UI's methods (`bots.*` v2). */
   readonly service: BotChatService
   /** Each activation's context pack as its latest main dispatch read it (frozen by the provider, bot-context.md §5). */
+  private readonly fileReads = new Map<string, Map<string, string>>()
   private readonly packs = new Map<string, string>()
   /**
    * Notes a live turn took and the runtime never reported read nor handed back, by activation: the model may have read
@@ -2916,7 +2917,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const { row, controller } = input
     const switchedAtStart = new Map(this.permissionSwitches.get(row.botId))
     const activity: BotActivityContext = { botId: row.botId, activationId: row.id, dispatchId: input.dispatchId }
+    let fileReads = this.fileReads.get(row.id)
+    if (!fileReads) this.fileReads.set(row.id, fileReads = new Map())
     const base = createBotAuthority({
+      fileReads,
       activationId: row.id,
       role: input.role,
       permissions: input.permissions,
@@ -6131,6 +6135,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** The scratch folder goes when the activation has ended (it stays while it waits or is paused). */
   private cleanup(row: BotActivationRow): void {
     if (!ENDED_ACTIVATION_STATUSES.has(row.status)) return
+    this.fileReads.delete(row.id)
     this.refusedAsks.delete(row.id)
     this.switchCuts.delete(row.id)
     // Its subagents ended with it: what they returned is no one's to read any more.

@@ -465,6 +465,7 @@ class PiTurn {
   readonly startedAt = Date.now()
   readonly openTools = new Map<string, { name: string; mousse: boolean }>()
   /** A bot's built-in calls with a `started` ledger row, by call id. */
+  readonly fileCalls = new Map<string, { completed(success: boolean): void }>()
   readonly ledgerRows = new Map<string, string>()
   /** Steers the turn owns and Pi has not read, each with its drain's token: it is accepted by that token alone. */
   readonly steers: PiSteer[] = []
@@ -1332,6 +1333,13 @@ export class PiRpcEngine implements ProviderAdapter {
       turn.episode.ended(request.toolCallId)
       return { allow: false, reason: `${GATE_REFUSALS.denied}: the run is no longer active` }
     }
+    // After the writer wait, before any count or ledger row. A stale file is a tool error,
+    // never a wall or an ask. Other runtimes never call this Pi-only hook.
+    const fileCall = bot && builtin ? bot.piFileCall?.(request.toolName, input) : undefined
+    if (fileCall && 'refused' in fileCall) {
+      turn.episode.ended(request.toolCallId)
+      return { allow: false, reason: fileCall.refused }
+    }
     const counted = turn.host.budget?.toolCall() ?? { ok: true }
     if (!counted.ok) {
       turn.episode.ended(request.toolCallId)
@@ -1355,6 +1363,7 @@ export class PiRpcEngine implements ProviderAdapter {
       }
       turn.ledgerRows.set(request.toolCallId, row)
     }
+    if (fileCall) turn.fileCalls.set(request.toolCallId, fileCall)
     return rewritten ? { allow: true, input: rewritten } : { allow: true }
   }
 
@@ -2212,6 +2221,9 @@ export class PiRpcEngine implements ProviderAdapter {
         turn.announced.delete(callId)
         turn.episode.ended(callId)
         const failed = event.isError === true
+        const fileCall = turn.fileCalls.get(callId)
+        turn.fileCalls.delete(callId)
+        fileCall?.completed(!failed)
         const row = turn.ledgerRows.get(callId)
         if (row) {
           turn.ledgerRows.delete(callId)

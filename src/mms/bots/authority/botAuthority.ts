@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto'
+import { readFileSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import type { ActiveTimeScope, BotAllowedObserver, BotAuthority, BotCheck, BotThreadRole, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
 import type { CounterScope } from '../../../shared/harness/counters'
 import type { SpendScope } from '../../../shared/harness/spend'
@@ -28,6 +30,8 @@ const NETWORK_TOOLS: ReadonlySet<NeutralTool> = new Set<NeutralTool>(['web_fetch
 
 export interface BotAuthorityInput {
   activationId: string
+  /** Read versions shared by dispatches of this activation; memory only, fresh after a service restart. */
+  fileReads?: Map<string, string>
   role: BotThreadRole
   permissions: BotPermissions
   /** Whether the activation waits for its owner's answer (`waiting_grant`), read at call time. */
@@ -51,6 +55,7 @@ export interface BotAuthorityInput {
 
 export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
   const { permissions } = input
+  const fileReads = input.fileReads ?? new Map<string, string>()
   const tools: ReadonlySet<NeutralTool> = new Set(permissions.tools)
   const appTools: ReadonlySet<string> = new Set(permissions.appTools)
   const skills: ReadonlySet<string> = new Set(permissions.skills)
@@ -74,6 +79,30 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
     counters: input.counters,
     time: input.time,
     spend: input.spend,
+    piFileCall(tool, args) {
+      const files = permissions.workspace?.files
+      const raw = args.path
+      if (!files || typeof raw !== 'string' || !['read', 'edit', 'write'].includes(tool)) return { completed() {} }
+      // Pi's gate has resolved this path and checked the grant already. Canonical names make
+      // relative paths and symlinks within the folder refer to the same remembered file.
+      if (!insideAny([files], raw, files)) return { completed() {} }
+      const absolute = resolve(files, raw)
+      let path = absolute
+      try { path = realpathSync(absolute) } catch { /* A new file has no real path yet. */ }
+      const before = fileHash(path)
+      if (tool !== 'read' && (before === null || (before !== undefined && fileReads.get(path) !== before))) {
+        return { refused: 'This file changed since you read it. Read it again, then make your change.' }
+      }
+      return {
+        completed(success) {
+          if (!success) return
+          // A read remembers the bytes at admission, not a newer writer's bytes at completion.
+          const hash = tool === 'read' ? before : fileHash(path)
+          if (typeof hash === 'string') fileReads.set(path, hash)
+          else fileReads.delete(path)
+        }
+      }
+    },
     check(call: NormalisedCall): BotCheck {
       const decided = decide(call)
       if (decided.ok && input.onAllowed) {
@@ -246,5 +275,14 @@ function insideAny(roots: readonly string[], raw: string, scratch: string): bool
     return true
   } catch {
     return false
+  }
+}
+
+/** Hash bytes rather than timestamps: equal-size edits and coarse/restored mtimes still differ. */
+function fileHash(path: string): string | undefined | null {
+  try { return createHash('sha256').update(readFileSync(path)).digest('hex') } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    // A file that cannot be read must not be overwritten on the strength of an old observation.
+    return null
   }
 }

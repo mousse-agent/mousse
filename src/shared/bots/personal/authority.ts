@@ -161,6 +161,8 @@ export interface BotAuthority {
    * them passes. Decided without side effects, so a wall or an ask is raised once, only when all are refused.
    */
   checkAny?(calls: readonly NormalisedCall[]): BotCheck
+  /** Pi alone: prepare a file call after the grant check, before charging it. Complete only calls that ran. */
+  piFileCall?(tool: string, args: Record<string, unknown>): { refused: string } | { completed(success: boolean): void }
   /** The activation's request and tool-call counts: one atomic row, shared by its main run and consults. */
   counters: CounterScope
   time: ActiveTimeScope
