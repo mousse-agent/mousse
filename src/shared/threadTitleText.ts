@@ -298,12 +298,12 @@ export interface TitleContext {
   images?: number
 }
 
-type TitleMessage = Pick<ChatMessage, 'role' | 'content' | 'kind' | 'hidden' | 'streaming' | 'images' | 'subagentNotice' | 'questionAnswers' | 'scheduledRun' | 'origin'>
+type TitleMessage = Pick<ChatMessage, 'role' | 'content' | 'kind' | 'hidden' | 'streaming' | 'images' | 'subagentNotice' | 'settleNotice' | 'questionAnswers' | 'scheduledRun' | 'origin'>
 
 /** A message the person or the agent wrote in the conversation, not a tool row, notice or hidden input. */
 function conversational(message: TitleMessage): boolean {
   return (!message.kind || message.kind === 'message') && !message.hidden && !message.streaming &&
-    !message.subagentNotice && !message.questionAnswers && !message.scheduledRun && Boolean(message.content.trim())
+    !message.subagentNotice && !message.settleNotice && !message.questionAnswers && !message.scheduledRun && Boolean(message.content.trim())
 }
 
 /**

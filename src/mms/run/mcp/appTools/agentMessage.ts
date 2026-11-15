@@ -8,8 +8,8 @@ const TITLE_MAX_CHARS = 80
  * notice Mousse wrote. Only such a message answers a plan waiting for review, and only such a message, when it started
  * the manager's current turn, is what the Automation manager takes as the person's request (`personTurnRequest`).
  */
-export function isPersonMessage(message: Pick<ChatMessage, 'role' | 'content' | 'origin' | 'scheduled' | 'subagentNotice' | 'backgroundNotice'>): boolean {
-  if (message.role !== 'user' || message.origin || message.scheduled || message.subagentNotice || message.backgroundNotice) return false
+export function isPersonMessage(message: Pick<ChatMessage, 'role' | 'content' | 'origin' | 'scheduled' | 'subagentNotice' | 'backgroundNotice' | 'settleNotice'>): boolean {
+  if (message.role !== 'user' || message.origin || message.scheduled || message.subagentNotice || message.backgroundNotice || message.settleNotice) return false
   // A message stored before it carried its sender is still labelled in its text.
   const text = typeof message.content === 'string' ? message.content.trimStart() : ''
   return !text.startsWith(AGENT_MESSAGE_PREFIX) && !text.startsWith(BOT_MESSAGE_PREFIX)

@@ -96,6 +96,11 @@ export type RunCommand =
       /** A person's leftover steer queued as a turn of its own (`RunOutcome.sentByPerson`). */
       sentByPerson?: true
       /**
+       * The run delivers settle notices (SPEC §15.1): it carries the count of agent messages in a row of the runs the
+       * notices are about and adds none of its own. It is not an agent's message.
+       */
+      noticeHops?: number
+      /**
        * A person's message that waits behind a usage-limit pause instead of ending it: on a paused thread the run
        * is created `queued`, the pause and its timer stay, and the result says so (`heldByPause`). The sender
        * queues it; the queue holds it until the continue turn has run or the pause is cancelled.
@@ -1991,7 +1996,11 @@ export class RunEngine extends EventEmitter {
       const continuationOf = command.continuationOfRunId
       // A run that carries on agent work (a provider's continuation, the resume after a pause) keeps the count of agent
       // messages in a row; it is not itself an agent's message.
-      const carriedHops = command.actor || command.agentOrigin ? undefined : inheritedAgentHops(store, command.threadId, command.source, continuationOf)
+      const carriedHops = command.actor || command.agentOrigin
+        ? undefined
+        : command.noticeHops !== undefined
+          ? (command.noticeHops > 0 ? command.noticeHops : undefined)
+          : inheritedAgentHops(store, command.threadId, command.source, continuationOf)
       const outcome: RunOutcome = {
         ...(continuationOf ? { continuationOf, ...(resuming ? { resumedFromPause: command.source === 'resume' ? 'auto' as const : 'user' as const } : {}) } : {}),
         // Remembered with the run, so a message an agent sent is still known as one when it starts later.

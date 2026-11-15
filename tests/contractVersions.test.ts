@@ -10,7 +10,7 @@ describe('contract versions', () => {
       daemonOwnerLease: 1,
       netProtocol: '1.0',
       netEnvelope: 1,
-      runDatabase: 19,
+      runDatabase: 20,
       botsDb: 9,
       mousseConf: 1,
       installation: 2,

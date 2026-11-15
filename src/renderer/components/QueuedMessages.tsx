@@ -8,7 +8,7 @@ import { useAfterTurnsLayout } from '../chat/components/agent-elements/after-tur
 import { shortTokens } from '../lib/promptCache'
 import { mousseToUIMessages } from '../chat/adapters/mousseToUI'
 import { UserMessage } from '../chat/components/agent-elements/user-message'
-import { SubagentNotice } from '../chat/components/agent-elements/tools/SubagentNotice'
+import { SettleNotice, SubagentNotice } from '../chat/components/agent-elements/tools/SubagentNotice'
 import { isOptimisticQueueItem, type ThreadQueue } from '../hooks/useThreadQueue'
 import { canEditQueued, queuedContentWithText, queuedWords, splitQueuedContent } from '../lib/queuedContent'
 import { formatBinding } from '../../shared/commands'
@@ -75,6 +75,7 @@ const QueuedBubble = memo(function QueuedBubble({ item }: { item: QueuedMessage 
     [item.id, item.content, item.enqueuedAt, item.images, item.origin]
   )
   if (item.subagentNotice?.length) return <SubagentNotice items={item.subagentNotice} />
+  if (item.settleNotice?.length) return <SettleNotice items={item.settleNotice} />
   return message ? <UserMessage message={message} /> : null
 })
 

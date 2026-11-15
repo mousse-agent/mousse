@@ -482,6 +482,15 @@ describe('queued messages in the conversation', () => {
     expect(button('n', 'Edit')).toBeNull()
   })
 
+  it('shows a queued settle notice by the thread it is about, never by the text the model reads, and offers no edit', async () => {
+    const notice = [{ watchId: 'w1', threadId: 't2', title: 'Fix build', event: 'ended' as const, status: 'completed' }]
+    await show([queued('s', '[Mousse notice, not from the user or any agent]\nSECRET RESULT', { source: 'thread-notice', settleNotice: notice })])
+    expect(row('s').textContent).toContain('Fix build')
+    expect(row('s').textContent).toContain('finished')
+    expect(row('s').textContent).not.toContain('SECRET RESULT')
+    expect(button('s', 'Edit')).toBeNull()
+  })
+
   it('leaves internal items out', async () => {
     await show([queued('a', 'one'), queued('i', 'wake up', { internal: true })])
     expect(rows().map((entry) => entry.dataset.queuedId)).toEqual(['a'])

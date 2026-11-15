@@ -11,7 +11,9 @@ import type { Migration } from './ProfileDatabase'
  * generations); version 9 stores each attempt's execution binding (harness gateway); version 10
  * rebuilds `runs` so a run can be `paused` until a usage limit resets; version 11 records the agent
  * access level on credentials, delegations and runs; version 17 binds a remote subagent's task to the
- * run on another computer that does it (issue #469); version 18 lets that task's mode be Full access.
+ * run on another computer that does it (issue #469); version 18 lets that task's mode be Full access; version 19
+ * records whether a remote subagent's calls carry the agent mark; version 20 keeps the watches of the settle notice (an
+ * agent that sent a message with `notify` is told when the work it started settles, SPEC §15.1).
  */
 export const RUN_MIGRATIONS: readonly Migration[] = [
   {
@@ -594,6 +596,41 @@ CREATE INDEX remote_subagents_child ON remote_subagents(child_thread_id);
 -- computer knows it), 0 when they go unmarked (an older computer), null until the first call decides. A task never
 -- changes form mid-flight: the other computer's replay ledger is keyed by method, so a switch would send it twice.
 ALTER TABLE remote_subagents ADD COLUMN marked INTEGER CHECK(marked IS NULL OR marked IN (0,1));
+`
+  },
+  {
+    version: 20,
+    sql: `
+-- The settle notice (SPEC §15.1): one row per message an agent sent with notify (thread_send, thread_create's first
+-- message). It follows the message, not a run: run_id is the run that carries it now (a re-queue, a steer handed
+-- back or a pause continuation moves it) and queue_item_id the queue item that carried it, when it was queued.
+-- target_node is null for a thread on this computer; how a watch learns about its run is not stored here, so a
+-- follower for another computer adds no column.
+--   active:  still followed;
+--   ended:   the work ended (end_status says how) and the end notice is written;
+--   expired: 24 h passed first (expires_at) and the sender was told once that the work is still going.
+-- needs_input and end_notice: 'due' once Mousse decided to tell the sender, 'sent' once the notice is in the sender's
+-- queue, so a restart in between delivers it.
+CREATE TABLE thread_watches(
+  watch_id                TEXT PRIMARY KEY,
+  message_key             TEXT NOT NULL UNIQUE,
+  watcher_thread_id       TEXT NOT NULL,
+  watcher_run_id          TEXT NOT NULL,
+  watcher_stop_generation INTEGER NOT NULL,
+  target_node             TEXT,
+  target_thread_id        TEXT NOT NULL,
+  run_id                  TEXT,
+  queue_item_id           TEXT,
+  state                   TEXT NOT NULL CHECK(state IN ('active','ended','expired')),
+  needs_input             TEXT CHECK(needs_input IN ('due','sent')),
+  end_notice              TEXT CHECK(end_notice IN ('due','sent')),
+  end_status              TEXT,
+  created_at              TEXT NOT NULL,
+  expires_at              TEXT NOT NULL,
+  updated_at              TEXT NOT NULL
+) STRICT;
+CREATE INDEX thread_watches_state ON thread_watches(state, target_thread_id);
+CREATE INDEX thread_watches_watcher ON thread_watches(watcher_thread_id);
 `
   }
 ]

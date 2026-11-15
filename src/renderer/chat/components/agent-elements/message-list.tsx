@@ -50,11 +50,12 @@ import {
 } from "./tools/permission-request";
 import { SubagentCardGroup } from "./tools/SubagentCard";
 import { SecretRequestInline, isSecretRequestPart, isWaitingSecretRequest } from "../../../components/secrets/secretRequestPart";
-import { BackgroundNotice, SubagentNotice } from "./tools/SubagentNotice";
+import { BackgroundNotice, SettleNotice, SubagentNotice } from "./tools/SubagentNotice";
 import { SteerGroup } from "./steer-group";
 import { isRunningSubagent } from "../../../../shared/subagents";
 import { useSubagentCards } from "./tools/subagent-cards-context";
 import { readSubagentNotice } from "../../adapters/subagentNotice";
+import { readSettleNoticeMeta } from "../../adapters/settleNotice";
 import { readBackgroundNotice } from "../../adapters/nativeSubagents";
 import { openThread } from "../../../lib/openThread";
 import { ThreadChip } from "../../../components/ThreadChip";
@@ -803,7 +804,7 @@ function messageTurnId(message: UIMessage | undefined): string | undefined {
 
 /** A message that reports results (a subagent's, or the runtime's own background tasks): not something the user wrote. */
 function isResultNotice(msg: UIMessage | undefined): boolean {
-  return Boolean(readSubagentNotice(msg) || readBackgroundNotice(msg));
+  return Boolean(readSubagentNotice(msg) || readBackgroundNotice(msg) || readSettleNoticeMeta(msg));
 }
 
 /** The empty-parts copy of a subagent-results message that joins a reply, one per message. */
@@ -2220,7 +2221,7 @@ function foldRowOf(msg: UIMessage, toolsOnly: boolean, suppressQuestionTool: boo
   if (toolsOnly) return { kind: "message", toolsOnly: true, keep: (msg.parts ?? []).some(isUnrecoveredFailure) };
   const metadata = (msg.metadata ?? {}) as Record<string, unknown>;
   if (
-    readSubagentNotice(msg) || readBackgroundNotice(msg) || isThreadNotice(msg) || isCompactionRow(msg) ||
+    readSubagentNotice(msg) || readBackgroundNotice(msg) || readSettleNoticeMeta(msg) || isThreadNotice(msg) || isCompactionRow(msg) ||
     metadata.contextHandoff != null || metadata.contextCleared || metadata.scheduledRun != null
   ) {
     return { kind: "message", keep: true };
@@ -2303,6 +2304,15 @@ const TurnRow = memo(function TurnRow({
             return (
               <div data-notice-id={turn.userMsg.id}>
                 <BackgroundNotice items={background} />
+              </div>
+            );
+          }
+          // What Mousse told the agent about work it asked to hear about (`notify`).
+          const settled = readSettleNoticeMeta(turn.userMsg);
+          if (settled) {
+            return (
+              <div data-notice-id={turn.userMsg.id}>
+                <SettleNotice items={settled} />
               </div>
             );
           }
@@ -2538,6 +2548,17 @@ const TurnRow = memo(function TurnRow({
                   node: (
                     <div key={msg.id} data-notice-id={msg.id}>
                       <BackgroundNotice items={background} />
+                    </div>
+                  ),
+                };
+              }
+              const settled = readSettleNoticeMeta(msg);
+              if (settled) {
+                return {
+                  fold,
+                  node: (
+                    <div key={msg.id} data-notice-id={msg.id}>
+                      <SettleNotice items={settled} />
                     </div>
                   ),
                 };

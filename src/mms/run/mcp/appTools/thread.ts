@@ -63,6 +63,21 @@ const THREAD_SEND_TRACKED_RUNS = 1000
 export const THREAD_CREATE_MAX_PER_RUN = 5
 /** A creator thread may have this many launched threads working (a queued, running or paused run) at once, however many runs it has; the next creation is refused. */
 export const THREAD_CREATE_MAX_ACTIVE_PER_THREAD = 10
+/** What a tool result says next when the caller asked to be told (`notify`), so it ends its turn instead of polling. */
+export const NOTIFY_NEXT = 'Mousse will tell you when it settles. Do not call thread_wait or thread_read to check. End your turn when nothing else is left.'
+const NOTIFY_SCHEMA = {
+  type: 'boolean',
+  description: 'Set it when you need the result: Mousse tells you when the work this message starts ends, and once before that if it waits for a person. Your turn then needs no thread_wait.'
+} as const
+
+/** `notify` read from a call's arguments; a personal bot hears with thread_wait instead. */
+function notifyArg(args: Record<string, unknown>, ctx: ToolCallContext): boolean {
+  if (args.notify === undefined || args.notify === false) return false
+  if (args.notify !== true) throw new Error('notify must be true or false')
+  if (ctx.turn.bot) throw new Error('notify is not available to a personal bot: use thread_wait.')
+  return true
+}
+
 /** A new thread's title is cut to this many characters. */
 const THREAD_TITLE_MAX_CHARS = 200
 /** The first message of a new thread is held to the size of a message a person could send in one go. */
@@ -612,6 +627,14 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
   const projectName = (projectId: string | undefined): string | null =>
     (projectId && host.listProjects?.().find((project) => project.id === projectId)?.name) || null
   const titleOf = (threadId: string): string | undefined => host.threadMeta?.(threadId)?.name
+  /**
+   * `notify`: one watch for the message sent with `messageKey` (a retry keeps it), and what the result says next. The
+   * sender's turn is told to end rather than poll; Mousse writes the notice into its queue (SPEC §15.1).
+   */
+  const watchSent = (threadId: string, messageKey: string, actor: AgentActor, runId: string, ctx: ToolCallContext): { notify: { watchId: string; next: string } } => {
+    const { watchId } = host.watchSettle!({ messageKey, watcherThreadId: ctx.caller.threadId, watcherRunId: actor.runId, targetThreadId: threadId, runId })
+    return { notify: { watchId, next: NOTIFY_NEXT } }
+  }
   /** Messages each run has sent to other threads, in memory: a restart gives every run a fresh count. */
   const sends = new Map<string, number>()
   const reserveSend = (runId: string): void => {
@@ -959,13 +982,14 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_send',
-      description: `Send a message to another thread. The thread's model receives it labelled as a message from an agent in your thread, not from the user, and runs it under your permission mode when that is stricter than the thread's own; it never gets more than the thread itself allows. It starts a turn when the thread is idle and queues behind the running turn otherwise (it never steers the running turn). A thread kept in Plan takes it as a plan turn. Refused while the thread waits for the user to answer a question or approval, is paused by a usage limit, or is archived, when it already has ${AGENT_QUEUE_MAX_PER_SENDER} messages from your thread or ${AGENT_QUEUE_MAX_PER_THREAD} from agents in all waiting, when you sent it the same text in the last ${AGENT_REPEAT_WINDOW_MS / 60_000} minutes, and when it would be more than a few agent messages in a row without a person in between; each refusal names its limit (data.conflict). You may send ${THREAD_SEND_MAX_PER_RUN} messages per run (a personal bot has no such count). Returns the run it created and delivery: started (a turn began with it) or queued (it waits behind the running turn): use thread_wait with it to wait for the answer, only when you need it this turn. Subagents are reached with continue_subagent.`,
+      description: `Send a message to another thread. The thread's model receives it labelled as a message from an agent in your thread, not from the user, and runs it under your permission mode when that is stricter than the thread's own; it never gets more than the thread itself allows. It starts a turn when the thread is idle and queues behind the running turn otherwise (it never steers the running turn). A thread kept in Plan takes it as a plan turn. Refused while the thread waits for the user to answer a question or approval, is paused by a usage limit, or is archived, when it already has ${AGENT_QUEUE_MAX_PER_SENDER} messages from your thread or ${AGENT_QUEUE_MAX_PER_THREAD} from agents in all waiting, when you sent it the same text in the last ${AGENT_REPEAT_WINDOW_MS / 60_000} minutes, and when it would be more than a few agent messages in a row without a person in between; each refusal names its limit (data.conflict). You may send ${THREAD_SEND_MAX_PER_RUN} messages per run (a personal bot has no such count). Set notify when you need the result: Mousse then tells you when the work settles (and once before that if it waits for a person), and you end your turn instead of waiting. Returns the run it created and delivery: started (a turn began with it) or queued (it waits behind the running turn). Subagents are reached with continue_subagent.`,
       inputSchema: {
         type: 'object',
         properties: {
           threadId: { type: 'string', description: 'The thread to send to; not your own (use queue_enqueue for that).' },
           content: { type: 'string' },
           mode: { type: 'string', enum: ['agent', 'plan'], description: 'Defaults to agent.' },
+          notify: NOTIFY_SCHEMA,
           clientRequestId: CLIENT_REQUEST_ID_SCHEMA
         },
         required: ['threadId', 'content']
@@ -978,7 +1002,9 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         if (typeof args.content !== 'string' || !args.content.trim()) throw new Error('thread_send requires content')
         if (args.mode !== undefined && args.mode !== 'agent' && args.mode !== 'plan') throw new Error('mode must be agent or plan')
         const mode = (args.mode as 'agent' | 'plan' | undefined) ?? 'agent'
+        const notify = notifyArg(args, ctx)
         if (!host.sendToThread) return notAvailable('thread_send')
+        if (notify && !host.watchSettle) return notAvailable('thread_send with notify')
         if (threadId === ctx.caller.threadId) throw new Error('thread_send is for other threads; use queue_enqueue to queue a message on your own thread.')
         if (mode === 'agent' && ctx.caller.modeCeiling === 'plan') throw new McpToolError('mousse_ceiling_exceeded', 'A plan-ceiling caller can only send plan turns.')
         // A personal bot reaches only what it may (`botThreadReach`: never a subagent, a bot's, a private thread or the
@@ -1000,7 +1026,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         } catch (limit) {
           // A retry of a send this run already made is answered with its first result, however many it has made.
           const earlier = host.earlierSend?.(threadId, requestKey)
-          if (earlier) return json({ threadId, ...earlier, delivery: deliveryOf(earlier) })
+          if (earlier) return json({ threadId, ...earlier, delivery: deliveryOf(earlier), ...(notify ? watchSent(threadId, requestKey, actor, earlier.runId, ctx) : {}) })
           throw limit
         }
         let sent
@@ -1020,12 +1046,12 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           if (!sent.replayed) botChip(bot, 'thread_send', threadId, title, args.content)
           return json({ threadId, title: title ?? null, ...sent, delivery: deliveryOf(sent), note: 'It runs in that thread\'s own mode. Approvals and questions there wait for your owner, never for you.' })
         }
-        return json({ threadId, ...sent, delivery: deliveryOf(sent) })
+        return json({ threadId, ...sent, delivery: deliveryOf(sent), ...(notify ? watchSent(threadId, requestKey, actor, sent.runId, ctx) : {}) })
       }
     },
     {
       name: 'thread_wait',
-      description: `Wait for a run of another thread to finish, for at most timeoutMs (default ${THREAD_WAIT_DEFAULT_MS}, up to ${THREAD_WAIT_MAX_MS}). Pass the runId thread_send returned; without one, the run that is active now. Returns status finished (with the run's outcome, and its final text where you may read it, cut to ${THREAD_RESULT_MAX_CHARS} characters with resultTruncated when longer), timeout (the run is still going: call again; the wait never interrupts it), paused (a usage limit paused the run and it was still paused when the wait ran out: it resumes by itself, and the result says when to ask again; a wait that is running when it resumes follows it into the run that continues it), idle (no run to wait for) or caller_ended (your own run ended). Wait only when you need the answer this turn; otherwise end your turn and read the thread later.`,
+      description: `Wait for a run of another thread to finish, for at most timeoutMs (default ${THREAD_WAIT_DEFAULT_MS}, up to ${THREAD_WAIT_MAX_MS}). Pass the runId thread_send returned; without one, the run that is active now. Returns status finished (with the run's outcome, and its final text where you may read it, cut to ${THREAD_RESULT_MAX_CHARS} characters with resultTruncated when longer), timeout (the run is still going: call again; the wait never interrupts it), paused (a usage limit paused the run and it was still paused when the wait ran out: it resumes by itself, and the result says when to ask again; a wait that is running when it resumes follows it into the run that continues it), idle (no run to wait for) or caller_ended (your own run ended). Use it only when this turn cannot continue without the answer; to hear about the result later, send with notify instead and end your turn.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -1380,7 +1406,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_create',
-      description: `Start a new thread in a project. Where the thread works is decided by the project, not by workspace: on a Git project a turn that edits gets a worktree of its own, and on any other project the thread works in the project folder (the result's runsIn says which). workspace "new_worktree" records the thread as a worktree thread and is refused on a project that is not Git-backed; "project" (default) records it as an ordinary project thread; "existing_worktree" is not supported. instanceId and model name the thread's model together, and effort its reasoning level (take them from list_models; the person sees your choice); without them the thread uses your own model, or the profile's default when you have none. A model that is not offered in the project, or an agent that is signed out, is refused with the reason and no thread is made: tell the user, never pick another yourself. The thread runs in a permission mode no wider than yours, which a later change of the profile's default does not widen. It is recorded as launched by your thread: you can read it, wait on it and interrupt it afterwards, a person's Stop of your thread also stops it while it runs work you started, and it is not nested under yours. firstMessage (with mode agent or plan) is sent to it as a message from you, so it starts at once; it counts toward the limit on agent messages in a row without a person in between. You may create ${THREAD_CREATE_MAX_PER_RUN} threads per run (a personal bot has no such count), and have at most ${THREAD_CREATE_MAX_ACTIVE_PER_THREAD} launched threads working at once. Pass a clientRequestId and reuse it to retry: the same thread comes back, never a second one, and a first message that was not sent is sent. Returns the thread's id, the model, mode and place it got, and what became of the first message; use thread_wait with its run id to wait for the answer, only when you need it this turn. A personal bot gives a title and a firstMessage, names the model with instanceId and model from thread_list's models (else the profile's default, never its own model), and its thread runs in Full access: it runs commands and changes files without asking.`,
+      description: `Start a new thread in a project. Where the thread works is decided by the project, not by workspace: on a Git project a turn that edits gets a worktree of its own, and on any other project the thread works in the project folder (the result's runsIn says which). workspace "new_worktree" records the thread as a worktree thread and is refused on a project that is not Git-backed; "project" (default) records it as an ordinary project thread; "existing_worktree" is not supported. instanceId and model name the thread's model together, and effort its reasoning level (take them from list_models; the person sees your choice); without them the thread uses your own model, or the profile's default when you have none. A model that is not offered in the project, or an agent that is signed out, is refused with the reason and no thread is made: tell the user, never pick another yourself. The thread runs in a permission mode no wider than yours, which a later change of the profile's default does not widen. It is recorded as launched by your thread: you can read it, wait on it and interrupt it afterwards, a person's Stop of your thread also stops it while it runs work you started, and it is not nested under yours. firstMessage (with mode agent or plan) is sent to it as a message from you, so it starts at once; it counts toward the limit on agent messages in a row without a person in between. You may create ${THREAD_CREATE_MAX_PER_RUN} threads per run (a personal bot has no such count), and have at most ${THREAD_CREATE_MAX_ACTIVE_PER_THREAD} launched threads working at once. Pass a clientRequestId and reuse it to retry: the same thread comes back, never a second one, and a first message that was not sent is sent. Returns the thread's id, the model, mode and place it got, and what became of the first message; set notify with a firstMessage when you need the result: Mousse then tells you when the work settles (and once before that if it waits for a person), and you end your turn instead of waiting. A personal bot gives a title and a firstMessage, names the model with instanceId and model from thread_list's models (else the profile's default, never its own model), and its thread runs in Full access: it runs commands and changes files without asking.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -1393,6 +1419,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           firstMessage: { type: 'string', description: 'Sent to the new thread as your message, so it starts working.' },
           mode: { type: 'string', enum: ['agent', 'plan'], description: 'The mode of firstMessage; defaults to agent.' },
           hidden: { type: 'boolean', description: 'Personal bots only. true keeps the thread out of your owner\'s sidebar: your chat lists it, and your owner opens it or shows it in the sidebar from there. Hide short background jobs your owner will not follow (a quick check, a lookup, a cleanup); leave visible work your owner will want to follow, answer or continue. thread_hide changes it later. Defaults to false.' },
+          notify: { ...NOTIFY_SCHEMA, description: `${NOTIFY_SCHEMA.description} Needs a firstMessage.` },
           clientRequestId: CLIENT_REQUEST_ID_SCHEMA
         },
         required: ['projectId']
@@ -1443,6 +1470,9 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         if (args.hidden !== undefined && typeof args.hidden !== 'boolean') throw new Error('hidden must be true or false')
         // Only a bot's chat lists the threads it started, so only a bot's thread can be hidden and still be found.
         if (args.hidden === true && !bot) throw new Error('hidden is for personal bots: a thread an agent starts always shows in the sidebar.')
+        const notify = notifyArg(args, ctx)
+        if (notify && args.firstMessage === undefined) throw new Error('notify tells you when the work of firstMessage settles: give a firstMessage, or leave notify out.')
+        if (notify && !host.watchSettle) return notAvailable('thread_create with notify')
         const request: AgentThreadRequest = {
           projectId,
           ...(title ? { title } : {}),
@@ -1507,7 +1537,9 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
             console.warn('the creator\'s note of a launched thread could not be written', { error: error instanceof Error ? error.message : String(error) })
           }
         }
-        return json({ ...created, link: threadLink(created.threadId) })
+        // The first message's work is watched once it was sent; one that was not sent has nothing to watch yet (a retry sends it).
+        const watched = notify && created.firstMessage?.sent === true ? watchSent(created.threadId, requestKey, actor, created.firstMessage.runId, ctx) : {}
+        return json({ ...created, link: threadLink(created.threadId), ...watched })
       }
     },
     {

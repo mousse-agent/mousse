@@ -906,6 +906,12 @@ export interface ChatMessage {
    * (a continuation run): the tasks it reports, so the app shows them as a notice instead of a message the user wrote.
    */
   backgroundNotice?: import('./subagents').BackgroundTaskNoticeItem[]
+  /**
+   * Set on the message that opens a turn Mousse started to tell this thread's agent about work it asked to hear about
+   * (`notify` on `thread_send` or `thread_create`): what settled where. The app shows it as a notice, never as a message
+   * the user wrote or an agent's.
+   */
+  settleNotice?: import('./settleNotice').SettleNoticeItem[]
   /** Set on a user message a scheduled job sent, so the thread can show "Scheduled: <name>" instead of passing it off as typed. */
   scheduled?: { jobId: string; jobName?: string }
   /** Set on a user message another thread's agent sent (`thread_send`), so the thread can say whose it is. */
@@ -1170,6 +1176,16 @@ export interface QueuedMessage {
   inboxIds?: string[]
   /** The subagent results the item's message reports. */
   subagentNotice?: import('./subagents').SubagentNoticeItem[]
+  /** The settle notices the item delivers (`ChatMessage.settleNotice`); notices that arrive while it waits join it. */
+  settleNotice?: import('./settleNotice').SettleNoticeItem[]
+  /** With `settleNotice`: the count of agent messages in a row of the runs the notices are about; the turn carries it. */
+  settleHops?: number
+  /**
+   * A settle notice that must not start a turn by itself (its thread is a subagent, the person stopped it, it is kept in
+   * Plan, or the notice says Mousse stopped watching): it waits until a person sends it (Send now), a notice that may
+   * start a turn joins it, or a person's turn of the thread starts and it runs after that turn.
+   */
+  heldNotice?: true
   /**
    * The thread's stop generation when the item was queued, for work that starts on behalf of a parent
    * (a steer that missed its turn). Once a Stop raised the generation the item is refused when it would

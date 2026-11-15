@@ -51,9 +51,10 @@ export function isFencedSource(source: string | null | undefined): boolean {
  * is not a person's message, so on a thread paused by a usage limit it neither ends the pause nor
  * restarts its chain of automatic resumes: `commitSend` refuses it (`thread_paused`), and one that was
  * admitted before the pause waits (`markStarting` refuses it) until the pause has ended on its own. A
- * message another thread's agent sends is held the same way (agent sends).
+ * message another thread's agent sends is held the same way (agent sends), and so is the turn that delivers a settle
+ * notice (`thread-notice`).
  */
-export const PAUSE_HELD_SOURCES: ReadonlySet<string> = new Set(['schedule'])
+export const PAUSE_HELD_SOURCES: ReadonlySet<string> = new Set(['schedule', 'thread-notice'])
 
 export function isPauseHeldSource(source: string | null | undefined): boolean {
   return source !== null && source !== undefined && PAUSE_HELD_SOURCES.has(source)
