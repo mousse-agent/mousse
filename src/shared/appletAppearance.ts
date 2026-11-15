@@ -84,7 +84,8 @@ export interface AppletAppearance {
   reducedMotion: boolean
   tokens: Partial<Record<(typeof APPLET_APPEARANCE_TOKENS)[number], string>>
 }
-const safeValue = (value: unknown): value is string =>
+/** A value the applet page accepts: short, one line, no markup, rules or URLs. */
+export const isAppletAppearanceValue = (value: unknown): value is string =>
   typeof value === 'string' &&
   value.length <= 512 &&
   !/[<>;{}@\u0000-\u001f]/.test(value) &&
@@ -98,8 +99,8 @@ export function validateAppletAppearance(value: unknown): AppletAppearance {
     !/^[a-z0-9-]{1,40}$/.test(raw.theme) ||
     !['dark', 'light'].includes(String(raw.colorScheme)) ||
     typeof raw.reducedMotion !== 'boolean' ||
-    !safeValue(raw.fontFamily) ||
-    !safeValue(raw.fontSize) ||
+    !isAppletAppearanceValue(raw.fontFamily) ||
+    !isAppletAppearanceValue(raw.fontSize) ||
     !raw.tokens ||
     typeof raw.tokens !== 'object' ||
     Array.isArray(raw.tokens)
@@ -109,7 +110,7 @@ export function validateAppletAppearance(value: unknown): AppletAppearance {
   for (const key of APPLET_APPEARANCE_TOKENS) {
     const token = (raw.tokens as Record<string, unknown>)[key]
     if (token !== undefined) {
-      if (!safeValue(token)) throw new Error('Invalid applet appearance token.')
+      if (!isAppletAppearanceValue(token)) throw new Error('Invalid applet appearance token.')
       tokens[key] = token
     }
   }

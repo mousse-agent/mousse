@@ -163,7 +163,7 @@ export class AppletRuntimeManager {
         ...(this.scrollPositions
           .get(JSON.stringify([input.threadId, input.revisionId]))
           ?.values() ?? [])
-      ])
+      ], { transparent: true })
     )
     const runtime: Runtime = {
       mount: input,

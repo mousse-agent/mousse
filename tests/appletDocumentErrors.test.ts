@@ -35,3 +35,53 @@ describe('applet runtime errors', () => {
     expect(errors).toEqual(['Uncaught TypeError: lamp is undefined'])
   })
 })
+
+// Runs an applet's own script and returns what it reported and its page.
+function runApplet(js: string, html = '') {
+  const errors: string[] = []
+  const virtualConsole = new VirtualConsole()
+  virtualConsole.on('log', (line: unknown) => {
+    if (typeof line !== 'string' || !line.startsWith(APPLET_EVENT_PREFIX)) return
+    const event = JSON.parse(line.slice(APPLET_EVENT_PREFIX.length)) as { type: string; payload: unknown }
+    if (event.type === 'error') errors.push(String(event.payload))
+  })
+  const dom = new JSDOM(
+    appletDocument({ schemaVersion: 1, title: 'Test', description: 'Test', html, css: '', js } as never),
+    { runScripts: 'dangerously', virtualConsole }
+  )
+  return { errors, document: dom.window.document, close: () => dom.window.close() }
+}
+
+describe('applet icons', () => {
+  it('an unknown icon name draws a placeholder and the rest of the script still runs', () => {
+    const page = runApplet(`
+      const button = document.querySelector('#mic');
+      button.appendChild(mousseApplet.icon('waveform-squiggle'));
+      button.addEventListener('click', () => { button.dataset.clicked = 'yes' });
+      document.body.dataset.done = 'yes';`, '<button id="mic"></button>')
+    try {
+      expect(page.errors).toEqual([])
+      expect(page.document.body.dataset.done).toBe('yes')
+      const button = page.document.querySelector<HTMLButtonElement>('#mic')!
+      expect(button.querySelector('svg')?.getAttribute('data-mousse-icon-name')).toBe('missing')
+      button.click()
+      expect(button.dataset.clicked).toBe('yes')
+    } finally {
+      page.close()
+    }
+  })
+
+  it('draws the common names applets reach for, by name, PascalCase or synonym', () => {
+    const page = runApplet(`
+      for (const name of ['microphone', 'Mic', 'send', 'stop', 'chevron-left', 'close', 'Trash2'])
+        document.body.appendChild(mousseApplet.icon(name));`)
+    try {
+      expect(page.errors).toEqual([])
+      const names = [...page.document.querySelectorAll('body > svg')].map((svg) => svg.getAttribute('data-mousse-icon-name'))
+      expect(names).toEqual(['microphone', 'microphone', 'send', 'stop', 'chevron-left', 'x', 'trash-2'])
+      expect(page.document.querySelector('body > svg')!.querySelector('path')).not.toBeNull()
+    } finally {
+      page.close()
+    }
+  })
+})

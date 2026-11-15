@@ -78,6 +78,15 @@ describe('applet renderer appearance', () => {
     expect(appearance.tokens['--bg-tertiary']).toBe('#333344')
     expect(appearance.tokens).not.toHaveProperty('--glass-bg')
   })
+  it('takes a theme value written across lines on one line, and leaves out a value the applet would refuse', () => {
+    const env = environment()
+    env.values['--surface-base-rgb'] = '0,\n    0,\n    0'
+    env.values['--accent'] = 'url(https://example.com/x.png)'
+    const appearance = readAppletAppearance()
+    expect(appearance.tokens['--surface-base-rgb']).toBe('0, 0, 0')
+    expect(appearance.tokens).not.toHaveProperty('--accent')
+    expect(appearance.tokens['--text-primary']).toBe('#eeeeee')
+  })
   it('updates subscribers without runtime recreation and deduplicates unchanged mutations', () => {
     const env = environment()
     const changes = vi.fn()

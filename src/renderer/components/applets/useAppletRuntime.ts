@@ -4,6 +4,7 @@ import { readAppletAppearance, subscribeAppletAppearance } from './appearance'
 import { subscribeAppletScroll } from './scrollPresentation'
 import { appletHostBlocked, appletHostShown, appletUncoveredClip, subscribeAppletHostVisibility } from './hostVisibility'
 import { appletHeightKey, rememberAppletHeight, rememberedAppletHeight } from './appletHeights'
+import type { AppletUiEvent } from '../../../shared/appletRuntime'
 
 /**
  * Where a preview sits. In the transcript it scrolls with the chat and stays above the composer; in the side panel
@@ -56,6 +57,8 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
     setScrollImage(null)
     let parked = false
     let mounting = false
+    // What the page reports while it loads (a script error, its first height) arrives before mount returns its id.
+    let early: AppletUiEvent[] = []
     let intersecting = false
     let failed = false
     let frame = 0
@@ -176,6 +179,8 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
             return
           }
           runtime.current = result.runtimeId
+          for (const event of early.splice(0)) if (event.runtimeId === result.runtimeId) receive(event)
+          if (failed || !runtime.current) return
           await api.appearance({ runtimeId: result.runtimeId, appearance }).catch(() => {})
           if (disposed) return
           lastGeometry = ''
@@ -190,6 +195,7 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
           }
         } finally {
           mounting = false
+          early = []
         }
       }
       const geometry = JSON.stringify({ bounds, clip })
@@ -249,8 +255,11 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
     window.addEventListener('scroll', schedule, true)
     window.addEventListener('resize', schedule)
     document.addEventListener('visibilitychange', schedule)
-    const unsubscribe = api.onEvent((event) => {
-      if (event.runtimeId !== runtime.current) return
+    const receive = (event: AppletUiEvent) => {
+      if (event.runtimeId !== runtime.current) {
+        if (mounting && !runtime.current && early.length < 32) early.push(event)
+        return
+      }
       if (event.type === 'released') {
         runtime.current = null
         parked = false
@@ -288,7 +297,8 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
       }
       if (event.type === 'conversation-input' && typeof event.text === 'string')
         setConversationInput(event.text.slice(0, 8000))
-    })
+    }
+    const unsubscribe = api.onEvent(receive)
     schedule()
     return () => {
       disposed = true

@@ -11,7 +11,7 @@ import { expect, it } from 'vitest'
  * to the cap and scroll inside above it, and pages sized to the frame (published before the publish check) settle
  * instead of growing their frame without end.
  */
-it('reports each applet page at its own content height, bounded, and never follows its own frame', async () => {
+it('reports each applet page at its own content height, bounded, never follows its own frame, and leaves the page unpainted', async () => {
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-applet-height-'))
   let child: ChildProcess | undefined
   let exited: Promise<number | null> | undefined
@@ -25,9 +25,14 @@ it('reports each applet page at its own content height, bounded, and never follo
     child.stderr!.on('data', (bytes) => { output = (output + bytes.toString()).slice(-32768) })
     exited = new Promise<number | null>((done, reject) => { child!.once('error', reject); child!.once('exit', done) })
     expect(await exited, output).toBe(0)
-    const { reports, errors } = JSON.parse(readFileSync(join(directory, 'evidence.json'), 'utf8')) as { reports: Record<string, number[]>; errors: string[] }
+    const { reports, errors, backdrop } = JSON.parse(readFileSync(join(directory, 'evidence.json'), 'utf8')) as { reports: Record<string, number[]>; errors: string[]; backdrop: Record<string, number[]> }
     expect(errors).toEqual([])
     const last = (name: string) => reports[name].at(-1)
+
+    // The page itself paints nothing, so the chat behind it (its theme surface or the acrylic window) shows through.
+    // What the applet paints itself stays opaque. Pixels are BGRA.
+    expect(backdrop.plain[3], `plain ${backdrop.plain}`).toBe(0)
+    expect(backdrop.painted, `painted ${backdrop.painted}`).toEqual([0x56, 0x34, 0x12, 255])
 
     // The content's own height, from a 320 px start.
     expect(last('short')).toBe(80)
