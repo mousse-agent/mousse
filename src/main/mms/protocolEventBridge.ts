@@ -196,6 +196,15 @@ export function bridgeProtocolEvent(
       )
       return true
     }
+    case 'secrets.requests.changed': {
+      // Only the thread id: a window reads the thread's open secret cards itself.
+      if (threadId != null) broadcast('secrets:requestsChanged', { threadId })
+      return true
+    }
+    case 'secrets.changed': {
+      broadcast('secrets:changed', {})
+      return true
+    }
     case 'pullRequests.updated': {
       broadcast('pullRequests:updated', event.data)
       return true

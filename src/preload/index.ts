@@ -296,6 +296,18 @@ const api = {
       ipcRenderer.on('orchestrator:questionsPending', handler)
       return () => ipcRenderer.removeListener('orchestrator:questionsPending', handler)
     },
+    /** A thread's open secret cards changed (#595); read them with `secrets.requests.list`. Carries no value. */
+    onSecretRequestsChanged: (cb: (payload: { threadId: string }) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, payload: { threadId: string }) => cb(payload)
+      ipcRenderer.on('secrets:requestsChanged', handler)
+      return () => ipcRenderer.removeListener('secrets:requestsChanged', handler)
+    },
+    /** A secret was added, used, removed or expired (Settings → Secrets). */
+    onSecretsChanged: (cb: () => void): (() => void) => {
+      const handler = () => cb()
+      ipcRenderer.on('secrets:changed', handler)
+      return () => ipcRenderer.removeListener('secrets:changed', handler)
+    },
     onQuestionsCleared: (
       cb: (payload: { requestId: string; threadId?: string }) => void
     ): (() => void) => {

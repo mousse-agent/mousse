@@ -737,6 +737,20 @@ export class MmsProtocolServer {
       }
     )
 
+    // Secret requests (#595): only the thread id travels; a window reads the thread's open cards itself.
+    const secretRequests = services.secretRequests
+    if (secretRequests) {
+      onEmitter(secretRequests, 'changed', (payload: { threadId: string }) => {
+        if (secretRequests.waiting(payload.threadId)) services.orchestrator.setAwaitingInput(payload.threadId)
+        emitToSubscribers(this.ring.push('secrets.requests.changed', { threadId: payload.threadId }, payload.threadId))
+      })
+    }
+    if (services.secretsChanged) {
+      onEmitter(services.secretsChanged, 'changed', () => {
+        emitToSubscribers(this.ring.push('secrets.changed', {}, undefined))
+      })
+    }
+
     // PTY streaming with per-PTY sequence
     const pty = services.ptyManager
     onEmitter(

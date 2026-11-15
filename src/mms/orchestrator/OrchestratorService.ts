@@ -1,4 +1,6 @@
 import { profilerService } from '../diagnostics/profilerService'
+import type { SecretToolHost } from '../run/mcp/appTools/secrets'
+import { maskedCopy, maskInPlace, type SecretMasker } from '../secrets/secretMasking'
 import { contextHandoff, modelChangeNote, previousTurnModel } from './contextHandoff'
 import { GOAL_SOURCE, ThreadGoals } from './threadGoals'
 import { goalNote, type GoalTurnOutcome } from '../../shared/threadGoal'
@@ -1144,6 +1146,24 @@ export class OrchestratorService extends EventEmitter {
   /** The profile's appearance settings, for the agents' `theme_read` and `theme_set`. */
   private appearanceTools?: AppearanceToolHost
   setAppearanceTools(tools: AppearanceToolHost | undefined): void { this.appearanceTools = tools }
+  /**
+   * Secrets agents asked for in threads (#595): the tools' host, and each thread's masker. Every message of a thread
+   * that may use a secret is masked before it is sent to a window, saved, handed off or forked, so a value an agent's
+   * output holds never leaves the run's memory.
+   */
+  private secretTools?: SecretToolHost
+  private secretMaskerFor?: (threadId: string) => SecretMasker | undefined
+  setSecrets(secrets: { tools: SecretToolHost; masker(threadId: string): SecretMasker | undefined } | undefined): void {
+    this.secretTools = secrets?.tools
+    this.secretMaskerFor = secrets ? (threadId) => secrets.masker(threadId) : undefined
+  }
+
+  /** Masks every secret the thread may use in the messages, in place (their objects stay the same). */
+  private maskThreadSecrets(threadId: string, messages: readonly ChatMessage[]): void {
+    const mask = this.secretMaskerFor?.(threadId)
+    if (!mask) return
+    for (const message of messages) maskInPlace(message, mask)
+  }
   /**
    * The Automations inbox's hooks: each scheduled run's hidden first message (the report levels, the automation's
    * context and Tuning notes), and each request's usage on a thread, which the inbox adds to the run going there.
@@ -3854,6 +3874,7 @@ export class OrchestratorService extends EventEmitter {
         this.delegationTools(this.getOrCreateSession(caller.threadId), caller.runId, caller.modeCeiling),
       askUser: (threadId, questions, options) => this.questions.requestAnswers(questions, threadId, options),
       dismissQuestions: (threadId) => this.questions.dismissAllForThread(threadId),
+      secrets: () => this.secretTools,
       tasks: (threadId) => (threadId ? this.getTasksForThread(threadId) : null),
       goals: {
         working: (threadId) => this.goals.goalTurnWanted(threadId),
@@ -8376,7 +8397,9 @@ export class OrchestratorService extends EventEmitter {
    * list held, so a message removed from it (or replaced in it) is removed or updated on disk. Read only.
    */
   liveMessagesForSave(threadId: string): readonly ChatMessage[] {
-    return threadId === this.boundSession.threadId ? this.boundSession.messages : this.getOrCreateSession(threadId).messages
+    const messages = threadId === this.boundSession.threadId ? this.boundSession.messages : this.getOrCreateSession(threadId).messages
+    this.maskThreadSecrets(threadId, messages)
+    return messages
   }
 
   getMessagesForPersistence(threadId?: string): ChatMessage[] {
@@ -8384,6 +8407,7 @@ export class OrchestratorService extends EventEmitter {
       !threadId || threadId === this.boundSession.threadId
         ? this.boundSession.messages
         : this.getOrCreateSession(threadId).messages
+    this.maskThreadSecrets(threadId ?? this.boundSession.threadId, messages)
     return [...messages]
   }
 
@@ -8403,6 +8427,7 @@ export class OrchestratorService extends EventEmitter {
   }
 
   private emitThreadMessages(threadId: string, messages: ChatMessage[], replace = false): void {
+    this.maskThreadSecrets(threadId, messages)
     const visible = messages.filter((message) => !message.hidden)
     this.emit('thread-messages', { threadId, messages: [...visible], ...(replace ? { replace: true } : {}) })
     // Legacy unscoped mirror only for the GUI-bound (selected) thread.
@@ -8414,6 +8439,7 @@ export class OrchestratorService extends EventEmitter {
   /** Always emit thread-scoped add; legacy `message` only for the bound session. */
   private emitMessageAdded(message: ChatMessage): void {
     const threadId = this.session.threadId
+    this.maskThreadSecrets(threadId, [message])
     this.emit('thread-message', { threadId, message })
     if (threadId === this.boundSession.threadId) {
       this.emit('message', message)
@@ -8423,6 +8449,7 @@ export class OrchestratorService extends EventEmitter {
   /** Always emit thread-scoped update; legacy `message-updated` only for the bound session. */
   private emitMessageUpdated(message: ChatMessage): void {
     const threadId = this.session.threadId
+    this.maskThreadSecrets(threadId, [message])
     this.emit('thread-message-updated', { threadId, message })
     if (threadId === this.boundSession.threadId) {
       this.emit('message-updated', message)
@@ -9620,10 +9647,13 @@ export class OrchestratorService extends EventEmitter {
   }
 
   getNativeContext(threadId?: string): NativeLlmContext {
-    if (!threadId || threadId === this.boundSession.threadId) {
-      return structuredClone(this.boundSession.nativeContext)
-    }
-    return structuredClone(this.getOrCreateSession(threadId).nativeContext)
+    const id = threadId ?? this.boundSession.threadId
+    const context = !threadId || threadId === this.boundSession.threadId
+      ? structuredClone(this.boundSession.nativeContext)
+      : structuredClone(this.getOrCreateSession(threadId).nativeContext)
+    const mask = this.secretMaskerFor?.(id)
+    if (mask) maskInPlace(context, mask)
+    return context
   }
 
   private clearLastTurnUsage(): void {
@@ -10720,7 +10750,10 @@ export class OrchestratorService extends EventEmitter {
     try {
       // Counted under its thread, so a delete of another thread neither waits for it nor is refused by it. A send with no
       // thread yet (`__unbound__`) is the profile's (`null`), never the scope of the work that called it.
-      return await this.lifecycle.run('send', () => this.sendOwned(input, reuseLastUser, opts), threadScope(threadId))
+      const response = await this.lifecycle.run('send', () => this.sendOwned(input, reuseLastUser, opts), threadScope(threadId))
+      // The reply's text goes back to the caller (a window, the CLI): masked like the thread's messages.
+      const mask = this.secretMaskerFor?.(threadId)
+      return mask ? maskedCopy(response, mask) : response
     } finally {
       const left = (this.sendsInFlight.get(threadId) ?? 1) - 1
       if (left > 0) this.sendsInFlight.set(threadId, left)

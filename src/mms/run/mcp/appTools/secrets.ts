@@ -1,0 +1,172 @@
+import { Type, type Tool } from '@earendil-works/pi-ai'
+import { isKeyName } from '../../../../shared/automationKeys'
+import type { AppToolHost } from './host'
+import { abortRace, plainSchema, truncateForDisplay, truncateForModel, type AppToolTurn, type MousseTool, type ToolCallContext, type ToolOutcome } from './types'
+import { secretOutcomeText, type SecretRequestInput, type SecretRequestOutcome } from '../../../secrets/SecretRequests'
+import { SECRET_RUN_DEFAULT_TIMEOUT_MS, SECRET_RUN_MAX_TIMEOUT_MS, type SecretForCommand, type SecretRunResult } from '../../../secrets/runWithSecrets'
+import type { SecretMasker } from '../../../secrets/secretMasking'
+
+/** What the secret tools need from the thread's owner. Values pass through `run` only, never through a tool result. */
+export interface SecretToolHost {
+  /** Puts the private card in the thread and waits for the person, the turn's end or an hour. */
+  request(threadId: string, input: SecretRequestInput, signal: AbortSignal): Promise<SecretRequestOutcome>
+  /** Ends the thread's requests (an in-process turn stopped). */
+  endThread(threadId: string): void
+  /** Whether the thread's agents may use the secret by name. */
+  usableIn(name: string, threadId: string): boolean
+  /** Runs the command with the named secrets in the thread's folder; the output is masked. */
+  run(input: { threadId: string; cwd: string; command: string; secrets: Array<Pick<SecretForCommand, 'name' | 'as'>>; timeoutMs: number; signal: AbortSignal }): Promise<SecretRunResult>
+  /** The thread's masker (every secret it may use), for anything the tool shows. */
+  masker(threadId: string): SecretMasker | undefined
+}
+
+const REQUEST_DEFINITION: Tool = {
+  name: 'secret_request',
+  description: [
+    'Ask the user for a secret you need (an API key, access token or password) through a private card in the thread.',
+    'Never ask for a secret in a message: the value would sit in the conversation. The user types it into the card;',
+    'Mousse keeps it and you get only its name, which you use with secret_run or as ${secret:NAME} in an MCP server\'s settings.',
+    'Blocks until the user answers (at most one hour) or your turn ends.'
+  ].join(' '),
+  parameters: Type.Object({
+    label: Type.String({ description: 'What the secret is, shown as the card\'s title, e.g. "Hugging Face write token".' }),
+    reason: Type.String({ description: 'Why you need it, in one sentence the user reads before giving it.' }),
+    link: Type.Optional(Type.String({ description: 'Where the user can create it (an https URL).' })),
+    format: Type.Optional(Type.String({ description: 'What it looks like, e.g. "starts with hf_".' })),
+    name: Type.Optional(Type.String({ description: 'The name to keep it under, in capitals, e.g. HF_TOKEN. Default: made from the label.' }))
+  })
+}
+
+const RUN_DEFINITION: Tool = {
+  name: 'secret_run',
+  description: [
+    'Run one shell command in the thread\'s project folder with secrets the user gave this thread (through secret_request).',
+    'Each secret is the environment variable of its name (as: "env", the default), or a private file whose path is in NAME_FILE',
+    '(as: "file"); the file is deleted when the command ends. Refer to the variable in the command (e.g. "$HF_TOKEN"), never the value.',
+    'The output comes back with every secret masked. Use this tool, not your own shell, for any command that needs a secret.'
+  ].join(' '),
+  parameters: Type.Object({
+    command: Type.String({ description: 'The shell command (sh on macOS and Linux, cmd on Windows).' }),
+    secrets: Type.Array(
+      Type.Object({
+        name: Type.String({ description: 'The secret\'s name, e.g. HF_TOKEN.' }),
+        as: Type.Optional(Type.Union([Type.Literal('env'), Type.Literal('file')], { description: 'env (default) or file.' }))
+      }),
+      { minItems: 1, maxItems: 8 }
+    ),
+    timeoutSeconds: Type.Optional(Type.Number({ description: `At most ${SECRET_RUN_MAX_TIMEOUT_MS / 1000}; default ${SECRET_RUN_DEFAULT_TIMEOUT_MS / 1000}.` }))
+  })
+}
+
+/** Offered where `ask_user` is: the thread's own agent in Agent and Plan mode, never a subagent or a discovery phase. */
+function requestOffered(turn: AppToolTurn): boolean {
+  return !turn.discovery && (turn.modeFacts.readOnly || (!turn.subagent && turn.modeFacts.agent))
+}
+
+function runAvailable(turn: AppToolTurn): true | string {
+  if (turn.modeFacts.readOnly) return 'secret_run runs a command, which this mode does not allow. Ask for the secret now, and use it once the plan is approved.'
+  if (!turn.projectPath) return 'secret_run needs a project folder, and this thread has none.'
+  return true
+}
+
+const text = (value: unknown, max: number): string => (typeof value === 'string' ? value.trim().slice(0, max) : '')
+
+/** `secret_request` and `secret_run` (#595, the chat part). */
+export function secretTools(host: AppToolHost): MousseTool[] {
+  const secrets = (): SecretToolHost | undefined => host.secrets?.()
+
+  const request = async (args: Record<string, unknown>, ctx: ToolCallContext): Promise<ToolOutcome> => {
+    const threadId = ctx.transport === 'mcp' ? ctx.caller.threadId : ctx.turn.threadId || undefined
+    const service = secrets()
+    if (!service) return { text: 'Secret requests are not available here.', isError: true }
+    if (!threadId) return { text: 'Cannot ask for a secret without an active thread.', isError: true }
+    const label = text(args.label, 120)
+    const reason = text(args.reason, 600)
+    if (!label || !reason) return { text: 'A secret request needs a label and a reason.', isError: true }
+    const input: SecretRequestInput = {
+      label,
+      reason,
+      ...(typeof args.link === 'string' ? { link: args.link } : {}),
+      ...(typeof args.format === 'string' ? { format: args.format } : {}),
+      ...(typeof args.name === 'string' ? { name: args.name } : {})
+    }
+    const run = async (): Promise<ToolOutcome> => secretOutcomeText(await service.request(threadId, input, ctx.signal))
+    if (ctx.transport === 'mcp') return run()
+    ctx.timeline?.record({ kind: 'build_tool_call', title: `Asked for a secret: ${label}`, summary: 'The assistant asked the user for a secret.', details: ['Tool: secret_request'], response: JSON.stringify({ label, reason }) }, 'start')
+    ctx.markEffect?.()
+    const result = await abortRace(run(), ctx.signal, () => service.endThread(threadId))
+    ctx.timeline?.record({ kind: 'build_tool_result', title: `Asked for a secret: ${label}`, summary: result.isError ? 'No secret was given.' : 'The user gave the secret.', details: ['Tool: secret_request'], response: truncateForDisplay(result.text) }, 'complete')
+    return result
+  }
+
+  const runCommand = async (args: Record<string, unknown>, ctx: ToolCallContext): Promise<ToolOutcome> => {
+    const threadId = ctx.transport === 'mcp' ? ctx.caller.threadId : ctx.turn.threadId
+    const service = secrets()
+    if (!service) return { text: 'secret_run is not available here.', isError: true }
+    const cwd = ctx.turn.projectPath
+    if (!cwd) return { text: 'secret_run needs a project folder, and this thread has none.', isError: true }
+    const command = typeof args.command === 'string' ? args.command : ''
+    if (!command.trim()) return { text: 'A command is required.', isError: true }
+    if (command.length > 16_000) return { text: 'The command is too long.', isError: true }
+    if (!Array.isArray(args.secrets) || args.secrets.length === 0 || args.secrets.length > 8) return { text: 'Name one to eight secrets.', isError: true }
+    const wanted: Array<Pick<SecretForCommand, 'name' | 'as'>> = []
+    for (const raw of args.secrets) {
+      const entry = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
+      const name = entry.name
+      if (!isKeyName(name)) return { text: 'Each secret is named like HF_TOKEN.', isError: true }
+      if (!service.usableIn(name, threadId))
+        return { text: `This thread has no secret named ${name}. Ask the user for it with secret_request.`, isError: true }
+      wanted.push({ name, as: entry.as === 'file' ? 'file' : 'env' })
+    }
+    const seconds = typeof args.timeoutSeconds === 'number' && Number.isFinite(args.timeoutSeconds) ? args.timeoutSeconds : SECRET_RUN_DEFAULT_TIMEOUT_MS / 1000
+    const timeoutMs = Math.min(Math.max(seconds * 1000, 1_000), SECRET_RUN_MAX_TIMEOUT_MS)
+    const mask = service.masker(threadId) ?? ((value: string) => value)
+    const title = `Ran a command with ${wanted.map((entry) => entry.name).join(', ')}`
+    if (ctx.transport !== 'mcp') ctx.timeline?.record({ kind: 'build_tool_call', title, summary: 'The assistant ran a command with a secret.', details: ['Tool: secret_run'], response: mask(command) }, 'start')
+    ctx.markEffect?.()
+    let outcome: ToolOutcome
+    try {
+      const result = await service.run({ threadId, cwd, command, secrets: wanted, timeoutMs, signal: ctx.signal })
+      const status = result.stopped ? 'Stopped.' : result.timedOut ? `Timed out after ${Math.round(timeoutMs / 1000)} seconds.` : `Exit code ${result.exitCode ?? 'unknown'}.`
+      outcome = { text: truncateForModel(`${status}\n${result.output || '(no output)'}`), ...(result.exitCode === 0 && !result.timedOut && !result.stopped ? {} : { isError: true }) }
+    } catch (error) {
+      outcome = { text: mask(error instanceof Error ? error.message : String(error)), isError: true }
+    }
+    if (ctx.transport !== 'mcp') ctx.timeline?.record({ kind: 'build_tool_result', title, summary: outcome.isError ? 'The command failed.' : 'The command finished.', details: ['Tool: secret_run'], response: truncateForDisplay(outcome.text) }, 'complete')
+    return outcome
+  }
+
+  return [
+    {
+      name: 'secret_request',
+      description: REQUEST_DEFINITION.description,
+      inputSchema: plainSchema(REQUEST_DEFINITION),
+      definition: () => REQUEST_DEFINITION,
+      access: 'actsAsCaller',
+      class: 'read',
+      asksUser: 'question',
+      listed: () => Boolean(secrets()),
+      available: () => (secrets() ? true : 'Secret requests are not available here.'),
+      offered: (turn) => requestOffered(turn) && Boolean(secrets()),
+      describe: (args) => `Asked for a secret: ${text(args.label, 120) || 'secret'}`,
+      handler: (args, ctx) => request(args, ctx)
+    },
+    {
+      name: 'secret_run',
+      description: RUN_DEFINITION.description,
+      inputSchema: plainSchema(RUN_DEFINITION),
+      definition: () => RUN_DEFINITION,
+      // It runs a command in the caller's own workspace: like a shell command, it asks first unless the run's permission
+      // mode allows edits, and a Plan turn or a read-only child cannot call it.
+      access: 'editsWorkspace',
+      permissionKey: 'mousse:secret_run',
+      approvalPrompt: 'Allow the agent to run this command with a secret you gave this thread?',
+      class: 'mutation',
+      listed: () => Boolean(secrets()),
+      available: (turn) => (secrets() ? runAvailable(turn) : 'secret_run is not available here.'),
+      offered: (turn) => !turn.subagent && !turn.discovery && runAvailable(turn) === true && Boolean(secrets()),
+      describe: (args) => `Ran a command with ${Array.isArray(args.secrets) ? args.secrets.map((entry) => (entry && typeof entry === 'object' ? String((entry as Record<string, unknown>).name ?? '') : '')).filter(Boolean).join(', ') : 'a secret'}`,
+      handler: (args, ctx) => runCommand(args, ctx)
+    }
+  ]
+}

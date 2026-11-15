@@ -965,6 +965,10 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
     reason: 'An agent’s ask and Keep are answered on the computer that holds them.'
   },
   {
+    methods: ['secrets.requests.list', 'secrets.requests.answer', 'secrets.requests.useSaved', 'secrets.requests.decline', 'secrets.list', 'secrets.delete'],
+    reason: 'A secret is typed and kept on the computer that runs the thread; it never travels to another computer.'
+  },
+  {
     methods: ['automations.request.resend', 'automations.keys.list', 'automations.keys.set'],
     reason: 'A request’s stored payload and the saved keys stay on the computer that runs the automation.'
   },
