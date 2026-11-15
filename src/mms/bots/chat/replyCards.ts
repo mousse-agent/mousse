@@ -28,6 +28,17 @@ export function keepReplyCard(activationId: string, card: BotCard): { kept: true
   return { kept: true }
 }
 
+/**
+ * Keeps a card Mousse made (an automation the turn created) for `activationId`'s next message, whatever the bot's own
+ * cards there: it never counts toward their limit, and it is never refused.
+ */
+export function keepMousseCard(activationId: string, card: BotCard): void {
+  const held = waiting.get(activationId) ?? []
+  waiting.delete(activationId)
+  waiting.set(activationId, [...held, card])
+  while (waiting.size > MAX_WAITING_ACTIVATIONS) waiting.delete(waiting.keys().next().value as string)
+}
+
 /** Whether cards wait for `activationId`'s next message. */
 export function hasReplyCards(activationId: string | undefined): boolean {
   return Boolean(activationId && waiting.get(activationId)?.length)

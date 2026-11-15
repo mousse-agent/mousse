@@ -19,6 +19,7 @@ import { MAX_BOT_CHAT_ATTACHMENTS } from '../../../shared/bots/personal/methods'
 import { replyApplets } from './replyApplets'
 import { takeToolImages } from './toolImages'
 import { takeReplyCards } from './replyCards'
+import { WAKE_LINE_PREFIX, wakeEventLabel } from '../../../shared/bots/personal/wakes'
 import type { AppletReference } from '../../../shared/applets'
 
 /**
@@ -202,7 +203,7 @@ export class BotChatProjection {
     /** `bots.message`, after the row's transaction committed. */
     emit(event: { botId: string; message: BotChatMessage }): void
     /** A bot's schedules, from the shared store (`BotEngine.listSchedules`), for About → Runs. */
-    schedules?(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string }>
+    schedules?(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string; jobId?: string; paused?: boolean }>
     /**
      * Where a granted MCP server stands now (`BotMcp.where`), for About → Can use; undefined while the servers were not
      * read yet (nothing is shown gone then).
@@ -348,7 +349,8 @@ export class BotChatProjection {
       author: row.author,
       kind: row.kind,
       // Reserved ids keep permission switch lines quiet after a restart without a message schema change.
-      ...(row.kind === 'notice' && row.id.startsWith('bm_permission_') ? { systemLine: true as const } : {}),
+      // A wake's line too: it says why the bot speaks unasked.
+      ...(row.kind === 'notice' && (row.id.startsWith('bm_permission_') || row.id.startsWith(WAKE_LINE_PREFIX)) ? { systemLine: true as const } : {}),
       text: plain ? (row.text ? `${row.text}\n\n${plain}` : plain) : row.text,
       ...(plain ? { plainFrom: row.text.length } : {}),
       ...(cards.length ? { cards } : {}),
@@ -569,10 +571,10 @@ export class BotChatProjection {
   detail(definition: BotDefinition, now: number): BotDetail {
     const grant = this.store.activeGrant(definition.id)
     const runs: BotRunItem[] = (this.options.schedules?.(definition.id) ?? []).map((schedule) => (
-      { id: schedule.scheduleId, label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}), kind: 'schedule' as const }
+      { id: schedule.scheduleId, label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}), kind: 'schedule' as const, ...(schedule.jobId ? { jobId: schedule.jobId } : {}), ...(schedule.paused ? { paused: true as const } : {}) }
     ))
     const reminders: BotReminderItem[] = this.store.waitingReminders(definition.id).map((reminder) => (
-      { id: reminder.id, dueAt: reminder.dueAt, text: reminder.text, ...(reminder.work ? { work: true as const } : {}) }
+      { id: reminder.id, dueAt: reminder.dueAt, text: reminder.text, ...(reminder.work ? { work: true as const } : {}), ...(reminder.wake ? { wake: reminder.event ? wakeEventLabel(reminder.event) : '' } : {}) }
     ))
     return {
       summary: this.summary(definition, now),

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Bell, Brain, ChevronRight, Clock, Shield, X } from '../../lib/icons'
-import type { BotSummary } from '../../../shared/bots/personal/chat'
+import type { BotReminderItem, BotSummary } from '../../../shared/bots/personal/chat'
 import type { BotModelPick } from '../../../shared/bots/personal/definition'
 import type { BotShownRows, BotsPersonalV2Result } from '../../../shared/bots/personal/methods'
 import { botFaceState, botsClient, useBotsStore } from '../../stores/botsStore'
@@ -21,6 +21,12 @@ export function nextRunText(at: string, now = new Date()): string {
   if (Number.isNaN(date.getTime())) return ''
   const time = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
   return date.toDateString() === now.toDateString() ? time : `${date.toLocaleDateString([], { weekday: 'short' })} ${time}`
+}
+
+/** A reminder's line in About → Runs: "Reminds: 18:42", "Starts: …", a wake's "Follows up: 18:42" or "Follows up when acme/app#12 merges". */
+export function reminderWhenLine(reminder: BotReminderItem, now = new Date()): string {
+  if (reminder.wake) return `Follows up ${reminder.wake}`
+  return `${reminder.work ? 'Starts' : reminder.wake === '' ? 'Follows up' : 'Reminds'}: ${reminderWhenText(reminder.dueAt, now)}`
 }
 
 /** When a reminder fires: like a run's next time within the week, else "14 Nov 09:00". */
@@ -182,7 +188,7 @@ export function BotAboutPanel({ bot }: { bot: BotSummary }) {
       : <p className="bot-about-empty">{detail ? 'Nothing yet. It asks in the chat the first time it needs something.' : 'Loading…'}</p>}
     <h3>RUNS</h3>
     {detail?.reminders?.map((reminder) => <div className="bot-about-row" key={reminder.id} data-testid="bot-about-reminder">
-      <Bell size={14} aria-hidden /><span title={reminder.text}><span className="bot-about-clamp">{reminder.text}</span><small className="bot-about-next">{reminder.work ? 'Starts' : 'Reminds'}: {reminderWhenText(reminder.dueAt)}</small></span>
+      <Bell size={14} aria-hidden /><span title={reminder.text}><span className="bot-about-clamp">{reminder.text}</span><small className="bot-about-next" title={reminder.wake ? `Gives up: ${reminderWhenText(reminder.dueAt)}` : undefined}>{reminderWhenLine(reminder)}</small></span>
       <button type="button" aria-label={`Cancel reminder: ${reminder.text}`} onClick={() => void store().cancelReminder(bot.id, reminder.id)}>Cancel</button>
     </div>)}
     {detail?.runs.length

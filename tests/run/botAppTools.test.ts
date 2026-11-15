@@ -29,8 +29,9 @@ const ON_SUB = { instanceId: 'claude', model: 'claude-opus-4-6', credential: 'su
 const ON_KEY = { instanceId: 'pi:key', model: 'claude-opus-4-6', credential: 'api_key' }
 const ROWS_ON_SUB: BotModelSlots = { talk: ON_SUB, light: ON_SUB, medium: ON_SUB, hard: ON_SUB } as BotModelSlots
 
-function fakeBots(lane: BotLane = 'chat', options: { owner?: string; changes?: boolean; rows?: BotModelSlots; choices?: BotModelOption[]; work?: Partial<BotToolHost['work']> } = {}) {
-  const schedules: Array<{ scheduleId: string; when: BotSchedule['when']; prompt: string; label: string }> = []
+function fakeBots(lane: BotLane = 'chat', options: { owner?: string; changes?: boolean; rows?: BotModelSlots; choices?: BotModelOption[]; work?: Partial<BotToolHost['work']>; cards?: boolean } = {}) {
+  const schedules: Array<{ scheduleId: string; when: BotSchedule['when']; prompt: string; label: string; from?: string }> = []
+  const wakes: Array<{ from: string; input: Parameters<NonNullable<BotToolHost['wakes']>['add']>[2] }> = []
   const profiles: Array<{ name?: string; description?: string }> = []
   const models: Array<{ scope: 'now' | 'always'; choice: BotModelChange }> = []
   const works: Array<{ title: string; brief: string; key: string; level?: string }> = []
@@ -40,10 +41,10 @@ function fakeBots(lane: BotLane = 'chat', options: { owner?: string; changes?: b
     rows: () => options.rows ?? ROWS_ON_SUB,
     activationOf: (threadId) => (threadId === 'home' ? { botId: 'b1', activationId: 'a1', lane } : undefined),
     schedules: {
-      add: (_botId, s) => {
-        const entry = { scheduleId: `s${schedules.length + 1}`, ...s, label: botScheduleLabel(s.when) }
+      add: (_botId, s, from) => {
+        const entry = { scheduleId: `s${schedules.length + 1}`, ...s, label: botScheduleLabel(s.when), ...(options.cards && from ? { from } : {}) }
         schedules.push(entry)
-        return { scheduleId: entry.scheduleId, label: entry.label }
+        return { scheduleId: entry.scheduleId, label: entry.label, ...(options.cards && from ? { card: true as const } : {}) }
       },
       remove: (_botId, scheduleId) => {
         const at = schedules.findIndex((entry) => entry.scheduleId === scheduleId)
@@ -60,6 +61,12 @@ function fakeBots(lane: BotLane = 'chat', options: { owner?: string; changes?: b
       models.push({ scope, choice })
       return { changed: options.changes ?? true }
     },
+    wakes: {
+      add: async (_botId, from, input) => {
+        wakes.push({ from, input })
+        return { wakeId: `w${wakes.length}`, dueAt: input.dueAt ?? '2026-11-08T09:00:00.000Z', label: input.event?.kind === 'pr' ? `when ${input.event.repo}#${input.event.number} merges` : input.event ? 'when "Fix login" finishes' : '' }
+      }
+    },
     work: {
       start: async (_botId, _from, input) => {
         works.push(input)
@@ -74,9 +81,9 @@ function fakeBots(lane: BotLane = 'chat', options: { owner?: string; changes?: b
   const activity = createBotActivitySink({ emit: () => {} })
   const deps: BotAppToolDeps = { host, activity, models: { pickable: async () => options.choices ?? CHOICES } }
   const tools = new Map(botTools(() => deps).map((tool) => [tool.name, tool]))
-  const ctx = (threadId = 'home', activationId = 'a1'): ToolCallContext => ({
+  const ctx = (threadId = 'home', activationId = 'a1', appTools: readonly string[] = []): ToolCallContext => ({
     caller: { threadId, runId: 'r1', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage' },
-    turn: { threadId, bot: { activationId } as BotAuthority } as ToolCallContext['turn'],
+    turn: { threadId, bot: { activationId, appTools: new Set(appTools) } as unknown as BotAuthority } as ToolCallContext['turn'],
     toolCallId: 'call-1',
     signal: new AbortController().signal,
     transport: 'mcp'
@@ -85,7 +92,7 @@ function fakeBots(lane: BotLane = 'chat', options: { owner?: string; changes?: b
     const outcome = await (tools.get(name) as MousseTool).handler(args, context)
     return { ...outcome, value: outcome.isError ? undefined : JSON.parse(outcome.text) }
   }
-  return { schedules, profiles, models, works, activity, call, ctx }
+  return { schedules, profiles, models, works, wakes, activity, call, ctx }
 }
 
 describe('schedule tools', () => {
@@ -96,6 +103,14 @@ describe('schedule tools', () => {
     expect(added.value).toEqual({ scheduleId: 's1', label: 'every weekday · 09:00' })
     expect(bots.schedules).toEqual([{ scheduleId: 's1', when: { kind: 'cron', expr: '0 9 * * 1-5' }, prompt: 'Go through my inbox', label: 'every weekday · 09:00' }])
     expect(bots.activity.drain('d1')).toEqual([{ icon: 'schedule', text: 'every weekday · 09:00' }])
+  })
+
+  it('bot_schedule_add from a chat turn hands the turn to the host, which shows the automation as a card; no chip repeats it', async () => {
+    const bots = fakeBots('chat', { cards: true })
+    bots.activity.onAllowed({ botId: 'b1', activationId: 'a1', dispatchId: 'd1' }, { tool: 'bot_schedule_add', input: { when: { kind: 'interval', minutes: 30 }, prompt: 'Check the build' } })
+    expect((await bots.call('bot_schedule_add', { when: { kind: 'interval', minutes: 30 }, prompt: 'Check the build' })).value).toEqual({ scheduleId: 's1', label: 'every 30 minutes' })
+    expect(bots.schedules[0]).toMatchObject({ from: 'a1' })
+    expect(bots.activity.drain('d1')).toEqual([])
   })
 
   it('refuses a ninth schedule, an interval under a minute, and a bad time', async () => {
@@ -353,7 +368,7 @@ describe('ask_owner (#1123)', () => {
 describe('registration', () => {
   it('lists the bot tools in the bots family, and WP6\'s memory tools beside them', () => {
     const { families } = createAppToolRegistry({ host: fakeAppToolHost().host, bots: () => undefined })
-    expect(families.bots).toEqual(['escalate', 'consult', 'bot_schedule_add', 'bot_schedule_remove', 'bot_schedule_list', 'mcp_servers', 'set_profile', 'set_depth', 'work_start', 'work_models', 'work_list', 'work_stop', 'work_note', 'remind', 'reminder_list', 'reminder_cancel', 'make_image', 'ask_owner', 'show_card', 'question_answer', 'use_model', 'subagent_start', 'subagent_send', 'subagent_wait', 'subagent_result', 'subagent_stop'])
+    expect(families.bots).toEqual(['escalate', 'consult', 'bot_schedule_add', 'bot_schedule_remove', 'bot_schedule_list', 'mcp_servers', 'set_profile', 'set_depth', 'work_start', 'work_models', 'work_list', 'work_stop', 'work_note', 'remind', 'wake', 'reminder_list', 'reminder_cancel', 'make_image', 'ask_owner', 'show_card', 'question_answer', 'use_model', 'subagent_start', 'subagent_send', 'subagent_wait', 'subagent_result', 'subagent_stop'])
     // With `botMemory`, WP6's memory tools follow them in the same family.
     const withMemory = createAppToolRegistry({ host: fakeAppToolHost().host, botMemory: { activationOf: () => undefined } })
     expect(withMemory.families.bots.slice(0, families.bots.length)).toEqual(families.bots)
@@ -363,5 +378,39 @@ describe('registration', () => {
   it('without the engine wired, the bot\'s own tools refuse', async () => {
     const tool = botTools(() => undefined).find((entry) => entry.name === 'bot_schedule_list')!
     expect(tool.available?.({ bot: { activationId: 'a1' } } as unknown as Parameters<NonNullable<MousseTool['available']>>[0])).toBe('Only a bot can use this.')
+  })
+})
+
+describe('wake', () => {
+  it('sets a wake at a time, on a pull request, or on a thread (with "use your threads"), from the chat turn, with a chip', async () => {
+    const bots = fakeBots()
+    bots.activity.onAllowed({ botId: 'b1', activationId: 'a1', dispatchId: 'd1' }, { tool: 'wake', input: {} })
+    expect((await bots.call('wake', { brief: 'Check the deploy.', inMinutes: 20 })).value).toMatchObject({ wakeId: 'w1', when: expect.any(String) })
+    expect((await bots.call('wake', { brief: 'Tell them it shipped.', pr: 'https://github.com/acme/app/pull/12', hours: 48 })).value).toMatchObject({ waitsFor: 'when acme/app#12 merges' })
+    expect((await bots.call('wake', { brief: 'Sum it up.', thread: 't1' }, bots.ctx('home', 'a1', ['thread_list', 'thread_read', 'thread_wait']))).value).toMatchObject({ waitsFor: 'when "Fix login" finishes' })
+    expect(bots.wakes.map((entry) => ({ from: entry.from, event: entry.input.event, hours: entry.input.hours }))).toEqual([
+      { from: 'a1', event: undefined, hours: undefined },
+      { from: 'a1', event: { kind: 'pr', repo: 'acme/app', number: 12 }, hours: 48 },
+      { from: 'a1', event: { kind: 'thread', threadId: 't1' }, hours: undefined }
+    ])
+    expect(bots.activity.drain('d1').map((chip) => chip.highlight)).toEqual([expect.any(String), 'when acme/app#12 merges', 'when "Fix login" finishes'])
+  })
+
+  it.each([
+    ['no brief', { inMinutes: 5 }, 'brief'],
+    ['no time and nothing to wait for', { brief: 'x' }, 'Give one of'],
+    ['a time and a thread both', { brief: 'x', inMinutes: 5, thread: 't1' }, 'Give one of'],
+    ['a pull request it can not read', { brief: 'x', pr: '#12' }, 'owner/repo#12'],
+    ['a thread without "use your threads"', { brief: 'x', thread: 't1' }, 'use your threads']
+  ])('refuses %s, setting nothing', async (_name, args, words) => {
+    const bots = fakeBots()
+    expect(await bots.call('wake', args)).toMatchObject({ isError: true, text: expect.stringContaining(words) })
+    expect(bots.wakes).toEqual([])
+  })
+
+  it('work never sets one', async () => {
+    const bots = fakeBots('run')
+    expect(await bots.call('wake', { brief: 'x', inMinutes: 5 })).toMatchObject({ isError: true, text: expect.stringContaining('Only your chat') })
+    expect(bots.wakes).toEqual([])
   })
 })

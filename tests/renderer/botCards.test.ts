@@ -25,6 +25,8 @@ const { ChatWorkspace } = await import('../../src/renderer/components/chats/Chat
 const { useChatsStore } = await import('../../src/renderer/stores/chatsStore')
 const { setBotsClient, useBotsStore } = await import('../../src/renderer/stores/botsStore')
 const { resetBotFileImages } = await import('../../src/renderer/components/bots/BotImages')
+const { useAppStore } = await import('../../src/renderer/stores/appStore')
+const { useInboxStore } = await import('../../src/renderer/components/automations/inbox/inboxStore')
 
 const FOLDER = '/home/me/.mousse/bots/files/shop/images/2026-11-14'
 const shop = summary('shop', { name: 'Shopper' })
@@ -129,5 +131,48 @@ describe('cards in the bot chat', () => {
     await open([message(1, { id: 'old', text: plain })])
     expect(bubbleOf('old').querySelector('dl')).toBeNull()
     expect(bubbleOf('old').textContent).toContain('Suction: 8,000 Pa')
+  })
+})
+
+describe('an automation the bot created', () => {
+  const AUTOMATION: BotChatCard = { type: 'automation', jobId: 'job-1', name: 'Inbox digest', label: 'every hour' }
+  const run = (over: { paused?: true } = {}) => ({ id: 's1', label: 'every hour', kind: 'schedule' as const, jobId: 'job-1', ...over })
+  const card = () => bubbleOf('c1').querySelector<HTMLElement>('[data-testid="bot-automation-card"]')!
+  const button = (name: string) => [...card().querySelectorAll('button')].find((entry) => entry.getAttribute('aria-label')?.startsWith(name))
+
+  it('shows as a row with its schedule; Pause pauses it, and the row then says Paused and offers Resume', async () => {
+    const pause = vi.fn(async (jobId: string) => { fake.details.shop = { summary: shop, permissions: [], runs: [run({ paused: true })] }; return jobId })
+    const resume = vi.fn(async () => undefined)
+    installPreload(fake, { fs: { readAsset }, scheduled: { pause, resume } })
+    fake.details.shop = { summary: shop, permissions: [], runs: [run()] }
+    await open([carded(1, 'Set up.', [AUTOMATION])])
+    expect(card().textContent).toContain('Inbox digest')
+    expect(card().textContent).toContain('every hour')
+    expect(card().textContent).not.toContain('Paused')
+    await act(async () => { button('Pause')!.click() })
+    await settle()
+    expect(pause).toHaveBeenCalledWith('job-1')
+    expect(card().dataset.state).toBe('paused')
+    expect(card().textContent).toContain('Paused')
+    await act(async () => { button('Resume')!.click() })
+    await settle()
+    expect(resume).toHaveBeenCalledWith('job-1')
+  })
+
+  it('a click on the row opens Automations at it', async () => {
+    fake.details.shop = { summary: shop, permissions: [], runs: [run()] }
+    await open([carded(1, 'Set up.', [AUTOMATION])])
+    await act(async () => { button('Open automation')!.click() })
+    expect(useAppStore.getState().scheduledOpen).toBe(true)
+    expect(useInboxStore.getState().filter).toMatchObject({ automationId: 'job-1' })
+  })
+
+  it('one removed since shows Removed, with nothing to press', async () => {
+    fake.details.shop = { summary: shop, permissions: [], runs: [] }
+    await open([carded(1, 'Set up.', [AUTOMATION])])
+    expect(card().dataset.state).toBe('removed')
+    expect(card().textContent).toContain('Removed')
+    expect(button('Pause')).toBeUndefined()
+    expect(button('Open automation')).toBeUndefined()
   })
 })

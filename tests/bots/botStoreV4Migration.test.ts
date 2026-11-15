@@ -290,14 +290,15 @@ describe('bots.db v7 → v8', () => {
     v7.statement("INSERT INTO bot_messages(id, bot_id, at, author, kind, text, reply_to) VALUES('bm_2', 'site-editor', ?, 'owner', 'text', 'The second one', 'bm_1')").run(T)
     v7.close()
     store = new BotStore({ profileHome: profile })
-    const copy = new DatabaseSync(join(profile, 'bots', 'bots.db.pre-v8'))
+    // The copy is named for the newest version this build migrates to.
+    const copy = new DatabaseSync(join(profile, 'bots', `bots.db.pre-v${BOTS_MIGRATIONS.at(-1)!.version}`))
     try {
       expect(Number(copy.prepare('PRAGMA user_version').get()!.user_version)).toBe(7)
       expect(copy.prepare('SELECT COUNT(*) AS n FROM bot_messages').get()).toEqual({ n: 2 })
     } finally {
       copy.close()
     }
-    expect(store.db.userVersion()).toBe(8)
+    expect(store.db.userVersion()).toBe(BOTS_MIGRATIONS.at(-1)!.version)
     expect(store.message('bm_1')).toMatchObject({ text: 'Which flat?', ownerReaction: { emoji: '❤️', at: T } })
     expect(store.message('bm_1')).not.toHaveProperty('questionId')
     expect(store.message('bm_2')).toMatchObject({ text: 'The second one', replyTo: 'bm_1' })
@@ -305,5 +306,20 @@ describe('bots.db v7 → v8', () => {
     store.insertQuestion({ id: 'q_1', botId: 'site-editor', activationId: 'act_1', dispatchN: 1, lane: 'chat', spec: { question: 'Which flat?', choices: [{ label: 'A' }, { label: 'B' }], other: true }, createdAt: T })
     store.setQuestionMessage('q_1', 'bm_1')
     expect(store.question('q_1')).toMatchObject({ status: 'open', messageId: 'bm_1', answer: null })
+  })
+})
+
+describe('bots.db v8 → v9', () => {
+  it('keeps a waiting reminder as it was (not a wake), and the table then takes a wake on an event', () => {
+    const v8 = new ProfileDatabase({ profileHome: profile, name: 'bots' })
+    v8.migrate(BOTS_MIGRATIONS.filter((migration) => migration.version <= 8))
+    v8.statement("INSERT INTO bot_reminders(id, bot_id, due_at, text, created_at, status) VALUES('rem_1', 'site-editor', ?, 'Call mum.', ?, 'waiting')").run(T, T)
+    v8.close()
+    store = new BotStore({ profileHome: profile })
+    expect(store.db.userVersion()).toBe(9)
+    expect(store.reminder('rem_1')).toMatchObject({ text: 'Call mum.', status: 'waiting', wake: false, event: null, fired: null, chain: 0 })
+    store.insertReminder({ id: 'rem_2', botId: 'site-editor', dueAt: T, text: 'Tell them it shipped.', work: null, replyTo: null, createdAt: T, wake: true, event: { kind: 'pr', repo: 'acme/app', number: 12 }, chain: 2 })
+    expect(store.reminder('rem_2')).toMatchObject({ wake: true, event: { kind: 'pr', repo: 'acme/app', number: 12 }, fired: null, chain: 2 })
+    expect(store.waitingEventWakes().map((row) => row.id)).toEqual(['rem_2'])
   })
 })

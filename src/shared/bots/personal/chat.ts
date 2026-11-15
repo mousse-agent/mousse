@@ -274,6 +274,10 @@ export interface BotRunItem {
   label: string
   nextAt?: string
   kind: 'schedule'
+  /** Its automation's job (an automation card finds it by this). Absent from older services. */
+  jobId?: string
+  /** Paused (from Automations, or a card's Pause). */
+  paused?: true
 }
 
 /** One of a bot's waiting reminders (one-off, not yet said), in About → Runs. */
@@ -283,6 +287,11 @@ export interface BotReminderItem {
   text: string
   /** It starts work at its time rather than only saying `text`. */
   work?: true
+  /**
+   * A wake: the bot carries on by itself at its time, or once what this says happens ("when acme/app#12 merges"; empty
+   * for a time alone), and `dueAt` is then when it gives up. Absent from older services.
+   */
+  wake?: string
 }
 
 /** About this bot. */

@@ -268,11 +268,12 @@ describe('Bot Phase 1, composed', () => {
     expect(turn2.preamble).toContain('I will plan your dinners.')
     expect(turn2.preamble).not.toContain('I am vegetarian.')
     expect(turn2.prompt).toContain('I am vegetarian.')
-    // One chip per call though each was checked twice; the forgotten text never reaches a chip.
+    // One chip per call though each was checked twice; the forgotten text never reaches a chip. The schedule it made is
+    // an automation card on the reply instead of a chip.
     expect(lastBot(botId).chips).toEqual([
-      { icon: 'memory', text: 'remembered', highlight: 'The owner is vegetarian.' },
-      { icon: 'schedule', text: 'every hour' }
+      { icon: 'memory', text: 'remembered', highlight: 'The owner is vegetarian.' }
     ])
+    expect(lastBot(botId).cards).toEqual([expect.objectContaining({ type: 'automation', label: 'every hour' })])
 
     // The next chat's pack carries the saved fact and the earlier chat.
     w.clock.now += 60_000
