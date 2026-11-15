@@ -464,8 +464,9 @@ class PiTurn {
   progressed = false
   readonly startedAt = Date.now()
   readonly openTools = new Map<string, { name: string; mousse: boolean }>()
-  /** A bot's built-in calls with a `started` ledger row, by call id. */
+  /** Pi file calls awaiting their success and truncation result, by call id. */
   readonly fileCalls = new Map<string, { completed(success: boolean, partial?: boolean): void }>()
+  /** A bot's built-in calls with a `started` ledger row, by call id. */
   readonly ledgerRows = new Map<string, string>()
   /** Steers the turn owns and Pi has not read, each with its drain's token: it is accepted by that token alone. */
   readonly steers: PiSteer[] = []

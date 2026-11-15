@@ -30,7 +30,7 @@ const NETWORK_TOOLS: ReadonlySet<NeutralTool> = new Set<NeutralTool>(['web_fetch
 
 export interface BotAuthorityInput {
   activationId: string
-  /** Read versions shared by dispatches of this activation; memory only, fresh after a service restart. */
+  /** Read versions shared by dispatches of this activation; partial reads carry a partial: prefix. Memory only, fresh after a restart. */
   fileReads?: Map<string, string>
   role: BotThreadRole
   permissions: BotPermissions
@@ -89,7 +89,7 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
       const absolute = resolve(files, raw)
       let path = absolute
       try { path = realpathSync.native(absolute) } catch { /* A new file has no real path yet. */ }
-      const before = fileHash(path)
+      const before = fileVersion(path)
       const previous = fileReads.get(path)
       if (tool !== 'read' && (before === null || (before !== undefined && previous !== before && previous !== `partial:${before}`))) {
         return { refused: 'This file changed since you read it. Read it again, then make your change.' }
@@ -101,7 +101,7 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
         completed(success, truncated = false) {
           if (!success) return
           // A read remembers the bytes at admission, not a newer writer's bytes at completion.
-          const hash = tool === 'read' ? before : fileHash(path)
+          const hash = tool === 'read' ? before : fileVersion(path)
           const partial = tool === 'read' ? args.offset !== undefined || args.limit !== undefined || truncated : tool === 'edit' && previous?.startsWith('partial:')
           if (typeof hash === 'string') fileReads.set(path, partial ? `partial:${hash}` : hash)
           else fileReads.delete(path)
@@ -290,7 +290,7 @@ function metadataVersion(stat: Stats): string {
   return `stat:${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}`
 }
 
-function fileHash(path: string): string | undefined | null {
+function fileVersion(path: string): string | undefined | null {
   let fd: number | undefined
   try {
     fd = openSync(path, 'r')

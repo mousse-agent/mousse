@@ -546,8 +546,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   readonly chat: BotChatProjection
   /** The Bot UI's methods (`bots.*` v2). */
   readonly service: BotChatService
-  /** Each activation's context pack as its latest main dispatch read it (frozen by the provider, bot-context.md §5). */
+  /** Pi file versions, shared by the activation's dispatches and discarded when it ends. */
   private readonly fileReads = new Map<string, Map<string, string>>()
+  /** Each activation's context pack as its latest main dispatch read it (frozen by the provider, bot-context.md §5). */
   private readonly packs = new Map<string, string>()
   /**
    * Notes a live turn took and the runtime never reported read nor handed back, by activation: the model may have read
