@@ -120,6 +120,7 @@ describe('bot timers after sleep', () => {
     } finally {
       release()
       await Promise.all([first, second, third])
+      await flush()
     }
     // One extra pass uses the newest tick, ending the pause and starting the queued work without another tick.
     expect.soft(f.store.activation(work.workId)?.status).toBe('running')

@@ -1486,17 +1486,27 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     // Hold upkeep before it starts. Calls during a pass request one more, at the latest tick's time.
     this.maintainAgainAt = undefined
-    this.maintaining = Promise.resolve().then(async () => {
-      let at: Date | undefined = now
-      while (at && !this.closed) {
-        await this.maintainPass(at)
-        at = this.maintainAgainAt
-        this.maintainAgainAt = undefined
-      }
-    }).finally(() => {
-      this.maintaining = undefined
+    const first = Promise.resolve().then(() => this.maintainPass(now))
+    this.maintaining = first
+    // The caller waits for its own pass, while this drain owns all queued follow-up work.
+    void this.drainMaintenance(first).catch((error: unknown) => {
+      console.warn('bot upkeep could not finish; the next tick tries again', { error: error instanceof Error ? error.message : String(error) })
     })
-    return this.maintaining
+    return first
+  }
+
+  private async drainMaintenance(first: Promise<void>): Promise<void> {
+    try {
+      await first
+      while (this.maintainAgainAt && !this.closed) {
+        const at = this.maintainAgainAt
+        this.maintainAgainAt = undefined
+        await this.maintainPass(at)
+      }
+    } finally {
+      // Clear as the drain exits, without a promise-finally gap that could lose a new tick.
+      this.maintaining = undefined
+    }
   }
 
   private async maintainPass(now: Date): Promise<void> {
