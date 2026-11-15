@@ -138,3 +138,30 @@ it.each(['removeAll', 'reset', 'purge'] as const)('finished schedules leave Auto
   else { await f.bots.remove(botId); await f.bots.purge(botId) }
   expect(f.scheduler.listJobs().filter((job) => job.bot?.botId === botId)).toEqual([])
 })
+
+it('keeps only the latest said occurrence per schedule', async () => {
+  f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 1 }, say: '  Hello  ' }, 'owner')
+  await f.bots.reconcileOnStartup()
+  for (const minute of [1, 2, 3]) await f.tickSchedules(new Date(T0 + minute * MIN))
+  expect(f.store.all("SELECT key FROM bot_memory_state WHERE bot_id = ? AND key LIKE 'schedule-said:%'", botId)).toHaveLength(1)
+  expect(chatOf(f, botId).filter((row) => row.kind === 'run_report').map((row) => row.text)).toEqual(['Hello', 'Hello', 'Hello'])
+  expect(f.scheduler.listJobs()[0]!.bot?.say).toBe('Hello')
+})
+
+it('editing a Say exactly Do keeps a trimmed fixed line', () => {
+  const entry = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, say: 'Hello' }, 'owner')
+  const updated = f.book.update(f.scheduler.getJob(entry.jobId)!, { prompt: 'Say exactly:   Goodbye  ' })!
+  expect(updated.bot?.say).toBe('Goodbye')
+  expect(updated.prompt).toBe('Say exactly: Goodbye')
+})
+
+it('until at the scheduled minute includes that occurrence', async () => {
+  const at = new Date(T0 + 5 * MIN)
+  const until = `${at.getFullYear()}-${String(at.getMonth()+1).padStart(2,'0')}-${String(at.getDate()).padStart(2,'0')}T${String(at.getHours()).padStart(2,'0')}:${String(at.getMinutes()).padStart(2,'0')}`
+  f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, say: 'Last hello', until }, 'owner')
+  await f.bots.reconcileOnStartup()
+  await f.tickSchedules(at)
+  expect(chatOf(f, botId).some((row) => row.text === 'Last hello')).toBe(true)
+  await f.tickSchedules(new Date(T0 + 10 * MIN))
+  expect(f.book.list(botId)).toEqual([])
+})

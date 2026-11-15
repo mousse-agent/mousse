@@ -1327,8 +1327,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /** The scheduler retries a claim as started before making any new admission or lateness decision. */
   findScheduledOccurrence(input: { botId: string; scheduleId: string; occurrenceKey: string }): { activationId: string; occurrenceAt: string } | { messageId: string; occurrenceAt: string } | undefined {
-    const said = this.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', input.botId, `schedule-said:${input.scheduleId}:${input.occurrenceKey}`)
-    if (said) return JSON.parse(String(said.value)) as { messageId: string; occurrenceAt: string }
+    const said = this.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', input.botId, `schedule-said:${input.scheduleId}`)
+    if (said) {
+      const last = JSON.parse(String(said.value)) as { occurrenceKey: string; messageId: string; occurrenceAt: string }
+      if (last.occurrenceKey === input.occurrenceKey) return last
+    }
     const row = this.store.activationByKey(`sched:${input.botId}:${input.scheduleId}:${input.occurrenceKey}`)
     if (row?.trigger.kind === 'schedule') return { activationId: row.id, occurrenceAt: row.trigger.occurrenceAt }
     return undefined
@@ -1360,7 +1363,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const messageId = `bm_sched:${botId}:${scheduleId}:${occurrenceKey}`
       const late = (input.now?.getTime() ?? this.now()) - Date.parse(occurrenceAt) > REMINDER_LATE_MS
       this.store.db.transaction(() => {
-        this.store.run('INSERT OR IGNORE INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?)', botId, `schedule-said:${scheduleId}:${occurrenceKey}`, JSON.stringify({ messageId, occurrenceAt }))
+        this.store.run('INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?) ON CONFLICT(bot_id, key) DO UPDATE SET value = excluded.value', botId, `schedule-said:${scheduleId}`, JSON.stringify({ occurrenceKey, messageId, occurrenceAt }))
         this.chat.post({ id: messageId, botId, author: 'bot', kind: 'run_report', text: `${late ? `(For ${clockTime(occurrenceAt)}) ` : ''}${input.say}`, lane: 'run' })
       })
       this.changed({ botId })
