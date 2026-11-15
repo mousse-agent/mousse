@@ -1,5 +1,7 @@
 import { profilerService } from '../diagnostics/profilerService'
 import { contextHandoff, modelChangeNote, previousTurnModel } from './contextHandoff'
+import { GOAL_SOURCE, ThreadGoals } from './threadGoals'
+import { goalNote, type GoalTurnOutcome } from '../../shared/threadGoal'
 import { AppletStore } from '../applets/AppletStore'
 import { publishAppletPresentation, recoverAppletPresentation } from '../applets/publishPresentation'
 import { validateAppletSubmission, type AppletSubmission } from '../../shared/applets'
@@ -1789,6 +1791,28 @@ export class OrchestratorService extends EventEmitter {
   private botMcpImpl?: BotMcp
   /** The app-tool context of each running turn (PR 2 §2), for the Mousse MCP server's calls. */
   readonly appToolTurns = new AppToolTurns()
+  /** The threads' goals (`/goal`, issue #1207): set, continued, stopped, and decided after each turn. */
+  readonly goals = new ThreadGoals({
+    thread: (threadId) => this.threadStore?.getThread(threadId),
+    saveGoal: (threadId, goal) => { this.threadStore?.updateThreadMeta(threadId, { goal }, { touch: false }) },
+    turnLimit: () => this.runSettings().goalTurnLimit,
+    queueGoalTurn: (threadId, turn) => this.queueGoalTurn(threadId, turn),
+    removeQueuedGoalTurns: (threadId) => this.removeQueuedGoalTurns(threadId),
+    goalTurnQueued: (threadId) => listPendingQueue(this.threadStore?.loadMessageQueue(threadId) ?? this.getOrCreateSession(threadId).queue).some((item) => item.source === GOAL_SOURCE),
+    busy: (threadId) => {
+      const session = this.getOrCreateSession(threadId)
+      this.refreshSessionQueueFromDisk(session)
+      return session.isTurnRunning() || session.turnAdmitted || listPendingQueue(session.queue).some((item) => item.intent === 'normal')
+    },
+    waitingForPerson: (threadId) => this.questions.listPendingForThread(threadId).length > 0 || (this.runEngine?.approvals.listPending().some((row) => row.threadId === threadId) ?? false),
+    now: () => new Date().toISOString()
+  })
+  /** Whether goals cut off by the previous daemon were marked stopped (once, before any queue drains). */
+  private goalsRecovered = false
+  /** The goal each thread's running turn runs under (`ThreadGoal.epoch`), recorded when the turn starts. */
+  private readonly goalTurnEpochs = new Map<string, { runId?: string; epoch?: string }>()
+  /** The same, by the turn's run, for the agent's `goal_status` call. */
+  private readonly goalRunEpochs = new Map<string, string>()
   /** The definition runs of each thread, for its public Stop (`stopDefinitionRuns`). */
   private readonly definitionStops = new Map<string, Set<DefinitionStop>>()
   /** Pending results of `turn.start` effects, keyed by runId (SPEC §12.7). */
@@ -2120,6 +2144,81 @@ export class OrchestratorService extends EventEmitter {
     this.on('turn-completed', (payload: { threadId?: string }) => { if (payload?.threadId) this.nameThreadAfterTurn(payload.threadId, true) })
     for (const event of ['turn-failed', 'turn-interrupted'] as const)
       this.on(event, (payload: { threadId?: string }) => { if (payload?.threadId) this.nameThreadAfterTurn(payload.threadId, false) })
+    // A thread's goal decides after each of its turns whether the next goal turn is queued.
+    const outcomes = { 'turn-completed': 'completed', 'turn-failed': 'failed', 'turn-interrupted': 'interrupted', 'turn-paused': 'paused' } as const
+    for (const [event, outcome] of Object.entries(outcomes) as Array<[keyof typeof outcomes, GoalTurnOutcome]>)
+      this.on(event, (payload: { threadId?: string; source?: string }) => { if (payload?.threadId) this.goalAfterTurn(payload.threadId, outcome, payload.source) })
+  }
+
+  /**
+   * After a turn of a thread whose goal is working: once the turn has finished settling (its lease is released and its
+   * own queue drain has looked), the goal decides. A turn cut off by shutdown leaves the goal for startup to stop.
+   */
+  private goalAfterTurn(threadId: string, outcome: GoalTurnOutcome, source: string | undefined): void {
+    const stamp = this.goalTurnEpochs.get(threadId)
+    this.goalTurnEpochs.delete(threadId)
+    if (stamp?.runId) this.goalRunEpochs.delete(stamp.runId)
+    if (this.lifecycle.stopping || threadId === '__unbound__') return
+    if (this.threadStore?.getThread(threadId)?.goal?.state !== 'working') return
+    setImmediate(() => {
+      if (this.lifecycle.stopping) return
+      try {
+        this.goals.afterTurn(threadId, outcome, source, stamp?.epoch)
+      } catch (error) {
+        console.warn('the goal could not decide after a turn', { threadId, error: error instanceof Error ? error.message : String(error) })
+      }
+    })
+  }
+
+  /** Queues a goal turn and makes sure it runs after whatever runs now. */
+  private queueGoalTurn(threadId: string, turn: { visible: true; text: string } | { visible: false }): void {
+    const session = this.getOrCreateSession(threadId)
+    const mode = getLastUserChatMode(session.messages) ?? 'agent'
+    // The next goal turns say only "continue"; the goal itself reaches the model in the note every goal turn starts with.
+    if (turn.visible) this.enqueueForThread(threadId, { content: turn.text, mode }, { source: GOAL_SOURCE })
+    else this.enqueueForThread(threadId, { content: CONTINUE_TEXT, mode }, { source: GOAL_SOURCE, internal: true })
+    if (session.isTurnRunning() || session.turnAdmitted) session.drainAfterSettle = true
+    else this.scheduleQueueDrain(session)
+  }
+
+  /** Removes the goal turns still pending in the thread's queue; a claimed one is the drain's and is refused there. */
+  private removeQueuedGoalTurns(threadId: string): void {
+    let gone: QueuedMessage[] = []
+    this.mutateQueue(threadId, (items) => {
+      gone = items.filter((item) => item.source === GOAL_SOURCE && item.state !== 'claimed')
+      return gone.length ? items.filter((item) => !gone.includes(item)) : items
+    })
+    this.cancelQueuedRuns(gone.map((item) => item.runId))
+  }
+
+  /** Startup: goals the previous daemon left working are stopped before any queue drains (`ThreadGoals.recoverAtStartup`). */
+  private recoverGoalsOnce(): void {
+    if (this.goalsRecovered || !this.threadStore) return
+    this.goalsRecovered = true
+    try {
+      this.goals.recoverAtStartup(this.threadStore.listAllThreads())
+    } catch (error) {
+      console.warn('goals cut off by a restart could not be recovered', { error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /** `threads.goal`: what the composer's `/goal` and the goal marker do. */
+  threadGoal(threadId: string, action: 'show' | 'set' | 'adopt' | 'clear' | 'continue' | 'stop', text?: string): { goal: Thread['goal'] | null; text?: string } {
+    if (action === 'set') return { goal: this.goals.set(threadId, text ?? '') }
+    if (action === 'adopt') return { goal: this.goals.adopt(threadId, text ?? '') }
+    if (action === 'clear') {
+      this.goals.clear(threadId)
+      return { goal: null }
+    }
+    if (action === 'continue') return { goal: this.goals.continue(threadId) }
+    if (action === 'stop') {
+      // The goal stops first, so the turn the Stop ends does not queue the next one.
+      this.goals.stopped(threadId)
+      const session = this.getOrCreateSession(threadId)
+      if (session.isTurnRunning() || session.turnAdmitted) void this.stopThread(threadId, 'goal stopped').catch(() => undefined)
+      return { goal: this.goals.get(threadId) ?? null }
+    }
+    return { goal: this.goals.get(threadId) ?? null, text: this.goals.describe(threadId) }
   }
 
   /**
@@ -2702,6 +2801,7 @@ export class OrchestratorService extends EventEmitter {
     const engine = this.runEngine
     if (!engine) return []
     const { interrupted } = engine.reconcileOnBoot({ queued: (run) => this.queueHoldsRun(run.threadId, run.runId) })
+    this.recoverGoalsOnce()
     this.writeRestartTranscripts()
     for (const runId of interrupted) {
       this.emit('run-interrupted-on-boot', { threadId: engine.getRun(runId)?.threadId, runId })
@@ -3137,6 +3237,12 @@ export class OrchestratorService extends EventEmitter {
   ): Promise<StopThreadOutcome> {
     // A `/compact` the thread runs stops with it; the full history stays.
     const compactionStopped = this.stopCompaction(threadId)
+    // A goal stops with its thread, and the goal turn waiting in the queue goes.
+    try {
+      this.goals.stopped(threadId)
+    } catch (error) {
+      console.warn('the goal of a stopped thread could not be stopped', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
     const engine = this.runEngine
     if (!engine) {
       // Without a run engine there is only the local turn and its queue.
@@ -3749,6 +3855,10 @@ export class OrchestratorService extends EventEmitter {
       askUser: (threadId, questions, options) => this.questions.requestAnswers(questions, threadId, options),
       dismissQuestions: (threadId) => this.questions.dismissAllForThread(threadId),
       tasks: (threadId) => (threadId ? this.getTasksForThread(threadId) : null),
+      goals: {
+        working: (threadId) => this.goals.goalTurnWanted(threadId),
+        report: (threadId, runId, status, reason) => this.goals.report(threadId, status, reason, this.goalRunEpochs.get(runId))
+      },
       queueSnapshot: (threadId) => this.queueSnapshot(threadId),
       queueCommand: (threadId, command, options) => this.queueCommandAsAgent(threadId, command, options),
       browserRuntime: () => this.browserRuntime,
@@ -10185,7 +10295,7 @@ export class OrchestratorService extends EventEmitter {
     session: ThreadSession,
     turn: NonNullable<ThreadSession['activeTurn']>,
     aborted: boolean,
-    opts?: { onTurnSettled?: (aborted: boolean) => void },
+    opts?: { onTurnSettled?: (aborted: boolean) => void; source?: string },
     failed = false,
     paused = false
   ): void {
@@ -10297,7 +10407,8 @@ export class OrchestratorService extends EventEmitter {
     opts?.onTurnSettled?.(wasAborted)
     // A paused run is neither finished nor failed: its thread rests until the limit resets.
     this.emit(wasAborted ? 'turn-interrupted' : paused ? 'turn-paused' : failed ? 'turn-failed' : 'turn-completed', {
-      threadId: session.threadId
+      threadId: session.threadId,
+      ...(opts?.source ? { source: opts.source } : {})
     })
   }
 
@@ -11467,6 +11578,12 @@ export class OrchestratorService extends EventEmitter {
       }
       throw new Error('An orchestrator turn is already running. Use /stop or the stop button first.')
     }
+    // The goal this turn runs under, recorded before anything can fail: its report and its end count only for that goal.
+    if (session.threadId !== '__unbound__') {
+      const epoch = opts?.bot || opts?.source === 'provider-continuation' ? undefined : this.goals.epochFor(session.threadId)
+      this.goalTurnEpochs.set(session.threadId, { ...(opts?.runId ? { runId: opts.runId } : {}), ...(epoch ? { epoch } : {}) })
+      if (opts?.runId && epoch) this.goalRunEpochs.set(opts.runId, epoch)
+    }
     // A Stop while the turn is still being set up ends the setup's waits (`endTurnSetups`); `startTurn` then ends the
     // turn before it started.
     const setupStop = new AbortController()
@@ -12062,7 +12179,11 @@ export class OrchestratorService extends EventEmitter {
       if (handoffs) this.recordHandoffMarkers(session, handoffs, switchMarker, turnId, selectedModel)
       // The first turn on a different model: the agent is told which model it is and which wrote the earlier replies.
       const modelNote = displayUserMessage ? this.modelChangeNoteFor(session.messages, turnPresentationStart, turnId, reuseLastUser) : undefined
-      const prompted = modelNote ? `${modelNote}\n\n${userContent}` : userContent
+      // A thread with a working goal: every turn tells the agent the goal and how to report on it (`goal_status`).
+      const goal = this.threadStore?.getThread(session.threadId)?.goal
+      const turnEpoch = this.goalTurnEpochs.get(session.threadId)?.epoch
+      const goalText = goal?.state === 'working' && turnEpoch && goal.epoch === turnEpoch ? goalNote(goal) : undefined
+      const prompted = [modelNote, goalText, userContent].filter(Boolean).join('\n\n')
       const activeMessages = getActiveMessages(this.nativeContext)
       const turnInput: TurnInput = {
         runId: engineRunId ?? turnId,
@@ -13289,6 +13410,13 @@ export class OrchestratorService extends EventEmitter {
       settle('idle')
       return
     }
+    // A goal turn whose goal stopped, was met or cleared since it was queued (a restart included) never runs.
+    if (item.source === GOAL_SOURCE && !this.goals.goalTurnWanted(session.threadId)) {
+      this.completeSessionClaim(session, item.id, claimToken)
+      this.cancelQueuedRuns([item.runId])
+      this.scheduleQueueDrain(session, opts)
+      return
+    }
     const managedByStartup = opts?.managedByStartup === true
     // The Stop fence at promotion: an entry that starts work on behalf of a parent and was queued before a
     // Stop of its thread is refused (a Stop removes such entries itself; this catches one that outlived it).
@@ -13529,6 +13657,7 @@ export class OrchestratorService extends EventEmitter {
    */
   private async recoverAndDrainPendingQueuesAsync(): Promise<void> {
     if (this.lifecycle.stopping || !this.threadStore) return
+    this.recoverGoalsOnce()
     const ordered = this.startupRecoveryOrder()
     for (const thread of ordered) {
       if (this.lifecycle.stopping) return

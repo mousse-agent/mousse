@@ -234,7 +234,10 @@ export function sameThreadSnapshot(a: Thread[], b: Thread[]): boolean {
       left.modelOverride?.llmProvider !== right.modelOverride?.llmProvider ||
       left.modelOverride?.model !== right.modelOverride?.model ||
       left.modelOverride?.effort !== right.modelOverride?.effort ||
-      left.modelOverride?.name !== right.modelOverride?.name
+      left.modelOverride?.name !== right.modelOverride?.name ||
+      // The goal (`/goal`) is saved without touching `updatedAt`; each change of it moves its own time.
+      left.goal?.setAt !== right.goal?.setAt ||
+      left.goal?.updatedAt !== right.goal?.updatedAt
     ) {
       return false
     }

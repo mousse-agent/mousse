@@ -28,6 +28,7 @@ export const COMPOSER_COMMANDS: ComposerCommandDef[] = [
   { name: 'rename', description: 'Rename this thread', category: 'Session', argument: 'optional', argsHint: '<title>', desktopOnly: true },
   { name: 'usage', description: 'Open subscription usage', category: 'Info', argument: 'none' },
   { name: 'stop', description: 'Stop the running turn', category: 'Session', argument: 'optional' },
+  { name: 'goal', description: 'Keep working until a goal is met', category: 'Session', argument: 'optional', argsHint: '[what done looks like | clear]', desktopOnly: true },
   { name: 'steer', description: 'Inject guidance mid-turn (after the next tool call)', category: 'Session', argument: 'required', argsHint: '<prompt>' },
   { name: 'skills', description: 'Pick a skill to use as the chat mode', category: 'Session', argument: 'optional', argsHint: '[filter]' }
 ]

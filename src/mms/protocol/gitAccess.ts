@@ -75,6 +75,8 @@ export const GIT_ACCESS = {
   'runs.handoffs': 'none',
   'runs.resumeNow': 'owned',
   'runs.cancelPause': 'none',
+  // Setting or continuing a goal queues a turn.
+  'threads.goal': 'owned',
   'thread.fork': 'owned',
   'thread.mergeBack': 'owned',
   'orchestrator.answerQuestions': 'owned',

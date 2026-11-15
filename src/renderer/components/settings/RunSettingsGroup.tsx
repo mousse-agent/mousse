@@ -1,5 +1,6 @@
 import type { MousseSettings, MousseSettingsUpdate } from '../../../shared/settings'
 import { EXPIRY_PRESETS } from '../../../shared/threadExpiry'
+import { GOAL_TURN_LIMIT_CHOICES } from '../../../shared/threadGoal'
 import { Pause } from '../../lib/icons'
 import { Select } from '../ui/Select'
 import { SettingsGroup, SettingsRow } from './SettingsRow'
@@ -48,6 +49,22 @@ export function RunSettingsGroup({ runs, onUpdate }: { runs: MousseSettings['run
               { value: OFF, label: 'Off' },
               ...capChoices(cap).map((choice) => ({ value: String(choice), label: capLabel(choice) }))
             ]}
+          />
+        }
+      />
+      <SettingsRow
+        title="Goal turn limit"
+        anchor="general-goal-turns"
+        description={<span title="A goal set with /goal keeps starting turns until the agent reports it met or blocked. After this many turns it stops; Continue on the goal allows as many again. Messages you send don't count.">Turns a /goal may run before it stops.</span>}
+        control={
+          <Select
+            ariaLabel="Goal turn limit"
+            value={String(runs.goalTurnLimit)}
+            onChange={(next) => {
+              if (Number(next) === runs.goalTurnLimit) return
+              void onUpdate({ runs: { ...runs, goalTurnLimit: Number(next) } })
+            }}
+            options={[...new Set<number>([...GOAL_TURN_LIMIT_CHOICES, runs.goalTurnLimit])].sort((a, b) => a - b).map((choice) => ({ value: String(choice), label: `${choice} turns` }))}
           />
         }
       />

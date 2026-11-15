@@ -6,6 +6,7 @@ import { botMemoryTools, type BotMemoryToolHost } from './botMemory'
 import { botTools, type BotAppToolDeps } from './bots'
 import { browserTools } from './browser'
 import { delegationTools } from './delegation'
+import { goalTools } from './goal'
 import { devGuiTools } from './devGui'
 import type { AppToolHost } from './host'
 import { profilerTools } from './profiler'
@@ -102,7 +103,7 @@ export function createAppToolRegistry(input: {
   }
   add('delegation', delegationTools(host))
   add('questions', askUserTools(host))
-  add('tasks', taskTools(host))
+  add('tasks', [...taskTools(host), ...goalTools(host)])
   add('thread', engine ? threadTools(host, engine, input.bots) : [])
   add('schedules', [...(engine ? scheduleTools(host, engine) : []), ...automationTools(host)])
   add('skills', skillTools(host))

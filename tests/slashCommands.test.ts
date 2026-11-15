@@ -16,6 +16,7 @@ function env(overrides: Partial<SlashCommandEnv> = {}): SlashCommandEnv {
     fork: vi.fn(async () => {}),
     rename: vi.fn(async () => {}),
     openRename: vi.fn(() => true),
+    goal: vi.fn(async () => ({ text: 'Goal: Ship it' })),
     ...overrides
   }
 }
@@ -142,5 +143,20 @@ describe('runSlashCommand', () => {
   it('reports a failed command in one line', async () => {
     const e = env({ clearContext: vi.fn(async () => { throw new Error("Error invoking remote method 'threads:clearContext': Error: Thread not found\nstack") }) })
     expect(await runSlashCommand('/clear', e)).toEqual({ kind: 'refused', message: 'Thread not found' })
+  })
+
+  it('/goal sets, shows and clears the goal, also while a turn runs; on a new chat the text is sent and becomes the goal', async () => {
+    const e = env({ turnActive: true })
+    expect(await runSlashCommand('/goal Make the tests pass', e)).toEqual({ kind: 'done' })
+    expect(e.goal).toHaveBeenCalledWith('thread-1', 'set', 'Make the tests pass')
+    expect(await runSlashCommand('/goal', e)).toEqual({ kind: 'info', message: 'Goal: Ship it' })
+    expect(e.goal).toHaveBeenCalledWith('thread-1', 'show')
+    expect(await runSlashCommand('/goal clear', e)).toEqual({ kind: 'done' })
+    expect(e.goal).toHaveBeenLastCalledWith('thread-1', 'clear', undefined)
+    const blank = env({ threadId: null })
+    expect(await runSlashCommand('/goal Make the tests pass', blank)).toEqual({ kind: 'send', text: 'Make the tests pass', adoptGoal: true })
+    expect(await runSlashCommand('/goal', blank)).toEqual({ kind: 'refused', message: 'Type what done looks like: /goal <text>' })
+    expect(blank.goal).not.toHaveBeenCalled()
+    expect(await runSlashCommand('/goal Ship it', env({ hasAttachments: true }))).toEqual({ kind: 'refused', message: 'Remove the attachments to use /goal.' })
   })
 })

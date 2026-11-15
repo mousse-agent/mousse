@@ -10,6 +10,7 @@ import { parseTellMe, isThreadEventKind, THREAD_EVENT_KINDS, type ChatImageAttac
 import { PROVIDER_DRIVER_KINDS, type ModelOverride } from '../../shared/providerInstances'
 import { upgradeSelection } from '../../shared/modelSelection'
 import { MAX_USAGE_LIMIT_PAUSE_CAP } from '../../shared/settings'
+import { MAX_GOAL_TURN_LIMIT } from '../../shared/threadGoal'
 import { isPermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import {
   RESERVED_AGENT_IDS,
@@ -1033,7 +1034,7 @@ function assertPermissionsPatch(value: unknown): void {
 function assertRunsPatch(value: unknown): void {
   const patch = asPlainObject(value, 'partial.runs')
   for (const key of Object.keys(patch)) {
-    if (key !== 'resumeAfterUsageLimit' && key !== 'usageLimitPauseCap' && key !== 'newThreadWorktree' && key !== 'privateThreadExpiry' && key !== 'steerRelease') throw new Error(`partial.runs.${key} is not allowed`)
+    if (key !== 'resumeAfterUsageLimit' && key !== 'usageLimitPauseCap' && key !== 'newThreadWorktree' && key !== 'privateThreadExpiry' && key !== 'goalTurnLimit' && key !== 'steerRelease') throw new Error(`partial.runs.${key} is not allowed`)
   }
   // How a held steer is released, per provider instance (docs/design/steer-and-interruptions.md §2.3.2).
   if (patch.steerRelease !== undefined) {
@@ -1049,6 +1050,8 @@ function assertRunsPatch(value: unknown): void {
     throw new Error('partial.runs.resumeAfterUsageLimit must be a boolean')
   if (patch.usageLimitPauseCap !== undefined && (!Number.isInteger(patch.usageLimitPauseCap) || (patch.usageLimitPauseCap as number) < 1 || (patch.usageLimitPauseCap as number) > MAX_USAGE_LIMIT_PAUSE_CAP))
     throw new Error(`partial.runs.usageLimitPauseCap must be a whole number from 1 to ${MAX_USAGE_LIMIT_PAUSE_CAP}`)
+  if (patch.goalTurnLimit !== undefined && (!Number.isInteger(patch.goalTurnLimit) || (patch.goalTurnLimit as number) < 1 || (patch.goalTurnLimit as number) > MAX_GOAL_TURN_LIMIT))
+    throw new Error(`partial.runs.goalTurnLimit must be a whole number from 1 to ${MAX_GOAL_TURN_LIMIT}`)
 }
 
 /** `agentAccess` widens what agents may do, so a malformed patch is refused rather than guessed at. */

@@ -1543,6 +1543,8 @@ export interface Thread {
   worktreeBaseBranch?: string
   /** The pull request this thread created, started from, or watches; set by the daemon, never inferred from a branch name. */
   pullRequest?: ThreadPullRequestLink
+  /** The thread's goal (`/goal`): Mousse keeps starting turns while it is working. Set by the daemon. */
+  goal?: import('./threadGoal').ThreadGoal
   /** Explicit sidebar position within this thread's project (or standalone group). */
   order: number
   pinnedAt?: string

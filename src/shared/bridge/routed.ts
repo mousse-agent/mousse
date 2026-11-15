@@ -896,6 +896,10 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
     reason: 'They describe or control the daemon a window is connected to, not a thread.'
   },
   {
+    methods: ['threads.goal'],
+    reason: 'A goal is set and changed from the desktop composer of the computer that runs the thread (issue #1207).'
+  },
+  {
     methods: ['threads.focus'],
     reason:
       'A window asks its own daemon to keep a thread of another computer in view; the router answers it.'
