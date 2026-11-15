@@ -189,27 +189,36 @@ describe('a bot on the owner\'s own Claude Code entry', () => {
     }
   })
 
+  const cloudSignIns = {
+    aws: { AWS_PROFILE: 'work', AWS_REGION: 'eu-west-1', AWS_ACCESS_KEY_ID: 'aws-id', AWS_SECRET_ACCESS_KEY: 'aws-secret', AWS_SESSION_TOKEN: 'aws-session', AWS_BEARER_TOKEN_BEDROCK: 'aws-bearer' },
+    google: { GOOGLE_APPLICATION_CREDENTIALS: '/signin/google.json', CLOUDSDK_CONFIG: '/signin/gcloud', GCLOUD_PROJECT: 'project', CLOUD_ML_REGION: 'us-east5' },
+    azure: { AZURE_CLIENT_ID: 'client', AZURE_TENANT_ID: 'tenant', AZURE_CLIENT_SECRET: 'azure-secret', AZURE_PASSWORD: 'azure-password' }
+  }
   it.each([
-    { route: 'CLAUDE_CODE_USE_BEDROCK', cloud: { AWS_PROFILE: 'work', AWS_REGION: 'eu-west-1', AWS_SECRET_ACCESS_KEY: 'bedrock-key' } },
-    { route: 'CLAUDE_CODE_USE_VERTEX', cloud: { GOOGLE_APPLICATION_CREDENTIALS: '/signin/google.json', CLOUD_ML_REGION: 'us-east5' } },
-    { route: 'CLAUDE_CODE_USE_FOUNDRY', cloud: { AZURE_CLIENT_ID: 'client', AZURE_TENANT_ID: 'tenant', AZURE_CLIENT_SECRET: 'foundry-key' } }
+    { route: '', cloud: {} },
+    { route: 'CLAUDE_CODE_USE_BEDROCK', cloud: cloudSignIns.aws },
+    { route: 'CLAUDE_CODE_USE_MANTLE', cloud: cloudSignIns.aws },
+    { route: 'CLAUDE_CODE_USE_ANTHROPIC_AWS', cloud: cloudSignIns.aws },
+    { route: 'CLAUDE_CODE_USE_VERTEX', cloud: cloudSignIns.google },
+    { route: 'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD', cloud: cloudSignIns.google },
+    { route: 'CLAUDE_CODE_USE_FOUNDRY', cloud: cloudSignIns.azure }
   ].flatMap((row) => ['environment', 'settings'].map((source) => ({ ...row, source }))))('keeps $route sign-in from $source only for the active cloud', async ({ route, cloud, source }) => {
     const root = temp('claude-cloud-root-')
     const scratch = temp('claude-cloud-scratch-')
-    const unrelated = { GITHUB_TOKEN: 'github', OPENAI_API_KEY: 'openai', MY_SECRET: 'arbitrary', AWS_PROFILE: 'inactive-aws', GOOGLE_APPLICATION_CREDENTIALS: '/inactive/google.json', AZURE_CLIENT_SECRET: 'inactive-azure' }
-    const variables = { ...unrelated, ...cloud, [route]: '1', ANTHROPIC_AUTH_TOKEN: 'signin-token' }
+    const unrelated = { ...cloudSignIns.aws, ...cloudSignIns.google, ...cloudSignIns.azure, GITHUB_TOKEN: 'github', OPENAI_API_KEY: 'openai', MY_SECRET: 'arbitrary', NODE_OPTIONS: '--require /untrusted.js' }
+    const variables = { ...unrelated, ...cloud, ...(route ? { [route]: '1' } : {}), ANTHROPIC_AUTH_TOKEN: 'signin-token' }
     if (source === 'environment') for (const [name, value] of Object.entries(variables)) vi.stubEnv(name, value)
     else writeFileSync(join(process.env.CLAUDE_CONFIG_DIR!, 'settings.json'), JSON.stringify({ env: variables }))
     const { service, captured } = ownerService(async () => {})
     const locked: ClaudeLockedTurn = { authority: authorityFor(['read'], { root, scratch }), ownerEntry: true, cwd: root, shellContained: false, temps: [], systemPrompt: '', ledger: fakeLedger().ledger }
     await service.chat({ threadId: 'bot-thread', cwd: root, model: 'sonnet', prompt: 'go', locked, onText: vi.fn() })
     const env = captured.find((entry) => entry.hooks)!.env!
-    expect(env).toMatchObject({ ...cloud, [route]: '1', ANTHROPIC_AUTH_TOKEN: 'signin-token' })
+    expect(env).toMatchObject({ ...cloud, ...(route ? { [route]: '1' } : {}), ANTHROPIC_AUTH_TOKEN: 'signin-token' })
     for (const name of Object.keys(unrelated).filter((name) => !(name in cloud))) expect(env, name).not.toHaveProperty(name)
   })
 
   it.each(['', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY']
-    .flatMap((route) => ['environment', 'settings'].map((source) => ({ route, source }))))('keeps model and endpoint choices from $source with route "$route"', async ({ route, source }) => {
+    .flatMap((route) => ['environment', 'settings'].map((source) => ({ route, source }))))('keeps Claude configuration families from $source with route "$route"', async ({ route, source }) => {
     const root = temp('claude-model-root-')
     const scratch = temp('claude-model-scratch-')
     const choices = {
@@ -217,20 +226,26 @@ describe('a bot on the owner\'s own Claude Code entry', () => {
       ANTHROPIC_DEFAULT_OPUS_MODEL: 'profile/opus', ANTHROPIC_DEFAULT_SONNET_MODEL: 'profile/sonnet',
       ANTHROPIC_DEFAULT_HAIKU_MODEL: 'profile/haiku', ANTHROPIC_DEFAULT_FABLE_MODEL: 'profile/fable',
       ANTHROPIC_SMALL_FAST_MODEL: 'proxy-small', ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION: 'eu-west-1',
-      ANTHROPIC_CUSTOM_MODEL_OPTION: 'proxy-custom', CLAUDE_CODE_AUTO_MODE_MODEL: 'proxy-classifier',
-      CLAUDE_CODE_SUBAGENT_MODEL: 'proxy-child', ANTHROPIC_BEDROCK_REGION_PREFIX: 'eu',
+      ANTHROPIC_CUSTOM_MODEL_OPTION: 'proxy-custom', ANTHROPIC_BEDROCK_REGION_PREFIX: 'eu',
       ANTHROPIC_FOUNDRY_RESOURCE: 'my-resource', ANTHROPIC_GOOGLE_CLOUD_LOCATION: 'global',
       ANTHROPIC_GOOGLE_CLOUD_PROJECT: 'google-project', ANTHROPIC_VERTEX_PROJECT_ID: 'vertex-project',
-      CLOUD_ML_REGION: 'us-east5', VERTEX_REGION_CLAUDE_4_6_SONNET: 'europe-west1',
+      VERTEX_REGION_CLAUDE_4_6_SONNET: 'europe-west1',
       ANTHROPIC_BASE_URL: 'https://proxy.test', ANTHROPIC_AWS_BASE_URL: 'https://aws.test',
       ANTHROPIC_BEDROCK_BASE_URL: 'https://bedrock.test', ANTHROPIC_BEDROCK_MANTLE_BASE_URL: 'https://mantle.test',
       ANTHROPIC_FOUNDRY_BASE_URL: 'https://foundry.test', ANTHROPIC_GOOGLE_CLOUD_BASE_URL: 'https://google.test',
-      ANTHROPIC_VERTEX_BASE_URL: 'https://vertex.test'
-    }
-    const excluded = { GITHUB_TOKEN: 'github', OPENAI_API_KEY: 'openai', MY_SECRET: 'arbitrary', NODE_OPTIONS: '--require /untrusted.js',
+      ANTHROPIC_VERTEX_BASE_URL: 'https://vertex.test',
+      ANTHROPIC_FUTURE_SETTING: 'future-value', VERTEX_REGION_CLAUDE_FUTURE: 'europe-west1',
+      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: 'effort,thinking',
+      ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES: 'effort,thinking',
+      ANTHROPIC_BEDROCK_SERVICE_TIER: 'flex', ENABLE_PROMPT_CACHING_1H_BEDROCK: '1',
+      ENABLE_PROMPT_CACHING_FUTURE: '1', CLAUDE_FUTURE_CONFIG_DIR: '/signin/future',
+      ANTHROPIC_CUSTOM_HEADERS: 'Authorization: Bearer proxy-key',
+      NODE_EXTRA_CA_CERTS: '/certs/extra.pem', SSL_CERT_FILE: '/certs/cert.pem', HTTPS_PROXY: 'https://proxy.test:8443',
       ANTHROPIC_UNLISTED_MODEL: 'unknown', ANTHROPIC_DEFAULT_CUSTOM_MODEL: 'unknown',
       ANTHROPIC_SMALL_FAST_MODEL_EXTRA: 'unknown', VERTEX_REGION_CLAUDE_UNKNOWN: 'unknown',
-      ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION: 'display copy' }
+      ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION: 'display copy'
+    }
+    const excluded = { GITHUB_TOKEN: 'github', OPENAI_API_KEY: 'openai', MY_SECRET: 'arbitrary', NODE_OPTIONS: '--require /untrusted.js' }
     const variables = { ...choices, ...excluded, ...(route ? { [route]: '1' } : {}) }
     if (source === 'environment') for (const [name, value] of Object.entries(variables)) vi.stubEnv(name, value)
     else writeFileSync(join(process.env.CLAUDE_CONFIG_DIR!, 'settings.json'), JSON.stringify({ env: variables }))
