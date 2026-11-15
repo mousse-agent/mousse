@@ -1377,6 +1377,8 @@ export class MmsProfileServices {
     })
     // Any Stop that reaches a thread, and every subagent below it, ends its watch at once.
     this.orchestrator.on('threads-stopped', (payload: { threadIds: string[] }) => this.pullRequestWatch.onStopped(payload.threadIds))
+    // An archived thread's watch ends as archived, not as stopped (`OrchestratorService.settleThread`).
+    this.orchestrator.on('thread-settled', (payload: { threadId: string }) => this.pullRequestWatch.onEnded(payload.threadId, 'settled'))
     // Thread-event automations wake on their pull request's activity, never on what their own run caused.
     const threadEvents = new ThreadEventTriggers({
       jobs: () => this.scheduled.listJobs(),

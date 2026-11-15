@@ -111,13 +111,14 @@ function botThreadCall(bots: (() => BotAppToolDeps | undefined) | undefined, ctx
 }
 
 /**
- * The outcome chip of a thread a bot started, messaged or stopped: its title and the thread, which the chip opens, and
- * the first line of what it sent there (shown with the chip), so the owner sees at once what the bot said.
+ * The outcome chip of a thread a bot started, messaged, stopped, archived or unarchived (`extra.archived`): its title and
+ * the thread, which the chip opens, and the first line of what it sent there (shown with the chip), so the owner sees at
+ * once what the bot said.
  */
-function botChip(call: BotThreadCall, tool: string, threadId: string, title: string | undefined, sent?: unknown): void {
+function botChip(call: BotThreadCall, tool: string, threadId: string, title: string | undefined, sent?: unknown, extra?: { archived: boolean }): void {
   const said = typeof sent === 'string' ? oneLine(sent.trim().split(/\r?\n/).find((line) => line.trim()) ?? '', 160) : ''
   try {
-    call.activity?.onAppResult(call.chips, tool, { threadId, ...(title ? { title } : {}), ...(said ? { sent: said } : {}) })
+    call.activity?.onAppResult(call.chips, tool, { threadId, ...(title ? { title } : {}), ...(said ? { sent: said } : {}), ...extra })
   } catch {
     // Chips are a view of the calls; they never fail one.
   }
@@ -1151,6 +1152,54 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         if (!result.replayed) showAction(host, threadId, actor, bot ? 'stopped the turn that was running' : `stopped run ${runId}`, ...(bot ? [{ notice: true }] : []))
         if (bot && !result.replayed) botChip(bot, 'thread_interrupt', threadId, titleOf(threadId))
         return json({ threadId, ...result })
+      }
+    },
+    {
+      name: 'thread_archive',
+      description: 'Archive one of your owner\'s threads when its work is merged or dropped and your owner asks you to tidy it away, as Archive in the app does: it leaves the sidebar for Archived and nothing is deleted. archived: false unarchives it again. A thread that is still working is refused: stop it first with thread_interrupt.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          threadId: { type: 'string' },
+          archived: { type: 'boolean', description: 'Defaults to true; false unarchives the thread.' }
+        },
+        required: ['threadId']
+      },
+      access: 'managesOthers',
+      class: 'mutation',
+      minLevel: 'manage',
+      // A personal bot's tool ("use your threads"): no other thread lists it.
+      listed: (listing) => listing.botRole !== undefined,
+      offered: () => false,
+      handler: async (args, ctx) => {
+        const threadId = requiredId(args, 'threadId')
+        if (args.archived !== undefined && typeof args.archived !== 'boolean') throw new Error('archived must be true or false')
+        const archived = args.archived !== false
+        const bot = botThreadCall(bots, ctx)
+        if (!bot) throw new McpToolError('mousse_scope_denied', 'thread_archive is for personal bots; agents leave archiving to the user.')
+        if (!host.setThreadArchived) return notAvailable('thread_archive')
+        // The one rule of what a bot reaches (`botThreadReach`): never its own chat or another bot's thread, a private
+        // thread, a subagent or the Automation manager's; its owner's threads in its projects, and the ones it started.
+        requireBotReach(host, engine, ctx.caller.threadId, threadId)
+        assertNotBotThread(host, threadId, 'thread_archive')
+        const actor = actorOf(ctx)
+        const result = await host.setThreadArchived(threadId, archived, { actor })
+        if (result.status === 'rejected')
+          throw new McpToolError('mousse_conflict', `Thread ${threadId} is still working, so it was not archived. If your owner wants it archived anyway, stop it first with thread_interrupt, then archive it.`, { conflict: result.reason, threadId })
+        const title = titleOf(threadId)
+        if (result.changed) {
+          // The thread says who archived it, and the bot's chat gets a chip with the thread to open.
+          showAction(host, threadId, actor, archived ? 'archived this thread' : 'unarchived this thread', { notice: true })
+          botChip(bot, 'thread_archive', threadId, title, undefined, { archived })
+        }
+        return json({
+          threadId,
+          link: threadLink(threadId),
+          title: title ?? null,
+          archived,
+          changed: result.changed,
+          note: archived ? 'It is in Archived now; thread_archive with archived: false brings it back.' : 'It is back in your owner\'s thread list.'
+        })
       }
     },
     {

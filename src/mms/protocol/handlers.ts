@@ -2197,15 +2197,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
       const settled = asOptionalBoolean(p.settled, 'settled') === true
-      const thread = ctx.mms.threads.setThreadSettled(threadId, settled)
-      // Settling a thread (the sidebar's archive) is a Stop: what it still runs ends with it.
-      if (settled) {
-        // The watch ends as archived, not as stopped.
-        ctx.mms.pullRequestWatch.onEnded(threadId, 'settled')
-        await ctx.mms.orchestrator.stopThread(threadId, 'settled').catch((error: unknown) => {
-          console.warn('settling a thread could not stop its work', { threadId, error: error instanceof Error ? error.message : String(error) })
-        })
-      }
+      // Settling a thread (the sidebar's archive) is a Stop: what it still runs ends with it (`settleThread`, which a
+      // bot's `thread_archive` uses too).
+      const thread = await ctx.mms.orchestrator.settleThread(threadId, settled)
       const { threads, version } = ctx.mms.threads.listAllThreadsVersioned()
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: listedThreadsFor(ctx, threads), version }

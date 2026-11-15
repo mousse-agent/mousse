@@ -23,7 +23,7 @@ export interface AskText {
 export const THREADS_TEXT: AskText = {
   title: 'use your threads',
   note: 'Threads it starts run with full access on this computer.',
-  tip: 'It can read your threads, start new ones and message or stop them, only when you ask it in its chat. A thread it starts runs commands and changes files without asking; a message it sends runs in that thread\'s own mode. It never answers an approval or a question.'
+  tip: 'It can read your threads, start new ones, message or stop them, and archive or unarchive them, only when you ask it in its chat. A thread it starts runs commands and changes files without asking; a message it sends runs in that thread\'s own mode. It never answers an approval or a question.'
 }
 
 /** Tools by name, as a card says them after "wants to". */
