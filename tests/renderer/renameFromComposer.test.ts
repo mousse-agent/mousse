@@ -36,8 +36,10 @@ beforeEach(async () => {
   useAppStore.setState({
     projects: [{ id: 'p1', name: 'Mousse', path: '/p/mousse', createdAt: at, order: 0 }],
     threads: [thread('a', 'Fix tests', 'p1'), thread('b', 'Ship docs', 'p1')],
-    activeThreadId: null,
-    threadsSidebarView: 'threads',
+    // The Projects tree keeps a waiting thread's own row beside its copy in "Needs me"; the open thread's
+    // project is open.
+    activeThreadId: 'a',
+    threadsSidebarView: 'projects',
     threadFeedOrder: [],
     threadActivity: { b: 'awaiting_input' }
   })

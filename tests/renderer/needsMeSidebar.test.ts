@@ -83,6 +83,12 @@ describe('the Needs me group', () => {
     expect(html.indexOf('threads-sidebar-needs-me')).toBeLessThan(html.indexOf('threads-sidebar-thread-feed"'))
   })
 
+  it('holds a waiting thread in the Threads view, which leaves it out of the list below', () => {
+    setStore({ projects, threads, threadActivity: waiting, threadsSidebarView: 'threads' })
+    const html = sidebar()
+    expect(titlesIn(html.replace(needsMeSection(html), ''))).toEqual(['Refactor'])
+  })
+
   it('is hidden when nothing waits', () => {
     setStore({ projects, threads, threadActivity: { c: 'processing' }, threadsSidebarView: 'projects' })
     expect(sidebar()).not.toContain('threads-sidebar-needs-me')
@@ -91,6 +97,8 @@ describe('the Needs me group', () => {
   it('is hidden when there is only one thread', () => {
     setStore({ projects, threads: [threads[0]], threadActivity: { a: 'awaiting_input' }, threadsSidebarView: 'threads' })
     expect(sidebar()).not.toContain('threads-sidebar-needs-me')
+    // Its own row stays in the list.
+    expect(titlesIn(sidebar())).toEqual(['Fix tests'])
   })
 
   it('does not let its rows be dragged', () => {
