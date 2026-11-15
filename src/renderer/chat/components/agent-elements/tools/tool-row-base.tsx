@@ -33,8 +33,11 @@ function useThrottledText(text: string, ms: number): string {
   return shown;
 }
 
-/** Seconds per sweep of a running row's label shimmer. */
-export const SHIMMER_DURATION_S = 1.2;
+/**
+ * Seconds per sweep of a running row's label shimmer: one pulse of its icon (`an-tool-icon-pulse`, tool-icon.css), so
+ * the band crosses the label as the icon dims after each peak. Both start as the row starts running.
+ */
+export const SHIMMER_DURATION_S = 1.6;
 
 export type ToolRowBaseProps = {
   icon?: ReactNode;

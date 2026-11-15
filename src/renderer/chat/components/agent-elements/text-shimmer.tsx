@@ -22,7 +22,8 @@ function TextShimmerComponent({
     "--an-shimmer-duration": `${duration}s`,
     "--an-shimmer-spread": `${spread}px`,
     animationDelay: delay > 0 ? `${delay}s` : undefined,
-    animationDuration: `${duration}s`,
+    // Scaled by Settings > Animation speed, as the pulses beside it are.
+    animationDuration: `calc(${duration}s * var(--ui-motion-scale, 1))`,
     animationIterationCount: "infinite",
     // About 15 updates a second, not every frame: each update redraws the whole window (agent-ui.css).
     animationTimingFunction: `steps(${Math.max(1, Math.round(duration * 15))})`,
