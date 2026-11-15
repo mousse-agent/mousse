@@ -445,8 +445,10 @@ export function openAutomationRuns(jobId: string): void {
 
 /** Whether the workspace shows the open run's thread beside the list (the App lays itself out by it). */
 export function useInboxShowsThread(): boolean {
-  return useInboxStore((state) => {
-    if (state.pane !== 'run' || !state.openRunId) return false
-    return Boolean(state.inbox?.runs.find((run) => run.id === state.openRunId)?.threadId)
-  })
+  return useInboxStore(inboxShowsThread)
+}
+
+export function inboxShowsThread(state: Pick<InboxState, 'pane' | 'openRunId' | 'inbox'>): boolean {
+  if (state.pane !== 'run' || !state.openRunId) return false
+  return Boolean(state.inbox?.runs.find((run) => run.id === state.openRunId)?.threadId)
 }
