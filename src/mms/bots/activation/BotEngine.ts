@@ -6299,6 +6299,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * is repaired by the next one. A failure pauses the activation with `reconcile_failed`.
    */
   async reconcileOnStartup(): Promise<void> {
+    this.loadPendingScheduleRemovals()
     // Cleanup is best effort: admission enforces the saved intent even while jobs.json cannot be written.
     this.retryCompletedScheduleRemovals()
     try {
@@ -8329,22 +8330,44 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
   }
 
-  private retryCompletedScheduleRemovals(): void {
+  private readonly pendingScheduleRemovals = new Map<string, string>()
+  private readonly warnedScheduleRemovals = new Set<string>()
+
+  private loadPendingScheduleRemovals(): void {
+    this.pendingScheduleRemovals.clear()
     for (const { id } of this.store.all(`SELECT id FROM bot_activations
       WHERE json_extract(trigger_json, '$.completed') IS NOT NULL
       AND json_extract(trigger_json, '$.completed.removed') IS NOT 1`)) {
       const row = this.store.activation(id as string)
-      if (row) this.removeCompletedSchedule(row)
+      if (row?.trigger.kind === 'schedule') this.pendingScheduleRemovals.set(this.scheduleKey(row.botId, row.trigger.scheduleId), row.id)
     }
   }
 
+  private retryCompletedScheduleRemovals(): void {
+    for (const [key, id] of this.pendingScheduleRemovals) {
+      const row = this.store.activation(id)
+      if (row?.trigger.kind === 'schedule' && row.trigger.completed && !row.trigger.completed.removed) this.removeCompletedSchedule(row)
+      else this.pendingScheduleRemovals.delete(key)
+    }
+  }
+
+  private markCompletedScheduleRemoved(row: BotActivationRow): void {
+    if (row.trigger.kind !== 'schedule') return
+    this.store.run("UPDATE bot_activations SET trigger_json = json_set(trigger_json, '$.completed.removed', json('true')) WHERE id = ?", row.id)
+    this.pendingScheduleRemovals.delete(this.scheduleKey(row.botId, row.trigger.scheduleId))
+  }
+
   private removeCompletedSchedule(row: BotActivationRow): void {
-    if (row.trigger.kind !== 'schedule' || !row.trigger.completed || row.trigger.completed.removed) return
+    if (row.trigger.kind !== 'schedule' || !row.trigger.completed || row.trigger.completed.removed || !this.host.schedules) return
     try {
-      this.host.schedules?.remove(row.botId, row.trigger.scheduleId)
-      this.store.run("UPDATE bot_activations SET trigger_json = json_set(trigger_json, '$.completed.removed', json('true')) WHERE id = ?", row.id)
+      this.host.schedules.remove(row.botId, row.trigger.scheduleId)
+      this.markCompletedScheduleRemoved(row)
     } catch (error) {
-      console.warn('a completed bot schedule could not be removed', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
+      const key = this.scheduleKey(row.botId, row.trigger.scheduleId)
+      if (!this.warnedScheduleRemovals.has(key)) {
+        this.warnedScheduleRemovals.add(key)
+        console.warn('a completed bot schedule could not be removed', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
+      }
     }
   }
 
@@ -8364,14 +8387,19 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!why.trim() || why.length > 200) throw new BotEngineError('invalid_params', 'why needs 1 to 200 characters.')
     const trigger = row.trigger
     if (trigger.completed) {
-      this.removeSchedule(row.botId, trigger.scheduleId)
+      if (!trigger.completed.removed) {
+        this.removeSchedule(row.botId, trigger.scheduleId)
+        this.markCompletedScheduleRemoved(row)
+      }
       return
     }
     const schedule = this.host.schedules?.get(row.botId, trigger.scheduleId)
     if (!schedule) return
     // Persist the intent before removing the shared job: retry after a crash can finish its removal.
     this.store.run('UPDATE bot_activations SET trigger_json = ? WHERE id = ?', JSON.stringify({ ...trigger, completed: { why, name: schedule.name, tellMe: schedule.tellMe } }), row.id)
+    this.pendingScheduleRemovals.set(this.scheduleKey(row.botId, trigger.scheduleId), row.id)
     this.removeSchedule(row.botId, trigger.scheduleId)
+    this.markCompletedScheduleRemoved(row)
   }
 
   private postScheduleCompleted(row: BotActivationRow): void {
