@@ -875,6 +875,23 @@ describe('the composer', () => {
     await click(button('Resume', transcript()))
     expect(fake.calls).toContainEqual(['resume', 'inbox'])
   })
+
+  it('offers Resume on the newest usage-limit line only while paused; once the bot runs again every such line settles', async () => {
+    const limit = (seq: number, id: string, text: string) => message(seq, { id, kind: 'error', text: '', error: { text, action: { kind: 'resume', label: 'Resume' } } })
+    fake.chats.inbox = [limit(1, 'l1', 'Paused until 03:27 (your Claude usage limit)'), message(2, { id: 'o2', author: 'owner', text: 'hi' }), limit(3, 'l3', 'Paused until 03:28 (your Claude usage limit)')]
+    await open({ ...inbox, state: 'paused', stateText: 'Paused until 03:28' })
+    const line = (id: string) => transcript().querySelector(`[data-message-id="${id}"] .bot-error`)!
+    expect(button('Resume', line('l1'))).toBeUndefined()
+    expect(line('l1').classList.contains('is-settled')).toBe(true)
+    expect(line('l3').classList.contains('is-settled')).toBe(false)
+    await click(button('Resume', line('l3')))
+    expect(fake.calls).toContainEqual(['resume', 'inbox'])
+    // The bot is no longer paused: no line offers a Resume that would do nothing.
+    await settle()
+    expect(transcript().querySelectorAll('.bot-error button')).toHaveLength(0)
+    expect(line('l3').classList.contains('is-settled')).toBe(true)
+    expect(line('l3').textContent).toBe('Paused until 03:28 (your Claude usage limit)')
+  })
 })
 
 describe('the menu', () => {

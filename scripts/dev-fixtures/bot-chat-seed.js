@@ -13,6 +13,8 @@
  *   await botSeed.show('oneTask')                   // one piece of work, using the browser
  *   await botSeed.show('taskPlusOne')               // one running, one queued
  *   await botSeed.show('paused')
+ *   await botSeed.show('limitPaused')               // two usage-limit lines while the limit holds
+ *   await botSeed.show('limitOver')                 // the same lines after the bot runs again
  *   botSeed.scrollTo('report')                      // brings a message to the top: see botSeed.ids
  *
  * The bot's memory (About's Memory row, the Memory dialog) answers from `memory` below; Forget and Edit change it until
@@ -39,7 +41,7 @@
     morning: 'seed-morning-1', drawAsk: 'seed-draw-ask', screenshot: 'seed-screenshot', compareAsk: 'seed-compare-ask',
     markdown: 'seed-markdown', commandAsk: 'seed-command-ask', handoff: 'seed-handoff', note: 'seed-note',
     noteReply: 'seed-note-reply', report: 'seed-report', browserAsk: 'seed-browser-ask', again: 'seed-again',
-    pictureAsk: 'seed-picture-ask', picture: 'seed-picture', pictures: 'seed-pictures'
+    pictureAsk: 'seed-picture-ask', picture: 'seed-picture', pictures: 'seed-pictures', limit: 'seed-limit-2'
   }
 
   function conversation(scenario) {
@@ -130,6 +132,13 @@
       })
     ]
     if (scenario === 'typing') rows.push(owner(ids.again, ago(0.2), 'again'))
+    // A usage limit ended two chat turns; in `limitOver` the bot has since answered again.
+    if (scenario === 'limitPaused' || scenario === 'limitOver') {
+      const limit = (id, at, text) => ({ seq: ++seq, id, at, author: 'bot', kind: 'error', text: '', chips: [], error: { text, action: { kind: 'resume', label: 'Resume' } } })
+      rows.push(owner('seed-limit-ask', ago(100), 'drop that path then'), limit('seed-limit-1', ago(99), 'Paused until 03:27 (your Claude usage limit)'),
+        owner('seed-limit-hi', ago(98), 'hi'), limit(ids.limit, ago(98), 'Paused until 03:28 (your Claude usage limit)'))
+      if (scenario === 'limitOver') rows.push(owner('seed-limit-yo', ago(2), 'yo'), bot('seed-limit-back', ago(1), "Hey. I'm back, and I've answered your last message."))
+    }
     return rows
   }
 
@@ -142,6 +151,7 @@
       case 'oneTask': return { ...base, state: 'working', stateText: 'Working on SSD search', work: [running('seed-act-work-1', 'SSD search', 4)] }
       case 'taskPlusOne': return { ...base, state: 'working', stateText: 'Working on 2 things', work: [running('seed-act-work-1', 'SSD search', 4), { id: 'seed-act-work-2', title: 'Find biggest folders', status: 'queued', startedAt: ago(1) }] }
       case 'paused': return { ...base, state: 'paused', stateText: 'Paused until 14:00' }
+      case 'limitPaused': return { ...base, state: 'paused', stateText: 'Paused until 03:28' }
       default: return base
     }
   }

@@ -99,6 +99,62 @@ describe('usage limits', () => {
     expect(chatOf(f, botId).at(-1)).toMatchObject({ author: 'bot', kind: 'text', text: 'Not yet.' })
     expect(f.store.registry(botId)).toMatchObject({ failureStreak: 0, pausedReason: null })
   })
+
+  /** The owner's chat message, its turn ended by every candidate's limit. */
+  async function chatLimited(until: string, text = 'Anything new?', id = 'm1') {
+    await f.bots.service.chatSend({ botId, text, clientRequestId: id })
+    const turn = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    for (const n of [1, 2]) await runDispatch(f, turn.id, n, limited(until))
+    await flush()
+    expect(f.store.activation(turn.id)).toMatchObject({ status: 'failed', endReason: 'usage_limit' })
+    return turn
+  }
+
+  it('Resume answers the owner\'s message a usage limit left unanswered', async () => {
+    const until = new Date(f.clock.now + 2 * HOUR).toISOString()
+    const failed = await chatLimited(until)
+    f.limited.clear()
+    await f.bots.service.resume(botId)
+    const retry = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    expect(retry.id).not.toBe(failed.id)
+    expect(retry.trigger).toMatchObject({ kind: 'manual', input: 'Anything new?' })
+    // The message belongs to the turn that answers it, so its pack never shows it twice.
+    expect(chatOf(f, botId).find((message) => message.author === 'owner')).toMatchObject({ text: 'Anything new?', activationId: retry.id })
+    await runDispatch(f, retry.id, 1, { text: 'Not yet.' })
+    expect(chatOf(f, botId).at(-1)).toMatchObject({ author: 'bot', kind: 'text', text: 'Not yet.' })
+    expect(f.bots.service.get(botId).summary.state).not.toBe('paused')
+    // A second Resume has nothing left to answer.
+    await f.bots.service.resume(botId)
+    expect(f.store.laneActivations(botId, 'chat', ['queued', 'running'])).toEqual([])
+  })
+
+  it('Resume while the limit still holds says so again, with a new line', async () => {
+    const until = new Date(f.clock.now + 2 * HOUR).toISOString()
+    const failed = await chatLimited(until)
+    // Every candidate is still marked limited: the new turn meets the limit before any call.
+    await f.bots.service.resume(botId)
+    await flush()
+    const retry = f.store.newestActivation(botId, 'chat')!
+    expect(retry.id).not.toBe(failed.id)
+    expect(retry).toMatchObject({ status: 'failed', endReason: 'usage_limit' })
+    const errors = chatOf(f, botId).filter((message) => message.kind === 'error')
+    expect(errors).toHaveLength(2)
+    expect(errors[1]).toMatchObject({ activationId: retry.id, error: { text: `Paused until ${hhmm(until)} (your Claude usage limit)`, action: { kind: 'resume' } } })
+    expect(f.bots.service.get(botId).summary.state).toBe('paused')
+  })
+
+  it('Resume starts nothing when the newest chat turn was not stopped by a limit', async () => {
+    const until = new Date(f.clock.now + 2 * HOUR).toISOString()
+    await chatLimited(until)
+    f.limited.clear()
+    // The owner wrote again after the reset and was answered: the older message is not answered twice.
+    f.store.setPaused(botId, null)
+    await f.bots.service.chatSend({ botId, text: 'hi', clientRequestId: 'm2' })
+    const turn = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    await runDispatch(f, turn.id, 1, { text: 'Hello.' })
+    await f.bots.service.resume(botId)
+    expect(f.store.laneActivations(botId, 'chat', ['queued', 'running'])).toEqual([])
+  })
 })
 
 describe('work a usage limit stopped', () => {
