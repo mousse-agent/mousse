@@ -4471,12 +4471,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // continuation, so its request and the durable draft contain those words too.
       if (hold && text === undefined && options.expectText) {
         const key = `${row.id}:${main.n}`
+        const replyTo = this.answeredOwnerMessageOf(row.id)
         if (!this.pendingReplies.has(key)) {
           const timer = (this.host.setTimer ?? defaultTimer)(() => this.pendingReplies.get(key)?.post(undefined), REPLY_WAIT_MS)
           this.pendingReplies.set(key, { timer, post: (late) => {
             this.pendingReplies.get(key)?.timer.clear()
             this.pendingReplies.delete(key)
-            void this.advance(row.id, late ?? '', { expectText: false })
+            const current = this.store.activation(row.id) ?? row
+            if (ENDED_ACTIVATION_STATUSES.has(current.status)) this.postReply(current, main, late ?? '', false, replyTo)
+            else void this.advance(row.id, late ?? '', { expectText: false })
           } })
         }
         return
