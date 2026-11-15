@@ -1,5 +1,6 @@
 import { streamingAppletPresentation } from '../../components/applets/streamPresentation'
 import type { ChatMessage, TurnEnd } from '../../../shared/types'
+import { agentMessageWords } from '../../../shared/agentMessageWords'
 import type { UIMessage } from 'ai'
 import { isToolTimelineMessage, RESTART_INTERRUPTED_TEXT, TURN_STOPPED_TEXT } from '../../../shared/types'
 import {
@@ -572,7 +573,10 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
     // browser blocks) that the model needs but the transcript must not show
     // raw — images already render as previews via msg.images, other files
     // become file pills below.
-    const text = msg.content ?? ''
+    // A message another thread's agent sent shows that agent's words, without the header and closing line Mousse wrote
+    // around them for the model; which agent is said by the bubble's header, from the stored origin.
+    const agentOrigin = msg.role === 'user' && msg.origin?.kind === 'agent' ? msg.origin : undefined
+    const text = agentOrigin ? agentMessageWords(msg.content ?? '', agentOrigin) : msg.content ?? ''
     let displayText = msg.role === 'assistant' ? assistantDisplayText(text) : text
     let extraFiles: ReturnType<typeof parseUserMessageContent>['attachedFiles'] = []
     let references: ReturnType<typeof parseUserMessageContent>['references'] = []
@@ -594,6 +598,7 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
     // The turn a person on another of the user's computers sent says so (the sender is kept on the run, not on the message).
     const sender = msg.role === 'user' && msg.turnId && !msg.steered ? senders?.[msg.turnId] : undefined
     if (sender) base.metadata = { ...(base.metadata as object | undefined), sentFrom: { name: sender.name } }
+    if (agentOrigin) base.metadata = { ...(base.metadata as object | undefined), origin: agentOrigin }
     const subagentNotice = msg.role === 'user' && msg.subagentNotice?.length ? msg.subagentNotice : undefined
     if (subagentNotice) base.metadata = { ...(base.metadata as object | undefined), subagentNotice }
     // The same for the message a turn the provider started itself opens with: the background tasks it reports.

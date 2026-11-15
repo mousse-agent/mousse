@@ -1,3 +1,4 @@
+import { agentMessageWords } from '../../shared/agentMessageWords'
 import type { ChatImageAttachment, QueuedMessage } from '../../shared/types'
 
 /**
@@ -47,6 +48,15 @@ export const isOptimisticQueueItem = (item: QueuedMessage): boolean => item.id.s
  */
 export function nextSteerableQueueItem(items: readonly QueuedMessage[], busyIds: Readonly<Record<string, boolean>>): QueuedMessage | undefined {
   return items.find((item) => !isOptimisticQueueItem(item) && item.state === 'pending' && item.intent !== 'steer' && !busyIds[item.id])
+}
+
+/**
+ * The part of a queued message an edit works on: for a message another thread's agent queued, that agent's words
+ * without the header and closing line Mousse wrote around them (`AgentOrigin.body`); the whole content otherwise.
+ * A person who edits it makes the words their own, so the saved text carries no header.
+ */
+export function queuedWords(content: string, origin: QueuedMessage['origin']): string {
+  return agentMessageWords(content, origin)
 }
 
 /** A queued message's content split into the text a person typed and the composer markers after it. */

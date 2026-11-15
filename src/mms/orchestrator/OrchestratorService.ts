@@ -84,7 +84,7 @@ import { delegationRequestKey, followUpRequestKey, narrowCeiling } from '../run/
 import { CommandRejection, RunStoreError } from '../run/db/RunStoreError'
 import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
 import { steerReleaseWindow, stopStrategy, type SteerDelivery } from '../run/CommandPolicy'
-import { agentMessageText, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentArchiveResult, type AgentCreatedThread, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
+import { agentMessage, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentArchiveResult, type AgentCreatedThread, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
 import { botRequestPrefix, THREAD_CREATE_MAX_ACTIVE_PER_THREAD } from '../run/mcp/appTools/thread'
 import { botMessageText } from '../run/mcp/appTools/agentMessage'
@@ -205,6 +205,7 @@ import {
   isTurnActivePhase
 } from '../../shared/types'
 import { isDefaultThreadName } from '../../shared/threadTitle'
+import { agentMessageWords } from '../../shared/agentMessageWords'
 import { buildTitlePrompt, cleanTitleText, fitTitle, heuristicTitle, normalizeTitle, TITLE_SYSTEM_PROMPT, titleContextOf, type TitleContext } from '../../shared/threadTitleText'
 import {
   buildPermissionModeChangeNotice,
@@ -630,7 +631,7 @@ export interface OrchestratorSendOptions {
    * written with it, the stored message and a queued item say it came from that agent, and its text is
    * never read for `/skill` mentions.
    */
-  agent?: AgentActor
+  agent?: AgentSender
   /**
    * A follow-up a parent thread on another computer sends to a subagent here: a thread paused by a usage limit
    * refuses it (`thread_paused`), as it refuses a follow-up from a parent on the same computer.
@@ -757,10 +758,26 @@ export const AGENT_MESSAGE_MAX_HOPS = 3
 /** Messages from other threads' agents a thread may have waiting in its queue; the next one is refused. */
 export const AGENT_QUEUE_MAX_PER_THREAD = 3
 
-/** The origin an agent's message is stored with: who sent it, and how many agent hops led to it. */
-function agentOriginOf(agent: Pick<AgentOrigin, 'threadId' | 'runId' | 'hops'>): AgentOrigin {
-  return { kind: 'agent', threadId: agent.threadId, runId: agent.runId, ...(agent.hops !== undefined ? { hops: agent.hops } : {}) }
+/**
+ * The agent behind a message, with where its words sit in the text the thread stores and its title then
+ * (`AgentOrigin.body`, `title`), once the labelled text is built (`agentLetter`).
+ */
+type AgentSender = AgentActor & Pick<AgentOrigin, 'body' | 'title'>
+
+/** The origin an agent's message is stored with: who sent it, how many agent hops led to it, and where its own words are. */
+function agentOriginOf(agent: Pick<AgentOrigin, 'threadId' | 'runId' | 'hops' | 'body' | 'title'>): AgentOrigin {
+  return {
+    kind: 'agent',
+    threadId: agent.threadId,
+    runId: agent.runId,
+    ...(agent.hops !== undefined ? { hops: agent.hops } : {}),
+    ...(agent.body ? { body: { head: agent.body.head, tail: agent.body.tail } } : {}),
+    ...(agent.title ? { title: agent.title } : {})
+  }
 }
+
+/** The longest sender title an agent's message keeps (`AgentOrigin.title`). */
+const AGENT_TITLE_MAX_CHARS = 200
 
 /** The longest removed message an `agent.action` event keeps whole. */
 const REMOVED_TEXT_MAX_CHARS = 8_000
@@ -3558,7 +3575,7 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /** Steer a specific run. Only the thread's active run receives the text; anything else is ignored. */
-  async steerRun(runId: string, text: string, clientRequestId: string, threadId?: string, actor?: AgentActor, ceiling?: PermissionMode, deviceLimit?: PermissionMode, sentFrom?: { node: string }): Promise<CommandResult> {
+  async steerRun(runId: string, text: string, clientRequestId: string, threadId?: string, actor?: AgentSender, ceiling?: PermissionMode, deviceLimit?: PermissionMode, sentFrom?: { node: string }): Promise<CommandResult> {
     const engine = this.requireRunEngine()
     const target = threadId ?? engine.getRun(runId)?.threadId
     if (!target) return { status: 'ignored', reason: 'run_not_found', runId, sequence: 0 }
@@ -4096,19 +4113,21 @@ export class OrchestratorService extends EventEmitter {
     if (turnBot?.limit && isStricter(turnBot.limit, this.storedPermissionMode(threadId)))
       throw new DomainRpcError('device_limit', `The thread runs in ${describePermissionMode(this.storedPermissionMode(threadId))}, more than the device your owner wrote from may run (${describePermissionMode(turnBot.limit)}).`)
     const sender = this.withAgentHops(options.actor)
+    const letter = bot ? undefined : this.agentLetter(sender, input.content)
     this.assertQueueOpen(threadId)
     if (turnBot) this.assertBotRequestKey('thread_send', options.clientRequestId, options.actor, turnBot)
     // A thread a person keeps in Plan takes the message as a plan turn, whatever mode the sender asked for.
     const mode: 'agent' | 'plan' = this.lastChatModeOf(threadId) === 'plan' ? 'plan' : input.mode
     const response = await this.send(
-      { content: bot ? botMessageText(bot.name, input.content) : agentMessageText(sender.threadId, this.titleOf(sender.threadId), input.content), mode },
+      { content: letter ? letter.content : botMessageText(bot!.name, input.content), mode },
       false,
       {
         threadId,
         source: 'mcp',
         clientRequestId: options.clientRequestId,
         awaitMode: 'ack',
-        agent: sender,
+        // A bot's message keeps its look until it stores a sender of its own: no words or title are kept for it.
+        agent: letter ? letter.sender : sender,
         // An agent's message runs no wider than the agent's own run. The owner's bot's runs in the thread's own mode, as
         // the owner's own message would: the owner allowed it to message their threads.
         ...(bot ? {} : { permissionMode: this.runPermissionMode(sender.runId) }),
@@ -4147,6 +4166,18 @@ export class OrchestratorService extends EventEmitter {
     if (hops > AGENT_MESSAGE_MAX_HOPS)
       throw new DomainRpcError('agent_hops_exceeded', `This message would be agent message number ${hops} in a row without a person in between; the limit is ${AGENT_MESSAGE_MAX_HOPS}. Wait for a person to reply before going on.`)
     return { ...actor, hops }
+  }
+
+  /**
+   * An agent's words as the thread stores them: labelled with the sender (`agentMessage`) unless `labelled` is false (an
+   * agent's note on its own thread), and the sender with where the words sit in that text and its title now, for the
+   * origin the message is stored with.
+   */
+  private agentLetter(sender: AgentActor, content: string, labelled = true): { content: string; sender: AgentSender } {
+    const name = this.titleOf(sender.threadId)
+    const title = name?.trim().slice(0, AGENT_TITLE_MAX_CHARS)
+    const envelope = labelled ? agentMessage(sender.threadId, name, content) : { text: content, head: 0, tail: 0 }
+    return { content: envelope.text, sender: { ...sender, body: { head: envelope.head, tail: envelope.tail }, ...(title ? { title } : {}) } }
   }
 
   /**
@@ -4576,7 +4607,8 @@ export class OrchestratorService extends EventEmitter {
     // steer, against the binding it reads there: a run that has not bound its turn yet is refused, and the
     // sender's mode travels with the steer wherever it ends up (SPEC §15.1).
     const callerMode = this.runPermissionMode(sender.runId)
-    const result = await this.steerRun(runId, agentMessageText(sender.threadId, this.titleOf(sender.threadId), text), options.clientRequestId, threadId, sender, callerMode)
+    const letter = this.agentLetter(sender, text)
+    const result = await this.steerRun(runId, letter.content, options.clientRequestId, threadId, letter.sender, callerMode)
     if (result.status === 'rejected' && result.reason === 'ceiling_exceeded') return { status: 'ceiling_exceeded', callerMode, targetMode: this.runPermissionMode(runId) }
     return this.agentRunCommandResult(engine, threadId, runId, result)
   }
@@ -6376,7 +6408,9 @@ export class OrchestratorService extends EventEmitter {
 
   /** What a thread's worktree branch is named from: its first message, else its name. */
   private branchNameSource(threadId: string, messages?: readonly ChatMessage[], pending?: string): string | undefined {
-    const first = (messages ?? this.sessions.get(threadId)?.messages ?? []).find((message) => message.role === 'user' && !message.inherited && message.content.trim())?.content ?? pending
+    // An agent's message is named from its words, never from the header Mousse wrote around them.
+    const stored = (messages ?? this.sessions.get(threadId)?.messages ?? []).find((message) => message.role === 'user' && !message.inherited && agentMessageWords(message.content, message.origin).trim())
+    const first = stored ? agentMessageWords(stored.content, stored.origin) : pending
     // A subagent's first message is its guidance, then its task: the branch is named from the task.
     const text = first ? withoutSubagentPreamble(first).trim() : ''
     return text || this.threadStore?.getThread(threadId)?.name
@@ -9246,9 +9280,9 @@ export class OrchestratorService extends EventEmitter {
           // Stop and runs as an agent's run (so an agent at its hop limit cannot start a fresh chain through its own queue).
           // On another thread the text is labelled too; on its own an agent reads its own note as written.
           if (agentItems(items) >= AGENT_QUEUE_MAX_PER_THREAD) full()
-          const sender = this.withAgentHops(actor)
-          const content = cross ? agentMessageText(sender.threadId, this.titleOf(sender.threadId), command.content) : command.content
-          const origin = agentOriginOf(sender)
+          const letter = this.agentLetter(this.withAgentHops(actor), command.content, cross)
+          const content = letter.content
+          const origin = agentOriginOf(letter.sender)
           const permissionMode: PermissionMode = callerMode
           // A thread a person keeps in Plan takes another agent's message as a plan turn, whatever mode it asked for.
           const mode: 'agent' | 'plan' = cross && this.lastChatModeOf(threadId) === 'plan' ? 'plan' : command.mode
@@ -9277,9 +9311,9 @@ export class OrchestratorService extends EventEmitter {
             // The words are the agent's from here on, with this run's hop count: stored as its own, run under the stricter mode.
             // Another writer's message, or any message on another thread, is labelled; an agent's own note on its own thread is not.
             if (item.origin?.kind !== 'agent' && agentItems(items) >= AGENT_QUEUE_MAX_PER_THREAD) full()
-            const sender = this.withAgentHops(actor)
-            patch.content = cross || !authored ? agentMessageText(sender.threadId, this.titleOf(sender.threadId), command.content) : command.content
-            patch.origin = agentOriginOf(sender)
+            const letter = this.agentLetter(this.withAgentHops(actor), command.content, cross || !authored)
+            patch.content = letter.content
+            patch.origin = agentOriginOf(letter.sender)
             patch.permissionMode = strictestMode(item.permissionMode, callerMode)
             // Its queued run was made for the earlier writer: it gets a fresh one, with this sender's count, when it drains.
             patch.dropRun = true
@@ -11810,9 +11844,10 @@ export class OrchestratorService extends EventEmitter {
         const threadDir = this.resolveThreadDir(session.threadId)
         if (projectPath && threadDir) {
           await this.seedForkWorkspace(session.threadId, projectPath, threadDir, setupSignal, session.executionLease)
-          await this.seedSubagentWorkspace(session.threadId, projectPath, threadDir, setupSignal, session.executionLease, this.branchNameSource(session.threadId, session.messages, request.content))
+          const pending = opts?.agent ? agentMessageWords(request.content, agentOriginOf(opts.agent)) : request.content
+          await this.seedSubagentWorkspace(session.threadId, projectPath, threadDir, setupSignal, session.executionLease, this.branchNameSource(session.threadId, session.messages, pending))
           session.workspace = await new WorkspaceResolver(threadDir, session.threadId, projectPath, this.placementOf(session.threadId), this.restoreNotifier(session.threadId))
-            .resolve(request.mode, 'main', setupSignal, session.executionLease ?? undefined, this.branchNameSource(session.threadId, session.messages, request.content))
+            .resolve(request.mode, 'main', setupSignal, session.executionLease ?? undefined, this.branchNameSource(session.threadId, session.messages, pending))
           session.projectCwd = session.workspace.projectPath
         } else {
           session.workspace = null
@@ -11922,7 +11957,8 @@ export class OrchestratorService extends EventEmitter {
     }
 
     if (!reuseLastUser && displayUserMessage) {
-      this.nameThreadOnFirstSend(session.threadId, userContent, images?.length ?? 0)
+      // An agent's message names the thread from its words, never from the header Mousse wrote around them.
+      this.nameThreadOnFirstSend(session.threadId, opts?.agent ? agentMessageWords(userContent, agentOriginOf(opts.agent)) : userContent, images?.length ?? 0)
     }
 
     // The mode the turn runs in is known before its message is admitted, so a change reaches the

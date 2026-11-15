@@ -1,5 +1,6 @@
 import { repositoryIdentitiesFor } from '../bridge/remote/repositoryIdentity'
 import { requestWorkScope } from '../execution/workScope'
+import { agentMessageWords } from '../../shared/agentMessageWords'
 import { expiryRefusal, isThreadExpired } from '../../shared/threadExpiry'
 import { MAX_GOAL_TEXT } from '../../shared/threadGoal'
 import { assertWorktreeFolderConnected, chosenFolderHolding, WorktreeFolderRefused } from '../worktree/worktreeLayout'
@@ -1087,8 +1088,9 @@ async function asDomainError<T>(run: () => Promise<T>): Promise<T> {
 
 /** What a thread's worktree branch is named from when one is made here: its first message, else its name. */
 function branchNameSource(ctx: HandlerContext, threadId: string): string | undefined {
-  const first = ctx.mms.orchestrator.getMessages(threadId).find((message) => message.role === 'user' && message.content.trim())
-  return first?.content ?? ctx.mms.threads.getThread(threadId)?.name
+  // An agent's message is named from its words, never from the header Mousse wrote around them.
+  const first = ctx.mms.orchestrator.getMessages(threadId).map((message) => message.role === 'user' ? agentMessageWords(message.content, message.origin) : '').find((words) => words.trim())
+  return first ?? ctx.mms.threads.getThread(threadId)?.name
 }
 
 /**

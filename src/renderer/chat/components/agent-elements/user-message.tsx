@@ -9,10 +9,15 @@ import { useImageGallery } from "./image-gallery";
 import { userMessageImages, userMessageImageTiles } from "./image-sources";
 import { ChatReferencePill } from "../../../components/ReferencePill";
 import { parseChatReference, type ChatReference } from "../../../../shared/chatReferences";
-import { openFileInPanel, routeLink } from "../../../utils/chatLinks";
+import { openFileInPanel, openLinkedThread, routeLink } from "../../../utils/chatLinks";
+import { threadLink } from "../../../../shared/threadLink";
 import { LinkLabel } from "./link-label-view";
 import { promptSegments } from "./prompt-links";
 import { WithSentQuotes } from "../../../components/QuotePill";
+import { Bot } from "../../../lib/icons";
+import { useAppStore } from "../../../stores/appStore";
+import { useBotsStore } from "../../../stores/botsStore";
+import type { AgentOrigin } from "../../../../shared/types";
 
 export type UserMessageProps = {
   message: UIMessage;
@@ -75,6 +80,66 @@ function getFileFromPart(part: unknown) {
 
 /** A long prompt shows this much (px) until "Show full message" is pressed. */
 export const PROMPT_FOLD_HEIGHT = 176;
+/** An agent's message folds sooner: it is read less closely than a prompt the person wrote. */
+export const AGENT_FOLD_HEIGHT = 110;
+
+/** The agent that sent this message, from the origin stored with it (never from its text); undefined for anyone else. */
+export function agentOriginOfMessage(message: UIMessage): AgentOrigin | undefined {
+  const origin = (message.metadata as { origin?: AgentOrigin } | undefined)?.origin;
+  return origin?.kind === "agent" && typeof origin.threadId === "string" ? origin : undefined;
+}
+
+/**
+ * Whether the message shows as an agent's: an agent's origin that is not a bot's. A bot's message stores its home thread as
+ * the sender and no words or title of its own; it keeps the look it has until it stores a sender of its own.
+ */
+export function useAgentSender(message: UIMessage): AgentOrigin | undefined {
+  const origin = agentOriginOfMessage(message);
+  const fromBot = useBotsStore((state) => Boolean(origin && isBotOrigin(origin, state.bots)));
+  return origin && !fromBot ? origin : undefined;
+}
+
+/** A bot's message: its home thread as the sender, with no words kept (`useAgentSender`). */
+export function isBotOrigin(origin: AgentOrigin, bots: ReadonlyArray<{ homeThreadId?: string }>): boolean {
+  return !origin.body && bots.some((bot) => bot.homeThreadId === origin.threadId);
+}
+
+/** `useAgentSender` outside a hook: read once, for a choice that need not follow the bot list. */
+export function agentSenderOf(message: UIMessage): AgentOrigin | undefined {
+  const origin = agentOriginOfMessage(message);
+  return origin && !isBotOrigin(origin, useBotsStore.getState().bots) ? origin : undefined;
+}
+
+/**
+ * The header inside an agent's bubble: the robot, "Agent", then the sending thread's title, which opens that thread. A
+ * sender that was deleted shows the title it had when it sent, with nothing to open.
+ */
+function AgentSenderHeader({ origin }: { origin: AgentOrigin }) {
+  const live = useAppStore((state) => state.threads.find((thread) => thread.id === origin.threadId)?.name);
+  const title = live || origin.title;
+  return (
+    <div className="chat-agent-sender" data-find-ignore>
+      <Bot size={13} strokeWidth={2} aria-hidden="true" />
+      <span className="chat-agent-sender-kind">Agent</span>
+      {title && <span aria-hidden="true">·</span>}
+      {title && (live ? (
+        <a
+          href={threadLink(origin.threadId)}
+          className="chat-agent-sender-link"
+          title={`Open ${title}`}
+          onClick={(event) => {
+            event.preventDefault();
+            openLinkedThread(origin.threadId);
+          }}
+        >
+          {title}
+        </a>
+      ) : (
+        <span className="chat-agent-sender-title">{title}</span>
+      ))}
+    </div>
+  );
+}
 
 /**
  * True when the element's text is at least twice the fold height, so folding it hides enough to matter.
@@ -85,21 +150,21 @@ export const PROMPT_FOLD_HEIGHT = 176;
  * such as Find's to the last turn. The observer reports every element once it is observed, before the
  * frame is painted, and the fold is applied in that same frame.
  */
-function useTallEnoughToFold(ref: RefObject<HTMLElement | null>, text: string): boolean {
+function useTallEnoughToFold(ref: RefObject<HTMLElement | null>, text: string, foldHeight = PROMPT_FOLD_HEIGHT): boolean {
   const [tall, setTall] = useState(false);
   const tallRef = useRef(false);
   useLayoutEffect(() => {
     const element = ref.current;
     if (!element || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(() => {
-      const next = element.scrollHeight >= PROMPT_FOLD_HEIGHT * 2;
+      const next = element.scrollHeight >= foldHeight * 2;
       if (next === tallRef.current) return;
       tallRef.current = next;
       flushSync(() => setTall(next));
     });
     observer.observe(element);
     return () => observer.disconnect();
-  }, [ref, text]);
+  }, [ref, text, foldHeight]);
   return tall;
 }
 
@@ -142,7 +207,8 @@ export const UserMessage = memo(function UserMessage({
   const textRef = useRef<HTMLParagraphElement>(null);
   const textParts = message.parts?.filter(isTextPart) ?? [];
   const text = textParts.map((p) => p.text).join("");
-  const foldable = useTallEnoughToFold(textRef, text);
+  const agent = useAgentSender(message);
+  const foldable = useTallEnoughToFold(textRef, text, agent ? AGENT_FOLD_HEIGHT : PROMPT_FOLD_HEIGHT);
   const folded = foldable && !expanded;
   // Find landing on a match in the folded part opens the prompt, so the match is not hidden under the fold.
   useEffect(() => {
@@ -177,7 +243,14 @@ export const UserMessage = memo(function UserMessage({
 
   return (
     <div className={cn("flex flex-col items-end gap-1", className)}>
-      <div data-mousse="user-message" className="chat-user-bubble max-w-[80%] p-3 rounded-an-message bg-an-user-message-bg text-an-user-message-text">
+      <div
+        data-mousse="user-message"
+        className={cn(
+          "chat-user-bubble max-w-[80%] p-3 rounded-an-message",
+          agent ? "is-agent" : "bg-an-user-message-bg text-an-user-message-text",
+        )}
+      >
+      {agent && <AgentSenderHeader origin={agent} />}
       {images.length > 0 && <div className="chat-user-image-carousel" role="region" aria-label="Attached images" tabIndex={0}>
         {images.map(({ url, name }, i) => {
           const label = name ?? `Image ${i + 1}`;

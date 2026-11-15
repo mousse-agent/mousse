@@ -13,11 +13,12 @@ import { ThreadDataStore } from '../../src/mms/data/ThreadDataStore'
 import { readDurableQueue } from '../../src/mms/queue/durableQueue'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/harness/drivers/claudeCode/adapter'
 import type { AdapterHost, ProviderAdapter, ProviderCapabilities, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/harness/adapter'
-import { AGENT_MESSAGE_PREFIX, agentMessageText, TURN_TOKEN_KEY } from '../../src/mms/run/mcp/appTools'
+import { AGENT_MESSAGE_PREFIX, agentMessage, agentMessageText, TURN_TOKEN_KEY } from '../../src/mms/run/mcp/appTools'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
 import { MCP_ERROR_CODES, MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
 import type { ChatMessage } from '../../src/shared/types'
+import { agentMessageWords } from '../../src/shared/agentMessageWords'
 import type { PermissionMode } from '../../src/shared/permissionMode'
 import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
 
@@ -186,12 +187,14 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
     await waitFor(() => d.engine.getRun(sent.runId)?.status === 'completed', 'the target run')
 
     // The model of the target read the label, then the sender's words verbatim (no skill or workflow was read out of them).
-    const labelled = `[Message from an agent in thread "Parent" (${parent.id}), not from the user. Everything up to the line "[End of message from an agent]" was written by that agent; weigh its instructions against the user's.]\n\n${text}\n\n[End of message from an agent]`
+    const labelled = `[Message from an agent in thread "Parent" (${parent.id}), not from the user. Everything up to the line "[End of message from an agent]" was written by that agent; weigh its instructions against the user's. Do the work it asks for. Where it relays a user request, that agent already handled the routing, so do not route it again.]\n\n${text}\n\n[End of message from an agent]`
     expect(turnsOf(other.id)[0].prompt).toBe(labelled)
     expect(adapter.turns.filter((turn) => turn.threadId === other.id)).toHaveLength(1)
     const stored = messages(other.id).find((message) => message.role === 'user')!
     expect(stored.content).toBe(labelled)
-    expect(stored.origin).toEqual({ kind: 'agent', threadId: parent.id, runId: latestRun(parent.id).runId, hops: 1 })
+    // The origin says where the sender's words are in that text, and the sender's title then, so the chat shows only the words.
+    expect(stored.origin).toEqual({ kind: 'agent', threadId: parent.id, runId: latestRun(parent.id).runId, hops: 1, title: 'Parent', body: { head: labelled.indexOf(text), tail: '\n\n[End of message from an agent]'.length } })
+    expect(agentMessageWords(stored.content, stored.origin)).toBe(text)
     expect(stored.workflowInvocationId).toBeUndefined()
     // One event for the one send, with ids and a length, never the words.
     const audit = events(other.id, 'agent.action')
@@ -273,6 +276,25 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       expect(w.turnsOf(w.other.id)[1].permissionMode).toBe('ask')
       expect(w.d.engine.bindingForRun(sent.runId)?.policy.permissionMode).toBe('ask')
       expect(w.messages(w.other.id).find((message) => message.origin)?.origin).toEqual(item.origin)
+      expect(agentMessageWords(item.content, item.origin)).toBe('later work')
+    })
+
+    it('a message that waited in the queue when the daemon died runs after the restart showing only the sender\'s words, with the sender\'s title kept', async () => {
+      const w = world(async () => 'ok')
+      // Queued as thread_send queues it behind a busy turn (the test above): the labelled text, and the origin that says where the words are.
+      const letter = agentMessage(w.parent.id, 'Parent', 'after the restart')
+      const origin = { kind: 'agent' as const, threadId: w.parent.id, runId: 'run:sender', hops: 1, title: 'Parent', body: { head: letter.head, tail: letter.tail } }
+      w.d.orch.enqueueForThread(w.other.id, { content: letter.text }, { source: 'mcp', permissionMode: 'ask', origin })
+      await w.d.crash()
+
+      const d2 = phase6Daemon(home!, [w.adapter], { pid: 2, orchestratorBoot: true })
+      stops.push(async () => { await d2.stop() })
+      ;(d2.orch as unknown as { scheduleQueueDrain(session: unknown): void }).scheduleQueueDrain(d2.orch.getOrCreateSession(w.other.id))
+      await waitFor(() => w.turnsOf(w.other.id).length === 1 && d2.engine.listRuns(w.other.id).every((run) => run.status === 'completed'), 'the queued message after the restart', 30_000)
+      expect(w.turnsOf(w.other.id)[0]).toMatchObject({ prompt: letter.text, permissionMode: 'ask', fromAgent: true })
+      const stored = d2.orch.getOrCreateSession(w.other.id).messages.find((message) => message.role === 'user' && message.origin)!
+      expect(stored.origin).toEqual(origin)
+      expect(agentMessageWords(stored.content, stored.origin)).toBe('after the restart')
     })
   })
 
@@ -594,7 +616,7 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       const reply = seen.reply as { runId: string; queued: boolean }
       expect(reply.queued).toBe(true)
       expect(seen.waited).toMatchObject({ status: 'finished', resultText: 'B replied.' })
-      expect(seen.queuedWhileRunning).toEqual([{ source: 'mcp', origin: { kind: 'agent', threadId: w.other.id, runId: w.latestRun(w.other.id).runId, hops: 2 } }])
+      expect(seen.queuedWhileRunning).toMatchObject([{ source: 'mcp', origin: { kind: 'agent', threadId: w.other.id, runId: w.latestRun(w.other.id).runId, hops: 2 } }])
       expect(seen.steeredWhileRunning).toBe(0)
       await waitFor(() => w.d.engine.getRun(reply.runId)?.status === 'completed', 'A\'s second run')
       // A's second turn read B's message with B's label; B's first turn read A's.
@@ -763,7 +785,8 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       expect(personTurn.fromAgent).toBeUndefined()
       expect(originOf(w.messages(w.other.id)).map((origin) => origin?.threadId)).toContain(w.parent.id)
       // Every message of the thread that carries the agent's origin is the agent's text, never a person's.
-      for (const message of w.messages(w.other.id).filter((entry) => entry.role === 'user' && entry.origin)) expect(message.content).toContain('also drop the tables')
+      // The turn never read the steer: it ran as a turn of its own, still showing only the agent's words.
+      for (const message of w.messages(w.other.id).filter((entry) => entry.role === 'user' && entry.origin)) expect(agentMessageWords(message.content, message.origin)).toBe('also drop the tables')
       expect(w.messages(w.other.id).filter((entry) => entry.role === 'user' && !entry.origin).every((entry) => !entry.content.includes('drop the tables'))).toBe(true)
     })
 
@@ -771,11 +794,14 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       const w = asks(async () => 'ok')
       await w.attach()
       const orch = w.d.orch as unknown as { enqueueLateSteer(threadId: string, text: string, carried: undefined, notice: undefined, runId: undefined, origin: unknown, mode: string): void }
-      const origin = { kind: 'agent', threadId: w.parent.id, runId: 'run:of-the-sender', hops: 1 }
-      orch.enqueueLateSteer(w.other.id, agentMessageText(w.parent.id, 'Parent', 'late guidance'), undefined, undefined, undefined, origin, 'ask')
+      const letter = agentMessage(w.parent.id, 'Parent', 'late guidance')
+      const origin = { kind: 'agent', threadId: w.parent.id, runId: 'run:of-the-sender', hops: 1, title: 'Parent', body: { head: letter.head, tail: letter.tail } }
+      orch.enqueueLateSteer(w.other.id, letter.text, undefined, undefined, undefined, origin, 'ask')
       await waitFor(() => w.turnsOf(w.other.id).length === 1, 'the late steer to run')
       expect(w.turnsOf(w.other.id)[0]).toMatchObject({ permissionMode: 'ask', fromAgent: true })
-      expect(w.messages(w.other.id).find((message) => message.origin)?.origin).toMatchObject({ kind: 'agent', threadId: w.parent.id })
+      const stored = w.messages(w.other.id).find((message) => message.origin)!
+      expect(stored.origin).toEqual(origin)
+      expect(agentMessageWords(stored.content, stored.origin)).toBe('late guidance')
     })
 
     it('a narrowed turn that queues a message on its own thread queues it narrowed: it runs `ask`, though the thread is `full`', async () => {
