@@ -511,6 +511,7 @@ interface BotCall {
   botId: string
   activationId: string
   lane: BotLane
+  memoryLane: BotLane
   activity: BotActivityContext
 }
 
@@ -526,6 +527,7 @@ function botCall(deps: (() => BotAppToolDeps | undefined) | undefined, ctx: Tool
     botId: activation.botId,
     activationId: activation.activationId,
     lane: activation.lane,
+    memoryLane: activation.memoryLane ?? 'run',
     // App tools know the activation; the sink finds its current dispatch.
     activity: { botId: activation.botId, activationId: activation.activationId, dispatchId: '' }
   }
@@ -668,6 +670,7 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         const call = botCall(deps, ctx)
         if (isOutcome(call)) return call
         if (call.lane !== 'chat') return error(OWNER_ONLY)
+        if (args.say !== undefined && call.memoryLane !== 'chat') return error('Only a turn your owner’s message or tap started can set a fixed line. Use prompt instead of say here.')
         let prompt: string
         try { prompt = schedulePrompt(args as { prompt?: string; say?: string }) } catch (failure) { return error(failure instanceof Error ? failure.message : String(failure)) }
         const problem = botScheduleProblem(args.when, prompt)

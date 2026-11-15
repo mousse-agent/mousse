@@ -40,7 +40,7 @@ function fakeBots(lane: BotLane = 'chat', options: { owner?: string; changes?: b
     // The owner's message the chat turn holds.
     ownerWords: () => options.owner ?? 'Please use Opus 4.6 from now on',
     rows: () => options.rows ?? ROWS_ON_SUB,
-    activationOf: (threadId) => (threadId === 'home' ? { botId: 'b1', activationId: 'a1', lane } : undefined),
+    activationOf: (threadId) => (threadId === 'home' ? { botId: 'b1', activationId: 'a1', lane, memoryLane: lane } : undefined),
     schedules: {
       add: (_botId, s, from) => {
         const entry = { scheduleId: `s${schedules.length + 1}`, ...s, label: botScheduleLabel(s.when), ...(options.cards && from ? { from } : {}) }
@@ -350,7 +350,7 @@ describe('ask_owner (#1123)', () => {
   function asking(lane: BotLane) {
     const bots = fakeBots(lane)
     const asked: unknown[] = []
-    const deps = { host: { ...{} as BotToolHost, activationOf: (threadId: string) => (threadId === 'home' ? { botId: 'b1', activationId: 'a1', lane } : undefined), questions: { ask: (_botId: string, _activationId: string, spec: unknown) => { asked.push(spec); return { asked: true, text: 'Shown under your reply.' } } } } as BotToolHost }
+    const deps = { host: { ...{} as BotToolHost, activationOf: (threadId: string) => (threadId === 'home' ? { botId: 'b1', activationId: 'a1', lane, memoryLane: lane } : undefined), questions: { ask: (_botId: string, _activationId: string, spec: unknown) => { asked.push(spec); return { asked: true, text: 'Shown under your reply.' } } } } as BotToolHost }
     const tool = botTools(() => deps).find((entry) => entry.name === 'ask_owner')!
     return { asked, call: (args: Record<string, unknown>) => tool.handler(args, bots.ctx()) }
   }
