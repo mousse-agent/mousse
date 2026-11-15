@@ -567,6 +567,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   private readonly offeredNotes = new Map<string, Set<number>>()
   /** Replies whose final message the executor still delivers, by `<activationId>:<n>`. */
+  /** Present only after a main authority was prepared here; absent after restart means unknown. */
+  private readonly replyEffects = new Map<string, boolean>()
   private readonly pendingReplies = new Map<string, { post(text?: string): void; timer: { clear(): void } }>()
   /** The live chip of each working activation (`bots.chat.list`'s `live`). */
   private readonly liveChips = new Map<string, { botId: string; chip: BotChip | null }>()
@@ -2176,7 +2178,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (row.lane !== 'chat' || this.chatDraft(row) || !this.store.pendingWorkNotes(row.id).length) return false
     if (this.store.get("SELECT 1 FROM bot_messages WHERE activation_id = ? AND author = 'bot' AND kind = 'text'", row.id)) return false
     const runs = this.host.runs()
-    return Boolean(runs && main.runId && runs.tools.listForRun(main.runId).every((call) => DRAFT_READ_ONLY_TOOLS.has(call.tool)))
+    return Boolean(this.replyEffects.get(`${row.id}:${main.n}`) === false && runs && main.runId && runs.tools.listForRun(main.runId).every((call) => DRAFT_READ_ONLY_TOOLS.has(call.tool)))
   }
 
   /** End and startup recovery share this consumption path; posting and deleting the key are one transaction. */
@@ -3005,7 +3007,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         return undefined
       }
     })
+    const effectKey = `${row.id}:${input.mainN}`
+    if (input.role === 'activation' && !this.replyEffects.has(effectKey)) this.replyEffects.set(effectKey, false)
     const observe = (call: NormalisedCall): void => {
+      const tool = chipCallOf(call).tool
+      if (!DRAFT_READ_ONLY_TOOLS.has(tool)) this.replyEffects.set(effectKey, true)
       const sink = this.host.activity
       if (!sink) return
       try {
@@ -6217,6 +6223,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private cleanup(row: BotActivationRow): void {
     if (!ENDED_ACTIVATION_STATUSES.has(row.status)) return
     this.postChatDraft(row)
+    for (const key of this.replyEffects.keys()) if (key.startsWith(`${row.id}:`)) this.replyEffects.delete(key)
     this.refusedAsks.delete(row.id)
     this.switchCuts.delete(row.id)
     // Its subagents ended with it: what they returned is no one's to read any more.
