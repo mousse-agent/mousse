@@ -2,6 +2,7 @@ import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRe
 import { ArrowDown, Brain, ChevronRight, CircleAlert, Loader2, Reply, Shield, X } from '../../lib/icons'
 import { withAppletNames, type BotChatApplet, type BotChatMessage, type BotChatQuote, type BotError, type BotSummary } from '../../../shared/bots/personal/chat'
 import { BOT_COLOUR_HEX, normalizeBotLook } from '../../../shared/bots/personal/look'
+import { plainCards } from '../../../shared/bots/personal/cards'
 import { botFaceState, useBotsStore } from '../../stores/botsStore'
 import { openProvider, openSettingsSection } from '../../lib/settingsNavigation'
 import { Markdown } from '../../chat/components/agent-elements/markdown'
@@ -118,7 +119,9 @@ export function BotReplyQuote({ botId, quote, botName }: { botId: string; quote:
 
 /** A message as a reply quote: who wrote it, its applets by name and its first line (as the service quotes it). */
 export function quoteOf(message: BotChatMessage): BotChatQuote {
-  const words = (message.text || message.error?.text || message.attachments?.map((file) => file.name).join(', ') || '').trim().split('\n').find((part) => part.trim())?.trim() ?? ''
+  // Its words without the plain copy of its cards, else its cards as text, as the service quotes it.
+  const own = message.plainFrom === undefined ? message.text : message.text.slice(0, message.plainFrom).trimEnd()
+  const words = (own || message.error?.text || plainCards(message.cards) || message.attachments?.map((file) => file.name).join(', ') || '').trim().split('\n').find((part) => part.trim())?.trim() ?? ''
   const line = withAppletNames(words, message.applets)
   return { id: message.id, author: message.author, text: line.length > 160 ? `${line.slice(0, 159)}…` : line }
 }

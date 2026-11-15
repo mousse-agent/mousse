@@ -5,6 +5,7 @@ import { withAppletNames, type BotChatApplet, type BotChatMessage, type BotChip,
 import { BOT_MODEL_SLOT_KEYS, DEFAULT_BOT_MODEL, ENDED_ACTIVATION_STATUSES, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, type BotDefinition, type BotModelPick, type BotModelSlotKey, type BotModelSlots, type BotSchedule } from '../../../shared/bots/personal/definition'
 import { normalizeBotLook, type BotLook } from '../../../shared/bots/personal/look'
 import { isSpecialAsk } from '../../../shared/bots/personal/escalation'
+import { plainCards, type BotCard } from '../../../shared/bots/personal/cards'
 import { BOT_THREADS_PERMISSION, botGrantTool } from '../../../shared/bots/personal/manifest'
 import type { BotOwnerTurn } from '../../../shared/bots/personal/definition'
 import type { PermissionMode } from '../../../shared/permissionMode'
@@ -205,8 +206,8 @@ function cutQuote(value: string): string {
   return text.length > REPLY_QUOTE_CHARS ? `${text.slice(0, REPLY_QUOTE_CHARS - 1)}…` : text
 }
 
-/** A message a reply quotes, as the bot is told it: who wrote it, its words, and the applets it showed (by name). */
-interface QuotedMessage { author: 'owner' | 'bot'; text: string; attachments?: ReadonlyArray<{ applet?: BotChatApplet }> | null }
+/** A message a reply quotes, as the bot is told it: who wrote it, its words (or its cards as text), and the applets it showed (by name). */
+interface QuotedMessage { author: 'owner' | 'bot'; text: string; cards?: readonly BotCard[]; attachments?: ReadonlyArray<{ applet?: BotChatApplet }> | null }
 
 /** The longest part of a quoted message the bot is shown with a reply. */
 const REPLY_QUOTE_CHARS = 600
@@ -217,7 +218,7 @@ const REPLY_QUOTE_CHARS = 600
  */
 export function replyLine(quoted: QuotedMessage): string {
   const applets = (quoted.attachments ?? []).flatMap((file) => (file.applet ? [file.applet] : []))
-  const cut = cutQuote(withAppletNames(quoted.text, applets))
+  const cut = cutQuote(withAppletNames(quoted.text || plainCards(quoted.cards), applets))
   return quoted.author === 'bot' ? `(Replying to your message: "${cut}")` : `(About their earlier message: "${cut}")`
 }
 
