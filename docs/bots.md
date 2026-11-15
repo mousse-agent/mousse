@@ -221,6 +221,16 @@ A wake is the bot's own follow-up: `wake({ brief, inMinutes | at | thread | pr, 
 - **Limits.** At most 5 in a row with no owner's message between them (`chain`: a wake set in a wake's own turn is the next), 30 set per bot in any 24 hours (cancelled ones count), and the 50 waiting reminders. A wake that falls due in the owner's quiet hours (22:00 to 08:00 in their zone, as question nudges) waits for 08:00.
 - The bot is told to use wakes when it waits on something (a pull request, a build, a thread it started) instead of checking on a schedule or promising to look later.
 
+### Background commands
+
+`watch_start({ command, brief, title?, match?, minutes? })` runs a command in the background and wakes the bot in its chat when it is done: when it exits (with its exit code), when a line of its output matches `match` (a regular expression; it is stopped then), or when it reaches its time limit (default 60 minutes, at most 360; it is stopped then). `watch_list` and `watch_stop` manage them. It is for what the bot waits on that a command can watch: a build, tests, `gh run watch`, `gh pr checks <n> --watch`.
+
+- **A wake.** Each one is a wake on a `watcher` event (`bot_reminders`, the same table and timer): it counts toward the chain and the daily budget, its turn waits out the quiet hours, and it is listed with the bot's reminders. The wake's input says how it ended, the line that matched, and the last 1,500 characters of its output, framed as data from the command (`wakeInput`).
+- **Who may.** A chat turn only, while the bot holds "run commands" (its revision inside the grant, less what is switched off, under What bots may do here: `holdsCommands`), and not while it is paused. At most 3 run per bot at once (`MAX_WATCHERS_PER_BOT`). A change that takes "run commands" away stops them.
+- **How it runs.** In a shell (`sh`; `cmd` on Windows), from the bot's files folder, in the locked environment (`lockedEnv`, as a Pi bot's commands run), in its own process group where there is one; Stop ends its whole tree (`killProcessTree`). It is not held by Claude Code's or Codex's sandbox, so it reaches what the owner's account can, as "Where commands aren't held" says for commands without a sandbox.
+- **Ends.** The bot's `watch_stop` and the owner's Stop end it with no wake; so do pausing or deleting the bot. They live in the service's process: when Mousse stops, they stop, and at its next start each one's bot wakes once and is told that the restart stopped it.
+- **In the chat.** The turn that starts one shows it as a card on its reply (`BotWatcherCard`: its title, "Running · 4m" with Stop, then "Ended"); the header's list shows **Background work**, each running command with how long it has run, its last line and Stop (`BotSummary.watchers`; Stop goes through `bots.work.stop`). While only commands run, the header says "Waiting on <title>".
+
 ## Asks
 
 An ask is a request for one permission, shown as a card with Allow and Not now (`bot_escalations`, `mode` `wall` or `ask`).

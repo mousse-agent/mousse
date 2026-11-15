@@ -19,6 +19,7 @@
  *   await botSeed.show('twoAsksAllowed')            // the same, both allowed
  *   await botSeed.show('wakes')                     // an automation card on a reply, then a wake's line and reply
  *   await botSeed.show('wakesPaused')               // the same automation, paused
+ *   await botSeed.show('watching')                  // a background command: its card, and the header's Background work
  *   botSeed.scrollTo('report')                      // brings a message to the top: see botSeed.ids
  *
  * The bot's memory (About's Memory row, the Memory dialog) answers from `memory` below; Forget and Edit change it until
@@ -47,8 +48,10 @@
     noteReply: 'seed-note-reply', report: 'seed-report', browserAsk: 'seed-browser-ask', again: 'seed-again',
     pictureAsk: 'seed-picture-ask', picture: 'seed-picture', pictures: 'seed-pictures', limit: 'seed-limit-2',
     repos: 'seed-repos', filesAsk: 'seed-files-ask', shellAsk: 'seed-shell-ask',
-    watch: 'seed-watch', automation: 'seed-automation', wake: 'bm_wake_seed', wakeReply: 'seed-wake-reply'
+    watch: 'seed-watch', automation: 'seed-automation', wake: 'bm_wake_seed', wakeReply: 'seed-wake-reply',
+    nightly: 'seed-nightly', watcher: 'seed-watcher'
   }
+  const WATCHER = { type: 'watcher', watcherId: 'rem_seed_watch', title: 'Nightly build', command: 'gh run watch 18234567 --exit-status' }
   const AUTOMATION = { type: 'automation', jobId: `${BOT}--inbox`, name: 'Go through my inbox', label: 'every hour' }
 
   function conversation(scenario) {
@@ -157,6 +160,13 @@
         bot(ids.wakeReply, today(21, 42), '#12 is in: **Fix login** merged at 21:41. The nightly picks it up tonight.')
       )
     }
+    // A background command it started: the reply's card says it runs, with Stop; the header lists it under Background work.
+    if (scenario === 'watching') {
+      rows.push(
+        owner(ids.nightly, today(22, 10), "tell me when tonight's nightly build is done"),
+        bot(ids.watcher, today(22, 10), "I'm watching the nightly build and will tell you how it went.", [], { replyTo: quote(ids.nightly, "tell me when tonight's nightly build is done"), cards: [WATCHER] })
+      )
+    }
     if (scenario === 'typing') rows.push(owner(ids.again, ago(0.2), 'again'))
     // A usage limit ended two chat turns; in `limitOver` the bot has since answered again.
     if (scenario === 'limitPaused' || scenario === 'limitOver') {
@@ -177,6 +187,7 @@
       case 'oneTask': return { ...base, state: 'working', stateText: 'Working on SSD search', work: [running('seed-act-work-1', 'SSD search', 4)] }
       case 'taskPlusOne': return { ...base, state: 'working', stateText: 'Working on 2 things', work: [running('seed-act-work-1', 'SSD search', 4), { id: 'seed-act-work-2', title: 'Find biggest folders', status: 'queued', startedAt: ago(1) }] }
       case 'paused': return { ...base, state: 'paused', stateText: 'Paused until 14:00' }
+      case 'watching': return { ...base, watchers: [{ id: WATCHER.watcherId, title: WATCHER.title, command: WATCHER.command, startedAt: ago(13), until: new Date(Date.now() + 47 * 60_000).toISOString(), lastLine: 'build  in progress  Nightly  12m' }] }
       case 'limitPaused': return { ...base, state: 'paused', stateText: 'Paused until 03:28' }
       default: return base
     }

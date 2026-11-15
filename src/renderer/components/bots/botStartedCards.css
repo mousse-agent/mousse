@@ -10,6 +10,11 @@
   flex: 1 1 auto;
 }
 
+/* A row with nothing to open (a background command): no hover tint. */
+.bot-started-card > .subagent-card.bot-started-static:hover {
+  background: transparent;
+}
+
 .bot-started-card .subagent-avatar.is-chip {
   width: 24px;
   height: 24px;
@@ -20,8 +25,8 @@
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
-  justify-content: center;
-  /* As wide for Pause as for Resume, so the row's arrow never moves. */
+  justify-content: flex-end;
+  /* As wide for Pause as for Resume, so the row's arrow never moves; its label sits at the row's end. */
   min-width: 76px;
   gap: 4px;
   padding: 4px 8px;

@@ -48,8 +48,20 @@ export interface BotAutomationCard {
   label: string
 }
 
+/**
+ * A background command the bot started (`watch_start`), on the message of the turn that started it. Mousse makes it;
+ * the app reads whether it still runs from the bot's summary (`BotSummary.watchers`) and offers Stop while it does.
+ */
+export interface BotWatcherCard {
+  type: 'watcher'
+  /** Its wake (`bot_reminders.id`), which is also its id in `watch_list` and the summary. */
+  watcherId: string
+  title: string
+  command: string
+}
+
 /** A card as the bot made it, or Mousse for it, and `bots.db` keeps it (`bot_messages.cards_json`). */
-export type BotCard = BotFactsCard | BotChecklistCard | BotProgressCard | BotGalleryCard | BotAutomationCard
+export type BotCard = BotFactsCard | BotChecklistCard | BotProgressCard | BotGalleryCard | BotAutomationCard | BotWatcherCard
 
 /** A gallery as the app gets it: each picture with its file's name too. */
 export interface BotChatGalleryCard extends Omit<BotGalleryCard, 'files'> {
@@ -57,10 +69,10 @@ export interface BotChatGalleryCard extends Omit<BotGalleryCard, 'files'> {
 }
 
 /** A card on a chat message, as the app draws it. */
-export type BotChatCard = BotFactsCard | BotChecklistCard | BotProgressCard | BotChatGalleryCard | BotAutomationCard
+export type BotChatCard = BotFactsCard | BotChecklistCard | BotProgressCard | BotChatGalleryCard | BotAutomationCard | BotWatcherCard
 
 /** The card types Mousse makes for a bot's message; the bot can't (`cardOf`), and they don't count toward its limit. */
-export const MOUSSE_CARD_TYPES = ['automation'] as const
+export const MOUSSE_CARD_TYPES = ['automation', 'watcher'] as const
 const isMousseCard = (card: { type: string }): boolean => (MOUSSE_CARD_TYPES as readonly string[]).includes(card.type)
 
 export const BOT_CARD_TYPES = ['facts', 'checklist', 'progress', 'gallery'] as const
@@ -87,7 +99,7 @@ export const CARD_SHOWN_TEXT = 'Shown with your next message. Don\'t repeat what
 /** Over `MAX_CARDS_PER_MESSAGE` or `MAX_CARDS_JSON_BYTES` for one message. */
 export const CARDS_FULL_TEXT = `Your next message already has as many cards as it can hold (${MAX_CARDS_PER_MESSAGE}, ${MAX_CARDS_JSON_BYTES / 1024} KB). Say the rest in words.`
 
-const FIELDS: Record<Exclude<BotCard['type'], 'automation'>, readonly string[]> = {
+const FIELDS: Record<Exclude<BotCard['type'], 'automation' | 'watcher'>, readonly string[]> = {
   facts: ['type', 'title', 'rows'],
   checklist: ['type', 'title', 'items'],
   progress: ['type', 'label', 'done', 'total', 'note'],
@@ -195,6 +207,11 @@ export function keptCardOf(value: unknown): BotCard | undefined {
     if (typeof jobId !== 'string' || !jobId || typeof name !== 'string' || typeof label !== 'string') return undefined
     return { type: 'automation', jobId, name: oneLine(name).slice(0, 120), label: oneLine(label).slice(0, 120) }
   }
+  if (given?.type === 'watcher') {
+    const { watcherId, title, command } = given
+    if (typeof watcherId !== 'string' || !watcherId || typeof title !== 'string' || typeof command !== 'string') return undefined
+    return { type: 'watcher', watcherId, title: oneLine(title).slice(0, 120), command: oneLine(command).slice(0, 300) }
+  }
   const card = cardOf(value)
   return 'problem' in card ? undefined : card
 }
@@ -219,6 +236,7 @@ const CHECK_MARKS: Record<BotChecklistState, string> = { done: '[x]', doing: '[~
  */
 export function plainCard(card: BotCard | BotChatCard): string {
   if (card.type === 'automation') return `Automation: ${card.name} · ${card.label}`
+  if (card.type === 'watcher') return `Background: ${card.title} · ${card.command}`
   const head = 'title' in card && card.title ? [card.title] : []
   if (card.type === 'facts') return [...head, ...card.rows.map((row) => `${row.label}: ${row.value}`)].join('\n')
   if (card.type === 'checklist') return [...head, ...card.items.map((item) => `${CHECK_MARKS[item.state]} ${item.text}`)].join('\n')

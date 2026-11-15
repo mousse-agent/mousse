@@ -163,19 +163,24 @@ export function leadWork(work: readonly BotWorkItem[]): BotWorkItem | undefined 
  * otherwise. Threads that ended or sit idle are listed but never make it busy. Typing wins over work; the line still
  * opens the list.
  */
-export function presenceOf(bot: Pick<BotSummary, 'state' | 'work' | 'threads'>, chat: { typing: boolean; offline: boolean }): BotPresence {
+export function presenceOf(bot: Pick<BotSummary, 'state' | 'work' | 'threads' | 'watchers'>, chat: { typing: boolean; offline: boolean }): BotPresence {
   if (bot.state === 'paused') return { kind: 'paused', text: 'paused' }
   if (chat.offline) return { kind: 'offline', text: 'waiting for internet' }
   if (chat.typing) return { kind: 'typing', text: 'typing…' }
   const work = bot.work ?? []
   const threads = (bot.threads ?? []).filter(launchedActive)
+  const watchers = bot.watchers ?? []
   const lead = leadWork(work)
   if (lead) {
-    const more = work.length - 1 + threads.length
+    const more = work.length - 1 + threads.length + watchers.length
     return { kind: 'busy', text: more > 0 ? `${lead.title} +${more}` : lead.title, lead }
   }
-  if (threads.length === 1) return { kind: 'busy', text: `Managing ${threads[0]!.title}` }
-  if (threads.length) return { kind: 'busy', text: `Managing ${threads.length} threads` }
+  const more = watchers.length ? ` +${watchers.length}` : ''
+  if (threads.length === 1) return { kind: 'busy', text: `Managing ${threads[0]!.title}${more}` }
+  if (threads.length) return { kind: 'busy', text: `Managing ${threads.length} threads${more}` }
+  // Only background commands: it is free to talk, and says what it waits on.
+  if (watchers.length === 1) return { kind: 'free', text: `Waiting on ${watchers[0]!.title}` }
+  if (watchers.length) return { kind: 'free', text: `Waiting on ${watchers.length} things` }
   return { kind: 'free', text: 'free' }
 }
 

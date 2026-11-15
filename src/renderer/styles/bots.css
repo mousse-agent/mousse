@@ -457,6 +457,8 @@ button.bot-image:focus-visible > img { opacity: 0.82; }
 .bot-work-line button { flex: none; display: grid; place-items: center; width: 22px; height: 22px; border-radius: 6px; color: var(--text-secondary); opacity: .7; }
 .bot-work-line button:hover { opacity: 1; background: color-mix(in srgb, var(--text-secondary) 12%, transparent); color: var(--text-primary); }
 .bot-work-list { list-style: none; display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; }
+/* The list's Background work: a quiet heading above the bot's running commands. */
+.bot-work-heading { margin: 4px 8px 2px; font-size: 11px; color: var(--text-secondary); }
 .bot-work button:focus-visible { outline: none; background-image: var(--ui-focus-layer); }
 /* Threads the bot started: the whole row opens it; a soft tint and a word say where it stands; those no longer going are dimmed. */
 .bot-thread-line { --tone: var(--text-secondary); display: flex; flex-direction: column; gap: 1px; width: 100%; min-width: 0; padding: 5px 8px; border-radius: 7px; text-align: left; font-size: var(--bot-meta); color: var(--text-secondary); background-color: color-mix(in srgb, var(--tone) var(--tint, 0%), transparent); cursor: pointer; }

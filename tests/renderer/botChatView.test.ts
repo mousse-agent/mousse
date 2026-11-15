@@ -1081,6 +1081,18 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
     expect(fake.calls).toContainEqual(['stopWork', 'inbox', 'act_w1'])
   })
 
+  it('lists its background commands under Background work, each with how long it has run, its last line and Stop; alone, the header says what it waits on', async () => {
+    const watcher = { id: 'rem_w1', title: 'Nightly build', command: 'gh run watch 123', startedAt: new Date(Date.now() - 12 * 60_000).toISOString(), until: new Date(Date.now() + 48 * 60_000).toISOString(), lastLine: 'Waiting for build' }
+    await open({ ...working, state: 'idle', stateText: '', work: undefined, watchers: [watcher] })
+    expect(presence().textContent).toBe('Waiting on Nightly build')
+    await click(presence())
+    const list = host.querySelector('[aria-label="Background work"]')!
+    expect([...list.querySelectorAll('.bot-work-line')].map((line) => line.textContent)).toEqual(['Nightly build12m'])
+    expect(list.querySelector('.bot-work-line')!.getAttribute('title')).toBe('gh run watch 123\nWaiting for build')
+    await click(button('Stop Nightly build'))
+    expect(fake.calls).toContainEqual(['stopWork', 'inbox', 'rem_w1'])
+  })
+
   it('work held for the owner’s answer to its question says it waits on them; other held work says held', async () => {
     const asked = { id: 'act_w3', title: 'Flat hunt', status: 'paused' as const, waitsFor: 'answer' as const, startedAt: new Date(Date.now() - 4 * 60_000).toISOString() }
     const held = { id: 'act_w4', title: 'Vacuums', status: 'paused' as const, startedAt: new Date(Date.now() - 4 * 60_000).toISOString() }
