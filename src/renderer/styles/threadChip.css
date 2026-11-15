@@ -1,25 +1,21 @@
-/* A link to a Mousse thread, drawn as a chip: title, then its status. */
+/*
+ * A link to a Mousse thread, drawn as text in the sentence: a small icon, then the title at the surrounding weight.
+ * A live thread reads in the accent, an archived or unreachable one in secondary text; the icon's colour carries the
+ * status, and the tooltip names it. Hover tints the link faintly.
+ */
 
 .thread-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  max-width: min(100%, 360px);
-  padding: 0 7px;
-  border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--accent) 9%, transparent);
-  color: var(--text-primary);
-  font-size: 0.92em;
-  line-height: 1.6;
+  padding: 0 3px;
+  margin: 0 -3px;
+  border-radius: 5px;
+  color: var(--accent);
   text-decoration: none;
-  vertical-align: baseline;
   cursor: pointer;
+  overflow-wrap: anywhere;
 }
 
 .thread-chip:hover {
-  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
-  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
 }
 
 .thread-chip:focus-visible {
@@ -28,75 +24,45 @@
 }
 
 .thread-chip-icon {
-  flex: 0 0 auto;
+  display: inline-block;
+  margin-right: 3px;
+  vertical-align: -0.1em;
   color: var(--accent);
 }
 
-.thread-chip-title {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.thread-chip[data-status='approval'] .thread-chip-icon,
+.thread-chip[data-status='question'] .thread-chip-icon,
+.thread-chip[data-status='paused'] .thread-chip-icon {
+  color: var(--warning);
 }
 
-.thread-chip-status {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 4px;
-  color: var(--text-secondary);
-  font-size: 0.88em;
-  white-space: nowrap;
+.thread-chip[data-status='done'] .thread-chip-icon {
+  color: var(--success);
 }
 
-.thread-chip-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
-}
-
-.thread-chip[data-status='working'] .thread-chip-dot,
-.thread-chip[data-status='waiting'] .thread-chip-dot {
-  background: var(--accent);
-}
-
-.thread-chip[data-status='approval'] .thread-chip-dot,
-.thread-chip[data-status='question'] .thread-chip-dot,
-.thread-chip[data-status='paused'] .thread-chip-dot {
-  background: var(--warning);
-}
-
-.thread-chip[data-status='done'] .thread-chip-dot {
-  background: var(--success);
-}
-
-/* Deleted, or on a computer that is not connected or not sharing: the chip stays, quieter, and says why. */
+/* Archived, deleted, or on a computer that is not connected or not sharing: secondary text, and a quiet icon. */
+.thread-chip[data-status='archived'],
 .thread-chip[data-state='missing'],
 .thread-chip[data-state='offline'],
 .thread-chip[data-state='not-shared'] {
-  border-style: dashed;
-  border-color: color-mix(in srgb, var(--text-secondary) 35%, transparent);
-  background: transparent;
   color: var(--text-secondary);
 }
 
-.thread-chip[data-state='missing'] .thread-chip-icon,
+.thread-chip[data-status='archived'] .thread-chip-icon,
+.thread-chip[data-state='missing'] .thread-chip-icon {
+  color: color-mix(in srgb, var(--text-secondary) 80%, transparent);
+}
+
 .thread-chip[data-state='offline'] .thread-chip-icon,
 .thread-chip[data-state='not-shared'] .thread-chip-icon {
-  color: inherit;
+  color: var(--warning);
 }
 
 .thread-chip[data-state='missing'] .thread-chip-title {
   text-decoration: line-through;
 }
 
-.thread-chip[data-state='offline'] .thread-chip-dot,
-.thread-chip[data-state='not-shared'] .thread-chip-dot {
-  background: var(--warning);
-}
-
-/* The note on the thread whose agent started another: "Started", the chip, then what was chosen for it. */
+/* The note on the thread whose agent started another: "Started", the link, then what was chosen for it. */
 .launched-thread-note .thread-chip {
   font-size: 12px;
 }

@@ -101,15 +101,15 @@ export type { ThreadToastPayload } from '../../shared/threadToast'
 /**
  * What a bot's chat row announces (Bot Phase 1 §5.7), as the thread event whose channels it uses:
  * a run report, a reply, a notice or an error is `completed`; an open ask is `question`. The
- * owner's own messages, answered asks and rows older than `maxAgeMs` (a changed old row, such as
+ * owner's own messages, service lines, answered asks and rows older than `maxAgeMs` (a changed old row, such as
  * a forgotten memory's blanked text) announce nothing. Chips never notify: they are not rows.
  */
 export function botNotificationKind(
-  message: Pick<BotChatMessage, 'author' | 'at' | 'ask' | 'question'>,
+  message: Pick<BotChatMessage, 'author' | 'at' | 'ask' | 'question' | 'systemLine'>,
   now = Date.now(),
   maxAgeMs = 10 * 60_000
 ): ThreadNotificationKind | null {
-  if (message.author !== 'bot') return null
+  if (message.author !== 'bot' || message.systemLine) return null
   const at = Date.parse(message.at)
   if (Number.isFinite(at) && now - at > maxAgeMs) return null
   if (message.ask) return message.ask.status === 'open' ? 'question' : null
