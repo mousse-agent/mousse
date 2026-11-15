@@ -19,6 +19,7 @@ import type { AppearanceToolHost } from './appearance'
 import type { DelegationToolsHost } from './delegation'
 import type { LiveRunGate } from './registry'
 import type { ToolLedger } from './types'
+import type { SecretToolHost } from './secrets'
 
 /** One match of `thread_search`. */
 export interface ThreadSearchHit {
@@ -222,6 +223,8 @@ export interface AppToolHost extends DelegationToolsHost {
   ): Promise<UserQuestionAnswers>
   /** Dismisses the thread's open questions (an in-process `ask_user` whose turn stopped). */
   dismissQuestions?(threadId: string): void
+  /** Secret requests and commands that use them (`secret_request`, `secret_run`); absent: those tools refuse. */
+  secrets?(): SecretToolHost | undefined
   /** The thread's task queue; null when the owner keeps none (no task tools). */
   tasks(threadId: string | undefined): TaskQueue | null
   /** The threads' goals (`/goal`): whether one is working, and the agent's `goal_status` report. Absent: no goal tool. */

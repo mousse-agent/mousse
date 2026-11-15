@@ -91,6 +91,7 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Run commands', section: 'agents', anchor: 'agents-bots-shell', keywords: ['bots', 'shell', 'terminal', 'commands'] },
   { title: 'Use the browser', section: 'agents', anchor: 'agents-bots-browser', keywords: ['bots', 'bot browser'] },
   { title: 'Use your threads', section: 'agents', anchor: 'agents-bots-threads', keywords: ['bots', 'bot threads', 'start thread', 'full access'] },
+  { title: 'Secrets', section: 'agents', anchor: 'agents-secrets', keywords: ['secret', 'secrets', 'api key', 'token', 'password', 'credential', 'saved keys', 'revoke'] },
   { title: 'Automations', section: 'agents', anchor: 'agents-automations', keywords: ['automations agents add', 'schedule', 'scheduled tasks', 'agent jobs', 'limits', 'allow', 'keep'] },
   { title: 'At most', section: 'agents', anchor: 'agents-automations-active', keywords: ['automations', 'limits', 'active', 'most active automations'] },
   { title: 'At least', section: 'agents', anchor: 'agents-automations-interval', keywords: ['automations', 'limits', 'minutes apart', 'interval', 'fewest minutes between runs'] },

@@ -108,6 +108,13 @@ import { resolveChatReference, resolveChatReferences } from '../utils/chatLinks'
 import { pickedSelection, pickerModelId } from '../../shared/modelSelection'
 import '../styles/compact-composer.css'
 import { CHAT_TOOL_RENDERERS } from './automations/inbox/ChatDraftCard'
+import { SecretRequestActionsContext, withSecretRequests, type SecretRequestActions } from './secrets/secretRequestPart'
+import { SecretRequestRow } from './secrets/SecretRequestRow'
+import { usePendingSecretRequests } from '../hooks/usePendingSecretRequests'
+import { createSecretsClient } from '../services/secretsClient'
+
+/** The chat's custom tool rows: drafts and run reports, and a secret request's row (#595). */
+const THREAD_TOOL_RENDERERS = { ...CHAT_TOOL_RENDERERS, secret_request: SecretRequestRow }
 
 /** A steer whose request got no answer: it may have reached the reply, so it is not sent again. */
 export const STEER_UNCONFIRMED = 'The steer was not confirmed. Checking whether it reached the reply…'
@@ -395,6 +402,9 @@ export function OrchestratorChat() {
   const [contextCompactionSetting, setContextCompactionSetting] = useState<ContextSettings>()
   // The open thread's agent questions; a question from another thread never shows or takes a message here.
   const [pendingQuestions, setPendingQuestions] = usePendingQuestions(activeThreadId)
+  // The open thread's secret cards (#595): an agent asked for a secret; the value goes only to this computer's daemon.
+  const secretsClient = useMemo(() => createSecretsClient(window.mousse?.platformRequest), [])
+  const { requests: secretRequests, refresh: refreshSecretRequests } = usePendingSecretRequests(activeThreadId, secretsClient)
   const [connectionFailed, setConnectionFailed] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
   /** A line a composer command answered with (`/goal` alone), until dismissed or the thread changes. */
@@ -488,10 +498,16 @@ export function OrchestratorChat() {
   // Messages a delta did not change stay the same objects, so only the turn that changed renders again.
   const shownMessagesRef = useRef<UIMessage[]>([])
   const shownMessages = useMemo(() => {
-    const next = reuseUIMessages(shownMessagesRef.current, placePermissionRequests(uiMessages))
+    // An open secret request is the form at the end of the turn that asked for it.
+    const next = reuseUIMessages(shownMessagesRef.current, placePermissionRequests(withSecretRequests(uiMessages, secretRequests)))
     shownMessagesRef.current = next
     return next
-  }, [uiMessages, placePermissionRequests])
+  }, [uiMessages, placePermissionRequests, secretRequests])
+  const secretActions = useMemo((): SecretRequestActions => ({
+    save: async (request, value, keep) => { await secretsClient.answer(request.threadId, request.requestId, value, keep); refreshSecretRequests() },
+    useSaved: async (request) => { await secretsClient.useSaved(request.threadId, request.requestId); refreshSecretRequests() },
+    decline: async (request) => { await secretsClient.decline(request.threadId, request.requestId); refreshSecretRequests() }
+  }), [secretsClient, refreshSecretRequests])
   const approvalRequest = permissionRequests.current
   const approvalRowId = approvalRequest ? `permission:${approvalRequest.requestId}` : null
   const approvalPlaced = approvalRowId !== null && shownMessages.some((message) => message.id === approvalRowId)
@@ -1758,13 +1774,14 @@ export function OrchestratorChat() {
       <ThreadModeBar />
       <EarlierMessagesBar />
       <ThreadMoveBanner instanceId={selectedInstanceId ?? providers.find((entry) => entry.id === selectedProviderId)?.instanceId} snapshots={providerSnapshots} />
+      <SecretRequestActionsContext.Provider value={secretActions}>
       <MousseAgentChatShell
         key={activeThreadId ?? 'no-thread'}
         threadId={activeThreadId}
         busy={turnActive || loading}
         messages={shownMessages}
         status={chatStatus}
-        toolRenderers={CHAT_TOOL_RENDERERS}
+        toolRenderers={THREAD_TOOL_RENDERERS}
         onSend={() => void handleSend()}
         onStop={() => void handleStop()}
         quickActionApproval={quickActionApproval}
@@ -1936,6 +1953,7 @@ export function OrchestratorChat() {
       </div>
         )}
       />
+      </SecretRequestActionsContext.Provider>
     </div>
   )
 }

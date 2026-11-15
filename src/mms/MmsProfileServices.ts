@@ -1,7 +1,11 @@
 import { ResourceLifecycleError } from './lifecycle/ResourceLifecycleStore'
+import { SecretVault } from './secrets/SecretVault'
+import { SecretRequests } from './secrets/SecretRequests'
+import { createSecretToolHost } from './secrets/secretToolHost'
 import { forgetWorktreeFolders, refreshWorktreeFolders, setWorktreeFolders } from './worktree/worktreeLayout'
 import { AgentEpisodeStore } from './agents/AgentEpisodeStore'
 import { join } from 'path'
+import { EventEmitter } from 'node:events'
 import { homedir, hostname } from 'os'
 import { MousseConfigStore } from './config/MousseConfigStore'
 import { MmsEventBus } from './events'
@@ -1174,11 +1178,39 @@ export class MmsProfileServices {
     })
     this.webhookSecretCache = new WebhookSecretCache(this.scheduledStore, webhookSecrets)
     // Saved keys live in the same secret file, by name; a run that names one that is not there ends Incomplete.
+    // Secrets agents ask for in threads (#595) live in the same store: a thread's card stores one, the agent gets its name.
+    this.secretVault = new SecretVault({
+      profileRoot: homeDir,
+      threadAlive: (threadId) => Boolean(this.threads.getThread(threadId)),
+      threadTitle: (threadId) => this.threads.getThread(threadId)?.name,
+      changed: () => this.secretsChanged.emit('changed')
+    })
+    this.secretRequests = new SecretRequests(this.secretVault)
+    const vault = this.secretVault
+    this.orchestrator.setSecrets({
+      masker: (threadId) => vault.maskerFor(threadId),
+      tools: createSecretToolHost({ vault, requests: this.secretRequests, scratchRoot: join(homeDir, 'secrets', 'run') })
+    })
+    try {
+      this.secretVault.sweep()
+    } catch (error) {
+      console.warn('Expired secrets could not be removed', { error: error instanceof Error ? error.name : 'unknown' })
+    }
+    this.secretSweepTimer = setInterval(() => {
+      try {
+        this.secretVault.sweep()
+      } catch {
+        // The next sweep tries again.
+      }
+    }, 10 * 60 * 1000)
+    this.secretSweepTimer.unref?.()
     this.automationKeys = {
-      list: () => listProfileKeyNames(homeDir),
+      // Secrets given in a thread for a while are not saved keys; a saved one is.
+      list: () => vault.savedKeyNames(),
       set: (name, value) => {
         if (!isKeyName(name)) throw new Error('A key name is a word like GITHUB_TOKEN')
         writeProfileSecret(homeDir, name, value)
+        vault.refresh()
         this.events.emit({ channel: 'scheduled:updated', data: this.scheduled.listJobs() })
       },
       has: (name) => listProfileKeyNames(homeDir).includes(name)
@@ -1859,6 +1891,12 @@ export class MmsProfileServices {
 
   /** Saved keys (#595, the automation part): names in the profile's secret store; values are written, never read back out. */
   automationKeys!: { list(): string[]; set(name: string, value: string): void; has(name: string): boolean }
+  /** Secrets agents asked for in threads, over the profile's secret store (#595). */
+  secretVault!: SecretVault
+  secretRequests!: SecretRequests
+  /** Emits `changed` when a secret is added, used, removed or expires (Settings → Secrets refreshes). */
+  readonly secretsChanged = new EventEmitter()
+  private secretSweepTimer: ReturnType<typeof setInterval> | null = null
   automationDrafts!: AutomationDrafts
 
   /** The project the composer picked for the manager's next turns (see `automationManagerWorkspace`). */
@@ -2134,6 +2172,9 @@ export class MmsProfileServices {
     this.scheduled.beginShutdown()
     if (this.botSweepTimer) clearInterval(this.botSweepTimer)
     this.botSweepTimer = null
+    if (this.secretSweepTimer) clearInterval(this.secretSweepTimer)
+    this.secretSweepTimer = null
+    this.secretRequests?.dispose()
     this.webhooksClosed = true
     if (this.webhookRetryTimer) clearTimeout(this.webhookRetryTimer)
     this.webhookRetryTimer = null

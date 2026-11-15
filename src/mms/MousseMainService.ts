@@ -32,6 +32,7 @@ import { registerBotDeviceMethods } from './bots/deviceMethods'
 import { BotDefinitionError } from './bots/definitions/BotDefinitionStore'
 import { registerBotBrowserMethods } from './bots/browser/registerBotBrowserMethods'
 import { registerAutomationMethods } from './automations/registerMethods'
+import { registerSecretMethods } from './secrets/registerMethods'
 import { registerWorkflowDefinitionMethods } from './workflows/registerDefinitionMethods'
 import { registerWorkflowRunMethods } from './workflows/registerRunMethods'
 import { registerIntegrationMethods, type IntegrationDomainRegistration } from './integrations/registerMethods'
@@ -291,6 +292,19 @@ export class MousseMainService extends MmsProfileServices {
           },
           removeTuning: (noteId) => services.automationRuns?.removeTuning(noteId) ?? false
         }
+      }
+    })
+    registerSecretMethods(this.domains, async (profileId) => {
+      const services = await profile(profileId)
+      return {
+        requests: {
+          list: (threadId) => services.secretRequests.list(threadId),
+          answer: (threadId, requestId, value, keep) => services.secretRequests.answer(threadId, requestId, value, keep),
+          useSaved: (threadId, requestId) => services.secretRequests.useSaved(threadId, requestId),
+          decline: (threadId, requestId) => services.secretRequests.decline(threadId, requestId)
+        },
+        list: () => services.secretVault.list(),
+        delete: (name) => services.secretVault.delete(name)
       }
     })
     registerAgentDefinitionMethods(this.domains, async (profileId, request) =>

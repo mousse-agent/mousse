@@ -6327,3 +6327,140 @@ html[data-theme='high-contrast'] .composer-input::placeholder {
 }
 .pasted-text-preview-body:focus-visible { outline: none; }
 .modal-body > .pasted-text-preview-cut { margin: 12px 0 0; color: var(--text-tertiary, var(--text-secondary)); font-size: 12px; }
+
+/* The private card an agent's secret request puts above the composer (#595); it shares the question card's surface. */
+.secret-request-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  margin: -4px 0 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.secret-request-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--accent, var(--text-primary));
+  text-decoration: none;
+}
+
+.secret-request-link:hover {
+  text-decoration: underline;
+}
+
+.secret-request-field {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 32px;
+  padding: 0 4px 0 10px;
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-control-radius);
+  background: transparent;
+}
+
+.secret-request-field:focus-within {
+  border-color: var(--accent, var(--ui-line-strong));
+}
+
+.secret-request-input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12.5px;
+  outline: none;
+}
+
+.secret-request-input::placeholder {
+  font-family: inherit;
+  color: var(--text-secondary);
+}
+
+.secret-request-reveal {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: var(--ui-control-radius);
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.secret-request-reveal:hover {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+.secret-request-keep {
+  display: inline-flex;
+  gap: 2px;
+  margin: 10px 0 6px;
+  padding: 2px;
+  border-radius: var(--ui-control-radius);
+  background: var(--ui-hover);
+}
+
+.secret-request-keep-option {
+  height: 24px;
+  padding: 0 10px;
+  border: none;
+  border-radius: calc(var(--ui-control-radius) - 2px);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.secret-request-keep-option.is-selected {
+  background: var(--ui-raised);
+  color: var(--text-primary);
+  box-shadow: var(--ui-dialog-edge);
+}
+
+.secret-request-keep-line {
+  margin-bottom: 0;
+}
+
+.secret-request-error {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--danger, #d14343);
+}
+
+.secret-request-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 6px 0;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+.secret-request-row-label {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+/* The secret form in the transcript: the question card's surface, in the flow of the turn instead of over the composer. */
+.composer-question-modal.secret-request-card.is-inline {
+  position: relative;
+  left: auto;
+  right: auto;
+  bottom: auto;
+  z-index: auto;
+  max-width: 640px;
+  box-shadow: var(--ui-dialog-edge);
+}

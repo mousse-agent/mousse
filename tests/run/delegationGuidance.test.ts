@@ -47,7 +47,7 @@ describe('subagent guidance', () => {
       - Skills: list_skills shows the Skills the user enabled and load_skill loads one; a skill the user invoked explicitly (/name) is already in the turn's instructions.
       - Themes: when the user asks to change how Mousse looks ("dark mode", "make it look like X"), read theme_read (themes, tokens, stable selectors), then theme_set to switch themes or save a user theme and switch to it.
       - What a turn may use depends on its mode, the browser binding and Settings; a Mousse tool that is not usable now returns why instead of running.
-      - Never ask for passwords, API keys, tokens or other secrets in chat, and never repeat a secret you were given."
+      - Never ask for passwords, API keys, tokens or other secrets in chat, and never repeat a secret you were given. When you need one, ask with secret_request: the user types it into a private card and you get only its name, which you use with secret_run (the command gets it as an environment variable or a private file) or as \${secret:NAME} in an MCP server's settings."
     `)
   })
 

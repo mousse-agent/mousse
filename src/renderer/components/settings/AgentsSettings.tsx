@@ -6,6 +6,7 @@ import { Select, type SelectOption } from '../ui/Select'
 import type { InstanceSnapshot } from '../../../shared/harness/status'
 import { AgentAccessSettings } from './AgentAccessSettings'
 import { AgentAutomationsSettings } from './AgentAutomationsSettings'
+import { SecretsSettings } from './SecretsSettings'
 import { compactionModelOf, ContextCompactionControl } from './ContextCompactionControl'
 import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { SettingsModelPicker } from './SettingsModelPicker'
@@ -310,6 +311,8 @@ export function AgentsSettings({
       <BotsHereGroup settings={settings} updateSettings={updateSettings} />
 
       <AgentAutomationsSettings />
+
+      <SecretsSettings />
     </section>
   )
 }

@@ -49,6 +49,7 @@ import {
   isWaitingPermissionRequest,
 } from "./tools/permission-request";
 import { SubagentCardGroup } from "./tools/SubagentCard";
+import { SecretRequestInline, isSecretRequestPart, isWaitingSecretRequest } from "../../../components/secrets/secretRequestPart";
 import { BackgroundNotice, SubagentNotice } from "./tools/SubagentNotice";
 import { SteerGroup } from "./steer-group";
 import { isRunningSubagent } from "../../../../shared/subagents";
@@ -213,7 +214,7 @@ function getLastAssistantHasContent(messages: UIMessage[]) {
     return (msg.parts ?? []).some((part) => {
       if (isTextPart(part)) return part.text.trim().length > 0;
       if (isRecord(part) && part.type === "data-applet-pending") return true;
-      if (isPermissionRequestPart(part)) return true;
+      if (isPermissionRequestPart(part) || isSecretRequestPart(part)) return true;
       return isV5ToolPart(part) || isAppletPart(part);
     });
   }
@@ -2216,7 +2217,7 @@ function foldRowOf(msg: UIMessage, toolsOnly: boolean, suppressQuestionTool: boo
       if (part.text.trim()) text = true;
       continue;
     }
-    if (isErrorPart(part) || isPermissionRequestPart(part) || isAppletPart(part)) return { kind: "message", keep: true };
+    if (isErrorPart(part) || isPermissionRequestPart(part) || isSecretRequestPart(part) || isAppletPart(part)) return { kind: "message", keep: true };
     if (isRecord(part) && part.type === "data-applet-pending") return { kind: "message", keep: true };
     if (isV5ToolPart(part)) {
       if (suppressQuestionTool && part.type === "tool-Question") continue;
@@ -2600,7 +2601,9 @@ const TurnRow = memo(function TurnRow({
                   isTurnStreaming &&
                   turn.assistantMsgs.some(isWaitingPermissionRequest)
                     ? "Waiting for approval"
-                    : undefined
+                    : isTurnStreaming && turn.assistantMsgs.some(isWaitingSecretRequest)
+                      ? "Waiting for a secret"
+                      : undefined
                 }
                 end={turn.end}
                 endYieldsToNotice={isLastTurn && Boolean(turn.userMsg)}
@@ -2823,6 +2826,11 @@ const AssistantParts = memo(function AssistantParts({
       }
       if (isPermissionRequestPart(part)) {
         elems.push(<PermissionRequestRow key={`${msg.id}-permission`} data={part.data} />);
+        i++;
+        continue;
+      }
+      if (isSecretRequestPart(part)) {
+        elems.push(<SecretRequestInline key={`${msg.id}-secret`} request={part.data} />);
         i++;
         continue;
       }

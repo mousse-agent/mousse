@@ -14,6 +14,7 @@ import { projectGitTools } from './projectGit'
 import { quickActionTools } from './quickActions'
 import { ToolRegistry, type ToolAccessPolicy, type ToolRegistryOptions } from './registry'
 import { scheduleTools } from './schedules'
+import { secretTools } from './secrets'
 import { automationTools } from './automations'
 import { skillTools } from './skills'
 import { taskTools } from './tasks'
@@ -102,7 +103,7 @@ export function createAppToolRegistry(input: {
     for (const tool of tools) registry.register(tool)
   }
   add('delegation', delegationTools(host))
-  add('questions', askUserTools(host))
+  add('questions', [...askUserTools(host), ...secretTools(host)])
   add('tasks', [...taskTools(host), ...goalTools(host)])
   add('thread', engine ? threadTools(host, engine, input.bots) : [])
   add('schedules', [...(engine ? scheduleTools(host, engine) : []), ...automationTools(host)])

@@ -1845,3 +1845,19 @@ html[data-theme='high-contrast'] .notification-channel.on {
   padding-left: calc(var(--settings-surface-x) + 2 * var(--space-24));
 }
 .settings-tool-name { font-size: 11px; color: var(--text-secondary); }
+
+/* Settings → Agents → Secrets: a secret's name, then what it is. */
+.secret-entry-title {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.secret-entry-label {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
