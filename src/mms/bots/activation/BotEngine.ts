@@ -1710,8 +1710,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           // A chat turn takes the owner's messages that joined it while it waited to start (`joinChatTurnInTx`).
           const notes = this.workNotes(row)
           if (notes) this.store.applyWorkNotes(notes.ids)
+          const skipped = row.trigger.kind === 'schedule' && row.trigger.missed ? Math.max(0, row.trigger.missed.count - 1) : 0
           const late = row.trigger.kind === 'schedule' && row.trigger.missed
-            ? `\n\nThis run was due at ${clockTime(row.trigger.occurrenceAt)}; this computer was off or asleep, and ${Math.max(0, row.trigger.missed.count - 1)} runs were skipped.` : ''
+            ? `\n\nThis run was due at ${scheduledDueTime(row.trigger.occurrenceAt, this.now())}; this computer was off or asleep${skipped ? `, and ${skipped} ${skipped === 1 ? 'run was' : 'runs were'} skipped` : ''}.` : ''
           const text = row.lane === 'run' ? `${row.trigger.input}${late}${notes ? `\n\n${notes.text}` : ''}\n\n${BOT_RUN_REPORT_LINE}` : `${row.trigger.input}${notes ? `\n\n${notes.text}` : ''}`
           this.store.insertDispatch({ activationId: row.id, n: 1, kind: 'start', clientRequestId, threadId, prompt: { text }, policyDigest: row.grantDigest })
           if (row.lane === 'run') this.journalInTx({
@@ -4556,7 +4557,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const silent = report && row.trigger.kind === 'schedule' && (isSilentOutput(written) || this.quietLevel(row.id))
     if (silent && !asks.length && !waiting && !cards) return
     const lateReport = report && row.trigger.kind === 'schedule' && row.trigger.missed && this.now() - Date.parse(row.trigger.occurrenceAt) > 15 * 60_000
-      ? `(Due ${clockTime(row.trigger.occurrenceAt)}, this computer was off or asleep) ` : ''
+      ? `(Due ${scheduledDueTime(row.trigger.occurrenceAt, this.now())}, this computer was off or asleep) ` : ''
     const body = silent ? '' : lateReport ? `${lateReport}${written || 'Done.'}` : written
     if (!body && !chips.length && !asks.length && !report && !waiting && !questions.length && !cards) return
     // A turn that asked and said nothing else shows its question alone.
@@ -8804,4 +8805,11 @@ function permissionTextOf(request: BotAskRequest): string {
 function runsDifferently(a: BotTurnModel, b: BotTurnModel): boolean {
   if (!samePick(a.pick, b.pick)) return true
   return !isPinned(a.pick) && a.depth !== b.depth
+}
+
+/** A queued run or its report can cross midnight: say which day's scheduled time it was. */
+function scheduledDueTime(at: string, now: number): string {
+  const due = new Date(at)
+  const day = due.toDateString() === new Date(now).toDateString() ? '' : `${due.toLocaleDateString('en-US', { weekday: 'short' })} `
+  return `${day}${clockTime(at)}`
 }
