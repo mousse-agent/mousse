@@ -130,7 +130,7 @@ export function schedulePrompt(input: { prompt?: string; say?: string }): string
     throw new BotScheduleError('schedule_invalid', 'say needs 1 to 500 characters.')
   const guarded = guardMemoryText(input.say)
   if (!guarded.ok && guarded.reason === 'invisible') throw new BotScheduleError('schedule_invalid', guarded.message)
-  return `Say exactly: ${input.say}`
+  return `Say exactly: ${input.say.trim()}`
 }
 
 /** A local date lasts through that day; a local date/time ends at that minute. */
@@ -141,6 +141,7 @@ export function scheduleUntil(value: string, now: Date): string {
   const date = new Date(+y, +m - 1, +d, h === undefined ? 23 : +h, min === undefined ? 59 : +min, sec === undefined ? (h === undefined ? 59 : 0) : +sec, h === undefined ? 999 : 0)
   if (date.getFullYear() !== +y || date.getMonth() !== +m - 1 || date.getDate() !== +d || (h !== undefined && (date.getHours() !== +h || date.getMinutes() !== +min || date.getSeconds() !== +(sec ?? 0))))
     throw new BotScheduleError('schedule_invalid', 'until is not a valid local date and time. Check the day and clock time.')
+  if (h !== undefined) date.setSeconds(59, 999)
   if (date <= now) throw new BotScheduleError('schedule_invalid', 'until is in the past. Pick a future date or time.')
   return date.toISOString()
 }
@@ -253,7 +254,7 @@ export class BotScheduleBook {
       threadId: botJobThreadGuard(botId),
       // Only the owner picks a model by hand; a bot's own schedule runs on its own rows. The name stays beside the pick,
       // for builds that read only the name.
-      bot: { botId, scheduleId, createdBy, ...(input.say !== undefined ? { say: input.say } : {}), ...(createdBy === 'owner' && input.model?.trim() ? { model: input.model.trim(), ...(isPinned(input.pick) ? { pick: { ...copyPick(input.pick), instanceId: input.pick.instanceId } } : {}) } : {}) }
+      bot: { botId, scheduleId, createdBy, ...(input.say !== undefined ? { say: input.say.trim() } : {}), ...(createdBy === 'owner' && input.model?.trim() ? { model: input.model.trim(), ...(isPinned(input.pick) ? { pick: { ...copyPick(input.pick), instanceId: input.pick.instanceId } } : {}) } : {}) }
     }, { id: botJobId(botId, scheduleId), nextRunAt: computeNextRun(jobScheduleOf(when), null, this.now()) })
     this.options.jobs.wake()
     return this.entryOf(job)!
@@ -291,7 +292,11 @@ export class BotScheduleBook {
       if (!prompt || prompt.length > 64 * 1024) throw new BotScheduleError('schedule_invalid', 'Each schedule needs something to do.')
       if (prompt.startsWith('/')) throw new BotScheduleError('schedule_locked', 'A bot does the work itself; a workflow can\'t be its Do.')
       changes.prompt = prompt
-      if (job.bot.say !== undefined) changes.bot = { ...job.bot, say: undefined }
+      if (job.bot.say !== undefined) {
+        const say = prompt.startsWith('Say exactly:') ? prompt.slice('Say exactly:'.length).trim() : undefined
+        changes.bot = { ...job.bot, say }
+        if (say !== undefined) changes.prompt = schedulePrompt({ say })
+      }
     }
     if (patch.schedule !== undefined) {
       const when = botWhenOf(patch.schedule)
