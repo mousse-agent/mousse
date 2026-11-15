@@ -9,6 +9,7 @@
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { rollUpChips } from '../../src/shared/bots/personal/chips'
 import { AT, fakeBots, installPreload, message, summary, type FakeBots } from './fakeBotsClient'
 import { setAnimationSpeed } from '../../src/renderer/lib/motion'
 import type { BotLaunchedThread } from '../../src/shared/bots/personal/chat'
@@ -117,6 +118,21 @@ afterEach(() => {
 })
 
 describe('the transcript', () => {
+  it('shows put-away memory entries in the reply steps and keeps the saved-entry link focused', async () => {
+    const chips = rollUpChips([{
+      tool: 'memory_save', input: { text: 'Combined notes.' },
+      result: { id: 'm3', absorbed: [{ ref: 'm1', text: 'First note.' }, { ref: 'm2', text: 'Second note.' }] }
+    }])
+    fake.chats.inbox = [message(1, { id: 'combined', text: 'Saved.', chips })]
+    await open()
+    await click(transcript().querySelector<HTMLButtonElement>('.bot-worked')!)
+    const step = transcript().querySelector('.bot-steps li')!
+    expect(step.textContent).toBe('Remembered · Combined notes. · put away 2')
+    expect(step.getAttribute('title')).toBe('Put away:\nFirst note.\nSecond note.')
+    await click(transcript().querySelector<HTMLButtonElement>('.bot-memory-tag')!)
+    expect(useBotsStore.getState().memoryOpen?.focus).toBe('Combined notes.')
+  })
+
   it('shows the owner’s messages and the bot’s as bubbles, with no face or name on the bot’s; its work folds behind Worked for', async () => {
     const at = (seconds: number) => new Date(Date.UTC(2026, 10, 13, 9, 0, seconds)).toISOString()
     fake.chats.inbox = [

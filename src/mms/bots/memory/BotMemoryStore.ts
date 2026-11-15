@@ -97,6 +97,7 @@ export interface BotMemorySave {
   kind: 'owner' | 'note'
   text: string
   replaces?: string
+  merges?: string[]
   validFrom?: string
   expiresAt?: string
   activationId?: string
@@ -205,6 +206,7 @@ export function entryOf(version: BotMemoryVersion): BotMemoryEntry {
     ...(version.expiresAt ? { until: version.expiresAt } : {}),
     learnedAt: version.learnedAt,
     by: version.writtenIn === 'run' ? 'a run' : version.writtenIn === 'dream' ? 'cleanup' : 'you said',
+    ...(version.reason?.startsWith('merged into ') ? { absorbedBy: version.reason.slice(12) } : {}),
     status: version.status
   }
 }
@@ -732,13 +734,32 @@ export class BotMemoryStore {
         if ((ref.version ?? 1) !== replaced.version)
           return { error: 'stale', current: { id: replaced.id, version: replaced.version, ref: memoryRef(replaced.id, replaced.version), text: replaced.text ?? '' } }
       }
-      const duplicate = this.get("SELECT * FROM bot_memories WHERE bot_id = ? AND text_hash = ? AND status = 'active' AND kind = ? LIMIT 1", botId, hash, kind)
-      if (duplicate && !replaced) {
+      const absorbed = new Map<string, BotMemoryVersion>()
+      for (const value of input.merges ?? []) {
+        const ref = parseMemoryRef(value)
+        const entry = ref ? this.current(botId, ref.id) : undefined
+        if (!ref || !entry) return { error: 'refused', reason: `There is no memory entry ${value}.` }
+        if ((ref.version ?? 1) !== entry.version)
+          return { error: 'stale', current: { id: entry.id, version: entry.version, ref: memoryRef(entry.id, entry.version), text: entry.text ?? '' } }
+        if (entry.status !== 'active') return { error: 'refused', reason: `${value} is not an active memory entry.` }
+        if (input.lane === 'run' && (entry.kind !== 'run_note' || entry.writtenIn === 'owner_ui'))
+          return { error: 'refused', reason: 'A run or a turn you started yourself can only absorb run notes that the owner has not edited. Ask the owner in the chat.' }
+        if (entry.kind !== kind) return { error: 'refused', reason: 'Absorbed entries must be of the same kind as the saved entry.' }
+        if (entry.id !== replaced?.id) absorbed.set(entry.id, entry)
+      }
+      const duplicates = this.all("SELECT * FROM bot_memories WHERE bot_id = ? AND text_hash = ? AND status = 'active'", botId, hash)
+      const outside = duplicates.find((entry) => entry.id !== replaced?.id && !absorbed.has(entry.id as string))
+      if (outside && input.merges?.length) {
+        const entry = versionOf(outside)
+        return { error: 'refused', reason: `That text is already active as ${memoryRef(entry.id, entry.version)}.` }
+      }
+      const duplicate = duplicates.find((entry) => entry.kind === kind)
+      if (duplicate && !replaced && !absorbed.size) {
         const version = versionOf(duplicate)
         return { id: version.id, version: version.version, ref: memoryRef(version.id, version.version), gauge: this.gauge(botId, input.lane) }
       }
       const active = this.active(botId)
-      const others = active.filter((entry) => entry.kind === kind && entry.id !== replaced?.id)
+      const others = active.filter((entry) => entry.kind === kind && entry.id !== replaced?.id && !absorbed.has(entry.id))
       if (usedTokens(others) + estimateTokens(text) > BOT_MEMORY_CAPS[kind])
         return {
           error: 'over_cap',
@@ -752,6 +773,14 @@ export class BotMemoryStore {
       this.run(`INSERT INTO bot_memories(id, version, bot_id, kind, text, text_hash, learned_at, valid_from, expires_at, written_in, source_seq, status)
         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')`,
       id, version, botId, kind, text, hash, at, validFrom ?? null, expiresAt ?? null, writtenIn, this.sourceSeq(botId, input.lane, input.activationId))
+      const absorbedBy = memoryRef(id, version)
+      for (const entry of absorbed.values()) {
+        this.run("UPDATE bot_memories SET status = 'superseded', reason = ? WHERE bot_id = ? AND id = ? AND status = 'active'", `merged into ${absorbedBy}`, botId, entry.id)
+        this.run(`INSERT INTO bot_memories(id, version, bot_id, kind, text, text_hash, learned_at, valid_from, expires_at, written_in, source_seq, status, reason)
+          VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'superseded', ?)`,
+        entry.id, entry.version + 1, botId, entry.kind, entry.text, entry.textHash, entry.learnedAt,
+        entry.validFrom, entry.expiresAt, entry.writtenIn, entry.sourceSeq, `merged into ${absorbedBy}`)
+      }
       this.appendInTx(this.db, {
         botId,
         kind: 'memory_op',
@@ -760,11 +789,14 @@ export class BotMemoryStore {
         sourceKey: `mem:${id}:v${version}`,
         who: input.lane === 'owner_ui' ? 'owner' : 'bot',
         text: `remembered · ${text}`,
-        json: { op: 'save', memId: id, version, kind, ...(replaced ? { replaces: memoryRef(replaced.id, replaced.version) } : {}) }
+        json: { op: 'save', memId: id, version, kind, ...(absorbed.size ? { merges: [...absorbed.values()].map((entry) => memoryRef(entry.id, entry.version)) } : {}), ...(replaced ? { replaces: memoryRef(replaced.id, replaced.version) } : {}) }
       }, at)
       // The next dispatch of every activation, a resumed one too, carries the new entry.
       this.dropPacks(botId)
-      return { id, version, ref: memoryRef(id, version), gauge: this.gauge(botId, input.lane) }
+      return {
+        id, version, ref: memoryRef(id, version), gauge: this.gauge(botId, input.lane),
+        ...(absorbed.size ? { absorbed: [...absorbed.values()].map((entry) => ({ ref: memoryRef(entry.id, entry.version), text: entry.text ?? '' })) } : {})
+      }
     })
   }
 
@@ -775,7 +807,7 @@ export class BotMemoryStore {
    * is blanked; the entry's `memory_op` rows are redacted; the chat summary and the frozen packs
    * lose it too. The reason is not stored: it often restates what was forgotten.
    */
-  forget(botId: string, input: BotMemoryForget): BotMemoryForgetResult | { error: string } {
+  forget(botId: string, input: BotMemoryForget): BotMemoryForgetResult | { error: string; holders?: BotMemoryEntry[] } {
     const ids = new Set<string>()
     const seqs = new Set<number>()
     for (const value of [...(input.id === undefined ? [] : [input.id]), ...(input.refs ?? [])]) {
@@ -812,16 +844,56 @@ export class BotMemoryStore {
       for (const seq of seqs) {
         const row = this.journalRow(botId, seq)!
         const copies = row.redactedAt ? [] : copiesOf(row.text, seq)
-        redact(row)
-        copies.forEach(redact)
         for (const copy of copies) cited.add(copy.seq)
       }
       for (const seq of cited)
         for (const memory of this.all('SELECT DISTINCT id FROM bot_memories WHERE bot_id = ? AND source_seq = ?', botId, seq)) ids.add(memory.id as string)
+      // Require upward holders through every historical version. Downward retirement
+      // only follows current superseded entries: put-back co-sources belong to the owner again.
+      const upward = new Map<string, Set<string>>()
+      const downward = new Map<string, Set<string>>()
+      const current = new Map<string, BotMemoryVersion | undefined>()
+      const entry = (id: string) => {
+        if (!current.has(id)) current.set(id, this.current(botId, id))
+        return current.get(id)
+      }
+      const connect = (links: Map<string, Set<string>>, from: string, to: string) => {
+        if (!links.has(from)) links.set(from, new Set())
+        links.get(from)!.add(to)
+      }
+      for (const row of this.all("SELECT DISTINCT id, reason FROM bot_memories WHERE bot_id = ? AND reason LIKE 'merged into %'", botId)) {
+        const target = parseMemoryRef((row.reason as string).slice(12))
+        if (!target) continue
+        const id = row.id as string
+        connect(upward, id, target.id)
+        const latest = entry(id)
+        if (latest?.status === 'superseded' && latest.reason?.startsWith('merged into ')
+          && parseMemoryRef(latest.reason.slice(12))?.id === target.id)
+          connect(downward, target.id, id)
+      }
+      const required = new Set(ids)
+      for (const id of required)
+        for (const holder of upward.get(id) ?? []) required.add(holder)
+      const holders = [...required].map(entry)
+        .filter((value): value is BotMemoryVersion => !!value && (value.status === 'active' || value.status === 'expired'))
+        .sort((a, b) => Number(a.id.slice(1)) - Number(b.id.slice(1)))
+      if (holders.some((value) => !ids.has(value.id))) {
+        const refs = holders.map((value) => memoryRef(value.id, value.version)).join(', ')
+        return { error: `This memory is held by ${refs}, including earlier versions. Name all these entries together in one Forget in the chat, then save again what should stay.`, holders: holders.map(entryOf) }
+      }
+      for (const id of ids)
+        for (const absorbed of downward.get(id) ?? []) ids.add(absorbed)
+      for (const seq of cited) redact(this.journalRow(botId, seq)!)
       for (const id of ids) {
         // Every version's words go from wherever they were copied: rows that hold them (a memory call
         // captured with its text by an older build) and the chip of the message that saved them.
         const texts = this.all('SELECT text FROM bot_memories WHERE bot_id = ? AND id = ? AND text IS NOT NULL', botId, id).map((row) => row.text as string)
+        // source_seq is approximate. It can identify a short exact copy, but never justifies
+        // removing an unrelated owner message or run prompt, or copies of that whole prompt.
+        for (const source of this.all('SELECT DISTINCT source_seq FROM bot_memories WHERE bot_id = ? AND id = ? AND source_seq IS NOT NULL', botId, id)) {
+          const row = this.journalRow(botId, num(source.source_seq)!)
+          if (row && texts.some((text) => text.trim() && row.text.includes(text.trim()))) redact(row)
+        }
         this.run("UPDATE bot_memories SET text = NULL, status = 'forgotten', reason = 'forgotten' WHERE bot_id = ? AND id = ?", botId, id)
         for (const op of this.all("SELECT * FROM bot_journal WHERE bot_id = ? AND kind = 'memory_op' AND json_extract(json, '$.memId') = ?", botId, id))
           redact(journalRowOf(op))
@@ -891,8 +963,12 @@ export class BotMemoryStore {
       if (!Array.isArray(chips)) return undefined
       let changed = false
       const next = chips.map((chip) => {
-        const value = chip as { icon?: unknown; highlight?: unknown }
-        if (value?.icon !== 'memory' || value.highlight !== highlight) return chip
+        const value = chip as { icon?: unknown; highlight?: unknown; title?: unknown }
+        if (value?.icon !== 'memory') return chip
+        const matches = value.highlight === highlight
+          || (typeof value.highlight === 'string' && value.highlight.startsWith(`${highlight} · put away `))
+          || (typeof value.title === 'string' && value.title.split('\n').includes(highlight))
+        if (!matches) return chip
         changed = true
         return { icon: 'memory', text: 'remembered something' }
       })

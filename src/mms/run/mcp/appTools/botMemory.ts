@@ -75,10 +75,11 @@ export const BOT_MEMORY_TOOL_DEFINITIONS: Record<BotMemoryTool, Tool> = {
   },
   memory_save: {
     name: 'memory_save',
-    description: `Save something to remember in every later turn. Save the owner's wishes and corrections ("don't…", "always…", "call me Sam") as kind owner the moment they say them; every later turn follows them. One fact or note an entry, under ${MAX_BOT_MEMORY_TEXT_CHARS} characters, with absolute dates ("12 Nov 2026", never "tomorrow"). kind owner: a fact about the owner, only from what the owner said; kind note: your own standing note. When it changes or contradicts an entry, pass replaces with that entry's ref (m12, or m12v2 for its second version). When memory is full, the save fails with the current list: merge or replace entries first. In a run or a chat turn you started yourself, saves become run notes.`,
+    description: `Save something to remember in every later turn. Save the owner's wishes and corrections ("don't…", "always…", "call me Sam") as kind owner the moment they say them; every later turn follows them. One fact or note an entry, under ${MAX_BOT_MEMORY_TEXT_CHARS} characters, with absolute dates ("12 Nov 2026", never "tomorrow"). kind owner: a fact about the owner, only from what the owner said; kind note: your own standing note. When it changes or contradicts an entry, pass replaces with that entry's ref (m12, or m12v2 for its second version). When memory is full, the save fails with the current list: combine entries of the same kind using merges: their current refs. Their text stays in history; replaces on a superseded current ref puts it back. In a run or a chat turn you started yourself, saves become run notes.`,
     parameters: Type.Object({
       text: Type.String(),
       kind: Type.Union([Type.Literal('owner'), Type.Literal('note')]),
+      merges: Type.Optional(Type.Array(Type.String(), { description: 'Current refs of entries of the same kind to absorb. May be used with replaces. Runs absorb only run notes the owner has not edited.' })),
       replaces: Type.Optional(Type.String({ description: 'The ref of the entry this replaces.' })),
       validFrom: Type.Optional(Type.String({ description: 'When it becomes true, if not now: a date like 2026-11-12.' })),
       expiresAt: Type.Optional(Type.String({ description: 'When it stops being true, like 2026-11-12 for "on leave until 12 Nov".' }))
@@ -86,10 +87,10 @@ export const BOT_MEMORY_TOOL_DEFINITIONS: Record<BotMemoryTool, Tool> = {
   },
   memory_forget: {
     name: 'memory_forget',
-    description: 'Forget something the owner asked you to forget: a memory entry (id m12) and the history rows that say it (refs from memory_search, like j123). Only in a chat turn the owner\'s message or tapped answer started. Afterwards say what you removed and offer to look for other mentions. Copies in app transcripts outside your memory are not covered: say so if asked.',
+    description: 'Forget something the owner asked you to forget: a memory entry (id m12) and the history rows that say it (refs from memory_search, like j123). Only in a chat turn the owner\'s message or tapped answer started. If an entry has been combined, Forget may refuse with all active or expired holders. Name all listed memory refs together in id and refs, then save again what should stay. Afterwards say what you removed and offer to look for other mentions. Copies in app transcripts outside your memory are not covered: say so if asked.',
     parameters: Type.Object({
       id: Type.Optional(Type.String({ description: 'The memory entry: m12.' })),
-      refs: Type.Optional(Type.Array(Type.String(), { description: 'History rows to remove: j123.' })),
+      refs: Type.Optional(Type.Array(Type.String(), { description: 'History rows to remove: j123. Also accepts memory refs to name all holders listed by a Forget refusal together.' })),
       reason: Type.String({ description: 'Why, in a few words.' })
     })
   }
@@ -201,12 +202,15 @@ export function botMemoryTools(source: BotMemoryToolHost | (() => BotMemoryToolH
       const listing = store.list(botId, args.history === true)
       // Run notes were written by unattended work, which reads pages and files: data, as the pack frames them.
       const runNotes = listing.entries.some((entry) => entry.kind === 'run_note')
-      return json({ ...(runNotes ? { note: RUN_NOTES_NOTE } : {}), ...listing, entries: listing.entries.map(({ ref, kind, text, since, until, learnedAt, by, status }) => ({ id: ref, kind, text, since, ...(until ? { until } : {}), learnedAt, by, status })) })
+      return json({ ...(runNotes ? { note: RUN_NOTES_NOTE } : {}), ...listing, entries: listing.entries.map(({ ref, kind, text, since, until, learnedAt, by, status, absorbedBy }) => ({ id: ref, kind, text, since, ...(until ? { until } : {}), learnedAt, by, status, ...(absorbedBy ? { absorbedBy } : {}) })) })
     }),
     tool('memory_save', (args) => `Remember · ${str(args.text)?.slice(0, 60) ?? ''}`, (args, ctx, activation, store) => {
       const text = str(args.text)
       if (!text) return error('memory_save needs the text to remember.')
+      if (args.merges !== undefined && (!Array.isArray(args.merges) || args.merges.some((ref) => typeof ref !== 'string')))
+        return error('merges must be a list of memory refs.')
       const result = store.save(activation.botId, {
+        ...(Array.isArray(args.merges) ? { merges: args.merges as string[] } : {}),
         lane: activation.lane,
         kind: args.kind === 'owner' ? 'owner' : 'note',
         text,

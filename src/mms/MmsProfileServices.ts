@@ -879,6 +879,7 @@ export class MmsProfileServices {
       }
       const admin = createBotMemoryAdmin({
         store: memory,
+        name: (botId) => this.personalBots?.definitionOf(botId)?.name,
         definition: (botId) => {
           try { return this.personalBots?.definitionOf(botId) } catch { return undefined }
         }
