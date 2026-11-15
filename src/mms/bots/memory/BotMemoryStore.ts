@@ -383,6 +383,13 @@ export class BotMemoryStore {
     return row ? journalRowOf(row) : undefined
   }
 
+  /** Searchable messages, without loading their text or counting tool and bookkeeping rows. */
+  messageHistory(botId: string): { count: number; since?: string } {
+    const row = this.get(`SELECT COUNT(*) AS n, MIN(at) AS since FROM bot_journal
+      WHERE bot_id = ? AND kind IN ('owner_msg', 'bot_msg', 'run_report') AND redacted_at IS NULL`, botId)!
+    return { count: num(row.n) ?? 0, ...(typeof row.since === 'string' ? { since: row.since } : {}) }
+  }
+
   /** Every journal row of a bot, oldest first (export). */
   journal(botId: string): BotJournalRow[] {
     return this.all('SELECT * FROM bot_journal WHERE bot_id = ? ORDER BY seq', botId).map(journalRowOf)

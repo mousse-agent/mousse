@@ -64,7 +64,7 @@ describe('asks in a run', () => {
     const cards = chatOf(f, botId).filter((message) => message.ask)
     expect(cards).toMatchObject([{ author: 'bot', kind: 'notice', text: 'Penny wants to run commands.', ask: { askId: asks[0]!.id, status: 'open', kind: 'permission' } }])
     expect(chatOf(f, botId).filter((message) => message.kind === 'run_report')).toHaveLength(3)
-    expect(f.bots.service.get(botId).summary).toMatchObject({ state: 'needs_you', stateText: 'Wants to run commands' })
+    expect(f.bots.service.get(botId).summary).toMatchObject({ state: 'needs_you', stateText: 'Wants to run commands', needsOwner: true })
   })
 
   it('the bot\'s own escalate in a run asks once and carries on', async () => {
@@ -86,8 +86,10 @@ describe('asks in a run', () => {
     first.prepared.authority.check(command('ls'))
     await finish(f, first.payload, 'completed', { text: 'Skipped.' })
     const askId = f.store.openAsks(botId)[0]!.id
+    expect(f.bots.service.get(botId).summary.needsOwner).toBe(true)
     const { message } = await f.bots.service.answer(botId, askId, 'not_now')
     expect(message.ask).toMatchObject({ askId, status: 'not_now' })
+    expect(f.bots.service.get(botId).summary.needsOwner).toBeUndefined()
     f.clock.now += DAY - 60_000
     const second = await run('r2')
     // No card: the bot is told the owner said not now, never that it asked.
