@@ -47,3 +47,14 @@ it('settles cancelled waiting runs after the job is removed without creating fai
   expect(run.state).toBe('done')
   expect(run.items).toEqual([])
 })
+
+it('settles a deleted bot\'s scheduled runs without failure items', async () => {
+  const schedule = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Check price.' }, 'owner')
+  await f.tickSchedules(new Date(T0 + 5 * 60_000))
+  await f.bots.remove(botId)
+  syncInbox()
+  const run = f.automationRuns.list().runs.find(run => run.jobId === schedule.jobId)!
+  expect(run.state).toBe('done')
+  expect(run.level).toBe('quiet')
+  expect(run.items).toEqual([])
+})
