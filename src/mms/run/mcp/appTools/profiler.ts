@@ -240,7 +240,7 @@ async function run(
     case 'profiler_sample_now': {
       const previous = latest()
       await service.collectApp(false)
-      await monitor.tick()
+      await monitor.tick({ children: true })
       const sample = latest()
       if (!sample || sample === previous) return error('The sample failed. Call again in a few seconds.')
       return json(sampleNowReport(sample, previous))

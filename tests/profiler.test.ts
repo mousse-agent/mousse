@@ -359,6 +359,45 @@ describe('the profiler tools', () => {
     expectNoPrivateData(outcome.text, dir)
   })
 
+  it('profiler_sample_now refreshes provider memory between detailed samples', async () => {
+    const { monitor, service, now } = profilerFixture(home())
+    const registry = toolsFor(() => ON, service)
+    await call(registry, 'profiler_overview')
+    const read = vi.spyOn(monitor, 'readChildrenNow').mockResolvedValue([{ kind: 'codex', mb: 333 }])
+    now.t += 60_000
+    await monitor.tick()
+    const cached = await call(registry, 'profiler_overview')
+    expect(cached.value.processes.find((row: { label: string }) => row.label.startsWith('Agents and tools'))).toMatchObject({ detail: expect.stringContaining('claude 210') })
+    expect(read).not.toHaveBeenCalled()
+    const fresh = await call(registry, 'profiler_sample_now')
+    expect(fresh.value.processes.find((row: { label: string }) => row.label.startsWith('Agents and tools'))).toMatchObject({ detail: 'codex 333 MB' })
+    expect(fresh.value.childrenSampledSecondsAgo).toBe(0)
+    expect(read).toHaveBeenCalledTimes(1)
+    monitor.stop()
+  })
+
+  it('profiler_sample_now waits for an in-flight periodic sample then takes a fresh child reading', async () => {
+    const { monitor, service, now } = profilerFixture(home())
+    const registry = toolsFor(() => ON, service)
+    await call(registry, 'profiler_overview')
+    let finish!: (children: Array<{ kind: string; mb: number }>) => void
+    let started!: () => void
+    const reading = new Promise<void>((resolve) => { started = resolve })
+    const read = vi.spyOn(monitor, 'readChildrenNow')
+      .mockImplementationOnce(() => { started(); return new Promise((resolve) => { finish = resolve }) })
+      .mockResolvedValue([{ kind: 'codex', mb: 444 }])
+    now.t += 5 * 60_000
+    const periodic = monitor.tick()
+    await reading
+    const requested = call(registry, 'profiler_sample_now')
+    finish([{ kind: 'codex', mb: 111 }])
+    await periodic
+    const fresh = await requested
+    expect(fresh.value.processes.find((row: { label: string }) => row.label.startsWith('Agents and tools'))).toMatchObject({ detail: 'codex 444 MB' })
+    expect(read).toHaveBeenCalledTimes(2)
+    monitor.stop()
+  })
+
   it('profiler_service_breakdown: heap, counts, caches, this profile\'s threads by id and other profiles as totals', async () => {
     const dir = home()
     const { service, threads } = profilerFixture(dir)
