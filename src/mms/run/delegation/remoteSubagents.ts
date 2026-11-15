@@ -46,6 +46,11 @@ export interface RemoteSubagentRecord {
   lastError: string | null
   /** When that computer last answered about this task. */
   lastSeenAt: string | null
+  /**
+   * Whether the task's calls carry the agent mark (`ROUTED_AGENT_KEY`): true where that computer knows it, false for an
+   * older computer, null until the first call. Fixed once set, and the same for every task of one subagent.
+   */
+  marked: boolean | null
   createdAt: string
   updatedAt: string
 }
@@ -87,6 +92,7 @@ function fromRow(row: Row): RemoteSubagentRecord {
     waitingInput: int(row.waiting_input) === 1,
     lastError: str(row.last_error),
     lastSeenAt: str(row.last_seen_at),
+    marked: row.marked === null || row.marked === undefined ? null : int(row.marked) === 1,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at)
   }
@@ -94,7 +100,7 @@ function fromRow(row: Row): RemoteSubagentRecord {
 
 /** What a caller may change on a row; `undefined` keeps a field, `null` clears a nullable one. */
 export type RemoteSubagentPatch = Partial<
-  Pick<RemoteSubagentRecord, 'remoteThreadId' | 'remoteRunId' | 'state' | 'waitingInput' | 'lastError' | 'lastSeenAt'>
+  Pick<RemoteSubagentRecord, 'remoteThreadId' | 'remoteRunId' | 'state' | 'waitingInput' | 'lastError' | 'lastSeenAt' | 'marked'>
 >
 
 const COLUMNS: Record<keyof RemoteSubagentPatch, string> = {
@@ -103,14 +109,15 @@ const COLUMNS: Record<keyof RemoteSubagentPatch, string> = {
   state: 'state',
   waitingInput: 'waiting_input',
   lastError: 'last_error',
-  lastSeenAt: 'last_seen_at'
+  lastSeenAt: 'last_seen_at',
+  marked: 'marked'
 }
 
 /** The rows of `remote_subagents`. Synchronous; every write joins the caller's transaction. */
 export class RemoteSubagentRecords {
   constructor(private readonly store: RunStore) {}
 
-  create(input: Omit<RemoteSubagentRecord, 'remoteThreadId' | 'remoteRunId' | 'state' | 'waitingInput' | 'lastError' | 'lastSeenAt' | 'createdAt' | 'updatedAt'> & {
+  create(input: Omit<RemoteSubagentRecord, 'remoteThreadId' | 'remoteRunId' | 'state' | 'waitingInput' | 'lastError' | 'lastSeenAt' | 'marked' | 'createdAt' | 'updatedAt'> & {
     /** A follow-up on a subagent whose far thread already exists. */
     remoteThreadId?: string | null
   }): RemoteSubagentRecord {

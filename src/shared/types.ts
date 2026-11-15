@@ -1236,8 +1236,15 @@ export interface QueueEditResult {
  */
 export interface AgentOrigin {
   kind: 'agent'
-  threadId: string
-  runId: string
+  /** The sending thread and run on this computer; unset for a sender on another computer (`from`). */
+  threadId?: string
+  runId?: string
+  /**
+   * A sender on another of the user's computers: that computer (`node`), the thread and run there by their ids on it,
+   * and the sender's title then. The fields are not named `…Id`, so the routed id rewriting leaves them alone
+   * (`routedIds.ts`, `isRemoteAgentFrom`); on the computer named by `node` they are its own plain ids.
+   */
+  from?: AgentOriginFrom
   /**
    * How many agent messages in a row led to this one without a person in between (the sender's own count
    * plus one). A message that would pass the limit is refused, so a chain of agents cannot run unwatched.
@@ -1257,6 +1264,14 @@ export interface AgentOrigin {
 export interface AgentMessageBody {
   head: number
   tail: number
+}
+
+/** Who sent an agent message from another computer (`AgentOrigin.from`). */
+export interface AgentOriginFrom {
+  node: string
+  thread: string
+  run: string
+  title: string
 }
 
 /** The category for the unsent draft: it is not yet in the context, so it never shows that usage is known. */
@@ -1406,6 +1421,13 @@ export interface SubagentWorkspaceBinding {
 export interface ThreadStartedFrom {
   node: string
   projectId?: string
+  /**
+   * Set when an agent on that device started the thread (a routed `threads.create` marked as an agent's): the sender's
+   * thread there (its id on that device, never rewritten), its title then, and the mode the thread was held to when it
+   * was made. A marked `threads.setPermissionMode` never goes above that mode. `createdByThreadId` stays unset: a foreign
+   * id there would be rewritten to a thread of this computer that does not exist.
+   */
+  agent?: { thread: string; title: string; mode: PermissionMode }
 }
 
 /** The computer a thread's latest routed message came from. */

@@ -1,4 +1,5 @@
 import type { NodeId } from '../../../shared/net'
+import { ROUTED_AGENT_METHODS } from '../../../shared/bridge/routed'
 import type { MmsProfileServices } from '../../MmsProfileServices'
 import type { RemoteComputer, RemoteComputersPort } from '../../protocol/remoteComputersPort'
 import { repositoryIdentitiesFor } from '../remote/repositoryIdentity'
@@ -23,6 +24,10 @@ export function remoteComputersPort(options: {
     computers: (): RemoteComputer[] | undefined =>
       options.computers()?.map(({ node, name }) => ({ node, name, online: options.online(node) })),
     call: (node, method, params, callOptions) => client.call(node as NodeId, method, params, callOptions),
+    takesAgentMark: async (node) => {
+      const versions = await client.versionsOrRefusal(node as NodeId)
+      return Object.entries(ROUTED_AGENT_METHODS).every(([method, since]) => (versions?.[method] ?? 0) >= since)
+    },
     matchProject: async (node, projectPath, signal) => {
       const identity = await repositoryIdentitiesFor(services).of(projectPath)
       if (!identity) return null

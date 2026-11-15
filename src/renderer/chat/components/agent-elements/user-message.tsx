@@ -115,21 +115,24 @@ export function agentSenderOf(message: UIMessage): AgentOrigin | undefined {
  * sender that was deleted shows the title it had when it sent, with nothing to open.
  */
 function AgentSenderHeader({ origin }: { origin: AgentOrigin }) {
-  const live = useAppStore((state) => state.threads.find((thread) => thread.id === origin.threadId)?.name);
-  const title = live || origin.title;
+  // A sender on another computer (`origin.from`) names a thread there, never one of this computer's: its title is shown
+  // as it was sent, with nothing to open here.
+  const localId = origin.from ? undefined : origin.threadId;
+  const live = useAppStore((state) => (localId ? state.threads.find((thread) => thread.id === localId)?.name : undefined));
+  const title = live || origin.from?.title || origin.title;
   return (
     <div className="chat-agent-sender" data-find-ignore>
       <Bot size={13} strokeWidth={2} aria-hidden="true" />
       <span className="chat-agent-sender-kind">Agent</span>
       {title && <span aria-hidden="true">·</span>}
-      {title && (live ? (
+      {title && (live && localId ? (
         <a
-          href={threadLink(origin.threadId)}
+          href={threadLink(localId)}
           className="chat-agent-sender-link"
           title={`Open ${title}`}
           onClick={(event) => {
             event.preventDefault();
-            openLinkedThread(origin.threadId);
+            openLinkedThread(localId);
           }}
         >
           {title}

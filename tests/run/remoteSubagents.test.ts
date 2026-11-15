@@ -29,6 +29,10 @@ class FakeComputer implements RemoteComputersPort {
   limit = 'accept_edits'
   /** What its model picker offers (`providers.snapshots`). */
   snapshots: Json[] = []
+  /** Whether it takes calls marked as an agent's; false is a computer from before the mark. */
+  marks = false
+  /** How often it was asked. */
+  asked = 0
   private threads = 0
   private runs = 0
 
@@ -39,6 +43,13 @@ class FakeComputer implements RemoteComputersPort {
   async matchProject(): Promise<{ projectId: string; weak: boolean } | null> {
     if (!this.online) throw new DomainRpcError('computer_offline', 'Studio Mac is offline.')
     return this.match
+  }
+
+  async takesAgentMark(node: string): Promise<boolean> {
+    expect(node).toBe(MAC)
+    this.asked += 1
+    if (!this.online) throw new DomainRpcError('computer_offline', 'Studio Mac is offline.')
+    return this.marks
   }
 
   async call(node: string, method: string, params: Record<string, unknown>, options?: { idem?: string }): Promise<unknown> {
@@ -273,6 +284,41 @@ describe('remote subagents (issue #469)', () => {
     expect(mac.methods().filter((method) => method === 'threads.create')).toHaveLength(1)
     expect(out.merge).toMatchObject({ merged: false, note: expect.stringContaining('another computer') })
     expect(d.engine.remoteSubagents.get(out.more.delegationId)).toMatchObject({ remoteThreadId: 'far-thread-1', remoteRunId: 'far-run-2', state: 'running' })
+  })
+
+  it('marks every call that changes a thread there as this agent\'s, where that computer knows the mark', async () => {
+    const { d, parent, steps, out, say, mac, startOnMac } = remoteWorld()
+    mac.marks = true
+    steps['go'] = async (tools) => { out.started = await startOnMac(tools, 'Mac tester') }
+    await say('go')
+    expect(mac.methods()).toEqual(['threads.create', 'composer.options', 'threads.setPermissionMode', 'orchestrator.send'])
+    const task = d.engine.remoteSubagents.get(out.started.delegationId)!
+    expect(task.marked).toBe(true)
+    const delegation = d.engine.delegations.get(out.started.delegationId)!
+    // The sender is the parent thread and the run that started the task; its mode is the task's own.
+    const mark = { thread: parent.id, run: delegation.parentRunId, title: d.store.getThread(parent.id)!.name, hops: 1, mode: task.permissionMode }
+    for (const call of mac.calls)
+      if (call.method === 'composer.options') expect(call.params).not.toHaveProperty('agent')
+      else expect(call.params.agent, call.method).toEqual(mark)
+  })
+
+  it('keeps an older computer\'s subagent unmarked for good, even once that computer knows the mark', async () => {
+    const { d, steps, out, say, mac, service, startOnMac } = remoteWorld()
+    steps['go'] = async (tools) => { out.started = await startOnMac(tools, 'Mac tester') }
+    steps['more'] = async (tools) => { out.more = await tools.continueSubagent({ subagent: 'Mac tester', prompt: 'And iOS?' }, { toolCallId: 'c1' }) as Json }
+    await say('go')
+    expect(d.engine.remoteSubagents.get(out.started.delegationId)!.marked).toBe(false)
+    expect(mac.calls.every((call) => !('agent' in call.params))).toBe(true)
+    // That computer is updated while the subagent lives: its next task, and the stop of this one, keep the form it began
+    // with, since the other computer's replay ledger is keyed by method and a switch could send a task twice.
+    mac.marks = true
+    mac.farRun = { status: 'completed', userMessageId: 'far-user-1' }
+    await service.pass()
+    await say('more')
+    expect(out.more).toMatchObject({ status: 'started' })
+    expect(d.engine.remoteSubagents.get(out.more.delegationId)!.marked).toBe(false)
+    expect(mac.calls.every((call) => !('agent' in call.params))).toBe(true)
+    expect(mac.asked).toBe(1)
   })
 
   // Issue #1160: the mode there is the narrowest of the parent thread's mode, its run and the limit that computer set

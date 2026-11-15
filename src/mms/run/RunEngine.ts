@@ -1265,7 +1265,8 @@ export class RunEngine extends EventEmitter {
       threadId,
       runId,
       type: 'agent.action',
-      payload: { ...details, action, actorThreadId: actor.threadId, actorRunId: actor.runId, toolCallId: actor.toolCallId }
+      // A sender on another computer: its ids are that computer's, so the event names the computer and its title too.
+      payload: { ...details, action, actorThreadId: actor.threadId, actorRunId: actor.runId, toolCallId: actor.toolCallId, ...(actor.remote ? { actorNode: actor.remote.node, actorTitle: actor.remote.title } : {}) }
     })
   }
 
