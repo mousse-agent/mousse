@@ -514,6 +514,19 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
       expect((await call('manage', 'thread_read', {}, { threadId: 'target', runId: runs.target })).isError).toBeUndefined()
     })
 
+    it('every thread an agent lists, finds or reads carries its link, which a reply can name', async () => {
+      const { call, result, threads } = await world({}, {
+        listThreads: () => [...threads.values()],
+        listProjects: () => [{ id: 'p1', name: 'One' }] as never,
+        searchThreads: () => [{ threadId: 'target', threadName: 'Thread target', projectId: 'p1', matchType: 'title' }] as never
+      })
+      const listed = (await result(call('manage', 'thread_list'))).threads
+      expect(listed.length).toBeGreaterThan(0)
+      for (const row of listed) expect(row.link).toBe(`mousse://thread/${row.id}`)
+      expect((await result(call('read', 'thread_search', { query: 'target' }))).results).toEqual([expect.objectContaining({ threadId: 'target', link: 'mousse://thread/target' })])
+      expect(await result(call('manage', 'thread_read', { threadId: 'target' }))).toMatchObject({ threadId: 'target', link: 'mousse://thread/target' })
+    })
+
     it('a bot\'s own turn is held to its walls: a send, steer or Stop is refused although its grant says manage, and a bot is never granted above lineage in the first place', async () => {
       const { fx, registry, turns, request, host, callerRun } = await world()
       const wall = (tool: string) => ({ kind: 'tool', tool })

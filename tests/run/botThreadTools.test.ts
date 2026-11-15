@@ -212,6 +212,17 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(managerFound).toEqual([])
   })
 
+  it('each thread a bot lists, finds, reads or starts carries its link, for its reply to name', async () => {
+    const { text } = await world({ threads: 'all' })
+    const body = (outcome: { text: string }) => JSON.parse(outcome.text.split('\n').slice(1, -1).join('\n'))
+    const listed = body(await text('thread_list', {})).threads
+    expect(listed).toContainEqual(expect.objectContaining({ id: 'mine', link: 'mousse://thread/mine' }))
+    for (const row of listed) expect(row.link).toBe(`mousse://thread/${row.id}`)
+    expect(body(await text('thread_search', { query: 'login' })).results).toEqual([expect.objectContaining({ threadId: 'mine', link: 'mousse://thread/mine' })])
+    expect(body(await text('thread_read', { threadId: 'mine' }))).toMatchObject({ threadId: 'mine', link: 'mousse://thread/mine' })
+    expect(JSON.parse((await text('thread_create', { projectId: 'p1', title: 'Fix login', firstMessage: 'Look.' })).text)).toMatchObject({ threadId: 'new-1', link: 'mousse://thread/new-1' })
+  })
+
   it('a project list that could not be read is no project for a bot, and the bot is told why; what it started stays its own', async () => {
     const { text, host } = await world({ threads: 'all', access: { level: 'lineage', projectIds: [], projectsUnreadable: true } })
     const listed = await text('thread_list', {})

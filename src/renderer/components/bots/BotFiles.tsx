@@ -1,7 +1,7 @@
 import { Children, createContext, isValidElement, useContext, useEffect, useState, type ReactElement, type ReactNode } from 'react'
 import type { Components } from 'streamdown'
 import { FileText, FolderOpen, Image as ImageIcon, X } from '../../lib/icons'
-import { Markdown, type MarkdownImages } from '../../chat/components/agent-elements/markdown'
+import { Markdown, restoreMousseHref, type MarkdownImages } from '../../chat/components/agent-elements/markdown'
 import { LinkLabel } from '../../chat/components/agent-elements/link-label-view'
 import { classifyLink, routeLink } from '../../utils/chatLinks'
 import { fileLocation, isAbsolutePath } from '../../utils/filesBrowse'
@@ -94,7 +94,7 @@ function KeyValueCard({ children }: { children: ReactNode }) {
 /** The path a link opens, when it names a file of this computer by its full path. */
 function linkedPath(href: string | undefined): string | undefined {
   if (!href) return undefined
-  const restored = href.startsWith('/__mousse_file_open__?') ? `mousse-file://open?${href.slice('/__mousse_file_open__?'.length)}` : href
+  const restored = restoreMousseHref(href)
   const file = parseMousseFileLink(restored)
   if (file) return file.path
   const route = classifyLink(restored)
@@ -114,9 +114,10 @@ export const BOT_IMAGES: MarkdownImages = { Image: BotMarkdownImage }
  * Kept for the module's life (see `Markdown`).
  */
 /** A link in a bot's message: a file of this computer is its chip, a link the app refuses is plain text. */
-export function BotLink({ href, children, ...props }: { href?: string; children?: ReactNode } & Record<string, unknown>) {
-  const path = linkedPath(href)
+export function BotLink({ href: written, children, ...props }: { href?: string; children?: ReactNode } & Record<string, unknown>) {
+  const path = linkedPath(written)
   if (path) return <BotPathChip path={path} />
+  const href = written && restoreMousseHref(written)
   if (!href || classifyLink(href).kind === 'reject') return <span>{children}</span>
   return <a {...props} href={href} className="an-md-link" onClick={(event) => { event.preventDefault(); routeLink(href) }}>
     <LinkLabel href={href}>{children}</LinkLabel>

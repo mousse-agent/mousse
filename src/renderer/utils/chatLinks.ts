@@ -1,12 +1,16 @@
 import { parseChatReference, parseMousseFileLink, type ChatReference } from '../../shared/chatReferences'
 import { useAppStore } from '../stores/appStore'
 import { visibleThreads } from '../../shared/threadLineage'
+import { parseThreadLink } from '../../shared/threadLink'
+import { selectThread } from '../lib/threadActions'
+import { showToast } from '../components/ui/Toast'
 
 const UNSAFE_SCHEME = /^(?:javascript|data|vbscript|blob):/i
 
 export type RoutedLink =
   | { kind: 'file'; path: string; line?: number; column?: number }
   | { kind: 'web'; url: string }
+  | { kind: 'thread'; threadId: string }
   | { kind: 'relative-file'; path: string; line?: number; column?: number }
   | { kind: 'reject' }
 
@@ -16,6 +20,8 @@ export function classifyLink(href: string): RoutedLink {
   if (!value || UNSAFE_SCHEME.test(value)) return { kind: 'reject' }
   const mousseFile = parseMousseFileLink(value)
   if (mousseFile) return { kind: 'file', ...mousseFile }
+  const threadId = parseThreadLink(value)
+  if (threadId) return { kind: 'thread', threadId }
   if (/^https?:\/\//i.test(value)) {
     try {
       const url = new URL(value)
@@ -44,6 +50,10 @@ export function classifyLink(href: string): RoutedLink {
 export function routeLink(href: string, context?: { threadId?: string; projectId?: string }): boolean {
   const route = classifyLink(href)
   if (route.kind === 'reject') return false
+  if (route.kind === 'thread') {
+    openLinkedThread(route.threadId)
+    return true
+  }
   if (route.kind === 'web') {
     const store = useAppStore.getState()
     // In Chats (a bot's or an agent chat) the Browser panel would swap the chat for the Projects workspace, so a
@@ -66,6 +76,18 @@ export function routeLink(href: string, context?: { threadId?: string; projectId
     projectId: context?.projectId
   })
   return true
+}
+
+/**
+ * Opens the thread a `mousse://thread/<id>` link names, in the app (out of Chats or a bot's chat). A thread this
+ * window does not list, such as a deleted one, gets a short toast instead.
+ */
+export function openLinkedThread(threadId: string): void {
+  const store = useAppStore.getState()
+  const missing = (): void => { showToast({ key: 'thread-link-missing', message: 'That thread is no longer here.' }) }
+  if (!store.threads.some((thread) => thread.id === threadId)) return missing()
+  store.setThreadsSidebarView('projects')
+  void selectThread(threadId).catch(missing)
 }
 
 /** Opens a file in the Files panel; a relative path is read from the thread's folder. */
