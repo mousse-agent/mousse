@@ -245,7 +245,7 @@ export class BotScheduleBook {
     const when: BotSchedule['when'] = input.when.kind === 'interval' ? { kind: 'interval', minutes: input.when.minutes } : { kind: 'cron', expr: input.when.expr.trim() }
     const job = this.options.jobs.createJob({
       // A draft turned on keeps its name and Tell me, in the same write.
-      name: input.name?.trim() || botJobName(prompt),
+      name: input.name?.trim() || botJobName(input.say ?? prompt),
       ...(input.tellMe ? { tellMe: input.tellMe } : {}),
       prompt,
       ...(expiresAt ? { expiresAt } : {}),
