@@ -8,6 +8,7 @@ import { CommandRejection, fail, reject, RunStoreError } from './db/RunStoreErro
 import { inheritedAgentHops } from './agentHops'
 import { isFencedSource, isFollowUpSource, isPauseHeldSource, isResumeSource } from './delegation/sources'
 import { cancelAcknowledgedWakes, recoverWakesOnBoot } from './delegation/wake'
+import { RemoteLaunchRecords } from './delegation/remoteLaunches'
 import { RemoteSubagentRecords } from './delegation/remoteSubagents'
 import { Delegations } from './Delegations'
 import { EffectOutbox } from './EffectOutbox'
@@ -472,6 +473,8 @@ export class RunEngine extends EventEmitter {
   readonly delegations: Delegations
   /** Remote subagents' tasks and the runs on other computers that do them (issue #469). */
   readonly remoteSubagents: RemoteSubagentRecords
+  /** Threads agents here launched on other computers (`thread_create` with `computer`, issue #1160). */
+  readonly remoteLaunches: RemoteLaunchRecords
   /** Saved approval requests (SPEC §17). */
   readonly approvals: ThreadApprovals
   /** Context handoffs (SPEC §16.1). */
@@ -507,6 +510,7 @@ export class RunEngine extends EventEmitter {
     this.inbox = new Inbox(opts.store)
     this.delegations = new Delegations(opts.store, this.inbox)
     this.remoteSubagents = new RemoteSubagentRecords(opts.store)
+    this.remoteLaunches = new RemoteLaunchRecords(opts.store)
     this.approvals = new ThreadApprovals(opts.store, { outbox: this.outbox, lineage: (threadId) => this.delegations.getLineage(threadId) })
     this.handoffs = new HandoffService(opts.store)
     this.transfers = new ContextTransfers(opts.store)

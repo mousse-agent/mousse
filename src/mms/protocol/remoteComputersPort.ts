@@ -30,4 +30,13 @@ export interface RemoteComputersPort {
    * `weak` when only the root commit matched. Null when it has none, or the folder is not a repository.
    */
   matchProject(node: string, projectPath: string, signal?: AbortSignal): Promise<{ projectId: string; weak: boolean } | null>
+  /**
+   * The same as `matchProject`, with the projects that may be it when there is no single answer (`candidates`, from a
+   * computer that names them; an older one names none). Null when the folder here is not a repository.
+   */
+  projectCandidates(
+    node: string,
+    projectPath: string,
+    signal?: AbortSignal
+  ): Promise<{ match: { projectId: string; weak: boolean } | null; candidates: Array<{ projectId: string; name?: string; weak?: boolean }> } | null>
 }
