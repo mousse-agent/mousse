@@ -472,6 +472,25 @@ describe('owner attention in the shared summary', () => {
     expect(summary().state).not.toBe('needs_you')
   })
 
+  it.each(['running', 'queued'] as const)('keeps %s work visible while a chat question still counts for the badge', async (status) => {
+    await chatAsks(DEFAULT_A)
+    const activation = await f.bots.activate({ botId, input: 'Check flights', clientRequestId: 'flights' })
+    if (status === 'queued') f.store.moveActivation(activation.id, ['running'], 'queued')
+    expect(summary()).toMatchObject({ state: 'working', needsOwner: true })
+    expect(summary().stateText).not.toContain('Asked:')
+    f.store.moveActivation(activation.id, [status], 'done')
+    expect(summary()).toMatchObject({ state: 'needs_you', stateText: `Asked: ${FLATS.question}`, needsOwner: true })
+  })
+
+  it('keeps a managed thread visible while a chat question still counts for the badge', async () => {
+    await chatAsks(FLATS)
+    f.launched = () => [{ threadId: 'flights', title: 'Check flights', status: 'running', startedAt: new Date(f.clock.now).toISOString(), updatedAt: new Date(f.clock.now).toISOString() }]
+    expect(summary()).toMatchObject({ state: 'working', needsOwner: true })
+    expect(summary().stateText).not.toContain('Asked:')
+    f.launched = () => []
+    expect(summary()).toMatchObject({ state: 'needs_you', stateText: `Asked: ${FLATS.question}`, needsOwner: true })
+  })
+
   it('clears when the owner answers the only question from work', async () => {
     const { questionId } = await workAsks(FLATS)
     expect(summary().needsOwner).toBe(true)
