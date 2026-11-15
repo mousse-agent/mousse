@@ -2,6 +2,7 @@ import { BROWSER_AUTOMATION_TOOLS, type BrowserAutomationTool } from '../../brow
 import { PROFILER_TOOL_NAMES, type ProfilerToolName } from '../../diagnostics/profiler'
 import { isNeutralTool, type NeutralTool } from '../../harness/tools'
 import { DEFAULT_BOT_ACTIVE_MS, foldersOf, workspaceOf, type BotBudget, type BotManifest, type BotPermissionLine } from './definition'
+import { BOT_LIST_TOOL, BOT_SEND_TOOL } from './botMessages'
 import { BOT_MEMORY_TOOLS } from './memory'
 
 /**
@@ -110,6 +111,13 @@ export const BOT_QUESTION_ANSWER_TOOL = 'question_answer'
  */
 export const BOT_CARD_TOOL = 'show_card'
 
+/**
+ * Messages to the owner's other bots (`bot_list`, `bot_send`, `botMessages.ts`): the message is information to the bot
+ * that gets it and gives it no permission, so like memory the tools are always on and never grantable. A chat turn and
+ * work the owner asked for get them; a scheduled run, a consult and a subagent never do.
+ */
+export const BOT_MESSAGE_TOOLS: readonly string[] = [BOT_LIST_TOOL, BOT_SEND_TOOL]
+
 /** Every new bot's app tools: the web, and its own tools. */
 export const BOT_DEFAULT_APP_TOOLS: readonly string[] = ['web_search', 'web_fetch', ...BOT_OWN_APP_TOOLS]
 
@@ -211,6 +219,7 @@ const BOT_OFFERABLE_APP_TOOLS: ReadonlySet<string> = new Set([
   BOT_QUESTION_TOOL,
   BOT_QUESTION_ANSWER_TOOL,
   BOT_CARD_TOOL,
+  ...BOT_MESSAGE_TOOLS,
   'list_skills', 'load_skill', 'escalate', 'consult'
 ])
 
