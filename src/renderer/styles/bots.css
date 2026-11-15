@@ -77,6 +77,9 @@ html:not([data-acrylic='true']) .bot-conversation .chat-input-area.bot-input-are
 /* A quiet centred line between messages: work started, an ask answered. */
 .bot-system-line { display: flex; justify-content: center; margin: 14px 0 0; }
 .bot-system-line > span { max-width: 80%; padding: 2px 10px; border-radius: 999px; font-size: 12px; line-height: 18px; text-align: center; color: var(--text-secondary); background: color-mix(in srgb, var(--text-secondary) 7%, transparent); }
+/* A `/` command's result: several lines (`/status`, `/model`) read left to right in a rounded box. */
+.bot-system-line.is-note > span { white-space: pre-line; overflow-wrap: anywhere; text-align: left; border-radius: 10px; }
+.bot-system-line.is-error > span { color: var(--danger); background: color-mix(in srgb, var(--danger) 9%, transparent); }
 
 /* The bot's messages: bubbles on the left, the time in each one's corner. */
 /* A reply keeps a gutter on its right, so it reads as the bot's side; its applets take the whole reply width instead. */

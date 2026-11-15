@@ -51,7 +51,26 @@ export function workSignalsOf(message: BotChatMessage): { titles: string[]; queu
  */
 export type BotChatRow =
   | { kind: 'message'; message: BotChatMessage }
-  | { kind: 'system'; id: string; at: string; text: string; title?: string; of?: string }
+  | { kind: 'system'; id: string; at: string; text: string; title?: string; of?: string; note?: 'info' | 'error' }
+
+/**
+ * `rows` with the owner's own lines from `/` commands (`notes`) among them by time: each before the first row that
+ * came after it, the newest at the end.
+ */
+export function withNotes(rows: readonly BotChatRow[], notes: ReadonlyArray<{ id: string; at: string; text: string; error?: true }>): BotChatRow[] {
+  if (!notes.length) return rows as BotChatRow[]
+  const merged: BotChatRow[] = []
+  let next = 0
+  const at = (row: BotChatRow) => Date.parse(row.kind === 'message' ? row.message.at : row.at)
+  for (const row of rows) {
+    while (next < notes.length && Date.parse(notes[next]!.at) < at(row)) merged.push(noteRow(notes[next++]!))
+    merged.push(row)
+  }
+  while (next < notes.length) merged.push(noteRow(notes[next++]!))
+  return merged
+}
+
+const noteRow = (note: { id: string; at: string; text: string; error?: true }): BotChatRow => ({ kind: 'system', id: note.id, at: note.at, text: note.text, note: note.error ? 'error' : 'info' })
 
 /** The quiet line an answer the owner tapped leaves in place of their bubble: "You answered “Flat B”". */
 export function tappedAnswerLine(label: string): string {

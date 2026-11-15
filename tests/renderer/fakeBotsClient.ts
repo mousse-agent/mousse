@@ -146,6 +146,20 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
     model: vi.fn((botId) => record('model', [botId], () => ({ model: null, models: [{ model: 'sonnet', label: 'Claude · sonnet' }], computer: 'this_computer', computers: [{ id: 'this_computer', name: 'Desk' }] }))),
     setModel: vi.fn((botId, model) => record('setModel', [botId, model], () => detail(botId).summary)),
     setSlots: vi.fn((botId, change) => record('setSlots', [botId, change], () => detail(botId).summary)),
+    setCustomSlot: vi.fn((botId, name, pick, description) => record('setCustomSlot', [botId, name, pick, description], () => detail(botId).summary)),
+    clearChat: vi.fn((botId) => record('clearChat', [botId], () => { fake.chats[botId] = [] })),
+    wipeMemory: vi.fn((botId, keep) => record('wipeMemory', [botId, keep], () => {
+      // History only: the chat goes and the listed entries (the owner's and the bot's notes) stay.
+      const before = fake.memory[botId] ?? []
+      if (keep) fake.chats[botId] = []
+      else fake.memory[botId] = []
+      return { forgotten: keep ? 0 : before.length }
+    })),
+    reset: vi.fn((botId) => record('reset', [botId], () => {
+      fake.chats[botId] = []
+      fake.memory[botId] = []
+      return detail(botId).summary
+    })),
     modelChoices: vi.fn(() => record('modelChoices', [], () => ({ models: [{ model: 'sonnet', label: 'Claude · sonnet' }], computer: 'this_computer', computers: [{ id: 'this_computer', name: 'Desk' }] }))),
     removeSchedule: vi.fn((botId, scheduleId) => record('removeSchedule', [botId, scheduleId], () => {
       const next = { ...detail(botId), runs: detail(botId).runs.filter((item) => item.id !== scheduleId) }
