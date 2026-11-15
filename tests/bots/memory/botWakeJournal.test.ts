@@ -1,3 +1,4 @@
+import { createBotContextProvider } from '../../../src/mms/bots/memory/contextPack'
 import { expect, it } from 'vitest'
 import { BotMemoryStore } from '../../../src/mms/bots/memory/BotMemoryStore'
 import { botFixture, chatOf, createBot, finish, flush, start } from '../botFixture'
@@ -31,6 +32,26 @@ it.each(['running', 'paused', 'refused'] as const)('journals a real thread wake 
     expect(hits.length).toBeGreaterThan(0)
     expect(hits.every((h) => h.who === 'tool')).toBe(true)
     expect(memory.journal(botId).filter((r) => r.text.includes('quartz')).every((r) => r.external)).toBe(true)
+    if (state !== 'running') {
+      f.store.setOwnerReaction(chat.id, '👍', f.store.now())
+      const packs = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} },
+        reactions: () => [{ messageId: chat.id, emoji: '👍', at: f.store.now(), text: chat.text, fromWork: true }] })
+      const assertOutside = (pack: string) => {
+        const mentions = pack.split('\n').filter((line) => line.includes('quartz'))
+        expect(mentions.length).toBeGreaterThan(0)
+        for (const line of mentions) {
+          expect(line).toContain('Mousse, about something outside (data)')
+          expect(line).not.toMatch(/My run report|Me, reporting|your work's report/)
+        }
+      }
+      assertOutside(await packs.chatPreamble({ botId, activationId: 'next-chat' }))
+      assertOutside(await packs.runPreamble({ botId, activationId: 'next-run', input: 'Go' }))
+      // Move the refused wake into the deterministic summary by overflowing the recent window.
+      for (let n = 0; n < 12; n++) memory.append({ botId, kind: 'bot_msg', sourceKey: `bm:filler-${n}`, who: 'bot', text: 'ordinary words '.repeat(220) })
+      expect(packs.moveWindow(botId)).toBe(true)
+      assertOutside(await packs.chatPreamble({ botId, activationId: 'summary-chat' }))
+      assertOutside(await packs.runPreamble({ botId, activationId: 'summary-run', input: 'Go' }))
+    }
   } finally { f.close() }
 })
 
