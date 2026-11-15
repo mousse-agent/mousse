@@ -68,14 +68,17 @@ describe('reading the stored setting', () => {
 
   // The stored `bots` value, and what every switch reads.
   const rows: Array<[string, unknown, typeof open | typeof shut | { here: BotComputerLimit }]> = [
-    ['all four on', { here: { shell: true, files: true, browser: true, threads: true } }, open],
+    ['all on', { here: { shell: true, browser: true, threads: true } }, open],
+    // An older build also stored "use files on this computer" (`files`), since removed: it is ignored, on or off.
+    ['an older build\'s value with files on', { here: { shell: true, files: true, browser: true, threads: true } }, open],
+    ['an older build\'s value with files off', { here: { shell: true, files: false, browser: false, threads: true } }, { here: { ...BOT_COMPUTER_OPEN, browser: false } }],
     // Written before Use your threads existed: it reads on, as a switch never set does; the others as stored.
     ['written before "use your threads" existed', { here: { shell: false, files: true, browser: true } }, { here: { ...BOT_COMPUTER_OPEN, shell: false } }],
-    ['use your threads off', { here: { shell: true, files: true, browser: true, threads: false } }, { here: { ...BOT_COMPUTER_OPEN, threads: false } }],
-    ['use your threads not a boolean', { here: { shell: true, files: true, browser: true, threads: 'off' } }, shut],
-    ['use your threads null', { here: { shell: true, files: true, browser: true, threads: null } }, shut],
-    ['one off', { here: { shell: false, files: true, browser: true } }, { here: { ...BOT_COMPUTER_OPEN, shell: false } }],
-    ['a switch the build does not know is ignored', { here: { shell: true, files: true, browser: true, camera: false } }, open],
+    ['use your threads off', { here: { shell: true, browser: true, threads: false } }, { here: { ...BOT_COMPUTER_OPEN, threads: false } }],
+    ['use your threads not a boolean', { here: { shell: true, browser: true, threads: 'off' } }, shut],
+    ['use your threads null', { here: { shell: true, browser: true, threads: null } }, shut],
+    ['one off', { here: { shell: false, browser: true } }, { here: { ...BOT_COMPUTER_OPEN, shell: false } }],
+    ['a switch the build does not know is ignored', { here: { shell: true, browser: true, camera: false } }, open],
     ['null', null, shut],
     ['false', false, shut],
     ['a string', 'on', shut],
@@ -83,10 +86,11 @@ describe('reading the stored setting', () => {
     ['an empty object', {}, shut],
     ['here null', { here: null }, shut],
     ['here an array', { here: [] }, shut],
-    ['a switch missing', { here: { shell: true, files: true } }, shut],
-    ['a switch not a boolean', { here: { shell: 'true', files: true, browser: true } }, shut],
-    ['a switch as a number', { here: { shell: 1, files: true, browser: true } }, shut],
-    ['marked unreadable, whatever the switches say', { here: { shell: true, files: true, browser: true }, unreadable: '2026-11-13T00:00:00.000Z' }, shut]
+    ['a switch missing', { here: { shell: true, threads: true } }, shut],
+    ['a switch missing, with an older build\'s files', { here: { shell: true, files: true, threads: true } }, shut],
+    ['a switch not a boolean', { here: { shell: 'true', browser: true } }, shut],
+    ['a switch as a number', { here: { shell: 1, browser: true } }, shut],
+    ['marked unreadable, whatever the switches say', { here: { shell: true, browser: true }, unreadable: '2026-11-13T00:00:00.000Z' }, shut]
   ]
   it.each(rows)('stored as %s', (_name, bots, expected) => {
     const home = tempHome()
@@ -108,9 +112,22 @@ describe('reading the stored setting', () => {
     const settings = new SettingsStore(profile)
     expect(settings.get().bots).toEqual(shut)
     // The owner switches one on: the notice goes, and what was set is what is read, after a restart too.
-    settings.set({ bots: { here: { shell: false, files: true, browser: false, threads: false } } })
-    expect(settings.get().bots).toEqual({ here: { shell: false, files: true, browser: false, threads: false } })
-    expect(MousseConfigStore.loadInstallation(home).botSettings()).toEqual({ here: { shell: false, files: true, browser: false, threads: false } })
+    settings.set({ bots: { here: { shell: false, browser: true, threads: false } } })
+    expect(settings.get().bots).toEqual({ here: { shell: false, browser: true, threads: false } })
+    expect(MousseConfigStore.loadInstallation(home).botSettings()).toEqual({ here: { shell: false, browser: true, threads: false } })
+  })
+
+  it('a save keeps the files value an older build stored, and writes it on when there was none, so an older build still reads the setting', () => {
+    const home = tempHome()
+    writeFileSync(conf(home), JSON.stringify({ version: 1, mms: { autostart: false, logLevel: 'info' }, features: {}, bots: { here: { shell: true, files: false, browser: true, threads: true } } }))
+    const installation = MousseConfigStore.loadInstallation(home)
+    installation.setBotsHere({ browser: false })
+    expect(stored(conf(home)).bots).toEqual({ here: { shell: true, files: false, browser: false, threads: true } })
+    expect(MousseConfigStore.loadInstallation(home).botSettings()).toEqual({ here: { ...BOT_COMPUTER_OPEN, browser: false } })
+    // Never stored (first start): the save writes it on, as an older build's "all on" had it.
+    const fresh = tempHome()
+    MousseConfigStore.loadInstallation(fresh).setBotsHere({ shell: false })
+    expect(stored(conf(fresh)).bots).toEqual({ here: { shell: false, files: true, browser: true, threads: true } })
   })
 
   it('a profile\'s own file that can\'t be read leaves the installation\'s setting as it is', () => {
@@ -148,7 +165,7 @@ describe('one setting for every profile of this computer, through the real servi
   const set = (services: MmsProfileServices, partial: unknown) =>
     dispatchMethod({ mms: services, connection: { id: 'test', binding: { profileId: services.profileId, epoch: 1 }, capabilities: new Set() } } as never, 'settings.set', { partial })
 
-  it('set in one profile: every profile\'s Settings shows it and every profile\'s bots are held to it, a new profile too; a write that is not the four switches changes nothing', async () => {
+  it('set in one profile: every profile\'s Settings shows it and every profile\'s bots are held to it, a new profile too; a write that is not the switches changes nothing', async () => {
     vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
     const root = tempHome()
     const home = join(root, 'home')
@@ -168,8 +185,8 @@ describe('one setting for every profile of this computer, through the real servi
     expect(changed).toContainEqual({ botId: 'runner' })
     expect(other.settings.get().bots).toEqual({ here: { ...BOT_COMPUTER_OPEN, shell: false } })
     expect(theirs.marks()).toEqual([['run commands', BOT_OFF_HERE_MARK]])
-    // Kept once, in the installation's file; no profile's file holds it.
-    expect(stored(conf(home)).bots).toEqual({ here: { ...BOT_COMPUTER_OPEN, shell: false } })
+    // Kept once, in the installation's file (with `files` on, for older builds); no profile's file holds it.
+    expect(stored(conf(home)).bots).toEqual({ here: { ...BOT_COMPUTER_OPEN, files: true, shell: false } })
     for (const services of [main, other]) expect(stored(services.config.getPath())).not.toHaveProperty('bots')
     // A profile made afterwards starts held to it, not all on.
     const later = await main.getProfileServices(manager.create({ displayName: 'Later', slug: 'later' }).id)
@@ -178,7 +195,7 @@ describe('one setting for every profile of this computer, through the real servi
     // Anything but one or more known switches, each a boolean, is refused, nothing in the same update is saved, and
     // nothing is reset.
     const theme = other.settings.get().appearance.theme
-    for (const bots of [null, false, 'on', [], {}, { here: null }, { here: {} }, { here: [] }, { here: { shell: 'true' } }, { here: { shell: null } }, { here: { camera: true } }, { here: { ...BOT_COMPUTER_OPEN, camera: true } }, { here: BOT_COMPUTER_OPEN, unreadable: true }, { here: BOT_COMPUTER_OPEN, more: 1 }])
+    for (const bots of [null, false, 'on', [], {}, { here: null }, { here: {} }, { here: [] }, { here: { shell: 'true' } }, { here: { shell: null } }, { here: { camera: true } }, { here: { files: false } }, { here: { ...BOT_COMPUTER_OPEN, camera: true } }, { here: BOT_COMPUTER_OPEN, unreadable: true }, { here: BOT_COMPUTER_OPEN, more: 1 }])
       await expect(set(other, { bots, appearance: { theme: theme === 'dark' ? 'light' : 'dark' } }), JSON.stringify(bots)).rejects.toThrow(/What bots may do here/)
     expect(main.settings.get().bots).toEqual({ here: { ...BOT_COMPUTER_OPEN, shell: false } })
     expect(other.settings.get().appearance.theme).toBe(theme)
@@ -210,25 +227,23 @@ describe('one setting for every profile of this computer, through the real servi
     await set(other, { bots: { here: { shell: false } } })
     // Window A, whose copy still says commands are on, switches the browser off: commands stay off.
     await set(main, { bots: { here: { browser: false } } })
-    expect(main.settings.get().bots).toEqual({ here: { shell: false, files: true, browser: false, threads: true } })
+    expect(main.settings.get().bots).toEqual({ here: { shell: false, browser: false, threads: true } })
     // The CLI, as the owner types it.
     cli.request = (method, params) => dispatchMethod({ mms: main, connection: { id: 'cli', binding: { profileId: main.profileId, epoch: 1 }, capabilities: new Set() } } as never, method, params)
     vi.spyOn(process.stdout, 'write').mockReturnValue(true)
-    await runConfig(parseArgs(['config', 'set', 'bots.here.files', 'false']))
-    expect(stored(conf(home)).bots).toEqual({ here: { shell: false, files: false, browser: false, threads: true } })
     await runConfig(parseArgs(['config', 'set', 'bots.here.shell', 'true']))
-    expect(other.settings.get().bots).toEqual({ here: { shell: true, files: false, browser: false, threads: true } })
-    // The fourth switch is written the same way, alone.
+    expect(other.settings.get().bots).toEqual({ here: { shell: true, browser: false, threads: true } })
+    // The third switch is written the same way, alone.
     await runConfig(parseArgs(['config', 'set', 'bots.here.threads', 'false']))
-    expect(stored(conf(home)).bots).toEqual({ here: { shell: true, files: false, browser: false, threads: false } })
+    expect(stored(conf(home)).bots).toEqual({ here: { shell: true, files: true, browser: false, threads: false } })
 
     // Every profile's windows were told of each change with that profile's own settings, whichever profile made it.
-    const steps = [{ shell: false, files: true, browser: true, threads: true }, { shell: false, files: true, browser: false, threads: true }, { shell: false, files: false, browser: false, threads: true }, { shell: true, files: false, browser: false, threads: true }, { shell: true, files: false, browser: false, threads: false }]
+    const steps = [{ shell: false, browser: true, threads: true }, { shell: false, browser: false, threads: true }, { shell: true, browser: false, threads: true }, { shell: true, browser: false, threads: false }]
     for (const services of [main, other]) expect(told.get(services.profileId)!.filter((here, index, all) => index === 0 || JSON.stringify(here) !== JSON.stringify(all[index - 1])), services.profileId).toEqual(steps)
 
     // The control: a window that sends its whole old copy, as the first version did, turns back what others changed.
     await set(main, { bots: { here: { ...windowA, browser: false } } })
-    expect(main.settings.get().bots.here).toEqual({ shell: true, files: true, browser: false, threads: true })
+    expect(main.settings.get().bots.here).toEqual({ shell: true, browser: false, threads: true })
   }, 120_000)
 })
 
@@ -275,6 +290,6 @@ describe('an update is saved whole or not at all', () => {
     rmSync(conf(home), { recursive: true, force: true })
     settings.set({ bots: { here: { shell: false } }, appearance: { theme: next } } as never)
     expect(settings.get().appearance.theme).toBe(next)
-    expect(stored(conf(home)).bots).toEqual({ here: { ...BOT_COMPUTER_OPEN, shell: false } })
+    expect(stored(conf(home)).bots).toEqual({ here: { ...BOT_COMPUTER_OPEN, files: true, shell: false } })
   })
 })

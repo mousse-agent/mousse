@@ -20,11 +20,10 @@ export interface BotManifest {
   /** Skill ids. */
   skills: string[]
   /**
-   * File access (bot-architecture.md §3.7): non-null lets the bot read and change files anywhere on
-   * this computer but Mousse's own data; null keeps it to its files folder. One permission, asked
-   * once: Allow writes `{ roots: [<top of the file system>], access: 'write' }`. A workspace an
-   * older build wrote for some folders is kept as it is (its digest stays approved) and grants the
-   * same; its roots and access no longer narrow anything.
+   * No longer grants anything. Older builds wrote file access outside the bot's files folder here ("use files on this
+   * computer", removed because a bot that runs commands reached past it anyway). A stored value is kept exactly as it
+   * was written, so grants and revisions that hold one keep their digest and stay approved; nothing reads it for what a
+   * bot may do, and a new bot's is null.
    */
   workspace: BotWorkspace | null
   budget: BotBudget

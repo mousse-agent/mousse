@@ -11,8 +11,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BOT_ASK_DEFERRED_TEXT, BOT_OFFLINE_WATCH_MS, BOT_WORK_HAS_TEXT, BotEngine, type BotEngineHost } from '../../src/mms/bots/activation/BotEngine'
 import { isBotWallAbort } from '../../src/mms/bots/activation/dispatcher'
 import { BotDefinitionStore } from '../../src/mms/bots/definitions/BotDefinitionStore'
-import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
-import { botManifestDigest, compileBotThread } from '../../src/mms/bots/grants/compile'
+import { botManifestDigest } from '../../src/mms/bots/grants/compile'
 import { BOTS_MIGRATIONS, BotStore } from '../../src/mms/bots/store/BotStore'
 import { PI_NATIVE_TOOLS } from '../../src/mms/harness/pi/nativeTools'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
@@ -23,9 +22,8 @@ import { ToolInvocations } from '../../src/mms/run/ToolInvocations'
 import { isIdempotentTool } from '../../src/mms/run/tools/idempotency'
 import { isBotTurnPayload, type BotTurnPayload, type RunOutcome } from '../../src/mms/run/types'
 import type { BotDefinition, BotManifest } from '../../src/shared/bots/personal/definition'
-import { filesAsk, permissionText, withPermission, type BotEscalationSummary, type BotPermissionRequest } from '../../src/shared/bots/personal/escalation'
+import { type BotEscalationSummary, type BotPermissionRequest } from '../../src/shared/bots/personal/escalation'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
-import { addedPermissions } from '../../src/shared/bots/personal/manifest'
 import { BOT_MEMORY_TOOLS } from '../../src/shared/bots/personal/memory'
 
 let base: string
@@ -55,7 +53,6 @@ const manifest = (patch: Partial<BotManifest> = {}): BotManifest => ({
   appTools: [],
   mcp: [],
   skills: [],
-  // No file access: a file call outside its own folders is a wall asking for it (these tests write their ledger rows directly).
   workspace: null,
   budget: { maxActiveMs: 10 * 60_000 },
   audience: 'owner',
@@ -187,9 +184,11 @@ async function endAtWall(payload: BotTurnPayload) {
   await tick()
 }
 
-/** A gate refusal of a folder outside the grant: in the chat lane, a wall at once. */
-const gateWall = (prepared: { authority: BotAuthority }) =>
-  prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: other } })
+/** A call of a thread tool: the chat uses "use your threads" itself, so the grant lacking it is a wall asking for it. */
+const threadCall = { kind: 'app' as const, tool: 'thread_create', args: {} }
+
+/** A gate refusal of a permission outside the grant: in the chat lane, a wall at once. */
+const gateWall = (prepared: { authority: BotAuthority }) => prepared.authority.check(threadCall)
 
 /** `escalate` in a chat turn: recorded now; the turn finishes and then waits with its card. */
 async function askAndFinish(prepared: { authority: { escalate?: (request: { permission: unknown; reason: string }) => string } }, payload: BotTurnPayload, permission: BotPermissionRequest = { tool: 'web_fetch' }) {
@@ -213,11 +212,10 @@ describe('walls', () => {
     // The chat's first dispatch starts from a cleared home context.
     expect(prepared.history).toBe('cleared')
     expect(cleared).toEqual([HOME])
-    const wall = prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(other, 'a.md') } })
-    // A file is asked for by its folder.
-    expect(wall).toEqual({ ok: false, wall: { kind: 'escalated', permission: 'use files on this computer' } })
+    const wall = prepared.authority.check(threadCall)
+    expect(wall).toEqual({ ok: false, wall: { kind: 'escalated', permission: 'use your threads' } })
     expect(isBotWallAbort(prepared.authority.time.signal.reason)).toBe(true)
-    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'waiting_grant', openEscalation: { kind: 'gate', status: 'open', mode: 'wall', expiresAt: null, permission: filesAsk() } })
+    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'waiting_grant', openEscalation: { kind: 'gate', status: 'open', mode: 'wall', expiresAt: null, permission: { tool: 'threads' } } })
     expect(escalations).toHaveLength(1)
     // Every later call waits, and asks nobody again.
     expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(root, 'a.md') } })).toEqual({ ok: false, wall: { kind: 'waiting' } })
@@ -273,14 +271,14 @@ describe('answers and continuations', () => {
     expect(answered).toMatchObject({ escalation: { status: 'allowed_once' }, activation: { status: 'running' } })
     const next = store.dispatch(activation.id, 2)!
     expect(next).toMatchObject({ kind: 'continue', clientRequestId: `${activation.id}:d2` })
-    expect(next.prompt.text).toBe('[Mousse] The owner allowed: use files on this computer. Continue.')
+    expect(next.prompt.text).toBe('[Mousse] The owner allowed: use your threads. Continue.')
     expect(runs.getRun(next.runId!)!.outcome?.continuationOf).toBe(payload.runId)
     const again = bots.prepare(payloadOf(next.runId!))
     if ('refused' in again) throw new Error(again.refused)
     expect(again.history).toBe('thread')
-    expect(again.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: other } })).toEqual({ ok: true })
+    expect(again.authority.check(threadCall)).toEqual({ ok: true })
     // The grant itself is unchanged: a later activation does not get it.
-    expect(store.activeGrant('site-editor')!.manifest.workspace).toBeNull()
+    expect(store.activeGrant('site-editor')!.manifest.appTools).not.toContain('threads')
   })
 
   it('"Allow for this bot" publishes and approves a wider revision in one action', async () => {
@@ -355,7 +353,7 @@ describe('answers and continuations', () => {
     expect(store.unknownCalls(activation.id)[0].acknowledged).toBe(false)
     await bots.continueActivation(activation.id, { acknowledge: { calls: ['consult-edit'] } })
     const next = store.dispatches(activation.id).find((dispatch) => dispatch.kind === 'continue')!
-    expect(next.prompt.text).toContain('The owner allowed: use files on this computer.')
+    expect(next.prompt.text).toContain('The owner allowed: use your threads.')
     expect(next.prompt.text).toContain('edit (consult run')
     expect(bots.getActivation(activation.id).status).toBe('running')
   })
@@ -713,24 +711,7 @@ describe('trash and profile hooks', () => {
   })
 })
 
-describe('file access is one permission (bot-architecture.md §3.7)', () => {
-  const authorityFor = (granted: BotManifest) => {
-    const compiled = compileBotThread({ grant: granted, digest: 'd', thread: {}, scratch: join(profile, 'bots', 'scratch', 'x'), profileHome: profile, nativeNames: (tools) => ({ ok: true, names: [...tools] }), remaining: { deadlineMs: 60_000 } })
-    if (!compiled.ok) throw new Error(compiled.error.message)
-    return createBotAuthority({ activationId: 'a', role: 'activation', permissions: compiled.permissions, waiting: () => false, counters: { charge: () => ({ ok: true, count: 1 }) }, time: { deadline: () => 0, signal: new AbortController().signal }, spend: null })
-  }
-  const edit = (path: string) => ({ kind: 'builtin' as const, tool: 'edit' as const, nativeName: 'edit', args: { path: join(path, 'a.md') } })
-
-  it('an answer for one folder grants every folder, read and write; another adds nothing', () => {
-    const none = manifest({ tools: ['read', 'edit'] })
-    const wider = withPermission(none, { path: other, access: 'read' })
-    expect(addedPermissions(wider, none).map((line) => line.text)).toEqual([permissionText(filesAsk())])
-    const authority = authorityFor(wider)
-    expect(authority.check(edit(root))).toEqual({ ok: true })
-    expect(authority.check(edit(other))).toEqual({ ok: true })
-    expect(addedPermissions(withPermission(wider, { path: root, access: 'write' }), wider)).toEqual([])
-  })
-
+describe('native names', () => {
   it('a native name that stands for several tools walls only when all are refused, and once', async () => {
     const { activation, prepared } = await running()
     const files = bots.filesFolder('site-editor')
@@ -742,13 +723,6 @@ describe('file access is one permission (bot-architecture.md §3.7)', () => {
     expect(store.escalations({ activationId: activation.id })).toHaveLength(1)
   })
 
-  it('any folder, a relative one too, asks for file access as a whole, once; a relative folder is never asked for by name', async () => {
-    const { activation, prepared } = await running()
-    expect(prepared.authority.escalate!({ permission: { path: 'docs', access: 'read' }, reason: 'r' })).toContain('full path')
-    expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: '../../outside.md' } })).toEqual({ ok: false, wall: { kind: 'escalated', permission: 'use files on this computer' } })
-    expect(store.escalations({ activationId: activation.id }).map((row) => row.permission)).toEqual([filesAsk()])
-    expect(bots.getActivation(activation.id).status).toBe('waiting_grant')
-  })
 })
 
 describe('round 1: startup recovery', () => {
@@ -775,7 +749,7 @@ describe('round 1: startup recovery', () => {
     end(payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
     await crash()
     expect(store.dispatches(activation.id).map((dispatch) => dispatch.kind)).toEqual(['start', 'continue'])
-    expect(store.dispatch(activation.id, 2)!.prompt.text).toContain('The owner allowed: use files on this computer.')
+    expect(store.dispatch(activation.id, 2)!.prompt.text).toContain('The owner allowed: use your threads.')
     expect(bots.getActivation(activation.id).status).toBe('running')
     await crash()
     expect(store.dispatches(activation.id)).toHaveLength(2)
@@ -1099,16 +1073,4 @@ describe('round 3', () => {
     await bots.remove('site-editor')
     expect(existsSync(scratch)).toBe(true)
   })
-
-  it('an older grant with a write folder nested in a read-only one is file access: both are writable', () => {
-    const outer = join(base, 'outer')
-    const inner = join(outer, 'inner')
-    mkdirSync(inner, { recursive: true })
-    const compiled = compileBotThread({ grant: manifest({ tools: ['edit'], workspace: { roots: [outer, inner], access: 'read', rootAccess: { [inner]: 'write' } } }), digest: 'd', thread: {}, scratch: join(profile, 'bots', 'scratch', 'n'), profileHome: profile, nativeNames: (tools) => ({ ok: true, names: [...tools] }), remaining: { deadlineMs: 60_000 } })
-    if (!compiled.ok) throw new Error(compiled.error.message)
-    const authority = createBotAuthority({ activationId: 'a', role: 'activation', permissions: compiled.permissions, waiting: () => false, counters: { charge: () => ({ ok: true, count: 1 }) }, time: { deadline: () => 0, signal: new AbortController().signal }, spend: null })
-    expect(authority.check({ kind: 'builtin', tool: 'edit', nativeName: 'edit', args: { path: join(inner, 'a.md') } })).toEqual({ ok: true })
-    expect(authority.check({ kind: 'builtin', tool: 'edit', nativeName: 'edit', args: { path: join(outer, 'a.md') } })).toEqual({ ok: true })
-  })
-
 })

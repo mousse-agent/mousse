@@ -98,11 +98,10 @@ describe('a subagent on another runtime, through the real drivers', () => {
     for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
   })
 
-  async function work(id: string, on: { instanceId: string; model: string }, options: { files?: boolean } = {}) {
+  async function work(id: string, on: { instanceId: string; model: string }) {
     f.candidates = [on]
     const activation = await f.bots.activate({ botId, input: 'Check the build.', clientRequestId: id })
     f.store.putOverlay(activation.id, `once-shell-${id}`, { tool: 'shell' })
-    if (options.files) f.store.putOverlay(activation.id, `once-files-${id}`, { path: f.base, access: 'write' })
     return { id: activation.id, ...(await start(f, activation.id)) }
   }
   const lastSubagent = (activationId: string) => f.store.dispatches(activationId).filter((dispatch) => dispatch.kind === 'subagent').at(-1)!.n
@@ -132,18 +131,5 @@ describe('a subagent on another runtime, through the real drivers', () => {
     expect(child.prepared.policy.tools!.allow).toContain('Read')
     expect(child.prepared.policy.tools!.allow).not.toContain('Bash')
     expect(child.prepared.authority.check(command)).toMatchObject({ ok: false })
-  })
-
-  it('with file access, work on Claude Code: a subagent on Codex runs without commands (Codex\'s sandbox then reads Mousse\'s own data)', async () => {
-    const job = await work('w1', CLAUDE, { files: true })
-    expect(await job.prepared.authority.subagents!.start({ title: 'Build', brief: 'Run the build.', model: on(CODEX, 'Codex', 'GPT-5.5') })).toMatchObject({ lacks: ['run commands'] })
-    const child = await start(f, job.id, lastSubagent(job.id))
-    // Codex names reads `commandExecution` too; what its thread reads is the authority's tools: without `shell` it
-    // starts with no command tool at all (`CODEX_COMMAND_FEATURES` off, `codexBotTools.test.ts` on the real binary).
-    expect(child.prepared.authority.tools.has('shell')).toBe(false)
-    expect(child.prepared.authority.check(command)).toMatchObject({ ok: false })
-    expect(child.prepared.policy.tools!.allow).toContain('fileChange')
-    // The control: the work's own turn on Claude Code keeps them.
-    expect(job.prepared.authority.tools.has('shell')).toBe(true)
   })
 })

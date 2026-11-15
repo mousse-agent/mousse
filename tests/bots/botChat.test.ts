@@ -5,7 +5,7 @@
  * chat row is journaled in its own transaction, capture runs after every dispatch, and a journal
  * that cannot be written makes the bot stuck rather than run unrecorded (bot-context.md §4).
  */
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BotEngine } from '../../src/mms/bots/activation/BotEngine'
@@ -22,6 +22,9 @@ beforeEach(async () => {
 afterEach(() => f.close())
 
 const home = () => `thread:bot:${botId}`
+
+/** A call of a thread tool: the chat uses "use your threads" itself, so without it the call is a wall asking for it. */
+const threadCall = { kind: 'app' as const, tool: 'thread_create', args: {} }
 
 /** The chat lane's activation that runs (or waits) now. */
 const chatActivation = (statuses: Array<'running' | 'queued' | 'waiting_grant'> = ['running']) => f.store.laneActivations(botId, 'chat', statuses)[0]!
@@ -53,35 +56,30 @@ describe('bots.chat.send', () => {
   })
 
   it('a wall shows a card on the reply; after Allow the continuation keeps the thread history and the same pack', async () => {
-    const docs = join(f.base, 'docs')
-    mkdirSync(docs)
-    writeFileSync(join(docs, 'a.md'), 'notes')
-    await send('Read my notes', 'm1')
+    await send('Start a thread for my notes', 'm1')
     const activation = chatActivation()
     const { payload, prepared } = await start(f, activation.id)
-    // A folder outside its own asks for file access as a whole.
-    expect(prepared.authority.check({ kind: 'builtin', tool: 'list', nativeName: 'ls', args: { path: docs } })).toMatchObject({ ok: false, wall: { kind: 'escalated' } })
+    expect(prepared.authority.check(threadCall)).toMatchObject({ ok: false, wall: { kind: 'escalated' } })
     expect(f.store.activation(activation.id)?.status).toBe('waiting_grant')
     await finish(f, payload, 'interrupted', { text: 'Let me look.', outcome: { interruptedBy: 'bot_wall' } })
     const reply = chatOf(f, botId).at(-1)!
-    expect(reply).toMatchObject({ author: 'bot', kind: 'text', text: 'Let me look.', ask: { title: 'use files on this computer', status: 'open', kind: 'permission' } })
+    expect(reply).toMatchObject({ author: 'bot', kind: 'text', text: 'Let me look.', ask: { title: 'use your threads', status: 'open', kind: 'permission' } })
     const { message } = await f.bots.service.answer(botId, reply.ask!.askId, 'allow')
     expect(message.ask?.status).toBe('allowed')
     await flush()
     const continuation = f.store.dispatch(activation.id, 2)!
-    expect(continuation).toMatchObject({ kind: 'continue', threadId: home(), prompt: { text: '[Mousse] The owner allowed: use files on this computer. Continue.' } })
+    expect(continuation).toMatchObject({ kind: 'continue', threadId: home(), prompt: { text: '[Mousse] The owner allowed: use your threads. Continue.' } })
     const next = await start(f, activation.id, 2)
     // Read again for the continuation: the provider keeps it frozen (a forget drops it).
     expect(next.prepared).toMatchObject({ history: 'thread', preamble: prepared.preamble })
-    expect(next.prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(docs, 'a.md') } })).toEqual({ ok: true })
+    expect(next.prepared.authority.check(threadCall)).toEqual({ ok: true })
   })
 
   it('a message sent while the chat waits at a wall counts as Not now and continues the walled dispatch with it', async () => {
-    const docs = join(f.base, 'docs')
-    await send('Read my notes', 'm1')
+    await send('Start a thread for my notes', 'm1')
     const activation = chatActivation()
     const { payload, prepared } = await start(f, activation.id)
-    prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(docs, 'a.md') } })
+    prepared.authority.check(threadCall)
     await finish(f, payload, 'interrupted', { text: '', outcome: { interruptedBy: 'bot_wall' } })
     const askId = chatOf(f, botId).at(-1)!.ask!.askId
     await send('Never mind, just say hi', 'm2')
@@ -89,7 +87,7 @@ describe('bots.chat.send', () => {
     expect(chatOf(f, botId).find((message) => message.ask?.askId === askId)?.ask?.status).toBe('not_now')
     // No new activation: the walled one goes on with the owner's message as its input.
     expect(f.store.laneActivations(botId, 'chat', ['queued', 'running', 'waiting_grant']).map((row) => row.id)).toEqual([activation.id])
-    expect(f.store.dispatch(activation.id, 2)?.prompt.text).toMatch(/^\[Mousse\] The owner wrote instead of answering, so the answer is not now: use files on this computer\. Carry on without it\.\n\nNever mind, just say hi$/)
+    expect(f.store.dispatch(activation.id, 2)?.prompt.text).toMatch(/^\[Mousse\] The owner wrote instead of answering, so the answer is not now: use your threads\. Carry on without it\.\n\nNever mind, just say hi$/)
   })
 
   it('a message saved just before Mousse stops is still answered: its activation is queued with it', async () => {
@@ -112,7 +110,7 @@ describe('bots.chat.send', () => {
       await send('Read my notes', `${recover}-1`)
       const activation = chatActivation()
       const { payload, prepared } = await start(f, activation.id)
-      prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(f.base, 'docs', 'a.md') } })
+      prepared.authority.check(threadCall)
       await finish(f, payload, 'interrupted', { text: '', outcome: { interruptedBy: 'bot_wall' } })
       const continueChatWith = f.bots.continueChatWith.bind(f.bots)
       f.bots.continueChatWith = async () => { throw new Error('Mousse stopped') }
@@ -180,7 +178,7 @@ describe('bots.chat.send', () => {
     await send('two', 'm2')
     const walled = chatActivation()
     const wall = await start(f, walled.id)
-    wall.prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(f.base, 'x') } })
+    wall.prepared.authority.check(threadCall)
     await finish(f, wall.payload, 'interrupted', { outcome: { interruptedBy: 'bot_wall' } })
     await f.bots.service.chatStop(botId)
     await send('three', 'm3')
@@ -309,7 +307,7 @@ describe('chat turns at their edges (review round 2)', () => {
     await send(text, id)
     const activation = chatActivation()
     const { payload, prepared } = await start(f, activation.id)
-    prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(f.base, 'docs', 'a.md') } })
+    prepared.authority.check(threadCall)
     let release!: () => void
     const held = new Promise<void>((resolve) => { release = resolve })
     const capture = f.host.context!.afterDispatch

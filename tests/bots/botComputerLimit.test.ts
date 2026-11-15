@@ -20,12 +20,11 @@ import { BOT_COMPUTER_OPEN, BOT_COMPUTER_SHUT, BOT_OFF_HERE_MARK, type BotComput
 import type { BotManifest } from '../../src/shared/bots/personal/definition'
 import { BOT_BROWSER_PERMISSION, botStarterManifest } from '../../src/shared/bots/personal/manifest'
 import { checkMessage } from '../../src/shared/bots/personal/walls'
-import { toolArgsDigest } from '../../src/mms/run/tools/argsDigest'
 import { appToolRegistry, appTurn, fakeAppToolHost } from '../run/appToolsFixture'
 import { delegationFixture } from '../run/delegationFixture'
 import { botFixture, chatOf, createBot, finish, flush, payloadOf, start, type BotFixture } from './botFixture'
 
-const NOT_HERE = /^Not on this computer: "(run commands|use files on this computer|use the browser)" is switched off here/
+const NOT_HERE = /^Not on this computer: "(run commands|use the browser)" is switched off here/
 const command = (text: string): NormalisedCall => ({ kind: 'builtin', tool: 'shell', nativeName: 'bash', args: { command: text } })
 const read = (path: string): NormalisedCall => ({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path } })
 const write = (path: string): NormalisedCall => ({ kind: 'builtin', tool: 'write', nativeName: 'write', args: { path } })
@@ -47,6 +46,7 @@ describe('the authority decides on every call', () => {
   afterEach(() => rmSync(base, { recursive: true, force: true }))
 
   const starter = botStarterManifest()
+  // Its workspace is an older build's "use files on this computer", kept in a stored grant: it opens no folder.
   const full: BotManifest = { ...starter, tools: [...starter.tools, 'shell'], appTools: [...starter.appTools, BOT_BROWSER_PERMISSION], workspace: { roots: ['/'], access: 'write' } }
 
   /** A run turn of `grant`, compiled under `compiledWith`; `now` is what the computer allows at each call. */
@@ -64,17 +64,15 @@ describe('the authority decides on every call', () => {
     return { compiled, authority }
   }
 
-  it('compiles no commands, no file access and no browser for what is switched off, whatever the grant holds', () => {
+  it('compiles no commands and no browser for what is switched off, whatever the grant holds', () => {
     const open = turn(full, BOT_COMPUTER_OPEN, () => BOT_COMPUTER_OPEN).compiled
     const shut = turn(full, BOT_COMPUTER_SHUT, () => BOT_COMPUTER_SHUT).compiled
     expect(open.ok && open.policy.tools!.allow).toEqual(expect.arrayContaining(['bash', 'browser_open']))
-    expect(open.ok && open.permissions.workspace?.computer).toBeDefined()
     if (!shut.ok) throw new Error('not compiled')
     expect(shut.policy.tools!.allow).not.toContain('bash')
     expect(shut.policy.tools!.allow!.filter((name) => name.startsWith('browser_'))).toEqual([])
     expect(shut.permissions.browser).toBeUndefined()
-    expect(shut.permissions.workspace?.computer).toBeUndefined()
-    // The bot's own folders are not file access: they stay.
+    // The bot's own folders are under no switch: they stay.
     expect(shut.permissions.workspace?.files).toBe(realpathSync(files))
     // One switch takes out only its own permission.
     const noBrowser = turn(full, off({ browser: false }), () => BOT_COMPUTER_OPEN).compiled
@@ -85,26 +83,19 @@ describe('the authority decides on every call', () => {
   // Which grant, what the turn was compiled under, what the computer allows at the call, the call, and the outcome.
   const outside = () => join(base, 'elsewhere', 'notes.md')
   const inFiles = () => join(files, 'list.md')
-  const rows: Array<[string, () => BotManifest, BotComputerLimit, BotComputerLimit, () => NormalisedCall, BotCheck | 'computer:shell' | 'computer:files' | 'computer:browser']> = [
+  const rows: Array<[string, () => BotManifest, BotComputerLimit, BotComputerLimit, () => NormalisedCall, BotCheck | 'computer:shell' | 'computer:browser']> = [
     ['all on: a command runs', () => full, BOT_COMPUTER_OPEN, BOT_COMPUTER_OPEN, () => command('ls'), { ok: true }],
-    ['all on: a file anywhere', () => full, BOT_COMPUTER_OPEN, BOT_COMPUTER_OPEN, () => read(outside()), { ok: true }],
     ['all on: the browser', () => full, BOT_COMPUTER_OPEN, BOT_COMPUTER_OPEN, () => app('browser_open'), { ok: true }],
+    ['all on, an old grant with file access: a file outside its folders is refused', () => full, BOT_COMPUTER_OPEN, BOT_COMPUTER_OPEN, () => read(outside()), { ok: false, wall: { kind: 'path', tool: 'read', access: 'read' } }],
     ['commands off mid-turn: the next command', () => full, BOT_COMPUTER_OPEN, off({ shell: false }), () => command('ls'), 'computer:shell'],
-    ['commands off: files still open', () => full, BOT_COMPUTER_OPEN, off({ shell: false }), () => read(outside()), { ok: true }],
-    ['files off mid-turn: a file outside', () => full, BOT_COMPUTER_OPEN, off({ files: false }), () => read(outside()), 'computer:files'],
-    ['files off mid-turn: a write outside', () => full, BOT_COMPUTER_OPEN, off({ files: false }), () => write(outside()), 'computer:files'],
-    ['files off: its files folder still works', () => full, BOT_COMPUTER_OPEN, off({ files: false }), () => write(inFiles()), { ok: true }],
-    ['files off: its scratch still works', () => full, BOT_COMPUTER_OPEN, off({ files: false }), () => write(join(scratch, 'x.md')), { ok: true }],
-    ['files off mid-turn: commands opened over every folder wait', () => full, BOT_COMPUTER_OPEN, off({ files: false }), () => command('ls'), 'computer:files'],
-    ['files off from the start: commands run, in their narrow sandbox', () => full, off({ files: false }), off({ files: false }), () => command('ls'), { ok: true }],
+    ['all off: its files folder still works', () => full, BOT_COMPUTER_OPEN, BOT_COMPUTER_SHUT, () => write(inFiles()), { ok: true }],
+    ['all off: its scratch still works', () => full, BOT_COMPUTER_OPEN, BOT_COMPUTER_SHUT, () => write(join(scratch, 'x.md')), { ok: true }],
     ['browser off mid-turn: any browser tool', () => full, BOT_COMPUTER_OPEN, off({ browser: false }), () => app('browser_act'), 'computer:browser'],
     ['all off: the web still works', () => full, BOT_COMPUTER_SHUT, BOT_COMPUTER_SHUT, () => app('web_fetch'), { ok: true }],
     ['all off, no grant: a command is no ask', () => starter, BOT_COMPUTER_OPEN, BOT_COMPUTER_SHUT, () => command('ls'), 'computer:shell'],
-    ['all off, no grant: a file outside is no ask', () => starter, BOT_COMPUTER_OPEN, BOT_COMPUTER_SHUT, () => read(outside()), 'computer:files'],
     ['all off, no grant: the browser is no ask', () => starter, BOT_COMPUTER_OPEN, BOT_COMPUTER_SHUT, () => app('browser_open'), 'computer:browser'],
-    // Controls: with the switches on, what the grant lacks is a wall the engine turns into an ask, as before.
+    // Control: with the switches on, what the grant lacks is a wall the engine turns into an ask, as before.
     ['all on, no grant: a command is a wall', () => starter, BOT_COMPUTER_OPEN, BOT_COMPUTER_OPEN, () => command('ls'), { ok: false, wall: { kind: 'tool', tool: 'bash' } }],
-    ['all on, no grant: a file outside is a wall', () => starter, BOT_COMPUTER_OPEN, BOT_COMPUTER_OPEN, () => read(outside()), { ok: false, wall: { kind: 'path', tool: 'read', access: 'read' } }],
     // Switched on mid-turn: the turn still lacks it (it continues with it once it ends, see below).
     ['commands on mid-turn: this turn has none', () => full, off({ shell: false }), BOT_COMPUTER_OPEN, () => command('ls'), { ok: false, wall: { kind: 'tool', tool: 'bash' } }]
   ]
@@ -162,14 +153,14 @@ describe('a bot on this computer', () => {
     return { id: activation.id, ...(await start(f, activation.id)) }
   }
 
-  /** The owner allows commands, files and the browser from work's cards while every switch is on. */
+  /** The owner allows commands and the browser from work's cards while every switch is on. */
   async function allowAll() {
     const work = await run('grant')
-    for (const permission of [{ tool: 'shell' }, { tool: 'browser' }, { path: f.base, access: 'write' as const }])
+    for (const permission of [{ tool: 'shell' }, { tool: 'browser' }])
       work.prepared.authority.escalate!({ permission, reason: 'The owner asked.' })
     await finish(f, work.payload, 'completed', { text: 'Asked.' })
     for (const ask of f.store.openAsks(botId)) await f.bots.service.answer(botId, ask.id, 'allow')
-    expect(f.bots.service.get(botId).permissions.map((item) => item.title).sort()).toEqual(['run commands', 'use files on this computer', 'use the browser'])
+    expect(f.bots.service.get(botId).permissions.map((item) => item.title).sort()).toEqual(['run commands', 'use the browser'])
   }
 
   it('a bot switch stops commands, continues without them, and restores without a card; old builds see no power', async () => {
@@ -370,18 +361,17 @@ describe('a bot on this computer', () => {
 
   it('an ask for what is switched off makes no card, in the chat and in work, and the bot is never told it can ask', async () => {
     limit = { ...BOT_COMPUTER_SHUT }
-    const asks: Array<{ tool: string } | { path: string; access: 'write' }> = [{ tool: 'shell' }, { tool: 'browser' }, { tool: 'browser_act' }, { path: f.base, access: 'write' }]
+    const asks: Array<{ tool: string }> = [{ tool: 'shell' }, { tool: 'browser' }, { tool: 'browser_act' }]
     const turn = await chat('Run ls in my home folder', 'm1')
     for (const permission of asks) expect(turn.prepared.authority.escalate!({ permission, reason: 'The owner asked.' }), JSON.stringify(permission)).toMatch(NOT_HERE)
-    for (const call of [command('ls'), read(join(f.base, 'a.md')), app('browser_open')]) expect(turn.prepared.authority.check(call)).toMatchObject({ ok: false, wall: { kind: 'computer' } })
-    for (const ask of ['use files on this computer', 'run commands', 'use the browser']) expect(turn.prepared.instructions).not.toContain(`You can ask ${ask === 'use files on this computer' ? 'to' : 'for'} "${ask}"`)
-    expect(line(turn.prepared.instructions, 'Use files on this computer')).toMatch(/off on this computer/)
+    for (const call of [command('ls'), app('browser_open')]) expect(turn.prepared.authority.check(call)).toMatchObject({ ok: false, wall: { kind: 'computer' } })
+    for (const ask of ['run commands', 'use the browser']) expect(turn.prepared.instructions).not.toContain(`You can ask for "${ask}"`)
     await finish(f, turn.payload, 'completed', { text: 'That is off on this computer.' })
     expect(f.store.activation(turn.activation.id)!.status).toBe('done')
 
     const work = await run('w1')
     for (const permission of asks) expect(work.prepared.authority.escalate!({ permission, reason: 'The owner asked.' })).toMatch(NOT_HERE)
-    for (const call of [command('ls'), read(join(f.base, 'a.md')), app('browser_open')]) expect(work.prepared.authority.check(call)).toMatchObject({ ok: false, wall: { kind: 'computer' } })
+    for (const call of [command('ls'), app('browser_open')]) expect(work.prepared.authority.check(call)).toMatchObject({ ok: false, wall: { kind: 'computer' } })
     // A browser tool the turn was never offered, called through the app tools as in the app: not on this computer.
     const fx = delegationFixture()
     try {
@@ -397,32 +387,6 @@ describe('a bot on this computer', () => {
     await finish(f, work.payload, 'completed', { text: 'Skipped them.' })
     expect(f.store.escalations({ botId })).toEqual([])
     expect(cards()).toEqual([])
-  })
-
-  it('file access switched off: work that started with it keeps only its own folders from the next call, and later turns start without it', async () => {
-    await allowAll()
-    const work = await run('w1')
-    const outside = join(f.base, 'notes.md')
-    const own = join(f.profile, 'bots', 'files', botId, 'list.md')
-    expect(work.prepared.authority.workspace?.computer).toBeDefined()
-    expect(work.prepared.authority.check(read(outside))).toEqual({ ok: true })
-    limit = { ...limit, files: false }
-    expect(work.prepared.authority.check(read(outside))).toMatchObject({ ok: false, wall: { kind: 'computer', off: 'files' } })
-    expect(work.prepared.authority.check(write(own))).toEqual({ ok: true })
-    // Its commands were set up over every folder: they wait for a turn without file access.
-    expect(work.prepared.authority.check(command('ls'))).toMatchObject({ ok: false, wall: { kind: 'computer', off: 'files' } })
-    // About never says files are closed while commands are on: a command may still read them.
-    const filesItem = () => f.bots.service.get(botId).permissions.find((item) => item.title === 'use files on this computer')!
-    expect(filesItem()).toMatchObject({ mark: BOT_OFF_HERE_MARK, note: expect.stringMatching(/commands may still read files/) })
-    limit = { ...limit, shell: false }
-    expect(filesItem().note).not.toMatch(/commands may still read files/)
-    limit = { ...limit, shell: true }
-    await finish(f, work.payload, 'completed', { text: 'Done.' })
-    const next = await run('w2')
-    expect(next.prepared.authority.workspace?.computer).toBeUndefined()
-    expect(next.prepared.authority.check(command('ls'))).toEqual({ ok: true })
-    expect(next.prepared.authority.check(read(outside))).toMatchObject({ ok: false, wall: { kind: 'computer', off: 'files' } })
-    await finish(f, next.payload, 'completed', { text: 'Done.' })
   })
 
   it('the browser switched off: running work\'s next browser call is refused through the app tools, and later turns get no browser', async () => {
@@ -485,7 +449,6 @@ describe('a bot on this computer', () => {
     const consult = f.bots.prepare(payloadOf(f, turn.activation.id, consultN))
     if ('refused' in consult) throw new Error(consult.refused)
     expect(consult.authority.check(command('ls'))).toMatchObject({ ok: false })
-    expect(consult.authority.check(read(join(f.base, 'a.md')))).toMatchObject({ ok: false })
     expect(consult.authority.escalate!({ permission: { tool: 'shell' }, reason: 'To run it.' })).toMatch(source === 'computer' ? NOT_HERE : /switched.*off/)
     expect(consult.instructions).not.toContain('You can ask for "run commands"')
     void asked.catch(() => undefined)
@@ -496,7 +459,6 @@ describe('a bot on this computer', () => {
     f.host.computerLimit = () => { throw new Error('unreadable') }
     const work = await run('w1')
     expect(work.prepared.policy.tools!.allow).not.toContain('bash')
-    expect(work.prepared.authority.workspace?.computer).toBeUndefined()
     expect(work.prepared.browser).toBeUndefined()
     await finish(f, work.payload, 'completed', { text: 'Done.' })
   })
@@ -505,10 +467,8 @@ describe('a bot on this computer', () => {
   function heldToNothing(prepared: Awaited<ReturnType<typeof start>>['prepared']) {
     expect(prepared.policy.tools!.allow).not.toContain('bash')
     expect(prepared.policy.tools!.allow!.filter((name) => name.startsWith('browser_'))).toEqual([])
-    expect(prepared.authority.workspace?.computer).toBeUndefined()
     expect(prepared.browser).toBeUndefined()
     expect(prepared.authority.check(command('ls')).ok).toBe(false)
-    expect(prepared.authority.check(read(join(f.base, 'a.md')))).toMatchObject({ ok: false, wall: { kind: 'computer', off: 'files' } })
   }
 
   it.each(['computer', 'bot'] as const)('a scheduled run and a reminder\'s work start under the same ceiling, with no card', async (source) => {
@@ -555,27 +515,26 @@ describe('a bot on this computer', () => {
   })
 
   it('the bot is never told it has, or can ask for, what is switched off: its instructions and the answer to a wrong ask', async () => {
-    limit = { ...BOT_COMPUTER_OPEN, files: false, browser: false }
+    limit = { ...BOT_COMPUTER_OPEN, browser: false }
     const turn = await chat('Hello', 'm1')
     const text = turn.prepared.instructions!
-    expect(text).not.toMatch(/With the browser|the browser,|use files on this computer"/)
+    expect(text).not.toMatch(/With the browser|the browser,/)
     expect(line(text, 'Use the browser')).toMatch(/off on this computer/)
     // What is on is still offered.
     expect(text).toContain('You can ask for "run commands"')
-    // An ask written wrongly is answered with what can be asked for: never file access while files are off.
+    // An ask written wrongly is answered with what can be asked for, which is never file access.
     const answer = turn.prepared.authority.escalate!({ permission: { nonsense: true } as never, reason: 'x' })
     expect(answer).toMatch(/Ask for a tool, a skill/)
     expect(answer).not.toMatch(/file access|folder path/)
     await finish(f, turn.payload, 'completed', { text: 'Hi.' })
-    // The control: with files on, the same answer offers file access.
+    // The control: with the browser on, it is offered.
     limit = { ...BOT_COMPUTER_OPEN }
     const again = await chat('Hello again', 'm2')
-    expect(again.prepared.authority.escalate!({ permission: { nonsense: true } as never, reason: 'x' })).toMatch(/file access \(any full folder path\)/)
     expect(again.prepared.instructions).toMatch(/With the browser/)
     await finish(f, again.payload, 'completed', { text: 'Hi.' })
   })
 
-  it('commands or file access switched off: a turn that started with it stops at once, its chat says why, and the work goes on in a new turn without it', async () => {
+  it('commands switched off: a turn that started with them stops at once, its chat says why, and the work goes on in a new turn without it', async () => {
     await allowAll()
     const work = await run('w1')
     const chatTurn = await chat('Hello', 'm1')
@@ -599,17 +558,10 @@ describe('a bot on this computer', () => {
     const next = await start(f, work.id, 2)
     expect(next.prepared.prompt).toMatch(/^\[Mousse\] "run commands" was switched off on this computer while you worked, so Mousse stopped your turn; you no longer have it here\. .*Continue where you left off, without it\. Interrupted tool calls .*bash/s)
     expect(next.prepared.policy.tools!.allow).not.toContain('bash')
-    // File access off: the new turn started with it (a sandbox over every folder), so it stops too.
-    limit = { ...limit, files: false }
+    // Read again while nothing holds commands: nothing more stops.
     f.bots.computerLimitChanged()
-    expect(next.prepared.authority.time.signal.aborted).toBe(true)
-    await finish(f, next.payload, 'interrupted', { outcome: { interruptedBy: 'bot_wall' } })
-    const third = await start(f, work.id, 3)
-    expect(third.prepared.authority.workspace?.computer).toBeUndefined()
-    // Switched off again while nothing holds it: nothing more stops.
-    f.bots.computerLimitChanged()
-    expect(third.prepared.authority.time.signal.aborted).toBe(false)
-    await finish(f, third.payload, 'completed', { text: 'Done without them.' })
+    expect(next.prepared.authority.time.signal.aborted).toBe(false)
+    await finish(f, next.payload, 'completed', { text: 'Done without them.' })
     expect(f.store.activation(work.id)!.status).toBe('done')
     await finish(f, chatTurn.payload, 'completed', { text: 'Hi.' })
   })
@@ -667,29 +619,6 @@ describe('a bot on this computer', () => {
     const next = await start(f, turn.activation.id, f.store.lastMainDispatch(turn.activation.id)!.n)
     expect(next.prepared.prompt).toMatch(source === 'computer' ? /switched off on this computer while you worked.*Interrupted tool calls .*bash \(consult run/s : /owner switched off.*Interrupted tool calls .*bash \(consult run/s)
     await finish(f, next.payload, 'completed', { text: 'Here is what I know.' })
-  })
-
-  // Use files off clears only a cut-off file change it took away: one outside the bot's own folders. The rest keep the
-  // rule of any interruption and wait for the owner.
-  it.each([
-    ['a change outside the bot\'s folders', 'write', 'outside', false],
-    ['a change of the bot\'s own files', 'write', 'own', true],
-    ['a change whose arguments differ from the one allowed', 'write', 'other', true],
-    ['a command (Run commands is still on)', 'bash', 'outside', true]
-  ] as const)('file access switched off: %s cut off by the stop', async (_name, tool, where, holds) => {
-    await allowAll()
-    const work = await run('w1')
-    const outside = join(f.base, 'notes.md')
-    const own = join(f.profile, 'bots', 'files', botId, 'list.md')
-    for (const path of [outside, own]) expect(work.prepared.authority.check(write(path))).toEqual({ ok: true })
-    const args = where === 'outside' ? { path: outside } : where === 'own' ? { path: own } : { path: outside, content: 'x' }
-    f.runs.tools.start({ invocationId: 'inv-cut', runId: work.payload.runId, attemptId: f.runs.getRun(work.payload.runId)!.activeAttemptId!, tool, argsDigest: toolArgsDigest(tool === 'bash' ? { command: 'ls' } : args), now: 'n', idempotent: false })
-    limit = { ...limit, files: false }
-    f.bots.computerLimitChanged()
-    expect(work.prepared.authority.time.signal.aborted).toBe(true)
-    await finish(f, work.payload, 'interrupted', { outcome: { interruptedBy: 'bot_wall' } })
-    if (holds) expect(f.store.activation(work.id)).toMatchObject({ status: 'paused', endReason: 'unknown_calls' })
-    else expect(f.store.activation(work.id)!.status).toBe('running')
   })
 
   it('a turn that finished before the stop reached it is done, with nothing carried on', async () => {

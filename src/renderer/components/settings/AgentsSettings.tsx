@@ -69,7 +69,6 @@ function CacheTimeRow() {
 /** The switches of What bots may do here, in the owner's words, with where search lands on each and its tooltip. */
 const BOT_SWITCHES: ReadonlyArray<{ key: keyof BotComputerLimit; title: string; anchor: string; tip?: string }> = [
   { key: 'shell', title: 'Run commands', anchor: 'agents-bots-shell', tip: BOTS_SHELL_TIP },
-  { key: 'files', title: 'Use files on this computer', anchor: 'agents-bots-files' },
   { key: 'browser', title: 'Use the browser', anchor: 'agents-bots-browser' },
   { key: 'threads', title: 'Use your threads', anchor: 'agents-bots-threads', tip: BOTS_THREADS_TIP }
 ]

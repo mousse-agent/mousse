@@ -1,7 +1,7 @@
 import { isNeutralTool } from '../../harness/tools'
 import { stableStringify } from '../../workflows/canonical'
-import { foldersOf, workspaceOf, type BotManifest } from './definition'
-import { BOT_BROWSER_PERMISSION, BOT_THREADS_PERMISSION, botGrantTool, isAbsolutePath } from './manifest'
+import type { BotManifest } from './definition'
+import { BOT_BROWSER_PERMISSION, BOT_THREADS_PERMISSION, botGrantTool } from './manifest'
 
 /**
  * Walls and escalations of personal bots (PR 6 §5). A wall ends the dispatch and asks the owner:
@@ -14,10 +14,9 @@ export const BOT_BUDGET_WALL_KEYS = ['maxActiveMs', 'maxTurns', 'maxToolCalls', 
 export type BotBudgetWallKey = (typeof BOT_BUDGET_WALL_KEYS)[number]
 
 /**
- * What a wall asks the owner to allow. A `path` request is file access as a whole, "use files on
- * this computer" (`filesAsk`): whichever folder it names, allowing it lets the bot read and change
- * files anywhere. Asks are written in the one form `filesAsk` returns; rows of older builds name
- * the folder that was asked about.
+ * What a wall asks the owner to allow. A `path` request ("use files on this computer") is only ever read from rows an
+ * older build wrote: bots can no longer be given files outside their files folder, so no new one is made (`askProblem`
+ * refuses it) and allowing an old one grants nothing (`withPermission`).
  */
 export type BotPermissionRequest =
   | { tool: string }
@@ -160,32 +159,6 @@ export function grantRequestOf<T extends BotAskRequest>(request: T): T {
   return (tool === request.tool ? request : { tool }) as T
 }
 
-/** The top of the file system `path` is on: `/`, a drive (`C:\\`) or a network share (`\\\\server\\share\\`). */
-export function pathRoot(path: string): string {
-  const drive = /^([A-Za-z]:)[\\/]/.exec(path)
-  if (drive) return `${drive[1]!.toUpperCase()}\\`
-  const share = /^\\\\([^\\/]+)[\\/]([^\\/]+)/.exec(path)
-  if (share) return `\\\\${share[1]}\\${share[2]}\\`
-  return '/'
-}
-
-/**
- * The one file ask (bot-architecture.md §3.7): "use files on this computer", for every folder,
- * read and write. Its folder is the top of the file system the computer starts from (`/`, or the
- * system drive on Windows), so every file ask has the same fingerprint, and an older build reading
- * the row sees a folder it can show.
- */
-export function filesAsk(): { path: string; access: 'write' } {
-  const scope = globalThis as { process?: { platform?: string; env?: Record<string, string | undefined> } }
-  const windows = scope.process?.platform === 'win32'
-  return { path: windows ? pathRoot(`${scope.process?.env?.SystemDrive ?? 'C:'}\\`) : '/', access: 'write' }
-}
-
-/** `request` as it is asked: any folder becomes the one file ask (`filesAsk`). */
-export function filesAskOf<T extends BotAskRequest>(request: T): T {
-  return ('path' in request ? filesAsk() : request) as T
-}
-
 /** A permission request in plain words. */
 export function permissionText(permission: BotPermissionRequest): string {
   if ('tool' in permission && botGrantTool(permission.tool) === BOT_BROWSER_PERMISSION) return 'Use the browser'
@@ -204,6 +177,9 @@ export function permissionText(permission: BotPermissionRequest): string {
   return `${amount} more ${BUDGET_WORDS[key]}`
 }
 
+/** What a bot is told when it asks for a folder: it has only its files folder, and asking gives no more. */
+export const BOT_NO_FOLDER_ASK_TEXT = "A bot can't be given files outside its files folder, so there is nothing to ask for. Work in your files folder; if the owner needs a file from elsewhere, ask them to attach it or copy it there."
+
 /** Why a value is not a permission request, or undefined when it is one. */
 export function permissionProblem(value: unknown): string | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return 'The permission is missing.'
@@ -212,11 +188,8 @@ export function permissionProblem(value: unknown): string | undefined {
   const text = (item: unknown) => typeof item === 'string' && item.length > 0 && item.length <= 1024
   if (keys.length === 1 && keys[0] === 'tool') return text(entry.tool) ? undefined : 'The tool name is invalid.'
   if (keys.length === 1 && keys[0] === 'skill') return text(entry.skill) ? undefined : 'The skill is invalid.'
-  if (keys.length === 2 && 'path' in entry && 'access' in entry) {
-    if (!text(entry.path) || (entry.access !== 'read' && entry.access !== 'write')) return 'The folder permission is invalid.'
-    // Never resolved against the daemon's working directory: the owner is shown the exact folder.
-    return isAbsolutePath(entry.path as string) ? undefined : 'The folder must be a full path, without . or .. parts.'
-  }
+  // Files outside the bot's files folder are no longer something a bot can be given (an older build's ask).
+  if ('path' in entry) return BOT_NO_FOLDER_ASK_TEXT
   if (keys.length === 1 && keys[0] === 'mcp') {
     const mcp = entry.mcp as Record<string, unknown> | null
     if (!mcp || typeof mcp !== 'object' || Array.isArray(mcp)) return 'The MCP server is invalid.'
@@ -249,10 +222,9 @@ export function askProblem(value: unknown): string | undefined {
 }
 
 /**
- * `manifest` with `permission` added ("Allow for this bot" and "Allow this time"). A path gives
- * file access as a whole (the workspace becomes the top of the file system, read and write), a
- * tool adds a built-in or an app tool, a budget raises the limit by `amount`. The result is
- * checked like any manifest before it is published.
+ * `manifest` with `permission` added ("Allow for this bot" and "Allow this time"). A tool adds a
+ * built-in or an app tool, a budget raises the limit by `amount`, and an older build's folder ask
+ * adds nothing. The result is checked like any manifest before it is published.
  */
 export function withPermission(manifest: BotManifest, permission: BotPermissionRequest, amount?: number): BotManifest {
   const next: BotManifest = {
@@ -271,8 +243,7 @@ export function withPermission(manifest: BotManifest, permission: BotPermissionR
       if (!next.tools.includes(tool)) next.tools.push(tool)
     } else if (!next.appTools.includes(tool)) next.appTools.push(tool)
   } else if ('path' in permission) {
-    // File access is one permission: whatever folder was asked about, every folder is allowed.
-    next.workspace = { roots: [pathRoot(permission.path)], access: 'write' }
+    // An older build's folder ask: files outside the files folder can no longer be given, so it adds nothing.
   } else if ('skill' in permission) {
     if (!next.skills.includes(permission.skill)) next.skills.push(permission.skill)
   } else if ('mcp' in permission) {

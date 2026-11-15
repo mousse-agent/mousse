@@ -452,8 +452,6 @@ export function normalizeExperimentalSettings(raw?: Partial<ExperimentalSettings
 export interface BotComputerLimit {
   /** "Run commands" (`shell`). */
   shell: boolean
-  /** "Use files on this computer": files and folders outside the bot's own files folder and scratch. */
-  files: boolean
   /** "Use the browser" (the bot's own browser). */
   browser: boolean
   /**
@@ -474,7 +472,7 @@ export interface BotSettings {
 }
 
 /** Every switch of What bots may do here, in the order Settings shows them: what a stored value must hold, and the only keys a write may name. */
-export const BOT_SWITCH_KEYS: ReadonlyArray<keyof BotComputerLimit> = ['shell', 'files', 'browser', 'threads']
+export const BOT_SWITCH_KEYS: ReadonlyArray<keyof BotComputerLimit> = ['shell', 'browser', 'threads']
 
 /**
  * Switches added after the setting was first saved: a stored value without one of them was written before it existed,
@@ -484,7 +482,7 @@ const BOT_SWITCHES_ADDED_LATER: ReadonlySet<keyof BotComputerLimit> = new Set(['
 
 /** The Use your threads switch's tooltip: what a bot can do through a thread, whatever the other switches say. */
 export const BOTS_THREADS_TIP =
-  'A thread a bot starts runs with full access, so it can run commands and change files even with Run commands and Use files off. Switch this off to keep bots from that here.'
+  'A thread a bot starts runs with full access, so it can run commands and change files even with Run commands off. Switch this off to keep bots from that here.'
 
 /** Settings' one line beside the switches while the stored setting can't be read (`BotSettings.unreadable`). */
 export const BOTS_UNREADABLE_LINE = "All off: the saved setting couldn't be read. Switch on what bots may use."
@@ -518,7 +516,8 @@ export function botSettingsWrite(value: unknown): Partial<BotComputerLimit> | un
 
 /**
  * The switches, when `value` is an object holding each as a boolean; undefined otherwise. A switch added after the
- * setting was first saved (`threads`) reads as on when it is missing, since the value was written before it existed.
+ * setting was first saved (`threads`) reads as on when it is missing, since the value was written before it existed. A
+ * switch that was removed (`files`, "Use files on this computer") is ignored when an older build stored it.
  */
 export function botComputerLimitOf(value: unknown): BotComputerLimit | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
@@ -532,13 +531,13 @@ export function botComputerLimitOf(value: unknown): BotComputerLimit | undefined
 
 /**
  * The stored setting (the raw top-level `bots` value) as the daemon reads it. Missing (an install that never set it):
- * every switch on, so existing installs keep what they had. Present but not `{ here: { shell, files, browser, threads } }`
+ * every switch on, so existing installs keep what they had. Present but not `{ here: { shell, browser, threads } }`
  * with booleans (`threads` may be missing: it was added later), or marked unreadable (written after an unreadable settings
  * file was replaced): every switch off. A ceiling that can't be read fails closed.
  */
 export function normalizeBotSettings(raw: unknown): BotSettings {
-  if (raw === undefined) return { here: { shell: true, files: true, browser: true, threads: true } }
-  const shut: BotSettings = { here: { shell: false, files: false, browser: false, threads: false }, unreadable: true }
+  if (raw === undefined) return { here: { shell: true, browser: true, threads: true } }
+  const shut: BotSettings = { here: { shell: false, browser: false, threads: false }, unreadable: true }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return shut
   const stored = raw as Record<string, unknown>
   if (stored.unreadable !== undefined) return shut

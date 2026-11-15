@@ -8,29 +8,28 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_ENOUGH_TEXT, BOT_ASK_NOT_NOW_TEXT, BOT_ASK_NOT_YET_TEXT, BOT_ASK_REFUSED_TEXT, BOT_ASK_UNKNOWN_TEXT, BOT_FILES_HELD_TEXT, BOT_MCP_UNAVAILABLE_TEXT, BOT_OFFLINE_WATCH_MS, BOT_WORK_HAS_TEXT } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_ENOUGH_TEXT, BOT_ASK_NOT_NOW_TEXT, BOT_ASK_NOT_YET_TEXT, BOT_ASK_REFUSED_TEXT, BOT_ASK_UNKNOWN_TEXT, BOT_MCP_UNAVAILABLE_TEXT, BOT_OFFLINE_WATCH_MS, BOT_WORK_HAS_TEXT } from '../../src/mms/bots/activation/BotEngine'
 import { askFingerprintOf } from '../../src/mms/bots/chat/projection'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
-import { filesAsk } from '../../src/shared/bots/personal/escalation'
 import { botFixture, chatOf, createBot, finish, flush, runDispatch, start, type BotFixture } from './botFixture'
 
 let f: BotFixture
 let botId: string
 let invoices: string
-let notes: string
 
 const DAY = 24 * 60 * 60_000
-/** A read of a folder: a gate refusal asks for file access as a whole (`filesAsk`), once. */
-const readIn = (folder: string): NormalisedCall => ({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: folder } })
+/** A command: a gate refusal asks for "run commands", once. */
+const command = (text: string): NormalisedCall => ({ kind: 'builtin', tool: 'shell', nativeName: 'bash', args: { command: text } })
+/** A call of a thread tool: a gate refusal asks for "use your threads", which the chat uses itself. */
+const app = (tool: string): NormalisedCall => ({ kind: 'app', tool, args: {} })
+const shellFingerprint = askFingerprintOf({ tool: 'shell' })
 /** The newest dispatch's deadline fires (the newest timer that is not the watch every live dispatch has). */
 const deadline = () => f.timers.filter((timer) => timer.ms !== BOT_OFFLINE_WATCH_MS).at(-1)!.fn()
 
 beforeEach(async () => {
   f = botFixture()
   invoices = join(f.base, 'Invoices')
-  notes = join(f.base, 'Notes')
   mkdirSync(invoices)
-  mkdirSync(notes)
   botId = (await createBot(f, { name: 'Penny', reply: 'Hello.' })).botId
 })
 
@@ -51,32 +50,31 @@ async function chat(text: string, id: string) {
 
 describe('asks in a run', () => {
   it('a refusal is a tool error; one ask per permission across three runs, and every run ends done', async () => {
-    const fingerprint = askFingerprintOf(filesAsk())
     for (const id of ['r1', 'r2', 'r3']) {
       const { activation, payload, prepared } = await run(id)
-      const decided = prepared.authority.check(readIn(invoices))
+      const decided = prepared.authority.check(command('ls'))
       expect(decided).toMatchObject({ ok: false, refused: { text: BOT_ASK_REFUSED_TEXT } })
       // The run carries on: other calls are still checked as usual.
       expect(f.store.activation(activation.id)!.status).toBe('running')
-      await finish(f, payload, 'completed', { text: `Report ${id}: I skipped the invoices.` })
+      await finish(f, payload, 'completed', { text: `Report ${id}: I skipped the commands.` })
       expect(f.store.activation(activation.id)).toMatchObject({ status: 'done' })
     }
     const asks = f.store.openAsks(botId)
-    expect(asks).toMatchObject([{ mode: 'ask', fingerprint, permission: filesAsk(), title: 'use files on this computer', expiresAt: null }])
+    expect(asks).toMatchObject([{ mode: 'ask', fingerprint: shellFingerprint, permission: { tool: 'shell' }, title: 'run commands', expiresAt: null }])
     const cards = chatOf(f, botId).filter((message) => message.ask)
-    expect(cards).toMatchObject([{ author: 'bot', kind: 'notice', text: 'Penny wants to use files on this computer.', ask: { askId: asks[0]!.id, status: 'open', kind: 'permission' } }])
+    expect(cards).toMatchObject([{ author: 'bot', kind: 'notice', text: 'Penny wants to run commands.', ask: { askId: asks[0]!.id, status: 'open', kind: 'permission' } }])
     expect(chatOf(f, botId).filter((message) => message.kind === 'run_report')).toHaveLength(3)
-    expect(f.bots.service.get(botId).summary).toMatchObject({ state: 'needs_you', stateText: 'Wants to use files on this computer' })
+    expect(f.bots.service.get(botId).summary).toMatchObject({ state: 'needs_you', stateText: 'Wants to run commands' })
   })
 
   it('the bot\'s own escalate in a run asks once and carries on', async () => {
     const first = await run('r1')
-    expect(first.prepared.authority.escalate!({ permission: { path: notes, access: 'write' }, reason: 'To tidy them.' })).toMatch(/^Asked the owner/)
+    expect(first.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'To tidy them.' })).toMatch(/^Asked the owner/)
     await finish(f, first.payload, 'completed', { text: 'Done what I could.' })
     const second = await run('r2')
-    expect(second.prepared.authority.escalate!({ permission: { path: notes, access: 'write' }, reason: 'Again.' })).toMatch(/^Asked the owner/)
+    expect(second.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'Again.' })).toMatch(/^Asked the owner/)
     // A gate refusal of the same permission finds the same ask.
-    const gate = second.prepared.authority.check({ kind: 'builtin', tool: 'edit', nativeName: 'edit', args: { path: notes } })
+    const gate = second.prepared.authority.check(command('ls'))
     expect(gate).toMatchObject({ ok: false, refused: { askId: f.store.openAsks(botId)[0]!.id } })
     await finish(f, second.payload, 'completed', { text: 'Done.' })
     expect(f.store.openAsks(botId)).toHaveLength(1)
@@ -85,7 +83,7 @@ describe('asks in a run', () => {
 
   it('Not now holds off a new ask for 24 hours; then the run asks again', async () => {
     const first = await run('r1')
-    first.prepared.authority.check(readIn(invoices))
+    first.prepared.authority.check(command('ls'))
     await finish(f, first.payload, 'completed', { text: 'Skipped.' })
     const askId = f.store.openAsks(botId)[0]!.id
     const { message } = await f.bots.service.answer(botId, askId, 'not_now')
@@ -93,13 +91,13 @@ describe('asks in a run', () => {
     f.clock.now += DAY - 60_000
     const second = await run('r2')
     // No card: the bot is told the owner said not now, never that it asked.
-    expect(second.prepared.authority.check(readIn(invoices))).toEqual({ ok: false, refused: { text: BOT_ASK_NOT_NOW_TEXT, askId: '' } })
+    expect(second.prepared.authority.check(command('ls'))).toEqual({ ok: false, refused: { text: BOT_ASK_NOT_NOW_TEXT, askId: '' } })
     await finish(f, second.payload, 'completed', { text: 'Skipped again.' })
     expect(f.store.openAsks(botId)).toEqual([])
     expect(chatOf(f, botId).filter((row) => row.ask)).toHaveLength(1)
     f.clock.now += 2 * 60_000
     const third = await run('r3')
-    third.prepared.authority.check(readIn(invoices))
+    third.prepared.authority.check(command('ls'))
     await finish(f, third.payload, 'completed', { text: 'Asked.' })
     expect(f.store.openAsks(botId)).toHaveLength(1)
     expect(f.store.openAsks(botId)[0]!.id).not.toBe(askId)
@@ -107,56 +105,26 @@ describe('asks in a run', () => {
 
   it('an ask never expires', async () => {
     const first = await run('r1')
-    first.prepared.authority.check(readIn(invoices))
+    first.prepared.authority.check(command('ls'))
     await finish(f, first.payload, 'completed', { text: 'Skipped.' })
     f.clock.now += 5 * DAY
     for (const timer of [...f.timers]) timer.fn()
     await flush()
     expect(f.store.openAsks(botId)).toMatchObject([{ status: 'open', expiresAt: null }])
     await f.bots.service.answer(botId, f.store.openAsks(botId)[0]!.id, 'allow')
-    expect(f.store.activeGrant(botId)!.manifest.workspace).toEqual({ roots: [filesAsk().path], access: 'write' })
+    expect(f.store.activeGrant(botId)!.manifest.tools).toContain('shell')
   })
 
-  it('one ask for file access, whichever folders the runs needed, read or write; once allowed, no file call asks again', async () => {
-    const first = await run('r1')
-    expect(first.prepared.authority.check(readIn(invoices))).toMatchObject({ ok: false, refused: { text: BOT_ASK_REFUSED_TEXT } })
-    expect(first.prepared.authority.check({ kind: 'builtin', tool: 'edit', nativeName: 'edit', args: { path: join(notes, 'a.md') } })).toMatchObject({ ok: false, refused: { askId: f.store.openAsks(botId)[0]!.id } })
-    expect(first.prepared.authority.escalate!({ permission: { path: join(f.base, 'Elsewhere'), access: 'write' }, reason: 'More.' })).toMatch(/^Asked the owner/)
-    await finish(f, first.payload, 'completed', { text: 'Skipped the files.' })
-    expect(f.store.openAsks(botId)).toHaveLength(1)
-    await f.bots.service.answer(botId, f.store.openAsks(botId)[0]!.id, 'allow')
-    const second = await run('r2')
-    for (const path of [join(invoices, 'a.pdf'), join(notes, 'b.md'), join(f.base, 'Elsewhere', 'c.txt'), f.base])
-      for (const tool of ['read', 'list', 'search', 'edit', 'write'] as const)
-        expect(second.prepared.authority.check({ kind: 'builtin', tool, nativeName: tool, args: { path } }), `${tool} ${path}`).toEqual({ ok: true })
-    // Asking for a folder now only says it is allowed already.
-    expect(second.prepared.authority.escalate!({ permission: { path: notes, access: 'write' }, reason: 'Notes.' })).toBe(BOT_FILES_HELD_TEXT)
-    await finish(f, second.payload, 'completed', { text: 'Done.' })
-    expect(f.store.openAsks(botId)).toEqual([])
-    expect(f.store.escalations({ botId }).filter((row) => 'path' in row.permission)).toHaveLength(1)
-  })
-
-  it('Mousse\'s own data stays closed after the file ask is allowed, and never asks', async () => {
-    const first = await run('r1')
-    first.prepared.authority.check(readIn(invoices))
-    await finish(f, first.payload, 'completed', { text: 'Skipped.' })
-    await f.bots.service.answer(botId, f.store.openAsks(botId)[0]!.id, 'allow')
-    const second = await run('r2')
-    expect(second.prepared.authority.check(readIn(join(f.profile, 'bots', 'bots.db')))).toMatchObject({ ok: false, wall: { kind: 'closed' } })
-    expect(second.prepared.authority.check(readIn(join(f.bots.filesFolder(botId), 'a.md')))).toEqual({ ok: true })
-    await finish(f, second.payload, 'completed', { text: 'Done.' })
-    expect(f.store.openAsks(botId)).toEqual([])
-  })
 })
 
 describe('asks in the chat', () => {
   it('a refusal is a wall: the card is on the reply, and the answer continues the turn', async () => {
-    const { activation, payload, prepared } = await chat('Sort my invoices', 'm1')
-    expect(prepared.authority.check(readIn(invoices))).toMatchObject({ ok: false, wall: { kind: 'escalated', permission: 'use files on this computer' } })
+    const { activation, payload, prepared } = await chat('Start a thread to fix the login page', 'm1')
+    expect(prepared.authority.check(app('thread_create'))).toMatchObject({ ok: false, wall: { kind: 'escalated', permission: 'use your threads' } })
     expect(f.store.activation(activation.id)!.status).toBe('waiting_grant')
-    await finish(f, payload, 'interrupted', { text: 'I need to read your invoices first.', outcome: { interruptedBy: 'bot_wall' } })
+    await finish(f, payload, 'interrupted', { text: 'I need to use your threads first.', outcome: { interruptedBy: 'bot_wall' } })
     const reply = chatOf(f, botId).at(-1)!
-    expect(reply).toMatchObject({ author: 'bot', kind: 'text', text: 'I need to read your invoices first.', ask: { status: 'open', title: 'use files on this computer' } })
+    expect(reply).toMatchObject({ author: 'bot', kind: 'text', text: 'I need to use your threads first.', ask: { status: 'open', title: 'use your threads' } })
     // Days pass: the wall waits, it never expires.
     f.clock.now += 3 * DAY
     for (const timer of [...f.timers]) timer.fn()
@@ -167,41 +135,27 @@ describe('asks in the chat', () => {
     expect(message).toMatchObject({ id: reply.id, ask: { status: 'allowed' } })
     const after = f.store.activeGrant(botId)!
     expect(after.digest).not.toBe(before.digest)
-    // Only file access is added: the rest of the grant is what it was.
-    expect({ ...after.manifest, workspace: null }).toEqual({ ...before.manifest, workspace: null })
-    expect(after.manifest.workspace).toEqual({ roots: [filesAsk().path], access: 'write' })
-    expect(f.host.definitions.get(botId)!.published!.permissions.workspace).toEqual({ roots: [filesAsk().path], access: 'write' })
+    // Only the threads are added: the rest of the grant is what it was.
+    expect({ ...after.manifest, appTools: before.manifest.appTools }).toEqual(before.manifest)
+    expect([...after.manifest.appTools].sort()).toEqual([...before.manifest.appTools, 'threads'].sort())
+    expect(f.host.definitions.get(botId)!.published!.permissions.appTools).toContain('threads')
     // The waiting activation moved to the wider grant, and continues on its own history.
     expect(f.store.activation(activation.id)).toMatchObject({ status: 'running', grantDigest: after.digest })
     const next = f.store.dispatch(activation.id, 2)!
-    expect(next).toMatchObject({ kind: 'continue', prompt: { text: '[Mousse] The owner allowed: use files on this computer. Continue.' } })
+    expect(next).toMatchObject({ kind: 'continue', prompt: { text: '[Mousse] The owner allowed: use your threads. Continue.' } })
     const continued = await start(f, activation.id, 2)
     expect(continued.prepared).toMatchObject({ history: 'thread', lane: 'chat' })
-    expect(continued.prepared.authority.check(readIn(invoices))).toEqual({ ok: true })
-    expect(continued.prepared.authority.check(readIn(notes))).toEqual({ ok: true })
-  })
-
-  it('Remove in About narrows the grant again', async () => {
-    const { payload, prepared } = await chat('Sort my invoices', 'm1')
-    prepared.authority.check(readIn(invoices))
-    await finish(f, payload, 'interrupted', { text: 'May I?', outcome: { interruptedBy: 'bot_wall' } })
-    await f.bots.service.answer(botId, chatOf(f, botId).at(-1)!.ask!.askId, 'allow')
-    const detail = f.bots.service.get(botId)
-    expect(detail.permissions).toMatchObject([{ id: askFingerprintOf(filesAsk()), title: 'use files on this computer', note: 'Read and change any file or folder, except Mousse\'s own data.' }])
-    const narrowed = f.bots.service.revokePermission(botId, detail.permissions[0]!.id)
-    expect(narrowed.permissions).toEqual([])
-    expect(f.store.activeGrant(botId)!.manifest.workspace).toBeNull()
-    expect(f.host.definitions.get(botId)!.published!.permissions.workspace).toBeNull()
+    expect(continued.prepared.authority.check(app('thread_create'))).toEqual({ ok: true })
   })
 
   it('several asks in one turn show together; the turn continues once every card is answered', async () => {
     const { activation, payload, prepared } = await chat('Ask me now for everything you\'ll need', 'm1')
-    expect(prepared.authority.escalate!({ permission: { path: invoices, access: 'read' }, reason: 'Invoices.' })).toBe(BOT_ASK_DEFERRED_TEXT)
+    expect(prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'Threads.' })).toBe(BOT_ASK_DEFERRED_TEXT)
     // Asks are ordered by when they were made (two in the same millisecond order by id).
     f.clock.now += 1
     expect(prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'Commands.' })).toBe(BOT_ASK_DEFERRED_TEXT)
-    // Another folder is the same ask: it adds no card.
-    expect(prepared.authority.escalate!({ permission: { path: notes, access: 'write' }, reason: 'Notes.' })).toBe(BOT_ASK_DEFERRED_TEXT)
+    // The same permission again adds no card.
+    expect(prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'Threads again.' })).toBe(BOT_ASK_DEFERRED_TEXT)
     // The turn keeps running until its text is complete.
     expect(f.store.activation(activation.id)!.status).toBe('running')
     expect(prepared.authority.time.signal.aborted).toBe(false)
@@ -209,7 +163,7 @@ describe('asks in the chat', () => {
     expect(f.store.activation(activation.id)!.status).toBe('waiting_grant')
     const rows = chatOf(f, botId).filter((row) => row.activationId === activation.id && row.author === 'bot')
     expect(rows).toMatchObject([
-      { kind: 'text', text: 'I need two things.', ask: { title: 'use files on this computer', status: 'open' } },
+      { kind: 'text', text: 'I need two things.', ask: { title: 'use your threads', status: 'open' } },
       { kind: 'notice', text: 'Penny wants to run commands.', ask: { title: 'run commands', status: 'open' } }
     ])
     await f.bots.service.answer(botId, rows[0]!.ask!.askId, 'allow')
@@ -217,26 +171,26 @@ describe('asks in the chat', () => {
     expect(f.store.activation(activation.id)!.status).toBe('waiting_grant')
     await f.bots.service.answer(botId, rows[1]!.ask!.askId, 'not_now')
     const next = f.store.dispatch(activation.id, 2)!
-    expect(next.prompt.text).toContain('The owner allowed: use files on this computer.')
+    expect(next.prompt.text).toContain('The owner allowed: use your threads.')
     expect(next.prompt.text).toContain('The owner said not now: run commands.')
     expect(f.store.dispatch(activation.id, 3)).toBeUndefined()
   })
 
-  it('both asks of one turn allowed: the turn carries on with the owner\'s request, on its own history, with file access', async () => {
+  it('both asks of one turn allowed: the turn carries on with the owner\'s request, on its own history, with the threads', async () => {
     const { activation, payload, prepared } = await chat('List my repos', 'm1')
-    prepared.authority.escalate!({ permission: { path: f.base, access: 'write' }, reason: 'To find your repos.' })
+    prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'To find your repo threads.' })
     f.clock.now += 1
     prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'To run git.' })
     await finish(f, payload, 'completed', { text: 'I need two things.' })
     const asks = chatOf(f, botId).filter((row) => row.activationId === activation.id && row.ask).map((row) => row.ask!)
-    expect(asks.map((ask) => ask.title)).toEqual(['use files on this computer', 'run commands'])
+    expect(asks.map((ask) => ask.title)).toEqual(['use your threads', 'run commands'])
     for (const ask of asks) await f.bots.service.answer(botId, ask.askId, 'allow')
     const next = await start(f, activation.id, 2)
     // The same activation goes on: the owner's request is in the thread's own history, not asked again.
     expect(next.prepared).toMatchObject({ history: 'thread', lane: 'chat' })
-    expect(next.prepared.prompt).toContain('The owner allowed: use files on this computer.')
+    expect(next.prepared.prompt).toContain('The owner allowed: use your threads.')
     expect(next.prepared.prompt).toContain('The owner allowed: run commands. Your work has it now: hand the job to work_start.')
-    expect(next.prepared.authority.workspace?.computer).toBeDefined()
+    expect(next.prepared.authority.check(app('thread_create'))).toEqual({ ok: true })
     await finish(f, next.payload, 'completed', { text: 'Here are your repos.' })
     expect(f.store.activation(activation.id)!.status).toBe('done')
     expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'text', text: 'Here are your repos.' })
@@ -266,14 +220,14 @@ describe('About', () => {
 
 describe('asks across lanes and timing (review)', () => {
   it('a chat card is answered only once its message is there; until then the bot is not "needs you"', async () => {
-    const { activation, payload, prepared } = await chat('ask me for my invoices', 'm-early')
-    prepared.authority.escalate!({ permission: { path: invoices, access: 'read' }, reason: 'To sort them.' })
+    const { activation, payload, prepared } = await chat('ask me for my threads', 'm-early')
+    prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'To sort them.' })
     const ask = f.store.openAsks(botId)[0]!
     expect(f.bots.service.get(botId).summary.state).toBe('working')
     await expect(f.bots.service.answer(botId, ask.id, 'allow')).rejects.toMatchObject({ code: 'ask_not_ready' })
-    await finish(f, payload, 'completed', { text: 'May I read your invoices?' })
+    await finish(f, payload, 'completed', { text: 'May I use your threads?' })
     expect(f.store.activation(activation.id)!.status).toBe('waiting_grant')
-    expect(f.bots.service.get(botId).summary).toMatchObject({ state: 'needs_you', stateText: 'Wants to use files on this computer' })
+    expect(f.bots.service.get(botId).summary).toMatchObject({ state: 'needs_you', stateText: 'Wants to use your threads' })
   })
 
   it('a limit has one open ask whichever way it was raised', async () => {
@@ -291,13 +245,13 @@ describe('asks across lanes and timing (review)', () => {
   it('stopping a chat that took over a run\'s ask leaves that ask open for the owner', async () => {
     // The run's ask, raised by its refused call; the run ends done.
     const live = await run('r-moved')
-    live.prepared.authority.check(readIn(notes))
-    await finish(f, live.payload, 'completed', { text: 'Skipped the notes.' })
-    const runAsk = f.store.openAsks(botId).find((ask) => 'path' in ask.permission)!
+    live.prepared.authority.check(command('ls'))
+    await finish(f, live.payload, 'completed', { text: 'Skipped the commands.' })
+    const runAsk = f.store.openAsks(botId).find((ask) => ask.fingerprint === shellFingerprint)!
     expect(runAsk.mode).toBe('ask')
     // The chat hits the same permission: the run's ask becomes its wall.
     const turn = await chat('tidy my notes', 'm-moved')
-    turn.prepared.authority.check(readIn(notes))
+    turn.prepared.authority.check(command('ls'))
     expect(f.store.escalation(runAsk.id)).toMatchObject({ mode: 'wall', activationId: turn.activation.id, status: 'open' })
     await f.bots.service.chatStop(botId)
     expect(f.store.escalation(runAsk.id)).toMatchObject({ mode: 'ask', status: 'open' })
@@ -320,7 +274,7 @@ describe('asks across lanes and timing (review)', () => {
 })
 
 describe('asks: caps, limits and grant moves (review round 2)', () => {
-  // Different asks: one skill each (folders are all the one file ask).
+  // Different asks: one skill each.
   const skill = (n: number) => ({ skill: `skill-${n}` })
 
   it('a run writes at most 5 new asks; later ones are refused without asking', async () => {
@@ -328,7 +282,7 @@ describe('asks: caps, limits and grant moves (review round 2)', () => {
     for (let n = 1; n <= 5; n += 1)
       expect(prepared.authority.escalate!({ permission: skill(n), reason: `Skill ${n}.` })).toMatch(/^Asked the owner/)
     expect(prepared.authority.escalate!({ permission: skill(6), reason: 'One more.' })).toBe(BOT_ASK_ENOUGH_TEXT)
-    expect(prepared.authority.check(readIn(invoices))).toMatchObject({ ok: false, refused: { text: BOT_ASK_ENOUGH_TEXT, askId: '' } })
+    expect(prepared.authority.check(command('ls'))).toMatchObject({ ok: false, refused: { text: BOT_ASK_ENOUGH_TEXT, askId: '' } })
     await finish(f, payload, 'completed', { text: 'Done.' })
     expect(f.store.openAsks(botId)).toHaveLength(5)
     expect(chatOf(f, botId).filter((message) => message.ask)).toHaveLength(5)
@@ -375,8 +329,8 @@ describe('asks: caps, limits and grant moves (review round 2)', () => {
   })
 
   it('Allow during another activation\'s start moves its unstarted dispatch to the wider grant', async () => {
-    const turn = await chat('Sort my invoices', 'm-wall')
-    turn.prepared.authority.check(readIn(invoices))
+    const turn = await chat('Count my invoices', 'm-wall')
+    turn.prepared.authority.check(command('ls'))
     await finish(f, turn.payload, 'interrupted', { text: 'May I?', outcome: { interruptedBy: 'bot_wall' } })
     // A run whose first dispatch is written but not yet prepared.
     const queued = await f.bots.activate({ botId, input: 'Report', clientRequestId: 'r-pending' })
@@ -390,8 +344,6 @@ describe('asks: caps, limits and grant moves (review round 2)', () => {
 })
 
 describe('"run commands": one permission, asked for once and remembered', () => {
-  const command = (text: string): NormalisedCall => ({ kind: 'builtin', tool: 'shell', nativeName: 'bash', args: { command: text } })
-  const shellFingerprint = askFingerprintOf({ tool: 'shell' })
 
   it('in the chat a command is a wall with one card; Allow puts it in the grant, and every later command runs in work with no new ask', async () => {
     const { activation, payload, prepared } = await chat('Count the lines in my notes', 'm1')
@@ -467,7 +419,7 @@ describe('asks nobody needs', () => {
     const created = await f.bots.service.create({ look: { colour: 'teal', accessory: 'cap' }, name: 'Pip', description: 'Keep my to-do list.', clientRequestId: 'create-pip' })
     const first = f.store.listActivations(created.bot.id).find((activation) => activation.lane === 'chat')!
     const { prepared, payload } = await start(f, first.id)
-    expect(prepared.authority.escalate!({ permission: filesAsk(), reason: 'To save your lists.' })).toBe(BOT_ASK_NOT_YET_TEXT)
+    expect(prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'To save your lists.' })).toBe(BOT_ASK_NOT_YET_TEXT)
     await finish(f, payload, 'completed', { text: "I'll keep your to-do list." })
     expect(f.store.openAsks(created.bot.id)).toEqual([])
     expect(f.store.activation(first.id)).toMatchObject({ status: 'done' })
@@ -494,9 +446,9 @@ describe('asks nobody needs', () => {
 
 describe('a message sent while the chat waits on an ask', () => {
   it('gets a turn of its own when the waiting turn cannot continue', async () => {
-    const { activation, prepared, payload } = await chat('sort my invoices', 'm-wall')
-    prepared.authority.escalate!({ permission: filesAsk(), reason: 'To read your invoices.' })
-    await finish(f, payload, 'completed', { text: 'I need your files first.' })
+    const { activation, prepared, payload } = await chat('sort my threads', 'm-wall')
+    prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'To read your threads.' })
+    await finish(f, payload, 'completed', { text: 'I need your threads first.' })
     expect(f.store.activation(activation.id)).toMatchObject({ status: 'waiting_grant' })
     // About → Remove while it waits: the waiting turn keeps the old grant, so it can't go on.
     f.bots.narrowGrant(botId, (manifest) => ({ ...manifest, appTools: manifest.appTools.filter((tool) => tool !== 'web_search') }))

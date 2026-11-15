@@ -8,7 +8,7 @@ import { botGrantTool } from './manifest'
  */
 
 export interface AskText {
-  /** Lower case, read after "wants to": "use files on this computer". */
+  /** Lower case, read after "wants to": "run commands". */
   title: string
   /** One line on the limit; empty when there is nothing to add. */
   note: string
@@ -28,11 +28,11 @@ export const THREADS_TEXT: AskText = {
 
 /** Tools by name, as a card says them after "wants to". */
 const TOOL_TEXT: Record<string, AskText> = {
-  read: { title: 'read files', note: 'In its files folder, or anywhere once it may use files on this computer.' },
-  list: { title: 'look through folders', note: 'In its files folder, or anywhere once it may use files on this computer.' },
-  search: { title: 'search in files', note: 'In its files folder, or anywhere once it may use files on this computer.' },
-  edit: { title: 'edit files', note: 'In its files folder, or anywhere once it may use files on this computer.' },
-  write: { title: 'create files', note: 'In its files folder, or anywhere once it may use files on this computer.' },
+  read: { title: 'read files', note: 'In its files folder.' },
+  list: { title: 'look through folders', note: 'In its files folder.' },
+  search: { title: 'search in files', note: 'In its files folder.' },
+  edit: { title: 'edit files', note: 'In its files folder.' },
+  write: { title: 'create files', note: 'In its files folder.' },
   shell: { title: 'run commands', note: 'Any command, started in its files folder. Commands can reach other files on this computer.' },
   web_search: { title: 'search the web', note: 'It sees search results, not your files.' },
   web_fetch: { title: 'read web pages', note: 'It sees the pages, not your files.' },
@@ -50,8 +50,11 @@ export function mcpChangesNote(name: string, changes: 'none' | 'some' | 'unknown
   return `${name} doesn't say whether these tools change things.`
 }
 
-/** The one file permission (`filesAsk`), read and write, everywhere but Mousse's own data. */
-export const FILES_TEXT: AskText = { title: 'use files on this computer', note: 'Read and change any file or folder, except Mousse\'s own data.' }
+/**
+ * A file ask an older build wrote (a `path` request): bots can no longer be given files outside their files folder, so
+ * such a card stays only as history and Allow gives nothing.
+ */
+export const OLD_FILES_TEXT: AskText = { title: 'use files on this computer', note: 'No longer available: a bot uses only its own files folder.' }
 
 const minutes = (ms: number) => Math.max(1, Math.round(ms / 60_000))
 const plural = (count: number, one: string, many = `${one}s`) => `${count} ${count === 1 ? one : many}`
@@ -87,8 +90,7 @@ function budgetText(key: string, amount: number | undefined, budget: BotBudget |
 /** `request` in plain words. `budget`, the bot's current limits, turns a limit ask into its new total. */
 export function askText(request: BotAskRequest, options: { budget?: BotBudget } = {}): AskText {
   if (isSpecialAsk(request)) return { title: 'save its memory to a folder', note: 'You pick the folder. Nothing else changes.' }
-  // File access is one permission, whatever folder an ask names (`filesAsk`).
-  if ('path' in request) return FILES_TEXT
+  if ('path' in request) return OLD_FILES_TEXT
   if ('skill' in request) return { title: `use the ${request.skill} skill`, note: '' }
   // The owner's MCP tools are one ask per server: "use your GitHub tools", and "use GitHub's new tools" once it added some.
   if ('mcp' in request) {

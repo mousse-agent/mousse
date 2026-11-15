@@ -2899,7 +2899,7 @@ export class ClaudeSubscriptionProviderService {
       ? {}
       : this.entrypointEnv(baseEnv, runsAuto, locked ? undefined : input.cwd)
     const turnEnv = this.finalEnv({ ...baseEnv, ...compaction, ...entrypoint })
-    // A bot turn's commands without file access (Linux): Claude Code keeps its temporary files in a private folder, and
+    // A bot turn's commands (Linux): Claude Code keeps its temporary files in a private folder, and
     // the shared one, which holds every session's command output, is closed to them (`claudeBotTemp`).
     const botTemp = locked ? claudeBotTemp(locked.authority, turnEnv, locked.cwd) : undefined
     const env = botTemp ? { ...turnEnv, CLAUDE_CODE_TMPDIR: botTemp.dir } : turnEnv

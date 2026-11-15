@@ -97,8 +97,8 @@ describe('an open Settings page and What bots may do here', () => {
     // The owner switches the browser off here: only that switch is sent, and commands stay off.
     await act(async () => toggle('Use the browser')!.click())
     expect(sent.at(-1)).toEqual({ bots: { here: { browser: false } } })
-    expect(service.get().bots.here).toEqual({ shell: false, files: true, browser: false, threads: true })
-    expect([checked('Run commands'), checked('Use files on this computer'), checked('Use the browser')]).toEqual(['false', 'true', 'false'])
+    expect(service.get().bots.here).toEqual({ shell: false, browser: false, threads: true })
+    expect([checked('Run commands'), checked('Use the browser'), checked('Use your threads')]).toEqual(['false', 'false', 'true'])
   })
 
   it('a page that missed the change still never turns a switch back: what it sends is only its own switch', async () => {
@@ -107,6 +107,6 @@ describe('an open Settings page and What bots may do here', () => {
     expect(checked('Run commands')).toBe('true')
     await act(async () => toggle('Use the browser')!.click())
     expect(sent.at(-1)).toEqual({ bots: { here: { browser: false } } })
-    expect(service.get().bots.here).toEqual({ shell: false, files: true, browser: false, threads: true })
+    expect(service.get().bots.here).toEqual({ shell: false, browser: false, threads: true })
   })
 })

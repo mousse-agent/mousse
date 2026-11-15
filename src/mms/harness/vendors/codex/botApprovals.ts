@@ -8,8 +8,8 @@ import { MOUSSE_MCP_SERVER_NAME, MOUSSE_RELAY_SERVER_NAME } from '../../../run/m
  * A bot's turn on Codex (Bot Phase 1): Codex runs in its asking mode (`untrusted` approvals, no
  * network), and every approval it raises is answered by the bot's authority, the same check (and
  * the same walls and asks) as Pi's gate. Nobody is asked. Its sandbox is read-only, or, for a bot
- * with "run commands", Mousse's permission profile on Linux and macOS, which closes Mousse's own
- * data on Linux (`codexTurnPolicy`, `codexBotSandbox`); Windows and macOS keep their earlier command sandbox.
+ * with "run commands", Mousse's permission profile on Linux and macOS (`codexTurnPolicy`, `codexBotSandbox`);
+ * Windows keeps the `workspaceWrite` command sandbox.
  *
  * What Codex runs without asking is not checked here: its web search, and the read-only commands
  * it trusts in a read-only sandbox (a bot without "run commands" has no command tool at all;
@@ -41,8 +41,7 @@ export type CodexBotDecision = { decision: 'accept' } | { decision: 'decline'; r
 const decided = (check: BotCheck): CodexBotDecision => (check.ok ? { decision: 'accept' } : { decision: 'decline', reason: checkMessage(check) })
 
 /**
- * Why a bot's command never runs outside Codex's sandbox. What a Linux bot's commands can't change is said in its
- * instructions (`codexBotInstructionsNote`): that refusal is the system's own, which Codex doesn't offer to retry.
+ * Why a bot's command never runs outside Codex's sandbox.
  */
 export const CODEX_BOT_UNSANDBOXED_REFUSAL = 'This bot\'s commands run only in its sandbox. Try another way.'
 

@@ -242,9 +242,7 @@ describe('a bot through the v2 methods', () => {
     expect((await call<{ bot: BotSummary }>('bots.update', { botId, look: { colour: 'pink', accessory: 'crown', kind: 'mousse', eyes: 'heart' } })).bot.look).toEqual({ colour: 'pink', accessory: 'crown', kind: 'mousse', eyes: 'heart' })
     expect((await call<{ bot: BotSummary }>('bots.update', { botId, look: { colour: 'pink', accessory: 'crown', kind: 'mouse', eyes: 'pill' } })).bot.look).toEqual({ colour: 'pink', accessory: 'crown' })
 
-    // The owner asks; the chat turn asks for a folder with `escalate`, and the card lands on its reply.
-    const invoices = join(f.base, 'Invoices')
-    mkdirSync(invoices)
+    // The owner asks; the chat turn asks to run commands with `escalate`, and the card lands on its reply.
     writeFileSync(join(f.base, 'list.txt'), 'March, April')
     const sent = await call<{ message: BotChatMessage }>('bots.chat.send', { botId, text: 'Sum up my invoices', clientRequestId: 'm1', attachments: [{ name: 'list.txt', path: join(f.base, 'list.txt') }] })
     expect(sent.message).toMatchObject({ author: 'owner', kind: 'text', text: 'Sum up my invoices', attachments: [{ name: 'list.txt' }] })
@@ -252,27 +250,27 @@ describe('a bot through the v2 methods', () => {
     expect((await call<{ message: BotChatMessage }>('bots.chat.send', { botId, text: 'Sum up my invoices', clientRequestId: 'm1' })).message.seq).toBe(sent.message.seq)
     const [chat] = f.store.laneActivations(botId, 'chat', ['running'])
     const { payload, prepared } = await start(f, chat!.id)
-    expect(prepared.authority.escalate!({ permission: { path: invoices, access: 'read' }, reason: 'To read them.' })).toContain('Asked')
-    await finish(f, payload, 'completed', { text: 'I need to read that folder.' })
+    expect(prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'To add them up.' })).toContain('Asked')
+    await finish(f, payload, 'completed', { text: 'I need to run a command.' })
     const listed = await call<{ messages: BotChatMessage[] }>('bots.chat.list', { botId, limit: 2 })
     expect(listed.messages).toHaveLength(2)
     const reply = listed.messages.at(-1)!
-    expect(reply).toMatchObject({ author: 'bot', text: 'I need to read that folder.', ask: { status: 'open', kind: 'permission', title: 'use files on this computer' } })
-    expect((await call<{ bots: BotSummary[] }>('bots.personal.list')).bots[0]).toMatchObject({ state: 'needs_you', stateText: 'Wants to use files on this computer' })
+    expect(reply).toMatchObject({ author: 'bot', text: 'I need to run a command.', ask: { status: 'open', kind: 'permission', title: 'run commands' } })
+    expect((await call<{ bots: BotSummary[] }>('bots.personal.list')).bots[0]).toMatchObject({ state: 'needs_you', stateText: 'Wants to run commands' })
     const older = await call<{ messages: BotChatMessage[] }>('bots.chat.list', { botId, beforeSeq: listed.messages[0]!.seq })
     expect(older.messages.map((message) => message.text)).toEqual(['Hello, I sum up invoices.'])
 
     const answered = await call<{ message: BotChatMessage }>('bots.asks.answer', { botId, askId: reply.ask!.askId, answer: 'allow' })
     expect(answered.message.ask).toMatchObject({ status: 'allowed' })
     // The wall continues: the next dispatch says what the owner allowed.
-    expect(f.store.dispatch(chat!.id, 2)?.prompt.text).toContain('The owner allowed: use files on this computer')
+    expect(f.store.dispatch(chat!.id, 2)?.prompt.text).toContain('The owner allowed: run commands')
     await runDispatch(f, chat!.id, 2, { text: 'Total: 120 EUR.' })
     expect(await call('bots.chat.markRead', { botId, seq: 1_000 })).toEqual({})
     expect((await call<{ bots: BotSummary[] }>('bots.personal.list')).bots[0]).toMatchObject({ state: 'idle', unread: 0 })
 
-    // About: file access is listed once and can be removed; so can a schedule.
+    // About: what was allowed is listed and can be removed; so can a schedule.
     let detail = await call<BotDetail>('bots.get', { botId })
-    expect(detail.permissions).toMatchObject([{ title: 'use files on this computer', note: expect.any(String) }])
+    expect(detail.permissions).toMatchObject([{ title: 'run commands', note: expect.any(String) }])
     f.bots.addSchedule(botId, { when: { kind: 'cron', expr: '0 9 * * 1-5' }, prompt: 'Sum up new invoices.' }, 'bot')
     await f.tickSchedules(new Date(f.clock.now))
     detail = await call<BotDetail>('bots.get', { botId })

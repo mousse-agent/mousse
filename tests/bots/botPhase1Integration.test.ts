@@ -302,23 +302,21 @@ describe('Bot Phase 1, composed', () => {
     await w.tick(new Date(w.clock.now))
     const run2 = w.store.listActivations(botId).filter((row) => row.lane === 'run').find((row) => row.id !== run1.id)!
     // A run asks without waiting: the call is refused, one card is posted, and the run goes on to its report.
-    const elsewhere = join(w.base, 'Recipes')
-    mkdirSync(elsewhere)
     const r2 = await dispatch(run2.id, ({ prepared }) => {
       for (let attempt = 0; attempt < 2; attempt += 1)
-        expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(elsewhere, 'list.md') } })).toMatchObject({ ok: false, refused: { askId: expect.stringMatching(/^esc_/) } })
-    }, 'Tonight: risotto. I could not read your recipes.')
+        expect(prepared.authority.check({ kind: 'builtin', tool: 'shell', nativeName: 'bash', args: { command: 'ls' } })).toMatchObject({ ok: false, refused: { askId: expect.stringMatching(/^esc_/) } })
+    }, 'Tonight: risotto. I could not run the command.')
     expect(r2.preamble).toContain("The owner's messages since this schedule last ran")
     expect(r2.preamble).toContain('Skip Fridays from now on.')
     expect(r2.preamble).toContain('Tonight: lentil curry.')
     expect(w.store.activation(run2.id)).toMatchObject({ status: 'done' })
     const cards = chat(botId).filter((message) => message.ask)
     expect(cards).toHaveLength(1)
-    expect(cards[0]).toMatchObject({ kind: 'notice', ask: { status: 'open', title: 'use files on this computer' } })
-    expect(lastBot(botId)).toMatchObject({ kind: 'run_report', text: 'Tonight: risotto. I could not read your recipes.' })
-    // Allow: the next run may use files anywhere, and About lists it as one permission.
+    expect(cards[0]).toMatchObject({ kind: 'notice', ask: { status: 'open', title: 'run commands' } })
+    expect(lastBot(botId)).toMatchObject({ kind: 'run_report', text: 'Tonight: risotto. I could not run the command.' })
+    // Allow: the next run may run commands, and About lists it.
     await w.engine.service.answer(botId, cards[0]!.ask!.askId, 'allow')
-    expect(w.engine.service.get(botId).permissions.map((item) => item.title)).toEqual(['use files on this computer'])
+    expect(w.engine.service.get(botId).permissions.map((item) => item.title)).toEqual(['run commands'])
   })
 
   it('forgetting in the chat leaves no forgotten text in the chip that is stored', async () => {

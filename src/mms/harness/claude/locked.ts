@@ -8,8 +8,7 @@ import type { ToolCall } from '@earendil-works/pi-ai'
 import type { BotAuthority, BotMcpTool } from '../../../shared/bots/personal/authority'
 import { botAppToolRefusal, checkBuiltinCall, checkMessage, wallMessage } from '../../../shared/bots/personal/walls'
 import { runtimeExpandedPath } from '../../bots/authority/botAuthority'
-import { entriesBeside } from '../../bots/grants/compile'
-import { CLAUDE_COMMAND_WRITE_LIMIT_TEXT, closedBeside, isMousseTempEntry, linuxCommandLayout, mousseTempEntries } from '../../data/closedPlaces'
+import { mousseTempEntries } from '../../data/closedPlaces'
 import { neutralToolIdempotent, neutralToolsOf, type NativeToolTable, type NeutralTool } from '../../../shared/harness/tools'
 import type { HarnessCaps } from '../../../shared/harness/types'
 import { withoutTransportFields } from '../../agentDefinitions/definitionGate'
@@ -283,7 +282,7 @@ export function claudeLockedTools(turn: Pick<ClaudeLockedTurn, 'authority' | 'sh
 /**
  * The top folders of a Linux system that hold its own programs, libraries, settings and kernel views, which commands
  * need to run. Every other top folder (`/home`, `/mnt`, `/media`, `/opt`, `/srv`, `/var`, `/root`, `/run`, …) is
- * unreadable to a bot's commands without file access, as Codex's `:minimal` profile keeps them. `/run` holds removable
+ * unreadable to a bot's commands, as Codex's `:minimal` profile keeps them. `/run` holds removable
  * drives (`/run/media/<user>`) and each signed-in user's runtime folder (`/run/user/<uid>`: network mounts, sign-in
  * sockets); commands need nothing there but NixOS's programs (`LINUX_RUN_KEPT_OPEN`).
  *
@@ -320,7 +319,7 @@ const CLAUDE_TMPDIR_MAX_BYTES = 30
 
 /**
  * Where Claude Code keeps a bot turn's own temporary files (`CLAUDE_CODE_TMPDIR`) on Linux, for a bot with "run commands"
- * and without file access: a folder of its own in the user's runtime folder (`$XDG_RUNTIME_DIR/mb<its working folder,
+ * a folder of its own in the user's runtime folder (`$XDG_RUNTIME_DIR/mb<its working folder,
  * hashed>`, mode 700, at most `CLAUDE_TMPDIR_MAX_BYTES` long), which the sandbox closes with the rest of `/run` but for
  * this one folder. Otherwise
  * Claude Code would keep them in the shared `<temporary folder>/claude-<uid>`, where every Claude Code session of this
@@ -335,7 +334,7 @@ const CLAUDE_TMPDIR_MAX_BYTES = 30
  * (`removeClaudeBotTemp`).
  */
 export function claudeBotTemp(authority: Pick<BotAuthority, 'tools' | 'workspace'>, env: NodeJS.ProcessEnv, cwd: string, platform: NodeJS.Platform = process.platform, runtime: string | undefined = env.XDG_RUNTIME_DIR ?? process.env.XDG_RUNTIME_DIR): { dir: string; shared: string[] } | undefined {
-  if (platform !== 'linux' || !authority.tools.has('shell') || !authority.workspace || authority.workspace.computer) return undefined
+  if (platform !== 'linux' || !authority.tools.has('shell') || !authority.workspace) return undefined
   const uid = process.getuid?.()
   const dir = claudeBotTempDir(cwd, runtime, uid)
   if (dir === undefined) {
@@ -426,7 +425,7 @@ export function removeClaudeBotTemp(cwd: string, runtime: string | undefined = p
 }
 
 /**
- * What a bot's commands without file access may not read: on Linux every top folder but the system's own
+ * What a bot's commands may not read: on Linux every top folder but the system's own
  * (`LINUX_SYSTEM_FOLDERS`), and the home folder wherever it is; elsewhere the home folder. `tops`: the entries of `/`,
  * which throws when `/` can't be listed: never fewer folders closed than that.
  */
@@ -443,11 +442,11 @@ function rootEntries(): string[] {
 
 /**
  * Why every command of a locked turn is refused before it runs (`ClaudeLockedTurn.commandsRefused`): on Linux, a bot
- * with "run commands" and without file access whose sandbox must close every top folder but the system's own, when `/`
+ * with "run commands" whose sandbox must close every top folder but the system's own, when `/`
  * can't be listed. Undefined when its commands may run.
  */
 export function claudeCommandsRefusal(authority: Pick<BotAuthority, 'tools' | 'workspace'>, platform: NodeJS.Platform = process.platform, tops: () => readonly string[] = rootEntries): string | undefined {
-  if (platform !== 'linux' || !authority.tools.has('shell') || !authority.workspace || authority.workspace.computer) return undefined
+  if (platform !== 'linux' || !authority.tools.has('shell') || !authority.workspace) return undefined
   try {
     tops()
     return undefined
@@ -459,17 +458,12 @@ export function claudeCommandsRefusal(authority: Pick<BotAuthority, 'tools' | 'w
 /**
  * The sandbox of a `shell` grant. `allowWrite` only adds to what the sandbox already allows (the
  * working directory and temporary storage), so the system temporary folders and, for a read-only
- * grant, the roots are denied explicitly; the working directory is the scratch folder. Without file access, on Linux
+ * grant, the roots are denied explicitly; the working directory is the scratch folder. On Linux
  * every top folder but the system's own (`LINUX_SYSTEM_FOLDERS`) is unreadable, and on macOS the home folder, but for
  * the roots, scratch and Claude Code's own storage (`own`); the network is closed, and the instance's key is unset for
  * every command.
  *
- * With file access (`workspace.computer`, bot-architecture.md §3.7) commands see the whole file
- * system, read and write, but Mousse's own data folder: unreadable but for the files folder and
- * scratch, and every entry in it that does not lead to them unwritable (`entriesBeside`); and the
- * other places closed to bots (`computer.outside`, `botClosedPlaces`), unreadable and unwritable.
- *
- * Without it, the folders Mousse keeps in the temporary folders when the turn starts (`mousseTempEntries`) are
+ * The folders Mousse keeps in the temporary folders when the turn starts (`mousseTempEntries`) are
  * unreadable too; everything else on that list is in the home folder or a top folder already closed.
  */
 export function claudeLockedSandbox(input: { workspace: NonNullable<BotAuthority['workspace']>; temps: readonly string[]; home?: string; own?: readonly string[]; platform?: NodeJS.Platform; tops?: () => readonly string[]; sharedTemp?: readonly string[]; exists?: (path: string) => boolean; user?: string }): SandboxSettings {
@@ -477,7 +471,6 @@ export function claudeLockedSandbox(input: { workspace: NonNullable<BotAuthority
   const platform = input.platform ?? process.platform
   const { roots, access, scratch } = input.workspace
   const own = input.own ?? []
-  const computer = input.workspace.computer
   // Per folder (6c-2): only the folders granted for writing are writable; every other root is denied.
   const writeRoots = input.workspace.writeRoots ?? (access === 'write' ? roots : [])
   const readRoots = roots.filter((root) => !writeRoots.includes(root))
@@ -487,33 +480,13 @@ export function claudeLockedSandbox(input: { workspace: NonNullable<BotAuthority
     const child = relative(place, folder)
     return child === '' || (!isAbsolute(child) && child !== '..' && !child.startsWith(`..${sep}`))
   })
-  // macOS keeps its sandbox as before; closing the other places to commands there waits for a run on a real Mac.
   const linux = platform === 'linux'
-  const filesystem = computer && linux
-    ? (() => {
-        const layout = linuxCommandLayout({ roots, mousseHome: computer.closed, outside: (computer.outside ?? []).filter(notMine), mine, windowsDrives: false, userHome: input.home ?? homedir(), ...(input.user ? { user: input.user } : {}) })
-        return {
-          allowWrite: layout.write,
-          // Claude Code's own storage for this bot is read-only to commands too: no link put there leads its Read tool,
-          // which runs outside the sandbox, out of it (`claudeOwnStorage` checks the real path as well).
-          denyWrite: [...new Set([...layout.deny, ...layout.read, ...own])],
-          denyRead: layout.deny,
-          allowRead: [...new Set(mine)]
-        }
-      })()
-    : computer
-      ? {
-          allowWrite: [...new Set([...roots, ...mine])],
-          denyWrite: entriesBeside(computer.closed, mine),
-          denyRead: [computer.closed],
-          allowRead: [...new Set(mine)]
-        }
-      : {
-          allowWrite: [...writeRoots, scratch],
-          denyWrite: [...readRoots, ...input.temps, ...sharedTemp],
-          denyRead: [...closedToCommands(input.home ?? homedir(), platform, input.tops ?? rootEntries), ...sharedTemp, ...(linux ? mousseTempEntries(input.temps).filter(notMine) : [])],
-          allowRead: [...roots, scratch, ...own, ...keptOpenUnderRun(platform, input.exists ?? existsSync)]
-        }
+  const filesystem = {
+    allowWrite: [...writeRoots, scratch],
+    denyWrite: [...readRoots, ...input.temps, ...sharedTemp],
+    denyRead: [...closedToCommands(input.home ?? homedir(), platform, input.tops ?? rootEntries), ...sharedTemp, ...(linux ? mousseTempEntries(input.temps).filter(notMine) : [])],
+    allowRead: [...roots, scratch, ...own, ...keptOpenUnderRun(platform, input.exists ?? existsSync)]
+  }
   return {
     enabled: true,
     failIfUnavailable: true,
@@ -526,46 +499,6 @@ export function claudeLockedSandbox(input: { workspace: NonNullable<BotAuthority
     credentials: { envVars: CLAUDE_KEY_VARIABLES.map((name) => ({ name, mode: 'deny' as const })) }
   } as SandboxSettings
 }
-
-/**
- * Claude Code's `Read` deny rules for every place closed to a bot with file access (`computer`): each entry of the
- * Mousse home beside the way down to the bot's folders (`closedBeside`) and every other closed place, each as itself and
- * as everything under it. Claude Code turns them into exclusions of its own Grep and Glob, which skip those places in a
- * search over a folder above them, and refuses a Read of one. Paths in the form its rules take: `//` and the absolute
- * path with `/`, a Windows drive as `/c/…`, and the characters its patterns read as special escaped.
- *
- * Mousse's own entries in a temporary folder of `temps` (`mousseTempEntries`; tens of thousands where tests or crashes
- * left them) are closed by one pattern per folder, `mousse-*`, which also closes the ones made after the turn starts.
- */
-export function claudeReadDenyRules(workspace: BotAuthority['workspace'], temps: readonly string[] = []): string[] {
-  const computer = workspace?.computer
-  if (!workspace || !computer) return []
-  const mine = [...(workspace.files !== undefined ? [workspace.files] : []), workspace.scratch]
-  const inside = (folder: string, path: string) => {
-    const child = relative(folder, path)
-    return child === '' || (!isAbsolute(child) && child !== '..' && !child.startsWith(`..${sep}`))
-  }
-  const places = [...closedBeside(computer.closed, mine), ...(computer.outside ?? []).filter((place) => !mine.some((folder) => inside(place, folder)))]
-  const rule = (path: string) => {
-    const posix = path.replace(/\\/g, '/').replace(/^([A-Za-z]):/, (_, drive: string) => `/${drive.toLowerCase()}`)
-    const escaped = posix.replace(/[*?[\]{}!#]/g, (char) => `\\${char}`)
-    return `/${escaped.startsWith('/') ? escaped : `/${escaped}`}`
-  }
-  // Whether a folder is one of `temps`, looked up once per folder.
-  const tempFolders = new Map<string, boolean>()
-  const inTemp = (place: string): boolean => {
-    if (!basename(place).startsWith(MOUSSE_TEMP_PREFIX)) return false
-    const folder = dirname(place)
-    let found = tempFolders.get(folder)
-    if (found === undefined) tempFolders.set(folder, (found = isMousseTempEntry(place, temps)))
-    return found
-  }
-  const paths = places.flatMap((place) => (inTemp(place) ? [] : [rule(place)]))
-  const patterns = [...tempFolders].flatMap(([folder, found]) => (found ? [`${rule(folder)}/${MOUSSE_TEMP_PREFIX}*`] : []))
-  return [...new Set([...paths, ...patterns].flatMap((path) => [`Read(${path})`, `Read(${path}/**)`]))]
-}
-
-const MOUSSE_TEMP_PREFIX = 'mousse-'
 
 /**
  * Where a locked turn's settings go (`claudeLockedOptions`'s `settings`): a file in `folder`, named on Claude Code's
@@ -607,17 +540,15 @@ export function claudeLockedOptions(turn: ClaudeLockedTurn, input: {
     mcpServers: {},
     tools,
     disallowedTools,
-    // Off the command line, in a file (`claudeLockedSettingsFile`): the places closed to a bot with file access, which
-    // its own Grep and Glob skip (`claudeReadDenyRules`), and the sandbox of its commands. Both grow with the places.
+    // Off the command line, in a file (`claudeLockedSettingsFile`): the sandbox of its commands.
     settings: {
-      permissions: { deny: claudeReadDenyRules(turn.authority.workspace, turn.temps) },
       ...(shell ? { sandbox: claudeLockedSandbox({ workspace: turn.authority.workspace!, temps: turn.temps, ...(input.home ? { home: input.home } : {}), ...(turn.own ? { own: turn.own.folders } : {}), ...(turn.sharedTemp ? { sharedTemp: turn.sharedTemp } : {}) }) } : {})
     },
     permissionMode: 'default',
     // The bot's own system text, rendered as given on every request of the session (never kept from its first one): a
     // turn after an Allow resumes the session with the wider permissions in it. It is the same text on every turn of an
     // activation, so the prompt cache holds.
-    systemPrompt: { type: 'custom', prompt: shell && turn.authority.workspace?.computer && process.platform === 'linux' ? `${turn.systemPrompt}\n\n${CLAUDE_COMMAND_WRITE_LIMIT_TEXT}` : turn.systemPrompt, snapshot: false },
+    systemPrompt: { type: 'custom', prompt: turn.systemPrompt, snapshot: false },
     maxTurns: CLAUDE_LOCKED_MAX_TURNS,
     ...(input.spawn ? { spawnClaudeCodeProcess: input.spawn } : {})
   }

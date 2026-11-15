@@ -35,7 +35,6 @@ const PERMISSION = Type.Union([
   // What a bot may ask for is in its instructions, which leave out what this computer has switched off (What bots may do
   // here): these words describe the fields and offer nothing themselves.
   Type.Object({ tool: Type.String({ description: 'A tool name, as your instructions say you can ask for it.' }) }),
-  Type.Object({ path: Type.String({ description: 'Any full folder path: asks for "use files on this computer" (read and write, everywhere, once), when your instructions say you can ask for it.' }), access: Type.Union([Type.Literal('read'), Type.Literal('write')]) }),
   Type.Object({ skill: Type.String({ description: 'A skill id.' }) }),
   Type.Object({
     mcp: Type.Object({

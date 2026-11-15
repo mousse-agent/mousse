@@ -10,7 +10,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { BOT_OFFLINE_WATCH_MS, BotEngine, type BotEngineHost } from '../../src/mms/bots/activation/BotEngine'
 import { BotDefinitionStore } from '../../src/mms/bots/definitions/BotDefinitionStore'
-import { botManifestDigest } from '../../src/mms/bots/grants/compile'
+import { botFilesFolder, botManifestDigest } from '../../src/mms/bots/grants/compile'
 import { BotStore } from '../../src/mms/bots/store/BotStore'
 import { PI_NATIVE_TOOLS } from '../../src/mms/harness/pi/nativeTools'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
@@ -47,7 +47,7 @@ const manifest = (patch: Partial<BotManifest> = {}): BotManifest => ({
   appTools: [],
   mcp: [],
   skills: [],
-  workspace: { roots: [root], access: 'read' },
+  workspace: null,
   budget: { maxActiveMs: 10 * 60_000, maxTurns: 30 },
   audience: 'owner',
   ...patch
@@ -78,7 +78,8 @@ const approve = () => bots.approve('site-editor', botManifestDigest(bots.get('si
 beforeEach(() => {
   base = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-bot-engine-')))
   profile = join(base, 'profile')
-  root = join(base, 'site')
+  // The bot's files folder: the one folder its file tools reach, beside its scratch.
+  root = botFilesFolder(profile, 'site-editor')
   mkdirSync(profile, { recursive: true })
   mkdirSync(root, { recursive: true })
   clock = T0
@@ -145,9 +146,8 @@ describe('approval', () => {
     await expect(bots.activate({ botId: 'site-editor', input: 'Fix the footer', clientRequestId: 'c1' })).rejects.toMatchObject({ code: 'bot_approval_required' })
     expect(() => bots.approve('site-editor', '0'.repeat(64))).toThrow(expect.objectContaining({ code: 'bot_grant_changed' }))
     expect(bots.approval('site-editor').added.map((line) => line.text)).toEqual([
-      'Use files on this computer',
-      'Read files',
-      'Search files',
+      'Read files in its files folder',
+      'Search files in its files folder',
       'Up to 10 minutes of work per run',
       'Up to 30 model requests (retries included) per run'
     ])
@@ -175,7 +175,7 @@ describe('approval', () => {
     publish({ tools: ['read', 'search', 'edit'] })
     await expect(bots.activate({ botId: 'site-editor', input: 'b', clientRequestId: 'wide' })).rejects.toMatchObject({
       code: 'bot_approval_required',
-      details: { added: [{ kind: 'tool', text: 'Edit files' }] }
+      details: { added: [{ kind: 'tool', text: 'Edit files in its files folder' }] }
     })
   })
 
@@ -312,13 +312,8 @@ describe('activation and dispatch', () => {
     expect(bots.getActivation(activation.id)).toMatchObject({ status: 'cancelled', endReason: 'grant_replaced' })
   })
 
-  it('a narrower published revision is what runs: tools, file access, limits and work time', async () => {
-    const wide = manifest({ tools: ['read', 'search'], workspace: { roots: [root, join(base, 'docs')], access: 'read' }, budget: { maxActiveMs: 10 * 60_000, maxTurns: 30 } })
-    mkdirSync(join(base, 'docs'))
-    bots.save({ ...definition(), permissions: wide }, bots.get('site-editor').draftHash)
-    bots.publish('site-editor', bots.get('site-editor').draftHash)
-    approve()
-    publish({ tools: ['read'], workspace: null, budget: { maxActiveMs: 2 * 60_000, maxTurns: 5 } })
+  it('a narrower published revision is what runs: tools, limits and work time', async () => {
+    publish({ tools: ['read'], budget: { maxActiveMs: 2 * 60_000, maxTurns: 5 } })
     const activation = await bots.activate({ botId: 'site-editor', input: 'go', clientRequestId: 'narrow' })
     expect(store.counters(activation.id).limits).toEqual({ maxTurns: 5 })
     const prepared = bots.prepare(turnStart(store.dispatch(activation.id, 1)!.runId!))
@@ -329,9 +324,8 @@ describe('activation and dispatch', () => {
     expect(store.counters(activation.id).activeMs).toBe(2 * 60_000)
     // An ungranted tool in a run is refused and asked for once (Bot Phase 1 §5.4); the run goes on.
     expect(prepared.authority.check({ kind: 'builtin', tool: 'search', nativeName: 'grep', args: { path: root } })).toMatchObject({ ok: false, refused: { askId: expect.stringMatching(/^esc_/) } })
-    expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(base, 'docs', 'a.md') } })).toMatchObject({ ok: false, refused: { askId: expect.stringMatching(/^esc_/) } })
-    // The revision has no file access although the grant has: only its own files folder is open.
-    expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(bots.filesFolder('site-editor'), 'a.md') } })).toEqual({ ok: true })
+    // The tool the revision keeps still works in its files folder.
+    expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(root, 'a.md') } })).toEqual({ ok: true })
     expect(bots.getActivation(activation.id).status).toBe('running')
   })
 

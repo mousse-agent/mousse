@@ -22,7 +22,7 @@ How you talk
 Permissions
 - You can use only what your owner allowed. Your files folder, your memory, your schedules and reminders, and the web need no asking. To get more, ask with escalate: one permission per call, with one plain sentence on why.
 - Ask only when the owner wants something that needs it. Then call escalate straight away, then tell them you've asked. Never ask the owner whether you should ask.
-- You can ask to "use files on this computer" (escalate with any full folder path). Once the owner allows it, you can read and change any file or folder except Mousse's own data, and you never ask for a folder again.
+- You use files only in your files folder, and can't be given any other folder. When your owner needs a file from elsewhere, ask them to attach it or copy it into your files folder.
 - You can ask for "run commands" (escalate with the tool shell). Once the owner allows it, you can run any command, starting in your files folder.
 - You can ask for "use the browser" (escalate with the tool browser). Once the owner allows it, you have your own browser, apart from the owner's tabs: open pages, click, type and read them with the browser tools. Use it when reading a page with web_fetch is not enough. The owner can watch it and take it over from your message. A page that is still loading is no failure: carry on with what is there, or wait for it. A cookie banner you may dismiss. You have no sign-ins of your own: when a page needs one, ask your owner to sign in (they can take over your browser). When a page shows a human check or a consent wall a person can get past, ask your owner to take over your browser and do it; don't retry it or work around it yourself. When a site refused your browser, don't retry it: say so in your report, and carry on with the rest.
 - Your owner may have MCP servers set up in Mousse: tools for services like GitHub or their notes. mcp_servers lists them and which ones you can use. To use one, ask for that server with escalate (mcp with its server), once; your work then has its tools. A server that needs a sign-in works only while the owner is signed in to it: never ask them to sign in for you, say so in your report.
@@ -100,8 +100,6 @@ export const BOT_SUBAGENT_INSTRUCTIONS = `You are a subagent of this bot's work:
  * from the permissions a dispatch runs with, so a change in About or an Allow shows at the next turn.
  */
 export interface BotAllowed {
-  /** "Use files on this computer". */
-  files: boolean
   /** "Run commands". */
   shell: boolean
   /** "Use the browser". */
@@ -135,7 +133,6 @@ export function botAllowedOf(manifest: BotManifest, mcpNames?: (serverIds: strin
   const servers = [...new Set(manifest.mcp.map((pair) => pair.serverId))]
   const mcp = servers.length && mcpNames ? [...new Set(mcpNames(servers))].sort() : []
   return {
-    files: manifest.workspace !== null,
     shell: has('shell'),
     browser: manifest.appTools.includes(BOT_BROWSER_PERMISSION),
     threads: manifest.appTools.includes(BOT_THREADS_PERMISSION),
@@ -157,7 +154,6 @@ export function botAllowedText(allowed: BotAllowed, lane?: BotLane, browserOffli
   const lines = [
     'What your owner allows now (current; it replaces anything said earlier in this chat)',
     `- Search the web and read pages: ${yes(allowed.web)}`,
-    `- Use files on this computer: ${off('files') ? `${BOT_OFF_HERE_ANSWER}; only your files folder` : allowed.files ? "yes, any folder except Mousse's own data" : 'no, only your files folder'}`,
     `- Run commands: ${off('shell') ? BOT_OFF_HERE_ANSWER : yes(allowed.shell)}`,
     `- Use the browser (your own): ${off('browser') ? BOT_OFF_HERE_ANSWER : allowed.browser && browserOffline ? "yes, but it can't open on this run" : yes(allowed.browser)}`,
     `- Use your owner's threads: ${off('threads') ? BOT_OFF_HERE_ANSWER : !allowed.threads ? 'no' : lane === 'chat' ? "yes: list, search, read and wait on them, and start, message, stop or archive one when your owner's message asks for it" : 'yes, to list, search, read and wait on them; starting, messaging, stopping or archiving one is for your chat, when your owner asks there'}`,
@@ -195,7 +191,6 @@ export const BOT_OFF_HERE_ANSWER = "off on this computer for every bot, so askin
  * computer has it off, so the bot is never told it has it or can ask for it.
  */
 const SWITCH_LINES: Readonly<Record<BotComputerSwitch, readonly string[]>> = {
-  files: ['- You can ask to "use files on this computer"'],
   shell: ['- You can ask for "run commands"'],
   browser: ['- You can ask for "use the browser"', '- With the browser,'],
   threads: ['- You can ask to "use your threads"']
@@ -203,7 +198,7 @@ const SWITCH_LINES: Readonly<Record<BotComputerSwitch, readonly string[]>> = {
 
 /** `BOT_BASE_INSTRUCTIONS` without the lines about what this computer has switched off. */
 export function baseInstructionsHere(here?: BotComputerLimit): string {
-  if (!here || (here.shell && here.files && here.browser && here.threads)) return BOT_BASE_INSTRUCTIONS
+  if (!here || (here.shell && here.browser && here.threads)) return BOT_BASE_INSTRUCTIONS
   const dropped = (Object.keys(SWITCH_LINES) as BotComputerSwitch[]).filter((which) => !here[which]).flatMap((which) => SWITCH_LINES[which])
   return BOT_BASE_INSTRUCTIONS.split('\n').filter((line) => !dropped.some((start) => line.startsWith(start))).join('\n')
 }
