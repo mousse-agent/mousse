@@ -271,7 +271,7 @@ export class BotScheduleBook {
   /** Every schedule of a bot goes (its purge). */
   removeAll(botId: string): number {
     let removed = 0
-    for (const entry of this.list(botId)) if (this.options.jobs.deleteJob(entry.jobId)) removed += 1
+    for (const job of this.options.jobs.listJobs()) if (job.bot?.botId === botId && this.options.jobs.deleteJob(job.id)) removed += 1
     return removed
   }
 
