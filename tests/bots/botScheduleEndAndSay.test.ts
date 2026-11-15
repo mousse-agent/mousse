@@ -34,7 +34,7 @@ it.each([undefined, 'usage_limit', 'owner'] as const)('says once without a run w
   expect(f.bots.listSchedules(botId)[0]!.label).toBe('Says “Take your pills” · every 60 minutes')
   await f.bots.reconcileOnStartup()
   if (pause) f.store.setPaused(botId, pause)
-  f.problem = { problem: 'usage_limit', until: new Date(T0 + 300 * MIN).toISOString() }
+  f.problem = { problem: 'all_limited', until: new Date(T0 + 300 * MIN).toISOString() }
   const packs = f.packs.length
   const oneShots = f.oneShot.prompts.length
   const before = f.store.listActivations(botId).map((row) => row.id)
@@ -101,4 +101,18 @@ it('an unfinished scheduler claim retried after the stale cutoff keeps the first
     expect(store.getJob(entry.jobId)!.botSkip).toBeUndefined()
     expect(f.store.listActivations(botId).filter((row) => row.lane === 'run')).toEqual([])
   } finally { scheduler.beginShutdown() }
+})
+
+it('a failed message transaction leaves no occurrence record and can be retried', async () => {
+  const entry = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 60 }, say: 'Take your pills' }, 'owner')
+  await f.bots.reconcileOnStartup()
+  const occurrenceAt = new Date(T0 + 60 * MIN).toISOString()
+  const input = { botId, scheduleId: entry.scheduleId, prompt: 'Say exactly: Take your pills', say: 'Take your pills', occurrenceAt }
+  f.journalFails.append = true
+  expect(() => f.bots.runScheduledOccurrence(input)).toThrow()
+  expect(f.bots.findScheduledOccurrence({ botId, scheduleId: entry.scheduleId, occurrenceKey: occurrenceAt })).toBeUndefined()
+  expect(chatOf(f, botId).filter((row) => row.text === 'Take your pills')).toEqual([])
+  f.journalFails.append = false
+  expect(f.bots.runScheduledOccurrence(input).kind).toBe('said')
+  expect(chatOf(f, botId).filter((row) => row.text === 'Take your pills')).toHaveLength(1)
 })
