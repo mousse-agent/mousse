@@ -636,7 +636,7 @@ export class BotMemoryStore {
         replaced = ref ? this.current(botId, ref.id) : undefined
         if (!ref || !replaced) return { error: 'refused', reason: `There is no memory entry ${input.replaces}.` }
         if (replaced.status === 'forgotten') return { error: 'refused', reason: `${ref.id} was forgotten: save a new entry instead.` }
-        if (input.lane === 'run' && replaced.kind !== 'run_note') return { error: 'refused', reason: 'A run can only replace its own run notes. Ask the owner in the chat.' }
+        if (input.lane === 'run' && replaced.kind !== 'run_note') return { error: 'refused', reason: 'A run or a turn you started yourself can only replace run notes. Ask the owner in the chat.' }
         if ((ref.version ?? 1) !== replaced.version)
           return { error: 'stale', current: { id: replaced.id, version: replaced.version, ref: memoryRef(replaced.id, replaced.version), text: replaced.text ?? '' } }
       }

@@ -5978,7 +5978,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   private async afterDispatch(row: BotActivationRow, threadId: string, dispatchId: string, endedBy: BotDispatchEnd, consult = false): Promise<boolean> {
     try {
-      await this.host.context?.afterDispatch({ botId: row.botId, activationId: row.id, dispatchId, lane: row.lane, threadId, endedBy, ...(consult ? { consult: true as const } : {}) })
+      await this.host.context?.afterDispatch({ botId: row.botId, activationId: row.id, dispatchId, lane: row.lane, memoryLane: consult ? 'run' : memoryLaneOf(row), threadId, endedBy, ...(consult ? { consult: true as const } : {}) })
       return true
     } catch (error) {
       console.warn('a bot dispatch could not be recorded', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
@@ -6967,7 +6967,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   // -- The bot app tools' host (BotToolHost, §7.1) ----------------------------------------------
 
   /** What the bot app tools (WP3, WP6) reach the engine through. Lane and bot come from the thread, never from arguments. */
-  readonly tools: BotToolHost & { activationOf(threadId: string): ({ botId: string; activationId: string; lane: BotLane; role: 'home' | BotThreadRole; dispatchId?: string }) | undefined } = {
+  readonly tools: BotToolHost & { activationOf(threadId: string): ({ botId: string; activationId: string; lane: BotLane; memoryLane: BotLane; role: 'home' | BotThreadRole; dispatchId?: string }) | undefined } = {
     activationOf: (threadId) => this.activationOf(threadId),
     schedules: {
       // An automation the bot creates is on at once, with no step for the owner; the turn's message shows it as a card
@@ -8051,7 +8051,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * The activation a thread's turn belongs to: the chat's on the home thread, a run's on its own, a
    * consult's on a context thread (`role` says which thread called).
    */
-  activationOf(threadId: string): { botId: string; activationId: string; lane: BotLane; role: 'home' | BotThreadRole; dispatchId?: string } | undefined {
+  activationOf(threadId: string): { botId: string; activationId: string; lane: BotLane; memoryLane: BotLane; role: 'home' | BotThreadRole; dispatchId?: string } | undefined {
     try {
       const thread = this.store.get('SELECT bot_id, role, activation_id FROM bot_threads WHERE thread_id = ?', threadId)
       if (!thread) return undefined
@@ -8068,7 +8068,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (!row || row.botId !== botId || ENDED_ACTIVATION_STATUSES.has(row.status)) return undefined
       const dispatchId = this.live.get(row.id)?.dispatchId
       const role = thread.role === 'home' ? 'home' : thread.role === 'activation' ? 'activation' : this.store.threadRole(threadId) === 'subagent' ? 'subagent' : 'context'
-      return { botId, activationId: row.id, lane: row.lane, role, ...(dispatchId ? { dispatchId } : {}) }
+      return { botId, activationId: row.id, lane: row.lane, memoryLane: memoryLaneOf(row), role, ...(dispatchId ? { dispatchId } : {}) }
     } catch {
       return undefined
     }
@@ -8647,6 +8647,13 @@ export function asksOwner(row: Pick<BotActivationRow, 'lane' | 'trigger'>): bool
  */
 export function ownerChatTurn(row: Pick<BotActivationRow, 'lane' | 'idempotencyKey'>): boolean {
   return row.lane === 'chat' && row.idempotencyKey.startsWith('chat:')
+}
+
+/** Owner facts, standing notes and Forget need an owner's message or tapped answer.
+ * Unknown starts keep a run's memory rights until explicitly allowed here.
+ */
+export function memoryLaneOf(row: Pick<BotActivationRow, 'lane' | 'idempotencyKey'>): BotLane {
+  return ownerChatTurn(row) || (row.lane === 'chat' && row.idempotencyKey.startsWith('answer:')) ? 'chat' : 'run'
 }
 
 /** Why a turn holds the owner's threads to reading only (`BotAuthority.threadsReadOnly`); undefined when it may act. */

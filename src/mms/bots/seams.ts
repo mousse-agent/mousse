@@ -69,9 +69,9 @@ export interface BotRuntimeHold {
 export interface BotToolHost {
   /**
    * The bot activation a thread's turn belongs to. Lane and bot always come from here, never from
-   * tool arguments; `role` is the calling thread's (a consult calls from a `context` thread).
+   * tool arguments; `memoryLane` is the activation's memory rights (missing means run notes only); `role` is the calling thread's (a consult calls from a `context` thread).
    */
-  activationOf(threadId: string): { botId: string; activationId: string; lane: BotLane; role?: 'home' | 'activation' | 'context' | 'subagent' } | undefined
+  activationOf(threadId: string): { botId: string; activationId: string; lane: BotLane; memoryLane?: BotLane; role?: 'home' | 'activation' | 'context' | 'subagent' } | undefined
   schedules: {
     /** `from`: the turn that adds it; its next message shows the automation as a card (`card`). */
     add(botId: string, s: { when: BotSchedule['when']; prompt: string }, from?: string): { scheduleId: string; label: string; card?: true }
@@ -254,8 +254,9 @@ export interface BotContextProvider {
    * thread and moves the chat window and summary. If it throws `bot_journal_failed`, the engine fails
    * the activation and sets the stuck error "I can't save my work. Free some disk space."
    * `consult`: the dispatch was a consult of the turn, not the turn itself.
+   * `memoryLane`: derived by the engine from the activation key; only chat rights allow the wish fallback.
    */
-  afterDispatch(e: { botId: string; activationId: string; dispatchId: string; lane: BotLane; threadId: string; endedBy: BotDispatchEnd; consult?: true }): Promise<void>
+  afterDispatch(e: { botId: string; activationId: string; dispatchId: string; lane: BotLane; memoryLane?: BotLane; threadId: string; endedBy: BotDispatchEnd; consult?: true }): Promise<void>
 }
 
 /** One journal row to write. `kind` follows bot-context.md §3. */
