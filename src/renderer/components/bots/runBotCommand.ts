@@ -128,7 +128,7 @@ function since(at: string, now = Date.now()): string {
 }
 
 const WORK_STATE: Record<BotWorkItem['status'], string> = { running: '', queued: 'waiting', waiting_for_internet: 'waiting for internet', paused: 'held' }
-const THREAD_STATE: Record<BotLaunchedThread['status'], string> = { running: 'running', queued: 'waiting', paused: 'held', needs_input: 'needs you', idle: 'idle', done: 'done', failed: 'failed', stopped: 'stopped' }
+const THREAD_STATE: Record<BotLaunchedThread['status'], string> = { running: 'running', queued: 'waiting', paused: 'held', subagents: 'subagents working', needs_input: 'needs you', idle: 'idle', done: 'done', failed: 'failed', stopped: 'stopped' }
 
 /** `/status`: the bot's work, background commands, threads, schedules and reminders, one short line each. */
 export function statusText(bot: BotSummary | undefined, detail: BotDetail, now = Date.now()): string {
