@@ -1,3 +1,4 @@
+import { requestJournalRows } from '../memory/requestFrames'
 import { grantedPermissions, permissionId, restorePermission, withoutPermission } from '../chat/projection'
 import { computerSwitchOf } from '../../../shared/bots/personal/computerLimit'
 import { randomUUID } from 'node:crypto'
@@ -1742,7 +1743,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /** A journal row in the caller's `bots.db` transaction (engine events, bot-context.md §4). */
   private journalInTx(row: BotJournalInput): void {
-    this.host.journal?.appendInTx(this.store.db, row)
+    for (const part of row.kind === 'run_start' ? requestJournalRows(row) : [row]) this.host.journal?.appendInTx(this.store.db, part)
   }
 
   /**
