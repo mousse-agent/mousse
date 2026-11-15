@@ -31,6 +31,7 @@ import { ChatsSidebar } from './chats/ChatsSidebar'
 import { ProfileSwitcher } from './profiles/ProfileSwitcher'
 import { DeleteArchivedDialog } from './sidebar/DeleteArchivedDialog'
 import { clearAllRequest, deleteThreads, type DeleteRequest } from '../lib/archivedThreads'
+import { threadsForList, useArchiveMotionRows } from '../lib/archiveMotion'
 import { Collapse, motionAllowed } from './ui/Collapse'
 import { scaleMotionMs, useMotionScale, VIEW_SWAP_IN_MS } from '../lib/motion'
 
@@ -498,6 +499,12 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   // Subagent threads sit under their parent, not beside it: the list holds the threads people started. A thread a bot
   // keeps out of the sidebar (`Thread.hidden`) is listed in the bot's chat instead.
   const listedThreads = useMemo(() => visibleThreads(threads).filter((thread) => !thread.hidden), [threads])
+  // A thread archived or unarchived, by any means, leaves its list and arrives in its new place with motion: for a
+  // moment its old row stays in the old list (`threadsForList`) while it fades and closes (archiveMotion.ts).
+  const asideRef = useRef<HTMLElement>(null)
+  const { moves: archiveMoves, motionOf: archiveMotionOfRow } = useArchiveMotionRows(asideRef, listedThreads)
+  const unarchivedListThreads = useMemo(() => threadsForList(listedThreads, archiveMoves, false), [listedThreads, archiveMoves])
+  const archivedListThreads = useMemo(() => threadsForList(listedThreads, archiveMoves, true), [listedThreads, archiveMoves])
   // A parent row shows what its subagents are doing, however deep they are nested.
   const rolledUpActivity = useMemo(() => rollUpActivities(threads, threadActivity), [threads, threadActivity])
   // While a subagent's thread is open, the row it sits under is highlighted instead.
@@ -509,15 +516,15 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   // Empty drafts are composer state, not conversations. They become visible
   // only when the first message is committed.
   const availableThreads = useMemo(
-    () => sortSidebarThreads(listedThreads.filter((thread) => !thread.settledAt && isThreadStarted(thread) && !agentThreadIds.has(thread.id))),
-    [listedThreads, agentThreadIds]
+    () => sortSidebarThreads(unarchivedListThreads.filter((thread) => !thread.settledAt && isThreadStarted(thread) && !agentThreadIds.has(thread.id))),
+    [unarchivedListThreads, agentThreadIds]
   )
   // The Threads tab: in the order its rows were dragged into, with threads started since on top, newest
   // first. Later messages do not move a row.
   const feedThreads = useMemo(() => sortThreadFeed(availableThreads, threadFeedOrder), [availableThreads, threadFeedOrder])
   const archivedThreads = useMemo(
-    () => sortThreadFeed(listedThreads.filter((thread) => Boolean(thread.settledAt) && isThreadStarted(thread) && !agentThreadIds.has(thread.id))),
-    [listedThreads, agentThreadIds]
+    () => sortThreadFeed(archivedListThreads.filter((thread) => Boolean(thread.settledAt) && isThreadStarted(thread) && !agentThreadIds.has(thread.id))),
+    [archivedListThreads, agentThreadIds]
   )
   const attentionOf = (threadId: string) => threadAttention(rolledUpActivity[threadId] ?? threadActivity[threadId])
   // Threads that wait for an answer or an approval, from every project and computer, at the top of the list.
@@ -1144,6 +1151,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   } = {}) => {
     countRender(`SidebarRow:${thread.id}`)
     const isArchived = Boolean(thread.settledAt)
+    // While the thread moves between its list and Archived: the row leaving (not clickable) or the one arriving.
+    const archiveMotion = inNeedsMe ? undefined : archiveMotionOfRow(thread)
     // A pending row whose thread the service has not made yet: it is the open one already, and has nothing to act on.
     const unmade = unmadeRows.has(thread.id)
     const isRenaming = renaming?.type === 'thread' && renaming.id === thread.id && Boolean(renaming.inNeedsMe) === inNeedsMe
@@ -1192,7 +1201,10 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
       <div
         key={rowKeys.get(thread.id) ?? thread.id}
         className={`threads-sidebar-thread-container${speakingThreadId === thread.id ? ' speaking' : ''}${dropLine}`}
-        inert={clipped || undefined}
+        inert={clipped || archiveMotion === 'leave' || undefined}
+        aria-hidden={archiveMotion === 'leave' || undefined}
+        data-archive-motion={archiveMotion}
+        data-archive-thread={archiveMotion ? thread.id : undefined}
         // The row whose menu is open, however it was opened: an archived row stays lit while it is (threads-sidebar.css).
         data-menu-open={(contextMenu?.target.type === 'thread' && contextMenu.target.id === thread.id && Boolean(contextMenu.inNeedsMe) === inNeedsMe) || undefined}
       >
@@ -1553,7 +1565,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   return (
 
     // While a menu is open, the rows under the pointer do not light their actions (see threads-sidebar.css).
-    <aside data-mousse="sidebar" className={`threads-sidebar${contextMenu ? ' menu-open' : ''}${className ? ` ${className}` : ''}`} style={{ width: threadsSidebarWidth }}>
+    <aside ref={asideRef} data-mousse="sidebar" className={`threads-sidebar${contextMenu ? ' menu-open' : ''}${className ? ` ${className}` : ''}`} style={{ width: threadsSidebarWidth }}>
 
       <div className="threads-sidebar-tabs-row">
         <PillTabs tabsRef={tabsRef} tabs={SIDEBAR_TABS} value={sidebarView} onSelect={setSidebarView} ariaLabel="Sidebar" idPrefix={tabsId} />
