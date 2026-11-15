@@ -218,7 +218,7 @@ it.each([false, true])('keeps question answers and nudge wording (nudge=%s)', as
   f.bots.setTellingWindows(1)
   const activation = f.store.listActivations(botId)[0]!
   f.store.insertQuestion({ id: 'banner-question', botId, activationId: activation.id, dispatchN: 1, lane: 'chat',
-    spec: { question: 'Which flat?', choices: ['Flat A', 'Flat B'] }, createdAt: f.store.now() })
+    spec: { question: 'Which flat?', choices: [{ label: 'Flat A' }, { label: 'Flat B' }], other: true }, createdAt: f.store.now() })
   const question = f.bots.chat.post({ botId, author: 'bot', kind: 'text', text: 'Which flat?', questionId: 'banner-question' })
   if (nudge) {
     f.store.run('UPDATE bot_messages SET told_at = ? WHERE id = ?', f.store.now(), question.id)
@@ -227,4 +227,19 @@ it.each([false, true])('keeps question answers and nudge wording (nudge=%s)', as
   const events: any[] = []; f.bots.events.on('tell', e => events.push(e))
   await f.bots.deliverDueReminders()
   expect(events[0].body).toBe(`${nudge ? 'Still need your answer: ' : ''}Which flat? — Flat A / Flat B`)
+})
+it('keeps legacy-announced rows untold until a capable window consumes durable receipts', async () => {
+  const m = f.bots.chat.post({ botId, author: 'bot', kind: 'text', text: 'Already announced' })
+  f.bots.noteLegacyTelling({ botId, message: m })
+  await f.bots.deliverDueReminders()
+  expect(f.store.message(m.id)?.toldAt).toBeNull()
+  const { BotTellings } = await import('../../src/mms/bots/chat/BotTellings')
+  const reopened = new BotStore({ profileHome: f.profile, clock: () => f.clock.now })
+  try {
+    const events: any[] = []
+    const release = new BotTellings(reopened, new BotChatProjection({ store: reopened, emit() {} }), () => 'Scout', e => events.push(e))
+    release.attach(1); release.release(f.clock.now)
+    expect(events).toHaveLength(0)
+    expect(reopened.message(m.id)?.toldAt).toBe(f.store.now())
+  } finally { reopened.close() }
 })

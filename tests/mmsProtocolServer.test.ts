@@ -1048,6 +1048,38 @@ describe('MmsProtocolServer + LocalMmsClient', () => {
     } finally { await Promise.all(clients.map(c => c.close())) }
   })
 
+  it('keeps legacy-only rows pending and consumes their receipts silently when a new window joins', async () => {
+    const { botFixture, createBot } = await import('./bots/botFixture')
+    const fixture = botFixture()
+    const old = new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType: 'gui' })
+    const modern = new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType: 'gui', requestedCapabilities: [BOT_TELLING_CAPABILITY] })
+    try {
+      const { botId } = await createBot(fixture)
+      const services = await mms.getProfileServices(mms.profileId)
+      const bots = services.personalBots!
+      bots.createBot(fixture.bots.definitionOf(botId))
+      const attached = vi.spyOn(bots, 'setTellingWindows')
+      await old.connect(); await old.subscribe(0)
+      expect(attached).toHaveBeenLastCalledWith(0)
+      const legacy = bots.chat.post({ botId, author: 'bot', kind: 'text', text: 'Legacy announcement' })
+      await old.request('capabilities')
+      await bots.deliverDueReminders()
+      expect(bots.nextDueAt(botId)).toBeUndefined()
+      const pending = (await bots.service.chatList(botId)).messages.find(m => m.id === legacy.id)
+      expect(pending).toBeDefined()
+      const events: any[] = []; modern.onEvent(e => { if (e.type === 'bots.tell') events.push(e.data) })
+      await modern.connect(); await modern.subscribe(0)
+      await bots.deliverDueReminders()
+      await modern.request('capabilities')
+      expect(events).toHaveLength(0)
+      // Both attached: the legacy message push and the modern telling are accepted separate paths.
+      bots.chat.post({ botId, author: 'bot', kind: 'text', text: 'Both paths' })
+      await bots.deliverDueReminders(); await modern.request('capabilities')
+      expect(events.at(-1)?.body).toBe('Both paths')
+      attached.mockRestore()
+    } finally { await old.close(); await modern.close(); fixture.close() }
+  })
+
   it("grants a window's first-send binding only when a window asks for it, and holds each window to what it said", async () => {
     const connect = async (clientType: 'gui' | 'cli', requestedCapabilities: string[] = []) => {
       const client = new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType, requestedCapabilities })
