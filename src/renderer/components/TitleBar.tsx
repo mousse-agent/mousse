@@ -16,6 +16,7 @@ import {
 } from './sideCard/sideCardLogic'
 import { useAppStore } from '../stores/appStore'
 import { useNeedsMeThreads } from '../lib/needsMe'
+import { useMainAreaAvailable } from '../lib/mainAreaAvailable'
 import { needsMeLabel } from '../../shared/threadAttention'
 import { channelForVersion } from '../../shared/updates'
 import stableLogoIcon from '../assets/mousse_logo_icon.svg'
@@ -49,6 +50,8 @@ export function TitleBar() {
   const detailsTitle = useShortcutTitle('Thread details', 'sideCard.toggle')
   // A disabled button explains why instead of offering its key.
   const sideCardTitle = sideCardUnavailable ? sideCardButtonTitle(sideCardUnavailable) : detailsTitle
+  // Chats and bots have no app panel beside them, so the button would do nothing there.
+  const panelAvailable = useMainAreaAvailable()
   const panelLabel = mainAreaOpen ? 'Hide panel' : 'Show panel'
   const panelTitle = useShortcutTitle(panelLabel, 'mainArea.toggle')
 
@@ -122,14 +125,14 @@ export function TitleBar() {
             disabled={sideCardUnavailable !== null}
             onClick={toggleSideCard}
           />
-          <IconButton
+          {panelAvailable && <IconButton
             icon={mainAreaOpen ? PanelRightClose : PanelRightOpen}
             label={panelLabel}
             title={panelTitle}
             variant="titlebar"
             className={mainAreaOpen ? 'titlebar-panel-open' : undefined}
             onClick={() => setMainAreaOpen(!mainAreaOpen)}
-          />
+          />}
         </div>
         <WindowCaptionButtons />
       </div>
