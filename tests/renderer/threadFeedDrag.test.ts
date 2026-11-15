@@ -115,12 +115,17 @@ describe('dragging rows in the Threads tab', () => {
     expect(host.querySelector('.drop-before, .drop-after')).toBeNull()
   })
 
-  it('still reorders with "Needs me" above the list, and its copies are neither dragged nor dropped on', () => {
+  it('still reorders with "Needs me" above the list, and its rows are neither dragged nor dropped on', () => {
     act(() => useAppStore.setState({ threadActivity: { b: 'awaiting_input' } }))
     const copy = host.querySelector<HTMLElement>('.threads-sidebar-needs-me [data-thread-id="b"]')!
     expect(copy).not.toBeNull()
     expect(copy.getAttribute('draggable')).toBe('false')
+    // The waiting thread shows under "Needs me" only, and keeps its place in the order for when it comes back.
+    expect(shown()).toEqual(['d', 'c', 'a'])
     drag('a', row('c'), 0)
+    expect(shown()).toEqual(['d', 'a', 'c'])
+    expect(useAppStore.getState().threadFeedOrder).toEqual(['d', 'a', 'c', 'b'])
+    act(() => useAppStore.setState({ threadActivity: {} }))
     expect(shown()).toEqual(['d', 'a', 'c', 'b'])
     fire(row('d'), 'dragstart')
     expect(fire(copy, 'dragover', 0).defaultPrevented).toBe(false)
