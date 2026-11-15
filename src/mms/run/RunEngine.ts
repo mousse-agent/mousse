@@ -93,6 +93,8 @@ export type RunCommand =
        * writes no event and does not refuse a paused thread (the queue holds such an item while a pause lasts).
        */
       agentOrigin?: { hops: number }
+      /** A person's leftover steer queued as a turn of its own (`RunOutcome.sentByPerson`). */
+      sentByPerson?: true
       /**
        * A person's message that waits behind a usage-limit pause instead of ending it: on a paused thread the run
        * is created `queued`, the pause and its timer stay, and the result says so (`heldByPause`). The sender
@@ -1993,7 +1995,8 @@ export class RunEngine extends EventEmitter {
         ...(continuationOf ? { continuationOf, ...(resuming ? { resumedFromPause: command.source === 'resume' ? 'auto' as const : 'user' as const } : {}) } : {}),
         // Remembered with the run, so a message an agent sent is still known as one when it starts later.
         ...(command.actor ? { sentByAgent: true as const, agentHops: command.actor.hops ?? 1 } : command.agentOrigin ? { sentByAgent: true as const, agentHops: command.agentOrigin.hops } : {}),
-        ...(carriedHops !== undefined ? { agentHops: carriedHops } : {})
+        ...(carriedHops !== undefined ? { agentHops: carriedHops } : {}),
+        ...(command.sentByPerson && !command.actor && !command.agentOrigin ? { sentByPerson: true as const } : {})
       }
       const run = store.createRun({
         threadId: command.threadId,

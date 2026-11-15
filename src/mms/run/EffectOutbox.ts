@@ -25,9 +25,10 @@ const BACKOFF_MAX_MS = 30_000
  */
 export const BACKGROUND_TURN_AGE_MS = 15 * 60_000
 
-/** A `turn.start` of a run a person is waiting for (`PRIORITY_TURN_SOURCES`). */
+/** A `turn.start` of a run a person is waiting for (`PRIORITY_TURN_SOURCES`, or a person's `steer-followup`). */
 const PERSON_TURN_SQL = `(c.kind = 'turn.start' AND EXISTS (SELECT 1 FROM runs r WHERE r.run_id = c.run_id
-  AND r.source IN (${PRIORITY_TURN_SOURCES.map((source) => `'${source}'`).join(',')})))`
+  AND (r.source IN (${PRIORITY_TURN_SOURCES.map((source) => `'${source}'`).join(',')})
+    OR (r.source = 'steer-followup' AND json_extract(r.outcome, '$.sentByPerson') = 1))))`
 
 export type EffectSettlement =
   { settled: true; effect: EffectRecord } | { settled: false; status: EffectStatus | null }

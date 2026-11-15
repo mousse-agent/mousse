@@ -418,6 +418,7 @@ describe('EffectOutbox', () => {
     // Each row: the turns waiting (in the order they were sent, each on its own thread, a minute
     // apart), how long after the last one the slot frees, the fibre (any turn or people only),
     // and which turn it takes. Person sources: gui, cli, remote. Everything else is background.
+    // A waiting turn is its run's source, or `source+marker` for a run whose outcome marks who sent it.
     const rows: Array<{ name: string; waiting: string[]; freesAfterMs?: number; personOnly?: boolean; takes: string | null }> = [
       { name: 'a person after background turns goes first', waiting: ['delegation', 'wake', 'gui'], takes: 'gui' },
       { name: 'the CLI and a phone are people too', waiting: ['resume', 'cli'], takes: 'cli' },
@@ -425,6 +426,13 @@ describe('EffectOutbox', () => {
       { name: 'people among themselves keep their order', waiting: ['remote', 'gui'], takes: 'remote' },
       { name: 'background among itself keeps its order', waiting: ['bot', 'delegation', 'mcp'], takes: 'bot' },
       { name: 'a Resume now continues paused work and is background', waiting: ['resume_now', 'gui'], takes: 'gui' },
+      { name: 'another authenticated client, or a person\'s answer that continues a run, is a person', waiting: ['delegation', 'internal'], takes: 'internal' },
+      { name: 'a client\'s steer that runs as its own turn is a person', waiting: ['wake', 'cli-steer'], takes: 'cli-steer' },
+      { name: 'a protocol steer that runs as its own turn is a person', waiting: ['mcp', 'protocol-steer'], takes: 'protocol-steer' },
+      { name: 'a person\'s steer that missed its turn is a person', waiting: ['delegation', 'steer-followup+sentByPerson'], takes: 'steer-followup+sentByPerson' },
+      { name: 'an agent\'s steer that missed its turn stays background', waiting: ['delegation', 'steer-followup+sentByAgent'], takes: 'delegation' },
+      { name: 'a follow-up carrying subagent results (no marker) stays background', waiting: ['delegation', 'steer-followup'], takes: 'delegation' },
+      { name: 'a people-only slot takes a person\'s leftover steer', waiting: ['steer-followup', 'steer-followup+sentByPerson'], personOnly: true, takes: 'steer-followup+sentByPerson' },
       {
         name: 'a background turn waiting past the age limit ranks with people again, and is older',
         waiting: ['delegation', 'gui'],
@@ -448,7 +456,8 @@ describe('EffectOutbox', () => {
         row.waiting.forEach((source, index) => {
           setClock(at(index * 60_000))
           const threadId = `t${index}`
-          const run = store.createRun({ threadId, source })
+          const [runSource, marker] = source.split('+')
+          const run = store.createRun({ threadId, source: runSource!, ...(marker ? { outcome: { [marker]: true } } : {}) })
           const effect = outbox.enqueue({ threadId, runId: run.runId, kind: 'turn.start' })
           effectSource.set(effect.effectId, source)
         })
