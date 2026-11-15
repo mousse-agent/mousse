@@ -49,7 +49,7 @@ import {
 } from '../mms/protocolEventBridge'
 import { SettingsStore } from '../../mms/settings/SettingsStore'
 import { listEditors, openInEditor, openRemoteInEditor } from '../editors'
-import { copyImageFile, saveFileCopy, showFileInFolder } from '../localFiles'
+import { copyImageFile, openLocalPath, saveFileCopy, showFileInFolder } from '../localFiles'
 import { nodeOfThread, remoteRoute } from '../remoteEditorFlow'
 import { EDITOR_PROXY_READY, type RemoteAskResult, type RemoteOpenResult, type RemoteRoute } from '../../shared/remoteEditor'
 import { askForEditorAccess } from '../remoteEditorAsk'
@@ -3230,7 +3230,8 @@ export function registerGuiIpc(
   registerHandler('editors:open', async (_e, editorId: string, path: string) => {
     await openInEditor(editorId, path)
   })
-  // A file of this computer that a bot's chat names (localFiles.ts): only an existing file by its absolute path.
+  // A file or folder of this computer that a bot's chat names (localFiles.ts): only an existing one by its absolute path.
+  registerHandler('localFiles:open', async (_e, path: unknown) => openLocalPath(path))
   registerHandler('localFiles:showInFolder', async (_e, path: unknown) => { await showFileInFolder(path) })
   registerHandler('localFiles:saveCopy', async (event, path: unknown) =>
     saveFileCopy(path, BrowserWindow.fromWebContents(event.sender) ?? getWindow(), app.getPath('downloads')))

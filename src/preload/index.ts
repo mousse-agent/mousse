@@ -699,9 +699,11 @@ const api = {
     /** Asks the computer that runs a thread to allow editor connections from this one. A person there answers. */
     askAccess: (threadId: string): Promise<RemoteAskResult> => ipcRenderer.invoke('editors:askAccess', threadId)
   },
-  /** A file of this computer by its absolute path (a bot's file chip or picture); each refuses anything but an existing file. */
+  /** A file or folder of this computer by its absolute path (a bot's file chip or picture); each refuses one that is not there. */
   localFiles: {
-    /** Shows the file selected in the computer's file manager. */
+    /** What the path names. A folder is opened in the computer's file manager; a file is for the window to show. */
+    open: (path: string): Promise<'file' | 'folder'> => ipcRenderer.invoke('localFiles:open', path),
+    /** Shows the file or folder selected in the computer's file manager. */
     showInFolder: (path: string): Promise<void> => ipcRenderer.invoke('localFiles:showInFolder', path),
     /** Saves a copy where the person picks; the path it was saved to, or null when they closed the dialog. */
     saveCopy: (path: string): Promise<string | null> => ipcRenderer.invoke('localFiles:saveCopy', path),
