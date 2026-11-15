@@ -588,11 +588,25 @@ describe('composer send slot', () => {
     expect(onSend).not.toHaveBeenCalled()
   })
 
-  it('shows only Stop recording in the slot while recording', () => {
-    const { onStopRecording } = slot({ isRecording: true })
-    expect(actions()).toEqual(['Attach files', 'Stop recording'])
-    act(() => button('Stop recording').click())
+  it('while recording, the footer holds only Cancel and Done', () => {
+    const onCancelRecording = vi.fn()
+    const { onStopRecording } = slot({ isRecording: true, onCancelRecording, recordingDuration: 75 })
+    expect(actions()).toEqual(['Cancel recording', 'Finish recording'])
+    // The run controls make way for the time and the wave.
+    expect(host.querySelector('.composer-model-btn')).toBeNull()
+    expect(host.querySelector('[role="group"][aria-label="Recording"]')?.textContent).toBe('1:15')
+    act(() => button('Cancel recording').click())
+    expect(onCancelRecording).toHaveBeenCalledTimes(1)
+    expect(onStopRecording).not.toHaveBeenCalled()
+    act(() => button('Finish recording').click())
     expect(onStopRecording).toHaveBeenCalledTimes(1)
+  })
+
+  it('while the recording turns into text, says so and waits', () => {
+    slot({ transcribing: true, onCancelRecording: vi.fn() })
+    expect(host.querySelector('[role="status"]')?.textContent).toBe('Transcribing…')
+    expect(button('Cancel recording').disabled).toBe(true)
+    expect(button('Finish recording').disabled).toBe(true)
   })
 })
 

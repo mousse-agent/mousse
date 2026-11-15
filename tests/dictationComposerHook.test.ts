@@ -130,4 +130,34 @@ describe('the composer microphone', () => {
     expect(mocks.microphone.stop).toHaveBeenCalled()
     root = createRoot(host)
   })
+
+  it.each([
+    ['a local model, transcribing live', 'local'],
+    ['a provider model, on the recorder', 'provider']
+  ] as const)('Cancel throws away the recording of %s: no text, no notice, microphone closed', async (_name, source) => {
+    const live = { finish: vi.fn(), cancel: vi.fn() }
+    if (source === 'local') {
+      select({ source: 'local', modelId: 'parakeet-tdt-110m', label: 'Parakeet' })
+      mocks.startLiveTranscription.mockResolvedValue(live)
+    } else {
+      select({ source: 'provider', providerId: 'openai', modelId: 'whisper-1', label: 'Whisper' })
+    }
+    mocks.transcribeRecording.mockResolvedValue('Should not appear.')
+
+    await act(async () => dictation.start())
+    expect(dictation.isRecording).toBe(true)
+    await act(async () => dictation.cancel())
+
+    expect(dictation.isRecording).toBe(false)
+    expect(dictation.transcribing).toBe(false)
+    expect(dictation.levels).toBeNull()
+    expect(mocks.microphone.stop).toHaveBeenCalled()
+    expect(live.finish).not.toHaveBeenCalled()
+    expect(mocks.transcribeRecording).not.toHaveBeenCalled()
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)))
+    expect(transcripts).toEqual([])
+    expect(dictation.notice).toBeNull()
+    if (source === 'local') expect(live.cancel).toHaveBeenCalledTimes(1)
+    else expect(FakeRecorder.all[0]!.state).toBe('inactive')
+  })
 })

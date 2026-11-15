@@ -248,6 +248,30 @@ export function useDictation({ disabled, loading, onTranscript }: UseDictationOp
     mediaRecorderRef.current.stop()
   }
 
+  /** Ends the recording and throws it away: no text, no notice. */
+  const cancel = () => {
+    if (!isRecording) return
+    // A new ticket makes any transcription of this recording land nowhere.
+    captureTicket.current += 1
+    stopRecordingTimer()
+    const recorder = mediaRecorderRef.current
+    if (recorder) {
+      recorder.onstop = null
+      recorder.onerror = null
+      recorder.ondataavailable = null
+      if (recorder.state === 'recording') recorder.stop()
+    }
+    mediaRecorderRef.current = null
+    recordingChunksRef.current = []
+    liveRef.current?.cancel()
+    liveRef.current = null
+    captureMicrophone.current?.stop()
+    captureMicrophone.current = null
+    stopRequestedRef.current = null
+    setIsRecording(false)
+    setLevels(null)
+  }
+
   return {
     isRecording,
     recordingPending,
@@ -259,6 +283,7 @@ export function useDictation({ disabled, loading, onTranscript }: UseDictationOp
     dismissError: () => setError(undefined),
     notice,
     start,
-    stop
+    stop,
+    cancel
   }
 }

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
-import { ArrowTurnForward, ArrowUp, Layers, Mic, Paperclip, Square, Zap } from '../lib/icons'
+import { ArrowTurnForward, ArrowUp, Check, Layers, Loader2, Mic, Paperclip, Square, X, Zap } from '../lib/icons'
+import type { AudioLevels } from '../speech/audioLevels'
+import { SpeechHistoryWave } from '../speech/SpeechHistoryWave'
 import { showsContextGauge, type ProviderWithStatus } from '../lib/providerSnapshots'
 import type { PermissionMode } from '../../shared/permissionMode'
 import type { ContextUsageSnapshot } from '../../shared/types'
@@ -114,7 +116,14 @@ export interface ComposerFooterProps {
   sendLabel?: string
   onStop?: () => void
   onStartRecording?: () => void
+  /** Done: ends the recording and turns it into text. */
   onStopRecording?: () => void
+  /** Cancel: ends the recording and throws it away. */
+  onCancelRecording?: () => void
+  /** Seconds recorded so far. */
+  recordingDuration?: number
+  /** Loudness of the recording, for its wave. */
+  recordingLevels?: AudioLevels | null
   primaryAction?: 'send' | 'implement-plan'
   onImplementPlan?: () => void
   implementPlanDisabled?: boolean
@@ -381,6 +390,9 @@ export function ComposerFooter({
   onStop,
   onStartRecording,
   onStopRecording,
+  onCancelRecording,
+  recordingDuration = 0,
+  recordingLevels = null,
   primaryAction = 'send',
   onImplementPlan,
   implementPlanDisabled = false,
@@ -423,6 +435,52 @@ export function ComposerFooter({
     </button>
   )
 
+  // While recording, the footer is the recorder: the time and the wave, then Cancel and Done. While the
+  // recording turns into text it says so in the same place, so the box above never moves.
+  if (isRecording || transcribing) {
+    return (
+      <div className="composer-footer composer-recorder">
+        {isRecording ? (
+          <div className="composer-recorder-status" role="group" aria-label="Recording">
+            <span className="composer-recorder-dot" aria-hidden="true" />
+            <span className="composer-recorder-time">{formatRecordingTime(recordingDuration)}</span>
+            <SpeechHistoryWave levels={recordingLevels} className="composer-recorder-wave" />
+          </div>
+        ) : (
+          <div className="composer-recorder-status" role="status">
+            <Loader2 size={14} strokeWidth={2} className="composer-transcribing-spin" />
+            <span className="composer-recorder-label">Transcribing…</span>
+          </div>
+        )}
+        <div className="composer-footer-right">
+          <button
+            type="button"
+            className="composer-icon-btn composer-recorder-cancel"
+            title="Cancel · discard the recording"
+            aria-label="Cancel recording"
+            // The box keeps focus and its selection, where Done puts the text.
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={onCancelRecording}
+            disabled={!isRecording || !onCancelRecording}
+          >
+            <X size={16} strokeWidth={2} />
+          </button>
+          <button
+            type="button"
+            className="composer-action-btn composer-recorder-done"
+            title="Done · insert the text"
+            aria-label="Finish recording"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={onStopRecording}
+            disabled={!isRecording}
+          >
+            <Check size={16} strokeWidth={2.2} />
+          </button>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="composer-footer">
       <div className="composer-footer-left">
@@ -445,25 +503,25 @@ export function ComposerFooter({
           <Paperclip size={16} strokeWidth={2} />
         </button>
 
-        {primaryAction !== 'implement-plan' && (!stoppable || dictateWhileStoppable) && !isRecording && onStartRecording ? (
+        {primaryAction !== 'implement-plan' && (!stoppable || dictateWhileStoppable) && onStartRecording ? (
           <button
             type="button"
             className="composer-icon-btn composer-dictate-btn"
             title="Dictate"
             aria-label="Dictate"
-            aria-busy={recordingPending || transcribing}
+            aria-busy={recordingPending}
             // The box keeps focus, so its selection stays highlighted while recording.
             onMouseDown={(event) => event.preventDefault()}
             onClick={onStartRecording}
-            disabled={disabled || recordingPending || transcribing}
+            disabled={disabled || recordingPending}
           >
             <Mic size={16} strokeWidth={2} />
           </button>
         ) : null}
 
-        {primaryAction !== 'implement-plan' && !isRecording && stoppable && canSend ? stopButton('composer-icon-btn composer-stop-btn') : null}
+        {primaryAction !== 'implement-plan' && stoppable && canSend ? stopButton('composer-icon-btn composer-stop-btn') : null}
 
-        {sendMode && primaryAction !== 'implement-plan' && !isRecording ? (
+        {sendMode && primaryAction !== 'implement-plan' ? (
           <button
             type="button"
             className={`composer-icon-btn composer-send-mode-btn${steers ? ' is-steer' : ''}`}
@@ -487,17 +545,6 @@ export function ComposerFooter({
           >
             Implement plan
           </button>
-        ) : isRecording ? (
-          <button
-            type="button"
-            className="composer-action-btn composer-action-btn-recording"
-            title="Stop recording"
-            aria-label="Stop recording"
-            onMouseDown={(event) => event.preventDefault()}
-            onClick={onStopRecording}
-          >
-            <Square size={14} strokeWidth={2} fill="currentColor" />
-          </button>
         ) : stopInSlot ? (
           stopButton('composer-action-btn composer-action-btn-stop')
         ) : (
@@ -515,4 +562,10 @@ export function ComposerFooter({
       </div>
     </div>
   )
+}
+
+/** 0:07, 1:23, 12:05: minutes and seconds of a recording. */
+export function formatRecordingTime(seconds: number): string {
+  const whole = Math.max(0, Math.floor(seconds))
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`
 }

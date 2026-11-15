@@ -8,11 +8,11 @@ import { useAppStore } from '../../src/renderer/stores/appStore'
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 // Stands in for the microphone: the test decides when recording finishes and with what text.
-const dictation = vi.hoisted(() => ({ onTranscript: (_text: string) => {}, start: vi.fn(), stop: vi.fn() }))
+const dictation = vi.hoisted(() => ({ onTranscript: (_text: string) => {}, recording: false, start: vi.fn(), stop: vi.fn(), cancel: vi.fn() }))
 vi.mock('../../src/renderer/dictation/useDictation', () => ({
   useDictation: ({ onTranscript }: { onTranscript: (text: string) => void }) => {
     dictation.onTranscript = onTranscript
-    return { isRecording: false, recordingPending: false, transcribing: false, recordingDuration: 0, levels: null, error: undefined, dismissError: () => {}, notice: null, start: dictation.start, stop: dictation.stop }
+    return { isRecording: dictation.recording, recordingPending: false, transcribing: false, recordingDuration: 7, levels: null, error: undefined, dismissError: () => {}, notice: null, start: dictation.start, stop: dictation.stop, cancel: dictation.cancel }
   }
 }))
 
@@ -33,6 +33,9 @@ beforeEach(() => {
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => frames.push(callback))
   Element.prototype.scrollIntoView ??= () => {}
   dictation.start.mockReset()
+  dictation.stop.mockReset()
+  dictation.cancel.mockReset()
+  dictation.recording = false
   useAppStore.setState({ profileId: 'profile-1', appInfo: { platform: 'darwin' } as never })
   host = document.createElement('div')
   document.body.append(host)
@@ -119,5 +122,41 @@ describe('dictation and the composer selection', () => {
     })
     finish('now')
     expect(value).toBe('fix a bug now')
+  })
+})
+
+describe('the composer while recording', () => {
+  const button = (name: string) => host.querySelector<HTMLButtonElement>(`button[aria-label="${name}"]`)
+  /** Presses a button the way a mouse does; returns whether the box kept focus. */
+  function press(target: HTMLButtonElement): boolean {
+    const down = new MouseEvent('mousedown', { bubbles: true, cancelable: true })
+    act(() => {
+      target.dispatchEvent(down)
+      target.click()
+    })
+    return down.defaultPrevented
+  }
+
+  it('shows the time with Cancel and Done in place of Send, and keeps the typed text', () => {
+    dictation.recording = true
+    render('fix the bug')
+    expect(host.querySelector('[role="group"][aria-label="Recording"]')?.textContent).toContain('0:07')
+    expect(button('Cancel recording')).not.toBeNull()
+    expect(button('Finish recording')).not.toBeNull()
+    expect(button('Send message')).toBeNull()
+    expect(button('Dictate')).toBeNull()
+    expect(box().value).toBe('fix the bug')
+  })
+
+  it('Cancel throws the recording away; Done finishes it; both leave focus in the box', () => {
+    dictation.recording = true
+    render('fix the bug')
+    box().focus()
+    expect(press(button('Cancel recording')!)).toBe(true)
+    expect(dictation.cancel).toHaveBeenCalledTimes(1)
+    expect(dictation.stop).not.toHaveBeenCalled()
+    expect(press(button('Finish recording')!)).toBe(true)
+    expect(dictation.stop).toHaveBeenCalledTimes(1)
+    expect(dictation.cancel).toHaveBeenCalledTimes(1)
   })
 })
