@@ -223,6 +223,18 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(JSON.parse((await text('thread_create', { projectId: 'p1', title: 'Fix login', firstMessage: 'Look.' })).text)).toMatchObject({ threadId: 'new-1', link: 'mousse://thread/new-1' })
   })
 
+  it('a thread whose own turn ended while its subagent still runs reads as waiting on subagents, in its list and its summary', async () => {
+    const { text } = await world({ threads: 'all' })
+    const body = (outcome: { text: string }) => JSON.parse(outcome.text.split('\n').slice(1, -1).join('\n'))
+    const mine = async () => body(await text('thread_list', {})).threads.find((entry: { id: string }) => entry.id === 'mine')
+    expect(await mine()).toMatchObject({ status: 'idle' })
+    expect(body(await text('thread_read', { threadId: 'mine' })).status).toBe('idle')
+    await fx!.runningRun('subagent')
+    expect(await mine()).toMatchObject({ status: 'active', waitingOnSubagents: true })
+    expect(body(await text('thread_list', { status: 'active' })).threads.map((entry: { id: string }) => entry.id)).toContain('mine')
+    expect(body(await text('thread_read', { threadId: 'mine' })).status).toBe('waiting on subagents')
+  })
+
   it('a Stop of a running turn leaves a line naming the bot, and every start and message is a chip with what it sent', async () => {
     const { text, host, onAppResult } = await world({ threads: 'all' })
     expect((await text('thread_interrupt', { threadId: 'mine', runId: 'run-x' })).error).toBe(false)

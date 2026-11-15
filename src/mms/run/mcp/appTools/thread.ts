@@ -1,6 +1,6 @@
 import { ALWAYS_OPTION_ID, PERMISSION_KEYS } from '../../../../shared/permissionKeys'
 import type { PermissionMode } from '../../../../shared/permissionMode'
-import { isLocalOnlyThread, visibleThreads } from '../../../../shared/threadLineage'
+import { isLocalOnlyThread, subagentDescendantsIn, visibleThreads } from '../../../../shared/threadLineage'
 import type { QueuedMessage, Thread, UserQuestionAnswers } from '../../../../shared/types'
 import { describeApprovalRefusal } from '../../approvalRights'
 import { QueueAccessError, QueueConflictError } from '../../../queue/ThreadMessageQueue'
@@ -644,6 +644,21 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     else creations.set(runId, used - 1)
   }
   /**
+   * Where a thread stands for `thread_list` and a bot's `thread_read`, its subagents counted as the sidebar rolls them up:
+   * a question in it or in a subagent below it (`awaiting_input`), then a run of it or of a subagent below it (`active`),
+   * else `idle`. `waitingOnSubagents`: only its subagents make it so (its own turn ended; they still work or ask).
+   */
+  const standingOf = (threadId: string, below: readonly string[]) => {
+    const activity = host.threadActivity?.(threadId) ?? { queuedCount: 0, pendingQuestions: [] }
+    const activeRunId = engine.getActiveRun(threadId)?.runId ?? null
+    const own = activity.pendingQuestions.length ? 'awaiting_input' : activeRunId ? 'active' : 'idle'
+    const result = (status: 'awaiting_input' | 'active' | 'idle', waitingOnSubagents = false) => ({ status, activity, activeRunId, waitingOnSubagents })
+    if (own === 'awaiting_input') return result(own)
+    if (below.some((id) => (host.threadActivity?.(id)?.pendingQuestions.length ?? 0) > 0)) return result('awaiting_input', true)
+    if (own === 'active') return result(own)
+    return below.some((id) => engine.getActiveRun(id)) ? result('active', true) : result('idle')
+  }
+  /**
    * `thread_read` for a personal bot: `summary` (default), one line on the thread and its last reply; or `messages`, the
    * transcript, the newest ones unless it pages from `afterIndex`, each message and the page capped. Never run events.
    * Framed as data from that thread. The registry has already decided it may reach the thread (`botThreadScope`).
@@ -657,15 +672,14 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     const all = host.threadMessages(threadId)
     const title = oneLine(meta.name)
     if (view === 'summary') {
-      const activity = host.threadActivity?.(threadId) ?? { queuedCount: 0, pendingQuestions: [] }
-      const activeRunId = engine.getActiveRun(threadId)?.runId ?? null
+      const { status, activeRunId, waitingOnSubagents } = standingOf(threadId, subagentDescendantsIn(host.listThreads?.() ?? [])(threadId))
       const lastReply = [...all].reverse().find((message) => message.role === 'assistant' && typeof message.content === 'string' && message.content.trim())
       return botData(`Thread «${title}»`, {
         threadId,
         link: threadLink(threadId),
         title,
         project: projectName(meta.projectId),
-        status: activity.pendingQuestions.length ? 'waiting for your owner' : activeRunId ? 'working' : 'idle',
+        status: waitingOnSubagents ? 'waiting on subagents' : status === 'awaiting_input' ? 'waiting for your owner' : status === 'active' ? 'working' : 'idle',
         ...(activeRunId ? { activeRunId } : {}),
         messages: all.length,
         updatedAt: meta.updatedAt,
@@ -810,7 +824,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         type: 'object',
         properties: {
           projectId: { type: 'string', description: 'Only this project.' },
-          status: { type: 'string', enum: ['active', 'idle', 'awaiting_input'], description: 'active: a run is going; awaiting_input: a question waits for an answer; idle: neither.' },
+          status: { type: 'string', enum: ['active', 'idle', 'awaiting_input'], description: 'active: a run of it or of a subagent below it is going; awaiting_input: a question in it or below it waits for an answer; idle: neither. A row whose own turn ended while its subagents still work or ask says waitingOnSubagents.' },
           includeUnstarted: { type: 'boolean', description: 'Include empty drafts (default false).' },
           includeSettled: { type: 'boolean', description: 'Include archived threads (default false).' },
           includeSubagents: { type: 'boolean', description: 'Include subagent threads (default false).' },
@@ -845,14 +859,13 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           return launched || args.includeSettled === true || !thread.settledAt
         }).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
         const projectNames = new Map(host.listProjects().map((project) => [project.id, project.name]))
+        const below = subagentDescendantsIn(all)
         const rows = []
         // A personal bot: a handle and one line each, the projects it may start threads in and, when this turn may start
         // one, the models a thread can run on. Framed as data from the owner's threads.
         if (bot) {
           for (const thread of candidates) {
-            const activeRunId = engine.getActiveRun(thread.id)?.runId ?? null
-            const activity = host.threadActivity?.(thread.id) ?? { queuedCount: 0, pendingQuestions: [] }
-            const status = activity.pendingQuestions.length ? 'awaiting_input' : activeRunId ? 'active' : 'idle'
+            const { status, waitingOnSubagents } = standingOf(thread.id, below(thread.id))
             if (args.status !== undefined && args.status !== status) continue
             rows.push({
               id: thread.id,
@@ -860,6 +873,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
               title: oneLine(thread.name),
               project: (thread.projectId && projectNames.get(thread.projectId)) || null,
               status,
+              ...(waitingOnSubagents ? { waitingOnSubagents: true } : {}),
               updatedAt: thread.updatedAt,
               ...(thread.createdByThreadId === ctx.caller.threadId ? { startedByYou: true } : {}),
               // Out of the owner's sidebar (`thread_hide`).
@@ -875,9 +889,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           })
         }
         for (const thread of candidates) {
-          const activeRunId = engine.getActiveRun(thread.id)?.runId ?? null
-          const activity = host.threadActivity?.(thread.id) ?? { queuedCount: 0, pendingQuestions: [] }
-          const status = activity.pendingQuestions.length ? 'awaiting_input' : activeRunId ? 'active' : 'idle'
+          const { status, activity, activeRunId, waitingOnSubagents } = standingOf(thread.id, below(thread.id))
           if (args.status !== undefined && args.status !== status) continue
           rows.push({
             id: thread.id,
@@ -890,6 +902,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
             settledAt: thread.settledAt ?? null,
             modelOverride: thread.modelOverride ?? null,
             status,
+            ...(waitingOnSubagents ? { waitingOnSubagents: true } : {}),
             activeRunId,
             queuedCount: activity.queuedCount,
             pendingQuestionCount: activity.pendingQuestions.length,

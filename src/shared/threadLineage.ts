@@ -97,6 +97,15 @@ function descendantsIn(childrenOf: ReadonlyMap<string, readonly string[]>, threa
   return found
 }
 
+/**
+ * `subagentDescendants` for many threads of one inventory: indexes `threads` once and returns the lookup, so a list
+ * asks for each of its rows without walking the whole inventory every time.
+ */
+export function subagentDescendantsIn(threads: readonly LineageThread[]): (threadId: string) => string[] {
+  const childrenOf = childrenByParent(threads)
+  return (threadId) => descendantsIn(childrenOf, threadId)
+}
+
 /** Ids of every subagent thread below `threadId` (children, their children, …), nearest first. */
 export function subagentDescendants(threadId: string, threads: readonly LineageThread[]): string[] {
   return descendantsIn(childrenByParent(threads), threadId)

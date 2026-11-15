@@ -187,11 +187,12 @@ export function presenceOf(bot: Pick<BotSummary, 'state' | 'work' | 'threads' | 
 /** How a thread the bot started looks in its list: the tint of its row (`working` blue, `waiting` amber, `done` green, `failed` red), and its label. */
 export type LaunchedTone = 'working' | 'waiting' | 'idle' | 'done' | 'failed'
 
-/** The tone and the words for where a thread the bot started stands: "working", "waiting on you", "done", "stopped". */
+/** The tone and the words for where a thread the bot started stands: "working", "waiting on subagents", "waiting on you", "done", "stopped". */
 export function launchedLook(status: BotLaunchedThread['status']): { tone: LaunchedTone; label: string } {
   if (status === 'needs_input') return { tone: 'waiting', label: 'waiting on you' }
   if (status === 'queued') return { tone: 'working', label: 'queued' }
   if (status === 'paused') return { tone: 'working', label: 'held' }
+  if (status === 'subagents') return { tone: 'working', label: 'waiting on subagents' }
   if (status === 'idle') return { tone: 'idle', label: 'idle' }
   if (status === 'done') return { tone: 'done', label: 'done' }
   if (status === 'failed') return { tone: 'failed', label: 'failed' }

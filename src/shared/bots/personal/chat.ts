@@ -200,24 +200,24 @@ export const BOT_LAUNCHED_ENDED_SHOWN = 30
 
 /**
  * A thread the bot started: its title, its project, and how it stands now: its run works, waits its turn, is held (a
- * usage limit), or waits on the owner (a question or approval in it); or no run works and it never ran (`idle`), or its
- * last run finished (`done`), failed (`failed`) or was stopped or cut off (`stopped`). `startedAt`: when its current run
+ * usage limit), or waits on the owner (a question or approval in it or in one of its subagents); or its own run ended but
+ * its subagents still work (`subagents`); or nothing works and it never ran (`idle`), or its last run finished (`done`), failed (`failed`) or was stopped or cut off (`stopped`). `startedAt`: when its current run
  * started (the thread's creation once none runs); `updatedAt`: when it last changed.
  */
 export interface BotLaunchedThread {
   threadId: string
   title: string
   project?: string
-  status: 'running' | 'queued' | 'paused' | 'needs_input' | 'idle' | 'done' | 'failed' | 'stopped'
+  status: 'running' | 'queued' | 'paused' | 'subagents' | 'needs_input' | 'idle' | 'done' | 'failed' | 'stopped'
   startedAt: string
   updatedAt: string
   /** Kept out of the owner's sidebar (`Thread.hidden`): this list is where the owner finds it, and shows it again. */
   hidden?: true
 }
 
-/** Whether a thread the bot started keeps it busy: a run of it works, waits its turn, is held, or waits on the owner. */
+/** Whether a thread the bot started keeps it busy: a run of it works, waits its turn, is held, waits on its subagents, or waits on the owner. */
 export function launchedActive(thread: Pick<BotLaunchedThread, 'status'>): boolean {
-  return thread.status === 'running' || thread.status === 'queued' || thread.status === 'paused' || thread.status === 'needs_input'
+  return thread.status === 'running' || thread.status === 'queued' || thread.status === 'paused' || thread.status === 'subagents' || thread.status === 'needs_input'
 }
 
 /** Where a thread the bot started goes in its list: what works, then what waits on the owner, then idle, then ended. */
