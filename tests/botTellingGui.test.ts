@@ -1,5 +1,5 @@
 import { beforeAll, expect, it, vi } from 'vitest'
-const h = vi.hoisted(() => ({ events: new Map<string, Function>(), shown: [] as any[], windows: [] as any[], supported: true, handlers: new Map<string, Function>() }))
+const h = vi.hoisted(() => ({ events: new Map<string, Function>(), shown: [] as any[], windows: [] as any[], supported: true, sound: false, system: true, played: vi.fn(), handlers: new Map<string, Function>() }))
 vi.mock('electron', () => ({
   ipcMain: { handle: (c: string, f: Function) => h.handlers.set(c, f), removeHandler() {}, on() {} },
   BrowserWindow: { getAllWindows: () => h.windows },
@@ -10,6 +10,7 @@ vi.mock('electron', () => ({
   },
   app: { getPath: () => '', getVersion: () => 'test', on() {} }, shell: {}, dialog: {}, clipboard: {}, nativeTheme: { on() {} }, session: {}, webContents: {}
 }))
+vi.mock('../src/main/notifications/completionSound', () => ({ playThreadCompletionSound: h.played }))
 import { registerGuiIpc, type GuiIpcServices } from '../src/main/ipc/registerGuiIpc'
 import { PresentationState } from '../src/main/mms/PresentationState'
 const inert = (base: object = {}): any => new Proxy(base, { get: (t, k) => k in t ? (t as any)[k] : () => undefined })
@@ -17,7 +18,7 @@ beforeAll(() => {
   const window = { isDestroyed: () => false, isFocused: () => false, webContents: { id: 1, send() {} } }
   h.windows.push(window)
   const guiMms = inert({ request: async () => ({}), on: (e: string, f: Function) => h.events.set(e, f), getWindowBindingForSender: () => ({ profileId: 'p' }), tellsForSender: () => h.supported })
-  registerGuiIpc({ guiMms, presentation: new PresentationState(), settings: inert({ get: () => ({ notifications: { events: { completed: { system: true, sound: false }, question: { system: true, sound: false } } } }) }), browserView: inert(), repoRoot: '' } as GuiIpcServices, () => window as any)
+  registerGuiIpc({ guiMms, presentation: new PresentationState(), settings: inert({ get: () => ({ notifications: { events: { completed: { system: h.system, sound: h.sound }, question: { system: h.system, sound: h.sound } } } }) }), browserView: inert(), repoRoot: '' } as GuiIpcServices, () => window as any)
 })
 it('shows and replaces the service banner, ignores the message path, and withdraws after a read in any window', () => {
   const event = h.events.get('window-event')!
@@ -41,4 +42,24 @@ it('uses the legacy message path when the service lacks telling support', () => 
   h.events.get('window-event')!({ senderId: 1, event: { type: 'bots.message', profileId: 'p', data: { botId: 'b', message: { id: 'legacy', author: 'bot', at: new Date().toISOString(), text: 'Legacy reply' } } } })
   expect(h.shown).toHaveLength(before + 1)
   expect(h.shown.at(-1).options.body).toBe('Legacy reply')
+})
+
+it('checks every focused window and applies sound caps and owner settings', async () => {
+  h.supported = true; h.sound = true
+  h.windows.push({ isDestroyed: () => false, isFocused: () => true, webContents: { id: 2, send() {} } })
+  await h.handlers.get('notifications:viewBot')!({ sender: { id: 2 } }, 'b')
+  const before = h.shown.length
+  const data = { id: 'focused', rows: [{ botId: 'b', messageId: 'focused', seq: 9, tell: 'now' }], title: 'Scout', body: 'Reply', kind: 'completed', sound: true }
+  const push = (sequence: number, patch = {}) => h.events.get('window-event')!({ senderId: 1, event: { type: 'bots.tell', profileId: 'p', sequence, data: { ...data, ...patch } } })
+  push(100)
+  expect(h.shown).toHaveLength(before)
+  expect(h.played).toHaveBeenCalledOnce()
+  push(101, { sound: false })
+  expect(h.played).toHaveBeenCalledOnce()
+  h.sound = false
+  push(102)
+  expect(h.played).toHaveBeenCalledOnce()
+  h.windows.pop(); h.system = false
+  push(103)
+  expect(h.shown).toHaveLength(before)
 })
