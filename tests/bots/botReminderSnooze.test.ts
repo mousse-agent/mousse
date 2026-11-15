@@ -47,7 +47,7 @@ async function said(work = false) {
 
 it.each(['10m', '1h', 'tomorrow'] as const)('snoozes %s once without a turn, then says it with buttons again', async choice => {
   const { r, message, bubble } = await said()
-  expect(bubble.reminder).toEqual({})
+  expect(bubble.reminder).toMatchObject({ expiresAt: expect.any(String) })
   const count = f.store.listActivations(botId).length
   const expected = new Date(f.clock.now)
   if (choice === 'tomorrow') { expected.setDate(expected.getDate() + 1); expected.setHours(9, 0, 0, 0) }
@@ -64,14 +64,14 @@ it.each(['10m', '1h', 'tomorrow'] as const)('snoozes %s once without a turn, the
   expect(f.store.listActivations(botId)).toHaveLength(count)
   f.clock.now = expected.getTime()
   await f.bots.deliverDueReminders()
-  expect(chatOf(f, botId).find(m => m.id === `bm_${rows[0]!.id}`)?.reminder).toEqual({})
+  expect(chatOf(f, botId).find(m => m.id === `bm_${rows[0]!.id}`)?.reminder).toMatchObject({ expiresAt: expect.any(String) })
 })
 
 it('refuses the cap and leaves the original available', async () => {
   const { bubble } = await said()
   for (let i = 0; i < 50; i++) f.store.insertReminder({ id: `r${i}`, botId, dueAt: new Date(f.clock.now + 60_000).toISOString(), text: 'Tea', work: null, replyTo: null, createdAt: f.store.now() })
   expect(() => f.bots.service.reminderSnooze(botId, bubble.id, '10m')).toThrow('Cancel one first')
-  expect(chatOf(f, botId).find(m => m.id === bubble.id)?.reminder).toEqual({})
+  expect(chatOf(f, botId).find(m => m.id === bubble.id)?.reminder).toMatchObject({ expiresAt: expect.any(String) })
 })
 
 it('Forget cancels a snoozed copy of the forgotten request', async () => {

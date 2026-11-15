@@ -337,6 +337,7 @@ export class BotChatProjection {
 
   toMessage(row: BotMessageRow): BotChatMessage {
     const reminder = row.id.startsWith('bm_rem_') ? this.store.reminderForMessage(row.botId, row.id) : undefined
+    const expiresAt = reminder?.deliveredAt ? new Date(Date.parse(reminder.deliveredAt) + 24 * 60 * 60_000).toISOString() : undefined
     const snoozed = reminder && this.store.snoozedCopy(row.botId, reminder.id)
     const tomorrow = new Date(this.store.now())
     tomorrow.setDate(tomorrow.getDate() + 1)
@@ -350,7 +351,7 @@ export class BotChatProjection {
     const cards = row.author === 'bot' ? chatCards(row.cards) : []
     const plain = [plainCards(cards), asks && asks.spec.choices.length ? plainChoices(asks.spec) : ''].filter(Boolean).join('\n\n')
     return {
-      ...(reminder && !reminder.work && !reminder.wake && !this.store.messageForgotten(row.botId, row.id) ? { reminder: { ...(snoozed ? { snoozedUntil: snoozed.dueAt, snoozedLabel } : {}) } } : {}),
+      ...(reminder && expiresAt && expiresAt > this.store.now() && !reminder.work && !reminder.wake && !this.store.messageForgotten(row.botId, row.id) ? { reminder: { expiresAt, ...(snoozed ? { snoozedUntil: snoozed.dueAt, snoozedLabel } : {}) } } : {}),
       seq: row.seq,
       id: row.id,
       at: row.at,

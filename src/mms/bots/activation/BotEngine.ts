@@ -7494,6 +7494,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const reminder = this.store.reminderForMessage(botId, messageId)
       if (!this.store.message(messageId) || !reminder || reminder.work || reminder.wake || reminder.status !== 'delivered' || this.store.messageForgotten(botId, messageId))
         throw new BotEngineError('reminder_not_found', 'This message has no reminder to snooze.')
+      if (!reminder.deliveredAt || Date.parse(reminder.deliveredAt) + 24 * 60 * 60_000 <= this.now())
+        throw new BotEngineError('reminder_expired', 'This reminder is too old to snooze.')
       if (this.store.snoozedCopy(botId, reminder.id)) throw new BotEngineError('reminder_snoozed', 'This reminder is already snoozed.')
       if (this.store.waitingReminders(botId).length >= MAX_WAITING_REMINDERS)
         throw new BotEngineError('reminder_limit', 'You already have 50 reminders waiting. Cancel one first.')
