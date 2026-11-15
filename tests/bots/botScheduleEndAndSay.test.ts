@@ -175,9 +175,8 @@ it('a newly added fixed line always records ownerAsked', () => {
 it.each([false, true])('a fixed line missing ownerAsked is repaired and said (restore: %s)', async restore => {
   const { MousseConfigStore, jobToDefinition } = await import('../../src/mms/config/MousseConfigStore')
   const { ScheduledJobStore } = await import('../../src/mms/scheduled/ScheduledJobStore')
-  const { join } = await import('node:path')
   const entry = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, say: 'Hello' }, 'owner')
-  const config = MousseConfigStore.load(join(f.base, 'mousse-home'))
+  const config = (f.scheduler as unknown as { store: { config: InstanceType<typeof MousseConfigStore> } }).store.config
   config.updateScheduledSection({ jobs: f.scheduler.listJobs().map(row => {
     const definition = jobToDefinition(row)
     if (row.id === entry.jobId) delete definition.bot!.ownerAsked
@@ -194,9 +193,9 @@ it.each([false, true])('a fixed line missing ownerAsked is repaired and said (re
 
 it('an explicitly non-owner fixed line is kept paused with an actionable reason', async () => {
   const { MousseConfigStore, jobToDefinition } = await import('../../src/mms/config/MousseConfigStore')
-  const { join } = await import('node:path')
   const entry = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, say: 'Hello' }, 'owner')
-  MousseConfigStore.load(join(f.base, 'mousse-home')).updateScheduledSection({ jobs: f.scheduler.listJobs().map(row => {
+  const config = (f.scheduler as unknown as { store: { config: InstanceType<typeof MousseConfigStore> } }).store.config
+  config.updateScheduledSection({ jobs: f.scheduler.listJobs().map(row => {
     const definition = jobToDefinition(row)
     if (row.id === entry.jobId) definition.bot!.ownerAsked = false
     return definition
