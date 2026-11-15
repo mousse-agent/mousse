@@ -316,7 +316,7 @@ describe('bots.db v8 → v9', () => {
     v8.statement("INSERT INTO bot_reminders(id, bot_id, due_at, text, created_at, status) VALUES('rem_1', 'site-editor', ?, 'Call mum.', ?, 'waiting')").run(T, T)
     v8.close()
     store = new BotStore({ profileHome: profile })
-    expect(store.db.userVersion()).toBe(9)
+    expect(store.db.userVersion()).toBe(BOTS_MIGRATIONS.at(-1)!.version)
     expect(store.reminder('rem_1')).toMatchObject({ text: 'Call mum.', status: 'waiting', wake: false, event: null, fired: null, chain: 0 })
     store.insertReminder({ id: 'rem_2', botId: 'site-editor', dueAt: T, text: 'Tell them it shipped.', work: null, replyTo: null, createdAt: T, wake: true, event: { kind: 'pr', repo: 'acme/app', number: 12 }, chain: 2 })
     expect(store.reminder('rem_2')).toMatchObject({ wake: true, event: { kind: 'pr', repo: 'acme/app', number: 12 }, fired: null, chain: 2 })
