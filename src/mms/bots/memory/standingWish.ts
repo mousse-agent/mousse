@@ -19,6 +19,9 @@ import type { BotMemoryStore } from './BotMemoryStore'
 
 const MAX_WISH_CHARS = 240
 
+/** Cumulative fallback refusals; chat packs acknowledge only the count they carried. */
+export const WISH_OVER_CAP_KEY = 'wish_over_cap'
+
 const LASTING = /\b(from now on|going forward|in (the )?future|from today on|every time|whenever)\b|^(please\s+)?(always|never)\b|\byou\s+(should\s+|must\s+)?(always|never)\b/
 const DIRECTIVE = /^(please\s+)?(don'?t|do not|stop|quit|no more|never|always)\b/
 const ADDRESSED = /\b(you|your)\b/
@@ -94,6 +97,9 @@ export function saveMissedWishes(store: BotMemoryStore, botId: string, activatio
       if (nearDuplicate(text, current)) continue
       const result = store.save(botId, { lane: 'chat', kind: 'owner', text, activationId })
       if (!('error' in result)) kept.push(text)
+      else if (result.error === 'over_cap') store.write(() => {
+        store.setState(botId, WISH_OVER_CAP_KEY, (store.getState<number>(botId, WISH_OVER_CAP_KEY) ?? 0) + 1)
+      })
     }
   }
   // Past every row so far, the saves above too: the next check starts with the next message.

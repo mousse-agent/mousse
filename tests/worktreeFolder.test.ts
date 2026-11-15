@@ -227,9 +227,10 @@ test("another repository at a worktree's recorded path is never used as the thre
   const resolver = new WorkspaceResolver(manager.threadDirectory, 'thread-one', f.repo, 'worktree')
   await expect(resolver.resolve('agent')).rejects.toThrow(DriveNotConnectedError)
   expect(decideGitCommand({ cwd: made.worktreePath, args: ['checkout', '--', 'personal.txt'] }).allowed).toBe(false)
-  // The same, with the chosen folder's own marker copied there: the folder is still not this repository's worktree.
+  // The same, with the chosen folder's own marker copied there: the folder is still not this repository's worktree, so
+  // the thread's turns run in the project folder.
   writeFileSync(join(f.folder, WORKTREE_FOLDER_MARKER), readFileSync(join(`${f.folder}-unplugged`, WORKTREE_FOLDER_MARKER)))
-  await expect(resolver.resolve('agent')).rejects.toThrow(/recovery/i)
+  expect((await resolver.resolve('agent')).workspacePath).toBe(f.repo)
   expect(decideGitCommand({ cwd: made.worktreePath, args: ['checkout', '--', 'personal.txt'] }).allowed).toBe(false)
   expect(readFileSync(join(made.worktreePath, 'personal.txt'), 'utf8')).toBe('personal bytes')
   expect(git(made.worktreePath, ['branch', '--show-current'])).toBe('personal')

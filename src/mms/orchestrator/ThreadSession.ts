@@ -125,6 +125,8 @@ export class ThreadSession {
   /** Project cwd for this thread (resolved path; never process.chdir). */
   projectCwd: string | null = null
   workspace: WorkspaceExecutionContext | null = null
+  /** The `workspace.workspaceNote` the agent was last told, so the next turns in the project folder do not repeat it. */
+  workspaceNoteGiven: string | null = null
   /**
    * A delegated child with `workspace: 'shared'` (read-only roles) runs in its parent's workspace
    * path under read-only tool access instead of provisioning its own (SPEC §14.2).

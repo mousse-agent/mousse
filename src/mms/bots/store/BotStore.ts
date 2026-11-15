@@ -1014,6 +1014,24 @@ export class BotStore {
     this.run('INSERT INTO bot_registry(bot_id, created_at) VALUES(?, ?) ON CONFLICT(bot_id) DO NOTHING', botId, this.now())
   }
 
+  /** Creation metadata shares the durable cursor namespace, so clearing memory cannot erase a request's identity. */
+  recordCreation(botId: string, key: string, input: string): void {
+    this.run('INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?)', botId, `cursor:${key}`, JSON.stringify(input))
+  }
+
+  botCreation(key: string): { botId: string; input: string } | undefined {
+    const row = this.get('SELECT bot_id, value FROM bot_memory_state WHERE key = ?', `cursor:${key}`)
+    return row ? { botId: row.bot_id as string, input: JSON.parse(row.value as string) as string } : undefined
+  }
+
+  unfinishedCreations(): Array<{ botId: string; key: string }> {
+    return this.all(`SELECT s.bot_id, s.key FROM bot_memory_state s
+      JOIN bot_registry b ON b.bot_id = s.bot_id AND b.deleted_at IS NULL
+      WHERE substr(s.key, 1, 14) = 'cursor:create:'
+      AND NOT EXISTS (SELECT 1 FROM bot_activations a WHERE a.idempotency_key = substr(s.key, 8))`)
+      .map((row) => ({ botId: row.bot_id as string, key: (row.key as string).slice(7) }))
+  }
+
   setPublished(botId: string, revision: string): void {
     this.run('UPDATE bot_registry SET revision = ? WHERE bot_id = ? AND deleted_at IS NULL', revision, botId)
   }

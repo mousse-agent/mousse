@@ -6288,6 +6288,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         console.warn('bot supervisor records could not be read', { error: error instanceof Error ? error.message : String(error) })
       }
       await this.reconcileAll()
+      // The bot and request key committed together, but its first turn may still be missing.
+      for (const created of this.store.unfinishedCreations()) {
+        try {
+          await this.finishCreation(created.key)
+        } catch (error) {
+          console.warn('bot creation could not be finished at startup', { botId: created.botId, error: error instanceof Error ? error.message : String(error) })
+        }
+      }
     } finally {
       this.startupPassed = true
     }
@@ -6738,18 +6746,29 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * A new bot (§5.3.1): its revision is published and its starter grant approved in one go
    * (pressing Create bot is that approval), its home thread and files folder are made.
    */
-  createBot(definition: BotDefinition): void {
+  createBot(definition: BotDefinition, firstTurn?: { key: string; input: string }): void {
     if (this.store.registry(definition.id)) throw new BotEngineError('bot_exists', 'A bot with that id exists already.')
     const revision = this.definitionCall(() => this.host.definitions.publishRevision(definition))
     this.host.definitions.save(revision)
     this.store.db.transaction(() => {
       this.store.ensureRegistry(definition.id)
+      if (firstTurn) this.store.recordCreation(definition.id, firstTurn.key, firstTurn.input)
       this.store.setPublished(definition.id, revision.revision!)
       this.store.approve(definition.id, botManifestDigest(revision.permissions), revision.permissions)
     })
     this.ensureHome(definition.id, definition.name)
     mkdirSync(this.filesFolder(definition.id), { recursive: true, mode: 0o700 })
     this.changed({ botId: definition.id })
+  }
+
+  /** Finishes an accepted create, including a crash before its home or first turn was written. */
+  async finishCreation(key: string): Promise<void> {
+    const created = this.store.botCreation(key)
+    if (!created) return
+    const definition = this.definitionOf(created.botId)
+    this.ensureHome(created.botId, definition.name)
+    mkdirSync(this.filesFolder(created.botId), { recursive: true, mode: 0o700 })
+    await this.enqueueChat(created.botId, key, created.input)
   }
 
   /**
@@ -7460,7 +7479,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   async addWake(botId: string, from: string, input: { brief: string; dueAt?: string; event?: BotWakeEvent; hours?: number }): Promise<{ wakeId: string; dueAt: string; label: string }> {
     this.entry(botId)
-    const brief = input.brief.trim().slice(0, MAX_WAKE_BRIEF_CHARS)
+    const brief = input.brief.trim()
+    if (brief.length > MAX_WAKE_BRIEF_CHARS) throw new BotEngineError('invalid_params', `Keep the brief to ${MAX_WAKE_BRIEF_CHARS.toLocaleString('en-US')} characters: say what to do more briefly, then try again.`)
     if (!brief) throw new BotEngineError('invalid_params', 'A wake-up needs a brief: what you will do then.')
     const chain = this.wakeAllowance(botId, from)
     let dueAt: string
@@ -7518,7 +7538,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const command = input.command.trim()
     if (!command) throw new BotEngineError('invalid_params', 'watch_start needs a command.')
     if (command.length > MAX_WATCHER_COMMAND_CHARS) throw new BotEngineError('invalid_params', `Keep the command to ${MAX_WATCHER_COMMAND_CHARS} characters.`)
-    const brief = input.brief.trim().slice(0, MAX_WAKE_BRIEF_CHARS)
+    const brief = input.brief.trim()
+    if (brief.length > MAX_WAKE_BRIEF_CHARS) throw new BotEngineError('invalid_params', `Keep the brief to ${MAX_WAKE_BRIEF_CHARS.toLocaleString('en-US')} characters: say what to do more briefly, then try again.`)
     if (!brief) throw new BotEngineError('invalid_params', 'watch_start needs a brief: what you will do when it ends.')
     const match = input.match?.trim() || undefined
     const problem = match ? watcherMatchProblem(match) : undefined

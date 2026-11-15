@@ -97,19 +97,19 @@ describe('the launching thread\'s note', () => {
     act(() => root.render(createElement(MessageList, { messages: mousseToUIMessages(messages), status: chatStatusFromPhase('idle') })))
   const chip = () => host.querySelector<HTMLAnchorElement>('a.thread-chip')
 
-  it('shows the new thread as a chip with its title and live status, beside what was chosen for it', () => {
+  it('shows the new thread as a link with its title and live status, beside what was chosen for it', () => {
     useAppStore.setState({ threads: [thread('launcher', 'Plan the release'), thread('launched', 'Audit the logs')], activeThreadId: 'launcher', threadActivity: { launched: 'processing' } })
     show([prompt, note, reply])
     const row = chip()!.closest('[role="note"]')!
-    expect(row.textContent).toBe('Started Audit the logsWorking · claude / sonnet, ask mode, the project folder')
+    expect(row.textContent).toBe('Started Audit the logs · claude / sonnet, ask mode, the project folder')
     expect(chip()!.getAttribute('aria-label')).toBe('Open thread Audit the logs, Working')
     act(() => useAppStore.setState({ threadActivity: { launched: 'awaiting_input' } }))
-    expect(chip()!.textContent).toBe('Audit the logsNeeds you')
+    expect(chip()!.getAttribute('title')).toBe('Needs you · Open Audit the logs')
     act(() => useAppStore.setState({ threadActivity: { launched: 'completed' } }))
-    expect(chip()!.textContent).toBe('Audit the logsDone')
+    expect(chip()!.getAttribute('title')).toBe('Done · Open Audit the logs')
     // A rename shows at once too.
     act(() => useAppStore.setState({ threads: [thread('launcher', 'Plan the release'), thread('launched', 'Audit the server logs')] }))
-    expect(chip()!.textContent).toBe('Audit the server logsDone')
+    expect(chip()!.textContent).toBe('Audit the server logs')
   })
 
   it('a click switches the main view to the new thread, and Back returns to the thread with the chip', async () => {
