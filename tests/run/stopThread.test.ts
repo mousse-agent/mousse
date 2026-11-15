@@ -1031,6 +1031,9 @@ describe('OrchestratorService.stopThread through a real orchestrator (issue #142
     it('the follow-up is a queued run from the start: it holds the task by itself, with no session in memory, and survives a restart', async () => {
       const { s, followUp } = await heldBySteer()
       expect(followUp.status).toBe('queued')
+      // It is the person's text, so its turn takes a free slot ahead of background turns.
+      expect(followUp.outcome?.sentByPerson).toBe(true)
+      expect(followUp.outcome?.sentByAgent).toBeUndefined()
       expect(s.d.store.loadMessageQueue(s.childThreadId).map((item) => item.runId)).toEqual([followUp.runId])
       expect(s.task(s.delegation.delegationId).status).toBe('running')
       ;(s.d.orch as any).sessions.delete(s.childThreadId)

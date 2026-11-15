@@ -81,6 +81,12 @@ export interface RunOutcome {
    */
   sentByAgent?: true
   agentHops?: number
+  /**
+   * A person's steer that missed its turn and runs as a `steer-followup` turn of its own. The source is shared
+   * with agents' leftover steers and carried subagent results, so this marks the person's: its `turn.start`
+   * takes a free turn slot ahead of background turns, as a message from the window does.
+   */
+  sentByPerson?: true
   /** SPEC §16.4: the interrupted run this send continues ("Continue" after a restart). */
   continuationOf?: string
   /** Set while the run is `paused`, and kept after the pause ended. */

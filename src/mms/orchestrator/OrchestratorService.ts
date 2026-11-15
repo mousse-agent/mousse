@@ -72,7 +72,7 @@ import { EventEmitter } from 'events'
 import { nativeAgentAssistantMessage, nativeAgentHistory } from '../providers/nativeAgentHistory'
 import { v4 as uuidv4 } from 'uuid'
 import { TitleTakenRejection, type CommandResult, type RunEngine, type SendDelegation, type StopResult } from '../run/RunEngine'
-import { isFencedSource, isPauseHeldSource, isResumeSource } from '../run/delegation/sources'
+import { isFencedSource, isPauseHeldSource, isPriorityTurnRun, isResumeSource } from '../run/delegation/sources'
 import { deleteRunResults } from '../run/delegation/hold'
 import { decideUsageLimit, usageLimitOf, type UsageLimitDecision } from '../run/pausePolicy'
 import { boundedResetIso, estimatedReset } from './providerErrors'
@@ -838,6 +838,14 @@ interface TurnStartRequest {
 /** Payload of a `turn.start` effect (SPEC §12.2). */
 export interface TurnStartPayload extends TurnStartRequest {
   runId: string
+}
+
+/**
+ * A `steer-followup` queue item a person sent: no agent or other origin, and no subagent results carried
+ * (those are deliveries, not a person's text).
+ */
+function isPersonFollowUp(item: QueuedMessage): boolean {
+  return item.source === 'steer-followup' && !item.origin && !item.inboxIds?.length
 }
 
 /** `turn.start` payload of an `integration` run (SPEC §14.4): merges one delegated result. */
@@ -4878,12 +4886,17 @@ export class OrchestratorService extends EventEmitter {
     setImmediate(() => {
       const entry = this.turnResults.get(runId)
       const slots = this.effectWorker?.turnSlots()
-      if (!entry || entry.started || entry.abandoned || !slots || slots.running < slots.limit) return
-      if (this.runEngine?.getRun(runId)?.status !== 'queued' || this.isStopping(threadId)) return
+      if (!entry || entry.started || entry.abandoned || !slots) return
+      const run = this.runEngine?.getRun(runId)
+      if (run?.status !== 'queued' || this.isStopping(threadId)) return
+      // A person's turn waits only while every slot runs a turn; a background one already while the slots it may use
+      // (all but those kept for people) do.
+      const person = isPriorityTurnRun(run)
+      if (person ? slots.running < slots.limit : slots.sharedRunning < slots.limit - slots.keptForPeople) return
       // Another turn of the thread is live (a queue drain raced it): its state is the thread's.
       if (this.loadedSession(threadId)?.activeTurn) return
       this.slotWaits.set(threadId, runId)
-      this.setTurnPhase(threadId, 'queued', { turnId: null, step: { kind: 'waiting_slot', running: slots.running } })
+      this.setTurnPhase(threadId, 'queued', { turnId: null, step: { kind: 'waiting_slot', running: slots.running, limit: slots.limit, ...(person ? {} : { keptForPeople: slots.keptForPeople }) } })
     })
   }
 
@@ -7643,7 +7656,9 @@ export class OrchestratorService extends EventEmitter {
         source: item.source ?? 'queue',
         // A message an agent queued is still its run: it counts toward the chain of agent messages and is held
         // behind a pause, wherever it was written (the send, or an edit that made it the agent's).
-        ...(item.origin?.kind === 'agent' ? { agentOrigin: { hops: item.origin.hops ?? 1 } } : {})
+        ...(item.origin?.kind === 'agent' ? { agentOrigin: { hops: item.origin.hops ?? 1 } } : {}),
+        // A person's unread steer queued again from its entry (`settleUnreadItems`); one carrying subagent results is not.
+        ...(isPersonFollowUp(item) ? { sentByPerson: true as const } : {})
       })
       return result.status === 'accepted' ? result.runId : undefined
     } catch (error) {
@@ -10391,7 +10406,7 @@ export class OrchestratorService extends EventEmitter {
           // The follow-up is a queued run from the start, so the thread stays held without memory (a restart included).
           let runId: string | undefined
           try {
-            runId = this.runEngine?.store.createRun({ threadId: session.threadId, source: 'steer-followup' }).runId
+            runId = this.runEngine?.store.createRun({ threadId: session.threadId, source: 'steer-followup', outcome: { sentByPerson: true } }).runId
           } catch {
             // Without a run the person's text is still queued; the thread is just not held for it.
           }
@@ -10436,7 +10451,7 @@ export class OrchestratorService extends EventEmitter {
             flush()
             let limitedRunId: string | undefined
             try {
-              limitedRunId = this.runEngine?.store.createRun({ threadId: session.threadId, source: 'steer-followup' }).runId
+              limitedRunId = this.runEngine?.store.createRun({ threadId: session.threadId, source: 'steer-followup', outcome: { sentByPerson: true } }).runId
             } catch {
               // Without a run the text is still queued; the thread is just not held for it.
             }

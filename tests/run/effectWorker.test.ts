@@ -225,11 +225,11 @@ describe('EffectWorker', () => {
     expect(outbox.get(next.effectId)!.status).toBe('pending')
   })
 
-  it('runs a stop while every turn fibre holds a live turn, and caps concurrent turns', async () => {
+  it('runs a stop while every turn fibre holds a live turn, and caps concurrent turns, two of them kept for people', async () => {
     const gate = deferred()
     const started: string[] = []
     const interrupted: string[] = []
-    const { outbox, worker } = setup({
+    const { store, outbox, worker } = setup({
       'turn.start': async (effect) => {
         started.push(effect.threadId)
         await gate.promise
@@ -240,16 +240,29 @@ describe('EffectWorker', () => {
     })
     expect(worker.fibreCounts).toEqual({ turn: 8, control: 2, replaySafe: 2 })
     worker.start()
-    for (let i = 1; i <= 9; i++) outbox.enqueue({ threadId: `t${i}`, kind: 'turn.start' })
+    const send = (threadId: string, source: string) =>
+      outbox.enqueue({ threadId, runId: store.createRun({ threadId, source }).runId, kind: 'turn.start' })
+    // Nine delegated subagents and wakes: background turns fill only six slots.
+    for (let i = 1; i <= 9; i++) send(`bg${i}`, i % 2 ? 'delegation' : 'wake')
+    await waitFor(() => started.length === 6, 'six background turns')
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(started).toHaveLength(6)
+    // A message from the window and one from a phone start at once, ahead of the three waiting.
+    send('person-gui', 'gui')
+    send('person-phone', 'remote')
     await waitFor(() => started.length === 8, 'eight live turns')
-    const stop = outbox.enqueue({ threadId: 't1', kind: 'turn.interrupt' })
+    expect(started.slice(6).sort()).toEqual(['person-gui', 'person-phone'])
+    const stop = outbox.enqueue({ threadId: 'bg1', kind: 'turn.interrupt' })
     await waitFor(() => outbox.get(stop.effectId)!.status === 'succeeded', 'the interrupt', 1000)
-    expect(interrupted).toEqual(['t1'])
-    // The ninth turn waits for a turn fibre; control fibres never take it.
+    expect(interrupted).toEqual(['bg1'])
+    // A ninth turn, even a person's, waits for a turn fibre; control fibres never take it.
+    send('person-cli', 'cli')
     await new Promise((resolve) => setTimeout(resolve, 30))
     expect(started).toHaveLength(8)
     gate.resolve()
-    await waitFor(() => started.length === 9, 'the ninth turn')
+    await waitFor(() => started.length === 12, 'the waiting turns')
+    // When slots free, the person's turn goes before the background turns that were waiting longer.
+    expect(started[8]).toBe('person-cli')
   })
 
   it('aborts in-flight executions with WorkerStoppedError on stop()', async () => {

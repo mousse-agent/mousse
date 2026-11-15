@@ -1668,10 +1668,11 @@ export type TurnStep =
    */
   | { kind: 'retrying'; attempt: number; maxAttempts?: number; delayMs?: number; noResponse?: true }
   /**
-   * The turn has not started: the profile already runs `running` turns, as many as it runs at once, and this one starts
-   * when one of them ends. Only with phase `queued`.
+   * The turn has not started: the profile runs `running` turns of the `limit` it runs at once, and this one starts when
+   * one of them ends. `keptForPeople`: set on a background turn (a subagent, a wake, a resume), which waits while every
+   * slot but those kept for people's turns is taken. Only with phase `queued`. `limit` is absent from an older daemon.
    */
-  | { kind: 'waiting_slot'; running: number }
+  | { kind: 'waiting_slot'; running: number; limit?: number; keptForPeople?: number }
 
 export function isTurnActivePhase(phase: TurnPhase): boolean {
   return phase === 'queued' || phase === 'thinking' || phase === 'streaming' || phase === 'tool_running' || phase === 'finalizing'
