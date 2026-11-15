@@ -170,6 +170,24 @@ function ownerService(probe: Probe, result: Record<string, unknown> = { subtype:
 }
 
 describe('a bot on the owner\'s own Claude Code entry', () => {
+  it.each(['owner', 'locked'] as const)('%s entry starts a bot without unrelated environment secrets', async (entry) => {
+    const secrets = ['GITHUB_TOKEN', 'OPENAI_API_KEY', 'AWS_SECRET_ACCESS_KEY', 'MY_SECRET']
+    for (const name of secrets) vi.stubEnv(name, `planted-${name}`)
+    vi.stubEnv('ANTHROPIC_AUTH_TOKEN', 'signin-token')
+    const root = temp('claude-clean-root-')
+    const scratch = temp('claude-clean-scratch-')
+    const { service, captured } = entry === 'owner' ? ownerService(async () => {}) : lockedService(async () => {})
+    const locked: ClaudeLockedTurn = { authority: authorityFor(['read'], { root, scratch }), ...(entry === 'owner' ? { ownerEntry: true as const } : {}), cwd: root, shellContained: false, temps: [], systemPrompt: '', ledger: fakeLedger().ledger }
+    await service.chat({ threadId: 'bot-thread', cwd: root, model: 'sonnet', prompt: 'go', locked, onText: vi.fn() })
+    const env = captured.find((options) => options.hooks)!.env!
+    for (const name of secrets) expect(env, name).not.toHaveProperty(name)
+    expect(env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB).toBe('1')
+    if (entry === 'owner') {
+      expect(env.ANTHROPIC_AUTH_TOKEN).toBe('signin-token')
+      expect(env.CLAUDE_CONFIG_DIR).toBe(process.env.CLAUDE_CONFIG_DIR)
+    }
+  })
+
   it('runs one query in Claude Code\'s asking mode with the owner\'s environment, none of their settings files, and no process of its own to supervise', async () => {
     const root = temp('claude-owner-root-')
     const scratch = temp('claude-owner-scratch-')
