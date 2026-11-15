@@ -1208,6 +1208,10 @@ function defaultRedactMessage(tx: BotStoreTx, botId: string, messageId: string, 
     if (reactions) tx.statement('UPDATE bot_messages SET owner_reaction = NULL, owner_reaction_at = NULL WHERE id = ? AND bot_id = ?').run(id, botId)
   }
   clearReaction(messageId)
+  // A held draft can quote even a one-word owner message. Drop the whole draft by its turn,
+  // before removing other copies, rather than guessing from the length of the quoted text.
+  if (has('bot_memory_state')) tx.statement(`DELETE FROM bot_memory_state WHERE bot_id = ? AND key IN
+    (SELECT 'draft:' || activation_id FROM bot_messages WHERE bot_id = ? AND id = ? AND author = 'owner')`).run(botId, botId, messageId)
   // What the forgotten message asked for keeps no copy of its words (docs/plans/bot-always-free.md): a reminder it set
   // is cancelled and its text removed, and work it started keeps neither its brief nor the notes passed to it.
   const redactJournal = (sourceKey: string) => {

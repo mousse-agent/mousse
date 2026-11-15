@@ -140,3 +140,17 @@ it.each(['completed', 'interrupted'] as const)('a removed executing schedule rep
   expect(rows.some(message => message.ask)).toBe(false)
   expect(f.store.dispatches(row.id)).toHaveLength(1)
 })
+
+it('a removed schedule at its request cap posts its last words without a card', async () => {
+  const schedule = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Check price' }, 'owner')
+  await f.tickSchedules(new Date(T0 + 5 * 60_000))
+  const row = f.store.listActivations(botId).find(a => a.trigger.kind === 'schedule')!
+  const run = await start(f, row.id)
+  f.bots.removeSchedule(botId, schedule.scheduleId)
+  f.store.setLimits(row.id, { ...f.store.counters(row.id).limits, maxTurns: f.store.counters(row.id).requests })
+  await finish(f, run.payload, 'failed', { text: 'Checked the price.', outcome: { error: '[provider_turn_cap] Claude Code reached the most steps one turn may take.' } })
+  expect(f.store.activation(row.id)?.status).toBe('done')
+  const reports = chatOf(f, botId).filter(m => m.activationId === row.id)
+  expect(reports.some(m => m.kind === 'run_report' && m.text.includes('Checked the price.'))).toBe(true)
+  expect(reports.some(m => m.ask)).toBe(false)
+})

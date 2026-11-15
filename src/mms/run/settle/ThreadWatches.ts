@@ -121,6 +121,14 @@ export class ThreadWatches {
     return rows.map(toWatch)
   }
 
+  /** Active watches on threads of other computers (followed there by `RemoteSettleFollower`), oldest first. */
+  listActiveRemote(): ThreadWatchRecord[] {
+    return this.store.db
+      .statement(`SELECT * FROM thread_watches WHERE state = 'active' AND target_node IS NOT NULL ORDER BY created_at, rowid`)
+      .all()
+      .map(toWatch)
+  }
+
   /** Watches with a notice decided but not yet in the sender's queue (a restart in between). */
   listDue(): ThreadWatchRecord[] {
     return this.store.db
