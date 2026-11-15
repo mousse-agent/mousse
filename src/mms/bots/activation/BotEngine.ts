@@ -6550,6 +6550,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         const row = this.store.activation(id as string)
         const main = row ? this.store.lastMainDispatch(row.id) : undefined
         if (!row || !main?.endedAt || this.store.message(`bm_${row.id}_d${main.n}`)) continue
+        // Its end path already owns the bounded wait for the executor's final words.
+        if (this.pendingReplies.has(`${row.id}:${main.n}`)) continue
         if (!ENDED_ACTIVATION_STATUSES.has(row.status) && this.chatDraft(row)) continue
         this.postReply(row, main, row.result ?? '', false)
       } catch (error) {
