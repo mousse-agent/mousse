@@ -1617,6 +1617,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * nothing (it is stuck until the owner tries again).
    */
   private nextRun(tried: ReadonlySet<string>): { resume: BotActivationRow } | { start: BotActivationRow } | undefined {
+    this.dropRemovedScheduleRuns()
     if (this.profileRunsHeld() >= MAX_RUN_SLOTS_PER_PROFILE) return undefined
     const stuck = new Map<string, boolean>()
     const may = (row: BotActivationRow): boolean => {
@@ -4826,6 +4827,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private async continueWith(activationId: string, from: readonly BotActivationRow['status'][], input: { answers?: BotEscalationRow[]; restart?: boolean; acknowledgeUncertain?: boolean; reload?: boolean; usageRetry?: boolean; ownerText?: string; network?: boolean; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean; switchCut?: true; questionAnswered?: boolean }): Promise<'sent' | 'paused' | 'wall' | 'none'> {
     const row = this.store.activation(activationId)
     if (!row || !from.includes(row.status)) return 'none'
+    if (this.cancelRemovedScheduleRun(row)) return 'none'
     const definition = this.host.definitions.revision(row.botId, row.revision)
     const grant = this.store.activeGrant(row.botId)
     const previous = this.store.lastMainDispatch(row.id)
@@ -6281,6 +6283,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * is repaired by the next one. A failure pauses the activation with `reconcile_failed`.
    */
   async reconcileOnStartup(): Promise<void> {
+    this.dropRemovedScheduleRuns()
     try {
       // Capture first (bot-context.md §4): every bot thread is copied into the journal past its
       // cursor before any activation is admitted or the scheduler starts.
@@ -8144,6 +8147,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /** One of a bot's schedules changed in the shared store (an edit on the Automations page): its chat and About read it again. */
   schedulesEdited(botId: string): void {
+    this.dropRemovedScheduleRuns(botId)
     this.changed({ botId })
   }
 
@@ -8193,9 +8197,29 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return when.expr
   }
 
+  /** No new dispatch may start for a schedule removed from the shared store. Running turns may finish. */
+  private cancelRemovedScheduleRun(row: BotActivationRow): boolean {
+    if (!this.host.schedules || row.trigger.kind !== 'schedule' || this.host.schedules.get(row.botId, row.trigger.scheduleId)) return false
+    if (ENDED_ACTIVATION_STATUSES.has(row.status)) return false
+    this.store.db.transaction(() => {
+      this.store.moveActivation(row.id, [row.status], 'cancelled', { endReason: 'schedule_removed' })
+      this.store.closeEscalations(row.id, 'cancelled')
+    })
+    this.usageWaits.delete(row.id)
+    this.packs.delete(row.id)
+    return true
+  }
+
+  private dropRemovedScheduleRuns(botId?: string): void {
+    // These hold no executing turn: cancel their queued work and withdraw their asks atomically in bots.db.
+    const rows = this.store.activationsWith(['queued', 'waiting_grant', 'paused', 'blocked'])
+    for (const row of rows) if (botId === undefined || row.botId === botId) this.cancelRemovedScheduleRun(row)
+  }
+
   removeSchedule(botId: string, scheduleId: string): boolean {
     this.entry(botId)
     const removed = this.host.schedules?.remove(botId, scheduleId) ?? false
+    this.dropRemovedScheduleRuns(botId)
     if (removed) this.changed({ botId })
     return removed
   }
