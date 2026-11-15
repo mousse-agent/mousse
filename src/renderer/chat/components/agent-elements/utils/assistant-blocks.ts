@@ -466,16 +466,14 @@ export type FoldRow = {
    * holding a failure the agent did not get past.
    */
   keep?: boolean;
-  /** Cards of which one still works. */
-  running?: boolean;
 };
 
 /**
- * Which segments of a finished turn fold behind its "Worked for" line: the work (thoughts, tool groups, narration,
- * finished subagents), not the answer. The answer is the last reply row with no work after it; a turn cut off
- * before it wrote one folds all of its work. What needs the person stays in view: errors and failures the agent did
- * not get past, questions, approvals, notices, Mousse's own markers, steered messages and the replies written before
- * them, and subagents still working.
+ * Which segments of a finished turn fold behind its "Worked for" line: the work (thoughts, tool groups, narration),
+ * not the answer. The answer is the last reply row with no work after it; a turn cut off before it wrote one folds
+ * all of its work. What needs the person stays in view: errors and failures the agent did not get past, questions,
+ * approvals, notices, Mousse's own markers, steered messages and the replies written before them, and subagent
+ * cards, finished or not, so every subagent shows where it was started.
  */
 export function foldTurnWork(rows: FoldRow[]): boolean[] {
   let answer = -1;
@@ -494,7 +492,7 @@ export function foldTurnWork(rows: FoldRow[]): boolean[] {
   });
   return rows.map((row, index) => {
     if (row.kind === "tools") return !row.keep;
-    if (row.kind === "cards") return !row.running;
+    if (row.kind === "cards") return false;
     if (row.steer || row.keep || index === answer) return false;
     if (row.toolsOnly) return true;
     return !(row.text && index < lastSteer);

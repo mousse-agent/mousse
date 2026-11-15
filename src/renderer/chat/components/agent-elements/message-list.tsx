@@ -1397,11 +1397,6 @@ export const MessageList = memo(function MessageList({
     () => new Set([...subagentCards.values()].filter((card) => card.spawning).map((card) => card.toolCallId)),
     [subagentCards],
   );
-  // Cards whose subagent still works: a finished turn keeps them in view when its work folds.
-  const runningCardIds = useMemo(
-    () => new Set([...subagentCards.values()].filter((card) => !card.pending && isRunningSubagent(card)).map((card) => card.toolCallId)),
-    [subagentCards],
-  );
   // Finished turns whose work is open, by turn key: kept while the thread is open (the list mounts per thread).
   const [openWork, setOpenWork] = useState<ReadonlySet<string>>(() => new Set());
   const openWorkRef = useRef(openWork);
@@ -2115,7 +2110,6 @@ export const MessageList = memo(function MessageList({
                 cardedSubagents={cardedSubagents}
                 subagentCardIds={subagentCardIds}
                 spawningCardIds={spawningCardIds}
-                runningCardIds={runningCardIds}
                 workOpen={openWork.has(turnKey)}
                 onToggleWork={toggleWork}
               />
@@ -2203,8 +2197,6 @@ type TurnRowProps = {
   cardedSubagents: Set<string>;
   subagentCardIds: Set<string>;
   spawningCardIds: Set<string>;
-  /** Cards whose subagent still works: they stay in view when the turn's work folds. */
-  runningCardIds: Set<string>;
   /** Whether this finished turn's work is open under its "Worked for" line. */
   workOpen: boolean;
   /** Opens or closes a finished turn's work, by turn key. */
@@ -2287,7 +2279,6 @@ const TurnRow = memo(function TurnRow({
   cardedSubagents,
   subagentCardIds,
   spawningCardIds,
-  runningCardIds,
   workOpen,
   onToggleWork,
 }: TurnRowProps) {
@@ -2481,7 +2472,6 @@ const TurnRow = memo(function TurnRow({
               const cardParts = segment.msgIndices.flatMap(
                 (msgIndex) => analyses[msgIndex]!.cardParts,
               ).filter((part) => !spawningCardIds.has(part.toolCallId!));
-              const running = cardParts.some((part) => runningCardIds.has(part.toolCallId!));
               if (cardParts.length === 0) return { node: null, fold: { kind: "cards" } };
               const cardNested = new Map(
                 segment.msgIndices.flatMap((msgIndex) => [
@@ -2489,7 +2479,7 @@ const TurnRow = memo(function TurnRow({
                 ]),
               );
               return {
-                fold: { kind: "cards", running },
+                fold: { kind: "cards" },
                 node: (
                   <SubagentCardGroup
                     key={`${answerMsgs[segment.msgIndices[0]!]!.id}-subagents`}
