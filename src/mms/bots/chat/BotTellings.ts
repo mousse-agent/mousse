@@ -7,7 +7,7 @@ import type { BotChatProjection } from './projection'
 export class BotTellings {
   private readonly retryAt = new Map<string, number>()
   private windows = 0
-  private catchup = false
+  private closedThrough = 0
   private readonly banners = new Map<string, BotMessageRow[]>()
   private fold: { id: string; until: number; rows: BotMessageRow[] } | undefined
   private readonly botSounds = new Map<string, number>()
@@ -17,7 +17,8 @@ export class BotTellings {
     private readonly retryMs = 60_000) {}
 
   attach(windows: number): void {
-    if (windows && !this.windows) this.catchup = !!this.store.get('SELECT 1 FROM bot_messages WHERE tell IS NOT NULL AND told_at IS NULL LIMIT 1')
+    if (windows && !this.windows) this.closedThrough = Number(this.store.get(`SELECT MAX(seq) AS seq FROM bot_messages
+      WHERE tell IS NOT NULL AND tell != 'later' AND told_at IS NULL`)?.seq ?? 0)
     this.windows = windows
   }
   read(): void {
@@ -69,33 +70,31 @@ export class BotTellings {
     for (const { id } of ids) {
       const row = this.store.message(String(id))!
       if ((this.retryAt.get(row.botId) ?? 0) > now) continue
-      if (!this.unread(row) || this.catchup && now - Date.parse(row.at) > 86_400_000) { this.attempt([row], now, () => this.told(row, now)); continue }
+      if (!this.unread(row) || row.seq <= this.closedThrough && now - Date.parse(row.at) > 86_400_000) { this.attempt([row], now, () => this.told(row, now)); continue }
       due.push(row)
     }
     // Only project later rows if this release can count them in a fold.
-    if (due.some(r => r.tell === 'soon') || this.catchup && due.length) {
+    if (due.some(r => r.tell === 'soon') || due.some(r => r.seq <= this.closedThrough)) {
       for (const { id } of this.store.all(`SELECT id FROM bot_messages INDEXED BY bot_messages_tell_due
         WHERE tell IS NOT NULL AND tell = 'later' AND told_at IS NULL AND tell_at <= ? ORDER BY seq`, new Date(now).toISOString())) {
         const row = this.store.message(String(id))!
         if ((this.retryAt.get(row.botId) ?? 0) <= now) due.push(row)
       }
     }
-    if (this.catchup) {
-      this.catchup = false
-      if (due.some(r => r.tell !== 'later')) {
-        if (!this.attempt(due, now, () => this.releaseBacklog(due, now))) {
-          for (const bot of new Set(due.map(r => r.botId))) {
-            const rows = due.filter(r => r.botId === bot)
-            this.attempt(rows, now, () => this.releaseBacklog(rows, now))
-          }
+    const closed = due.filter(r => r.seq <= this.closedThrough)
+    if (closed.some(r => r.tell !== 'later')) {
+      if (!this.attempt(closed, now, () => this.releaseBacklog(closed, now))) {
+        for (const bot of new Set(closed.map(r => r.botId))) {
+          const rows = closed.filter(r => r.botId === bot)
+          this.attempt(rows, now, () => this.releaseBacklog(rows, now))
         }
       }
-      return
     }
-    for (const row of due.filter(r => r.tell === 'now')) {
+    const live = due.filter(r => r.seq > this.closedThrough)
+    for (const row of live.filter(r => r.tell === 'now')) {
       this.attempt([row], now, () => { this.announce([row], true); this.told(row, now) })
     }
-    const rest = due.filter(r => r.tell !== 'now')
+    const rest = live.filter(r => r.tell !== 'now')
     if (!rest.some(r => r.tell === 'soon')) return
     for (const bot of new Set(rest.filter(r => r.tell === 'soon').map(r => r.botId))) {
       const rows = rest.filter(r => r.botId === bot || r.tell === 'later' && !this.store.message(r.id)?.toldAt && (this.retryAt.get(r.botId) ?? 0) <= now)
@@ -112,15 +111,15 @@ export class BotTellings {
     }
   }
   /** A held backlog is released as one fold; usable for future quiet-hour release too. */
-  releaseBacklog(rows: BotMessageRow[], now: number): void {
-    this.announce(rows, false, `bt_${randomUUID()}`, true)
+  releaseBacklog(rows: BotMessageRow[], now: number, label = 'While Mousse was closed'): void {
+    this.announce(rows, false, `bt_${randomUUID()}`, label)
     for (const row of rows) this.told(row, now)
   }
 
   private told(row: BotMessageRow, now: number): void {
     this.store.run('UPDATE bot_messages SET told_at = ? WHERE id = ? AND told_at IS NULL', new Date(now).toISOString(), row.id)
   }
-  private announce(rows: BotMessageRow[], sound: boolean, id = `bt_${randomUUID()}`, closed = false): void {
+  private announce(rows: BotMessageRow[], sound: boolean, id = `bt_${randomUUID()}`, closed: false | string = false): void {
     rows = rows.map(r => this.store.message(r.id)!).filter(Boolean)
     const priority = (row: BotMessageRow): number => row.tell === 'later' ? 0 : row.askId || row.questionId || row.error ? 2 : 1
     rows.sort((a, b) => priority(b) - priority(a) || a.seq - b.seq)
@@ -131,7 +130,7 @@ export class BotTellings {
       const group = rows.filter(r => this.name(r.botId) === name)
       return group.some(r => r.askId || r.questionId || r.error) ? `${name} needs you` : `${name} ${group.length} messages`
     }).join(' · ')
-    const title = closed ? `While Mousse was closed: ${summary}` : rows.length > 1 ? `${names.join(', ')} · ${rows.length} messages` : names[0]!
+    const title = closed ? `${closed}: ${summary}` : rows.length > 1 ? `${names.join(', ')} · ${rows.length} messages` : names[0]!
     this.emit({ id, rows: rows.map(r => ({ botId: r.botId, messageId: r.id, seq: r.seq, tell: r.tell! })), title, body: line.slice(0, 140), kind: first.ask || first.question ? 'question' : 'completed', sound })
     this.banners.set(id, rows)
   }
