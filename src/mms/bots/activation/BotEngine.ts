@@ -7887,7 +7887,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         let soonest: number | undefined
         for (const id of botId === undefined ? this.host.definitions.ids() : [botId]) {
           const registry = this.store.registry(id)
-          if (!registry || registry.deletedAt) continue
+          if (!registry || registry.deletedAt || registry.pausedReason) continue
           for (const schedule of this.schedulesOf(id)) {
             if (schedule.paused || !schedule.nextAt) continue
             const at = Date.parse(schedule.nextAt)
