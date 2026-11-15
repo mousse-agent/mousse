@@ -3,7 +3,12 @@
  * `turn.start`: a `remote_subagents` row binds it to the run on another computer, a restart leaves it
  * alone, and its terminal write publishes to the parent exactly as a local child run's does.
  */
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
+import { RUN_MIGRATIONS } from '../../src/mms/run/db/migrations'
 import type { RemoteDelegationTarget } from '../../src/mms/run/RunEngine'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
@@ -114,5 +119,39 @@ describe('remote subagent tasks in the engine (issue #469)', () => {
     expect(f.engine.remoteSubagents.get(next.delegationId)).toMatchObject({ remoteThreadId: 'far-thread', remoteRunId: null, state: 'starting' })
     expect(await f.engine.requestRemoteFollowUp(request)).toMatchObject({ delegationId: next.delegationId, replayed: true })
     expect(f.engine.remoteSubagents.listForChildThread(first.childThreadId)).toHaveLength(2)
+  })
+})
+
+// Issue #1160: version 18 lets a task's mode be Full access. Rows a computer wrote before it keep their mode and
+// their order (a subagent's tasks are read by created_at, then rowid).
+describe('the remote subagent table before and after Full access', () => {
+  it('keeps the rows written before, in order, and takes Full access after', () => {
+    const home = mkdtempSync(join(tmpdir(), 'mousse-remote-mode-'))
+    const db = new ProfileDatabase({ profileHome: home })
+    try {
+      db.migrate(RUN_MIGRATIONS.filter((migration) => migration.version <= 17))
+      const insert = (id: string, mode: string) => db.database.prepare(
+        `INSERT INTO remote_subagents(delegation_id, child_thread_id, child_run_id, node, prompt, permission_mode, chat_mode, worktree, state, created_at, updated_at)
+         VALUES(?, 'child', ?, 'node-mac', 'p', ?, 'agent', 0, 'done', '2026-11-01T00:00:00.000Z', '2026-11-01T00:00:00.000Z')`
+      ).run(id, `run-${id}`, mode)
+      // Same created_at: only the rowid orders them, and 'b' was written before 'a'.
+      insert('b', 'accept_edits')
+      insert('a', 'ask')
+      insert('c', 'auto')
+      expect(() => insert('d', 'full')).toThrow(/CHECK/)
+      db.migrate(RUN_MIGRATIONS)
+      const rows = () => db.database.prepare('SELECT delegation_id, permission_mode FROM remote_subagents ORDER BY created_at, rowid').all()
+      expect(rows()).toEqual([
+        { delegation_id: 'b', permission_mode: 'accept_edits' },
+        { delegation_id: 'a', permission_mode: 'ask' },
+        { delegation_id: 'c', permission_mode: 'auto' }
+      ])
+      insert('d', 'full')
+      expect(() => insert('e', 'root')).toThrow(/CHECK/)
+      expect(rows().at(-1)).toEqual({ delegation_id: 'd', permission_mode: 'full' })
+    } finally {
+      db.close()
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 })

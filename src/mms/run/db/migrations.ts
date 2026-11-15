@@ -11,7 +11,7 @@ import type { Migration } from './ProfileDatabase'
  * generations); version 9 stores each attempt's execution binding (harness gateway); version 10
  * rebuilds `runs` so a run can be `paused` until a usage limit resets; version 11 records the agent
  * access level on credentials, delegations and runs; version 17 binds a remote subagent's task to the
- * run on another computer that does it (issue #469).
+ * run on another computer that does it (issue #469); version 18 lets that task's mode be Full access.
  */
 export const RUN_MIGRATIONS: readonly Migration[] = [
   {
@@ -540,6 +540,49 @@ CREATE TABLE remote_subagents(
   created_at       TEXT NOT NULL,
   updated_at       TEXT NOT NULL
 ) STRICT;
+CREATE INDEX remote_subagents_state ON remote_subagents(state);
+CREATE INDEX remote_subagents_child ON remote_subagents(child_thread_id);
+`
+  },
+  {
+    version: 18,
+    // SQLite cannot change a CHECK in place: the table is rebuilt (SQLite's "other kinds of ALTER TABLE"
+    // procedure). It has no foreign key, and nothing refers to it.
+    sql: `
+-- A remote subagent may run in Full access when the computer that runs it allows this one Full access
+-- (issue #1160): the mode CHECK takes 'full'. Rows written before keep the mode they were started with, and
+-- their rowids, which order a subagent's tasks.
+CREATE TABLE remote_subagents_new(
+  delegation_id    TEXT PRIMARY KEY,
+  child_thread_id  TEXT NOT NULL,
+  child_run_id     TEXT NOT NULL,
+  node             TEXT NOT NULL,
+  prompt           TEXT NOT NULL,
+  permission_mode  TEXT NOT NULL CHECK(permission_mode IN ('ask','accept_edits','auto','full')),
+  chat_mode        TEXT NOT NULL CHECK(chat_mode IN ('agent','plan')),
+  worktree         INTEGER NOT NULL CHECK(worktree IN (0,1)),
+  project_id       TEXT,
+  instance_id      TEXT,
+  model            TEXT,
+  remote_thread_id TEXT,
+  remote_run_id    TEXT,
+  deadline_at      TEXT,
+  state            TEXT NOT NULL CHECK(state IN ('starting','running','stopping','done')),
+  waiting_input    INTEGER NOT NULL DEFAULT 0 CHECK(waiting_input IN (0,1)),
+  last_error       TEXT,
+  last_seen_at     TEXT,
+  created_at       TEXT NOT NULL,
+  updated_at       TEXT NOT NULL
+) STRICT;
+INSERT INTO remote_subagents_new(rowid, delegation_id, child_thread_id, child_run_id, node, prompt, permission_mode, chat_mode,
+    worktree, project_id, instance_id, model, remote_thread_id, remote_run_id, deadline_at, state, waiting_input,
+    last_error, last_seen_at, created_at, updated_at)
+  SELECT rowid, delegation_id, child_thread_id, child_run_id, node, prompt, permission_mode, chat_mode,
+    worktree, project_id, instance_id, model, remote_thread_id, remote_run_id, deadline_at, state, waiting_input,
+    last_error, last_seen_at, created_at, updated_at
+  FROM remote_subagents;
+DROP TABLE remote_subagents;
+ALTER TABLE remote_subagents_new RENAME TO remote_subagents;
 CREATE INDEX remote_subagents_state ON remote_subagents(state);
 CREATE INDEX remote_subagents_child ON remote_subagents(child_thread_id);
 `

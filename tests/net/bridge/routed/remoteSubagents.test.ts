@@ -97,4 +97,43 @@ describe('remote subagents over Bridge (issue #469)', () => {
       vi.restoreAllMocks()
     }
   }, 120_000)
+
+  // Issue #1160: no fixed cap. The owner's limit for this computer is the only one past the parent's run.
+  it('runs in Full access there once the owner raised its limit for this computer to Full access', async () => {
+    const service = serviceOf(t.caller)
+    service.pause()
+    const ownerSend = vi.spyOn(t.owner.orchestrator, 'send').mockImplementation(async (_input, _reuse, opts) => {
+      const sent = await t.owner.runEngine.dispatch({ kind: 'send', threadId: opts!.threadId!, clientRequestId: opts!.clientRequestId!, source: 'gui' })
+      if (sent.status !== 'accepted') throw new Error('not accepted')
+      return { message: '', actions: [], runId: sent.runId, accepted: true } as never
+    })
+    await t.owner.net.request('bridge.policy', { node: t.callerNode, maxPermissionMode: 'full' })
+    try {
+      const parentThread = t.caller.threads.createThread('Full parent')
+      const parent = await t.caller.runEngine.dispatch({ kind: 'send', threadId: parentThread.id, clientRequestId: 'full-parent-send', source: 'gui' })
+      if (parent.status !== 'accepted') throw new Error('parent not accepted')
+      t.caller.runEngine.markStarting(parent.runId)
+      t.caller.runEngine.markRunning(parent.runId)
+      const accepted = await t.caller.runEngine.requestDelegation({
+        parentThreadId: parentThread.id,
+        parentRunId: parent.runId,
+        clientRequestId: 'delegation:remote-full',
+        prompt: 'Build it there',
+        workspace: 'isolated',
+        role: 'implement',
+        wake: 'always',
+        title: 'Remote builder',
+        remote: { node: t.node, prompt: 'Build it there', permissionMode: 'full', chatMode: 'agent', worktree: false, projectId: null, instanceId: null, model: null, deadlineAt: null }
+      })
+      const launched = await service.launch(accepted.delegationId)
+      expect(launched, JSON.stringify(launched)).toMatchObject({ ok: true })
+      if (launched.ok !== true) return
+      // The owner set the thread to Full access and sent the task under a limit of Full access.
+      expect(t.owner.threads.getThread(launched.remoteThreadId)!.permissionMode).toBe('full')
+      expect(ownerSend.mock.calls.at(-1)![2]).toMatchObject({ threadId: launched.remoteThreadId, permissionMode: 'full' })
+    } finally {
+      await t.owner.net.request('bridge.policy', { node: t.callerNode, maxPermissionMode: 'accept_edits' })
+      vi.restoreAllMocks()
+    }
+  }, 120_000)
 })

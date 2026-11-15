@@ -6,6 +6,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { DomainRpcError } from '../../src/mms/protocol/domainRegistry'
+import type { PermissionMode } from '../../src/shared/permissionMode'
 import type { RemoteComputer, RemoteComputersPort } from '../../src/mms/protocol/remoteComputersPort'
 import type { RemoteSubagents } from '../../src/mms/orchestrator/RemoteSubagents'
 import { useSubagentWorld, type Json } from './subagentWorld'
@@ -106,7 +107,7 @@ describe('remote subagents (issue #469)', () => {
     await say('go')
     expect(out.started).toMatchObject({ title: 'Mac tester', computer: 'Studio Mac' })
     expect(out.started.note).toContain('Started on Studio Mac')
-    // Created in the same repository there, in its own worktree, no looser than Auto-accept edits.
+    // Created in the same repository there, in its own worktree, no looser than the parent (Auto-accept edits by default).
     expect(mac.methods()).toEqual(['threads.create', 'composer.options', 'threads.setPermissionMode', 'orchestrator.send'])
     expect(mac.calls[0]).toMatchObject({ params: { name: 'Mac tester', worktreeEnabled: true }, idem: expect.stringContaining('create') })
     expect(mac.calls[2].params).toMatchObject({ threadId: 'far-thread-1' })
@@ -274,12 +275,42 @@ describe('remote subagents (issue #469)', () => {
     expect(d.engine.remoteSubagents.get(out.more.delegationId)).toMatchObject({ remoteThreadId: 'far-thread-1', remoteRunId: 'far-run-2', state: 'running' })
   })
 
-  it('narrows the mode to the limit that computer set for this one, which it would refuse to exceed', async () => {
-    const { steps, out, say, mac, startOnMac } = remoteWorld()
-    mac.limit = 'ask'
-    steps['go'] = async (tools) => { out.started = await startOnMac(tools, 'Mac tester') }
+  // Issue #1160: the mode there is the narrowest of the parent thread's mode, its run and the limit that computer set
+  // for this one, with no fixed cap. A read-only task is still sent in Plan mode.
+  const MODE_ROWS: Array<{ name: string; parent: PermissionMode; limit: PermissionMode; workspace?: 'shared'; mode: PermissionMode; chatMode: 'agent' | 'plan' }> = [
+    { name: 'Full access when both sides allow it', parent: 'full', limit: 'full', mode: 'full', chatMode: 'agent' },
+    { name: 'the default device limit narrows a Full access parent', parent: 'full', limit: 'accept_edits', mode: 'accept_edits', chatMode: 'agent' },
+    { name: 'a lower device limit narrows it', parent: 'full', limit: 'ask', mode: 'ask', chatMode: 'agent' },
+    { name: 'a stricter parent narrows a Full access limit', parent: 'accept_edits', limit: 'full', mode: 'accept_edits', chatMode: 'agent' },
+    { name: 'a read-only task is still Plan', parent: 'full', limit: 'full', workspace: 'shared', mode: 'full', chatMode: 'plan' }
+  ]
+  it.each(MODE_ROWS)('the mode there: $name', async ({ parent: parentMode, limit, workspace, mode, chatMode }) => {
+    const { d, parent, steps, out, say, mac, startOnMac } = remoteWorld()
+    d.orch.setThreadPermissionMode(parent.id, parentMode)
+    mac.limit = limit
+    steps['go'] = async (tools) => {
+      out.started = await startOnMac(tools, 'Mac tester', workspace ? { workspace, role: 'research' } : {})
+    }
     await say('go')
-    expect(mac.calls.find((call) => call.method === 'threads.setPermissionMode')!.params.mode).toBe('ask')
+    expect(out.started).toMatchObject({ title: 'Mac tester', computer: 'Studio Mac' })
+    expect(mac.calls.find((call) => call.method === 'threads.setPermissionMode')!.params.mode).toBe(mode)
+    expect(mac.calls.find((call) => call.method === 'orchestrator.send')!.params.mode).toBe(chatMode)
+  })
+
+  it('a follow-up runs no looser than the run that sends it', async () => {
+    const { d, parent, steps, out, say, mac, service, startOnMac } = remoteWorld()
+    d.orch.setThreadPermissionMode(parent.id, 'full')
+    mac.limit = 'full'
+    steps['go'] = async (tools) => { out.started = await startOnMac(tools, 'Mac tester') }
+    steps['more'] = async (tools) => { out.more = await tools.continueSubagent({ subagent: 'Mac tester', prompt: 'And iOS?' }, { toolCallId: 'c1' }) as Json }
+    await say('go')
+    mac.farRun = { status: 'completed', userMessageId: 'far-user-1' }
+    await service.pass()
+    d.orch.setThreadPermissionMode(parent.id, 'ask')
+    await say('more')
+    expect(out.more).toMatchObject({ status: 'started' })
+    const modes = mac.calls.filter((call) => call.method === 'threads.setPermissionMode').map((call) => call.params.mode)
+    expect(modes).toEqual(['full', 'ask'])
   })
 
   it('a person cannot start a turn on the stand-in here', async () => {
