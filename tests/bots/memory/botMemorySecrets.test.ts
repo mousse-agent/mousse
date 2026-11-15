@@ -1,12 +1,13 @@
 import { readFile } from 'node:fs/promises'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createBotMemoryAdmin } from '../../../src/mms/bots/memory/admin'
+import * as memoryGuard from '../../../src/mms/bots/memory/guard'
 import { packText } from '../../../src/mms/bots/memory/chatSummary'
 import { botMemoryTools } from '../../../src/mms/run/mcp/appTools/botMemory'
 import type { ToolCallContext } from '../../../src/mms/run/mcp/appTools/types'
 import { disposeFixtures, memoryFixture } from './memoryFixture'
 
-afterEach(disposeFixtures)
+afterEach(() => { vi.restoreAllMocks(); disposeFixtures() })
 const MARK = '[held back: looks like a secret]'
 const LINK = 'https://docs.google.com/document/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/edit'
 // Credential shapes, actors, read routes, FTS highlighting/cuts, and the harmless URL exception.
@@ -233,18 +234,19 @@ describe('held-back credentials', () => {
       expect(fx.store.search('ada', { query, kinds: [kind] }).map((hit) => hit.ref)).toEqual(original)
   })
 
-  it('examines at most 4,096 matches with one sorted statement for credential-heavy search', () => {
+  it('classifies credential-heavy matches once with one sorted statement', () => {
     const fx = memoryFixture()
     fx.db.transaction(() => {
       for (let n = 0; n < 5000; n++) fx.store.append({ botId: 'ada', kind: 'tool_result', who: 'tool', sourceKey: `many${n}`, text: `token ghp_0123456789abcdefghijABCDEFGHIJ${n}` })
     })
     let examined = 0
+    const classify = vi.spyOn(memoryGuard, 'classifyMemorySearchText')
     let statements = 0
     const db = new Proxy(fx.db, {
       get(target, key) {
         if (key === 'statement') return (sql: string) => {
           const stmt = target.statement(sql)
-          if (!sql.includes('ORDER BY score')) return stmt
+          if (!sql.includes('AS search_class')) return stmt
           statements++
           return new Proxy(stmt, {
             get(statement, method) {
@@ -267,12 +269,13 @@ describe('held-back credentials', () => {
     })
     const store = fx.reopen({ db })
     const hits = store.search('ada', { query: 'token', kinds: ['tool'] })
-    expect(examined).toBeLessThanOrEqual(4096)
+    expect(classify).toHaveBeenCalledTimes(5000)
+    expect(examined).toBe(8)
     expect(statements).toBe(1)
-    expect(hits).toEqual([])
+    expect(hits).toHaveLength(8)
   })
 
-  it('does not reveal guesses when a credential-heavy search reaches its scan bound', () => {
+  it('does not reveal guesses through a raw-match cutoff in credential-heavy search', () => {
     const fx = memoryFixture()
     fx.db.transaction(() => {
       for (let n = 0; n < 7; n++) fx.store.append({ botId: 'ada', kind: 'owner_msg', who: 'owner', sourceKey: `clean${n}`, text: `wifi wifi only ${n}` })

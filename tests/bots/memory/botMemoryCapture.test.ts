@@ -114,6 +114,7 @@ describe('syncThread', () => {
     const fx = memoryFixture()
     const full = new BotMemoryStore({
       db: {
+        database: fx.db.database,
         inTransaction: false,
         transaction: (work) => fx.db.transaction(work),
         statement: (sql) => {
@@ -208,6 +209,7 @@ describe('review round 2', () => {
     const fx = memoryFixture()
     const full = new BotMemoryStore({
       db: {
+        database: fx.db.database,
         inTransaction: false,
         transaction: (work) => fx.db.transaction(work),
         statement: (sql) => {
