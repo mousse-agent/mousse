@@ -60,7 +60,13 @@ describe.each(zones)('cron clock changes in $zone', (row) => {
     expect(skippedDates({ kind: 'cron', expr: '30 2 * * *' }, at(row.spring, '00:00', row.springOffset), 2)).toEqual([])
   })
 
-  it('keeps elapsed intervals and hourly cron cadence across both changes', () => {
+  it('still lists the spring gap date for hourly cron', () => {
+    process.env.TZ = row.zone
+    const dates = skippedDates({ kind: 'cron', expr: '30 * * * *' }, at(row.spring, '00:00', row.springOffset), 2)
+    expect(dates.map((entry) => entry.date)).toEqual([row.spring])
+  })
+
+  it('keeps elapsed intervals and skips the repeated pass for hourly cron', () => {
     process.env.TZ = row.zone
     for (const [from, hourly] of [
       [at(row.spring, '01:30', row.springOffset), at(row.spring, '03:30', row.summerOffset)],
