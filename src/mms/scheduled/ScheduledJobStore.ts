@@ -1416,13 +1416,13 @@ export class ScheduledJobStore {
    * ends without a run record (the bot's activations are its runs) and the schedule moves on; occurrences missed while
    * Mousse was closed collapse into this one, so a backlog never runs.
    */
-  finishBotClaim(id: string, claimToken: string, outcome: { skipped?: string }, now: Date = new Date()): ScheduledJob | null {
+  finishBotClaim(id: string, claimToken: string, outcome: { skipped?: string; occurrenceAt?: string }, now: Date = new Date()): ScheduledJob | null {
     return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
       const jobs = this.listJobs()
       const job = jobs.find((entry) => entry.id === id)
       const claim = job?.runClaim
       if (!job?.bot || !claim || job.state !== 'running' || claim.token !== claimToken) return null
-      const occurrenceAt = claim.occurrenceKey
+      const occurrenceAt = outcome.occurrenceAt ?? claim.occurrenceKey
       job.runClaim = undefined
       job.botSkip = outcome.skipped ? { at: occurrenceAt, reason: outcome.skipped } : undefined
       if (!outcome.skipped) {
