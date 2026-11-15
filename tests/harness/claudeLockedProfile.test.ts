@@ -182,10 +182,30 @@ describe('a bot on the owner\'s own Claude Code entry', () => {
     const env = captured.find((options) => options.hooks)!.env!
     for (const name of secrets) expect(env, name).not.toHaveProperty(name)
     expect(env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB).toBe('1')
+    if (entry === 'owner' && process.platform !== 'win32') expect(env.TMPDIR).toBe(join(scratch, 'tmp'))
     if (entry === 'owner') {
       expect(env.ANTHROPIC_AUTH_TOKEN).toBe('signin-token')
       expect(env.CLAUDE_CONFIG_DIR).toBe(process.env.CLAUDE_CONFIG_DIR)
     }
+  })
+
+  it.each([
+    { route: 'CLAUDE_CODE_USE_BEDROCK', cloud: { AWS_PROFILE: 'work', AWS_REGION: 'eu-west-1', AWS_SECRET_ACCESS_KEY: 'bedrock-key' } },
+    { route: 'CLAUDE_CODE_USE_VERTEX', cloud: { GOOGLE_APPLICATION_CREDENTIALS: '/signin/google.json', CLOUD_ML_REGION: 'us-east5' } },
+    { route: 'CLAUDE_CODE_USE_FOUNDRY', cloud: { AZURE_CLIENT_ID: 'client', AZURE_TENANT_ID: 'tenant', AZURE_CLIENT_SECRET: 'foundry-key' } }
+  ].flatMap((row) => ['environment', 'settings'].map((source) => ({ ...row, source }))))('keeps $route sign-in from $source only for the active cloud', async ({ route, cloud, source }) => {
+    const root = temp('claude-cloud-root-')
+    const scratch = temp('claude-cloud-scratch-')
+    const unrelated = { GITHUB_TOKEN: 'github', OPENAI_API_KEY: 'openai', MY_SECRET: 'arbitrary', AWS_PROFILE: 'inactive-aws', GOOGLE_APPLICATION_CREDENTIALS: '/inactive/google.json', AZURE_CLIENT_SECRET: 'inactive-azure' }
+    const variables = { ...unrelated, ...cloud, [route]: '1', ANTHROPIC_AUTH_TOKEN: 'signin-token' }
+    if (source === 'environment') for (const [name, value] of Object.entries(variables)) vi.stubEnv(name, value)
+    else writeFileSync(join(process.env.CLAUDE_CONFIG_DIR!, 'settings.json'), JSON.stringify({ env: variables }))
+    const { service, captured } = ownerService(async () => {})
+    const locked: ClaudeLockedTurn = { authority: authorityFor(['read'], { root, scratch }), ownerEntry: true, cwd: root, shellContained: false, temps: [], systemPrompt: '', ledger: fakeLedger().ledger }
+    await service.chat({ threadId: 'bot-thread', cwd: root, model: 'sonnet', prompt: 'go', locked, onText: vi.fn() })
+    const env = captured.find((entry) => entry.hooks)!.env!
+    expect(env).toMatchObject({ ...cloud, [route]: '1', ANTHROPIC_AUTH_TOKEN: 'signin-token' })
+    for (const name of Object.keys(unrelated).filter((name) => !(name in cloud))) expect(env, name).not.toHaveProperty(name)
   })
 
   it('runs one query in Claude Code\'s asking mode with the owner\'s sign-in, none of their settings files, and no process of its own to supervise', async () => {

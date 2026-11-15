@@ -83,11 +83,13 @@ describe('Mousse’s Pi extension', () => {
     vi.stubEnv('AWS_SECRET_ACCESS_KEY', 'cloud-key')
     vi.stubEnv('GITHUB_TOKEN', 'github-key')
     vi.stubEnv('MY_SECRET', 'arbitrary-secret')
+    vi.stubEnv('TMPDIR', '/activation/scratch/tmp')
     vi.stubEnv('MOUSSE_BOT_ACTIVATION', bot ? 'act-1' : '')
     const { tools } = await loaded(async () => ({ allow: true }))
     const bash = tools.find((tool) => tool.name === 'bash')! as unknown as ReturnType<typeof import('@earendil-works/pi-coding-agent').createBashToolDefinition>
     await bash.execute('call-1', { command: 'env' }, new AbortController().signal)
     const env = shellExec.mock.calls[0][2].env!
+    expect(env.TMPDIR).toBe('/activation/scratch/tmp')
     for (const name of ['OPENAI_API_KEY', 'AWS_SECRET_ACCESS_KEY', 'GITHUB_TOKEN', 'MY_SECRET']) {
       if (bot) expect(env, name).not.toHaveProperty(name)
       else expect(env[name]).toBe(process.env[name])
