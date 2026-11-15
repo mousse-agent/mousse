@@ -1483,9 +1483,10 @@ export class ClaudeSubscriptionProviderService {
    * - one the user set (the entry's variables, or the `env` of their own or the managed Claude settings) is passed
    *   on: Claude Code reads the name only from its process environment, and Mousse removes an inherited one. A
    *   project's settings cannot set it: a cloned folder would otherwise pass every check below;
-   * - otherwise Mousse's own, only on Claude Code's own subscription sign-in, straight to Anthropic. An API key (an
-   *   `apiKeyHelper` too), a cloud route or a sign-in through a gateway or proxy keeps the default: credit-only API
-   *   accounts refuse an unknown client name, and proxies rewrite requests from one they don't recognise (a turn runs
+   * - otherwise Mousse's own, on a direct subscription or an explicitly opted-in subscription proxy. An API key (an
+   *   `apiKeyHelper` too), a cloud route or an unconfirmed gateway keeps the default: credit-only API
+   *   accounts refuse an unknown client name, and proxies rewrite requests from one they don't recognise. A proxy
+   *   needs the operator's route-bound native-passthrough opt-in and a fresh subscription-only seat listing (a turn runs
    *   only after a sign-in check that answered, so the account is known here);
    * - never for a process that runs in Auto (`runsAuto`): under an unknown client name Claude Code's auto mode
    *   checks each tool call with a billed request of its own instead of Anthropic's server-side check. A process
@@ -1499,7 +1500,18 @@ export class ClaudeSubscriptionProviderService {
     if (runsAuto) return {}
     const variable = (name: string) => claudeTurnVariable(env, name, options)
     const baseUrl = variable('ANTHROPIC_BASE_URL')
-    if (baseUrl && !isAnthropicApi(baseUrl)) return {}
+    if (baseUrl && !isAnthropicApi(baseUrl)) {
+      // This is an operator assertion of native passthrough, not discovery from a private address or seat listing.
+      // Bind it to the complete route; a project can neither opt in nor redirect it to another gateway/path.
+      if (claudeEffectiveVariable(env, 'MOUSSE_CLAUDE_NATIVE_PROXY_URL') !== baseUrl) return {}
+      try {
+        const url = new URL(baseUrl)
+        if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) return {}
+      } catch { return {} }
+      if (variable('ANTHROPIC_API_KEY')) return {}
+      const listing = listedProxySeats(baseUrl)
+      if (listing?.seats !== 'subscription' || Date.now() - listing.at >= PROXY_SEATS_FRESH_MS) return {}
+    }
     if (claudeUsesApiKeyHelper(env, options)) return {}
     // Settings the entry passes in its launch arguments (`--settings`) can route Claude Code anywhere and are not read
     // here, so they keep the default.
