@@ -15,6 +15,7 @@ it.each<BotWakeFired>([
   { kind: 'watcher', title: 'build', how: 'failed', message: 'quartz failure', tail: '' },
   { kind: 'pr', repo: 'a/b', number: 1, state: 'merged', title: 'quartz title' },
   { kind: 'pr', repo: 'a/b', number: 1, state: 'checks', passed: 1, failed: 1, failedNames: ['quartz check'] },
+  { kind: 'pr', repo: 'a/b', number: 1, state: 'checks', passed: 1, failed: 0, failedNames: [], waiting: 1, waitingNames: ['quartz approval'] },
   { kind: 'pr', repo: 'a/b', number: 1, state: 'review', reviewState: 'approved', reviewer: 'quartz' },
   { kind: 'thread', threadId: 't', status: 'completed', title: 'quartz thread' }
 ])('keeps $kind outside text only in external rows, once, through capture and search', (fired) => {
