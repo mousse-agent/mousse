@@ -586,5 +586,14 @@ ALTER TABLE remote_subagents_new RENAME TO remote_subagents;
 CREATE INDEX remote_subagents_state ON remote_subagents(state);
 CREATE INDEX remote_subagents_child ON remote_subagents(child_thread_id);
 `
+  },
+  {
+    version: 19,
+    sql: `
+-- The form a remote subagent's calls take on its computer (issue #1160): 1 when they carry the agent mark (that
+-- computer knows it), 0 when they go unmarked (an older computer), null until the first call decides. A task never
+-- changes form mid-flight: the other computer's replay ledger is keyed by method, so a switch would send it twice.
+ALTER TABLE remote_subagents ADD COLUMN marked INTEGER CHECK(marked IS NULL OR marked IN (0,1));
+`
   }
 ]
