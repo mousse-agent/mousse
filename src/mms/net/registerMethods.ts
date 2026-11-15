@@ -1,5 +1,6 @@
 import { isIP } from 'node:net'
 import {
+  isAgentReach,
   NET_LOCAL_CAPABILITY,
   NET_LOCAL_METHODS,
   type NetLocalMethod
@@ -76,7 +77,7 @@ const keys: Record<NetLocalMethod, readonly string[]> = {
   'bridge.rename': ['node', 'name'],
   'bridge.setCaps': ['node', 'caps'],
   'bridge.setKind': ['node', 'kind'],
-  'bridge.policy': ['node', 'blocked', 'maxPermissionMode', 'terminal', 'editor', 'bots'],
+  'bridge.policy': ['node', 'blocked', 'maxPermissionMode', 'terminal', 'editor', 'bots', 'agentReach'],
   'bridge.workOnThreads': ['enabled'],
   'bridge.shareBots': ['enabled'],
   'bridge.editorServer': ['system']
@@ -275,7 +276,8 @@ function validate(method: NetLocalMethod, value: unknown): Record<string, unknow
       params.maxPermissionMode === undefined &&
       params.terminal === undefined &&
       params.editor === undefined &&
-      params.bots === undefined
+      params.bots === undefined &&
+      params.agentReach === undefined
     )
       throw new DomainRpcError('invalid_params', 'Choose a limit to change')
     if (params.blocked !== undefined && typeof params.blocked !== 'boolean')
@@ -288,6 +290,8 @@ function validate(method: NetLocalMethod, value: unknown): Record<string, unknow
       throw new DomainRpcError('invalid_params', 'bots must be boolean')
     if (params.maxPermissionMode !== undefined && !isPermissionMode(params.maxPermissionMode))
       throw new DomainRpcError('invalid_params', 'Unknown permission mode')
+    if (params.agentReach !== undefined && !isAgentReach(params.agentReach))
+      throw new DomainRpcError('invalid_params', 'agentReach must be none, launched or all')
   }
   if (
     method === 'net.recovery.import' &&

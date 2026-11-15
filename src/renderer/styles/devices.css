@@ -279,6 +279,7 @@
   color: var(--text-secondary);
 }
 
+.devices-activity-who,
 .devices-activity-where {
   color: var(--text-secondary);
 }

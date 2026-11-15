@@ -3,6 +3,7 @@ import type { NodeId } from '../../../shared/net'
 import { isPermissionMode, type PermissionMode } from '../../../shared/permissionMode'
 import type { Clock } from '../contracts'
 import type { NetDatabase } from './database'
+import { AGENT_REACHES, isAgentReach, type AgentReach } from '../../../shared/net/local'
 
 /**
  * What this computer lets one other device do here, set on this computer alone. It never travels
@@ -36,10 +37,7 @@ export type NodePolicyChange = Partial<
   Pick<NodePolicy, 'blocked' | 'maxPermissionMode' | 'terminal' | 'editor' | 'bots' | 'agentReach'>
 >
 
-export type AgentReach = 'none' | 'launched' | 'all'
-export const AGENT_REACHES: readonly AgentReach[] = ['none', 'launched', 'all']
-export const isAgentReach = (value: unknown): value is AgentReach =>
-  (AGENT_REACHES as readonly unknown[]).includes(value)
+export { AGENT_REACHES, isAgentReach, type AgentReach }
 /** A device's agents change only the threads they started here, until a person on this computer allows more. */
 export const DEFAULT_AGENT_REACH: AgentReach = 'launched'
 
