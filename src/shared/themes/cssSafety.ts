@@ -1,12 +1,13 @@
 /**
- * What makes theme CSS load something from outside Mousse, checked on text. The renderer runs it on the CSS the
- * browser produced after parsing a theme (`sanitizeThemeCss`), rule by rule and then on the whole result; the daemon
- * runs it on a theme an agent writes, to say which rules will be dropped.
+ * What makes theme CSS load something from outside Mousse, checked on its tokens. The renderer runs it on the CSS as
+ * written (`withoutExternalLoads`), then on what the browser produced after parsing (`sanitizeThemeCss`), rule by rule
+ * and on the whole result; the daemon runs it on a theme an agent writes, to say what will be dropped.
  *
- * The check is deliberately wider than the browser: it removes comments outside strings and decodes CSS escapes first,
- * so `\75 rl(` and `u/**\/rl(` count as `url(`, and it refuses every function that can name a resource, also inside
- * strings. The only url() it allows is one quoted `data:` address. A false alarm drops one harmless declaration or rule;
- * a miss would let a theme fetch a URL.
+ * The text is split into tokens the way the CSS syntax does it (strings, escapes, comments, unquoted `url(` tokens and
+ * bracket nesting), so a string cannot hide an address and an escaped quote does not end one. The only url() allowed is
+ * one quoted `data:` address. The CSS is also checked once more with its comments removed, so a name split by a
+ * comment (`u/**\/rl(`) is refused too. A false alarm drops one harmless declaration or rule; a miss would let a theme
+ * fetch a URL.
  */
 
 /** Functions that fetch or name a resource. `url()` is allowed only for a quoted `data:` address, the rest never. */
@@ -24,161 +25,219 @@ const BLOCKED_FUNCTIONS: ReadonlySet<string> = new Set([
   'attr'
 ])
 
-/** At-rules that load or point at another resource, refused wherever they appear in the text. */
-const BLOCKED_AT_RULES = /@(?:import|namespace)\b/
+/** At-rules that load or point at another resource. */
+const BLOCKED_AT_RULES: ReadonlySet<string> = new Set(['import', 'namespace'])
 
-/**
- * The text with CSS escapes decoded (`\75 ` → `u`, `\r` → `r`, an escaped newline removed), lower-cased.
- * NUL and code points beyond Unicode become U+FFFD, as the CSS tokenizer does.
- */
-export function normalizeCssText(text: string): string {
-  let out = ''
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i]
-    if (ch !== '\\') {
-      out += ch
-      continue
-    }
-    const hex = /^[0-9a-fA-F]{1,6}/.exec(text.slice(i + 1, i + 7))
-    if (hex) {
-      const code = parseInt(hex[0], 16)
-      out += code === 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff) ? '\ufffd' : String.fromCodePoint(code)
-      i += hex[0].length
-      // One whitespace after a hex escape belongs to the escape.
-      const next = text[i + 1]
-      if (next === ' ' || next === '\t' || next === '\n' || next === '\f') i += 1
-      else if (next === '\r') i += text[i + 2] === '\n' ? 2 : 1
-      continue
-    }
-    const next = text[i + 1]
-    if (next === undefined) continue
-    if (next === '\n' || next === '\f') { i += 1; continue }
-    if (next === '\r') { i += text[i + 2] === '\n' ? 2 : 1; continue }
-    out += next
-    i += 1
-  }
-  return out.toLowerCase()
+const REPLACEMENT = String.fromCharCode(0xfffd)
+
+type Token =
+  | { kind: 'space' | 'comment'; start: number; end: number }
+  | { kind: 'string'; value: string; start: number; end: number }
+  /** An unquoted `url(…)`, complete or broken: never allowed. */
+  | { kind: 'url'; start: number; end: number }
+  | { kind: 'function' | 'ident' | 'at'; name: string; start: number; end: number }
+  | { kind: 'delim'; char: string; start: number; end: number }
+
+/** The input as the CSS syntax reads it: CR LF, CR and FF become LF, and NUL becomes U+FFFD. */
+function preprocess(text: string): string {
+  return text.replace(/\r\n?|\f/g, '\n').split(String.fromCharCode(0)).join(REPLACEMENT)
 }
 
-/**
- * The text with comments removed outside strings: a comment between letters (`u/**\/rl(`) is read as no gap at all, so
- * a split name is caught, while a comment inside a quoted address stays part of that address.
- */
-export function stripCommentsOutsideStrings(text: string): string {
-  let out = ''
-  let quote: string | null = null
-  for (let i = 0; i < text.length; i++) {
+const isSpace = (ch: string | undefined): boolean => ch === ' ' || ch === '\t' || ch === '\n'
+const isHex = (ch: string | undefined): boolean => ch !== undefined && /^[0-9a-fA-F]$/.test(ch)
+const isNameStart = (ch: string | undefined): boolean => ch !== undefined && (/^[a-zA-Z_]$/.test(ch) || ch.charCodeAt(0) >= 0x80)
+const isNameChar = (ch: string | undefined): boolean => ch !== undefined && (isNameStart(ch) || /^[0-9-]$/.test(ch))
+const isValidEscape = (text: string, at: number): boolean => text[at] === '\\' && at + 1 < text.length && text[at + 1] !== '\n'
+
+/** The escape whose backslash is at `at` - 1: what it stands for and where it ends. */
+function consumeEscape(text: string, at: number): { char: string; next: number } {
+  if (at >= text.length) return { char: REPLACEMENT, next: at }
+  if (!isHex(text[at])) return { char: text[at], next: at + 1 }
+  let end = at
+  while (end < text.length && end - at < 6 && isHex(text[end])) end++
+  const code = parseInt(text.slice(at, end), 16)
+  if (isSpace(text[end])) end++
+  const char = code === 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff) ? REPLACEMENT : String.fromCodePoint(code)
+  return { char, next: end }
+}
+
+function startsIdent(text: string, at: number): boolean {
+  const ch = text[at]
+  if (ch === '-') return isNameStart(text[at + 1]) || text[at + 1] === '-' || isValidEscape(text, at + 1)
+  return isNameStart(ch) || isValidEscape(text, at)
+}
+
+function consumeName(text: string, at: number): { name: string; next: number } {
+  let name = ''
+  let i = at
+  while (i < text.length) {
+    if (isNameChar(text[i])) { name += text[i]; i++ } else if (isValidEscape(text, i)) {
+      const escape = consumeEscape(text, i + 1)
+      name += escape.char
+      i = escape.next
+    } else break
+  }
+  return { name, next: i }
+}
+
+/** A string token from the quote at `at`; a newline ends it unfinished, as in CSS. */
+function consumeString(text: string, at: number): { value: string; next: number } {
+  const quote = text[at]
+  let value = ''
+  let i = at + 1
+  while (i < text.length) {
     const ch = text[i]
+    if (ch === quote) return { value, next: i + 1 }
+    if (ch === '\n') return { value, next: i }
     if (ch === '\\') {
-      out += ch + (text[i + 1] ?? '')
-      i += 1
+      if (i + 1 >= text.length) { i++; continue }
+      if (text[i + 1] === '\n') { i += 2; continue }
+      const escape = consumeEscape(text, i + 1)
+      value += escape.char
+      i = escape.next
       continue
     }
-    if (quote) {
-      out += ch
-      if (ch === quote) quote = null
-      continue
-    }
-    if (ch === '"' || ch === "'") {
-      quote = ch
-      out += ch
-      continue
-    }
+    value += ch
+    i++
+  }
+  return { value, next: i }
+}
+
+/** An unquoted url token from just after its `(`: up to the `)` that ends it, broken or not. */
+function consumeUrl(text: string, at: number): number {
+  let i = at
+  while (i < text.length) {
+    if (text[i] === ')') return i + 1
+    if (isValidEscape(text, i)) { i = consumeEscape(text, i + 1).next; continue }
+    i++
+  }
+  return i
+}
+
+function tokenize(text: string): Token[] {
+  const tokens: Token[] = []
+  let i = 0
+  while (i < text.length) {
+    const start = i
+    const ch = text[i]
     if (ch === '/' && text[i + 1] === '*') {
       const end = text.indexOf('*/', i + 2)
-      i = end < 0 ? text.length : end + 1
-      continue
+      i = end < 0 ? text.length : end + 2
+      tokens.push({ kind: 'comment', start, end: i })
+    } else if (isSpace(ch)) {
+      while (isSpace(text[i])) i++
+      tokens.push({ kind: 'space', start, end: i })
+    } else if (ch === '"' || ch === "'") {
+      const string = consumeString(text, i)
+      i = string.next
+      tokens.push({ kind: 'string', value: string.value, start, end: i })
+    } else if (ch === '@' && startsIdent(text, i + 1)) {
+      const name = consumeName(text, i + 1)
+      i = name.next
+      tokens.push({ kind: 'at', name: name.name.toLowerCase(), start, end: i })
+    } else if (startsIdent(text, i)) {
+      const name = consumeName(text, i)
+      i = name.next
+      const lower = name.name.toLowerCase()
+      if (text[i] !== '(') tokens.push({ kind: 'ident', name: lower, start, end: i })
+      else if (lower === 'url') {
+        let after = i + 1
+        while (isSpace(text[after])) after++
+        if (text[after] === '"' || text[after] === "'") {
+          i += 1
+          tokens.push({ kind: 'function', name: lower, start, end: i })
+        } else {
+          i = consumeUrl(text, i + 1)
+          tokens.push({ kind: 'url', start, end: i })
+        }
+      } else {
+        i += 1
+        tokens.push({ kind: 'function', name: lower, start, end: i })
+      }
+    } else {
+      i += 1
+      tokens.push({ kind: 'delim', char: ch, start, end: i })
     }
-    out += ch
   }
-  return out
+  return tokens
 }
 
-const ASCII_SPACE = /[\t\n\f\r ]/
-
-/**
- * Where a `url(` whose argument starts at `open` ends, when that argument is one quoted `data:` address
- * (`url("data:…")`, ASCII spaces allowed around it); null for anything else. An unquoted address, `#id`, http(s), a
- * relative path, or a quote that ends before the closing parenthesis are all refused.
- */
-function quotedDataUrlEnd(text: string, open: number): number | null {
-  let i = open
-  while (i < text.length && ASCII_SPACE.test(text[i])) i++
-  const quote = text[i]
-  if (quote !== '"' && quote !== "'") return null
-  const close = text.indexOf(quote, i + 1)
-  if (close < 0 || !text.slice(i + 1, close).startsWith('data:')) return null
-  let j = close + 1
-  while (j < text.length && ASCII_SPACE.test(text[j])) j++
-  return text[j] === ')' ? j + 1 : null
-}
-
-/** Why `text` could load something from outside Mousse, or null when it cannot. */
-export function externalLoadIn(text: string): string | null {
-  const normalized = normalizeCssText(stripCommentsOutsideStrings(text))
-  if (BLOCKED_AT_RULES.test(normalized)) return 'loads another stylesheet'
-  // Every function name, as the tokenizer reads one: a name directly followed by "(".
-  const functions = /(?<![a-z0-9_\-\u0080-\uffff])(-?-?[a-z_\u0080-\uffff][a-z0-9_\-\u0080-\uffff]*)\(/g
-  for (let match = functions.exec(normalized); match; match = functions.exec(normalized)) {
-    const name = match[1]
-    if (BLOCKED_FUNCTIONS.has(name)) return `uses ${name}()`
-    if (name !== 'url') continue
-    const end = quotedDataUrlEnd(normalized, match.index + match[0].length)
-    if (end === null) return 'uses a url() that is not a quoted data: address'
-    // The address itself is not scanned again: an SVG in it may name its own parts with url(#id).
-    functions.lastIndex = end
+/** Why these tokens could load something from outside Mousse, or null when they cannot. */
+function refusal(tokens: Token[]): string | null {
+  const next = (from: number): number => {
+    let k = from
+    while (k < tokens.length && (tokens[k].kind === 'space' || tokens[k].kind === 'comment')) k++
+    return k
+  }
+  for (let k = 0; k < tokens.length; k++) {
+    const token = tokens[k]
+    if (token.kind === 'at' && BLOCKED_AT_RULES.has(token.name)) return 'loads another stylesheet'
+    if (token.kind === 'url') return 'uses a url() that is not a quoted data: address'
+    if (token.kind !== 'function') continue
+    if (BLOCKED_FUNCTIONS.has(token.name)) return `uses ${token.name}()`
+    if (token.name !== 'url') continue
+    // url( then one quoted address that starts with data:, then ).
+    const address = next(k + 1)
+    const value = tokens[address]
+    if (value?.kind !== 'string' || !value.value.toLowerCase().startsWith('data:')) return 'uses a url() that is not a quoted data: address'
+    const close = tokens[next(address + 1)]
+    if (close?.kind !== 'delim' || close.char !== ')') return 'uses a url() that is not a quoted data: address'
   }
   return null
 }
 
-/**
- * The top-level pieces of `text`, each a statement ending in `;` or a block ending in its `}`, with strings, escapes
- * and comments respected; anything after the last piece is one more piece.
- */
-export function splitCssPieces(text: string): string[] {
-  const pieces: string[] = []
-  let start = 0
-  let depth = 0
-  let quote: string | null = null
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i]
-    if (ch === '\\') { i += 1; continue }
-    if (quote) { if (ch === quote) quote = null; continue }
-    if (ch === '"' || ch === "'") { quote = ch; continue }
-    if (ch === '/' && text[i + 1] === '*') {
-      const end = text.indexOf('*/', i + 2)
-      i = end < 0 ? text.length : end + 1
-      continue
-    }
-    if (ch === '{') depth++
-    else if (ch === '}') {
-      if (depth > 0) depth--
-      if (depth === 0) { pieces.push(text.slice(start, i + 1)); start = i + 1 }
-    } else if (ch === ';' && depth === 0) {
-      pieces.push(text.slice(start, i + 1))
-      start = i + 1
-    }
-  }
-  if (start < text.length) pieces.push(text.slice(start))
-  return pieces
+/** Why `text` could load something from outside Mousse, or null when it cannot. */
+export function externalLoadIn(text: string): string | null {
+  const input = preprocess(text)
+  const tokens = tokenize(input)
+  const direct = refusal(tokens)
+  if (direct) return direct
+  // The same CSS without its comments: a name split by one (`u/**/rl(`) is refused as what it reads like.
+  const joined = tokens.filter((token) => token.kind !== 'comment').map((token) => input.slice(token.start, token.end)).join('')
+  return joined === input ? null : refusal(tokenize(joined))
 }
 
-/** The `{` that opens a block piece, outside strings and comments; -1 for a statement. */
-function blockOpen(piece: string): number {
-  let quote: string | null = null
-  for (let i = 0; i < piece.length; i++) {
-    const ch = piece[i]
-    if (ch === '\\') { i += 1; continue }
-    if (quote) { if (ch === quote) quote = null; continue }
-    if (ch === '"' || ch === "'") { quote = ch; continue }
-    if (ch === '/' && piece[i + 1] === '*') {
-      const end = piece.indexOf('*/', i + 2)
-      i = end < 0 ? piece.length : end + 1
-      continue
+/** A top-level piece of CSS: a statement ending in `;`, or a block with where its braces are. */
+interface Piece {
+  text: string
+  /** Offsets of the block's `{` and its matching `}` in `text`; absent for a statement or an unfinished block. */
+  open?: number
+  close?: number
+}
+
+/**
+ * The top-level pieces of `text`: statements end at a `;` and blocks at their matching `}`, outside strings, comments,
+ * url tokens and any (), [] or {} nesting. Anything after the last piece is one more piece.
+ */
+function splitPieces(text: string): Piece[] {
+  const pieces: Piece[] = []
+  const stack: string[] = []
+  let start = 0
+  let open: number | undefined
+  for (const token of tokenize(text)) {
+    if (token.kind === 'function') { stack.push(')'); continue }
+    if (token.kind !== 'delim') continue
+    const ch = token.char
+    if (ch === '{' || ch === '(' || ch === '[') {
+      if (ch === '{' && stack.length === 0) open = token.start - start
+      stack.push(ch === '{' ? '}' : ch === '(' ? ')' : ']')
+    } else if (ch === '}' || ch === ')' || ch === ']') {
+      // A closer that does not match the open bracket is part of the content, as in CSS.
+      if (stack[stack.length - 1] !== ch) continue
+      stack.pop()
+      if (ch === '}' && stack.length === 0) {
+        pieces.push({ text: text.slice(start, token.end), open, close: token.start - start })
+        start = token.end
+        open = undefined
+      }
+    } else if (ch === ';' && stack.length === 0) {
+      pieces.push({ text: text.slice(start, token.end) })
+      start = token.end
+      open = undefined
     }
-    if (ch === '{') return i
   }
-  return -1
+  if (start < text.length) pieces.push({ text: text.slice(start) })
+  return pieces
 }
 
 /**
@@ -188,16 +247,15 @@ function blockOpen(piece: string): number {
  * because a browser writes `url(data:…)` back with quotes.
  */
 export function withoutExternalLoads(text: string, dropped: Array<{ text: string; reason: string }> = [], depth = 0): string {
-  return splitCssPieces(text).map((piece) => {
-    const reason = externalLoadIn(piece)
-    if (!reason) return piece
-    const open = blockOpen(piece)
-    const close = piece.lastIndexOf('}')
-    if (open < 0 || close < open || depth > 16 || externalLoadIn(piece.slice(0, open))) {
-      dropped.push({ text: piece.replace(/\s+/g, ' ').trim().slice(0, 160), reason })
+  return splitPieces(depth === 0 ? preprocess(text) : text).map((piece) => {
+    const reason = externalLoadIn(piece.text)
+    if (!reason) return piece.text
+    const { open, close } = piece
+    if (open === undefined || close === undefined || depth > 16 || externalLoadIn(piece.text.slice(0, open))) {
+      dropped.push({ text: piece.text.replace(/\s+/g, ' ').trim().slice(0, 160), reason })
       return ''
     }
-    return `${piece.slice(0, open + 1)}${withoutExternalLoads(piece.slice(open + 1, close), dropped, depth + 1)}${piece.slice(close)}`
+    return `${piece.text.slice(0, open + 1)}${withoutExternalLoads(piece.text.slice(open + 1, close), dropped, depth + 1)}${piece.text.slice(close)}`
   }).join('')
 }
 

@@ -56,6 +56,10 @@ it('applies the safe rules of a hostile theme and makes no request, pauses it wh
     expect(evidence.theme.measured.keepData).toContain('data:image/svg+xml')
     // An unquoted data: address and #id are dropped, declaration by declaration: the rule's color stays.
     expect(evidence.theme.measured).toMatchObject({ unquotedDataColor: 'rgb(22, 23, 24)', unquotedDataImage: 'none', idUrlImage: 'none' })
+    // Strings around an unquoted address do not hide it; an escaped quote stays inside a quoted address; a brace in an
+    // unquoted url() leaves the next rule a rule of its own.
+    expect(evidence.theme.measured).toMatchObject({ stringHiddenColor: 'rgb(25, 26, 27)', stringHiddenImage: 'none', braceColor: 'rgb(28, 29, 30)', braceImage: 'none', afterBraceColor: 'rgb(31, 32, 33)' })
+    expect(evidence.theme.measured.escapedSvg).toContain('data:image/svg+xml')
 
     // While a person is asked to decide, no theme rule or color applies: a theme cannot relabel Approve as Deny.
     expect(evidence.decision.before).toMatchObject({ sidebar: 'rgb(1, 2, 3)', token: '#010203', paused: false })

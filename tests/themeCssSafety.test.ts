@@ -5,7 +5,7 @@
  * url() a theme may use is one quoted data: address.
  */
 import { describe, expect, it } from 'vitest'
-import { externalLoadIn, normalizeCssText, withoutExternalLoads } from '../src/shared/themes/cssSafety'
+import { externalLoadIn, withoutExternalLoads } from '../src/shared/themes/cssSafety'
 
 describe('externalLoadIn', () => {
   // Inputs: plain and escaped function names, quoted and unquoted addresses, every function that names a resource,
@@ -19,7 +19,6 @@ describe('externalLoadIn', () => {
     ['hex-escaped u', 'a { background: \\75 rl(https://evil.example/x) }'],
     ['six-digit escape', 'a { background: \\000075rl(https://evil.example/x) }'],
     ['escaped letter', 'a { background: u\\rl(https://evil.example/x) }'],
-    ['escape split by newline', 'a { background: ur\\\nl(https://evil.example/x) }'],
     ['custom property', ':root { --x: url(https://evil.example/x) }'],
     ['escaped custom property', ':root { --x: \\75\\72\\6c(https://evil.example/x) }'],
     ['var() fallback', 'a { background: var(--nope, url(https://evil.example/x)) }'],
@@ -59,7 +58,8 @@ describe('externalLoadIn', () => {
     ['comment inside a quoted address', 'a { background: url("data/**/:x") }'],
     ['comment before the quote', 'a { background: url(/**/https://evil.example/x) }'],
     ['text after the quoted address', 'a { background: url("data:x" https://evil.example/x) }'],
-    ['an escaped quote ending the address early', 'a { background: url("data:x\\22 x.png") }']
+    // Strings in other declarations cannot pair up across an unquoted address and hide it.
+    ['an unquoted data: address between two strings', `a { --x: 'url("data:foo'; background: url(data:image/png;base64,AA); --y: '")'; }`]
   ]
   it.each(loads)('refuses %s', (_name, css) => {
     expect(externalLoadIn(css)).not.toBeNull()
@@ -73,21 +73,17 @@ describe('externalLoadIn', () => {
     // The address is not scanned again: an SVG in it may name its own parts.
     ['an SVG data: address that uses url(#id) inside', `a { background: url("data:image/svg+xml,<svg><rect fill='url(#g)'/></svg>") }`],
     ['a comment outside the quoted address', 'a { background: /* tiles */ url("data:image/png;base64,AA") }'],
+    // An escaped quote is part of the address, not its end.
+    ['escaped quotes inside a quoted data: address', 'a { background: url("data:image/svg+xml,<svg xmlns=\\"http://www.w3.org/2000/svg\\"></svg>") }'],
+    ['an escaped quote that stays inside the address', 'a { background: url("data:x\\22 x.png") }'],
+    // A backslash before a newline is no escape: `ur\` then `l(` is no url() at all, and the browser drops it as invalid.
+    ['a backslash-newline between letters', 'a { background: ur\\\nl(x) }'],
     ['var() and calc()', 'a { padding: calc(var(--space-8) * 2) }'],
     ['gradients', 'a { background: linear-gradient(90deg, red, color-mix(in srgb, red, blue)) }'],
     ['@keyframes', '@keyframes k { from { opacity: 0 } to { opacity: 1 } }']
   ]
   it.each(safe)('keeps %s', (_name, css) => {
     expect(externalLoadIn(css)).toBeNull()
-  })
-})
-
-describe('normalizeCssText', () => {
-  it('decodes escapes the way the CSS tokenizer does', () => {
-    expect(normalizeCssText('\\75 rl')).toBe('url')
-    expect(normalizeCssText('\\000075rl')).toBe('url')
-    expect(normalizeCssText('U\\52L')).toBe('url')
-    expect(normalizeCssText('\\0')).toBe('\ufffd')
   })
 })
 
@@ -106,9 +102,23 @@ describe('withoutExternalLoads: the CSS as written, before it is parsed', () => 
   })
 
   it('drops a rule whose selector or at-rule prelude names an address, and goes into nested blocks', () => {
-    expect(flat(run('a[x="url(y)"] { color: red } b { color: blue }').css)).toBe(flat('b { color: blue }'))
+    expect(flat(run('@supports (background: url(x.png)) { a { color: red } } b { color: blue }').css)).toBe(flat('b { color: blue }'))
+    // Quoted text in a selector is text, not an address: the rule stays.
+    expect(flat(run('a[title="url(y)"] { color: red }').css)).toBe(flat('a[title="url(y)"] { color: red }'))
     expect(flat(run('@media (min-width: 1px) { a { color: red; background: url(x.png) } b { color: blue } }').css))
       .toBe(flat('@media (min-width: 1px) { a { color: red; } b { color: blue } }'))
+  })
+
+  it('keeps a brace inside an unquoted url() out of the split, so the rules around it stay as they are', () => {
+    const { css, dropped } = run('a { background: url(data:text/plain,{); color: red } b { color: blue }')
+    expect(flat(css)).toBe(flat('a { color: red } b { color: blue }'))
+    expect(dropped).toEqual([expect.objectContaining({ text: 'background: url(data:text/plain,{);' })])
+    expect(flat(run('a { background: url(data:text/plain,}); color: red } b { color: blue }').css)).toBe(flat('a { color: red } b { color: blue }'))
+  })
+
+  it('drops an unquoted address that strings around it try to hide, and keeps the strings', () => {
+    const { css } = run(`a { --x: 'url("data:foo'; background: url(data:image/png;base64,AA); --y: '")'; }`)
+    expect(flat(css)).toBe(flat(`a { --x: 'url("data:foo'; --y: '")'; }`))
   })
 
   it('keeps a semicolon or brace inside a quoted address, and a comment, out of the split', () => {
