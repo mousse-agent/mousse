@@ -225,3 +225,15 @@ it('upkeep retries pending removals without rescanning all activations or repeat
   expect(all.mock.calls.filter(([sql]) => sql.includes("'$.completed'") && sql.includes('SELECT id'))).toHaveLength(0)
   expect(warn.mock.calls.filter(([message]) => message === 'a completed bot schedule could not be removed')).toHaveLength(1)
 })
+
+it('settles completion without a scheduler read from the merged progress hook', async () => {
+  const s = await scheduled()
+  await s.tool.handler({ why: 'Finished.' }, s.ctx)
+  const finishProgress = vi.fn()
+  f.host.progress = { finishProgress } as NonNullable<typeof f.host.progress>
+  vi.spyOn(f.book, 'get').mockImplementation(() => { throw new Error('jobs locked') })
+  await finish(f, s.payload, 'completed', { text: 'Price is low.' })
+  expect(f.store.activation(s.row.id)!.status).toBe('done')
+  expect(chatOf(f, botId).some(row => row.kind === 'run_report' && row.text === 'Price is low.')).toBe(true)
+  expect(finishProgress).toHaveBeenCalledWith(botId, s.row.id, false)
+})

@@ -51,6 +51,8 @@ it('settles cancelled waiting runs after the job is removed without creating fai
 it('settles a deleted bot\'s scheduled runs without failure items', async () => {
   const schedule = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Check price.' }, 'owner')
   await f.tickSchedules(new Date(T0 + 5 * 60_000))
+  const row = f.store.listActivations(botId).find(row => row.trigger.kind === 'schedule')!
+  f.automationRuns.report({ threadId: '', activationId: row.id }, 'needs_you', 'An unfinished choice.')
   await f.bots.remove(botId)
   syncInbox()
   const run = f.automationRuns.list().runs.find(run => run.jobId === schedule.jobId)!
