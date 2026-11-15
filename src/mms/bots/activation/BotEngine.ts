@@ -1328,6 +1328,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /** The scheduler retries a claim as started before making any new admission or lateness decision. */
   findScheduledOccurrence(input: { botId: string; scheduleId: string; occurrenceKey: string }): { activationId: string; occurrenceAt: string } | undefined {
+    if (this.scheduleHasCompletion(input.botId, input.scheduleId)) return undefined
     const row = this.store.activationByKey(`sched:${input.botId}:${input.scheduleId}:${input.occurrenceKey}`)
     if (row?.trigger.kind === 'schedule') return { activationId: row.id, occurrenceAt: row.trigger.occurrenceAt }
     return undefined
@@ -1348,6 +1349,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     | { kind: 'not_ready' } {
     if (!this.startupPassed) return { kind: 'not_ready' }
     const { botId, scheduleId, prompt, occurrenceAt } = input
+    if (this.scheduleHasCompletion(botId, scheduleId)) return { kind: 'skipped', reason: 'schedule_completed' }
     const registry = this.store.registry(botId)
     if (!registry || registry.deletedAt) return { kind: 'skipped', reason: 'bot_deleted' }
     this.endUsagePauseIfDue(botId, input.now ?? new Date(this.now()))
@@ -6295,8 +6297,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (row?.trigger.kind !== 'schedule') continue
       try { this.host.schedules?.remove(row.botId, row.trigger.scheduleId) } catch (error) {
         console.warn('a completed bot schedule could not be removed', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
-        // No new occurrence may run until this intent can be applied.
-        throw error
+        // The hand-over guard enforces the intent even while jobs.json cannot be written.
       }
     }
     this.dropRemovedScheduleRuns()
@@ -8233,6 +8234,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // These hold no executing turn: cancel their queued work and withdraw their asks atomically in bots.db.
     const rows = this.store.activationsWith(['queued', 'waiting_grant', 'paused', 'blocked'])
     for (const row of rows) if (botId === undefined || row.botId === botId) this.cancelRemovedScheduleRun(row)
+  }
+
+  private scheduleHasCompletion(botId: string, scheduleId: string): boolean {
+    return Boolean(this.store.get(`SELECT 1 FROM bot_activations WHERE bot_id = ?
+      AND json_extract(trigger_json, '$.kind') = 'schedule'
+      AND json_extract(trigger_json, '$.scheduleId') = ?
+      AND json_extract(trigger_json, '$.completed') IS NOT NULL LIMIT 1`, botId, scheduleId))
   }
 
   /** The activation chooses the schedule, never an argument supplied by the model. */
