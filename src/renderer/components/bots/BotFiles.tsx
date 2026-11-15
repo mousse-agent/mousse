@@ -41,9 +41,15 @@ const reason = (error: unknown) => String((error as { message?: string })?.messa
 /**
  * The actions on a file of this computer (localFiles in the preload): Show in folder selects it in File Explorer,
  * Finder or the Files app; Save as… copies it where the owner picks; Copy image puts a picture on the clipboard. A
- * refusal ("That file does not exist.") is said through `failed`.
+ * refusal ("Can't find notes.md. It may have been moved or deleted.") is said through `failed`. `open` is a chip's
+ * click on a full path: a file goes to `show` (the Files pane), a folder opens in the file manager.
  */
 export const fileActions = {
+  open: (path: string, show: (path: string) => void, failed?: (message: string) => void) => {
+    // A short name is read from the chat's own folder by the pane.
+    if (!isAbsolutePath(path)) return show(path)
+    void window.mousse.localFiles.open(path).then((kind) => { if (kind === 'file') show(path) }).catch((error) => failed?.(reason(error)))
+  },
   showInFolder: (path: string, failed?: (message: string) => void) => { void window.mousse.localFiles.showInFolder(path).catch((error) => failed?.(reason(error))) },
   saveAs: (path: string, failed?: (message: string) => void) => { void window.mousse.localFiles.saveCopy(path).catch((error) => failed?.(reason(error))) },
   copyImage: (path: string, failed?: (message: string) => void) => { void window.mousse.localFiles.copyImage(path).catch((error) => failed?.(reason(error))) }
