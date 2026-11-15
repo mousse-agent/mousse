@@ -1,5 +1,5 @@
 import { addMs, type EffectOutbox, type EffectSettlement } from './EffectOutbox'
-import type { EffectKind, EffectLaneClass, EffectRecord } from './types'
+import { effectLaneClass, type EffectKind, type EffectLaneClass, type EffectRecord } from './types'
 
 export type EffectExecutor = (
   effect: EffectRecord,
@@ -98,6 +98,8 @@ export class EffectWorker {
   private readonly wakers = new Set<() => void>()
   private generation = 0
   private readonly running = new Map<string, AbortController>()
+  /** Executions in flight per lane class: a full `turn` lane means a new turn waits for a free slot. */
+  private readonly busy: Record<EffectLaneClass, number> = { turn: 0, control: 0, replaySafe: 0 }
   /** Executor promises still running, including ones a race already gave up on. */
   private readonly executing = new Set<Promise<unknown>>()
 
@@ -169,6 +171,11 @@ export class EffectWorker {
     return this.running.size
   }
 
+  /** The profile's turn slots: how many run a turn now, and how many it has. */
+  turnSlots(): { running: number; limit: number } {
+    return { running: this.busy.turn, limit: this.fibres.turn }
+  }
+
   private async loop(signal: AbortSignal, lanes: readonly EffectLaneClass[]): Promise<void> {
     while (!signal.aborted) {
       const generation = this.generation
@@ -222,6 +229,8 @@ export class EffectWorker {
     const timeout = AbortSignal.timeout(effect.timeoutMs)
     const signal = AbortSignal.any([stopSignal, cancel.signal, timeout, lease.signal])
     this.running.set(effectId, cancel)
+    const lane = effectLaneClass(effect.kind)
+    this.busy[lane]++
     const renewLease = (): boolean => {
       let renewed = false
       try {
@@ -253,6 +262,7 @@ export class EffectWorker {
     } finally {
       clearInterval(renewer)
       this.running.delete(effectId)
+      this.busy[lane]--
     }
 
     let settlement: EffectSettlement

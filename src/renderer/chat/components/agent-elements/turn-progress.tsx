@@ -45,6 +45,7 @@ export function useTurnProgressState(): TurnProgressState | null {
 export type TurnProgressKind =
   | "starting"
   | "waiting"
+  | "waiting-slot"
   | "thinking"
   | "writing"
   | "preparing-tool"
@@ -211,6 +212,16 @@ function describeProgress({ state, messages, stepSince, awaitingSubagents, spawn
   const last = messages[messages.length - 1];
   const compacting = last && isCompactionRow(last) && (last.metadata as { compacting?: boolean } | undefined)?.compacting === true;
   if (compacting) return standalone ? { kind: "compacting", label: "Compacting context…" } : null;
+
+  // Not started: every turn slot runs another turn. Not a thought, so no thinking icon.
+  if (step?.kind === "waiting_slot") {
+    const running = step.running === 1 ? "1 turn running" : `${step.running} turns running`;
+    return {
+      kind: "waiting-slot",
+      label: `Waiting for a free slot · ${running}`,
+      title: `Mousse runs up to ${step.running} turns at once. This one starts when one of them ends.`,
+    };
+  }
 
   if (step?.kind === "retrying") {
     const until = step.delayMs !== undefined ? (stepSince ?? now) + step.delayMs : NaN;
