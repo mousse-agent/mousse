@@ -7858,7 +7858,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /** No unfinished work, unread joined chat messages, or due time within `within` milliseconds (default 30 minutes). */
   isIdle(botId: string, { within = 30 * 60_000 }: { within?: number } = {}): boolean {
-    if (this.store.activationsIn(botId, NOT_ENDED).length) return false
+    if (this.store.activationsIn(botId, ['queued', 'running', 'waiting_grant', 'blocked'])
+      .some((row) => row.status !== 'blocked' || workWaits(row))) return false
     // A turn can have ended before its joined messages are requeued by upkeep.
     if (this.store.get(`SELECT 1 FROM bot_work_notes n JOIN bot_activations a ON a.id = n.activation_id
       WHERE n.bot_id = ? AND a.lane = 'chat' AND n.applied_at IS NULL LIMIT 1`, botId)) return false
