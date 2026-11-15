@@ -107,7 +107,7 @@ describe('held-back credentials', () => {
     const seq = fx.message({ botId: 'ada', id: 'link', author: 'owner', text: `Document ${LINK}` })
     for (const query of ['', 'Document']) {
       const hit = fx.store.search('ada', { query }).find((hit) => hit.ref === `j${seq}`)!
-      expect(hit.snippet).toContain(LINK)
+      expect(hit.snippet.replace(/[«»]/g, '')).toContain(LINK)
     }
     fx.message({ botId: 'ada', id: 'long', author: 'owner', text: `password: ${'ordinary '.repeat(100)}tailword` })
     const hit = fx.store.search('ada', { query: 'tailword' })[0]!
