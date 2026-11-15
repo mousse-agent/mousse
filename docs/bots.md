@@ -45,7 +45,7 @@ Each bot has two lanes. The chat lane runs one activation at a time; the run lan
 
 The chat is the record. **Telling** is the banner and possible sound for an unread message, decided and kept by the service when the message is posted. It never delays the chat. Quiet hours are off; setting them comes later.
 
-- **Now:** a reminder the owner set (including older reminders whose ownership is unknown), or a reply, ask or question in a chat turn started by the owner's message or tap. These go by themselves and are exempt from sound caps.
+- **Now:** a reminder the owner set (including older reminders whose ownership is unknown), a schedule’s fixed line whose job records that the owner asked for it, or a reply, ask or question in a chat turn started by the owner's message or tap. These go by themselves and are exempt from sound caps.
 - **Soon:** reports at or above a schedule's Tell me level, work reports, unattended replies, asks, questions, errors, question nudges, and the notice that schedules were paused after failures. Failures always tell.
 - **Later:** reports below Tell me, waiting for internet, and dropped scheduled runs. These never cause a banner or sound alone; they count in the next fold.
 - Owner messages, service lines and answered cards tell nothing.
