@@ -15,7 +15,7 @@ import { expandComposerQuotes, insertQuoteToken, registerQuote } from '../lib/co
 /**
  * The owner's bots in the Chats tab (Bot Phase 1 §5.12): the list, each bot's chat as far as it
  * was read, the live chip of a working bot, owner messages on their way, and About's detail.
- * Pushed by `bots.changed`, `bots.message` and `bots.activity`; while the Chats tab is open,
+ * Pushed by `bots.changed`, `bots.message` and `bots.activity`; while the title bar or Chats tab is mounted,
  * `useBotsPolling` lists them again every 30 seconds while the window shows, and as soon as it shows
  * again, in case an event was missed. A list that changed nothing keeps the objects held, so nothing renders again for it.
  */

@@ -68,3 +68,8 @@ export function worstOf(levels: Iterable<ThreadAttention>): ThreadAttention {
 export function needsMeLabel(count: number): string {
   return count === 1 ? '1 thread needs you' : `${count} threads need you`
 }
+
+/** The app badge counts threads and bots together. Thread-only lists keep `needsMeLabel`. */
+export function attentionCountLabel(count: number): string {
+  return count === 1 ? '1 item needs you' : `${count} items need you`
+}

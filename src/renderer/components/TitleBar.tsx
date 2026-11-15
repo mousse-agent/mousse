@@ -3,6 +3,7 @@ import { Edit, Info, PanelLeft, PanelRightClose, PanelRightOpen } from '../lib/i
 import { useShortcutTitle } from '../commands/commandRegistry'
 import { createAndSelectThread } from '../lib/threadActions'
 import { useChatsStore } from '../stores/chatsStore'
+import { useBotsPolling } from '../stores/botsStore'
 import { WindowCaptionButtons } from './WindowCaptionButtons'
 import { TitleBarNav } from './TitleBarNav'
 import { IconButton } from './IconButton'
@@ -15,9 +16,9 @@ import {
   useSideCardVisible
 } from './sideCard/sideCardLogic'
 import { useAppStore } from '../stores/appStore'
-import { useNeedsMeThreads } from '../lib/needsMe'
+import { useNeedsMeCount } from '../lib/needsMe'
 import { useMainAreaAvailable } from '../lib/mainAreaAvailable'
-import { needsMeLabel } from '../../shared/threadAttention'
+import { attentionCountLabel } from '../../shared/threadAttention'
 import { channelForVersion } from '../../shared/updates'
 import stableLogoIcon from '../assets/mousse_logo_icon.svg'
 import nightlyLogoIcon from '../assets/mousse_logo_icon_nightly.webp'
@@ -28,6 +29,7 @@ const BUILD_VERSION = typeof __MOUSSE_VERSION__ === 'string' ? __MOUSSE_VERSION_
 const logoIcon = channelForVersion(BUILD_VERSION) === 'nightly' ? nightlyLogoIcon : stableLogoIcon
 
 export function TitleBar() {
+  useBotsPolling()
   const threadsSidebarOpen = useAppStore((s) => s.threadsSidebarOpen)
   const setThreadsSidebarOpen = useAppStore((s) => s.setThreadsSidebarOpen)
   const mainAreaOpen = useAppStore((s) => s.mainAreaOpen)
@@ -35,7 +37,7 @@ export function TitleBar() {
   const sideCardVisible = useSideCardVisible()
   const sideCardMode = useSideCardMode()
   const sideCardUnavailable = useSideCardUnavailable()
-  const needsMeCount = useNeedsMeThreads().length
+  const needsMeCount = useNeedsMeCount()
   // The sidebar shows who needs the person; while it is closed, its toggle carries the count.
   const showBadge = !threadsSidebarOpen && needsMeCount > 0
   // The dock or taskbar carries the same count while the window is in the background.
@@ -44,7 +46,7 @@ export function TitleBar() {
   }, [needsMeCount])
   // In the Chats tab, New starts an agent chat. Search is in the navigation rail.
   const chatsMode = useAppStore((s) => s.sidebarMode === 'chats')
-  const sidebarLabel = threadsSidebarOpen ? 'Hide sidebar' : showBadge ? `Show sidebar · ${needsMeLabel(needsMeCount)}` : 'Show sidebar'
+  const sidebarLabel = threadsSidebarOpen ? 'Hide sidebar' : showBadge ? `Show sidebar · ${attentionCountLabel(needsMeCount)}` : 'Show sidebar'
   const sidebarTitle = useShortcutTitle(sidebarLabel, 'sidebar.toggle')
   const newThreadTitle = useShortcutTitle('New thread', 'thread.new')
   const detailsTitle = useShortcutTitle('Thread details', 'sideCard.toggle')

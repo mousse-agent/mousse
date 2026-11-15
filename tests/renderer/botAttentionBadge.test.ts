@@ -58,7 +58,7 @@ it('loads waiting bots on mount without a change event or opening Chats', async 
   expect(badge).toHaveBeenLastCalledWith(1)
 })
 
-it.each(['ask answered', 'chat question answered', 'work question answered', 'paused', 'deleted'])('clears the badge after %s on another window or device', async (reason) => {
+it.each(['answered', 'paused', 'deleted'])('clears the badge after %s on another window or device', async (reason) => {
   fake.bots = [summary('a', { state: 'needs_you' })]
   await show()
   expect(badge).toHaveBeenLastCalledWith(1)
@@ -66,4 +66,14 @@ it.each(['ask answered', 'chat question answered', 'work question answered', 'pa
   await change()
   expect(badge).toHaveBeenLastCalledWith(0)
   expect(host.querySelector('button[aria-label="Show sidebar"]')).not.toBeNull()
+})
+
+
+it('counts a waiting bot once despite multiple waiting work items, including when stuck', async () => {
+  fake.bots = [summary('a', { state: 'stuck', needsOwner: true, work: ['one', 'two'].map((id) => ({ id, title: id, status: 'paused', waitsFor: 'answer', startedAt: '2026-11-01' })) })]
+  await show()
+  expect(badge).toHaveBeenLastCalledWith(1)
+  fake.bots = [summary('a', { state: 'stuck' })]
+  await change()
+  expect(badge).toHaveBeenLastCalledWith(0)
 })
