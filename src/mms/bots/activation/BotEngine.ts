@@ -7002,7 +7002,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // An automation the bot creates is on at once, with no step for the owner; the turn's message shows it as a card
       // with Pause and Open, so the owner sees each one and can stop it there.
       add: (botId, schedule, from) => {
-        const added = this.addSchedule(botId, schedule, 'bot')
+        const added = this.addSchedule(botId, schedule, 'bot', from ? this.timerOwnerSet(botId, from) : false)
         if (from) keepMousseCard(from, { type: 'automation', jobId: added.jobId, name: added.name, label: added.label })
         return { scheduleId: added.scheduleId, label: added.label, ...(from ? { card: true as const } : {}) }
       },
@@ -7476,6 +7476,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
   }
 
+  private timerOwnerSet(botId: string, from: string): boolean {
+    const row = this.store.activation(from)
+    return !!row && row.botId === botId && memoryLaneOf(row) === 'chat'
+  }
+
   /** `remind`: a one-off reminder of this bot, said (or its work started) at `dueAt`. */
   addReminder(botId: string, from: string, input: { dueAt: string; text: string; work?: { title: string; brief: string } }): { reminderId: string; dueAt: string } {
     this.entry(botId)
@@ -7490,7 +7495,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const replyTo = this.ownerMessageOf(from) ?? null
     const reminderId = `rem_${randomUUID()}`
     const dueAt = new Date(Math.max(due, this.now())).toISOString()
-    this.store.insertReminder({ id: reminderId, botId, dueAt, text, work, replyTo, createdAt: this.store.now() })
+    this.store.insertReminder({ id: reminderId, botId, dueAt, text, work, replyTo, createdAt: this.store.now(), ownerSet: this.timerOwnerSet(botId, from) })
     this.armDue()
     this.changed({ botId })
     return { reminderId, dueAt }
@@ -7524,7 +7529,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       dueAt = new Date(Math.max(due, this.now())).toISOString()
     }
     const wakeId = `rem_${randomUUID()}`
-    this.store.insertReminder({ id: wakeId, botId, dueAt, text: brief, work: null, replyTo: this.ownerMessageOf(from) ?? null, createdAt: this.store.now(), wake: true, event, chain })
+    this.store.insertReminder({ id: wakeId, botId, dueAt, text: brief, work: null, replyTo: this.ownerMessageOf(from) ?? null, createdAt: this.store.now(), wake: true, event, chain, ownerSet: false })
     this.armDue()
     this.changed({ botId })
     return { wakeId, dueAt, label: event ? wakeEventLabel(event) : '' }
@@ -7582,7 +7587,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const limitMs = minutes * 60_000
     // Its wake gives up a little after the time limit, as a backstop for a process that never reported.
     const dueAt = new Date(this.now() + limitMs + 2 * 60_000).toISOString()
-    this.store.insertReminder({ id: watcherId, botId, dueAt, text: brief, work: null, replyTo: this.ownerMessageOf(from) ?? null, createdAt: this.store.now(), wake: true, event, chain })
+    this.store.insertReminder({ id: watcherId, botId, dueAt, text: brief, work: null, replyTo: this.ownerMessageOf(from) ?? null, createdAt: this.store.now(), wake: true, event, chain, ownerSet: false })
     const scratch = join(this.store.directory, 'scratch', `watch-${watcherId}`)
     try {
       mkdirSync(join(scratch, 'tmp'), { recursive: true, mode: 0o700 })
@@ -8162,11 +8167,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * apart. The bot adds its own with `bot_schedule_add`, the owner from the Automations page; it needs no approval
    * (schedules are not permissions) and changes no revision.
    */
-  addSchedule(botId: string, input: { when: BotSchedule['when']; prompt: string; model?: string; pick?: BotModelPick }, createdBy: 'owner' | 'bot'): BotScheduleEntry {
+  addSchedule(botId: string, input: { when: BotSchedule['when']; prompt: string; model?: string; pick?: BotModelPick }, createdBy: 'owner' | 'bot', ownerAsked = false): BotScheduleEntry {
     this.entry(botId)
     let added: BotScheduleEntry
     try {
-      added = this.scheduleBook().add(botId, input, createdBy)
+      added = this.scheduleBook().add(botId, input, createdBy, { ownerAsked })
     } catch (error) {
       if (error instanceof BotScheduleError) throw new BotEngineError(error.code, error.message)
       throw error
