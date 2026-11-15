@@ -1373,7 +1373,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * skipped and says why. Other runs and the owner's work never skip it: they run beside it. An open ask is not a skip:
    * asks don't block. Before the startup pass nothing is inserted and the occurrence stays due.
    */
-  runScheduledOccurrence(input: { botId: string; scheduleId: string; prompt: string; occurrenceAt: string; missed?: ScheduledMissedRuns; now?: Date; model?: string; pick?: BotModelPick }):
+  runScheduledOccurrence(input: { botId: string; scheduleId: string; prompt: string; occurrenceAt: string; occurrenceKey?: string; missed?: ScheduledMissedRuns; now?: Date; model?: string; pick?: BotModelPick }):
     | { kind: 'started'; activationId: string }
     | { kind: 'skipped'; reason: string }
     | { kind: 'not_ready' } {
@@ -1414,7 +1414,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     const id = `act_${randomUUID()}`
     // The same occurrence handed over again (after a crash): it was inserted already, whatever runs now.
-    const key = `sched:${botId}:${scheduleId}:${occurrenceAt}`
+    // Labels use the latest due time; a retry must still reuse the original claim's run.
+    const key = `sched:${botId}:${scheduleId}:${input.occurrenceKey ?? occurrenceAt}`
     const existing = this.store.activationByKey(key)
     if (existing) return { kind: 'started', activationId: existing.id }
     const made = this.store.db.transaction(() => {

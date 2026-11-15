@@ -42,7 +42,7 @@ export interface ScheduledJobRunner {
  * ready yet (the occurrence stays due).
  */
 export interface ScheduledBotRunner {
-  runOccurrence(input: { jobId: string; botId: string; scheduleId: string; prompt: string; occurrenceAt: string; missed?: ScheduledMissedRuns; now: Date; model?: string; pick?: NonNullable<ScheduledJob['bot']>['pick'] }):
+  runOccurrence(input: { jobId: string; botId: string; scheduleId: string; prompt: string; occurrenceAt: string; occurrenceKey?: string; missed?: ScheduledMissedRuns; now: Date; model?: string; pick?: NonNullable<ScheduledJob['bot']>['pick'] }):
     | { kind: 'started'; activationId: string }
     | { kind: 'skipped'; reason: string }
     | { kind: 'not_ready' }
@@ -899,7 +899,7 @@ export class ScheduledJobService extends EventEmitter {
       const expired = next && now.getTime() - Date.parse(occurrenceAt) >= Date.parse(next) - now.getTime()
       const missedReason = `Missed ${new Date(occurrenceAt).toLocaleDateString('en-US', { weekday: 'short' })} ${clockTime(occurrenceAt)} (computer off)`
       outcome = expired ? { kind: 'skipped', reason: missedReason } : this.botRunner
-        ? this.botRunner.runOccurrence({ jobId: job.id, botId: job.bot.botId, scheduleId: job.bot.scheduleId, prompt: job.prompt, occurrenceAt, ...(claim.missed ? { missed: claim.missed } : {}), now, ...(job.bot.model ? { model: job.bot.model } : {}), ...(job.bot.model && job.bot.pick?.model === job.bot.model ? { pick: job.bot.pick } : {}) })
+        ? this.botRunner.runOccurrence({ jobId: job.id, botId: job.bot.botId, scheduleId: job.bot.scheduleId, prompt: job.prompt, occurrenceAt, occurrenceKey: claim.occurrenceKey, ...(claim.missed ? { missed: claim.missed } : {}), now, ...(job.bot.model ? { model: job.bot.model } : {}), ...(job.bot.model && job.bot.pick?.model === job.bot.model ? { pick: job.bot.pick } : {}) })
         : { kind: 'skipped', reason: 'bots_unavailable' }
     } catch (error) {
       outcome = { kind: 'skipped', reason: 'bot_unavailable' }
