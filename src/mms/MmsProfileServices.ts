@@ -747,8 +747,15 @@ export class MmsProfileServices {
         }
       },
       runs: () => this.runEngine,
-      // The threads a bot started that still work (a run not ended), hidden ones too: the bot is busy managing them.
-      launchedThreads: (creators) => launchedThreadsOf({ creators, runs: this.runEngine.store.listNonTerminalRuns(), thread: (id) => this.threads.getThread(id), asks: (id) => this.questions.listPendingForThread(id).length > 0 }),
+      // The threads a bot started, hidden ones too, and how each stands: the bot is busy while any of them works.
+      launchedThreads: (creators) => launchedThreadsOf({
+        creators,
+        threads: this.threads.listAllThreads(),
+        activeRuns: this.runEngine.store.listNonTerminalRuns(),
+        lastRun: (id) => this.runEngine.store.listRuns(id, { limit: 1 })[0],
+        asks: (id) => this.questions.listPendingForThread(id).length > 0,
+        projectName: (id) => this.projects.getProject(id)?.name
+      }),
       harness,
       notifyEffects: () => this.orchestrator.notifyEffects(),
       stopThread: (threadId) => this.orchestrator.stopThread(threadId, 'user', { clientRequestId: `bot-stop:${threadId}:${Date.now()}` }),

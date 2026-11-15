@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import type { BotChatMessage, BotChip, BotLaunchedThread, BotWorkItem } from '../../src/shared/bots/personal/chat'
-import { chatRows, isKeyValueList, presenceOf, stickerOf, workSignalsOf } from '../../src/renderer/components/bots/botChatShape'
+import { chatRows, isKeyValueList, launchedGroups, launchedLook, presenceOf, stickerOf, workSignalsOf } from '../../src/renderer/components/bots/botChatShape'
 
 const started = (title: string, text = 'started'): BotChip => ({ icon: 'think', text, highlight: title })
 const noted: BotChip = { icon: 'think', text: 'passed on your note' }
@@ -83,19 +83,34 @@ describe('presence and sticker', () => {
   })
 
   it('threads the bot started and still manages keep it busy, alone or beside its work', () => {
-    const thread = (threadId: string, title: string): BotLaunchedThread => ({ threadId, title, status: 'running', startedAt: '2026-11-13T21:40:00.000Z' })
+    const thread = (threadId: string, title: string, status: BotLaunchedThread['status'] = 'running'): BotLaunchedThread => ({ threadId, title, status, startedAt: '2026-11-13T21:40:00.000Z', updatedAt: '2026-11-13T21:40:00.000Z' })
     const threads = [thread('t1', 'Dictation mock-ups'), thread('t2', 'Typing dots shimmer')]
     const rows: Array<[string, BotWorkItem[], BotLaunchedThread[], string, string | undefined]> = [
       ['one thread alone names it', [], threads.slice(0, 1), 'Managing Dictation mock-ups', 'working'],
       ['several threads are counted', [], threads, 'Managing 2 threads', 'working'],
       ['work leads, threads add to +N', one, threads, 'System check +2', 'working'],
-      ['none left: free', [], [], 'free', undefined]
+      ['none left: free', [], [], 'free', undefined],
+      ['threads that ended or sit idle: free', [], [thread('t3', 'A', 'done'), thread('t4', 'B', 'failed'), thread('t5', 'C', 'stopped'), thread('t6', 'D', 'idle')], 'free', undefined],
+      ['waiting on the owner still counts', [], [thread('t2', 'Typing dots shimmer', 'needs_input'), thread('t3', 'A', 'done')], 'Managing Typing dots shimmer', 'working']
     ]
     for (const [what, work, launched, text, sticker] of rows) {
-      const presence = presenceOf({ state: launched.length || work.length ? 'working' : 'idle', work, threads: launched }, { typing: false, offline: false })
+      const presence = presenceOf({ state: text === 'free' ? 'idle' : 'working', work, threads: launched }, { typing: false, offline: false })
       expect([what, presence.text, stickerOf(presence, undefined)]).toEqual([what, text, sticker])
     }
     expect(presenceOf({ state: 'paused', threads }, { typing: false, offline: false }).text).toBe('paused')
+  })
+
+  it("splits the threads it started into those going (working, then waiting on the owner) and the rest (idle, then ended), each with its tint and word", () => {
+    const thread = (threadId: string, status: BotLaunchedThread['status']): BotLaunchedThread => ({ threadId, title: threadId, status, startedAt: '2026-11-13T21:40:00.000Z', updatedAt: '2026-11-13T21:40:00.000Z' })
+    const statuses: Array<[BotLaunchedThread['status'], string, string]> = [
+      ['done', 'done', 'done'], ['needs_input', 'waiting', 'waiting on you'], ['running', 'working', 'working'], ['failed', 'failed', 'failed'],
+      ['queued', 'working', 'queued'], ['idle', 'idle', 'idle'], ['stopped', 'failed', 'stopped'], ['paused', 'working', 'held']
+    ]
+    for (const [status, tone, label] of statuses) expect([status, launchedLook(status)]).toEqual([status, { tone, label }])
+    const { going, ended } = launchedGroups(statuses.map(([status]) => thread(status, status)))
+    // Started at the same time here, so ties go by id.
+    expect(going.map((item) => item.status)).toEqual(['paused', 'queued', 'running', 'needs_input'])
+    expect(ended.map((item) => item.status)).toEqual(['idle', 'done', 'failed', 'stopped'])
   })
 
   it('shows the lead work’s live activity, and "working" for a kind with no picture', () => {

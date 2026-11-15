@@ -155,8 +155,8 @@ export interface BotEngineHost {
   /** `bots.changed`. */
   changed?(event: { botId?: string; activationId?: string }): void
   /**
-   * The threads started by any of `creatorThreadIds` (`Thread.createdByThreadId`) whose run has not ended, hidden ones
-   * too, oldest first: what a bot manages beside its own work. Absent: none is counted.
+   * The threads started by any of `creatorThreadIds` (`Thread.createdByThreadId`), hidden ones too, and how each stands
+   * (`launchedThreadsOf`): what a bot manages beside its own work, and what it managed. Absent: none is listed.
    */
   launchedThreads?(creatorThreadIds: ReadonlySet<string>): BotLaunchedThread[]
   /** A bot's schedules may have changed (it was resumed): the scheduler ticks now. */
@@ -6574,7 +6574,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return role === 'home' ? 'activation' : role === 'activation' || role === 'context' || role === 'subagent' ? role : undefined
   }
 
-  /** The threads `botId` started from any of its threads (its chat, its work) that still work, oldest first. */
+  /** The threads `botId` started from any of its threads (its chat, its work), as `BotEngineHost.launchedThreads` lists them. */
   launchedThreads(botId: string): BotLaunchedThread[] {
     if (!this.host.launchedThreads) return []
     const creators = new Set(this.store.botThreads(botId).map((thread) => thread.threadId))

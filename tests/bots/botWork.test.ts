@@ -1001,7 +1001,7 @@ describe('long work', () => {
 })
 
 describe('threads it started ("use your threads")', () => {
-  const thread = (threadId: string, title: string, status: BotLaunchedThread['status'] = 'running'): BotLaunchedThread => ({ threadId, title, status, startedAt: '2026-11-14T09:00:00.000Z' })
+  const thread = (threadId: string, title: string, status: BotLaunchedThread['status'] = 'running'): BotLaunchedThread => ({ threadId, title, status, startedAt: '2026-11-14T09:00:00.000Z', updatedAt: '2026-11-14T09:00:00.000Z' })
 
   it('is busy while threads it started still work, names them, and is free again once they end', () => {
     const home = f.store.registry(botId)!.homeThreadId!
@@ -1011,6 +1011,9 @@ describe('threads it started ("use your threads")', () => {
     expect(summary()).toMatchObject({ state: 'working', stateText: 'Managing 2 threads: Dictation mock-ups, Typing dots shimmer', threads: working })
     working = [thread('t1', 'Dictation mock-ups')]
     expect(summary()).toMatchObject({ state: 'working', stateText: 'Managing Dictation mock-ups' })
+    // Threads that ended, failed, were stopped or never ran are still listed, but it is free.
+    working = [thread('t1', 'Dictation mock-ups', 'done'), thread('t2', 'Typing dots shimmer', 'failed'), thread('t3', 'Halted', 'stopped'), thread('t4', 'Not started', 'idle')]
+    expect(summary()).toMatchObject({ state: 'idle', threads: working })
     working = []
     expect(summary().state).toBe('idle')
     expect(summary().threads).toBeUndefined()

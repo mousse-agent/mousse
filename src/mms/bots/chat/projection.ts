@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { askText } from '../../../shared/bots/personal/askText'
-import type { BotAskCard, BotAskStatus, BotChatApplet, BotChatMessage, BotChatQuote, BotLaunchedThread, BotWorkItem, BotChip, BotDetail, BotError, BotMessageKind, BotPermissionItem, BotReminderItem, BotRunItem, BotSummary } from '../../../shared/bots/personal/chat'
+import { launchedActive, type BotAskCard, type BotAskStatus, type BotChatApplet, type BotChatMessage, type BotChatQuote, type BotLaunchedThread, type BotWorkItem, type BotChip, type BotDetail, type BotError, type BotMessageKind, type BotPermissionItem, type BotReminderItem, type BotRunItem, type BotSummary } from '../../../shared/bots/personal/chat'
 import { BOT_MODEL_SLOT_KEYS, type BotDefinition, type BotLane, type BotManifest } from '../../../shared/bots/personal/definition'
 import { isPinned, limitOnPick, slotsOf, stuckRowsOf } from '../../../shared/bots/personal/modelSlots'
 import { askFingerprint, filesAsk, filesAskOf, isSpecialAsk, mcpAskTools, type BotAskRequest, type BotEscalationStatus, type BotPermissionRequest } from '../../../shared/bots/personal/escalation'
@@ -212,7 +212,7 @@ export class BotChatProjection {
     computerLimit?(): BotComputerLimit
     /** When a question's first follow-up is due, its bubble shown at `shownAt` (`BotEngine.firstFollowUpAt`); null for none. */
     followUpAt?(question: BotQuestionRow, shownAt: string): string | null
-    /** The threads the bot started that still work, hidden ones too, oldest first (`BotEngine.launchedThreads`). */
+    /** The threads the bot started, hidden ones too, and how each stands (`BotEngine.launchedThreads`). */
     launched?(botId: string): BotLaunchedThread[]
   }) {}
 
@@ -502,9 +502,10 @@ export class BotChatProjection {
       }))
     // Questions the bot's work waits on need the owner too ("Asked: Which flat…?"); a permission ask's words come first.
     const waitingOn = this.store.waitingQuestions(definition.id)
-    // Threads it started that still work keep it busy: it manages them.
+    // Threads it started that still work keep it busy: it manages them. Those that ended are listed, never counted.
     const threads = this.launchedOf(definition.id)
-    const state = botState({ paused, ...(error ? { error } : {}), openAsks: asks.length + waitingOn.length, liveActivations: live + threads.length })
+    const managing = threads.filter(launchedActive)
+    const state = botState({ paused, ...(error ? { error } : {}), openAsks: asks.length + waitingOn.length, liveActivations: live + managing.length })
     // Working, but every running activation waits for the internet.
     const running = liveRows.filter((row) => row.status === 'running')
     const offline = state === 'working' && running.length > 0 && running.every((row) => row.offline)
@@ -516,7 +517,7 @@ export class BotChatProjection {
         : `Paused until ${clockTime(limitedUntil!)}`
       : state === 'stuck' ? `Needs you: ${error!.text}`
         : state === 'needs_you' ? (asks[0] ? `Wants to ${this.card(asks[0]).title}` : `Asked: ${oneLine(waitingOn[0]!.spec.question, 80)}`)
-          : state === 'working' ? (offline ? 'Waiting for internet' : chatTurn ? 'Working…' : work.length ? workingOn(work) : threads.length ? managingLine(threads) : 'Working…')
+          : state === 'working' ? (offline ? 'Waiting for internet' : chatTurn ? 'Working…' : work.length ? workingOn(work) : managing.length ? managingLine(managing) : 'Working…')
             : last ? oneLine(last.text || last.error?.text || plainCards(last.cards)) : ''
     return {
       id: definition.id,
