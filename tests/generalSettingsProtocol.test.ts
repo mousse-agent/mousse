@@ -36,3 +36,19 @@ describe('General settings through the daemon protocol', () => {
     }
   })
 })
+
+it('validates quiet hours, preserves them on unrelated saves, and clears them across reload', () => {
+  const home = mkdtempSync(join(tmpdir(), 'mousse-quiet-settings-'))
+  try {
+    let settings = new SettingsStore(MousseConfigStore.load(home))
+    for (const quietHours of [{ from: '25:00', to: '08:00' }, { from: '22:00', to: '22:00' }, { from: '9:00', to: '10:00' }])
+      expect(() => settings.set({ notifications: { quietHours } })).toThrow('HH:MM')
+    settings.set({ notifications: { quietHours: { from: '22:00', to: '08:00' } } })
+    settings.set({ notifications: { threadCompletionSound: false } })
+    settings = new SettingsStore(MousseConfigStore.load(home))
+    expect(settings.get().notifications.quietHours).toEqual({ from: '22:00', to: '08:00' })
+    settings.set({ notifications: { quietHours: null } })
+    settings = new SettingsStore(MousseConfigStore.load(home))
+    expect(settings.get().notifications.quietHours).toBeUndefined()
+  } finally { rmSync(home, { recursive: true, force: true }) }
+})

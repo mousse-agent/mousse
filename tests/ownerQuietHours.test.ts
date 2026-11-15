@@ -26,3 +26,10 @@ it('is off unless set and follows the last device only until restart', () => {
   expect(q.active()).toBe(false)
   expect(new OwnerQuietHours(() => setting, () => now, () => 'UTC').ownerZone()).toBe('UTC')
 })
+
+it('handles a same-day interval and both boundaries', () => {
+  const q = new OwnerQuietHours(() => ({ from: '09:00', to: '17:00' }), Date.now, () => 'UTC')
+  expect(q.quietHoursFor(undefined, Date.parse('2026-11-08T08:59:59Z'))).toBeUndefined()
+  expect(q.quietHoursFor(undefined, Date.parse('2026-11-08T09:00:00Z'))?.end).toBe(Date.parse('2026-11-08T17:00:00Z'))
+  expect(q.quietHoursFor(undefined, Date.parse('2026-11-08T17:00:00Z'))).toBeUndefined()
+})

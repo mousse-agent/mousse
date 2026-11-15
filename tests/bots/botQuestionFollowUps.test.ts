@@ -535,3 +535,16 @@ describe('owner attention in the shared summary', () => {
     expect(summary().needsOwner).toBeUndefined()
   })
 })
+
+it.each(['nudge', 'default'])('moves a %s due at 03:00 to the quiet-hours end and never applies it overnight', async kind => {
+  const { OwnerQuietHours } = await import('../../src/mms/notifications/OwnerQuietHours')
+  const q = new OwnerQuietHours(() => ({ from: '22:00', to: '08:00' }), () => f.clock.now, () => 'UTC')
+  Object.assign(f.host, { quietHoursFor: (botId: string, at: number) => q.quietHoursFor(botId, at) })
+  f.clock.now = Date.parse('2026-11-08T02:30:00Z')
+  const { questionId } = await chatAsks(kind === 'default' ? DEFAULT_A : { ...FLATS, ifNoAnswer: 'nudge', after: 30 })
+  expect(f.store.question(questionId)?.nextAt).toBe('2026-11-08T08:00:00.000Z')
+  await reach(Date.parse('2026-11-08T04:00:00Z'))
+  expect(f.store.question(questionId)).toMatchObject({ status: 'open', nudges: 0 })
+  await reach(Date.parse('2026-11-08T08:00:00Z'))
+  expect(f.store.question(questionId)).toMatchObject(kind === 'default' ? { status: 'defaulted' } : { nudges: 1 })
+})
