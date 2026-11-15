@@ -267,6 +267,28 @@ describe('going back to an older build and coming back', () => {
     expect((jobs.getJob(job.id)!.bot as { ownerAsked?: boolean }).ownerAsked).not.toBe(true)
   })
 
+  it.each([[false, false], [false, true], [true, false], [true, true]])('restores both fixed words and ownership without undoing Do (changed: %s, dropped bot: %s)', (changed, whole) => {
+    move()
+    const job = jobs.getJob('bot-a--news')!
+    jobs.updateJob(job.id, { prompt: 'Say exactly: Take your pills', bot: { ...job.bot!, say: 'Take your pills', ownerAsked: true } })
+    const inside = jobs as unknown as { config: MousseConfigStore }
+    inside.config.updateScheduledSection({ jobs: jobs.listJobs().map(row => {
+      const definition = jobToDefinition(row)
+      if (row.id === job.id) {
+        if (changed) definition.prompt = 'Check my inbox and tell me what matters.'
+        if (whole) delete definition.bot
+        else { delete definition.bot!.say; delete definition.bot!.ownerAsked }
+      }
+      return definition
+    }) })
+    jobs.restoreDroppedFields()
+    const restored = jobs.getJob(job.id)!
+    expect(restored.bot?.ownerAsked).toBe(true)
+    expect(restored.bot?.say).toBe(changed ? undefined : 'Take your pills')
+    expect(restored.prompt).toBe(changed ? 'Check my inbox and tell me what matters.' : 'Say exactly: Take your pills')
+    expect(jobs.restoreDroppedFields()).toEqual([])
+  })
+
   it('puts back every field an older build’s save dropped: a bot’s link, a draft, keys, Tell me and a CLI name', () => {
     move()
     jobs.updateJob('bot-a--news', { bot: { ...jobs.getJob('bot-a--news')!.bot!, ownerAsked: true } })

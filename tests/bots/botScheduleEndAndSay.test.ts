@@ -165,3 +165,44 @@ it('until at the scheduled minute includes that occurrence', async () => {
   await f.tickSchedules(new Date(T0 + 10 * MIN))
   expect(f.book.list(botId)).toEqual([])
 })
+
+it('a newly added fixed line always records ownerAsked', () => {
+  const entry = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, say: 'Hello' }, 'owner')
+  expect(f.scheduler.getJob(entry.jobId)!.bot).toMatchObject({ say: 'Hello', ownerAsked: true })
+  expect(() => f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, say: 'Not owner words' }, 'bot')).toThrow(/owner|prompt/i)
+})
+
+it.each([false, true])('a fixed line missing ownerAsked is repaired and said (restore: %s)', async restore => {
+  const { MousseConfigStore, jobToDefinition } = await import('../../src/mms/config/MousseConfigStore')
+  const { ScheduledJobStore } = await import('../../src/mms/scheduled/ScheduledJobStore')
+  const { join } = await import('node:path')
+  const entry = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, say: 'Hello' }, 'owner')
+  const config = MousseConfigStore.load(join(f.base, 'mousse-home'))
+  config.updateScheduledSection({ jobs: f.scheduler.listJobs().map(row => {
+    const definition = jobToDefinition(row)
+    if (row.id === entry.jobId) delete definition.bot!.ownerAsked
+    return definition
+  }) })
+  if (restore) new ScheduledJobStore(config).restoreDroppedFields()
+  expect(f.scheduler.getJob(entry.jobId)!.bot).toMatchObject({ say: 'Hello', ownerAsked: true })
+  await f.bots.reconcileOnStartup()
+  await f.tickSchedules(new Date(T0 + 5 * MIN))
+  expect(chatOf(f, botId).filter(row => row.text === 'Hello')).toHaveLength(1)
+  expect(f.scheduler.getJob(entry.jobId)!.bot?.ownerAsked).toBe(true)
+  expect(f.store.listActivations(botId).filter(row => row.lane === 'run')).toEqual([])
+})
+
+it('an explicitly non-owner fixed line is kept paused with an actionable reason', async () => {
+  const { MousseConfigStore, jobToDefinition } = await import('../../src/mms/config/MousseConfigStore')
+  const { join } = await import('node:path')
+  const entry = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, say: 'Hello' }, 'owner')
+  MousseConfigStore.load(join(f.base, 'mousse-home')).updateScheduledSection({ jobs: f.scheduler.listJobs().map(row => {
+    const definition = jobToDefinition(row)
+    if (row.id === entry.jobId) definition.bot!.ownerAsked = false
+    return definition
+  }) })
+  await f.bots.reconcileOnStartup()
+  await f.tickSchedules(new Date(T0 + 5 * MIN))
+  expect(chatOf(f, botId).some(row => row.text === 'Hello')).toBe(false)
+  expect(f.scheduler.getJob(entry.jobId)).toMatchObject({ state: 'paused', bot: { say: 'Hello', ownerAsked: false }, pausedReason: expect.stringMatching(/owner|prompt/i) })
+})
