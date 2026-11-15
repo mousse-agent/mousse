@@ -1,3 +1,4 @@
+import { botNotificationContent } from '../../../shared/bots/personal/notification'
 import { randomUUID } from 'node:crypto'
 import type { BotTelling } from '../../../shared/bots/personal/telling'
 import type { BotStore, BotMessageRow } from '../store/BotStore'
@@ -125,13 +126,13 @@ export class BotTellings {
     rows.sort((a, b) => priority(b) - priority(a) || a.seq - b.seq)
     const first = this.chat.toMessage(rows[0]!)
     const names = [...new Set(rows.map(r => this.name(r.botId)))]
-    const line = (first.error?.text ?? (first.ask ? `Wants to ${first.ask.title}` : first.text)).split('\n').map(s => s.replace(/[*_`#>[\]]/g, '').trim()).find(Boolean) ?? 'New message'
+    const { body } = botNotificationContent(this.name(rows[0]!.botId), first)
     const summary = names.map(name => {
       const group = rows.filter(r => this.name(r.botId) === name)
       return group.some(r => r.askId || r.questionId || r.error) ? `${name} needs you` : `${name} ${group.length} messages`
     }).join(' · ')
     const title = closed ? `${closed}: ${summary}` : rows.length > 1 ? `${names.join(', ')} · ${rows.length} messages` : names[0]!
-    this.emit({ id, rows: rows.map(r => ({ botId: r.botId, messageId: r.id, seq: r.seq, tell: r.tell! })), title, body: line.slice(0, 140), kind: first.ask || first.question ? 'question' : 'completed', sound })
+    this.emit({ id, rows: rows.map(r => ({ botId: r.botId, messageId: r.id, seq: r.seq, tell: r.tell! })), title, body, kind: first.ask || first.question ? 'question' : 'completed', sound })
     this.banners.set(id, rows)
   }
 }
