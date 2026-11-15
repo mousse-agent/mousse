@@ -2430,6 +2430,7 @@ export class OrchestratorService extends EventEmitter {
       denial: (node, name) => this.remoteThreadDenial(node, name),
       related: (callerThreadId, launcherThreadId) => callerThreadId === launcherThreadId || lineageRelation(engine, callerThreadId, launcherThreadId) !== null,
       localOnly: (threadId) => this.isLocalOnly(threadId),
+      startedElsewhere: (threadId) => this.startedFromAnotherDevice(threadId),
       note: (launcherThreadId, text) => {
         // A launcher that is gone (deleted, expired) gets no note: nothing would show it.
         if (!this.threadStore?.getThread(launcherThreadId) || this.isExpired(launcherThreadId)) return
@@ -2910,7 +2911,10 @@ export class OrchestratorService extends EventEmitter {
         reads: () => this.remoteThreads,
         launched: (node, remoteThreadId) => {
           const record = engine.remoteLaunches.getByRemoteThread(node, remoteThreadId)
-          return record ? { computer: record.computerName, title: record.title } : undefined
+          if (record) return { computer: record.computerName, title: record.title }
+          // A thread there this computer's agents did not launch: named by the device list, with no title known here.
+          const computer = this.remoteComputers?.computers()?.find((entry) => entry.node === node)?.name
+          return computer ? { computer } : undefined
         },
         denial: (node, computer) => this.remoteThreadDenial(node, computer),
         // What `remoteAgentMark` carried for a message of that run: its own count plus one.
@@ -4783,9 +4787,7 @@ export class OrchestratorService extends EventEmitter {
     }
     if (engine.store.getReceipt(key)) throw this.creationKeyConflict(key)
     // A chain stays one computer deep: work another device started here never reaches a third computer.
-    const caller = this.threadStore?.getThread(callerThreadId)
-    const root = caller?.lineage ? this.threadStore?.getThread(caller.lineage.rootThreadId) : caller
-    if (root?.startedFrom) return refuse('remote_from_remote', 'A thread another device started cannot start threads on other computers.')
+    if (this.startedFromAnotherDevice(callerThreadId)) return refuse('remote_from_remote', 'A thread another device started cannot start threads on other computers.')
     const found = this.findComputer(input.computer)
     if (!found.ok) return refuse(found.code, found.message, found.extra as { computers?: Array<{ id: string; name: string }> })
     const computer = found.computer
@@ -4857,6 +4859,13 @@ export class OrchestratorService extends EventEmitter {
     return this.remoteThreadResult(await launches.launch(key), false)
   }
 
+  /** Whether the thread, or the thread at the top of its lineage, was started from another device (`startedFrom`). */
+  private startedFromAnotherDevice(threadId: string): boolean {
+    const thread = this.threadStore?.getThread(threadId)
+    const root = thread?.lineage ? this.threadStore?.getThread(thread.lineage.rootThreadId) : thread
+    return Boolean(root?.startedFrom)
+  }
+
   /** Why an agent may not start a thread on `node` now: the switch in Agent access is off, or that computer is not ticked. */
   private remoteThreadDenial(node: string, name: string): { code: string; message: string } | undefined {
     const access = this.agentAccessSettings()
@@ -4919,6 +4928,9 @@ export class OrchestratorService extends EventEmitter {
   private remoteThreadsHost(service: RemoteLaunchedThreads): RemoteThreadsHost {
     return {
       reach: (callerThreadId, threadId) => service.reach(callerThreadId, threadId),
+      computerFor: (callerThreadId, computer) => service.computerFor(callerThreadId, computer),
+      list: (callerThreadId, target, filter) => service.list(callerThreadId, target, filter),
+      search: (target, query, limit) => service.search(target, query, limit),
       events: (target, page) => service.events(target, page),
       messages: (target, page) => service.messages(target, page),
       wait: (target, request) => {
@@ -7553,7 +7565,7 @@ export class OrchestratorService extends EventEmitter {
     }))
     return {
       computers,
-      note: 'A subagent can start on a computer that is online and allowed, and that has this repository (repository "same"; "no_project" when this thread has none).'
+      note: 'A subagent can start on a computer that is online and allowed, and that has this repository (repository "same"; "no_project" when this thread has none). The threads of an allowed computer can be listed and searched with thread_list and thread_search with computer, and read by their qualified ids.'
     }
   }
 

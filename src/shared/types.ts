@@ -109,6 +109,8 @@ export interface ScheduledRunAgent {
  * and its chat know the schedule by (`bot_schedule_list`), kept across the move from `bots.db`.
  */
 export interface ScheduledJobBot {
+  /** A fixed reminder line, posted without a model run. */
+  say?: string
   /** The owner's message or tapped answer started the turn that added this timer. */
   ownerAsked?: boolean
   botId: string

@@ -271,14 +271,6 @@ describe('thread_create on another computer (issue #1160)', () => {
       }
     }, 120_000)
 
-    it('notify, which does not reach another computer yet, is refused before anything is recorded', async () => {
-      const { thread, create } = await caller()
-      const count = before()
-      await expect(create({ computer: t.node, firstMessage: 'Hi.', notify: true })).rejects.toThrow(/notify/)
-      expect(before()).toBe(count)
-      expect(t.caller.runEngine.remoteLaunches.listForLauncher(thread.id)).toEqual([])
-    }, 120_000)
-
     it('no project for the repository there', async () => {
       const elsewhere = repository()
       expect(await refusal({}, { project: elsewhere.path })).toMatchObject({ code: 'no_matching_project' })

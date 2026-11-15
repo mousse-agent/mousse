@@ -270,6 +270,30 @@ describe('notify on a thread launched on another computer (issue #1160)', () => 
     expect(noticesFor(thread.id)[0]!.notice.text).toContain('Integration tests pass.')
   }, 120_000)
 
+  it('thread_send with notify to a thread a person started there (reach "all threads"): followed the same way, the notice naming that computer', async () => {
+    standIn()
+    policy.set(t.callerNode, { blocked: false, maxPermissionMode: 'accept_edits', agentReach: 'all' })
+    const { thread, tool, idle } = await launcher()
+    // Nobody here launched it: no remote_launches row names it.
+    const theirs = t.owner.threads.createThread(`Person ${++seq}`, undefined, undefined, { started: true } as never)
+    const id = qualifyId(t.node, theirs.id)
+    expect(t.caller.runEngine.remoteLaunches.getByRemoteThread(t.node, theirs.id)).toBeNull()
+    const sent = await tool('thread_send', { threadId: id, content: 'Please run the tests.', notify: true, clientRequestId: `theirs-${seq}` })
+    expect(sent.isError, sent.text).toBeUndefined()
+    expect(sent.body).toMatchObject({ threadId: id, computer: nameOf(), delivery: 'started', notify: { watchId: expect.any(String), next: NOTIFY_NEXT } })
+    expect(watchRow(sent.body.notify.watchId)).toMatchObject({ state: 'active', target_node: t.node, target_thread_id: theirs.id })
+    const runId = sent.body.runId as string
+    running(runId)
+    idle()
+    finish(runId, 'All green.')
+    await vi.waitFor(() => expect(noticesFor(thread.id)).toHaveLength(1), { timeout: 20_000 })
+    const [{ notice }] = noticesFor(thread.id)
+    expect(notice.item).toMatchObject({ watchId: sent.body.notify.watchId, threadId: id, event: 'ended', status: 'completed', runId })
+    expect(notice.text).toContain(`on ${nameOf()}`)
+    expect(notice.text).toContain('All green.')
+    expect(watchRow(sent.body.notify.watchId)).toMatchObject({ state: 'ended', end_notice: 'sent' })
+  }, 120_000)
+
   it('survives a restart of this daemon and a link that was down: the computer offline is never a false end', async () => {
     standIn()
     const { thread, launch, idle } = await launcher()

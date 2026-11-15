@@ -7,14 +7,18 @@ import type { RemoteLaunchRecord, RemoteLaunchRecords, RemoteLaunchStop } from '
 import type { RunWaitReply, RunWaitRun } from '../run/runWait'
 import { TERMINAL_RUN_STATUSES, type RunRecord, type RunStatus, type ThreadEvent } from '../run/types'
 import type { MessageRow } from '../run/mcp/appTools/messageRows'
+import type { ThreadActivityState } from '../../shared/types'
 
 /**
- * The thread tools on a thread this computer's agents launched on another of the user's computers (issue #1160):
- * `thread_read`, `thread_wait`, `thread_send`, `thread_steer` and `thread_interrupt` with a qualified id
- * (`<node>:<id>`), and the Stop a person's Stop (or the deletion or expiry) of the launcher sends there.
+ * The thread tools on a thread of another of the user's computers (issue #1160): `thread_read`, `thread_wait`,
+ * `thread_send`, `thread_steer` and `thread_interrupt` with a qualified id (`<node>:<id>`), `thread_list` and
+ * `thread_search` with `computer`, and the Stop a person's Stop (or the deletion or expiry) of a launcher sends there.
  *
- * - **Which threads.** `reach` is the one place that decides: a thread `remote_launches` records as launched by the
- *   calling thread or a thread of its lineage. Any other qualified id is refused, naming why; never a bare not-found.
+ * - **Which threads.** `reach` is the one place that decides. A thread `remote_launches` records as launched by the
+ *   calling thread or a thread of its lineage is reached as before. Any other thread there is reached when agents here
+ *   may work on that computer (`computerRefusal`): read as that computer shares it, and changed only by a marked call
+ *   that computer decides by the reach its person gave this one ("Agents on … may change"). A refusal names why; never
+ *   a bare not-found.
  * - **Calls.** Every call is a routed call through Bridge, the writes marked as the calling agent's. Each first reaches
  *   the computer (its row versions, with a connect deadline of its own), then runs with its own deadline. A call that finds
  *   the computer unreachable is tried once more about a second later before the computer is called offline. A refusal
@@ -34,6 +38,8 @@ const CONNECT_MS = 10_000
 const CALL_MS = 30_000
 /** The deadline of a quick probe (the working count). */
 const PROBE_MS = 8_000
+/** How long a search waits for the computer (reaching it, then its answer) before it is named as not searched. */
+export const SEARCH_MS = 10_000
 /** Without `runs.wait`, how often a wait asks the run's status. */
 export const REMOTE_WAIT_POLL_MS = 4_000
 /** A kept Stop is given up after this long. */
@@ -45,8 +51,35 @@ const messageOf = (error: unknown): string => (error instanceof Error ? error.me
 
 /** A thread on another computer the caller may reach, or why not. */
 export type RemoteReach =
-  | { ok: true; record: RemoteLaunchRecord; node: string; remoteThreadId: string; computer: string; threadId: string }
+  /** `record`: this thread (or its lineage) launched it there; absent for any other thread there. */
+  | { ok: true; record?: RemoteLaunchRecord; node: string; remoteThreadId: string; computer: string; threadId: string }
   | { ok: false; code: string; message: string; computer?: string }
+
+/** A computer the caller may list and search now, or why not. */
+export type RemoteComputerReach =
+  | { ok: true; node: string; computer: string; online: boolean }
+  | { ok: false; code: string; message: string; computer?: string; computers?: Array<{ id: string; name: string }> }
+
+/** One thread of `threads.list` there, its ids named the way this computer names things. */
+export interface RemoteListedThread {
+  id: string
+  name: string
+  projectId?: string | null
+  startedAt?: string | null
+  updatedAt: string
+  settledAt?: string | null
+  parentThreadId?: string
+  subagent: boolean
+  /** That computer says an agent of this computer started it there (any thread of this computer, not only the caller's). */
+  startedByAgentHere: boolean
+  /** The caller, or a thread of its lineage, launched it there (`remote_launches`). */
+  launchedByYou: boolean
+}
+
+/** What a search there found, or why that computer was not searched. */
+export type RemoteSearchResult =
+  | { searched: true; results: Array<Record<string, unknown>> }
+  | { searched: false; code: string; message: string }
 
 export type RemoteTarget = Extract<RemoteReach, { ok: true }>
 
@@ -81,6 +114,11 @@ export interface RemoteLaunchedThreadsDeps {
   related: (callerThreadId: string, launcherThreadId: string) => boolean
   /** Whether the thread is private (it stays on this computer). */
   localOnly: (threadId: string) => boolean
+  /**
+   * Whether the thread (or the thread at the top of its lineage) was started from another device: work another device
+   * started here never reaches a further computer (one computer deep).
+   */
+  startedElsewhere?: (threadId: string) => boolean
   /** A note in the launcher's transcript; skipped for a launcher that is gone. */
   note: (launcherThreadId: string, text: string) => void
   now?: () => number
@@ -113,8 +151,21 @@ export function remoteReachRefusal(error: unknown, computer: string, what: strin
     }
     case 'computer_outdated':
       return new RemoteThreadRefusal('computer_outdated', `Update Mousse on ${computer}: it is too old for ${what} from an agent on this computer.`, computer)
-    case 'agent_reach':
-      return new RemoteThreadRefusal('computer_not_allowed', `${computer} does not let this computer's agents change that thread: ${message}`, computer)
+    case 'agent_reach': {
+      // That computer's person decided it, for this device: told as such, with where it is changed, and never retried.
+      // The reach is in the refusal's details; a computer from before it says so only in words.
+      const given = isRecord((error as { details?: unknown }).details) ? (error as { details: Record<string, unknown> }).details.reach : undefined
+      const reach = given === 'none' || given === 'launched' ? given : /work here/.test(message) ? 'none' : 'launched'
+      const limit = reach === 'none'
+        ? `the person on ${computer} does not let this computer's agents change any thread there`
+        : `the person on ${computer} lets this computer's agents change only the threads they started there`
+      return new RemoteThreadRefusal(
+        'outside_agent_reach',
+        `${what[0]!.toUpperCase()}${what.slice(1)} was refused: ${limit}, so nothing was changed. This is their choice; do not try again. They can change it on ${computer} in Settings → Devices, under this computer's limits ("Agents on … may change": All threads). Tell the user, or ask them to make the change themselves.`,
+        computer,
+        { reach }
+      )
+    }
     case 'thread_not_found':
       return new RemoteThreadRefusal('remote_thread_gone', `${computer} has no such thread any more: it was deleted there.`, computer)
     case 'deadline_exceeded':
@@ -162,8 +213,10 @@ export class RemoteLaunchedThreads {
   // ------------------------------------------------------------------ reach
 
   /**
-   * Whether `callerThreadId` may reach `threadId`, a qualified id: a thread `remote_launches` says the caller, or a thread
-   * of its lineage, launched there. The one place that decides it (a later change widens it here).
+   * Whether `callerThreadId` may reach `threadId`, a qualified id. The one place that decides it:
+   * - a thread `remote_launches` says the caller, or a thread of its lineage, launched there (`record` set);
+   * - any other thread of a computer agents here may work on now (`computerRefusal`), with no `record`. What it may
+   *   change there that computer decides at each marked call; what it reads is what that computer shares with this one.
    */
   reach(callerThreadId: string, threadId: string): RemoteReach {
     const ref = parseQualifiedId(threadId)
@@ -171,20 +224,57 @@ export class RemoteLaunchedThreads {
     const port = this.deps.port()
     const self = port?.self?.()
     if (self && ref.node === self) return { ok: false, code: 'invalid_thread_id', message: `That thread is on this computer: use its own id, ${ref.id}.` }
-    const record = this.deps.records.getByRemoteThread(ref.node, ref.id)
-    const computer = record?.computerName ?? port?.computers()?.find((entry) => entry.node === ref.node)?.name ?? 'that computer'
+    const found = this.deps.records.getByRemoteThread(ref.node, ref.id)
+    const listed = port?.computers()?.find((entry) => entry.node === ref.node)
+    const computer = found?.computerName ?? listed?.name ?? 'that computer'
     if (this.deps.localOnly(callerThreadId))
       return { ok: false, code: 'private_thread', message: 'This is a private thread: it stays on this computer, so it cannot reach threads on other computers.', computer }
-    if (!record || !this.deps.related(callerThreadId, record.launcherThreadId))
-      return {
-        ok: false,
-        code: 'not_launched_here',
-        message: `Thread ${threadId} on ${computer} was not launched by this thread or a thread of its lineage. An agent reaches a thread on another computer only after launching it there with thread_create and computer.`,
-        computer
-      }
-    if (record.state === 'abandoned')
-      return { ok: false, code: 'launch_abandoned', message: `The launch of «${record.title}» on ${computer} was given up (${record.lastError ?? 'refused'}); the thread there was archived.`, computer }
-    return { ok: true, record, node: ref.node, remoteThreadId: ref.id, computer, threadId: qualifyId(ref.node, ref.id) }
+    const record = found && this.deps.related(callerThreadId, found.launcherThreadId) ? found : undefined
+    if (record) {
+      if (record.state === 'abandoned')
+        return { ok: false, code: 'launch_abandoned', message: `The launch of «${record.title}» on ${computer} was given up (${record.lastError ?? 'refused'}); the thread there was archived.`, computer }
+      return { ok: true, record, node: ref.node, remoteThreadId: ref.id, computer, threadId: qualifyId(ref.node, ref.id) }
+    }
+    if (!listed && !found)
+      return { ok: false, code: 'unknown_computer', message: `${ref.node} is not one of the user's other computers (list_computers names them), so thread ${threadId} cannot be reached.` }
+    const refused = this.computerRefusal(callerThreadId, ref.node, computer)
+    if (refused) return { ok: false, ...refused, computer }
+    return { ok: true, node: ref.node, remoteThreadId: ref.id, computer, threadId: qualifyId(ref.node, ref.id) }
+  }
+
+  /**
+   * Why the caller may not work on `node` beyond the threads it launched there, read at every call: a private caller,
+   * a caller another device started (one computer deep), or the user's switch and list in Agent access.
+   */
+  private computerRefusal(callerThreadId: string, node: string, computer: string): { code: string; message: string } | undefined {
+    if (this.deps.localOnly(callerThreadId))
+      return { code: 'private_thread', message: 'This is a private thread: it stays on this computer, so it cannot reach threads on other computers.' }
+    if (this.deps.startedElsewhere?.(callerThreadId))
+      return { code: 'remote_from_remote', message: `This thread was started from another device, so it cannot reach threads on ${computer}: work another device started stays one computer deep.` }
+    return this.deps.denial(node, computer)
+  }
+
+  /**
+   * `thread_list` and `thread_search` with `computer`: the computer `ref` names (a name or id from `list_computers`), as
+   * the caller may list and search it now, or why not.
+   */
+  computerFor(callerThreadId: string, ref: string): RemoteComputerReach {
+    const port = this.deps.port()
+    if (!port) return { ok: false, code: 'remote_unavailable', message: 'Threads on other computers need Mousse to be connected to your other computers (Settings → Devices).' }
+    const computers = port.computers() ?? []
+    const wanted = ref.trim()
+    const byNode = computers.find((entry) => entry.node === wanted)
+    const byName = computers.filter((entry) => entry.name.trim().toLowerCase() === wanted.toLowerCase())
+    if (!byNode && byName.length > 1)
+      return { ok: false, code: 'ambiguous_computer', message: `Several of the user's computers are called "${wanted}"; name one by its id from list_computers.`, computers: byName.map(({ node, name }) => ({ id: node, name })) }
+    const found = byNode ?? byName[0]
+    if (!found) {
+      const names = computers.map((entry) => entry.name)
+      return { ok: false, code: 'unknown_computer', message: names.length ? `No computer is called "${wanted}". The user's other computers: ${names.join(', ')}.` : 'This computer is not connected to any other computer of the user.' }
+    }
+    const refused = this.computerRefusal(callerThreadId, found.node, found.name)
+    if (refused) return { ok: false, ...refused, computer: found.name }
+    return { ok: true, node: found.node, computer: found.name, online: found.online }
   }
 
   /** Refuses a call agents here may no longer make on that computer (the user turned it off since the launch). */
@@ -409,7 +499,7 @@ export class RemoteLaunchedThreads {
     this.assertAllowed(target)
     const self = this.deps.port()?.self?.()
     // A later message from here is new work: a Stop still on its way there from before must not end it.
-    if (target.record.stop?.state === 'pending') this.deps.records.settleStop(target.record.creationKey, target.record.stop.key, 'expired', 'A later message from this computer superseded it.')
+    if (target.record?.stop?.state === 'pending') this.deps.records.settleStop(target.record.creationKey, target.record.stop.key, 'expired', 'A later message from this computer superseded it.')
     let result: unknown
     try {
       result = (await this.call(target, 'orchestrator.send', {
@@ -466,7 +556,9 @@ export class RemoteLaunchedThreads {
    * computer started it; a thread a person took over is left as it is, and the answer says so.
    */
   async interrupt(target: RemoteTarget, runId: string | undefined, options: { clientRequestId: string; mark: RoutedAgentMark }): Promise<{ status: 'stopped' | 'left'; runId?: string; left?: string } | RemoteUncertain> {
-    // An agent may always stop work it started, even after the user turned agents on that computer off.
+    // An agent may always stop work it launched, even after the user turned agents on that computer off; any other
+    // thread there only while it may work there.
+    if (!target.record) this.assertAllowed(target)
     let result: unknown
     try {
       result = (await this.call(target, 'orchestrator.abort', {
@@ -487,6 +579,81 @@ export class RemoteLaunchedThreads {
       status: stopped.stopped === true ? 'stopped' : 'left',
       ...(typeof stopped.runId === 'string' ? { runId: stopped.runId } : runId ? { runId } : {}),
       ...(typeof stopped.left === 'string' ? { left: stopped.left } : {})
+    }
+  }
+
+  // ------------------------------------------------------------------ listing and searching
+
+  /**
+   * `thread_list` with `computer`: the threads that computer shares with this one (`threads.list`, which never answers
+   * a private thread or a bot's), their projects and what each is doing, named the way this computer names things.
+   */
+  async list(callerThreadId: string, target: { node: string; computer: string }, filter: { projectId?: string }): Promise<{ threads: RemoteListedThread[]; projects: Array<{ id: string; name: string }>; activity: Record<string, ThreadActivityState> }> {
+    const what = 'the list'
+    const ask = async (method: string, params: Record<string, unknown>): Promise<unknown> => {
+      try {
+        return this.named(target.node, method, (await this.call(target, method, params, { what })).result)
+      } catch (error) {
+        throw remoteReachRefusal(error, target.computer, what)
+      }
+    }
+    const projectId = filter.projectId === undefined ? undefined : parseQualifiedId(filter.projectId)?.node === target.node ? parseQualifiedId(filter.projectId)!.id : filter.projectId
+    const [listed, projectsValue, activityValue] = await Promise.all([
+      ask('threads.list', projectId ? { projectId } : {}),
+      ask('projects.list', {}),
+      ask('activity.snapshot', {})
+    ])
+    const raw = isRecord(listed) && Array.isArray(listed.threads) ? listed.threads.filter(isRecord) : []
+    const self = this.deps.port()?.self?.()
+    const launchedByCaller = (plain: string): boolean => {
+      const record = this.deps.records.getByRemoteThread(target.node, plain)
+      return Boolean(record && this.deps.related(callerThreadId, record.launcherThreadId))
+    }
+    const threads: RemoteListedThread[] = []
+    for (const thread of raw) {
+      if (typeof thread.id !== 'string' || thread.localOnly === true || thread.botOwned === true || thread.automationManager === true) continue
+      const plain = parseQualifiedId(thread.id)?.id ?? thread.id
+      const lineage = isRecord(thread.lineage) ? thread.lineage : undefined
+      const startedFrom = isRecord(thread.startedFrom) ? thread.startedFrom : undefined
+      const startedByAgentHere = Boolean(self && startedFrom?.node === self && isRecord(startedFrom.agent))
+      threads.push({
+        id: qualifyId(target.node, plain),
+        name: typeof thread.name === 'string' ? thread.name : '',
+        projectId: typeof thread.projectId === 'string' ? thread.projectId : null,
+        startedAt: typeof thread.startedAt === 'string' ? thread.startedAt : null,
+        updatedAt: typeof thread.updatedAt === 'string' ? thread.updatedAt : '',
+        settledAt: typeof thread.settledAt === 'string' ? thread.settledAt : null,
+        ...(lineage && typeof lineage.parentThreadId === 'string' ? { parentThreadId: lineage.parentThreadId } : {}),
+        subagent: lineage?.relationship === 'subagent',
+        startedByAgentHere,
+        // Only a thread an agent here started can be one this caller launched.
+        launchedByYou: startedByAgentHere && launchedByCaller(plain)
+      })
+    }
+    const projects = (isRecord(projectsValue) && Array.isArray(projectsValue.projects) ? projectsValue.projects.filter(isRecord) : [])
+      .flatMap((project) => (typeof project.id === 'string' ? [{ id: project.id, name: typeof project.name === 'string' ? project.name : '' }] : []))
+    const activity = isRecord(activityValue) && isRecord(activityValue.activity) ? (activityValue.activity as Record<string, ThreadActivityState>) : {}
+    return { threads, projects, activity }
+  }
+
+  /**
+   * `thread_search` with `computer`: that computer's own search (`threads.search`: titles, project names and the
+   * transcripts of its newest threads only, never a private thread or a bot's), within `SEARCH_MS`. A computer that
+   * cannot be reached, or does not answer in time, is named as not searched, with why.
+   */
+  async search(target: { node: string; computer: string; online: boolean }, query: string, limit: number): Promise<RemoteSearchResult> {
+    if (!target.online) return { searched: false, code: 'computer_offline', message: `${target.computer} is offline, so it was not searched.` }
+    // One deadline for the whole search, the second attempt after an unreached first one included.
+    const deadline = AbortSignal.timeout(SEARCH_MS)
+    try {
+      const { result } = await this.call(target, 'threads.search', { query, limit }, { what: 'the search', deadlineMs: SEARCH_MS, connectMs: SEARCH_MS, signal: deadline })
+      const found = this.named(target.node, 'threads.search', result)
+      const results = isRecord(found) && Array.isArray(found.results) ? found.results.filter(isRecord) : []
+      return { searched: true, results }
+    } catch (error) {
+      if (deadline.aborted) return { searched: false, code: 'computer_slow', message: `${target.computer} did not answer the search within ${SEARCH_MS / 1000} s, so it was not searched.` }
+      const refused = remoteReachRefusal(error, target.computer, 'the search')
+      return { searched: false, code: refused.code, message: refused.message }
     }
   }
 

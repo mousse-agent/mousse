@@ -1,3 +1,4 @@
+import { guardMemoryText } from '../bots/memory/guard'
 import { randomUUID } from 'node:crypto'
 import type { BotModelPick, BotSchedule } from '../../shared/bots/personal/definition'
 import { MAX_BOT_SCHEDULES } from '../../shared/bots/personal/definition'
@@ -121,6 +122,34 @@ export class BotScheduleError extends Error {
   }
 }
 
+/** A fixed line is the owner's words, so only the reminder text's hidden-character guard applies. */
+export function schedulePrompt(input: { prompt?: string; say?: string }): string {
+  if (input.say === undefined) return typeof input.prompt === 'string' ? input.prompt.trim() : ''
+  if (input.prompt !== undefined) throw new BotScheduleError('schedule_invalid', 'Give either prompt or say, not both.')
+  if (typeof input.say !== 'string' || !input.say.trim() || input.say.length > 500)
+    throw new BotScheduleError('schedule_invalid', 'say needs 1 to 500 characters.')
+  const guarded = guardMemoryText(input.say)
+  if (!guarded.ok && guarded.reason === 'invisible') throw new BotScheduleError('schedule_invalid', guarded.message)
+  return `Say exactly: ${input.say.trim()}`
+}
+
+/** A local date lasts through that day; a local date/time ends at that minute. */
+export function scheduleUntil(value: string, now: Date): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2}))?)?$/.exec(value)
+  if (!match) throw new BotScheduleError('schedule_invalid', 'until needs a local date (2026-11-21) or date and time (2026-11-21T18:00) on this computer.')
+  const [, y, m, d, h, min, sec] = match
+  const date = new Date(+y, +m - 1, +d, h === undefined ? 23 : +h, min === undefined ? 59 : +min, sec === undefined ? (h === undefined ? 59 : 0) : +sec, h === undefined ? 999 : 0)
+  if (date.getFullYear() !== +y || date.getMonth() !== +m - 1 || date.getDate() !== +d || (h !== undefined && (date.getHours() !== +h || date.getMinutes() !== +min || date.getSeconds() !== +(sec ?? 0))))
+    throw new BotScheduleError('schedule_invalid', 'until is not a valid local date and time. Check the day and clock time.')
+  if (h !== undefined) date.setSeconds(59, 999)
+  if (date <= now) throw new BotScheduleError('schedule_invalid', 'until is in the past. Pick a future date or time.')
+  return date.toISOString()
+}
+
+export function scheduleEndLabel(expiresAt?: string): string {
+  return expiresAt ? ` · until ${new Date(expiresAt).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' }).replace(',', '')}` : ''
+}
+
 /** The fields a bot automation can change from the Automations page: When, Do, its name and Tell me. Who, Where and May stay the bot's. */
 const BOT_PATCH_KEYS = new Set(['name', 'prompt', 'schedule', 'tellMe'])
 
@@ -150,7 +179,7 @@ export class BotScheduleBook {
       when,
       prompt: job.prompt,
       name: job.name,
-      label: this.labelOf(when),
+      label: `${job.bot.say !== undefined ? `Says “${job.bot.say}” · ` : ''}${this.labelOf(when)}${scheduleEndLabel(job.expiresAt)}`,
       createdBy: job.bot.createdBy,
       createdAt: job.createdAt,
       ...(job.bot.model ? { model: job.bot.model } : {}),
@@ -173,10 +202,15 @@ export class BotScheduleBook {
     return when.expr
   }
 
+  /** Completed schedules stay in Automations; upkeep writes their quiet end line once. */
+  ended(botId: string): Array<{ jobId: string; scheduleId: string; name: string; tellMe: TellMe }> {
+    return this.options.jobs.listJobs().filter((job) => job.bot?.botId === botId && job.state === 'completed' && Boolean(job.expiresAt)).map((job) => ({ jobId: job.id, scheduleId: job.bot!.scheduleId, name: job.name, tellMe: tellMeOf(job) }))
+  }
+
   /** Every bot's schedules, oldest first. */
   all(): BotScheduleEntry[] {
     return this.options.jobs.listJobs()
-      .flatMap((job) => this.entryOf(job) ?? [])
+      .flatMap((job) => job.state === 'completed' ? [] : this.entryOf(job) ?? [])
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.scheduleId.localeCompare(b.scheduleId))
   }
 
@@ -202,23 +236,27 @@ export class BotScheduleBook {
    * Adds a schedule: at most 8 per bot, at least a minute apart. It needs no approval (a schedule is not a permission)
    * and starts from now, so it never runs for times before it existed.
    */
-  add(botId: string, input: { when: BotSchedule['when']; prompt: string; model?: string; pick?: BotModelPick; name?: string; tellMe?: TellMe }, createdBy: 'owner' | 'bot', options: { scheduleId?: string; ownerAsked?: boolean } = {}): BotScheduleEntry {
+  add(botId: string, input: { when: BotSchedule['when']; prompt?: string; say?: string; until?: string; model?: string; pick?: BotModelPick; name?: string; tellMe?: TellMe }, createdBy: 'owner' | 'bot', options: { scheduleId?: string; ownerAsked?: boolean } = {}): BotScheduleEntry {
     if (this.list(botId).length >= MAX_BOT_SCHEDULES) throw new BotScheduleError('schedule_limit', `A bot can have at most ${MAX_BOT_SCHEDULES} schedules. Remove one first.`)
-    const prompt = typeof input.prompt === 'string' ? input.prompt.trim() : ''
+    const ownerAsked = options.ownerAsked === true || (input.say !== undefined && createdBy === 'owner')
+    if (input.say !== undefined && !ownerAsked) throw new BotScheduleError('schedule_invalid', 'Only the owner’s message or tap can set a fixed line. Use prompt instead of say.')
+    const prompt = schedulePrompt(input)
     const problem = botScheduleProblem(input.when, prompt)
     if (problem) throw new BotScheduleError('schedule_invalid', problem)
+    const expiresAt = input.until === undefined ? undefined : scheduleUntil(input.until, this.now())
     const scheduleId = options.scheduleId ?? `s-${randomUUID().slice(0, 8)}`
     const when: BotSchedule['when'] = input.when.kind === 'interval' ? { kind: 'interval', minutes: input.when.minutes } : { kind: 'cron', expr: input.when.expr.trim() }
     const job = this.options.jobs.createJob({
       // A draft turned on keeps its name and Tell me, in the same write.
-      name: input.name?.trim() || botJobName(prompt),
+      name: input.name?.trim() || botJobName(input.say ?? prompt),
       ...(input.tellMe ? { tellMe: input.tellMe } : {}),
       prompt,
+      ...(expiresAt ? { expiresAt } : {}),
       schedule: jobScheduleOf(when),
       threadId: botJobThreadGuard(botId),
       // Only the owner picks a model by hand; a bot's own schedule runs on its own rows. The name stays beside the pick,
       // for builds that read only the name.
-      bot: { botId, scheduleId, createdBy, ...(options.ownerAsked ? { ownerAsked: true } : {}), ...(createdBy === 'owner' && input.model?.trim() ? { model: input.model.trim(), ...(isPinned(input.pick) ? { pick: { ...copyPick(input.pick), instanceId: input.pick.instanceId } } : {}) } : {}) }
+      bot: { botId, scheduleId, createdBy, ...(ownerAsked ? { ownerAsked: true } : {}), ...(input.say !== undefined ? { say: input.say.trim() } : {}), ...(createdBy === 'owner' && input.model?.trim() ? { model: input.model.trim(), ...(isPinned(input.pick) ? { pick: { ...copyPick(input.pick), instanceId: input.pick.instanceId } } : {}) } : {}) }
     }, { id: botJobId(botId, scheduleId), nextRunAt: computeNextRun(jobScheduleOf(when), null, this.now()) })
     this.options.jobs.wake()
     return this.entryOf(job)!
@@ -236,7 +274,7 @@ export class BotScheduleBook {
   /** Every schedule of a bot goes (its purge). */
   removeAll(botId: string): number {
     let removed = 0
-    for (const entry of this.list(botId)) if (this.options.jobs.deleteJob(entry.jobId)) removed += 1
+    for (const job of this.options.jobs.listJobs()) if (job.bot?.botId === botId && this.options.jobs.deleteJob(job.id)) removed += 1
     return removed
   }
 
@@ -256,6 +294,14 @@ export class BotScheduleBook {
       if (!prompt || prompt.length > 64 * 1024) throw new BotScheduleError('schedule_invalid', 'Each schedule needs something to do.')
       if (prompt.startsWith('/')) throw new BotScheduleError('schedule_locked', 'A bot does the work itself; a workflow can\'t be its Do.')
       changes.prompt = prompt
+      if (job.bot.say !== undefined) {
+        const say = prompt.startsWith('Say exactly:') ? prompt.slice('Say exactly:'.length).trim() : undefined
+        changes.bot = { ...job.bot, say }
+        if (say !== undefined) {
+          changes.prompt = schedulePrompt({ say })
+          changes.bot.ownerAsked = true
+        }
+      }
     }
     if (patch.schedule !== undefined) {
       const when = botWhenOf(patch.schedule)

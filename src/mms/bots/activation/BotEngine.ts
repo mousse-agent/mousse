@@ -222,7 +222,7 @@ export interface BotEngineHost {
    * The bots' schedules, in the shared scheduled-job store (`BotScheduleBook`): automations whose Who is the bot. The
    * one scheduler claims each occurrence and hands it to `runScheduledOccurrence`. Absent: no bot has schedules here.
    */
-  schedules?: Pick<BotScheduleBook, 'list' | 'get' | 'add' | 'remove' | 'removeAll' | 'labelOf'> & Partial<Pick<BotScheduleBook, 'skipped'>>
+  schedules?: Pick<BotScheduleBook, 'list' | 'get' | 'add' | 'remove' | 'removeAll' | 'labelOf'> & Partial<Pick<BotScheduleBook, 'skipped' | 'ended'>>
   /** Per-schedule progress in bot memory; pending reports are published only on successful completion. */
   progress?: Pick<BotMemoryStore, 'stageProgress' | 'finishProgress' | 'progress'>
   /** The level a scheduled run's activation reported with `run_report` (`AutomationRuns`). */
@@ -742,7 +742,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     try {
       const row = this.store.activation(message.activationId)
       if (row?.trigger.kind !== 'schedule') return false
-      const tellMe = row.trigger.completed?.tellMe ?? this.host.schedules?.get(botId, row.trigger.scheduleId)?.tellMe
+      const scheduleId = row.trigger.scheduleId
+      const tellMe = row.trigger.completed?.tellMe ?? this.host.schedules?.get(botId, scheduleId)?.tellMe
+        ?? this.host.schedules?.ended?.(botId).find(schedule => schedule.scheduleId === scheduleId)?.tellMe
       return tellMe ? !tellMeNotifies(tellMe, 'done', this.host.runLevel?.(message.activationId)) : false
     } catch {
       return false
@@ -1376,7 +1378,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   // -- Schedules (Path step 3: one scheduler) -------------------------------------------------------
 
   /** The scheduler retries a claim as started before making any new admission or lateness decision. */
-  findScheduledOccurrence(input: { botId: string; scheduleId: string; occurrenceKey: string }): { activationId: string; occurrenceAt: string } | { kind: 'skipped'; reason: string } | undefined {
+  findScheduledOccurrence(input: { botId: string; scheduleId: string; occurrenceKey: string }): { activationId: string; occurrenceAt: string } | { messageId: string; occurrenceAt: string } | { kind: 'skipped'; reason: string } | undefined {
+    const said = this.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', input.botId, `schedule-said:${input.scheduleId}`)
+    if (said) {
+      const last = JSON.parse(String(said.value)) as { occurrenceKey: string; messageId: string; occurrenceAt: string }
+      if (last.occurrenceKey === input.occurrenceKey) return last
+    }
     if (this.scheduleHasCompletion(input.botId, input.scheduleId)) return { kind: 'skipped', reason: 'schedule_completed' }
     const row = this.store.activationByKey(`sched:${input.botId}:${input.scheduleId}:${input.occurrenceKey}`)
     if (row?.trigger.kind === 'schedule') return { activationId: row.id, occurrenceAt: row.trigger.occurrenceAt }
@@ -1392,8 +1399,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * skipped and says why. Other runs and the owner's work never skip it: they run beside it. An open ask is not a skip:
    * asks don't block. Before the startup pass nothing is inserted and the occurrence stays due.
    */
-  runScheduledOccurrence(input: { botId: string; scheduleId: string; prompt: string; occurrenceAt: string; occurrenceKey?: string; missed?: ScheduledMissedRuns; now?: Date; model?: string; pick?: BotModelPick }):
+  runScheduledOccurrence(input: { botId: string; scheduleId: string; prompt: string; say?: string; ownerAsked?: boolean; occurrenceAt: string; occurrenceKey?: string; missed?: ScheduledMissedRuns; now?: Date; model?: string; pick?: BotModelPick }):
     | { kind: 'started'; activationId: string }
+    | { kind: 'said'; messageId: string }
     | { kind: 'skipped'; reason: string }
     | { kind: 'not_ready' } {
     if (!this.startupPassed) return { kind: 'not_ready' }
@@ -1401,6 +1409,21 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (this.scheduleHasCompletion(botId, scheduleId)) return { kind: 'skipped', reason: 'schedule_completed' }
     const registry = this.store.registry(botId)
     if (!registry || registry.deletedAt) return { kind: 'skipped', reason: 'bot_deleted' }
+    if (input.say !== undefined) {
+      if (input.ownerAsked === false) return { kind: 'skipped', reason: 'say_owner_required' }
+      const occurrenceKey = input.occurrenceKey ?? occurrenceAt
+      const existing = this.findScheduledOccurrence({ botId, scheduleId, occurrenceKey })
+      if (existing && 'messageId' in existing) return { kind: 'said', messageId: existing.messageId }
+      if (registry.pausedReason && registry.pausedReason !== 'usage_limit') return { kind: 'skipped', reason: 'paused' }
+      const messageId = `bm_sched:${botId}:${scheduleId}:${occurrenceKey}`
+      const late = (input.now?.getTime() ?? this.now()) - Date.parse(occurrenceAt) > REMINDER_LATE_MS
+      this.store.db.transaction(() => {
+        this.store.run('INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?) ON CONFLICT(bot_id, key) DO UPDATE SET value = excluded.value', botId, `schedule-said:${scheduleId}`, JSON.stringify({ occurrenceKey, messageId, occurrenceAt }))
+        this.chat.post({ id: messageId, botId, author: 'bot', kind: 'run_report', text: `${late ? `(For ${clockTime(occurrenceAt)}) ` : ''}${input.say}`, lane: 'run' })
+      })
+      this.changed({ botId })
+      return { kind: 'said', messageId }
+    }
     this.endUsagePauseIfDue(botId, input.now ?? new Date(this.now()))
     const paused = this.store.registry(botId)?.pausedReason
     let skip: string | undefined = paused ? (paused === 'usage_limit' ? 'usage_limited' : 'paused') : undefined
@@ -1530,6 +1553,23 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (this.removedScheduleSweepPending) this.tryDropRemovedScheduleRuns()
     for (const botId of this.host.definitions.ids()) {
       try {
+        for (const ended of this.host.schedules?.ended?.(botId) ?? []) {
+          if (this.store.registry(botId)?.deletedAt) continue
+          const endedKey = `schedule-ended:${ended.jobId}`
+          if (this.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, endedKey)) continue
+          // Expiry makes the schedule absent from the active list, like removal. Snapshot
+          // that absence outside the transaction so waiting runs end and executing walls report.
+          this.dropRemovedScheduleRuns(botId)
+          // A saved self-completion intent wins even if its shared-store removal is
+          // still retrying when until passes. Its report owns the Stopped line.
+          if (this.scheduleHasCompletion(botId, ended.scheduleId)) continue
+          this.store.db.transaction(() => {
+            const key = `schedule-ended:${ended.jobId}`
+            if (this.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, key)) return
+            this.chat.post({ id: `bm_schedule_ended_${ended.jobId}`, botId, author: 'bot', kind: 'notice', text: `‘${ended.name}’ ended, as planned.` })
+            this.store.run('INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?)', botId, key, 'posted')
+          })
+        }
         this.endUsagePauseIfDue(botId, now)
       } catch (error) {
         console.warn('a bot\'s usage pause could not be checked', { botId, error: error instanceof Error ? error.message : String(error) })
@@ -3520,8 +3560,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.journalEnd(row, 'schedule_removed')
       return true
     })
-    this.live.get(row.id)?.controller.abort(new BotWallAbort())
-    if (ended) this.changed({ botId: row.botId, activationId: row.id })
+    const live = this.live.get(row.id)
+    live?.controller.abort(new BotWallAbort())
+    if (ended) {
+      this.changed({ botId: row.botId, activationId: row.id })
+      // Without a live turn no executor will advance this end. Keep the usual bounded wait for late final words.
+      if (!live) void this.advance(row.id, this.carried.get(row.id)?.text ?? row.result ?? undefined, { expectText: true })
+        .catch(error => console.warn('a removed schedule report could not be posted', { activationId: row.id, error: error instanceof Error ? error.message : String(error) }))
+    }
     return { kind: 'ended' }
   }
 
@@ -4831,11 +4877,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const maxTurns = counters.limits.maxTurns
     if (maxTurns !== undefined && counters.requests >= maxTurns) {
       this.raiseWall(row.id, { dispatchN: main.n, kind: 'budget', permission: { budget: { key: 'maxTurns', amount: maxTurns } }, reason: `This bot reached its limit of ${maxTurns} model requests.` })
-      // Removing a schedule turns this wall into an end immediately. Reuse its normal end path
-      // now: this dispatch was already settled, so no later run event will post its report.
-      const ended = this.store.activation(row.id)
-      if (ended?.status === 'done' && ended.endReason === 'schedule_removed')
-        await this.advance(row.id, text ?? this.carried.get(row.id)?.text, { expectText: true })
       return
     }
     const allowed = this.allowedSinceRefused(row)
@@ -6569,6 +6610,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         const row = this.store.activation(id as string)
         const main = row ? this.store.lastMainDispatch(row.id) : undefined
         if (!row || !main?.endedAt || this.store.message(`bm_${row.id}_d${main.n}`)) continue
+        // Its end path already owns the bounded wait for the executor's final words.
+        if (this.pendingReplies.has(`${row.id}:${main.n}`)) continue
         if (!ENDED_ACTIVATION_STATUSES.has(row.status) && this.chatDraft(row)) continue
         this.postReply(row, main, row.result ?? '', false)
       } catch (error) {
@@ -8479,7 +8522,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * apart. The bot adds its own with `bot_schedule_add`, the owner from the Automations page; it needs no approval
    * (schedules are not permissions) and changes no revision.
    */
-  addSchedule(botId: string, input: { when: BotSchedule['when']; prompt: string; model?: string; pick?: BotModelPick }, createdBy: 'owner' | 'bot', ownerAsked = false): BotScheduleEntry {
+  addSchedule(botId: string, input: { when: BotSchedule['when']; prompt?: string; say?: string; until?: string; model?: string; pick?: BotModelPick }, createdBy: 'owner' | 'bot', ownerAsked = false): BotScheduleEntry {
     this.entry(botId)
     let added: BotScheduleEntry
     try {

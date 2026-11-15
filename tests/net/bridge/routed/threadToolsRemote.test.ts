@@ -25,7 +25,7 @@ import { qualifyId } from '../../../../src/shared/threadRef'
 import { DomainRpcError } from '../../../../src/mms/protocol/domainRegistry'
 import type { RemoteComputersPort } from '../../../../src/mms/protocol/remoteComputersPort'
 import type { SqliteNodePolicy } from '../../../../src/mms/net/store/nodePolicy'
-import { localized, RemoteLaunchedThreads } from '../../../../src/mms/orchestrator/RemoteLaunchedThreads'
+import { localized, RemoteLaunchedThreads, remoteReachRefusal } from '../../../../src/mms/orchestrator/RemoteLaunchedThreads'
 import type { AppToolHost } from '../../../../src/mms/run/mcp/appTools'
 import { appToolRegistry, appTurn } from '../../../run/appToolsFixture'
 import { cleanups, cleanupAll, linked } from './routerFixture'
@@ -85,9 +85,9 @@ function standInForTurns(): void {
 }
 
 /** A thread on the caller with a live run in `mode`, and its agent's tools. */
-async function launcher(options: { mode?: 'auto' | 'full' | 'accept_edits' | 'ask' } = {}) {
+async function launcher(options: { mode?: 'auto' | 'full' | 'accept_edits' | 'ask'; localOnly?: boolean } = {}) {
   const project = t.caller.projects.openProject(repo.path)
-  const thread = t.caller.threads.createThread(`Launcher ${++seq}`, project.id, project.path, { permissionMode: options.mode ?? 'auto' } as never)
+  const thread = t.caller.threads.createThread(`Launcher ${++seq}`, project.id, project.path, { permissionMode: options.mode ?? 'auto', ...(options.localOnly ? { localOnly: true } : {}) } as never)
   const sent = await t.caller.runEngine.dispatch({ kind: 'send', threadId: thread.id, clientRequestId: `launcher-send-${seq}`, source: 'gui' })
   if (sent.status !== 'accepted') throw new Error('launcher run not accepted')
   t.caller.runEngine.markStarting(sent.runId)
@@ -342,28 +342,15 @@ describe('the thread tools on a thread launched on another computer (issue #1160
   }, 120_000)
 
   describe('reachability: a refusal names which it is, with the computer', () => {
-    it('a thread this thread did not launch there is refused, and nothing is asked of that computer', async () => {
-      const { launch } = await launcher()
-      const { id } = await launch()
-      const other = await launcher()
+    it('a qualified id of a computer that is not one of the user\'s is refused, and nothing is asked', async () => {
+      const { tool } = await launcher()
       const calls = vi.spyOn(portOf(), 'call')
-      const read = await other.tool('thread_read', { threadId: id })
-      expect(read).toMatchObject({ isError: true, body: { ok: false, code: 'not_launched_here', computer: nameOf() } })
-      // A thread a person there started, which no agent here launched.
-      const own = t.thread('The owner\'s own')
-      for (const [name, args] of [
-        ['thread_read', {}],
-        ['thread_wait', {}],
-        ['thread_send', { content: 'hi' }],
-        ['thread_steer', { runId: 'run-x', text: 'hi' }],
-        ['thread_interrupt', { runId: 'run-x' }]
-      ] as const) {
-        const out = await other.tool(name, { threadId: t.qualified(own.id), ...args })
-        expect(out, name).toMatchObject({ isError: true, body: { code: 'not_launched_here' } })
-      }
+      const out = await tool('thread_read', { threadId: qualifyId('nod_99999999999999999999999999', 'thread-x') })
+      expect(out).toMatchObject({ isError: true, body: { ok: false, code: 'unknown_computer' } })
       expect(calls).not.toHaveBeenCalled()
       // No agent answers an approval on another computer.
-      await expect(other.tool('approval_respond', { threadId: id, requestId: 'q-1', answers: { a: 'allow_once' } })).rejects.toMatchObject({ code: 'mousse_scope_denied' })
+      const own = t.thread('The owner\'s own')
+      await expect(tool('approval_respond', { threadId: t.qualified(own.id), requestId: 'q-1', answers: { a: 'allow_once' } })).rejects.toMatchObject({ code: 'mousse_scope_denied' })
     }, 120_000)
 
     it('offline: tried once more a second later, then named offline, from this call\'s answer', async () => {
@@ -392,6 +379,205 @@ describe('the thread tools on a thread launched on another computer (issue #1160
   })
 })
 
+/**
+ * Beyond launched threads (issue #1160, phase 4): thread_list and thread_search with computer, and the thread tools on a
+ * thread of that computer this computer's agents did not launch.
+ *
+ * Inputs listed before the cases:
+ * - who asks: an ordinary thread; a private thread; a thread another device started (one computer deep); the user's
+ *   switch off, or the computer not ticked;
+ * - which computer: a name from list_computers; a name that is none; offline; not sharing its threads;
+ * - what is there: a thread a person started; a private thread; a thread this thread launched; many long-named threads;
+ * - what that computer lets this one's agents change: threads they started (the default), all threads, nothing;
+ * - what is asked there: read, send, steer, Stop (a run an agent here started, a run a person there started).
+ */
+describe('thread_list, thread_search and any thread of an allowed computer (issue #1160)', () => {
+  /** A thread a person on the owner started, with a row in its transcript. */
+  const personThread = (name: string) => {
+    const thread = t.owner.threads.createThread(name, undefined, undefined, { started: true } as never)
+    ;(t.owner.orchestrator as unknown as Loose).noteAgentLaunch(thread.id, `Notes of ${name}`)
+    return thread
+  }
+  const allow = (computers: string[], on = true) =>
+    t.caller.settings.set({ agentAccess: { ...t.caller.settings.get().agentAccess, remoteSubagents: on, computers } } as never)
+
+  it('lists and searches that computer: qualified ids and links, its name, and never a private thread', async () => {
+    const { tool, launch } = await launcher()
+    const word = `Quarterly${++seq}`
+    const shared = personThread(`${word} report`)
+    const secret = t.owner.threads.createThread(`${word} secret`, undefined, undefined, { started: true, localOnly: true } as never)
+    // A thread this thread launched there is listed as started by it.
+    const launched = await launch()
+
+    const list = await tool('thread_list', { computer: nameOf() })
+    expect(list.isError, list.text).toBeUndefined()
+    expect(list.body).toMatchObject({ computer: nameOf(), computerId: t.node })
+    const row = list.body.threads.find((entry: Loose) => entry.id === t.qualified(shared.id))
+    expect(row).toMatchObject({ link: `mousse://thread/${t.qualified(shared.id)}`, name: `${word} report`, computer: nameOf(), status: 'idle' })
+    expect(row.startedByYou).toBeUndefined()
+    expect(list.body.threads.find((entry: Loose) => entry.id === launched.id)).toMatchObject({ startedByYou: true })
+    for (const entry of list.body.threads) expect(entry.id.startsWith(`${t.node}:`), entry.id).toBe(true)
+    expect(list.text).not.toContain(secret.id)
+
+    const search = await tool('thread_search', { computer: nameOf(), query: word })
+    expect(search.isError, search.text).toBeUndefined()
+    expect(search.body.notSearched).toBeUndefined()
+    // Its title and its transcript both match: each hit names the thread qualified, with its link and computer.
+    expect(search.body.results.length).toBeGreaterThan(0)
+    for (const hit of search.body.results) expect(hit).toMatchObject({ threadId: t.qualified(shared.id), link: `mousse://thread/${t.qualified(shared.id)}`, computer: nameOf() })
+    expect(search.text).not.toContain(secret.id)
+
+    // Without computer both stay on this computer.
+    const here = await tool('thread_search', { query: word })
+    expect(here.body.results).toEqual([])
+  }, 120_000)
+
+  it('cuts a long list at the byte cap, and says so', async () => {
+    const { tool } = await launcher()
+    for (let i = 0; i < 200; i++) t.owner.threads.createThread(`Long ${i} ${'n'.repeat(400)}`, undefined, undefined, { started: true } as never)
+    const list = await tool('thread_list', { computer: nameOf(), limit: 500 })
+    expect(list.isError, list.text.slice(0, 500)).toBeUndefined()
+    expect(Buffer.byteLength(list.text, 'utf8')).toBeLessThanOrEqual(64 * 1024)
+    expect(list.body).toMatchObject({ capped: true, hint: expect.stringContaining('64 KB') })
+    expect(list.body.threads.length).toBeGreaterThan(10)
+    expect(list.body.threads.length).toBeLessThan(200)
+  }, 120_000)
+
+  it('reads a thread a person started there', async () => {
+    const { tool } = await launcher()
+    const theirs = personThread(`Person ${++seq}`)
+    const read = await tool('thread_read', { threadId: t.qualified(theirs.id), view: 'messages' })
+    expect(read.isError, read.text).toBeUndefined()
+    expect(read.body).toMatchObject({ threadId: t.qualified(theirs.id), computer: nameOf(), scope: 'computer' })
+    expect(read.body.messages.some((message: Loose) => String(message.text).includes(`Notes of Person ${seq}`))).toBe(true)
+  }, 120_000)
+
+  it('with the default reach (threads they started), a send to a person\'s thread is refused by that computer, once, and says where it is changed', async () => {
+    standInForTurns()
+    const { tool } = await launcher()
+    const theirs = personThread(`Person ${++seq}`)
+    const calls = vi.spyOn(portOf(), 'call')
+    const sent = await tool('thread_send', { threadId: t.qualified(theirs.id), content: 'Please run the tests.' })
+    expect(sent).toMatchObject({ isError: true, body: { ok: false, code: 'outside_agent_reach', reach: 'launched', computer: nameOf() } })
+    expect(sent.body.message).toMatch(/only the threads they started/)
+    expect(sent.body.message).toContain('Settings → Devices')
+    // Asked once, marked, and never again unmarked.
+    const sends = calls.mock.calls.filter(([, method]) => method === 'orchestrator.send')
+    expect(sends).toHaveLength(1)
+    expect(sends[0]![2]).toHaveProperty('agent')
+    expect(t.owner.runEngine.listRuns(theirs.id, { limit: 10 })).toHaveLength(0)
+    expect(turns).toHaveLength(0)
+  }, 120_000)
+
+  it('with reach "all threads", the message arrives as the agent\'s; its Stop ends that run and leaves a person\'s', async () => {
+    standInForTurns()
+    policy.set(t.callerNode, { maxPermissionMode: 'accept_edits', agentReach: 'all' })
+    const { thread, runId: launcherRun, tool } = await launcher()
+    const theirs = personThread(`Person ${++seq}`)
+    const sent = await tool('thread_send', { threadId: t.qualified(theirs.id), content: 'Please run the tests.', clientRequestId: `all-${seq}` })
+    expect(sent.isError, sent.text).toBeUndefined()
+    expect(sent.body).toMatchObject({ threadId: t.qualified(theirs.id), computer: nameOf(), delivery: 'started' })
+    expect(t.owner.runEngine.getRun(sent.body.runId)).toMatchObject({ threadId: theirs.id, source: 'mcp', outcome: { sentByAgent: true } })
+    await vi.waitFor(() => expect(turns).toHaveLength(1))
+    expect(turns[0]!.agent).toMatchObject({ kind: 'agent', from: { node: t.callerNode, thread: thread.id, run: launcherRun } })
+    running(sent.body.runId)
+    const stopped = await tool('thread_interrupt', { threadId: t.qualified(theirs.id), runId: sent.body.runId })
+    expect(stopped.body).toMatchObject({ stopped: true })
+    await vi.waitFor(() => expect(isTerminal(sent.body.runId)).toBe(true))
+
+    const person = await personRun(theirs.id)
+    await expect(tool('thread_interrupt', { threadId: t.qualified(theirs.id), runId: person })).rejects.toMatchObject({ code: 'mousse_scope_denied', details: { conflict: 'not_started_by_this_computer' } })
+    expect(t.owner.runEngine.getRun(person)!.status).toBe('running')
+  }, 120_000)
+
+  it('with reach "nothing", no send or steer changes anything there', async () => {
+    standInForTurns()
+    policy.set(t.callerNode, { maxPermissionMode: 'accept_edits', agentReach: 'none' })
+    const { tool } = await launcher()
+    const theirs = personThread(`Person ${++seq}`)
+    const person = await personRun(theirs.id)
+    const sent = await tool('thread_send', { threadId: t.qualified(theirs.id), content: 'Hello.' })
+    expect(sent).toMatchObject({ isError: true, body: { code: 'outside_agent_reach', reach: 'none' } })
+    expect(sent.body.message).toMatch(/any thread there/)
+    const steered = await tool('thread_steer', { threadId: t.qualified(theirs.id), runId: person, text: 'Faster.' })
+    expect(steered).toMatchObject({ isError: true, body: { code: 'outside_agent_reach', reach: 'none' } })
+    expect(t.owner.runEngine.listRuns(theirs.id, { limit: 10 }).map((run) => run.runId)).toEqual([person])
+    expect(turns).toHaveLength(0)
+  }, 120_000)
+
+  it('the user\'s switch off, or the computer not ticked, refuses everything there, and nothing is asked of it', async () => {
+    const { tool } = await launcher()
+    const theirs = personThread(`Person ${++seq}`)
+    const calls = vi.spyOn(portOf(), 'call')
+    const versions = vi.spyOn(portOf(), 'versions')
+    for (const settings of [() => allow([t.node], false), () => allow([])]) {
+      settings()
+      try {
+        for (const [name, args] of [
+          ['thread_list', { computer: nameOf() }],
+          ['thread_search', { computer: nameOf(), query: 'Person' }],
+          ['thread_read', { threadId: t.qualified(theirs.id) }],
+          ['thread_wait', { threadId: t.qualified(theirs.id), timeoutMs: 1_000 }],
+          ['thread_send', { threadId: t.qualified(theirs.id), content: 'hi' }],
+          ['thread_steer', { threadId: t.qualified(theirs.id), runId: 'run-x', text: 'hi' }],
+          ['thread_interrupt', { threadId: t.qualified(theirs.id), runId: 'run-x' }]
+        ] as const) {
+          const out = await tool(name, args)
+          expect(out, name).toMatchObject({ isError: true, body: { code: 'computer_not_allowed', computer: nameOf() } })
+        }
+      } finally {
+        allow([t.node])
+      }
+    }
+    expect(calls).not.toHaveBeenCalled()
+    expect(versions).not.toHaveBeenCalled()
+  }, 120_000)
+
+  it('a private thread, or one another device started, does not reach that computer', async () => {
+    const secret = await launcher({ localOnly: true })
+    expect((await secret.tool('thread_list', { computer: nameOf() })).body).toMatchObject({ code: 'private_thread' })
+    expect((await secret.tool('thread_search', { computer: nameOf(), query: 'x' })).body).toMatchObject({ code: 'private_thread' })
+
+    const relayed = await launcher()
+    const real = (t.caller.orchestrator as unknown as Loose).startedFromAnotherDevice.bind(t.caller.orchestrator)
+    vi.spyOn(t.caller.orchestrator as unknown as Loose, 'startedFromAnotherDevice').mockImplementation(((id: string) => id === relayed.thread.id || real(id)) as never)
+    const theirs = personThread(`Person ${++seq}`)
+    expect((await relayed.tool('thread_list', { computer: nameOf() })).body).toMatchObject({ code: 'remote_from_remote', computer: nameOf() })
+    expect((await relayed.tool('thread_read', { threadId: t.qualified(theirs.id) })).body).toMatchObject({ code: 'remote_from_remote' })
+  }, 120_000)
+
+  it('a computer that is none of the user\'s is refused; one offline, slow or not sharing is refused for a list and named as not searched', async () => {
+    const { tool } = await launcher()
+    expect((await tool('thread_list', { computer: 'No such box' })).body).toMatchObject({ code: 'unknown_computer' })
+
+    const port = portOf()
+    const computers = vi.spyOn(port, 'computers').mockReturnValue([{ node: t.node, name: nameOf(), online: false }])
+    expect((await tool('thread_list', { computer: nameOf() })).body).toMatchObject({ code: 'computer_offline', computer: nameOf() })
+    const offline = await tool('thread_search', { computer: nameOf(), query: 'Person' })
+    expect(offline.isError).toBeUndefined()
+    expect(offline.body).toMatchObject({ results: [], notSearched: { code: 'computer_offline' } })
+    computers.mockRestore()
+
+    // A computer that does not answer: named as not searched once the search's deadline passes.
+    const real = port.call.bind(port)
+    const hang = vi.spyOn(port, 'call').mockImplementation(((node: string, method: string, params: Record<string, unknown>, options?: { signal?: AbortSignal }) =>
+      method === 'threads.search'
+        ? new Promise((_resolve, reject) => options?.signal?.addEventListener('abort', () => reject(new DomainRpcError('cancelled', 'cancelled')), { once: true }))
+        : real(node, method, params, options)) as never)
+    const slow = await tool('thread_search', { computer: nameOf(), query: 'Person' })
+    expect(slow.body).toMatchObject({ results: [], notSearched: { code: 'computer_slow', message: expect.stringContaining('10 s') } })
+    hang.mockRestore()
+
+    await t.owner.net.request('bridge.workOnThreads', { enabled: false })
+    try {
+      expect((await tool('thread_list', { computer: nameOf() })).body).toMatchObject({ code: 'computer_not_shared', computer: nameOf() })
+      expect((await tool('thread_search', { computer: nameOf(), query: 'Person' })).body).toMatchObject({ results: [], notSearched: { code: 'computer_not_shared' } })
+    } finally {
+      await t.owner.net.request('bridge.workOnThreads', { enabled: true })
+    }
+  }, 120_000)
+})
+
 describe('ids an agent here reads from another computer (issue #1160)', () => {
   // Rows: an id of that computer (already qualified by the router), one of this computer that it named, an agent sender
   // on that computer, on this one, and on a third.
@@ -406,5 +592,20 @@ describe('ids an agent here reads from another computer (issue #1160)', () => {
     ['a sender on a third computer is named by its own', { items: [{ origin: { kind: 'agent', from: { node: third, thread: 't5', run: 'r', title: 'C' } } }] }, { items: [{ origin: { kind: 'agent', from: { node: third, thread: `${third}:t5`, run: 'r', title: 'C' } } }] }]
   ])('%s', (_name, given, expected) => {
     expect(localized(given, self)).toEqual(expected)
+  })
+})
+
+describe('a refusal of that computer\'s agent reach, as the agent reads it (issue #1160)', () => {
+  // Rows: the reach in the refusal's details, and a computer from before that detail, which says it only in words.
+  it.each([
+    ['launched, in details', { reach: 'launched' }, 'Agents on that computer may change only the threads they started here.', 'launched'],
+    ['none, in details', { reach: 'none' }, 'This computer does not let agents on that computer work here.', 'none'],
+    ['launched, in words only', undefined, 'Agents on that computer may change only the threads they started here.', 'launched'],
+    ['none, in words only', undefined, 'This computer does not let agents on that computer work here.', 'none']
+  ] as const)('%s', (_name, details, message, reach) => {
+    const refusal = remoteReachRefusal(new DomainRpcError('agent_reach', message, details), 'Linux box', 'the message')
+    expect(refusal).toMatchObject({ code: 'outside_agent_reach', computer: 'Linux box', details: { reach } })
+    expect(refusal.message).toContain(reach === 'none' ? 'any thread there' : 'only the threads they started')
+    expect(refusal.message).toContain('Settings → Devices')
   })
 })
