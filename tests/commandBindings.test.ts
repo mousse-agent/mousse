@@ -562,6 +562,21 @@ describe('the command table', () => {
     expect(normalizeShortcuts({ 'approval.deny': 'Ctrl+Alt+Enter' }, 'win32')).toEqual({ 'approval.deny': 'Ctrl+Alt+Enter' })
   })
 
+  it('starts and finishes dictation with Ctrl+Shift+Space (Cmd+Shift+Space on a Mac), from the composer too', () => {
+    const space = (mods: Partial<KeyInput>): KeyInput => ({ key: ' ', code: 'Space', ctrlKey: false, metaKey: false, altKey: false, shiftKey: true, ...mods })
+    expect(defaultBindingFor('composer.dictate', 'win32')).toBe('CommandOrControl+Shift+Space')
+    expect(getCommand('composer.dictate').category).toBe('Composer')
+    expect(resolveCommand(space({ ctrlKey: true }), {}, context({ inTextInput: true, inComposer: true }), everythingRegistered)).toBe('composer.dictate')
+    expect(resolveCommand(space({ metaKey: true }), {}, context({ platform: 'darwin' }), everythingRegistered)).toBe('composer.dictate')
+    // A terminal and the browser page keep the chord.
+    expect(resolveCommand(space({ ctrlKey: true }), {}, context({ inTerminal: true }), everythingRegistered)).toBeNull()
+    expect(getCommand('composer.dictate').guest).toBe('deny')
+    // Rebindable from Settings → Shortcuts.
+    expect(resolve('Ctrl+Alt+D', context(), { 'composer.dictate': 'CommandOrControl+Alt+D' })).toBe('composer.dictate')
+    expect(findConflicts({}, 'win32')).toEqual([])
+    expect(findConflicts({}, 'darwin')).toEqual([])
+  })
+
   it('switches the send mode with Ctrl+Shift+Enter (Cmd+Shift+Enter on a Mac), a key no other command has', () => {
     expect(defaultBindingFor('composer.switchSendMode', 'win32')).toBe('CommandOrControl+Shift+Enter')
     expect(resolve('Ctrl+Shift+Enter')).toBe('composer.switchSendMode')
