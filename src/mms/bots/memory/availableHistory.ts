@@ -19,7 +19,10 @@ function listFiles(folder: string) {
   while (pending.length && visited < ENTRY_LIMIT) {
     const current = pending.pop()!
     let directory: ReturnType<typeof opendirSync>
-    try { directory = opendirSync(current.path) } catch { incomplete = true; continue }
+    try { directory = opendirSync(current.path) } catch {
+      if (current.relative) incomplete = true
+      continue
+    }
     try {
       while (visited < ENTRY_LIMIT) {
         const entry = directory.readSync()
@@ -41,7 +44,7 @@ function listFiles(folder: string) {
           }
         }
       }
-    } finally { directory.closeSync() }
+    } catch { incomplete = true } finally { directory.closeSync() }
   }
   return { files: files.sort((a, b) => b.mtime - a.mtime || a.name.localeCompare(b.name)), pictures, attached, temporaryFiles, incomplete: incomplete || visited >= ENTRY_LIMIT }
 }
