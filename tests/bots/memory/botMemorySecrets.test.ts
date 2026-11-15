@@ -92,12 +92,13 @@ describe('held-back credentials', () => {
   it.each(secrets)('search snippets never expose %s through highlighting or a cut', (label, secret) => {
     const fx = memoryFixture()
     const seq = fx.message({ botId: 'ada', id: 'secret', author: 'owner', text: `needle ${label} ${secret}\n${LINK}` })
-    for (const query of ['', 'needle', label, secret.split(/[._-]/)[1] ?? secret]) {
+    for (const query of ['', 'needle', label]) {
       const hit = fx.store.search('ada', { query })[0]!
       expect(hit).toBeDefined()
       expect(hit.snippet).toContain(MARK)
       expect(hit.snippet.replace(/[«»]/g, '')).not.toContain(secret)
     }
+    expect(fx.store.search('ada', { query: secret.split(/[._-]/)[1] ?? secret })).toEqual([])
     expect(packText(fx.store.journalRow('ada', seq)!)).toContain(MARK)
     expect(packText(fx.store.journalRow('ada', seq)!)).not.toContain('memory_read')
   })
@@ -110,9 +111,35 @@ describe('held-back credentials', () => {
       expect(hit.snippet.replace(/[«»]/g, '')).toContain(LINK)
     }
     fx.message({ botId: 'ada', id: 'long', author: 'owner', text: `password: ${'ordinary '.repeat(100)}tailword` })
-    const hit = fx.store.search('ada', { query: 'tailword' })[0]!
-    expect(hit.snippet).toBe(`password: ${MARK}`)
-    expect(hit.snippet).not.toContain('tailword')
+    expect(fx.store.search('ada', { query: 'tailword' })).toEqual([])
+  })
+
+  it.each(['chat', 'memory'] as const)('does not confirm password guesses in either search pass for %s', async (kind) => {
+    const { store, db } = memoryFixture()
+    const words = 'wifi router\npassword: sunflower42 correct horse battery staple'
+    if (kind === 'chat') {
+      store.append({ botId: 'ada', kind: 'owner_msg', who: 'owner', sourceKey: 'password', text: words })
+    } else {
+      ok(store.save('ada', { lane: 'chat', kind: 'note', text: 'A legacy entry.' }))
+      db.statement('UPDATE bot_memories SET text = ? WHERE bot_id = ?').run(words, 'ada')
+    }
+    const tools = botMemoryTools({ memory: store, activationOf: () => ({ botId: 'ada', activationId: 'act', lane: 'chat' }) })
+    const ctx = { caller: { threadId: 'home', runId: 'probe' }, turn: {} } as ToolCallContext
+    const search = async (query: string) => JSON.parse((await tools.find((tool) => tool.name === 'memory_search')!.handler({ query, kinds: [kind] }, ctx)).text).hits
+    // Single-word / all-words matches, then the any-word fallback: guesses must not affect results.
+    for (const [right, wrong] of [
+      ['sunflower42', 'moonflower99'],
+      ['correct horse', 'wrong guess'],
+      ['correct absent', 'wrong absent']
+    ]) {
+      expect(await search(right)).toEqual([])
+      expect(await search(right)).toEqual(await search(wrong))
+    }
+    for (const query of ['wifi', 'wifi router', 'wifi absent', 'wifi sunflower42']) {
+      const hits = await search(query)
+      expect(hits).toHaveLength(1)
+      expect(hits[0].snippet).toContain(`password: ${MARK}`)
+    }
   })
 
   it('still reads instruction-shaped and hidden text, with its secrets masked, through the bot tools', async () => {
