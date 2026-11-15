@@ -532,7 +532,7 @@ export function AutomationDetail({
         </FormRow>
 
         <FormRow label="Tell me" labelId={id('tell-label')}>
-          <Select<TellMe>
+          {job.bot?.say !== undefined ? <span className="automation-form-value">Always, like a reminder</span> : <Select<TellMe>
             id={id('tell')}
             ariaLabelledBy={id('tell-label')}
             className="automation-field-select"
@@ -540,8 +540,10 @@ export function AutomationDetail({
             options={tellOptions}
             title="When a run notifies you. Nothing new is when the agent finds nothing to report."
             onChange={(tellMe) => patch({ tellMe })}
-          />
+          />}
         </FormRow>
+
+        {job.bot && job.expiresAt ? <FormRow label="End"><span className="automation-form-value" data-testid="automation-bot-end">{`${job.state === 'completed' ? 'Ended' : 'Ends'} ${ownedWhenText(job.expiresAt, now, owner, viewerZone)}`}</span></FormRow> : null}
 
         <FormRow label="Next">
           <span className="automation-form-value" data-testid="automation-next">
