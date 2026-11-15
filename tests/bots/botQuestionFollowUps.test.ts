@@ -548,3 +548,15 @@ it.each(['nudge', 'default'])('moves a %s due at 03:00 to the quiet-hours end an
   await reach(Date.parse('2026-11-08T08:00:00Z'))
   expect(f.store.question(questionId)).toMatchObject(kind === 'default' ? { status: 'defaulted' } : { nudges: 1 })
 })
+
+it('updates the shown default time when a new quiet-hours wish moves it', async () => {
+  f.clock.now = Date.parse('2026-11-07T21:45:00Z')
+  const { questionId } = await chatAsks(DEFAULT_A)
+  const messages: BotChatMessage[] = []
+  f.bots.events.on('message', e => messages.push(e.message))
+  const { OwnerQuietHours } = await import('../../src/mms/notifications/OwnerQuietHours')
+  const q = new OwnerQuietHours(() => ({ from: '22:00', to: '08:00' }), () => f.clock.now, () => 'UTC')
+  Object.assign(f.host, { quietHoursFor: (id: string, at: number) => q.quietHoursFor(id, at) })
+  f.bots.quietHoursChanged()
+  expect(messages.find(m => m.question?.questionId === questionId)?.question?.defaultAt).toBe('2026-11-08T08:00:00.000Z')
+})
