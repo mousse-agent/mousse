@@ -67,10 +67,10 @@ describe('blur that stays: something varied shows through it', () => {
     expect(source('styles/toast.css')).toMatch(/backdrop-filter: blur\(22px\)/)
   })
 
-  it('keeps the dialog blur over the content behind dialogs, Search and the integrations dialog', () => {
+  it('keeps the dialog blur over the content behind dialogs, the bot and chat dialogs, Search and the integrations dialog', () => {
     expect(source('styles/app.css')).toMatch(/--ui-dialog-blur: blur\(3px\);/)
     const users = allRules().filter(({ body }) => /backdrop-filter:\s*var\(--ui-dialog-blur\)/.test(body)).map(({ selector }) => selector).sort()
-    expect(users).toEqual(['.integration-modal-backdrop', '.modal-overlay', '.thread-search-overlay'])
+    expect(users).toEqual(['.chat-dialog-backdrop', '.chat-network-dialog-backdrop', '.integration-modal-backdrop', '.modal-overlay', '.thread-search-overlay'])
   })
 
   it('keeps the image viewer blur', () => {
