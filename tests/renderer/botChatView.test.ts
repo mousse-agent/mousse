@@ -44,7 +44,8 @@ vi.mock('../../src/renderer/lib/threadActions', async (importOriginal) => {
 })
 
 const { ChatWorkspace } = await import('../../src/renderer/components/chats/ChatWorkspace')
-const { useChatsStore } = await import('../../src/renderer/stores/chatsStore')
+const { useChatsStore, OPEN_BOT_HOLD_MS } = await import('../../src/renderer/stores/chatsStore')
+const { ChatsSidebar } = await import('../../src/renderer/components/chats/ChatsSidebar')
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
 const { setBotsClient, useBotsStore } = await import('../../src/renderer/stores/botsStore')
 const { SelectionReplyButton } = await import('../../src/renderer/components/SelectionReplyButton')
@@ -1305,19 +1306,46 @@ describe('pinned above the composer, and New message', () => {
 describe('loading and labels', () => {
   const loadState = () => host.querySelector('.bot-load-state')
 
-  it('says Loading messages… while the chat first loads, then shows it', async () => {
+  /** Bot faces beside the chat pane, as in the window; the first page of messages answers when `release` is called. */
+  async function withSlowFirstPage(): Promise<() => void> {
     fake.chats.inbox = [message(1, { text: 'Hello.' })]
     let release!: () => void
     const original = fake.client.messages
     vi.mocked(fake.client.messages).mockImplementationOnce((...args) => new Promise((resolve) => { release = () => resolve(original(...args)) }))
     fake.bots = [inbox]
     await act(async () => useChatsStore.getState().activate('p1'))
-    await act(async () => root.render(createElement(ChatWorkspace)))
-    let opening!: Promise<void>
-    await act(async () => { opening = useChatsStore.getState().openBot('inbox') })
-    expect(loadState()?.textContent).toBe('Loading messages…')
-    expect(transcript().querySelectorAll('article')).toHaveLength(0)
-    await act(async () => { release(); await opening })
+    await act(async () => root.render(createElement('div', null, createElement(ChatsSidebar), createElement(ChatWorkspace))))
+    await act(async () => { await useBotsStore.getState().refresh() })
+    return () => release()
+  }
+
+  it('opens a bot with its messages: the click marks its face, and the pane changes once they are here', async () => {
+    const release = await withSlowFirstPage()
+    await click(button('Message Inbox helper'))
+    expect(button('Message Inbox helper')!.className).toContain('bot-roster-active')
+    // Nothing of the bot shows without its messages: no empty chat, no Loading line.
+    expect(host.querySelector('.chat-transcript')).toBeNull()
+    expect(loadState()).toBeNull()
+    await act(async () => { release() })
+    await settle()
+    expect(loadState()).toBeNull()
+    expect(transcript().querySelectorAll('article')).toHaveLength(1)
+  })
+
+  it('says Loading messages… when a bot’s messages take longer than the hold, then shows them', async () => {
+    const release = await withSlowFirstPage()
+    vi.useFakeTimers({ toFake: ['setTimeout'] })
+    try {
+      let opening!: Promise<void>
+      await act(async () => { opening = useChatsStore.getState().openBot('inbox') })
+      expect(host.querySelector('.chat-transcript')).toBeNull()
+      await act(async () => { await vi.advanceTimersByTimeAsync(OPEN_BOT_HOLD_MS) })
+      expect(loadState()?.textContent).toBe('Loading messages…')
+      expect(transcript().querySelectorAll('article')).toHaveLength(0)
+      await act(async () => { release(); await opening })
+    } finally {
+      vi.useRealTimers()
+    }
     expect(loadState()).toBeNull()
     expect(transcript().querySelectorAll('article')).toHaveLength(1)
   })

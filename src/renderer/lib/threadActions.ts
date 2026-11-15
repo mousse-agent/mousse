@@ -8,6 +8,7 @@ import { confirmNavigation } from '../services/navigationGuards'
 import { useAppStore } from '../stores/appStore'
 import { useChatsStore } from '../stores/chatsStore'
 import { orderedThreadIds, threadAfterArchive } from './threadOrder'
+import { afterNextPaint } from './pendingThreadRows'
 import { fadeOutThreadRows } from './archiveMotion'
 import { loadProviderSnapshots, pickerListsModel, pickerProviders, projectScope, scopeKey, useProviderSnapshotsStore } from './providerSnapshots'
 
@@ -31,13 +32,14 @@ export async function selectThread(threadId: string): Promise<void> {
 }
 
 /**
- * Shows a thread and asks main to select it. A cached thread shows at once with its messages; a started one with
- * nothing cached stays held until its view arrives (`openThreadWhenReady`), so it never shows without them.
+ * Shows a thread and asks main to select it. Its row shows as chosen at once. A cached thread shows with its messages
+ * once that frame has been drawn; a started one with nothing cached stays held until its view arrives
+ * (`openThreadWhenReady`), so it never shows without them.
  */
 export async function openAndSelect(threadId: string): Promise<void> {
-  if (useAppStore.getState().openThreadWhenReady(threadId)) {
-    setTimeout(() => useAppStore.getState().showOpeningThread(threadId), OPEN_THREAD_HOLD_MS)
-  }
+  const opening = useAppStore.getState().openThreadWhenReady(threadId)
+  if (opening === 'held') setTimeout(() => useAppStore.getState().showOpeningThread(threadId), OPEN_THREAD_HOLD_MS)
+  if (opening === 'cached') void afterNextPaint().then(() => useAppStore.getState().showOpeningThread(threadId))
   await selectOrSettle(threadId)
 }
 

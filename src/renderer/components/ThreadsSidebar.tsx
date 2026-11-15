@@ -32,7 +32,7 @@ import { ProfileSwitcher } from './profiles/ProfileSwitcher'
 import { DeleteArchivedDialog } from './sidebar/DeleteArchivedDialog'
 import { clearAllRequest, deleteThreads, type DeleteRequest } from '../lib/archivedThreads'
 import { Collapse, motionAllowed } from './ui/Collapse'
-import { scaleMotionMs, useMotionScale } from '../lib/motion'
+import { scaleMotionMs, useMotionScale, VIEW_SWAP_IN_MS } from '../lib/motion'
 
 import {
   ThreadsContextMenu,
@@ -105,8 +105,6 @@ const SIDEBAR_TABS = [
   { id: 'chats', label: 'Chats', icon: MessagesSquare }
 ] as const satisfies readonly PillTab<string>[]
 type SidebarView = (typeof SIDEBAR_TABS)[number]['id']
-/** How long the old view fades out on a tab switch; matches the leaving rule in sidebar-view-motion.css. */
-const SIDEBAR_VIEW_OUT_MS = 140
 
 /** Shift+F10 or the context-menu key: open a row's menu from the keyboard. */
 const isMenuKey = (event: KeyboardEvent) => event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)
@@ -412,28 +410,15 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     useAppStore.getState().setThreadsSidebarView(view)
   }
 
-  // Tab switch motion (sidebar-view-motion.css). The tabs follow `sidebarView` at once; the content shows
-  // `shownView`, which trails it by the old view's fade-out, then the new view fades in as its panel unhides.
-  // Clicks during the fade-out restart nothing: the view chosen last is the one that comes in. With motion
-  // off (the setting, the OS, or no renderer) the content follows the tabs at once.
+  // Tab switch motion (sidebar-view-motion.css). The content follows the tabs at once: the new view shows in
+  // the click's own update and settles in with a short lift as its panel unhides. With motion off (the setting,
+  // the OS, or no renderer) it does not move.
   const instantViews = useMotionScale() === 0 || !motionAllowed()
-  const [shownView, setShownView] = useState(sidebarView)
-  const contentView = instantViews ? sidebarView : shownView
-  const viewLeaving = contentView !== sidebarView
-  useEffect(() => {
-    if (instantViews) setShownView(sidebarView)
-  }, [instantViews, sidebarView])
-  useEffect(() => {
-    if (!viewLeaving) return
-    const timer = setTimeout(() => setShownView(useAppStore.getState().threadsSidebarView), scaleMotionMs(SIDEBAR_VIEW_OUT_MS))
-    return () => clearTimeout(timer)
-  }, [viewLeaving])
+  const contentView = sidebarView
 
-  // The Archived footer is not under Chats: it folds away while the old view fades out and unfolds as the
-  // new one comes in, so the list above it takes or gives the room smoothly. `footerAway` is set from the
-  // click; the footer is `hidden` once Chats shows.
+  // The Archived footer is not under Chats: it is hidden as Chats shows and unfolds as another view comes in,
+  // so the list above it gives the room smoothly.
   const footerRef = useRef<HTMLDivElement>(null)
-  const footerAway = sidebarView === 'chats' || contentView === 'chats'
   const footerHidden = contentView === 'chats'
   const footerWasHidden = useRef(footerHidden)
   useLayoutEffect(() => {
@@ -441,20 +426,17 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     const wasHidden = footerWasHidden.current
     footerWasHidden.current = footerHidden
     if (!footer || typeof footer.animate !== 'function') return
-    const running = footer.getAnimations().filter((animation) => animation.id === 'footer-swap')
-    if (footerHidden || instantViews) { for (const animation of running) animation.cancel(); return }
-    const from = wasHidden ? { height: 0, opacity: 0 } : { height: footer.getBoundingClientRect().height, opacity: Number(getComputedStyle(footer).opacity) }
-    for (const animation of running) animation.cancel()
-    const to = footerAway ? { height: 0, opacity: 0 } : { height: footer.getBoundingClientRect().height, opacity: 1 }
-    if (Math.abs(from.height - to.height) < 0.5 && Math.abs(from.opacity - to.opacity) < 0.01) return
+    for (const animation of footer.getAnimations()) if (animation.id === 'footer-swap') animation.cancel()
+    if (footerHidden || instantViews || !wasHidden) return
+    const height = footer.getBoundingClientRect().height
+    if (height < 0.5) return
     const frame = (at: { height: number; opacity: number }) => ({ blockSize: `${at.height}px`, opacity: at.opacity, overflow: 'hidden' })
-    const animation = footer.animate([frame(from), frame(to)], {
-      duration: scaleMotionMs(footerAway ? SIDEBAR_VIEW_OUT_MS : 180),
-      easing: footerAway ? 'cubic-bezier(0.5, 1, 0.89, 1)' : 'cubic-bezier(0.22, 1, 0.36, 1)',
-      fill: footerAway ? 'forwards' : 'none',
+    const animation = footer.animate([frame({ height: 0, opacity: 0 }), frame({ height, opacity: 1 })], {
+      duration: scaleMotionMs(VIEW_SWAP_IN_MS),
+      easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
     })
     animation.id = 'footer-swap'
-  }, [footerAway, footerHidden, instantViews])
+  }, [footerHidden, instantViews])
 
   // Add project leaves with the Projects tab; the tab list then eases out over its room instead of jumping.
   // `tabsWidth` is the list's settled width, so the layout effect still sees the width from before the change.
@@ -1575,9 +1557,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         )}
       </div>
 
-      <div ref={scrollRef} className="threads-sidebar-scroll" data-view={contentView} data-view-leaving={viewLeaving || undefined} data-more-below={moreBelow || undefined}>
+      <div ref={scrollRef} className="threads-sidebar-scroll" data-view={contentView} data-more-below={moreBelow || undefined}>
 
-      <div className="threads-sidebar-section threads-sidebar-section-projects" role="tabpanel" id={`${tabsId}-projects-panel`} aria-labelledby={`${tabsId}-projects-tab`} hidden={contentView !== 'projects'} inert={viewLeaving && contentView === 'projects'}>
+      <div className="threads-sidebar-section threads-sidebar-section-projects" role="tabpanel" id={`${tabsId}-projects-panel`} aria-labelledby={`${tabsId}-projects-tab`} hidden={contentView !== 'projects'}>
 
         {contentView === 'projects' && renderNeedsMe()}
 
@@ -1848,7 +1830,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
 
-      <div className="threads-sidebar-section threads-sidebar-section-feed" role="tabpanel" id={`${tabsId}-threads-panel`} aria-labelledby={`${tabsId}-threads-tab`} hidden={contentView !== 'threads'} inert={viewLeaving && contentView === 'threads'}>
+      <div className="threads-sidebar-section threads-sidebar-section-feed" role="tabpanel" id={`${tabsId}-threads-panel`} aria-labelledby={`${tabsId}-threads-tab`} hidden={contentView !== 'threads'}>
         {contentView === 'threads' && renderNeedsMe()}
         <div
           className="threads-sidebar-tree threads-sidebar-thread-feed threads-sidebar-feed-list"
@@ -1881,14 +1863,14 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         </div>
       </div>
 
-      <div className="threads-sidebar-section threads-sidebar-section-chats" role="tabpanel" id={`${tabsId}-chats-panel`} aria-labelledby={`${tabsId}-chats-tab`} hidden={contentView !== 'chats'} inert={viewLeaving && contentView === 'chats'}>
+      <div className="threads-sidebar-section threads-sidebar-section-chats" role="tabpanel" id={`${tabsId}-chats-panel`} aria-labelledby={`${tabsId}-chats-tab`} hidden={contentView !== 'chats'}>
         {contentView === 'chats' && <ChatsSidebar />}
       </div>
 
       </div>
 
       {/* The same footer under Projects and Threads: one "Archived" disclosure; the whole heading opens and closes it. */}
-      <div ref={footerRef} className="threads-sidebar-footer" hidden={contentView === 'chats'} inert={footerAway || undefined}>
+      <div ref={footerRef} className="threads-sidebar-footer" hidden={footerHidden}>
 
         <section className={`threads-sidebar-section threads-sidebar-section-settled${archivedExpanded ? ' expanded' : ' collapsed'}`} aria-label="Archived">
 

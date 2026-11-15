@@ -122,8 +122,8 @@ export default function App() {
   }, [profileReady])
   const sidebarMode = useAppStore((s) => s.sidebarMode)
   const threadsSidebarView = useAppStore((s) => s.threadsSidebarView)
-  // The workspace beside the sidebar swaps with the sidebar's tabs (Projects/Threads or Chats): the old one
-  // fades out, inert, then the new one fades in, in step with the sidebar lists (sidebar-view-motion.css).
+  // The workspace beside the sidebar swaps with the sidebar's tabs (Projects/Threads or Chats): the new one shows
+  // at once and settles in, in step with the sidebar lists (sidebar-view-motion.css).
   const { shown: workspaceMode, phase: workspaceSwap } = useViewSwap(sidebarMode)
   // A run's thread from the Automations page always shows as a conversation, whatever Chats was showing.
   const layoutMode = inboxThread ? 'projects' : workspaceMode
@@ -617,7 +617,6 @@ export default function App() {
           ref={sidebarRef}
           className={`sidebar${!mainAreaOpen ? ' sidebar-full' : ''}`}
           style={layoutMode === 'chats' ? { display: 'none' } : undefined}
-          inert={workspaceSwap === 'out' || undefined}
         >
           {inboxThread && <RunStrip />}
           <KeepMounted active={!usageOpen} className="keep-mounted-pane">
@@ -631,7 +630,7 @@ export default function App() {
 
 
         {/* The conversation pane is hidden here, so a failed workspace load shows in this pane's place. */}
-        {layoutMode === 'chats' && <KeepMounted active={!usageOpen} leaving={workspaceSwap === 'out'} className="keep-mounted-pane">
+        {layoutMode === 'chats' && <KeepMounted active={!usageOpen} className="keep-mounted-pane">
           {bootstrapError
             ? <WorkspaceLoading conversationOnly error={bootstrapError} onRetry={retryBootstrap} />
             : <Suspense fallback={null}><ChatWorkspace key={profileId} /></Suspense>}
@@ -640,7 +639,6 @@ export default function App() {
         {mainAreaOpen && layoutMode === 'projects' && (
           <div
             className={`resizer ${resizing === 'main' ? 'active' : ''}`}
-            inert={workspaceSwap === 'out' || undefined}
             onPointerDown={(event) => startResize('main', event)}
             onKeyDown={onMainResizerKey}
             onDoubleClick={() => setMainAreaWidth(null)}
@@ -654,7 +652,7 @@ export default function App() {
         )}
 
         {/* Keep terminal PTYs and browser guests mounted when the pane is collapsed. */}
-        <KeepMounted as="main" active={mainAreaOpen && layoutMode === 'projects'} leaving={workspaceSwap === 'out'} preserveLayout className="main-area"
+        <KeepMounted as="main" active={mainAreaOpen && layoutMode === 'projects'} preserveLayout className="main-area"
           // Beside it: the threads sidebar and its divider when open (the Runs list sits outside the workspace), and the 1px divider before it.
           style={mainAreaStyle(mainAreaWidth, (threadsSidebarOpen && !inboxThread ? threadsSidebarWidth + 1 : 0) + 1)}>
           <MainViewTabs />

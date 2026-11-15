@@ -96,6 +96,12 @@ function switchPatch(s: Pick<AppState, 'activeThreadId' | 'messages' | 'threads'
  * Whether switching to `id` would show a listed, started thread with no messages while its view loads (see
  * `openThreadWhenReady`). A thread this window does not list yet is shown at once, as before.
  */
+function opensFromCache(s: Pick<AppState, 'threads'>, id: string): boolean {
+  if (!messageCache.has(id)) return false
+  const target = s.threads.find((thread) => thread.id === id)
+  return Boolean(target && isThreadStarted(target))
+}
+
 function opensEmpty(s: Pick<AppState, 'threads'>, id: string): boolean {
   if (messageCache.has(id)) return false
   const target = s.threads.find((thread) => thread.id === id)
@@ -377,11 +383,16 @@ interface AppState {
    */
   openingThreadId: string | null
   /**
-   * Opens a thread the person asked for. A cached or never-started thread is shown at once (`switchToThread`); a
-   * started one with nothing cached is held in `openingThreadId` until its view arrives. Returns whether it is held.
+   * Opens a thread the person asked for. A never-started thread is shown at once (`switchToThread`). A started one is
+   * held in `openingThreadId`, so its row shows as chosen at once while the chat goes on showing the thread before:
+   * one with its messages cached (`'cached'`) until the next frame has been drawn (`showOpeningThread`), so the click
+   * is answered before the transcript is drawn; one with nothing cached (`'held'`) until its view arrives.
    */
-  openThreadWhenReady: (id: string) => boolean
-  /** The held thread's view is slow (another computer, a busy service): show it now and wait with an empty transcript. */
+  openThreadWhenReady: (id: string) => 'cached' | 'held' | false
+  /**
+   * Shows the held thread now: a cached one once the frame that highlights its row has been drawn, or one whose view is
+   * slow (another computer, a busy service), which then waits with an empty transcript.
+   */
   showOpeningThread: (threadId: string) => void
   /** A message (or a change to one) of the thread being opened, which arrived before its view. */
   holdOpeningMessage: (threadId: string, message: ChatMessage) => void
@@ -644,13 +655,19 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       if (s.openingThreadId) set({ openingThreadId: null })
       return false
     }
+    if (opensFromCache(s, id)) {
+      // Its row shows as chosen in this update; its transcript, which takes a while to draw, comes in the next.
+      openingEarly = null
+      set({ openingThreadId: id, sidebarMode: 'projects' })
+      return 'cached'
+    }
     if (!opensEmpty(s, id)) {
       get().switchToThread(id)
       return false
     }
     openingEarly = null
     set({ openingThreadId: id, sidebarMode: 'projects' })
-    return true
+    return 'held'
   },
   showOpeningThread: (threadId) =>
     set((s) => (s.openingThreadId === threadId ? switchPatch(s, threadId) : s)),

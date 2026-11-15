@@ -1168,6 +1168,28 @@ html .chat-avatar[class*='chat-color-']:not(.group) {
   padding-bottom: var(--chat-composer-gap);
 }
 
+/*
+ * The composer's height (`--chat-composer-stack`, composer-stack-height.ts) and the mask made from it are not
+ * inherited. They change when the composer grows, folds or mounts with a thread, and an inherited value made
+ * every element of the transcript compute its style again each time (tens of ms per change on a long reply).
+ * Only the elements on the way to the ones that use them take them from their parent.
+ */
+@property --chat-composer-stack {
+  syntax: '*';
+  inherits: false;
+}
+
+@property --transcript-mask {
+  syntax: '*';
+  inherits: false;
+}
+
+.mousse-chat-shell > .an-message-list-wrap,
+.an-message-list-wrap > :is(.an-message-list, .chat-prompt-rail, .chat-jump),
+.an-message-list-wrap > .an-message-list > div {
+  --chat-composer-stack: inherit;
+}
+
 /* At the end of the transcript the last line sits just above the composer, clear of the fade below. */
 .chat:not(.chat--empty) .an-message-list > div:not([data-end-reserve]) {
   padding-bottom: calc(var(--chat-composer-stack, 160px) + 16px);
