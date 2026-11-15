@@ -206,6 +206,7 @@ export const BOT_APP_TOOLS: ReadonlySet<string> = new Set([...BOT_DEFAULT_APP_TO
  * tools, and `make_image` with an Images row. A bot's thread lists only these, so its runtime never shows the model a tool no bot can hold.
  */
 const BOT_OFFERABLE_APP_TOOLS: ReadonlySet<string> = new Set([
+  'schedule_done',
   ...[...BOT_APP_TOOLS].filter((tool) => tool !== BOT_BROWSER_PERMISSION && tool !== BOT_THREADS_PERMISSION && tool !== BOT_PROFILER_PERMISSION),
   ...BOT_BROWSER_TOOLS,
   ...BOT_THREAD_TOOLS,

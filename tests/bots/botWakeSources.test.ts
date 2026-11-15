@@ -65,3 +65,9 @@ describe('how a bot names a pull request', () => {
     expect(pullRequestOf(given)).toEqual(expected)
   })
 })
+
+
+it('preserves current-head checks and submitted reviews through the project reader', async () => {
+  const detail = { state: 'open' as const, headSha: 'new-head', checkRuns: [{ name: 'test', state: 'pending' as const, url: null }], reviews: [{ id: 'review', state: 'approved' as const, author: 'reviewer', submittedAt: '2026-11-16T10:00:00Z' }] }
+  expect(await pullRequestStateOf({ folders: () => ['/app'], repository: async () => 'acme/app', pullRequest: async () => detail }, 'acme/app', 12)).toMatchObject(detail)
+})
