@@ -94,7 +94,6 @@ import { botMessageText } from '../run/mcp/appTools/agentMessage'
  * acts in, and the limit of the other device whose message started or continued that turn (absent: this computer).
  */
 type BotSender = { botId: string; name: string; activationId: string; limit?: PermissionMode }
-import { notOnThisComputerText } from '../../shared/bots/personal/computerLimit'
 import { createHash, randomUUID } from 'node:crypto'
 import { QueueCommands, type QueueIntent } from '../run/QueueCommands'
 import type { PlannedQueueCommand, QueueEffects } from '../queue/queueJournal'
@@ -267,6 +266,7 @@ import {
   type CommitInput
 } from '../git/commitSuggestion'
 import { readPullRequestTemplate } from '../git/pullRequestTemplate'
+import { RepositoryIdentityError } from '../git/RepositoryIdentity'
 import type { LineEditStatsStore } from '../stats/LineEditStatsStore'
 import type { ProjectManager } from '../data/ProjectManager'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
@@ -1839,8 +1839,16 @@ export class OrchestratorService extends EventEmitter {
     loadedThreadIds: () => this.sessions.keys(),
     holdReason: (threadId) => this.releaseHoldReason(threadId),
     releaseIfIdle: (threadId) => this.releaseIfIdle(threadId),
-    releaseIdleData: (idleMs, now) => { this.threadStore?.releaseIdleThreadData(idleMs, now) }
+    releaseIdleData: (idleMs, now) => { this.threadStore?.releaseIdleThreadData(idleMs, now) },
+    releaseIdleRuntimes: (idleMs, now) => { this.runtimeManager?.releaseIdleRuntimes(idleMs, now, (threadId) => this.runtimeKeepReason(threadId)) }
   })
+
+  /** What the orchestrator alone knows keeps a thread's runtime: a window shows it, or a reload is reading it. */
+  private runtimeKeepReason(threadId: string): string | undefined {
+    if (this.residency.isViewed(threadId)) return 'shown in a window'
+    if (this.residency.isWarming(threadId)) return 'reloading'
+    return undefined
+  }
 
   /** How many threads have a session in memory (the memory monitor's count). */
   loadedSessionCount(): number {
@@ -4968,6 +4976,8 @@ export class OrchestratorService extends EventEmitter {
       await this.stopThread(threadId, 'settled').catch((error: unknown) => {
         console.warn('settling a thread could not stop its work', { threadId, error: error instanceof Error ? error.message : String(error) })
       })
+      // An archived thread's runtime goes now when nothing holds it; otherwise the idle sweep drops it once free.
+      this.runtimeManager?.releaseRuntime(threadId, (id) => this.runtimeKeepReason(id))
     }
     return thread
   }
@@ -5136,8 +5146,7 @@ export class OrchestratorService extends EventEmitter {
   /**
    * The owner's bot behind a call from one of its threads ("use your threads"), when the call may go ahead: the bot's
    * main thread made it, in a turn registered with the bot's authority that holds `tool` now (starting, messaging and
-   * stopping only in a chat turn the owner's own message started), and this computer has "use your threads" on. Undefined
-   * for a thread that is no bot's. A bot's thread that may not make the call is refused here, whatever let it this far.
+   * stopping only in a chat turn the owner's own message started). Undefined for a thread that is no bot's. A bot's thread that may not make the call is refused here, whatever let it this far.
    */
   private botSenderOf(actor: AgentActor, tool: 'thread_create' | 'thread_send' | 'thread_interrupt' | 'thread_archive' | 'thread_hide'): BotSender | undefined {
     let role: string | undefined
@@ -5159,13 +5168,6 @@ export class OrchestratorService extends EventEmitter {
       owned = undefined
     }
     if (!owned) throw refused
-    let here = false
-    try {
-      here = this.settingsStore.get().bots.here.threads === true
-    } catch {
-      here = false
-    }
-    if (!here) throw new McpToolError('mousse_scope_denied', notOnThisComputerText('threads'))
     const bot = this.botThreads?.botOf?.(actor.threadId)
     if (!bot) throw refused
     return { ...bot, activationId: turn.bot.activationId, ...(owned.limit ? { limit: owned.limit } : {}) }
@@ -5182,7 +5184,7 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * "Use your threads" no longer holds for a bot (Remove, or this computer's switch went off): the messages it sent that
+   * "Use your threads" no longer holds for a bot (Remove, or its switch went off in About): the messages it sent that
    * wait in its owner's threads and have not started are taken out of their queues, and each thread says so in one line.
    * A message already running is left to finish; its owner can stop it. Returns how many were withdrawn.
    */
@@ -8219,6 +8221,7 @@ export class OrchestratorService extends EventEmitter {
     manager: import('../runtime/ThreadRuntimeManager').ThreadRuntimeManager | null
   ): void {
     this.runtimeManager = manager
+    manager?.setClock(() => this.residency.now())
   }
 
   /** Public access to session agents for a thread (hydrates via runtime manager when present). */
@@ -12478,11 +12481,19 @@ export class OrchestratorService extends EventEmitter {
           snapshotFolder = undefined
         }
       } else if (directory) {
-        turnStartSha = (await new ThreadActionService(directory).recordOutsideChanges({
-          threadId: session.threadId, conversationBranchId, workspacePath: checkpointCwd,
-          heldThreadLease: session.executionLease ?? undefined, signal: setupSignal,
-          presentationMessageStart: turnPresentationStart, nativeContextBoundary: turnNativeStartBoundary
-        })).startSha
+        try {
+          turnStartSha = (await new ThreadActionService(directory).recordOutsideChanges({
+            threadId: session.threadId, conversationBranchId, workspacePath: checkpointCwd,
+            heldThreadLease: session.executionLease ?? undefined, signal: setupSignal,
+            presentationMessageStart: turnPresentationStart, nativeContextBoundary: turnNativeStartBoundary
+          })).startSha
+        } catch (error) {
+          // A worktree folder given a new repository (Initialize Git) has no commit to snapshot yet: the turn runs with
+          // its conversation recorded alone, and Undo says why. Anything else still fails the turn.
+          if (!(error instanceof RepositoryIdentityError && error.capability.reason === 'unborn-head')) throw error
+          snapshotsOff = 'Undo is off for this turn: the worktree\'s repository has no commit yet.'
+          checkpointEnabled = false
+        }
       } else {
         await requireCleanWorkspaceAsync(checkpointCwd, 'Thread workspace')
         turnStartSha = await actionGitAsync(checkpointCwd, ['rev-parse', 'HEAD'])
@@ -12858,7 +12869,11 @@ export class OrchestratorService extends EventEmitter {
       const goal = this.threadStore?.getThread(session.threadId)?.goal
       const turnEpoch = this.goalTurnEpochs.get(session.threadId)?.epoch
       const goalText = goal?.state === 'working' && turnEpoch && goal.epoch === turnEpoch ? goalNote(goal) : undefined
-      const prompted = [modelNote, goalText, userContent].filter(Boolean).join('\n\n')
+      // The first turn that runs in the project folder because the worktree is gone or emptied: the agent is told, once.
+      const folderNote = opts?.bot ? undefined : session.workspace?.workspaceNote
+      const workspaceNote = folderNote && folderNote !== session.workspaceNoteGiven ? folderNote : undefined
+      session.workspaceNoteGiven = folderNote ?? null
+      const prompted = [modelNote, goalText, workspaceNote, userContent].filter(Boolean).join('\n\n')
       const activeMessages = getActiveMessages(this.nativeContext)
       const turnInput: TurnInput = {
         runId: engineRunId ?? turnId,

@@ -1,7 +1,6 @@
 import type { CounterScope } from '../../harness/counters'
 import type { SpendScope } from '../../harness/spend'
 import type { NeutralTool } from '../../harness/tools'
-import type { BotComputerSwitch } from './computerLimit'
 import type { PermissionMode } from '../../permissionMode'
 import type { BotModelPick, BotWorkModelName } from './definition'
 
@@ -75,11 +74,6 @@ export interface BotMcpTool {
 export type WallReason =
   | { kind: 'tool'; tool: string }
   | { kind: 'path'; tool: string; path: string; access: 'read' | 'write' }
-  /**
-   * Something this computer has switched off for every bot (Settings → What bots may do here, `BotComputerLimit`):
-   * commands, the browser or the owner's threads. Never an ask, whatever the grant holds.
-   */
-  | { kind: 'computer'; tool: string; off: BotComputerSwitch }
   /**
    * A path the runtime would rewrite before opening (`~`, a variable): never checked, never an ask.
    * `home`: the owner's home folder, for a `~` or variable path; `full`: the path it stands for.

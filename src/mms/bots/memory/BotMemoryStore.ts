@@ -1,3 +1,4 @@
+import { requestJournalRows } from './requestFrames'
 import { createHash } from 'node:crypto'
 import type { ProfileDatabase } from '../../run/db/ProfileDatabase'
 import type { BotLane } from '../../../shared/bots/personal/definition'
@@ -255,6 +256,14 @@ export class BotMemoryStore {
     this.timeZone = options.timeZone ?? (() => undefined)
     this.log = options.log ?? (() => {})
     this.redactMessage = options.redactMessage ?? defaultRedactMessage
+    // Profile-wide repair, deliberately separate from the bots.db schema version.
+    this.write(() => {
+      const key = 'request_frames_external_v1'
+      if (this.getState('', key)) return
+      this.run(`UPDATE bot_journal SET external = 1 WHERE kind IN ('notice', 'run_start')
+        AND (instr(text, '[output]') > 0 OR instr(text, '[data from ') > 0 OR instr(text, '[Message from the bot "') > 0)`)
+      this.setState('', key, true)
+    })
     if (options.checkIndexes !== false) this.checkIndexes()
   }
 
@@ -337,7 +346,8 @@ export class BotMemoryStore {
     const existing = this.get('SELECT seq, json, redacted_at FROM bot_journal WHERE bot_id = ? AND source_key = ?', row.botId, row.sourceKey)
     const json = { ...((row.json as Record<string, unknown> | undefined) ?? {}), sha256: sha256(row.text), ...(partial ? { partial: true } : {}) }
     if (!existing) {
-      this.appendInTx(this.db, { ...row, json }, row.at)
+      for (const part of row.kind === 'notice' ? requestJournalRows({ ...row, json }) : [{ ...row, json }])
+        this.appendInTx(this.db, part, row.at)
       return
     }
     const stored = parseJson(existing.json)
@@ -353,6 +363,12 @@ export class BotMemoryStore {
 
   journalRow(botId: string, seq: number): BotJournalRow | undefined {
     const row = this.get('SELECT * FROM bot_journal WHERE bot_id = ? AND seq = ?', botId, seq)
+    return row ? journalRowOf(row) : undefined
+  }
+
+  /** The journal provenance of a chat message, including service lines shown with a bot author. */
+  journalMessage(botId: string, messageId: string): BotJournalRow | undefined {
+    const row = this.get('SELECT * FROM bot_journal WHERE bot_id = ? AND source_key = ?', botId, `bm:${messageId}`)
     return row ? journalRowOf(row) : undefined
   }
 
@@ -570,9 +586,9 @@ export class BotMemoryStore {
     return row ? versionOf(row) : undefined
   }
 
-  /** The active entries, oldest first: what every pack injects. */
+  /** The active entries, first learned first: corrections keep their place in every pack. */
   active(botId: string): BotMemoryEntry[] {
-    return this.all("SELECT * FROM bot_memories WHERE bot_id = ? AND status = 'active' ORDER BY learned_at, row_id", botId).map((row) => entryOf(versionOf(row)))
+    return this.all("SELECT current.* FROM bot_memories current JOIN bot_memories first ON first.bot_id = current.bot_id AND first.id = current.id AND first.version = 1 WHERE current.bot_id = ? AND current.status = 'active' ORDER BY first.learned_at, first.row_id", botId).map((row) => entryOf(versionOf(row)))
   }
 
   /** `memory_list` / `bots.memory.list`: current entries (active and expired), or every version with `history`. */
@@ -923,6 +939,7 @@ export class BotMemoryStore {
   /**
    * A fresh start for the bot's memory, in one transaction: every journal row (with its search rows, by trigger) and the
    * memory state go, but the capture cursors (`cursor:<threadId>`), so capture never copies the bot's threads in again.
+   * `BotStore` also writes `cursor:create:<clientRequestId>` records, not capture cursors; `cursor:` keeps them here too.
    * `keepSaved` (`bots.memory.wipe` with `keep: 'saved'`): the owner's entries and the bot's notes stay as they are,
    * forgotten ones as tombstones; only entries that are run notes now go, every version. Without it every entry goes.
    * Returns how many current entries went. Entries never need the journal rows they came from (`source_seq`).

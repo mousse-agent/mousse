@@ -9,7 +9,7 @@ import { EventEmitter } from 'node:events'
 import { homedir, hostname } from 'os'
 import { MousseConfigStore } from './config/MousseConfigStore'
 import { MmsEventBus } from './events'
-import { onSettingsSaved, SettingsStore } from './settings/SettingsStore'
+import { SettingsStore } from './settings/SettingsStore'
 import type { MousseSettingsUpdate } from '../shared/settings'
 import { rewriteMovedDefaults } from './settings/movedDefaults'
 import { ProviderAuthService } from './providers/ProviderAuthService'
@@ -837,9 +837,6 @@ export class MmsProfileServices {
       // A run may only ask for a skill this profile has. MCP asks are made from the owner's servers set up now (`mcp`).
       knownAsk: (permission) => 'skill' in permission && (this.botKnownSkills?.has(permission.skill) ?? true),
       browser: botBrowsers,
-      // What bots may do on this computer (Settings → Agents): the installation's setting, the same for every profile,
-      // read at every dispatch and call, never taken from a caller or another computer.
-      computerLimit: () => this.config.botSettings().here,
       // "Use your threads" removed: what the bot sent that has not started leaves its owner's threads.
       threadsWithdrawn: (bot) => { this.orchestrator.withdrawBotThreadMessages(bot) },
       // A deleted bot's private temporary folder outside Mousse's data (Claude Code's commands on Linux) goes with it.
@@ -860,7 +857,7 @@ export class MmsProfileServices {
           situation: (botId) => this.botSituation(botId),
           scheduleCreatedAt: (botId, scheduleId) => this.botSchedules?.get(botId, scheduleId)?.createdAt,
           reactions: (botId, since) => store.reactionsSince(botId, since, BOT_PACK_REACTIONS)
-            .map((row) => ({ emoji: row.ownerReaction!.emoji, at: row.ownerReaction!.at, text: row.text, fromWork: row.kind === 'run_report' || (row.activationId !== null && store.activation(row.activationId)?.lane === 'run') }))
+            .map((row) => ({ messageId: row.id, emoji: row.ownerReaction!.emoji, at: row.ownerReaction!.at, text: row.text, fromWork: row.kind === 'run_report' || (row.activationId !== null && store.activation(row.activationId)?.lane === 'run') }))
         }
       })
       botMemory = memory
@@ -917,17 +914,6 @@ export class MmsProfileServices {
     }
     const personalBots = this.personalBots
     if (personalBots) this.orchestrator.setBotThreads(personalBots)
-    // A switch of What bots may do here changed: every bot's About reads again (it marks what is off here).
-    if (personalBots) this.platform.onDispose(onSettingsSaved(() => personalBots.computerLimitChanged()))
-    // The switches are the installation's: when any profile, window or the CLI changes them, every window of this
-    // profile hears it too, with this profile's own settings, so a Settings page already open shows them as they are.
-    let botsHere = JSON.stringify(this.config.botSettings())
-    this.platform.onDispose(onSettingsSaved(() => {
-      const now = JSON.stringify(this.config.botSettings())
-      if (now === botsHere) return
-      botsHere = now
-      this.events.emit({ channel: 'protocol:event', data: { type: 'settings.changed', data: { settings: this.settings.get() } } })
-    }))
     // The bots' own app tools (schedules, profile, depth) and memory tools, through the engine.
     if (personalBots && botMemory) {
       const memory = botMemory

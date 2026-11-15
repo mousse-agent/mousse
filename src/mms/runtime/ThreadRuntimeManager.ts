@@ -64,6 +64,10 @@ export class ThreadRuntimeManager extends EventEmitter {
   private questions: UserQuestionService | null = null
   /** Threads showing Done: finished, and not seen in a window since. Kept across restarts. */
   private unseenDone: UnseenDoneStore | null = null
+  /** When each runtime was last used (hydrated, read through `getOrHydrate`, given an activity or a terminal). */
+  private readonly lastUse = new Map<string, number>()
+  /** The idle sweep's clock (`ThreadResidency.now`), so the sweep and the uses above are timed alike. */
+  private now: () => number = Date.now
 
   attach(deps: {
     threadStore: ThreadDataStore
@@ -86,6 +90,10 @@ export class ThreadRuntimeManager extends EventEmitter {
     return this.runtimes.get(threadId)
   }
 
+  setClock(now: () => number): void {
+    this.now = now
+  }
+
   /**
    * Hydrate or return existing runtime. Loads agents/tasks from disk once.
    * Does not call getOrCreateSession (avoids recursion). Does not kill PTYs.
@@ -93,6 +101,7 @@ export class ThreadRuntimeManager extends EventEmitter {
    */
   getOrHydrate(threadId: string): ThreadRuntime {
     let rt = this.runtimes.get(threadId)
+    this.lastUse.set(threadId, this.now())
     if (rt?.isHydrated) return rt
     if (!rt) {
       rt = new ThreadRuntime(threadId)
@@ -361,6 +370,69 @@ export class ThreadRuntimeManager extends EventEmitter {
     this.pendingDelegations.delete(threadId)
     this.pendingBackgroundWork.delete(threadId)
     this.unseenDone?.delete(threadId)
+    this.lastUse.delete(threadId)
+  }
+
+  /**
+   * Why the thread's runtime must stay in memory, or undefined when dropping it loses nothing: its agents and tasks
+   * are saved on every change and read back by `getOrHydrate`, and its activity is what a restart shows (Idle, or a
+   * personal bot's chat that nothing lists). Cheap and synchronous; never hydrates.
+   */
+  runtimeHoldReason(threadId: string): string | undefined {
+    const rt = this.runtimes.get(threadId)
+    if (!rt) return undefined
+    // A loaded session shares the runtime's agent and task registries; the session's release comes first.
+    if (this.orchestrator?.hasSession(threadId)) return 'thread loaded'
+    if (this.orchestrator?.isTurnActive(threadId) || this.orchestrator?.isActiveTurnRunning(threadId)) return 'turn running'
+    if (!this.activityRebuiltByRestart(threadId, rt.activity) || !this.activityRebuiltByRestart(threadId, this.turnActivity.get(threadId) ?? rt.activity))
+      return 'activity shown'
+    if (this.pendingDelegations.has(threadId) || this.pendingBackgroundWork.has(threadId)) return 'waiting on work'
+    if (rt.agents.list().some((agent) => BUSY_AGENT_STATUSES.has(agent.status))) return 'agent running'
+    if (rt.tasks.list().some((task) => task.status === 'in_progress')) return 'task in progress'
+    if (rt.ptyIds.size) return 'terminal open'
+    if (rt.pendingQuestionIds.size || this.questions?.listPendingForThread(threadId).length) return 'question pending'
+    if (rt.connectionFailed) return 'connection failed'
+    return undefined
+  }
+
+  /** Idle is what every thread shows after a restart; Done only when it is marked unseen, which is kept. */
+  private activityRebuiltByRestart(threadId: string, state: ThreadActivityState): boolean {
+    if (state === 'idle') return true
+    if (state !== 'completed' || this.unseenDone?.has(threadId)) return false
+    // A personal bot's chat is never listed, so its Done is never shown or marked.
+    return Boolean(this.threadStore?.getThread(threadId)?.botOwned)
+  }
+
+  /**
+   * Drops the thread's runtime when nothing holds it (`runtimeHoldReason`, and `keep`). Kills nothing and dismisses
+   * nothing: a held runtime stays as it is. Emits nothing; the next use hydrates it again from disk. True when dropped.
+   */
+  releaseRuntime(threadId: string, keep?: (threadId: string) => string | undefined): boolean {
+    const rt = this.runtimes.get(threadId)
+    if (!rt) return false
+    if (this.runtimeHoldReason(threadId) !== undefined || keep?.(threadId) !== undefined) return false
+    this.detachRegistryListeners(threadId, rt)
+    this.runtimes.delete(threadId)
+    this.turnActivity.delete(threadId)
+    this.lastUse.delete(threadId)
+    return true
+  }
+
+  /**
+   * The idle sweep (`ThreadResidency.sweepNow`): drops runtimes unused for `idleMs` before `now`, and at once those
+   * of archived threads, unless something holds them. Returns the threads dropped.
+   */
+  releaseIdleRuntimes(idleMs: number, now: number, keep?: (threadId: string) => string | undefined): string[] {
+    const out: string[] = []
+    for (const threadId of [...this.runtimes.keys()]) {
+      let since = this.lastUse.get(threadId)
+      if (since === undefined) this.lastUse.set(threadId, (since = now))
+      const thread = this.threadStore?.getThread(threadId)
+      const archived = Boolean(thread?.settledAt)
+      if (!archived && now - since < idleMs) continue
+      if (this.releaseRuntime(threadId, keep)) out.push(threadId)
+    }
+    return out
   }
 
   /**
@@ -372,8 +444,9 @@ export class ThreadRuntimeManager extends EventEmitter {
     for (const thread of this.threadStore.listAllThreads()) {
       if (thread.settledAt) continue
       const data = this.threadStore.loadThreadWorkState(thread.id)
+      // Only threads with work to look at: a runtime for every started thread is what the idle sweep later drops.
       const hasWork = data.agents.length > 0 || data.tasks.length > 0 || data.queued > 0 || data.sessions > 0
-      if (!hasWork && !this.threadStore.isThreadStarted(thread.id)) continue
+      if (!hasWork) continue
       const rt = this.getOrHydrate(thread.id)
       for (const agent of rt.agents.list()) {
         // Headless children are owned by the daemon process and cannot outlive a restart.

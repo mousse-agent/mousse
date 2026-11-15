@@ -195,19 +195,16 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
     return unsub
   }, [settingsOpen, refreshProviderData])
 
-  // What bots may do here is the installation's: a change made in another window, another profile or the CLI shows on
-  // an open page at once, so its switches always start from what the service holds. The same for the theme, which an
-  // agent can change while the page is open: the theme list a save starts from is always the saved one.
+  // The theme can change while the page is open (an agent can set it): the theme list a save starts from is always the
+  // saved one.
   useEffect(() => {
     if (!settingsOpen) return
     return window.mousse.settings.onChanged?.((next) => {
-      if (!next) return
+      if (!next?.appearance) return
       setSettings((current) => {
         if (!current) return current
-        const withBots = next.bots ? { ...current, bots: next.bots } : current
-        if (!next.appearance) return withBots
-        const { theme, userTheme, userThemes } = next.appearance
-        return { ...withBots, appearance: { ...withBots.appearance, theme, userTheme, userThemes } }
+        const { theme, userTheme, userThemes } = next.appearance!
+        return { ...current, appearance: { ...current.appearance, theme, userTheme, userThemes } }
       })
     })
   }, [settingsOpen])

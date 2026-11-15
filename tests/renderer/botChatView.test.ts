@@ -49,6 +49,7 @@ const { ChatsSidebar } = await import('../../src/renderer/components/chats/Chats
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
 const { setBotsClient, useBotsStore } = await import('../../src/renderer/stores/botsStore')
 const { SelectionReplyButton } = await import('../../src/renderer/components/SelectionReplyButton')
+const { botMessageScroller } = await import('../../src/renderer/components/bots/BotChatView')
 
 let root: Root
 let host: HTMLElement
@@ -686,6 +687,90 @@ describe('the transcript', () => {
     } finally {
       delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView
     }
+  })
+})
+
+describe('a long chat', () => {
+  const drawn = () => [...transcript().querySelectorAll('article[data-message-id]')].map((row) => row.getAttribute('data-message-id'))
+  const messageCalls = () => fake.calls.filter((call) => call[0] === 'messages').length
+  /** The transcript scrolled to `top` of a 5,000px chat in a 500px view, with the scroll event the browser sends. */
+  async function scrollTo(top: number) {
+    const log = transcript()
+    Object.defineProperty(log, 'scrollHeight', { configurable: true, get: () => 5000 })
+    Object.defineProperty(log, 'clientHeight', { configurable: true, value: 500 })
+    log.scrollTop = top
+    await act(async () => { log.dispatchEvent(new Event('scroll')) })
+    await settle()
+  }
+
+  it('draws only the newest rows when opened again; scrolling up draws older ones, and the end draws only the newest again', async () => {
+    const scrolled: string[] = []
+    Element.prototype.scrollIntoView = vi.fn(function (this: HTMLElement) { scrolled.push(this.getAttribute('data-message-id')!) })
+    try {
+      fake.chats.inbox = [
+        ...Array.from({ length: 199 }, (_, index) => message(index + 1)),
+        message(200, { text: 'As I said.', replyTo: { id: 'm10', author: 'bot', text: 'Message 10' } })
+      ]
+      await open()
+      expect(drawn()).toHaveLength(50)
+      // Reading back to the start: each page asked for at the top shows when it arrives.
+      for (const rows of [100, 150, 200]) {
+        await scrollTo(0)
+        expect(drawn()).toHaveLength(rows)
+      }
+      expect(drawn()[0]).toBe('m1')
+
+      // Away to the Threads tab and back: the chat is still loaded, and only its newest rows are drawn.
+      await act(async () => root.render(null))
+      await act(async () => root.render(createElement(ChatWorkspace)))
+      expect(drawn()).toHaveLength(60)
+      expect([drawn()[0], drawn().at(-1)]).toEqual(['m141', 'm200'])
+
+      // At the top of what is drawn, the next loaded rows above join it, without asking the service.
+      const calls = messageCalls()
+      await scrollTo(0)
+      expect(drawn()).toHaveLength(100)
+      expect(drawn()[0]).toBe('m101')
+      expect(messageCalls()).toBe(calls)
+
+      // Go to latest goes to the end, where only the newest rows are drawn again; a new message keeps it so.
+      await click(button('Go to latest'))
+      await scrollTo(4500)
+      expect(drawn()).toHaveLength(60)
+      await act(async () => fake.emit.message('inbox', message(201)))
+      await settle()
+      expect(drawn()).toHaveLength(60)
+      expect(drawn().at(-1)).toBe('m201')
+
+      // A quote of a loaded message above the rows drawn draws it, then scrolls to it.
+      await click(transcript().querySelector('[data-message-id="m200"] .bot-reply-quote'))
+      await settle()
+      expect(drawn()[0]).toBe('m10')
+      expect(scrolled).toEqual(['m10'])
+      expect(messageCalls()).toBe(calls)
+    } finally {
+      delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView
+    }
+  })
+
+  it('lands on a message as find does: loaded and drawn when it is older than the rows drawn; a landing a newer one replaced does nothing', async () => {
+    fake.chats.inbox = Array.from({ length: 200 }, (_, index) => message(index + 1))
+    await open()
+    expect(drawn()[0]).toBe('m151')
+    const land = botMessageScroller('inbox')
+    let current = 1
+    const landing = (token: number) => ({ isCurrent: () => current === token, end: () => undefined })
+    // Replaced before it was drawn: false, and the message is not drawn.
+    const stale = land('m120', landing(1))
+    current = 2
+    expect(await stale).toBe(false)
+    expect(drawn()).not.toContain('m120')
+    // Not loaded yet: older pages load until it is held, then it is drawn with every row after it.
+    let result: boolean | undefined
+    void land('m3', landing(2)).then((value) => { result = value })
+    for (let turn = 0; turn < 60 && result === undefined; turn += 1) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)) })
+    expect(result).toBe(true)
+    expect(drawn()[0]).toBe('m3')
   })
 })
 

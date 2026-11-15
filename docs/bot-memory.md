@@ -8,6 +8,7 @@ Every bot has an append-only **journal** in `bots.db` (`bot_journal`). It holds 
 
 - `BotJournal.appendInTx` writes a row inside the caller's `bots.db` transaction, so a `bot_messages` row and its journal row commit together. Rows are idempotent on `(bot_id, source_key)`: `bm:<message id>`, `<threadId>:<messageId>`, `act:<id>:start` …
 - **Capture** (`capture.ts`) copies a bot thread's rows through `ThreadDataStore.loadThreadData`, from a per-thread cursor in `bot_memory_state`. The engine runs it after every dispatch (`afterDispatch`) and for every bot thread at startup (`catchUp`). A tool call still running when copied is marked partial and replaced once by its final form.
+- Outside text in a request (command output, matching lines, event reasons, pull request and thread titles) stays inside fixed data frames. Capture and `run_start` replace each frame with a short placeholder and keep its content as an external tool-result row, keyed `frame:<activationId>:<n>`. Both writers share the key, so recapture adds no copy and never restores a row removed by Forget. At first open, a one-time pass marks older notices and run starts containing frame markers as external without splitting them. No database version changes.
 - Owner and bot messages are never cut. Tool rows keep at most 16 KB, head and tail, with the full text's hash.
 - A failed journal write is `BotJournalError` (`bot_journal_failed`): the bot goes stuck with "I can't save my work. Free some disk space."
 - The journal holds what Mousse observes. It does not hold a runtime's hidden reasoning, or files the bot never named.
@@ -20,6 +21,7 @@ Every bot has an append-only **journal** in `bots.db` (`bot_journal`). It holds 
 - **Caps** (estimated tokens): owner 600, notes 1,400, run notes 500. A save over its kind's cap fails with that kind's entries. Superseded and expired entries do not count.
 - **Refused saves:** over 400 characters, unresolved relative dates ("tomorrow"; the refusal gives the absolute date), and anything the guard rejects.
 - **Lists and longer documents** are files in the bot's files folder, which the chat and its work can both change; memory keeps one short note per list with its path (`instructions.ts`).
+- **Pack order:** entries keep the place where they were first learned when the bot replaces them or the owner edits them. Each version still has its own date.
 - **Dates:** `learned_at`, plus optional `valid_from` and `expires_at`. An entry past `expires_at` becomes `expired`: out of the pack, still listed and searchable.
 - **Forget** (a chat turn the owner's message or tapped answer started, or the owner through `bots.memory.forget`): the entry's text is removed and its hash kept, so it is refused if saved again. Cited journal rows (`refs`), their exact copies, and the entry's save records are redacted to `[removed at your request · <date>]`, with their index rows. Entries citing a redacted row are forgotten too, and a redacted `bm:` row's `bot_messages` text is blanked. Thread transcripts and runtime session files are caches outside this.
 
@@ -39,6 +41,7 @@ Every bot has an append-only **journal** in `bots.db` (`bot_journal`). It holds 
 
 - **The window moves in chunks.** When it passes 8k tokens, its oldest rows drop until it is under 4k and fold into the chat summary, newest first: owner messages cut at 300 characters, the first line of a run report, the first sentence of a reply. No model call. Between jumps each pack's prefix extends the last one, so prompt caches hold.
 - A run's request (its prompt, after the pack) ends with "Your last message is your report to the owner …" (`BOT_RUN_REPORT_LINE`), which the engine appends.
+- **Missed standing wishes.** After a settled chat turn, the fallback saves a standing wish the turn did not save. If the owner entries are full, the refusal is counted in `bot_memory_state`. The next chat situation gives the count and asks the bot to tell the owner in its own words that its notes about them are full and ask which to drop. Only a settled turn that carried the count acknowledges it; failures and consults leave it pending, and a run is not told.
 - The rows of the current activation (the owner's new message) are left out: they arrive as the request.
 - The **guard** checks every row entering a pack. A piece that looks like a credential is replaced in place by "[held back: looks like a secret · memory_read j12 shows it]", and the rest of the row stays (after "password:" the rest of the line goes with it, since a password may have spaces). A row with hidden characters or instruction-shaped text is held back whole: "(held back: … memory_read j12 shows it.)". The owner's own words skip only the instruction check.
 
@@ -47,6 +50,7 @@ Every bot has an append-only **journal** in `bots.db` (`bot_journal`). It holds 
 Both FTS5 indexes use `porter unicode61 remove_diacritics 2`. `bot_journal_fts` is an external-content index; `bot_memories_fts` indexes versions that still have text. Triggers keep them in the writer's transaction.
 
 - `memory_search`: memory hits first, then journal rows, by bm25 with recency breaking ties, filtered to the bot before the limit. Every word must match first; when that finds too few, any word may. Query text is reduced to quoted words, so no FTS syntax passes through. `model_change`, `memory_op` and `redaction` rows are never returned.
+- Outside text from a request is searchable and readable as external data from a tool, rather than as a Mousse notice. Older framed rows keep their original kind and carry the external mark.
 - `memory_read`: rows around a hit, an entry's versions, or one activation page by page (about 8k tokens a page).
 - Zero-hit searches and turns with three searches and no read are counted in `search_stats`, locally.
 - At open, a failed integrity check rebuilds an index; `BotMemoryAdmin.reindex` rebuilds both.

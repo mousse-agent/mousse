@@ -202,6 +202,8 @@ export interface BotWorkModel {
 
 /** `work_start`'s answer: the work's id, and whether it runs now or waits behind others (their titles). */
 export interface BotWorkStarted {
+  /** This request found existing work; no new activation was started. */
+  replayed?: true
   workId: string
   status: 'started' | 'queued' | 'ended'
   ahead: string[]

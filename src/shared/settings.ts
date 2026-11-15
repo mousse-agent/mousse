@@ -421,109 +421,6 @@ export function normalizeExperimentalSettings(raw?: Partial<ExperimentalSettings
   return { subagentWorktrees: raw?.subagentWorktrees === true, profiler: normalizeProfilerSettings(raw?.profiler) }
 }
 
-/**
- * What bots may do on this computer (Settings → Agents → What bots may do here): a ceiling over every bot's grant, kept
- * once for the whole installation (the top-level `bots` key of the installation's `mousse.conf`), so every profile's
- * bots are held to it and every profile's Settings shows it. It is never sent to or set from another computer
- * (`settings.*` methods are not routed). A switch that is off gives no bot that permission here, whatever its grant
- * holds, and no bot can ask for it.
- */
-export interface BotComputerLimit {
-  /** "Run commands" (`shell`). */
-  shell: boolean
-  /** "Use the browser" (the bot's own browser). */
-  browser: boolean
-  /**
-   * "Use your threads": a bot may read the owner's threads, start threads (which run in Full access) and message them.
-   * Off, no bot here holds it whatever its grant says, which is what keeps a computer where bots must not run commands
-   * that way: a thread a bot starts runs commands without asking.
-   */
-  threads: boolean
-}
-
-export interface BotSettings {
-  here: BotComputerLimit
-  /**
-   * The stored setting could not be read (the settings file was unreadable and replaced, or the setting is malformed):
-   * every switch reads off until the owner sets them again. Settings says so beside the switches.
-   */
-  unreadable?: true
-}
-
-/** Every switch of What bots may do here, in the order Settings shows them: what a stored value must hold, and the only keys a write may name. */
-export const BOT_SWITCH_KEYS: ReadonlyArray<keyof BotComputerLimit> = ['shell', 'browser', 'threads']
-
-/**
- * Switches added after the setting was first saved: a stored value without one of them was written before it existed,
- * so it reads as on (its default), never as unreadable. Present and not a boolean still fails closed.
- */
-const BOT_SWITCHES_ADDED_LATER: ReadonlySet<keyof BotComputerLimit> = new Set(['threads'])
-
-/** The Use your threads switch's tooltip: what a bot can do through a thread, whatever the other switches say. */
-export const BOTS_THREADS_TIP =
-  'A thread a bot starts runs with full access, so it can run commands and change files even with Run commands off. Switch this off to keep bots from that here.'
-
-/** Settings' one line beside the switches while the stored setting can't be read (`BotSettings.unreadable`). */
-export const BOTS_UNREADABLE_LINE = "All off: the saved setting couldn't be read. Switch on what bots may use."
-
-/**
- * The Run commands switch's tooltip: where a bot's commands run without a sandbox they are held to nothing (docs/bots.md,
- * Run commands), so the switch says so, and that it is what closes that on this computer.
- */
-export const BOTS_SHELL_TIP =
-  'Where a bot’s commands run without a sandbox (on Windows, with Pi, and with Claude Code on Linux without bubblewrap and socat), a bot that may run commands can read and change anything your account can, Mousse’s own data included. Switch this off to close that here.'
-
-/** Why a write of What bots may do here was refused: it names one or more of the switches, each on or off. */
-export const BOTS_HERE_SHAPE = `What bots may do here takes { here: { … } } naming one or more of ${BOT_SWITCH_KEYS.join(', ')}, each true or false. Nothing was changed.`
-
-/**
- * The switches a settings update changes for What bots may do here: `{ here: { … } }` naming one or more known switches,
- * each a boolean, and nothing else, or undefined (refused). Each window and the CLI send only the switch they change, and
- * the service puts it over the switches it holds (`MousseConfigStore.setBotsHere`), so a window whose copy is older
- * never turns back a switch another one changed. A switch added later is written the same way.
- */
-export function botSettingsWrite(value: unknown): Partial<BotComputerLimit> | undefined {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
-  const keys = Object.keys(value)
-  if (keys.length !== 1 || keys[0] !== 'here') return undefined
-  const here = (value as { here: unknown }).here
-  if (!here || typeof here !== 'object' || Array.isArray(here)) return undefined
-  const named = Object.entries(here as Record<string, unknown>)
-  if (!named.length || !named.every(([key, on]) => (BOT_SWITCH_KEYS as readonly string[]).includes(key) && typeof on === 'boolean')) return undefined
-  return Object.fromEntries(named) as Partial<BotComputerLimit>
-}
-
-/**
- * The switches, when `value` is an object holding each as a boolean; undefined otherwise. A switch added after the
- * setting was first saved (`threads`) reads as on when it is missing, since the value was written before it existed. A
- * switch that was removed (`files`, "Use files on this computer") is ignored when an older build stored it.
- */
-export function botComputerLimitOf(value: unknown): BotComputerLimit | undefined {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
-  const here = value as Record<string, unknown>
-  const read = (key: keyof BotComputerLimit): boolean | undefined =>
-    typeof here[key] === 'boolean' ? here[key] as boolean : here[key] === undefined && BOT_SWITCHES_ADDED_LATER.has(key) ? true : undefined
-  const switches = Object.fromEntries(BOT_SWITCH_KEYS.map((key) => [key, read(key)])) as Record<keyof BotComputerLimit, boolean | undefined>
-  if (BOT_SWITCH_KEYS.some((key) => switches[key] === undefined)) return undefined
-  return switches as BotComputerLimit
-}
-
-/**
- * The stored setting (the raw top-level `bots` value) as the daemon reads it. Missing (an install that never set it):
- * every switch on, so existing installs keep what they had. Present but not `{ here: { shell, browser, threads } }`
- * with booleans (`threads` may be missing: it was added later), or marked unreadable (written after an unreadable settings
- * file was replaced): every switch off. A ceiling that can't be read fails closed.
- */
-export function normalizeBotSettings(raw: unknown): BotSettings {
-  if (raw === undefined) return { here: { shell: true, browser: true, threads: true } }
-  const shut: BotSettings = { here: { shell: false, browser: false, threads: false }, unreadable: true }
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return shut
-  const stored = raw as Record<string, unknown>
-  if (stored.unreadable !== undefined) return shut
-  const here = botComputerLimitOf(stored.here)
-  return here ? { here } : shut
-}
-
 /** A worktree folder the person chose, and the id written in its marker (`.mousse-worktrees.json`) when it was chosen. */
 export interface WorktreeFolderEntry {
   path: string
@@ -608,8 +505,6 @@ export interface MousseSettings {
     model: string
     instanceId?: string
   }
-  /** What bots may do on this computer (`BotComputerLimit`). */
-  bots: BotSettings
   agents: {
     enabled: Record<AgentTypeId, boolean>
     /** Default provider for in-app Mousse subagents; blank inherits the main model. */
@@ -1005,7 +900,6 @@ export function getDefaultSettings(): MousseSettings {
       llmProvider: '',
       model: ''
     },
-    bots: normalizeBotSettings(undefined),
     agents: {
       enabled: {
         mousse: true,

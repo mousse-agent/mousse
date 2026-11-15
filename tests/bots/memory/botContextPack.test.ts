@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { BOT_CHAT_PACK_TOKENS, estimateTokens } from '../../../src/shared/bots/personal/memory'
+import { createBotMemoryAdmin } from '../../../src/mms/bots/memory/admin'
 import { BotJournalError } from '../../../src/mms/bots/memory/BotMemoryStore'
 import { createBotJournal } from '../../../src/mms/bots/memory/capture'
 import { BOT_MEMORY_PROTOCOL, BOT_MEMORY_WRAPPER_CLOSE, BOT_MEMORY_WRAPPER_OPEN, BOT_RUN_REPORT_LINE, createBotContextProvider, type BotContextPackOptions } from '../../../src/mms/bots/memory/contextPack'
@@ -89,6 +90,22 @@ describe('the chat pack', () => {
     expect(pack).toContain('The owner last wrote 2 hours ago.')
     expect(pack).toContain('Waiting for the owner: change files in ~/Notes.')
     expect(pack).toContain('Schedules: every weekday · 09:00 (next Mon 9 Nov 2026, 09:00).')
+  })
+
+  it.each(['replace', 'edit'] as const)('keeps an entry in its original pack position after %s', async (how) => {
+    const fx = memoryFixture()
+    const { packs } = provider(fx)
+    // A timestamp tie also keeps first-learned order after the first entry gains a new row.
+    fx.store.save('ada', { lane: 'chat', kind: 'owner', text: 'Likes tea.' })
+    fx.store.save('ada', { lane: 'chat', kind: 'owner', text: 'Lives in London.' })
+    later(fx, DAY)
+    if (how === 'edit') createBotMemoryAdmin({ store: fx.store }).edit('ada', 'm1', 'Likes coffee.')
+    else fx.store.save('ada', { lane: 'chat', kind: 'owner', replaces: 'm1', text: 'Likes coffee.' })
+    const pack = await packs.chatPreamble({ botId: 'ada', activationId: 'corrected' })
+    expect(pack).toContain('Likes coffee.')
+    expect(pack.indexOf('Likes coffee.')).toBeLessThan(pack.indexOf('Lives in London.'))
+    expect(fx.store.current('ada', 'm1')?.learnedAt).toBe(new Date(fx.clock.now).toISOString())
+    expect(fx.reopen().active('ada').map((entry) => entry.id)).toEqual(['m1', 'm2'])
   })
 
   it('leaves out owner messages queued after its own: their turns answer them', async () => {

@@ -1,7 +1,7 @@
 /**
  * "Use your threads" as the bot engine holds it: one ask and one card (what Allow gives, plainly: threads it starts run
- * with full access), About with Remove, which turns get which thread tools, what the bot is told, and What bots may do
- * here's fourth switch, which takes it away on this computer with no card. The tools themselves are in
+ * with full access), About with Remove and its switch, which turns get which thread tools, and what the bot is told. The
+ * tools themselves are in
  * tests/run/botThreadTools.test.ts and the service's side in tests/run/botThreadsDaemon.test.ts.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -9,25 +9,23 @@ import { ownerChatTurn, threadsReadOnlyOf } from '../../src/mms/bots/activation/
 import { BOT_THREADS_CHAT_ONLY_TEXT, BOT_THREADS_NOT_OWNER_TEXT, botAppToolRefusal } from '../../src/shared/bots/personal/walls'
 import { botInstructions } from '../../src/mms/bots/instructions'
 import { THREADS_TEXT } from '../../src/shared/bots/personal/askText'
-import { BOT_COMPUTER_OPEN, BOT_OFF_HERE_MARK, type BotComputerLimit } from '../../src/shared/bots/personal/computerLimit'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
 import { botFixture, chatOf, createBot, finish, start, type BotFixture } from './botFixture'
 
 const app = (tool: string): NormalisedCall => ({ kind: 'app', tool, args: {} })
-const NOT_HERE = /^Not on this computer: "use your threads" is switched off here/
+const SWITCHED_OFF = /switched that off/
 const threadTools = (allow: readonly string[] | undefined) => (allow ?? []).filter((name) => name.startsWith('thread_')).sort()
 
 describe('"use your threads" in the bot engine', () => {
   let f: BotFixture
   let botId: string
-  let limit: BotComputerLimit
   const cards = () => chatOf(f, botId).filter((message) => message.ask)
   const line = (text: string | undefined) => text!.slice(text!.indexOf('What your owner allows now')).split('\n').find((row) => row.startsWith("- Use your owner's threads"))
+  /** The bot's own "use your threads" switch in About. */
+  const setThreads = (enabled: boolean) => f.bots.service.setPermission(botId, f.bots.service.get(botId).permissions.find((entry) => entry.title === 'use your threads')!.id, enabled)
 
   beforeEach(async () => {
     f = botFixture()
-    limit = { ...BOT_COMPUTER_OPEN }
-    f.host.computerLimit = () => limit
     f.host.instructions = (bot) => botInstructions(bot)
     await f.bots.reconcileOnStartup()
     botId = (await createBot(f, { name: 'Alpha', description: 'Help me with my work.', reply: 'Hello.' })).botId
@@ -91,7 +89,7 @@ describe('"use your threads" in the bot engine', () => {
     await finish(f, after.payload, 'completed', { text: 'I can\'t now.' })
   })
 
-  it('switched off on this computer: no thread tool, no card, the bot is told it is not here and is never offered it; About marks what it holds', async () => {
+  it('switched off for the bot: no thread tool, no card, the bot is told it is switched off and is never offered it', async () => {
     const asked = await chat('Start a thread for me.', 'm1')
     asked.prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'You asked.' })
     await finish(f, asked.payload, 'completed', { text: 'Asked.' })
@@ -99,24 +97,23 @@ describe('"use your threads" in the bot engine', () => {
     await finish(f, (await start(f, asked.activation.id, 2)).payload, 'completed', { text: 'Done.' })
     const before = cards().length
 
-    limit = { ...BOT_COMPUTER_OPEN, threads: false }
+    setThreads(false)
     const turn = await chat('Start one now.', 'm2')
     expect(threadTools(turn.prepared.policy.tools!.allow)).toEqual([])
-    expect(turn.prepared.authority.check(app('thread_create'))).toMatchObject({ ok: false, wall: { kind: 'computer', off: 'threads' } })
-    expect(turn.prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'You asked.' })).toMatch(NOT_HERE)
+    expect(turn.prepared.authority.check(app('thread_create'))).toMatchObject({ ok: false })
+    expect(turn.prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'You asked.' })).toMatch(SWITCHED_OFF)
     expect(turn.prepared.instructions).not.toContain('You can ask to "use your threads"')
-    expect(line(turn.prepared.instructions)).toMatch(/off on this computer/)
-    await finish(f, turn.payload, 'completed', { text: 'That is off here.' })
+    expect(line(turn.prepared.instructions)).toMatch(/switched off by your owner/)
+    await finish(f, turn.payload, 'completed', { text: 'That is off.' })
     expect(cards()).toHaveLength(before)
-    expect(f.store.activeGrant(botId)!.manifest.appTools).toContain('threads')
-    expect(f.bots.service.get(botId).permissions.find((entry) => entry.title === 'use your threads')).toMatchObject({ mark: BOT_OFF_HERE_MARK })
+    expect(f.bots.service.get(botId).permissions.find((entry) => entry.title === 'use your threads')).toMatchObject({ enabled: false })
 
     // A turn that started with it loses it at its next call when the switch goes off.
-    limit = { ...BOT_COMPUTER_OPEN }
+    setThreads(true)
     const running = await chat('And another.', 'm3')
     expect(running.prepared.authority.check(app('thread_list'))).toEqual({ ok: true })
-    limit = { ...BOT_COMPUTER_OPEN, threads: false }
-    expect(running.prepared.authority.check(app('thread_list'))).toMatchObject({ ok: false, wall: { kind: 'computer', off: 'threads' } })
+    setThreads(false)
+    expect(running.prepared.authority.check(app('thread_list'))).toMatchObject({ ok: false, refused: { text: expect.stringMatching(SWITCHED_OFF) } })
     await finish(f, running.payload, 'completed', { text: 'Stopped.' })
   })
 
@@ -215,11 +212,6 @@ describe('"use your threads" in the bot engine', () => {
     const running = await chat('Wait on that thread.', 'm2')
     const authority = running.prepared.authority
     expect(authority.stillHolds?.('thread_wait')).toBeUndefined()
-    // The switch off: the turn no longer holds it, and nothing is asked or shown for it.
-    limit = { ...BOT_COMPUTER_OPEN, threads: false }
-    expect(authority.stillHolds?.('thread_wait')).toMatch(NOT_HERE)
-    limit = { ...BOT_COMPUTER_OPEN }
-    expect(authority.stillHolds?.('thread_wait')).toBeUndefined()
     expect(cards().filter((card) => card.ask?.status === 'open')).toEqual([])
 
     f.bots.service.revokePermission(botId, f.bots.service.get(botId).permissions.find((entry) => entry.title === 'use your threads')!.id)
@@ -230,18 +222,25 @@ describe('"use your threads" in the bot engine', () => {
     await finish(f, running.payload, 'completed', { text: 'Stopped.' })
   })
 
-  it('switching "Use your threads" off on this computer withdraws every bot\'s waiting messages; another switch does not', () => {
+  it('switching "Use your threads" off for the bot withdraws its waiting messages, and a running wait is refused; switching another permission off does not', async () => {
     const withdrawn = vi.fn()
     f.host.threadsWithdrawn = withdrawn
-    f.bots.computerLimitChanged()
-    limit = { ...BOT_COMPUTER_OPEN, browser: false }
-    f.bots.computerLimitChanged()
+    for (const [tool, id] of [['threads', 'm1'], ['browser', 'm1b']] as const) {
+      const asked = await chat(`Use ${tool}.`, id)
+      asked.prepared.authority.escalate!({ permission: { tool }, reason: 'You asked.' })
+      await finish(f, asked.payload, 'completed', { text: 'Asked.' })
+      await f.bots.service.answer(botId, cards().find((card) => card.ask?.status === 'open')!.ask!.askId, 'allow')
+      await finish(f, (await start(f, asked.activation.id, 2)).payload, 'completed', { text: 'Done.' })
+    }
+    const running = await chat('Wait on that thread.', 'm2')
+    expect(running.prepared.authority.stillHolds?.('thread_wait')).toBeUndefined()
+    f.bots.service.setPermission(botId, f.bots.service.get(botId).permissions.find((entry) => entry.title === 'use the browser')!.id, false)
     expect(withdrawn).not.toHaveBeenCalled()
-    limit = { ...BOT_COMPUTER_OPEN, browser: false, threads: false }
-    f.bots.computerLimitChanged()
+    setThreads(false)
     expect(withdrawn).toHaveBeenCalledWith({ botId, homeThreadId: f.store.registry(botId)!.homeThreadId, name: 'Alpha' })
-    // Saved again with it still off: nothing more to withdraw.
-    f.bots.computerLimitChanged()
-    expect(withdrawn).toHaveBeenCalledTimes(1)
+    // The turn no longer holds it, and nothing is asked or shown for it.
+    expect(running.prepared.authority.stillHolds?.('thread_wait')).toMatch(SWITCHED_OFF)
+    expect(cards().filter((card) => card.ask?.status === 'open')).toEqual([])
+    await finish(f, running.payload, 'completed', { text: 'Stopped.' })
   })
 })

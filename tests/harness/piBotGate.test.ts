@@ -185,7 +185,7 @@ describe('the built-ins a bot\'s turn offers', () => {
   }, 120_000)
 })
 
-describe('What bots may do here, at Pi\'s gate (real child)', () => {
+describe('a permission the owner switched off for the bot, at Pi\'s gate (real child)', () => {
   it('Run commands switched off while the turn runs: a command is refused at the gate, nothing runs, its own folder still works', async () => {
     const { engine, recorder, project } = await setup(cleanups, supervised)
     const root = realpathSync(project)
@@ -193,7 +193,7 @@ describe('What bots may do here, at Pi\'s gate (real child)', () => {
     const files = join(root, '..', 'files')
     for (const dir of [scratch, files]) mkdirSync(dir, { recursive: true })
     writeFileSync(join(files, 'own.txt'), 'own-file')
-    let limit = { shell: true, browser: true, threads: true }
+    let commandsOff = false
     const authority = createBotAuthority({
       activationId: 'act-1',
       role: 'activation',
@@ -202,10 +202,11 @@ describe('What bots may do here, at Pi\'s gate (real child)', () => {
       counters: new RunCounters(),
       time: { deadline: () => Number.MAX_SAFE_INTEGER, signal: new AbortController().signal },
       spend: null,
-      limit: () => limit
+      // As the engine answers for a permission switched off in About (`permissionOff`), read at each call.
+      disabled: (call) => (commandsOff && call.kind === 'builtin' && call.tool === 'shell' ? 'Your owner has switched that off for now.' : undefined)
     })
     // The turn was offered bash and read; the owner switches commands off before its calls.
-    limit = { ...limit, shell: false }
+    commandsOff = true
     recorder.respond(script([
       { tool: { name: 'bash', args: { command: 'echo made > made.txt' } } },
       { tool: { name: 'read', args: { path: join(files, 'own.txt') } } },
@@ -216,7 +217,7 @@ describe('What bots may do here, at Pi\'s gate (real child)', () => {
     expect(result.text).toBe('done')
     const results = turn.events.filter((event) => event.kind === 'tool' && event.phase === 'complete')
     expect(results.map(refused)).toEqual([true, false])
-    expect(String(results[0]!.response)).toMatch(/Not on this computer: "run commands" is switched off here/)
+    expect(String(results[0]!.response)).toMatch(/Your owner has switched that off/)
     expect(String(results[1]!.response)).toContain('own-file')
     expect(existsSync(join(files, 'made.txt'))).toBe(false)
     expect(existsSync(join(root, 'made.txt'))).toBe(false)
