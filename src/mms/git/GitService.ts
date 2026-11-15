@@ -20,6 +20,7 @@ import { addedBlob, fileDigest, findRevert, linkDigest, modeBits, notPutBack, pa
 import { PRESERVED_REFS } from '../../shared/resourceLifecycle'
 import { IN_PROGRESS_GIT_MARKERS } from './gitMarkers'
 import { OperationStream } from './gitOperationStream'
+import { onlyExcludedIgnored } from './excludedIgnored'
 import { englishMessagesEnv, runGit, type GitLine, type GitRun, type GitRunOptions } from './gitProcess'
 import { LISTING_MAX_BUFFER } from './runGitProcess'
 import { HookTrace, withHookFailure, type HookTraceEvent } from './gitTrace'
@@ -539,6 +540,13 @@ export type DiscardedCopy = KeptCopy & {
   /** The digest of each path's index entries as the discard wrote them, under the index lock (`stagedEntryDigests`). */
   indexWritten?: Map<string, string>
 }
+
+/**
+ * Whether a `git add` that leaves paths out with `:(exclude)` added everything else. A project whose `.gitignore`
+ * lists an excluded path (the Mousse repository ignores `.mousse/`) makes Git name it as ignored and exit with 1 after
+ * adding the rest.
+ */
+const addedAll = (run: GitRun, excluded: string[]): boolean => run.ok || (run.code === 1 && onlyExcludedIgnored(run.output, excluded))
 
 export class GitService {
   /** Profile-scoped GitHub CLI integration alongside the existing Git operations. */
@@ -1820,7 +1828,7 @@ export class GitService {
       snapshot = tree.stdout.trim()
       // From the top of the repository: the project can be a subfolder, and the checkpoint that follows sweeps the whole tree.
       const add = await this.runGit(await this.toplevel(cwd), ['add', '-A', ...(options.all ? ['--', '.', ':(exclude).mousse/**'] : [])], { userAction: true })
-      if (!add.ok) {
+      if (!addedAll(add, ['.mousse'])) {
         await this.restoreIndex(cwd, snapshot, add)
         throw failure('git_commit_failed', add)
       }
@@ -1907,7 +1915,7 @@ export class GitService {
         const list = join(dir, 'paths')
         await writeFile(list, `${specs.join('\0')}\0`)
         const add = await this.runGit(top, ['add', '-A', `--pathspec-from-file=${list}`, '--pathspec-file-nul'], { env, ...(asPerson ? { userAction: true } : {}) })
-        if (!add.ok) throw failure('git_commit_failed', add)
+        if (!addedAll(add, ['.mousse', ...Object.keys(overlay)])) throw failure('git_commit_failed', add)
       } finally {
         await rm(dir, { recursive: true, force: true }).catch(() => undefined)
       }
@@ -2081,7 +2089,7 @@ ${run.output}`))
   /** `git add -A` from the top, leaving out `.mousse/`: everything included. */
   private async stageEverything(top: string): Promise<void> {
     const run = await this.runGit(top, ['add', '-A', '--', '.', ':(exclude).mousse/**'], { userAction: true })
-    if (!run.ok) throw failure('git_failed', run)
+    if (!addedAll(run, ['.mousse'])) throw failure('git_failed', run)
   }
 
   /** The entries a choice of hunks or lines makes: the working tree's when all is chosen, HEAD's when nothing is, else a new blob. */
