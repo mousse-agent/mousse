@@ -7850,6 +7850,58 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }, RESUME_WATCH_MS)
   }
 
+  /** The soonest due time for one bot, or the profile when omitted. Schedules remain the scheduler's to claim. */
+  nextDueAt(botId?: string): string | undefined {
+    const due = this.dueAt(botId)
+    return due === undefined ? undefined : new Date(due).toISOString()
+  }
+
+  /** No unfinished work, unread joined chat messages, or due time within `within` milliseconds (default 30 minutes). */
+  isIdle(botId: string, { within = 30 * 60_000 }: { within?: number } = {}): boolean {
+    if (this.store.activationsIn(botId, NOT_ENDED).length) return false
+    // A turn can have ended before its joined messages are requeued by upkeep.
+    if (this.store.get(`SELECT 1 FROM bot_work_notes n JOIN bot_activations a ON a.id = n.activation_id
+      WHERE n.bot_id = ? AND a.lane = 'chat' AND n.applied_at IS NULL LIMIT 1`, botId)) return false
+    const due = this.nextDueAt(botId)
+    return due === undefined || Date.parse(due) > this.now() + within
+  }
+
+  /**
+   * The single list of due sources. Timer reads retain delivery retry backoff and exclude schedules: the shared
+   * scheduler starts those, so an overdue schedule must never spin the engine's delivery timer.
+   */
+  private dueAt(botId?: string, forTimer = false): number | undefined {
+    const sources: Array<() => number | undefined> = [
+      () => {
+        const row = this.store.nextReminder(botId)
+        return row ? Math.max(Date.parse(row.dueAt), forTimer ? this.reminderRetryAt.get(row.id) ?? 0 : 0) : undefined
+      },
+      () => {
+        const row = this.store.nextQuestionDue(botId)
+        return row?.nextAt ? Math.max(Date.parse(row.nextAt), forTimer ? this.questionRetryAt.get(row.id) ?? 0 : 0) : undefined
+      },
+      () => {
+        if (forTimer) return undefined
+        let soonest: number | undefined
+        for (const id of botId === undefined ? this.host.definitions.ids() : [botId]) {
+          const registry = this.store.registry(id)
+          if (!registry || registry.deletedAt) continue
+          for (const schedule of this.schedulesOf(id)) {
+            if (schedule.paused || !schedule.nextAt) continue
+            const at = Date.parse(schedule.nextAt)
+            if (soonest === undefined || at < soonest) soonest = at
+          }
+        }
+        return soonest
+      }
+    ]
+    const times = sources.flatMap((read) => {
+      const at = read()
+      return at === undefined ? [] : [at]
+    })
+    return times.length ? Math.min(...times) : undefined
+  }
+
   /**
    * Arms the one timer for the soonest waiting reminder or question follow-up of any bot (long waits re-arm, so a far
    * timer never overflows).
@@ -7858,15 +7910,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.reminderTimer?.clear()
     this.reminderTimer = undefined
     if (!this.startupPassed || this.closed) return
-    const reminder = this.store.nextReminder()
-    const question = this.store.nextQuestionDue()
-    // One that failed waits for its retry time; the others behind it are settled at the next pass.
-    const times = [
-      ...(reminder ? [Math.max(Date.parse(reminder.dueAt), this.reminderRetryAt.get(reminder.id) ?? 0)] : []),
-      ...(question?.nextAt ? [Math.max(Date.parse(question.nextAt), this.questionRetryAt.get(question.id) ?? 0)] : [])
-    ]
-    if (!times.length) return
-    const wait = Math.min(Math.max(0, Math.min(...times) - this.now()), REMINDER_REARM_MS)
+    const due = this.dueAt(undefined, true)
+    if (due === undefined) return
+    const wait = Math.min(Math.max(0, due - this.now()), REMINDER_REARM_MS)
     this.reminderTimer = (this.host.setTimer ?? defaultTimer)(() => {
       this.reminderTimer = undefined
       void this.deliverDueReminders().catch((error: unknown) => {
