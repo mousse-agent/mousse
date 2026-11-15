@@ -46,7 +46,8 @@ const names = () => Array.from(host.querySelectorAll<HTMLButtonElement>('button'
 const button = (label: string) => Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find((entry) => (entry.getAttribute('aria-label') ?? entry.textContent)?.startsWith(label))!
 const inSlot = (child: ReactNode) => createElement(ComposerNoticeProvider, null, createElement(Fragment, null, createElement(ComposerNoticeSlot), child))
 const show = (client: GoalClient) => act(() => root.render(inSlot(createElement(GoalNotice, { threadId: 't1', client }))))
-const setGoal = (g?: ThreadGoal) => act(() => { useAppStore.setState({ threads: [thread(g)] }) })
+// Through the store's own list update, as a pushed thread list arrives: a goal change alone must reach the marker.
+const setGoal = (g?: ThreadGoal) => act(() => { useAppStore.getState().setThreads([thread(g)]) })
 
 describe('the goal marker', () => {
   it('shows nothing for a thread without a goal, and appears when one is set', () => {
@@ -58,6 +59,10 @@ describe('the goal marker', () => {
     expect(line()!.textContent).toContain('Goal · Working · turn 3/20')
     expect(line()!.textContent).toContain('Make the five failing tests pass')
     expect(line()!.title).toContain('Latest: Fixed four of five.')
+    setGoal(goal({ turns: 4, updatedAt: '2026-11-15T10:06:00.000Z' }))
+    expect(line()!.textContent).toContain('Goal · Working · turn 4/20')
+    setGoal(goal({ state: 'met', updatedAt: '2026-11-15T10:07:00.000Z' }))
+    expect(line()!.textContent).toContain('Goal · Met')
   })
 
   it.each([
@@ -80,8 +85,8 @@ describe('the goal marker', () => {
     setGoal(goal({ state: 'stuck', lastReport: { status: 'blocked', reason: 'Need the staging password.', at: '' } }))
     show(client)
     expect(line()!.textContent).toContain('Need the staging password.')
-    setGoal(goal({ state: 'stopped', stoppedBy: 'turn_limit' }))
-    expect(line()!.title).toContain('Reached the 20-turn limit.')
+    setGoal(goal({ state: 'stopped', stoppedBy: 'turn_limit', updatedAt: '2026-11-15T10:08:00.000Z' }))
+    expect(line()!.title).toContain('Stopped: reached the 20-turn limit.')
   })
 
   it('a refused press shows its error in place of the line', async () => {

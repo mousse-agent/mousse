@@ -1317,6 +1317,8 @@ export function OrchestratorChat() {
     // (`lib/slashCommands.ts`). The usage dialog intentionally contains every configured provider.
     const attached = images.length > 0 || attachedFiles.length > 0 || voiceMessages.length > 0 || browserElements.length > 0 || resolvedReferences.length > 0
     const command = await runSlashCommand(trimmed, slashCommandEnv(attached))
+    // A command's earlier answer (`/goal` alone) is about what was true then.
+    if (command) setCommandInfo(null)
     let steerQueued = false
     // `/goal <text>` on a new chat: the text is the first message, and the goal of the thread the send makes.
     let goalToAdopt: string | undefined

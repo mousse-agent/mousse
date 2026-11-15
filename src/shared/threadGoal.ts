@@ -161,7 +161,7 @@ export function goalStateLabel(goal: Pick<ThreadGoal, 'state' | 'turns' | 'turnL
 export function goalReason(goal: ThreadGoal): string | undefined {
   if (goal.state === 'stopped') {
     const cause = STOP_REASONS[goal.stoppedBy ?? 'user']
-    return goal.stoppedBy === 'turn_limit' ? `Reached the ${goal.turnLimit}-turn limit.` : cause
+    return goal.stoppedBy === 'turn_limit' ? `Stopped: reached the ${goal.turnLimit}-turn limit.` : cause
   }
   return goal.lastReport?.reason || undefined
 }
@@ -169,5 +169,7 @@ export function goalReason(goal: ThreadGoal): string | undefined {
 /** The full wording: the goal, its state and the latest word on it. */
 export function goalDetails(goal: ThreadGoal): string {
   const reason = goalReason(goal)
-  return [`Goal: ${goal.text}`, `${goalStateLabel(goal)}.`, reason ? `${goal.state === 'working' ? 'Latest: ' : ''}${reason}` : ''].filter(Boolean).join('\n')
+  // A stopped goal's reason says it stopped ("Stopped: Mousse restarted."), so it stands in for the state.
+  const state = goal.state === 'stopped' ? '' : `${goalStateLabel(goal)}.`
+  return [`Goal: ${goal.text}`, state, reason ? `${goal.state === 'working' ? 'Latest: ' : ''}${reason}` : ''].filter(Boolean).join('\n')
 }
