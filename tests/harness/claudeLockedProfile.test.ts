@@ -18,7 +18,6 @@ import {
   claudeLockedCaps,
   claudeLockedHoldsBots,
   claudeLockedOptions,
-  claudeReadDenyRules,
   claudeManagedPolicyIn,
   ClaudeLockedGate,
   CLAUDE_MANAGED_POLICY_REFUSAL,
@@ -326,25 +325,6 @@ describe('"run commands" on the owner\'s own Claude Code entry', () => {
 })
 
 describe('locked Claude Code: launch options (item 1, 4, 7)', () => {
-  it('closes Mousse\'s entries in a temporary folder with one pattern per folder, however many there are, and names every other closed place', () => {
-    const root = temp('claude-deny-root-')
-    const temps = [join(root, 'tmp'), join(root, 'tmp2')]
-    const scratch = join(root, 'scratch')
-    const other = join(root, 'apps', 'mousse-data')
-    const outside = [
-      ...Array.from({ length: 5_000 }, (_, index) => join(temps[0]!, `mousse-left-${index}`)),
-      join(temps[1]!, 'mousse-hub-1'),
-      // Not Mousse's entry in a temporary folder: named as itself.
-      join(temps[0]!, 'other.sock'),
-      other
-    ]
-    const rules = claudeReadDenyRules({ roots: [root], access: 'read', scratch, computer: { closed: join(root, '.mousse'), outside } }, temps)
-    const form = (path: string) => `/${path.replace(/\\/g, '/').replace(/^([A-Za-z]):/, (_, drive: string) => `/${drive.toLowerCase()}`)}`.replace(/^\/\/\//, '//')
-    for (const place of [join(root, '.mousse'), join(temps[0]!, 'other.sock'), other]) expect(rules, place).toEqual(expect.arrayContaining([`Read(${form(place)})`, `Read(${form(place)}/**)`]))
-    for (const temp of temps) expect(rules, temp).toEqual(expect.arrayContaining([`Read(${form(temp)}/mousse-*)`, `Read(${form(temp)}/mousse-*/**)`]))
-    expect(rules).toHaveLength(10)
-  })
-
   it('loads nothing of the user\'s setup, runs in scratch, and offers exactly the granted built-ins', async () => {
     vi.stubEnv('SOME_USER_TOKEN', 'secret-from-parent')
     vi.stubEnv('ANTHROPIC_API_KEY', 'sk-ant-api-inherited')

@@ -42,8 +42,8 @@ export const BOT_SUBAGENT_TOOLS: readonly string[] = ['subagent_start', 'subagen
 /**
  * The grant's Mousse app tools a bot's subagent may have, when the grant holds them: the web and the bot's own browser.
  * The rest are the bot's and its work's alone: its own tools (schedules, its name and depth, its model, memory, asks),
- * the automation tools, and the owner's threads. The built-ins, the files folder, file access, MCP tools and skills are
- * the work's, unchanged.
+ * the automation tools, and the owner's threads. The built-ins, the files folder, MCP tools and skills are the work's,
+ * unchanged.
  */
 export const BOT_SUBAGENT_APP_TOOLS: readonly string[] = ['web_search', 'web_fetch', 'browser']
 
@@ -212,9 +212,8 @@ export function isOwnBotAppTool(tool: string): boolean {
 }
 
 /**
- * A new bot's grant (Bot Phase 1 §5.3.1): the file tools, which reach only its files folder until
- * the owner lets it use files on this computer; the web and its own tools; no file access; an hour
- * per activation. Pressing Create bot approves it.
+ * A new bot's grant (Bot Phase 1 §5.3.1): the file tools, which reach only its files folder; the web and its own tools;
+ * an hour per activation. Pressing Create bot approves it.
  */
 export function botStarterManifest(): BotManifest {
   return {
@@ -276,6 +275,7 @@ export function manifestProblem(value: unknown): string | undefined {
   if (refusedApp !== undefined) return `A bot can't be given the Mousse tool ${refusedApp}: it would reach other threads, act in your name or ask you, outside the bot's permissions.`
   if (!strings(manifest.skills)) return 'A skill id is invalid.'
   if (!Array.isArray(manifest.mcp) || !manifest.mcp.every((pair) => pair && typeof pair === 'object' && typeof pair.serverId === 'string' && typeof pair.tool === 'string' && MCP_PART.test(pair.serverId) && MCP_PART.test(pair.tool))) return 'An MCP tool is invalid.'
+  // A stored workspace grants nothing now, but one an older build wrote must still read as well formed.
   if (manifest.workspace !== null) {
     const workspace = manifest.workspace
     if (!workspace || typeof workspace !== 'object' || !strings(workspace.roots) || workspace.roots.length === 0) return 'The bot needs at least one folder, or no file access.'
@@ -321,8 +321,8 @@ function currentPlatform(): string {
 
 /**
  * Whether `wanted` asks for nothing beyond `granted`: every tool, app tool, MCP tool and skill is
- * granted, file access only when it is granted, and every limit is at most the granted one (a
- * limit the grant has and `wanted` drops is wider, so it is not a subset).
+ * granted, and every limit is at most the granted one (a limit the grant has and `wanted` drops is
+ * wider, so it is not a subset). A stored `workspace` grants nothing, so it is never asked about.
  */
 export function manifestSubset(wanted: BotManifest, granted: BotManifest): boolean {
   return addedPermissions(wanted, granted).length === 0
@@ -336,14 +336,13 @@ export function addedPermissions(wanted: BotManifest, granted: BotManifest | nul
   if (!granted) return describeManifest(wanted)
   const lines: BotPermissionLine[] = []
   const tools = new Set(granted.tools)
-  for (const tool of wanted.tools) if (!tools.has(tool)) lines.push(toolLine(tool, wanted.workspace))
+  for (const tool of wanted.tools) if (!tools.has(tool)) lines.push(toolLine(tool))
   const appTools = new Set(granted.appTools)
   for (const tool of wanted.appTools) if (!appTools.has(tool)) lines.push(appToolLine(tool))
   const mcp = new Set(granted.mcp.map(mcpIdentity))
   for (const pair of wanted.mcp) if (!mcp.has(mcpIdentity(pair))) lines.push(mcpLine(pair))
   const skills = new Set(granted.skills)
   for (const skill of wanted.skills) if (!skills.has(skill)) lines.push({ kind: 'skill', text: `Use the skill *${skill}*` })
-  if (wanted.workspace && !granted.workspace) lines.push(FILES_LINE)
   for (const key of BUDGET_KEYS) {
     const limit = wanted.budget[key]
     const held = granted.budget[key]
@@ -356,8 +355,7 @@ export function addedPermissions(wanted: BotManifest, granted: BotManifest | nul
 /** Every permission of a manifest, in plain words. */
 export function describeManifest(manifest: BotManifest): BotPermissionLine[] {
   const lines: BotPermissionLine[] = []
-  if (manifest.workspace) lines.push(FILES_LINE)
-  for (const tool of manifest.tools) lines.push(toolLine(tool, manifest.workspace))
+  for (const tool of manifest.tools) lines.push(toolLine(tool))
   for (const tool of manifest.appTools) lines.push(appToolLine(tool))
   for (const pair of manifest.mcp) lines.push(mcpLine(pair))
   for (const skill of manifest.skills) lines.push({ kind: 'skill', text: `Use the skill *${skill}*` })
@@ -365,7 +363,7 @@ export function describeManifest(manifest: BotManifest): BotPermissionLine[] {
   return unique(lines)
 }
 
-/** Each line once: a folder's access and a tool on it can say the same thing. */
+/** Each line once. */
 function unique(lines: BotPermissionLine[]): BotPermissionLine[] {
   const seen = new Set<string>()
   return lines.filter((line) => !seen.has(line.text) && Boolean(seen.add(line.text)))
@@ -382,19 +380,11 @@ const TOOL_WORDS: Record<NeutralTool, string> = {
   web_search: 'Search the web'
 }
 
-/** The file tools: in the bot's files folder, or anywhere once it may use files on this computer. */
+/** The file tools: they reach only the bot's files folder. */
 const FILE_TOOLS: ReadonlySet<NeutralTool> = new Set<NeutralTool>(['read', 'list', 'search', 'edit', 'write'])
 
-/**
- * File access (bot-architecture.md §3.7): one permission, every folder on this computer, read and
- * write. A workspace of any shape grants it, so a grant an older build wrote for some folders
- * holds it too.
- */
-const FILES_LINE: BotPermissionLine = { kind: 'workspace', text: 'Use files on this computer' }
-
-function toolLine(tool: NeutralTool, workspace: BotManifest['workspace']): BotPermissionLine {
-  if (!FILE_TOOLS.has(tool)) return { kind: 'tool', text: TOOL_WORDS[tool] }
-  return { kind: 'tool', text: workspace ? TOOL_WORDS[tool] : `${TOOL_WORDS[tool]} in its files folder` }
+function toolLine(tool: NeutralTool): BotPermissionLine {
+  return { kind: 'tool', text: FILE_TOOLS.has(tool) ? `${TOOL_WORDS[tool]} in its files folder` : TOOL_WORDS[tool] }
 }
 
 /** An app tool in plain words: the browser and the owner's threads by what they are, any other tool by its name. */
@@ -429,8 +419,7 @@ const BUDGET_WORDS: Record<(typeof BUDGET_KEYS)[number], string> = {
 
 /**
  * One thread's permissions: the manifest, narrowed. `narrow` only removes: a tool, MCP tool or
- * skill it names that the manifest lacks is ignored. File access is one permission: a narrowing
- * to no workspace removes it, and any other keeps it as the manifest has it.
+ * skill it names that the manifest lacks is ignored. A stored `workspace` grants nothing, so none is kept.
  */
 export function narrowManifest(manifest: BotManifest, narrow: Partial<Pick<BotManifest, 'tools' | 'mcp' | 'skills' | 'workspace'>> | undefined): BotManifest {
   if (!narrow) return manifest
@@ -444,21 +433,20 @@ export function narrowManifest(manifest: BotManifest, narrow: Partial<Pick<BotMa
     tools: keep(manifest.tools, narrow.tools, (tool) => tool),
     mcp: keep(manifest.mcp, narrow.mcp, mcpIdentity),
     skills: keep(manifest.skills, narrow.skills, (skill) => skill),
-    workspace: narrow.workspace === null ? null : manifest.workspace
+    workspace: null
   }
 }
 
 /**
  * What runs: `wanted` (a published revision) held inside `granted` (the approved grant). Only
- * what both name is kept (file access when both have it), and each limit is the lower one. A
- * revision that is a subset of the grant is itself; a narrower one really narrows.
+ * what both name is kept, and each limit is the lower one. A revision that is a subset of the
+ * grant is itself; a narrower one really narrows. A stored `workspace` grants nothing, so none is kept.
  */
 export function intersectManifest(wanted: BotManifest, granted: BotManifest): BotManifest {
   const within = <T>(values: readonly T[], allowed: readonly T[], key: (value: T) => string): T[] => {
     const names = new Set(allowed.map(key))
     return values.filter((value) => names.has(key(value)))
   }
-  const workspace = wanted.workspace && granted.workspace ? granted.workspace : null
   const budget: BotBudget = { maxActiveMs: Math.min(wanted.budget.maxActiveMs, granted.budget.maxActiveMs) }
   for (const key of BUDGET_KEYS) {
     const a = wanted.budget[key]
@@ -471,7 +459,7 @@ export function intersectManifest(wanted: BotManifest, granted: BotManifest): Bo
     appTools: within(wanted.appTools, granted.appTools, (tool) => tool),
     mcp: within(wanted.mcp, granted.mcp, mcpIdentity),
     skills: within(wanted.skills, granted.skills, (skill) => skill),
-    workspace,
+    workspace: null,
     budget,
     audience: 'owner'
   }

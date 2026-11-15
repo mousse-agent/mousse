@@ -11,7 +11,6 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { BOT_ASK_REFUSED_TEXT, BotEngine } from '../../src/mms/bots/activation/BotEngine'
 import { CLAUDE_TOPS_UNLISTED, claudeBotTemp, claudeCommandsRefusal, ClaudeLockedGate, claudeLockedOptions, claudeLockedSandbox, claudeLockedTools, claudeOwnStorage, claudeProjectName, holdClaudeBotTemp, removeClaudeBotTemp, type ClaudeLockedTurn } from '../../src/mms/harness/claude/locked'
-import { filesAsk } from '../../src/shared/bots/personal/escalation'
 import { CODEX_BOT_UNSANDBOXED_REFUSAL, codexBotCommand, codexBotFileChange } from '../../src/mms/harness/vendors/codex/botApprovals'
 import { CODEX_BOT_PROFILE, codexBotSandbox, codexBotSandboxConfig, codexTurnPolicy } from '../../src/mms/harness/vendors/codex/childPolicy'
 import { BOT_COMPUTER_OPEN, type BotComputerLimit } from '../../src/shared/bots/personal/computerLimit'
@@ -60,7 +59,7 @@ describe('Claude Code\'s own storage never asks (bot-architecture.md §3.7)', ()
     return new ClaudeLockedGate(turn, true)
   }
 
-  it('reading back its saved tool output needs no file access, in a run and in the chat, and writes no ask', async () => {
+  it('reading back its saved tool output needs no permission, in a run and in the chat, and writes no ask', async () => {
     const home = join(f.base, 'claude-home')
     for (const [lane, started] of [['run', () => run('r1')], ['chat', () => chat('Search the web', 'm1')]] as const) {
       const { activation, prepared, payload } = await started()
@@ -72,14 +71,14 @@ describe('Claude Code\'s own storage never asks (bot-architecture.md §3.7)', ()
       // Another bot's sessions, or Claude Code's other folders, are not its own storage.
       const another = join(home, 'projects', claudeProjectName(join(f.base, 'other-bot')), 's', 'tool-results', 'x.txt')
       expect(gate.canUse('Read', { file_path: another }, `tu-${lane}-3`)).toMatchObject({ ok: false })
-      expect(f.store.openAsks(botId).map((ask) => ask.permission)).toEqual([filesAsk()])
-      expect(f.store.activation(activation.id)!.status).toBe(lane === 'run' ? 'running' : 'waiting_grant')
-      await finish(f, payload, lane === 'run' ? 'completed' : 'interrupted', { text: 'Done.', ...(lane === 'chat' ? { outcome: { interruptedBy: 'bot_wall' } } : {}) })
-      for (const ask of f.store.openAsks(botId)) f.store.answerEscalation(ask.id, 'withdrawn')
+      // A file outside the bot's folders is nothing it can be given: refused with no ask, and nothing waits for the owner.
+      expect(f.store.openAsks(botId)).toEqual([])
+      expect(f.store.activation(activation.id)!.status).toBe('running')
+      await finish(f, payload, 'completed', { text: 'Done.' })
     }
   })
 
-  it('a link put in its storage is checked where it leads: one to a folder (a junction on Windows) or a file outside it needs file access, as that path would', async () => {
+  it('a link put in its storage is checked where it leads: one to a folder (a junction on Windows) or a file outside it is refused, as that path would be', async () => {
     const home = join(f.base, 'claude-home')
     const { prepared, payload } = await run('r1')
     const gate = gateWithOwn(prepared.authority, home)
@@ -134,7 +133,7 @@ describe('approvals on the owner\'s entries are answered by the bot\'s authority
 
   it('in the chat lane a missing permission is a wall: the call is declined and the activation waits for the owner', async () => {
     const codex = await chat('Sort my invoices', 'm1')
-    const declined = codexBotFileChange(codex.prepared.authority, { changes: [{ path: join(invoices, 'a.pdf'), kind: 'update' }], cwd: codex.prepared.authority.workspace!.files! })
+    const declined = codexBotCommand(codex.prepared.authority, { command: 'ls', cwd: codex.prepared.authority.workspace!.files! })
     expect(declined).toMatchObject({ decision: 'decline', reason: expect.stringContaining('Paused: waiting for the owner') })
     expect(f.store.activation(codex.activation.id)!.status).toBe('waiting_grant')
     expect(f.store.openAsks(botId)).toMatchObject([{ mode: 'wall' }])
@@ -143,7 +142,7 @@ describe('approvals on the owner\'s entries are answered by the bot\'s authority
 
   it('on Claude Code the same: a wall in the chat lane', async () => {
     const { activation, prepared, payload } = await chat('Read my invoices', 'm1')
-    const denied = claudeGate(prepared.authority).canUse('Read', { file_path: join(invoices, 'a.pdf') }, 'tu-1')
+    const denied = claudeGate(prepared.authority).preToolUse('Bash', { command: 'ls' })
     expect(denied).toMatchObject({ ok: false, reason: expect.stringContaining('Paused: waiting for the owner') })
     expect(f.store.activation(activation.id)!.status).toBe('waiting_grant')
     await finish(f, payload, 'interrupted', { text: 'I need your invoices.', outcome: { interruptedBy: 'bot_wall' } })
@@ -152,11 +151,15 @@ describe('approvals on the owner\'s entries are answered by the bot\'s authority
   it('in a run a missing permission is refused with an ask, and the run carries on', async () => {
     const { activation, prepared, payload } = await run('r1')
     const files = prepared.authority.workspace!.files!
-    expect(codexBotFileChange(prepared.authority, { changes: [{ path: join(invoices, 'a.pdf'), kind: 'update' }], cwd: files })).toEqual({ decision: 'decline', reason: BOT_ASK_REFUSED_TEXT })
-    expect(claudeGate(prepared.authority).canUse('Read', { file_path: join(invoices, 'b.pdf') }, 'tu-1')).toEqual({ ok: false, reason: BOT_ASK_REFUSED_TEXT })
+    expect(codexBotCommand(prepared.authority, { command: 'ls', cwd: files })).toEqual({ decision: 'decline', reason: BOT_ASK_REFUSED_TEXT })
+    expect(claudeGate(prepared.authority).preToolUse('Bash', { command: 'make' })).toEqual({ ok: false, reason: BOT_ASK_REFUSED_TEXT })
     expect(f.store.activation(activation.id)!.status).toBe('running')
-    // Codex's change and Claude Code's read need the same permission: one ask for file access.
+    // Codex's command and Claude Code's Bash need the same permission: one ask, for run commands.
     expect(f.store.openAsks(botId).map((ask) => ask.mode)).toEqual(['ask'])
+    // A file outside the bot's folders is nothing it can ask for: refused at both gates, with no ask.
+    expect(codexBotFileChange(prepared.authority, { changes: [{ path: join(invoices, 'a.pdf'), kind: 'update' }], cwd: files })).toMatchObject({ decision: 'decline' })
+    expect(claudeGate(prepared.authority).canUse('Read', { file_path: join(invoices, 'b.pdf') }, 'tu-1')).toMatchObject({ ok: false })
+    expect(f.store.openAsks(botId)).toHaveLength(1)
     // Still allowed afterwards: the run goes on.
     expect(codexBotFileChange(prepared.authority, { changes: [{ path: 'report.md', kind: 'add' }], cwd: files })).toEqual({ decision: 'accept' })
     await finish(f, payload, 'completed', { text: 'Report: I skipped the invoices.' })
@@ -192,16 +195,15 @@ describe('approvals on the owner\'s entries are answered by the bot\'s authority
 })
 
 describe('What bots may do here, at each runtime\'s own gate (the owner\'s Claude Code and Codex entries)', () => {
-  const NOT_HERE = /^Not on this computer: "(run commands|use files on this computer)" is switched off here/
+  const NOT_HERE = /^Not on this computer: "run commands" is switched off here/
   let limit: BotComputerLimit
 
-  /** The owner allows commands and file access while every switch is on. */
+  /** The owner allows commands while every switch is on. */
   beforeEach(async () => {
     limit = { ...BOT_COMPUTER_OPEN }
     f.host.computerLimit = () => limit
     const work = await run('grant')
-    for (const permission of [{ tool: 'shell' }, { path: invoices, access: 'write' as const }])
-      work.prepared.authority.escalate!({ permission, reason: 'The owner asked.' })
+    work.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'The owner asked.' })
     await finish(f, work.payload, 'completed', { text: 'Asked.' })
     for (const ask of f.store.openAsks(botId)) await f.bots.service.answer(botId, ask.id, 'allow')
     expect(f.store.openAsks(botId)).toEqual([])
@@ -228,27 +230,10 @@ describe('What bots may do here, at each runtime\'s own gate (the owner\'s Claud
     await finish(f, payload, 'completed', { text: 'Done.' })
   })
 
-  it('Use files off in a turn already running: a read or change outside the bot\'s folders is refused by both runtimes\' gates; its own folder still works', async () => {
-    const { prepared, payload } = await run('r1')
-    const files = prepared.authority.workspace!.files!
-    const outside = join(invoices, 'a.pdf')
-    expect(claudeGate(prepared.authority).canUse('Read', { file_path: outside }, 'tu-1')).toEqual({ ok: true })
-    limit = { ...limit, files: false }
-    expect(claudeGate(prepared.authority).canUse('Read', { file_path: outside }, 'tu-2')).toMatchObject({ ok: false, reason: expect.stringMatching(NOT_HERE) })
-    expect(codexBotFileChange(prepared.authority, { changes: [{ path: outside, kind: 'update' }], cwd: files })).toMatchObject({ decision: 'decline', reason: expect.stringMatching(NOT_HERE) })
-    expect(codexBotFileChange(prepared.authority, { changes: [{ path: 'notes.md', kind: 'add' }], cwd: files })).toEqual({ decision: 'accept' })
-    // Its commands were set up over every folder: they wait for a turn that starts without file access.
-    expect(codexBotCommand(prepared.authority, { command: 'ls', cwd: files })).toMatchObject({ decision: 'decline', reason: expect.stringMatching(NOT_HERE) })
-    expect(f.store.openAsks(botId)).toEqual([])
-    await finish(f, payload, 'completed', { text: 'Done.' })
-  })
-
-  it('Use files off from the start: commands run, in a sandbox that reads only the system\'s programs and the bot\'s own folders', async () => {
-    limit = { ...limit, files: false }
+  it('commands run, in a sandbox that reads only the system\'s programs and the bot\'s own folders', async () => {
     const { prepared, payload } = await run('r1')
     const workspace = prepared.authority.workspace!
     const mine = [workspace.files!, workspace.scratch]
-    expect(workspace.computer).toBeUndefined()
     // Codex on Linux and macOS: Mousse's permission profile, reading `:minimal`, writing only the bot's folders.
     const codex = codexBotSandbox(prepared.authority, { codexPackage: '/opt/codex', platform: 'linux' })
     expect(codexTurnPolicy('default', undefined, 'ask', codex)).toEqual({ approvalPolicy: 'untrusted', permissions: CODEX_BOT_PROFILE })
@@ -281,7 +266,6 @@ describe('What bots may do here, at each runtime\'s own gate (the owner\'s Claud
   })
 
   it('Claude Code on Linux when `/` can\'t be listed: every command is refused with a plain reason, and none runs with only the home folder closed', async () => {
-    limit = { ...limit, files: false }
     const { prepared, payload } = await run('r1')
     const unlisted = () => { throw new Error('EACCES') }
     const reason = claudeCommandsRefusal(prepared.authority, 'linux', unlisted)
@@ -294,14 +278,13 @@ describe('What bots may do here, at each runtime\'s own gate (the owner\'s Claud
     const options = claudeLockedOptions(turn, { env: {}, mousseTools: false })
     expect(options.tools).toContain('Bash')
     expect((options.settings as { sandbox?: unknown }).sandbox).toBeUndefined()
-    // Not refused where it doesn't apply: listable, another platform, or file access (whose sandbox closes Mousse's data only).
+    // Not refused where it doesn't apply: listable, or another platform.
     expect(claudeCommandsRefusal(prepared.authority, 'linux', () => ['usr'])).toBeUndefined()
     expect(claudeCommandsRefusal(prepared.authority, 'darwin', unlisted)).toBeUndefined()
     await finish(f, payload, 'completed', { text: 'Done.' })
   })
 
   it('Claude Code on Linux keeps a bot\'s own temporary files private only in a runtime folder under /run, which its sandbox closes; elsewhere the turn keeps Claude Code\'s shared one', async () => {
-    limit = { ...limit, files: false }
     const { prepared, payload } = await run('r1')
     const cwd = prepared.authority.workspace!.files!
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)

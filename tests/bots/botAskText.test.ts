@@ -3,24 +3,10 @@
  */
 import { describe, expect, it } from 'vitest'
 import { askText } from '../../src/shared/bots/personal/askText'
-import { filesAsk, filesAskOf, pathRoot } from '../../src/shared/bots/personal/escalation'
 
 describe('askText', () => {
-  it('file access is one permission, whatever folder an ask names', () => {
-    const files = { title: 'use files on this computer', note: "Read and change any file or folder, except Mousse's own data." }
-    expect(askText(filesAsk())).toEqual(files)
-    // Rows an older build wrote name the folder they were about; Allow grants the same.
-    expect(askText({ path: '/home/me/Documents/Invoices', access: 'read' })).toEqual(files)
-    expect(askText({ path: '/home/me/Notes', access: 'write' })).toEqual(files)
-  })
-
-  it('the one file ask: every folder asks the same, at the top of the file system', () => {
-    expect(filesAsk()).toEqual({ path: process.platform === 'win32' ? expect.stringMatching(/^[A-Z]:\\$/) : '/', access: 'write' })
-    expect(filesAskOf({ path: '/home/me/.claude/projects/x/s/tool-results', access: 'read' })).toEqual(filesAsk())
-    expect(filesAskOf({ tool: 'shell' })).toEqual({ tool: 'shell' })
-    expect(pathRoot('/home/me')).toBe('/')
-    expect(pathRoot('d:\\Work\\x')).toBe('D:\\')
-    expect(pathRoot('\\\\server\\share\\docs')).toBe('\\\\server\\share\\')
+  it('a file ask an older build wrote reads as no longer available', () => {
+    expect(askText({ path: '/home/me/Documents/Invoices', access: 'read' })).toEqual({ title: 'use files on this computer', note: 'No longer available: a bot uses only its own files folder.' })
   })
 
   it('tools, skills and MCP tools in words', () => {

@@ -5,9 +5,9 @@
  * The inputs (test-the-claim §4):
  * - entries: the work's own; another on the same runtime; one whose runtime holds commands less tightly; one that
  *   searches the web whatever the bot holds;
- * - what the work's turn holds: commands, file access, the web; an Allow given while the turn runs;
+ * - what the work's turn holds: commands, the web; an Allow given while the turn runs;
  * - endings: the report with a subagent mid-command, mid-file-change or idle; the owner's Stop; the deadline; the bot
- *   deleted; Run commands or Use files switched off (a cut-off call under the subagent's own entry's names);
+ *   deleted; Run commands switched off (a cut-off call under the subagent's own entry's names);
  * - counts: the work's time with subagents running, and the bot's day;
  * - a follow-up (`subagent_send`) after the model's entry reached its usage limit, or the work moved model.
  */
@@ -61,11 +61,10 @@ describe('a subagent on another entry is never held less tightly than its work',
   })
   afterEach(() => f.close())
 
-  /** A piece of work on its first turn; `shell` and `files`: allowed for this work ("Allow this time"). */
-  async function work(id: string, options: { shell?: boolean; files?: boolean } = {}) {
+  /** A piece of work on its first turn; `shell`: allowed for this work ("Allow this time"). */
+  async function work(id: string, options: { shell?: boolean } = {}) {
     const activation = await f.bots.activate({ botId, input: 'Compare three vacuum cleaners.', clientRequestId: id })
     if (options.shell) f.store.putOverlay(activation.id, `once-shell-${id}`, { tool: 'shell' })
-    if (options.files) f.store.putOverlay(activation.id, `once-files-${id}`, { path: f.base, access: 'write' })
     return { id: activation.id, ...(await start(f, activation.id)) }
   }
   const subagentNs = (activationId: string) => f.store.dispatches(activationId).filter((dispatch) => dispatch.kind === 'subagent').map((dispatch) => dispatch.n)
@@ -134,19 +133,18 @@ describe('a subagent on another entry is never held less tightly than its work',
     expect(child.prepared.authority.time.signal.aborted).toBe(false)
   })
 
-  // Run commands or Use files switched off stops the work and its subagent on another entry; the call the subagent had
-  // in flight is matched by that entry's names, and only what the switch took away is cleared.
+  // Run commands switched off stops the work and its subagent on another entry; the call the subagent had in flight is
+  // matched by that entry's names, and only what the switch took away is cleared.
   it.each([
     ['a command, Run commands off', 'shell', 'second_bash', false],
-    ['a file change outside the bot\'s folders, Use files off', 'files', 'second_write', false],
     ['a file change, Run commands off (another power: it holds)', 'shell', 'second_write', true]
   ] as const)('a switch turned off: %s', async (_name, which, tool, holdsWork) => {
-    const job = await work('w1', { shell: true, files: true })
+    const job = await work('w1', { shell: true })
     await job.prepared.authority.subagents!.start({ title: 'Builder', brief: 'Build it.', model: second })
     const builder = await start(f, job.id, subagentNs(job.id)[0])
-    const outside = join(f.base, 'notes.md')
-    expect(builder.prepared.authority.check(write(outside))).toEqual({ ok: true })
-    f.runs.tools.start({ invocationId: 'inv-sub', runId: builder.payload.runId, attemptId: attemptOf(builder.payload.runId), tool, argsDigest: toolArgsDigest(tool === 'second_bash' ? { command: 'make' } : { path: outside }), now: 'n', idempotent: false })
+    const own = join(builder.prepared.authority.workspace!.files!, 'notes.md')
+    expect(builder.prepared.authority.check(write(own))).toEqual({ ok: true })
+    f.runs.tools.start({ invocationId: 'inv-sub', runId: builder.payload.runId, attemptId: attemptOf(builder.payload.runId), tool, argsDigest: toolArgsDigest(tool === 'second_bash' ? { command: 'make' } : { path: own }), now: 'n', idempotent: false })
     limit = { ...limit, [which]: false }
     f.bots.computerLimitChanged()
     expect(job.prepared.authority.time.signal.aborted).toBe(true)

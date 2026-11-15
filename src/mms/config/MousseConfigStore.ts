@@ -178,7 +178,7 @@ function defaultConf(): MousseConf {
  * switch off, and when (`normalizeBotSettings` reads any `unreadable` as every switch off).
  */
 function unreadableBots(at: Date): { here: BotComputerLimit; unreadable: string } {
-  return { here: { shell: false, files: false, browser: false, threads: false }, unreadable: at.toISOString() }
+  return { here: { shell: false, browser: false, threads: false }, unreadable: at.toISOString() }
 }
 
 function writeMigratedMarker(originalPath: string): void {
@@ -440,7 +440,10 @@ export class MousseConfigStore {
     const exact = named && botComputerLimitOf({ ...this.botSettings().here, ...named })
     if (!exact) throw new Error(BOTS_HERE_SHAPE)
     const previous = this.conf.bots
-    this.conf.bots = { here: exact }
+    // Older builds read `files` ("Use files on this computer", removed here) as a required switch: the value they stored
+    // is kept, or on when there is none, so the setting stays readable to them and is never read as all off.
+    const stored = (previous as { here?: Record<string, unknown> } | undefined)?.here?.files
+    this.conf.bots = { here: { ...exact, files: typeof stored === 'boolean' ? stored : true } as BotComputerLimit }
     try {
       this.persist()
     } catch (error) {

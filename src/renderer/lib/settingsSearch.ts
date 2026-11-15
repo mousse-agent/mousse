@@ -89,7 +89,6 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Worktree per subagent', section: 'agents', anchor: 'agents-subagent-worktrees', keywords: ['experimental', 'branch', 'give each subagent its own worktree'] },
   { title: 'What bots may do here', section: 'agents', anchor: 'agents-bots-here', keywords: ['bots', 'personal bots', 'bot permissions', 'this computer', 'limit'] },
   { title: 'Run commands', section: 'agents', anchor: 'agents-bots-shell', keywords: ['bots', 'shell', 'terminal', 'commands'] },
-  { title: 'Use files on this computer', section: 'agents', anchor: 'agents-bots-files', keywords: ['bots', 'file access', 'folders'] },
   { title: 'Use the browser', section: 'agents', anchor: 'agents-bots-browser', keywords: ['bots', 'bot browser'] },
   { title: 'Use your threads', section: 'agents', anchor: 'agents-bots-threads', keywords: ['bots', 'bot threads', 'start thread', 'full access'] },
   { title: 'Automations', section: 'agents', anchor: 'agents-automations', keywords: ['automations agents add', 'schedule', 'scheduled tasks', 'agent jobs', 'limits', 'allow', 'keep'] },

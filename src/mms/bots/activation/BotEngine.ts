@@ -14,8 +14,6 @@ import {
   BOT_ASK_DENY_COOLDOWN_MS,
   MAX_BOT_WALLS,
   askProblem,
-  filesAsk,
-  filesAskOf,
   isSpecialAsk,
   mcpAskTools,
   permissionText,
@@ -65,7 +63,7 @@ import {
   type BotThreadSpec
 } from '../../../shared/bots/personal/definition'
 import { addedPermissions, intersectManifest, manifestSubset, narrowManifest } from '../../../shared/bots/personal/manifest'
-import { BOT_COMPUTER_OPEN, BOT_COMPUTER_SHUT, limitCutLead, notOnThisComputerText, stoppedForLimitText, switchedOff, whatToAskText, withinComputerLimit, type BotComputerLimit, type BotComputerSwitch } from '../../../shared/bots/personal/computerLimit'
+import { BOT_COMPUTER_OPEN, BOT_COMPUTER_SHUT, limitCutLead, notOnThisComputerText, stoppedForLimitText, switchedOff, WHAT_TO_ASK_TEXT, withinComputerLimit, type BotComputerLimit, type BotComputerSwitch } from '../../../shared/bots/personal/computerLimit'
 import { allPinned, copyPick, imagePickOf, isPinned, limitFamilyOf, limitOnPick, pickProblemText, plainLabel, rowName, samePick, samePickTarget, sameStoredPick, slotsOf, slotsWith, startDepthOf, stuckRowsOf, turnModelOf, UNPICKED_SLOTS, withImagePick, withSlots, type BotPickMiss, type BotStuckEntry, type BotTurnModel } from '../../../shared/bots/personal/modelSlots'
 import type { BotModelOption } from '../../../shared/bots/personal/methods'
 import { defaultChatInput, defaultWorkLine, lateWorkNote, MAX_NEW_QUESTIONS_PER_DAY, MAX_NUDGES_PER_QUESTION, MAX_OPEN_QUESTIONS_PER_BOT, MAX_OPEN_QUESTIONS_PER_WORK, MAX_QUESTIONS_PER_CHAT_TURN, NUDGE_AGAIN_MS, NUDGE_TEXT, plainChoices, QUESTION_AFTER_ASK_TEXT, QUESTION_ASKED_TEXT, QUESTION_END_TURN_TEXT, QUESTION_ANSWER_FORGOTTEN_TEXT, QUESTION_NOT_OFFERED_TEXT, QUESTION_WORK_ASKED_TEXT, QUESTION_WORK_WAITING_TEXT, questionGoneText, QUESTIONS_ENOUGH_TEXT, waitingQuestionLine, workAnswerLine, type BotQuestionAnswer, type BotQuestionFollow, type BotQuestionSpec } from '../../../shared/bots/personal/questions'
@@ -78,15 +76,13 @@ import { isProviderTurnCap, type Enforceability, type HarnessError, type Provide
 import type { NeutralTool } from '../../../shared/harness/tools'
 import type { RunEngine } from '../../run/RunEngine'
 import { TERMINAL_RUN_STATUSES, type BotTurnPayload, type RunRecord } from '../../run/types'
-import { PATH_ARGUMENTS as BOT_PATH_ARGUMENTS, createBotAuthority } from '../authority/botAuthority'
-import { assertInsideRoots } from '../../agents/WorkspaceAccessPolicy'
+import { createBotAuthority } from '../authority/botAuthority'
 import { type BotChatImages, BotChatService, chatInput, messageInput } from '../chat/BotChatService'
 import { askFingerprintOf, BotChatProjection, clockTime, starterManifest } from '../chat/projection'
 import { BotDefinitionError, upgradeDefinitionV1, type BotDefinitionEntry, type BotDefinitionStore } from '../definitions/BotDefinitionStore'
 import { chipCallOf } from '../activity/BotActivitySink'
 import { botFilesFolder, botManifestDigest, compileBotThread, subagentManifest, type BotPermissions, type CompileInput } from '../grants/compile'
 import { shortModelName } from '../../../shared/modelNames'
-import { toolArgsDigest } from '../../run/tools/argsDigest'
 import { isCodexBotRefusal } from '../../../shared/harness/codexBotVersion'
 import { BOT_RUN_REPORT_LINE } from '../memory/contextPack'
 import type { BotActivityContext, BotActivitySink, BotContextProvider, BotDispatchEnd, BotJournal, BotJournalInput, BotMcpListing, BotMemoryAdmin, BotModelChange, BotModelProblem, BotModelResolution, BotModelResolver, BotProcessSupervision, BotToolHost, BotWorkList, BotWorkModel, BotWorkStarted } from '../seams'
@@ -110,6 +106,9 @@ import { BOT_COMPACTION_HOLD_MS, BotReloadAbort, BotRoomAbort, BotWallAbort, typ
  * gate across the main run and every consult; consults of context threads, one at a time per
  * thread; the three-phase startup pass; and the trash and profile hooks.
  */
+
+/** Why an older build's file ask can't be allowed: "use files on this computer" was removed. */
+export const BOT_FILE_ASK_GONE_TEXT = 'A bot can no longer use files outside its own files folder, so there is nothing to allow.'
 
 export class BotEngineError extends Error {
   constructor(readonly code: string, message: string, readonly details?: Record<string, unknown>) {
@@ -268,8 +267,7 @@ export const BOT_ASK_REFUSED_TEXT = 'The owner has not allowed this yet. You ask
 export const BOT_ASK_NOT_NOW_TEXT = 'The owner said not now to this. Carry on without it, don\'t ask for it again today, and say in your report what you skipped.'
 /** What a run's call or `escalate` is refused with once its asks reached their cap: no new ask is written. */
 export const BOT_ASK_ENOUGH_TEXT = 'You have asked the owner enough for now. Carry on without it and say in your report what you skipped.'
-/** What `escalate` for a folder answers a bot that may already use files on this computer. */
-export const BOT_FILES_HELD_TEXT = 'You can already use files anywhere on this computer, except Mousse\'s own data. Go ahead without asking.'
+
 /** What an ask in a new bot's first message is answered with: nothing has been asked of it yet. */
 export const BOT_ASK_NOT_YET_TEXT = "Don't ask for permissions yet: the owner hasn't asked for anything that needs one. Your files folder, memory and the web already work. Ask when they want something that needs more."
 
@@ -280,7 +278,7 @@ export const BOT_WORK_HAS_TEXT = 'Your work already has this; the chat does not 
  * turn keeps the permissions it started with, and the work continues with the new one once the turn ends.
  */
 export const BOT_ASK_HELD_NEXT_TEXT = 'The owner already allowed this; you get it as soon as this turn ends. Do not ask again. Finish what you can without it and end your turn: you then continue in this thread with it.'
-/** The same for a chat turn, for a permission the chat uses itself (file access, a skill, a Mousse tool). */
+/** The same for a chat turn, for a permission the chat uses itself (a skill, a Mousse tool). */
 export const BOT_ASK_HELD_CHAT_TEXT = 'The owner already allowed this; you get it as soon as this reply ends. Do not ask again: finish your reply without it, and you then continue in this chat with it.'
 /** The same for a consult: the bot's next turn has it, the consult does not. */
 export const BOT_ASK_HELD_CONSULT_TEXT = 'The owner already allowed this, but this consult can\'t use it. Do not ask again: answer with what you have and say what needs it.'
@@ -421,12 +419,12 @@ interface LiveDispatch {
   /** The runtime is compacting the turn's context since then (`BotTurnSteer.compacting`): a note waits for it, at most `BOT_COMPACTION_HOLD_MS`. */
   compactingSince?: number
   /**
-   * What the turn started with that a runtime opens once for the whole turn: commands (`shell`), and file access
-   * (`files`, a sandbox over every folder). When this computer switches one off, the turn stops (`computerLimitChanged`).
+   * What the turn started with that a runtime opens once for the whole turn: commands (`shell`). When this computer
+   * switches it off, the turn stops (`computerLimitChanged`).
    */
-  powers: { shell: boolean; files: boolean }
+  powers: { shell: boolean }
   /** The same for each consult of this dispatch that has not settled, by its dispatch number: it is stopped with it. */
-  consultPowers: Map<number, { shell: boolean; files: boolean }>
+  consultPowers: Map<number, { shell: boolean }>
   /**
    * What the turn holds (the manifest it was compiled from): a subagent it starts holds no more, so an Allow given while
    * the turn runs reaches its subagents with its next turn, as it reaches the turn.
@@ -443,8 +441,8 @@ interface LiveDispatch {
 }
 
 /** What a compiled turn started with that a runtime opens once for the whole turn (`LiveDispatch.powers`). */
-function powersOf(permissions: BotPermissions): { shell: boolean; files: boolean } {
-  return { shell: permissions.tools.includes('shell'), files: permissions.workspace?.computer !== undefined }
+function powersOf(permissions: BotPermissions): { shell: boolean } {
+  return { shell: permissions.tools.includes('shell') }
 }
 
 /** An activation that runs or waits for its owner's answer holds a slot of its lane: what does not fit waits. */
@@ -463,7 +461,7 @@ export const MAX_BACKGROUND_SLOTS_PER_PROFILE = 4
 const NOT_ENDED = ['queued', 'running', 'waiting_grant', 'paused', 'blocked'] as const
 
 /** Gate refusals that become a wall: the owner can answer them. */
-const ESCALATABLE: ReadonlySet<WallReason['kind']> = new Set(['tool', 'path', 'skill', 'mcp'])
+const ESCALATABLE: ReadonlySet<WallReason['kind']> = new Set(['tool', 'skill', 'mcp'])
 
 export class BotEngine implements BotTurnDispatcher, BotThreads {
   private readonly live = new Map<string, LiveDispatch>()
@@ -571,12 +569,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * switches: each goes on in a new turn under the new limit (`advance`), told why.
    */
   private readonly limitCuts = new Map<string, BotComputerSwitch[]>()
-  /**
-   * Per activation, the argument digests (`toolArgsDigest`, as the run's tool ledger keeps them) of the file changes its
-   * turns were allowed outside the bot's own folders (its files folder and scratch). A stop because Use files was
-   * switched off clears only those of its cut-off calls (`acknowledgeCut`). Kept in memory, as `limitCuts` is.
-   */
-  private readonly outsideChanges = new Map<string, Set<string>>()
   /**
    * What each subagent turn ended with, by `<activationId>:<n>`: its final message, or why it has none. Kept in memory:
    * after a restart the work is told its subagents were stopped, and their results are gone.
@@ -700,8 +692,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /**
    * The settings were saved: when what bots may do here changed since the last save, every bot's About is read again
-   * (it marks what is off here). A turn running now that started with commands or file access, and this computer has
-   * just switched that off, stops at once (`cutForLimit`): a runtime opens them once for the whole turn (Codex runs the
+   * (it marks what is off here). A turn running now that started with commands, and this computer has just switched
+   * them off, stops at once (`cutForLimit`): a runtime opens them once for the whole turn (Codex runs the
    * commands it trusts without asking, and a command already running runs on), so a refusal at the next call is not
    * enough. Everything else is read at every dispatch and call. "Use your threads" switched off: its tools are refused
    * at the next call (and a wait in flight ends with the refusal), and every bot's messages still queued in its owner's
@@ -711,8 +703,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const now = this.limit()
     const before = this.lastLimit
     this.lastLimit = now
-    if (before && before.shell === now.shell && before.files === now.files && before.browser === now.browser && before.threads === now.threads) return
-    const turnedOff = (['shell', 'files'] as const).filter((which) => (before?.[which] ?? true) && !now[which])
+    if (before && before.shell === now.shell && before.browser === now.browser && before.threads === now.threads) return
+    const turnedOff = (['shell'] as const).filter((which) => (before?.[which] ?? true) && !now[which])
     if (turnedOff.length) for (const [activationId, live] of this.live) {
       // A consult runs under its main dispatch's abort: one that holds the power stops the dispatch, consults and all.
       const held = (which: keyof LiveDispatch['powers']): boolean => live.powers[which] || [...live.consultPowers.values()].some((powers) => powers[which])
@@ -2751,7 +2743,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** A turn was refused `asked`: if the owner allows it before the turn ends, the activation continues with it. */
   private refused(activationId: string, asked: BotAskRequest): void {
     if ('budget' in asked || isSpecialAsk(asked)) return
-    const permission = filesAskOf(grantRequestOf(asked))
+    const permission = grantRequestOf(asked)
     const asks = this.refusedAsks.get(activationId) ?? new Map<string, BotAskRequest>()
     asks.set(askFingerprintOf(permission), permission)
     this.refusedAsks.set(activationId, asks)
@@ -2854,14 +2846,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       disabled: (call) => {
         const asked = call.kind === 'skill' ? { skill: call.skill } : call.kind === 'mcp' ? { mcp: { serverId: call.server, tool: call.tool } } : { tool: botGrantTool(call.tool) }
         if (this.permissionOff(row.botId, asked)) return this.offText()
-        const id = permissionId(filesAskOf(grantRequestOf(asked)))
+        const id = permissionId(grantRequestOf(asked))
         if ((this.permissionSwitches.get(row.botId)?.get(id) ?? 0) !== (switchedAtStart.get(id) ?? 0))
           return 'That permission changed while you worked. Carry on without it until your next turn.'
         return undefined
       }
     })
     const observe = (call: NormalisedCall): void => {
-      this.noteFileChange(row.id, input.permissions, call)
       const sink = this.host.activity
       if (!sink) return
       try {
@@ -2970,7 +2961,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         const stop = endTurn()
         if (stop) return stop
         const problem = askProblem(request.permission)
-        if (problem) return `${problem} ${whatToAskText(this.limit())}`
+        if (problem) return `${problem} ${WHAT_TO_ASK_TEXT}`
         // A new bot's first message answers no request: it asks once the owner wants something that needs more.
         if (firstMessage) return BOT_ASK_NOT_YET_TEXT
         const live = base.check({ kind: 'app', tool: 'escalate', args: {} })
@@ -2992,8 +2983,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         const off = switchedOff(this.limit(), asked)
         if (off) return notOnThisComputerText(off)
         if (this.permissionOff(row.botId, asked)) return this.offText()
-        // File access is one permission: a bot that has it has every folder already.
-        if ('path' in asked && base.workspace?.computer) return BOT_FILES_HELD_TEXT
         // What the bot already holds is no ask: a card for it would grant nothing. In a chat turn its work holds more
         // than the chat is offered (the web, the browser, commands): the chat hands that work off instead.
         if (heldAlready(base, asked)) return `The owner already allowed this (${askText(asked).title}). Use it now.`
@@ -3688,7 +3677,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /** The bot's open ask for `fingerprint` becomes this activation's wall, or a new one is written. */
   private openWall(row: BotActivationRow, asked: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string }): BotEscalationRow {
-    const input = { ...asked, permission: this.limitAsk(row.botId, filesAskOf(asked.permission)) }
+    const input = { ...asked, permission: this.limitAsk(row.botId, asked.permission) }
     const fingerprint = this.fingerprintOf(row.id, input.kind, input.permission)
     const open = this.store.openAsk(row.botId, fingerprint)
     if (open) {
@@ -3778,7 +3767,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * said not now (never that it asked). The bot is told it asked only when a card is there.
    */
   private raiseAsk(row: BotActivationRow, dispatchN: number, kind: BotWallKind, asked: BotAskRequest, reason: string, toolCallId?: string): BotCheck {
-    const permission = this.limitAsk(row.botId, filesAskOf(asked))
+    const permission = this.limitAsk(row.botId, asked)
     const fingerprint = this.fingerprintOf(row.id, kind, permission)
     let raised: { askId: string; created: boolean } | { refused: string }
     try {
@@ -3886,6 +3875,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const special = isSpecialAsk(escalation.permission)
     // Allow never grants tools the owner has not seen: an MCP ask whose server has not listed them waits for them.
     if (input.answer !== 'deny' && waitsForTools(escalation.permission)) throw new BotEngineError('ask_not_ready', MCP_ASK_LOADING_TEXT)
+    if (input.answer !== 'deny' && 'path' in escalation.permission) throw new BotEngineError('ask_not_available', BOT_FILE_ASK_GONE_TEXT)
     if (input.answer !== 'deny' && this.permissionOff(row.botId, escalation.permission)) throw new BotEngineError('permission_off', this.offText())
     if (input.answer !== 'deny' && !special) {
       const problem = this.answerProblem(row, escalation.permission as BotPermissionRequest, amount)
@@ -3938,6 +3928,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const limit = 'budget' in escalation.permission ? escalation.permission.budget.key : undefined
     const waiting = limit ? this.waitingKeys(botId) : undefined
     let amount: number | undefined
+    if (answer === 'allow' && 'path' in escalation.permission) throw new BotEngineError('ask_not_available', BOT_FILE_ASK_GONE_TEXT)
     if (answer === 'allow' && this.permissionOff(botId, escalation.permission)) throw new BotEngineError('permission_off', this.offText())
     if (answer === 'allow' && !special) {
       const permission = escalation.permission as BotPermissionRequest
@@ -3967,9 +3958,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * The bot's open asks its grant now holds, settled as allowed with their cards updated: after an
-   * Allow (the other cards of the one file ask), and at startup for an older build's folder asks
-   * of a bot that has file access. Returns the activations whose walls this answered, to go on.
+   * The bot's open asks its grant now holds, settled as allowed with their cards updated after an
+   * Allow. Returns the activations whose walls this answered, to go on.
    */
   private settleHeldAsks(botId: string): string[] {
     const grant = this.store.activeGrant(botId)
@@ -3988,31 +3978,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * An older build asked for one folder at a time; file access is now one permission (§3.7). Each
-   * open folder ask is worded as the one file ask, so its card and the bot's continuation say what
-   * Allow grants. A bot that has file access already has it: its folder asks are settled as allowed,
-   * and the startup pass continues the walls among them. Otherwise one stays open (the wall the
-   * chat waits at, else the oldest) and the rest are withdrawn: one ask per permission is open.
+   * "Use files on this computer" was removed: a bot can no longer be given files outside its files folder. Every file
+   * ask an older build left open is withdrawn at startup, with its card, so nobody can allow it (Allow would give
+   * nothing) and no chat waits at it. A chat turn that waited at one goes on without it (`resumeAfterRestart`).
    */
-  upgradeFileAsks(): void {
-    const ask = filesAsk()
-    const fingerprint = askFingerprintOf(ask)
-    const text = askText(ask)
-    const reworded = { permission: ask, fingerprint, title: text.title, note: text.note }
-    this.store.db.transaction(() => {
-      const older = this.store.escalations({ status: 'open' }).filter((row) => 'path' in row.permission && row.fingerprint !== fingerprint)
-      for (const botId of new Set(older.map((row) => row.botId))) {
-        const mine = older.filter((row) => row.botId === botId)
-        if (this.store.activeGrant(botId)?.manifest.workspace) {
-          // Settled first: only an open ask's fingerprint is unique.
-          for (const row of mine) if (this.store.answerEscalation(row.id, 'allowed_bot')) this.store.reword(row.id, reworded)
-          continue
-        }
-        const keep = this.store.openAsk(botId, fingerprint) ? undefined : mine.find((row) => row.mode === 'wall') ?? mine[0]
-        for (const row of mine) if (row !== keep) this.store.answerEscalation(row.id, 'withdrawn')
-        if (keep) this.store.reword(keep.id, reworded)
-      }
-    })
+  withdrawFileAsks(): void {
+    const open = this.store.escalations({ status: 'open' }).filter((row) => 'path' in row.permission)
+    if (!open.length) return
+    const withdrawn = this.store.db.transaction(() => open.filter((row) => this.store.answerEscalation(row.id, 'withdrawn')))
+    for (const row of withdrawn) this.republishAsk(row.id)
   }
 
   /** Every chat row carrying an ask's card, again (its status changed); the newest one is returned. */
@@ -4168,7 +4142,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   permissionOff(botId: string, asked: BotAskRequest): boolean {
     if (isSpecialAsk(asked)) return false
-    const request = filesAskOf(grantRequestOf(asked))
+    const request = grantRequestOf(asked)
     return this.store.disabledPermissions(botId).some((off) => {
       const held = grantedPermissions(off.manifest).find((item) => permissionId(item) === off.id)
       if (!held) return false
@@ -4208,7 +4182,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     let stopped = false
     if (!enabled) {
       const which = computerSwitchOf(permission)
-      if (which === 'shell' || which === 'files') for (const [activationId, live] of this.live) {
+      if (which === 'shell') for (const [activationId, live] of this.live) {
         if (this.store.activation(activationId)?.botId !== botId || live.controller.signal.aborted) continue
         if (live.powers[which] || [...live.consultPowers.values()].some((powers) => powers[which])) {
           this.cutForLimit(activationId, live, [which], '')
@@ -4652,7 +4626,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   /**
    * A turn this computer's limit stopped (`cutForLimit`): the calls of the switched-off power it cut off mid-way (a
-   * command; with file access, a file change too) were stopped by the owner's own switch, and the bot no longer has that
+   * command) were stopped by the owner's own switch, and the bot no longer has that
    * power, so they don't hold the work for an acknowledgement: the next turn is told they were interrupted. Any other
    * call whose effect is unknown still holds it, as after any interruption.
    */
@@ -4677,17 +4651,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       }
       return names
     }
-    // Run commands off: a command. Use files off: a file change outside the bot's own folders, which it no longer may
-    // make; a cut-off change of its own files keeps the rule of any interruption, as a command does when only files went off.
+    // Run commands off: a command.
     const command = (instanceId: string, tool: string) => switches.includes('shell') && namesOf(instanceId, ['shell']).has(tool)
-    const change = (instanceId: string, tool: string) => switches.includes('files') && namesOf(instanceId, ['write', 'edit']).has(tool)
-    const outside = this.outsideChanges.get(row.id) ?? new Set<string>()
-    const digests = new Map<string, string>()
-    if (switches.includes('files')) for (const id of entryOf.keys()) for (const call of this.host.runs()?.tools.listForRun(id) ?? []) digests.set(call.invocationId, call.argsDigest)
     const ids = this.store.unknownCalls(row.id).filter((call) => {
       const instanceId = entryOf.get(call.runId)
       if (call.acknowledged || instanceId === undefined) return false
-      return command(instanceId, call.tool) || (change(instanceId, call.tool) && outside.has(digests.get(call.invocationId) ?? ''))
+      return command(instanceId, call.tool)
     }).map((call) => call.invocationId)
     if (ids.length) this.store.acknowledgeUnknownCalls(row.id, ids)
   }
@@ -4727,31 +4696,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     if (ids.length) this.store.acknowledgeUnknownCalls(row.id, ids)
     if (stopped.length) this.reportChips.set(`${row.id}:${main.n}`, stoppedSubagentsChip(stopped))
-  }
-
-  /**
-   * An allowed file change outside the bot's own folders (its files folder and scratch) is noted by its arguments'
-   * digest, the tool ledger's key for the call, so a stop because Use files went off can tell it from a change of the
-   * bot's own files (`acknowledgeCut`). One the digest can't be matched to keeps the rule of any interruption.
-   */
-  private noteFileChange(activationId: string, permissions: BotPermissions, call: NormalisedCall): void {
-    if (call.kind !== 'builtin' || (call.tool !== 'write' && call.tool !== 'edit') || call.own) return
-    const scratch = permissions.workspace?.scratch
-    if (!scratch) return
-    const own = [scratch, ...(permissions.workspace?.files !== undefined ? [permissions.workspace.files] : [])]
-    const paths = BOT_PATH_ARGUMENTS.map((key) => call.args[key]).filter((value): value is string => typeof value === 'string')
-    const outside = paths.some((path) => {
-      try {
-        assertInsideRoots(own, path, scratch)
-        return false
-      } catch {
-        return true
-      }
-    })
-    if (!outside) return
-    const noted = this.outsideChanges.get(activationId) ?? new Set<string>()
-    noted.add(toolArgsDigest(call.args))
-    this.outsideChanges.set(activationId, noted)
   }
 
   private collectUnknownCalls(row: BotActivationRow): void {
@@ -5463,7 +5407,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       platform: this.host.platform ?? process.platform,
       holds: {
         shell: manifest.tools.includes('shell'),
-        files: manifest.workspace !== null,
         web: manifest.appTools.some((tool) => BOT_WEB_TOOLS.has(tool)),
         browser: manifest.appTools.includes(BOT_BROWSER_PERMISSION),
         mcp: manifest.mcp.length > 0,
@@ -6083,7 +6026,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.reportStops.delete(row.id)
     for (const key of this.reportChips.keys()) if (key.startsWith(`${row.id}:`)) this.reportChips.delete(key)
     for (const key of this.subagentEnds.keys()) if (key.startsWith(`${row.id}:`)) this.subagentEnds.delete(key)
-    this.outsideChanges.delete(row.id)
     this.roomKeys.delete(row.id)
     this.carried.delete(row.id)
     this.offeredNotes.delete(row.id)
@@ -7995,11 +7937,12 @@ function spendLimits(manifest: BotManifest): ActivationLimits {
 
 /**
  * Whether a grant (`BotManifest`, before a chat turn's front-desk narrowing) holds the permission `asked` names: a tool
- * (any browser tool is the browser), file access, a skill, or every tool an MCP ask lists. Limits and special asks
+ * (any browser tool is the browser), a skill, or every tool an MCP ask lists. Limits, special asks and an old folder ask
  * never count.
  */
 function grantHolds(manifest: BotManifest, asked: BotAskRequest): boolean {
-  if ('path' in asked) return manifest.workspace !== null
+  // An older build's folder ask: files outside the files folder can no longer be held.
+  if ('path' in asked) return false
   if ('skill' in asked) return manifest.skills.includes(asked.skill)
   if ('mcp' in asked) {
     const tools = mcpAskTools(asked.mcp)
@@ -8076,8 +8019,6 @@ export function threadsReadOnlyOf(row: Pick<BotActivationRow, 'lane' | 'idempote
 /** What a gate refusal asks the owner for. */
 function permissionOfWall(call: NormalisedCall, wall: WallReason): BotPermissionRequest | undefined {
   switch (wall.kind) {
-    // File access is one permission (§3.7): any folder asks for all of them, once.
-    case 'path': return filesAsk()
     case 'skill': return { skill: wall.skill }
     case 'mcp': return { mcp: { serverId: wall.server, tool: wall.tool } }
     case 'tool':

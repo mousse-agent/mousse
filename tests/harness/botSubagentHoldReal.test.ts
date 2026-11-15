@@ -1,10 +1,8 @@
 /**
  * The hold rule for a bot's subagents on the real binaries (docs/bots.md, "How each runtime holds a subagent"): on Linux,
- * work on Claude Code (in its sandbox) and a subagent on Codex, without file access: the rule
- * keeps the subagent's commands, and the subagent's own runtime holds them as tightly as the work's, so a command reads
- * nothing of the home folder outside the bot's folders. With file access, a subagent on Codex under work on Claude Code
- * runs with no command tool at all (Codex's sandbox would then read Mousse's own data). In the reverse direction without
- * file access, commands are withheld because Claude Code opens /tmp, which Codex closes.
+ * work on Claude Code (in its sandbox) and a subagent on Codex: the rule keeps the subagent's commands, and the
+ * subagent's own runtime holds them as tightly as the work's, so a command reads nothing of the home folder outside the
+ * bot's folders. In the reverse direction, commands are withheld because Claude Code opens /tmp, which Codex closes.
  *
  * The subagent's turn is compiled by the real engine (`BotEngine`, on a real `bots.db`) with each runtime's tool names
  * and what its driver says about how it holds a bot here; the turn then runs on the real Codex (`CodexProviderService`)
@@ -58,10 +56,10 @@ describe(`a subagent on the other runtime is held as its work is, on the real bi
   })
 
   /**
-   * The real engine: work on `work`'s entry, allowed commands (and file access) for this work, starts a subagent on the
+   * The real engine: work on `work`'s entry, allowed commands for this work, starts a subagent on the
    * other entry. Returns the subagent's prepared turn, what it was told it lacks, and a file outside the bot's folders.
    */
-  async function subagentOf(work: 'claude' | 'codex', options: { files?: boolean; codexModel?: string } = {}) {
+  async function subagentOf(work: 'claude' | 'codex', options: { codexModel?: string } = {}) {
     const f: BotFixture = botFixture()
     cleanups.push(() => f.close())
     const selection = { claude: { instanceId: 'claude', model: 'claude-sonnet-4-5' }, codex: { instanceId: 'codex', model: options.codexModel ?? 'gpt-5.5' } }
@@ -80,7 +78,6 @@ describe(`a subagent on the other runtime is held as its work is, on the real bi
     const { botId } = await createBot(f, { name: 'Pip', description: 'Check the build.', reply: 'Hello.' })
     const activation = await f.bots.activate({ botId, input: 'Check the build.', clientRequestId: 'w1' })
     f.store.putOverlay(activation.id, 'shell', { tool: 'shell' })
-    if (options.files) f.store.putOverlay(activation.id, 'files', { path: f.base, access: 'write' })
     const job = await start(f, activation.id)
     const other = work === 'claude' ? 'codex' : 'claude'
     const started = await job.prepared.authority.subagents!.start({ title: 'Build', brief: 'Run the build.', model: { pick: selection[other], name: { name: choices.find((option) => option.instanceId === other)!.label, entry: choices.find((option) => option.instanceId === other)!.entry } } })
@@ -231,15 +228,5 @@ describe(`a subagent on the other runtime is held as its work is, on the real bi
     const said = run.results.join('\n')
     expect(said).not.toContain('read own')
     expect(said).not.toContain('read secret')
-  }, 120_000)
-
-  it.skipIf(!READY)('with file access, work on Claude Code: a subagent on Codex is offered no command tool at all', async () => {
-    const run = await codex()
-    const { child, lacks, files } = await subagentOf('claude', { files: true, codexModel: run.model })
-    expect(lacks).toEqual(['run commands'])
-    const sent = await run.turn(child.prepared.authority, files, undefined)
-    const offered = ((sent[0] as { tools?: Array<{ name?: string; type?: string }> }).tools ?? []).map((tool) => tool.name ?? tool.type)
-    expect(offered.length).toBeGreaterThan(0)
-    expect(offered.filter((name) => /exec_command|write_stdin|shell/.test(String(name)))).toEqual([])
   }, 120_000)
 })

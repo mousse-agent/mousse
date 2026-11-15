@@ -184,6 +184,8 @@ The usage-window reserve is deferred to Phase 2, and a computer other than this 
 
 ### 3.7 Changed in revision 6: file access is one permission
 
+> **Removed since.** "Use files on this computer" no longer exists: a bot that may run commands reached past it, so a bot's file tools now reach only its files folder and scratch, and no bot can ask for more. Stored grants and revisions that hold a `workspace` keep it unchanged (same digest, no new approval) and it grants nothing; open file asks are withdrawn when bots open. A real design for file access is still to come. What follows is history; `docs/bots.md`, Files, describes the current behaviour.
+
 A bot on the owner's Claude Code searched the web, then stopped to ask to "read files in ~/.claude/projects/…/tool-results": Claude Code had saved the search results there and was reading them back. Folder asks also came back for each new folder, blocking runs. The owner's decisions:
 
 - **File access is one permission, "use files on this computer"**, asked once and kept, like "run commands". Once allowed, the bot reads and changes any file or folder, and no file or folder is asked about again, read or write. It is not granular.

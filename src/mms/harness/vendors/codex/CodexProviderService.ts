@@ -74,7 +74,7 @@ import { isUsageLimitInfo, isUsageLimitText, resetFromSnapshot, trimResetCredits
 import { readUsageLimit, usageLimitError } from '../../../orchestrator/providerErrors'
 import { normalizePermissionMode, permissionModeAllows, type PermissionMode } from '../../../../shared/permissionMode'
 import { PERMISSION_KEYS } from '../../../../shared/permissionKeys'
-import { CODEX_BOT_CHECKED_VERSIONS, CODEX_BOT_FEATURES_REFUSED, type CodexBotSandbox, codexBotInstructionsNote, codexBotSandbox, codexBotSandboxConfig, codexBotWebOff, codexPackageOf, codexTurnPolicy } from './childPolicy'
+import { CODEX_BOT_CHECKED_VERSIONS, CODEX_BOT_FEATURES_REFUSED, type CodexBotSandbox, codexBotSandbox, codexBotSandboxConfig, codexBotWebOff, codexPackageOf, codexTurnPolicy } from './childPolicy'
 import { CODEX_BOT_SETUP_UNREADABLE_TEXT, codexBotSettingText, codexBotVersionRefusal, codexVersionOf } from '../../../../shared/harness/codexBotVersion'
 import { STOP_GRACE_MS, listProcesses, stopCommandProcesses } from '../../stopProcesses'
 import { DEFAULT_TREE_TIMING, HelperTree, RpcRefused, ThreadStatuses, TreeOff, isWakeUp, type TreePorts, type TreeTiming } from './helperTree'
@@ -2928,10 +2928,7 @@ export class CodexProviderService {
     return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false, botSandbox }
   }
 
-  async chat(given: CodexChatInput): Promise<CodexChatResult> {
-    // A bot whose commands can't change some files is told so, and what to use instead (`codexBotInstructionsNote`).
-    const note = codexBotInstructionsNote(given.bot)
-    const input: CodexChatInput = note ? { ...given, developerInstructions: given.developerInstructions ? `${given.developerInstructions}\n\n${note}` : note } : given
+  async chat(input: CodexChatInput): Promise<CodexChatResult> {
     if (input.mcp?.token) this.secrets.add(input.mcp.token)
     input.signal?.throwIfAborted()
     if (this.activeThreads.has(input.threadId)) throw new Error('A Codex turn is already running for this thread')

@@ -3,9 +3,9 @@ import { askText } from '../../../shared/bots/personal/askText'
 import { launchedActive, type BotAskCard, type BotAskStatus, type BotChatApplet, type BotChatMessage, type BotChatQuote, type BotLaunchedThread, type BotWorkItem, type BotChip, type BotDetail, type BotError, type BotMessageKind, type BotPermissionItem, type BotReminderItem, type BotRunItem, type BotSummary } from '../../../shared/bots/personal/chat'
 import { BOT_MODEL_SLOT_KEYS, type BotDefinition, type BotLane, type BotManifest } from '../../../shared/bots/personal/definition'
 import { isPinned, limitOnPick, slotsOf, stuckRowsOf } from '../../../shared/bots/personal/modelSlots'
-import { askFingerprint, filesAsk, filesAskOf, isSpecialAsk, mcpAskTools, type BotAskRequest, type BotEscalationStatus, type BotPermissionRequest } from '../../../shared/bots/personal/escalation'
+import { askFingerprint, isSpecialAsk, mcpAskTools, type BotAskRequest, type BotEscalationStatus, type BotPermissionRequest } from '../../../shared/bots/personal/escalation'
 import { BOT_THREADS_PERMISSION, botStarterManifest, canonicalManifest, isOwnBotAppTool } from '../../../shared/bots/personal/manifest'
-import { BOT_OFF_HERE_MARK, offHereNote, switchedOff, type BotComputerLimit } from '../../../shared/bots/personal/computerLimit'
+import { BOT_OFF_HERE_MARK, BOT_OFF_HERE_NOTE, switchedOff, type BotComputerLimit } from '../../../shared/bots/personal/computerLimit'
 import type { BotJournalKind } from '../../../shared/bots/personal/memory'
 import { botState } from '../../../shared/bots/personal/state'
 import { normalizeBotLook } from '../../../shared/bots/personal/look'
@@ -614,7 +614,7 @@ export class BotChatProjection {
       const text = askText(permission, { budget: starterManifest().budget })
       // Kept in the grant, but this computer has it switched off: it gives nothing here until it is switched on.
       const off = limit ? switchedOff(limit, permission) : undefined
-      if (limit && off) return { id, title: text.title, note: offHereNote(off, limit), grantedAt, mark: BOT_OFF_HERE_MARK, ...('tool' in permission && permission.tool === BOT_THREADS_PERMISSION ? { needsFullAccess: true as const } : {}) }
+      if (limit && off) return { id, title: text.title, note: BOT_OFF_HERE_NOTE, grantedAt, mark: BOT_OFF_HERE_MARK, ...('tool' in permission && permission.tool === BOT_THREADS_PERMISSION ? { needsFullAccess: true as const } : {}) }
       // About's tooltip says what it gives in full, as the card's does ("use your threads": full access).
       return { id, title: text.title, note: text.tip ?? text.note, grantedAt, ...('tool' in permission && permission.tool === BOT_THREADS_PERMISSION ? { needsFullAccess: true as const } : {}) }
     })
@@ -626,20 +626,18 @@ export function permissionId(permission: BotPermissionRequest): string {
   return askFingerprint('budget' in permission ? { budget: { key: permission.budget.key } } : permission)
 }
 
-/**
- * The fingerprint of an ask: at most one is open per bot and fingerprint (a limit's without its
- * amount, a folder's as the one file ask).
- */
+/** The fingerprint of an ask: at most one is open per bot and fingerprint (a limit's without its amount). */
 export function askFingerprintOf(request: BotAskRequest): string {
-  return 'budget' in request ? permissionId(request) : askFingerprint(filesAskOf(request))
+  return 'budget' in request ? permissionId(request) : askFingerprint(request)
 }
 
-/** What `manifest` grants beyond the starter grant, one request per permission. */
+/**
+ * What `manifest` grants beyond the starter grant, one request per permission. A stored `workspace` ("use files on this
+ * computer", removed) grants nothing, so it is never listed.
+ */
 export function grantedPermissions(manifest: BotManifest): BotPermissionRequest[] {
   const starter = starterManifest()
   const items: BotPermissionRequest[] = []
-  // File access is one permission, however many folders an older grant names (`filesAsk`).
-  if (manifest.workspace) items.push(filesAsk())
   for (const tool of manifest.tools) if (!starter.tools.includes(tool)) items.push({ tool })
   // The bot's own tools are never permissions: About never lists them.
   for (const tool of manifest.appTools) if (!starter.appTools.includes(tool) && !isOwnBotAppTool(tool)) items.push({ tool })
@@ -657,14 +655,14 @@ export function grantedPermissions(manifest: BotManifest): BotPermissionRequest[
 }
 
 /**
- * `manifest` without `permission` (About → Remove): file access goes as a whole, a tool, skill or
- * MCP tool is taken away, a limit returns to the starter one. Narrowing never needs consent.
+ * `manifest` without `permission` (About → Remove): a tool, skill or MCP tool is taken away, a limit
+ * returns to the starter one. Narrowing never needs consent.
  */
 export function withoutPermission(manifest: BotManifest, permission: BotPermissionRequest): BotManifest {
   const starter = starterManifest()
   const next: BotManifest = { ...manifest, tools: [...manifest.tools], appTools: [...manifest.appTools], mcp: manifest.mcp.map((pair) => ({ ...pair })), skills: [...manifest.skills], budget: { ...manifest.budget } }
-  if ('path' in permission) next.workspace = null
-  else if ('tool' in permission) {
+  if ('path' in permission) return canonicalManifest(next)
+  if ('tool' in permission) {
     next.tools = next.tools.filter((tool) => tool !== permission.tool)
     next.appTools = next.appTools.filter((tool) => tool !== permission.tool)
   } else if ('skill' in permission) next.skills = next.skills.filter((skill) => skill !== permission.skill)
@@ -681,8 +679,8 @@ export function withoutPermission(manifest: BotManifest, permission: BotPermissi
 /** Restore exactly what this row kept, including older grants that hold a web tool in both lists. */
 export function restorePermission(manifest: BotManifest, remembered: BotManifest, permission: BotPermissionRequest): BotManifest {
   const next = withoutPermission(manifest, permission)
-  if ('path' in permission) next.workspace = remembered.workspace
-  else if ('tool' in permission) {
+  if ('path' in permission) return next
+  if ('tool' in permission) {
     next.tools.push(...remembered.tools.filter((tool) => tool === permission.tool))
     next.appTools.push(...remembered.appTools.filter((tool) => tool === permission.tool))
   } else if ('skill' in permission) next.skills.push(permission.skill)

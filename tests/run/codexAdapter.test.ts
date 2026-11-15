@@ -2469,7 +2469,7 @@ describe('a bot turn on Codex', () => {
   const command = (id: string, text: string, cwd: string, reason: string | null = null) =>
     inn({ id, method: 'item/commandExecution/requestApproval', params: { kind: 'command', threadId: T, turnId: 'turn-1', itemId: `cmd-${id}`, startedAtMs: 0, environmentId: null, command: text, cwd, reason } })
 
-  it('with "run commands": every command allowed by the grant with no question, never a retry outside the sandbox; without file access its own profile (Linux, macOS) or workspace-write (Windows) over exactly its own folders', async () => {
+  it('with "run commands": every command allowed by the grant with no question, never a retry outside the sandbox; its own profile (Linux, macOS) or workspace-write (Windows) over exactly its own folders', async () => {
     const { bot, files, docs, scratch } = realBot(['read', 'shell'])
     const writable = [docs, files, scratch]
     // Linux and macOS: Mousse's permission profile, reading Codex's `:minimal`, the folder granted for reading and the

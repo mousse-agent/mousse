@@ -1,15 +1,14 @@
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
-import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
-import { existsSync, readdirSync, realpathSync } from 'node:fs'
-import { foldersOf, type BotManifest, type BotThreadSpec } from '../../../shared/bots/personal/definition'
+import { isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { realpathSync } from 'node:fs'
+import type { BotManifest, BotThreadSpec } from '../../../shared/bots/personal/definition'
 import { BOT_APP_TOOLS, BOT_APPLET_TOOL, BOT_CARD_TOOL, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest, BOT_SUBAGENT_APP_TOOLS, BOT_SUBAGENT_TOOLS } from '../../../shared/bots/personal/manifest'
 import { BOT_MEMORY_TOOLS } from '../../../shared/bots/personal/memory'
 import { withinComputerLimit, type BotComputerLimit } from '../../../shared/bots/personal/computerLimit'
 import type { NeutralTool } from '../../../shared/harness/tools'
 import type { BindPolicy, HarnessCaps, HarnessError } from '../../../shared/harness/types'
 import { stableStringify } from '../../run/json'
-import { botClosedPlaces, ClosedPlacesUnknown } from '../../data/closedPlaces'
 
 /**
  * A bot thread's grant, compiled for one dispatch (PR 6 §4). Pure: the caller supplies the native
@@ -39,13 +38,11 @@ export interface BotPermissions {
   mcp: Array<`${string}::${string}`>
   skills: string[]
   /**
-   * `writeRoots`: the roots the bot may change. `files`: the bot's files folder, writable beside the
-   * roots like scratch; never one of `roots`, so it is never listed as a permission. `computer`: file
-   * access (bot-architecture.md §3.7), with the tops of the file system as the roots, read and
-   * write, and Mousse's own data folder (`closed`) shut but for the files folder and scratch, and the places
-   * `botClosedPlaces` lists outside it (`outside`).
+   * The bot's own folders: its scratch folder and its files folder (`files`), both writable, and nothing else. A bot
+   * has no folder beyond them ("use files on this computer" was removed), so `roots` and `writeRoots` are empty, and a
+   * stored grant's `workspace` adds none. Null for a bot made before files folders.
    */
-  workspace: { roots: string[]; access: 'read' | 'write'; writeRoots?: string[]; scratch: string; files?: string; computer?: { closed: string; outside?: string[] } } | null
+  workspace: { roots: string[]; access: 'read' | 'write'; writeRoots?: string[]; scratch: string; files?: string } | null
   /** "Use the browser": `appTools` holds the browser tools, on the bot's own browser. */
   browser?: true
   /** "Use your threads": `appTools` holds the thread tools of this turn, to read (`read`) or also to start, message and stop (`all`). */
@@ -69,8 +66,6 @@ export interface CompileInput {
   nativeNames(tools: readonly NeutralTool[]): { ok: true; names: string[] } | { ok: false; error: HarnessError & { code: 'policy_unenforceable' } }
   /** What is left of the activation's counts and spend, and the dispatch's active-time deadline. */
   remaining: { maxTurns?: number; maxToolCalls?: number; maxInputTokens?: number; maxOutputTokens?: number; maxUsd?: number; deadlineMs: number }
-  /** The tops of the file system file access opens (default: `computerRoots()`). */
-  computer?: readonly string[]
   /**
    * The bot's files folder (`botFilesFolder`): an implicit writable root, like scratch, allowed
    * although it sits inside the profile home. Absent: none (bots made before Bot Phase 1's files folder).
@@ -148,65 +143,6 @@ function real(path: string): string {
   }
 }
 
-/** The tops of this computer's file system: `/`, or every drive on Windows. */
-export function computerRoots(platform: NodeJS.Platform = process.platform): string[] {
-  if (platform !== 'win32') return ['/']
-  const drives = [...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'].map((letter) => `${letter}:\\`).filter((drive) => existsSync(drive))
-  return drives.length ? drives : [parse(resolve('/')).root]
-}
-
-/**
- * Mousse's own data, closed to every bot whatever it may use: the Mousse home holding the profile
- * (`<home>/profiles/<id>`: the sign-ins, keys and data of every profile), or the profile alone
- * when it is not laid out so.
- */
-export function mousseDataFolder(profileHome: string): string {
-  const profiles = dirname(profileHome)
-  return basename(profiles) === 'profiles' ? dirname(profiles) : profileHome
-}
-
-/**
- * What file access leaves closed: the Mousse home `closed`, and every place `botClosedPlaces` lists outside it, with the
- * homes the profile's own CLI entries are set to use. Undefined when those entries can't be read.
- */
-function closedTo(closed: string, profileHome: string): { closed: string; outside: string[] } | undefined {
-  try {
-    return { closed, outside: botClosedPlaces({ mousseHome: closed, profileHome }) }
-  } catch (error) {
-    if (error instanceof ClosedPlacesUnknown) return undefined
-    throw error
-  }
-}
-
-/**
- * Every entry inside `folder` that is not one of `keep` and does not lead to one: at each folder on
- * the way down to them, every other entry; `folder` itself when none of `keep` is inside it. With
- * file access, a sandbox closes these (Claude Code's `denyWrite` over Mousse's data) or opens them
- * (Codex's writable roots beside it). Read when the turn starts: an entry made later in a folder
- * on the way is not among them.
- */
-export function entriesBeside(folder: string, keep: readonly string[]): string[] {
-  const within = (path: string, parent: string) => path.startsWith(parent.endsWith(sep) ? parent : `${parent}${sep}`)
-  if (!keep.some((path) => within(path, folder))) return [folder]
-  const beside: string[] = []
-  const walk = (at: string): void => {
-    let names: string[]
-    try {
-      names = readdirSync(at)
-    } catch {
-      return
-    }
-    for (const name of names) {
-      const entry = join(at, name)
-      if (keep.includes(entry)) continue
-      if (keep.some((path) => within(path, entry))) walk(entry)
-      else beside.push(entry)
-    }
-  }
-  walk(folder)
-  return beside
-}
-
 /** The real paths of the system temporary folders, deduplicated. */
 export function systemTempDirs(): string[] {
   const candidates = [tmpdir(), ...(process.platform === 'win32' ? [] : ['/tmp', '/private/tmp', '/var/tmp'])]
@@ -237,9 +173,7 @@ export function compileBotThread(input: CompileInput): CompileResult {
     if (files === home || !inside(home, files)) return unenforceable("The bot's files folder is not where Mousse keeps bots' files.")
     if (inside(files, scratch) || inside(scratch, files)) return unenforceable("The bot's files folder overlaps its private scratch folder.")
   }
-  // File access is one permission (§3.7): any workspace opens every folder, read and write. The
-  // folders an older build's grant names are not checked or kept: they no longer narrow anything.
-  const computer = manifest.workspace ? (input.computer ?? computerRoots()).map(real) : undefined
+  // Only the bot's own folders: a stored grant's `workspace` ("use files on this computer", removed) opens no folder.
   const native = input.nativeNames(manifest.tools)
   if (!native.ok) return native
   const { deadlineMs, ...counts } = input.remaining
@@ -269,8 +203,6 @@ export function compileBotThread(input: CompileInput): CompileResult {
     ...(own?.subagents && !own.frontDesk ? [...BOT_SUBAGENT_TOOLS, 'work_models'] : [])
   ])].sort()
   const mcp = [...new Set(manifest.mcp.map((pair) => `${pair.serverId}::${pair.tool}` as const))].sort()
-  const closed = computer ? closedTo(real(mousseDataFolder(input.profileHome)), input.profileHome) : undefined
-  if (computer && !closed) return unenforceable('Mousse couldn\'t read this profile\'s provider settings, so it can\'t tell which sign-ins to keep closed to this bot.', ['containment'])
   return {
     ok: true,
     policy: {
@@ -288,16 +220,7 @@ export function compileBotThread(input: CompileInput): CompileResult {
       skills: [...new Set(manifest.skills)].sort(),
       ...(browser ? { browser: true as const } : {}),
       ...(threads ? { threads } : {}),
-      workspace: computer || files !== undefined
-        ? {
-            roots: computer ?? [],
-            access: computer ? 'write' : 'read',
-            writeRoots: computer ?? [],
-            scratch,
-            ...(files !== undefined ? { files } : {}),
-            ...(closed ? { computer: closed } : {})
-          }
-        : null
+      workspace: files !== undefined ? { roots: [], access: 'read', writeRoots: [], scratch, files } : null
     }
   }
 }
@@ -305,7 +228,7 @@ export function compileBotThread(input: CompileInput): CompileResult {
 const SUBAGENT_APP: ReadonlySet<string> = new Set(BOT_SUBAGENT_APP_TOOLS)
 
 /**
- * What a run's subagent holds of what its work holds: the built-ins, file access, the owner's MCP tools and skills as
+ * What a run's subagent holds of what its work holds: the built-ins, the owner's MCP tools and skills as
  * they are, and of the Mousse app tools only the web and the browser (`BOT_SUBAGENT_APP_TOOLS`, an allowlist, so an app
  * tool a later build makes grantable never reaches a subagent by itself). The limits stay the work's: its subagents
  * draw on the same counts, spend and time.

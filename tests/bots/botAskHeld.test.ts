@@ -5,7 +5,6 @@
  * caps; a chat turn hands the job to work, and running work continues in the same thread with the wider grant once its
  * turn ends.
  */
-import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_HELD_CHAT_TEXT, BOT_ASK_HELD_CONSULT_TEXT, BOT_ASK_HELD_NEXT_TEXT, BOT_ASK_HELD_UNAVAILABLE_TEXT, BOT_ASK_REFUSED_TEXT, BOT_WORK_HAS_TEXT, BotEngine } from '../../src/mms/bots/activation/BotEngine'
 import type { BotBrowserHost } from '../../src/mms/bots/activation/dispatcher'
@@ -209,20 +208,6 @@ describe('work that was running when the owner pressed Allow', () => {
     expect(cards()).toHaveLength(2)
   })
 
-  it('gets file access the same way', async () => {
-    const work = await workStarted('Read my notes', 'm1')
-    const read: NormalisedCall = { kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(f.base, 'notes.md') } }
-    expect(work.prepared.authority.check(read)).toMatchObject({ ok: false, refused: { text: BOT_ASK_REFUSED_TEXT } })
-    await f.bots.service.answer(botId, f.store.openAsks(botId)[0]!.id, 'allow')
-    expect(work.prepared.authority.check(read)).toEqual({ ok: false, refused: { text: BOT_ASK_HELD_NEXT_TEXT, askId: '' } })
-    expect(work.prepared.authority.escalate!({ permission: { path: f.base, access: 'read' }, reason: 'Notes.' })).toBe(BOT_ASK_HELD_NEXT_TEXT)
-    expect(cards()).toHaveLength(1)
-    await finish(f, work.payload, 'completed', { text: 'Not yet.' })
-    const continued = await start(f, work.workId, 2)
-    expect(continued.prepared.authority.check(read)).toEqual({ ok: true })
-    await finish(f, continued.payload, 'completed', { text: 'Read them.' })
-  })
-
   it('work that never needed the new permission ends as it would have', async () => {
     const work = await workStarted('Sum my numbers', 'm1')
     expect(work.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'Maybe later.' })).toMatch(/^Asked the owner/)
@@ -315,22 +300,22 @@ describe('a chat turn that was running when the owner pressed Allow', () => {
     expect(f.store.openAsks(botId)).toEqual([])
   })
 
-  it('uses file access itself: it finishes its reply, then continues in the chat with it', async () => {
-    const work = await workStarted('Sort my notes', 'm1')
-    work.prepared.authority.escalate!({ permission: { path: f.base, access: 'read' }, reason: 'To read them.' })
-    const turn = await chat('What do my notes say?', 'm2')
+  it('uses your threads itself: it finishes its reply, then continues in the chat with them', async () => {
+    const work = await workStarted('Sort my threads', 'm1')
+    work.prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'To read them.' })
+    const turn = await chat('Start a thread to fix the login page', 'm2')
     await f.bots.service.answer(botId, f.store.openAsks(botId)[0]!.id, 'allow')
-    const read: NormalisedCall = { kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(f.base, 'notes.md') } }
-    expect(turn.prepared.authority.check(read)).toEqual({ ok: false, refused: { text: BOT_ASK_HELD_CHAT_TEXT, askId: '' } })
-    expect(turn.prepared.authority.escalate!({ permission: { path: f.base, access: 'read' }, reason: 'To read them.' })).toBe(BOT_ASK_HELD_CHAT_TEXT)
+    const create: NormalisedCall = { kind: 'app', tool: 'thread_create', args: {} }
+    expect(turn.prepared.authority.check(create)).toEqual({ ok: false, refused: { text: BOT_ASK_HELD_CHAT_TEXT, askId: '' } })
+    expect(turn.prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'To start it.' })).toBe(BOT_ASK_HELD_CHAT_TEXT)
     expect(cards()).toHaveLength(1)
-    await finish(f, turn.payload, 'completed', { text: 'Let me look.' })
+    await finish(f, turn.payload, 'completed', { text: 'Let me start it.' })
     const continued = await start(f, turn.activation.id, 2)
-    expect(continued.prepared.prompt).toContain('use files on this computer')
-    expect(continued.prepared.authority.check(read)).toEqual({ ok: true })
-    await finish(f, continued.payload, 'completed', { text: 'They list three errands.' })
+    expect(continued.prepared.prompt).toContain('use your threads')
+    expect(continued.prepared.authority.check(create)).toEqual({ ok: true })
+    await finish(f, continued.payload, 'completed', { text: 'Started it.' })
     expect(f.store.activation(turn.activation.id)!.status).toBe('done')
-    expect(chatOf(f, botId).filter((message) => message.activationId === turn.activation.id && message.author === 'bot').map((message) => message.text)).toEqual(['Let me look.', 'They list three errands.'])
+    expect(chatOf(f, botId).filter((message) => message.activationId === turn.activation.id && message.author === 'bot').map((message) => message.text)).toEqual(['Let me start it.', 'Started it.'])
     expect(cards()).toHaveLength(1)
   })
 
@@ -341,7 +326,7 @@ describe('a chat turn that was running when the owner pressed Allow', () => {
     f.store.setPublished(botId, published.revision!)
     const work = await workStarted('Check cua-driver', 'm1')
     work.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'To check.' })
-    work.prepared.authority.escalate!({ permission: { path: f.base, access: 'read' }, reason: 'To read its notes.' })
+    work.prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'To read its threads.' })
     const turn = await chat('What does the doc say about it?', 'm2')
     const asked = turn.prepared.authority.consult!({ context: 'docs', question: 'What does it say?' })
     await flush()
@@ -350,7 +335,7 @@ describe('a chat turn that was running when the owner pressed Allow', () => {
     if ('refused' in consult) throw new Error(consult.refused)
     for (const ask of f.store.openAsks(botId)) await f.bots.service.answer(botId, ask.id, 'allow')
     expect(consult.authority.escalate!({ permission: { tool: 'shell' }, reason: 'To run it.' })).toBe(BOT_ASK_HELD_CONSULT_TEXT)
-    expect(consult.authority.escalate!({ permission: { path: f.base, access: 'read' }, reason: 'To read it.' })).toBe(BOT_ASK_HELD_CONSULT_TEXT)
+    expect(consult.authority.escalate!({ permission: { tool: 'threads' }, reason: 'To read them.' })).toBe(BOT_ASK_HELD_CONSULT_TEXT)
     expect(cards()).toHaveLength(2)
     void asked.catch(() => undefined)
   })
