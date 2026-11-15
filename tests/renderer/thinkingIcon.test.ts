@@ -35,13 +35,15 @@ describe('Thinking icon', () => {
   })
 })
 
-describe('Thinking shimmer in light themes', () => {
+describe('Running shimmer colours', () => {
   const globalCss = readFileSync('src/renderer/styles/global.css', 'utf8')
   const agentCss = readFileSync('src/renderer/chat/components/agent-elements/agent-ui.css', 'utf8')
 
-  it('gives light (and system on a light OS) two different shimmer colours, from theme tokens', () => {
+  // Dark themes had no pair: the label fell back to agent-ui's light subtle grey, about the dark muted colour itself, so
+  // the band could not be seen while the icon beside it pulsed.
+  it('gives dark, light and system on a light OS two different shimmer colours, from theme tokens', () => {
     const pairs = [...globalCss.matchAll(/--an-shimmer-base: ([^;]+);\s*--an-shimmer-peak: ([^;]+);/g)]
-    expect(pairs).toHaveLength(2)
+    expect(pairs).toHaveLength(3)
     for (const [, base, peak] of pairs) {
       expect(base).not.toBe(peak)
       expect(`${base}${peak}`).not.toMatch(/#[0-9a-f]{3,8}\b/i)
@@ -51,5 +53,10 @@ describe('Thinking shimmer in light themes', () => {
   it('sweeps the label with the pair', () => {
     expect(agentCss).toContain('var(--an-shimmer-base, var(--an-foreground-subtle, #a3a3a3))')
     expect(agentCss).toContain('var(--an-shimmer-peak, var(--an-foreground-muted, #737373))')
+  })
+
+  it('holds the label still with motion off or reduced, as its icon', () => {
+    expect(agentCss).toMatch(/\[data-motion='off'\] \.an-text-shimmer--active\s*\{\s*animation: none !important;/)
+    expect(agentCss).toMatch(/prefers-reduced-motion: reduce\)\s*\{\s*\.an-text-shimmer--active\s*\{\s*animation: none !important;/)
   })
 })

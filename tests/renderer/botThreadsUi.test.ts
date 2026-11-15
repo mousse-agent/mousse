@@ -116,4 +116,18 @@ describe('a bot\'s threads, as the owner sees them', () => {
     act(() => root.render(createElement(BotSteps, { chips })))
     expect(host.querySelector('.bot-steps li')!.getAttribute('title')).toBe('Sent: Please also check the signup page.')
   })
+
+  it('an archive and an unarchive are steps with the thread\'s title, each with Open, at once', () => {
+    const calls = [
+      { tool: 'thread_archive', input: { threadId: 't-done' }, result: { threadId: 't-done', title: 'Merged work', archived: true } },
+      { tool: 'thread_archive', input: { threadId: 't-back', archived: false }, result: { threadId: 't-back', title: 'Dropped idea', archived: false } }
+    ]
+    const chips = rollUpChips(calls)
+    expect(chips.map((chip) => [chip.text, chip.highlight, chip.thread])).toEqual([['archived', 'Merged work', 't-done'], ['unarchived', 'Dropped idea', 't-back']])
+    expect(actedChip(calls[0]!.tool, calls[0]!.input, calls[0]!.result)).toEqual(chips[0])
+    act(() => root.render(createElement(BotSteps, { chips })))
+    expect(host.textContent).toContain('Archived: Merged work')
+    expect(host.textContent).toContain('Unarchived: Dropped idea')
+    expect([...host.querySelectorAll('button')].filter((button) => button.textContent === 'Open')).toHaveLength(2)
+  })
 })

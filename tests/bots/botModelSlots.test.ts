@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { OLD_MODEL_NAME_IGNORED } from '../../src/mms/bots/activation/BotEngine'
 import { createBotModelResolver } from '../../src/mms/bots/model/BotModelResolver'
 import type { BotRuntimeHold } from '../../src/mms/bots/seams'
-import type { BotActivationTrigger, BotModelSlots, BotThreadSpec } from '../../src/shared/bots/personal/definition'
+import type { BotActivationTrigger, BotDepth, BotModelPick, BotModelSlotKey, BotModelSlots, BotThreadSpec } from '../../src/shared/bots/personal/definition'
 import type { BotModelOption } from '../../src/shared/bots/personal/methods'
 import { modelSlotsProblem, ownerNamesModel, pickProblemText, plainLabel, slotsAllOn, slotsOf, slotsWith, turnModelOf, UNPICKED_SLOTS, withSlots, workRowsDiffer } from '../../src/shared/bots/personal/modelSlots'
 import type { InstanceSnapshot } from '../../src/shared/harness/status'
@@ -99,6 +99,30 @@ describe('which row a turn takes', () => {
     expect(turnModelOf(spec, { ...chatTurn, modelOverride: { mode: 'named', model: 'sonnet', instanceId: 'pi:key', credential: 'api_key', depth: 'normal' } })).toEqual({ slot: 'talk', pick: { instanceId: 'pi:key', model: 'sonnet', credential: 'api_key' }, depth: 'normal' })
     // An automation's model saved by name only (before picks kept their entry).
     expect(turnModelOf(spec, { ...work(), modelOverride: { mode: 'named', model: 'opus', depth: 'normal' } })).toEqual({ slot: 'medium', pick: { model: 'opus' }, depth: 'normal' })
+  })
+
+  it("a row with no pick runs on a picked row: Medium work's, else Talk's, else another; Mousse chooses only while none is picked", () => {
+    const rows = (picked: Partial<BotModelSlots>) => withSlots(thread({ mode: 'auto', depth: 'normal' }), { ...UNPICKED_SLOTS, ...picked })
+    const table: Array<[Partial<BotModelSlots>, typeof chatTurn | ReturnType<typeof work>, BotModelSlotKey, BotModelPick | null, BotDepth]> = [
+      // Talk picked alone (a bot from before picks, given only Talk): all work runs on Talk's model and level.
+      [{ talk: TALK }, work('hard'), 'talk', TALK, 'deep'],
+      [{ talk: TALK }, work('light'), 'talk', TALK, 'quick'],
+      [{ talk: TALK }, work(), 'talk', TALK, 'normal'],
+      // Medium work picked too: the other work rows follow Medium work, not Talk.
+      [{ talk: TALK, medium: MEDIUM }, work('hard'), 'medium', MEDIUM, 'deep'],
+      [{ talk: TALK, medium: MEDIUM }, work('light'), 'medium', MEDIUM, 'quick'],
+      [{ talk: TALK, medium: MEDIUM }, chatTurn, 'talk', TALK, 'normal'],
+      // Talk unpicked: the chat runs on Medium work's pick; with only Light or Hard picked, on that one.
+      [{ medium: MEDIUM }, chatTurn, 'medium', MEDIUM, 'normal'],
+      [{ light: LIGHT }, work('hard'), 'light', LIGHT, 'deep'],
+      [{ hard: HARD }, chatTurn, 'hard', HARD, 'normal'],
+      // Nothing picked: Mousse chooses by usage, on the turn's own row.
+      [{}, work('hard'), 'hard', null, 'deep'],
+      [{}, chatTurn, 'talk', null, 'normal']
+    ]
+    for (const [picked, turn, slot, pick, depth] of table) expect(turnModelOf(rows(picked), turn)).toEqual({ slot, pick, depth })
+    // An activation's own pick still replaces whatever the row borrows.
+    expect(turnModelOf(rows({ talk: TALK }), { ...work('hard'), modelOverride: { mode: 'named', ...MEDIUM, depth: 'deep' } })).toEqual({ slot: 'hard', pick: MEDIUM, depth: 'deep' })
   })
 })
 
@@ -554,6 +578,29 @@ describe('the engine on rows', () => {
     // Sonnet on the same entry is not at that limit: its schedule runs.
     const { inserted: [scheduled] } = await f.tickSchedules(new Date(f.clock.now + 31 * 60_000))
     expect((await start(f, scheduled!)).prepared.selection).toMatchObject({ instanceId: 'claude:sub', model: 'sonnet' })
+  })
+
+  it("work with no Work model runs on Talk's pick, never on a pricier model by usage; when Talk can't run, work is not started", async () => {
+    // Talk on a cheap model through a paid gateway; a frontier model on the same gateway is first by usage.
+    const FLASH = { instanceId: 'pi:gateway', model: 'deepseek/flash', effort: 'low', credential: 'api_key' as const }
+    f.candidates = [{ instanceId: 'pi:gateway', model: 'anthropic/opus' }]
+    f.bots.setOwnerSlots(botId, { talk: FLASH, light: null, medium: null, hard: null })
+    const turn = await chat('Research sandboxing', 'm1')
+    const { workId } = await f.bots.tools.work.start(botId, turn.activation.id, { title: 'Research', brief: 'Dig in.', key: 'k1', level: 'hard' })
+    const run = await start(f, workId)
+    expect(f.resolved.at(-1)).toEqual({ pick: FLASH, depth: 'deep' })
+    expect(run.prepared.selection).toEqual({ instanceId: 'pi:gateway', model: 'deepseek/flash', effort: 'low' })
+    await finish(f, run.payload, 'completed', { text: 'Done.' })
+    expect(f.store.listActivations(botId).filter((row) => row.selection?.model === 'anthropic/opus')).toEqual([])
+    // Talk's entry goes off: the work that borrows it fails with Talk's line, and nothing runs by usage in its place.
+    f.pickMiss = (pick) => (pick.instanceId === 'pi:gateway' ? { label: 'Flash on Vercel', reason: 'off' } : undefined)
+    const { workId: second } = await f.bots.tools.work.start(botId, turn.activation.id, { title: 'More', brief: 'Again.', key: 'k2', level: 'hard' })
+    await flush()
+    expect(f.store.activation(second)).toMatchObject({ status: 'failed', endReason: 'bot_pick_unavailable', selection: null })
+    expect(chatOf(f, botId).filter((message) => message.error?.text === "I can't use Flash on Vercel: it's turned off.")).toHaveLength(1)
+    await expect(f.bots.tools.work.start(botId, turn.activation.id, { title: 'Third', brief: 'Once more.', key: 'k3' })).rejects.toThrow(/talk can't run now\. Pick one in About → Runs on\./)
+    expect(f.resolved.filter((entry) => entry.pick === null)).toEqual([])
+    await finish(f, turn.payload, 'completed', { text: 'On it.' })
   })
 
   it('a bot from before rows keeps working: its one model by name on Talk and Work', async () => {

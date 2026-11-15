@@ -95,13 +95,13 @@ const BROWSER_TOOL_NAMES: ReadonlySet<string> = new Set(BROWSER_AUTOMATION_TOOLS
 const THREAD_ACT: ReadonlySet<string> = new Set(BOT_THREAD_ACT_TOOLS)
 
 /** What work (a reminder's work, a schedule) is told when it tries to start, message or stop one of the owner's threads. */
-export const BOT_THREADS_CHAT_ONLY_TEXT = "Not on this turn: you start, message or stop your owner's threads only in your chat, when your owner's message asks for it. Here you may list, search, read and wait on them. Say in your report what you would start or send, and your owner can ask you in the chat."
+export const BOT_THREADS_CHAT_ONLY_TEXT = "Not on this turn: you start, message, stop or archive your owner's threads only in your chat, when your owner's message asks for it. Here you may list, search, read and wait on them. Say in your report what you would start or send, and your owner can ask you in the chat."
 
 /**
  * What a chat turn that no message of the owner started (the bot's first message) is told when it tries
  * to start, message or stop one of the owner's threads.
  */
-export const BOT_THREADS_NOT_OWNER_TEXT = "Not on this turn: it did not start with a message from your owner, and you start, message or stop their threads only when their own message asks for it. You may list, search, read and wait on them now. Say what you would do, and do it once your owner replies."
+export const BOT_THREADS_NOT_OWNER_TEXT = "Not on this turn: it did not start with a message from your owner, and you start, message, stop or archive their threads only when their own message asks for it. You may list, search, read and wait on them now. Say what you would do, and do it once your owner replies."
 
 /**
  * What a bot's call of a browser tool returns when its turn does not hold the browser (a bot's thread lists the browser

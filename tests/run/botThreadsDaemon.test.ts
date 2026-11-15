@@ -15,6 +15,9 @@ import type { PermissionMode } from '../../src/shared/permissionMode'
 import { BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS } from '../../src/shared/bots/personal/manifest'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 import type { AgentActor } from '../../src/mms/run/types'
+import type { EventEmitter } from 'node:events'
+import { launchedThreadsOf, watchLaunchedThreads } from '../../src/mms/bots/launchedThreads'
+import { launchedActive } from '../../src/shared/bots/personal/chat'
 import { appTurn } from './appToolsFixture'
 import { PI, phase6Daemon, piAdapter, waitFor, type Phase6Daemon } from './phase6Fixture'
 
@@ -71,6 +74,7 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
       createThreadAsAgent(input: Record<string, unknown>, options: Record<string, unknown>): Promise<AgentCreatedThread>
       sendToThreadAsAgent(threadId: string, input: { content: string; mode: 'agent' | 'plan' }, options: Record<string, unknown>): Promise<{ runId: string }>
       stopRunAsAgent(threadId: string, runId: string, options: Record<string, unknown>): Promise<unknown>
+      setThreadArchivedAsAgent(threadId: string, archived: boolean, options: Record<string, unknown>): Promise<unknown>
       showAgentAction(threadId: string, actor: AgentActor, summary: string, options?: { notice?: boolean }): void
       questions: { requestAnswers(questions: unknown, threadId: string, options: unknown): Promise<unknown>; listPendingForThread(threadId: string): unknown[] }
     }
@@ -79,9 +83,10 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
       orch.createThreadAsAgent({ projectId: project.id, title: 'Fix login', workspace: 'project', firstMessage: 'Look at the login page.', mode: 'agent', ...extra }, { clientRequestId: `thread_create:${chat.id}:${activationId}:${key}`, actor, accessLevel: 'lineage' })
     const send = (threadId: string, key: string) => orch.sendToThreadAsAgent(threadId, { content: 'Please also check the signup page.', mode: 'agent' }, { clientRequestId: `thread_send:${chat.id}:${activationId}:${key}`, actor })
     const stop = (threadId: string, runId: string, key: string) => orch.stopRunAsAgent(threadId, runId, { clientRequestId: `thread_interrupt:${chat.id}:${key}`, actor })
+    const archive = (threadId: string, archived = true) => orch.setThreadArchivedAsAgent(threadId, archived, { actor })
     const runMode = (runId: string) => d.engine.bindingForRun(runId)?.policy.permissionMode
     const settled = (runId: string) => waitFor(() => ['completed', 'failed', 'cancelled', 'interrupted'].includes(d.engine.getRun(runId)?.status ?? ''), `run ${runId}`)
-    return { d, pi, project, chat, get actor() { return actor }, orch, create, send, stop, runMode, settled, turnRun }
+    return { d, pi, project, chat, get actor() { return actor }, orch, create, send, stop, archive, runMode, settled, turnRun }
   }
 
   it('a thread it starts is an ordinary thread in Full access, launched by its chat thread, on the default model unless it names one, and its first message is the bot\'s', async () => {
@@ -141,23 +146,24 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     await expect(w.send(planned.id, 's5')).resolves.toMatchObject({ runId: expect.any(String) })
   })
 
-  // A bot's thread that may not start, message or stop threads, whatever let the call get this far.
+  // A bot's thread that may not start, message, stop or archive threads, whatever let the call get this far.
   const refusals: Array<[string, Parameters<typeof world>[0], (() => void) | undefined, RegExp]> = [
     ['a turn that may only read threads (work, a schedule, a reminder)', { held: BOT_THREAD_READ_TOOLS }, undefined, /only in its chat/],
     ['a turn that holds none of them', { held: [] }, undefined, /only in its chat/],
     ['a consult\'s thread', { role: 'context' }, undefined, /only in its chat/],
     ['a turn its records say no message of the owner\'s started', { owner: null }, undefined, /only in its chat/]
   ]
-  it.each(refusals)('%s starts, messages and stops nothing', async (_name, options) => {
+  it.each(refusals)('%s starts, messages, stops and archives nothing', async (_name, options) => {
     const w = world(options)
     const target = w.d.store.createThread('Target', w.project.id)
     const before = w.d.store.listAllThreads().length
-    for (const attempt of [() => w.create('r1'), () => w.send(target.id, 'r2'), () => w.stop(target.id, 'run-x', 'r3')]) {
+    for (const attempt of [() => w.create('r1'), () => w.send(target.id, 'r2'), () => w.stop(target.id, 'run-x', 'r3'), () => w.archive(target.id)]) {
       const error = await attempt().then(() => undefined, (failure: unknown) => failure)
       expect(error).toBeInstanceOf(McpToolError)
       expect((error as McpToolError).code).toBe('mousse_scope_denied')
     }
     expect(w.d.store.listAllThreads()).toHaveLength(before)
+    expect(w.d.store.getThread(target.id)!.settledAt).toBeUndefined()
     expect(w.pi.turns).toHaveLength(0)
   })
 
@@ -165,6 +171,9 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     const w = world()
     w.d.settings.bots = { here: { ...w.d.settings.bots.here, threads: false } }
     await expect(w.create('off-1')).rejects.toMatchObject({ code: 'mousse_scope_denied', message: expect.stringMatching(/Not on this computer: "use your threads" is switched off here/) })
+    const kept = w.d.store.createThread('Kept', w.project.id)
+    await expect(w.archive(kept.id)).rejects.toMatchObject({ code: 'mousse_scope_denied', message: expect.stringMatching(/Not on this computer/) })
+    expect(w.d.store.getThread(kept.id)!.settledAt).toBeUndefined()
     w.d.settings.bots = { here: { ...w.d.settings.bots.here, threads: true } }
     const stranger = { ...w.actor, runId: 'run:not-registered' }
     await expect(w.orch.createThreadAsAgent({ projectId: w.project.id, title: 'X', workspace: 'project' }, { clientRequestId: 'x1', actor: stranger, accessLevel: 'manage' })).rejects.toBeInstanceOf(McpToolError)
@@ -256,6 +265,53 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     expect(w.d.engine.getRun(owner.runId!)!.status).not.toBe('completed')
   })
 
+  it('it archives and unarchives a thread through the app\'s own Archive, never its own chat, and never a thread still working', async () => {
+    let busy = ''
+    let release!: () => void
+    const held = new Promise<string>((resolve) => { release = () => resolve('done late') })
+    const w = world({ script: (input) => (input.threadId === busy ? held : 'done') })
+    const settledEvents: string[] = []
+    w.d.orch.on('thread-settled', (payload: { threadId: string }) => settledEvents.push(payload.threadId))
+    const actions = (threadId: string) => w.d.engine.store.listEvents(threadId).filter((event) => event.type === 'agent.action').map((event) => (event.payload as { action: string; actorThreadId: string }))
+    // Archived as the app's Archive does: in Archived, its pull request watch told, and the change recorded as the bot's.
+    const done = w.d.store.createThread('Merged work', w.project.id)
+    expect(await w.archive(done.id)).toEqual({ status: 'accepted', archived: true, changed: true })
+    expect(w.d.store.getThread(done.id)!.settledAt).toEqual(expect.any(String))
+    expect(settledEvents).toEqual([done.id])
+    expect(actions(done.id)).toEqual([expect.objectContaining({ action: 'archived_thread', actorThreadId: w.chat.id })])
+    // Again: already archived, nothing changes.
+    expect(await w.archive(done.id)).toEqual({ status: 'accepted', archived: true, changed: false })
+    // Unarchived: back in the list, nothing deleted.
+    expect(await w.archive(done.id, false)).toEqual({ status: 'accepted', archived: false, changed: true })
+    expect(w.d.store.getThread(done.id)!.settledAt).toBeUndefined()
+    expect(actions(done.id).map((action) => action.action)).toEqual(['archived_thread', 'unarchived_thread'])
+    // Never its own chat thread.
+    await expect(w.archive(w.chat.id)).rejects.toMatchObject({ code: 'mousse_scope_denied' })
+    expect(w.d.store.getThread(w.chat.id)!.settledAt).toBeUndefined()
+    // A thread still working is refused, and keeps working; once its turn ends it can be archived.
+    const target = w.d.store.createThread('Busy', w.project.id)
+    busy = target.id
+    const owner = await w.d.orch.send('Work on this.', false, { threadId: target.id, clientRequestId: 'owner-busy', awaitMode: 'ack' })
+    await waitFor(() => w.d.engine.getRun(owner.runId!)?.status === 'running', 'the owner\'s turn running')
+    expect(await w.archive(target.id)).toEqual({ status: 'rejected', reason: 'thread_running' })
+    expect(w.d.store.getThread(target.id)!.settledAt).toBeUndefined()
+    expect(w.d.engine.getRun(owner.runId!)!.status).toBe('running')
+    // So is a thread whose subagent is still working.
+    const parent = w.d.store.createThread('Parent', w.project.id)
+    w.d.store.createThread('Child', w.project.id, undefined, { lineage: { parentThreadId: parent.id, rootThreadId: parent.id, relationship: 'subagent' } })
+    const child = w.d.store.listAllThreads().find((thread) => thread.lineage?.parentThreadId === parent.id)!
+    busy = child.id
+    const childRun = await w.d.orch.send('Sub work.', false, { threadId: child.id, clientRequestId: 'child-busy', awaitMode: 'ack' })
+    await waitFor(() => w.d.engine.getRun(childRun.runId!)?.status === 'running', 'the subagent\'s turn running')
+    expect(await w.archive(parent.id)).toEqual({ status: 'rejected', reason: 'thread_running' })
+    release()
+    await w.settled(owner.runId!)
+    await w.settled(childRun.runId!)
+    expect(w.d.engine.getRun(owner.runId!)!.status).toBe('completed')
+    expect(await w.archive(target.id)).toMatchObject({ status: 'accepted', changed: true })
+    expect(await w.archive(parent.id)).toMatchObject({ status: 'accepted', changed: true })
+  })
+
   it('when "use your threads" goes, its messages still waiting in a queue are withdrawn with a line in the thread, and never run', async () => {
     let busy = ''
     let release!: () => void
@@ -298,5 +354,46 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     w.turnRun('act-day-over')
     await expect(w.create('d-over', { title: 'One more', firstMessage: undefined, mode: undefined })).rejects.toMatchObject({ code: 'mousse_conflict', message: expect.stringMatching(/the most a bot may start in a day/) })
     expect(w.d.store.listAllThreads().filter((thread) => thread.createdByThreadId === w.chat.id)).toHaveLength(BOT_THREAD_STARTS_PER_DAY)
+  })
+
+  it('a thread it starts is what it manages while its run works, waits on the owner while it asks, and is listed as done once it ends; each change tells its chat thread', async () => {
+    let release: (() => void) | undefined
+    const w = world({ script: (input) => (input.prompt.includes('Look at the login page.') ? new Promise<string>((resolve) => { release = () => resolve('done') }) : 'done') })
+    const questions = w.orch.questions as unknown as EventEmitter & { listPendingForThread(threadId: string): Array<{ requestId: string }>; dismiss(requestId: string): boolean }
+    const changed: string[] = []
+    const unwatch = watchLaunchedThreads({ runs: w.d.engine, questions, thread: (id) => w.d.store.getThread(id), changed: (creator) => changed.push(creator) })
+    const managed = (creators: string[]) => launchedThreadsOf({
+      creators: new Set(creators),
+      threads: w.d.store.listAllThreads(),
+      activeRuns: w.d.engine.store.listNonTerminalRuns(),
+      lastRun: (id) => w.d.engine.store.listRuns(id, { limit: 1 })[0],
+      asks: (id) => questions.listPendingForThread(id).length > 0,
+      projectName: (id) => (id === w.project.id ? 'Shop' : undefined)
+    })
+    const made = await w.create('c1')
+    await waitFor(() => release !== undefined, 'the launched thread\'s turn')
+    expect(managed([w.chat.id])).toEqual([{ threadId: made.threadId, title: 'Fix login', project: 'Shop', status: 'running', startedAt: expect.any(String), updatedAt: expect.any(String) }])
+    // Another thread's launches are not this bot's.
+    expect(managed(['another-thread'])).toEqual([])
+    expect(changed.length).toBeGreaterThan(0)
+    expect(new Set(changed)).toEqual(new Set([w.chat.id]))
+
+    // A question in it waits on the owner: the line says so, and goes back to working once it is answered.
+    let seen = changed.length
+    void w.orch.questions.requestAnswers([{ id: 'q', prompt: 'Which?', options: [{ id: 'a', label: 'A' }] }], made.threadId, {}).catch(() => undefined)
+    expect(managed([w.chat.id])[0]?.status).toBe('needs_input')
+    expect(changed.length).toBeGreaterThan(seen)
+    seen = changed.length
+    questions.dismiss(questions.listPendingForThread(made.threadId)[0]!.requestId)
+    expect(managed([w.chat.id])[0]?.status).toBe('running')
+    expect(changed.length).toBeGreaterThan(seen)
+
+    // Its run ends: it is listed as done, no longer keeping the bot busy, and the chat thread hears it.
+    seen = changed.length
+    release!()
+    await w.settled((made.firstMessage as { runId: string }).runId)
+    expect(managed([w.chat.id]).map((thread) => [thread.threadId, thread.status, launchedActive(thread)])).toEqual([[made.threadId, 'done', false]])
+    expect(changed.length).toBeGreaterThan(seen)
+    unwatch()
   })
 })

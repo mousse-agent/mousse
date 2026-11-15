@@ -91,6 +91,10 @@ describe('work on a model the owner named', () => {
       { entry: 'Codex', instanceId: 'codex', why: 'it\'s signed out' }
     ])
     expect(listed.usualWork).toEqual({ light: 'Sonnet 5 on Claude Code', medium: 'Sonnet 5 on Claude Code', hard: 'Sonnet 5 on Claude Code' })
+    // Work rows left unpicked run on Talk's model: the bot is told which, never "chosen by Mousse".
+    f.bots.setOwnerSlots(botId, { talk: { instanceId: 'pi:openrouter', model: 'cheap/model' }, light: null, medium: null, hard: null })
+    const cheap = 'Cheap Model on OpenRouter'
+    expect((await call(turn.activation.id, 'work_models', {})).value.usualWork).toEqual({ light: cheap, medium: cheap, hard: cheap })
   })
 
   it('runs that work on the named model, keeps it across a restart, and leaves the chat and the next work on the rows', async () => {

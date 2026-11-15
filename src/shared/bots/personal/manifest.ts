@@ -143,10 +143,10 @@ export const BOT_THREADS_PERMISSION = 'threads'
 export const BOT_THREAD_READ_TOOLS: readonly string[] = ['thread_list', 'thread_search', 'thread_read', 'thread_wait']
 
 /**
- * What changes threads: start one, message one, stop one's turn. Only a chat turn the owner's own message started gets
- * them, so nothing a bot read in its work, a reminder or a schedule starts or steers a thread.
+ * What changes threads: start one, message one, stop one's turn, archive or unarchive one. Only a chat turn the owner's
+ * own message started gets them, so nothing a bot read in its work, a reminder or a schedule starts or steers a thread.
  */
-export const BOT_THREAD_ACT_TOOLS: readonly string[] = ['thread_create', 'thread_send', 'thread_interrupt']
+export const BOT_THREAD_ACT_TOOLS: readonly string[] = ['thread_create', 'thread_send', 'thread_interrupt', 'thread_archive']
 
 /** Every thread tool a bot can hold, all under "use your threads". */
 export const BOT_THREAD_TOOLS: readonly string[] = [...BOT_THREAD_READ_TOOLS, ...BOT_THREAD_ACT_TOOLS]

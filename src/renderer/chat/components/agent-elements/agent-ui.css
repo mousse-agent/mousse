@@ -228,6 +228,15 @@
 .an-text-shimmer--active {
   animation: an-shimmer var(--an-shimmer-duration, 2s) steps(18) infinite;
 }
+/* With motion off (Settings or the OS), the label rests in its own colour, as the icon beside it does. */
+[data-motion='off'] .an-text-shimmer--active {
+  animation: none !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  .an-text-shimmer--active {
+    animation: none !important;
+  }
+}
 
 .an-ellipsis {
   display: inline-block;

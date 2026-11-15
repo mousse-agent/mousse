@@ -9,6 +9,7 @@ import type { RunEngine } from '../../RunEngine'
 import { TERMINAL_RUN_STATUSES, type AgentActor, type DelegationRecord, type RunRecord, type ThreadEvent } from '../../types'
 import type { AgentCreatedThread, AgentQueueCommand, AgentQueueResult, AgentRunCommandResult, AgentThreadRequest, AppToolHost, ApprovalRequestInfo } from './host'
 import type { BotAppToolDeps } from './bots'
+import { threadLink } from '../../../../shared/threadLink'
 import type { BotActivityContext, BotActivitySink } from '../../../bots/seams'
 import {
   CLIENT_REQUEST_ID_SCHEMA,
@@ -110,13 +111,14 @@ function botThreadCall(bots: (() => BotAppToolDeps | undefined) | undefined, ctx
 }
 
 /**
- * The outcome chip of a thread a bot started, messaged or stopped: its title and the thread, which the chip opens, and
- * the first line of what it sent there (shown with the chip), so the owner sees at once what the bot said.
+ * The outcome chip of a thread a bot started, messaged, stopped, archived or unarchived (`extra.archived`): its title and
+ * the thread, which the chip opens, and the first line of what it sent there (shown with the chip), so the owner sees at
+ * once what the bot said.
  */
-function botChip(call: BotThreadCall, tool: string, threadId: string, title: string | undefined, sent?: unknown): void {
+function botChip(call: BotThreadCall, tool: string, threadId: string, title: string | undefined, sent?: unknown, extra?: { archived: boolean }): void {
   const said = typeof sent === 'string' ? oneLine(sent.trim().split(/\r?\n/).find((line) => line.trim()) ?? '', 160) : ''
   try {
-    call.activity?.onAppResult(call.chips, tool, { threadId, ...(title ? { title } : {}), ...(said ? { sent: said } : {}) })
+    call.activity?.onAppResult(call.chips, tool, { threadId, ...(title ? { title } : {}), ...(said ? { sent: said } : {}), ...extra })
   } catch {
     // Chips are a view of the calls; they never fail one.
   }
@@ -654,6 +656,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       const lastReply = [...all].reverse().find((message) => message.role === 'assistant' && typeof message.content === 'string' && message.content.trim())
       return botData(`Thread «${title}»`, {
         threadId,
+        link: threadLink(threadId),
         title,
         project: projectName(meta.projectId),
         status: activity.pendingQuestions.length ? 'waiting for your owner' : activeRunId ? 'working' : 'idle',
@@ -676,7 +679,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       budget -= Math.min(text.length, cut)
       messages.push({ index: from + offset, role: message.role, at: message.timestamp, text: text.length > cut ? `${text.slice(0, cut)}…` : text, ...(text.length > cut ? { cut: true } : {}) })
     }
-    return botData(`Messages of thread «${title}»`, { threadId, title, total: all.length, messages, nextAfterIndex: from + messages.length })
+    return botData(`Messages of thread «${title}»`, { threadId, link: threadLink(threadId), title, total: all.length, messages, nextAfterIndex: from + messages.length })
   }
   /** A change to another thread's queue is held to the same rules as a steer or a Stop there: not into another agent's subagent, and not into an archived thread. */
   const guardOtherThreadQueue = (threadId: string, ctx: ToolCallContext, tool: string, takesWork: boolean): void => {
@@ -747,14 +750,14 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
               ...(truncated ? { truncated: true } : {})
             }
           })
-          return json({ threadId, view, scope, messages, total: all.length, nextAfterIndex: afterIndex + messages.length })
+          return json({ threadId, link: threadLink(threadId), view, scope, messages, total: all.length, nextAfterIndex: afterIndex + messages.length })
         }
         const afterSeq = boundedInt(args.afterSeq, 'afterSeq', 0, Number.MAX_SAFE_INTEGER, 0)
         const limit = boundedInt(args.limit, 'limit', 1, THREAD_READ_MAX_LIMIT, THREAD_READ_DEFAULT_LIMIT)
         const page = engine.listEvents(threadId, { afterSeq, limit })
         const events = full ? page : lineageView(page, ctx.caller.threadId, scope)
         // `nextAfterSeq` pages on even when a lineage view filtered events out of this page.
-        return json({ threadId, view, scope, events, maxSeq: engine.maxSeq(threadId), nextAfterSeq: page.at(-1)?.seq ?? afterSeq })
+        return json({ threadId, link: threadLink(threadId), view, scope, events, maxSeq: engine.maxSeq(threadId), nextAfterSeq: page.at(-1)?.seq ?? afterSeq })
       }
     },
     {
@@ -812,6 +815,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
             if (args.status !== undefined && args.status !== status) continue
             rows.push({
               id: thread.id,
+              link: threadLink(thread.id),
               title: oneLine(thread.name),
               project: (thread.projectId && projectNames.get(thread.projectId)) || null,
               status,
@@ -835,6 +839,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           if (args.status !== undefined && args.status !== status) continue
           rows.push({
             id: thread.id,
+            link: threadLink(thread.id),
             name: thread.name,
             projectId: thread.projectId ?? null,
             projectName: (thread.projectId && projectNames.get(thread.projectId)) || null,
@@ -898,12 +903,13 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           .filter((hit) => manage || hit.matchType !== 'message')
           .filter((hit) => bot ? 'scope' in botThreadReach(host, engine, ctx.caller.threadId, hit.threadId) : inProjects(projectIds, hit.projectId) || host.threadMeta?.(hit.threadId)?.createdByThreadId === ctx.caller.threadId)
           .slice(0, limit)
-          .map(({ snippet, ...hit }) => (manage && snippet !== undefined ? { ...hit, snippet } : hit))
+          .map(({ snippet, ...hit }) => ({ ...hit, link: threadLink(hit.threadId), ...(manage && snippet !== undefined ? { snippet } : {}) }))
         // A personal bot: each hit as a handle and one line, framed as data from the owner's threads.
         if (bot)
           return botData('Your owner\'s threads that match', {
             results: results.map((hit) => ({
               threadId: hit.threadId,
+              link: hit.link,
               title: oneLine(hit.threadName),
               project: hit.projectName ?? null,
               matched: hit.matchType,
@@ -1149,6 +1155,54 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       }
     },
     {
+      name: 'thread_archive',
+      description: 'Archive one of your owner\'s threads when its work is merged or dropped and your owner asks you to tidy it away, as Archive in the app does: it leaves the sidebar for Archived and nothing is deleted. archived: false unarchives it again. A thread that is still working is refused: stop it first with thread_interrupt.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          threadId: { type: 'string' },
+          archived: { type: 'boolean', description: 'Defaults to true; false unarchives the thread.' }
+        },
+        required: ['threadId']
+      },
+      access: 'managesOthers',
+      class: 'mutation',
+      minLevel: 'manage',
+      // A personal bot's tool ("use your threads"): no other thread lists it.
+      listed: (listing) => listing.botRole !== undefined,
+      offered: () => false,
+      handler: async (args, ctx) => {
+        const threadId = requiredId(args, 'threadId')
+        if (args.archived !== undefined && typeof args.archived !== 'boolean') throw new Error('archived must be true or false')
+        const archived = args.archived !== false
+        const bot = botThreadCall(bots, ctx)
+        if (!bot) throw new McpToolError('mousse_scope_denied', 'thread_archive is for personal bots; agents leave archiving to the user.')
+        if (!host.setThreadArchived) return notAvailable('thread_archive')
+        // The one rule of what a bot reaches (`botThreadReach`): never its own chat or another bot's thread, a private
+        // thread, a subagent or the Automation manager's; its owner's threads in its projects, and the ones it started.
+        requireBotReach(host, engine, ctx.caller.threadId, threadId)
+        assertNotBotThread(host, threadId, 'thread_archive')
+        const actor = actorOf(ctx)
+        const result = await host.setThreadArchived(threadId, archived, { actor })
+        if (result.status === 'rejected')
+          throw new McpToolError('mousse_conflict', `Thread ${threadId} is still working, so it was not archived. If your owner wants it archived anyway, stop it first with thread_interrupt, then archive it.`, { conflict: result.reason, threadId })
+        const title = titleOf(threadId)
+        if (result.changed) {
+          // The thread says who archived it, and the bot's chat gets a chip with the thread to open.
+          showAction(host, threadId, actor, archived ? 'archived this thread' : 'unarchived this thread', { notice: true })
+          botChip(bot, 'thread_archive', threadId, title, undefined, { archived })
+        }
+        return json({
+          threadId,
+          link: threadLink(threadId),
+          title: title ?? null,
+          archived,
+          changed: result.changed,
+          note: archived ? 'It is in Archived now; thread_archive with archived: false brings it back.' : 'It is back in your owner\'s thread list.'
+        })
+      }
+    },
+    {
       name: 'thread_steer',
       description: 'Add guidance to the turn another thread is running now (needs the manage agent access level and a project the profile allows). Name the run you read; if it is not the thread\'s active run, or is paused, nothing is sent and you are told why. The thread\'s model receives the text labelled as a message from an agent, not from the user. Refused when the run is running under a looser permission mode than yours (a running turn cannot be narrowed): send a message instead.',
       inputSchema: {
@@ -1347,6 +1401,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           }
           return json({
             threadId: created.threadId,
+            link: threadLink(created.threadId),
             title: created.title,
             project: projectName(created.projectId),
             model: created.model ?? 'the default model',
@@ -1367,7 +1422,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
             console.warn('the creator\'s note of a launched thread could not be written', { error: error instanceof Error ? error.message : String(error) })
           }
         }
-        return json(created)
+        return json({ ...created, link: threadLink(created.threadId) })
       }
     },
     {
@@ -1573,7 +1628,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           seedFrom: args.seedFrom as 'checkpoint' | 'current_head' | undefined,
           clientRequestId: `thread_fork:${ctx.caller.runId}:${toolRequestId(args, ctx)}`
         })
-        return json({ threadId: forked.threadId, transferId: forked.transferId })
+        return json({ threadId: forked.threadId, link: threadLink(forked.threadId), transferId: forked.transferId })
       }
     },
     {

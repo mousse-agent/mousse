@@ -82,7 +82,7 @@ import { delegationRequestKey, followUpRequestKey, narrowCeiling } from '../run/
 import { CommandRejection, RunStoreError } from '../run/db/RunStoreError'
 import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
 import { steerReleaseWindow, stopStrategy, type SteerDelivery } from '../run/CommandPolicy'
-import { agentMessageText, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentCreatedThread, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
+import { agentMessageText, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentArchiveResult, type AgentCreatedThread, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, LAUNCHED_THREAD_ACCESS_CEILING, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
 import { BOT_THREAD_STARTS_PER_DAY, botRequestPrefix, THREAD_CREATE_MAX_ACTIVE_PER_THREAD, THREAD_CREATE_MAX_PER_RUN, THREAD_SEND_MAX_PER_RUN } from '../run/mcp/appTools/thread'
 import { botMessageText, isPersonMessage } from '../run/mcp/appTools/agentMessage'
@@ -3911,6 +3911,7 @@ export class OrchestratorService extends EventEmitter {
       creationStarted: (clientRequestId) => this.agentCreationStarted(clientRequestId),
       noteOnThread: (threadId, text) => this.noteAgentLaunch(threadId, text),
       stopRun: (threadId, runId, options) => this.stopRunAsAgent(threadId, runId, options),
+      setThreadArchived: (threadId, archived, options) => this.setThreadArchivedAsAgent(threadId, archived, options),
       steerRun: (threadId, runId, text, options) => this.steerRunAsAgent(threadId, runId, text, options),
       approvalRequest: (requestId) => this.approvalRequestInfo(requestId),
       answerApproval: (threadId, requestId, answers, options) => this.answerApprovalAsAgent(threadId, requestId, answers, options),
@@ -4501,6 +4502,57 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
+   * Archives (`settled`) or unarchives a thread: the app's Archive (`threads.settle`) and a bot's `thread_archive` both
+   * come here. Archiving is a Stop: what the thread still runs ends with it, and its pull request watch ends as archived
+   * (`thread-settled`). Nothing is deleted.
+   */
+  async settleThread(threadId: string, settled: boolean): Promise<Thread> {
+    if (!this.threadStore) throw new Error('Thread store is not ready.')
+    const thread = this.threadStore.setThreadSettled(threadId, settled)
+    if (settled) {
+      // The watch ends as archived, not as stopped.
+      this.emit('thread-settled', { threadId })
+      await this.stopThread(threadId, 'settled').catch((error: unknown) => {
+        console.warn('settling a thread could not stop its work', { threadId, error: error instanceof Error ? error.message : String(error) })
+      })
+    }
+    return thread
+  }
+
+  /**
+   * `thread_archive`: the owner's bot archives or unarchives one of their threads through the app's own Archive
+   * (`settleThread`), only from its chat in a chat turn its owner's message started (`botSenderOf`). A bot's archive never
+   * ends work: a thread with a run working or paused, there or in a subagent below it, is refused, and the bot stops it
+   * first. Never a bot's thread. The change is recorded as an `agent.action` of the thread.
+   */
+  private async setThreadArchivedAsAgent(threadId: string, archived: boolean, options: { actor: AgentActor }): Promise<AgentArchiveResult> {
+    const engine = this.requireRunEngine()
+    const bot = this.botSenderOf(options.actor, 'thread_archive')
+    if (!bot) throw new McpToolError('mousse_scope_denied', 'Only a bot\'s chat archives threads this way.')
+    const thread = this.threadStore?.getThread(threadId)
+    let botThread = false
+    try {
+      botThread = threadId === options.actor.threadId || thread?.botOwned === true || this.botThreads?.roleOf(threadId) !== undefined
+    } catch {
+      botThread = true
+    }
+    if (!thread || botThread) throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is not available to you.`)
+    if (Boolean(thread.settledAt) === archived) return { status: 'accepted', archived, changed: false }
+    if (archived) {
+      const subtree = [threadId, ...subagentDescendants(threadId, this.threadStore?.listAllThreads() ?? [])]
+      if (subtree.some((id) => engine.getActiveRun(id) || engine.store.getPausedRun(id))) return { status: 'rejected', reason: 'thread_running' }
+    }
+    await this.settleThread(threadId, archived)
+    engine.store.appendEvent({
+      threadId,
+      runId: null,
+      type: 'agent.action',
+      payload: { action: archived ? 'archived_thread' : 'unarchived_thread', actorThreadId: options.actor.threadId, actorRunId: options.actor.runId, toolCallId: options.actor.toolCallId }
+    })
+    return { status: 'accepted', archived, changed: true }
+  }
+
+  /**
    * `thread_steer`: joins a run that is live. A running turn cannot be narrowed, so a caller whose permission
    * mode is stricter than the one the run is bound to is refused: its words would run with more authority than
    * the caller itself has. A run bound to a stricter mode than the caller's takes the steer.
@@ -4553,7 +4605,7 @@ export class OrchestratorService extends EventEmitter {
    * stopping only in a chat turn the owner's own message started), and this computer has "use your threads" on. Undefined
    * for a thread that is no bot's. A bot's thread that may not make the call is refused here, whatever let it this far.
    */
-  private botSenderOf(actor: AgentActor, tool: 'thread_create' | 'thread_send' | 'thread_interrupt'): BotSender | undefined {
+  private botSenderOf(actor: AgentActor, tool: 'thread_create' | 'thread_send' | 'thread_interrupt' | 'thread_archive'): BotSender | undefined {
     let role: string | undefined
     try {
       role = this.botThreads?.roleOf(actor.threadId)
@@ -4561,7 +4613,7 @@ export class OrchestratorService extends EventEmitter {
       role = 'unknown'
     }
     if (!role) return undefined
-    const refused = new McpToolError('mousse_scope_denied', 'A bot starts, messages or stops your threads only in its chat, with "use your threads" allowed.')
+    const refused = new McpToolError('mousse_scope_denied', 'A bot starts, messages, stops or archives your threads only in its chat, with "use your threads" allowed.')
     if (role !== 'activation') throw refused
     const turn = this.appToolTurns.get(actor.runId)
     if (!turn?.bot || turn.threadId !== actor.threadId || !turn.bot.appTools.has(tool)) throw refused

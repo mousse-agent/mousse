@@ -35,7 +35,7 @@ type ChipKind =
   | 'search' | 'fetch' | 'browse' | 'read' | 'change' | 'save' | 'draft' | 'lookback' | 'consult' | 'skill' | 'tool' | 'mcp' | 'schedules'
   | 'schedule' | 'unschedule' | 'remember' | 'forget' | 'depth' | 'profile' | 'model'
   | 'work' | 'work_stop' | 'work_note' | 'remind' | 'unremind' | 'work_look'
-  | 'threads_look' | 'thread_wait' | 'thread_start' | 'thread_send' | 'thread_stop' | 'picture'
+  | 'threads_look' | 'thread_wait' | 'thread_start' | 'thread_send' | 'thread_stop' | 'thread_archive' | 'picture'
   | 'subagent' | 'subagent_wait' | 'subagent_look'
 
 interface Classified {
@@ -197,6 +197,7 @@ function classify(tool: string, input: unknown, ctx: BotChipContext): Classified
     }
     case 'thread_send': return { kind: 'thread_send', icon: 'think', live: 'messaging a thread' }
     case 'thread_interrupt': return { kind: 'thread_stop', icon: 'think', live: 'stopping a thread' }
+    case 'thread_archive': return { kind: 'thread_archive', icon: 'think', live: args.archived === false ? 'unarchiving a thread' : 'archiving a thread' }
     // Its work's subagents: each one it starts or sends more work by its title; waiting on them is one chip.
     case 'subagent_start':
     case 'subagent_send': {
@@ -280,14 +281,15 @@ function outcomeChip(kind: ChipKind, call: BotChipCall): BotChip | null {
       return { icon: 'schedule', text: 'reminder', ...(label ? { highlight: label } : {}) }
     }
     case 'unremind': return { icon: 'schedule', text: 'cancelled a reminder' }
-    // A thread it started, messaged or stopped: its title, and the thread, which the chip opens.
+    // A thread it started, messaged, stopped, archived or unarchived: its title, and the thread, which the chip opens.
     case 'thread_start':
     case 'thread_send':
-    case 'thread_stop': {
+    case 'thread_stop':
+    case 'thread_archive': {
       const threadId = str(result.threadId)
       if (!threadId) return null
       const title = str(result.title)
-      const text = kind === 'thread_start' ? 'started thread' : kind === 'thread_send' ? 'messaged' : 'stopped'
+      const text = kind === 'thread_start' ? 'started thread' : kind === 'thread_send' ? 'messaged' : kind === 'thread_stop' ? 'stopped' : result.archived === false ? 'unarchived' : 'archived'
       // The first line of what it sent there, which the chip shows on hover.
       const said = str(result.sent)
       return { icon: 'think', text, ...(title ? { highlight: shortChipText(title, 40) } : {}), thread: threadId, ...(said ? { said: shortChipText(said, 160) } : {}) }
@@ -345,7 +347,7 @@ function groupChip(kind: ChipKind, icon: BotChipIcon, calls: readonly Classified
 }
 
 /** Kinds whose every successful call is its own chip. */
-const OUTCOME_KINDS: ReadonlySet<ChipKind> = new Set(['schedule', 'remember', 'forget', 'work', 'work_stop', 'work_note', 'remind', 'unremind', 'model', 'thread_start', 'thread_send', 'thread_stop'])
+const OUTCOME_KINDS: ReadonlySet<ChipKind> = new Set(['schedule', 'remember', 'forget', 'work', 'work_stop', 'work_note', 'remind', 'unremind', 'model', 'thread_start', 'thread_send', 'thread_stop', 'thread_archive'])
 /** Kinds that settle to one chip for the last call only. */
 const LAST_KINDS: ReadonlySet<ChipKind> = new Set(['profile'])
 /** Kinds that settle to nothing: a look at its own schedules is not worth a chip. */
@@ -361,7 +363,7 @@ const QUIET_KINDS: ReadonlySet<ChipKind> = new Set(['schedules', 'work_look', 's
  * shows it at once, before the turn ends and its message carries every chip. Null for any other call.
  */
 export function actedChip(tool: string, input: unknown, result: unknown): BotChip | null {
-  const kind = tool === 'thread_create' ? 'thread_start' : tool === 'thread_send' ? 'thread_send' : tool === 'thread_interrupt' ? 'thread_stop' : undefined
+  const kind = tool === 'thread_create' ? 'thread_start' : tool === 'thread_send' ? 'thread_send' : tool === 'thread_interrupt' ? 'thread_stop' : tool === 'thread_archive' ? 'thread_archive' : undefined
   return kind ? outcomeChip(kind, { tool, input, result }) : null
 }
 

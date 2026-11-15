@@ -484,6 +484,8 @@ describe('Runs on with rows (#673)', () => {
     expect(createButton()?.title).toBe('Pick a model for Talk and Work')
     await pick('Talk', 'Claude Code')
     expect(createButton()?.disabled).toBe(true)
+    // A new bot needs both rows: Work never says it follows Talk here.
+    expect(rowPicker('Work')?.getAttribute('aria-label')).toBe("New bot's Work model: Pick a model")
     await pick('Work', 'Anthropic API')
     expect(createButton()?.disabled).toBe(false)
     await click(createButton())

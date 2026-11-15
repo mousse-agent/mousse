@@ -75,7 +75,7 @@ export interface BotImageUsage {
   perTurn: number
 }
 
-/** A bot's rows as Runs on shows them: each a pick on an entry, or null for "Pick a model" (Mousse chooses until then). */
+/** A bot's rows as Runs on shows them: each a pick on an entry, or null (Same as another picked row, else Pick a model). */
 export type BotShownRows = Record<BotModelSlotKey, BotModelPick | null>
 
 /**

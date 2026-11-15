@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { Type, type Tool } from '@earendil-works/pi-ai'
-import { BOT_DEPTHS, BOT_WORK_LEVELS, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, MAX_BOT_SCHEDULES, type BotDepth, type BotLane, type BotModelPick, type BotModelSlotKey, type BotModelSlots, type BotSchedule } from '../../../../shared/bots/personal/definition'
-import { entriesOf, modelsNamedBy, namedOn, ownerNamesModel, pickReasonText, plainLabel, workLevelOf, type BotModelRows, type NamedModel } from '../../../../shared/bots/personal/modelSlots'
+import { BOT_DEPTHS, BOT_WORK_LEVELS, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, MAX_BOT_SCHEDULES, type BotDepth, type BotLane, type BotModelPick, type BotModelSlotKey, type BotModelSlots, type BotSchedule, type BotWorkLevel } from '../../../../shared/bots/personal/definition'
+import { entriesOf, modelsNamedBy, namedOn, ownerNamesModel, pickReasonText, pickSourceOf, plainLabel, workLevelOf, type BotModelRows, type NamedModel } from '../../../../shared/bots/personal/modelSlots'
 import type { BotModelOption, BotWorkChoices } from '../../../../shared/bots/personal/methods'
 import { BOT_CARD_TOOL, BOT_IMAGE_TOOL, BOT_MCP_LIST_TOOL, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL, MAX_BOT_SUBAGENTS_AT_ONCE, MAX_BOT_SUBAGENTS_PER_DAY, MAX_BOT_SUBAGENTS_PER_WORK } from '../../../../shared/bots/personal/manifest'
 import type { BotSubagentView } from '../../../../shared/bots/personal/authority'
@@ -53,7 +53,7 @@ const PERMISSION = Type.Union([
 ])
 
 const WHEN = Type.Union([
-  Type.Object({ kind: Type.Literal('interval'), minutes: Type.Integer({ description: 'Every this many minutes; at least 5.' }) }),
+  Type.Object({ kind: Type.Literal('interval'), minutes: Type.Integer({ description: 'Every this many minutes; at least 1.' }) }),
   Type.Object({ kind: Type.Literal('cron'), expr: Type.String({ description: 'Five-field cron in this computer\'s local time, for example "0 9 * * 1-5" for weekdays at 9:00.' }) })
 ])
 
@@ -115,7 +115,7 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'bot_schedule_add',
-    description: `Run yourself on a schedule: each time, you get the prompt as your task. At most ${MAX_BOT_SCHEDULES} schedules, at most every 5 minutes. Returns the schedule's id and its label; confirm it to the owner in words.`,
+    description: `Run yourself on a schedule: each time, you get the prompt as your task. At most ${MAX_BOT_SCHEDULES} schedules, at most once a minute. Returns the schedule's id and its label; confirm it to the owner in words.`,
     parameters: Type.Object({
       when: WHEN,
       prompt: Type.String({ description: 'What to do on each run, in your own words.' })
@@ -354,10 +354,12 @@ export function workModelListing(choices: BotWorkChoices, rows: BotModelSlots): 
     const name = option ? `${modelName(option)} on ${plainLabel(option.entry, 40)}` : plainLabel(pick.model)
     return pick.effort ? `${name}, ${pick.effort} reasoning` : name
   }
+  const usual = (key: BotWorkLevel) => named(rows[pickSourceOf(rows, key) ?? key])
   return {
     entries: [...entries.values()],
     ...(choices.unavailable.length ? { cantRunWork: choices.unavailable.map((entry) => ({ entry: entry.entry, instanceId: entry.instanceId, why: pickReasonText(entry.reason) })) } : {}),
-    usualWork: { light: named(rows.light), medium: named(rows.medium), hard: named(rows.hard) },
+    // A Work row left unpicked runs on the row it borrows from (Medium work's, else Talk's model).
+    usualWork: { light: usual('light'), medium: usual('medium'), hard: usual('hard') },
     note: entries.size
       ? 'Use one only when the owner asks for it for a piece of work: pass its instanceId, model and (if they asked for one) effort to work_start as model. It is for that work only. If the owner names an entry under cantRunWork, tell them plainly why it can\'t run your work.'
       : 'Your owner has no model your work can run on here other than through Runs on. Tell them plainly.'

@@ -3,18 +3,16 @@ import type { BotModelPick, BotSchedule } from '../../shared/bots/personal/defin
 import { MAX_BOT_SCHEDULES } from '../../shared/bots/personal/definition'
 import { copyPick, isPinned, modelPickProblem } from '../../shared/bots/personal/modelSlots'
 import { parseTellMe, tellMeOf, type JobSchedule, type ScheduledJob, type ScheduledJobPatch, type TellMe } from '../../shared/types'
-import { computeNextRun, cronProblem, minCronGapMinutes } from './computeNextRun'
+import { computeNextRun, cronProblem } from './computeNextRun'
 
 /**
  * Bots' schedules in the shared scheduled-job store (Path step 3, "One scheduler"). A bot's schedule is an automation
  * whose Who is the bot (`ScheduledJob.bot`): the one `ScheduledJobService` claims it, and the bot engine runs each
- * occurrence in the bot's run lane. What stays a bot's own: at most 8 schedules, at most every 5 minutes, only a
+ * occurrence in the bot's run lane. What stays a bot's own: at most 8 schedules, at most once a minute, only a
  * repeating time (an interval or cron), and Who, Where and May are the bot's (its grant), never the job's fields.
  */
 
 export { MAX_BOT_SCHEDULES }
-/** The shortest time between two runs of one bot schedule. */
-export const MIN_BOT_SCHEDULE_MINUTES = 5
 
 const SCHEDULE_ID = /^[a-z0-9][a-z0-9-]{0,31}$/
 
@@ -67,16 +65,12 @@ export function scheduleProblem(schedule: BotSchedule): string | undefined {
   return 'A schedule runs every few minutes or on a cron expression.'
 }
 
-/** Why a bot can't keep this time and prompt, or undefined: the checks above, plus at most every 5 minutes. */
+/**
+ * Why a bot can't keep this time and prompt, or undefined: the checks above. A schedule runs at most once a minute: an
+ * interval is whole minutes, at least 1, and a cron expression's smallest step is a minute.
+ */
 export function botScheduleProblem(when: unknown, prompt: unknown): string | undefined {
-  const problem = scheduleProblem({ id: 'new', when, prompt } as BotSchedule)
-  if (problem) return problem
-  const schedule = when as BotSchedule['when']
-  const tooOften = `A schedule runs at most every ${MIN_BOT_SCHEDULE_MINUTES} minutes.`
-  if (schedule.kind === 'interval') return schedule.minutes < MIN_BOT_SCHEDULE_MINUTES ? tooOften : undefined
-  // Over a whole leap year, so a rule on the day of the month or week is counted; once a year or rarer is never too often.
-  const gap = minCronGapMinutes(schedule.expr)
-  return gap !== null && gap < MIN_BOT_SCHEDULE_MINUTES ? tooOften : undefined
+  return scheduleProblem({ id: 'new', when, prompt } as BotSchedule)
 }
 
 /** A short name from a prompt: its first line, cut. */
@@ -205,7 +199,7 @@ export class BotScheduleBook {
   }
 
   /**
-   * Adds a schedule: at most 8 per bot, at least 5 minutes apart. It needs no approval (a schedule is not a permission)
+   * Adds a schedule: at most 8 per bot, at least a minute apart. It needs no approval (a schedule is not a permission)
    * and starts from now, so it never runs for times before it existed.
    */
   add(botId: string, input: { when: BotSchedule['when']; prompt: string; model?: string; pick?: BotModelPick; name?: string; tellMe?: TellMe }, createdBy: 'owner' | 'bot', options: { scheduleId?: string } = {}): BotScheduleEntry {
@@ -247,7 +241,7 @@ export class BotScheduleBook {
   }
 
   /**
-   * An edit from the Automations page. Only When, Do, the name and Tell me change; a bot repeats, at most every 5 minutes.
+   * An edit from the Automations page. Only When, Do, the name and Tell me change; a bot repeats, at most once a minute.
    * A new time starts from now, as a new schedule does.
    */
   update(job: ScheduledJob, patch: ScheduledJobPatch & { enabled?: boolean }): ScheduledJob | null {

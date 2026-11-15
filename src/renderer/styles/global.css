@@ -37,6 +37,11 @@
   --an-tool-background: #242832;
   --an-tool-border-color: rgba(255,255,255,0.10);
   --an-tool-color: #f0f0f0;
+  /* The running shimmer (agent-ui.css): the label rests in the muted colour and a band of the foreground sweeps it.
+     Without these it fell back to agent-ui's light-theme subtle grey, about the muted colour itself, so the band
+     could not be seen. A theme's own muted and foreground colours carry through. */
+  --an-shimmer-base: var(--an-foreground-muted);
+  --an-shimmer-peak: var(--an-foreground);
   --an-input-background: var(--surface-strong);
   --an-input-border-color: var(--border);
   --an-input-color: var(--text-primary);

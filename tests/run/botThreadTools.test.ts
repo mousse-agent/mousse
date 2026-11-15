@@ -113,6 +113,7 @@ describe('a bot\'s thread tools ("use your threads")', () => {
       creationStarted: vi.fn(() => false),
       sendToThread: vi.fn(async () => ({ runId: 'run-x', sequence: 1, queued: false, replayed: false })),
       stopRun: vi.fn(async (_threadId, runId) => ({ status: 'accepted' as const, runId, sequence: 1, replayed: false })),
+      setThreadArchived: vi.fn(async (_threadId, archived) => ({ status: 'accepted' as const, archived, changed: true })),
       showAgentAction: vi.fn(),
       noteOnThread: vi.fn()
     })
@@ -127,7 +128,7 @@ describe('a bot\'s thread tools ("use your threads")', () => {
         return { error: true, text: error instanceof Error ? error.message : String(error) }
       }
     }
-    return { registry, compiled, call, text, host: fake.host, onAppResult, runId: homeRun.runId, threads }
+    return { registry, compiled, call, text, host: fake.host, onAppResult, runId: homeRun.runId, threads, request, turns }
   }
 
   it('the grant gives each lane its tools: a chat turn the owner started all, other turns only reading, a consult none, and a computer with it off none', async () => {
@@ -162,23 +163,25 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(thread(registry.listForThread('home', 'default', 'lineage').map((tool) => tool.name))).toEqual([])
     expect(registry.listForThread('home', 'default', 'lineage', runId).map((tool) => tool.name).filter((name) => name.startsWith('queue_') || name === 'approval_respond' || name === 'thread_steer')).toEqual([])
     expect(registry.listForThread('mine', 'default', 'lineage').map((tool) => tool.name)).not.toContain('thread_list')
+    // Archiving is a bot's tool only: an ordinary thread does not list it, even with the manage level.
+    expect(registry.listForThread('mine', 'default', 'manage').map((tool) => tool.name)).not.toContain('thread_archive')
   })
 
-  // Who the bot may reach, by each tool that names a thread: whether read, send, wait and stop go ahead. Every thread the
+  // Who the bot may reach, by each tool that names a thread: whether read, send, wait, stop and archive go ahead. Every thread the
   // list and search hide is refused by id, in the same words; an archived thread is read, waited on and stopped, and
-  // takes no new message; so is a thread it started in a project it may not use now, as for ordinary agents.
-  const reach: Array<[string, string, { read: boolean; send: boolean; wait: boolean; stop: boolean }]> = [
-    ['an ordinary thread in an allowed project', 'mine', { read: true, send: true, wait: true, stop: true }],
-    ['a thread it started, now outside the allowed projects', 'started', { read: true, send: false, wait: true, stop: true }],
-    ['an archived thread', 'archived', { read: true, send: false, wait: true, stop: true }],
-    ['its own chat thread', 'home', { read: false, send: false, wait: false, stop: false }],
-    ['another bot\'s thread', 'other-bot', { read: false, send: false, wait: false, stop: false }],
-    ['a private thread', 'private', { read: false, send: false, wait: false, stop: false }],
-    ['a thread outside the allowed projects', 'elsewhere', { read: false, send: false, wait: false, stop: false }],
-    ['a thread with no project', 'no-project', { read: false, send: false, wait: false, stop: false }],
-    ['a subagent', 'subagent', { read: false, send: false, wait: false, stop: false }],
-    ['the Automation manager\'s thread', 'manager', { read: false, send: false, wait: false, stop: false }],
-    ['a thread that does not exist', 'missing', { read: false, send: false, wait: false, stop: false }]
+  // takes no new message; so is a thread it started in a project it may not use now, as for ordinary agents. Archive follows the Stop.
+  const reach: Array<[string, string, { read: boolean; send: boolean; wait: boolean; stop: boolean; archive: boolean }]> = [
+    ['an ordinary thread in an allowed project', 'mine', { read: true, send: true, wait: true, stop: true, archive: true }],
+    ['a thread it started, now outside the allowed projects', 'started', { read: true, send: false, wait: true, stop: true, archive: true }],
+    ['an archived thread', 'archived', { read: true, send: false, wait: true, stop: true, archive: true }],
+    ['its own chat thread', 'home', { read: false, send: false, wait: false, stop: false, archive: false }],
+    ['another bot\'s thread', 'other-bot', { read: false, send: false, wait: false, stop: false, archive: false }],
+    ['a private thread', 'private', { read: false, send: false, wait: false, stop: false, archive: false }],
+    ['a thread outside the allowed projects', 'elsewhere', { read: false, send: false, wait: false, stop: false, archive: false }],
+    ['a thread with no project', 'no-project', { read: false, send: false, wait: false, stop: false, archive: false }],
+    ['a subagent', 'subagent', { read: false, send: false, wait: false, stop: false, archive: false }],
+    ['the Automation manager\'s thread', 'manager', { read: false, send: false, wait: false, stop: false, archive: false }],
+    ['a thread that does not exist', 'missing', { read: false, send: false, wait: false, stop: false, archive: false }]
   ]
   it.each(reach)('reaching %s', async (_name, threadId, ok) => {
     const { text, host } = await world({ threads: 'all' })
@@ -186,7 +189,8 @@ describe('a bot\'s thread tools ("use your threads")', () => {
       read: () => text('thread_read', { threadId }),
       send: () => text('thread_send', { threadId, content: 'Please check this.' }),
       wait: () => text('thread_wait', { threadId, timeoutMs: 1 }),
-      stop: () => text('thread_interrupt', { threadId, runId: 'run-x' })
+      stop: () => text('thread_interrupt', { threadId, runId: 'run-x' }),
+      archive: () => text('thread_archive', { threadId })
     }
     for (const [tool, go] of Object.entries(calls) as Array<[keyof typeof calls, () => Promise<{ error: boolean; text: string }>]>) {
       const outcome = await go()
@@ -197,6 +201,7 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     if (threadId === 'started') expect((await calls.send()).text).toContain(`Thread started is in a project you may not use now (Settings → Agents), so you can't message it.`)
     expect(vi.mocked(host.sendToThread!).mock.calls.length).toBe(ok.send ? 1 : 0)
     expect(vi.mocked(host.stopRun!).mock.calls.length).toBe(ok.stop ? 1 : 0)
+    expect(vi.mocked(host.setThreadArchived!).mock.calls.length).toBe(ok.archive ? 1 : 0)
   })
 
   it('what list and search show is exactly what the bot may reach by id', async () => {
@@ -210,6 +215,17 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(listed).toEqual(reachable.sort())
     expect(found.every((id: string) => reachable.includes(id))).toBe(true)
     expect(managerFound).toEqual([])
+  })
+
+  it('each thread a bot lists, finds, reads or starts carries its link, for its reply to name', async () => {
+    const { text } = await world({ threads: 'all' })
+    const body = (outcome: { text: string }) => JSON.parse(outcome.text.split('\n').slice(1, -1).join('\n'))
+    const listed = body(await text('thread_list', {})).threads
+    expect(listed).toContainEqual(expect.objectContaining({ id: 'mine', link: 'mousse://thread/mine' }))
+    for (const row of listed) expect(row.link).toBe(`mousse://thread/${row.id}`)
+    expect(body(await text('thread_search', { query: 'login' })).results).toEqual([expect.objectContaining({ threadId: 'mine', link: 'mousse://thread/mine' })])
+    expect(body(await text('thread_read', { threadId: 'mine' }))).toMatchObject({ threadId: 'mine', link: 'mousse://thread/mine' })
+    expect(JSON.parse((await text('thread_create', { projectId: 'p1', title: 'Fix login', firstMessage: 'Look.' })).text)).toMatchObject({ threadId: 'new-1', link: 'mousse://thread/new-1' })
   })
 
   it('a project list that could not be read is no project for a bot, and the bot is told why; what it started stays its own', async () => {
@@ -288,11 +304,12 @@ describe('a bot\'s thread tools ("use your threads")', () => {
   it('work, a schedule or a reminder reads threads but never starts, messages or stops one', async () => {
     const { text, host } = await world({ threads: 'read' })
     expect((await text('thread_list', {})).error).toBe(false)
-    for (const [name, args] of [['thread_create', { projectId: 'p1', title: 'X', firstMessage: 'Y' }], ['thread_send', { threadId: 'mine', content: 'Hi' }], ['thread_interrupt', { threadId: 'mine', runId: 'r1' }]] as const)
+    for (const [name, args] of [['thread_create', { projectId: 'p1', title: 'X', firstMessage: 'Y' }], ['thread_send', { threadId: 'mine', content: 'Hi' }], ['thread_interrupt', { threadId: 'mine', runId: 'r1' }], ['thread_archive', { threadId: 'mine' }]] as const)
       expect(await text(name, args), name).toEqual({ error: true, text: BOT_THREADS_CHAT_ONLY_TEXT })
     expect(host.createThread).not.toHaveBeenCalled()
     expect(host.sendToThread).not.toHaveBeenCalled()
     expect(host.stopRun).not.toHaveBeenCalled()
+    expect(host.setThreadArchived).not.toHaveBeenCalled()
   })
 
   it('a chat turn the owner started starts a thread, with a title and a first message, and its chat gets a chip with the thread', async () => {
@@ -331,6 +348,39 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     fx = undefined
     const reading = await world({ threads: 'read' })
     expect(JSON.parse((await reading.text('thread_list', {})).text.split('\n').slice(1, -1).join('\n')).models).toBeUndefined()
+  })
+
+  it('an archive and an unarchive each leave a line naming the bot and a chip with the thread; a working thread is refused with "stop it first"', async () => {
+    const { text, host, onAppResult, runId } = await world({ threads: 'all' })
+    const archived = await text('thread_archive', { threadId: 'mine' })
+    expect(archived.error).toBe(false)
+    expect(JSON.parse(archived.text)).toMatchObject({ threadId: 'mine', archived: true, changed: true })
+    expect(host.setThreadArchived).toHaveBeenLastCalledWith('mine', true, { actor: expect.objectContaining({ threadId: 'home', runId }) })
+    expect(host.showAgentAction).toHaveBeenCalledWith({ threadId: 'mine' }, expect.objectContaining({ threadId: 'home' }), 'archived this thread', { notice: true })
+    expect(onAppResult).toHaveBeenCalledWith(expect.anything(), 'thread_archive', { threadId: 'mine', title: 'Fix the login page', archived: true })
+    expect((await text('thread_archive', { threadId: 'archived', archived: false })).error).toBe(false)
+    expect(host.setThreadArchived).toHaveBeenLastCalledWith('archived', false, expect.anything())
+    expect(host.showAgentAction).toHaveBeenCalledWith({ threadId: 'archived' }, expect.objectContaining({ threadId: 'home' }), 'unarchived this thread', { notice: true })
+    expect(onAppResult).toHaveBeenCalledWith(expect.anything(), 'thread_archive', { threadId: 'archived', title: 'Thread archived', archived: false })
+    // Already so: nothing changed, so no line and no chip.
+    vi.mocked(host.showAgentAction!).mockClear()
+    onAppResult.mockClear()
+    vi.mocked(host.setThreadArchived!).mockResolvedValueOnce({ status: 'accepted', archived: true, changed: false })
+    expect(JSON.parse((await text('thread_archive', { threadId: 'mine' })).text)).toMatchObject({ changed: false })
+    // Still working: refused, with what to do.
+    vi.mocked(host.setThreadArchived!).mockResolvedValueOnce({ status: 'rejected', reason: 'thread_running' })
+    expect(await text('thread_archive', { threadId: 'mine' })).toEqual({ error: true, text: expect.stringContaining('is still working, so it was not archived. If your owner wants it archived anyway, stop it first with thread_interrupt') })
+    expect(host.showAgentAction).not.toHaveBeenCalled()
+    expect(onAppResult).not.toHaveBeenCalled()
+    // An ordinary thread's agent never archives through it, even with the manage level and if it names the tool.
+    fx?.dispose()
+    fx = undefined
+    const managed = await world({ threads: 'all', access: { level: 'manage' } })
+    const plain = await fx!.runningRun('mine')
+    managed.turns.register(appTurn({ threadId: 'mine', runId: plain.runId }))
+    const asAgent = await managed.registry.call('thread_archive', { threadId: 'archived' }, managed.request({ threadId: 'mine', runId: plain.runId, accessLevel: 'manage' })).catch((error: Error) => ({ isError: true, text: error.message }))
+    expect(asAgent).toMatchObject({ isError: true, text: expect.stringContaining('thread_archive is for personal bots') })
+    expect(managed.host.setThreadArchived).not.toHaveBeenCalled()
   })
 
   it('what it reads is framed as data from the thread, short by default, and the transcript only when asked, capped', async () => {

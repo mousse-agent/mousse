@@ -420,8 +420,9 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   useReclampOpenTools(transcript)
   const messages = chat?.messages ?? EMPTY
   // The chat's own turn: its typing bubble and Stop. Work beside it is in the header's list, and the chat stays free.
-  // A service from before work (no `chat` or `work` in its summary) says only that the bot works: that is the chat's.
-  const legacy = bot.chat === undefined && bot.work === undefined
+  // A service from before work (no `chat`, `work` or `threads` in its summary) says only that the bot works: that is
+  // the chat's. A bot that only manages threads it started is not typing.
+  const legacy = bot.chat === undefined && bot.work === undefined && bot.threads === undefined
   const working = Boolean(bot.chat) || (legacy && bot.state === 'working')
   // The chat's turn waits for the internet: no dots, and it says so.
   const offline = bot.chat ? Boolean(bot.chat.offline) : working && bot.waiting === 'internet'

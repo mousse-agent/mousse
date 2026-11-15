@@ -47,6 +47,7 @@ import { MousseMcpServer } from './run/mcp/MousseMcpServer'
 import { personTurnRequest } from './run/mcp/appTools/agentMessage'
 import { EffectWorker, type EffectWorkerFibres } from './run/EffectWorker'
 import { TERMINAL_RUN_STATUSES, type RunRecord, type ThreadEvent } from './run/types'
+import { launchedThreadsOf, watchLaunchedThreads } from './bots/launchedThreads'
 import { Reconciler } from './run/Reconciler'
 import { RunEngine } from './run/RunEngine'
 import type { BotEngine } from './bots/activation/BotEngine'
@@ -746,6 +747,15 @@ export class MmsProfileServices {
         }
       },
       runs: () => this.runEngine,
+      // The threads a bot started, hidden ones too, and how each stands: the bot is busy while any of them works.
+      launchedThreads: (creators) => launchedThreadsOf({
+        creators,
+        threads: this.threads.listAllThreads(),
+        activeRuns: this.runEngine.store.listNonTerminalRuns(),
+        lastRun: (id) => this.runEngine.store.listRuns(id, { limit: 1 })[0],
+        asks: (id) => this.questions.listPendingForThread(id).length > 0,
+        projectName: (id) => this.projects.getProject(id)?.name
+      }),
       harness,
       notifyEffects: () => this.orchestrator.notifyEffects(),
       stopThread: (threadId) => this.orchestrator.stopThread(threadId, 'user', { clientRequestId: `bot-stop:${threadId}:${Date.now()}` }),
@@ -919,6 +929,11 @@ export class MmsProfileServices {
         try { personalBots.settleRun(run.runId) } catch (error) { console.warn('bot dispatch could not be settled', { runId: run.runId, error: error instanceof Error ? error.message : String(error) }) }
       })
     })
+    // A thread a bot started began, was held, asks the owner or ended: that bot's header reads busy or free again.
+    if (personalBots) {
+      const stop = watchLaunchedThreads({ runs: this.runEngine, questions: this.questions, thread: (id) => this.threads.getThread(id), changed: (creator) => personalBots.launchedThreadChanged(creator) })
+      this.platform.onDispose(stop)
+    }
     this.orchestrator.setBotDispatcher(personalBots)
     this.orchestrator.setWorkflowChatExecutor(this.platform.workflowChat)
     this.orchestrator.setFeatureFlags(this.config.get().features)
@@ -1362,6 +1377,8 @@ export class MmsProfileServices {
     })
     // Any Stop that reaches a thread, and every subagent below it, ends its watch at once.
     this.orchestrator.on('threads-stopped', (payload: { threadIds: string[] }) => this.pullRequestWatch.onStopped(payload.threadIds))
+    // An archived thread's watch ends as archived, not as stopped (`OrchestratorService.settleThread`).
+    this.orchestrator.on('thread-settled', (payload: { threadId: string }) => this.pullRequestWatch.onEnded(payload.threadId, 'settled'))
     // Thread-event automations wake on their pull request's activity, never on what their own run caused.
     const threadEvents = new ThreadEventTriggers({
       jobs: () => this.scheduled.listJobs(),

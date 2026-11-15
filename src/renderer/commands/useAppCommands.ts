@@ -3,6 +3,7 @@ import type { MousseSettingsUpdate } from '../../shared/settings'
 import { applySideCardToggle, deriveSideCardState, nextSideCardToggleState } from '../components/sideCard/sideCardLogic'
 import { openThreadRenameDialog } from '../components/ThreadRenameDialog'
 import { openRailPage } from '../lib/railPages'
+import { mainAreaAvailable } from '../lib/mainAreaAvailable'
 import { SURFACE_CHOICES, openSurface } from '../lib/surfaces'
 import {
   addProjectAndStartThread,
@@ -67,6 +68,8 @@ export function useAppCommands(): void {
     state.setThreadsSidebarOpen(!state.threadsSidebarOpen)
   })
   useCommand('mainArea.toggle', () => {
+    // Chats has no app panel; toggling there would only flip it unseen for the Projects view.
+    if (!mainAreaAvailable()) return
     const state = useAppStore.getState()
     state.setMainAreaOpen(!state.mainAreaOpen)
   })
