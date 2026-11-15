@@ -47,6 +47,7 @@ describe('BOT_BASE_INSTRUCTIONS', () => {
     expect(BOT_BASE_INSTRUCTIONS).not.toContain('Memory holds one short note per list')
     expect(BOT_BASE_INSTRUCTIONS).toContain('Your files are listed for you by name and date; read a file when you need it.')
     expect(BOT_BASE_INSTRUCTIONS).toContain('and anything too long for a memory entry')
+    expect(BOT_BASE_INSTRUCTIONS).toContain('Read a list or plan file just before changing it, and change it in one edit.')
     // A list no longer lives in one memory entry, which holds 400 characters and only the chat may change.
     expect(BOT_BASE_INSTRUCTIONS).not.toContain('one entry per list')
   })
