@@ -127,6 +127,46 @@ describe('bot timers after sleep', () => {
     expect(network).toHaveBeenCalledTimes(2)
   })
 
+  it('lets ten scheduler ticks reach inbox sync while upkeep is blocked, with one follow-up pass', async () => {
+    const { botId } = await createBot(f, { reply: 'Hello.' })
+    await f.bots.service.chatSend({ botId, text: 'Watch this PR.', clientRequestId: 'slow-inbox' })
+    const activation = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    const turn = await start(f, activation.id)
+    f.host.pullRequestState = async () => ({ state: 'open' })
+    await f.bots.tools.wakes!.add(botId, activation.id, { brief: 'Watch deploy.', event: { kind: 'pr', repo: 'acme/app', number: 1 } })
+    await finish(f, turn.payload, 'completed', { text: 'Will do.' })
+    let release!: () => void
+    const read = new Promise<{ state: 'open' }>((resolve) => { release = () => resolve({ state: 'open' }) })
+    const network = vi.fn<NonNullable<typeof f.host.pullRequestState>>()
+      .mockImplementationOnce(() => read).mockResolvedValue({ state: 'open' })
+    f.host.pullRequestState = network
+    const syncInbox = vi.fn()
+    // The service's tick hook awaits bot maintenance before syncing the Automations inbox.
+    f.scheduler.setTickHook(async (now) => {
+      await f.bots.maintain(now)
+      syncInbox()
+    })
+    const first = f.scheduler.tickNow()
+    await flush()
+    expect(network).toHaveBeenCalledTimes(1)
+    const ticks: Promise<void>[] = []
+    try {
+      for (let i = 1; i <= 10; i++) {
+        f.clock.now += 120_000
+        ticks.push(f.scheduler.tickNow())
+        await flush()
+        expect.soft(syncInbox).toHaveBeenCalledTimes(i)
+        expect(network).toHaveBeenCalledTimes(1)
+      }
+    } finally {
+      release()
+      await Promise.all([first, ...ticks])
+      await flush()
+    }
+    expect(syncInbox).toHaveBeenCalledTimes(11)
+    expect(network).toHaveBeenCalledTimes(2)
+  })
+
   it('stops checking when the engine closes', async () => {
     const due = vi.spyOn(f.bots, 'deliverDueReminders')
     f.bots.close()
