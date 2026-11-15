@@ -1,9 +1,10 @@
 /**
- * Live check: through a CLIProxyAPI route, with no management key and nothing set in Mousse, the real Claude Code that
- * Mousse starts sends Mousse's client name, and a second turn sends the same system prompt and tools, so the proxy
- * sees a stable prefix. No sign-in or Anthropic call: a stand-in in this process answers CLIProxyAPI's key-free root and
- * the Messages endpoint with synthetic replies. Runs only with MOUSSE_LIVE_CLAUDE=1; MOUSSE_CLAUDE_BINARY may name the
- * executable. This checks the wire, not CLIProxyAPI's own handling or Anthropic's metering.
+ * Live check: through a proxy route (a stand-in for CLIProxyAPI), with no management key and nothing set in Mousse, the
+ * real Claude Code that Mousse starts sends Mousse's client name in every mode, and a second turn sends the same system
+ * prompt and tools, so the proxy sees a stable prefix. An Auto turn under Mousse's name still asks Anthropic's server
+ * for its safety check (the `safeguards` field). No sign-in or Anthropic call: a stand-in in this process answers with
+ * synthetic replies. Runs only with MOUSSE_LIVE_CLAUDE=1; MOUSSE_CLAUDE_BINARY may name the executable. This checks the
+ * wire, not a proxy's own handling or Anthropic's metering.
  */
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
@@ -19,12 +20,14 @@ const live = process.env.MOUSSE_LIVE_CLAUDE === '1'
 const binary = process.env.MOUSSE_CLAUDE_BINARY || join(homedir(), '.local', 'bin', process.platform === 'win32' ? 'claude.exe' : 'claude')
 const ROUTE = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY', 'CLAUDE_CODE_ENTRYPOINT', 'CLIPROXY_MANAGEMENT_KEY', 'CLI_PROXY_API_MANAGEMENT_KEY', 'MANAGEMENT_PASSWORD']
 
-describe.skipIf(!live)('Claude Code through a CLIProxyAPI route', () => {
+type Body = { model: string; system?: unknown; tools?: unknown[]; messages: unknown[]; safeguards?: Array<{ type: string }> }
+
+describe.skipIf(!live)('Claude Code through a proxy route', () => {
   let root: string
   let server: Server
   let port = 0
-  /** Main-loop Messages requests (the ones with tools), with the headers they came with. */
-  const captures: Array<{ headers: IncomingHttpHeaders; body: { system?: unknown; tools?: unknown[]; messages: unknown[] } }> = []
+  /** Every Messages request, with the headers it came with. */
+  const captures: Array<{ headers: IncomingHttpHeaders; body: Body }> = []
 
   beforeAll(async () => {
     root = mkdtempSync(join(tmpdir(), 'mousse-live-claude-proxy-'))
@@ -38,8 +41,8 @@ describe.skipIf(!live)('Claude Code through a CLIProxyAPI route', () => {
       req.on('end', () => {
         if (req.method === 'GET' && req.url === '/') { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"message":"CLI Proxy API Server"}'); return }
         if (!req.url?.startsWith('/v1/messages') || req.url.includes('count_tokens')) { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"input_tokens":1}'); return }
-        const body = JSON.parse(raw) as { model: string; system?: unknown; tools?: unknown[]; messages: unknown[] }
-        if (body.tools?.length) captures.push({ headers: req.headers, body })
+        const body = JSON.parse(raw) as Body
+        captures.push({ headers: req.headers, body })
         res.writeHead(200, { 'content-type': 'text/event-stream' })
         const send = (type: string, data: object) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`)
         send('message_start', { message: { id: `m${captures.length}`, type: 'message', role: 'assistant', model: body.model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 1 } } })
@@ -64,7 +67,7 @@ describe.skipIf(!live)('Claude Code through a CLIProxyAPI route', () => {
     }
   }, 60_000)
 
-  it('sends Mousse\'s name with a stable prefix, and the default in Auto', async () => {
+  it("sends Mousse's name with a stable prefix, Auto included", async () => {
     const home = join(root, 'mousse')
     mkdirSync(join(home, 'providers', 'claude-subscription'), { recursive: true })
     writeFileSync(join(home, 'providers', 'claude-subscription', 'settings.json'), JSON.stringify({ binaryPath: binary, models: [{ id: 'sonnet', label: 'Sonnet' }] }))
@@ -85,13 +88,12 @@ describe.skipIf(!live)('Claude Code through a CLIProxyAPI route', () => {
     }
     expect(captures).toHaveLength(3)
     const [first, second, auto] = captures as [typeof captures[0], typeof captures[0], typeof captures[0]]
-    for (const capture of [first, second]) {
+    for (const capture of captures) {
       expect(capture.headers['user-agent']).toMatch(/\bmousse\b/)
       expect(JSON.stringify(capture.body.system)).toContain('cc_entrypoint=mousse')
     }
     expect(second.body.system).toEqual(first.body.system)
     expect(second.body.tools).toEqual(first.body.tools)
-    expect(auto.headers['user-agent']).toMatch(/\bsdk-ts\b/)
-    expect(JSON.stringify(auto.body.system)).toContain('cc_entrypoint=sdk-ts')
+    expect(auto.body.safeguards?.map((safeguard) => safeguard.type)).toContain('dangerous_tool_use')
   }, 180_000)
 })

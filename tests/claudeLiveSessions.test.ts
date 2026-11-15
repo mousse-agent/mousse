@@ -542,32 +542,14 @@ describe('a live Claude query', () => {
     expect(f.cli.processes).toHaveLength(2)
   })
 
-  it("a process under Mousse's client name never runs Auto: idle, Auto restarts it without the name; kept for background work, it runs Auto as Auto-accept edits", async () => {
-    // A direct subscription sign-in, whatever this machine routes through.
+  it("a process under Mousse's client name switches to Auto in place, keeping its name", async () => {
     for (const name of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_ENTRYPOINT']) vi.stubEnv(name, undefined)
     const f = fixture()
-    const named = (index: number) => f.cli.processes[index].options.env?.CLAUDE_CODE_ENTRYPOINT
     await f.turn({ permissionMode: 'full' })
-    expect(named(0)).toBe('mousse')
-    // Idle: Auto needs the default name, so the process is replaced.
     await f.turn({ permissionMode: 'auto' })
-    expect(f.cli.processes).toHaveLength(2)
-    expect(named(1)).toBeUndefined()
-    // Back in Full access, a named process again; it starts background work and is kept for it.
-    await f.turn({ permissionMode: 'full' })
-    expect(f.cli.processes).toHaveLength(3)
-    expect(named(2)).toBe('mousse')
-    f.cli.reply = (message, process) => {
-      process.emit(roster({ id: 'bash-1' }))
-      process.answer(String(message.uuid), 'started')
-    }
-    await f.turn({ permissionMode: 'full' })
-    f.cli.reply = (message, process) => process.answer(String(message.uuid), 'again')
-    // The Auto turn runs on the kept process, switched to Auto-accept edits instead of Auto.
-    expect(await f.turn({ permissionMode: 'auto' })).toBe('again')
-    expect(f.cli.processes).toHaveLength(3)
-    expect(f.cli.last.permissionModes).not.toContain('auto')
-    expect(f.cli.last.permissionModes.at(-1)).toBe('acceptEdits')
+    expect(f.cli.processes).toHaveLength(1)
+    expect(f.cli.last.options.env?.CLAUDE_CODE_ENTRYPOINT).toBe('mousse')
+    expect(f.cli.last.permissionModes.at(-1)).toBe('auto')
   })
 
   it('moves a steer into the live query as an immediate message and never interrupts, so helpers keep running', async () => {

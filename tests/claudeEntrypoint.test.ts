@@ -43,7 +43,7 @@ function fakeQuery(prompt: unknown): Query {
   return Object.assign((async function* () { yield* frames })(), { close: () => {}, interrupt: async () => {}, supportedModels: async () => [] }) as unknown as Query
 }
 
-type Setup = { root?: string; seats?: string[]; authMethod?: string; env?: Record<string, string>; args?: string[]; inherited?: Record<string, string>; paysPerToken?: boolean; userSettings?: Record<string, unknown>; projectSettings?: Record<string, unknown> }
+type Setup = { seats?: string[]; authMethod?: string; env?: Record<string, string>; args?: string[]; inherited?: Record<string, string>; paysPerToken?: boolean; userSettings?: Record<string, unknown>; projectSettings?: Record<string, unknown> }
 
 function service(options: Setup = {}) {
   const home = tempDir('mousse-entrypoint-')
@@ -65,7 +65,7 @@ function service(options: Setup = {}) {
   const created = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
     proxySeats: (input) => readLocalProxySeats({ ...input, fetch: (async (url) => ({
       status: 200,
-      text: async () => JSON.stringify(new URL(url).pathname === '/' ? { message: options.root ?? 'CLI Proxy API Server' } : {
+      text: async () => JSON.stringify(new URL(url).pathname === '/' ? { message: 'CLI Proxy API Server' } : {
         files: (options.seats ?? []).map((kind, index) => ({ id: `c${index}`, provider: 'claude', account_type: kind, auth_index: `i${index}` }))
       })
     })) as ProxyFetch }),
@@ -89,41 +89,33 @@ function service(options: Setup = {}) {
 }
 
 describe('the client name of a turn', () => {
-  // Each row: the sign-in and setup, the thread's mode, and the name Claude Code starts with (undefined: the Agent SDK's sdk-ts).
-  const rows: Array<[string, Setup, PermissionMode | undefined, string | undefined]> = [
+  const proxy = { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8317', ANTHROPIC_AUTH_TOKEN: 'proxy-token' }
+  // Each row: the sign-in and setup, the thread's mode, and the name Claude Code starts with. Mousse's on every route and
+  // in every mode; only a name the user set themselves replaces it.
+  const rows: Array<[string, Setup, PermissionMode | undefined, string]> = [
     ['subscription sign-in, Ask', {}, 'ask', MOUSSE_CLAUDE_ENTRYPOINT],
     ['subscription sign-in, Auto-accept edits', {}, 'accept_edits', MOUSSE_CLAUDE_ENTRYPOINT],
     ['subscription sign-in, Full access', {}, 'full', MOUSSE_CLAUDE_ENTRYPOINT],
-    // Auto mode checks each tool call with a billed request of its own under an unknown name.
-    ['subscription sign-in, Auto', {}, 'auto', undefined],
-    // Settings that turn auto mode off make Auto run as Auto-accept edits: the name is safe there.
-    ['Auto turned off by Claude settings', { userSettings: { permissions: { disableAutoMode: 'disable' } } }, 'auto', MOUSSE_CLAUDE_ENTRYPOINT],
-    ["Anthropic's own address as the base URL", { env: { ANTHROPIC_BASE_URL: 'https://api.anthropic.com' } }, 'full', MOUSSE_CLAUDE_ENTRYPOINT],
+    ['subscription sign-in, Auto', {}, 'auto', MOUSSE_CLAUDE_ENTRYPOINT],
+    ['API-key sign-in', { authMethod: 'api_key' }, 'full', MOUSSE_CLAUDE_ENTRYPOINT],
+    ['ANTHROPIC_API_KEY', { env: { ANTHROPIC_API_KEY: 'sk-ant-api03-x' } }, 'full', MOUSSE_CLAUDE_ENTRYPOINT],
+    ["apiKeyHelper in the user's Claude settings", { userSettings: { apiKeyHelper: 'echo key' } }, 'full', MOUSSE_CLAUDE_ENTRYPOINT],
+    ['an entry that pays per token', { paysPerToken: true }, 'full', MOUSSE_CLAUDE_ENTRYPOINT],
+    ['Bedrock', { env: { CLAUDE_CODE_USE_BEDROCK: '1' } }, 'full', MOUSSE_CLAUDE_ENTRYPOINT],
+    ['a local proxy, nothing set in Mousse', { authMethod: 'oauth_token', env: proxy }, 'full', MOUSSE_CLAUDE_ENTRYPOINT],
+    ["a proxy in the user's Claude settings, in Auto", { authMethod: 'oauth_token', userSettings: { env: proxy } }, 'auto', MOUSSE_CLAUDE_ENTRYPOINT],
+    ['a proxy whose seats are API keys', { authMethod: 'oauth_token', env: { ...proxy, CLIPROXY_MANAGEMENT_KEY: 'fixture' }, seats: ['api_key'] }, 'full', MOUSSE_CLAUDE_ENTRYPOINT],
+    ['a gateway', { authMethod: 'oauth_token', env: { ANTHROPIC_BASE_URL: 'https://gateway.example/anthropic' } }, 'full', MOUSSE_CLAUDE_ENTRYPOINT],
+    ["a settings file in the entry's launch arguments", { args: ['--settings', '/somewhere/proxy.json'] }, 'full', MOUSSE_CLAUDE_ENTRYPOINT],
     ["a host Claude session's name is not inherited", { inherited: { CLAUDE_CODE_ENTRYPOINT: 'claude-desktop' } }, 'full', MOUSSE_CLAUDE_ENTRYPOINT],
-    ['subscription token in the environment (CLAUDE_CODE_OAUTH_TOKEN)', { env: { CLAUDE_CODE_OAUTH_TOKEN: 'oauth' } }, 'full', MOUSSE_CLAUDE_ENTRYPOINT],
-    // Credit-only API accounts refuse an unknown name. Routes through CLIProxyAPI: the table below.
-    ['API-key sign-in', { authMethod: 'api_key' }, 'full', undefined],
-    ['ANTHROPIC_API_KEY', { env: { ANTHROPIC_API_KEY: 'sk-ant-api03-x' } }, 'full', undefined],
-    ['ANTHROPIC_AUTH_TOKEN', { authMethod: 'oauth_token', env: { ANTHROPIC_AUTH_TOKEN: 'bearer' } }, 'full', undefined],
-    ['gateway', { authMethod: 'oauth_token', env: { ANTHROPIC_BASE_URL: 'https://gateway.example/anthropic' } }, 'full', undefined],
-    ['Bedrock', { env: { CLAUDE_CODE_USE_BEDROCK: '1' } }, 'full', undefined],
-    ['an entry that pays per token', { paysPerToken: true }, 'full', undefined],
-    // Settings passed in launch arguments are not read, so they may route anywhere.
-    ["a settings file in the entry's launch arguments", { args: ['--settings', '/somewhere/proxy.json'] }, 'full', undefined],
-    ["a proxy set in the project's Claude settings", { projectSettings: { env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8317' } } }, 'full', undefined],
-    ["an API key in the project's Claude settings", { projectSettings: { env: { ANTHROPIC_API_KEY: 'sk-ant-api03-x' } } }, 'full', undefined],
-    ["apiKeyHelper in the user's Claude settings", { userSettings: { apiKeyHelper: 'echo key' } }, 'full', undefined],
-    ["apiKeyHelper in the project's Claude settings", { projectSettings: { apiKeyHelper: 'echo key' } }, 'full', undefined],
-    // A cloned folder cannot set the name: it would pass every check above.
-    ["a name in the project's Claude settings is not taken", { projectSettings: { env: { CLAUDE_CODE_ENTRYPOINT: 'my-app' } } }, 'full', MOUSSE_CLAUDE_ENTRYPOINT],
-    ["a name in the project's Claude settings, in Auto", { projectSettings: { env: { CLAUDE_CODE_ENTRYPOINT: 'my-app' } } }, 'auto', undefined],
-    // The user's own choice wins, Auto included.
+    // A cloned folder cannot choose the name.
+    ["a name in the project's Claude settings is not taken", { projectSettings: { env: { CLAUDE_CODE_ENTRYPOINT: 'my-app' } } }, 'auto', MOUSSE_CLAUDE_ENTRYPOINT],
+    // The user's own choice wins.
     ["the entry's own variable", { env: { CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' } }, 'full', 'sdk-ts'],
     ["the entry's own variable in Auto", { env: { CLAUDE_CODE_ENTRYPOINT: 'my-app' } }, 'auto', 'my-app']
   ]
   it.each(rows)('%s', async (_name, setup, mode, expected) => {
-    const env = await service(setup).turn(mode)
-    expect(env.CLAUDE_CODE_ENTRYPOINT).toBe(expected)
+    expect((await service(setup).turn(mode)).CLAUDE_CODE_ENTRYPOINT).toBe(expected)
   })
 
   it("a name in the user's Claude settings `env` is passed to the process, which reads it nowhere else", async () => {
@@ -131,66 +123,21 @@ describe('the client name of a turn', () => {
     expect((await service().turn('full')).CLAUDE_CODE_ENTRYPOINT).toBe('sdk-ts')
   })
 
-  it('a chat title or other one-shot on the subscription carries the name too', async () => {
+  it("a plan turn keeps its thread's name and never enters Claude Code's plan mode", async () => {
+    const fixture = service()
+    const optionsOf = () => fixture.started.at(-1)!.options
+    // The turn runs read-only in the default mode, with Claude Code's plan tools off.
+    expect((await fixture.turn('ask', 'ask-thread', { mode: 'plan' })).CLAUDE_CODE_ENTRYPOINT).toBe(MOUSSE_CLAUDE_ENTRYPOINT)
+    expect(optionsOf().permissionMode).toBe('default')
+    expect(optionsOf().disallowedTools).toEqual(expect.arrayContaining(['EnterPlanMode', 'ExitPlanMode']))
+    expect((await fixture.turn('auto', 'auto-thread', { mode: 'plan' })).CLAUDE_CODE_ENTRYPOINT).toBe(MOUSSE_CLAUDE_ENTRYPOINT)
+  })
+
+  it('a chat title or other one-shot carries the name too', async () => {
     const { service: claude, started } = service()
     await claude.status()
     await claude.oneShot({ model: 'sonnet', prompt: 'Name this chat', onActivity: () => {} }, new AbortController().signal)
     expect(started.at(-1)!.options.env!.CLAUDE_CODE_ENTRYPOINT).toBe(MOUSSE_CLAUDE_ENTRYPOINT)
-  })
-
-  it("a plan turn keeps its thread's name and never enters Claude Code's plan mode", async () => {
-    const fixture = service()
-    const optionsOf = () => fixture.started.at(-1)!.options
-    // In an Ask thread: the name; the turn runs read-only in the default mode, with Claude Code's plan tools off.
-    expect((await fixture.turn('ask', 'ask-thread', { mode: 'plan' })).CLAUDE_CODE_ENTRYPOINT).toBe(MOUSSE_CLAUDE_ENTRYPOINT)
-    expect(optionsOf().permissionMode).toBe('default')
-    expect(optionsOf().disallowedTools).toEqual(expect.arrayContaining(['EnterPlanMode', 'ExitPlanMode']))
-    // In an Auto thread: the default, like the thread's other turns, so its process is not restarted for it.
-    expect((await fixture.turn('auto', 'auto-thread', { mode: 'plan' })).CLAUDE_CODE_ENTRYPOINT).toBeUndefined()
-  })
-
-  it('a read-only child of an Auto thread runs in the default mode, so it takes the name', async () => {
-    expect((await service().turn('auto', undefined, { child: { readOnly: true } })).CLAUDE_CODE_ENTRYPOINT).toBe(MOUSSE_CLAUDE_ENTRYPOINT)
-  })
-
-})
-
-describe('a route through CLIProxyAPI', () => {
-  const base = 'http://127.0.0.1:8317'
-  const env = { ANTHROPIC_BASE_URL: base, ANTHROPIC_AUTH_TOKEN: 'fixture' }
-  const setup: Setup = { env, authMethod: 'oauth_token' }
-  const keyed = { ...env, CLIPROXY_MANAGEMENT_KEY: 'fixture' }
-  // Claim: a CLIProxyAPI route gets Mousse's name with nothing set in Mousse; known API-key seats and Auto keep the default.
-  const rows: Array<[string, Setup, PermissionMode, string | undefined]> = [
-    ['no management key, nothing set in Mousse', setup, 'full', MOUSSE_CLAUDE_ENTRYPOINT],
-    ["the proxy in the user's Claude settings", { authMethod: 'oauth_token', userSettings: { env } }, 'full', MOUSSE_CLAUDE_ENTRYPOINT],
-    ['subscription seats listed', { ...setup, env: keyed, seats: ['oauth'] }, 'full', MOUSSE_CLAUDE_ENTRYPOINT],
-    ['API-key seats listed', { ...setup, env: keyed, seats: ['api_key'] }, 'full', undefined],
-    ['mixed seats listed', { ...setup, env: keyed, seats: ['oauth', 'api_key'] }, 'full', undefined],
-    ['another server at the address', { ...setup, root: 'Some other gateway' }, 'full', undefined],
-    ['Auto', setup, 'auto', undefined],
-    ['an entry that pays per token', { ...setup, paysPerToken: true }, 'full', undefined],
-    ['ANTHROPIC_API_KEY', { ...setup, env: { ...env, ANTHROPIC_API_KEY: 'fixture' } }, 'full', undefined],
-    ['apiKeyHelper', { ...setup, userSettings: { apiKeyHelper: 'echo fixture' } }, 'full', undefined],
-    ["a settings file in the entry's launch arguments", { ...setup, args: ['--settings', 'other.json'] }, 'full', undefined],
-    ['Bedrock', { ...setup, env: { ...env, CLAUDE_CODE_USE_BEDROCK: '1' } }, 'full', undefined],
-    ["the entry's own name still wins", { ...setup, env: { ...env, CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' } }, 'full', 'sdk-ts']
-  ]
-  it.each(rows)('%s', async (_name, options, mode, expected) => {
-    expect((await service(options).turn(mode)).CLAUDE_CODE_ENTRYPOINT).toBe(expected)
-  })
-
-  it('a session that ran under the default keeps it for its compaction; a new one is compacted under the name', async () => {
-    const fixture = service(setup)
-    const compact = async (thread: string) => {
-      fixture.service.commitConversation(thread, `${thread}-history`)
-      await fixture.service.compactConversation(thread, `${thread}-history`, undefined, undefined, new AbortController().signal)
-      return fixture.started.at(-1)!.options.env!.CLAUDE_CODE_ENTRYPOINT
-    }
-    expect((await fixture.turn('auto', 'auto-thread')).CLAUDE_CODE_ENTRYPOINT).toBeUndefined()
-    expect(await compact('auto-thread')).toBeUndefined()
-    expect((await fixture.turn('full', 'full-thread')).CLAUDE_CODE_ENTRYPOINT).toBe(MOUSSE_CLAUDE_ENTRYPOINT)
-    expect(await compact('full-thread')).toBe(MOUSSE_CLAUDE_ENTRYPOINT)
   })
 })
 
@@ -208,7 +155,7 @@ describe('compaction', () => {
 
   it('runs under the name the thread last ran with, so a warm cache still matches', async () => {
     expect((await compacted('full')).CLAUDE_CODE_ENTRYPOINT).toBe(MOUSSE_CLAUDE_ENTRYPOINT)
-    expect((await compacted('auto')).CLAUDE_CODE_ENTRYPOINT).toBeUndefined()
+    expect((await compacted('auto')).CLAUDE_CODE_ENTRYPOINT).toBe(MOUSSE_CLAUDE_ENTRYPOINT)
   })
 
   it('on a cold cache, does not write the history it summarizes back to the cache; on a warm one, keeps caching', async () => {
@@ -217,16 +164,19 @@ describe('compaction', () => {
     expect(await compacted('full')).not.toHaveProperty('DISABLE_PROMPT_CACHING')
   })
 
-  it('drops the saved name when the route no longer allows it: a proxy or an API key set since', async () => {
-    for (const route of [{ ANTHROPIC_BASE_URL: 'http://127.0.0.1:8317', ANTHROPIC_AUTH_TOKEN: 'proxy-token' }, { ANTHROPIC_API_KEY: 'sk-ant-api03-x' }]) {
-      const fixture = service({ env: {} })
-      await fixture.turn('full', 'thread')
-      fixture.service.commitConversation('thread', 'history')
-      Object.assign(fixture.launchEnv, route)
-      await fixture.service.compactConversation('thread', 'history', undefined, undefined, new AbortController().signal)
-      expect(fixture.started.at(-1)!.prompt).toBe('/compact')
-      expect(fixture.started.at(-1)!.options.env!.CLAUDE_CODE_ENTRYPOINT, Object.keys(route).join()).toBeUndefined()
-    }
+  it("a session that ran under another name keeps the default, not Mousse's, once that name is removed", async () => {
+    const fixture = service({ env: { CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' } })
+    await fixture.turn('full', 'thread')
+    fixture.service.commitConversation('thread', 'history')
+    delete fixture.launchEnv.CLAUDE_CODE_ENTRYPOINT
+    await fixture.service.compactConversation('thread', 'history', undefined, undefined, new AbortController().signal)
+    expect(fixture.started.at(-1)!.prompt).toBe('/compact')
+    expect(fixture.started.at(-1)!.options.env!.CLAUDE_CODE_ENTRYPOINT).toBeUndefined()
+    // A new thread then runs, and compacts, under Mousse's name.
+    await fixture.turn('full', 'new-thread')
+    fixture.service.commitConversation('new-thread', 'new-history')
+    await fixture.service.compactConversation('new-thread', 'new-history', undefined, undefined, new AbortController().signal)
+    expect(fixture.started.at(-1)!.options.env!.CLAUDE_CODE_ENTRYPOINT).toBe(MOUSSE_CLAUDE_ENTRYPOINT)
   })
 
   it('the next turn after a cold compaction caches as usual', async () => {
