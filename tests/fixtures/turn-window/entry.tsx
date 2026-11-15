@@ -252,6 +252,38 @@ const qa = {
       Array.from(container().querySelectorAll('img'), (image) => (image.complete ? undefined : new Promise((done) => { image.onload = image.onerror = done }))),
     )
   },
+  /**
+   * Opens a thread of `count` turns in a new transcript and returns how many turn rows the open added to the page,
+   * counting rows that a later commit removed again. `afterLoad` opens it the way the app does when the thread is not
+   * cached: the transcript mounts empty while the thread loads, then the turns arrive. Otherwise it mounts with them.
+   */
+  async openCounted(count: number, afterLoad: boolean): Promise<number> {
+    turnCount = count
+    epoch += 1
+    streaming = false
+    const turns = Array.from({ length: count }, (_, index) => turnMessages(index)).flat()
+    if (afterLoad) {
+      messages = []
+      render()
+      await frames(2)
+    }
+    let added = 0
+    const observer = new MutationObserver((records) => {
+      for (const record of records) {
+        for (const node of Array.from(record.addedNodes)) {
+          if (!(node instanceof HTMLElement)) continue
+          if (node.matches('[data-turn-key]')) added += 1
+          added += node.querySelectorAll('[data-turn-key]').length
+        }
+      }
+    })
+    observer.observe(document.getElementById('root')!, { childList: true, subtree: true })
+    messages = turns
+    render()
+    await frames(3)
+    observer.disconnect()
+    return added
+  },
   messageCount: () => messages.length,
   mountedTurns: () => document.querySelectorAll('[data-turn-key]').length,
   isMounted: (index: number) => Boolean(row(index)),
