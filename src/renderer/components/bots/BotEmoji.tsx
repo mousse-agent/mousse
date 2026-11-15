@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type RefObject } from 'react'
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from 'react'
 import { Smile } from '../../lib/icons'
 
 /** The emoji a bot's composer offers: the everyday ones of a messaging app, no search and no skin tones. */
@@ -30,7 +30,7 @@ export function useDismiss(open: boolean, close: () => void, root: RefObject<HTM
 }
 
 /** Arrow keys, Home and End move the focus between a popover grid's buttons, `columns` to a row. */
-export function moveFocus(event: KeyboardEvent<HTMLElement>, columns: number): void {
+export function moveFocus(event: ReactKeyboardEvent<HTMLElement>, columns: number): void {
   const step = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -columns, ArrowDown: columns }[event.key]
   const items = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('button')]
   const at = items.indexOf(document.activeElement as HTMLButtonElement)
