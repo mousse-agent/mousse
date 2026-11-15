@@ -191,7 +191,7 @@ describe('the transcript', () => {
     expect(transcript().querySelector('[data-message-id="a1"] .bot-markdown')?.textContent).toBe('I need two things.')
   })
 
-  it('work it started is a 👍 and a quiet line, a note a "Noted" receipt; what their chips said stays on them, and in the steps', async () => {
+  it('work it started is a 👍 and a quiet line, a note a "Noted" receipt; a reply with words stays a message, never in a tooltip', async () => {
     const opus = 'Opus 5.5 on Claude Code, high reasoning, for this work only'
     fake.chats.inbox = [
       message(1, { id: 'o1', author: 'owner', text: 'run some command pls' }),
@@ -200,20 +200,27 @@ describe('the transcript', () => {
       message(4, { id: 'b2', text: 'I’ll use PC Part Picker from here on.', chips: [{ icon: 'think', text: 'noted', title: 'For SSD search' }] }),
       message(5, { id: 'o3', author: 'owner', text: 'And the weather?' }),
       // A reply that says more stays a message, with the line for its work before it, and its chip in its steps.
-      message(6, { id: 'b3', text: 'Rain at 4. I also started a forecast check:\n\nit runs hourly.', replyTo: { id: 'o3', author: 'owner', text: 'And the weather?' }, chips: [{ icon: 'think', text: 'started', highlight: 'Forecast' }] })
+      message(6, { id: 'b3', text: 'Rain at 4. I also started a forecast check:\n\nit runs hourly.', replyTo: { id: 'o3', author: 'owner', text: 'And the weather?' }, chips: [{ icon: 'think', text: 'started', highlight: 'Forecast' }] }),
+      message(7, { id: 'o4', author: 'owner', text: 'Check the backups' }),
+      // A start with no words at all leaves no empty bubble.
+      message(8, { id: 'b4', text: '', chips: [{ icon: 'think', text: 'started', highlight: 'Backup check' }] })
     ]
     await open()
     const log = transcript()
-    expect(log.querySelector('[data-message-id="b1"], [data-message-id="b2"]')).toBeNull()
+    // The replies' words show as messages; the 👍 only says who reacted.
+    expect(log.querySelector('[data-message-id="b1"]')?.textContent).toContain('On it, I’ll text you when it’s done.')
+    expect(log.querySelector('[data-message-id="b2"]')?.textContent).toContain('I’ll use PC Part Picker from here on.')
+    expect(log.querySelector('[data-message-id="b4"]')).toBeNull()
     expect(log.querySelector('[data-message-id="o1"] .bot-reaction')?.textContent).toBe('👍')
-    // The reply's words and the model the work runs on stay on the mark and the line, on hover.
-    expect(log.querySelector('[data-message-id="o1"] .bot-reaction')?.getAttribute('title')).toBe(`On it, I’ll text you when it’s done.\n${opus}`)
+    expect(log.querySelector('[data-message-id="o1"] .bot-reaction')?.getAttribute('title')).toBe('Inbox helper reacted')
+    expect(log.querySelector('[data-message-id="o4"] .bot-reaction')?.getAttribute('title')).toBe('Inbox helper reacted')
+    // What the chips said (the model the work runs on, the job a note is for) stays on what stands in for them.
     expect(log.querySelector('[data-message-id="o2"] .bot-receipt')?.textContent).toBe('Noted')
-    expect(log.querySelector('[data-message-id="o2"] .bot-receipt')?.getAttribute('title')).toBe('I’ll use PC Part Picker from here on.\nFor SSD search')
+    expect(log.querySelector('[data-message-id="o2"] .bot-receipt')?.getAttribute('title')).toBe('For SSD search')
     expect(log.querySelector('[data-message-id="o2"] .bot-reaction')).toBeNull()
     const lines = [...log.querySelectorAll('.bot-system-line')]
-    expect(lines.map((line) => line.textContent)).toEqual(['Inbox helper started System check', 'Inbox helper started Forecast'])
-    expect(lines[0]!.getAttribute('title')).toBe(`On it, I’ll text you when it’s done.\n${opus}`)
+    expect(lines.map((line) => line.textContent)).toEqual(['Inbox helper started System check', 'Inbox helper started Forecast', 'Inbox helper started Backup check'])
+    expect(lines[0]!.getAttribute('title')).toBe(opus)
     // No plumbing words on what stands in for the chips.
     expect(log.textContent).not.toMatch(/passed to work|the run|Passed on/)
     expect(log.querySelector('[data-message-id="o3"] .bot-reaction')?.textContent).toBe('👍')
@@ -415,53 +422,82 @@ describe('the transcript', () => {
     expect(codes.map((code) => [code.textContent, code.classList.contains('is-whole')])).toEqual([['ssd-shortlist.md', true], ['Get-PhysicalDisk | Select-Object FriendlyName, MediaType, Size', false]])
   })
 
-  it('the owner reacts to a bot message: six quick emoji and +, one reaction shown on the bubble, the same again or its badge removes it', async () => {
+  it('the owner reacts to a bot message: one button opens six quick emoji and +, one reaction shown on the bubble, the same again or its badge removes it', async () => {
     fake.chats.inbox = [message(1, { id: 'b1', text: 'Here are three SSDs.' }), message(2, { id: 'o1', author: 'owner', text: 'Thanks' })]
     await open()
     const reply = () => transcript().querySelector<HTMLElement>('[data-message-id="b1"]')!
     const bar = () => reply().querySelector<HTMLElement>('[role="toolbar"]')!
+    const menu = () => bar().querySelector<HTMLElement>('[role="menu"]')
+    const add = () => button('Add reaction', bar())!
     const badge = () => reply().querySelector<HTMLButtonElement>('.bot-bubble > .bot-reaction')
+    const react = async (label: string) => { await click(add()); await click(button(label, menu()!)) }
     expect(bar().getAttribute('aria-label')).toBe('React to this message')
-    expect([...bar().querySelectorAll('button')].map((choice) => choice.getAttribute('aria-label'))).toEqual(['React 👍', 'React ❤️', 'React 😂', 'React 😮', 'React 😢', 'React 🙏', 'More reactions'])
+    // The bar holds one button; the emoji are in its popup, closed until it is pressed.
+    expect([...bar().querySelectorAll('button')].map((choice) => choice.getAttribute('aria-label'))).toEqual(['Add reaction'])
+    expect(menu()).toBeNull()
     // The owner's own messages take none.
     expect(transcript().querySelector('[data-message-id="o1"] [role="toolbar"]')).toBeNull()
 
-    await click(button('React ❤️', bar()))
+    await click(add())
+    expect(add().getAttribute('aria-expanded')).toBe('true')
+    expect(menu()?.getAttribute('aria-label')).toBe('Reactions')
+    expect([...menu()!.querySelectorAll('button')].map((choice) => choice.getAttribute('aria-label'))).toEqual(['React 👍', 'React ❤️', 'React 😂', 'React 😮', 'React 😢', 'React 🙏', 'More reactions'])
+    // By keyboard: the focus is on the first emoji, the arrows move it, Escape closes and puts it back on the button.
+    expect(document.activeElement?.getAttribute('aria-label')).toBe('React 👍')
+    await act(async () => { document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })) })
+    expect(document.activeElement?.getAttribute('aria-label')).toBe('React ❤️')
+    await act(async () => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
+    expect(menu()).toBeNull()
+    expect(document.activeElement).toBe(add())
+    expect(fake.calls.some((call) => call[0] === 'react')).toBe(false)
+    // A press outside closes it too.
+    await click(add())
+    await act(async () => { document.body.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true })) })
+    expect(menu()).toBeNull()
+    expect(add().getAttribute('aria-expanded')).toBe('false')
+
+    await react('React ❤️')
     expect(fake.calls).toContainEqual(['react', 'inbox', 'b1', '❤️'])
     expect(badge()?.textContent).toBe('❤️')
+    expect(menu()).toBeNull()
     // A pick puts the bar away: the focus is on the bubble, not on a button that would hold the bar open, and the bar
     // stays away while the pointer stays; leaving the message, or tabbing back into the bar, brings it back.
     expect(document.activeElement).toBe(reply().querySelector('.bot-bubble'))
     expect(reply().classList.contains('is-react-quiet')).toBe(true)
     await act(async () => { reply().dispatchEvent(new MouseEvent('mouseout', { bubbles: true, relatedTarget: document.body })) })
     expect(reply().classList.contains('is-react-quiet')).toBe(false)
-    await click(button('React 😂', bar()))
+    await react('React 😂')
     expect(reply().classList.contains('is-react-quiet')).toBe(true)
-    await act(async () => { button('React 👍', bar())!.focus() })
+    await act(async () => { add().focus() })
     expect(reply().classList.contains('is-react-quiet')).toBe(false)
-    await click(button('React ❤️', bar()))
-    expect(button('Remove your reaction ❤️', bar())?.getAttribute('aria-pressed')).toBe('true')
+    await react('React ❤️')
+    // Opened again, the reaction there now is marked and has the focus.
+    await click(add())
+    expect(button('Remove your reaction ❤️', menu()!)?.getAttribute('aria-checked')).toBe('true')
+    expect(document.activeElement?.getAttribute('aria-label')).toBe('Remove your reaction ❤️')
     // Another replaces it: one reaction.
-    await click(button('React 👍', bar()))
+    await click(button('React 👍', menu()!))
     expect(reply().querySelectorAll('.bot-reaction')).toHaveLength(1)
     expect(badge()?.textContent).toBe('👍')
     // The same one again removes it.
-    await click(button('Remove your reaction 👍', bar()))
+    await react('Remove your reaction 👍')
     expect(fake.calls.at(-1)).toEqual(['react', 'inbox', 'b1', null])
     expect(badge()).toBeNull()
 
-    // + opens the composer's grid; a pick sets it, and the badge takes it away again.
-    await click(button('More reactions', bar()))
-    await click(button('🔥', reply().querySelector('.bot-react-grid')!))
+    // + opens the composer's grid in its place; a pick sets it, and the badge takes it away again.
+    await click(add())
+    await click(button('More reactions', menu()!))
+    expect(menu()?.querySelectorAll('button').length).toBeGreaterThan(7)
+    await click(button('🔥', menu()!))
     expect(badge()?.textContent).toBe('🔥')
-    expect(reply().querySelector('.bot-react-grid')).toBeNull()
+    expect(menu()).toBeNull()
     await click(badge())
     expect(fake.calls.at(-1)).toEqual(['react', 'inbox', 'b1', null])
     expect(badge()).toBeNull()
 
     // Refused by the service: shown at once, then put back as it was, with why above the composer.
     vi.mocked(fake.client.react).mockRejectedValueOnce(new Error('This bot has no such message.'))
-    await click(button('React 😮', bar()))
+    await react('React 😮')
     await settle()
     expect(badge()).toBeNull()
     expect(composerError()?.textContent).toBe('This bot has no such message.')
@@ -480,8 +516,9 @@ describe('the transcript', () => {
     const refusals: Array<(error: Error) => void> = []
     const onTheWay = () => new Promise<never>((_, reject) => { refusals.push(reject) })
     vi.mocked(fake.client.react).mockImplementationOnce(onTheWay).mockImplementationOnce(onTheWay)
-    await click(button('React 👍', bar()!))
-    await click(button('React 😂', bar()!))
+    const react = async (label: string) => { await click(button('Add reaction', bar()!)); await click(button(label, bar()!.querySelector('[role="menu"]')!)) }
+    await react('React 👍')
+    await react('React 😂')
     expect(badge()?.textContent).toBe('😂')
     await act(async () => { refusals[0]!(new Error('Busy.')) })
     expect(badge()?.textContent).toBe('😂')
@@ -491,7 +528,7 @@ describe('the transcript', () => {
     // An older service has no reactions: the pick is put back, the bar goes, and nothing is shown as an error.
     await act(async () => { useBotsStore.setState({ error: null, errorBotId: null }) })
     vi.mocked(fake.client.react).mockRejectedValueOnce(Object.assign(new Error('Domain method is unavailable'), { code: 'method_not_available' }))
-    await click(button('React 👍', bar()!))
+    await react('React 👍')
     await settle()
     expect(badge()?.textContent).toBe('❤️')
     expect(bar()).toBeNull()
@@ -733,7 +770,7 @@ describe('what renders again', () => {
 })
 
 describe('the composer', () => {
-  it('is the thread composer with emoji, attach, dictation and send, and no model, context, permission, commands or skills', async () => {
+  it('is the thread composer with emoji, attach, dictation and send, and no model, context, permission, thread commands or skills', async () => {
     await open()
     const form = composer()
     expect(form.querySelectorAll('textarea')).toHaveLength(1)
@@ -742,11 +779,148 @@ describe('the composer', () => {
     expect([...form.querySelectorAll('button')].map((element) => element.getAttribute('aria-label'))).toEqual(['Emoji', 'Attach files', 'Dictate', 'Send message'])
     expect(form.querySelector('.composer-run-controls, .composer-model-btn, .composer-context-anchor, .composer-permission-chip')).toBeNull()
     expect(button('Send message')?.disabled).toBe(true)
-    // Neither `/` commands nor `@` skills open a list.
-    for (const text of ['/', '/c', '/skills', '@']) {
+    // A thread's `/` commands and `@` skills open no list; `/` opens the bot's own commands (below).
+    for (const text of ['/skills', '/compact', '@']) {
       await type(box(), text)
       expect(host.querySelector('#composer-command-suggestions')).toBeNull()
     }
+  })
+
+  describe('/ commands', () => {
+    const list = () => host.querySelector('#composer-command-suggestions')
+    const rows = () => [...(list()?.querySelectorAll('[role="option"]') ?? [])].map((row) => row.textContent)
+    const notes = () => [...transcript().querySelectorAll('.bot-system-line.is-note')].map((line) => line.textContent)
+    const dialog = () => host.querySelector<HTMLElement>('[role="dialog"]')
+
+    it('a slash opens the commands, each with what it does; typing narrows them, arrows move, Escape closes', async () => {
+      await open()
+      await type(box(), '/')
+      expect(rows()).toContain('/clearWipe the chat')
+      expect(rows()).toHaveLength(10)
+      await type(box(), '/st')
+      expect(rows()).toEqual(['/stopStop all running work', '/statusShow work, threads and schedules'])
+      expect(list()!.querySelector('[aria-selected="true"]')?.textContent).toContain('/stop')
+      await press('ArrowDown')
+      expect(list()!.querySelector('[aria-selected="true"]')?.textContent).toContain('/status')
+      // Tab fills the command in; it does not run it.
+      await press('Tab')
+      expect(box().value).toBe('/status')
+      expect(fake.calls.some(([name]) => name === 'get')).toBe(false)
+      await press('Escape')
+      expect(list()).toBeNull()
+    })
+
+    it('runs /clear in Mousse: the bot is sent nothing, the chat empties and a line says so', async () => {
+      fake.chats.inbox = [message(1, { author: 'owner', text: 'Hi' }), message(2, { text: 'Hello!' })]
+      await open()
+      await settle()
+      await type(box(), '/cl')
+      // Enter on a command not typed in full fills it in; a second Enter runs it.
+      await press('Enter')
+      expect(box().value).toBe('/clear')
+      await press('Enter')
+      await settle()
+      expect(fake.client.send).not.toHaveBeenCalled()
+      expect(fake.client.clearChat).toHaveBeenCalledWith('inbox')
+      expect(transcript().querySelectorAll('.bot-you, .bot-message')).toHaveLength(0)
+      expect(notes()).toEqual(['Chat cleared.'])
+      expect(box().value).toBe('')
+    })
+
+    it('an unknown command shows a short error and is not sent; a path at the start of a message is sent as written', async () => {
+      await open()
+      await type(box(), '/xyz please')
+      await press('Enter')
+      await settle()
+      expect(fake.client.send).not.toHaveBeenCalled()
+      expect(transcript().querySelector('.bot-system-line.is-error')?.textContent).toBe("/xyz isn't a command. Type / to see them.")
+      await type(box(), '/Users/me/notes.txt is broken')
+      await press('Enter')
+      await settle()
+      expect(vi.mocked(fake.client.send).mock.calls.map((call) => call[1])).toEqual(['/Users/me/notes.txt is broken'])
+    })
+
+    it('/stop stops the chat turn, every piece of work and every background command', async () => {
+      await open(summary('inbox', { name: 'Inbox helper', state: 'working', chat: { activationId: 'c1' }, work: [{ id: 'w1', title: 'Search', status: 'running', startedAt: AT }], watchers: [{ id: 'x1', title: 'Watch', command: 'tail', startedAt: AT, until: AT }] }))
+      await type(box(), '/stop')
+      await press('Enter')
+      await settle()
+      expect(fake.client.stop).toHaveBeenCalledWith('inbox')
+      expect(vi.mocked(fake.client.stopWork).mock.calls.map((call) => call[1]).sort()).toEqual(['w1', 'x1'])
+      expect(fake.client.send).not.toHaveBeenCalled()
+      expect(notes()).toEqual(['Stopped 3 things.'])
+    })
+
+    it('/status shows the work and the schedules from the app, /pause and /resume switch the schedules', async () => {
+      fake.details.inbox = { summary: inbox, permissions: [], runs: [{ id: 's1', label: 'every weekday · 09:00', kind: 'schedule' }] }
+      await open()
+      await type(box(), '/status')
+      await press('Enter')
+      await settle()
+      expect(notes()).toEqual(['Work: none\nSchedules: every weekday · 09:00'])
+      await type(box(), '/pause')
+      await press('Enter')
+      await settle()
+      expect(fake.client.pause).toHaveBeenCalledWith('inbox')
+      await type(box(), '/resume')
+      await press('Enter')
+      await settle()
+      expect(fake.client.resume).toHaveBeenCalledWith('inbox')
+      expect(notes().slice(1)).toEqual(['Paused: schedules and wake-ups are off.', 'Resumed.'])
+      expect(fake.client.send).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      ['/forget', 'Wipe memory', ['inbox', undefined], 'Memory wiped: 0 entries.'],
+      ['/forget history', 'Wipe history', ['inbox', 'saved'], 'Chat history and run notes wiped; memory kept.']
+    ])('%s asks first: Cancel leaves everything, the confirm wipes', async (command, action, args, line) => {
+      await open()
+      await type(box(), command)
+      await press('Enter')
+      await settle()
+      expect(dialog()).not.toBeNull()
+      await click(button('Cancel', dialog()!))
+      expect(dialog()).toBeNull()
+      expect(fake.client.wipeMemory).not.toHaveBeenCalled()
+      await type(box(), command)
+      await press('Enter')
+      await settle()
+      await click(button(action, dialog()!))
+      await settle()
+      expect(fake.client.wipeMemory).toHaveBeenCalledWith(...args)
+      expect(notes()).toEqual([line])
+      expect(fake.client.send).not.toHaveBeenCalled()
+    })
+
+    it('/reset asks first, then starts the bot fresh', async () => {
+      await open()
+      await type(box(), '/reset')
+      await press('Enter')
+      await settle()
+      await click(button('Reset', dialog()!))
+      await settle()
+      expect(fake.client.reset).toHaveBeenCalledWith('inbox')
+      expect(notes()).toEqual(['Fresh start: chat, memory, schedules and reminders wiped.'])
+    })
+
+    it('/model offers the slots, then the models; a custom slot takes everything after the model as its description', async () => {
+      const providers = [{ id: 'codex' as const, instanceId: 'openai-codex', label: 'Codex', models: [{ id: 'gpt-6.1-sol', label: 'GPT 6.1 Sol' }] }]
+      vi.mocked(fake.client.model).mockImplementation(async () => ({ model: null, models: [], computer: 'this_computer', computers: [], providers, slots: { talk: null, light: null, medium: null, hard: null }, custom: [] }))
+      await open()
+      await type(box(), '/model ')
+      await settle()
+      expect(rows().map((row) => row?.split(/[A-Z]/)[0])).toEqual(['talk', 'work', 'light', 'medium', 'hard', 'images'])
+      await type(box(), '/model iosdev ')
+      expect(rows()).toEqual(['openai-codex:gpt-6.1-solGPT 6.1 Sol · Codex'])
+      await press('Enter')
+      expect(box().value).toBe('/model iosdev openai-codex:gpt-6.1-sol ')
+      await type(box(), `${box().value}iOS apps, Swift, Xcode`)
+      await press('Enter')
+      await settle()
+      expect(fake.client.setCustomSlot).toHaveBeenCalledWith('inbox', 'iosdev', { instanceId: 'openai-codex', model: 'gpt-6.1-sol' }, 'iOS apps, Swift, Xcode')
+      expect(notes()).toEqual(['iosdev now runs on GPT 6.1 Sol · Codex.'])
+      expect(fake.client.send).not.toHaveBeenCalled()
+    })
   })
 
   it('Emoji opens a small grid; a pick goes in at the caret and the grid closes', async () => {
@@ -1235,6 +1409,26 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
       expect(presence().textContent).toBe('free')
       await click(presence())
       expect(rows().map(([title]) => title)).toEqual(['Broken', 'Old run'])
+    })
+
+    it('a thread it starts while the bot list is being read shows in the open chat without leaving it', async () => {
+      const ended = threads.filter((item) => item.status === 'done')
+      await open({ ...inbox, threads: ended })
+      // A change (the bot's turn going on) asks for the list; the service reads it before the bot starts the thread.
+      let release!: () => void
+      vi.mocked(fake.client.list).mockImplementationOnce(() => {
+        const before = fake.bots.map((bot) => ({ ...bot }))
+        return new Promise((resolve) => { release = () => resolve(before) })
+      })
+      await act(async () => fake.emit.changed('inbox'))
+      // The bot starts a thread, and the service says so while that list is still on its way.
+      fake.bots = [{ ...fake.bots[0]!, state: 'working', stateText: 'Managing Fix login', threads: [thread('t9', 'Fix login', 'running', 0), ...ended] }]
+      await act(async () => fake.emit.changed('inbox'))
+      await act(async () => release())
+      await settle()
+      expect(presence().textContent).toBe('Managing Fix login')
+      await click(presence())
+      expect(rows()[0]).toEqual(['Fix login', 'working', 'working'])
     })
   })
 

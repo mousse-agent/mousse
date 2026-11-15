@@ -12,6 +12,7 @@ import { RunEngine } from '../src/mms/run/RunEngine'
 import { RunStore } from '../src/mms/run/RunStore'
 import { readUsageLimit } from '../src/mms/orchestrator/providerErrors'
 import { parseModelCatalog, type ModelCatalog } from '../src/shared/modelCatalog'
+import { EMPTY_PREFS, modelsWithPrefs } from '../src/mms/harness/catalog'
 
 /** No catalog models: a test that checks older models passes its own made-up catalog. */
 const NO_CATALOG: ModelCatalog = { format: 1, revision: 0, models: [] }
@@ -1067,6 +1068,21 @@ describe('Claude reasoning levels', () => {
     expect(captured[0].effort).toBeUndefined()
   })
 
+  it('offers Fast on the models Claude Code marks supportsFastMode, through to the instance\'s model list', () => {
+    const listed = claudeModelOptions([{ ...opus, supportedEffortLevels: [...opus.supportedEffortLevels], supportsFastMode: true }, { ...haiku, supportedEffortLevels: [...haiku.supportedEffortLevels] }])
+    expect(modelsWithPrefs(listed, EMPTY_PREFS).map((model) => [model.id, model.capabilities.speeds])).toEqual([['opus', ['fast']], ['haiku', undefined]])
+  })
+
+  it('runs a Fast selection with Claude Code\'s fastMode setting on the model and level chosen', async () => {
+    const captured: Options[] = []
+    const { service, home } = fixture(({ options }) => { captured.push(options); return fakeQuery([result]) }, true, undefined, [{ id: 'opus', label: 'Opus 5.5', efforts: ['low', 'high'], speeds: ['fast'] }])
+    await service.chat({ ...chatInput(home), model: 'opus:fast:high' })
+    await service.chat({ ...chatInput(home), threadId: 'other-thread', model: 'opus:high' })
+    expect(captured[0]).toMatchObject({ model: 'opus', effort: 'high', settings: { fastMode: true } })
+    expect(captured[1]).toMatchObject({ model: 'opus', effort: 'high' })
+    expect(captured[1].settings?.fastMode).toBeUndefined()
+  })
+
   it('runs a saved level the model does not list at the model\'s default', async () => {
     const captured: Options[] = []
     const { service, home } = fixture(({ options }) => { captured.push(options); return fakeQuery([result]) }, true, undefined, [{ id: 'haiku', label: 'Haiku 5.5', efforts: ['low', 'medium', 'high'] }])
@@ -1096,7 +1112,7 @@ describe('older Claude models', () => {
     ]
   })
   const live = { value: 'ember', resolvedModel: 'ember-live[1m]', displayName: 'Ember', description: 'Ember 9 · test model' }
-  type Behaviour = { refuse?: true; fail?: true; applied?: string | null; effort?: string; hang?: true }
+  type Behaviour = { refuse?: true; fail?: true; applied?: string | null; effort?: string; hang?: true; ultracode?: true }
   /** An idle query whose `setModel` and `get_settings` act per model as `behaviour` says. */
   function olderQuery(behaviour: Record<string, Behaviour>, listed: unknown[] = [live]) {
     let current = 'ember'
@@ -1109,7 +1125,7 @@ describe('older Claude models', () => {
       const acting = behaviour[current]
       if (acting?.hang) return new Promise(() => {})
       const model = acting?.applied === undefined ? current : acting.applied
-      return { applied: { ...(model === null ? {} : { model }), ...(acting?.effort ? { effort: acting.effort } : {}) } }
+      return { applied: { ...(model === null ? {} : { model }), ...(acting?.effort ? { effort: acting.effort } : {}), ...(acting?.ultracode ? { ultracodeAvailable: true } : {}) } }
     })
     const query = Object.assign(fakeQuery(), { supportedModels: vi.fn(async () => listed), setModel, getSettings }) as unknown as Query
     return { query, setModel, close: (query as unknown as { close: ReturnType<typeof vi.fn> }).close }
@@ -1140,6 +1156,17 @@ describe('older Claude models', () => {
       'ember-old-20290101': { outcome: 'runs' }
     })
     expect(first.close).toHaveBeenCalledOnce()
+  })
+
+  it('offers Ultracode on a model the check found when Claude Code says the model can run it', async () => {
+    const check = olderQuery({ ...standard, 'ember-runs': { effort: 'high', ultracode: true } })
+    const { service, home } = fixture(() => check.query, true, undefined, undefined, { modelCatalog: () => catalog })
+    await service.refreshModels(home)
+    await service.olderCheck
+    const runs = service.llmProvider()?.models.find((model) => model.id === 'ember-runs')
+    expect(runs?.efforts).toEqual(['low', 'high', 'ultracode'])
+    expect(runs?.effortDescriptions?.ultracode).toBeTruthy()
+    expect(service.llmProvider()?.models.find((model) => model.id === 'ember-old-20290101')?.efforts).toBeUndefined()
   })
 
   it('checks again only the models left unknown, until Claude Code or the account changes', async () => {

@@ -618,9 +618,9 @@ describe('initialize repository', () => {
     expect(canInitRepository({ ...input, status: null })).toBe(false)
   })
 
-  it('is not offered for a folder that does not exist, which reads as not found', () => {
+  it('is offered for a folder that is gone too (a removed worktree), which reads as not found', () => {
     const missing = { ...input, status: status({ isRepo: false, branch: null, missing: true }) }
-    expect(canInitRepository(missing)).toBe(false)
+    expect(canInitRepository(missing)).toBe(true)
     expect(gitCollapsedLabel(missing)).toBe('Folder not found')
     expect(gitCollapsedLabel(input)).toBe('Not a repository')
   })
@@ -757,10 +757,10 @@ describe('git section actions markup', () => {
         canInitialize
       }))
 
-    it('keeps the quiet line and adds an enabled Initialize repository button', () => {
+    it('keeps the quiet line and adds an enabled Initialize Git button', () => {
       const html = renderCollapsed(true)
       expect(html).toContain('side-card-git-collapsed">Not a repository<')
-      expect(html).toMatch(/<button[^>]*class="side-card-git-init"(?![^>]*disabled)[^>]*>Initialize repository</)
+      expect(html).toMatch(/<button[^>]*class="side-card-git-init"(?![^>]*disabled)[^>]*>Initialize Git</)
     })
 
     it('shows no button when the section is not asked to offer one', () => {

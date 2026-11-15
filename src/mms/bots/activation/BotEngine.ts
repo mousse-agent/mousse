@@ -42,11 +42,13 @@ import {
   BOT_DEPTHS,
   BOT_MODEL_SLOT_KEYS,
   ENDED_ACTIVATION_STATUSES,
+  MAX_BOT_CUSTOM_SLOTS,
   MAX_BOT_SCHEDULES,
   MAX_QUEUED_ACTIVATIONS,
   type BotAcknowledgement,
   type BotActivationSummary,
   type BotActivationTrigger,
+  type BotCustomSlot,
   type BotOwnerTurn,
   type BotDefinition,
   type BotLane,
@@ -65,12 +67,12 @@ import {
 } from '../../../shared/bots/personal/definition'
 import { addedPermissions, intersectManifest, manifestSubset, narrowManifest } from '../../../shared/bots/personal/manifest'
 import { BOT_COMPUTER_OPEN, BOT_COMPUTER_SHUT, limitCutLead, notOnThisComputerText, stoppedForLimitText, switchedOff, WHAT_TO_ASK_TEXT, withinComputerLimit, type BotComputerLimit, type BotComputerSwitch } from '../../../shared/bots/personal/computerLimit'
-import { allPinned, copyPick, imagePickOf, isPinned, limitFamilyOf, limitOnPick, pickProblemText, plainLabel, rowName, samePick, samePickTarget, sameStoredPick, slotsOf, slotsWith, startDepthOf, stuckRowsOf, turnModelOf, UNPICKED_SLOTS, withImagePick, withSlots, type BotPickMiss, type BotStuckEntry, type BotTurnModel } from '../../../shared/bots/personal/modelSlots'
+import { allPinned, copyPick, customSlotsOf, imagePickOf, isPinned, limitFamilyOf, limitOnPick, pickProblemText, plainLabel, rowName, samePick, samePickTarget, sameStoredPick, slotsOf, slotsWith, startDepthOf, stuckRowsOf, turnModelOf, UNPICKED_SLOTS, withCustomSlot, withImagePick, withSlots, type BotPickMiss, type BotStuckEntry, type BotTurnModel } from '../../../shared/bots/personal/modelSlots'
 import type { BotModelOption } from '../../../shared/bots/personal/methods'
 import { defaultChatInput, defaultWorkLine, lateWorkNote, MAX_NEW_QUESTIONS_PER_DAY, MAX_NUDGES_PER_QUESTION, MAX_OPEN_QUESTIONS_PER_BOT, MAX_OPEN_QUESTIONS_PER_WORK, MAX_QUESTIONS_PER_CHAT_TURN, NUDGE_AGAIN_MS, NUDGE_TEXT, plainChoices, QUESTION_AFTER_ASK_TEXT, QUESTION_ASKED_TEXT, QUESTION_END_TURN_TEXT, QUESTION_ANSWER_FORGOTTEN_TEXT, QUESTION_NOT_OFFERED_TEXT, QUESTION_WORK_ASKED_TEXT, QUESTION_WORK_WAITING_TEXT, questionGoneText, QUESTIONS_ENOUGH_TEXT, waitingQuestionLine, workAnswerLine, type BotQuestionAnswer, type BotQuestionFollow, type BotQuestionSpec } from '../../../shared/bots/personal/questions'
 import { CARD_SHOWN_TEXT, type BotCard } from '../../../shared/bots/personal/cards'
 import { checkedCard, hasReplyCards, keepMousseCard, keepReplyCard } from '../chat/replyCards'
-import { afterQuietHours, inQuietHours, nudgeSlot } from './questionFollowUps'
+import { nudgeSlot } from './questionFollowUps'
 import { BotWatchers, DEFAULT_WATCHER_MINUTES, MAX_WATCHER_COMMAND_CHARS, MAX_WATCHER_MINUTES, MAX_WATCHERS_PER_BOT, watcherMatchProblem, type WatcherEnd, type WatcherSpec, type WatcherView } from '../watchers'
 import { lockedEnv } from '../../harness/env'
 import { DEFAULT_EVENT_WAKE_HOURS, MAX_EVENT_WAKE_HOURS, MAX_WAKE_BRIEF_CHARS, MAX_WAKE_CHAIN, MAX_WAKES_PER_DAY, WAKE_LINE_PREFIX, wakeEventLabel, wakeFiredLabel, wakeInput, type BotWakeEvent, type BotWakeFired } from '../../../shared/bots/personal/wakes'
@@ -193,8 +195,6 @@ export interface BotEngineHost {
   /** Monotonic milliseconds, for measured active time (default: `performance.now`). */
   monotonic?(): number
   setTimer?(fn: () => void, ms: number): { clear(): void }
-  /** The owner's time zone, for the quiet hours of question follow-ups (default: this computer's). */
-  timeZone?(): string | undefined
 
   // -- Bot Phase 1 seams (docs/plans/bot-architecture.md §7.1); each is optional so a package can land alone.
 
@@ -652,7 +652,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         const live = host.mcp.servers().find((server) => server.serverId === serverId || server.installationId === serverId)
         return live ? { state: 'on', server: live } : { state: 'gone' }
       },
-      // A question's follow-up counts from when its bubble is shown, and never falls in the owner's quiet hours.
+      // A question's follow-up counts from when its bubble is shown.
       followUpAt: (question, shownAt) => this.firstFollowUpAt(question, shownAt)
     })
     this.service = new BotChatService(this, {
@@ -6845,6 +6845,116 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
   }
 
+  // -- The owner's fresh starts (`/clear`, `/forget`, `/reset`) -----------------------------------------------------
+
+  /**
+   * Ends `rows` at once, as a delete does: each is cancelled with its walls in one transaction (with `alsoInTx`), so
+   * none starts in a freed slot meanwhile, and their runs are stopped (bounded). Scratch folders go once nothing runs in
+   * them.
+   */
+  private async endAll(rows: readonly BotActivationRow[], endReason: string, alsoInTx?: () => void): Promise<void> {
+    const ended = this.store.db.transaction(() => {
+      const moved = rows.filter((row) => {
+        if (!this.store.moveActivation(row.id, [row.status], 'cancelled', { endReason })) return false
+        this.store.closeEscalations(row.id, 'cancelled')
+        return true
+      })
+      alsoInTx?.()
+      return moved
+    })
+    for (const row of ended) {
+      this.clearInternetCheck(row.id)
+      this.usageWaits.delete(row.id)
+    }
+    const quiet = await this.stopAndWait(ended)
+    for (const row of ended) {
+      if (quiet || row.status !== 'running') this.cleanup({ ...row, status: 'cancelled' })
+      this.packs.delete(row.id)
+    }
+  }
+
+  /**
+   * `bots.chat.clear` (`/clear`): the chat's turns end (one that waits its turn too), and so does work that waits for the
+   * owner's answer (at a wall, or on its question): its card goes with the chat, so nothing could answer it. Every open
+   * ask and question is withdrawn, and every chat message is deleted. The journal and memory stay, so the bot still
+   * remembers what was said. Other work goes on, and its report is posted into the cleared chat.
+   */
+  async clearChat(botId: string): Promise<void> {
+    this.entry(botId)
+    const asking = new Set(this.store.openAsks(botId).map((ask) => ask.activationId))
+    const waiting = this.store.laneActivations(botId, 'run', [...NOT_ENDED]).filter((row) =>
+      row.status === 'waiting_grant' || (row.status === 'blocked' && (asking.has(row.id) || row.endReason === 'question')))
+    await this.endAll([...this.store.laneActivations(botId, 'chat', [...NOT_ENDED]), ...waiting], 'stopped', () => {
+      this.store.withdrawAsks(botId)
+      this.store.withdrawQuestions(botId)
+    })
+    // Deleted once the turns stopped, so a turn ending meanwhile adds no row to the cleared chat.
+    this.store.deleteMessages(botId)
+    this.changed({ botId })
+    await this.pump(botId)
+  }
+
+  /**
+   * `bots.memory.wipe` (`/forget`): every current entry is forgotten, each as the owner's Forget does one. With
+   * `keep: 'saved'` (`/forget history`) the chat is cleared as `/clear` clears it, and the bot's history goes: its
+   * journal, chat summary, search rows and run notes; the owner's entries and the bot's notes stay. The count of entries
+   * that went.
+   */
+  async wipeMemory(botId: string, keep?: 'saved'): Promise<number> {
+    this.entry(botId)
+    const memory = this.host.memory
+    if (!memory) throw new BotEngineError('bots_unavailable', 'Bot memory is not available in this build.')
+    if (keep !== 'saved') {
+      const forgotten = memory.forgetAll(botId)
+      // Work that waited on a question whose words were forgotten ends now, and says so.
+      this.afterForget()
+      this.changed({ botId })
+      return forgotten
+    }
+    // The chat turn is stopped first, so it copies nothing more into the history once it is gone.
+    await this.clearChat(botId)
+    const removed = memory.wipeHistory(botId)
+    this.changed({ botId })
+    return removed
+  }
+
+  /**
+   * `bots.reset` (`/reset`): a fresh start. Everything of the bot that runs or waits ends (the chat, its work, scheduled
+   * runs, their subagents, its background commands and its messages waiting in the owner's threads); every ask and
+   * question is withdrawn and every reminder and wake cancelled, in one transaction as a delete does. Then its schedules
+   * leave the shared store, its chat is deleted, its memory goes, and the pause, failure count, stuck error and usage
+   * limits are cleared as Resume clears them. Its name, look, permissions, model rows and custom slots stay.
+   */
+  async resetBot(botId: string): Promise<void> {
+    this.entry(botId)
+    await this.endAll(this.store.activationsIn(botId, [...NOT_ENDED]), 'stopped', () => {
+      this.store.withdrawAsks(botId)
+      this.stopWatchersOf(botId)
+      this.store.cancelReminders(botId)
+      this.store.withdrawQuestions(botId)
+    })
+    this.withdrawThreadMessages(botId)
+    // Its schedules in the shared store go before the rest: a reset stopped after this leaves nothing that runs.
+    this.host.schedules?.removeAll(botId)
+    for (const [activationId, wait] of this.usageWaits) if (wait.botId === botId) this.usageWaits.delete(activationId)
+    const limited = Object.values(this.store.registry(botId)?.model?.limits ?? {}).map((limit) => limit.instanceId)
+    this.store.db.transaction(() => {
+      this.store.deleteMessages(botId)
+      this.store.setPaused(botId, null)
+      this.store.setError(botId, null)
+      if (limited.length) this.updateModelStateInTx(botId, (state) => ({ ...state, limits: {} }))
+    })
+    for (const instanceId of new Set(limited)) {
+      try { this.host.models?.clearLimited?.(instanceId) } catch { /* the next limit marks it again */ }
+    }
+    this.host.memory?.reset(botId)
+    this.armDue()
+    this.changed({ botId })
+    try { this.host.schedulesChanged?.() } catch { /* the next tick reads it */ }
+    // A row that can't run is not a pause: it clears when its pick can run again, which is checked now too.
+    await this.recheckStuck(botId).catch(() => {})
+  }
+
   /** `bots.chat.markRead`: the unread count drops to what follows `seq`. */
   markRead(botId: string, seq: number): void {
     this.entry(botId)
@@ -7183,13 +7293,23 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * what it waits behind: the bot's own running pieces and what starts before it, or, when the bot has room but the
    * profile does not, the other bots' work.
    */
-  async startWork(botId: string, from: string, input: { title: string; brief: string; key: string; level?: BotWorkLevel; model?: BotWorkModel }): Promise<BotWorkStarted> {
+  async startWork(botId: string, from: string, input: { title: string; brief: string; key: string; level?: BotWorkLevel; model?: BotWorkModel; slot?: string }): Promise<BotWorkStarted> {
     const brief = input.brief.trim()
     if (!brief) throw new BotEngineError('invalid_params', 'work_start needs a brief.')
     const title = input.title.replace(/\s+/g, ' ').trim().slice(0, MAX_WORK_TITLE_CHARS) || summarise(brief)
+    // A custom slot the owner set up for jobs like this one: it needs no words of the owner's, since the owner made it
+    // for this. One the bot doesn't have starts nothing, and the bot is told which it has.
+    const slot = input.slot?.trim().toLowerCase()
+    if (input.slot !== undefined) {
+      const slots = this.customSlots(botId)
+      if (!slot || !slots.some((entry) => entry.name === slot))
+        throw new BotEngineError('invalid_params', slots.length
+          ? `Your owner has no slot named "${plainLabel(input.slot, 40)}". Their slots: ${slots.map((entry) => entry.name).join(', ')}. Nothing was started.`
+          : 'Your owner has set up no custom slots: leave slot out. Nothing was started.')
+    }
     const replyTo = this.ownerMessageOf(from)
-    // Its level picks its Work row (#673); absent, the bot's standing level.
-    const trigger: Extract<BotActivationTrigger, { kind: 'work' }> = { kind: 'work', input: brief, title, ...(replyTo ? { replyTo } : {}), from, ...(input.level ? { level: input.level } : {}) }
+    // Its level picks its Work row (#673); absent, the bot's standing level. A slot it was routed to comes before its row.
+    const trigger: Extract<BotActivationTrigger, { kind: 'work' }> = { kind: 'work', input: brief, title, ...(replyTo ? { replyTo } : {}), from, ...(input.level ? { level: input.level } : {}), ...(slot ? { slot } : {}) }
     // A model the owner asked for this work alone is its own pick for good, kept on its activation; the work line names
     // it when it is not the row's.
     let own: BotModelOverride | undefined
@@ -7331,7 +7451,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * a pull request merging), as a chat turn no person started (`wake:<id>`). Set from a chat turn only; one set in a
    * wake's own turn is the next in its chain, at most `MAX_WAKE_CHAIN` in a row with no owner's message between them,
    * and a bot sets at most `MAX_WAKES_PER_DAY` in any 24 hours. A wake on an event gives up after `hours` (default a day,
-   * at most a week) and then wakes once anyway, saying why. Its turn waits out the owner's quiet hours.
+   * at most a week) and then wakes once anyway, saying why. Its turn starts when it is due, at any hour.
    */
   async addWake(botId: string, from: string, input: { brief: string; dueAt?: string; event?: BotWakeEvent; hours?: number }): Promise<{ wakeId: string; dueAt: string; label: string }> {
     this.entry(botId)
@@ -7382,7 +7502,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * `watch_start`: a command that runs in the background, from the bot's files folder, in the locked environment (as a
    * Pi bot's commands run), while the bot holds "run commands" here. It ends when it exits, prints a line that matches
    * `match`, or reaches its time limit (default an hour, at most six), and then the bot wakes in its chat with what
-   * happened: it is a wake on a `watcher` event, so the chain, the daily budget and the quiet hours hold. At most
+   * happened: it is a wake on a `watcher` event, so the chain and the daily budget hold. At most
    * `MAX_WATCHERS_PER_BOT` run at once. Its card shows on the turn's reply.
    */
   startWatcher(botId: string, from: string, input: { command: string; brief: string; title?: string; match?: string; minutes?: number }): { watcherId: string; until: string } {
@@ -7474,8 +7594,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * A watcher ended: its wake fires now with how it ended, the matched line and the end of its output (its turn still waits
-   * out the quiet hours). One the bot or the owner stopped fires nothing.
+   * A watcher ended: its wake fires now with how it ended, the matched line and the end of its output. One the bot or the owner stopped fires nothing.
    */
   private watcherEnded(spec: WatcherSpec, end: WatcherEnd, tail: string): void {
     rmSync(join(this.store.directory, 'scratch', `watch-${spec.id}`), { recursive: true, force: true })
@@ -7529,7 +7648,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /**
    * Looks at what each waiting wake on an event waits for, and fires the ones whose event happened, or that can no
    * longer happen: the thread finished, was archived, deleted or went out of the bot's sight; the pull request merged or
-   * was closed. A fired wake is due now (its turn may still wait out the quiet hours). `threadId`: only the wakes on that
+   * was closed. A fired wake is due now. `threadId`: only the wakes on that
    * thread (its run just ended). Every scheduler tick looks at all of them, so one missed while Mousse was off fires.
    */
   async checkWakeEvents(now: Date = new Date(this.now()), only?: { threadId: string }): Promise<void> {
@@ -7666,7 +7785,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // The pass works from a list read before it began: one cancelled or forgotten since is not said or started.
     // Nothing awaits between this read and the work's insert below, so a cancel can't slip in between.
     if (this.store.reminder(reminder.id)?.status !== 'waiting') return
-    if (reminder.wake) return this.deliverWake(this.store.reminder(reminder.id)!, now, late)
+    if (reminder.wake) return this.deliverWake(this.store.reminder(reminder.id)!, late)
     if (reminder.work) {
       try {
         const summary = await this.enqueue(reminder.botId, `reminder:${reminder.id}`, { kind: 'work', input: late ? `${reminder.work.brief}\n\n(This was due at ${clockTime(reminder.dueAt)}; Mousse was off then.)` : reminder.work.brief, title: reminder.work.title, ...(reminder.replyTo ? { replyTo: reminder.replyTo } : {}), from: reminder.id }, 'run')
@@ -7697,18 +7816,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * A wake that is due: in the owner's quiet hours it waits for the morning; otherwise a chat turn of the bot's own
-   * (`wake:<id>`, not the owner's: it can't act on their threads) starts with what the bot wrote for itself and what
-   * happened, after a quiet line in the chat saying why the bot speaks. A wake on an event whose time came first ended
-   * without it, and says so. A bot that is paused, or can't run now, has the wake said as a line instead, so it is never
-   * lost and never retried forever. Marked delivered in the transaction that queues the turn: it wakes once.
+   * A wake that is due, at any hour: a chat turn of the bot's own (`wake:<id>`, not the owner's: it can't act on their
+   * threads) starts with what the bot wrote for itself and what happened, after a quiet line in the chat saying why the
+   * bot speaks. A wake on an event whose time came first ended without it, and says so. A bot that is paused, or can't
+   * run now, has the wake said as a line instead, so it is never lost and never retried forever. Marked delivered in the
+   * transaction that queues the turn: it wakes once.
    */
-  private async deliverWake(wake: BotReminderRow, now: Date, late: boolean): Promise<void> {
-    const zone = this.zone()
-    if (inQuietHours(now.getTime(), zone)) {
-      if (this.store.moveReminder(wake.id, new Date(afterQuietHours(now.getTime(), zone)).toISOString())) this.changed({ botId: wake.botId })
-      return
-    }
+  private async deliverWake(wake: BotReminderRow, late: boolean): Promise<void> {
     const fired: BotWakeFired | null = wake.fired ?? (wake.event ? { kind: 'ended', reason: 'expired' } : null)
     const input = wakeInput({ brief: wake.text, setAt: wake.createdAt, event: wake.event, fired, chain: Math.max(1, wake.chain), clock: clockTime, ...(late && !wake.event ? { late: clockTime(wake.dueAt) } : {}) })
     const paused = Boolean(this.store.registry(wake.botId)?.pausedReason)
@@ -7741,30 +7855,20 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   // survive a restart; only an open question is ever followed up, so one the owner answered or moved on from, or that
   // was withdrawn or forgotten, never is.
 
-  /** The owner's time zone: the quiet hours are theirs. */
-  private zone(): string {
-    return this.host.timeZone?.() || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
-  }
-
-  /** When a question's first follow-up is due, its bubble shown at `shownAt`: after its time, out of the quiet hours. */
+  /** When a question's first follow-up is due, its bubble shown at `shownAt`: the time the bot gave after that. */
   private firstFollowUpAt(question: Pick<BotQuestionRow, 'follow'>, shownAt: string): string | null {
     if (!question.follow) return null
-    return new Date(afterQuietHours(Date.parse(shownAt) + question.follow.afterMs, this.zone())).toISOString()
+    return new Date(Date.parse(shownAt) + question.follow.afterMs).toISOString()
   }
 
   /**
-   * A question whose follow-up is due: in the quiet hours it moves to the morning; otherwise Mousse nudges the owner, or
-   * the bot goes with its default. A bot that is gone, or a question with nothing to follow up, is left be.
+   * A question whose follow-up is due, at any hour: Mousse nudges the owner, or the bot goes with its default. A bot that
+   * is gone, or a question with nothing to follow up, is left be.
    */
   private async followUpQuestion(question: BotQuestionRow, now: Date): Promise<void> {
     const registry = this.store.registry(question.botId)
     if (!registry || registry.deletedAt || !question.follow) {
       this.store.setQuestionNext(question.id, null)
-      return
-    }
-    const morning = afterQuietHours(now.getTime(), this.zone())
-    if (morning > now.getTime()) {
-      this.moveFollowUp(question, morning)
       return
     }
     if (question.follow.kind === 'nudge') this.nudge(question, now)
@@ -7786,8 +7890,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   private nudge(question: BotQuestionRow, now: Date): void {
     const at = now.getTime()
-    const zone = this.zone()
-    const slot = nudgeSlot(at, this.store.nudgeTimes(question.botId, new Date(at - 24 * 60 * 60_000).toISOString()).map((time) => Date.parse(time)), zone)
+    const slot = nudgeSlot(at, this.store.nudgeTimes(question.botId, new Date(at - 24 * 60 * 60_000).toISOString()).map((time) => Date.parse(time)))
     if (slot > at) {
       this.moveFollowUp(question, slot)
       return
@@ -7798,7 +7901,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return
     }
     const count = question.nudges + 1
-    const next = count < MAX_NUDGES_PER_QUESTION ? new Date(afterQuietHours(at + NUDGE_AGAIN_MS, zone)).toISOString() : null
+    const next = count < MAX_NUDGES_PER_QUESTION ? new Date(at + NUDGE_AGAIN_MS).toISOString() : null
     const posted = this.store.db.transaction(() => {
       if (!this.store.recordNudge(question.id, count, next)) return false
       this.chat.post({
@@ -8001,6 +8104,31 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   setImagePick(botId: string, pick: BotModelPick | null): void {
     this.entry(botId)
     this.publishProfile(botId, (next) => ({ ...next, main: withImagePick(next.main, pick) }))
+  }
+
+  /** The owner's custom slots (`/model <name> …`), from the published definition; none when it can't be read. */
+  customSlots(botId: string): BotCustomSlot[] {
+    try {
+      return customSlotsOf(this.published(botId).main)
+    } catch {
+      return []
+    }
+  }
+
+  /**
+   * The owner adds, changes or removes (null) a custom slot: a revision with the same grant, like the other rows. A
+   * changed slot keeps its description when none is given (`undefined`); an empty one takes it away. A new slot beyond
+   * `MAX_BOT_CUSTOM_SLOTS`, and removing one the bot doesn't have, are refused before anything is saved.
+   */
+  setCustomSlot(botId: string, name: string, pick: BotModelPick | null, description?: string): void {
+    this.entry(botId)
+    this.publishProfile(botId, (next) => {
+      const slots = customSlotsOf(next.main)
+      const known = slots.find((slot) => slot.name === name)
+      if (!pick && !known) throw new BotEngineError('invalid_params', `No slot named ${name}.`)
+      if (pick && !known && slots.length >= MAX_BOT_CUSTOM_SLOTS) throw new BotEngineError('invalid_params', `A bot keeps at most ${MAX_BOT_CUSTOM_SLOTS} custom slots. Remove one first.`)
+      return { ...next, main: withCustomSlot(next.main, name, pick, (description ?? known?.description) || undefined) }
+    })
   }
 
   /** The bot's rows, upgraded on read (`slotsOf`): a bot from before rows has its one model on each. */

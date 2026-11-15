@@ -920,6 +920,33 @@ export class BotMemoryStore {
     })
   }
 
+  /**
+   * A fresh start for the bot's memory, in one transaction: every journal row (with its search rows, by trigger) and the
+   * memory state go, but the capture cursors (`cursor:<threadId>`), so capture never copies the bot's threads in again.
+   * `keepSaved` (`bots.memory.wipe` with `keep: 'saved'`): the owner's entries and the bot's notes stay as they are,
+   * forgotten ones as tombstones; only entries that are run notes now go, every version. Without it every entry goes.
+   * Returns how many current entries went. Entries never need the journal rows they came from (`source_seq`).
+   */
+  wipe(botId: string, keepSaved: boolean): number {
+    return this.write(() => {
+      let removed: number
+      if (keepSaved) {
+        // Entries whose newest version is a run note: a run note the owner edited into a note is a note now, and stays.
+        const runNotes = this.all(`SELECT m.id, m.status FROM bot_memories m WHERE m.bot_id = ? AND m.kind = 'run_note'
+          AND m.version = (SELECT MAX(version) FROM bot_memories WHERE bot_id = m.bot_id AND id = m.id)`, botId)
+          .filter((row) => row.status !== 'forgotten').map((row) => row.id as string)
+        removed = runNotes.length
+        for (const id of runNotes) this.run('DELETE FROM bot_memories WHERE bot_id = ? AND id = ?', botId, id)
+      } else {
+        removed = num(this.get("SELECT COUNT(DISTINCT id) AS n FROM bot_memories WHERE bot_id = ? AND status IN ('active','expired')", botId)?.n) ?? 0
+        this.run('DELETE FROM bot_memories WHERE bot_id = ?', botId)
+      }
+      this.run('DELETE FROM bot_journal WHERE bot_id = ?', botId)
+      this.run("DELETE FROM bot_memory_state WHERE bot_id = ? AND substr(key, 1, 7) <> 'cursor:'", botId)
+      return removed
+    })
+  }
+
   /** Every memory version of a bot, in write order (export). */
   allVersions(botId: string): BotMemoryVersion[] {
     return this.all('SELECT * FROM bot_memories WHERE bot_id = ? ORDER BY row_id', botId).map(versionOf)

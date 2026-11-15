@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from 'react'
 import { Smile } from '../../lib/icons'
 
 /** The emoji a bot's composer offers: the everyday ones of a messaging app, no search and no skin tones. */
@@ -29,9 +29,23 @@ export function useDismiss(open: boolean, close: () => void, root: RefObject<HTM
   }, [open, close, root, onEscape])
 }
 
+/** Arrow keys, Home and End move the focus between a popover grid's buttons, `columns` to a row. */
+export function moveFocus(event: ReactKeyboardEvent<HTMLElement>, columns: number): void {
+  const step = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -columns, ArrowDown: columns }[event.key]
+  const items = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('button')]
+  const at = items.indexOf(document.activeElement as HTMLButtonElement)
+  let next: number | undefined
+  if (step !== undefined && at >= 0) next = at + step
+  else if (event.key === 'Home') next = 0
+  else if (event.key === 'End') next = items.length - 1
+  if (next === undefined || next < 0 || next >= items.length) return
+  event.preventDefault()
+  items[next]!.focus()
+}
+
 /** The grid of everyday emoji (`BOT_EMOJI`): the composer's, and a reaction's "+". `chosen` is marked as picked. */
 export function EmojiGrid({ label, chosen, onPick, className }: { label: string; chosen?: string; onPick(emoji: string): void; className?: string }) {
-  return <div className={`bot-emoji-grid${className ? ` ${className}` : ''}`} role="menu" aria-label={label}>
+  return <div className={`bot-emoji-grid${className ? ` ${className}` : ''}`} role="menu" aria-label={label} onKeyDown={(event) => moveFocus(event, 8)}>
     {BOT_EMOJI.map((emoji) => <button key={emoji} type="button" role="menuitemradio" aria-checked={emoji === chosen} aria-label={emoji} onClick={() => onPick(emoji)}>{emoji}</button>)}
   </div>
 }

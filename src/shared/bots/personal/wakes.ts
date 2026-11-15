@@ -109,8 +109,7 @@ export function wakeFiredLabel(fired: BotWakeFired | null): string {
 
 /**
  * The text a wake's chat turn starts with: what the bot wrote for itself, when it set it, and what happened (its fixed
- * fields), framed as Mousse's, never the owner's. `late`: the time it was for, when it is said later (Mousse was off, or
- * the quiet hours held it).
+ * fields), framed as Mousse's, never the owner's. `late`: the time it was for, when it is said later (Mousse was off).
  */
 export function wakeInput(input: { brief: string; setAt: string; event: BotWakeEvent | null; fired: BotWakeFired | null; late?: string; chain: number; clock: (iso: string) => string }): string {
   const lines: string[] = []

@@ -1,4 +1,4 @@
-import type { BotModelPick, BotModelSlotKey, BotModelSlots, BotPickCredential, BotSchedule } from './definition'
+import type { BotCustomSlot, BotModelPick, BotModelSlotKey, BotModelSlots, BotPickCredential, BotSchedule } from './definition'
 import type { BotChatMessage, BotChip, BotDetail, BotSummary } from './chat'
 import type { BotLook } from './look'
 import type { BotPickReason } from './modelSlots'
@@ -142,7 +142,8 @@ export const BOTS_PERSONAL_V2_METHODS = [
  * Methods added after the required Bot UI set (docs/plans/bot-always-free.md, #673): the app calls them when they are
  * there, and an older service that lacks them is still compatible (`guiDaemonCompatibility` lists only the set above).
  */
-export const BOTS_WORK_METHODS = ['bots.work.stop', 'bots.reminders.cancel', 'bots.model.choices', 'bots.model.setSlots', 'bots.model.setImage', 'bots.chat.react', 'bots.questions.answer', 'bots.memory.edit'] as const
+export const BOTS_WORK_METHODS = ['bots.work.stop', 'bots.reminders.cancel', 'bots.model.choices', 'bots.model.setSlots', 'bots.model.setImage', 'bots.chat.react', 'bots.questions.answer', 'bots.memory.edit',
+  'bots.chat.clear', 'bots.memory.wipe', 'bots.reset', 'bots.model.setCustom'] as const
 export type BotsPersonalV2Method = (typeof BOTS_PERSONAL_V2_METHODS)[number] | (typeof BOTS_WORK_METHODS)[number]
 export const BOTS_PERSONAL_V2_CAPABILITY = 'bots.personal.v2'
 
@@ -222,7 +223,7 @@ export interface BotsPersonalV2Api {
    * no `slots` or `providers`, and the app shows its single Model picker. `image` is the Images row (#1088), a pick or
    * null, and `images` today's pictures against the caps; an older service sends neither.
    */
-  'bots.model.get': { params: { botId: string }; result: { model: string | null; slots?: BotShownRows; named?: Partial<Record<BotModelSlotKey, string>>; image?: BotModelPick | null; images?: BotImageUsage } & BotRunsOnChoices }
+  'bots.model.get': { params: { botId: string }; result: { model: string | null; slots?: BotShownRows; named?: Partial<Record<BotModelSlotKey, string>>; image?: BotModelPick | null; images?: BotImageUsage; custom?: BotCustomSlot[] } & BotRunsOnChoices }
   /**
    * What New bot's Runs on offers before the bot exists (#673): the same choices as `bots.model.get`, and `last`, the
    * rows of the owner's newest bot with picks, which a new bot starts from (null where it had none).
@@ -244,6 +245,30 @@ export interface BotsPersonalV2Api {
    * it is not offered), or null, which takes the bot's image tool away from its next turn. A revision with the same grant.
    */
   'bots.model.setImage': { params: { botId: string; pick: BotModelPick | null }; result: { bot: BotSummary } }
+  /**
+   * A custom slot (`BotCustomSlot`, the bot chat's `/model <name> <model> [description]`): `pick`, a model among
+   * `providers` saved with the entry's sign-in now (`model_unavailable` when it is not offered), adds the slot or
+   * replaces its pick and description (left out, the slot keeps its description); null removes it. A base slot's name
+   * or a malformed one is refused (`invalid_params`), as is a 13th slot and removing a slot the bot doesn't have. The
+   * name is taken in lower case. A revision with the same grant.
+   */
+  'bots.model.setCustom': { params: { botId: string; name: string; pick: BotModelPick | null; description?: string }; result: { bot: BotSummary } }
+  /**
+   * Wipes the bot's chat (`/clear`): its turn stops, open asks and questions are withdrawn, and every chat message is
+   * deleted. Its memory and journal stay, so it still remembers what was said.
+   */
+  'bots.chat.clear': { params: { botId: string }; result: Record<string, never> }
+  /**
+   * Wipes the bot's memory (`/forget`): every entry is forgotten, as Forget does one. With `keep: 'saved'`
+   * (`/forget history`): the chat, its history (journal, summary, search) and run notes go, and the owner's entries and
+   * the bot's notes stay. `forgotten`: the entries removed.
+   */
+  'bots.memory.wipe': { params: { botId: string; keep?: 'saved' }; result: { forgotten: number } }
+  /**
+   * A fresh start (`/reset`): everything running stops, and the chat, memory, schedules and reminders are deleted. The
+   * bot's name, look, permissions and models stay.
+   */
+  'bots.reset': { params: { botId: string }; result: { bot: BotSummary } }
   'bots.schedules.remove': { params: { botId: string; scheduleId: string }; result: BotDetail }
   'bots.memory.list': { params: { botId: string; history?: boolean }; result: BotMemoryListing }
   'bots.memory.forget': { params: { botId: string; id: string }; result: BotMemoryForgetResult }

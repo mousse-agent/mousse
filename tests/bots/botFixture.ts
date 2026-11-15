@@ -176,7 +176,10 @@ export function botFixture(): BotFixture {
       edit: (_botId, id) => { throw Object.assign(new Error(`There is no memory entry ${id}.`), { code: 'not_found' }) },
       export: async () => ({ files: [] }),
       reindex: async () => {},
-      purge: async (botId) => { fixture.purged.push(botId) }
+      purge: async (botId) => { fixture.purged.push(botId) },
+      forgetAll: () => 0,
+      wipeHistory: () => 0,
+      reset: () => {}
     },
     clearContext: (threadId) => { fixture.cleared.push(threadId) },
     archiveThread: (threadId) => { fixture.archived.push(threadId) },

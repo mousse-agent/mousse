@@ -2,7 +2,7 @@ import { realpathSync } from 'node:fs'
 import { sep } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { withAppletNames, type BotChatApplet, type BotChatMessage, type BotChip, type BotDetail, type BotSummary } from '../../../shared/bots/personal/chat'
-import { BOT_MODEL_SLOT_KEYS, DEFAULT_BOT_MODEL, ENDED_ACTIVATION_STATUSES, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, type BotDefinition, type BotModelPick, type BotModelSlotKey, type BotModelSlots, type BotSchedule } from '../../../shared/bots/personal/definition'
+import { BOT_BASE_SLOT_NAMES, BOT_MODEL_SLOT_KEYS, DEFAULT_BOT_MODEL, ENDED_ACTIVATION_STATUSES, MAX_BOT_CUSTOM_SLOT_DESCRIPTION, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, type BotCustomSlot, type BotDefinition, type BotModelPick, type BotModelSlotKey, type BotModelSlots, type BotSchedule } from '../../../shared/bots/personal/definition'
 import { normalizeBotLook, type BotLook } from '../../../shared/bots/personal/look'
 import { isSpecialAsk } from '../../../shared/bots/personal/escalation'
 import { plainCards, type BotCard } from '../../../shared/bots/personal/cards'
@@ -11,7 +11,7 @@ import type { BotOwnerTurn } from '../../../shared/bots/personal/definition'
 import type { PermissionMode } from '../../../shared/permissionMode'
 import type { BotMemoryEntry, BotMemoryForgetResult, BotMemoryListing } from '../../../shared/bots/personal/memory'
 import { MAX_BOT_CHAT_PAGE, type BotChatAttachment, type BotImageUsage, type BotModelOption, type BotRunsOnChoices, type BotShownRows } from '../../../shared/bots/personal/methods'
-import { allPinned, isPinned, shownPick, slotsAllOn, UNPICKED_SLOTS, withImagePick, withSlots } from '../../../shared/bots/personal/modelSlots'
+import { allPinned, isCustomSlotName, isPinned, plainLabel, shownPick, slotsAllOn, UNPICKED_SLOTS, withImagePick, withSlots } from '../../../shared/bots/personal/modelSlots'
 import type { BotImageOption } from '../images/BotImageMaker'
 import { botPickProviderOptions, type LlmProviderOption } from '../../../shared/settings'
 import { copyBotAttachments, removeBotAttachments, type SavedBotAttachment } from './attachments'
@@ -653,6 +653,28 @@ export class BotChatService {
     return {}
   }
 
+  /** `bots.chat.clear` (`/clear`): the chat's messages are deleted; memory and the journal stay. */
+  async chatClear(botId: string): Promise<Record<string, never>> {
+    await this.engine.clearChat(botId)
+    return {}
+  }
+
+  /**
+   * `bots.memory.wipe` (`/forget`): every memory entry is forgotten, or with `keep: 'saved'` the chat, its history and
+   * the run notes go and the owner's entries and the bot's notes stay.
+   */
+  async memoryWipe(botId: string, keep?: 'saved'): Promise<{ forgotten: number }> {
+    this.memoryFor(botId)
+    return { forgotten: await this.engine.wipeMemory(botId, keep) }
+  }
+
+  /** `bots.reset` (`/reset`): a fresh start; the bot's name, look, permissions and models stay. */
+  async reset(botId: string): Promise<{ bot: BotSummary }> {
+    this.memoryFor(botId)
+    await this.engine.resetBot(botId)
+    return { bot: this.summaryOf(botId) }
+  }
+
   /** `bots.work.stop`: one piece of work (or a scheduled run) of the bot stops; the chat goes on. */
   async workStop(botId: string, workId: string): Promise<{ stopped: boolean }> {
     this.engine.definitionOf(botId)
@@ -820,7 +842,7 @@ export class BotChatService {
    * on the computer that holds it, so the others are listed but cannot be picked (`unavailable` says why), and an
    * offline one says so.
    */
-  async modelGet(botId: string): Promise<{ model: string | null; slots: BotShownRows; named?: Partial<Record<BotModelSlotKey, string>>; image?: BotModelPick | null; images?: BotImageUsage } & BotRunsOnChoices> {
+  async modelGet(botId: string): Promise<{ model: string | null; slots: BotShownRows; named?: Partial<Record<BotModelSlotKey, string>>; image?: BotModelPick | null; images?: BotImageUsage; custom: BotCustomSlot[] } & BotRunsOnChoices> {
     this.engine.definitionOf(botId)
     const choices = await this.modelChoices()
     // Read after the choices: a change the bot made meanwhile shows.
@@ -831,7 +853,9 @@ export class BotChatService {
     })) as Partial<Record<BotModelSlotKey, string>>
     const { last: _last, ...offered } = choices
     const images = this.options.images ? { image: shownPick(this.engine.imagePick(botId)), images: this.options.images.usage(botId) } : {}
-    return { model: slots.talk?.model ?? null, slots: shownRows(slots), ...(Object.keys(named).length ? { named } : {}), ...images, ...offered }
+    // The custom slots, their picks shown as the rows' are: never what the sign-in was.
+    const custom = this.engine.customSlots(botId).map((slot) => ({ name: slot.name, pick: shownPick(slot.pick)!, ...(slot.description ? { description: slot.description } : {}) }))
+    return { model: slots.talk?.model ?? null, slots: shownRows(slots), ...(Object.keys(named).length ? { named } : {}), ...images, custom, ...offered }
   }
 
   /**
@@ -957,6 +981,28 @@ export class BotChatService {
     if (!this.options.images) throw new BotEngineError('bots_unavailable', 'Pictures are not available in this build.')
     const saved = pick ? stampedImagePick(await this.options.images.options().catch(() => []), pick) : null
     this.engine.setImagePick(botId, saved)
+    return { bot: this.summaryOf(botId) }
+  }
+
+  /**
+   * `bots.model.setCustom` (`/model <name> <model> [description]`): a custom slot added or changed, its pick offered now
+   * and saved with its entry's sign-in now, or removed (null). The name is taken in lower case; a base slot's name, a
+   * malformed name or description, a 13th slot and removing a slot the bot doesn't have are refused in plain words.
+   */
+  async modelCustomSet(botId: string, name: string, pick: BotModelPick | null, description?: string): Promise<{ bot: BotSummary }> {
+    this.engine.definitionOf(botId)
+    const slot = name.trim().toLowerCase()
+    if ((BOT_BASE_SLOT_NAMES as readonly string[]).includes(slot)) throw new BotEngineError('invalid_params', `${slot} is a base slot.`)
+    if (!isCustomSlotName(slot)) throw new BotEngineError('invalid_params', 'A slot\'s name starts with a letter, then letters, digits, - or _, at most 24 characters.')
+    // One plain line: line breaks and hidden characters become spaces.
+    const about = description === undefined ? undefined : plainLabel(description, Number.MAX_SAFE_INTEGER)
+    if (about && about.length > MAX_BOT_CUSTOM_SLOT_DESCRIPTION) throw new BotEngineError('invalid_params', `Say what the slot is for in at most ${MAX_BOT_CUSTOM_SLOT_DESCRIPTION} characters.`)
+    let saved: BotModelPick | null = null
+    if (pick) {
+      if (!isPinned(pick)) throw new BotEngineError('invalid_params', 'Pick a model on one of your provider entries.')
+      saved = this.offeredPick(await this.pickableOptions().catch(() => []), pick)
+    }
+    this.engine.setCustomSlot(botId, slot, saved, about)
     return { bot: this.summaryOf(botId) }
   }
 

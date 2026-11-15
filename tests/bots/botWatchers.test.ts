@@ -36,7 +36,6 @@ afterAll(() => rmSync(dir, { recursive: true, force: true }))
 
 beforeEach(async () => {
   f = botFixture()
-  f.host.timeZone = () => 'UTC'
   await f.bots.reconcileOnStartup()
   botId = (await createBot(f, { name: 'Pip', reply: 'Hello.' })).botId
 })

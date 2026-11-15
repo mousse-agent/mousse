@@ -173,7 +173,8 @@ export const BOT_TOOLS: Tool[] = [
         instanceId: Type.String({ description: 'The entry\'s instanceId from work_models.' }),
         model: Type.String({ description: 'The model\'s id from work_models.' }),
         effort: Type.Optional(Type.String({ description: 'One of that model\'s reasoning levels from work_models, when the owner asked for one. Left out: the model\'s default.' }))
-      }, { description: 'Only when the owner, in their message, asked for this work to run on a particular model: that model, from work_models. It is for this work only; never pick one yourself. Left out: your usual model for the level.' }))
+      }, { description: 'Only when the owner, in their message, asked for this work to run on a particular model: that model, from work_models. It is for this work only; never pick one yourself. Left out: your usual model for the level.' })),
+      slot: Type.Optional(Type.String({ description: 'A custom slot of the owner\'s whose name or description matches this job; it runs on that slot\'s model.' }))
     })
   },
   {
@@ -247,7 +248,7 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'wake',
-    description: `Wake yourself up later to carry on, here in this chat, without your owner writing: at a time (inMinutes or at), when a thread finishes its turn (thread: its id), or when a pull request merges (pr). Use it whenever you are waiting on something (a pull request, a nightly build, a thread you started) instead of checking on a schedule or promising to look later. brief is what you will do then, standing on its own: you see it with what happened. A wake on a thread or pull request gives up after hours (default ${DEFAULT_EVENT_WAKE_HOURS}, at most ${MAX_EVENT_WAKE_HOURS}) or when the pull request is closed or the thread archived or deleted, and you still wake once and are told why. Waking turns wait out your owner's night (22:00 to 08:00); for something they want at an exact time, use remind. At most ${MAX_WAKE_CHAIN} wake-ups in a row without your owner writing, and ${MAX_WAKES_PER_DAY} a day. Your wake-ups are listed and cancelled with reminder_list and reminder_cancel. Tell your owner in a few words what you'll follow up on.`,
+    description: `Wake yourself up later to carry on, here in this chat, without your owner writing: at a time (inMinutes or at), when a thread finishes its turn (thread: its id), or when a pull request merges (pr). Use it whenever you are waiting on something (a pull request, a nightly build, a thread you started) instead of checking on a schedule or promising to look later. brief is what you will do then, standing on its own: you see it with what happened. A wake on a thread or pull request gives up after hours (default ${DEFAULT_EVENT_WAKE_HOURS}, at most ${MAX_EVENT_WAKE_HOURS}) or when the pull request is closed or the thread archived or deleted, and you still wake once and are told why. At most ${MAX_WAKE_CHAIN} wake-ups in a row without your owner writing, and ${MAX_WAKES_PER_DAY} a day. Your wake-ups are listed and cancelled with reminder_list and reminder_cancel. Tell your owner in a few words what you'll follow up on.`,
     parameters: Type.Object({
       brief: Type.String({ description: 'What you will do then, standing on its own, as a note to yourself.' }),
       inMinutes: Type.Optional(Type.Number({ description: 'Minutes from now.' })),
@@ -259,7 +260,7 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'watch_start',
-    description: `Run a command in the background and wake up here when it is done, instead of waiting or checking again and again: for example a build, a test run, \`gh run watch\` on a nightly, or \`gh pr checks 12 --watch\`. It runs in a shell (${process.platform === 'win32' ? 'cmd on Windows' : 'sh'}) from your files folder, as your commands do, and needs "run commands". You wake when it exits (with its exit code), when a line of its output matches match (a regular expression; it is stopped then), or when it reaches its time limit (minutes, default ${DEFAULT_WATCHER_MINUTES}, at most ${MAX_WATCHER_MINUTES}; it is stopped then); you get the line that matched and the end of its output. brief is what you will do then, standing on its own. It counts as a wake-up (at most ${MAX_WAKE_CHAIN} in a row without your owner, ${MAX_WAKES_PER_DAY} a day) and waits out your owner's night. At most ${MAX_WATCHERS_PER_BOT} run at once; a restart of Mousse stops them, and you are told. Tell your owner in a few words what you are waiting on.`,
+    description: `Run a command in the background and wake up here when it is done, instead of waiting or checking again and again: for example a build, a test run, \`gh run watch\` on a nightly, or \`gh pr checks 12 --watch\`. It runs in a shell (${process.platform === 'win32' ? 'cmd on Windows' : 'sh'}) from your files folder, as your commands do, and needs "run commands". You wake when it exits (with its exit code), when a line of its output matches match (a regular expression; it is stopped then), or when it reaches its time limit (minutes, default ${DEFAULT_WATCHER_MINUTES}, at most ${MAX_WATCHER_MINUTES}; it is stopped then); you get the line that matched and the end of its output. brief is what you will do then, standing on its own. It counts as a wake-up (at most ${MAX_WAKE_CHAIN} in a row without your owner, ${MAX_WAKES_PER_DAY} a day). At most ${MAX_WATCHERS_PER_BOT} run at once; a restart of Mousse stops them, and you are told. Tell your owner in a few words what you are waiting on.`,
     parameters: Type.Object({
       command: Type.String({ description: 'The command line.' }),
       brief: Type.String({ description: 'What you will do when it ends, standing on its own, as a note to yourself.' }),
@@ -778,8 +779,11 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
             name: { name: modelName(option), entry: plainLabel(option.entry, 40), ...(effort ? { effort } : {}) }
           }
         }
+        // A custom slot needs no words of the owner's: the owner set it up for jobs like this. The engine checks it is one.
+        if (args.slot !== undefined && args.slot !== null && typeof args.slot !== 'string') return error('slot is the name of one of the owner\'s custom slots.')
+        const slot = typeof args.slot === 'string' ? args.slot : undefined
         try {
-          const started = await call.deps.host.work.start(call.botId, call.activationId, { title, brief, key: `${call.activationId}:${ctx.toolCallId ?? randomUUID()}`, ...(level ? { level } : {}), ...(model ? { model } : {}) })
+          const started = await call.deps.host.work.start(call.botId, call.activationId, { title, brief, key: `${call.activationId}:${ctx.toolCallId ?? randomUUID()}`, ...(level ? { level } : {}), ...(model ? { model } : {}), ...(slot !== undefined ? { slot } : {}) })
           const where = model ? ` It runs on ${model.name.name} on ${model.name.entry}${model.name.effort ? `, ${model.name.effort} reasoning` : ''}, for this work only.` : ''
           const result = { ...started, note: (started.status === 'queued' ? `You start on it when there is room, after: ${started.ahead.join('; ')}. Tell the owner you'll get to it after that.` : started.status === 'ended' ? 'You already did this and finished; work_list has the start of your report.' : 'You are on it now, beside anything else you are working on. Tell the owner in one short line that you are on it; when you finish, your report reaches them by itself.') + where }
           call.deps.activity?.onAppResult(call.activity, 'work_start', started)

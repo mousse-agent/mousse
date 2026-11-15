@@ -533,6 +533,15 @@ function pickerModel(model: InstanceSnapshot['models']['entries'][number], catal
 }
 
 /**
+ * A model's list entries in a picker: the model, then one variant per other speed it runs at
+ * (`opus:fast`), so the picker's speed control offers it. Snapshots list the model once.
+ */
+function withSpeedVariants(model: LlmModelOption, speeds: readonly ('fast' | 'slow')[] | undefined): LlmModelOption[] {
+  if (!speeds?.length || model.speed) return [model]
+  return [model, ...speeds.map((speed) => ({ ...model, id: `${model.id}:${speed}`, speed }))]
+}
+
+/**
  * Mousse's provider order, the same on the providers page and in every model picker. A data
  * table: model APIs (many instances of one driver) sort by name, agents keep their seeded order.
  */
@@ -587,7 +596,7 @@ const pickerProvidersMade = new WeakMap<readonly InstanceSnapshot[], WeakMap<rea
 const catalogProvidersMade = new WeakMap<readonly LlmProviderOption[], PickerProvider[]>()
 
 function makePickerProviders(snapshots: readonly InstanceSnapshot[] | undefined, catalog: readonly LlmProviderOption[]): PickerProvider[] {
-  if (!snapshots) return catalog.map((provider) => ({ ...provider, llmProvider: provider.id }))
+  if (!snapshots) return catalog.map((provider) => ({ ...provider, llmProvider: provider.id, models: provider.models.flatMap((model) => withSpeedVariants(model, model.speeds)) }))
   const providers: PickerProvider[] = []
   for (const snapshot of sortInstances(snapshots)) {
     // A locked entry runs bot turns only.
@@ -598,7 +607,7 @@ function makePickerProviders(snapshots: readonly InstanceSnapshot[] | undefined,
     for (const entry of listed?.models ?? []) if (!listedModels.has(entry.id)) listedModels.set(entry.id, entry)
     const models = snapshot.models.entries
       .filter((model) => !model.hidden)
-      .map((model) => pickerModel(model, listedModels.get(model.id)))
+      .flatMap((model) => withSpeedVariants(pickerModel(model, listedModels.get(model.id)), model.capabilities.speeds ?? listedModels.get(model.id)?.speeds))
     if (models.length === 0) continue
     providers.push({
       id: pickerIdOf(snapshot),

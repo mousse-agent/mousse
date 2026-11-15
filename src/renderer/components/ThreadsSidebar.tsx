@@ -531,6 +531,13 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const needsMe = useMemo(() => needsMeThreads(threads, threadActivity, agentThreadIds), [threads, threadActivity, agentThreadIds])
   // With one thread in all, its own row already says it: a group of it would only repeat it.
   const showNeedsMe = needsMe.length > 0 && availableThreads.length > 1
+  // The Threads tab lists a thread in one place: while "Needs me" shows it, the list below leaves it out.
+  // Dragging still arranges `feedThreads`, so the thread comes back where it was.
+  const feedRows = useMemo(() => {
+    if (!showNeedsMe) return feedThreads
+    const waiting = new Set(needsMe.map((thread) => thread.id))
+    return feedThreads.filter((thread) => !waiting.has(thread.id))
+  }, [feedThreads, needsMe, showNeedsMe])
 
   // A project that several computers hold for the same repository is one group; the others' projects that
   // match none of this computer's stay groups of their own, named with their computer.
@@ -569,7 +576,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const focusedThread = threads.find((thread) => thread.id === (openSubagentParentId ?? activeThreadId))
   const activeGroupId = focusedThread && !agentThreadIds.has(focusedThread.id) && !focusedThread.hidden ? listGroupOf(focusedThread.projectId) : undefined
   // The Threads tab dims its other cards only while the open thread has a card there.
-  const feedHasActive = Boolean(focusedThread && availableThreads.some((thread) => thread.id === focusedThread.id))
+  const feedHasActive = Boolean(focusedThread && feedRows.some((thread) => thread.id === focusedThread.id))
 
   // Reveal the highlighted row once per thread: open its group, show the group's whole list when it is past
   // the first 5, or open "Archived". A draft is revealed when it is started and gets its row. Before the frame is
@@ -1854,7 +1861,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             event.preventDefault()
             const rows = event.currentTarget.querySelectorAll('.threads-sidebar-thread-container')
             const bottom = rows[rows.length - 1]?.getBoundingClientRect().bottom
-            const last = [...feedThreads].reverse().find((thread) => !unmadeRows.has(thread.id))
+            const last = [...feedRows].reverse().find((thread) => !unmadeRows.has(thread.id))
             if (last && bottom !== undefined && event.clientY > bottom && (feedDrop?.id !== last.id || !feedDrop.after)) {
               setFeedDrop({ id: last.id, after: true })
             }
@@ -1870,7 +1877,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             <div className="threads-sidebar-empty">No threads</div>
           ) : (
             <>
-              {feedThreads.map((thread) => renderThreadRow(thread, { root: true, layout: 'card' }))}
+              {feedRows.map((thread) => renderThreadRow(thread, { root: true, layout: 'card' }))}
             </>
           )}
         </div>

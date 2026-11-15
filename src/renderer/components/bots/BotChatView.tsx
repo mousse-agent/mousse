@@ -31,7 +31,10 @@ import { useBotBrowser, useBotBrowserStore } from '../../stores/botBrowserStore'
 import { ChatComposer, type AttachedFile, type VoiceMessage } from '../ChatComposer'
 import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from '../ComposerNotice'
 import { botGroupTime, placeMessages } from './messageGroups'
-import { chatRows, type BotChatRow, type OwnerMarks } from './botChatShape'
+import { chatRows, withNotes, type BotChatRow, type OwnerMarks } from './botChatShape'
+import { botCommandSuggestions } from './botCommands'
+import { slotModels, submitBotChat } from './runBotCommand'
+import type { BotLocalNote } from '../../stores/botsStore'
 import { formatDurationLong, formatWorkedFor } from '../../utils/responseTimeline'
 import { WithSentQuotes } from '../QuotePill'
 import { ImageGalleryProvider } from '../../chat/components/agent-elements/image-gallery'
@@ -44,6 +47,7 @@ const NO_FILES: AttachedFile[] = []
 const NO_VOICE: VoiceMessage[] = []
 const NO_SKILLS: never[] = []
 const NO_MARKS = new Map<string, OwnerMarks>()
+const NO_NOTES: BotLocalNote[] = []
 /** The chat's turn waits for the internet (its work, if any, says so in the header's list). */
 const OFFLINE_TEXT = 'Waiting for internet'
 const ignore = () => {}
@@ -201,7 +205,7 @@ const OwnerMessage = memo(function OwnerMessage({ botId, message, pending, botNa
         {message.text && <div className="bot-you-bubble">
           <WithSentQuotes text={message.text} render={(part) => <Markdown content={part} className="bot-markdown" images={BOT_IMAGES} />} />
           <BubbleTime message={message} pending={pending} />
-          {marks?.reaction && <span className="bot-reaction" role="img" aria-label={`${botName} reacted ${marks.reaction}`} title={marks.title}>{marks.reaction}</span>}
+          {marks?.reaction && <span className="bot-reaction" role="img" aria-label={`${botName} reacted ${marks.reaction}`} title={`${botName} reacted`}>{marks.reaction}</span>}
         </div>}
         {!!message.attachments?.length && <BotOtherFiles files={message.attachments} />}
         {!message.text && <BubbleTime message={message} pending={pending} />}
@@ -366,10 +370,11 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settl
   </article>
 }, sameBotMessage)
 
-/** A quiet centred line between messages: work the bot started, an ask answered. */
+/** A quiet centred line between messages: work the bot started, an ask answered, a `/` command's result. */
 function SystemLine({ row }: { row: Extract<BotChatRow, { kind: 'system' }> }) {
   // A line standing in for a message (a tapped answer) carries its id, so a quote of that message scrolls to it.
-  return <p className="bot-system-line" role="note" {...(row.title ? { title: row.title } : {})} {...(row.of ? { 'data-message-id': row.of } : {})}><span>{row.text}</span></p>
+  const className = `bot-system-line${row.note ? ' is-note' : ''}${row.note === 'error' ? ' is-error' : ''}`
+  return <p className={className} role={row.note === 'error' ? 'alert' : 'note'} {...(row.title ? { title: row.title } : {})} {...(row.of ? { 'data-message-id': row.of } : {})}><span>{row.text}</span></p>
 }
 
 /**
@@ -500,7 +505,12 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   const firstId = messages[0]?.id
   const files = attachments ?? NO_FILES
   // The rows: messages, and quiet lines for work started and asks answered; what replies left on the owner's messages.
-  const { rows, marks } = useMemo(() => chatRows(messages, bot.name, (message) => (message.ask ? askAnswerLine(message.ask, message.kind === 'notice') : undefined)), [messages, bot.name])
+  // The lines of the owner's `/` commands go among them by time; they are this window's only, never the bot's.
+  const notes = useBotsStore((s) => s.notes[bot.id] ?? NO_NOTES)
+  const { rows, marks } = useMemo(() => {
+    const shaped = chatRows(messages, bot.name, (message) => (message.ask ? askAnswerLine(message.ask, message.kind === 'notice') : undefined))
+    return { rows: withNotes(shaped.rows, notes), marks: shaped.marks }
+  }, [messages, bot.name, notes])
   // The sent rows and the messages on their way, in one run of groups (a quiet line ends a group), with the day lines.
   const shown = useMemo<BotChatRow[]>(() => (pending.length ? [...rows, ...pending.map((message) => ({ kind: 'message' as const, message }))] : rows), [rows, pending])
   const places = useMemo(() => placeMessages(shown.map((row) => (row.kind === 'message' ? row.message : { author: 'system', at: row.at }))), [shown])
@@ -616,6 +626,16 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   // An action on a file that the computer refused ("That file does not exist.") is said above the composer.
   const fileFailed = useCallback((text: string) => useBotsStore.setState({ error: text, errorBotId: bot.id }), [bot.id])
   const pictureActions = useCallback((image: LightboxImage) => <BotPictureActions image={image} />, [])
+  // `/` commands: the list follows what is typed; after `/model` it offers the bot's slots and models, read once.
+  const modelInfo = useBotsStore((s) => s.modelInfo[bot.id])
+  const wantsModels = /^\/model\s/i.test(draft)
+  useEffect(() => { if (wantsModels && !modelInfo) void store().loadModelInfo(bot.id) }, [wantsModels, modelInfo, bot.id, store])
+  const commandSuggestions = useCallback((input: string) => botCommandSuggestions(input, {
+    ...(modelInfo?.custom ? { custom: modelInfo.custom } : {}),
+    slotModels: slotModels(modelInfo),
+    ...(modelInfo?.providers ? { providers: modelInfo.providers } : {}),
+    ...(modelInfo?.imageProviders ? { imageProviders: modelInfo.imageProviders } : {})
+  }), [modelInfo])
 
   return <BotFilesProvider botId={bot.id} open={openFile} failed={fileFailed}><ImageGalleryProvider images={chatImages} actions={pictureActions}>
     {/* The bot's colour tints the quotes of its messages. */}
@@ -681,7 +701,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
             <QuoteLine quote={replying} botName={bot.name} />
             <button type="button" aria-label="Don't reply to this message" title="Cancel reply" onClick={() => store().setReplyingTo(bot.id, null)}><X size={14} aria-hidden /></button>
           </div>}
-          {/* A bot picks its own model: no model picker, context ring, permission mode, commands or skills. */}
+          {/* A bot picks its own model: no model picker, context ring, permission mode or skills. Its `/` commands are
+              the owner's, run by Mousse and never sent (runBotCommand.ts). */}
           <ChatComposer
             key={bot.id}
             input={draft}
@@ -694,19 +715,12 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
             enabledSkills={NO_SKILLS}
             disableSkillsPicker
             slashCommands={false}
+            commandSuggestions={commandSuggestions}
             placeholder={`Message ${bot.name}`}
             stoppable={working}
             dictateWhileStoppable
             extraActions={<BotEmojiButton field={composerField} value={draft} onChange={(value) => store().setDraft(bot.id, value)} />}
-            onSend={() => {
-              // `/memory` opens the Memory dialog; it is not sent.
-              if (draft.trim().toLowerCase() === '/memory') {
-                store().setDraft(bot.id, '')
-                store().openMemory(bot.id)
-                return
-              }
-              void store().send(bot.id)
-            }}
+            onSend={() => { void submitBotChat(bot.id) }}
             onStop={() => void store().stop(bot.id)}
             lastPrompt={lastPrompt}
           />

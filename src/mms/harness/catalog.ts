@@ -189,6 +189,7 @@ function listedCapabilities(model: LlmModelOption): ModelCapabilities {
     ...(model.defaultEffort ? { defaultEffort: model.defaultEffort } : {}),
     ...(model.effortDescriptions ? { effortDescriptions: model.effortDescriptions } : {}),
     ...(model.thinkingOff === false ? { thinkingOff: false as const } : {}),
+    ...(model.speeds?.length ? { speeds: [...model.speeds] } : {}),
     images: model.images === true,
     ...(model.contextWindow !== undefined ? { contextWindow: model.contextWindow } : {})
   }

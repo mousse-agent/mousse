@@ -15,6 +15,7 @@ import { useInheritedProvider, useSubagentCard, useSubagentCards } from "./subag
 import {
   cardElapsedLabel,
   cardGroupElapsedLabel,
+  cardGroupFoldedTitle,
   cardGroupLabel,
   cardGroupSummary,
   cardIconStack,
@@ -287,9 +288,10 @@ export const SubagentTool = memo(function SubagentTool({ part, chatStatus }: { p
 });
 
 /**
- * Subagents started in quick succession. Two or more share one card headed by their provider icons, how
- * many there are ("3 subagents"), a coloured count of what they are doing and how long they have run.
- * It lists their rows, each opening its subagent, until the user folds it. A single card stands alone.
+ * Subagents started in quick succession. Two or more share one card headed by their provider icons, a title,
+ * a coloured count of what they are doing and how long they have run. It starts folded, titled with the first
+ * subagent's name and how many more ("Archive builder + 2"); opened, it says how many there are ("3 subagents")
+ * and lists their rows, each opening its subagent. A single card stands alone.
  */
 export function SubagentCardGroup({ toolCallIds, children }: { toolCallIds: readonly string[]; children: ReactNode }) {
   const cards = useSubagentCards();
@@ -299,9 +301,10 @@ export function SubagentCardGroup({ toolCallIds, children }: { toolCallIds: read
   const now = useTick(running);
   const [chosenOpen, setChosenOpen] = useState<boolean | null>(null);
   if (models.length < 2) return <div className="subagent-cards">{children}</div>;
-  // Open, so the card lists its subagents, until the user folds it.
-  const open = chosenOpen ?? true;
+  // Folded until the user opens it.
+  const open = chosenOpen ?? false;
   const { title, parts } = cardGroupSummary(models);
+  const folded = cardGroupFoldedTitle(models);
   const stack = cardIconStack(models);
   const elapsed = cardGroupElapsedLabel(models, now);
   return (
@@ -314,7 +317,14 @@ export function SubagentCardGroup({ toolCallIds, children }: { toolCallIds: read
           {stack.extra > 0 && <span className="subagent-group-more">+{stack.extra}</span>}
         </span>
         <span className="subagent-group-text">
-          <span className="subagent-group-title">{title}</span>
+          {open ? (
+            <span className="subagent-group-title">{title}</span>
+          ) : (
+            <span className="subagent-group-title" title={`${folded.name} ${folded.rest}`}>
+              <span className="subagent-group-name">{folded.name}</span>
+              <span className="subagent-group-rest"> {folded.rest}</span>
+            </span>
+          )}
           <span className="subagent-group-summary">
             {parts.map((part, index) => (
               <Fragment key={part.text}>

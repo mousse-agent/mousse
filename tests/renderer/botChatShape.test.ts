@@ -15,15 +15,16 @@ const owner = (id: string, text: string): BotChatMessage => ({ seq: 0, id, at: '
 describe('workSignalsOf', () => {
   // [what, message, titles, noted, only]
   const rows: Array<[string, BotChatMessage, string[], boolean, boolean]> = [
-    ['"On it." with a start', bot('b', 'On it, I’ll text you when it’s done.', [started('System check')]), ['System check'], false, true],
-    ['a start on a model of its own drops the model', bot('b', 'On it.', [started('Vacuum comparison · Opus 5.5')]), ['Vacuum comparison'], false, true],
-    ['a note passed on', bot('b', 'Your note’s with it now.', [noted]), [], true, true],
-    ['a note, as later services word its chip', bot('b', 'I’ll use that tab from here on.', [{ icon: 'think', text: 'noted', title: 'For SSD search' }]), [], true, true],
+    ['a start with no words', bot('b', '', [started('System check')]), ['System check'], false, true],
+    ['a start on a model of its own drops the model', bot('b', ' ', [started('Vacuum comparison · Opus 5.5')]), ['Vacuum comparison'], false, true],
+    ['a note passed on with no words', bot('b', '', [noted]), [], true, true],
+    // Any words keep the bubble: a reaction or a line never carries the reply.
+    ['"On it." with a start', bot('b', 'On it, I’ll text you when it’s done.', [started('System check')]), ['System check'], false, false],
+    ['a note with words', bot('b', 'I’ll use that tab from here on.', [{ icon: 'think', text: 'noted', title: 'For SSD search' }]), [], true, false],
     ['a reply that says more', bot('b', 'Rain at 4.\n\nI also started a forecast.', [started('Forecast')]), ['Forecast'], false, false],
-    ['a reply with other work too', bot('b', 'On it.', [started('A'), { icon: 'search', text: 'searched the web' }]), ['A'], false, false],
-    ['a reply with an ask', bot('b', 'On it.', [started('A')], { ask: { askId: 'k', title: 'use the browser', note: '', status: 'open' } }), ['A'], false, false],
-    ['a report is never left out', bot('b', 'Done.', [started('A')], { kind: 'run_report' }), ['A'], false, false],
-    ['a long one-paragraph reply', bot('b', 'x'.repeat(200), [started('A')]), ['A'], false, false]
+    ['a reply with other work too', bot('b', '', [started('A'), { icon: 'search', text: 'searched the web' }]), ['A'], false, false],
+    ['a reply with an ask', bot('b', '', [started('A')], { ask: { askId: 'k', title: 'use the browser', note: '', status: 'open' } }), ['A'], false, false],
+    ['a report is never left out', bot('b', '', [started('A')], { kind: 'run_report' }), ['A'], false, false]
   ]
   it.each(rows)('%s', (_what, message, titles, isNoted, only) => {
     expect(workSignalsOf(message)).toMatchObject({ titles, noted: isNoted, only })
@@ -36,18 +37,19 @@ describe('workSignalsOf', () => {
 })
 
 describe('chatRows', () => {
-  it('leaves out a hand-off’s bubble for a line and a 👍 on the message it answers, and a note for "Passed on"', () => {
+  it('puts a line and a 👍 on the message a start answers, and keeps every reply with words as a message', () => {
     const { rows, marks } = chatRows([
       owner('o1', 'run some command pls'),
       bot('b1', 'On it.', [started('System check')], { replyTo: { id: 'o1', author: 'owner', text: 'run some command pls' } }),
       owner('o2', 'Use PC Part Picker'),
-      bot('b2', 'Got it.', [noted]),
-      bot('b3', 'Two now.', [started('A', 'will start'), started('B', 'will start')])
+      bot('b2', 'Got it.', [{ ...noted, title: 'For SSD search' }]),
+      bot('b3', '', [started('A', 'will start'), started('B', 'will start')])
     ], 'alpha')
-    expect(rows.map((row) => (row.kind === 'message' ? row.message.id : row.text))).toEqual(['o1', 'alpha started System check', 'o2', 'alpha will start A and B'])
-    expect(marks.get('o1')).toEqual({ reaction: '👍', title: 'On it.' })
+    expect(rows.map((row) => (row.kind === 'message' ? row.message.id : row.text))).toEqual(['o1', 'alpha started System check', 'b1', 'o2', 'b2', 'alpha will start A and B'])
+    // The reply's words never move onto the mark.
+    expect(marks.get('o1')).toEqual({ reaction: '👍' })
     // The later start with no reply-to lands on the owner's last message, beside its receipt.
-    expect(marks.get('o2')).toEqual({ passedOn: true, reaction: '👍', title: 'Two now.' })
+    expect(marks.get('o2')).toEqual({ passedOn: true, reaction: '👍', title: 'For SSD search' })
   })
 
   it('follows an answered ask with its line, and an open one with none', () => {

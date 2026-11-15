@@ -126,6 +126,11 @@ export function cardGroupSummary(cards: readonly CardCounted[]): { title: string
   return { title: `${cards.length} ${cards.length === 1 ? "subagent" : "subagents"}`, parts };
 }
 
+/** A folded group's title: the first subagent's name, then how many more ("+ 2"), kept apart so the name alone truncates. */
+export function cardGroupFoldedTitle(cards: readonly Pick<SubagentCardModel, "title">[]): { name: string; rest: string } {
+  return { name: cards[0] ? cardTitle(cards[0]) : "", rest: `+ ${Math.max(0, cards.length - 1)}` };
+}
+
 /** The group's summary in one line, for its accessible name: "5 subagents · 2 working · 3 done". */
 export function cardGroupLabel(cards: readonly CardCounted[]): string {
   const { title, parts } = cardGroupSummary(cards);

@@ -144,9 +144,6 @@ export const NUDGE_AGAIN_MS = 24 * 60 * 60_000
 /** A bot's nudges, all its questions together: at most one an hour, and three in any 24 hours. */
 export const NUDGE_SPACING_MS = 60 * 60_000
 export const MAX_NUDGES_PER_DAY = 3
-/** No nudge and no default between these hours in the owner's time zone: they wait until the morning. */
-export const QUIET_FROM_HOUR = 22
-export const QUIET_UNTIL_HOUR = 8
 
 /** A nudge: one fixed line from Mousse (no model call), as a reply to the question's bubble, with its answers again. */
 export const NUDGE_TEXT = 'Still need your answer on this one.'

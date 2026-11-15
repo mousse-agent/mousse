@@ -744,11 +744,19 @@ describe('commit and push through the git store', () => {
     expect(git.status).toHaveBeenCalledTimes(2)
   })
 
-  it('does not refresh after an init that fails', async () => {
+  it('starts Git in a thread\'s own folder when the scope names one, and reads that folder again', async () => {
+    const thread = { projectId: 'p1', workspaceThreadId: 't1' }
+    const git = install({ init: vi.fn(async () => undefined), status: vi.fn(async () => repoStatus()) })
+    await initGitRepository('thread:t1', thread)
+    expect(git.init).toHaveBeenCalledWith(thread)
+    expect(git.status).toHaveBeenLastCalledWith(thread)
+  })
+
+  it('reads the folder again after an init that fails, so a repository that came back meanwhile shows', async () => {
     const git = install({ init: vi.fn(async () => { throw new Error('This folder is already a Git repository.') }) })
     await refreshGitStatus('/repo/a', { scope: GIT_SCOPE })
     await expect(initGitRepository('/repo/a', standalone)).rejects.toThrow('already a Git repository')
-    expect(git.status).toHaveBeenCalledTimes(1)
+    expect(git.status).toHaveBeenCalledTimes(2)
   })
 
   it('skips the pull request refresh when there is no branch', async () => {

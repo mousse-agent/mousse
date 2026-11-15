@@ -655,6 +655,11 @@ export interface LlmModelOption {
   thinkingOff?: false
   /** Effective endpoint speed, including provider defaults. */
   speed?: 'fast' | 'slow'
+  /**
+   * Speeds besides the standard one this model runs at, chosen by a suffix on its id (`opus:fast`).
+   * The picker offers each as a variant of the model; other lists show the model once.
+   */
+  speeds?: Array<'fast' | 'slow'>
   /** `false`: this model cannot run a single request (chat titles) even though its provider can. */
   oneShot?: false
   /** The model takes images, when its catalogue says so. */
