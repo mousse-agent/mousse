@@ -2,7 +2,7 @@
  * A bot's wakes: follow-ups it sets for itself, at a time or when a thread finishes or a pull request merges. When one
  * comes, the bot carries on in its own chat, in a turn no person started (`wake:`), after a quiet line saying why. A wake
  * on an event ends once anyway when the event can't come (closed, archived, deleted, out of sight, past its time). Limits:
- * a chain of at most five with no owner's message between, thirty a day, and none in the owner's night.
+ * a chain of at most five with no owner's message between, and thirty a day. A wake starts when it is due, at any hour.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ownerChatTurn } from '../../src/mms/bots/activation/BotEngine'
@@ -22,8 +22,6 @@ let prReads: number
 
 beforeEach(async () => {
   f = botFixture()
-  // The quiet hours are 22:00 to 08:00 UTC here; the fixture's clock starts at 09:00 UTC.
-  f.host.timeZone = () => 'UTC'
   thread = { state: 'running', title: 'Fix login' }
   pr = { state: 'open', title: 'Fix login' }
   prReads = 0
@@ -80,18 +78,15 @@ describe('a wake at a time', () => {
     expect(f.store.listActivations(botId).filter((entry) => entry.idempotencyKey.startsWith('wake:'))).toHaveLength(1)
   })
 
-  it('waits out the owner\'s night: one due at 23:00 starts at 08:00', async () => {
-    f.clock.now = Date.parse('2026-11-07T21:30:00.000Z')
+  it('is not held for the night: one due at 23:00 (this computer\'s time) starts at 23:00', async () => {
+    f.clock.now = new Date(2026, 10, 7, 21, 30).getTime()
     const turn = await chat('Look at it again in 90 minutes', 'm1')
     const set = await wake(turn.activation.id, { brief: 'Look at the logs again.', dueAt: inMinutes(90) })
     await finish(f, turn.payload, 'completed', { text: 'Will do.' })
-    f.clock.now = Date.parse('2026-11-07T23:00:00.000Z')
-    await f.bots.deliverDueReminders()
-    expect(wakeTurn(set.wakeId)).toBeUndefined()
-    expect(f.store.reminder(set.wakeId)).toMatchObject({ status: 'waiting', dueAt: '2026-11-08T08:00:00.000Z' })
-    f.clock.now = Date.parse('2026-11-08T08:00:00.000Z')
+    f.clock.now = new Date(2026, 10, 7, 23, 0).getTime()
     await f.bots.deliverDueReminders()
     expect(wakeTurn(set.wakeId)).toBeDefined()
+    expect(f.store.reminder(set.wakeId)?.status).toBe('delivered')
   })
 
   it('a paused bot does not follow up: the wake is said as a line, and no turn starts', async () => {

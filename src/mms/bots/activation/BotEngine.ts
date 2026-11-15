@@ -70,7 +70,7 @@ import type { BotModelOption } from '../../../shared/bots/personal/methods'
 import { defaultChatInput, defaultWorkLine, lateWorkNote, MAX_NEW_QUESTIONS_PER_DAY, MAX_NUDGES_PER_QUESTION, MAX_OPEN_QUESTIONS_PER_BOT, MAX_OPEN_QUESTIONS_PER_WORK, MAX_QUESTIONS_PER_CHAT_TURN, NUDGE_AGAIN_MS, NUDGE_TEXT, plainChoices, QUESTION_AFTER_ASK_TEXT, QUESTION_ASKED_TEXT, QUESTION_END_TURN_TEXT, QUESTION_ANSWER_FORGOTTEN_TEXT, QUESTION_NOT_OFFERED_TEXT, QUESTION_WORK_ASKED_TEXT, QUESTION_WORK_WAITING_TEXT, questionGoneText, QUESTIONS_ENOUGH_TEXT, waitingQuestionLine, workAnswerLine, type BotQuestionAnswer, type BotQuestionFollow, type BotQuestionSpec } from '../../../shared/bots/personal/questions'
 import { CARD_SHOWN_TEXT, type BotCard } from '../../../shared/bots/personal/cards'
 import { checkedCard, hasReplyCards, keepMousseCard, keepReplyCard } from '../chat/replyCards'
-import { afterQuietHours, inQuietHours, nudgeSlot } from './questionFollowUps'
+import { nudgeSlot } from './questionFollowUps'
 import { BotWatchers, DEFAULT_WATCHER_MINUTES, MAX_WATCHER_COMMAND_CHARS, MAX_WATCHER_MINUTES, MAX_WATCHERS_PER_BOT, watcherMatchProblem, type WatcherEnd, type WatcherSpec, type WatcherView } from '../watchers'
 import { lockedEnv } from '../../harness/env'
 import { DEFAULT_EVENT_WAKE_HOURS, MAX_EVENT_WAKE_HOURS, MAX_WAKE_BRIEF_CHARS, MAX_WAKE_CHAIN, MAX_WAKES_PER_DAY, WAKE_LINE_PREFIX, wakeEventLabel, wakeFiredLabel, wakeInput, type BotWakeEvent, type BotWakeFired } from '../../../shared/bots/personal/wakes'
@@ -193,8 +193,6 @@ export interface BotEngineHost {
   /** Monotonic milliseconds, for measured active time (default: `performance.now`). */
   monotonic?(): number
   setTimer?(fn: () => void, ms: number): { clear(): void }
-  /** The owner's time zone, for the quiet hours of question follow-ups (default: this computer's). */
-  timeZone?(): string | undefined
 
   // -- Bot Phase 1 seams (docs/plans/bot-architecture.md §7.1); each is optional so a package can land alone.
 
@@ -652,7 +650,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         const live = host.mcp.servers().find((server) => server.serverId === serverId || server.installationId === serverId)
         return live ? { state: 'on', server: live } : { state: 'gone' }
       },
-      // A question's follow-up counts from when its bubble is shown, and never falls in the owner's quiet hours.
+      // A question's follow-up counts from when its bubble is shown.
       followUpAt: (question, shownAt) => this.firstFollowUpAt(question, shownAt)
     })
     this.service = new BotChatService(this, {
@@ -7331,7 +7329,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * a pull request merging), as a chat turn no person started (`wake:<id>`). Set from a chat turn only; one set in a
    * wake's own turn is the next in its chain, at most `MAX_WAKE_CHAIN` in a row with no owner's message between them,
    * and a bot sets at most `MAX_WAKES_PER_DAY` in any 24 hours. A wake on an event gives up after `hours` (default a day,
-   * at most a week) and then wakes once anyway, saying why. Its turn waits out the owner's quiet hours.
+   * at most a week) and then wakes once anyway, saying why. Its turn starts when it is due, at any hour.
    */
   async addWake(botId: string, from: string, input: { brief: string; dueAt?: string; event?: BotWakeEvent; hours?: number }): Promise<{ wakeId: string; dueAt: string; label: string }> {
     this.entry(botId)
@@ -7382,7 +7380,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * `watch_start`: a command that runs in the background, from the bot's files folder, in the locked environment (as a
    * Pi bot's commands run), while the bot holds "run commands" here. It ends when it exits, prints a line that matches
    * `match`, or reaches its time limit (default an hour, at most six), and then the bot wakes in its chat with what
-   * happened: it is a wake on a `watcher` event, so the chain, the daily budget and the quiet hours hold. At most
+   * happened: it is a wake on a `watcher` event, so the chain and the daily budget hold. At most
    * `MAX_WATCHERS_PER_BOT` run at once. Its card shows on the turn's reply.
    */
   startWatcher(botId: string, from: string, input: { command: string; brief: string; title?: string; match?: string; minutes?: number }): { watcherId: string; until: string } {
@@ -7474,8 +7472,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * A watcher ended: its wake fires now with how it ended, the matched line and the end of its output (its turn still waits
-   * out the quiet hours). One the bot or the owner stopped fires nothing.
+   * A watcher ended: its wake fires now with how it ended, the matched line and the end of its output. One the bot or the owner stopped fires nothing.
    */
   private watcherEnded(spec: WatcherSpec, end: WatcherEnd, tail: string): void {
     rmSync(join(this.store.directory, 'scratch', `watch-${spec.id}`), { recursive: true, force: true })
@@ -7529,7 +7526,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /**
    * Looks at what each waiting wake on an event waits for, and fires the ones whose event happened, or that can no
    * longer happen: the thread finished, was archived, deleted or went out of the bot's sight; the pull request merged or
-   * was closed. A fired wake is due now (its turn may still wait out the quiet hours). `threadId`: only the wakes on that
+   * was closed. A fired wake is due now. `threadId`: only the wakes on that
    * thread (its run just ended). Every scheduler tick looks at all of them, so one missed while Mousse was off fires.
    */
   async checkWakeEvents(now: Date = new Date(this.now()), only?: { threadId: string }): Promise<void> {
@@ -7666,7 +7663,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // The pass works from a list read before it began: one cancelled or forgotten since is not said or started.
     // Nothing awaits between this read and the work's insert below, so a cancel can't slip in between.
     if (this.store.reminder(reminder.id)?.status !== 'waiting') return
-    if (reminder.wake) return this.deliverWake(this.store.reminder(reminder.id)!, now, late)
+    if (reminder.wake) return this.deliverWake(this.store.reminder(reminder.id)!, late)
     if (reminder.work) {
       try {
         const summary = await this.enqueue(reminder.botId, `reminder:${reminder.id}`, { kind: 'work', input: late ? `${reminder.work.brief}\n\n(This was due at ${clockTime(reminder.dueAt)}; Mousse was off then.)` : reminder.work.brief, title: reminder.work.title, ...(reminder.replyTo ? { replyTo: reminder.replyTo } : {}), from: reminder.id }, 'run')
@@ -7697,18 +7694,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * A wake that is due: in the owner's quiet hours it waits for the morning; otherwise a chat turn of the bot's own
-   * (`wake:<id>`, not the owner's: it can't act on their threads) starts with what the bot wrote for itself and what
-   * happened, after a quiet line in the chat saying why the bot speaks. A wake on an event whose time came first ended
-   * without it, and says so. A bot that is paused, or can't run now, has the wake said as a line instead, so it is never
-   * lost and never retried forever. Marked delivered in the transaction that queues the turn: it wakes once.
+   * A wake that is due, at any hour: a chat turn of the bot's own (`wake:<id>`, not the owner's: it can't act on their
+   * threads) starts with what the bot wrote for itself and what happened, after a quiet line in the chat saying why the
+   * bot speaks. A wake on an event whose time came first ended without it, and says so. A bot that is paused, or can't
+   * run now, has the wake said as a line instead, so it is never lost and never retried forever. Marked delivered in the
+   * transaction that queues the turn: it wakes once.
    */
-  private async deliverWake(wake: BotReminderRow, now: Date, late: boolean): Promise<void> {
-    const zone = this.zone()
-    if (inQuietHours(now.getTime(), zone)) {
-      if (this.store.moveReminder(wake.id, new Date(afterQuietHours(now.getTime(), zone)).toISOString())) this.changed({ botId: wake.botId })
-      return
-    }
+  private async deliverWake(wake: BotReminderRow, late: boolean): Promise<void> {
     const fired: BotWakeFired | null = wake.fired ?? (wake.event ? { kind: 'ended', reason: 'expired' } : null)
     const input = wakeInput({ brief: wake.text, setAt: wake.createdAt, event: wake.event, fired, chain: Math.max(1, wake.chain), clock: clockTime, ...(late && !wake.event ? { late: clockTime(wake.dueAt) } : {}) })
     const paused = Boolean(this.store.registry(wake.botId)?.pausedReason)
@@ -7741,30 +7733,20 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   // survive a restart; only an open question is ever followed up, so one the owner answered or moved on from, or that
   // was withdrawn or forgotten, never is.
 
-  /** The owner's time zone: the quiet hours are theirs. */
-  private zone(): string {
-    return this.host.timeZone?.() || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
-  }
-
-  /** When a question's first follow-up is due, its bubble shown at `shownAt`: after its time, out of the quiet hours. */
+  /** When a question's first follow-up is due, its bubble shown at `shownAt`: the time the bot gave after that. */
   private firstFollowUpAt(question: Pick<BotQuestionRow, 'follow'>, shownAt: string): string | null {
     if (!question.follow) return null
-    return new Date(afterQuietHours(Date.parse(shownAt) + question.follow.afterMs, this.zone())).toISOString()
+    return new Date(Date.parse(shownAt) + question.follow.afterMs).toISOString()
   }
 
   /**
-   * A question whose follow-up is due: in the quiet hours it moves to the morning; otherwise Mousse nudges the owner, or
-   * the bot goes with its default. A bot that is gone, or a question with nothing to follow up, is left be.
+   * A question whose follow-up is due, at any hour: Mousse nudges the owner, or the bot goes with its default. A bot that
+   * is gone, or a question with nothing to follow up, is left be.
    */
   private async followUpQuestion(question: BotQuestionRow, now: Date): Promise<void> {
     const registry = this.store.registry(question.botId)
     if (!registry || registry.deletedAt || !question.follow) {
       this.store.setQuestionNext(question.id, null)
-      return
-    }
-    const morning = afterQuietHours(now.getTime(), this.zone())
-    if (morning > now.getTime()) {
-      this.moveFollowUp(question, morning)
       return
     }
     if (question.follow.kind === 'nudge') this.nudge(question, now)
@@ -7786,8 +7768,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   private nudge(question: BotQuestionRow, now: Date): void {
     const at = now.getTime()
-    const zone = this.zone()
-    const slot = nudgeSlot(at, this.store.nudgeTimes(question.botId, new Date(at - 24 * 60 * 60_000).toISOString()).map((time) => Date.parse(time)), zone)
+    const slot = nudgeSlot(at, this.store.nudgeTimes(question.botId, new Date(at - 24 * 60 * 60_000).toISOString()).map((time) => Date.parse(time)))
     if (slot > at) {
       this.moveFollowUp(question, slot)
       return
@@ -7798,7 +7779,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return
     }
     const count = question.nudges + 1
-    const next = count < MAX_NUDGES_PER_QUESTION ? new Date(afterQuietHours(at + NUDGE_AGAIN_MS, zone)).toISOString() : null
+    const next = count < MAX_NUDGES_PER_QUESTION ? new Date(at + NUDGE_AGAIN_MS).toISOString() : null
     const posted = this.store.db.transaction(() => {
       if (!this.store.recordNudge(question.id, count, next)) return false
       this.chat.post({

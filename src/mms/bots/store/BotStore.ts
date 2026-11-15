@@ -1728,7 +1728,7 @@ export class BotStore {
     return row ? questionOf(row) : undefined
   }
 
-  /** An open question's follow-up moves to `nextAt` (quiet hours, the nudge budget, an owner's turn running); false when it is not open. */
+  /** An open question's follow-up moves to `nextAt` (the nudge budget, an owner's turn running); false when it is not open. */
   setQuestionNext(id: string, nextAt: string | null): boolean {
     return this.run("UPDATE bot_questions SET next_at = ? WHERE id = ? AND status = 'open'", nextAt, id) > 0
   }
@@ -1899,11 +1899,6 @@ export class BotStore {
    */
   fireWake(id: string, fired: BotWakeFired, dueAt: string): boolean {
     return this.run("UPDATE bot_reminders SET fired_json = ?, due_at = ? WHERE id = ? AND status = 'waiting' AND wake = 1 AND fired_json IS NULL", JSON.stringify(fired), dueAt, id) > 0
-  }
-
-  /** A waiting reminder is said later (a wake held through the quiet hours). */
-  moveReminder(id: string, dueAt: string): boolean {
-    return this.run("UPDATE bot_reminders SET due_at = ? WHERE id = ? AND status = 'waiting'", dueAt, id) > 0
   }
 
   reminder(id: string): BotReminderRow | undefined {

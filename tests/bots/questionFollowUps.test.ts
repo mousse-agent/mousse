@@ -1,10 +1,10 @@
 /**
  * The rules that decide a question's follow-up (issue #1123), at the modules that decide them: what `ask_owner`'s
- * `ifNoAnswer`, `after` and `default` mean (`questionFollowOf`), the owner's quiet hours (22:00 to 08:00 in their time
- * zone, across a clock change), and a bot's nudge budget (one an hour, three in any 24 hours), as rows.
+ * `ifNoAnswer`, `after` and `default` mean (`questionFollowOf`), and a bot's nudge budget (one an hour, three in any 24
+ * hours), as rows.
  */
 import { describe, expect, it } from 'vitest'
-import { afterQuietHours, nudgeSlot } from '../../src/mms/bots/activation/questionFollowUps'
+import { nudgeSlot } from '../../src/mms/bots/activation/questionFollowUps'
 import { questionFollowOf } from '../../src/shared/bots/personal/questions'
 
 const SPEC = { choices: [{ label: 'Flat A' }, { label: 'Flat B' }] }
@@ -35,22 +35,6 @@ describe('ask_owner’s follow-up (questionFollowOf)', () => {
   })
 })
 
-describe('quiet hours (afterQuietHours)', () => {
-  it.each([
-    ['UTC', '2026-11-07T21:59:00Z', '2026-11-07T21:59:00Z'],
-    ['UTC', '2026-11-07T22:00:00Z', '2026-11-08T08:00:00Z'],
-    ['UTC', '2026-11-08T03:10:00Z', '2026-11-08T08:00:00Z'],
-    ['UTC', '2026-11-08T08:00:00Z', '2026-11-08T08:00:00Z'],
-    // 22:30 in India is the next morning's 08:00 there.
-    ['Asia/Kolkata', '2026-11-07T17:00:00Z', '2026-11-08T02:30:00Z'],
-    ['Asia/Kolkata', '2026-11-07T16:29:00Z', '2026-11-07T16:29:00Z'],
-    // New York's clocks go back at 02:00 on 1 November 2026: 23:00 EDT the night before is followed by 08:00 EST.
-    ['America/New_York', '2026-11-01T03:00:00Z', '2026-11-01T13:00:00Z']
-  ])('%s %s → %s', (zone, at, expected) => {
-    expect(new Date(afterQuietHours(Date.parse(at), zone)).toISOString()).toBe(new Date(expected).toISOString())
-  })
-})
-
 describe('a bot’s nudge budget (nudgeSlot)', () => {
   const at = Date.parse('2026-11-07T12:00:00Z')
   it.each([
@@ -59,11 +43,10 @@ describe('a bot’s nudge budget (nudgeSlot)', () => {
     ['one an hour ago: now', [at - HOUR], at],
     ['three in the last day: once the oldest is a day old', [at - 20 * HOUR, at - 10 * HOUR, at - 2 * HOUR], at + 4 * HOUR],
     ['two in the last day: now', [at - 20 * HOUR, at - 2 * HOUR], at],
-    ['a free time at night: the morning', [at - 14 * HOUR, at - 10 * HOUR, at - 2 * HOUR], Date.parse('2026-11-08T08:00:00Z')],
     // The clock was set back: a nudge "posted" after now still counts, in the hour and in the day.
     ['one posted half an hour from now: an hour after it', [at + 30 * MIN], at + 90 * MIN],
     ['three in the day, one of them from later: once the oldest is a day old', [at - 20 * HOUR, at - 3 * HOUR, at + 2 * HOUR], at + 4 * HOUR]
   ])('%s', (_name, nudges, expected) => {
-    expect(nudgeSlot(at, nudges, 'UTC')).toBe(expected)
+    expect(nudgeSlot(at, nudges)).toBe(expected)
   })
 })
