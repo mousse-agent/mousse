@@ -174,6 +174,16 @@ function requireBotReach(host: AppToolHost, engine: RunEngine, callerThreadId: s
   return reach.scope
 }
 
+/**
+ * Whether a personal bot may see `thread` named by id (`thread_list`, the profiler's threads): only while its turn holds
+ * "use your threads" (`thread_list`), and then only what `thread_list` would list it.
+ */
+export function botMayNameThread(host: AppToolHost, engine: RunEngine | undefined, bot: { appTools: ReadonlySet<string> }, callerThreadId: string, thread: Thread, inventory: readonly Thread[]): boolean {
+  if (!bot.appTools.has('thread_list')) return false
+  // Without the engine a delegation's lineage can't be read, so nothing is named.
+  return engine !== undefined && botMayList(host, engine, callerThreadId, thread, inventory)
+}
+
 /** Whether a bot may list or find `thread` (the same rule as `botThreadReach`, over a thread already read). */
 function botMayList(host: AppToolHost, engine: RunEngine, callerThreadId: string, thread: Thread, inventory: readonly Thread[]): boolean {
   return thread.id !== callerThreadId && !botThreadHidden(host, engine, thread, () => inventory)

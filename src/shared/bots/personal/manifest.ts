@@ -1,4 +1,5 @@
 import { BROWSER_AUTOMATION_TOOLS, type BrowserAutomationTool } from '../../browser/automation'
+import { PROFILER_TOOL_NAMES, type ProfilerToolName } from '../../diagnostics/profiler'
 import { isNeutralTool, type NeutralTool } from '../../harness/tools'
 import { DEFAULT_BOT_ACTIVE_MS, foldersOf, workspaceOf, type BotBudget, type BotManifest, type BotPermissionLine } from './definition'
 import { BOT_MEMORY_TOOLS } from './memory'
@@ -148,6 +149,29 @@ export const BOT_THREAD_READ_TOOLS: readonly string[] = ['thread_list', 'thread_
  */
 export const BOT_THREAD_ACT_TOOLS: readonly string[] = ['thread_create', 'thread_send', 'thread_interrupt', 'thread_archive']
 
+/**
+ * "Use the profiler": one permission, asked for once, for Mousse's own profiler (Settings → Labs → Profiler). The grant
+ * names it alone; `compileBotThread` turns it into the profiler tools of a main turn (`BOT_PROFILER_TOOLS` in work,
+ * `BOT_PROFILER_CHAT_TOOLS` in the chat; never a consult or a subagent). Each call is still held to the Labs switches.
+ */
+export const BOT_PROFILER_PERMISSION = 'profiler'
+
+/**
+ * The profiler tools a bot with the profiler gets: every read and sample tool. Never `profiler_heap_summary`, which
+ * pauses the service: no bot is offered it, asks for it or can be granted it.
+ */
+export const BOT_PROFILER_TOOLS: readonly ProfilerToolName[] = PROFILER_TOOL_NAMES.filter((tool) => tool !== 'profiler_heap_summary')
+
+/** What a chat turn gets of them: all but `profiler_watch`, which samples for minutes, so the chat stays free (work watches). */
+export const BOT_PROFILER_CHAT_TOOLS: readonly ProfilerToolName[] = BOT_PROFILER_TOOLS.filter((tool) => tool !== 'profiler_watch')
+
+const PROFILER_TOOL_SET: ReadonlySet<string> = new Set(BOT_PROFILER_TOOLS)
+
+/** Whether `name` is one of the profiler tools a bot can hold under "use the profiler". */
+export function isBotProfilerTool(name: string): boolean {
+  return PROFILER_TOOL_SET.has(name)
+}
+
 /** Every thread tool a bot can hold, all under "use your threads". */
 export const BOT_THREAD_TOOLS: readonly string[] = [...BOT_THREAD_READ_TOOLS, ...BOT_THREAD_ACT_TOOLS]
 
@@ -160,22 +184,23 @@ export function isBotThreadTool(name: string): boolean {
 
 /**
  * The Mousse app tools a bot may be granted: ones that read the web, its own browser, the bot's
- * own tools, the automation tools, and the owner's threads as one permission. Every other app tool starts, wakes,
+ * own tools, the automation tools, and the owner's threads and Mousse's profiler as one permission each. Every other app tool starts, wakes,
  * writes or reads other threads (delegation, forks, queues, merge-backs), acts in the owner's name, or asks a person,
  * so it would run work outside the grant. Consults (6c-2) are the way a bot uses its own threads. The skill tools come
  * with granted skills.
  */
-export const BOT_APP_TOOLS: ReadonlySet<string> = new Set([...BOT_DEFAULT_APP_TOOLS, BOT_BROWSER_PERMISSION, ...BOT_AUTOMATION_APP_TOOLS, BOT_THREADS_PERMISSION])
+export const BOT_APP_TOOLS: ReadonlySet<string> = new Set([...BOT_DEFAULT_APP_TOOLS, BOT_BROWSER_PERMISSION, ...BOT_AUTOMATION_APP_TOOLS, BOT_THREADS_PERMISSION, BOT_PROFILER_PERMISSION])
 
 /**
  * Every Mousse app tool a bot's turn can ever be offered (what `compileBotThread` may add to a turn): the grantable
- * tools, the browser's tools in place of "browser", the skill tools, consult, the front desk's work and reminder
+ * tools, the browser's, threads' and profiler's tools in place of their permissions, the skill tools, consult, the front desk's work and reminder
  * tools, and `make_image` with an Images row. A bot's thread lists only these, so its runtime never shows the model a tool no bot can hold.
  */
 const BOT_OFFERABLE_APP_TOOLS: ReadonlySet<string> = new Set([
-  ...[...BOT_APP_TOOLS].filter((tool) => tool !== BOT_BROWSER_PERMISSION && tool !== BOT_THREADS_PERMISSION),
+  ...[...BOT_APP_TOOLS].filter((tool) => tool !== BOT_BROWSER_PERMISSION && tool !== BOT_THREADS_PERMISSION && tool !== BOT_PROFILER_PERMISSION),
   ...BOT_BROWSER_TOOLS,
   ...BOT_THREAD_TOOLS,
+  ...BOT_PROFILER_TOOLS,
   ...BOT_WORK_TOOLS,
   ...BOT_SUBAGENT_TOOLS,
   ...BOT_MEMORY_TOOLS,
@@ -198,11 +223,12 @@ const BROWSER_TOOLS: ReadonlySet<string> = new Set(BROWSER_AUTOMATION_TOOLS)
 
 /**
  * The permission an app tool falls under: every browser tool is "use the browser" (`browser`), so
- * an ask for `browser_act` is the same one ask; every thread tool is "use your threads" (`threads`); any other tool is
- * its own.
+ * an ask for `browser_act` is the same one ask; every thread tool is "use your threads" (`threads`); every profiler tool a
+ * bot can hold is "use the profiler" (`profiler`); any other tool is its own (the heap summary too, which no bot holds).
  */
 export function botGrantTool(tool: string): string {
   if (BROWSER_TOOLS.has(tool)) return BOT_BROWSER_PERMISSION
+  if (PROFILER_TOOL_SET.has(tool)) return BOT_PROFILER_PERMISSION
   return THREAD_TOOL_NAMES.has(tool) ? BOT_THREADS_PERMISSION : tool
 }
 
@@ -387,10 +413,11 @@ function toolLine(tool: NeutralTool): BotPermissionLine {
   return { kind: 'tool', text: FILE_TOOLS.has(tool) ? `${TOOL_WORDS[tool]} in its files folder` : TOOL_WORDS[tool] }
 }
 
-/** An app tool in plain words: the browser and the owner's threads by what they are, any other tool by its name. */
+/** An app tool in plain words: the browser, the owner's threads and the profiler by what they are, any other tool by its name. */
 function appToolLine(tool: string): BotPermissionLine {
   if (tool === BOT_BROWSER_PERMISSION) return { kind: 'app_tool', text: 'Use the browser' }
   if (tool === BOT_THREADS_PERMISSION) return { kind: 'app_tool', text: 'Use your threads' }
+  if (tool === BOT_PROFILER_PERMISSION) return { kind: 'app_tool', text: 'Use the profiler' }
   return { kind: 'app_tool', text: `Use the Mousse tool \`${tool}\`` }
 }
 

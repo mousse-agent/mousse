@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { realpathSync } from 'node:fs'
 import type { BotManifest, BotThreadSpec } from '../../../shared/bots/personal/definition'
-import { BOT_APP_TOOLS, BOT_APPLET_TOOL, BOT_CARD_TOOL, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest, BOT_SUBAGENT_APP_TOOLS, BOT_SUBAGENT_TOOLS } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_APPLET_TOOL, BOT_CARD_TOOL, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_PROFILER_CHAT_TOOLS, BOT_PROFILER_PERMISSION, BOT_PROFILER_TOOLS, BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest, BOT_SUBAGENT_APP_TOOLS, BOT_SUBAGENT_TOOLS } from '../../../shared/bots/personal/manifest'
 import { BOT_MEMORY_TOOLS } from '../../../shared/bots/personal/memory'
 import { withinComputerLimit, type BotComputerLimit } from '../../../shared/bots/personal/computerLimit'
 import type { NeutralTool } from '../../../shared/harness/tools'
@@ -47,6 +47,8 @@ export interface BotPermissions {
   browser?: true
   /** "Use your threads": `appTools` holds the thread tools of this turn, to read (`read`) or also to start, message and stop (`all`). */
   threads?: 'read' | 'all'
+  /** "Use the profiler": `appTools` holds the profiler tools of this turn. */
+  profiler?: true
 }
 
 export interface CompileInput {
@@ -91,6 +93,11 @@ export interface CompileInput {
      * messaging and stopping, only for a chat turn the owner's own message started. Absent: nothing (a consult).
      */
     threads?: 'read' | 'all'
+    /**
+     * A main turn, chat or work: "use the profiler", when the grant holds it, gives it the profiler tools (in the chat
+     * all but `profiler_watch`, which samples for minutes). Absent: none (a consult; a subagent never has them).
+     */
+    profiler?: boolean
     /** `make_image` (#1088): the owner picked a model in Runs on's Images row. Chat and work alike; never a consult or a subagent. */
     images?: boolean
     /** `publish_applet` (`BOT_APPLET_TOOL`): a main turn, chat or work, publishes applets; they need no permission. Never a consult. */
@@ -181,11 +188,13 @@ export function compileBotThread(input: CompileInput): CompileResult {
   for (const key of ['maxTurns', 'maxToolCalls', 'maxInputTokens', 'maxOutputTokens', 'maxUsd'] as const)
     if (counts[key] !== undefined) budget[key] = counts[key]
   // Granted skills come with the skill tools that list and load them; the browser is its tools, and the owner's threads
-  // are the thread tools this turn may use (none unless the caller says which).
+  // are the thread tools this turn may use (none unless the caller says which), as the profiler is its tools on a main turn.
   const browser = manifest.appTools.includes(BOT_BROWSER_PERMISSION)
   const threads = manifest.appTools.includes(BOT_THREADS_PERMISSION) ? own?.threads : undefined
+  const profiler = manifest.appTools.includes(BOT_PROFILER_PERMISSION) && own?.profiler === true
   const appTools = [...new Set([
-    ...manifest.appTools.filter((tool) => tool !== BOT_BROWSER_PERMISSION && tool !== BOT_THREADS_PERMISSION),
+    ...manifest.appTools.filter((tool) => tool !== BOT_BROWSER_PERMISSION && tool !== BOT_THREADS_PERMISSION && tool !== BOT_PROFILER_PERMISSION),
+    ...(profiler ? (own?.frontDesk ? BOT_PROFILER_CHAT_TOOLS : BOT_PROFILER_TOOLS) : []),
     ...(browser ? BOT_BROWSER_TOOLS : []),
     ...(threads ? BOT_THREAD_READ_TOOLS : []),
     ...(threads === 'all' ? BOT_THREAD_ACT_TOOLS : []),
@@ -220,6 +229,7 @@ export function compileBotThread(input: CompileInput): CompileResult {
       skills: [...new Set(manifest.skills)].sort(),
       ...(browser ? { browser: true as const } : {}),
       ...(threads ? { threads } : {}),
+      ...(profiler ? { profiler: true as const } : {}),
       workspace: files !== undefined ? { roots: [], access: 'read', writeRoots: [], scratch, files } : null
     }
   }

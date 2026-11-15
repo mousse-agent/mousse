@@ -22,7 +22,8 @@ import {
 } from '../../../diagnostics/profilerReports'
 import type { Thread } from '../../../../shared/types'
 import type { AppToolHost } from './host'
-import { agentThreadView, isBotThread, threadVisibleToAgent } from './thread'
+import type { RunEngine } from '../../RunEngine'
+import { agentThreadView, botMayNameThread, isBotThread, threadVisibleToAgent } from './thread'
 import { json, type JsonSchema, type MousseTool, type ToolCallContext, type ToolOutcome } from './types'
 
 /** What the profiler tools read, at every call: the profile's switches (Settings → Labs) and the service's profiler. */
@@ -53,11 +54,14 @@ function delegationChain(host: AppToolHost, threadId: string): string[] {
 /**
  * The caller's profile's threads held to what `thread_list` shows the calling agent: a thread that is private (unless
  * the caller's is), a bot's or below a bot's, or the Automation manager's (unless related to the caller) counts only in
- * a total, as does a cache entry no thread of the profile owns, which cannot be checked.
+ * a total, as does a cache entry no thread of the profile owns, which cannot be checked. A personal bot's caller sees
+ * by id only what `thread_list` lists that bot (`botMayNameThread`): none without "use your threads".
  */
-function visibleThreadMemory(threads: ThreadMemory, host: AppToolHost, callerThreadId: string): ThreadMemory {
+function visibleThreadMemory(threads: ThreadMemory, host: AppToolHost, ctx: Pick<ToolCallContext, 'caller' | 'turn'>, engine?: RunEngine): ThreadMemory {
+  const callerThreadId = ctx.caller.threadId
   const view = agentThreadView(host, callerThreadId)
   const byId = new Map(view.all.map((thread) => [thread.id, thread]))
+  const bot = ctx.turn.bot
   const chain = new Set(delegationChain(host, callerThreadId))
   const related = (thread: Thread) =>
     chain.has(thread.id) || thread.lineage?.parentThreadId === callerThreadId || thread.createdByThreadId === callerThreadId
@@ -71,7 +75,7 @@ function visibleThreadMemory(threads: ThreadMemory, host: AppToolHost, callerThr
   const hidden = { threads: 0, cachedBytes: 0 }
   const own = threads.own.filter((entry) => {
     const thread = entry.threadId ? byId.get(entry.threadId) : undefined
-    if (thread && named(thread) && threadVisibleToAgent(host, thread, view) && !belowBot(thread)) return true
+    if (thread && (bot ? botMayNameThread(host, engine, bot, callerThreadId, thread, view.all) : named(thread) && threadVisibleToAgent(host, thread, view) && !belowBot(thread))) return true
     hidden.threads += 1
     hidden.cachedBytes += entry.cachedBytes ?? 0
     return false
@@ -152,7 +156,7 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
  * again at the call. They return numbers and fixed names only; a thread is named by its id alone, and only when it
  * belongs to the caller's profile. Other profiles belong to other people and count only in totals.
  */
-export function profilerTools(host: AppToolHost): MousseTool[] {
+export function profilerTools(host: AppToolHost, engine?: RunEngine): MousseTool[] {
   const reach = (): ProfilerToolHost | undefined => host.profiler?.()
   const allowed = (name: ProfilerToolName): boolean => {
     const profiler = reach()
@@ -183,7 +187,7 @@ export function profilerTools(host: AppToolHost): MousseTool[] {
         if (!service.monitor()) service.refresh()
         const monitor = service.monitor()
         if (!monitor) return error('The profiler is starting. Call again in a few seconds.')
-        return await run(name, args, ctx, { profiler: profiler!, service, monitor, host })
+        return await run(name, args, ctx, { profiler: profiler!, service, monitor, host, engine })
       } catch (caught) {
         // Only fixed text reaches the agent: a Node error's message can name a file under the home folder.
         if (caught instanceof HeapSummaryError) return error(caught.message)
@@ -199,7 +203,7 @@ async function run(
   name: ProfilerToolName,
   args: Record<string, unknown>,
   ctx: ToolCallContext,
-  env: { profiler: ProfilerToolHost; service: ProfilerService; monitor: Monitor; host: AppToolHost }
+  env: { profiler: ProfilerToolHost; service: ProfilerService; monitor: Monitor; host: AppToolHost; engine?: RunEngine }
 ): Promise<ToolOutcome> {
   const { service, monitor } = env
   const latest = () => { const all = monitor.samples(); return all.length ? all[all.length - 1] : null }
@@ -217,7 +221,7 @@ async function run(
         sample,
         detail: monitor.readDetailNow(),
         thresholds: monitor.thresholds,
-        threads: visibleThreadMemory(service.threads(env.profiler.owner), env.host, ctx.caller.threadId),
+        threads: visibleThreadMemory(service.threads(env.profiler.owner), env.host, ctx, env.engine),
         cacheLimits: { threads: MAX_CACHED_THREADS, mb: MAX_CACHED_BYTES / 1048576 },
         replayLimitPerProfile: MMS_PROTOCOL_REPLAY_RING_SIZE
       }))

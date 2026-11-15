@@ -35,7 +35,7 @@ type ChipKind =
   | 'search' | 'fetch' | 'browse' | 'read' | 'change' | 'save' | 'draft' | 'lookback' | 'consult' | 'skill' | 'tool' | 'mcp' | 'schedules'
   | 'schedule' | 'unschedule' | 'remember' | 'forget' | 'depth' | 'profile' | 'model'
   | 'work' | 'work_stop' | 'work_note' | 'remind' | 'unremind' | 'work_look'
-  | 'threads_look' | 'thread_wait' | 'thread_start' | 'thread_send' | 'thread_stop' | 'thread_archive' | 'picture'
+  | 'threads_look' | 'profiler' | 'thread_wait' | 'thread_start' | 'thread_send' | 'thread_stop' | 'thread_archive' | 'picture'
   | 'subagent' | 'subagent_wait' | 'subagent_look'
 
 interface Classified {
@@ -191,6 +191,14 @@ function classify(tool: string, input: unknown, ctx: BotChipContext): Classified
     case 'thread_search':
     case 'thread_read': return { kind: 'threads_look', icon: 'read', live: 'reading your threads' }
     case 'thread_wait': return { kind: 'thread_wait', icon: 'think', live: 'waiting on a thread' }
+    // Mousse's profiler ("use the profiler"): every read and sample rolls up into one chip.
+    case 'profiler_overview':
+    case 'profiler_service_breakdown':
+    case 'profiler_window_breakdown':
+    case 'profiler_gpu_hints':
+    case 'profiler_children':
+    case 'profiler_sample_now':
+    case 'profiler_watch': return { kind: 'profiler', icon: 'read', live: "checking Mousse's memory" }
     case 'thread_create': {
       const title = str(args.title)
       return { kind: 'thread_start', icon: 'think', live: 'starting a thread', ...(title ? { detail: shortChipText(title, 40) } : {}) }
@@ -327,6 +335,7 @@ function groupChip(kind: ChipKind, icon: BotChipIcon, calls: readonly Classified
     case 'tool': return chip(details.length ? 'used a tool' : 'ran a command', listed(details))
     case 'mcp': return details.length ? chip('used', listed(details)) : chip('used a tool')
     case 'threads_look': return chip('read your threads')
+    case 'profiler': return chip("checked Mousse's memory and CPU")
     case 'thread_wait': return chip(n === 1 ? 'waited on a thread' : `waited on threads · ${n}`)
     case 'subagent': {
       const titles = [...new Set(details)]
