@@ -86,7 +86,7 @@ import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type Effe
 import { steerReleaseWindow, stopStrategy, type SteerDelivery } from '../run/CommandPolicy'
 import { agentMessageText, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentArchiveResult, type AgentCreatedThread, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
-import { botRequestPrefix, THREAD_CREATE_MAX_ACTIVE_PER_THREAD, THREAD_CREATE_MAX_PER_RUN, THREAD_SEND_MAX_PER_RUN } from '../run/mcp/appTools/thread'
+import { botRequestPrefix, THREAD_CREATE_MAX_ACTIVE_PER_THREAD } from '../run/mcp/appTools/thread'
 import { botMessageText } from '../run/mcp/appTools/agentMessage'
 
 /**
@@ -4081,14 +4081,10 @@ export class OrchestratorService extends EventEmitter {
       throw new DomainRpcError('device_limit', `The thread runs in ${describePermissionMode(this.storedPermissionMode(threadId))}, more than the device your owner wrote from may run (${describePermissionMode(turnBot.limit)}).`)
     const sender = this.withAgentHops(options.actor)
     this.assertQueueOpen(threadId)
-    // A turn's messages are counted from their receipts, with the ones still being sent: 20 per chat turn, however many
-    // runs the turn takes (a wall, a restart).
-    const release = turnBot ? this.reserveBotAct('thread_send', options.clientRequestId, options.actor, turnBot) : undefined
+    if (turnBot) this.assertBotRequestKey('thread_send', options.clientRequestId, options.actor, turnBot)
     // A thread a person keeps in Plan takes the message as a plan turn, whatever mode the sender asked for.
     const mode: 'agent' | 'plan' = this.lastChatModeOf(threadId) === 'plan' ? 'plan' : input.mode
-    const response = await (async () => {
-      try {
-        return await this.send(
+    const response = await this.send(
       { content: bot ? botMessageText(bot.name, input.content) : agentMessageText(sender.threadId, this.titleOf(sender.threadId), input.content), mode },
       false,
       {
@@ -4105,10 +4101,6 @@ export class OrchestratorService extends EventEmitter {
         refuseWhileAsking: true
       }
     )
-      } finally {
-        release?.()
-      }
-    })()
     if (!response.runId || response.sequence === undefined) throw new Error('The message was not recorded as a run.')
     const replayed = response.replayed === true
     return {
@@ -4217,9 +4209,8 @@ export class OrchestratorService extends EventEmitter {
       if (!earlier || stored.threadId !== options.actor.threadId || earlier.fingerprint !== fingerprint) throw this.creationKeyConflict(key)
       intent = earlier.intent
     } else {
-      // Everything that can refuse does so here, before anything is recorded or made. A bot's starts are counted per chat
-      // turn from their receipts; this one's is written below with nothing awaited in between.
-      if (bot) this.reserveBotAct('thread_create', key, options.actor, bot)()
+      // Everything that can refuse does so here, before anything is recorded or made.
+      if (bot) this.assertBotRequestKey('thread_create', key, options.actor, bot)
       intent = this.planAgentThread(input, { ...options, ...(bot ? { bot } : {}) }, gitBacked)
       engine.store.putReceipt({
         clientRequestId: key,
@@ -4609,41 +4600,14 @@ export class OrchestratorService extends EventEmitter {
     return { ...bot, activationId: turn.bot.activationId, ...(owned.limit ? { limit: owned.limit } : {}) }
   }
 
-  /** Starts and messages of bots' chat turns still being made, by turn: counted with the receipts until theirs is written. */
-  private readonly botActsInFlight = new Map<string, number>()
-
   /**
-   * A place for one more start or message of a bot's chat turn ("use your threads"): 5 starts and 20 messages per turn,
-   * counted from the receipts whose request names the turn (`botRequestPrefix`), so a turn that goes on in another run
-   * (after a wall, a restart, the owner's reply) does not start over. A retry of one already made takes no place. Returns
-   * what gives the place back once the call has written its receipt or failed.
+   * A bot's start or message ("use your threads") names its chat turn in its request (`botRequestPrefix`), as the thread
+   * tools make it. There is no count per turn: a bot starts and messages as many of its threads as the work needs, held
+   * by the limit on agent messages in a row and by how many threads it started may work at once.
    */
-  private reserveBotAct(tool: 'thread_create' | 'thread_send', clientRequestId: string, actor: AgentActor, bot: BotSender): () => void {
-    const engine = this.requireRunEngine()
-    const prefix = botRequestPrefix(tool, actor.threadId, bot.activationId)
-    if (!clientRequestId.startsWith(prefix)) throw new McpToolError('mousse_scope_denied', "A bot's start or message must name its chat turn.")
-    if (engine.store.getReceipt(clientRequestId)) return () => undefined
-    const key = `${tool}:${bot.activationId}`
-    const max = tool === 'thread_create' ? THREAD_CREATE_MAX_PER_RUN : THREAD_SEND_MAX_PER_RUN
-    // Only what was accepted counts (a refused message writes no receipt), with what is still being sent; the bot is told
-    // only what was accepted.
-    const done = engine.store.countReceipts(prefix, tool === 'thread_create' ? AGENT_THREAD_COMMAND : 'send', 'accepted')
-    const sending = this.botActsInFlight.get(key) ?? 0
-    if (done + sending >= max) {
-      const pending = sending ? `, and ${sending} more ${sending === 1 ? 'is' : 'are'} still being ${tool === 'thread_create' ? 'started' : 'sent'}` : ''
-      throw new McpToolError('mousse_conflict', tool === 'thread_create'
-        ? `You started ${done} threads in this chat turn${pending}, the most one turn may start (${max}). Tell your owner what you started; they can ask for more in their next message.`
-        : `You sent ${done} messages to threads in this chat turn${pending}, the most one turn may send (${max}). Tell your owner; they can ask for more in their next message.`, { conflict: 'turn_limit', used: done })
-    }
-    this.botActsInFlight.set(key, (this.botActsInFlight.get(key) ?? 0) + 1)
-    let given = false
-    return () => {
-      if (given) return
-      given = true
-      const left = (this.botActsInFlight.get(key) ?? 1) - 1
-      if (left > 0) this.botActsInFlight.set(key, left)
-      else this.botActsInFlight.delete(key)
-    }
+  private assertBotRequestKey(tool: 'thread_create' | 'thread_send', clientRequestId: string, actor: AgentActor, bot: BotSender): void {
+    if (!clientRequestId.startsWith(botRequestPrefix(tool, actor.threadId, bot.activationId)))
+      throw new McpToolError('mousse_scope_denied', "A bot's start or message must name its chat turn.")
   }
 
   /**

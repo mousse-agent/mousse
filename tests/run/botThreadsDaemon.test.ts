@@ -187,34 +187,18 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     expect(w.d.engine.listRuns(full.id, { limit: 5 })).toEqual([])
   })
 
-  it(`counts ${THREAD_CREATE_MAX_PER_RUN} starts and ${THREAD_SEND_MAX_PER_RUN} messages a chat turn, across every run of that turn`, async () => {
+  it(`has no count per chat turn or per day: one turn starts more than ${THREAD_CREATE_MAX_PER_RUN} threads and sends more than ${THREAD_SEND_MAX_PER_RUN} messages`, async () => {
     const w = world()
-    const bare = { firstMessage: undefined, mode: undefined }
-    for (let index = 0; index < 3; index += 1) await w.create(`a${index}`, { title: `A${index}`, ...bare })
-    // The same turn goes on in a new run (after a wall, or a restart): its count goes on with it.
-    w.turnRun('act-1')
-    for (let index = 3; index < THREAD_CREATE_MAX_PER_RUN; index += 1) await w.create(`a${index}`, { title: `A${index}`, ...bare })
-    await expect(w.create('a-over', { title: 'Over', ...bare })).rejects.toMatchObject({ code: 'mousse_conflict', message: expect.stringMatching(/the most one turn may start/) })
-    // A retry of one it made takes no new place.
-    await expect(w.create('a1', { title: 'A1', ...bare })).resolves.toMatchObject({ replayed: true })
-    // The owner's next message is a turn of its own.
-    w.turnRun('act-2')
-    await expect(w.create('b0', { title: 'B0', ...bare })).resolves.toMatchObject({ replayed: false })
-
-    w.turnRun('act-3')
-    // Messages that were refused are not counted, nor reported: a thread waiting on a question refuses three.
-    const waiting = w.d.store.createThread('Waiting', w.project.id)
-    void w.orch.questions.requestAnswers([{ id: 'q', prompt: 'Which?', options: [{ id: 'a', label: 'A' }] }], waiting.id, {})
-    for (let index = 0; index < 3; index += 1) await expect(w.send(waiting.id, `refused-${index}`)).rejects.toMatchObject({ code: 'questions_pending' })
+    // More than a day's worth under the old daily cap, all in one chat turn.
+    const starts = 25
+    for (let index = 0; index < starts; index += 1) await w.create(`a${index}`, { title: `A${index}`, firstMessage: undefined, mode: undefined })
+    expect(w.d.store.listAllThreads().filter((thread) => thread.createdByThreadId === w.chat.id)).toHaveLength(starts)
     const targets = Array.from({ length: THREAD_SEND_MAX_PER_RUN + 1 }, (_, index) => w.d.store.createThread(`Target ${index}`, w.project.id))
     const sent: string[] = []
-    for (let index = 0; index < THREAD_SEND_MAX_PER_RUN; index += 1) {
-      if (index === THREAD_SEND_MAX_PER_RUN / 2) w.turnRun('act-3')
-      sent.push((await w.send(targets[index]!.id, `m${index}`)).runId)
-    }
-    await expect(w.send(targets[THREAD_SEND_MAX_PER_RUN]!.id, 'm-over')).rejects.toMatchObject({ code: 'mousse_conflict', message: expect.stringMatching(new RegExp(`You sent ${THREAD_SEND_MAX_PER_RUN} messages to threads in this chat turn, the most one turn may send`)) })
-    // Twenty turns run before the daemon stops; on a busy machine they take a while.
-    await waitFor(() => sent.every((runId) => ['completed', 'failed', 'cancelled', 'interrupted'].includes(w.d.engine.getRun(runId)?.status ?? '')), 'the twenty runs', 120_000)
+    for (const [index, target] of targets.entries()) sent.push((await w.send(target.id, `m${index}`)).runId)
+    expect(new Set(sent).size).toBe(targets.length)
+    // Every message is a turn that runs before the daemon stops; on a busy machine they take a while.
+    await waitFor(() => sent.every((runId) => ['completed', 'failed', 'cancelled', 'interrupted'].includes(w.d.engine.getRun(runId)?.status ?? '')), 'the runs', 120_000)
   }, 180_000)
 
   it('a Stop is refused while a thread waits on its owner, in the words of a refused message, and stops a turn that is simply running', async () => {
@@ -325,17 +309,6 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     await new Promise((resolve) => setTimeout(resolve, 200))
     expect(w.pi.turns.filter((turn) => turn.threadId === target.id)).toHaveLength(1)
     expect(w.d.orch.withdrawBotThreadMessages({ homeThreadId: w.chat.id, name: 'alpha' })).toBe(0)
-  })
-
-  it('has no daily cap: across chat turns it starts more than 20 threads in a day', async () => {
-    const w = world()
-    const total = 25
-    for (let index = 0; index < total; index += 1) {
-      // Five a chat turn: a new turn every five.
-      if (index % THREAD_CREATE_MAX_PER_RUN === 0) w.turnRun(`act-day-${index}`)
-      await w.create(`d${index}`, { title: `Day ${index}`, firstMessage: undefined, mode: undefined })
-    }
-    expect(w.d.store.listAllThreads().filter((thread) => thread.createdByThreadId === w.chat.id)).toHaveLength(total)
   })
 
   it('a thread it starts is what it manages while its run works, waits on the owner while it asks, and is listed as done once it ends; each change tells its chat thread', async () => {

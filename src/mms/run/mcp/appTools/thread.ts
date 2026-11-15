@@ -190,8 +190,8 @@ function botMayList(host: AppToolHost, engine: RunEngine, callerThreadId: string
 }
 
 /**
- * The request key of a bot's start or message: its chat turn (activation) is part of it, so the service counts a turn's
- * starts and messages from their durable receipts (`OrchestratorService.reserveBotAct`), across every run of the turn.
+ * The request key of a bot's start or message: its chat turn (activation) is part of it, which the service checks
+ * (`OrchestratorService.assertBotRequestKey`). A bot's starts and messages are not counted.
  */
 export function botRequestPrefix(tool: 'thread_create' | 'thread_send', callerThreadId: string, activationId: string): string {
   return `${tool}:${callerThreadId}:${activationId}:`
@@ -830,7 +830,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_send',
-      description: `Send a message to another thread. The thread's model receives it labelled as a message from an agent in your thread, not from the user, and runs it under your permission mode when that is stricter than the thread's own; it never gets more than the thread itself allows. It starts a turn when the thread is idle and queues behind the running turn otherwise (it never steers the running turn). A thread kept in Plan takes it as a plan turn. Refused while the thread waits for the user to answer a question or approval, is paused by a usage limit, or is archived, when it already has several messages from agents waiting, and when it would be more than a few agent messages in a row without a person in between. You may send ${THREAD_SEND_MAX_PER_RUN} messages per run. Returns the run it created: use thread_wait with it to wait for the answer, only when you need it this turn. Subagents are reached with continue_subagent.`,
+      description: `Send a message to another thread. The thread's model receives it labelled as a message from an agent in your thread, not from the user, and runs it under your permission mode when that is stricter than the thread's own; it never gets more than the thread itself allows. It starts a turn when the thread is idle and queues behind the running turn otherwise (it never steers the running turn). A thread kept in Plan takes it as a plan turn. Refused while the thread waits for the user to answer a question or approval, is paused by a usage limit, or is archived, when it already has several messages from agents waiting, and when it would be more than a few agent messages in a row without a person in between. You may send ${THREAD_SEND_MAX_PER_RUN} messages per run (a personal bot has no such count). Returns the run it created: use thread_wait with it to wait for the answer, only when you need it this turn. Subagents are reached with continue_subagent.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -861,7 +861,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         assertNotBotThread(host, threadId, 'thread_send')
         assertTakesWork(host, threadId)
         const actor = actorOf(ctx)
-        // A bot's messages are counted per chat turn by the service, from their receipts: its key names the turn.
+        // A bot's messages are not counted: its key names its chat turn.
         const requestKey = ctx.turn.bot
           ? `${botRequestPrefix('thread_send', ctx.caller.threadId, ctx.turn.bot.activationId)}${toolRequestId(args, ctx)}`
           : `thread_send:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`
@@ -1201,7 +1201,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_create',
-      description: `Start a new thread in a project. Where the thread works is decided by the project, not by workspace: on a Git project a turn that edits gets a worktree of its own, and on any other project the thread works in the project folder (the result's runsIn says which). workspace "new_worktree" records the thread as a worktree thread and is refused on a project that is not Git-backed; "project" (default) records it as an ordinary project thread; "existing_worktree" is not supported. instanceId and model name the thread's model together, and effort its reasoning level (take them from list_models; the person sees your choice); without them the thread uses your own model, or the profile's default when you have none. A model that is not offered in the project, or an agent that is signed out, is refused with the reason and no thread is made: tell the user, never pick another yourself. The thread runs in a permission mode no wider than yours, which a later change of the profile's default does not widen. It is recorded as launched by your thread: you can read it, wait on it and interrupt it afterwards, a person's Stop of your thread also stops it while it runs work you started, and it is not nested under yours. firstMessage (with mode agent or plan) is sent to it as a message from you, so it starts at once; it counts toward the limit on agent messages in a row without a person in between. You may create ${THREAD_CREATE_MAX_PER_RUN} threads per run, and have at most ${THREAD_CREATE_MAX_ACTIVE_PER_THREAD} launched threads working at once. Pass a clientRequestId and reuse it to retry: the same thread comes back, never a second one, and a first message that was not sent is sent. Returns the thread's id, the model, mode and place it got, and what became of the first message; use thread_wait with its run id to wait for the answer, only when you need it this turn. A personal bot gives a title and a firstMessage, names the model with instanceId and model from thread_list's models (else the profile's default, never its own model), and its thread runs in Full access: it runs commands and changes files without asking.`,
+      description: `Start a new thread in a project. Where the thread works is decided by the project, not by workspace: on a Git project a turn that edits gets a worktree of its own, and on any other project the thread works in the project folder (the result's runsIn says which). workspace "new_worktree" records the thread as a worktree thread and is refused on a project that is not Git-backed; "project" (default) records it as an ordinary project thread; "existing_worktree" is not supported. instanceId and model name the thread's model together, and effort its reasoning level (take them from list_models; the person sees your choice); without them the thread uses your own model, or the profile's default when you have none. A model that is not offered in the project, or an agent that is signed out, is refused with the reason and no thread is made: tell the user, never pick another yourself. The thread runs in a permission mode no wider than yours, which a later change of the profile's default does not widen. It is recorded as launched by your thread: you can read it, wait on it and interrupt it afterwards, a person's Stop of your thread also stops it while it runs work you started, and it is not nested under yours. firstMessage (with mode agent or plan) is sent to it as a message from you, so it starts at once; it counts toward the limit on agent messages in a row without a person in between. You may create ${THREAD_CREATE_MAX_PER_RUN} threads per run (a personal bot has no such count), and have at most ${THREAD_CREATE_MAX_ACTIVE_PER_THREAD} launched threads working at once. Pass a clientRequestId and reuse it to retry: the same thread comes back, never a second one, and a first message that was not sent is sent. Returns the thread's id, the model, mode and place it got, and what became of the first message; use thread_wait with its run id to wait for the answer, only when you need it this turn. A personal bot gives a title and a firstMessage, names the model with instanceId and model from thread_list's models (else the profile's default, never its own model), and its thread runs in Full access: it runs commands and changes files without asking.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -1270,14 +1270,14 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           ...(typeof args.firstMessage === 'string' ? { firstMessage: args.firstMessage, mode: (args.mode as 'agent' | 'plan' | undefined) ?? 'agent' } : {})
         }
         const actor = actorOf(ctx)
-        // A bot's starts are counted per chat turn by the service, from their receipts: its key names the turn.
+        // A bot's starts are not counted: its key names its chat turn.
         const requestKey = bot
           ? `${botRequestPrefix('thread_create', ctx.caller.threadId, ctx.turn.bot!.activationId)}${toolRequestId(args, ctx)}`
           : `thread_create:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`
         // A key that already has a stored creation is a retry of that one thread: it takes no new place under the cap
         // (past the cap it still finishes its own thread and first message), and the host refuses it if the thread was
         // used by a person meanwhile.
-        // A bot's start is counted by the service instead, per chat turn.
+        // A bot's start is not counted.
         const uncounted = bot !== undefined || host.creationStarted?.(requestKey) === true
         if (!uncounted) reserveCreation(actor.runId)
         let created: AgentCreatedThread
