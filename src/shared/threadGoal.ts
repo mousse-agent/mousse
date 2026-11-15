@@ -23,6 +23,11 @@ export interface GoalReport {
 export interface ThreadGoal {
   /** What done looks like, as the person typed it. */
   text: string
+  /**
+   * Which goal this is: new when a goal is set and when it is continued. A turn records the one it ran under, and its
+   * report and its end count only while that is still the thread's goal (a goal set or continued meanwhile is another).
+   */
+  epoch: string
   state: ThreadGoalState
   /** Set when stopped: why. */
   stoppedBy?: GoalStopCause
@@ -63,14 +68,14 @@ function clip(text: string, max: number): string {
 }
 
 /** A new goal, counting the turn that starts it. */
-export function newGoal(text: string, turnLimit: number, now: string): ThreadGoal {
-  return { text: text.trim().slice(0, MAX_GOAL_TEXT), state: 'working', turns: 1, turnLimit: normalizeGoalTurnLimit(turnLimit), silentTurns: 0, setAt: now, updatedAt: now }
+export function newGoal(text: string, turnLimit: number, now: string, epoch: string): ThreadGoal {
+  return { text: text.trim().slice(0, MAX_GOAL_TEXT), epoch, state: 'working', turns: 1, turnLimit: normalizeGoalTurnLimit(turnLimit), silentTurns: 0, setAt: now, updatedAt: now }
 }
 
 /** Continue: the goal works again with a fresh allowance of turns, counting the turn Continue starts. */
-export function continuedGoal(goal: ThreadGoal, turnLimit: number, now: string): ThreadGoal {
+export function continuedGoal(goal: ThreadGoal, turnLimit: number, now: string, epoch: string): ThreadGoal {
   const { stoppedBy: _stoppedBy, ...rest } = goal
-  return { ...rest, state: 'working', turns: 1, turnLimit: normalizeGoalTurnLimit(turnLimit), silentTurns: 0, updatedAt: now }
+  return { ...rest, epoch, state: 'working', turns: 1, turnLimit: normalizeGoalTurnLimit(turnLimit), silentTurns: 0, updatedAt: now }
 }
 
 export function stoppedGoal(goal: ThreadGoal, cause: GoalStopCause, now: string): ThreadGoal {

@@ -7,7 +7,7 @@ import { applyGoalReport, decideAfterGoalTurn, newGoal, type GoalTurnEnd, type T
  * else is queued, and how many turns and silent turns the goal has used.
  */
 const NOW = '2026-11-15T10:00:00.000Z'
-const working = (patch: Partial<ThreadGoal> = {}): ThreadGoal => ({ ...newGoal('Ship it', 5, NOW), ...patch })
+const working = (patch: Partial<ThreadGoal> = {}): ThreadGoal => ({ ...newGoal('Ship it', 5, NOW, 'goal-1'), ...patch })
 const end = (patch: Partial<GoalTurnEnd> = {}): GoalTurnEnd => ({ outcome: 'completed', goalTurn: true, reported: true, waitingForPerson: false, queued: false, ...patch })
 
 describe('after a goal turn', () => {

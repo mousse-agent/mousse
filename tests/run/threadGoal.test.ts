@@ -51,9 +51,9 @@ describe('a thread goal', () => {
   }
 
   /** What the agent's `goal_status` call does: the registered tool's handler, over the orchestrator's host. */
-  const report = (d: Phase6Daemon, threadId: string, args: Record<string, unknown>) => {
+  const report = (d: Phase6Daemon, input: Pick<TurnInput, 'threadId' | 'runId'>, args: Record<string, unknown>) => {
     const tool = goalTools(d.orch.mcpToolHost())[0]!
-    return tool.handler(args, { caller: { threadId, runId: 'run', provider: 'test', modeCeiling: 'default', accessLevel: 'manage' }, transport: 'mcp' } as unknown as ToolCallContext)
+    return tool.handler(args, { caller: { threadId: input.threadId, runId: input.runId, provider: 'test', modeCeiling: 'default', accessLevel: 'manage' }, transport: 'mcp' } as unknown as ToolCallContext)
   }
 
   /** An agent that reports `reports[i]` in its turn i (null: no report) and replies. */
@@ -61,7 +61,7 @@ describe('a thread goal', () => {
     let turn = 0
     return adapter(async (input: TurnInput) => {
       const next = reports[turn++]
-      if (next) await report(d(), input.threadId, next)
+      if (next) await report(d(), input, next)
       return `turn ${turn}`
     })
   }
@@ -157,7 +157,7 @@ describe('a thread goal', () => {
   it('stops while a question waits for the person', async () => {
     let d!: Phase6Daemon
     const scripted = piAdapter(async (input) => {
-      await report(d, input.threadId, { status: 'continue', reason: 'Asked which database to use.' })
+      await report(d, input, { status: 'continue', reason: 'Asked which database to use.' })
       void d.questions.requestAnswers([{ id: 'q', prompt: 'Which database?', options: [{ id: 'a', label: 'Postgres' }, { id: 'b', label: 'SQLite' }] }], input.threadId, {}).catch(() => undefined)
       return 'asked'
     })
@@ -176,7 +176,7 @@ describe('a thread goal', () => {
     const gate = new Promise<void>((resolve) => { release = resolve })
     let d!: Phase6Daemon
     const scripted = piAdapter(async (input) => {
-      await report(d, input.threadId, { status: 'continue', reason: 'Working.' })
+      await report(d, input, { status: 'continue', reason: 'Working.' })
       await gate
       return 'done'
     })
@@ -201,10 +201,10 @@ describe('a thread goal', () => {
     const scripted = piAdapter(async (input) => {
       turn += 1
       if (turn === 1) {
-        await report(d, input.threadId, { status: 'continue', reason: 'Started.' })
+        await report(d, input, { status: 'continue', reason: 'Started.' })
         await gate
-      } else if (turn === 3) await report(d, input.threadId, { status: 'met', reason: 'Done, the README too.' })
-      else await report(d, input.threadId, { status: 'continue', reason: 'Updated the README.' })
+      } else if (turn === 3) await report(d, input, { status: 'met', reason: 'Done, the README too.' })
+      else await report(d, input, { status: 'continue', reason: 'Updated the README.' })
       return `turn ${turn}`
     })
     d = boot(newHome(), scripted)
@@ -227,7 +227,7 @@ describe('a thread goal', () => {
     const d = boot(home, first)
     const { id } = thread(d)
     // What a daemon that died mid-goal leaves: the goal working, and its next turn queued on disk.
-    d.store.updateThreadMeta(id, { goal: newGoal('Ship it', 20, new Date().toISOString()) }, { touch: false })
+    d.store.updateThreadMeta(id, { goal: newGoal('Ship it', 20, new Date().toISOString(), 'goal-before-restart') }, { touch: false })
     d.orch.enqueueForThread(id, { content: CONTINUE_TEXT, mode: 'agent' }, { source: 'goal', internal: true })
     await d.crash()
 
@@ -246,13 +246,65 @@ describe('a thread goal', () => {
     expect(second.turns[0]!.prompt).toContain(CONTINUE_TEXT)
   })
 
+  it('a goal set while another goal\'s turn runs is not ended by that turn\'s report or its failure', async () => {
+    let releaseFirst!: () => void
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve })
+    let d!: Phase6Daemon
+    let turn = 0
+    const scripted = piAdapter(async (input) => {
+      turn += 1
+      if (turn === 1) {
+        await firstGate
+        // Goal A's turn reports met after goal B replaced it, then fails.
+        const answer = await report(d, input, { status: 'met', reason: 'A is done.' })
+        expect(answer.text).toMatch(/changes nothing/)
+        throw new Error('turn of goal A failed')
+      }
+      await report(d, input, { status: 'met', reason: 'B is done.' })
+      return 'done'
+    })
+    d = boot(newHome(), scripted)
+    const { id } = thread(d)
+
+    d.orch.threadGoal(id, 'set', 'Goal A')
+    await waitFor(() => scripted.turns.length === 1, 'goal A\'s turn')
+    d.orch.threadGoal(id, 'set', 'Goal B')
+    releaseFirst()
+    await waitFor(() => goalOf(d, id)?.state === 'met' && idle(d, id), 'goal B met')
+    await settle()
+    expect(scripted.turns).toHaveLength(2)
+    expect(scripted.turns[1]!.prompt).toContain('Done looks like: Goal B')
+    expect(goalOf(d, id)).toMatchObject({ text: 'Goal B', state: 'met', lastReport: { reason: 'B is done.' } })
+  })
+
+  it('a new chat\'s goal is set before its first message, so that turn runs under it, and a Stop of it ends the goal', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const scripted = piAdapter(async () => { await gate; return 'stopped meanwhile' })
+    const d = boot(newHome(), scripted)
+    const { id } = thread(d)
+
+    // What the window does for `/goal <text>` on a new chat: adopt, then send the text as the first message.
+    d.orch.threadGoal(id, 'adopt', 'Ship it')
+    expect(readDurableQueue(d.store, id)).toEqual([])
+    void d.orch.send('Ship it', false, { threadId: id, clientRequestId: 'first' }).catch(() => undefined)
+    await waitFor(() => scripted.turns.length === 1, 'the first turn')
+    expect(scripted.turns[0]!.prompt).toContain('Done looks like: Ship it')
+    await d.orch.stopThread(id, 'user')
+    release()
+    await waitFor(() => idle(d, id), 'the thread idle')
+    await settle()
+    expect(scripted.turns).toHaveLength(1)
+    expect(goalOf(d, id)).toMatchObject({ state: 'stopped', stoppedBy: 'user' })
+  })
+
   it('goal_status is refused on a thread without a working goal', async () => {
     const d = boot(newHome(), piAdapter(() => 'reply'))
     const { id } = thread(d)
     const tool = goalTools(d.orch.mcpToolHost())[0]!
     const turn = { threadId: id, subagent: false, discovery: false } as never
     expect(tool.available!(turn)).toMatch(/no goal/)
-    const outcome = await report(d, id, { status: 'met', reason: 'Done.' })
+    const outcome = await report(d, { threadId: id, runId: 'run:none' }, { status: 'met', reason: 'Done.' })
     expect(outcome).toMatchObject({ isError: true })
   })
 })

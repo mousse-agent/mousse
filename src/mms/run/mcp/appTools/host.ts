@@ -227,8 +227,8 @@ export interface AppToolHost extends DelegationToolsHost {
   /** The threads' goals (`/goal`): whether one is working, and the agent's `goal_status` report. Absent: no goal tool. */
   goals?: {
     working(threadId: string): boolean
-    /** Records the report; returns what the agent is told. Throws on a report it refuses. */
-    report(threadId: string, status: unknown, reason: unknown): string
+    /** Records the report of the caller's run; returns what the agent is told. Throws on a report it refuses. */
+    report(threadId: string, runId: string, status: unknown, reason: unknown): string
   }
   /** The run engine of the thread tools (`thread_read`, the queue, fork and merge-back); MCP only. */
   engine?: RunEngine

@@ -36,7 +36,7 @@ export function goalTools(host: AppToolHost): MousseTool[] {
     describe: (args) => `Goal status: ${typeof args.status === 'string' ? args.status : 'report'}`,
     handler: (args, ctx) => {
       try {
-        return { text: goals.report(ctx.caller.threadId, args.status, args.reason) }
+        return { text: goals.report(ctx.caller.threadId, ctx.caller.runId, args.status, args.reason) }
       } catch (error) {
         return { text: error instanceof Error ? error.message : String(error), isError: true }
       }

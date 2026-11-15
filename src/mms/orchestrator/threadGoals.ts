@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import {
   applyGoalReport,
   continuedGoal,
@@ -63,6 +64,12 @@ export class ThreadGoals {
     return this.get(threadId)?.state === 'working'
   }
 
+  /** The working goal a turn starting now runs under (its `epoch`); undefined without one. */
+  epochFor(threadId: string): string | undefined {
+    const goal = this.get(threadId)
+    return goal?.state === 'working' ? goal.epoch : undefined
+  }
+
   /** `/goal <text>`: the thread's goal, replacing any other, and its first turn queued. */
   set(threadId: string, text: string): ThreadGoal {
     const trimmed = text.trim()
@@ -70,15 +77,16 @@ export class ThreadGoals {
     this.requireThread(threadId)
     this.host.removeQueuedGoalTurns(threadId)
     this.reported.delete(threadId)
-    const goal = newGoal(trimmed, this.host.turnLimit(), this.host.now())
+    const goal = newGoal(trimmed, this.host.turnLimit(), this.host.now(), randomUUID())
     this.host.saveGoal(threadId, goal)
     this.host.queueGoalTurn(threadId, { visible: true, text: trimmed })
     return goal
   }
 
   /**
-   * `/goal <text>` on a new chat: the goal's text was just sent as the thread's first message, an ordinary turn, so the
-   * goal is set without a turn of its own. Only when nothing runs or waits any more is its next turn queued.
+   * `/goal <text>` on a new chat: the goal is set just before the window sends its text as the thread's first message,
+   * so that turn runs under the goal and its end decides like any other. Nothing is queued here; a send the window could
+   * not make clears the goal again.
    */
   adopt(threadId: string, text: string): ThreadGoal {
     const trimmed = text.trim()
@@ -86,9 +94,8 @@ export class ThreadGoals {
     this.requireThread(threadId)
     this.host.removeQueuedGoalTurns(threadId)
     this.reported.delete(threadId)
-    const goal = newGoal(trimmed, this.host.turnLimit(), this.host.now())
+    const goal = newGoal(trimmed, this.host.turnLimit(), this.host.now(), randomUUID())
     this.host.saveGoal(threadId, goal)
-    if (!this.host.busy(threadId)) this.host.queueGoalTurn(threadId, { visible: false })
     return goal
   }
 
@@ -106,7 +113,7 @@ export class ThreadGoals {
     const goal = this.get(threadId)
     if (!goal) throw new GoalError('no_goal', 'This thread has no goal.')
     if (goal.state === 'working') return goal
-    const next = continuedGoal(goal, this.host.turnLimit(), this.host.now())
+    const next = continuedGoal(goal, this.host.turnLimit(), this.host.now(), randomUUID())
     this.host.saveGoal(threadId, next)
     // A turn running now (a person's) is followed by the goal's when it ends; the queue keeps its order.
     if (!this.host.goalTurnQueued(threadId)) this.host.queueGoalTurn(threadId, { visible: false })
@@ -121,14 +128,18 @@ export class ThreadGoals {
     this.host.saveGoal(threadId, stoppedGoal(goal, 'user', this.host.now()))
   }
 
-  /** `goal_status` from the thread's agent. Returns what the agent is told. */
-  report(threadId: string, status: unknown, reason: unknown): string {
+  /**
+   * `goal_status` from the thread's agent, in a turn that ran under the goal `turnEpoch`. A report from a turn of a goal
+   * that was replaced or continued since changes nothing. Returns what the agent is told.
+   */
+  report(threadId: string, status: unknown, reason: unknown, turnEpoch: string | undefined): string {
     if (status !== 'met' && status !== 'continue' && status !== 'blocked') throw new GoalError('invalid', 'status must be "met", "continue" or "blocked".')
     const text = typeof reason === 'string' ? reason.trim() : ''
     if (!text) throw new GoalError('invalid', 'Give a short reason.')
     const goal = this.get(threadId)
     if (!goal) throw new GoalError('no_goal', 'This thread has no goal; goal_status is only for a thread whose person set one with /goal.')
     if (goal.state !== 'working') return `The goal is already ${goal.state}; nothing more runs for it unless the person continues it.`
+    if (turnEpoch !== goal.epoch) return 'This turn started before the person set or continued the goal it has now, so this report changes nothing. The next turn says what the goal is.'
     const next = applyGoalReport(goal, status as GoalReportStatus, text, this.host.now())
     this.reported.add(threadId)
     this.host.saveGoal(threadId, next)
@@ -142,10 +153,13 @@ export class ThreadGoals {
    * A turn of the thread ended. Only a working goal is touched: it stops on a pause, a failure, an interruption or a
    * waiting question; otherwise its next turn is queued unless something else runs first or a limit is reached.
    */
-  afterTurn(threadId: string, outcome: GoalTurnOutcome, source: string | undefined): void {
+  afterTurn(threadId: string, outcome: GoalTurnOutcome, source: string | undefined, turnEpoch: string | undefined): void {
     const reported = this.reported.delete(threadId)
     const goal = this.get(threadId)
     if (goal?.state !== 'working') return
+    // A turn that did not run under this goal (it started before the goal was set or continued) decides nothing: the
+    // goal's own first turn is queued already, or follows the send that is starting it.
+    if (!turnEpoch || turnEpoch !== goal.epoch) return
     const decision = decideAfterGoalTurn(goal, {
       outcome,
       goalTurn: source === GOAL_SOURCE,

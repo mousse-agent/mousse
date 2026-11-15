@@ -1809,6 +1809,10 @@ export class OrchestratorService extends EventEmitter {
   })
   /** Whether goals cut off by the previous daemon were marked stopped (once, before any queue drains). */
   private goalsRecovered = false
+  /** The goal each thread's running turn runs under (`ThreadGoal.epoch`), recorded when the turn starts. */
+  private readonly goalTurnEpochs = new Map<string, { runId?: string; epoch?: string }>()
+  /** The same, by the turn's run, for the agent's `goal_status` call. */
+  private readonly goalRunEpochs = new Map<string, string>()
   /** The definition runs of each thread, for its public Stop (`stopDefinitionRuns`). */
   private readonly definitionStops = new Map<string, Set<DefinitionStop>>()
   /** Pending results of `turn.start` effects, keyed by runId (SPEC §12.7). */
@@ -2151,12 +2155,15 @@ export class OrchestratorService extends EventEmitter {
    * own queue drain has looked), the goal decides. A turn cut off by shutdown leaves the goal for startup to stop.
    */
   private goalAfterTurn(threadId: string, outcome: GoalTurnOutcome, source: string | undefined): void {
+    const stamp = this.goalTurnEpochs.get(threadId)
+    this.goalTurnEpochs.delete(threadId)
+    if (stamp?.runId) this.goalRunEpochs.delete(stamp.runId)
     if (this.lifecycle.stopping || threadId === '__unbound__') return
     if (this.threadStore?.getThread(threadId)?.goal?.state !== 'working') return
     setImmediate(() => {
       if (this.lifecycle.stopping) return
       try {
-        this.goals.afterTurn(threadId, outcome, source)
+        this.goals.afterTurn(threadId, outcome, source, stamp?.epoch)
       } catch (error) {
         console.warn('the goal could not decide after a turn', { threadId, error: error instanceof Error ? error.message : String(error) })
       }
@@ -3850,7 +3857,7 @@ export class OrchestratorService extends EventEmitter {
       tasks: (threadId) => (threadId ? this.getTasksForThread(threadId) : null),
       goals: {
         working: (threadId) => this.goals.goalTurnWanted(threadId),
-        report: (threadId, status, reason) => this.goals.report(threadId, status, reason)
+        report: (threadId, runId, status, reason) => this.goals.report(threadId, status, reason, this.goalRunEpochs.get(runId))
       },
       queueSnapshot: (threadId) => this.queueSnapshot(threadId),
       queueCommand: (threadId, command, options) => this.queueCommandAsAgent(threadId, command, options),
@@ -11571,6 +11578,12 @@ export class OrchestratorService extends EventEmitter {
       }
       throw new Error('An orchestrator turn is already running. Use /stop or the stop button first.')
     }
+    // The goal this turn runs under, recorded before anything can fail: its report and its end count only for that goal.
+    if (session.threadId !== '__unbound__') {
+      const epoch = opts?.bot || opts?.source === 'provider-continuation' ? undefined : this.goals.epochFor(session.threadId)
+      this.goalTurnEpochs.set(session.threadId, { ...(opts?.runId ? { runId: opts.runId } : {}), ...(epoch ? { epoch } : {}) })
+      if (opts?.runId && epoch) this.goalRunEpochs.set(opts.runId, epoch)
+    }
     // A Stop while the turn is still being set up ends the setup's waits (`endTurnSetups`); `startTurn` then ends the
     // turn before it started.
     const setupStop = new AbortController()
@@ -12167,8 +12180,9 @@ export class OrchestratorService extends EventEmitter {
       // The first turn on a different model: the agent is told which model it is and which wrote the earlier replies.
       const modelNote = displayUserMessage ? this.modelChangeNoteFor(session.messages, turnPresentationStart, turnId, reuseLastUser) : undefined
       // A thread with a working goal: every turn tells the agent the goal and how to report on it (`goal_status`).
-      const goal = opts?.bot || opts?.source === 'provider-continuation' ? undefined : this.threadStore?.getThread(session.threadId)?.goal
-      const goalText = goal?.state === 'working' ? goalNote(goal) : undefined
+      const goal = this.threadStore?.getThread(session.threadId)?.goal
+      const turnEpoch = this.goalTurnEpochs.get(session.threadId)?.epoch
+      const goalText = goal?.state === 'working' && turnEpoch && goal.epoch === turnEpoch ? goalNote(goal) : undefined
       const prompted = [modelNote, goalText, userContent].filter(Boolean).join('\n\n')
       const activeMessages = getActiveMessages(this.nativeContext)
       const turnInput: TurnInput = {

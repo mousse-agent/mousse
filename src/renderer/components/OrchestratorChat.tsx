@@ -1557,12 +1557,22 @@ export function OrchestratorChat() {
       resolvedReferences.forEach((reference) => useAppStore.getState().addComposerReference(targetThreadId, reference))
     }
     if (typedMeanwhile) setInput(typedMeanwhile)
-    const sent = await sendMessage(text, skillMode ?? chatMode, images, targetThreadId, restoreUnsent, undefined, bound, steerQueued)
-    if (goalToAdopt && sent === true && targetThreadId) {
-      const goalThread = targetThreadId
-      void window.mousse.platformRequest.request('threads.goal', { threadId: goalThread, action: 'adopt', text: goalToAdopt })
-        .catch((error: unknown) => { if (useAppStore.getState().activeThreadId === goalThread) setSendError(sendErrorLine(error)) })
+    // `/goal` on a new chat: the goal is set before its text is sent, so the first turn runs under it and its end decides.
+    const goalThread = goalToAdopt ? targetThreadId : null
+    if (goalToAdopt && goalThread) {
+      try {
+        await window.mousse.platformRequest.request('threads.goal', { threadId: goalThread, action: 'adopt', text: goalToAdopt })
+      } catch (error) {
+        if (stillVisible()) {
+          setSendError(sendErrorLine(error))
+          restoreUnsent()
+        }
+        return
+      }
     }
+    const sent = await sendMessage(text, skillMode ?? chatMode, images, targetThreadId, restoreUnsent, undefined, bound, steerQueued)
+    // Refused: nothing runs, so the goal set for it goes too. (An unconfirmed send may have arrived; it keeps the goal.)
+    if (goalThread && sent === false) void window.mousse.platformRequest.request('threads.goal', { threadId: goalThread, action: 'clear' }).catch(() => undefined)
     if (sent === false && stillVisible()) {
       restoreUnsent()
     } else if (sent !== 'uncertain') {
