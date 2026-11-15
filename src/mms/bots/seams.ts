@@ -135,6 +135,15 @@ export interface BotToolHost {
   cards?: {
     show(botId: string, activationId: string, card: BotCard): { shown: boolean; text: string }
   }
+  /**
+   * Messages to the owner's other bots (`bot_list`, `bot_send`). `from` is the turn that sends: a chat turn, or work the
+   * owner asked for. `send` throws, with why in words for the bot, when the message can't go. Absent: none here.
+   */
+  bots?: {
+    list(botId: string): Array<{ name: string; does: string; paused?: true }>
+    /** `left`: how many more turns in a row may follow between bots without the owner. */
+    send(botId: string, from: string, input: { to: string; message: string }): Promise<{ to: string; left: number }>
+  }
   /** One-off reminders: said at a time, or work started then. Wakes are listed and cancelled with them. */
   reminders: {
     add(botId: string, from: string, input: { dueAt: string; text: string; work?: { title: string; brief: string } }): { reminderId: string; dueAt: string }
