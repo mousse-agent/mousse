@@ -33,6 +33,14 @@ describe('held-back credentials', () => {
     expect(ok(store.read('ada', { ref: `j${seq}`, before: 0, after: 0 })).rows[0]!.text).toBe(masked)
     expect(ok(store.read('ada', { ref: `j${seq + 1}`, before: 1, after: 1 })).rows.map((row) => row.text)).toEqual([masked, masked, masked])
     expect(ok(store.read('ada', { activationId: 'act' })).rows.map((row) => row.text)).toEqual([masked, masked, masked])
+    for (const query of ['', 'password', 'Document']) {
+      const hits = store.search('ada', { query })
+      expect(hits.length).toBeGreaterThan(0)
+      for (const hit of hits) {
+        expect(hit.snippet).toContain(MARK)
+        for (const [, secret] of secrets) expect(hit.snippet).not.toContain(secret)
+      }
+    }
     expect(store.journalRow('ada', seq)!.text).toBe(text)
   })
 
@@ -92,6 +100,19 @@ describe('held-back credentials', () => {
     }
     expect(packText(fx.store.journalRow('ada', seq)!)).toContain(MARK)
     expect(packText(fx.store.journalRow('ada', seq)!)).not.toContain('memory_read')
+  })
+
+  it('keeps document ids in search and masks password words far beyond the snippet start', () => {
+    const fx = memoryFixture()
+    const seq = fx.message({ botId: 'ada', id: 'link', author: 'owner', text: `Document ${LINK}` })
+    for (const query of ['', 'Document']) {
+      const hit = fx.store.search('ada', { query }).find((hit) => hit.ref === `j${seq}`)!
+      expect(hit.snippet).toContain(LINK)
+    }
+    fx.message({ botId: 'ada', id: 'long', author: 'owner', text: `password: ${'ordinary '.repeat(100)}tailword` })
+    const hit = fx.store.search('ada', { query: 'tailword' })[0]!
+    expect(hit.snippet).toBe(`password: ${MARK}`)
+    expect(hit.snippet).not.toContain('tailword')
   })
 
   it('still reads instruction-shaped and hidden text, with its secrets masked, through the bot tools', async () => {
