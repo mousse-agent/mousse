@@ -94,14 +94,14 @@ it.each(['request limit', 'time limit', 'restart'] as const)('%s takes final wor
   expect(reports.map(message => message.text)).toEqual(['Checked the price.'])
 })
 
-it('uses the existing Done fallback once when no final words arrive', async () => {
+it('keeps an empty scheduled report quiet when no final words arrive', async () => {
   const s = await scheduled()
   f.bots.removeSchedule(botId, s.schedule.scheduleId)
   f.clock.now = s.prepared.authority.time.deadline() - 10_000
   await finish(f, s.payload, 'failed', { outcome: CAP })
   for (const timer of [...f.timers]) timer.fn()
   await flush()
-  expect(chatOf(f, botId).filter(message => message.activationId === s.row.id && message.kind === 'run_report').map(message => message.text)).toEqual(['Done.'])
+  expect(chatOf(f, botId).filter(message => message.activationId === s.row.id && message.kind === 'run_report').map(message => message.text)).toEqual([])
 })
 
 it.each([false, true])('a live schedule still gets its wall card when another schedule was removed=%s', async otherRemoved => {
