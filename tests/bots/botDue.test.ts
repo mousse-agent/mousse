@@ -1,5 +1,5 @@
 /** Due sources: reminders, timed/event wakes, shown open question follow-ups, active schedules.
- * Activity: every unfinished activation status in both lanes, plus unread joined chat messages.
+ * Activity: queued/running/walled turns, resumable work, joined messages, watchers and launched threads.
  * Edges: no due time, overdue, window boundary, another bot, settled/cancelled/deleted rows, paused schedules.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -107,15 +107,27 @@ describe('next due time', () => {
 })
 
 describe('idleness (no caller outside tests yet)', () => {
-  it.each(['chat', 'run'] as const)('checks each unfinished status in the %s lane', (lane) => {
-    for (const status of ['queued', 'running', 'waiting_grant', 'paused', 'blocked'] as const) {
+  it.each(['chat', 'run'] as const)('is busy for queued, running and walled turns in the %s lane', (lane) => {
+    for (const status of ['queued', 'running', 'waiting_grant']) {
       f.store.run('UPDATE bot_activations SET lane = ?, status = ? WHERE id = ?', lane, status, first)
       expect(f.bots.isIdle(botId)).toBe(false)
     }
-    for (const status of ['done', 'failed', 'cancelled']) {
-      f.store.run('UPDATE bot_activations SET status = ? WHERE id = ?', status, first)
-      expect(f.bots.isIdle(botId)).toBe(true)
-    }
+  })
+
+  it.each(['budget_exhausted', 'room_allowed', 'usage_limit', 'question', 'question_answered'])('is busy for work waiting on %s', (reason) => {
+    f.store.run("UPDATE bot_activations SET lane = 'run', status = 'blocked', trigger_json = ?, end_reason = ? WHERE id = ?",
+      JSON.stringify({ kind: 'work', title: 'Check.', input: 'Check.' }), reason, first)
+    expect(f.bots.isIdle(botId)).toBe(false)
+  })
+
+  it.each([
+    ['paused', 'unknown_calls'], ['paused', 'uncertain'], ['paused', 'restarted_twice'], ['paused', 'wall_lost'],
+    ['blocked', 'budget_denied'], ['blocked', 'bot_grant_revoked'], ['blocked', 'asked_too_often'],
+    ['blocked', 'escalation_expired'], ['blocked', 'no_progress'], ['done', null], ['failed', null], ['cancelled', null]
+  ])('is idle after a stopped %s row (%s)', (status, reason) => {
+    f.store.run("UPDATE bot_activations SET lane = 'run', status = ?, trigger_json = ?, end_reason = ? WHERE id = ?",
+      status, JSON.stringify({ kind: 'work', title: 'Check.', input: 'Check.' }), reason, first)
+    expect(f.bots.isIdle(botId)).toBe(true)
   })
 
   it('is busy while an ended chat turn still holds unread joined messages', () => {
