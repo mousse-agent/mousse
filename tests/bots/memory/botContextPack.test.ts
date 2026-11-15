@@ -5,6 +5,7 @@ import { createBotJournal } from '../../../src/mms/bots/memory/capture'
 import { BOT_MEMORY_PROTOCOL, BOT_MEMORY_WRAPPER_CLOSE, BOT_MEMORY_WRAPPER_OPEN, BOT_RUN_REPORT_LINE, createBotContextProvider, type BotContextPackOptions } from '../../../src/mms/bots/memory/contextPack'
 import type { ChatMessage } from '../../../src/shared/types'
 import { DAY, HOUR, disposeFixtures, later, memoryFixture, type MemoryFixture } from './memoryFixture'
+import { BOT_CHANGELOG_LATEST } from '../../../src/mms/bots/changelog'
 
 /**
  * The context packs (bot-context.md §5): budgets, stable-to-volatile order, the verbatim window
@@ -15,6 +16,8 @@ import { DAY, HOUR, disposeFixtures, later, memoryFixture, type MemoryFixture } 
 afterEach(disposeFixtures)
 
 function provider(fx: MemoryFixture, extra: Partial<BotContextPackOptions> = {}) {
+  // A bot told every change Mousse made (botChangelog.test.ts covers the block that follows the wrapper until then).
+  fx.store.write(() => fx.store.setState('ada', 'changelog_seen', BOT_CHANGELOG_LATEST))
   const thread = new Map<string, ChatMessage[]>()
   const journal = createBotJournal({ store: fx.store, readThread: (id) => ({ messages: thread.get(id) ?? [] }), listThreads: () => [] })
   return { thread, journal, packs: createBotContextProvider({ store: fx.store, journal, ...extra }) }
