@@ -230,9 +230,13 @@ export function inspectPendingChangesAsync(cwd: string): Promise<PendingChanges>
 /** The merge, revert, cherry-pick or rebase that waits for the user in a checkout, if any. */
 export function* operationInProgressSteps(cwd: string): Steps<PendingChanges['operation']> {
   if (activeHiddenStore(cwd)) return undefined
-  for (const marker of IN_PROGRESS_GIT_MARKERS) {
-    const resolved = yield* tryGitStep(cwd, ['rev-parse', '--git-path', marker])
-    if (resolved.ok && (yield* files.exists(resolve(cwd, resolved.stdout)))) return OPERATION_OF[marker]
+  // One Git command for every marker: Git prints each path on its own line, in the order asked.
+  const resolved = yield* tryGitStep(cwd, ['rev-parse', ...IN_PROGRESS_GIT_MARKERS.flatMap((marker) => ['--git-path', marker])])
+  if (!resolved.ok) return undefined
+  const paths = resolved.stdout.split(/\r?\n/)
+  for (const [index, marker] of IN_PROGRESS_GIT_MARKERS.entries()) {
+    const path = paths[index]
+    if (path && (yield* files.exists(resolve(cwd, path)))) return OPERATION_OF[marker]
   }
   return undefined
 }
