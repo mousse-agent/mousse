@@ -26,8 +26,8 @@ export const NO_LOADED_BROWSER_TABS: LoadedBrowserTabs = { recent: [], loaded: n
 
 /**
  * Keeps loaded the tab on screen, busy tabs, and the three tabs used before the one on screen; every other tab
- * unloads. A tab restored from an earlier session loads the first time it is shown. Applying it twice to the same
- * input changes nothing, so a render may run it again.
+ * unloads. A tab restored from an earlier session loads the first time it is shown, and an unloaded tab loads again
+ * only when shown, opened or busy. Applying it twice to the same input changes nothing, so a render may run it again.
  */
 export function nextLoadedBrowserTabs(previous: LoadedBrowserTabs, input: LoadedBrowserTabsInput): LoadedBrowserTabs {
   const open = new Set(input.tabIds)
@@ -41,6 +41,10 @@ export function nextLoadedBrowserTabs(previous: LoadedBrowserTabs, input: Loaded
   const loaded = new Set<string>()
   if (active && (input.shown || previous.loaded.has(active) || input.openedThisSession.has(active))) loaded.add(active)
   for (const id of input.busy) if (open.has(id)) loaded.add(id)
-  for (const id of recent.filter((id) => id !== active).slice(0, RECENT_BROWSER_TABS_KEPT)) loaded.add(id)
+  // A hidden tab that already unloaded stays so when closing other tabs frees a place: nothing reloads out of sight.
+  const fresh = new Set(opened)
+  for (const id of recent.filter((id) => id !== active).slice(0, RECENT_BROWSER_TABS_KEPT)) {
+    if (previous.loaded.has(id) || fresh.has(id)) loaded.add(id)
+  }
   return { recent, loaded }
 }

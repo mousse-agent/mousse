@@ -34,6 +34,12 @@ describe('which browser tabs keep their page', () => {
     expect(loaded(nextLoadedBrowserTabs(opened, input({ activeTabId: 't4', openedThisSession: new Set(['t6']) })))).toEqual(['t2', 't3', 't4', 't6'])
   })
 
+  it('reloads no hidden tab when closing others frees a place', () => {
+    const state = showInTurn(['t1', 't2', 't3', 't4', 't5', 't6'])
+    const closed = nextLoadedBrowserTabs(state, input({ tabIds: ['t1', 't2', 't3', 't6'], activeTabId: 't6' }))
+    expect(loaded(closed)).toEqual(['t3', 't6'])
+  })
+
   it('gives the same answer when run again on the same input', () => {
     const state = showInTurn(['t1', 't2', 't3', 't4', 't5'])
     const again = nextLoadedBrowserTabs(state, input({ activeTabId: 't5', openedThisSession: new Set(['t6']) }))
