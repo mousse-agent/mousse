@@ -68,9 +68,10 @@ import { botFilesFolder } from './bots/grants/compile'
 import { BotImageMaker } from './bots/images/BotImageMaker'
 import { botInstructions } from './bots/instructions'
 import { createBotMemoryAdmin } from './bots/memory/admin'
-import { BotMemoryStore } from './bots/memory/BotMemoryStore'
-import { botThreadsForCatchUp, createBotJournal } from './bots/memory/capture'
-import { BOT_PACK_REACTIONS, createBotContextProvider, type BotSituation } from './bots/memory/contextPack'
+import type { BotMemoryStore } from './bots/memory/BotMemoryStore'
+import { createProfileBotMemory } from './bots/memory/profileMemory'
+import { botThreadsForCatchUp } from './bots/memory/capture'
+import { BOT_PACK_REACTIONS, type BotSituation } from './bots/memory/contextPack'
 import { createBotModelResolver, type BotModelChooser } from './bots/model/BotModelResolver'
 import { BOT_SUPERVISOR_MISSING, createBotProcessRegistry, type BotProcessRegistry } from './bots/supervisor/BotProcessRegistry'
 import { BotScheduleBook, botWhenOf } from './scheduled/botJobs'
@@ -844,23 +845,22 @@ export class MmsProfileServices {
       ...(this.orchestrator.botMcp() ? { mcp: this.orchestrator.botMcp()! } : {})
     }, ({ store }) => {
       // Memory (WP6) on `bots.db`, right after its migration: the journal, the packs and the owner's memory operations.
-      const memory = new BotMemoryStore({ db: store.db, log: (message, error) => console.warn(message, error instanceof Error ? error.message : error ?? '') })
+      const { memory, journal, pack } = createProfileBotMemory({
+        memory: { db: store.db, log: (message, error) => console.warn(message, error instanceof Error ? error.message : error ?? '') },
+        journal: {
+          readThread: (threadId) => this.threads.loadThreadData(threadId),
+          listThreads: () => botThreadsForCatchUp(store.captureThreads()),
+          // A subagent's thread is copied as its own rows, never as the bot's words to its owner.
+          isSubagentThread: (threadId) => store.threadRole(threadId) === 'subagent'
+        },
+        context: {
+          situation: (botId) => this.botSituation(botId),
+          scheduleCreatedAt: (botId, scheduleId) => this.botSchedules?.get(botId, scheduleId)?.createdAt,
+          reactions: (botId, since) => store.reactionsSince(botId, since, BOT_PACK_REACTIONS)
+            .map((row) => ({ messageId: row.id, emoji: row.ownerReaction!.emoji, at: row.ownerReaction!.at, text: row.text, fromWork: row.kind === 'run_report' || (row.activationId !== null && store.activation(row.activationId)?.lane === 'run') }))
+        }
+      })
       botMemory = memory
-      const journal = createBotJournal({
-        store: memory,
-        readThread: (threadId) => this.threads.loadThreadData(threadId),
-        listThreads: () => botThreadsForCatchUp(store.captureThreads()),
-        // A subagent's thread is copied as its own rows, never as the bot's words to its owner.
-        isSubagentThread: (threadId) => store.threadRole(threadId) === 'subagent'
-      })
-      const pack = createBotContextProvider({
-        store: memory,
-        journal,
-        situation: (botId) => this.botSituation(botId),
-        scheduleCreatedAt: (botId, scheduleId) => this.botSchedules?.get(botId, scheduleId)?.createdAt,
-        reactions: (botId, since) => store.reactionsSince(botId, since, BOT_PACK_REACTIONS)
-          .map((row) => ({ messageId: row.id, emoji: row.ownerReaction!.emoji, at: row.ownerReaction!.at, text: row.text, fromWork: row.kind === 'run_report' || (row.activationId !== null && store.activation(row.activationId)?.lane === 'run') }))
-      })
       // A scheduled run of a bot's automation learns the report levels, its context and Tuning, as any automation run does.
       const context: typeof pack = {
         ...pack,
