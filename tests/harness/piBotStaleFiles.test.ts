@@ -154,14 +154,13 @@ it('detects a file growing past the hash cap and accepts it after a fresh read',
 })
 
 for (const [name, read] of [
-  ['offset', { args: { offset: 1 } }],
+  ['offset', { args: { offset: 2 } }],
   ['limit', { args: { limit: 1 } }],
   ['Pi truncation', { result: { details: { truncation: { truncated: true } } } }],
   ['oversized first line', { result: { details: { truncation: { firstLineExceedsLimit: true } } } }]
 ] as const) {
   it(`a partial read (${name}) allows version-checked edits but requires a whole read before overwrite`, async () => {
     const f = fixture(), t = f.turn()
-    await f.call(t, 'read')
     await f.call(t, 'read', f.path, '', false, read)
     expect((await f.call(t, 'write')).allow).toBe(false)
     expect(readFileSync(f.path, 'utf8')).toBe('one\n')
@@ -196,4 +195,63 @@ it('stays within the content-read cap when a file grows during fingerprinting', 
   expect(requested).toBeLessThanOrEqual(2 * 1024 * 1024)
   reads.mockRestore()
   expect((await f.call(t, 'write')).allow).toBe(true)
+})
+
+for (const args of [{ limit: 100 }, { offset: 1 }, { offset: 1, limit: 100 }]) {
+  it(`allows overwrite after a complete short read with ${JSON.stringify(args)}`, async () => {
+    const f = fixture(), t = f.turn()
+    writeFileSync(f.path, 'one\ntwo')
+    await f.call(t, 'read', f.path, '', false, { args })
+    expect((await f.call(t, 'write')).allow).toBe(true)
+  })
+}
+const page = (offset: number, outputLines: number, truncated: boolean) => ({
+  args: { offset }, result: { details: { truncation: { outputLines, truncated } } }
+})
+it('allows overwrite after three consecutive pages cover an unchanged 5000-line file', async () => {
+  const f = fixture(), t = f.turn()
+  writeFileSync(f.path, Array.from({ length: 5000 }, (_, n) => `line ${n}`).join('\n'))
+  await f.call(t, 'read', f.path, '', false, page(1, 2000, true))
+  expect(await f.call(t, 'write')).toEqual({ allow: false, reason: expect.stringContaining('change it with edit, which is checked against what you read, or read every page first') })
+  await f.call(t, 'read', f.path, '', false, page(2001, 2000, true))
+  expect((await f.call(t, 'write')).allow).toBe(false)
+  await f.call(t, 'read', f.path, '', false, page(4001, 1000, false))
+  expect((await f.call(t, 'write')).allow).toBe(true)
+})
+it('does not combine pages from different versions or across a gap', async () => {
+  const f = fixture(), t = f.turn()
+  writeFileSync(f.path, Array.from({ length: 5000 }, () => 'one').join('\n'))
+  await f.call(t, 'read', f.path, '', false, page(1, 2000, true))
+  writeFileSync(f.path, readFileSync(f.path, 'utf8').replace('one', 'two'))
+  await f.call(t, 'read', f.path, '', false, page(2001, 2000, true))
+  await f.call(t, 'read', f.path, '', false, page(4001, 1000, false))
+  expect((await f.call(t, 'write')).allow).toBe(false)
+  await f.call(t, 'read', f.path, '', false, page(1, 2000, true))
+  await f.call(t, 'read', f.path, '', false, page(4001, 1000, false))
+  expect((await f.call(t, 'write')).allow).toBe(false)
+})
+it('a short partial read explains how to read the file whole', async () => {
+  const f = fixture(), t = f.turn()
+  await f.call(t, 'read', f.path, '', false, { args: { limit: 1 } })
+  expect(await f.call(t, 'write')).toEqual({ allow: false, reason: expect.stringContaining('read it again without offset or limit') })
+})
+it('a file created under a symlinked folder permits its first edit', async () => {
+  const f = fixture(), t = f.turn(), directory = join(f.files, 'real'), alias = join(f.files, 'alias')
+  mkdirSync(directory)
+  fs.symlinkSync(directory, alias, process.platform === 'win32' ? 'junction' : 'dir')
+  const path = join(alias, 'new.md')
+  expect((await f.call(t, 'write', path, 'one\n')).allow).toBe(true)
+  expect((await f.call(t, 'edit', path)).allow).toBe(true)
+  expect(readFileSync(join(directory, 'new.md'), 'utf8')).toBe('mine\n')
+})
+it('metadata catches a same-size rewrite with restored mtime', async () => {
+  const f = fixture(), t = f.turn()
+  const fd = fs.openSync(f.path, 'r+')
+  fs.ftruncateSync(fd, 4 * 1024 * 1024); fs.closeSync(fd)
+  const stat = fs.statSync(f.path)
+  await f.call(t, 'read')
+  const writer = fs.openSync(f.path, 'r+')
+  fs.writeSync(writer, 'two', 0, 'utf8'); fs.closeSync(writer)
+  fs.utimesSync(f.path, stat.atime, stat.mtime)
+  expect(await f.call(t, 'write')).toEqual({ allow: false, reason: refusal })
 })
