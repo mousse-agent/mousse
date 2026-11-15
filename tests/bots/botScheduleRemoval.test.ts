@@ -118,7 +118,9 @@ it('starting unrelated work does not read the shared scheduler under the bot tra
   const row = f.store.listActivations(botId).find(row => row.trigger.kind === 'schedule')!
   f.bots.raiseWall(row.id, { dispatchN: 1, kind: 'gate', permission: { tool: 'write' }, reason: 'Need write.' })
   const get = vi.spyOn(f.book, 'get')
+  const list = vi.spyOn(f.book, 'list')
   await f.bots.activate({ botId, input: 'Other work', clientRequestId: 'other' })
   expect(get).not.toHaveBeenCalled()
+  expect(list).not.toHaveBeenCalled()
   expect(f.book.list(botId).some(entry => entry.scheduleId === a.scheduleId)).toBe(true)
 })

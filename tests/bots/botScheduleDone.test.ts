@@ -186,3 +186,16 @@ it.each(['failed', 'stopped'] as const)('posts one completion line when the run 
   await flush()
   expect(chatOf(f, botId).filter(row => row.systemLine)).toHaveLength(1)
 })
+
+it('keeps a late final reply ahead of its completion line', async () => {
+  const s = await scheduled()
+  await s.tool.handler({ why: 'Finished.' }, s.ctx)
+  await finish(f, s.payload)
+  expect(chatOf(f, botId).some(row => row.systemLine)).toBe(false)
+  f.bots.settle(s.payload, { text: 'Price is low.' })
+  await flush()
+  const rows = chatOf(f, botId)
+  const report = rows.findIndex(row => row.kind === 'run_report' && row.text === 'Price is low.')
+  expect(report).toBeGreaterThan(-1)
+  expect(rows.findIndex(row => row.systemLine)).toBeGreaterThan(report)
+})
