@@ -121,10 +121,15 @@
   border-right: 1px solid var(--ui-line);
 }
 
+/* The column's content never sizes the picker (size containment): it keeps room for the longest level
+   list (--model-picker-run-rows: header, one 28px row each, padding), so hovering a model with fewer
+   levels, none, or a note does not resize the picker and slide the rows under the pointer. Anything
+   past that scrolls. */
 .model-picker-run {
   flex: 0 0 156px;
   width: 156px;
-  min-height: 0;
+  contain: size;
+  min-height: calc(35px + 2 * var(--ui-menu-pad) + var(--model-picker-run-rows, 0) * 28px);
   overflow-y: auto;
 }
 

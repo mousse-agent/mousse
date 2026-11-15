@@ -334,6 +334,22 @@ describe('composer model picker', () => {
     expect(levelItems()).toHaveLength(0)
   })
 
+  it('keeps room for the longest level list, so hovering a model with fewer never resizes the picker', async () => {
+    render({ permission: false })
+    const run = () => document.querySelector<HTMLElement>('.model-picker-run')!
+    // Opus lists six levels; the column holds room for six whichever model is hovered.
+    expect(run().style.getPropertyValue('--model-picker-run-rows')).toBe('6')
+    await hover('Plain 1')
+    expect(run().style.getPropertyValue('--model-picker-run-rows')).toBe('6')
+    await hover('Sonnet 5')
+    expect(run().style.getPropertyValue('--model-picker-run-rows')).toBe('6')
+    // The column's own content does not size the picker; the reserved rows do.
+    const css = readFileSync('src/renderer/styles/composer-run-controls.css', 'utf8')
+    const rule = css.slice(css.indexOf('.model-picker-run {'), css.indexOf('}', css.indexOf('.model-picker-run {')))
+    expect(rule).toContain('contain: size;')
+    expect(rule).toContain('var(--model-picker-run-rows, 0) * 28px')
+  })
+
   it('has no footer for a model without speeds, and never a permission control inside the picker', () => {
     render({ models: [plain], modelId: 'plain' })
     expect(modelButton().querySelector('.composer-model-btn-level')).toBeNull()
