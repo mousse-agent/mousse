@@ -586,7 +586,7 @@ describe('the transcript', () => {
     expect(transcript().querySelector('dl')).toBeNull()
   })
 
-  it('groups one sender’s messages within ten minutes, with a time on every message and a day line per day', async () => {
+  it('groups one sender’s messages within ten minutes, with one time per run in a minute and a day line per day', async () => {
     const today = new Date()
     today.setHours(11, 27, 0, 0)
     const at = (minutes: number, days = 0) => new Date(today.getTime() + minutes * 60_000 - days * 86_400_000).toISOString()
@@ -606,9 +606,10 @@ describe('the transcript', () => {
     // Owner o1+o2, bot b1+b2 (a quote does not break a group), then o3 twenty minutes later.
     expect(['y1', 'o1', 'o2', 'b1', 'b2', 'o3'].map((id) => article(id).classList.contains('is-group-start'))).toEqual([true, true, false, true, false, true])
     expect(article('b2').querySelector('.bot-reply-quote')?.textContent).toBe('tool calls')
-    // Every message has its own time in its bubble, grouped or not, and no time on hover.
+    // One sender's messages in a row in one minute show one time, on the last: o1 and o2 share 11:27, so only o2
+    // shows it; b1 (11:27) and b2 (11:28) are in other minutes, so each shows its own. No time on hover.
     const time = (id: string) => article(id).querySelector('time.bot-bubble-time')
-    expect(['y1', 'o1', 'o2', 'b1', 'b2', 'o3'].map((id) => time(id)?.getAttribute('dateTime'))).toEqual([at(0, 1), at(0), at(0), at(0), at(1), at(20)])
+    expect(['y1', 'o1', 'o2', 'b1', 'b2', 'o3'].map((id) => time(id)?.getAttribute('dateTime') ?? null)).toEqual([at(0, 1), null, at(0), at(0), at(1), at(20)])
     expect(time('b2')?.closest('.bot-bubble')).not.toBeNull()
     expect(time('o2')?.closest('.bot-you-bubble')).not.toBeNull()
     expect(log.querySelector('[title*="2026"], article[title]')).toBeNull()
@@ -623,6 +624,26 @@ describe('the transcript', () => {
     const sending = transcript().querySelector<HTMLElement>('.bot-you.is-pending')!
     expect(sending.classList.contains('is-group-start')).toBe(false)
     expect(sending.querySelector('.bot-bubble-time')?.textContent).toBe('Sending…')
+    // The message above has no other time to lean on until this one is sent: it keeps its own.
+    expect(transcript().querySelector('[data-message-id="o1"] time.bot-bubble-time')).not.toBeNull()
+  })
+
+  it('a quiet line between two of the bot’s messages in one minute keeps both times', async () => {
+    const minute = new Date()
+    minute.setHours(11, 27, 0, 0)
+    const at = (seconds: number) => new Date(minute.getTime() + seconds * 1000).toISOString()
+    fake.chats.inbox = [
+      message(1, { id: 'b1', at: at(10), text: 'Starting.' }),
+      message(2, { id: 'b2', at: at(30), text: 'Done.' }),
+      message(3, { id: 'b3', at: at(40), text: 'Anything else?' })
+    ]
+    await open()
+    await act(async () => useBotsStore.setState({ notes: { inbox: [{ id: 'n1', text: 'Checked mail', at: at(20) }] } }))
+    const log = transcript()
+    expect(log.textContent).toContain('Checked mail')
+    const hasTime = (id: string) => log.querySelector(`[data-message-id="${id}"] time.bot-bubble-time`) !== null
+    // b1, then the quiet line, then b2 and b3 in the same minute: b1 keeps its time, b2 gives its time to b3.
+    expect(['b1', 'b2', 'b3'].map(hasTime)).toEqual([true, false, true])
   })
 
   it('Sign in opens Settings, Providers on the entry to sign in to (the bot runner\'s card)', async () => {
@@ -895,7 +916,7 @@ describe('what renders again', () => {
     await act(async () => useChatsStore.setState({ snapshot: { ...useChatsStore.getState().snapshot } }))
     expect(markdown.renders).toBe(0)
     expect(transcript().querySelector('.bot-typing')).not.toBeNull()
-    // A new message renders itself only.
+    // A new message renders itself only (the one above may lose its time to it, but not draw its words again).
     await act(async () => fake.emit.message('inbox', message(4, { text: 'Done.' })))
     expect(markdown.renders).toBe(1)
   })
