@@ -195,8 +195,10 @@ function atomicWriteEpoch(path: string, at: Date = new Date()): void {
   renameSync(tmpPath, path)
 }
 
-export function recordTickerHeartbeat(success = false, homeDir = getMousseHomeDir(), at: Date = new Date()): void {
+export function recordTickerHeartbeat(success = false, homeDir = getMousseHomeDir(), at: Date = new Date(), downtime?: SchedulerDowntime): void {
   try {
+    // Write the gap first: advancing the heartbeat must not erase why pending claims are late.
+    if (downtime) atomicWriteJson(join(homeDir, 'scheduled', 'ticker_downtime.json'), downtime)
     atomicWriteEpoch(join(homeDir, 'scheduled', 'ticker_heartbeat'), at)
     if (success) {
       atomicWriteEpoch(join(homeDir, 'scheduled', 'ticker_last_success'), at)
@@ -206,7 +208,7 @@ export function recordTickerHeartbeat(success = false, homeDir = getMousseHomeDi
   }
 }
 
-export function readTickerHeartbeat(homeDir = getMousseHomeDir()): { heartbeatAt: string | null; successAt: string | null } {
+export function readTickerHeartbeat(homeDir = getMousseHomeDir()): { heartbeatAt: string | null; successAt: string | null; downtime?: SchedulerDowntime } {
   const readEpoch = (path: string): string | null => {
     try {
       if (!existsSync(path)) return null
@@ -219,9 +221,16 @@ export function readTickerHeartbeat(homeDir = getMousseHomeDir()): { heartbeatAt
     }
   }
 
+  let downtime: SchedulerDowntime | undefined
+  try {
+    const saved = JSON.parse(readFileSync(join(homeDir, 'scheduled', 'ticker_downtime.json'), 'utf-8'))
+    if (typeof saved?.from === 'string' && typeof saved?.to === 'string' && Number.isFinite(Date.parse(saved.from)) && Number.isFinite(Date.parse(saved.to)) && Date.parse(saved.from) < Date.parse(saved.to))
+      downtime = { from: saved.from, to: saved.to }
+  } catch { /* Older profiles have no saved downtime; an unreadable sidecar does not stop ticks. */ }
   return {
     heartbeatAt: readEpoch(join(homeDir, 'scheduled', 'ticker_heartbeat')),
-    successAt: readEpoch(join(homeDir, 'scheduled', 'ticker_last_success'))
+    successAt: readEpoch(join(homeDir, 'scheduled', 'ticker_last_success')),
+    ...(downtime ? { downtime } : {})
   }
 }
 
@@ -1416,13 +1425,13 @@ export class ScheduledJobStore {
    * ends without a run record (the bot's activations are its runs) and the schedule moves on; occurrences missed while
    * Mousse was closed collapse into this one, so a backlog never runs.
    */
-  finishBotClaim(id: string, claimToken: string, outcome: { skipped?: string }, now: Date = new Date()): ScheduledJob | null {
+  finishBotClaim(id: string, claimToken: string, outcome: { skipped?: string; occurrenceAt?: string }, now: Date = new Date()): ScheduledJob | null {
     return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
       const jobs = this.listJobs()
       const job = jobs.find((entry) => entry.id === id)
       const claim = job?.runClaim
       if (!job?.bot || !claim || job.state !== 'running' || claim.token !== claimToken) return null
-      const occurrenceAt = claim.occurrenceKey
+      const occurrenceAt = outcome.occurrenceAt ?? claim.occurrenceKey
       job.runClaim = undefined
       job.botSkip = outcome.skipped ? { at: occurrenceAt, reason: outcome.skipped } : undefined
       if (!outcome.skipped) {

@@ -1,10 +1,15 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { BOT_CHAT_PACK_TOKENS, estimateTokens } from '../../../src/shared/bots/personal/memory'
+import { createBotMemoryAdmin } from '../../../src/mms/bots/memory/admin'
 import { BotJournalError } from '../../../src/mms/bots/memory/BotMemoryStore'
 import { createBotJournal } from '../../../src/mms/bots/memory/capture'
 import { BOT_MEMORY_PROTOCOL, BOT_MEMORY_WRAPPER_CLOSE, BOT_MEMORY_WRAPPER_OPEN, BOT_RUN_REPORT_LINE, createBotContextProvider, type BotContextPackOptions } from '../../../src/mms/bots/memory/contextPack'
 import type { ChatMessage } from '../../../src/shared/types'
 import { DAY, HOUR, disposeFixtures, later, memoryFixture, type MemoryFixture } from './memoryFixture'
+import { createProfileBotMemory } from '../../../src/mms/bots/memory/profileMemory'
+import { botTools } from '../../../src/mms/run/mcp/appTools/bots'
+import type { BotToolHost } from '../../../src/mms/bots/seams'
+import type { ToolCallContext } from '../../../src/mms/run/mcp/appTools/types'
 import { BOT_CHANGELOG_LATEST } from '../../../src/mms/bots/changelog'
 
 /**
@@ -33,6 +38,37 @@ function chat(fx: MemoryFixture, n: number, tokens = 100, activationId = `act-${
 }
 
 describe('the chat pack', () => {
+  it('reads a reminder at 9 in the zone named by Now, with the service defaults', async () => {
+    // The same store and pack construction as MmsProfileServices, over a temporary database.
+    const fx = memoryFixture()
+    const { pack: packs } = createProfileBotMemory({
+      memory: { db: fx.db, clock: () => fx.clock.now },
+      journal: { readThread: () => undefined, listThreads: () => [] }
+    })
+    let dueAt = ''
+    const host = {
+      activationOf: () => ({ botId: 'ada', activationId: 'at-nine', lane: 'chat' }),
+      reminders: { add: (_bot: string, _from: string, input: { dueAt: string }) => {
+        dueAt = input.dueAt
+        return { reminderId: 'r1', dueAt }
+      } },
+      wakes: { add: async (_bot: string, _from: string, input: { dueAt: string }) => {
+        dueAt = input.dueAt
+        return { wakeId: 'w1', dueAt }
+      } }
+    } as unknown as BotToolHost
+    const ctx = { caller: { threadId: 'home' }, turn: { bot: { activationId: 'at-nine' } } } as ToolCallContext
+    for (const name of ['remind', 'wake']) {
+      const tool = botTools(() => ({ host })).find((entry) => entry.name === name)!
+      const result = await tool.handler({ text: 'At nine.', brief: 'Check back.', at: '2026-11-14T09:00' }, ctx)
+      expect(result.isError).not.toBe(true)
+      fx.clock.now = Date.parse(dueAt)
+      const pack = await packs.chatPreamble({ botId: 'ada', activationId: 'at-nine' })
+      const zone = Intl.DateTimeFormat().resolvedOptions().timeZone
+      expect(pack).toContain(`Now: Sat 14 Nov 2026, 09:00 (${zone}).`)
+    }
+  })
+
   it('orders its blocks from stable to volatile, inside the bot_memory wrapper', async () => {
     const fx = memoryFixture()
     const { packs } = provider(fx, { situation: () => ({ ownerName: 'Sam', language: 'English', openAsks: ['change files in ~/Notes'], schedules: [{ label: 'every weekday · 09:00', nextAt: '2026-11-09T09:00:00.000Z' }] }) })
@@ -54,6 +90,22 @@ describe('the chat pack', () => {
     expect(pack).toContain('The owner last wrote 2 hours ago.')
     expect(pack).toContain('Waiting for the owner: change files in ~/Notes.')
     expect(pack).toContain('Schedules: every weekday · 09:00 (next Mon 9 Nov 2026, 09:00).')
+  })
+
+  it.each(['replace', 'edit'] as const)('keeps an entry in its original pack position after %s', async (how) => {
+    const fx = memoryFixture()
+    const { packs } = provider(fx)
+    // A timestamp tie also keeps first-learned order after the first entry gains a new row.
+    fx.store.save('ada', { lane: 'chat', kind: 'owner', text: 'Likes tea.' })
+    fx.store.save('ada', { lane: 'chat', kind: 'owner', text: 'Lives in London.' })
+    later(fx, DAY)
+    if (how === 'edit') createBotMemoryAdmin({ store: fx.store }).edit('ada', 'm1', 'Likes coffee.')
+    else fx.store.save('ada', { lane: 'chat', kind: 'owner', replaces: 'm1', text: 'Likes coffee.' })
+    const pack = await packs.chatPreamble({ botId: 'ada', activationId: 'corrected' })
+    expect(pack).toContain('Likes coffee.')
+    expect(pack.indexOf('Likes coffee.')).toBeLessThan(pack.indexOf('Lives in London.'))
+    expect(fx.store.current('ada', 'm1')?.learnedAt).toBe(new Date(fx.clock.now).toISOString())
+    expect(fx.reopen().active('ada').map((entry) => entry.id)).toEqual(['m1', 'm2'])
   })
 
   it('leaves out owner messages queued after its own: their turns answer them', async () => {
@@ -163,7 +215,7 @@ describe('the chat pack', () => {
     const pack = await packs.chatPreamble({ botId: 'ada', activationId: 'act-2' })
     expect(pack).not.toContain('ghp_')
     expect(pack).not.toContain('Ignore all previous')
-    expect(pack).toContain('] Owner: My token is [held back: looks like a secret · memory_read j1 shows it]')
+    expect(pack).toContain('] Owner: My token is [held back: looks like a secret]')
     expect(pack).toContain('memory_read j2 shows it.)')
     expect(pack).not.toContain('What is the weather?')
   })

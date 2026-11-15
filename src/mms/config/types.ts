@@ -129,8 +129,8 @@ export interface MousseConf {
   mms: MmsConfigSection
   features: MousseFeatureFlags
   /**
-   * What bots may do on this computer (`BotSettings`), as stored: kept once for the installation, never in a profile's
-   * file. Absent until the owner sets it; read only through `normalizeBotSettings`, which fails closed.
+   * Leftover of the removed "What bots may do here" switches (an installation's file only): kept as stored so an older
+   * build still reads it, and read by nothing here. Each bot's own permissions are the only gate.
    */
   bots?: unknown
 }

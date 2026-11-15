@@ -9,7 +9,7 @@ import { EventEmitter } from 'node:events'
 import { homedir, hostname } from 'os'
 import { MousseConfigStore } from './config/MousseConfigStore'
 import { MmsEventBus } from './events'
-import { onSettingsSaved, SettingsStore } from './settings/SettingsStore'
+import { SettingsStore } from './settings/SettingsStore'
 import type { MousseSettingsUpdate } from '../shared/settings'
 import { rewriteMovedDefaults } from './settings/movedDefaults'
 import { ProviderAuthService } from './providers/ProviderAuthService'
@@ -68,9 +68,10 @@ import { botFilesFolder } from './bots/grants/compile'
 import { BotImageMaker } from './bots/images/BotImageMaker'
 import { botInstructions } from './bots/instructions'
 import { createBotMemoryAdmin } from './bots/memory/admin'
-import { BotMemoryStore } from './bots/memory/BotMemoryStore'
-import { botThreadsForCatchUp, createBotJournal } from './bots/memory/capture'
-import { BOT_PACK_REACTIONS, createBotContextProvider, type BotSituation } from './bots/memory/contextPack'
+import type { BotMemoryStore } from './bots/memory/BotMemoryStore'
+import { createProfileBotMemory } from './bots/memory/profileMemory'
+import { botThreadsForCatchUp } from './bots/memory/capture'
+import { BOT_PACK_REACTIONS, type BotSituation } from './bots/memory/contextPack'
 import { createBotModelResolver, type BotModelChooser } from './bots/model/BotModelResolver'
 import { BOT_SUPERVISOR_MISSING, createBotProcessRegistry, type BotProcessRegistry } from './bots/supervisor/BotProcessRegistry'
 import { BotScheduleBook, botWhenOf } from './scheduled/botJobs'
@@ -836,9 +837,6 @@ export class MmsProfileServices {
       // A run may only ask for a skill this profile has. MCP asks are made from the owner's servers set up now (`mcp`).
       knownAsk: (permission) => 'skill' in permission && (this.botKnownSkills?.has(permission.skill) ?? true),
       browser: botBrowsers,
-      // What bots may do on this computer (Settings → Agents): the installation's setting, the same for every profile,
-      // read at every dispatch and call, never taken from a caller or another computer.
-      computerLimit: () => this.config.botSettings().here,
       // "Use your threads" removed: what the bot sent that has not started leaves its owner's threads.
       threadsWithdrawn: (bot) => { this.orchestrator.withdrawBotThreadMessages(bot) },
       // A deleted bot's private temporary folder outside Mousse's data (Claude Code's commands on Linux) goes with it.
@@ -847,23 +845,22 @@ export class MmsProfileServices {
       ...(this.orchestrator.botMcp() ? { mcp: this.orchestrator.botMcp()! } : {})
     }, ({ store }) => {
       // Memory (WP6) on `bots.db`, right after its migration: the journal, the packs and the owner's memory operations.
-      const memory = new BotMemoryStore({ db: store.db, log: (message, error) => console.warn(message, error instanceof Error ? error.message : error ?? '') })
+      const { memory, journal, pack } = createProfileBotMemory({
+        memory: { db: store.db, log: (message, error) => console.warn(message, error instanceof Error ? error.message : error ?? '') },
+        journal: {
+          readThread: (threadId) => this.threads.loadThreadData(threadId),
+          listThreads: () => botThreadsForCatchUp(store.captureThreads()),
+          // A subagent's thread is copied as its own rows, never as the bot's words to its owner.
+          isSubagentThread: (threadId) => store.threadRole(threadId) === 'subagent'
+        },
+        context: {
+          situation: (botId) => this.botSituation(botId),
+          scheduleCreatedAt: (botId, scheduleId) => this.botSchedules?.get(botId, scheduleId)?.createdAt,
+          reactions: (botId, since) => store.reactionsSince(botId, since, BOT_PACK_REACTIONS)
+            .map((row) => ({ messageId: row.id, emoji: row.ownerReaction!.emoji, at: row.ownerReaction!.at, text: row.text, fromWork: row.kind === 'run_report' || (row.activationId !== null && store.activation(row.activationId)?.lane === 'run') }))
+        }
+      })
       botMemory = memory
-      const journal = createBotJournal({
-        store: memory,
-        readThread: (threadId) => this.threads.loadThreadData(threadId),
-        listThreads: () => botThreadsForCatchUp(store.captureThreads()),
-        // A subagent's thread is copied as its own rows, never as the bot's words to its owner.
-        isSubagentThread: (threadId) => store.threadRole(threadId) === 'subagent'
-      })
-      const pack = createBotContextProvider({
-        store: memory,
-        journal,
-        situation: (botId) => this.botSituation(botId),
-        scheduleCreatedAt: (botId, scheduleId) => this.botSchedules?.get(botId, scheduleId)?.createdAt,
-        reactions: (botId, since) => store.reactionsSince(botId, since, BOT_PACK_REACTIONS)
-          .map((row) => ({ emoji: row.ownerReaction!.emoji, at: row.ownerReaction!.at, text: row.text, fromWork: row.kind === 'run_report' || (row.activationId !== null && store.activation(row.activationId)?.lane === 'run') }))
-      })
       // A scheduled run of a bot's automation learns the report levels, its context and Tuning, as any automation run does.
       const context: typeof pack = {
         ...pack,
@@ -917,17 +914,6 @@ export class MmsProfileServices {
     }
     const personalBots = this.personalBots
     if (personalBots) this.orchestrator.setBotThreads(personalBots)
-    // A switch of What bots may do here changed: every bot's About reads again (it marks what is off here).
-    if (personalBots) this.platform.onDispose(onSettingsSaved(() => personalBots.computerLimitChanged()))
-    // The switches are the installation's: when any profile, window or the CLI changes them, every window of this
-    // profile hears it too, with this profile's own settings, so a Settings page already open shows them as they are.
-    let botsHere = JSON.stringify(this.config.botSettings())
-    this.platform.onDispose(onSettingsSaved(() => {
-      const now = JSON.stringify(this.config.botSettings())
-      if (now === botsHere) return
-      botsHere = now
-      this.events.emit({ channel: 'protocol:event', data: { type: 'settings.changed', data: { settings: this.settings.get() } } })
-    }))
     // The bots' own app tools (schedules, profile, depth) and memory tools, through the engine.
     if (personalBots && botMemory) {
       const memory = botMemory
@@ -1055,7 +1041,7 @@ export class MmsProfileServices {
       })
     }
     if (personalBots) {
-      this.scheduled.setBotRunner({ runOccurrence: (input) => personalBots.runScheduledOccurrence(input) })
+      this.scheduled.setBotRunner({ findOccurrence: (input) => personalBots.findScheduledOccurrence(input), runOccurrence: (input) => personalBots.runScheduledOccurrence(input) })
       // Each tick also brings the inbox's bot runs up to date, so their items appear without the page open.
       this.scheduled.setTickHook(async (now) => {
         await personalBots.maintain(now)

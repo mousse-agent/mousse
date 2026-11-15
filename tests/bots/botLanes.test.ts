@@ -139,6 +139,33 @@ describe('messages sent one after another', () => {
     }
   })
 
+  // Identity and limit are independent: equal limits do not make two devices the same sender.
+  it.each([
+    ['running', 'phone', 'ask', true],
+    ['running', 'laptop', 'ask', false],
+    ['running', 'phone', 'full', false],
+    ['queued', 'phone', 'ask', true],
+    ['queued', 'laptop', 'ask', false],
+    ['queued', 'phone', 'full', false]
+  ] as const)('%s turn: follow-up from %s with %s joins=%s', async (status, node, limit, joins) => {
+    if (status === 'queued') await send('Hold the chat lane', 'hold')
+    const first = await f.bots.service.chatSend({ botId, text: 'first', clientRequestId: 'first', from: { node: 'phone', limit: 'ask' } })
+    const second = await f.bots.service.chatSend({ botId, text: 'second', clientRequestId: 'second', from: { node, limit } })
+    expect(second.message.activationId === first.message.activationId).toBe(joins)
+    expect(f.store.activation(second.message.activationId!)?.status).toBe(joins ? status : 'queued')
+  })
+
+  it("withdrawing a device reaches all its queued messages, including joined follow-ups", async () => {
+    await send('Hold the chat lane', 'hold')
+    const messages = []
+    for (const [id, node] of [['l1', 'laptop'], ['p1', 'phone'], ['p2', 'phone']] as const) {
+      messages.push((await f.bots.service.chatSend({ botId, text: id, clientRequestId: id, from: { node, limit: 'ask' } })).message)
+    }
+    expect(await f.bots.service.withdrawQueued((_id, node) => node === 'phone')).toBe(1)
+    expect(f.store.activation(messages[0]!.activationId!)?.status).toBe('queued')
+    for (const message of messages.slice(1)) expect(f.store.activation(message.activationId!)?.status).toBe('cancelled')
+  })
+
   it("another device's message starts a turn of its own", async () => {
     await send('first', 'm1')
     const [turn] = lane('chat', ['running'])

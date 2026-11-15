@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import { Type, type Tool } from '@earendil-works/pi-ai'
 import { BOT_DEPTHS, BOT_WORK_LEVELS, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, MAX_BOT_SCHEDULES, type BotDepth, type BotLane, type BotModelPick, type BotModelSlotKey, type BotModelSlots, type BotSchedule, type BotWorkLevel } from '../../../../shared/bots/personal/definition'
 import { entriesOf, modelsNamedBy, namedOn, ownerNamesModel, pickReasonText, pickSourceOf, plainLabel, workLevelOf, type BotModelRows, type NamedModel } from '../../../../shared/bots/personal/modelSlots'
@@ -261,7 +261,7 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'watch_start',
-    description: `Run a command in the background and wake up here when it is done, instead of waiting or checking again and again: for example a build, a test run, \`gh run watch\` on a nightly, or \`gh pr checks 12 --watch\`. It runs in a shell (${process.platform === 'win32' ? 'cmd on Windows' : 'sh'}) from your files folder, as your commands do, and needs "run commands". You wake when it exits (with its exit code), when a line of its output matches match (a regular expression; it is stopped then), or when it reaches its time limit (minutes, default ${DEFAULT_WATCHER_MINUTES}, at most ${MAX_WATCHER_MINUTES}; it is stopped then); you get the line that matched and the end of its output. brief is what you will do then, standing on its own. It counts as a wake-up (at most ${MAX_WAKE_CHAIN} in a row without your owner, ${MAX_WAKES_PER_DAY} a day). At most ${MAX_WATCHERS_PER_BOT} run at once; a restart of Mousse stops them, and you are told. Tell your owner in a few words what you are waiting on.`,
+    description: `Run a command in the background only in a chat turn your owner's own message started, and wake up here when it is done, instead of waiting or checking again and again: for example a build, a test run, \`gh run watch\` on a nightly, or \`gh pr checks 12 --watch\`. It runs in a shell (${process.platform === 'win32' ? 'cmd on Windows' : 'sh'}) from your files folder, as your commands do, and needs "run commands". You wake when it exits (with its exit code), when a line of its output matches match (a regular expression; it is stopped then), or when it reaches its time limit (minutes, default ${DEFAULT_WATCHER_MINUTES}, at most ${MAX_WATCHER_MINUTES}; it is stopped then); you get the line that matched and the end of its output. brief is what you will do then, standing on its own. It counts as a wake-up (at most ${MAX_WAKE_CHAIN} in a row without your owner, ${MAX_WAKES_PER_DAY} a day). At most ${MAX_WATCHERS_PER_BOT} run at once; a restart of Mousse stops them, and you are told. Tell your owner in a few words what you are waiting on.`,
     parameters: Type.Object({
       command: Type.String({ description: 'The command line.' }),
       brief: Type.String({ description: 'What you will do when it ends, standing on its own, as a note to yourself.' }),
@@ -727,11 +727,17 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         if (name === undefined && description === undefined) return error('set_profile needs a name or a description.')
         if (name !== undefined && (!name || name.length > MAX_BOT_NAME_CHARS)) return error(`A name is 1 to ${MAX_BOT_NAME_CHARS} characters.`)
         if (description !== undefined && (!description || description.length > MAX_BOT_DESCRIPTION_CHARS)) return error(`A description is 1 to ${MAX_BOT_DESCRIPTION_CHARS} characters.`)
-        const profile = { ...(name !== undefined ? { name } : {}), ...(description !== undefined ? { description } : {}) }
+        // The name first and on its own: a description the owner wrote in About is refused, and the name still changes.
+        let renamed = false
         try {
-          call.deps.host.setProfile(call.botId, profile)
+          if (name !== undefined) {
+            call.deps.host.setProfile(call.botId, { name })
+            renamed = true
+          }
+          if (description !== undefined) call.deps.host.setProfile(call.botId, { description })
         } catch (failure) {
-          return error(failure instanceof Error ? failure.message : String(failure))
+          const message = failure instanceof Error ? failure.message : String(failure)
+          return error(renamed ? `Your name is now ${name}. ${message}` : message)
         }
         const result = { ok: true as const }
         call.deps.activity?.onAppResult(call.activity, 'set_profile', result)
@@ -798,10 +804,24 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         // A custom slot needs no words of the owner's: the owner set it up for jobs like this. The engine checks it is one.
         if (args.slot !== undefined && args.slot !== null && typeof args.slot !== 'string') return error('slot is the name of one of the owner\'s custom slots.')
         const slot = typeof args.slot === 'string' ? args.slot : undefined
+        // MCP assigns fresh call ids, and a restarted chat gets a new dispatch. Request identity belongs to the
+        // whole chat activation instead; include every choice that can change which work the owner asked for.
+        const requestKey = createHash('sha256').update(JSON.stringify([
+          title, brief, level ?? null,
+          model ? [model.pick.instanceId, model.pick.model, model.pick.effort ?? null] : null,
+          slot ?? null
+        ])).digest('hex')
         try {
-          const started = await call.deps.host.work.start(call.botId, call.activationId, { title, brief, key: `${call.activationId}:${ctx.toolCallId ?? randomUUID()}`, ...(level ? { level } : {}), ...(model ? { model } : {}), ...(slot !== undefined ? { slot } : {}) })
+          const started = await call.deps.host.work.start(call.botId, call.activationId, { title, brief, key: `${call.activationId}:${requestKey}`, ...(level ? { level } : {}), ...(model ? { model } : {}), ...(slot !== undefined ? { slot } : {}) })
           const where = model ? ` It runs on ${model.name.name} on ${model.name.entry}${model.name.effort ? `, ${model.name.effort} reasoning` : ''}, for this work only.` : ''
-          const result = { ...started, note: (started.status === 'queued' ? `You start on it when there is room, after: ${started.ahead.join('; ')}. Tell the owner you'll get to it after that.` : started.status === 'ended' ? 'You already did this and finished; work_list has the start of your report.' : 'You are on it now, beside anything else you are working on. Tell the owner in one short line that you are on it; when you finish, your report reaches them by itself.') + where }
+          const note = started.status === 'ended'
+            ? 'This work already ended; nothing new was started. work_list has its result.'
+            : started.status === 'queued'
+              ? `${started.replayed ? 'This work is already queued; nothing new was started. ' : ''}You start on it when there is room, after: ${started.ahead.join('; ')}. Tell the owner you'll get to it after that.`
+              : started.replayed
+                ? 'This work is already in progress; nothing new was started. Tell the owner you are already on it; its report reaches them by itself.'
+                : 'You are on it now, beside anything else you are working on. Tell the owner in one short line that you are on it; when you finish, your report reaches them by itself.'
+          const result = { ...started, note: note + where }
           call.deps.activity?.onAppResult(call.activity, 'work_start', started)
           return json(result)
         } catch (failure) {

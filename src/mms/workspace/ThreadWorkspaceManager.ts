@@ -721,6 +721,15 @@ export class ThreadWorkspaceManager {
     return rebound
   }
 
+  /**
+   * Whether an operation of Mousse's own on the worktree did not finish: one its journal still waits on, a rebuild that
+   * stopped, or a retirement that left the folder partly removed. A worktree that is gone or that Git cannot read
+   * without any of these was removed or emptied by someone else (the agent, the person), and nothing waits to recover it.
+   */
+  async ownOperationUnfinished(metadata: ThreadWorkspaceMetadata, inFlight?: InFlightTest): Promise<boolean> {
+    return this.hasPendingOperation(inFlight) || this.rebuildUnfinished(metadata) || await this.partlyRemoved(metadata)
+  }
+
   /** Whether the worktree's record has a rebuild that did not finish: the folder at its path is then not the worktree. */
   rebuildUnfinished(metadata: ThreadWorkspaceMetadata): boolean {
     const gate = getThreadLifecycleGate(this.threadDirectory)

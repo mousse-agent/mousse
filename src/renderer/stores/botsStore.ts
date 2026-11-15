@@ -180,6 +180,11 @@ interface BotsState {
   /** One create at a time: a second call while one is on its way gets the same answer. */
   create(input: { look: BotLook; name?: string; description: string; model?: string; slots?: BotModelSlots; image?: BotModelPick }): Promise<BotSummary | null>
   update(botId: string, change: { name?: string; look?: BotLook }): Promise<boolean>
+  /**
+   * The owner edits the bot's prompt in About (its description; null: back to the default). Its next turn works under
+   * it. Why it failed, in words, or null; the failure stays with the editor, not the chat.
+   */
+  setPrompt(botId: string, description: string | null): Promise<string | null>
   pause(botId: string): Promise<void>
   resume(botId: string): Promise<void>
   remove(botId: string): Promise<boolean>
@@ -758,6 +763,17 @@ export const useBotsStore = create<BotsState>((set, get) => {
         set({ busy: false })
         return true
       } catch (cause) { fail(owner, cause, botId); return false }
+    },
+
+    async setPrompt(botId, description) {
+      const owner = epoch
+      try {
+        const bot = await bots().update(botId, { description })
+        if (owner === epoch) putBot(bot)
+        return null
+      } catch (cause) {
+        return errorText(cause)
+      }
     },
 
     async pause(botId) {

@@ -412,15 +412,6 @@ function pullRequestScopeParams(scope: PullRequestScope | undefined): Record<str
   }
 }
 
-/**
- * What the window chrome's own settings store mirrors of the daemon's settings: everything but What bots may do here,
- * which the chrome never reads and which the store writes only as exactly three switches.
- */
-function chromeMirrorOf(settings: MousseSettings): MousseSettingsUpdate {
-  const { bots: _bots, ...chrome } = settings
-  return chrome
-}
-
 export function registerGuiIpc(
   services: GuiIpcServices,
   getWindow: () => BrowserWindow | null
@@ -676,7 +667,7 @@ export function registerGuiIpc(
   const notifyBot = (data: unknown, win: BrowserWindow, profileSettings: MousseSettings, profileId: string): void => {
     const { botId, message, botName, quiet } = (data ?? {}) as { botId?: unknown; message?: BotChatMessage; botName?: unknown; quiet?: unknown }
     if (typeof botId !== 'string' || !message || typeof message.id !== 'string') return
-    // A run report its schedule's Tell me keeps quiet (Only problems) stays in the chat without a notification.
+    // A scheduled report below its Tell me level stays in the chat without a notification.
     if (quiet === true) return
     const kind = botNotificationKind(message)
     if (!kind || !botNotifications.first(profileId, message.id)) return
@@ -1051,7 +1042,7 @@ export function registerGuiIpc(
       const next = (event.data as { settings?: MousseSettings } | null)?.settings
       if (next) {
         try {
-          settings.set(chromeMirrorOf(next))
+          settings.set(next)
           applyWindowAccentBackground(getWindow(), next)
         } catch {
           /* chrome mirror best-effort */
@@ -1198,7 +1189,7 @@ export function registerGuiIpc(
         rememberWindowSettings(senderId, next)
         if (binding.profileId === guiMms.getBaseBinding()?.profileId) {
           try {
-            settings.set(chromeMirrorOf(next))
+            settings.set(next)
           } catch {
             /* chrome mirror best-effort */
           }
@@ -3340,7 +3331,7 @@ export function registerGuiIpc(
     }
     if (guiMms.getWindowBinding()?.profileId === guiMms.getBaseBinding()?.profileId) {
       try {
-        settings.set(chromeMirrorOf(res.settings))
+        settings.set(res.settings)
       } catch {
         /* chrome mirror best-effort */
       }
@@ -3354,7 +3345,7 @@ export function registerGuiIpc(
     rememberWindowSettings(event.sender.id, res.settings)
     if (guiMms.getWindowBinding()?.profileId === guiMms.getBaseBinding()?.profileId) {
       try {
-        settings.set(chromeMirrorOf(res.settings))
+        settings.set(res.settings)
       } catch {
         /* ignore */
       }

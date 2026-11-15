@@ -83,8 +83,8 @@ export async function clearStaleLeftMerges(threadDirectory: string, beforeRecord
 /**
  * What a thread's worktree or its Publish is waiting on, or undefined when nothing is. `verified` is
  * `ThreadWorkspaceManager.verify()` of the stored metadata: `recovery_required` while a Mousse operation other than
- * Publish waits, or when Git cannot read the worktree. The branch and HEAD are the agent's to move and are never a
- * reason. With `inFlight`, `verified` must come from `verify(…, { inFlight })` too, so a skipped record does not come
+ * Publish waits, or when Git cannot read the worktree (a pause only when Mousse's own operation left it so). The branch
+ * and HEAD are the agent's to move and are never a reason. With `inFlight`, `verified` must come from `verify(…, { inFlight })` too, so a skipped record does not come
  * back as "Git cannot read the worktree".
  */
 export async function describeRecovery(threadDirectory: string, verified: ThreadWorkspaceMetadata, options: RecoveryReadOptions = {}): Promise<WorkspaceRecovery | undefined> {
@@ -104,7 +104,11 @@ export async function describeRecovery(threadDirectory: string, verified: Thread
   const waiting = latest.find((entry) => PENDING_STATES.includes(entry.state) && !PUBLISH_TYPES.includes(entry.operationType) && !settlesItself(entry.operationType) && !options.inFlight?.(entry))
   if (waiting) return { kind: 'paused', reason: errorOf(waiting) ?? `The ${waiting.operationType} operation did not finish.`, ...operationOf(waiting) }
   // A folder with no Git of its own (`snapshotOnly`) has no worktree for Git to read: only a waiting operation pauses it.
-  if (!verified.snapshotOnly && verified.lifecycle === 'recovery_required') return { kind: 'paused', reason: 'Git cannot read the worktree.' }
+  // A worktree the agent or the person removed or emptied pauses nothing either: the thread's turns run in the project
+  // folder (`WorkspaceResolver`). Only one an operation of Mousse's own left unreadable waits to be recovered.
+  if (!verified.snapshotOnly && verified.lifecycle === 'recovery_required' && await new ThreadWorkspaceManager(threadDirectory).ownOperationUnfinished(verified, options.inFlight)) {
+    return { kind: 'paused', reason: 'Git cannot read the worktree.' }
+  }
 
   // Nothing is refused, but Git keeps a merge open in that folder until it is aborted or finished.
   for (const entry of latest) {

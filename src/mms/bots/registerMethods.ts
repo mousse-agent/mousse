@@ -22,7 +22,7 @@ const KEYS: Record<BotsPersonalV2Method, readonly string[]> = {
   'bots.personal.list': [],
   'bots.create': ['look', 'name', 'description', 'clientRequestId', 'model', 'slots', 'image'],
   'bots.get': ['botId'],
-  'bots.update': ['botId', 'name', 'look'],
+  'bots.update': ['botId', 'name', 'look', 'description'],
   'bots.personal.pause': ['botId'],
   'bots.personal.resume': ['botId'],
   'bots.delete': ['botId'],
@@ -136,9 +136,12 @@ function validate(method: BotsPersonalV2Method, value: unknown): Params {
       if (p.oneWork !== undefined && p.oneWork !== true) throw new DomainRpcError('invalid_params', 'oneWork is true')
       break
     case 'bots.update':
-      if (p.name === undefined && p.look === undefined) throw new DomainRpcError('invalid_params', 'Give a name or a look')
+      if (p.name === undefined && p.look === undefined && p.description === undefined) throw new DomainRpcError('invalid_params', 'Give a name, a look or a description')
       if (p.name !== undefined && !text(p.name, MAX_BOT_NAME_CHARS)) throw new DomainRpcError('invalid_params', `A name is 1 to ${MAX_BOT_NAME_CHARS} characters`)
       if (p.look !== undefined) p.look = look(p.look)
+      // null: back to the prompt from before the owner's first edit.
+      if (p.description !== undefined && p.description !== null && !text(p.description, MAX_BOT_DESCRIPTION_CHARS))
+        throw new DomainRpcError('invalid_params', `Say what the bot should do in 1 to ${MAX_BOT_DESCRIPTION_CHARS} characters`)
       break
     case 'bots.chat.list':
       if (p.beforeSeq !== undefined && !whole(p.beforeSeq, 1)) throw new DomainRpcError('invalid_params', 'beforeSeq must be a positive whole number')
@@ -234,7 +237,7 @@ async function handle(method: BotsPersonalV2Method, p: Params, bots: BotChatServ
     case 'bots.personal.list': return bots.list()
     case 'bots.create': return bots.create({ look: p.look as BotLook, ...(typeof p.name === 'string' && p.name.trim() ? { name: p.name } : {}), description: p.description as string, clientRequestId: p.clientRequestId as string, ...(typeof p.model === 'string' ? { model: p.model.trim() } : {}), ...(p.slots !== undefined ? { slots: p.slots as BotModelSlots } : {}), ...(p.image !== undefined ? { image: p.image as BotModelPick } : {}) })
     case 'bots.get': return bots.get(botId)
-    case 'bots.update': return bots.update(botId, { ...(p.name !== undefined ? { name: p.name as string } : {}), ...(p.look !== undefined ? { look: p.look as BotLook } : {}) })
+    case 'bots.update': return bots.update(botId, { ...(p.name !== undefined ? { name: p.name as string } : {}), ...(p.look !== undefined ? { look: p.look as BotLook } : {}), ...(p.description !== undefined ? { description: p.description as string | null } : {}) })
     case 'bots.personal.pause': return bots.pause(botId)
     case 'bots.personal.resume': return bots.resume(botId)
     case 'bots.delete': return bots.delete(botId)

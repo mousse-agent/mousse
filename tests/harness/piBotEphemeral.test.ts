@@ -61,7 +61,7 @@ function alive(pid: number): boolean {
 }
 
 describe('the locked launch (piLaunch)', () => {
-  it('builds the environment from nothing: the allowlist, the instance’s own key and ids, and the marker', () => {
+  it('builds the environment from nothing: the allowlist, configured ids, and the marker', () => {
     const home = '/profile/harness/pi-openrouter/home'
     const env = instanceEnv({ instanceId: 'pi:openrouter', driver: 'pi', configRevision: 0, home, searchPath: [], base: { PATH: '/usr/bin', HOME: '/home/me', LANG: 'C.UTF-8', HTTPS_PROXY: 'http://proxy:3128', ...PLANTED } })
     const runtime = { root: '/rt', entry: '/rt/dist/bundle/rpc-entry.js', extension: '/rt/ext.mjs' }
@@ -74,14 +74,15 @@ describe('the locked launch (piLaunch)', () => {
       locked: { credential: 'api_key', scratch: '/profile/bots/scratch/act-7', marker: { MOUSSE_BOT_ACTIVATION: 'act-7' }, platform: 'linux' }
     }) as Extract<PiLaunch, { runs: 'yes' }>
     expect(launched.runs).toBe('yes')
-    const extra = new Set(['OPENROUTER_API_KEY', 'OPENROUTER_ACCOUNT'])
+    const extra = new Set(['OPENROUTER_ACCOUNT'])
     expect(Object.keys(launched.env).filter((name) => !allowed(name) && !extra.has(name))).toEqual([])
     for (const name of Object.keys(PLANTED)) expect(launched.env).not.toHaveProperty(name)
     expect(launched.env).toMatchObject({
       PATH: '/usr/bin', HOME: '/home/me', HTTPS_PROXY: 'http://proxy:3128', TMPDIR: '/profile/bots/scratch/act-7/tmp',
-      PI_CODING_AGENT_DIR: home, OPENROUTER_API_KEY: 'or-own-key', OPENROUTER_ACCOUNT: 'acct-1', MOUSSE_PI_BRIDGE: '{}', MOUSSE_BOT_ACTIVATION: 'act-7',
+      PI_CODING_AGENT_DIR: home, OPENROUTER_ACCOUNT: 'acct-1', MOUSSE_PI_BRIDGE: '{}', MOUSSE_BOT_ACTIVATION: 'act-7',
       PI_OFFLINE: '1', AWS_MAX_ATTEMPTS: '1'
     })
+    expect(launched.env).not.toHaveProperty('OPENROUTER_API_KEY')
     expect(launched.args).toContain('--no-session')
   })
 

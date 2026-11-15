@@ -25,6 +25,8 @@ export interface SavedCursorAgent {
   historyKey?: string
   /** Runs Mousse started on the agent for this thread (most recent last), for active-run recovery. */
   runIds: string[]
+  /** Hash of the session instructions the agent was given in its first prompt. */
+  instructionsHash?: string
 }
 
 export interface CursorSessionStore {
@@ -59,6 +61,11 @@ export interface CursorChatInput {
   signal?: AbortSignal
   mcp?: McpAttachment | null
   orchestrationInstructions?: string
+  /**
+   * A bot's turn: its session instructions are its system text (the owner's words, what it may use), so an agent given
+   * other ones is not reopened. A new agent gets them and the history in its first prompt, as Codex starts a new thread.
+   */
+  bot?: true
   onText(text: string): void
   onThinking?(text: string): void
   onTool?(event: CursorToolEvent): void
@@ -481,7 +488,10 @@ export class CursorSessions {
     // A Stop that came first opens nothing (and starts no host).
     if (stop.aborted) throw new TurnStopped()
     const saved = store.saved(input.threadId)
-    const matches = saved?.cwd === input.cwd && saved.historyKey === historyKey
+    const instructionsHash = input.orchestrationInstructions ? createHash('sha256').update(input.orchestrationInstructions).digest('hex').slice(0, 32) : undefined
+    // An agent reads the instructions in its first prompt only: a bot's agent given other ones is replaced.
+    const stale = input.bot === true && instructionsHash !== undefined && saved?.instructionsHash !== instructionsHash
+    const matches = saved?.cwd === input.cwd && saved.historyKey === historyKey && !stale
     const live = this.live.get(input.threadId)
     if (live && live.generation === this.generation && matches && live.agentId === saved?.agentId) return { agentId: live.agentId, resumed: true }
     if (live) this.closeLive(input.threadId)
@@ -517,7 +527,7 @@ export class CursorSessions {
       if (error instanceof TurnStopped) this.abandon(creating, { prune: true })
       throw error
     }
-    store.setSaved(input.threadId, { agentId, cwd: input.cwd, runIds: [] })
+    store.setSaved(input.threadId, { agentId, cwd: input.cwd, runIds: [], ...(instructionsHash ? { instructionsHash } : {}) })
     if (saved && saved.agentId !== agentId) this.prune([saved.agentId])
     this.live.set(input.threadId, { agentId, cwd: input.cwd, generation: this.generation })
     return { agentId, resumed: false }
