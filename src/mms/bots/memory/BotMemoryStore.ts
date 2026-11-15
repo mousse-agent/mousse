@@ -825,13 +825,16 @@ export class BotMemoryStore {
           this.dropChip(botId, shortChipText(text))
         }
       }
+      const progressRows = this.all("SELECT * FROM bot_journal WHERE bot_id = ? AND json_extract(json, '$.op') = 'progress' AND redacted_at IS NULL", botId).map(journalRowOf)
+      const matches = (text: string) => [...text.matchAll(/\bj(\d+)\b/g)].some((match) => redactedSeqs.has(Number(match[1])))
+        || forgottenTexts.some((forgotten) => forgotten.trim().length >= MIN_COPY_CHARS && text.includes(forgotten.trim().replace(/\s+/g, ' ')))
+      // All versions matter: the latest value may no longer cite what an older note still holds.
+      for (const row of progressRows) if (matches(row.text) || redactedSeqs.has(row.seq)) redact(row)
       for (const row of this.all("SELECT key, value FROM bot_memory_state WHERE bot_id = ? AND key LIKE 'progress:%'", botId)) {
         const progress = parseJson(row.value) as { text?: string; seq?: number } | undefined
         if (!progress?.text) continue
-        const cites = [...progress.text.matchAll(/\bj(\d+)\b/g)].some((match) => redactedSeqs.has(Number(match[1])))
-        if (cites || (progress.seq !== undefined && redactedSeqs.has(progress.seq)) || forgottenTexts.some((text) => text.trim() && progress.text!.includes(text.trim()))) {
+        if (matches(progress.text) || (progress.seq !== undefined && redactedSeqs.has(progress.seq))) {
           this.run('DELETE FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, row.key as string)
-          // The note may only cite the removed words; its journal copy must go as well.
           if (progress.seq !== undefined) {
             const source = this.journalRow(botId, progress.seq)
             if (source) redact(source)
