@@ -13115,7 +13115,18 @@ export class OrchestratorService extends EventEmitter {
       this.setTurnPhase(session.threadId, 'completed')
       this.markRun(engineRunId, (engine, id) => engine.markFinalizing(id))
     }
-    await checkpointTurn(executionFailed ? 'failed' : 'completed')
+    try {
+      await checkpointTurn(executionFailed ? 'failed' : 'completed')
+    } catch (error) {
+      // The answer was already shown finished, and announced as finished. The run now fails with its checkpoint, so the
+      // thread says why instead of reading as a turn that ended well; the failure goes on as before.
+      if (!executionFailed) {
+        const reason = error instanceof Error ? error.message : String(error)
+        this.addSystemMessage(`The answer is complete, but this turn's checkpoint could not be recorded: ${reason}`, undefined, 'warning')
+        this.persist(true)
+      }
+      throw error
+    }
     this.persist(true)
     if (!executionFailed) markRunTerminal('completed', undefined, displayText || 'Done.')
     this.emit('response', response)
