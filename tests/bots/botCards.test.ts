@@ -126,6 +126,15 @@ describe('a card on a message', () => {
     expect(f.bots.service.list().bots.find((bot) => bot.id === botId)?.last?.text).toBe('4 of 9 · Listings checked')
   })
 
+  it('a reply to a message of cards alone quotes the card, and the bot is told it', async () => {
+    const reply = await shown([{ type: 'progress', label: 'Listings checked', done: 4, total: 9 }], '')
+    const { message } = await f.bots.service.chatSend({ botId, text: 'Check the rest', clientRequestId: 'm2', replyTo: reply.id })
+    expect(message.replyTo).toMatchObject({ id: reply.id, author: 'bot', text: '4 of 9 · Listings checked' })
+    const turn = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    const { prepared } = await start(f, turn.id)
+    expect(prepared.prompt).toBe('(Replying to your message: "4 of 9 · Listings checked")\n\nCheck the rest')
+  })
+
   it('goes with work\'s report', async () => {
     const turn = await chatTurn('Compare two vacuums.', 'w')
     const { workId } = await f.bots.tools.work.start(botId, turn.activation.id, { title: 'Vacuums', brief: 'Compare two vacuums.', key: 'w1' })

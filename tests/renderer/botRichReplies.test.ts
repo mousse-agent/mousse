@@ -130,6 +130,14 @@ describe('a bot\'s reply, drawn as a thread\'s', () => {
     expect(replying.getAttribute('aria-label')).toBe("Replying to Trip planner's message: Applet: Budget · Your budget:")
   })
 
+  it('quotes a message of a card alone by its card, as the sent message will quote it', async () => {
+    const card = { type: 'progress' as const, label: 'Listings checked', done: 4, total: 9 }
+    fake.chats.trip = [message(1, { id: 'b3', text: '4 of 9 · Listings checked', plainFrom: 0, cards: [card], applets: [{ threadId: HOME, reference: budget }] })]
+    await open()
+    await click(reply().querySelector('button[aria-label="Reply to Budget"]'))
+    expect(host.querySelector('.bot-replying')!.getAttribute('aria-label')).toBe("Replying to Trip planner's message: Applet: Budget · 4 of 9 · Listings checked")
+  })
+
   it('quotes a message that is only an applet by the applet\'s name', async () => {
     fake.chats.trip = [message(1, { id: 'b2', text: '', applets: [{ threadId: HOME, reference: budget }] })]
     await open()
