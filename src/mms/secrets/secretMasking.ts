@@ -1,6 +1,6 @@
 import { MIN_SECRET_VALUE_LENGTH, secretMask } from '../../shared/secretRequests'
 
-/** The forms a value can take in text: as typed, inside JSON, base64 (padded or not) and URL-encoded. Longest first. */
+/** The forms a value can take in text: as typed, inside JSON, base64 (padded or not), URL-encoded and hex. Longest first. */
 export function secretForms(value: string): string[] {
   const forms = new Set<string>([value])
   forms.add(JSON.stringify(value).slice(1, -1))
@@ -8,6 +8,8 @@ export function secretForms(value: string): string[] {
   forms.add(base64)
   forms.add(base64.replace(/=+$/, ''))
   forms.add(encodeURIComponent(value))
+  forms.add(Buffer.from(value, 'utf8').toString('hex'))
+  forms.add(Buffer.from(value, 'utf8').toString('hex').toUpperCase())
   return [...forms].filter((form) => form.length >= MIN_SECRET_VALUE_LENGTH).sort((a, b) => b.length - a.length)
 }
 
@@ -74,4 +76,13 @@ export function maskedCopy<T>(value: T, mask: SecretMasker): T {
   const copy = JSON.parse(text) as T
   maskInPlace(copy, mask)
   return copy
+}
+
+/**
+ * A command's output masked for the thread: every form of its secrets, and the value of every `Authorization` header or
+ * field, which can hold a secret in a form no list of encodings covers (HTTP Basic is base64 of `user:password`).
+ */
+export function maskCommandOutput(text: string, mask: SecretMasker): string {
+  return mask(text)
+    .replace(/((?:^|[\s"'{,])(?:proxy-)?authorization["']?\s*[:=]\s*["']?)((?:basic|bearer|token|digest)\s+)?[^"'\r\n,}]+/gim, (_match, head: string, scheme?: string) => `${head}${scheme ?? ''}[hidden]`)
 }

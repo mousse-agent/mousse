@@ -94,6 +94,8 @@ export function secretNameFor(input: { name?: unknown; label: string }): string 
 export function secretValueProblem(value: unknown): string | undefined {
   if (typeof value !== 'string' || value.length === 0) return 'Enter the secret.'
   if (value.length < MIN_SECRET_VALUE_LENGTH) return `A secret is at least ${MIN_SECRET_VALUE_LENGTH} characters.`
+  // A command's environment cannot hold a NUL, and a refusal to start one would echo the value.
+  if (value.includes('\u0000')) return 'A secret cannot hold a NUL character.'
   if (new TextEncoder().encode(value).length > MAX_KEY_VALUE_BYTES) return 'A secret holds at most 16 KB.'
   return undefined
 }

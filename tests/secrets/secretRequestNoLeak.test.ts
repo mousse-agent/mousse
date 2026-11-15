@@ -18,7 +18,7 @@ import { registerSecretMethods } from '../../src/mms/secrets/registerMethods'
 import { SecretRequests } from '../../src/mms/secrets/SecretRequests'
 import { SecretVault } from '../../src/mms/secrets/SecretVault'
 import { createSecretToolHost } from '../../src/mms/secrets/secretToolHost'
-import { createOrchestrator, piAdapter, waitFor, type ScriptedAdapter } from '../run/phase6Fixture'
+import { createOrchestrator, phase6Daemon, piAdapter, waitFor, type Phase6Daemon, type ScriptedAdapter } from '../run/phase6Fixture'
 
 const VALUE = 'hf_Secr3tValue-that-must-never-leak'
 
@@ -48,14 +48,22 @@ describe('a secret given through the card', () => {
   let events: string[]
   let tool: (args: Record<string, unknown>, threadId: string) => Promise<ToolOutcome>
   let agentToolResult: ToolOutcome | undefined
+  let laterTurnInputs: string[] = []
   let runTool: (args: Record<string, unknown>, threadId: string, cwd: string) => Promise<ToolOutcome>
 
   const gui = { connection: { clientType: 'gui', binding: { profileId: 'p', epoch: 1 }, capabilities: new Set<string>() } } as unknown as HandlerContext
   const cli = { connection: { clientType: 'cli', binding: { profileId: 'p', epoch: 1 }, capabilities: new Set<string>() } } as unknown as HandlerContext
   const dispatch = (context: HandlerContext, method: string, params: Record<string, unknown>) => domains.dispatch(context, method, params)
 
-  function setUp(adapter: ProviderAdapter): void {
-    orch = createOrchestrator(home, store, [adapter])
+  let daemon: Phase6Daemon | undefined
+  /** `withEngine`: a whole daemon (run engine, effect worker), whose runs record their final text. */
+  function setUp(adapter: ProviderAdapter, withEngine = false): void {
+    if (withEngine) {
+      process.env.MOUSSE_HOME = home
+      daemon = phase6Daemon(home, [adapter])
+      orch = daemon.orch
+      store = daemon.store
+    } else orch = createOrchestrator(home, store, [adapter])
     orch.setPersistCallback((threadId) => {
       if (!threadId) return
       const existing = store.loadThreadData(threadId)
@@ -96,6 +104,8 @@ describe('a secret given through the card', () => {
     }))
     console_ = []
     events = []
+    agentToolResult = undefined
+    laterTurnInputs = []
     requests.on('changed', (payload) => events.push(JSON.stringify(payload)))
     for (const level of ['log', 'info', 'warn', 'error', 'debug'] as const) {
       vi.spyOn(console, level).mockImplementation((...args: unknown[]) => { console_.push(args.map((arg) => (typeof arg === 'string' ? arg : JSON.stringify(arg))).join(' ')) })
@@ -105,7 +115,9 @@ describe('a secret given through the card', () => {
   afterEach(async () => {
     vi.restoreAllMocks()
     requests.dispose()
-    await orch?.shutdown(5_000)
+    if (daemon) await daemon.shutdown()
+    else await orch?.shutdown(5_000)
+    daemon = undefined
     rmSync(home, { recursive: true, force: true })
     delete process.env.MOUSSE_HOME
   })
@@ -115,6 +127,12 @@ describe('a secret given through the card', () => {
     const adapter = piAdapter(() => 'unused')
     adapter.startTurn = async (input: TurnInput, sink): Promise<TurnResult> => {
       sink.providerRef({ provider: input.llmProvider, model: input.model })
+      if (agentToolResult) {
+        // A later turn: what the runtime is sent again (the history, the prompt) is kept to be checked.
+        laterTurnInputs.push(JSON.stringify({ messages: input.messages, nativeHistory: input.nativeHistory, prompt: input.prompt }))
+        sink.text({ phase: 'complete', content: 'ok', contentIndex: 0 })
+        return { text: 'ok', aborted: false, modelName: 'Scripted', totalResponseTimeMs: 1, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, contextSignature: 's', nativeMessages: [], providerRef: { provider: input.llmProvider, model: input.model } }
+      }
       const result = (agentToolResult = await tool({ label: 'Hugging Face write token', reason: 'To upload the model.', link: 'https://huggingface.co/settings/tokens', format: 'starts with hf_', name: 'HF_TOKEN' }, threadIdOf()))
       const half = Math.floor(VALUE.length / 2)
       sink.tool({ kind: 'build_tool_call', phase: 'start', callId: 'echo', title: 'Bash', summary: 'echo', details: [], response: `echo ${VALUE}` })
@@ -172,6 +190,31 @@ describe('a secret given through the card', () => {
     for (const file of files) expect({ path: file.path, leaked: file.text.includes(VALUE) }).toEqual({ path: file.path, leaked: false })
   })
 
+  it('a reply that repeats it is masked in the run\'s recorded result and in what the next turn is sent', async () => {
+    let threadId = ''
+    setUp(leakyAgent(() => threadId), true)
+    const results: Array<string | undefined> = []
+    const markTerminal = daemon!.engine.markTerminal.bind(daemon!.engine)
+    vi.spyOn(daemon!.engine, 'markTerminal').mockImplementation((...args: Parameters<typeof markTerminal>) => {
+      results.push(args[3]?.resultText)
+      return markTerminal(...args)
+    })
+    threadId = store.createThread('Upload').id
+    const sending = orch.send('Upload my model to the Hub', false, { threadId })
+    await waitFor(() => requests.list(threadId).length === 1, 'the card')
+    await dispatch(gui, 'secrets.requests.answer', { threadId, requestId: requests.list(threadId)[0].requestId, value: VALUE, keep: 'day' })
+    await sending
+    await waitFor(() => results.length >= 1, 'the run to end')
+    await orch.send('And now?', false, { threadId })
+    await waitFor(() => laterTurnInputs.length === 1, 'the next turn')
+
+    expect(results[0]).toContain('[secret HF_TOKEN hidden]')
+    for (const result of results) expect(result ?? '').not.toContain(VALUE)
+    expect(laterTurnInputs[0]).toContain('[secret HF_TOKEN hidden]')
+    expect(laterTurnInputs[0]).not.toContain(VALUE)
+    for (const file of filesUnder(home)) expect({ path: file.path, leaked: file.text.includes(VALUE) }).toEqual({ path: file.path, leaked: false })
+  })
+
   it('declining, a refusal and a request that ends store nothing, and the agent is told plainly', async () => {
     setUp(piAdapter(() => 'ok'))
     const threadId = store.createThread('Decline').id
@@ -181,6 +224,8 @@ describe('a secret given through the card', () => {
     // A value too short is refused in words that do not repeat it; the card stays open.
     await expect(dispatch(gui, 'secrets.requests.answer', { threadId, requestId: card.requestId, value: 'ab', keep: 'day' })).rejects.toThrow(/at least 4/)
     await expect(dispatch(gui, 'secrets.requests.answer', { threadId, requestId: card.requestId, value: VALUE, keep: 'forever' })).rejects.toThrow(/how long/)
+    // A NUL cannot go into a command's environment, and a refusal to start would quote it: refused here.
+    await expect(dispatch(gui, 'secrets.requests.answer', { threadId, requestId: card.requestId, value: 'demo\u0000password', keep: 'day' })).rejects.toThrow(/NUL/)
     await dispatch(gui, 'secrets.requests.decline', { threadId, requestId: card.requestId })
     expect(await declined).toMatchObject({ isError: true, text: expect.stringMatching(/declined.*Nothing was stored/) })
 
@@ -214,6 +259,13 @@ describe('a secret given through the card', () => {
     const filePath = ran.text.split('|').pop()!.trim()
     expect(() => statSync(filePath)).toThrow()
     expect(vault.list()[0]).toMatchObject({ name: 'API_TOKEN', keep: 'thread', threadId, lastUsedAt: expect.any(String) })
+
+    // Forms a command prints without meaning to: hex, and HTTP Basic (base64 of user:password) in a verbose header.
+    const encoded = await runTool({ command: 'printf "%s" "$API_TOKEN" | od -An -tx1 | tr -d " \\n"; echo; printf "> Authorization: Basic %s\\n" "$(printf "me:%s" "$API_TOKEN" | base64)"', secrets: [{ name: 'API_TOKEN' }] }, threadId, home)
+    expect(encoded.text).toContain('[secret API_TOKEN hidden]')
+    expect(encoded.text).toContain('> Authorization: Basic [hidden]')
+    expect(encoded.text).not.toContain(Buffer.from(VALUE).toString('hex'))
+    expect(encoded.text).not.toContain(Buffer.from(`me:${VALUE}`).toString('base64').slice(0, 20))
 
     const refused = await runTool({ command: 'printf "%s" "$API_TOKEN"', secrets: [{ name: 'API_TOKEN' }] }, other, home)
     expect(refused).toMatchObject({ isError: true, text: expect.stringContaining('no secret named API_TOKEN') })

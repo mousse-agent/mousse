@@ -43,7 +43,9 @@ const RUN_DEFINITION: Tool = {
     'Run one shell command in the thread\'s project folder with secrets the user gave this thread (through secret_request).',
     'Each secret is the environment variable of its name (as: "env", the default), or a private file whose path is in NAME_FILE',
     '(as: "file"); the file is deleted when the command ends. Refer to the variable in the command (e.g. "$HF_TOKEN"), never the value.',
-    'The output comes back with every secret masked. Use this tool, not your own shell, for any command that needs a secret.'
+    'The output comes back with every secret masked, and Authorization headers hidden. Use this tool, not your own shell, for any command that needs a secret.',
+    'Prefer a program option that reads the secret from the environment or a file (e.g. curl -H @file, or a tool that reads NAME itself):',
+    'a value expanded onto a program\'s command line ("$NAME" as an argument) can be seen by other processes on this computer while it runs.'
   ].join(' '),
   parameters: Type.Object({
     command: Type.String({ description: 'The shell command (sh on macOS and Linux, cmd on Windows).' }),
@@ -130,7 +132,9 @@ export function secretTools(host: AppToolHost): MousseTool[] {
       const status = result.stopped ? 'Stopped.' : result.timedOut ? `Timed out after ${Math.round(timeoutMs / 1000)} seconds.` : `Exit code ${result.exitCode ?? 'unknown'}.`
       outcome = { text: truncateForModel(`${status}\n${result.output || '(no output)'}`), ...(result.exitCode === 0 && !result.timedOut && !result.stopped ? {} : { isError: true }) }
     } catch (error) {
-      outcome = { text: mask(error instanceof Error ? error.message : String(error)), isError: true }
+      // The host's own refusals name a secret, never its value; anything else is reported by kind only.
+      const message = error instanceof Error ? error.message : ''
+      outcome = { text: /^(This thread has no secret named|The secret [A-Z][A-Z0-9_]* is gone)/.test(message) ? message : 'The command could not run.', isError: true }
     }
     if (ctx.transport !== 'mcp') ctx.timeline?.record({ kind: 'build_tool_result', title, summary: outcome.isError ? 'The command failed.' : 'The command finished.', details: ['Tool: secret_run'], response: truncateForDisplay(outcome.text) }, 'complete')
     return outcome

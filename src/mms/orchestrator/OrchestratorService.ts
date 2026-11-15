@@ -1422,7 +1422,8 @@ export class OrchestratorService extends EventEmitter {
     const markTerminal = (status: 'completed' | 'interrupted' | 'failed', outcome?: { error?: string; interruptedBy?: 'user' }, resultText?: string): void => {
       if (terminal) return
       terminal = true
-      this.markRun(runId, (runs, id) => runs.markTerminal(id, status, outcome, { resultText }))
+      const mask = resultText ? this.secretMaskerFor?.(threadId) : undefined
+      this.markRun(runId, (runs, id) => runs.markTerminal(id, status, outcome, { resultText: mask && resultText ? mask(resultText) : resultText }))
       this.harness.runSettled?.(runId)
     }
     try {
@@ -2043,7 +2044,10 @@ export class OrchestratorService extends EventEmitter {
     return this.session.nativeContext
   }
   private set nativeContext(value: NativeLlmContext) {
-    this.session.nativeContext = value
+    // The history a runtime is sent again (and compacts) never holds a secret the thread may use, even one the
+    // provider's own reply repeated.
+    const mask = this.secretMaskerFor?.(this.session.threadId)
+    this.session.nativeContext = mask ? maskedCopy(value, mask) : value
   }
 
   private get activeTurn(): ThreadSession['activeTurn'] {
@@ -11945,7 +11949,10 @@ export class OrchestratorService extends EventEmitter {
     const markRunTerminal = (status: 'completed' | 'interrupted' | 'failed', outcome?: { error?: string; interruptedBy?: 'user' | 'daemon_restart' | 'bot_wall'; usageLimitUntil?: string; usageLimitKind?: string }, resultText?: string): void => {
       if (runTerminalMarked) return
       runTerminalMarked = true
-      this.markRun(engineRunId, (engine, id) => engine.markTerminal(id, status, outcome, { resultText }))
+      // The reply is kept as the run's result (`thread_wait`, a parent's delegation): masked like the thread's messages.
+      const mask = resultText ? this.secretMaskerFor?.(session.threadId) : undefined
+      const kept = mask && resultText ? mask(resultText) : resultText
+      this.markRun(engineRunId, (engine, id) => engine.markTerminal(id, status, outcome, { resultText: kept }))
       // The run's count record goes with it: no later attempt starts from fresh counts.
       this.harness.runSettled?.(engineRunId ?? turnId)
     }

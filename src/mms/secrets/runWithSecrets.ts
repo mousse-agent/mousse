@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { ensurePrivateDirectory } from '../data/privateAcl'
 import { killProcessTree } from '../execution/processTree'
-import type { SecretMasker } from './secretMasking'
+import { maskCommandOutput, type SecretMasker } from './secretMasking'
 
 /** The most output a command keeps before masking; past it the end is cut. */
 export const SECRET_RUN_MAX_OUTPUT = 256 * 1024
@@ -61,9 +61,17 @@ export async function runWithSecrets(input: {
     const longestForm = Math.max(0, ...input.secrets.map((secret) => secret.value.length * 3))
     return await new Promise<SecretRunResult>((resolve) => {
       const windows = process.platform === 'win32'
-      const child = windows
-        ? spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${input.command}"`], { cwd: input.cwd, env, windowsVerbatimArguments: true, windowsHide: true })
-        : spawn('/bin/sh', ['-c', input.command], { cwd: input.cwd, env, detached: true })
+      let child: ReturnType<typeof spawn>
+      try {
+        child = windows
+          ? spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${input.command}"`], { cwd: input.cwd, env, windowsVerbatimArguments: true, windowsHide: true })
+          : spawn('/bin/sh', ['-c', input.command], { cwd: input.cwd, env, detached: true })
+      } catch (error) {
+        // Node's refusal quotes the environment it was given: only its code is kept.
+        const code = (error as NodeJS.ErrnoException)?.code
+        resolve({ exitCode: null, output: `The command could not start${code ? ` (${code})` : ''}.`, timedOut: false, stopped: false, truncated: false })
+        return
+      }
       const chunks: Buffer[] = []
       let size = 0
       let truncated = false
@@ -102,13 +110,14 @@ export async function runWithSecrets(input: {
         settled = true
         clearTimeout(timer)
         input.signal?.removeEventListener('abort', onAbort)
-        let output = input.mask(Buffer.concat(chunks).toString('utf8'))
+        let output = maskCommandOutput(Buffer.concat(chunks).toString('utf8'), input.mask)
         // A cut can leave the start of a secret at the very end, too short to match: drop as much as the longest form.
         if (truncated) output = `${output.slice(0, Math.max(0, output.length - longestForm))}\n...[output cut]`
-        if (extra) output = `${output}${output ? '\n' : ''}${input.mask(extra)}`
+        if (extra) output = `${output}${output ? '\n' : ''}${extra}`
         resolve({ exitCode, output, timedOut, stopped, truncated })
       }
-      child.on('error', (error) => finish(null, error.message))
+      // Only the error's code: its message can quote what the command was started with.
+      child.on('error', (error) => finish(null, `The command could not run${(error as NodeJS.ErrnoException).code ? ` (${(error as NodeJS.ErrnoException).code})` : ''}.`))
       child.on('close', (code) => finish(code))
     })
   } finally {
