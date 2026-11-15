@@ -341,6 +341,9 @@ export const MAX_WAITING_REMINDERS = 50
 const MAX_REMINDER_AHEAD_MS = 366 * 24 * 60 * 60_000
 /** The longest the reminder timer waits before it looks again (a far timer would overflow, and clocks move). */
 const REMINDER_REARM_MS = 6 * 60 * 60_000
+/** A delayed watchdog callback detects sleep without an app-process resume event. */
+const RESUME_WATCH_MS = 10_000
+const RESUME_LATE_MS = 30_000
 /** The outcome chips of `work_start` (`chips.ts`): a chat turn that shows one handed work off. */
 const WORK_STARTED_CHIPS: ReadonlySet<string> = new Set(['started', 'will start'])
 
@@ -560,6 +563,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** The one timer for the soonest reminder or question follow-up of any bot (`armDue`). */
   private reminderTimer: { clear(): void } | undefined
   private delivering: Promise<void> | undefined
+  private resumeTimer: { clear(): void } | undefined
+  private maintaining: Promise<void> | undefined
   /** Until when a reminder that failed to be said is not tried again (`REMINDER_RETRY_MS`), so a failure never spins. */
   private readonly reminderRetryAt = new Map<string, number>()
   /** The same for a question's follow-up (a nudge or a default) that failed. */
@@ -1472,7 +1477,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * are purged. One bot that cannot be read never stops the others. Nothing happens before the startup pass.
    */
   async maintain(now: Date = new Date(this.now())): Promise<void> {
-    if (!this.startupPassed) return
+    if (!this.startupPassed || this.closed) return
+    if (this.maintaining) return this.maintaining
+    // Hold the pass before any asynchronous work starts: scheduler and resume checks share it.
+    this.maintaining = Promise.resolve().then(() => this.maintainPass(now)).finally(() => {
+      this.maintaining = undefined
+    })
+    return this.maintaining
+  }
+
+  private async maintainPass(now: Date): Promise<void> {
+    if (this.closed) return
     for (const botId of this.host.definitions.ids()) {
       try {
         this.endUsagePauseIfDue(botId, now)
@@ -6291,6 +6306,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       await this.reconcileAll()
     } finally {
       this.startupPassed = true
+      this.armResumeWatch()
     }
     // Reminders that fell due while Mousse was off are said now, with their time; then the next one is armed.
     await this.deliverDueReminders().catch((error: unknown) => {
@@ -7782,6 +7798,23 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     void this.checkWakeEvents(new Date(this.now()), { threadId }).catch(() => {})
   }
 
+  /** The service's timers pause during sleep; a late callback brings bot upkeep forward to now. */
+  private armResumeWatch(): void {
+    if (this.closed || this.resumeTimer || !this.startupPassed) return
+    const expected = this.now() + RESUME_WATCH_MS
+    this.resumeTimer = (this.host.setTimer ?? defaultTimer)(() => {
+      this.resumeTimer = undefined
+      if (this.closed) return
+      const now = this.now()
+      this.armResumeWatch()
+      if (now - expected > RESUME_LATE_MS) {
+        void this.maintain(new Date(now)).catch((error: unknown) => {
+          console.warn('bot timers could not be checked after resume', { error: error instanceof Error ? error.message : String(error) })
+        })
+      }
+    }, RESUME_WATCH_MS)
+  }
+
   /**
    * Arms the one timer for the soonest waiting reminder or question follow-up of any bot (long waits re-arm, so a far
    * timer never overflows).
@@ -7814,7 +7847,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * `followUpQuestion`.
    */
   async deliverDueReminders(now: Date = new Date(this.now())): Promise<void> {
-    if (!this.startupPassed) return
+    if (!this.startupPassed || this.closed) return
     if (this.delivering) return this.delivering
     let pass: Promise<void> | undefined
     pass = (async () => {
@@ -8422,6 +8455,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     for (const reply of this.pendingReplies.values()) reply.timer.clear()
     this.pendingReplies.clear()
     this.closed = true
+    this.resumeTimer?.clear()
+    this.resumeTimer = undefined
     this.reminderTimer?.clear()
     this.reminderTimer = undefined
     this.mcpWatch?.stop()
