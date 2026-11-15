@@ -1,3 +1,5 @@
+import { hasToolImages } from '../chat/toolImages'
+import { extractAppletParts } from '../../../shared/applets'
 import type { WakePullRequestState } from '../wakeSources'
 import type { BotMemoryStore } from '../memory/BotMemoryStore'
 import type { ScheduledMissedRuns } from '../../../shared/types'
@@ -124,6 +126,32 @@ import { BOT_COMPACTION_HOLD_MS, BotReloadAbort, BotRoomAbort, BotWallAbort, typ
 
 /** Why an older build's file ask can't be allowed: "use files on this computer" was removed. */
 export const BOT_FILE_ASK_GONE_TEXT = 'A bot can no longer use files outside its own files folder, so there is nothing to allow.'
+
+// Unknown tools are deliberately effects: only these recorded calls can leave an unsent draft.
+const DRAFT_READ_ONLY_TOOLS = new Set([
+  'thread_list', 'thread_search', 'thread_read', 'thread_wait', 'memory_list', 'memory_search', 'memory_read',
+  'read', 'list', 'search', 'ls', 'find', 'grep', 'Read', 'Glob', 'Grep',
+  'bot_schedule_list', 'work_list', 'work_models', 'watch_list', 'reminder_list', 'bot_list',
+  'mcp_servers', 'list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource'
+])
+/** A reply can carry a picture as Markdown or as a path, without calling a tool.
+ * Keep these replies conservatively; code fences describe pictures rather than showing them. */
+function replyMayCarryPicture(text: string): boolean {
+  let fence: string | undefined
+  for (const line of text.split('\n')) {
+    const marker = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1]
+    if (fence) {
+      if (marker && marker[0] === fence[0] && marker.length >= fence.length) fence = undefined
+      continue
+    }
+    if (marker) { fence = marker; continue }
+    if (/!\[[^\]\n]*\]\(/.test(line)) return true
+    if (/(?:file:\/\/|[A-Za-z]:[\\/]|(?:~|\/(?:Users|home|tmp|var|opt|private|mnt|Volumes|srv|etc|root))\/)[^\n]*?\.(?:png|jpe?g|gif|webp)(?=$|[\s`"'.,;!?<>()[\]])/i.test(line)) return true
+  }
+  return false
+}
+
+type HeldChatDraft = { n: number; text: string; replyTo?: string; chips: BotChip[] }
 
 export class BotEngineError extends Error {
   constructor(readonly code: string, message: string, readonly details?: Record<string, unknown>) {
@@ -559,6 +587,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   private readonly offeredNotes = new Map<string, Set<number>>()
   /** Replies whose final message the executor still delivers, by `<activationId>:<n>`. */
+  /** Present only after a main authority was prepared here; absent after restart means unknown. */
+  private readonly replyEffects = new Map<string, boolean>()
   private readonly pendingReplies = new Map<string, { post(text?: string): void; timer: { clear(): void } }>()
   /** The live chip of each working activation (`bots.chat.list`'s `live`). */
   private readonly liveChips = new Map<string, { botId: string; chip: BotChip | null }>()
@@ -1534,6 +1564,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     })
     this.clearInternetCheck(activationId)
     await this.stopRun(row)
+    this.postChatDraft(this.store.activation(row.id) ?? row)
     // The question waiting work had asked was withdrawn with it: its bubble shows that in every window.
     this.republishWorkQuestions(row)
     // A run waiting for the internet has no turn whose end would clean up after it.
@@ -2126,6 +2157,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (!this.store.moveActivation(row.id, ['running', 'queued'], 'failed', { endReason: reason })) return false
       this.store.closeEscalations(row.id, 'cancelled')
       if (stuck) this.store.setError(row.botId, stuck)
+      this.postChatDraft(this.store.activation(row.id) ?? row)
       this.chat.post({ botId: row.botId, author: 'bot', kind: 'error', text: '', error, activationId: row.id, lane: row.lane, id: `bm_${row.id}_failed` })
       this.journalEnd(row, reason)
       return true
@@ -2159,6 +2191,43 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     } catch (error) {
       console.warn('a bot chat turn end could not be journaled', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
     }
+  }
+
+  private chatDraft(row: BotActivationRow): HeldChatDraft | undefined {
+    const state = this.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', row.botId, `draft:${row.id}`)
+    return state ? JSON.parse(String(state.value)) as HeldChatDraft : undefined
+  }
+
+  private clearChatDraft(row: BotActivationRow): void {
+    this.store.run('DELETE FROM bot_memory_state WHERE bot_id = ? AND key = ?', row.botId, `draft:${row.id}`)
+  }
+
+  private canHoldChatDraft(row: BotActivationRow, main: BotDispatchRow, text?: string): boolean {
+    if (hasReplyCards(row.id) || hasToolImages(row.id) || (text && (replyMayCarryPicture(text) || extractAppletParts(text, true).some(part => part.type !== 'text')))) return false
+    if (row.lane !== 'chat' || this.chatDraft(row) || !this.store.pendingWorkNotes(row.id).length) return false
+    if (this.store.get("SELECT 1 FROM bot_messages WHERE activation_id = ? AND author = 'bot' AND kind = 'text'", row.id)) return false
+    return this.replyEffects.get(`${row.id}:${main.n}`) === false
+  }
+
+  /** End and startup recovery share this consumption path; posting and deleting the key are one transaction. */
+  private postChatDraft(row: BotActivationRow): void {
+    if (row.lane !== 'chat' || !ENDED_ACTIVATION_STATUSES.has(row.status)) return
+    const draft = this.chatDraft(row)
+    if (!draft) return
+    const later = this.store.get("SELECT 1 FROM bot_messages WHERE activation_id = ? AND author = 'bot' AND kind = 'text'", row.id)
+    if (later) return this.clearChatDraft(row)
+    const latest = this.store.lastMainDispatch(row.id)
+    // Cleanup can also run during startup, before postMissingReplies. A completed continuation's
+    // saved result wins there too. Its executor may still be delivering the final text in-process.
+    if (latest && latest.n > draft.n) {
+      if (this.pendingReplies.has(`${row.id}:${latest.n}`)) return
+      if (row.status === 'done' && latest.endedAt && row.result?.trim()) {
+        this.postReply(row, latest, row.result, false)
+        return
+      }
+    }
+    const dispatch = this.store.dispatch(row.id, draft.n)
+    if (dispatch) this.postReply(row, dispatch, draft.text, false, draft.replyTo)
   }
 
   /** What follows any end of an activation: its scratch and pack go, the lane moves on. */
@@ -2966,7 +3035,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         return undefined
       }
     })
+    const effectKey = `${row.id}:${input.mainN}`
+    if (input.role === 'activation' && !this.replyEffects.has(effectKey)) this.replyEffects.set(effectKey, false)
     const observe = (call: NormalisedCall): void => {
+      const tool = chipCallOf(call).tool
+      if (!DRAFT_READ_ONLY_TOOLS.has(tool)) this.replyEffects.set(effectKey, true)
       const sink = this.host.activity
       if (!sink) return
       try {
@@ -4453,6 +4526,25 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // left for them; without the time it reports what it has, and the notes stay unread (work_list shows it ended).
       // The same holds, in either lane, for a permission the owner allowed after the turn was refused it (issue #983).
       const allowed = !reload && run.status === 'completed' ? this.allowedSinceRefused(row) : []
+      const hold = this.canHoldChatDraft(row, main, text)
+      // The executor can deliver its final words after the terminal event. Wait before making the
+      // continuation, so its request and the durable draft contain those words too.
+      if (hold && text === undefined && options.expectText) {
+        const key = `${row.id}:${main.n}`
+        const replyTo = this.answeredOwnerMessageOf(row.id)
+        if (!this.pendingReplies.has(key)) {
+          const timer = (this.host.setTimer ?? defaultTimer)(() => this.pendingReplies.get(key)?.post(undefined), REPLY_WAIT_MS)
+          this.pendingReplies.set(key, { timer, post: (late) => {
+            this.pendingReplies.get(key)?.timer.clear()
+            this.pendingReplies.delete(key)
+            const current = this.store.activation(row.id) ?? row
+            if (ENDED_ACTIVATION_STATUSES.has(current.status)) this.postReply(current, main, late ?? '', false, replyTo)
+            else void this.advance(row.id, late ?? '', { expectText: false })
+          } })
+        }
+        return
+      }
+      let heldDraft = false
       let noted = false
       const next = this.recorded(row, () => {
         // A chat turn the owner wrote to again while it answered, and that never read it, answers it now in its thread;
@@ -4474,6 +4566,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         } else if (forgotten) {
           this.endWaitingInTx(row, 'question_gone', questionGoneText(this.workTitle(row)), ['running'])
         } else if (noted) {
+          if (hold && text?.trim()) {
+            const draft: HeldChatDraft = { n: main.n, text, replyTo: this.answeredOwnerMessageOf(row.id), chips: this.drained.get(`${row.id}:${main.n}`) ?? [] }
+            this.store.run('INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?)', row.botId, `draft:${row.id}`, JSON.stringify(draft))
+            heldDraft = true
+          }
           // What this turn found is its result for now: a late final message replaces it, never an older turn's text.
           this.store.moveActivation(row.id, ['running'], 'running', { result: text ?? '' })
         } else if (!reload) {
@@ -4497,7 +4594,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       }
       // What it has is posted first, so a continuation that fails or is stopped never loses it; then the notes continue
       // the same thread, and its report follows with the change.
-      this.postReply(next, main, text, options.expectText === true)
+      if (heldDraft) this.drained.delete(`${row.id}:${main.n}`)
+      else this.postReply(next, main, text, options.expectText === true)
       if (noted && next.status === 'running') {
         await this.continueWith(row.id, ['running'], { afterReport: true, ...(allowed.length ? { allowed } : {}) })
         return
@@ -4547,7 +4645,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * once (its id is the dispatch's). When the executor's final message is still on its way, the row
    * waits for it, at most `REPLY_WAIT_MS`.
    */
-  private postReply(row: BotActivationRow, dispatch: BotDispatchRow, text: string | undefined, expectText: boolean): void {
+  private postReply(row: BotActivationRow, dispatch: BotDispatchRow, text: string | undefined, expectText: boolean, draftReplyTo?: string): void {
     const key = `${row.id}:${dispatch.n}`
     if (this.store.message(`bm_${row.id}_d${dispatch.n}`)) return
     // Work that ran out of room says so with what it had and the ask that lets it go on, once (`postRoom` may have).
@@ -4583,7 +4681,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.carried.delete(row.id)
     const stoppedChip = this.reportChips.get(key)
     this.reportChips.delete(key)
-    const chips = [...(carried?.chips ?? []), ...(this.drained.get(key) ?? []), ...(stoppedChip ? [stoppedChip] : [])]
+    const chips = [...(carried?.chips ?? []), ...(this.chatDraft(row)?.chips ?? []), ...(this.drained.get(key) ?? []), ...(stoppedChip ? [stoppedChip] : [])]
     this.drained.delete(key)
     if (!text?.trim() && carried?.text) text = carried.text
     // Its open walls, unless a card for them was posted in this activation already (a moved run ask keeps its old card too).
@@ -4605,7 +4703,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const lateReport = report && row.trigger.kind === 'schedule' && row.trigger.missed && this.now() - Date.parse(row.trigger.occurrenceAt) > 15 * 60_000
       ? `(Due ${scheduledDueTime(row.trigger.occurrenceAt, this.now())}, this computer was off or asleep) ` : ''
     const body = silent ? '' : lateReport ? `${lateReport}${written || 'Done.'}` : written
-    if (!body && !chips.length && !asks.length && !report && !waiting && !questions.length && !cards) return
+    if (!body && !chips.length && !asks.length && !report && !waiting && !questions.length && !cards) {
+      if (ENDED_ACTIVATION_STATUSES.has(row.status)) this.postChatDraft(row)
+      return
+    }
     // A turn that asked and said nothing else shows its question alone.
     const reply = Boolean(body || chips.length || asks.length || report || waiting || cards)
     const kind = row.lane === 'chat' ? 'text' : report ? 'run_report' : 'notice'
@@ -4613,7 +4714,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const room = waiting ? this.roomAskOf(row) : undefined
     const [first, ...more] = room ? [room] : asks
     // What the message answers: the owner's message a chat turn holds and has read, or the one that asked for the work.
-    const replyTo = row.lane === 'chat' ? this.answeredOwnerMessageOf(row.id) : row.trigger.kind === 'work' ? row.trigger.replyTo : undefined
+    const replyTo = draftReplyTo ?? (row.lane === 'chat' ? this.answeredOwnerMessageOf(row.id) : row.trigger.kind === 'work' ? row.trigger.replyTo : undefined)
     try {
       this.store.db.transaction(() => {
         if (reply) this.chat.post({
@@ -4629,6 +4730,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           lane: row.lane,
           threadId: dispatch.threadId
         })
+        if (reply && row.lane === 'chat') this.clearChatDraft(row)
         for (const ask of more)
           this.chat.post({ botId: row.botId, author: 'bot', kind: 'notice', text: askNoticeText(name, this.chat.card(ask).title), askId: ask.id, activationId: row.id, lane: row.lane, threadId: dispatch.threadId })
         // Each question as a bubble of its own under the reply, carrying its answers (its id is the question's place in
@@ -4710,6 +4812,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const maxTurns = counters.limits.maxTurns
     if (maxTurns !== undefined && counters.requests >= maxTurns) {
       this.raiseWall(row.id, { dispatchN: main.n, kind: 'budget', permission: { budget: { key: 'maxTurns', amount: maxTurns } }, reason: `This bot reached its limit of ${maxTurns} model requests.` })
+      // Removing a schedule turns this wall into an end immediately. Reuse its normal end path
+      // now: this dispatch was already settled, so no later run event will post its report.
+      const ended = this.store.activation(row.id)
+      if (ended?.status === 'done' && ended.endReason === 'schedule_removed')
+        await this.advance(row.id, text ?? this.carried.get(row.id)?.text, { expectText: true })
       return
     }
     const allowed = this.allowedSinceRefused(row)
@@ -5040,7 +5147,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       : '') + this.stoppedSubagentsLine(row)
     // A chat turn the owner wrote to again while it answered: their messages, answered as part of the same conversation.
     if (row.lane === 'chat' && input.notes) {
-      const before = input.afterReport ? 'The owner wrote again while you were answering; your reply so far was already sent to them.' : lead
+      const draft = input.afterReport ? this.chatDraft(row) : undefined
+      const before = draft ? `The owner wrote again before your reply went out. Your draft, not sent: «${draft.text}». Answer everything in one reply.` : input.afterReport ? 'The owner wrote again while you were answering; your reply so far was already sent to them.' : lead
       const allowed = input.allowed?.length ? ` The owner also allowed you to ${input.allowed.join(' and ')}; you have it now.` : ''
       const owner = input.ownerText !== undefined ? `\n\n${input.ownerText}` : ''
       const first = neverRan !== undefined ? `${neverRan}\n\n` : ''
@@ -6175,6 +6283,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** The scratch folder goes when the activation has ended (it stays while it waits or is paused). */
   private cleanup(row: BotActivationRow): void {
     if (!ENDED_ACTIVATION_STATUSES.has(row.status)) return
+    this.postChatDraft(row)
+    for (const key of this.replyEffects.keys()) if (key.startsWith(`${row.id}:`)) this.replyEffects.delete(key)
     this.refusedAsks.delete(row.id)
     this.switchCuts.delete(row.id)
     // Its subagents ended with it: what they returned is no one's to read any more.
@@ -6439,10 +6549,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         const row = this.store.activation(id as string)
         const main = row ? this.store.lastMainDispatch(row.id) : undefined
         if (!row || !main?.endedAt || this.store.message(`bm_${row.id}_d${main.n}`)) continue
+        if (!ENDED_ACTIVATION_STATUSES.has(row.status) && this.chatDraft(row)) continue
         this.postReply(row, main, row.result ?? '', false)
       } catch (error) {
         console.warn('a bot message could not be written at startup', { activationId: id, error: error instanceof Error ? error.message : String(error) })
       }
+    }
+    for (const entry of this.store.all("SELECT a.id FROM bot_activations a JOIN bot_memory_state s ON s.bot_id = a.bot_id AND s.key = 'draft:' || a.id WHERE a.lane = 'chat' AND a.status IN ('done', 'failed', 'cancelled')")) {
+      const row = this.store.activation(String(entry.id))
+      if (row) this.postChatDraft(row)
     }
   }
 
