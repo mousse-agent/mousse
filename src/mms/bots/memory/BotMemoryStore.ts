@@ -570,9 +570,9 @@ export class BotMemoryStore {
     return row ? versionOf(row) : undefined
   }
 
-  /** The active entries, oldest first: what every pack injects. */
+  /** The active entries, first learned first: corrections keep their place in every pack. */
   active(botId: string): BotMemoryEntry[] {
-    return this.all("SELECT * FROM bot_memories WHERE bot_id = ? AND status = 'active' ORDER BY learned_at, row_id", botId).map((row) => entryOf(versionOf(row)))
+    return this.all("SELECT current.* FROM bot_memories current JOIN bot_memories first ON first.bot_id = current.bot_id AND first.id = current.id AND first.version = 1 WHERE current.bot_id = ? AND current.status = 'active' ORDER BY first.learned_at, first.row_id", botId).map((row) => entryOf(versionOf(row)))
   }
 
   /** `memory_list` / `bots.memory.list`: current entries (active and expired), or every version with `history`. */
