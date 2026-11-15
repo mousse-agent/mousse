@@ -1,4 +1,5 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import * as fs from 'node:fs'
+import { accessSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -10,7 +11,7 @@ import { WriterEpisode } from '../../src/mms/harness/pi/episode'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 
 const roots: string[] = []
-afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
+afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 const refusal = 'This file changed since you read it. Read it again, then make your change.'
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'bot-stale-'))
@@ -43,7 +44,7 @@ function fixture() {
       if (!fail) {
         if (toolName === 'write') writeFileSync(target, content)
         if (toolName === 'edit') writeFileSync(target, readFileSync(target, 'utf8').replace('one', 'mine'))
-        if (toolName === 'read') readFileSync(target)
+        if (toolName === 'read') accessSync(target)
       }
       rpc.turnEvent(thread, t, { type: 'tool_execution_end', toolCallId, toolName, args: input, isError: fail, result: {} })
     }
@@ -115,4 +116,34 @@ it('scratch files and Claude Code/Codex authority checks are unchanged', async (
   for (const nativeName of ['Edit', 'Write', 'apply_patch']) {
     expect(t.bot.check({ kind: 'builtin', tool: 'edit', nativeName, args: { path: f.path } }).ok).toBe(true)
   }
+})
+
+for (const size of [50 * 1024 * 1024, 3 * 1024 * 1024 * 1024]) {
+  it(`versions a ${size}-byte file without loading its contents and permits a fresh overwrite`, async () => {
+    const f = fixture(), t = f.turn()
+    const fd = fs.openSync(f.path, 'r+')
+    fs.ftruncateSync(fd, size); fs.closeSync(fd)
+    // Fail safely on the old implementation, rather than allocate a giant buffer in the test.
+    const original = fs.readFileSync
+    const reads = vi.spyOn(fs, 'readFileSync').mockImplementation(((path: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+      if (path === f.path) throw new Error('whole-file read is forbidden in this fixture')
+      return original(path, ...args as [])
+    }) as typeof fs.readFileSync)
+    await f.call(t, 'read')
+    expect(reads.mock.calls.filter(([path]) => path === f.path)).toHaveLength(0)
+    expect((await f.call(t, 'write')).allow).toBe(true)
+    reads.mockRestore()
+    expect(readFileSync(f.path, 'utf8')).toBe('mine\n')
+  })
+}
+it('detects a file growing past the hash cap and accepts it after a fresh read', async () => {
+  const f = fixture(), t = f.turn()
+  await f.call(t, 'read')
+  const fd = fs.openSync(f.path, 'r+')
+  fs.ftruncateSync(fd, 4 * 1024 * 1024); fs.closeSync(fd)
+  const reads = vi.spyOn(fs, 'readFileSync')
+  expect(await f.call(t, 'write')).toEqual({ allow: false, reason: refusal })
+  await f.call(t, 'read')
+  expect((await f.call(t, 'write')).allow).toBe(true)
+  expect(reads.mock.calls.filter(([path]) => path === f.path)).toHaveLength(0)
 })
