@@ -47,6 +47,22 @@ describe('work_start through the production registry', () => {
     expect(f.store.listActivations(botId).filter((row) => row.trigger.kind === 'work')).toHaveLength(1)
   })
 
+  it('concurrent identical MCP requests start one piece of work', async () => {
+    const call = caller(await chat())
+    const [first, repeated] = await Promise.all([call(), call()])
+    expect(repeated).toMatchObject({ workId: first.workId, replayed: true })
+    expect(f.store.listActivations(botId).filter((row) => row.trigger.kind === 'work')).toHaveLength(1)
+  })
+
+  it('a repeated queued request says it is already queued', async () => {
+    const call = caller(await chat())
+    for (const title of ['First', 'Second', 'Third']) await call({ ...request, title })
+    const queued = await call()
+    const repeated = await call()
+    expect(repeated).toMatchObject({ workId: queued.workId, status: 'queued', replayed: true, note: expect.stringMatching(/already queued/i) })
+    expect(rollUpChips([{ tool: 'work_start', input: request, result: repeated }])).toMatchObject([{ text: 'already queued' }])
+  })
+
   // Every field that chooses the job: changing any one makes a separate request, even with the same runtime id.
   it.each([
     ['title', { title: 'Other comparison' }],
@@ -54,7 +70,7 @@ describe('work_start through the production registry', () => {
     ['level', { level: 'hard' }],
     ['model', { model: pick }],
     ['slot', { slot: 'research' }]
-  ])('a different %s starts different work', async (_name, change) => {
+  ] as const)('a different %s starts different work', async (_name, change) => {
     const call = caller(await chat())
     const id = `mcp:${randomUUID()}`
     const first = await call(request, id)
@@ -98,6 +114,7 @@ describe('work_start through the production registry', () => {
     await runDispatch(f, first.workId, 1, { text: 'Vacuum A wins.' })
     const ended = await call(request, id)
     expect(ended).toMatchObject({ workId: first.workId, status: 'ended', note: expect.stringMatching(/already ended/i) })
+    expect(rollUpChips([{ tool: 'work_start', input: request, result: ended }])).toMatchObject([{ text: 'already ended' }])
     expect(chatOf(f, botId).find((row) => row.kind === 'run_report' && row.activationId === first.workId)?.replyTo?.id).toBe(turn.message.id)
   })
 })
