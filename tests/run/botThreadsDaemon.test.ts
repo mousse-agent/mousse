@@ -281,6 +281,20 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     expect(await w.archive(parent.id)).toMatchObject({ status: 'accepted', changed: true })
   })
 
+  it('a thread it starts tells its chat thread as it is made, before any run does (or with no first message at all)', async () => {
+    const w = world()
+    const questions = w.orch.questions as unknown as EventEmitter
+    const changed: string[] = []
+    const unwatch = watchLaunchedThreads({ runs: w.d.engine, questions, threads: w.d.store, thread: (id) => w.d.store.getThread(id), changed: (creator) => changed.push(creator) })
+    await w.create('n1', { title: 'Note', firstMessage: undefined, mode: undefined })
+    expect(changed).toContain(w.chat.id)
+    // A thread no thread started tells no one.
+    changed.length = 0
+    w.d.store.createThread('Mine', w.project.id)
+    expect(changed).toEqual([])
+    unwatch()
+  })
+
   it('a thread it starts hidden is kept out of the sidebar and listed as hidden in its chat; it hides or shows only threads it started, and each change tells its chat thread', async () => {
     const w = world()
     const questions = w.orch.questions as unknown as EventEmitter & { listPendingForThread(threadId: string): unknown[] }

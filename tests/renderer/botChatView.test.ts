@@ -1266,6 +1266,26 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
       await click(presence())
       expect(rows().map(([title]) => title)).toEqual(['Broken', 'Old run'])
     })
+
+    it('a thread it starts while the bot list is being read shows in the open chat without leaving it', async () => {
+      const ended = threads.filter((item) => item.status === 'done')
+      await open({ ...inbox, threads: ended })
+      // A change (the bot's turn going on) asks for the list; the service reads it before the bot starts the thread.
+      let release!: () => void
+      vi.mocked(fake.client.list).mockImplementationOnce(() => {
+        const before = fake.bots.map((bot) => ({ ...bot }))
+        return new Promise((resolve) => { release = () => resolve(before) })
+      })
+      await act(async () => fake.emit.changed('inbox'))
+      // The bot starts a thread, and the service says so while that list is still on its way.
+      fake.bots = [{ ...fake.bots[0]!, state: 'working', stateText: 'Managing Fix login', threads: [thread('t9', 'Fix login', 'running', 0), ...ended] }]
+      await act(async () => fake.emit.changed('inbox'))
+      await act(async () => release())
+      await settle()
+      expect(presence().textContent).toBe('Managing Fix login')
+      await click(presence())
+      expect(rows()[0]).toEqual(['Fix login', 'working', 'working'])
+    })
   })
 
   it('a reply shows what it answers only when that is not right above it; Reply quotes a message and sends with it', async () => {
