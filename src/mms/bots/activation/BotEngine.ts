@@ -3394,6 +3394,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   raiseWall(activationId: string, input: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string }): WallReason {
     const current = this.store.activation(activationId)
+    if (current && this.removedExecutingSchedule(current)) return this.endRemovedScheduleAtWall(current)
     if (current?.lane === 'run' && input.kind === 'budget') return this.budgetEnd(current, input)
     let raised: ReturnType<BotEngine['wallInTransaction']>
     try {
@@ -3412,6 +3413,24 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // Outside a turn (before it started) no reply follows: the card is posted now.
     if (raised.kind === 'wall' && !this.live.has(activationId)) this.announceWall(raised.escalation)
     return raised.kind === 'wall' ? { kind: 'escalated', permission: this.chat.card(raised.escalation).title } : { kind: 'ended' }
+  }
+
+  private removedExecutingSchedule(row: BotActivationRow): boolean {
+    return row.status === 'running' && row.trigger.kind === 'schedule' && !row.trigger.completed
+      && this.removedSchedules.has(this.scheduleKey(row.botId, row.trigger.scheduleId))
+  }
+
+  /** The owner already ended this schedule: return what this turn has, without an ask that cannot continue it. */
+  private endRemovedScheduleAtWall(row: BotActivationRow): WallReason {
+    const ended = this.recorded(row, () => {
+      if (!this.store.moveActivation(row.id, ['running'], 'done', { endReason: 'schedule_removed' })) return false
+      this.store.closeEscalations(row.id, 'cancelled')
+      this.journalEnd(row, 'schedule_removed')
+      return true
+    })
+    this.live.get(row.id)?.controller.abort(new BotWallAbort())
+    if (ended) this.changed({ botId: row.botId, activationId: row.id })
+    return { kind: 'ended' }
   }
 
   /** A wall raised outside a turn (a continuation or the startup pass): its card on a notice row, once per activation. */
@@ -3450,6 +3469,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   private budgetEnd(row: BotActivationRow, input: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string }, options: { stuck?: boolean } = {}): WallReason {
     if (row.status !== 'running') return row.status === 'waiting_grant' ? { kind: 'waiting' } : { kind: 'ended' }
+    if (this.removedExecutingSchedule(row)) return this.endRemovedScheduleAtWall(row)
     const name = this.host.definitions.revision(row.botId, row.revision)?.name ?? 'This bot'
     const live = this.live.get(row.id)
     // A turn that still runs posts what it had, with the card, when it ends; without one the notice is posted now.
@@ -4352,6 +4372,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (ENDED_ACTIVATION_STATUSES.has(row.status)) {
       // Work that ran out of room right after a Not now to that limit ends at once, with no ask: what its turn had is
       // still posted, after the line that says it stopped.
+      if (row.trigger.kind === 'schedule' && row.status === 'done' && row.endReason === 'schedule_removed') {
+        const main = this.store.lastMainDispatch(row.id)
+        if (main?.endedAt) this.postReply(row, main, text, options.expectText === true)
+        this.afterEnd(row)
+        return
+      }
       if (row.trigger.kind === 'work' && row.endReason === 'budget_exhausted') {
         const main = this.store.lastMainDispatch(row.id)
         if (main?.endedAt) this.postReply(row, main, text, options.expectText === true)
