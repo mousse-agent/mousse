@@ -223,7 +223,7 @@ A bot's main turns, chat and work (scheduled runs too), can attach a small card 
 
 ## Reminders
 
-`remind({ text, inMinutes | at, work? })` keeps a one-off reminder in `bot_reminders` (v6); `reminder_list` and `reminder_cancel` manage them, at most 50 waiting per bot, at most a year ahead. `at` is a local date and time on this computer. One engine timer waits for the soonest reminder or question follow-up (`armDue`, re-armed at most every 6 hours), and each scheduler tick checks again (`maintain`). When one is due (`deliverDueReminders`):
+`remind({ text, inMinutes | at, work? })` keeps a one-off reminder in `bot_reminders` (v6); `reminder_list` and `reminder_cancel` manage them, at most 50 waiting per bot, at most a year ahead. `at` is a local date and time on this computer. One engine timer waits for the soonest reminder or question follow-up (`armDue`, re-armed at most every 6 hours), and each scheduler tick checks again (`maintain`). A watchdog checks every 10 seconds for a clock jump more than 30 seconds beyond its expected tick, then checks due reminders, wakes and question follow-ups at once. It shares any upkeep pass already running and stops when the engine closes. When one is due (`deliverDueReminders`):
 
 - a text reminder is posted as a `run_report` answering the message that asked, in the same transaction that marks it delivered, with no model run;
 - a reminder with `work` starts that work (`reminder:<id>`), whose report answers the same message; when the bot can't run then (its permissions wait for approval, its thread is in the trash), the reminder is said with why;
