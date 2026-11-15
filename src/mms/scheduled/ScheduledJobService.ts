@@ -721,12 +721,14 @@ export class ScheduledJobService extends EventEmitter {
 
       // The last tick before this one, by any process, read before it is overwritten: a gap means the scheduler was down.
       const tickAt = this.clock()
-      const previousTick = readTickerHeartbeat(this.store.homeDir).heartbeatAt
+      const persisted = readTickerHeartbeat(this.store.homeDir)
+      this.downtime = persisted.downtime ?? this.downtime
+      const previousTick = persisted.heartbeatAt
       if (previousTick && tickAt.getTime() - Date.parse(previousTick) > MISSED_GRACE_MS) {
         this.downtime = { from: previousTick, to: tickAt.toISOString() }
       }
       this.lastHeartbeatAt = tickAt.toISOString()
-      recordTickerHeartbeat(false, this.store.homeDir, tickAt)
+      recordTickerHeartbeat(false, this.store.homeDir, tickAt, this.downtime)
 
       // Jobs this process is already running are not claimed again, and a catch-up after downtime starts a few
       // runs per tick, not every overdue job in the same second; the rest stay due and follow shortly.
