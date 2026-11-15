@@ -84,8 +84,8 @@ sign-in check, chat) runs `grok --permission-mode default agent --no-leader stdi
 
 ## Claude Code, a second account
 
-For subscription routes through CLIProxyAPI, see [native proxy client names](claude-native-proxy.md)
-for the optional passthrough setup and its cache and Auto-mode limits.
+For the client name Mousse gives Claude Code (`mousse`, on every route), and what proxies do
+with it, see [Claude's client name](claude-native-proxy.md).
 
 - An added Claude Code entry with its own home runs every process (status, chats, sign-in, sign-out)
   with `CLAUDE_CONFIG_DIR` and `CLAUDE_SECURESTORAGE_CONFIG_DIR` set to that home (the secure-storage
