@@ -198,7 +198,6 @@ export function BotAboutPanel({ bot }: { bot: BotSummary }) {
         {`Runs ${detail.runs.length} ${detail.runs.length === 1 ? 'automation' : 'automations'}`}
       </button>
       : null}
-    <h3>MEMORY</h3>
     <Memory botId={bot.id} detail={detail} />
     <h3>RUNS ON</h3>
     <RunsOn botId={bot.id} name={bot.name} refresh={`${bot.last?.at ?? ''}|${bot.error?.text ?? ''}`} />

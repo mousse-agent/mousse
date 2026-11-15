@@ -366,7 +366,8 @@ button.bot-image:focus-visible > img { opacity: 0.82; }
 .bot-about-row button:hover { color: var(--text-primary); }
 .bot-about-empty { font-size: 11px; color: var(--text-secondary); margin: 0; line-height: 1.5; }
 /* About's one Memory row: the count and its split; it opens the Memory dialog. */
-.bot-about-row.bot-about-memory { width: 100%; margin: 0 -8px; width: calc(100% + 16px); padding: 7px 8px; border-radius: 8px; text-align: left; color: var(--text-primary); font-size: 12px; }
+/* No heading of its own (the row names it): it keeps a section's space above it. */
+.bot-about-row.bot-about-memory { margin: 12px -8px 0; width: calc(100% + 16px); padding: 7px 8px; border-radius: 8px; text-align: left; color: var(--text-primary); font-size: 12px; }
 .bot-about-row.bot-about-memory:hover, .bot-about-row.bot-about-memory:focus-visible { background: color-mix(in srgb, var(--text-secondary) 10%, transparent); color: var(--text-primary); }
 
 /* The Memory dialog: a search box, then the owner's wishes and the bot's notes, each entry with its date. */

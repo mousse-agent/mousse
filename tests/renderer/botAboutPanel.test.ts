@@ -82,7 +82,7 @@ describe('About this bot', () => {
     expect(face.getAttribute('data-colour')).toBe('green')
     expect(head.querySelector('h2')?.textContent).toBe('Inbox helper')
     expect(head.querySelector('p')?.textContent).toBe('Tells me which emails need a reply.')
-    expect([...host.querySelectorAll('h3')].map((element) => element.textContent)).toEqual(['CAN USE', 'RUNS', 'MEMORY', 'RUNS ON'])
+    expect([...host.querySelectorAll('h3')].map((element) => element.textContent)).toEqual(['CAN USE', 'RUNS', 'RUNS ON'])
   })
 
   it('with an older service (no rows): one Model picker, by usage until the owner picks a model by hand, on this computer (#673)', async () => {
