@@ -194,13 +194,34 @@ describe('held-back credentials', () => {
     })
   })
 
-  it('bounds the journal candidate window even when newer rows are all filtered out', () => {
+  it('finds an old journal match past 1,024 newer rows that only match hidden text', () => {
     const { store } = memoryFixture()
     store.append({ botId: 'ada', kind: 'owner_msg', who: 'owner', sourceKey: 'old', text: 'ancient target' })
     for (let n = 0; n < 1100; n++) store.append({ botId: 'ada', kind: 'owner_msg', who: 'owner', sourceKey: `recent${n}`, text: `password: target ${n}` })
-    expect(store.search('ada', { query: 'target', kinds: ['chat'] })).toEqual([])
-    // Reading a known older ref still works; only the search candidate window is bounded.
+    expect(store.search('ada', { query: 'target', kinds: ['chat'] }).map((hit) => hit.ref)).toEqual(['j1'])
+    // Both indexed search and a known ref reach the older row.
     expect(ok(store.read('ada', { ref: 'j1', before: 0, after: 0 })).rows[0]!.text).toBe('ancient target')
+  })
+
+  it.each(['chat', 'memory'] as const)('keeps origin/master relevance order across all %s history without credentials', (kind) => {
+    const fx = memoryFixture()
+    for (let n = 0; n < 160; n++) {
+      fx.clock.now += 1000
+      const words = n === 0 ? 'wifi wifi wifi' : `wifi ${'ordinary context '.repeat(10)}note ${n}`
+      if (kind === 'chat') fx.message({ botId: 'ada', id: `ordinary${n}`, author: 'owner', text: words })
+      else fx.db.statement(`INSERT INTO bot_memories(id,version,bot_id,kind,text,text_hash,learned_at,written_in,status)
+        VALUES(?,1,'ada','note',?,?,?,'chat','active')`).run(`m${n + 1}`, words, `${n}`, new Date(fx.clock.now).toISOString())
+    }
+    // The exact full-index ORDER BY from origin/master before this PR: relevance, then date.
+    const original = kind === 'chat'
+      ? fx.db.statement(`SELECT j.seq AS ref FROM bot_journal_fts JOIN bot_journal j ON j.seq = bot_journal_fts.rowid
+          WHERE bot_journal_fts MATCH ? AND j.bot_id = 'ada'
+          ORDER BY bm25(bot_journal_fts), j.seq DESC LIMIT 8`).all('"wifi"').map((row) => `j${row.ref}`)
+      : fx.db.statement(`SELECT m.id AS ref FROM bot_memories_fts JOIN bot_memories m ON m.row_id = bot_memories_fts.rowid
+          WHERE bot_memories_fts MATCH ? AND m.bot_id = 'ada'
+          ORDER BY bm25(bot_memories_fts), m.learned_at DESC LIMIT 8`).all('"wifi"').map((row) => row.ref)
+    for (const query of ['wifi', 'wifi absent'])
+      expect(fx.store.search('ada', { query, kinds: [kind] }).map((hit) => hit.ref)).toEqual(original)
   })
 
   it('still reads instruction-shaped and hidden text, with its secrets masked, through the bot tools', async () => {
