@@ -1,6 +1,6 @@
 import type { BotChatMessage, BotChip, BotDetail, BotSummary } from '../../shared/bots/personal/chat'
 import type { BotLook } from '../../shared/bots/personal/look'
-import type { BotMemoryListing } from '../../shared/bots/personal/memory'
+import type { BotMemoryEntry, BotMemoryListing } from '../../shared/bots/personal/memory'
 import type { BotModelPick, BotModelSlots, BotSchedule } from '../../shared/bots/personal/definition'
 import type { BotChatAttachment, BotsPersonalV2EventData, BotsPersonalV2Method, BotsPersonalV2Params, BotsPersonalV2Result } from '../../shared/bots/personal/methods'
 import type { PlatformRequestApi } from '../../shared/platform'
@@ -62,6 +62,8 @@ export interface PersonalBotsClient {
   memory(botId: string): Promise<BotMemoryListing>
   /** Forgets one entry (`m12`): the next turn no longer carries it. */
   forgetMemory(botId: string, id: string): Promise<void>
+  /** New words for an entry (`ref`, the version shown): its next version. An older service lacks it and rejects. */
+  editMemory(botId: string, ref: string, text: string): Promise<BotMemoryEntry>
   /** Which of the owner's devices reach the bot, and the devices to pick from. An older service lacks it and rejects. */
   devices(botId: string): Promise<BotDevicesView>
   /** Saves which devices reach the bot; only this computer's window and command line may. */
@@ -102,6 +104,7 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
     exportMemory: (botId, dir) => call('bots.memory.export', { botId, dir }),
     memory: (botId) => call('bots.memory.list', { botId }),
     forgetMemory: async (botId, id) => { await call('bots.memory.forget', { botId, id }) },
+    editMemory: async (botId, ref, text) => (await call('bots.memory.edit', { botId, id: ref, text })).entry,
     devices: (botId) => transport.request<BotDevicesView>('bots.devices.get', { botId }),
     setDevices: (botId, access) => transport.request<BotDevicesView>('bots.devices.set', { botId, access })
   }

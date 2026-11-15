@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Bell, Brain, Clock, Shield, X } from '../../lib/icons'
+import { Bell, Brain, ChevronRight, Clock, Shield, X } from '../../lib/icons'
 import type { BotSummary } from '../../../shared/bots/personal/chat'
-import type { BotMemoryEntry } from '../../../shared/bots/personal/memory'
 import type { BotModelPick } from '../../../shared/bots/personal/definition'
 import type { BotShownRows, BotsPersonalV2Result } from '../../../shared/bots/personal/methods'
 import { botFaceState, botsClient, useBotsStore } from '../../stores/botsStore'
@@ -11,6 +10,7 @@ import { errorText } from '../../services/personalBotsClient'
 import { BotComputerSelect, BotModelRows, BotModelSelect } from './BotRunsOn'
 import { BotFace } from './face/BotFace'
 import { BotDevicesRow } from './BotDevices'
+import { memorySplitText } from './BotMemoryDialog'
 
 /** About's Runs on section, which a bot's Pick a model scrolls to. */
 export const RUNS_ON_ID = 'bot-about-runs-on'
@@ -137,42 +137,24 @@ function RunsOn({ botId, name, refresh }: { botId: string; name: string; refresh
 }
 
 /**
- * What the bot remembers: the entries every turn carries, each with Remove. Read again whenever the bot's detail
- * reloads (after each of its turns), so an entry it just saved shows up.
+ * What the bot remembers, as one row: how many entries every turn carries, the owner's wishes and its own notes. It
+ * opens the Memory dialog. Read again whenever the bot's detail reloads (after each of its turns), so an entry it just
+ * saved is counted.
  */
 function Memory({ botId, detail }: { botId: string; detail: unknown }) {
-  const [entries, setEntries] = useState<BotMemoryEntry[] | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const client = botsClient()
-  useEffect(() => {
-    let live = true
-    client.memory(botId).then((listing) => { if (live) setEntries(listing.entries.filter((entry) => entry.status === 'active' && entry.text)) }, (cause) => { if (live) setError(errorText(cause)) })
-    return () => { live = false }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [botId, detail])
-  const remove = async (entry: BotMemoryEntry) => {
-    setError(null)
-    try {
-      await client.forgetMemory(botId, entry.id)
-      setEntries((current) => current?.filter((item) => item.id !== entry.id) ?? null)
-    } catch (cause) {
-      setError(errorText(cause))
-    }
-  }
-  return <>
-    {entries?.length
-      ? entries.map((entry) => <div className="bot-about-row" key={entry.id} data-testid="bot-about-memory">
-        <Brain size={14} aria-hidden /><span title={entry.text ?? undefined}><span className="bot-about-clamp">{entry.text}</span></span>
-        <button type="button" aria-label={`Remove memory: ${entry.text}`} onClick={() => void remove(entry)}>Remove</button>
-      </div>)
-      : entries || !error ? <p className="bot-about-empty">{entries ? 'Nothing yet. Tell it what to remember.' : 'Loading…'}</p> : null}
-    {error ? <p className="bot-about-empty" role="alert">{error}</p> : null}
-  </>
+  const entries = useBotsStore((s) => s.memory[botId])
+  const error = useBotsStore((s) => s.memoryError[botId])
+  useEffect(() => { void useBotsStore.getState().loadMemory(botId) }, [botId, detail])
+  return <button type="button" className="bot-about-row bot-about-memory" data-testid="bot-about-memory" onClick={() => useBotsStore.getState().openMemory(botId)}>
+    <Brain size={14} aria-hidden />
+    <span>{entries ? `Memory · ${entries.length}` : 'Memory'}<small className="bot-about-next">{entries ? memorySplitText(entries) : error ?? 'Loading…'}</small></span>
+    <ChevronRight size={14} aria-hidden />
+  </button>
 }
 
 /**
  * About this bot (bot-ui §4.8): the whole mouse, the name and the description; what it can use and
- * when it runs, each with Remove; what it remembers, each with Remove; what it runs on, by hand or by usage (#673), and
+ * when it runs, each with Remove; how much it remembers, which opens Memory; what it runs on, by hand or by usage (#673), and
  * which of the owner's devices reach it; Pause and Delete.
  */
 export function BotAboutPanel({ bot }: { bot: BotSummary }) {
@@ -216,7 +198,6 @@ export function BotAboutPanel({ bot }: { bot: BotSummary }) {
         {`Runs ${detail.runs.length} ${detail.runs.length === 1 ? 'automation' : 'automations'}`}
       </button>
       : null}
-    <h3>MEMORY</h3>
     <Memory botId={bot.id} detail={detail} />
     <h3>RUNS ON</h3>
     <RunsOn botId={bot.id} name={bot.name} refresh={`${bot.last?.at ?? ''}|${bot.error?.text ?? ''}`} />

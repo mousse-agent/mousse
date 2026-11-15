@@ -1228,3 +1228,107 @@ describe('loading and labels', () => {
     expect(report.querySelector('.bot-message-label')).toBeNull()
   })
 })
+
+describe('memory', () => {
+  const entry = (id: string, kind: 'owner' | 'note' | 'run_note', text: string, learnedAt = AT) => ({ id, version: 1, ref: id, kind, text, since: learnedAt, learnedAt, by: 'you said' as const, status: 'active' as const })
+  const dialog = () => document.querySelector<HTMLElement>('[role="dialog"]')
+  const group = (label: string) => [...dialog()!.querySelectorAll<HTMLElement>('section')].find((element) => element.getAttribute('aria-label') === label)
+  const texts = (scope: ParentNode | null | undefined) => [...(scope?.querySelectorAll('.bot-memory-text') ?? [])].map((element) => element.textContent)
+  const entryOf = (text: string) => [...dialog()!.querySelectorAll<HTMLElement>('li')].find((element) => element.querySelector('.bot-memory-text')?.textContent === text)!
+  beforeEach(() => {
+    fake.memory.inbox = [
+      entry('m1', 'owner', 'No em dashes in my messages.', '2026-11-01T09:00:00.000Z'),
+      entry('m2', 'note', 'The owner reads mail at 8.', '2026-11-03T09:00:00.000Z'),
+      entry('m3', 'owner', 'Call me Sam.', '2026-11-05T09:00:00.000Z'),
+      entry('m4', 'run_note', 'The Lisbon host replied twice.', '2026-11-06T09:00:00.000Z')
+    ]
+  })
+
+  it("About's one row opens Memory: the owner's wishes, then the bot's notes, newest first, each with its date", async () => {
+    await open()
+    await click(button('About Inbox helper'))
+    const row = host.querySelector<HTMLButtonElement>('[data-testid="bot-about-memory"]')!
+    expect(row.textContent).toBe('Memory · 42 wishes · 2 notes')
+    await click(row)
+    expect(dialog()?.querySelector('h2')?.textContent).toBe('Memory')
+    expect(texts(group('Your wishes'))).toEqual(['Call me Sam.', 'No em dashes in my messages.'])
+    expect(texts(group("Inbox helper's notes"))).toEqual(['The Lisbon host replied twice.', 'The owner reads mail at 8.'])
+    expect(entryOf('Call me Sam.').querySelector('time')?.getAttribute('dateTime')).toBe('2026-11-05T09:00:00.000Z')
+  })
+
+  it('/memory in the composer opens Memory and sends nothing', async () => {
+    await open()
+    await type(box(), '/memory')
+    await press('Enter')
+    expect(dialog()?.querySelector('h2')?.textContent).toBe('Memory')
+    expect(fake.calls.some(([name]) => name === 'send')).toBe(false)
+    expect(box().value).toBe('')
+  })
+
+  it('search narrows both groups', async () => {
+    await open()
+    await act(async () => useBotsStore.getState().openMemory('inbox'))
+    await settle()
+    await type(dialog()!.querySelector<HTMLInputElement>('input[aria-label="Search memory"]')!, 'the')
+    expect(texts(group('Your wishes'))).toEqual([])
+    expect(texts(group("Inbox helper's notes"))).toEqual(['The Lisbon host replied twice.', 'The owner reads mail at 8.'])
+    await type(dialog()!.querySelector<HTMLInputElement>('input[aria-label="Search memory"]')!, 'zebra')
+    expect(dialog()!.textContent).toContain('Nothing matches.')
+  })
+
+  it('Forget asks first, then forgets the entry', async () => {
+    await open()
+    await act(async () => useBotsStore.getState().openMemory('inbox'))
+    await settle()
+    await click(button('Forget', entryOf('Call me Sam.')))
+    expect(fake.calls.some(([name]) => name === 'forgetMemory')).toBe(false)
+    const confirm = entryOf('Call me Sam.').querySelector('[role="group"][aria-label="Forget this?"]')!
+    await click(button('Cancel', confirm))
+    expect(fake.calls.some(([name]) => name === 'forgetMemory')).toBe(false)
+    await click(button('Forget', entryOf('Call me Sam.')))
+    await click(button('Forget', entryOf('Call me Sam.').querySelector('[role="group"]')!))
+    await settle()
+    expect(fake.calls).toContainEqual(['forgetMemory', 'inbox', 'm3'])
+    expect(texts(group('Your wishes'))).toEqual(['No em dashes in my messages.'])
+  })
+
+  it('Edit saves the new words as the version shown', async () => {
+    await open()
+    await act(async () => useBotsStore.getState().openMemory('inbox'))
+    await settle()
+    await click(button('Edit', entryOf('Call me Sam.')))
+    const field = dialog()!.querySelector<HTMLTextAreaElement>('textarea[aria-label="Memory text"]')!
+    await type(field, 'Call me Sam, never Samuel.')
+    await click(button('Save', field.closest('li')!))
+    await settle()
+    expect(fake.calls).toContainEqual(['editMemory', 'inbox', 'm3', 'Call me Sam, never Samuel.'])
+    expect(texts(group('Your wishes'))).toEqual(['Call me Sam, never Samuel.', 'No em dashes in my messages.'])
+  })
+
+  it('"Ask Inbox helper about this" quotes the entry in the composer, sends nothing, and closes Memory', async () => {
+    await open()
+    await type(box(), 'Why?')
+    await act(async () => useBotsStore.getState().openMemory('inbox'))
+    await settle()
+    await click(button('Ask Inbox helper about this', entryOf('The owner reads mail at 8.')))
+    expect(dialog()).toBeNull()
+    expect(box().value).toMatch(/^Why\? \u2068\u2003\u00a0“The\u00a0owner\u00a0reads\u00a0mail\u00a0at\u00a08\.”\u2069 $/)
+    expect(fake.calls.some(([name]) => name === 'send')).toBe(false)
+    await press('Enter')
+    expect(vi.mocked(fake.client.send).mock.calls.at(-1)?.[1]).toBe('Why?\n\n"The owner reads mail at 8."')
+  })
+
+  it('a reply whose turn saved a memory has a "Saved to memory" tag that opens Memory at that entry', async () => {
+    fake.chats.inbox = [
+      message(1, { id: 'b1', text: 'Noted.', chips: [{ icon: 'memory', text: 'remembered', highlight: 'The owner reads mail at 8.' }] }),
+      message(2, { id: 'b2', text: 'Hello.' })
+    ]
+    await open()
+    const tags = [...transcript().querySelectorAll('button')].filter((element) => element.textContent === 'Saved to memory')
+    expect(tags).toHaveLength(1)
+    expect(tags[0]!.closest('[data-message-id]')?.getAttribute('data-message-id')).toBe('b1')
+    await click(tags[0])
+    await settle()
+    expect(dialog()?.querySelector('.is-focused .bot-memory-text')?.textContent).toBe('The owner reads mail at 8.')
+  })
+})

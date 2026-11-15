@@ -180,6 +180,8 @@ describe('validation', () => {
       ['bots.schedules.remove', { botId, scheduleId: 'Bad Id' }],
       ['bots.memory.list', { botId, history: 'yes' }],
       ['bots.memory.forget', { botId }],
+      ['bots.memory.edit', { botId, id: 'm1' }],
+      ['bots.memory.edit', { botId, id: 'm1', text: '  ' }],
       ['bots.memory.export', { botId, dir: 'relative/dir' }]
     ]
     for (const [method, params] of bad) await expect(domains.dispatch(context, method, params), `${method} ${JSON.stringify(params)}`).rejects.toMatchObject({ code: expect.stringMatching(/^(invalid_params|unknown_field)$/) })
@@ -285,6 +287,7 @@ describe('a bot through the v2 methods', () => {
     // Memory goes to the memory admin.
     expect(await call('bots.memory.list', { botId, history: true })).toEqual({ entries: [], gauge: 'core 0/2,000' })
     expect(await call('bots.memory.forget', { botId, id: 'm1' })).toEqual({ redacted: [] })
+    await expect(call('bots.memory.edit', { botId, id: 'm1', text: 'Call me Sam.' })).rejects.toMatchObject({ code: 'not_found' })
     expect(await call('bots.memory.export', { botId, dir: join(f.base, 'export') })).toEqual({ files: [] })
 
     const deleted = await call<{ purgeAt: string }>('bots.delete', { botId })

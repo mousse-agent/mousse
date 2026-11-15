@@ -4,7 +4,7 @@ import type { BotChatCard, BotChatMessage, BotDetail, BotError, BotSummary } fro
 import { MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS } from '../../../shared/bots/personal/definition'
 import { MAX_CHOICE_LABEL_CHARS } from '../../../shared/bots/personal/questions'
 import type { BotLook } from '../../../shared/bots/personal/look'
-import type { BotMemoryForgetResult, BotMemoryListing } from '../../../shared/bots/personal/memory'
+import type { BotMemoryEntry, BotMemoryForgetResult, BotMemoryListing } from '../../../shared/bots/personal/memory'
 import { MAX_BOT_CHAT_ATTACHMENTS, MAX_BOT_CHAT_PAGE, type BotsPersonalV2Api } from '../../../shared/bots/personal/methods'
 import type { RpcContext, RpcMethod } from '../../net/contracts'
 import type { PermissionMode } from '../../../shared/permissionMode'
@@ -42,7 +42,8 @@ export const REMOTE_BOT_METHODS = {
   'bots.schedules.remove': { capability: 'write', mutating: true },
   'bots.permissions.set': { capability: 'write', mutating: true },
   'bots.permissions.revoke': { capability: 'write', mutating: true },
-  'bots.memory.forget': { capability: 'write', mutating: true }
+  'bots.memory.forget': { capability: 'write', mutating: true },
+  'bots.memory.edit': { capability: 'write', mutating: true }
 } as const satisfies Record<string, { capability: NodeCapability; mutating: boolean }>
 export type RemoteBotMethod = keyof typeof REMOTE_BOT_METHODS
 
@@ -69,6 +70,7 @@ export interface RemoteBotsPort {
   revokePermission(botId: string, id: string): BotDetail
   memoryList(botId: string, history?: boolean): BotMemoryListing
   memoryForget(botId: string, id: string): BotMemoryForgetResult
+  memoryEdit(botId: string, id: string, text: string): BotMemoryEntry
   attachmentFile(botId: string, messageId: string, index: number): { name: string; path: string }
 }
 
@@ -92,7 +94,8 @@ const KEYS: Record<RemoteBotMethod, { required: readonly string[]; optional?: re
   'bots.schedules.remove': { required: ['botId', 'scheduleId'] },
   'bots.permissions.set': { required: ['botId', 'permissionId', 'enabled'] },
   'bots.permissions.revoke': { required: ['botId', 'permissionId'] },
-  'bots.memory.forget': { required: ['botId', 'id'] }
+  'bots.memory.forget': { required: ['botId', 'id'] },
+  'bots.memory.edit': { required: ['botId', 'id', 'text'] }
 }
 
 const REQUEST_ID = /^[A-Za-z0-9._:-]{1,128}$/
@@ -102,6 +105,10 @@ const WORK_ID = /^act_[0-9a-f-]{36}$/
 const REMINDER_ID = /^rem_[0-9a-f-]{36}$/
 const SCHEDULE_ID = /^[a-z0-9][a-z0-9-]{0,31}$/
 const MEMORY_ID = /^m[0-9]{1,12}$/
+/** An entry's version as the owner saw it: `m12`, or `m12v2`. */
+const MEMORY_REF = /^m[0-9]{1,12}(?:v[0-9]{1,9})?$/
+/** The store refuses words over its own limit; this keeps a huge payload out. */
+const MAX_MEMORY_EDIT = 4096
 const LOOK_KEYS = new Set(['colour', 'accessory', 'kind', 'eyes'])
 /**
  * A remote message, in bytes. The desktop's limit is 64K characters; a remote one is smaller so the message the
@@ -244,6 +251,9 @@ export function validateRemoteBotParams(method: RemoteBotMethod, value: unknown)
       break
     case 'bots.memory.forget':
       ok(typeof p.id === 'string' && MEMORY_ID.test(p.id))
+      break
+    case 'bots.memory.edit':
+      ok(typeof p.id === 'string' && MEMORY_REF.test(p.id) && text(p.text, MAX_MEMORY_EDIT))
       break
     default:
       break
@@ -667,6 +677,14 @@ export function remoteBotMethods(options: {
       async (p, port) => port.memoryForget(botId(p), p.id as string),
       first((p, port) => {
         if (!port.memoryList(botId(p)).entries.some((entry) => entry.id === p.id && entry.status === 'active')) gone('This memory')
+      })
+    ),
+    method(
+      'bots.memory.edit',
+      async (p, port) => ({ entry: port.memoryEdit(botId(p), p.id as string, p.text as string) }),
+      first((p, port) => {
+        const id = (p.id as string).replace(/v[0-9]+$/, '')
+        if (!port.memoryList(botId(p)).entries.some((entry) => entry.id === id && entry.status === 'active')) gone('This memory')
       })
     )
   ]

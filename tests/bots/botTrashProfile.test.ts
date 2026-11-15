@@ -123,7 +123,7 @@ async function withBot() {
   const host = (bots as unknown as { host: BotEngineHost }).host
   host.models = { resolve: async () => ({ selection: { instanceId: 'pi:test', model: 'test' } }), markLimited: () => {} }
   host.archiveThread = (threadId) => { services.threads.setThreadSettled(threadId, true) }
-  host.memory = { list: () => ({ entries: [], gauge: '' }), forget: () => ({ redacted: [] }), export: async () => ({ files: [] }), reindex: async () => {}, purge: async (botId) => { purged.push(botId) } }
+  host.memory = { list: () => ({ entries: [], gauge: '' }), forget: () => ({ redacted: [] }), edit: () => { throw new Error('unused') }, export: async () => ({ files: [] }), reindex: async () => {}, purge: async (botId) => { purged.push(botId) } }
   const definition: BotDefinition = {
     format: 2, id: 'review-bot', name: 'Review bot', description: 'test', look: { colour: 'coral', accessory: 'none' },
     owner: { kind: 'person', id: 'self' }, placement: { kind: 'this_computer' }, role: 'test',

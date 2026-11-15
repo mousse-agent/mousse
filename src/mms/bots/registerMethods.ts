@@ -46,6 +46,7 @@ const KEYS: Record<BotsPersonalV2Method, readonly string[]> = {
   'bots.model.setImage': ['botId', 'pick'],
   'bots.memory.list': ['botId', 'history'],
   'bots.memory.forget': ['botId', 'id'],
+  'bots.memory.edit': ['botId', 'id', 'text'],
   'bots.memory.export': ['botId', 'dir']
 }
 
@@ -197,6 +198,10 @@ function validate(method: BotsPersonalV2Method, value: unknown): Params {
     case 'bots.memory.forget':
       if (!text(p.id, 64)) throw new DomainRpcError('invalid_params', 'A memory id is required')
       break
+    case 'bots.memory.edit':
+      if (!text(p.id, 64)) throw new DomainRpcError('invalid_params', 'A memory id is required')
+      if (!text(p.text, MAX_CHAT_TEXT)) throw new DomainRpcError('invalid_params', 'Write what it should remember.')
+      break
     case 'bots.memory.export':
       if (!text(p.dir, 4096) || !isAbsolutePath(p.dir)) throw new DomainRpcError('invalid_params', 'The folder must be a full path')
       break
@@ -237,6 +242,7 @@ async function handle(method: BotsPersonalV2Method, p: Params, bots: BotChatServ
     // WP6's handlers, over the profile's memory (their own checks: an entry id like m12, a folder that exists).
     case 'bots.memory.list':
     case 'bots.memory.forget':
+    case 'bots.memory.edit':
     case 'bots.memory.export':
       return botMemoryMethods(bots.memoryFor(botId))[method](p)
   }

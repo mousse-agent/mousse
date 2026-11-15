@@ -3,7 +3,7 @@ import type { BotDepth, BotLane, BotModelPick, BotModelSlotKey, BotModelSlots, B
 import type { BotModelRows, BotPickMiss } from '../../shared/bots/personal/modelSlots'
 import type { BotQuestionFollow, BotQuestionSpec } from '../../shared/bots/personal/questions'
 import type { BotCard } from '../../shared/bots/personal/cards'
-import type { BotJournalKind, BotJournalWho, BotMemoryForgetResult, BotMemoryListing } from '../../shared/bots/personal/memory'
+import type { BotJournalKind, BotJournalWho, BotMemoryEntry, BotMemoryForgetResult, BotMemoryListing } from '../../shared/bots/personal/memory'
 import type { Enforceability, ProviderSelection, RunPolicy } from '../../shared/harness/types'
 import type { BotStoreTx } from './store/BotStore'
 
@@ -260,6 +260,8 @@ export interface BotJournal {
 export interface BotMemoryAdmin {
   list(botId: string, history?: boolean): BotMemoryListing
   forget(botId: string, id: string): BotMemoryForgetResult
+  /** The owner's new words for an entry (`bots.memory.edit`): its next version. */
+  edit(botId: string, id: string, text: string): BotMemoryEntry
   export(botId: string, dir: string): Promise<{ files: string[] }>
   reindex(botId?: string): Promise<void>
   /** Removes every memory row of the bot, and nothing of another bot (the 30-day purge). */

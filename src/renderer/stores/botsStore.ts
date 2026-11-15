@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { create } from 'zustand'
 import type { BotChatMessage, BotChatQuote, BotChip, BotDetail, BotSummary } from '../../shared/bots/personal/chat'
 import type { BotLook } from '../../shared/bots/personal/look'
+import type { BotMemoryEntry } from '../../shared/bots/personal/memory'
 import type { BotModelPick, BotModelSlots } from '../../shared/bots/personal/definition'
 import { attachmentTooLargeText } from '../../shared/bots/personal/attachments'
 import { MAX_BOT_CHAT_ATTACHMENT_BYTES, MAX_BOT_CHAT_ATTACHMENTS, type BotChatAttachment, type BotShownRows } from '../../shared/bots/personal/methods'
@@ -9,7 +10,7 @@ import type { BotFaceState } from '../components/bots/face/BotFace'
 import type { AttachedFile } from '../components/ChatComposer'
 import { attachmentPath, createPersonalBotsClient, errorText, personalBotsEvents, type PersonalBotsClient } from '../services/personalBotsClient'
 import { keepEqualById } from '../lib/keepEqual'
-import { expandComposerQuotes } from '../lib/composerQuotes'
+import { expandComposerQuotes, insertQuoteToken, registerQuote } from '../lib/composerQuotes'
 
 /**
  * The owner's bots in the Chats tab (Bot Phase 1 §5.12): the list, each bot's chat as far as it
@@ -115,6 +116,14 @@ interface BotsState {
   newBotDraft: NewBotDraft
   aboutOpen: boolean
   dialog: BotDialog | null
+  /** Each bot's memory as About and the Memory dialog show it: the entries every turn carries, with their words. */
+  memory: Record<string, BotMemoryEntry[]>
+  /** Why a bot's memory could not be read. */
+  memoryError: Record<string, string>
+  /** The Memory dialog: whose, and the words of an entry to show first (a reply's "Saved to memory"). */
+  memoryOpen: { botId: string; focus?: string } | null
+  /** The service has no `bots.memory.edit` (an older one): entries show no Edit. */
+  memoryEditMissing: boolean
   activate(profileId: string): void
   refresh(): Promise<void>
   loadChat(botId: string): Promise<void>
@@ -164,6 +173,15 @@ interface BotsState {
   revokePermission(botId: string, permissionId: string): Promise<void>
   removeSchedule(botId: string, scheduleId: string): Promise<void>
   cancelReminder(botId: string, reminderId: string): Promise<void>
+  loadMemory(botId: string): Promise<void>
+  openMemory(botId: string, focus?: string): void
+  closeMemory(): void
+  /** Forgets one entry; the error's words when it was not forgotten, else null. */
+  forgetMemory(botId: string, id: string): Promise<string | null>
+  /** New words for an entry (`ref`, the version shown); the error's words when they were not saved, else null. */
+  editMemory(botId: string, ref: string, text: string): Promise<string | null>
+  /** "Ask the bot about this": the entry goes into the composer as a quote, not sent, and the dialog closes. */
+  askAboutMemory(botId: string, text: string): void
 }
 
 let client: PersonalBotsClient | null = null
@@ -290,6 +308,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
   return {
     profileId: null, bots: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, replyingTo: {},
     reactionsMissing: false, questionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null,
+    memory: {}, memoryError: {}, memoryOpen: null, memoryEditMissing: false,
 
     activate(profileId) {
       if (get().profileId === profileId) return
@@ -304,7 +323,8 @@ export const useBotsStore = create<BotsState>((set, get) => {
       removed.clear()
       reactions.clear()
       set({ profileId, bots: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, replyingTo: {},
-        reactionsMissing: false, questionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null })
+        reactionsMissing: false, questionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null,
+    memory: {}, memoryError: {}, memoryOpen: null, memoryEditMissing: false })
       subscribe()
     },
 
@@ -547,6 +567,65 @@ export const useBotsStore = create<BotsState>((set, get) => {
         if (missingMethod(cause)) set({ reactionsMissing: true })
         else fail(owner, cause, botId)
       }
+    },
+
+    async loadMemory(botId) {
+      const owner = epoch
+      try {
+        const listing = await bots().memory(botId)
+        if (owner !== epoch) return
+        const entries = listing.entries.filter((entry) => entry.status === 'active' && entry.text)
+        set((state) => ({ memory: { ...state.memory, [botId]: keepEqualById(state.memory[botId] ?? [], entries) }, memoryError: withoutKey(state.memoryError, botId) }))
+      } catch (cause) {
+        if (owner === epoch) set((state) => ({ memoryError: { ...state.memoryError, [botId]: errorText(cause) } }))
+      }
+    },
+
+    openMemory(botId, focus) {
+      set({ memoryOpen: { botId, ...(focus ? { focus } : {}) } })
+      void get().loadMemory(botId)
+    },
+
+    closeMemory() { set({ memoryOpen: null }) },
+
+    async forgetMemory(botId, id) {
+      const owner = epoch
+      try {
+        await bots().forgetMemory(botId, id)
+        if (owner === epoch) set((state) => ({ memory: { ...state.memory, [botId]: (state.memory[botId] ?? []).filter((entry) => entry.id !== id) } }))
+        return null
+      } catch (cause) {
+        return errorText(cause)
+      }
+    },
+
+    async editMemory(botId, ref, text) {
+      const owner = epoch
+      try {
+        const entry = await bots().editMemory(botId, ref, text)
+        if (owner === epoch) set((state) => ({ memory: { ...state.memory, [botId]: (state.memory[botId] ?? []).map((item) => (item.id === entry.id ? entry : item)) } }))
+        return null
+      } catch (cause) {
+        if (missingMethod(cause)) {
+          set({ memoryEditMissing: true })
+          return 'This computer’s Mousse can’t edit memory yet.'
+        }
+        return errorText(cause)
+      }
+    },
+
+    askAboutMemory(botId, text) {
+      // The composer's reply pill, at the end of what is already typed; on send it becomes the words in quotes.
+      const token = registerQuote(text)
+      set((state) => {
+        const draft = state.drafts[botId] ?? ''
+        return { memoryOpen: null, drafts: { ...state.drafts, [botId]: insertQuoteToken(draft, draft.length, draft.length, token).value } }
+      })
+      window.requestAnimationFrame(() => {
+        const field = document.querySelector<HTMLTextAreaElement>('.bot-input-area textarea')
+        field?.focus()
+        field?.setSelectionRange(field.value.length, field.value.length)
+      })
     },
 
     async exportMemory(botId, askId) {

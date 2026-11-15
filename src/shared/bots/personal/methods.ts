@@ -2,7 +2,7 @@ import type { BotModelPick, BotModelSlotKey, BotModelSlots, BotPickCredential, B
 import type { BotChatMessage, BotChip, BotDetail, BotSummary } from './chat'
 import type { BotLook } from './look'
 import type { BotPickReason } from './modelSlots'
-import type { BotMemoryForgetResult, BotMemoryListing } from './memory'
+import type { BotMemoryEntry, BotMemoryForgetResult, BotMemoryListing } from './memory'
 import type { LlmProviderOption } from '../../settings'
 
 /** A computer on a bot's About and create row: this one (`this_computer`), or another of the person's computers by node. */
@@ -142,7 +142,7 @@ export const BOTS_PERSONAL_V2_METHODS = [
  * Methods added after the required Bot UI set (docs/plans/bot-always-free.md, #673): the app calls them when they are
  * there, and an older service that lacks them is still compatible (`guiDaemonCompatibility` lists only the set above).
  */
-export const BOTS_WORK_METHODS = ['bots.work.stop', 'bots.reminders.cancel', 'bots.model.choices', 'bots.model.setSlots', 'bots.model.setImage', 'bots.chat.react', 'bots.questions.answer'] as const
+export const BOTS_WORK_METHODS = ['bots.work.stop', 'bots.reminders.cancel', 'bots.model.choices', 'bots.model.setSlots', 'bots.model.setImage', 'bots.chat.react', 'bots.questions.answer', 'bots.memory.edit'] as const
 export type BotsPersonalV2Method = (typeof BOTS_PERSONAL_V2_METHODS)[number] | (typeof BOTS_WORK_METHODS)[number]
 export const BOTS_PERSONAL_V2_CAPABILITY = 'bots.personal.v2'
 
@@ -244,6 +244,11 @@ export interface BotsPersonalV2Api {
   'bots.schedules.remove': { params: { botId: string; scheduleId: string }; result: BotDetail }
   'bots.memory.list': { params: { botId: string; history?: boolean }; result: BotMemoryListing }
   'bots.memory.forget': { params: { botId: string; id: string }; result: BotMemoryForgetResult }
+  /**
+   * The owner changes an entry's words: a new version of it (`id` names the version the owner saw, `m12` or `m12v2`;
+   * an older one is refused), with the guard and caps a save has. A run note the owner edits becomes a note.
+   */
+  'bots.memory.edit': { params: { botId: string; id: string; text: string }; result: { entry: BotMemoryEntry } }
   /** Writes `memory.md`, `memory.jsonl`, `journal.jsonl`, `questions.jsonl` (when it asked any) and the definition into `dir`. */
   'bots.memory.export': { params: { botId: string; dir: string }; result: { files: string[] } }
 }

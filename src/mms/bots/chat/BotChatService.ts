@@ -8,7 +8,7 @@ import { isSpecialAsk } from '../../../shared/bots/personal/escalation'
 import { BOT_THREADS_PERMISSION, botGrantTool } from '../../../shared/bots/personal/manifest'
 import type { BotOwnerTurn } from '../../../shared/bots/personal/definition'
 import type { PermissionMode } from '../../../shared/permissionMode'
-import type { BotMemoryForgetResult, BotMemoryListing } from '../../../shared/bots/personal/memory'
+import type { BotMemoryEntry, BotMemoryForgetResult, BotMemoryListing } from '../../../shared/bots/personal/memory'
 import { MAX_BOT_CHAT_PAGE, type BotChatAttachment, type BotImageUsage, type BotModelOption, type BotRunsOnChoices, type BotShownRows } from '../../../shared/bots/personal/methods'
 import { allPinned, isPinned, shownPick, slotsAllOn, UNPICKED_SLOTS, withImagePick, withSlots } from '../../../shared/bots/personal/modelSlots'
 import type { BotImageOption } from '../images/BotImageMaker'
@@ -965,6 +965,11 @@ export class BotChatService {
     // Work that waited on a question the owner just forgot ends now, and says so.
     this.engine.afterForget()
     return result
+  }
+
+  /** The owner's new words for an entry: its next version, which the bot's next turn carries. */
+  memoryEdit(botId: string, id: string, text: string): BotMemoryEntry {
+    return this.memoryFor(botId).edit(botId, id, text)
   }
 
   memoryExport(botId: string, dir: string): Promise<{ files: string[] }> {
