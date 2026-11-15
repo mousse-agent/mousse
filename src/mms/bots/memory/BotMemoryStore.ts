@@ -807,7 +807,7 @@ export class BotMemoryStore {
    * is blanked; the entry's `memory_op` rows are redacted; the chat summary and the frozen packs
    * lose it too. The reason is not stored: it often restates what was forgotten.
    */
-  forget(botId: string, input: BotMemoryForget): BotMemoryForgetResult | { error: string } {
+  forget(botId: string, input: BotMemoryForget): BotMemoryForgetResult | { error: string; holders?: BotMemoryEntry[] } {
     const ids = new Set<string>()
     const seqs = new Set<number>()
     for (const value of [...(input.id === undefined ? [] : [input.id]), ...(input.refs ?? [])]) {
@@ -879,7 +879,7 @@ export class BotMemoryStore {
         .sort((a, b) => Number(a.id.slice(1)) - Number(b.id.slice(1)))
       if (holders.some((value) => !ids.has(value.id))) {
         const refs = holders.map((value) => memoryRef(value.id, value.version)).join(', ')
-        return { error: `This memory is held by ${refs}, including earlier versions. Name all these entries together in one Forget in the chat, then save again what should stay.` }
+        return { error: `This memory is held by ${refs}, including earlier versions. Name all these entries together in one Forget in the chat, then save again what should stay.`, holders: holders.map(entryOf) }
       }
       for (const id of ids)
         for (const absorbed of downward.get(id) ?? []) ids.add(absorbed)

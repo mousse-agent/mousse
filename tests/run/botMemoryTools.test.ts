@@ -218,7 +218,7 @@ describe('memory tools', () => {
       expect(result.text).toContain(top)
       expect(result.text).toContain('then save again what should stay')
     } else {
-      await expect(methods['bots.memory.forget']({ profileId: 'p', botId: 'ada', id: door })).rejects.toThrow(top)
+      await expect(methods['bots.memory.forget']({ profileId: 'p', botId: 'ada', id: door })).rejects.toThrow('Ask your bot to forget these together')
     }
     expect({ entries: fx.store.allVersions('ada'), journal: fx.store.journal('ada') }).toEqual(before)
     if (via === 'bot') expect((await call('memory_forget', 'ada-home', { id: top, reason: 'Forget those details.' })).isError).toBeUndefined()
@@ -282,7 +282,7 @@ describe('memory tools', () => {
       expect(refused.isError).toBe(true)
       expect(refused.text).toContain(restored)
       expect(refused.text).toContain(m5)
-      expect(() => admin.forget('ada', ref)).toThrow(refused.text)
+      expect(() => admin.forget('ada', ref)).toThrow('Ask your bot to forget these together')
     }
     expect({ versions: fx.store.allVersions('ada'), journal: fx.store.journal('ada') }).toEqual(before)
     if (state === 'corrected') expect(admin.forgetAll!('ada')).toBe(5)

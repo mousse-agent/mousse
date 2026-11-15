@@ -4,6 +4,8 @@ import type { BotMemoryAdmin } from '../seams'
 import { memoryRef, parseMemoryRef } from '../../../shared/bots/personal/memory'
 import { entryOf, type BotMemoryStore } from './BotMemoryStore'
 import { renderMemoryBlocks } from './render'
+import { shortChipText } from '../../../shared/bots/personal/chips'
+import { guardPackText, MEMORY_SECRET_MARKER } from './guard'
 
 /**
  * The owner's side of bot memory (bot-context.md §8, §10): what `bots.memory.*` and the engine's
@@ -43,7 +45,16 @@ export function createBotMemoryAdmin(options: BotMemoryAdminOptions): BotMemoryA
     list: (botId, history) => store.list(botId, history),
     forget: (botId, id) => {
       const result = store.forget(botId, { id, by: 'owner_ui' })
-      if ('error' in result) throw Object.assign(new Error(result.error), { code: 'not_found' })
+      if ('error' in result) {
+        const labels = result.holders?.map((entry) => {
+          const screened = guardPackText(entry.text ?? '', 'owner', MEMORY_SECRET_MARKER)
+          return `“${shortChipText(screened.ok ? screened.text : 'Saved memory (text held back)')}”`
+        })
+        const message = labels?.length
+          ? `These memories still hold those words: ${labels.join('; ')}. Ask ${name(botId)} to forget these together, then save again what should stay.`
+          : result.error
+        throw Object.assign(new Error(message), { code: labels?.length ? 'invalid_params' : 'not_found' })
+      }
       return result
     },
     edit: (botId, ref, words) => {
