@@ -473,3 +473,37 @@ describe('memory tools', () => {
     expect(fx.store.getState('ada', 'search_stats')).toMatchObject({ searches: 3, readlessTurns: 0 })
   })
 })
+
+// Retired-copy refs: original/current, keeper active/expired and versioned, ordinary
+// different-text merges. A correction must change the owner fact, never revive its copy.
+it.each(['active', 'expired'] as const)('redirects every tidied-copy ref to the current %s keeper through the tools', async (state) => {
+  const fx = memoryFixture()
+  const { call } = setup(fx)
+  await call('memory_save', 'ada-home', { kind: 'owner', text: 'Gym Tuesday 7pm.', expiresAt: '2026-11-08' })
+  await call('memory_save', 'ada-run', { kind: 'note', text: 'Gym Tuesday 7pm.', expiresAt: '2026-11-08' })
+  fx.store.tidyDuplicates('ada')
+  await call('memory_save', 'ada-home', { kind: 'owner', text: 'Gym Tuesday 7pm.', replaces: 'm1', expiresAt: '2026-11-08' })
+  if (state === 'expired') { fx.clock.now += 2 * 24 * 60 * 60 * 1000; fx.store.expireMemories('ada') }
+  const advice = 'm2 was put away as a copy of m1v2. To change these words, replace m1v2.'
+  for (const ref of ['m2', 'm2v2']) {
+    for (const arg of [{ replaces: ref }, { merges: [ref] }]) {
+      expect(await call('memory_save', 'ada-home', { kind: 'owner', text: 'Gym Wednesday 7pm.', ...arg }))
+        .toMatchObject({ isError: true, value: { error: 'refused', reason: advice } })
+    }
+    expect((await call('memory_read', 'ada-home', { ref })).text).toContain(advice)
+    expect((await call('memory_forget', 'ada-home', { id: ref, reason: 'Drop it.' })).text).toContain(advice)
+  }
+  expect((await call('memory_save', 'ada-home', { kind: 'owner', text: 'Gym Wednesday 7pm.', replaces: 'm1v2' })).isError).toBeUndefined()
+  expect(fx.store.active('ada')).toMatchObject([{ id: 'm1', kind: 'owner', text: 'Gym Wednesday 7pm.' }])
+  expect(fx.store.active('ada')).toHaveLength(1)
+  expect(fx.store.versions('ada', 'm2').at(-1)).toMatchObject({ status: 'superseded', text: 'Gym Tuesday 7pm.' })
+})
+
+it('still puts back entries absorbed from different words', async () => {
+  const fx = memoryFixture()
+  const { call } = setup(fx)
+  await call('memory_save', 'ada-home', { kind: 'owner', text: 'Gym Tuesday 7pm.' })
+  await call('memory_save', 'ada-home', { kind: 'owner', text: 'Gym Tuesday 7pm, back by 9.', merges: ['m1'] })
+  expect((await call('memory_save', 'ada-home', { kind: 'owner', text: 'Gym Wednesday 7pm.', replaces: 'm1v2' })).isError).toBeUndefined()
+  expect(fx.store.active('ada')).toHaveLength(2)
+})

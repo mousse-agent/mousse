@@ -106,7 +106,7 @@ export const BOT_MEMORY_PROTOCOL = [
   '- A Mousse line in recent chat says a turn of yours failed, was interrupted or was stopped. If it matters to the owner, say so plainly in a few words.',
   "- Before you say you don't know or don't remember, look with memory_search. memory_read shows the rows around a hit.",
   '- Save what should last with memory_save, with absolute dates ("12 Nov 2026", never "tomorrow"). When the owner corrects you or says how they want something ("don\'t…", "always…", "stop…"), save it as kind owner in that turn.',
-  '- When memory is full, combine entries of the same kind with memory_save merges: their current refs. This puts them away without forgetting; replaces on a superseded current ref puts one back.',
+  '- When memory is full, combine entries of the same kind with memory_save merges: their current refs. This puts them away without forgetting; replaces on a superseded current ref puts one back, except exact copies: follow the refusal and replace the kept entry instead.',
   '- If something contradicts a saved entry, replace that entry (replaces: its ref, like m12 or m12v2); never add a second one.',
   '- Facts about the owner (kind owner) come only from what the owner said. Your standing notes are kind note.',
   '- When the owner asks you to forget something, use memory_forget, say what you removed, and offer to look for other mentions.',
