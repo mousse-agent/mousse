@@ -11,6 +11,8 @@ export interface SubagentResultReport {
   baseSha: string
   /** The files it finished with: a snapshot or a commit. */
   resultSha: string
+  /** Its worktree was removed before the task ended: no snapshot of its end exists, and `resultSha` is the last one recorded. */
+  workspaceRemoved?: true
   /** Refs under `refs/mousse/` that keep `baseSha` and `resultSha`; they outlive the worktree. */
   baseRef?: string
   resultRef?: string
