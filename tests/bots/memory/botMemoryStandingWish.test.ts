@@ -159,16 +159,23 @@ describe('nearDuplicate', () => {
   })
 })
 
-it('a telling_set call handles the wish without changing existing memory', async () => {
+// Runtime recordings: Claude Code names the MCP tool with its server prefix;
+// Codex and Pi can record the bare tool name. Both forms pass through capture.
+it.each([
+  ['Claude Code', 'mcp__mousse__telling_set'],
+  ['Codex', 'telling_set'],
+  ['Pi', 'telling_set'],
+  ['no telling call', undefined]
+])('%s capture handles telling wishes without creating a memory', async (_runtime, toolName) => {
   const fx = memoryFixture()
-  const original = fx.store.save('ada', { lane: 'chat', kind: 'owner', text: 'Never ping me at night.' })
   fx.message({ botId: 'ada', id: 'wish', author: 'owner', text: 'Never ping me at night.', activationId: 'telling' })
-  fx.store.append({ botId: 'ada', kind: 'tool_call', lane: 'chat', activationId: 'telling', sourceKey: 'telling-call', who: 'bot', text: 'telling_set', json: { tool: 'telling_set' } })
-  const before = fx.store.active('ada')
-  const journal = createBotJournal({ store: fx.store, readThread: () => ({ messages: [] }), listThreads: () => [] })
-  const provider = createBotContextProvider({ store: fx.store, journal, situation: () => ({ telling: 'Tells you when it needs you' }) })
+  const messages: import('../../../src/shared/types').ChatMessage[] = toolName ? [{
+    id: 'tool', role: 'assistant', kind: 'mcp_tool_call', content: '', timestamp: '2026-11-07T10:00:00.000Z',
+    toolCall: { toolName, title: toolName, summary: '', details: [], input: { quietHours: { from: '22:00', to: '08:00' } }, status: 'complete' }
+  }] : []
+  const journal = createBotJournal({ store: fx.store, readThread: () => ({ messages }), listThreads: () => [] })
+  const provider = createBotContextProvider({ store: fx.store, journal })
   await provider.afterDispatch({ botId: 'ada', activationId: 'telling', dispatchId: 'd', lane: 'chat', memoryLane: 'chat', threadId: 'home', endedBy: 'settled' })
-  expect(fx.store.active('ada')).toEqual(before)
-  expect(original).not.toHaveProperty('error')
-  expect(await provider.chatPreamble({ botId: 'ada', activationId: 'next' })).toContain('Tells you when it needs you')
+  expect(fx.store.active('ada').map(entry => entry.text)).toEqual(toolName ? [] : ['Never ping me at night.'])
+  if (toolName) expect(fx.store.journal('ada').find(row => row.kind === 'tool_call')?.json).toMatchObject({ tool: 'telling_set' })
 })
