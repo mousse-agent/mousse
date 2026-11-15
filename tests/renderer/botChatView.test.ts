@@ -1899,3 +1899,69 @@ describe('memory', () => {
     expect(dialog()?.querySelector('.is-focused .bot-memory-text')?.textContent).toBe('The owner reads mail at 8.')
   })
 })
+
+
+it('a reminder offers snooze replies and a tap leaves a quiet confirmation', async () => {
+  fake.chats.inbox = [message(1, { text: 'Tea', reminder: {} })]
+  fake.client.snoozeReminder = vi.fn(async () => ({ ...fake.chats.inbox![0]!, reminder: { snoozedUntil: '2026-11-07T09:10:00.000Z' } }))
+  await open()
+  expect(button('In 10 min')).toBeDefined()
+  expect(button('In 1 hour')).toBeDefined()
+  expect([...host.querySelectorAll('button')].some(b => b.textContent?.startsWith('Tomorrow '))).toBe(true)
+  await click(button('In 10 min'))
+  expect(fake.client.snoozeReminder).toHaveBeenCalledWith('inbox', 'm1', '10m')
+  expect(button('In 10 min')).toBeUndefined()
+  expect(host.textContent).toContain('Snoozed until')
+})
+
+it('a service without snooze support offers no snooze replies', async () => {
+  fake.chats.inbox = [message(1, { text: 'Tea' })]
+  await open()
+  expect(button('In 10 min')).toBeUndefined()
+})
+
+it('removes snooze replies in an open chat when their day expires', async () => {
+  vi.useFakeTimers()
+  fake.chats.inbox = [message(1, { text: 'Tea', reminder: { expiresAt: new Date(Date.now() + 60_000).toISOString() } })]
+  await open()
+  expect(button('In 10 min')).toBeDefined()
+  try {
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_001) })
+    expect(button('In 10 min')).toBeUndefined()
+  } finally { vi.useRealTimers() }
+})
+
+
+it.each([
+  ['en-US', '4:05 AM', '9:00 AM'],
+  ['en-GB', '4:05', '9:00']
+])('snooze replies use the bubble clock format in %s', async (locale, dueTime, morning) => {
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(new Date(2026, 10, 16, 3, 55))
+  const nativeTime = Date.prototype.toLocaleTimeString
+  const format = vi.spyOn(Date.prototype, 'toLocaleTimeString').mockImplementation(function (locales, options) {
+    return nativeTime.call(this, locale, options)
+  })
+  try {
+    const due = new Date(2026, 10, 16, 4, 5).toISOString()
+    fake.chats.inbox = [message(1, { at: due, text: 'Tea', reminder: {} })]
+    fake.client.snoozeReminder = vi.fn(async () => ({ ...fake.chats.inbox![0]!, reminder: { snoozedUntil: due } }))
+    await open()
+    expect(button(`Tomorrow ${morning}`)).toBeDefined()
+    expect(host.querySelector('.bot-bubble-time')?.textContent).toBe(dueTime)
+    await click(button('In 10 min'))
+    expect(host.querySelector('.bot-question-settled')?.textContent).toBe(`Snoozed until ${dueTime}`)
+  } finally { format.mockRestore(); vi.useRealTimers() }
+})
+
+it('a snooze on another day shows the chat date and time', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(new Date(2026, 10, 16, 23, 55))
+  try {
+    const due = new Date(2026, 10, 17, 9).toISOString()
+    const { botDayLabel, botGroupTime } = await import('../../src/renderer/components/bots/messageGroups')
+    fake.chats.inbox = [message(1, { at: due, text: 'Tea', reminder: { snoozedUntil: due } })]
+    await open()
+    expect(host.querySelector('.bot-question-settled')?.textContent).toBe(`Snoozed until ${botDayLabel(due)} ${botGroupTime(due)}`)
+  } finally { vi.useRealTimers() }
+})

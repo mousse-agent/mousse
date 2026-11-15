@@ -52,6 +52,7 @@ function paramsFor(botId: string): Record<Exclude<RemoteBotMethod, 'bots.create'
     'bots.personal.pause': { botId },
     'bots.personal.resume': { botId },
     'bots.update': { botId, name: 'Pip' },
+    'bots.reminders.snooze': { botId, messageId: 'm1', choice: '10m' },
     'bots.reminders.cancel': { botId, reminderId: REM },
     'bots.schedules.remove': { botId, scheduleId: 'daily' },
     'bots.permissions.set': { botId, permissionId: 'p1', enabled: false },

@@ -34,6 +34,7 @@ export interface PersonalBotsClient {
   /** The owner's reaction on one of the bot's messages: an emoji, or `null` to remove it. The message as it is now. */
   react(botId: string, messageId: string, emoji: string | null): Promise<BotChatMessage>
   answer(botId: string, askId: string, answer: 'allow' | 'not_now'): Promise<BotChatMessage>
+  snoozeReminder(botId: string, messageId: string, choice: import('../../shared/bots/personal/chat').BotSnoozeChoice): Promise<BotsPersonalV2Result<'bots.reminders.snooze'>>
   /**
    * The owner taps one of a question's answers: their reply, and the question's bubble as it is now. An older service
    * lacks it and rejects; the owner answers with Reply there.
@@ -99,6 +100,7 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
     markRead: async (botId, seq) => { await call('bots.chat.markRead', { botId, seq }) },
     react: async (botId, messageId, emoji) => (await call('bots.chat.react', { botId, messageId, emoji })).message,
     answer: async (botId, askId, answer) => (await call('bots.asks.answer', { botId, askId, answer })).message,
+    snoozeReminder: (botId, messageId, choice) => call('bots.reminders.snooze', { botId, messageId, choice }),
     answerQuestion: (botId, questionId, choice, clientRequestId) => call('bots.questions.answer', { botId, questionId, choice, clientRequestId }),
     setPermission: (botId, permissionId, enabled) => call('bots.permissions.set', { botId, permissionId, enabled }),
     revokePermission: (botId, permissionId) => call('bots.permissions.revoke', { botId, permissionId }),

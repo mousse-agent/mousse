@@ -38,6 +38,7 @@ export const REMOTE_BOT_METHODS = {
   'bots.personal.resume': { capability: 'write', mutating: true },
   'bots.create': { capability: 'write', mutating: true },
   'bots.update': { capability: 'write', mutating: true },
+  'bots.reminders.snooze': { capability: 'chat', mutating: true },
   'bots.reminders.cancel': { capability: 'write', mutating: true },
   'bots.schedules.remove': { capability: 'write', mutating: true },
   'bots.permissions.set': { capability: 'write', mutating: true },
@@ -64,6 +65,7 @@ export interface RemoteBotsPort {
   resume(botId: string): Promise<{ bot: BotSummary }>
   create(input: { look: BotLook; name?: string; description: string; clientRequestId: string }): Promise<{ bot: BotSummary }>
   update(botId: string, change: { name?: string; look?: BotLook }): { bot: BotSummary }
+  reminderSnooze(botId: string, messageId: string, choice: import('../../../shared/bots/personal/chat').BotSnoozeChoice): BotChatMessage
   reminderCancel(botId: string, reminderId: string): BotDetail
   removeSchedule(botId: string, scheduleId: string): BotDetail
   setPermission(botId: string, id: string, enabled: boolean): BotDetail
@@ -90,6 +92,7 @@ const KEYS: Record<RemoteBotMethod, { required: readonly string[]; optional?: re
   'bots.personal.resume': { required: ['botId'] },
   'bots.create': { required: ['look', 'description', 'clientRequestId'], optional: ['name'] },
   'bots.update': { required: ['botId'], optional: ['name', 'look'] },
+  'bots.reminders.snooze': { required: ['botId', 'messageId', 'choice'] },
   'bots.reminders.cancel': { required: ['botId', 'reminderId'] },
   'bots.schedules.remove': { required: ['botId', 'scheduleId'] },
   'bots.permissions.set': { required: ['botId', 'permissionId', 'enabled'] },
@@ -237,6 +240,9 @@ export function validateRemoteBotParams(method: RemoteBotMethod, value: unknown)
       ok(p.name !== undefined || p.look !== undefined)
       if (p.name !== undefined) ok(text(p.name, MAX_BOT_NAME_CHARS))
       if (p.look !== undefined) ok(lookOf(p.look))
+      break
+    case 'bots.reminders.snooze':
+      ok(text(p.messageId, 200) && ['10m', '1h', 'tomorrow'].includes(p.choice as string))
       break
     case 'bots.reminders.cancel':
       ok(typeof p.reminderId === 'string' && REMINDER_ID.test(p.reminderId))
@@ -609,6 +615,7 @@ export function remoteBotMethods(options: {
       },
       first((p, port) => port.questionCheck(botId(p), p.questionId as string))
     ),
+    method('bots.reminders.snooze', async (p, port) => fitted(remoteBotMessage(port.reminderSnooze(botId(p), p.messageId as string, p.choice as import('../../../shared/bots/personal/chat').BotSnoozeChoice)))),
     method('bots.personal.pause', async (p, port) => ({ bot: remoteBotSummary(port.pause(botId(p)).bot) })),
     method('bots.personal.resume', async (p, port) => ({ bot: remoteBotSummary((await port.resume(botId(p))).bot) })),
     method('bots.create', async (p, port, context) => {

@@ -60,6 +60,11 @@ export function keepToolImages(input: {
   return `[Your owner sees ${one ? 'this picture' : `these ${kept.length} pictures`} under your next message, so don't add ${one ? 'it' : 'them'} to it. Saved in your files folder: ${kept.map((image) => image.path).join(', ')}]`
 }
 
+/** Whether a reply must carry pictures, even when no tool ledger was recorded. */
+export function hasToolImages(activationId: string): boolean {
+  return Boolean(waiting.get(activationId)?.length)
+}
+
 /** The pictures waiting for `activationId`'s next message, now taken by it. */
 export function takeToolImages(activationId: string | undefined): KeptImage[] {
   if (!activationId) return []
