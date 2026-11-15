@@ -638,7 +638,7 @@ export function appHintsLine(hints: AppHints): string {
 
 /** Where the Memory column's numbers come from on `platform` (`process.platform`). */
 export function memorySource(platform: string): string {
-  if (platform === 'darwin') return "each process's footprint, as Activity Monitor's Memory column, which counts the GPU and IOSurface memory it holds"
+  if (platform === 'darwin') return "the footprint, as in Activity Monitor, with the GPU and IOSurface memory a process holds"
   if (platform === 'win32') return 'private bytes'
   return 'private memory where it is known, else the working set'
 }

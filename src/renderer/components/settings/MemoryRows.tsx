@@ -114,7 +114,7 @@ export function MemoryRows() {
         {sample && (
           <table className="memory-table">
             <thead>
-              <tr><th scope="col">Process</th><th scope="col" title={`Each process's memory: ${memorySource(window.mousse?.platform ?? '')}`}>Memory MB</th><th scope="col">Working set MB</th><th scope="col">CPU %</th><th scope="col" title="JavaScript heap used of total">Heap MB</th></tr>
+              <tr><th scope="col">Process</th><th scope="col" title={`Memory: ${memorySource(window.mousse?.platform ?? '')}`}>Memory MB</th><th scope="col">Working set MB</th><th scope="col">CPU %</th><th scope="col" title="JavaScript heap used of total">Heap MB</th></tr>
             </thead>
             <tbody>
               {memoryTable(sample).map((row, index) => (
