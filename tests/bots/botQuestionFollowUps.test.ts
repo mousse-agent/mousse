@@ -459,3 +459,43 @@ describe('Forget', () => {
     expect(botNotificationContent('Pip', after).body).not.toMatch(/which flat|flat a/i)
   })
 })
+
+
+describe('owner attention in the shared summary', () => {
+  const summary = () => f.bots.service.get(botId).summary
+
+  it('counts a posted chat question, then clears on an answer', async () => {
+    const { questionId } = await chatAsks(FLATS)
+    expect(summary()).toMatchObject({ state: 'needs_you', stateText: `Asked: ${FLATS.question}`, needsOwner: true })
+    await tap(questionId, 'Flat A')
+    expect(summary().needsOwner).toBeUndefined()
+    expect(summary().state).not.toBe('needs_you')
+  })
+
+  it('counts work waiting on its question, once even with three questions', async () => {
+    const one = await workAsks(FLATS)
+    await workAsks({ question: 'Which movers?', choices: ['A', 'B'] }, 'Movers', 'w2')
+    await chatAsks({ question: 'Which day?', choices: ['Monday', 'Tuesday'] })
+    expect(summary()).toMatchObject({ state: 'needs_you', needsOwner: true })
+    await tap(one.questionId, 'Flat A')
+    expect(summary().needsOwner).toBe(true)
+  })
+
+  it.each(['moved_on', 'defaulted', 'withdrawn'] as const)('does not count a %s chat question', async (status) => {
+    const { questionId } = await chatAsks(DEFAULT_A)
+    expect(summary().needsOwner).toBe(true)
+    if (status === 'moved_on') await chat('Something else now.', 'move-on')
+    else if (status === 'defaulted') await reach(Date.parse(f.store.question(questionId)!.nextAt!))
+    else f.store.withdrawQuestions(botId)
+    expect(f.store.question(questionId)?.status).toBe(status)
+    expect(summary().needsOwner).toBeUndefined()
+    expect(summary().state).not.toBe('needs_you')
+  })
+
+  it('does not count a paused bot with an open question', async () => {
+    await chatAsks(FLATS)
+    await f.bots.service.pause(botId)
+    expect(summary()).toMatchObject({ state: 'paused' })
+    expect(summary().needsOwner).toBeUndefined()
+  })
+})

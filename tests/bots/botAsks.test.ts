@@ -64,7 +64,7 @@ describe('asks in a run', () => {
     const cards = chatOf(f, botId).filter((message) => message.ask)
     expect(cards).toMatchObject([{ author: 'bot', kind: 'notice', text: 'Penny wants to run commands.', ask: { askId: asks[0]!.id, status: 'open', kind: 'permission' } }])
     expect(chatOf(f, botId).filter((message) => message.kind === 'run_report')).toHaveLength(3)
-    expect(f.bots.service.get(botId).summary).toMatchObject({ state: 'needs_you', stateText: 'Wants to run commands' })
+    expect(f.bots.service.get(botId).summary).toMatchObject({ state: 'needs_you', stateText: 'Wants to run commands', needsOwner: true })
   })
 
   it('the bot\'s own escalate in a run asks once and carries on', async () => {
