@@ -285,7 +285,8 @@ describe('memory tools', () => {
       expect(() => admin.forget('ada', ref)).toThrow(refused.text)
     }
     expect({ versions: fx.store.allVersions('ada'), journal: fx.store.journal('ada') }).toEqual(before)
-    expect((await call('memory_forget', 'ada-home', { id: restored, refs: [m5], reason: 'Forget these details together.' })).isError).toBeUndefined()
+    if (state === 'corrected') expect(admin.forgetAll!('ada')).toBe(5)
+    else expect((await call('memory_forget', 'ada-home', { id: restored, refs: [m5], reason: 'Forget these details together.' })).isError).toBeUndefined()
     expect(fx.store.allVersions('ada').every(e => e.status === 'forgotten' && e.text === null)).toBe(true)
     expect(fx.store.search('ada', { query: '4471' })).toEqual([])
     for (const file of (await admin.export('ada', fx.home)).files) expect(readFileSync(file, 'utf8')).not.toContain('4471')
