@@ -1170,6 +1170,37 @@ describe('pinned above the composer, and New message', () => {
     await act(async () => { log.dispatchEvent(new Event('scroll')) })
     expect(button('New message')).toBeUndefined()
   })
+
+  it('offers Go to latest while scrolled up, and goes to the end when the owner sends from scrolled up', async () => {
+    fake.chats.inbox = Array.from({ length: 20 }, (_, index) => message(index + 1))
+    await open()
+    const log = transcript()
+    let height = 2000
+    Object.defineProperty(log, 'scrollHeight', { configurable: true, get: () => height })
+    Object.defineProperty(log, 'clientHeight', { configurable: true, value: 500 })
+    // At the end there is nothing to go to; scrolled up, Go to latest takes the reader back.
+    log.scrollTop = 1500
+    await act(async () => { log.dispatchEvent(new Event('scroll')) })
+    expect(button('Go to latest')).toBeUndefined()
+    log.scrollTop = 300
+    await act(async () => { log.dispatchEvent(new Event('scroll')) })
+    await click(button('Go to latest'))
+    expect(log.scrollTop).toBe(2000)
+    expect(button('Go to latest')).toBeUndefined()
+    await act(async () => { log.dispatchEvent(new Event('scroll')) })
+
+    // Scrolled up, the owner's own message goes to the end at once, while it is on its way.
+    log.scrollTop = 300
+    await act(async () => { log.dispatchEvent(new Event('scroll')) })
+    expect(button('Go to latest')).toBeDefined()
+    vi.mocked(fake.client.send).mockImplementationOnce(() => new Promise(() => {}))
+    await type(box(), 'And the other one?')
+    height = 2100
+    await press('Enter')
+    expect(transcript().querySelector('.bot-you.is-pending')).not.toBeNull()
+    expect(log.scrollTop).toBe(2100)
+    expect(button('Go to latest')).toBeUndefined()
+  })
 })
 
 describe('loading and labels', () => {
