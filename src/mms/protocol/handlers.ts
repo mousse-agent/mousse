@@ -2197,6 +2197,21 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: listedThreadsFor(ctx, threads), version }
     }
+    case 'threads.setHidden': {
+      // Show in sidebar, and hiding again: a thread one of the owner's bots started (`Thread.hidden`). The bot's chat lists
+      // it either way, so only such a thread can be hidden.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'hidden'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const hidden = asOptionalBoolean(p.hidden, 'hidden') === true
+      const current = ctx.mms.threads.getThread(threadId)
+      if (!current) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      if (hidden && !current.startedByBot) throw new DomainRpcError('invalid_params', 'Only a thread a bot started can be hidden: its bot\'s chat lists it.', { threadId })
+      const thread = ctx.mms.threads.setThreadHidden(threadId, hidden)
+      const { threads, version } = ctx.mms.threads.listAllThreadsVersioned()
+      ctx.emitEvent?.('threads.updated', { threads })
+      return { thread, threads: listedThreadsFor(ctx, threads), version }
+    }
     case 'threads.settle': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)

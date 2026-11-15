@@ -68,9 +68,11 @@ describe('"use your threads" in the bot engine', () => {
     expect(item.note).toBe(THREADS_TEXT.tip)
 
     const owner = await chat('Start it now on Opus.', 'm2')
-    expect(threadTools(owner.prepared.policy.tools!.allow)).toEqual(['thread_archive', 'thread_create', 'thread_interrupt', 'thread_list', 'thread_read', 'thread_search', 'thread_send', 'thread_wait'])
+    expect(threadTools(owner.prepared.policy.tools!.allow)).toEqual(['thread_archive', 'thread_create', 'thread_hide', 'thread_interrupt', 'thread_list', 'thread_read', 'thread_search', 'thread_send', 'thread_wait'])
     expect(line(owner.prepared.instructions)).toMatch(/: yes: .*start, message, stop or archive one when your owner's message asks for it/)
     expect(owner.prepared.instructions).toMatch(/A thread you start runs with full access/)
+    // When to start one hidden: short background jobs out of the sidebar, work the owner follows visible.
+    expect(owner.prepared.instructions).toMatch(/Start a short background job your owner won't follow .* with hidden: true/)
     // The chip of the thread it started keeps that thread in the posted message, for its Open.
     f.chips.set(f.store.dispatch(owner.activation.id, 1)!.clientRequestId, [{ icon: 'think', text: 'started thread', highlight: 'Fix the login page', thread: 't-new' }])
     await finish(f, owner.payload, 'completed', { text: 'Started it.' })

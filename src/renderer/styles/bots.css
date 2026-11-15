@@ -475,6 +475,13 @@ button.bot-image:focus-visible > img { opacity: 0.82; }
 .bot-thread-line[data-tone='idle'] .bot-thread-state { color: var(--text-secondary); }
 .bot-thread-meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
 .bot-thread-meta:empty { display: none; }
+/* A thread the bot keeps out of the sidebar: "Hidden" leads its meta line, and Show in sidebar sits at the row's bottom right. */
+.bot-thread-item { position: relative; }
+.bot-thread-line[data-hidden] .bot-thread-meta { padding-right: 24px; }
+.bot-thread-hidden { display: inline-flex; align-items: center; gap: 3px; vertical-align: bottom; }
+.bot-thread-show { position: absolute; right: 4px; bottom: 3px; display: grid; place-items: center; width: 22px; height: 20px; border-radius: 6px; color: var(--text-secondary); opacity: .75; }
+.bot-thread-show:hover:not(:disabled) { opacity: 1; background: color-mix(in srgb, var(--text-secondary) 14%, transparent); color: var(--text-primary); }
+.bot-thread-show:disabled { opacity: .4; cursor: default; }
 .bot-thread-fold { display: flex; align-items: center; gap: 4px; width: 100%; padding: 4px 8px 2px; border-radius: 6px; font-size: 11px; color: var(--text-secondary); text-align: left; }
 .bot-thread-fold:hover { color: var(--text-primary); }
 .bot-thread-fold svg { flex: none; transition: transform 150ms ease-out; }

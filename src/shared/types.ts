@@ -1458,6 +1458,12 @@ export interface Thread {
    * bot's chat thread.
    */
   startedByBot?: { botId: string; name: string }
+  /**
+   * Set on a thread kept out of the owner's sidebar: a personal bot started it hidden, or hid it later (a short background
+   * job). It is not in the thread lists of this computer or the owner's other devices; the bot's chat lists it, it opens
+   * like any thread, and Show in sidebar (`threads.setHidden`) clears the mark. Search, links and Needs me still reach it.
+   */
+  hidden?: true
   /** Set on a thread another of the user's devices created through Bridge. */
   startedFrom?: ThreadStartedFrom
   /**

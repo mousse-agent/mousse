@@ -1213,6 +1213,23 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
       expect(host.querySelector('.bot-work')).toBeNull()
     })
 
+    it('a thread it keeps out of the sidebar says Hidden, still opens from its row, and Show in sidebar brings it back', async () => {
+      opened.ids.length = 0
+      const request = vi.fn(async () => ({ thread: { id: 't7', name: 'Quick check', createdAt: ago(2), updatedAt: ago(2) } }))
+      ;(window as unknown as { mousse: { platformRequest: unknown } }).mousse.platformRequest = { request }
+      await open({ ...inbox, state: 'working', stateText: 'Managing Quick check', threads: [{ ...thread('t7', 'Quick check', 'running', 2), hidden: true }, thread('t1', 'Dictation', 'running', 1)] })
+      await click(presence())
+      const metas = [...host.querySelectorAll('.bot-thread-meta')].map((meta) => meta.textContent)
+      expect(metas).toEqual(['Hidden · Mousse · updated 2m ago', 'Mousse · updated 1m ago'])
+      // Only the hidden one has Show in sidebar, named for the thread.
+      expect(host.querySelectorAll('.bot-thread-show')).toHaveLength(1)
+      await click(button('Show Quick check in sidebar'))
+      expect(request).toHaveBeenCalledWith('threads.setHidden', { threadId: 't7', hidden: false })
+      // The row itself opens the thread, as any row does.
+      await click(host.querySelector('.bot-thread-line[data-hidden]'))
+      expect(opened.ids).toEqual(['t7'])
+    })
+
     it('a free bot whose threads all ended still opens their list, Done unfolded', async () => {
       await open({ ...inbox, threads: threads.filter((item) => item.status === 'done' || item.status === 'failed') })
       expect(presence().textContent).toBe('free')

@@ -960,7 +960,7 @@ export class MmsProfileServices {
     })
     // A thread a bot started began, was held, asks the owner or ended: that bot's header reads busy or free again.
     if (personalBots) {
-      const stop = watchLaunchedThreads({ runs: this.runEngine, questions: this.questions, thread: (id) => this.threads.getThread(id), changed: (creator) => personalBots.launchedThreadChanged(creator) })
+      const stop = watchLaunchedThreads({ runs: this.runEngine, questions: this.questions, threads: this.threads, thread: (id) => this.threads.getThread(id), changed: (creator) => personalBots.launchedThreadChanged(creator) })
       this.platform.onDispose(stop)
     }
     // A step of a bot's turn began: its words just before it are what it is doing now, beside its typing dots.

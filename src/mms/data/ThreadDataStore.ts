@@ -93,6 +93,8 @@ interface ThreadMeta {
   createdByThreadId?: string
   /** See `Thread.startedByBot`. */
   startedByBot?: { botId: string; name: string }
+  /** See `Thread.hidden`. */
+  hidden?: true
   startedFrom?: ThreadStartedFrom
   /** See `Thread.sentFrom`. */
   sentFrom?: ThreadSentFrom
@@ -1211,6 +1213,8 @@ export class ThreadDataStore extends EventEmitter {
       createdByThreadId?: string
       /** See `Thread.startedByBot`. */
       startedByBot?: { botId: string; name: string }
+      /** See `Thread.hidden`. */
+      hidden?: boolean
       scheduledJobId?: string
       /** See `Thread.runsOn`: a remote subagent's stand-in. */
       runsOn?: ThreadRunsOn
@@ -1242,6 +1246,7 @@ export class ThreadDataStore extends EventEmitter {
     if (opts?.lineage) meta.lineage = structuredClone(opts.lineage)
     if (opts?.createdByThreadId) meta.createdByThreadId = opts.createdByThreadId
     if (opts?.startedByBot) meta.startedByBot = { botId: opts.startedByBot.botId, name: opts.startedByBot.name }
+    if (opts?.hidden === true) meta.hidden = true
     if (opts?.modelOverride) meta.modelOverride = structuredClone(opts.modelOverride)
     if (opts?.permissionMode) meta.permissionMode = opts.permissionMode
     meta.settingsRevision = 0
@@ -1729,6 +1734,28 @@ export class ThreadDataStore extends EventEmitter {
       this.updateStandaloneIndexEntry(updated)
     }
 
+    this.patchListCache(updated)
+    this.emit('list-changed', { id })
+    return updated
+  }
+
+  /**
+   * Hides the thread from the owner's sidebar or shows it there again (`Thread.hidden`). `updatedAt` is kept: hiding is
+   * not activity, so the bot chat's list and the sidebar keep their order. Unchanged when it already is so.
+   */
+  setThreadHidden(id: string, hidden: boolean): Thread {
+    const thread = this.getThread(id)
+    if (!thread) {
+      throw new Error(`Thread not found: ${id}`)
+    }
+    if (Boolean(thread.hidden) === hidden) return thread
+    const updated = this.writeThreadMeta(thread, (base) => {
+      const next: Thread = { ...base }
+      if (hidden) next.hidden = true
+      else delete next.hidden
+      return next
+    })
+    if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
     this.patchListCache(updated)
     this.emit('list-changed', { id })
     return updated

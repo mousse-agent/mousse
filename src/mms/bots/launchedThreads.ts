@@ -10,6 +10,8 @@ export interface LaunchedThreadMeta {
   createdAt?: string
   updatedAt?: string
   createdByThreadId?: string
+  /** `Thread.hidden`: out of the owner's sidebar, so this list is where the owner finds it. */
+  hidden?: true
 }
 
 /** How a thread's last run ended, when none runs now: finished, failed, stopped (or cut off), or it never ran. */
@@ -65,21 +67,25 @@ export function launchedThreadsOf(input: {
       ...(project ? { project } : {}),
       status,
       startedAt: run ? run.startedAt ?? run.requestedAt : created,
-      updatedAt: latest(thread.updatedAt, created, last?.requestedAt, last?.startedAt, last?.completedAt) ?? created
+      updatedAt: latest(thread.updatedAt, created, last?.requestedAt, last?.startedAt, last?.completedAt) ?? created,
+      ...(thread.hidden ? { hidden: true as const } : {})
     }
   })
   return launched.sort(compareLaunched)
 }
 
 /**
- * Calls `changed` with the thread that started a thread whenever that thread's run changes status, or a question or
- * approval in it opens or closes: a bot that started it reads its summary again, so its header goes busy or back to
- * free. Threads no thread started are ignored. Returns the unsubscribe. Never throws into the emitters.
+ * Calls `changed` with the thread that started a thread whenever that thread's run changes status, a question or
+ * approval in it opens or closes, or its place in the lists changes (hidden or shown, archived): a bot that started it
+ * reads its summary again, so its header goes busy or back to free and its list shows the thread as it is. Threads no
+ * thread started are ignored. Returns the unsubscribe. Never throws into the emitters.
  */
 export function watchLaunchedThreads(input: {
   /** The run engine (`event`) and the questions service (`pending`, `cleared`). */
   runs: Pick<EventEmitter, 'on' | 'off'>
   questions: Pick<EventEmitter, 'on' | 'off'>
+  /** The thread store (`list-changed`, with the thread's id). */
+  threads?: Pick<EventEmitter, 'on' | 'off'>
   thread(threadId: string): LaunchedThreadMeta | undefined
   changed(creatorThreadId: string): void
 }): () => void {
@@ -92,12 +98,15 @@ export function watchLaunchedThreads(input: {
   }
   const onRun = (event: ThreadEvent) => { if (event.type === 'run.status') touch((event.payload as RunRecord | undefined)?.threadId) }
   const onAsk = (event: { threadId?: unknown }) => touch(event?.threadId)
+  const onListed = (change: { id?: unknown } | undefined) => touch(change?.id)
   input.runs.on('event', onRun)
   input.questions.on('pending', onAsk)
   input.questions.on('cleared', onAsk)
+  input.threads?.on('list-changed', onListed)
   return () => {
     input.runs.off('event', onRun)
     input.questions.off('pending', onAsk)
     input.questions.off('cleared', onAsk)
+    input.threads?.off('list-changed', onListed)
   }
 }

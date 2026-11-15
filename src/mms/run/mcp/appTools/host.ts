@@ -60,6 +60,8 @@ export interface AgentThreadRequest {
   firstMessage?: string
   /** Mode of the first message; defaults to agent. */
   mode?: 'agent' | 'plan'
+  /** A personal bot's thread kept out of the owner's sidebar (`Thread.hidden`). */
+  hidden?: boolean
 }
 
 /** A thread an agent created, as the creation decided it (never as the retry's arguments say). */
@@ -332,6 +334,11 @@ export interface AppToolHost extends DelegationToolsHost {
   stopRun?(threadId: string, runId: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult>
   /** Archives (`archived`) or unarchives another thread through the app's own Archive, as a personal bot's call (`thread_archive`). */
   setThreadArchived?(threadId: string, archived: boolean, options: { actor: AgentActor }): Promise<AgentArchiveResult>
+  /**
+   * Hides a thread the calling bot started from its owner's sidebar, or shows it there again (`thread_hide`). `changed`
+   * is false when it already was so.
+   */
+  setThreadHidden?(threadId: string, hidden: boolean, options: { actor: AgentActor }): { hidden: boolean; changed: boolean }
   /** Steers run `runId` of another thread with `text` as `actor`'s message (`thread_steer`). */
   steerRun?(threadId: string, runId: string, text: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult>
   /** The profile's scheduled jobs (`schedule_*`); absent: the host registers no schedule tools. */
