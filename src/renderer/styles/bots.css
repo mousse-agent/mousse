@@ -371,7 +371,8 @@ button.bot-image:focus-visible > img { opacity: 0.82; }
 
 /* The Memory dialog: a search box, then the owner's wishes and the bot's notes, each entry with its date. */
 .bot-memory-search { display: flex; align-items: center; gap: 8px; padding: 0 12px; margin-bottom: 12px; border-radius: 9px; border: 1px solid rgba(var(--accent-pale-rgb), .15); background: #0002; color: var(--text-secondary); }
-.bot-memory-search input { flex: 1; min-width: 0; padding: 9px 0; border: 0; background: none; color: var(--text-primary); font: inherit; font-size: 13px; outline: none; }
+.chat-dialog.bot-dialog .bot-memory-search input[type=search] { flex: 1; width: auto; min-width: 0; padding: 9px 0; border: 0; border-radius: 0; background: none; box-shadow: none; color: var(--text-primary); font: inherit; font-size: 13px; outline: none; }
+.bot-memory-search:focus-within { border-color: rgba(var(--accent-pale-rgb), .35); }
 .bot-memory-search input::placeholder { color: var(--text-secondary); }
 .bot-memory-list { max-height: min(60vh, 520px); overflow: auto; margin: 0 -8px; padding: 0 8px; }
 .bot-memory-group + .bot-memory-group { margin-top: 14px; }
