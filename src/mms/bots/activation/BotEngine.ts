@@ -718,6 +718,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   private changed(event: { botId?: string; activationId?: string }): void {
+    const ended = event.activationId ? this.store.activation(event.activationId) : undefined
+    if (ended && ENDED_ACTIVATION_STATUSES.has(ended.status)) this.postScheduleCompleted(ended)
     // A change may take "run commands" away (a Remove, a switch): background commands stop with it.
     if (this.watchers?.size && !this.checkingWatchers) {
       this.checkingWatchers = true
@@ -838,6 +840,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const quiet = await this.stopAndWait(live)
     // Scratch folders go only once nothing runs in them (the startup pass removes the rest).
     if (quiet) for (const activation of live) this.cleanup({ ...activation, status: 'cancelled' })
+    for (const activation of live) this.postScheduleCompleted(this.store.activation(activation.id) ?? activation)
     // Its runtimes' private temporary folder too (one still in use is emptied when its turn ends).
     try { this.host.removeRuntimeTemp?.(this.filesFolder(botId)) } catch { /* left for the system */ }
     for (const row of live) this.packs.delete(row.id)
@@ -4526,6 +4529,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           this.pendingReplies.delete(key)
           const current = this.store.activation(row.id) ?? row
           this.postReply(current, dispatch, late ?? current.result ?? '', false)
+          if (ENDED_ACTIVATION_STATUSES.has(current.status)) this.postScheduleCompleted(current)
         }
       })
       return
@@ -4562,7 +4566,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // its report is not posted, so the chat shows nothing; the run and its line stay in Automations. Open asks and
     // cards it made still show, without the marker. Work the owner asked for and chat replies are posted as written.
     const silent = report && row.trigger.kind === 'schedule' && (isSilentOutput(written) || this.quietLevel(row.id))
-    if (report) this.postScheduleCompleted(row)
     if (silent && !asks.length && !waiting && !cards) return
     const lateReport = report && row.trigger.kind === 'schedule' && row.trigger.missed && this.now() - Date.parse(row.trigger.occurrenceAt) > 15 * 60_000
       ? `(Due ${scheduledDueTime(row.trigger.occurrenceAt, this.now())}, this computer was off or asleep) ` : ''
@@ -6917,6 +6920,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     for (const row of ended) {
       if (quiet || row.status !== 'running') this.cleanup({ ...row, status: 'cancelled' })
       this.packs.delete(row.id)
+      this.postScheduleCompleted(this.store.activation(row.id) ?? row)
     }
   }
 
@@ -8213,6 +8217,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /** No new dispatch may start for a schedule removed from the shared store. Running turns may finish. */
   private cancelRemovedScheduleRun(row: BotActivationRow): boolean {
+    if (row.status === 'running' || (row.trigger.kind === 'schedule' && row.trigger.completed)) return false
     if (!this.host.schedules || row.trigger.kind !== 'schedule' || this.host.schedules.get(row.botId, row.trigger.scheduleId)) return false
     if (ENDED_ACTIVATION_STATUSES.has(row.status)) return false
     this.store.db.transaction(() => {
@@ -8250,9 +8255,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   private postScheduleCompleted(row: BotActivationRow): void {
-    if (row.trigger.kind !== 'schedule' || !row.trigger.completed) return
-    this.removeSchedule(row.botId, row.trigger.scheduleId)
+    if (row.trigger.kind !== 'schedule' || !row.trigger.completed || !ENDED_ACTIVATION_STATUSES.has(row.status)) return
+    // A late final message still gets its report first. Its bounded reply timer finishes this settlement.
+    if ([...this.pendingReplies.keys()].some(key => key.startsWith(`${row.id}:`))) return
     const id = `bm_schedule_done_${row.id}`
+    if (this.store.message(id)) return
+    this.host.schedules?.remove(row.botId, row.trigger.scheduleId)
     if (!this.store.message(id)) this.chat.post({ id, botId: row.botId, author: 'bot', kind: 'notice', text: `Stopped ‘${row.trigger.completed.name}’.`, activationId: row.id, lane: 'run' })
   }
 
