@@ -309,6 +309,7 @@ it.each([
   f.store.run('UPDATE bot_activations SET idempotency_key = ? WHERE id = ?', key, turn.activation.id)
   const result = await tool('bot_schedule_add', turn.prepared, turn.payload.threadId, { when: { kind: 'interval', minutes: 60 }, say: 'Hello' })
   expect(Boolean(result.isError)).toBe(!allowed)
+  if (allowed) expect(f.scheduler.listJobs()[0]!.bot).toMatchObject({ say: 'Hello', ownerAsked: true })
   if (!allowed) {
     expect(result.text).toMatch(/prompt/)
     expect(f.book.list(botId)).toEqual([])
