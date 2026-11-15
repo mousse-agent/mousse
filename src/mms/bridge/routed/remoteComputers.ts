@@ -3,6 +3,7 @@ import { ROUTED_AGENT_METHODS } from '../../../shared/bridge/routed'
 import type { MmsProfileServices } from '../../MmsProfileServices'
 import type { RemoteComputer, RemoteComputersPort } from '../../protocol/remoteComputersPort'
 import { repositoryIdentitiesFor } from '../remote/repositoryIdentity'
+import { DomainRpcError } from '../../protocol/domainRegistry'
 import type { RoutedClient } from './RoutedClient'
 
 const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value)
@@ -18,11 +19,24 @@ export function remoteComputersPort(options: {
   client: RoutedClient
   computers: () => Array<{ node: NodeId; name: string }> | undefined
   online: (node: NodeId) => boolean
+  self?: () => string | undefined
 }): RemoteComputersPort {
   const { services, client } = options
   return {
     computers: (): RemoteComputer[] | undefined =>
       options.computers()?.map(({ node, name }) => ({ node, name, online: options.online(node) })),
+    self: () => options.self?.(),
+    versions: async (node, signal) => {
+      const asked = client.versionsOrRefusal(node as NodeId)
+      if (!signal) return asked
+      // The connect deadline: a handshake that stalls fails here, whatever the call's own deadline is.
+      return new Promise((resolve, reject) => {
+        const give = (): void => reject(new DomainRpcError('computer_offline', `${client.nameOf(node as NodeId)} did not answer in time, so it is taken as offline.`))
+        if (signal.aborted) return give()
+        signal.addEventListener('abort', give, { once: true })
+        asked.then(resolve, reject).finally(() => signal.removeEventListener('abort', give))
+      })
+    },
     call: (node, method, params, callOptions) => client.call(node as NodeId, method, params, callOptions),
     takesAgentMark: async (node) => {
       const versions = await client.versionsOrRefusal(node as NodeId)
