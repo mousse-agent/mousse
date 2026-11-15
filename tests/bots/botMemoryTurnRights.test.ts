@@ -36,12 +36,13 @@ it.each([
     const result = await call('memory_save', { kind, text: `New ${kind}`, lane: 'chat', ownerStarted: true })
     expect(result.isError).toBeUndefined()
     expect(store.active(botId).find((entry) => entry.text === `New ${kind}`)?.kind).toBe(ownerStarted ? kind : 'run_note')
-    if (!ownerStarted) expect(result.value).toMatchObject({ kind: 'run_note', note: expect.any(String) })
+    if (!ownerStarted) expect(result.value).toMatchObject({ kind: 'run_note', note: 'In a run or a turn you started yourself, saves are run notes.' })
   }
   for (const entry of saved) {
     if ('error' in entry) throw new Error(entry.error)
     const result = await call('memory_save', { kind: 'owner', text: 'Replacement', replaces: entry.ref })
     expect(result.isError === true).toBe(!ownerStarted)
+    if (!ownerStarted) expect(result.value.reason).toContain('A run or a turn you started yourself')
   }
   // Run notes may still be replaced in an unattended turn.
   if (!ownerStarted) {

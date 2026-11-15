@@ -217,7 +217,7 @@ export function botMemoryTools(source: BotMemoryToolHost | (() => BotMemoryToolH
       })
       if ('error' in result) return { text: JSON.stringify(result), isError: true }
       report(ctx, activation, 'memory_save', { ...result, text })
-      return json(activation.lane === 'run' ? { ...result, kind: 'run_note', note: 'In a run, saves are run notes.' } : result)
+      return json(activation.lane === 'run' ? { ...result, kind: 'run_note', note: 'In a run or a turn you started yourself, saves are run notes.' } : result)
     }),
     tool('memory_forget', () => 'Forget', (args, ctx, activation, store) => {
       if (activation.lane === 'run') return { text: JSON.stringify({ error: 'refused', reason: 'Ask the owner in the chat.' }), isError: true }
