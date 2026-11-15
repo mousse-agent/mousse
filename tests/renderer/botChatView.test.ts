@@ -1888,6 +1888,11 @@ describe('memory', () => {
 })
 
 it.each(['unfocused', 'hidden'] as const)('keeps a mounted %s chat unread until visible and focused', async state => {
+  const markRead = vi.mocked(fake.client.markRead).getMockImplementation()!
+  vi.mocked(fake.client.markRead).mockImplementation((id, seq) => {
+    fake.bots = fake.bots.map(bot => bot.id === id ? { ...bot, unread: 0 } : bot)
+    return markRead(id, seq)
+  })
   let focused = state !== 'unfocused'
   let visible = state !== 'hidden'
   vi.mocked(document.hasFocus).mockImplementation(() => focused)
