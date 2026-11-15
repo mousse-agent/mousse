@@ -333,9 +333,12 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   'threads.clearContext': chat('thread', ['threadId']),
   'threads.compact': chat('thread', ['threadId', 'focus']),
   'threads.stopCompaction': chat('thread', ['threadId']),
-  'orchestrator.answerQuestions': chat('thread', ['threadId', 'requestId', 'answers'], {
+  // Version 2: `attachments`, images sent with the answers by question id, which may be staged.
+  'orchestrator.answerQuestions': chat('thread', ['threadId', 'requestId', 'answers', 'attachments', ROUTED_STAGED_KEY], {
     required: ['requestId', 'answers'],
-    owned: { requestId: 'question' }
+    owned: { requestId: 'question' },
+    ...staging(['attachments']),
+    since: { attachments: 2, [ROUTED_STAGED_KEY]: 2 }
   }),
   'orchestrator.dismissQuestions': chat('thread', ['threadId', 'requestId'], {
     required: ['requestId'],

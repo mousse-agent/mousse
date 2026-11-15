@@ -164,7 +164,7 @@ import type {
   QuestionAnswerOutcome,
   PendingUserQuestions,
   ThreadApprovalRequest,
-  UserQuestionAnswers,
+  UserQuestionAnswers, UserQuestionAttachments,
   QueuedMessage,
   QueueEditResult
 } from '../../shared/types'
@@ -1807,10 +1807,12 @@ export function registerGuiIpc(
     }
   )
 
-  const answerQuestions = async (requestId: string, answers: UserQuestionAnswers, threadId?: unknown): Promise<QuestionAnswerOutcome> => {
+  const answerQuestions = async (requestId: string, answers: UserQuestionAnswers, threadId?: unknown, attachments?: unknown): Promise<QuestionAnswerOutcome> => {
     const res = await guiMms.request<QuestionAnswerOutcome>('orchestrator.answerQuestions', withThreadId({
       requestId,
-      answers
+      answers,
+      // Images sent with the answers, by question id; the daemon checks them.
+      ...(attachments && typeof attachments === 'object' && Object.keys(attachments).length ? { attachments: attachments as UserQuestionAttachments } : {})
     }, threadId))
     const busy = activityTrackerFor().getBusyThreadId()
     if (res.ok && busy) setThreadActivity(busy, 'processing')
@@ -1824,7 +1826,7 @@ export function registerGuiIpc(
   // the card says who decided what (SPEC §17.4).
   registerHandler(
     'orchestrator:answerQuestionsDetailed',
-    async (_e, requestId: string, answers: UserQuestionAnswers, threadId?: unknown) => answerQuestions(requestId, answers, threadId)
+    async (_e, requestId: string, answers: UserQuestionAnswers, threadId?: unknown, attachments?: unknown) => answerQuestions(requestId, answers, threadId, attachments)
   )
   registerHandler('orchestrator:dismissQuestions', async (_e, requestId: string, threadId?: unknown) => {
     const res = await guiMms.request<{ ok: boolean }>('orchestrator.dismissQuestions', withThreadId({

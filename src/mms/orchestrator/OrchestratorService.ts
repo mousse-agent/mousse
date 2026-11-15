@@ -457,7 +457,9 @@ export function formatQuestionAnswersMessage(
  */
 export function describeQuestionAnswers(
   questions: UserQuestion[],
-  answers: UserQuestionAnswers
+  answers: UserQuestionAnswers,
+  /** Which of the answer message's images each question got, by question id. */
+  imageIndexes?: Record<string, number[]>
 ): AnsweredQuestion[] {
   return questions.map((question) => {
     const value = answers[question.id]
@@ -471,7 +473,13 @@ export function describeQuestionAnswers(
       if (option) chosen.push(option.label.trim() || entry)
       else typed.push(entry)
     }
-    return { prompt: question.prompt, chosen, ...(typed.length ? { reply: typed.join('\n') } : {}) }
+    const images = imageIndexes && Object.hasOwn(imageIndexes, question.id) ? imageIndexes[question.id] : undefined
+    return {
+      prompt: question.prompt,
+      chosen,
+      ...(typed.length ? { reply: typed.join('\n') } : {}),
+      ...(images?.length ? { images } : {})
+    }
   })
 }
 
@@ -11078,7 +11086,7 @@ export class OrchestratorService extends EventEmitter {
    * returns null when the thread is gone.
    */
   /** `questionAnswers`, for answers (not a dismissal), makes the transcript show them as a step of the agent's turn. */
-  recordQuestionResponseMessage(threadId: string, content: string, questionAnswers?: AnsweredQuestion[]): ChatMessage | null {
+  recordQuestionResponseMessage(threadId: string, content: string, questionAnswers?: AnsweredQuestion[], images?: ChatImageAttachment[]): ChatMessage | null {
     const text = content.trim()
     if (!text || threadId === '__unbound__') return null
     if (this.threadStore && !this.threadStore.getThread(threadId)) return null
@@ -11091,6 +11099,8 @@ export class OrchestratorService extends EventEmitter {
         content: text,
         timestamp: new Date().toISOString(),
         ...(questionAnswers?.length ? { questionAnswers } : {}),
+        // The images sent with the answers: shown under each answer, and a model a handoff gives the thread to sees them.
+        ...(images?.length ? { images } : {}),
         // Presentation-only echo: preserve the tracked mode so the next real
         // turn does not mistake this answer for a legacy agent turn.
         ...((() => {

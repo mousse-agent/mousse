@@ -272,7 +272,23 @@ export function validateRemoteParams(
       text('requestId')
       break
     case 'orchestrator.answerQuestions': {
-      keys(['threadId', 'requestId', 'answers'])
+      keys(['threadId', 'requestId', 'answers'], ['attachments'])
+      // Images staged with `attachments.stage`, by the id of the question each answers; as many as one message takes.
+      if (Object.hasOwn(p, 'attachments')) {
+        const byQuestion = p.attachments
+        if (!byQuestion || typeof byQuestion !== 'object' || Array.isArray(byQuestion)) throw new NetError('bad_request')
+        const groups = Object.entries(byQuestion)
+        const ids = groups.flatMap(([, value]) => (Array.isArray(value) ? value : [null]))
+        if (
+          groups.length < 1 ||
+          groups.length > 32 ||
+          groups.some(([key, value]) => !key || key.length > 256 || !Array.isArray(value) || value.length < 1) ||
+          ids.length > REMOTE_MAX_ATTACHMENTS ||
+          new Set(ids).size !== ids.length ||
+          ids.some((id) => typeof id !== 'string' || !UPLOAD_ID.test(id))
+        )
+          throw new NetError('bad_request')
+      }
       text('threadId')
       text('requestId')
       const answers = p.answers

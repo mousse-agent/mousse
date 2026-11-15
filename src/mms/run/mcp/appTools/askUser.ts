@@ -10,8 +10,11 @@ import {
   type AppToolTurn,
   type MousseTool,
   type ToolCallContext,
+  type ToolImage,
   type ToolOutcome
 } from './types'
+import type { UserQuestionAttachments } from '../../../../shared/types'
+import { ownList } from '../../../orchestrator/questionAttachments'
 
 type Question = { id: string; prompt: string; options: Array<{ id: string; label: string }>; allowMultiple?: boolean }
 
@@ -68,11 +71,17 @@ export function askUserTools(host: AppToolHost): MousseTool[] {
       const questions = parseQuestions(args.questions)
       if (questions.length === 0) return { text: 'No valid questions provided.', isError: true }
       if (!threadId) return { text: 'Cannot ask a question without an active thread.', isError: true }
+      // Images sent with the answers come back as images too; the answers name their saved files.
+      const images: ToolImage[] = []
+      const onAttachments = (attachments: UserQuestionAttachments): void => {
+        for (const question of questions)
+          for (const image of ownList(attachments, question.id) ?? []) images.push({ data: image.data, mimeType: image.mimeType })
+      }
       const answers = await host.askUser(threadId, questions, ctx.transport === 'mcp'
-        ? { signal: ctx.signal, timeoutMs: ASK_USER_TIMEOUT_MS }
+        ? { signal: ctx.signal, timeoutMs: ASK_USER_TIMEOUT_MS, onAttachments }
         // The pi loop's questions keep the service's default wait; its stop dismisses them below.
-        : {})
-      return { text: JSON.stringify(answers, null, 2), isError: false }
+        : { onAttachments })
+      return { text: JSON.stringify(answers, null, 2), isError: false, ...(images.length ? { images } : {}) }
     } catch (err) {
       return { text: err instanceof Error ? err.message : String(err), isError: true }
     }

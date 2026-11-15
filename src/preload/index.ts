@@ -89,7 +89,7 @@ import type {
   TurnStateSnapshot,
   QuestionAnswerOutcome,
   ThreadApprovalRequest,
-  UserQuestionAnswers
+  UserQuestionAnswers, UserQuestionAttachments
 } from '../shared/types'
 import type {
   CreatePullRequestResult,
@@ -336,9 +336,12 @@ const api = {
     /** `threadId` names the thread that asked; a thread on another computer needs it. */
     answerQuestions: (requestId: string, answers: UserQuestionAnswers, threadId?: string): Promise<boolean> =>
       ipcRenderer.invoke('orchestrator:answerQuestions', requestId, answers, threadId),
-    /** `answerQuestions` with its outcome: who answered a saved approval request first, or why it was closed. */
-    answerQuestionsDetailed: (requestId: string, answers: UserQuestionAnswers, threadId?: string): Promise<QuestionAnswerOutcome> =>
-      ipcRenderer.invoke('orchestrator:answerQuestionsDetailed', requestId, answers, threadId),
+    /**
+     * `answerQuestions` with its outcome: who answered a saved approval request first, or why it was closed.
+     * `attachments`: images sent with the answers, by the id of the question each answers.
+     */
+    answerQuestionsDetailed: (requestId: string, answers: UserQuestionAnswers, threadId?: string, attachments?: UserQuestionAttachments): Promise<QuestionAnswerOutcome> =>
+      ipcRenderer.invoke('orchestrator:answerQuestionsDetailed', requestId, answers, threadId, attachments),
     dismissQuestions: (requestId: string, threadId?: string): Promise<boolean> =>
       ipcRenderer.invoke('orchestrator:dismissQuestions', requestId, threadId),
     /** The thread's saved approval requests, oldest first, with the answers they got. */

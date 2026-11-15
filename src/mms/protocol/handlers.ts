@@ -53,6 +53,7 @@ import { AppError, createErrorProvider, knownAppError } from '../../shared/error
 import type { DiscardedCopy, GitOperationHandle } from '../git/GitService'
 import { listClaimedQueue, listPendingQueue, QueueConflictError, QueueValidationError } from '../queue/ThreadMessageQueue'
 import { describeQuestionAnswers, formatQuestionAnswersMessage, formatQuestionDismissMessage } from '../orchestrator/OrchestratorService'
+import { answerMessageImages, answersWithImagePaths, attachmentsForQuestions, removeAnswerImages, saveAnswerImages } from '../orchestrator/questionAttachments'
 import { withoutStandingRules } from '../orchestrator/UserQuestionService'
 import type { ModelOverride } from '../../shared/providerInstances'
 import { projectRememberingPick, rememberedChoiceFor } from '../data/newThreadChoice'
@@ -71,6 +72,7 @@ import {
   asAddInstanceInput,
   asAfterSequence,
   asAnswersMap,
+  asOptionalAnswerAttachments,
   asEnabledForScope,
   asInstanceConfigPatch,
   asInstanceId,
@@ -149,7 +151,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync } from 'node:fs'
 import { access, realpath as realpathNative } from 'node:fs/promises'
 import { FILE_ASSET_PIECE_BYTES, SAVE_TOO_LARGE_MESSAGE, saveExceedsRequest } from '../../shared/fileAssets'
 import { homedir } from 'node:os'
-import { isAbsolute, join, relative, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { clearMarker, type SelectionPlace } from '../git/gitSelection'
 import { FolderNotAnsweringError, waitForFolderAccess } from '../files/folderAccess'
 import { listFilesPlaces } from '../files/drives'
@@ -2859,14 +2861,32 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const requestId = asString(p.requestId, 'requestId', 256)
       const answers = asAnswersMap(p.answers)
       const pending = ctx.mms.questions.getPending(requestId)
-      const settled = ctx.mms.questions.settle(requestId, answers, questionAnswerer(ctx))
+      // Images sent with a plain question's answers (an approval takes none): saved in the thread's folder, and
+      // each named in the answer of the question it answers, which is how every question tool carries them.
+      const attachments = pending && !pending.approval
+        ? attachmentsForQuestions(pending.questions, asOptionalAnswerAttachments(p.attachments))
+        : {}
+      let sent = answers
+      let savedFolder: string | null = null
+      if (pending && Object.keys(attachments).length) {
+        const threadDir = ctx.mms.threads.getThreadDir(pending.threadId)
+        const paths = saveAnswerImages(threadDir, requestId, pending.questions, attachments)
+        savedFolder = dirname(Object.values(paths)[0]![0]!)
+        sent = answersWithImagePaths(pending.questions, answers, paths)
+      }
+      const settled = savedFolder
+        ? ctx.mms.questions.settle(requestId, sent, questionAnswerer(ctx), { attachments })
+        : ctx.mms.questions.settle(requestId, sent, questionAnswerer(ctx))
+      if (!settled.ok && savedFolder) removeAnswerImages(savedFolder)
       if (settled.ok && pending) {
         // Answers reach the model through the tool result; the transcript records them too, shown
-        // as a step of the agent's turn (`questionAnswers`).
+        // as a step of the agent's turn (`questionAnswers`), with the images under the answers they came with.
+        const { images, indexes } = answerMessageImages(pending.questions, attachments)
         ctx.mms.orchestrator.recordQuestionResponseMessage(
           pending.threadId,
-          formatQuestionAnswersMessage(pending.questions, answers),
-          describeQuestionAnswers(pending.questions, answers)
+          formatQuestionAnswersMessage(pending.questions, sent),
+          describeQuestionAnswers(pending.questions, answers, indexes),
+          images
         )
       }
       // The loser of a race learns who won and what they decided (SPEC §17.4).

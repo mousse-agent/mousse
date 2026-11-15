@@ -148,6 +148,8 @@ export interface BridgeRemoteParams {
     threadId: string
     requestId: string
     answers: Record<string, string | string[]>
+    /** Images staged with `attachments.stage`, by the id of the question each answers. */
+    attachments?: Record<string, string[]>
   }
   'orchestrator.dismissQuestions': {
     threadId: string

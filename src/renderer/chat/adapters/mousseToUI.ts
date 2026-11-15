@@ -533,7 +533,14 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
         type: 'tool-QuestionAnswers',
         toolCallId: msg.id,
         state: 'output-available',
-        input: { questions: msg.questionAnswers },
+        // The images sent with the answers; each question names its own by index. One of a thread on another
+        // computer may arrive by name first, its bytes fetched when shown.
+        input: {
+          questions: msg.questionAnswers,
+          ...(msg.images?.length
+            ? { images: msg.images.map((img) => ({ name: img.name, ...(img.data ? { url: `data:${img.mimeType};base64,${img.data}` } : {}) })) }
+            : {}),
+        },
       } as unknown as UIMessage['parts'][number]]
       out.push(base)
       lastAssistantText = null

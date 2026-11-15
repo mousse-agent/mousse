@@ -3,7 +3,7 @@ import type { AgentJobLimits } from '../../../../shared/agentJobLimits'
 import type { PermissionMode } from '../../../../shared/permissionMode'
 import type { ModelOverride } from '../../../../shared/providerInstances'
 import type { ApprovalTag } from '../../../orchestrator/UserQuestionService'
-import type { ChatMessage, CreateScheduledJobInput, PendingUserQuestions, QueuedMessage, ScheduledJob, Thread, UserQuestion, UserQuestionAnswers } from '../../../../shared/types'
+import type { ChatMessage, CreateScheduledJobInput, PendingUserQuestions, QueuedMessage, ScheduledJob, Thread, UserQuestion, UserQuestionAnswers, UserQuestionAttachments } from '../../../../shared/types'
 import type { ScheduledJobOptionsInput } from '../../../scheduled/validateJobOptions'
 import type { DevGuiTools } from '../../../devgui/DevGuiTools'
 import type { SkillsRegistry } from '../../../integrations/skills/SkillsRegistry'
@@ -218,7 +218,7 @@ export interface AppToolHost extends DelegationToolsHost {
   askUser(
     threadId: string,
     questions: PendingUserQuestions['questions'],
-    options: { signal?: AbortSignal; timeoutMs?: number }
+    options: { signal?: AbortSignal; timeoutMs?: number; onAttachments?: (attachments: UserQuestionAttachments) => void }
   ): Promise<UserQuestionAnswers>
   /** Dismisses the thread's open questions (an in-process `ask_user` whose turn stopped). */
   dismissQuestions?(threadId: string): void

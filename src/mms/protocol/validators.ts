@@ -1111,6 +1111,25 @@ export function asAnswersMap(v: unknown): Record<string, string | string[]> {
   return out
 }
 
+/** Images sent with an answer, by question id (`orchestrator.answerQuestions`): at most as many images as one message takes. */
+export function asOptionalAnswerAttachments(v: unknown): Record<string, ChatImageAttachment[]> | undefined {
+  if (v === undefined || v === null) return undefined
+  const o = asPlainObject(v, 'attachments')
+  const keys = Object.keys(o)
+  if (keys.length > 64) throw invalidParams('attachments has too many keys')
+  // No prototype: a question id such as `constructor` is an ordinary key here.
+  const out = Object.create(null) as Record<string, ChatImageAttachment[]>
+  let total = 0
+  for (const key of keys) {
+    if (!key || key.length > 256) throw invalidParams('attachments key must be a question id')
+    const images = asChatImages(o[key], `attachments.${key}`)
+    total += images.length
+    if (total > MMS_PROTOCOL_MAX_IMAGES) throw invalidParams(`attachments exceed max ${MMS_PROTOCOL_MAX_IMAGES} images`)
+    if (images.length) out[key] = images
+  }
+  return Object.keys(out).length ? out : undefined
+}
+
 export function asCursorMcpConfigPatch(v: unknown): Record<string, unknown> {
   const o = asPlainObject(v, 'patch')
   // Bound size of serialized patch

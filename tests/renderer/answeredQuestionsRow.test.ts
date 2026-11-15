@@ -102,6 +102,27 @@ describe('answers to the agent\'s questions', () => {
     expect(answeredQuestionsSummary([{ prompt: 'Skipped?', chosen: [] }]).detail).toBe('· No answer')
   })
 
+  it('show the images sent with an answer under that answer, and count them on the collapsed row', () => {
+    const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=='
+    const messages = transcript([
+      { prompt: 'Which screen do you mean?', chosen: [], images: [0] },
+      { prompt: 'What looks wrong?', chosen: ['Layout'], reply: 'The header', images: [1] }
+    ])
+    messages[2] = { ...messages[2]!, images: [
+      { name: 'screen.png', mimeType: 'image/png', data: PNG },
+      // An image of a thread on another computer whose bytes have not arrived yet: shown by name.
+      { name: 'header.png', mimeType: 'image/png', data: '' }
+    ] }
+    render(messages)
+    act(() => rowOf()!.querySelector<HTMLElement>('button, [role="button"]')!.click())
+    const answers = [...rowOf()!.querySelectorAll('.an-answered-questions-list > div')]
+    expect(answers[0]!.querySelector('img')?.getAttribute('src')).toBe(`data:image/png;base64,${PNG}`)
+    expect(answers[0]!.textContent).not.toContain('No answer')
+    expect(answers[1]!.querySelector('img')).toBeNull()
+    expect(answers[1]!.textContent).toContain('header.png')
+    expect(answeredQuestionsSummary([{ prompt: 'Which screen?', chosen: [], images: [0] }]).detail).toBe('· 1 image')
+  })
+
   it('leave an older answer, saved as text only, as the user message it was', () => {
     const older = transcript(undefined)
     const ui = mousseToUIMessages(older)

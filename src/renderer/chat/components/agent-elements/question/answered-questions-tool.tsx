@@ -1,12 +1,16 @@
 import { memo } from "react";
 import type { AnsweredQuestion } from "../../../../../shared/types";
 import { IconMessageCircleQuestion } from "../../../../lib/icons";
+import { MessageImage } from "../message-image";
 import { ToolRowBase } from "../tools/tool-row-base";
+
+/** An image sent with the answers: its data URL, or only its name until its bytes arrive. */
+export type AnsweredQuestionImage = { name: string; url?: string };
 
 export type AnsweredQuestionsPart = {
   type: string;
   toolCallId?: string;
-  input?: { questions?: AnsweredQuestion[] };
+  input?: { questions?: AnsweredQuestion[]; images?: AnsweredQuestionImage[] };
 };
 
 const PROMPT_LIMIT = 60;
@@ -17,10 +21,12 @@ function shortPrompt(prompt: string): string {
   return line.length > PROMPT_LIMIT ? `${line.slice(0, PROMPT_LIMIT - 1).trimEnd()}…` : line;
 }
 
-/** The answer on one line: the options chosen, then the text typed instead. */
+/** The answer on one line: the options chosen, then the text typed instead, then how many images came with it. */
 export function answerText(question: AnsweredQuestion): string {
   const parts = [...question.chosen];
   if (question.reply?.trim()) parts.push(question.reply.trim().replace(/\s*\n\s*/g, " "));
+  const images = question.images?.length ?? 0;
+  if (images) parts.push(images === 1 ? "1 image" : `${images} images`);
   return parts.join(", ") || "No answer";
 }
 
@@ -45,6 +51,7 @@ export const AnsweredQuestionsTool = memo(function AnsweredQuestionsTool({
   part: AnsweredQuestionsPart;
 }) {
   const questions = part.input?.questions ?? [];
+  const images = part.input?.images ?? [];
   if (questions.length === 0) return null;
   const { label, detail } = answeredQuestionsSummary(questions);
 
@@ -67,7 +74,20 @@ export const AnsweredQuestionsTool = memo(function AnsweredQuestionsTool({
               {question.reply?.trim() && (
                 <dd className="text-foreground whitespace-pre-wrap break-words">“{question.reply.trim()}”</dd>
               )}
-              {question.chosen.length === 0 && !question.reply?.trim() && (
+              {(question.images?.length ?? 0) > 0 && (
+                <dd className="an-answered-question-images flex flex-wrap gap-2">
+                  {question.images!.map((index) => {
+                    const image = images[index];
+                    if (!image) return null;
+                    return image.url ? (
+                      <MessageImage key={index} src={image.url} alt={image.name} className="max-h-[120px] w-auto" />
+                    ) : (
+                      <span key={index} className="text-muted-foreground">{image.name}</span>
+                    );
+                  })}
+                </dd>
+              )}
+              {question.chosen.length === 0 && !question.reply?.trim() && !question.images?.length && (
                 <dd className="text-muted-foreground">No answer</dd>
               )}
             </div>

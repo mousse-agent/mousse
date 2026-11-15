@@ -15,7 +15,7 @@ import { redactSecrets } from '../../shared/errors'
 import type { RunPolicy, TurnOrigin } from '../../shared/harness/types'
 import { ALWAYS_OPTION_ID, ALWAYS_OPTION_LABEL } from '../../shared/permissionKeys'
 import { permissionModeAllows, type PermissionAction, type PermissionMode } from '../../shared/permissionMode'
-import type { PendingApprovalInfo, PendingUserQuestions, UserQuestionAnswers } from '../../shared/types'
+import type { PendingApprovalInfo, PendingUserQuestions, UserQuestionAnswers, UserQuestionAttachments } from '../../shared/types'
 import {
   canAnswerApproval,
   type Answerer,
@@ -124,6 +124,8 @@ interface PendingRequest {
   resolve: (answers: UserQuestionAnswers) => void
   reject: (error: Error) => void
   timer?: ReturnType<typeof setTimeout>
+  /** Told the images sent with the answer, before the answers resolve (`requestAnswers`' `onAttachments`). */
+  onAttachments?: (attachments: UserQuestionAttachments) => void
 }
 
 /** A saved request that was settled while its provider callback still waits for the answer. */
@@ -203,11 +205,13 @@ export class UserQuestionService extends EventEmitter {
    * minutes for an unattended origin (a workflow, a bot, a scheduled job, a definition run). An aborted
    * `options.signal` dismisses the request (its caller's run ended).
    * `options.approval` marks a provider's approval request (see `ApprovalTag`).
+   * `options.onAttachments` is told the images a plain question's answer carries, by question id, before the answers
+   * resolve: for a caller that can hand images to its agent (`ask_user`). Their paths are in the answers either way.
    */
   requestAnswers(
     questions: PendingUserQuestions['questions'],
     threadId = '__unbound__',
-    options: { timeoutMs?: number; signal?: AbortSignal; approval?: ApprovalTag } = {}
+    options: { timeoutMs?: number; signal?: AbortSignal; approval?: ApprovalTag; onAttachments?: (attachments: UserQuestionAttachments) => void } = {}
   ): Promise<UserQuestionAnswers> {
     if (this.stopped) return Promise.reject(Object.assign(new Error('Profile questions are stopped'), { code: 'profile_draining' }))
     if (options.signal?.aborted) return Promise.reject(new Error('User did not answer before the run ended.'))
@@ -316,7 +320,8 @@ export class UserQuestionService extends EventEmitter {
         durable,
         resolve,
         reject,
-        ...(timer ? { timer } : {})
+        ...(timer ? { timer } : {}),
+        ...(options.onAttachments && !shown.approval ? { onAttachments: options.onAttachments } : {})
       })
       // One `pending` event per request: a client that resubscribes reads the snapshot, not a replay.
       this.emit('pending', record ? this.viewOf(record) : ({ requestId, threadId, questions: shown.questions } satisfies PendingUserQuestions & { threadId: string }))
@@ -330,9 +335,10 @@ export class UserQuestionService extends EventEmitter {
    * transaction: of two answers one wins and the other learns who did.
    *
    * `options.continuation: false` leaves the continue turn of a restarted run to the caller (a send
-   * that denies approvals starts its own run).
+   * that denies approvals starts its own run). `options.attachments`: the images sent with a plain question's
+   * answer, for a caller that asked to be told (`onAttachments`); an approval takes none.
    */
-  settle(requestId: string, answers: UserQuestionAnswers, answeredBy?: Answerer, options: { continuation?: boolean } = {}): SettleResult {
+  settle(requestId: string, answers: UserQuestionAnswers, answeredBy?: Answerer, options: { continuation?: boolean; attachments?: UserQuestionAttachments } = {}): SettleResult {
     const pending = this.pending.get(requestId)
     if ((pending?.durable || (!pending && this.binding))) return this.settleSaved(requestId, answers, answeredBy, options)
     if (!pending) return { ok: false, reason: 'unknown' }
@@ -353,6 +359,9 @@ export class UserQuestionService extends EventEmitter {
 
     if (pending.timer) clearTimeout(pending.timer)
     this.pending.delete(requestId)
+    if (!pending.approval && options.attachments && Object.keys(options.attachments).length) {
+      try { pending.onAttachments?.(options.attachments) } catch { /* the paths in the answers still name the images */ }
+    }
     pending.resolve(answers)
     this.emit('cleared', { requestId, threadId: pending.threadId })
     return { ok: true, ...(decision ? { decision } : {}) }

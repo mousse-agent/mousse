@@ -1,12 +1,23 @@
 import { useEffect, useImperativeHandle, useRef, useState, type KeyboardEvent, type Ref } from 'react'
 import { Check, IconMessageCircleQuestion } from '../lib/icons'
 import { ALWAYS_OPTION_NOTE } from '../../shared/permissionKeys'
-import type { PendingApprovalInfo, PendingUserQuestions, QuestionAnswerOutcome, UserQuestion, UserQuestionAnswers } from '../../shared/types'
+import type {
+  ChatImageAttachment,
+  PendingApprovalInfo,
+  PendingUserQuestions,
+  QuestionAnswerOutcome,
+  UserQuestion,
+  UserQuestionAnswers,
+  UserQuestionAttachments
+} from '../../shared/types'
 
 interface ComposerQuestionModalProps {
   pending: PendingUserQuestions
-  onSubmit: (answers: UserQuestionAnswers) => void
+  /** `attachments`: the images sent from the composer with the answers, by question id. */
+  onSubmit: (answers: UserQuestionAnswers, attachments: UserQuestionAttachments) => void
   onDismiss: () => void
+  /** Skips the questions and sends the composer's message to the thread as usual; shown when the composer has one. */
+  onSkipAndSend?: () => void
   /** Filled with the handle the composer uses to answer the shown question. */
   handleRef?: Ref<QuestionCardHandle | null>
   /** Whether a message from the composer would answer the last open question (and so submit), each time that changes. */
@@ -19,9 +30,13 @@ export const AUTO_ADVANCE_MS = 250
 export function isQuestionAnswered(
   question: UserQuestion,
   answer: string | string[] | undefined,
-  custom: string | undefined
+  custom: string | undefined,
+  /** Images sent from the composer: an answer on their own. */
+  images?: number
 ): boolean {
-  if (custom && custom.trim().length > 0) return true
+  // Only text typed for this question: a question named `constructor` must not read an inherited value.
+  if (typeof custom === 'string' && custom.trim().length > 0) return true
+  if (images) return true
   if (question.allowMultiple) {
     return Array.isArray(answer) && answer.length > 0
   }
@@ -36,7 +51,8 @@ export function resolveQuestionAnswers(
 ): UserQuestionAnswers {
   const resolved: UserQuestionAnswers = {}
   for (const question of questions) {
-    const custom = (customs[question.id] ?? '').trim()
+    const typed = Object.hasOwn(customs, question.id) ? customs[question.id] : undefined
+    const custom = (typeof typed === 'string' ? typed : '').trim()
     if (question.allowMultiple) {
       const selected = Array.isArray(answers[question.id]) ? [...answers[question.id]] : []
       if (custom) selected.push(custom)
@@ -55,39 +71,64 @@ export const APPROVAL_COMPOSER_PLACEHOLDER = 'Type to deny and redirect'
 export const QUESTION_COMPOSER_PLACEHOLDER = 'Or reply in your own words'
 
 /**
- * What sending from the composer does while questions are open: the message answers the question the
- * card shows, and submits all the answers when that was the last one without an answer. A message with
- * images cannot be an answer; then the questions are skipped and the message is sent.
+ * What sending from the composer does while questions are open: the message, with any images and files attached,
+ * answers the question the card shows, and submits all the answers when that was the last one without an answer.
+ * Skipping the questions to send it as an ordinary message is the card's own "Skip questions and send".
  */
-export function questionComposerSend(hasImages: boolean, submits: boolean): { answers: boolean; label: string } {
-  if (hasImages) return { answers: false, label: 'Skip questions and send' }
-  return { answers: true, label: submits ? 'Answer and submit' : 'Answer this question' }
+export function questionComposerSendLabel(submits: boolean): string {
+  return submits ? 'Answer and submit' : 'Answer this question'
 }
 
-/** The card's state after a message from the composer answers the question at `step`, as if typed into its "Other…" field. */
+/** The images a question was answered with: its own entry only, as a question may be named `constructor`. */
+export function imagesFor(attachments: UserQuestionAttachments, questionId: string): ChatImageAttachment[] {
+  const own = Object.hasOwn(attachments, questionId) ? attachments[questionId] : undefined
+  return Array.isArray(own) ? own : []
+}
+
+/** The text typed for a question, from its own entry only. */
+function typedFor(customs: Record<string, string>, questionId: string): string {
+  const own = Object.hasOwn(customs, questionId) ? customs[questionId] : undefined
+  return typeof own === 'string' ? own : ''
+}
+
+/** The card's button that skips the questions and sends the composer's message as usual. */
+export const SKIP_QUESTIONS_AND_SEND_LABEL = 'Skip questions and send'
+
+/**
+ * The card's state after a message from the composer answers the question at `step`, as if typed into its "Other…"
+ * field. Images sent with it are that question's own and replace the ones an earlier message gave it.
+ */
 export function answerWithMessage(
   questions: UserQuestion[],
   step: number,
   answers: UserQuestionAnswers,
   customs: Record<string, string>,
-  message: string
-): { answers: UserQuestionAnswers; customs: Record<string, string>; complete: boolean } {
+  message: string,
+  attachments: UserQuestionAttachments = {},
+  images: ChatImageAttachment[] = []
+): { answers: UserQuestionAnswers; customs: Record<string, string>; attachments: UserQuestionAttachments; complete: boolean } {
   const question = questions[step]
-  if (!question) return { answers, customs, complete: false }
+  if (!question) return { answers, customs, attachments, complete: false }
   const nextCustoms = { ...customs, [question.id]: message }
+  // No prototype, so an id such as `__proto__` is an ordinary key.
+  const nextAttachments: UserQuestionAttachments = Object.assign(Object.create(null) as UserQuestionAttachments, attachments)
+  if (images.length) nextAttachments[question.id] = images
+  else delete nextAttachments[question.id]
   // Single choice: the typed answer replaces a picked option, as "Other…" does. Several: it joins the picks.
   const nextAnswers = question.allowMultiple ? answers : { ...answers, [question.id]: '' }
-  const complete = questions.every((each) => isQuestionAnswered(each, nextAnswers[each.id], nextCustoms[each.id]))
-  return { answers: nextAnswers, customs: nextCustoms, complete }
+  const complete = questions.every((each) =>
+    isQuestionAnswered(each, nextAnswers[each.id], nextCustoms[each.id], imagesFor(nextAttachments, each.id).length))
+  return { answers: nextAnswers, customs: nextCustoms, attachments: nextAttachments, complete }
 }
 
 /** Lets the composer answer the question the card shows. */
 export interface QuestionCardHandle {
   /**
-   * Answers the shown question with `message`. When every question then has an answer, returns all of them
-   * for the caller to submit; otherwise the card moves on to the next unanswered question and returns null.
+   * Answers the shown question with `message` and the images sent with it. When every question then has an
+   * answer, returns all of them, with each question's images, for the caller to submit; otherwise the card moves
+   * on to the next unanswered question and returns null.
    */
-  answerWithMessage: (message: string) => UserQuestionAnswers | null
+  answerWithMessage: (message: string, images?: ChatImageAttachment[]) => { answers: UserQuestionAnswers; attachments: UserQuestionAttachments } | null
 }
 
 /** What a loser of an answer race is told; null when the answer was taken (or there is nothing to say). */
@@ -264,13 +305,15 @@ function QuestionIndicator({ kind, checked }: { kind: 'radio' | 'checkbox'; chec
   )
 }
 
-export function ComposerQuestionModal({ pending, onSubmit, onDismiss, handleRef, onComposerSubmitsChange }: ComposerQuestionModalProps) {
+export function ComposerQuestionModal({ pending, onSubmit, onDismiss, onSkipAndSend, handleRef, onComposerSubmitsChange }: ComposerQuestionModalProps) {
   const total = pending.questions.length
   const [step, setStep] = useState(0)
   // Which way the current question slid in: 1 from the right, -1 from the left, 0 not at all.
   const [direction, setDirection] = useState(0)
   const [answers, setAnswers] = useState<UserQuestionAnswers>(() => initAnswers(pending.questions))
   const [customs, setCustoms] = useState<Record<string, string>>({})
+  // Images sent from the composer, by the question each answers.
+  const [attachments, setAttachments] = useState<UserQuestionAttachments>({})
   const [otherOpen, setOtherOpen] = useState<Record<string, boolean>>({})
   const rootRef = useRef<HTMLDivElement>(null)
   const advanceTimer = useRef<number | undefined>(undefined)
@@ -289,6 +332,7 @@ export function ComposerQuestionModal({ pending, onSubmit, onDismiss, handleRef,
     setDirection(0)
     setAnswers(initAnswers(pending.questions))
     setCustoms({})
+    setAttachments({})
     setOtherOpen({})
   }, [pending.requestId])
 
@@ -299,16 +343,18 @@ export function ComposerQuestionModal({ pending, onSubmit, onDismiss, handleRef,
   // A message from the composer answers the shown question, as its "Other…" text, then the card moves
   // on to the next unanswered question; focus stays in the composer for the next answer.
   useImperativeHandle(handleRef, () => ({
-    answerWithMessage: (message: string) => {
+    answerWithMessage: (message: string, images: ChatImageAttachment[] = []) => {
       cancelAdvance()
-      const next = answerWithMessage(pending.questions, clampedStep, answers, customs, message)
+      const next = answerWithMessage(pending.questions, clampedStep, answers, customs, message, attachments, images)
       const question = pending.questions[clampedStep]
       setAnswers(next.answers)
       setCustoms(next.customs)
-      if (next.complete) return resolveQuestionAnswers(pending.questions, next.answers, next.customs)
+      setAttachments(next.attachments)
+      if (next.complete) return { answers: resolveQuestionAnswers(pending.questions, next.answers, next.customs), attachments: next.attachments }
       // Going back shows the message in that question's "Other…" field (it slides out now, so nothing takes focus).
-      if (question) setOtherOpen((current) => ({ ...current, [question.id]: true }))
-      const answeredNow = pending.questions.map((each) => isQuestionAnswered(each, next.answers[each.id], next.customs[each.id]))
+      if (question && message.trim()) setOtherOpen((current) => ({ ...current, [question.id]: true }))
+      const answeredNow = pending.questions.map((each) =>
+        isQuestionAnswered(each, next.answers[each.id], typedFor(next.customs, each.id), imagesFor(next.attachments, each.id).length))
       const target = nextUnansweredStep(answeredNow, clampedStep)
       if (target !== clampedStep) {
         setDirection(target > clampedStep ? 1 : -1)
@@ -320,7 +366,7 @@ export function ComposerQuestionModal({ pending, onSubmit, onDismiss, handleRef,
 
   // Whether the shown question is the only one left without an answer: then a message from the composer submits.
   const composerSubmits = pending.questions.every((question, index) =>
-    index === clampedStep || isQuestionAnswered(question, answers[question.id], customs[question.id]))
+    index === clampedStep || isQuestionAnswered(question, answers[question.id], typedFor(customs, question.id), imagesFor(attachments, question.id).length))
   const onComposerSubmitsChangeRef = useRef(onComposerSubmitsChange)
   onComposerSubmitsChangeRef.current = onComposerSubmitsChange
   useEffect(() => {
@@ -340,7 +386,7 @@ export function ComposerQuestionModal({ pending, onSubmit, onDismiss, handleRef,
   if (!active) return null
 
   const answered = (question: UserQuestion, current = answers, currentCustoms = customs): boolean =>
-    isQuestionAnswered(question, current[question.id], currentCustoms[question.id])
+    isQuestionAnswered(question, current[question.id], typedFor(currentCustoms, question.id), imagesFor(attachments, question.id).length)
   const isLast = clampedStep >= total - 1
   // An empty answer is never sent: Submit waits until every question has one.
   const allAnswered = pending.questions.every((question) => answered(question))
@@ -361,7 +407,7 @@ export function ComposerQuestionModal({ pending, onSubmit, onDismiss, handleRef,
   const submit = () => {
     if (!allAnswered) return
     cancelAdvance()
-    onSubmit(resolveQuestionAnswers(pending.questions, answers, customs))
+    onSubmit(resolveQuestionAnswers(pending.questions, answers, customs), attachments)
   }
 
   const toggleOption = (question: UserQuestion, optionId: string) => {
@@ -375,7 +421,7 @@ export function ComposerQuestionModal({ pending, onSubmit, onDismiss, handleRef,
     }
     // Single choice: picking an option closes "Other", then the next question slides in.
     const nextAnswers = { ...answers, [question.id]: optionId }
-    const nextCustoms = customs[question.id] ? { ...customs, [question.id]: '' } : customs
+    const nextCustoms = typedFor(customs, question.id) ? { ...customs, [question.id]: '' } : customs
     setAnswers(nextAnswers)
     setCustoms(nextCustoms)
     setOtherOpen((current) => (current[question.id] ? { ...current, [question.id]: false } : current))
@@ -406,10 +452,11 @@ export function ComposerQuestionModal({ pending, onSubmit, onDismiss, handleRef,
   }
 
   const value = answers[active.id]
+  const activeImages = imagesFor(attachments, active.id)
   const label = questionDialogLabel(total)
-  const otherUsed = Boolean(otherOpen[active.id]) && (customs[active.id] ?? '').trim().length > 0
-  // A single choice moves on by itself; several choices or a typed answer need Next.
-  const showNext = !isLast && answered(active) && (Boolean(active.allowMultiple) || otherUsed)
+  const otherUsed = otherOpen[active.id] === true && typedFor(customs, active.id).trim().length > 0
+  // A single choice moves on by itself; several choices, a typed answer or attached images need Next.
+  const showNext = !isLast && answered(active) && (Boolean(active.allowMultiple) || otherUsed || activeImages.length > 0)
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== 'Escape' || event.defaultPrevented) return
@@ -479,20 +526,44 @@ export function ComposerQuestionModal({ pending, onSubmit, onDismiss, handleRef,
             label={active.prompt}
             onToggle={(optionId) => toggleOption(active, optionId)}
             other={{
-              open: Boolean(otherOpen[active.id]),
-              value: customs[active.id] ?? '',
+              open: otherOpen[active.id] === true,
+              value: typedFor(customs, active.id),
               onOpen: () => openOther(active),
               onClose: () => closeOther(active),
               onChange: (text) => setCustoms((current) => ({ ...current, [active.id]: text })),
               onEnter: advance
             }}
           />
+          {activeImages.length > 0 && (
+            <p className="composer-question-attached">
+              <span>{activeImages.length === 1 ? 'Image attached' : `${activeImages.length} images attached`}</span>
+              <button
+                type="button"
+                className="composer-question-btn is-quiet"
+                aria-label={activeImages.length === 1 ? 'Remove the attached image' : 'Remove the attached images'}
+                onClick={() => setAttachments((current) => {
+                  const next: UserQuestionAttachments = Object.assign(Object.create(null) as UserQuestionAttachments, current)
+                  delete next[active.id]
+                  return next
+                })}
+              >
+                Remove
+              </button>
+            </p>
+          )}
         </div>
       </div>
       <div className="composer-question-modal-footer" data-mousse-decision="">
-        <button type="button" className="composer-question-btn is-quiet" onClick={() => { cancelAdvance(); onDismiss() }}>
-          Skip
-        </button>
+        <span className="composer-question-footer-start">
+          <button type="button" className="composer-question-btn is-quiet" onClick={() => { cancelAdvance(); onDismiss() }}>
+            Skip
+          </button>
+          {onSkipAndSend && (
+            <button type="button" className="composer-question-btn is-quiet" onClick={() => { cancelAdvance(); onSkipAndSend() }}>
+              {SKIP_QUESTIONS_AND_SEND_LABEL}
+            </button>
+          )}
+        </span>
         <span className="composer-question-footer-end">
           {isLast && !allAnswered && total > 1 && <span className="composer-question-hint">Answer all to submit</span>}
           {clampedStep > 0 && (
