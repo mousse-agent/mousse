@@ -3,50 +3,65 @@ import { join } from 'node:path'
 import { guardPackText, MEMORY_SECRET_MARKER } from './guard'
 import { cut } from './render'
 
-/** Includes directories and managed files: neither traversal nor stat work grows without bound. */
+/** Each phase bounds directory reads and pending paths independently. */
 const ENTRY_LIMIT = 512
+const MANAGED_ENTRY_LIMIT = 128
 const FILE_LIMIT = 12
-const temporary = /^(?:\.?tmp|\.?temp|temporary|scratch)(?:$|[-_.])/i
+const temporary = new Set(['tmp', 'temp', 'temporary', 'scratch'])
 
 type FileDate = { name: string; mtime: number }
+type Folder = { path: string; relative: string; kind: string }
 
-/** No contents are opened. Symlinks are skipped, and unreadable or disappearing entries are harmless. */
+/** No contents are opened. Managed folders are counted only after the bot's files are scanned. */
 function listFiles(folder: string) {
   const files: FileDate[] = []
-  const pending = [{ path: folder, relative: '', kind: '' }]
-  let visited = 0, pictures = 0, attached = 0, temporaryFiles = 0
-  let incomplete = false
-  while (pending.length && visited < ENTRY_LIMIT) {
-    const current = pending.pop()!
-    let directory: ReturnType<typeof opendirSync>
-    try { directory = opendirSync(current.path) } catch {
-      if (current.relative) incomplete = true
-      continue
-    }
-    try {
-      while (visited < ENTRY_LIMIT) {
-        const entry = directory.readSync()
-        if (!entry) break
-        visited++
-        const relative = current.relative ? `${current.relative}/${entry.name}` : entry.name
-        const path = join(current.path, entry.name)
-        const kind = temporary.test(entry.name) ? 'temporary' : current.kind || (entry.name === 'images' || entry.name === 'attachments' ? entry.name : '')
-        if (entry.isDirectory()) pending.push({ path, relative, kind })
-        else if (entry.isFile()) {
-          if (kind === 'images') pictures++
-          else if (kind === 'attachments') attached++
-          else if (kind === 'temporary') temporaryFiles++
-          else {
-            try {
-              const stat = lstatSync(path)
-              if (stat.isFile()) files.push({ name: relative, mtime: stat.mtimeMs })
-            } catch { incomplete = true }
+  const managed: Folder[] = []
+  let pictures = 0, attached = 0, temporaryFiles = 0
+  const scan = (pending: Folder[], limit: number): boolean => {
+    let visited = 0
+    let incomplete = false
+    while (pending.length && visited < limit) {
+      const current = pending.pop()!
+      let directory: ReturnType<typeof opendirSync>
+      try { directory = opendirSync(current.path) } catch {
+        if (current.relative) incomplete = true
+        continue
+      }
+      try {
+        while (visited < limit) {
+          const entry = directory.readSync()
+          if (!entry) break
+          visited++
+          if (entry.name.startsWith('.')) continue
+          const relative = current.relative ? `${current.relative}/${entry.name}` : entry.name
+          const path = join(current.path, entry.name)
+          if (entry.isDirectory()) {
+            // Only Mousse's root folders are managed; similarly named user files and subfolders are ordinary files.
+            const kind = current.kind || (!current.relative
+              ? temporary.has(entry.name) ? 'temporary' : ['images', 'attachments'].includes(entry.name) ? entry.name : ''
+              : '')
+            const next = { path, relative, kind }
+            if (kind && !current.kind) managed.push(next)
+            else pending.push(next)
+          } else if (entry.isFile()) {
+            if (current.kind === 'images') pictures++
+            else if (current.kind === 'attachments') attached++
+            else if (current.kind === 'temporary') temporaryFiles++
+            else {
+              try {
+                const stat = lstatSync(path)
+                if (stat.isFile()) files.push({ name: relative, mtime: stat.mtimeMs })
+              } catch { incomplete = true }
+            }
           }
         }
-      }
-    } catch { incomplete = true } finally { directory.closeSync() }
+      } catch { incomplete = true } finally { directory.closeSync() }
+    }
+    return incomplete || visited >= limit
   }
-  return { files: files.sort((a, b) => b.mtime - a.mtime || a.name.localeCompare(b.name)), pictures, attached, temporaryFiles, incomplete: incomplete || visited >= ENTRY_LIMIT }
+  const incomplete = scan([{ path: folder, relative: '', kind: '' }], ENTRY_LIMIT)
+  const managedIncomplete = scan(managed, MANAGED_ENTRY_LIMIT)
+  return { files: files.sort((a, b) => b.mtime - a.mtime || a.name.localeCompare(b.name)), pictures, attached, temporaryFiles, incomplete, managedIncomplete }
 }
 
 const dateLabel = (at: number | string, timeZone?: string) => new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', timeZone }).format(new Date(at))
@@ -68,7 +83,8 @@ export function availableHistoryLines(input: {
     if (listing.incomplete) tails.push('and many more')
     else if (listing.files.length > chosen.length) tails.push(`and ${listing.files.length - chosen.length} more`)
     const managed = [listing.pictures ? `${listing.pictures} pictures` : '', listing.attached ? `${listing.attached} attached files` : '', listing.temporaryFiles ? `${listing.temporaryFiles} temporary files` : ''].filter(Boolean)
-    if (managed.length) tails.push(`plus ${managed.join(' and ')}${listing.incomplete ? ' (at least)' : ''}`)
+    if (managed.length) tails.push(`plus ${managed.join(' and ')}${listing.managedIncomplete ? ' (at least)' : ''}`)
+    if (listing.managedIncomplete) tails.push('and many more managed files')
     const render = (nameLimit: number) => {
       const names = chosen.map((file) => {
         // Guard the entire original path, before truncation; never promote a name to prompt markup.
