@@ -181,7 +181,7 @@ export class MmsProtocolServer {
     this.emitToSubscribers(this.ring.push(type, data), null)
   }
 
-  /** The replay buffers' approximate size in bytes, as JSON. Costs a pass over every retained event; call rarely. */
+  /** The replay buffers' approximate size in bytes, each object several events share counted once. */
   replayBytes(): number {
     let bytes = 0
     for (const ring of this.audienceRings.values()) bytes += ring.approximateBytes()
@@ -1323,7 +1323,7 @@ export class MmsProtocolServer {
         replay: [] as ProtocolEvent[]
       }
     }
-    // The ring is bounded by event count, but a valid event can contain a large
+    // The ring holds up to 8 MiB, and a valid event can contain a large
     // thread update. Keep replay below both wire limits and reserve half the
     // outbound budget for live events around this boundary. Oversized history
     // requires a snapshot, rather than disconnecting every newly opened GUI.

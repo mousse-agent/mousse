@@ -362,7 +362,7 @@ describe('the profiler tools', () => {
       heapSpacesMb: { old_space: 50, other: 1 },
       workerHeapsMb: [4],
       counts: { loadedThreads: 1, cachedThreads: 1, sqliteConnections: 2, childProcesses: 2 },
-      caches: { threadDatabase: { threads: 1, mb: 0.5, maxThreads: 64, maxMb: 48 }, replayBuffer: { events: 12, mb: 2, maxEventsPerProfile: 512 } }
+      caches: { threadDatabase: { threads: 1, mb: 0.5, maxThreads: 64, maxMb: 48 }, replayBuffer: { events: 12, mb: 2, maxEventsPerProfile: 512, maxMbPerProfile: 8 } }
     })
     // Ids and numbers only: no titles, not even this profile's (a private or expiring thread's title stays out too).
     expect(value.threads).toEqual([

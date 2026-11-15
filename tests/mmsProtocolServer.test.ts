@@ -398,6 +398,41 @@ describe('MmsProtocolServer + LocalMmsClient', () => {
     await client.close()
   })
 
+  it('keeps one message list per thread and about 8 MB in all; a window that fell behind it takes a snapshot', async () => {
+    const first = new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType: 'test' })
+    await first.connect()
+    const { sequence: seen } = await first.subscribe(0)
+    await first.close()
+    const internal = server as unknown as { ringFor(profileId: string): EventSequenceRing }
+    const ring = internal.ringFor(mms.profileId)
+    const listsOf = (threadId: string) =>
+      ring.replayAfter(seen).events.filter((event) => event.type === 'thread.messages' && event.threadId === threadId)
+    const transcript = (length: number) => [{ id: 'm1', role: 'assistant', content: 'x'.repeat(length) }]
+
+    // While the window is away, ten long threads are opened and closed; each sends its whole list twice.
+    for (let i = 0; i < 10; i++) {
+      mms.orchestrator.emit('thread-messages', { threadId: `t${i}`, messages: transcript(1_000_000) })
+      mms.orchestrator.emit('thread-messages', { threadId: `t${i}`, messages: transcript(1_000_000) })
+    }
+    expect(listsOf('t9')).toHaveLength(1)
+    expect(server.replayBytes()).toBeLessThanOrEqual(8 * 1024 * 1024)
+    expect(listsOf('t0')).toHaveLength(0)
+    // The threads that remain send small lists; what the window would replay now fits a subscribe answer.
+    for (let i = 0; i < 10; i++) mms.orchestrator.emit('thread-messages', { threadId: `t${i}`, messages: transcript(10) })
+    expect(server.replayBytes()).toBeLessThan(10_000)
+
+    const back = new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType: 'test' })
+    await back.connect()
+    try {
+      const sub = await back.subscribe(seen)
+      expect(sub.gap).toBe(true)
+      expect(back.requiresResnapshot).toBe(true)
+      expect(back.connected).toBe(true)
+    } finally {
+      await back.close()
+    }
+  })
+
   it('oversized subscribe replay requests a snapshot without closing the connection', async () => {
     const client = new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType: 'test' })
     await client.connect()

@@ -226,7 +226,7 @@ export const DEFAULT_MEMORY_THRESHOLDS: MemoryThresholds = {
     loadedThreads: 40,
     threadRuntimes: 400,
     threadCacheThreads: 64,
-    // Per profile: each profile's replay ring keeps at most 512 events (MMS_PROTOCOL_REPLAY_RING_SIZE).
+    // Per profile: each profile's replay ring keeps at most 512 events and about 8 MB (MMS_PROTOCOL_REPLAY_RING_SIZE, _BYTES).
     replayEvents: 512,
     ptys: 32,
     fileWatchers: 32,
