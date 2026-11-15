@@ -1591,6 +1591,29 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         console.warn('a bot\'s models could not be checked', { botId, error: error instanceof Error ? error.message : String(error) })
       }
     }
+    for (const botId of this.host.definitions.ids()) {
+      try {
+        // The store checks for duplicate hashes before any activity or owner-attention read.
+        this.host.memory?.tidyDuplicates?.(botId, () => {
+          const registry = this.store.registry(botId)
+          if (!registry || registry.deletedAt || registry.pausedReason || !this.isIdle(botId)) return false
+          // A pinned row's limit also shows as paused, without a registry-wide pause.
+          if (registry.model?.limits) {
+            const slots = slotsOf(this.published(botId).main)
+            if (BOT_MODEL_SLOT_KEYS.some((key) => {
+              const pick = slots[key]
+              return pick && isPinned(pick) && limitOnPick(registry.model?.limits, pick, now.getTime())
+            })) return false
+          }
+          // The same posted asks and questions as projection.summary's needsOwner, without
+          // building a whole summary (threads, watchers, model slots and work) every tick.
+          return !(this.store.openAsks(botId).some((ask) => ask.messageId !== null)
+            || this.store.waitingQuestions(botId).length || this.store.openChatQuestions(botId).length)
+        })
+      } catch (error) {
+        console.warn("a bot's duplicate memory could not be put away", { botId, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
     // Waiting work that nothing would wake or end (its ask's answer lost, its question forgotten) ends now, with a line.
     this.settleStrandedWork()
     for (const botId of this.waitingBots()) {
