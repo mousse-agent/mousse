@@ -212,7 +212,7 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
     // The custom slots' line and `extra` (the reactions) are bounded on their own: a full situation never pushes them out.
     const slots = chat && facts.slots?.length ? [customSlotsLine(facts.slots)] : []
     const index = availableHistoryLines({
-      folder: options.filesFolder?.(botId), history: store.messageHistory(botId), budget: chat ? 300 : 200, timeZone: tz
+      folder: options.filesFolder?.(botId), history: store.messageHistory(botId), budget: chat ? 300 : 200, timeZone: tz, now
     })
     return `Situation:\n${[...withinBudget(lines, BOT_CHAT_PACK_BUDGET.situation), ...slots, ...extra, ...index].join('\n')}`
   }
