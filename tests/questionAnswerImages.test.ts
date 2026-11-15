@@ -137,6 +137,24 @@ describe('answering an agent question with images', () => {
     expect(told).toEqual([{ screen: [{ name: 'home.png', mimeType: 'image/png', data: PNG }] }])
   })
 
+  it('questions named like built-in object keys keep their own answers and images', async () => {
+    const named = (id: string): UserQuestion => ({ id, prompt: `Question ${id}?`, options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] })
+    const { thread, answered, requestId } = await ask([named('hasOwnProperty'), named('toString')])
+    const c = await client()
+
+    // A text-only answer to `hasOwnProperty` beside an image for `toString`: neither picks up anything inherited.
+    await expect(c.request('orchestrator.answerQuestions', {
+      requestId,
+      answers: { hasOwnProperty: 'a', toString: 'b' },
+      attachments: { toString: [{ name: 'x.png', mimeType: 'image/png', data: PNG }] }
+    })).resolves.toEqual({ ok: true })
+    const answers = await answered
+    expect(answers.hasOwnProperty).toBe('a')
+    expect(namedPaths(answers.toString)).toHaveLength(1)
+    const message = mms.orchestrator.getMessages(thread.id).find((each) => each.questionAnswers?.length)!
+    expect(message.questionAnswers?.map((answer) => answer.images)).toEqual([undefined, [0]])
+  })
+
   it('images under a question the request does not ask are dropped, and malformed ones are refused', async () => {
     const { thread, answered, requestId } = await ask([which])
     const c = await client()

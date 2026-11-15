@@ -1117,7 +1117,8 @@ export function asOptionalAnswerAttachments(v: unknown): Record<string, ChatImag
   const o = asPlainObject(v, 'attachments')
   const keys = Object.keys(o)
   if (keys.length > 64) throw invalidParams('attachments has too many keys')
-  const out: Record<string, ChatImageAttachment[]> = {}
+  // No prototype: a question id such as `constructor` is an ordinary key here.
+  const out = Object.create(null) as Record<string, ChatImageAttachment[]>
   let total = 0
   for (const key of keys) {
     if (!key || key.length > 256) throw invalidParams('attachments key must be a question id')

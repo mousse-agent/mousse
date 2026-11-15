@@ -24,12 +24,26 @@ const EXTENSIONS: Record<string, string> = {
   'image/avif': 'avif'
 }
 
+/**
+ * The value `map` holds under `key` itself, never one it inherits: a question may be named `constructor` or
+ * `__proto__`. Maps keyed by question id are made with `idMap()` so writing such a key stays an own property.
+ */
+export function ownList<T>(map: Record<string, T[]> | undefined, key: string): T[] | undefined {
+  if (!map || !Object.hasOwn(map, key)) return undefined
+  const value = map[key]
+  return Array.isArray(value) ? value : undefined
+}
+
+/** An empty map keyed by question id, with no prototype to collide with an id. */
+export function idMap<T>(): Record<string, T> {
+  return Object.create(null) as Record<string, T>
+}
+
 /** Only the questions the request asks: an image under another id answers nothing and is dropped. */
 export function attachmentsForQuestions(questions: UserQuestion[], attachments: UserQuestionAttachments | undefined): UserQuestionAttachments {
-  const out: UserQuestionAttachments = {}
-  if (!attachments) return out
+  const out = idMap<ChatImageAttachment[]>()
   for (const question of questions) {
-    const images = attachments[question.id]
+    const images = ownList(attachments, question.id)
     if (images?.length) out[question.id] = images
   }
   return out
@@ -42,11 +56,11 @@ export function attachmentsForQuestions(questions: UserQuestion[], attachments: 
  */
 export function saveAnswerImages(threadDir: string, requestId: string, questions: UserQuestion[], attachments: UserQuestionAttachments): Record<string, string[]> {
   const folder = join(threadDir, ANSWER_IMAGES_FOLDER, requestId.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 128) || 'request')
-  const paths: Record<string, string[]> = {}
+  const paths = idMap<string[]>()
   let made = false
   try {
     questions.forEach((question, questionIndex) => {
-      const images = attachments[question.id]
+      const images = ownList(attachments, question.id)
       if (!images?.length) return
       if (!made) {
         mkdirSync(folder, { recursive: true })
@@ -85,12 +99,12 @@ export function attachedImageLine(path: string): string {
  * tool can carry. A single answer gets the lines after its text; several get them as extra entries.
  */
 export function answersWithImagePaths(questions: UserQuestion[], answers: UserQuestionAnswers, paths: Record<string, string[]>): UserQuestionAnswers {
-  const out: UserQuestionAnswers = { ...answers }
+  const out: UserQuestionAnswers = Object.assign(idMap<string | string[]>(), answers)
   for (const question of questions) {
-    const saved = paths[question.id]
+    const saved = ownList(paths, question.id)
     if (!saved?.length) continue
     const lines = saved.map(attachedImageLine)
-    const value = answers[question.id]
+    const value = Object.hasOwn(answers, question.id) ? answers[question.id] : undefined
     if (Array.isArray(value)) out[question.id] = [...value, ...lines]
     else out[question.id] = [typeof value === 'string' ? value.trim() : '', ...lines].filter(Boolean).join('\n')
   }
@@ -100,9 +114,9 @@ export function answersWithImagePaths(questions: UserQuestion[], answers: UserQu
 /** The images of an answer message in question order, and which of them each question got (`AnsweredQuestion.images`). */
 export function answerMessageImages(questions: UserQuestion[], attachments: UserQuestionAttachments): { images: ChatImageAttachment[]; indexes: Record<string, number[]> } {
   const images: ChatImageAttachment[] = []
-  const indexes: Record<string, number[]> = {}
+  const indexes = idMap<number[]>()
   for (const question of questions) {
-    const own = attachments[question.id]
+    const own = ownList(attachments, question.id)
     if (!own?.length) continue
     indexes[question.id] = own.map((image) => images.push(image) - 1)
   }

@@ -473,7 +473,7 @@ export function describeQuestionAnswers(
       if (option) chosen.push(option.label.trim() || entry)
       else typed.push(entry)
     }
-    const images = imageIndexes?.[question.id]
+    const images = imageIndexes && Object.hasOwn(imageIndexes, question.id) ? imageIndexes[question.id] : undefined
     return {
       prompt: question.prompt,
       chosen,

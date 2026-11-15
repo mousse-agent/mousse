@@ -382,6 +382,15 @@ describe('ComposerQuestionModal', () => {
     expect(dots().map((dot) => dot.className.includes('is-answered'))).toEqual([false, false])
   })
 
+  it('a question named like a built-in object key is unanswered until it gets an answer of its own', () => {
+    const constructorQuestion: UserQuestion = { ...single, id: 'constructor' }
+    const screen = { name: 'screen.png', mimeType: 'image/png', data: 'AAAA' }
+    open([constructorQuestion, third])
+    expect(dots().map((dot) => dot.className.includes('is-answered'))).toEqual([false, false])
+    expect(sendFromComposer('', [screen])).toBeNull()
+    expect(sendFromComposer('Small')).toEqual({ answers: { constructor: '', size: 'Small' }, attachments: { constructor: [screen] } })
+  })
+
   it('"Skip questions and send" is offered only while the composer holds a message, and skips nothing by itself', () => {
     open([single])
     expect(footer()).not.toContain('Skip questions and send')

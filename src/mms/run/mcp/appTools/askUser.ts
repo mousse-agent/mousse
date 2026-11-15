@@ -14,6 +14,7 @@ import {
   type ToolOutcome
 } from './types'
 import type { UserQuestionAttachments } from '../../../../shared/types'
+import { ownList } from '../../../orchestrator/questionAttachments'
 
 type Question = { id: string; prompt: string; options: Array<{ id: string; label: string }>; allowMultiple?: boolean }
 
@@ -74,7 +75,7 @@ export function askUserTools(host: AppToolHost): MousseTool[] {
       const images: ToolImage[] = []
       const onAttachments = (attachments: UserQuestionAttachments): void => {
         for (const question of questions)
-          for (const image of attachments[question.id] ?? []) images.push({ data: image.data, mimeType: image.mimeType })
+          for (const image of ownList(attachments, question.id) ?? []) images.push({ data: image.data, mimeType: image.mimeType })
       }
       const answers = await host.askUser(threadId, questions, ctx.transport === 'mcp'
         ? { signal: ctx.signal, timeoutMs: ASK_USER_TIMEOUT_MS, onAttachments }

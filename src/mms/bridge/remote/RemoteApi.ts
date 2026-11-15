@@ -195,7 +195,7 @@ export class RemoteApi {
         throw error
       }
       const images = resolved.extras.images ?? []
-      const attachments: Record<string, RemoteImage[]> = {}
+      const attachments = Object.create(null) as Record<string, RemoteImage[]>
       let at = 0
       for (const [questionId, ids] of groups) {
         attachments[questionId] = images.slice(at, at + ids.length)
