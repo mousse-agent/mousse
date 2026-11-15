@@ -107,7 +107,7 @@ describe('messages sent one after another', () => {
     expect(f.bots.service.get(botId).summary.unread).toBe(held ? 1 : 2)
   })
 
-  it.each(['stop', 'fail', 'restart-cancelled', 'restart-failed', 'restart-running', 'third'] as const)('a held reply survives %s, once', async (end) => {
+  it.each(['stop', 'fail', 'restart-cancelled', 'restart-failed', 'restart-running', 'restart-done', 'third'] as const)('a held reply survives %s, once', async (end) => {
     const first = await f.bots.service.chatSend({ botId, text: 'hi', clientRequestId: 'm1' })
     const turn = first.message.activationId!
     const { payload } = await start(f, turn)
@@ -117,7 +117,10 @@ describe('messages sent one after another', () => {
     expect(replies()).toHaveLength(0)
     if (end.startsWith('restart')) {
       f.bots.close()
-      if (end !== 'restart-running') f.store.moveActivation(turn, ['running'], end === 'restart-failed' ? 'failed' : 'cancelled', { endReason: 'stopped' })
+      if (end === 'restart-done') {
+        f.store.run('UPDATE bot_dispatches SET ended_at = ? WHERE activation_id = ? AND n = 2', new Date(f.clock.now).toISOString(), turn)
+        f.store.moveActivation(turn, ['running'], 'done', { result: 'Hi — checking the flat.' })
+      } else if (end !== 'restart-running') f.store.moveActivation(turn, ['running'], end === 'restart-failed' ? 'failed' : 'cancelled', { endReason: 'stopped' })
       f.bots = new BotEngine(f.host)
       await f.bots.reconcileOnStartup()
       await flush()
@@ -127,6 +130,7 @@ describe('messages sent one after another', () => {
       }
       await f.bots.reconcileOnStartup()
       expect(replies()).toHaveLength(1)
+      if (end === 'restart-done') expect(replies()[0]?.text).toBe('Hi — checking the flat.')
     } else {
       const { payload: next } = await start(f, turn, 2)
       if (end === 'third') {
@@ -146,6 +150,26 @@ describe('messages sent one after another', () => {
       }
     }
     expect(f.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, `draft:${turn}`)).toBeUndefined()
+  })
+
+  it('late final words are held and a late combined reply replaces the draft', async () => {
+    const first = await f.bots.service.chatSend({ botId, text: 'hi', clientRequestId: 'm1' })
+    const turn = first.message.activationId!
+    const one = await start(f, turn)
+    await send('check the flat', 'm2')
+    f.runs.markTerminal(one.payload.runId, 'completed')
+    await flush()
+    f.bots.settle(one.payload, { text: 'Hi! What can I do?' })
+    await flush()
+    const two = await start(f, turn, 2)
+    expect(two.prepared.prompt).toContain('Your draft, not sent: «Hi! What can I do?»')
+    f.runs.markTerminal(two.payload.runId, 'completed')
+    await flush()
+    const replies = () => chatOf(f, botId).filter((m) => m.activationId === turn && m.author === 'bot' && m.kind === 'text')
+    expect(replies()).toHaveLength(0)
+    f.bots.settle(two.payload, { text: 'Hi — checking the flat.' })
+    await flush()
+    expect(replies().map((m) => m.text)).toEqual(['Hi — checking the flat.'])
   })
 
   it('a follow-up the turn never read before it failed gets a turn of its own that holds it', async () => {
