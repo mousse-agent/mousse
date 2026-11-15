@@ -207,7 +207,8 @@ describe('thread_create (SPEC §15.1)', () => {
       await call({ projectId: 'p1', clientRequestId: 'k' })
       await call({ projectId: 'p1', clientRequestId: 'k' })
       expect(host.noteOnThread).toHaveBeenCalledTimes(1)
-      expect(host.noteOnThread).toHaveBeenCalledWith('caller', 'Created thread «Audit» (th1) in project p1: claude / sonnet, ask mode, a worktree of its own.')
+      // The note names the new thread as a field, which the transcript draws as a chip; the text stays for the model.
+      expect(host.noteOnThread).toHaveBeenCalledWith('caller', 'Created thread «Audit» (th1) in project p1: claude / sonnet, ask mode, a worktree of its own.', { threadId: 'th1', summary: 'claude / sonnet, ask mode, a worktree of its own' })
     })
 
     it('a replayed creation does not use up a place', async () => {

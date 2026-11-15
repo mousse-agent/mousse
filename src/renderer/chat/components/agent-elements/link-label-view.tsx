@@ -21,6 +21,16 @@ function ThreadTitle({ threadId, text }: { threadId: string; text: string }) {
 }
 
 /**
+ * The text a thread chip shows for a link: the link's own text, or nothing (the thread's title) when its text is the
+ * address itself.
+ */
+export function threadLinkLabel(href: string, children: ReactNode): ReactNode | undefined {
+  const text = plainText(children);
+  if (text === href || (text !== null && !text.trim())) return undefined;
+  return children ?? undefined;
+}
+
+/**
  * What goes inside a chat link (see link-label): the GitHub mark before a link to GitHub, and the short
  * label of a bare GitHub address. Each surface keeps its own anchor and routing.
  */

@@ -62,20 +62,19 @@ describe('a bot\'s threads, as the owner sees them', () => {
     expect(useAppStore.getState().threadsSidebarView).toBe('projects')
   })
 
-  it('above a thread a bot started: "Started by" and the bot\'s name, which opens its chat; nothing above any other thread', () => {
+  it('above a thread a bot started: "Started by" and the bot\'s name, which opens its chat; nothing above a thread no one launched', () => {
     const bot = { id: 'b1', name: 'Alpha', homeThreadId: 'bot-chat' } as BotSummary
     const thread = (id: string, createdByThreadId?: string) => ({ id, name: id, createdAt: NOW, updatedAt: NOW, ...(createdByThreadId ? { createdByThreadId } : {}) }) as Thread
     useBotsStore.setState({ bots: [bot] })
-    useAppStore.setState({ threads: [thread('started', 'bot-chat'), thread('mine'), thread('by-agent', 'other-thread')], activeThreadId: 'started' })
+    useAppStore.setState({ threads: [thread('started', 'bot-chat'), thread('mine')], activeThreadId: 'started' })
     const openBot = vi.spyOn(useChatsStore.getState(), 'openBot').mockResolvedValue(undefined)
     act(() => root.render(createElement(ThreadStartedByBar)))
     expect(host.textContent).toBe('Started by Alpha')
     act(() => host.querySelector('button')!.click())
     expect(openBot).toHaveBeenCalledWith('b1')
-    for (const other of ['mine', 'by-agent']) {
-      act(() => useAppStore.setState({ activeThreadId: other }))
-      expect(host.textContent, other).toBe('')
-    }
+    // A thread an agent started has a line of its own (agentLaunchedThread.test.ts).
+    act(() => useAppStore.setState({ activeThreadId: 'mine' }))
+    expect(host.textContent).toBe('')
   })
 
   it('a thread a deleted bot started keeps its line with the bot\'s name, marked deleted, with nothing to open', () => {

@@ -459,6 +459,17 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
       continue
     }
 
+    // The note Mousse writes when this thread's agent started another thread: a quiet line of its own with that thread as
+    // a chip. An older note (no `launchedThread`) is not shown, as Mousse's other plain lines are not.
+    if (msg.role === 'system' && msg.launchedThread) {
+      base.role = 'assistant'
+      base.metadata = { ...(base.metadata as object | undefined), notice: true, launchedThread: msg.launchedThread }
+      base.parts = [{ type: 'text', text: msg.content } as unknown as UIMessage['parts'][number]]
+      out.push(base)
+      lastAssistantText = null
+      continue
+    }
+
     // Thinking -> tool-Thinking so ThinkingTool renders with shimmer
     if (msg.kind === 'thinking' && msg.thinking) {
       const state = msg.thinking.status === 'processing' ? 'input-available' : 'output-available'

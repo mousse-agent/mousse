@@ -1366,7 +1366,8 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           // The person watching this thread sees what its agent launched, and on which model.
           try {
             const model = created.model ? `${created.model.instanceId} / ${created.model.model}${created.model.effort ? ` (${created.model.effort} reasoning)` : ''}` : 'the default model'
-            host.noteOnThread?.(ctx.caller.threadId, `Created thread «${created.title}» (${created.threadId}) in project ${created.projectId}: ${model}, ${created.permissionMode} mode, ${created.runsIn === 'own_worktree' ? 'a worktree of its own' : 'the project folder'}${created.firstMessage ? created.firstMessage.sent ? ', first message sent' : ', first message not sent' : ''}.`)
+            const summary = `${model}, ${created.permissionMode} mode, ${created.runsIn === 'own_worktree' ? 'a worktree of its own' : 'the project folder'}${created.firstMessage ? created.firstMessage.sent ? ', first message sent' : ', first message not sent' : ''}`
+            host.noteOnThread?.(ctx.caller.threadId, `Created thread «${created.title}» (${created.threadId}) in project ${created.projectId}: ${summary}.`, { threadId: created.threadId, summary })
           } catch (error) {
             console.warn('the creator\'s note of a launched thread could not be written', { error: error instanceof Error ? error.message : String(error) })
           }
