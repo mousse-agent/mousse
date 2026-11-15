@@ -693,7 +693,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const row = this.store.activation(message.activationId)
       if (row?.trigger.kind !== 'schedule') return false
       const entry = this.host.schedules?.get(botId, row.trigger.scheduleId)
-      return entry ? !tellMeNotifies(entry.tellMe, 'done', this.host.runLevel?.(message.activationId)) : false
+      const tellMe = entry?.tellMe ?? row.trigger.completed?.tellMe
+      return tellMe ? !tellMeNotifies(tellMe, 'done', this.host.runLevel?.(message.activationId)) : false
     } catch {
       return false
     }
@@ -6284,6 +6285,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * is repaired by the next one. A failure pauses the activation with `reconcile_failed`.
    */
   async reconcileOnStartup(): Promise<void> {
+    // The intent lives with the run; jobs.json and bots.db cannot commit together. Finish an interrupted removal
+    // before the scheduler can admit another occurrence, even if the reporting run has already ended.
+    for (const { id } of this.store.all("SELECT id FROM bot_activations WHERE json_extract(trigger_json, '$.completed') IS NOT NULL")) {
+      const row = this.store.activation(id as string)
+      if (row?.trigger.kind !== 'schedule') continue
+      try { this.host.schedules?.remove(row.botId, row.trigger.scheduleId) } catch (error) {
+        console.warn('a completed bot schedule could not be removed', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
+        // No new occurrence may run until this intent can be applied.
+        throw error
+      }
+    }
     this.dropRemovedScheduleRuns()
     try {
       // Capture first (bot-context.md §4): every bot thread is copied into the journal past its
@@ -8226,11 +8238,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       throw new BotEngineError('invalid_params', 'Only a scheduled run can end its own schedule.')
     if (!why.trim() || why.length > 200) throw new BotEngineError('invalid_params', 'why needs 1 to 200 characters.')
     const trigger = row.trigger
-    if (trigger.completed) return
+    if (trigger.completed) {
+      this.removeSchedule(row.botId, trigger.scheduleId)
+      return
+    }
     const schedule = this.host.schedules?.get(row.botId, trigger.scheduleId)
     if (!schedule) return
     // Persist the intent before removing the shared job: retry after a crash can finish its removal.
-    this.store.run('UPDATE bot_activations SET trigger_json = ? WHERE id = ?', JSON.stringify({ ...trigger, completed: { why, name: schedule.name } }), row.id)
+    this.store.run('UPDATE bot_activations SET trigger_json = ? WHERE id = ?', JSON.stringify({ ...trigger, completed: { why, name: schedule.name, tellMe: schedule.tellMe } }), row.id)
     this.removeSchedule(row.botId, trigger.scheduleId)
   }
 
