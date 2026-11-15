@@ -885,7 +885,7 @@ export class MmsProfileServices {
       })
       // Process control (WP1) over this `bots.db`: the engine arms each dispatch, the runtimes attach to it.
       botProcesses = createBotProcessRegistry({ store })
-      return { journal, context, memory: admin, supervision: botProcesses }
+      return { journal, context, progress: memory, memory: admin, supervision: botProcesses }
     })
     this.botStore = opened?.store ?? null
     // A bot's thread from an earlier build, or of a bot that never runs again, is marked as well.
@@ -1041,6 +1041,7 @@ export class MmsProfileServices {
         try { runs.forgetAutomation(jobId) } catch { /* the notes stay; nothing reads them */ }
       })
     }
+    this.scheduled.on('jobRemoved', (jobId: string) => botMemory?.removeProgressForJob(jobId))
     if (personalBots) {
       this.scheduled.setBotRunner({ findOccurrence: (input) => personalBots.findScheduledOccurrence(input), runOccurrence: (input) => personalBots.runScheduledOccurrence(input) })
       // Each tick also brings the inbox's bot runs up to date, so their items appear without the page open.
@@ -1149,6 +1150,7 @@ export class MmsProfileServices {
       managerWorkspace: () => automationManagerWorkspace(this.homeDir, this.automationManagerProjectId ? this.projects.getProject(this.automationManagerProjectId)?.path : undefined),
       botOf: (threadId) => this.personalBots?.tools.activationOf(threadId)?.botId,
       activationOf: (threadId) => this.personalBots?.tools.activationOf(threadId)?.activationId,
+      saveLeftOff: (activationId, text) => this.personalBots?.saveLeftOff(activationId, text),
       // "Check this daily" in an ordinary chat: a person's thread, not a run's, a bot's or the manager's.
       ordinaryThread: (threadId) => {
         const thread = this.threads.getThread(threadId)

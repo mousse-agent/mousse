@@ -1,3 +1,4 @@
+import type { BotMemoryStore } from '../memory/BotMemoryStore'
 import type { ScheduledMissedRuns } from '../../../shared/types'
 import { requestJournalRows } from '../memory/requestFrames'
 import { grantedPermissions, permissionId, restorePermission, withoutPermission } from '../chat/projection'
@@ -191,7 +192,9 @@ export interface BotEngineHost {
    * one scheduler claims each occurrence and hands it to `runScheduledOccurrence`. Absent: no bot has schedules here.
    */
   schedules?: Pick<BotScheduleBook, 'list' | 'get' | 'add' | 'remove' | 'removeAll' | 'labelOf'> & Partial<Pick<BotScheduleBook, 'skipped'>>
-  /** The level a scheduled run's activation reported with `run_report` (`AutomationRuns`). Absent: none is known. */
+  /** Per-schedule progress in bot memory; pending reports are published only on successful completion. */
+  progress?: Pick<BotMemoryStore, 'stageProgress' | 'finishProgress' | 'progress'>
+  /** The level a scheduled run's activation reported with `run_report` (`AutomationRuns`). */
   runLevel?(activationId: string): RunLevel | undefined
   /** Wall-clock milliseconds, for the times `bots.db` records (default: `Date.now`). */
   clock?(): number
@@ -2152,6 +2155,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /** What follows any end of an activation: its scratch and pack go, the lane moves on. */
   private afterEnd(row: BotActivationRow): void {
+    this.host.progress?.finishProgress(row.botId, row.id, false)
     this.clearInternetCheck(row.id)
     this.cleanup(row)
     this.packs.delete(row.id)
@@ -2161,6 +2165,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   private journalEnd(row: BotActivationRow, reason: string | null): void {
+    if (row.trigger.kind === 'schedule') this.host.progress?.finishProgress(row.botId, row.id,
+      reason === null && this.store.activation(row.id)?.status === 'done' && Boolean(this.host.schedules?.get(row.botId, row.trigger.scheduleId)))
     // A chat turn that ended without its reply leaves one line in the recent chat, so the next turn can tell the owner.
     if (row.lane === 'chat') {
       if (reason !== null) this.journalInTx(chatTurnEndRow(row, reason))
@@ -5130,6 +5136,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const run = main?.runId ? this.host.runs()?.getRun(main.runId) : undefined
     if (row.status !== 'paused' || run?.status !== 'completed') throw new BotEngineError('bot_not_done', 'Only a paused activation whose run completed can be marked done.')
     this.acknowledge(row, options.acknowledge)
+    // The owner accepted the draft result; the unattended run did not finish successfully.
+    this.host.progress?.finishProgress(row.botId, row.id, false)
     this.store.moveActivation(row.id, ['paused'], 'done', { endReason: null })
     const next = this.store.activation(row.id)!
     this.cleanup(next)
@@ -8252,6 +8260,16 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return when.expr
   }
 
+  /** Only the activation's own existing schedule may keep a cursor; never work or a run by hand. */
+  saveLeftOff(activationId: string, text: string): string {
+    const row = this.host.store.activation(activationId)
+    if (!row || row.trigger.kind !== 'schedule') return 'not kept: only a bot scheduled run keeps leftOff'
+    if (!this.host.schedules?.get(row.botId, row.trigger.scheduleId)) return 'not kept: the schedule was removed'
+    if (!this.host.progress) return 'not kept: bot memory is unavailable'
+    this.host.progress.stageProgress(row.botId, row.trigger.scheduleId, row.id, text)
+    return 'pending: kept only when this run ends done'
+  }
+
   removeSchedule(botId: string, scheduleId: string): boolean {
     this.entry(botId)
     const removed = this.host.schedules?.remove(botId, scheduleId) ?? false
@@ -8259,8 +8277,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return removed
   }
 
-  listSchedules(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string }> {
-    return this.schedulesOf(botId).map((schedule) => ({ scheduleId: schedule.scheduleId, label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}) }))
+  listSchedules(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string; leftOff?: string }> {
+    return this.schedulesOf(botId).map((schedule) => {
+      const leftOff = this.host.progress?.progress(botId, schedule.scheduleId)
+      return { scheduleId: schedule.scheduleId, label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}), ...(leftOff !== undefined ? { leftOff } : {}) }
+    })
   }
 
   /**
