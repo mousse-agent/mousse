@@ -219,3 +219,129 @@ describe("Claude's frames", () => {
     expect(retries).toEqual([{ attempt: 3, maxAttempts: 10, delayMs: 4800 }])
   })
 })
+
+/** A provider whose turns wait for `release`, one gate per thread. */
+class GateAdapter implements ProviderAdapter {
+  readonly driver = 'pi' as const
+  readonly capabilities = PI_TEST_CAPABILITIES
+  readonly started: string[] = []
+  private readonly gates = new Map<string, () => void>()
+
+  release(threadId: string): void {
+    this.gates.get(threadId)?.()
+  }
+
+  async startTurn(input: TurnInput, sink: TurnSink): Promise<TurnResult> {
+    const providerRef = { provider: input.llmProvider, model: input.model, sessionId: `s-${input.threadId}` }
+    sink.providerRef(providerRef)
+    this.started.push(input.threadId)
+    await new Promise<void>((resolve) => this.gates.set(input.threadId, resolve))
+    sink.text({ phase: 'complete', content: 'done', contentIndex: 0 })
+    return {
+      text: 'done', aborted: false, modelName: 'Fake Model', totalResponseTimeMs: 1, totalTokensUsed: 2,
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, contextSignature: 'sig', nativeMessages: input.messages, providerRef
+    }
+  }
+
+  async interrupt(): Promise<'interrupted' | 'not_active'> {
+    return 'not_active'
+  }
+}
+
+describe('a turn that waits for a free turn slot', () => {
+  let home: string
+  let engine: RunEngine
+  let worker: EffectWorker
+  let orch: OrchestratorService
+  let store: ThreadDataStore
+  let adapter: GateAdapter
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'mousse-slot-'))
+    process.env.MOUSSE_HOME = home
+    store = new ThreadDataStore(new ProjectManager())
+    orch = new OrchestratorService(
+      new AgentRegistry(),
+      new TaskQueue(),
+      new WorktreeManager(home),
+      new PtyManager(),
+      { get: () => ({ ...getDefaultSettings(), provider: { ...getDefaultSettings().provider, llmProvider: 'openai', model: 'gpt-x' } }) } as never,
+      {} as never
+    )
+    orch.setThreadStore(store)
+    adapter = new GateAdapter()
+    orch.setHarness(testHarness({ adapters: [adapter], profileHome: home }))
+    engine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: home })) })
+    orch.setRunEngine(engine)
+    orch.recoverRunEngineOnBoot()
+    // One turn slot: the profile's limit, made small.
+    worker = new EffectWorker({ outbox: engine.outbox, executors: orch.effectExecutors(), owner: engine.leaseOwner, fibres: { turn: 1 } })
+    worker.start()
+    orch.attachEffectWorker(worker)
+  })
+
+  afterEach(async () => {
+    for (const threadId of adapter.started) adapter.release(threadId)
+    await worker.stop()
+    orch.attachEffectWorker(null)
+    orch.setRunEngine(null)
+    engine.store.db.close()
+    rmSync(home, { recursive: true, force: true })
+    delete process.env.MOUSSE_HOME
+  })
+
+  const until = async (check: () => boolean, what: string): Promise<void> => {
+    for (let i = 0; i < 200 && !check(); i++) await new Promise((resolve) => setTimeout(resolve, 10))
+    if (!check()) throw new Error(`timed out waiting for ${what}`)
+  }
+
+  it('shows the wait, not a turn that thinks, and starts as usual when the running turn ends', async () => {
+    const a = store.createThread('a')
+    const b = store.createThread('b')
+    const seenA: TurnState[] = []
+    const seenB: TurnState[] = []
+    orch.on('turn-state', (state: TurnState) => { if (state.threadId === a.id) seenA.push(state); if (state.threadId === b.id) seenB.push(state) })
+    const first = orch.send('first', false, { threadId: a.id, clientRequestId: 'send-a' })
+    await until(() => adapter.started.includes(a.id), 'the first turn')
+    await new Promise((resolve) => setImmediate(resolve))
+    // A turn that found a free slot never showed the wait.
+    expect(seenA.some((state) => state.step?.kind === 'waiting_slot')).toBe(false)
+
+    const second = orch.send('hi', false, { threadId: b.id, clientRequestId: 'send-b' })
+    await until(() => orch.getTurnState(b.id).phase === 'queued', 'the wait')
+    expect(orch.getTurnState(b.id)).toMatchObject({ phase: 'queued', step: { kind: 'waiting_slot', running: 1 } })
+    // It is not a turn that thinks.
+    expect(seenB.some((state) => state.phase === 'thinking')).toBe(false)
+    expect(adapter.started).not.toContain(b.id)
+
+    adapter.release(a.id)
+    await first
+    await until(() => adapter.started.includes(b.id), 'the second turn')
+    expect(orch.getTurnState(b.id).phase).toBe('thinking')
+    expect(orch.getTurnState(b.id).step?.kind).not.toBe('waiting_slot')
+    adapter.release(b.id)
+    await second
+    expect(orch.getTurnState(b.id)).toMatchObject({ phase: 'completed' })
+  })
+
+  it('a Stop of the waiting turn shows it stopped, and its run ends stopped by the person', async () => {
+    const a = store.createThread('a')
+    const b = store.createThread('b')
+    const first = orch.send('first', false, { threadId: a.id, clientRequestId: 'send-a2' })
+    await until(() => adapter.started.includes(a.id), 'the first turn')
+    const second = orch.send('hi', false, { threadId: b.id, clientRequestId: 'send-b2' })
+    await until(() => orch.getTurnState(b.id).step?.kind === 'waiting_slot', 'the wait')
+
+    await orch.stopThread(b.id, 'user')
+    expect(orch.getTurnState(b.id).phase).toBe('stopped')
+    expect(orch.getTurnState(b.id).step).toBeUndefined()
+    adapter.release(a.id)
+    await first
+    // The fake provider ignores the abort, so let its turn end too.
+    await until(() => adapter.started.includes(b.id) || engine.listRuns(b.id).every((run) => run.status !== 'queued'), 'the stopped run to settle')
+    adapter.release(b.id)
+    await second.catch(() => undefined)
+    expect(engine.listRuns(b.id).map((run) => [run.status, run.outcome?.interruptedBy])).toEqual([['interrupted', 'user']])
+    expect(orch.getTurnState(b.id).phase).toBe('stopped')
+  })
+})

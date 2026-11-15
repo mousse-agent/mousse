@@ -1803,6 +1803,8 @@ export class OrchestratorService extends EventEmitter {
   private readonly definitionHeartbeatMs = DEFINITION_HEARTBEAT_MS
   /** Phase 2b: the worker that executes `turn.*` effects. Null keeps direct turn starts. */
   private effectWorker: EffectWorker | null = null
+  /** Threads whose new run waits for a free turn slot, with that run (`showSlotWait`). */
+  private readonly slotWaits = new Map<string, string>()
   /** Phase 5: mints a Mousse MCP credential per MCP-capable turn. Null attaches nothing. */
   private mcpAttachment: McpAttachmentProvider | null = null
   private mcpRegistry?: ToolRegistry
@@ -2338,6 +2340,11 @@ export class OrchestratorService extends EventEmitter {
         if (engine.remoteSubagents.hasOpen()) this.remoteSubagents?.kick()
       }
       if (event.type === 'reconcile.delivery_failed') this.noteUndeliveredResult(event)
+      // A run that waited for a turn slot and ended unstarted (a Stop, a cancel) no longer shows the wait.
+      if (event.type === 'run.status' && event.runId && this.slotWaits.get(event.threadId) === event.runId) {
+        const status = (event.payload as { status?: RunRecord['status'] } | undefined)?.status
+        if (status && TERMINAL_RUN_STATUSES.has(status)) this.endSlotWait(event.threadId, event.runId)
+      }
       // A saved approval request closed without an answer (its run ended, a Stop, the thread was
       // deleted): its card goes and the provider callback that still waits for it is released.
       if (event.type === 'approval.cancelled') {
@@ -4779,7 +4786,9 @@ export class OrchestratorService extends EventEmitter {
     // that held it across the await that made the run): the owner is the run the effect starts.
     if (session.turnAdmitted && !session.activeTurn) session.admissionRunId = runId
     try {
-      return this.enqueueTurnStart({ ...payload, runId, admissionHeld: true })
+      const pending = this.enqueueTurnStart({ ...payload, runId, admissionHeld: true })
+      this.showSlotWait(payload.threadId, runId)
+      return pending
     } catch (error) {
       console.warn('turn.start effect could not be recorded; running the turn directly', {
         runId,
@@ -4859,6 +4868,33 @@ export class OrchestratorService extends EventEmitter {
     return promise
   }
 
+  /**
+   * A run whose `turn.start` no turn slot is free for waits until one of the turns running ends. Its thread shows that
+   * wait (phase `queued`, step `waiting_slot`) instead of a turn that thinks, until the turn starts (`runTurnOnSession`)
+   * or the run ends unstarted (`endSlotWait`). Checked after the worker had its chance to claim the effect, so a turn
+   * that starts at once never shows it.
+   */
+  private showSlotWait(threadId: string, runId: string): void {
+    setImmediate(() => {
+      const entry = this.turnResults.get(runId)
+      const slots = this.effectWorker?.turnSlots()
+      if (!entry || entry.started || entry.abandoned || !slots || slots.running < slots.limit) return
+      if (this.runEngine?.getRun(runId)?.status !== 'queued' || this.isStopping(threadId)) return
+      // Another turn of the thread is live (a queue drain raced it): its state is the thread's.
+      if (this.loadedSession(threadId)?.activeTurn) return
+      this.slotWaits.set(threadId, runId)
+      this.setTurnPhase(threadId, 'queued', { turnId: null, step: { kind: 'waiting_slot', running: slots.running } })
+    })
+  }
+
+  /** The run `showSlotWait` showed ended without starting: its thread no longer shows the wait. */
+  private endSlotWait(threadId: string, runId: string): void {
+    if (this.slotWaits.get(threadId) !== runId) return
+    this.slotWaits.delete(threadId)
+    const state = this.turnStates.get(threadId)
+    if (state?.phase === 'queued' && state.step?.kind === 'waiting_slot') this.setTurnPhase(threadId, 'idle')
+  }
+
   private async executeTurnStartEffect(effect: EffectRecord, signal: AbortSignal): Promise<void> {
     // A thread whose expiry passed is being deleted: nothing queued or recovered starts in it.
     if (this.isExpired(effect.threadId)) {
@@ -4907,6 +4943,8 @@ export class OrchestratorService extends EventEmitter {
       return
     }
     if (entry) entry.started = true
+    // Its slot is free now: the turn's own phases replace the wait.
+    if (this.slotWaits.get(stored.threadId) === stored.runId) this.slotWaits.delete(stored.threadId)
     // The in-memory payload keeps image data the durable payload omits. Without it the sender is
     // gone (another orchestrator instance), so this executor does not inherit its admission.
     const payload = entry?.payload ?? { ...stored, admissionHeld: false }
@@ -5037,6 +5075,7 @@ export class OrchestratorService extends EventEmitter {
     }
     if (session && payload.queueItemId && TERMINAL_RUN_STATUSES.has(run.status))
       this.completeSessionClaim(session, payload.queueItemId, payload.claimOwnerToken)
+    this.endSlotWait(payload.threadId, payload.runId)
     entry?.reject(new Error(`Run ${payload.runId} is ${run.status}; its turn did not start.`))
   }
 
@@ -5066,6 +5105,7 @@ export class OrchestratorService extends EventEmitter {
         if (engine.getRun(id)?.status === 'queued') engine.markTerminal(id, 'interrupted', { interruptedBy: 'daemon_restart' })
       })
     }
+    this.endSlotWait(payload.threadId, runId)
     entry.reject(Object.assign(new Error('Profile work is shutting down'), { code: 'profile_draining' }))
   }
 

@@ -1667,6 +1667,11 @@ export type TurnStep =
    * nothing back in time (its own retry, outside the attempt count).
    */
   | { kind: 'retrying'; attempt: number; maxAttempts?: number; delayMs?: number; noResponse?: true }
+  /**
+   * The turn has not started: the profile already runs `running` turns, as many as it runs at once, and this one starts
+   * when one of them ends. Only with phase `queued`.
+   */
+  | { kind: 'waiting_slot'; running: number }
 
 export function isTurnActivePhase(phase: TurnPhase): boolean {
   return phase === 'queued' || phase === 'thinking' || phase === 'streaming' || phase === 'tool_running' || phase === 'finalizing'

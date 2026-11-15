@@ -100,10 +100,20 @@ describe('the line under Working', () => {
     vi.setSystemTime(NOW)
   })
 
-  it('1. sent, before the service starts the turn (lease or turn-slot wait): Thinking…', () => {
+  it('1. sent, before the service starts the turn: Thinking…', () => {
     render([ask('optimistic:1')], 'ready', { phase: 'idle' })
     expectLive('Thinking…')
     render([ask()], 'submitted', { phase: 'queued' })
+    expectLive('Thinking…')
+  })
+
+  it('1. waiting for a free turn slot: says so, with how many turns run, and no thinking icon', () => {
+    render([ask()], 'submitted', { phase: 'queued', step: { kind: 'waiting_slot', running: 8 } })
+    expectLive('Waiting for a free slot · 8 turns running')
+    expect(line()!.title).toBe('Mousse runs up to 8 turns at once. This one starts when one of them ends.')
+    expect(line()!.querySelector('svg.thinking-icon')).toBeNull()
+    // Once its turn starts, the line is the turn's own.
+    render([ask()], 'streaming', { phase: 'thinking', step: { kind: 'starting' } })
     expectLive('Thinking…')
   })
 
