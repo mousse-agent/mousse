@@ -886,7 +886,6 @@ export class MmsProfileServices {
       botProcesses = createBotProcessRegistry({ store })
       return { journal, context, progress: memory, memory: admin, supervision: botProcesses }
     })
-    this.scheduled.on('jobRemoved', (jobId: string) => botMemory?.removeProgressForJob(jobId))
     this.botStore = opened?.store ?? null
     // A bot's thread from an earlier build, or of a bot that never runs again, is marked as well.
     if (opened) {
@@ -1041,6 +1040,7 @@ export class MmsProfileServices {
         try { runs.forgetAutomation(jobId) } catch { /* the notes stay; nothing reads them */ }
       })
     }
+    this.scheduled.on('jobRemoved', (jobId: string) => botMemory?.removeProgressForJob(jobId))
     if (personalBots) {
       this.scheduled.setBotRunner({ findOccurrence: (input) => personalBots.findScheduledOccurrence(input), runOccurrence: (input) => personalBots.runScheduledOccurrence(input) })
       // Each tick also brings the inbox's bot runs up to date, so their items appear without the page open.
