@@ -186,11 +186,14 @@ export function nextOccurrenceAfter(schedule: JobSchedule, occurrenceAt: string,
   return computeNextRun(schedule, null, now)
 }
 
+/** Missed counts at this limit are a lower bound, not an exact number. */
+export const MISSED_OCCURRENCES_CAP = 1000
+
 /**
  * How many occurrences of a schedule fell from the one due at `from` (itself one) until `now`, at most `cap`: the
  * repeats a computer that was off missed, which collapse into one run.
  */
-export function occurrencesSince(schedule: JobSchedule, from: string, now: Date, cap = 1000): number {
+export function occurrencesSince(schedule: JobSchedule, from: string, now: Date, cap = MISSED_OCCURRENCES_CAP): number {
   if (schedule.kind !== 'interval' && schedule.kind !== 'cron') return 1
   if (schedule.kind === 'interval') {
     const every = (schedule.minutes ?? 1) * 60_000

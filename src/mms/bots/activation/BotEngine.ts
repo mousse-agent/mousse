@@ -1,3 +1,4 @@
+import type { ScheduledMissedRuns } from '../../../shared/types'
 import { requestJournalRows } from '../memory/requestFrames'
 import { grantedPermissions, permissionId, restorePermission, withoutPermission } from '../chat/projection'
 import { randomUUID } from 'node:crypto'
@@ -99,7 +100,7 @@ import { workWaits, type BotActivationRow, type BotDispatchRow, type BotSubagent
 import { BotCounterScope, BotSpendScope, type ActivationLimits } from '../store/scopes'
 import { isConnectionFailure, type BotConnectivity } from './connectivity'
 import { BotScheduleError, type BotScheduleBook, type BotScheduleEntry } from '../../scheduled/botJobs'
-import { isSilentOutput } from '../../scheduled/computeNextRun'
+import { isSilentOutput, MISSED_OCCURRENCES_CAP } from '../../scheduled/computeNextRun'
 import { tellMeNotifies } from '../../../shared/automations'
 import type { RunLevel } from '../../../shared/automationInbox'
 import { statusLineOf } from '../activity/statusLine'
@@ -1321,6 +1322,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   // -- Schedules (Path step 3: one scheduler) -------------------------------------------------------
 
+  /** The scheduler retries a claim as started before making any new admission or lateness decision. */
+  findScheduledOccurrence(input: { botId: string; scheduleId: string; occurrenceKey: string }): { activationId: string; occurrenceAt: string } | undefined {
+    const row = this.store.activationByKey(`sched:${input.botId}:${input.scheduleId}:${input.occurrenceKey}`)
+    if (row?.trigger.kind === 'schedule') return { activationId: row.id, occurrenceAt: row.trigger.occurrenceAt }
+    return undefined
+  }
+
   /**
    * One occurrence of a bot's schedule, handed over by the shared scheduler (`ScheduledJobService`), which owns the
    * schedule's time and moves it on. In one transaction this inserts the occurrence's run activation, keyed
@@ -1330,7 +1338,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * skipped and says why. Other runs and the owner's work never skip it: they run beside it. An open ask is not a skip:
    * asks don't block. Before the startup pass nothing is inserted and the occurrence stays due.
    */
-  runScheduledOccurrence(input: { botId: string; scheduleId: string; prompt: string; occurrenceAt: string; now?: Date; model?: string; pick?: BotModelPick }):
+  runScheduledOccurrence(input: { botId: string; scheduleId: string; prompt: string; occurrenceAt: string; occurrenceKey?: string; missed?: ScheduledMissedRuns; now?: Date; model?: string; pick?: BotModelPick }):
     | { kind: 'started'; activationId: string }
     | { kind: 'skipped'; reason: string }
     | { kind: 'not_ready' } {
@@ -1371,7 +1379,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     const id = `act_${randomUUID()}`
     // The same occurrence handed over again (after a crash): it was inserted already, whatever runs now.
-    const key = `sched:${botId}:${scheduleId}:${occurrenceAt}`
+    // Labels use the latest due time; a retry must still reuse the original claim's run.
+    const key = `sched:${botId}:${scheduleId}:${input.occurrenceKey ?? occurrenceAt}`
     const existing = this.store.activationByKey(key)
     if (existing) return { kind: 'started', activationId: existing.id }
     const made = this.store.db.transaction(() => {
@@ -1387,7 +1396,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         botId,
         revision: admitted.published.revision!,
         grantDigest: admitted.grant.digest,
-        trigger: { kind: 'schedule', input: prompt, scheduleId, occurrenceAt },
+        trigger: { kind: 'schedule', input: prompt, scheduleId, occurrenceAt, ...(input.missed ? { missed: input.missed } : {}) },
         idempotencyKey: key,
         status: 'queued',
         createdAt: this.store.now(),
@@ -1698,7 +1707,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           // A chat turn takes the owner's messages that joined it while it waited to start (`joinChatTurnInTx`).
           const notes = this.workNotes(row)
           if (notes) this.store.applyWorkNotes(notes.ids)
-          const text = row.lane === 'run' ? `${row.trigger.input}${notes ? `\n\n${notes.text}` : ''}\n\n${BOT_RUN_REPORT_LINE}` : `${row.trigger.input}${notes ? `\n\n${notes.text}` : ''}`
+          const skipped = row.trigger.kind === 'schedule' && row.trigger.missed ? Math.max(0, row.trigger.missed.count - 1) : 0
+          const capped = row.trigger.kind === 'schedule' && (row.trigger.missed?.count ?? 0) >= MISSED_OCCURRENCES_CAP
+          const late = row.trigger.kind === 'schedule' && row.trigger.missed
+            ? `\n\nThis run was due at ${scheduledDueTime(row.trigger.occurrenceAt, this.now())}; this computer was off or asleep${skipped ? `, and ${capped ? 'over ' : ''}${skipped} ${skipped === 1 ? 'run was' : 'runs were'} skipped` : ''}.` : ''
+          const text = row.lane === 'run' ? `${row.trigger.input}${late}${notes ? `\n\n${notes.text}` : ''}\n\n${BOT_RUN_REPORT_LINE}` : `${row.trigger.input}${notes ? `\n\n${notes.text}` : ''}`
           this.store.insertDispatch({ activationId: row.id, n: 1, kind: 'start', clientRequestId, threadId, prompt: { text }, policyDigest: row.grantDigest })
           if (row.lane === 'run') this.journalInTx({
             botId: row.botId, kind: 'run_start', lane: 'run', activationId: row.id, threadId, sourceKey: `act:${row.id}:start`, who: 'mousse',
@@ -4548,7 +4561,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // cards it made still show, without the marker. Work the owner asked for and chat replies are posted as written.
     const silent = report && row.trigger.kind === 'schedule' && (isSilentOutput(written) || this.quietLevel(row.id))
     if (silent && !asks.length && !waiting && !cards) return
-    const body = silent ? '' : written
+    const lateReport = report && row.trigger.kind === 'schedule' && row.trigger.missed && this.now() - Date.parse(row.trigger.occurrenceAt) > 15 * 60_000
+      ? `(Due ${scheduledDueTime(row.trigger.occurrenceAt, this.now())}, this computer was off or asleep) ` : ''
+    const body = silent ? '' : lateReport ? `${lateReport}${written || 'Done.'}` : written
     if (!body && !chips.length && !asks.length && !report && !waiting && !questions.length && !cards) return
     // A turn that asked and said nothing else shows its question alone.
     const reply = Boolean(body || chips.length || asks.length || report || waiting || cards)
@@ -8888,4 +8903,11 @@ function permissionTextOf(request: BotAskRequest): string {
 function runsDifferently(a: BotTurnModel, b: BotTurnModel): boolean {
   if (!samePick(a.pick, b.pick)) return true
   return !isPinned(a.pick) && a.depth !== b.depth
+}
+
+/** A queued run or its report can cross midnight: say which day's scheduled time it was. */
+function scheduledDueTime(at: string, now: number): string {
+  const due = new Date(at)
+  const day = due.toDateString() === new Date(now).toDateString() ? '' : `${due.toLocaleDateString('en-US', { weekday: 'short' })} `
+  return `${day}${clockTime(at)}`
 }

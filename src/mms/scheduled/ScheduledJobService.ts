@@ -1,14 +1,15 @@
 import { randomBytes } from 'node:crypto'
 import { EventEmitter } from 'events'
+import { clockTime } from '../bots/chat/projection'
 import type { ProjectManager } from '../data/ProjectManager'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
-import { tellMeOf, type SchedulerStatus, type ScheduledJob, type ScheduledOccurrenceResult, type ScheduledRunAgent, type ScheduledWebhookDelivery, type ThreadEventKind } from '../../shared/types'
+import { tellMeOf, type SchedulerStatus, type ScheduledJob, type ScheduledMissedRuns, type ScheduledOccurrenceResult, type ScheduledRunAgent, type ScheduledWebhookDelivery, type ThreadEventKind } from '../../shared/types'
 import { occurrenceOutcome, tellMeNotifies, type RunEndState, type ScheduledRunEnded } from '../../shared/automations'
 import type { InboxRunState, RunLevel } from '../../shared/automationInbox'
 import { missingKeyText } from '../../shared/automationKeys'
 import { join } from 'node:path'
 import { TERMINAL_RUN_STATUSES } from '../run/types'
-import { isSilentOutput } from './computeNextRun'
+import { computeNextRun, CRON_SEARCH_YEARS, isSilentOutput } from './computeNextRun'
 import { FileLockBusyError, tryAcquireTickLock } from './fileLock'
 import { OwnedWorkBarrier, type OwnedWorkEntry } from '../execution/OwnedWorkBarrier'
 import {
@@ -41,7 +42,9 @@ export interface ScheduledJobRunner {
  * ready yet (the occurrence stays due).
  */
 export interface ScheduledBotRunner {
-  runOccurrence(input: { jobId: string; botId: string; scheduleId: string; prompt: string; occurrenceAt: string; now: Date; model?: string; pick?: NonNullable<ScheduledJob['bot']>['pick'] }):
+  /** The run already inserted for this claim, before a crash interrupted the hand-over. */
+  findOccurrence(input: { botId: string; scheduleId: string; occurrenceKey: string }): { activationId: string; occurrenceAt: string } | undefined
+  runOccurrence(input: { jobId: string; botId: string; scheduleId: string; prompt: string; occurrenceAt: string; occurrenceKey?: string; missed?: ScheduledMissedRuns; now: Date; model?: string; pick?: NonNullable<ScheduledJob['bot']>['pick'] }):
     | { kind: 'started'; activationId: string }
     | { kind: 'skipped'; reason: string }
     | { kind: 'not_ready' }
@@ -720,12 +723,14 @@ export class ScheduledJobService extends EventEmitter {
 
       // The last tick before this one, by any process, read before it is overwritten: a gap means the scheduler was down.
       const tickAt = this.clock()
-      const previousTick = readTickerHeartbeat(this.store.homeDir).heartbeatAt
+      const persisted = readTickerHeartbeat(this.store.homeDir)
+      this.downtime = persisted.downtime ?? this.downtime
+      const previousTick = persisted.heartbeatAt
       if (previousTick && tickAt.getTime() - Date.parse(previousTick) > MISSED_GRACE_MS) {
         this.downtime = { from: previousTick, to: tickAt.toISOString() }
       }
       this.lastHeartbeatAt = tickAt.toISOString()
-      recordTickerHeartbeat(false, this.store.homeDir, tickAt)
+      recordTickerHeartbeat(false, this.store.homeDir, tickAt, this.downtime)
 
       // Jobs this process is already running are not claimed again, and a catch-up after downtime starts a few
       // runs per tick, not every overdue job in the same second; the rest stay due and follow shortly.
@@ -858,11 +863,52 @@ export class ScheduledJobService extends EventEmitter {
     const claim = job.runClaim
     if (!claim) return
     const now = this.clock()
+    let occurrenceAt = claim.occurrenceKey
     let outcome: ReturnType<ScheduledBotRunner['runOccurrence']>
     try {
-      outcome = this.botRunner
-        ? this.botRunner.runOccurrence({ jobId: job.id, botId: job.bot.botId, scheduleId: job.bot.scheduleId, prompt: job.prompt, occurrenceAt: claim.occurrenceKey, now, ...(job.bot.model ? { model: job.bot.model } : {}), ...(job.bot.model && job.bot.pick?.model === job.bot.model ? { pick: job.bot.pick } : {}) })
-        : { kind: 'skipped', reason: 'bots_unavailable' }
+      const existing = this.botRunner?.findOccurrence({ botId: job.bot.botId, scheduleId: job.bot.scheduleId, occurrenceKey: claim.occurrenceKey })
+      if (existing) {
+        occurrenceAt = existing.occurrenceAt
+        outcome = { kind: 'started', activationId: existing.activationId }
+      } else {
+        // Only detected downtime expires an occurrence. A busy tick may be arbitrarily late.
+        let next = claim.missed ? computeNextRun(job.schedule, occurrenceAt, now) : null
+        if (claim.missed && job.schedule.kind === 'interval') {
+          const gap = (job.schedule.minutes ?? 1) * 60_000
+          occurrenceAt = new Date(Date.parse(occurrenceAt) + Math.floor((now.getTime() - Date.parse(occurrenceAt)) / gap) * gap).toISOString()
+          next = computeNextRun(job.schedule, occurrenceAt, now)
+        } else if (claim.missed) {
+          const hour = 60 * 60_000
+          // Jump near now before walking: a year of minute ticks costs the same as a day.
+          // The final window covers even the longest supported leap-day gap.
+          for (const hours of [1, 24, 32 * 24, 366 * 24, CRON_SEARCH_YEARS * 366 * 24]) {
+            const candidate = computeNextRun(job.schedule, new Date(now.getTime() - hours * hour).toISOString(), now)
+            if (candidate && Date.parse(candidate) <= now.getTime() && Date.parse(candidate) >= Date.parse(occurrenceAt)) {
+              occurrenceAt = candidate
+              break
+            }
+          }
+          // A sparse schedule can have a dense burst far back in that window. Narrow it
+          // before walking too, so the walk never traverses more than an hour of minutes.
+          let end = now.getTime()
+          while (end - Date.parse(occurrenceAt) > hour) {
+            const middle = Math.floor((Date.parse(occurrenceAt) + end) / 2)
+            const candidate = computeNextRun(job.schedule, new Date(middle).toISOString(), now)
+            if (candidate && Date.parse(candidate) <= now.getTime() && Date.parse(candidate) > Date.parse(occurrenceAt)) occurrenceAt = candidate
+            else end = middle
+          }
+          next = computeNextRun(job.schedule, occurrenceAt, now)
+          while (next && Date.parse(next) <= now.getTime() && Date.parse(next) > Date.parse(occurrenceAt)) {
+            occurrenceAt = next
+            next = computeNextRun(job.schedule, occurrenceAt, now)
+          }
+        }
+        const expired = next && now.getTime() - Date.parse(occurrenceAt) >= Date.parse(next) - now.getTime()
+        const missedReason = `Missed ${new Date(occurrenceAt).toLocaleDateString('en-US', { weekday: 'short' })} ${clockTime(occurrenceAt)} (computer off)`
+        outcome = expired ? { kind: 'skipped', reason: missedReason } : this.botRunner
+          ? this.botRunner.runOccurrence({ jobId: job.id, botId: job.bot.botId, scheduleId: job.bot.scheduleId, prompt: job.prompt, occurrenceAt, occurrenceKey: claim.occurrenceKey, ...(claim.missed ? { missed: claim.missed } : {}), now, ...(job.bot.model ? { model: job.bot.model } : {}), ...(job.bot.model && job.bot.pick?.model === job.bot.model ? { pick: job.bot.pick } : {}) })
+          : { kind: 'skipped', reason: 'bots_unavailable' }
+      }
     } catch (error) {
       outcome = { kind: 'skipped', reason: 'bot_unavailable' }
       console.warn('a bot occurrence could not start', { jobId: job.id, error: error instanceof Error ? error.message : String(error) })
@@ -876,7 +922,7 @@ export class ScheduledJobService extends EventEmitter {
       const activationId = outcome.activationId
       this.record('bot run', (ledger) => ledger.begin({ jobId: job.id, jobName: job.name, occurrenceKey: claim.occurrenceKey, botId: job.bot.botId, activationId, state: 'queued', ...(job.projectId ? { projectId: job.projectId } : {}) }))
     }
-    if (this.store.finishBotClaim(job.id, claim.token, outcome.kind === 'skipped' ? { skipped: outcome.reason } : {}, now)) this.ownedRunClaims.delete(job.id)
+    if (this.store.finishBotClaim(job.id, claim.token, { occurrenceAt, ...(outcome.kind === 'skipped' ? { skipped: outcome.reason } : {}) }, now)) this.ownedRunClaims.delete(job.id)
     // A skip that every later occurrence would repeat pauses it once, with why, instead of skipping it forever.
     const lasting = outcome.kind === 'skipped' ? LASTING_BOT_SKIPS[outcome.reason] : undefined
     if (lasting && this.store.pauseJob(job.id, lasting)) this.emitUpdated()

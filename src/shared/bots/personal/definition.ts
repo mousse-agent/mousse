@@ -1,3 +1,4 @@
+import type { ScheduledMissedRuns } from '../../types'
 import type { NeutralTool } from '../../harness/tools'
 import type { ProviderSelection } from '../../harness/types'
 import type { BotMessageSender } from './botMessages'
@@ -325,7 +326,7 @@ export type BotActivationTrigger =
    * sent it and which turn in a row without the owner it is.
    */
   | { kind: 'manual'; input: string; owner?: BotOwnerTurn; fromBot?: BotMessageSender }
-  | { kind: 'schedule'; input: string; scheduleId: string; occurrenceAt: string }
+  | { kind: 'schedule'; input: string; scheduleId: string; occurrenceAt: string; missed?: ScheduledMissedRuns }
   /**
    * Work the chat handed off (`work_start`) or a reminder started (docs/plans/bot-always-free.md): a run beside the
    * chat, whose report answers `replyTo`, the owner's message that asked for it. `from`: the chat activation or
