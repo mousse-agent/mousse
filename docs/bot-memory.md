@@ -14,7 +14,7 @@ Every bot has an append-only **journal** in `bots.db` (`bot_journal`). It holds 
 
 ## Memory entries
 
-`bot_memories` holds one row per version. Kinds: `owner` (facts about the owner, chat only), `note` (standing notes, chat only), `run_note` (written by unattended runs, framed as data).
+`bot_memories` holds one row per version. Kinds: `owner` (facts about the owner) and `note` (standing notes), saved only in chat turns the owner's message or tapped answer started; `run_note` (written by unattended runs and bot-started chat turns, framed as data).
 
 - **Refs.** The bot names a version `m12` (first version) or `m12v3`. `replaces` must name the current version, or the save returns `stale` with it.
 - **Caps** (estimated tokens): owner 600, notes 1,400, run notes 500. A save over its kind's cap fails with that kind's entries. Superseded and expired entries do not count.
@@ -22,7 +22,7 @@ Every bot has an append-only **journal** in `bots.db` (`bot_journal`). It holds 
 - **Lists and longer documents** are files in the bot's files folder, which the chat and its work can both change; memory keeps one short note per list with its path (`instructions.ts`).
 - **Pack order:** entries keep the place where they were first learned when the bot replaces them or the owner edits them. Each version still has its own date.
 - **Dates:** `learned_at`, plus optional `valid_from` and `expires_at`. An entry past `expires_at` becomes `expired`: out of the pack, still listed and searchable.
-- **Forget** (chat lane, or the owner through `bots.memory.forget`): the entry's text is removed and its hash kept, so it is refused if saved again. Cited journal rows (`refs`), their exact copies, and the entry's save records are redacted to `[removed at your request · <date>]`, with their index rows. Entries citing a redacted row are forgotten too, and a redacted `bm:` row's `bot_messages` text is blanked. Thread transcripts and runtime session files are caches outside this.
+- **Forget** (a chat turn the owner's message or tapped answer started, or the owner through `bots.memory.forget`): the entry's text is removed and its hash kept, so it is refused if saved again. Cited journal rows (`refs`), their exact copies, and the entry's save records are redacted to `[removed at your request · <date>]`, with their index rows. Entries citing a redacted row are forgotten too, and a redacted `bm:` row's `bot_messages` text is blanked. Thread transcripts and runtime session files are caches outside this.
 
 ## What every turn gets
 
@@ -55,10 +55,11 @@ Both FTS5 indexes use `porter unicode61 remove_diacritics 2`. `bot_journal_fts` 
 
 ## Tools and lanes
 
-The five tools are always on and never grantable. The bot and lane come from `BotToolHost.activationOf(threadId)`, never from arguments.
+The five tools are always on and never grantable. The bot and memory rights come from `BotToolHost.activationOf(threadId)`, never from arguments. The engine decides those rights from the activation's key in one place (`memoryLaneOf`). Unknown starts have run rights.
 
-- **Run lane:** `memory_save` writes `run_note` whatever was asked, and replaces only run notes. `memory_forget` is refused: "Ask the owner in the chat."
-- **Chat lane:** owner facts and notes; `replaces` names the current version.
+- **Run lane, consults, and bot-started chat turns** (`create:`, `wake:`, `question:…:default`): `memory_save` writes `run_note` whatever was asked, and replaces only run notes. `memory_forget` is refused: "Ask the owner in the chat."
+- **Chat turns started by the owner's message** (`chat:`, including `chat:after:`) **or tapped answer** (`answer:`): owner facts and notes; `replaces` names the current version. Forget works as before.
+- The standing-wish fallback also needs these owner-started chat rights and a settled turn; a consult or bot-started turn never saves an owner entry through it.
 - Saves and forgets report their result, with the text, for a `memory` chip.
 
 ## The guard (`guard.ts`)

@@ -675,10 +675,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.lastLimit = this.limit()
   }
 
-  /**
-   * Whether a run report stays out of notifications: its schedule's Tell me is Only problems, and a report is a run
-   * that ended done. Every run, Only news and a failure's error row notify as before.
-   */
   /** Whether a run's activation reported `quiet`: nothing worth saying. A lookup that fails counts as not quiet. */
   private quietLevel(activationId: string): boolean {
     try {
@@ -688,13 +684,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
   }
 
+  /** A scheduled report below Tell me stays quiet; failure error rows always notify. */
   private quietReport(botId: string, message: { kind?: string; activationId?: string } | undefined): boolean {
     if (message?.kind !== 'run_report' || !message.activationId) return false
     try {
       const row = this.store.activation(message.activationId)
       if (row?.trigger.kind !== 'schedule') return false
       const entry = this.host.schedules?.get(botId, row.trigger.scheduleId)
-      return entry ? !tellMeNotifies(entry.tellMe, 'done') : false
+      return entry ? !tellMeNotifies(entry.tellMe, 'done', this.host.runLevel?.(message.activationId)) : false
     } catch {
       return false
     }
@@ -1349,10 +1346,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /**
    * A scheduled run dropped from a full queue (inside its transaction): its automation says why, as a skipped occurrence
-   * does, and the chat says scheduled runs are being dropped, at most once a day (`bm_<botId>_sched_dropped_<day>`).
+   * does, and the chat says scheduled runs are being dropped, at most once a local day (`bm_<botId>_sched_dropped_<day>`).
    */
   private droppedScheduledRun(botId: string, trigger: Extract<BotActivationTrigger, { kind: 'schedule' }>): void {
-    const day = new Date(this.now()).toISOString().slice(0, 10)
+    const at = new Date(this.now())
+    const day = `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, '0')}-${String(at.getDate()).padStart(2, '0')}`
     this.chat.post({ botId, author: 'bot', kind: 'error', text: '', error: { text: 'I have too much waiting, so I\'m dropping some of my scheduled runs. They run again at their next times once I\'m less busy.' }, lane: 'run', id: `bm_${botId}_sched_dropped_${day}` })
     this.store.db.afterCommit(() => {
       try {
@@ -5978,7 +5976,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   private async afterDispatch(row: BotActivationRow, threadId: string, dispatchId: string, endedBy: BotDispatchEnd, consult = false): Promise<boolean> {
     try {
-      await this.host.context?.afterDispatch({ botId: row.botId, activationId: row.id, dispatchId, lane: row.lane, threadId, endedBy, ...(consult ? { consult: true as const } : {}) })
+      await this.host.context?.afterDispatch({ botId: row.botId, activationId: row.id, dispatchId, lane: row.lane, memoryLane: consult ? 'run' : memoryLaneOf(row), threadId, endedBy, ...(consult ? { consult: true as const } : {}) })
       return true
     } catch (error) {
       console.warn('a bot dispatch could not be recorded', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
@@ -6967,7 +6965,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   // -- The bot app tools' host (BotToolHost, §7.1) ----------------------------------------------
 
   /** What the bot app tools (WP3, WP6) reach the engine through. Lane and bot come from the thread, never from arguments. */
-  readonly tools: BotToolHost & { activationOf(threadId: string): ({ botId: string; activationId: string; lane: BotLane; role: 'home' | BotThreadRole; dispatchId?: string }) | undefined } = {
+  readonly tools: BotToolHost & { activationOf(threadId: string): ({ botId: string; activationId: string; lane: BotLane; memoryLane: BotLane; role: 'home' | BotThreadRole; dispatchId?: string }) | undefined } = {
     activationOf: (threadId) => this.activationOf(threadId),
     schedules: {
       // An automation the bot creates is on at once, with no step for the owner; the turn's message shows it as a card
@@ -8053,7 +8051,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * The activation a thread's turn belongs to: the chat's on the home thread, a run's on its own, a
    * consult's on a context thread (`role` says which thread called).
    */
-  activationOf(threadId: string): { botId: string; activationId: string; lane: BotLane; role: 'home' | BotThreadRole; dispatchId?: string } | undefined {
+  activationOf(threadId: string): { botId: string; activationId: string; lane: BotLane; memoryLane: BotLane; role: 'home' | BotThreadRole; dispatchId?: string } | undefined {
     try {
       const thread = this.store.get('SELECT bot_id, role, activation_id FROM bot_threads WHERE thread_id = ?', threadId)
       if (!thread) return undefined
@@ -8070,7 +8068,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (!row || row.botId !== botId || ENDED_ACTIVATION_STATUSES.has(row.status)) return undefined
       const dispatchId = this.live.get(row.id)?.dispatchId
       const role = thread.role === 'home' ? 'home' : thread.role === 'activation' ? 'activation' : this.store.threadRole(threadId) === 'subagent' ? 'subagent' : 'context'
-      return { botId, activationId: row.id, lane: row.lane, role, ...(dispatchId ? { dispatchId } : {}) }
+      return { botId, activationId: row.id, lane: row.lane, memoryLane: memoryLaneOf(row), role, ...(dispatchId ? { dispatchId } : {}) }
     } catch {
       return undefined
     }
@@ -8649,6 +8647,13 @@ export function asksOwner(row: Pick<BotActivationRow, 'lane' | 'trigger'>): bool
  */
 export function ownerChatTurn(row: Pick<BotActivationRow, 'lane' | 'idempotencyKey'>): boolean {
   return row.lane === 'chat' && row.idempotencyKey.startsWith('chat:')
+}
+
+/** Owner facts, standing notes and Forget need an owner's message or tapped answer.
+ * Unknown starts keep a run's memory rights until explicitly allowed here.
+ */
+export function memoryLaneOf(row: Pick<BotActivationRow, 'lane' | 'idempotencyKey'>): BotLane {
+  return ownerChatTurn(row) || (row.lane === 'chat' && row.idempotencyKey.startsWith('answer:')) ? 'chat' : 'run'
 }
 
 /** Why a turn holds the owner's threads to reading only (`BotAuthority.threadsReadOnly`); undefined when it may act. */

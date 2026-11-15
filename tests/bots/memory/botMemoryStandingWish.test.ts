@@ -25,7 +25,7 @@ function chat(fx: MemoryFixture) {
       fx.store.append({ botId: 'ada', kind: 'tool_call', lane: 'chat', activationId, sourceKey: `t:${n}`, who: 'bot', text: 'memory_save', json: { tool: 'memory_save' } })
       fx.store.save('ada', { lane: 'chat', kind: 'owner', text: options.modelSaves, activationId })
     }
-    await provider.afterDispatch({ botId: 'ada', activationId, dispatchId: `d-${n}`, lane: 'chat', threadId: 'home', endedBy: options.endedBy ?? 'settled' })
+    await provider.afterDispatch({ botId: 'ada', activationId, dispatchId: `d-${n}`, lane: 'chat', memoryLane: 'chat', threadId: 'home', endedBy: options.endedBy ?? 'settled' })
   }
   const entries = () => fx.store.list('ada').entries.map((entry) => ({ kind: entry.kind, text: entry.text, by: entry.by }))
   return { turn, entries }

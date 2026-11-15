@@ -72,6 +72,11 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
     date: '2026-11-16',
     text: "Only a chat turn your owner's own message started can start a background command with watch_start. From a wake-up, your first message, a question's default, a tapped answer or another bot's message, hand the command to work, which runs it in the sandbox, or tell your owner what to start; watch_list and watch_stop still work in every chat turn.",
     gone: [/start it with watch_start instead, from here/i, /never start work only to wait on something/i]
+  },
+  {
+    id: 11,
+    date: '2026-11-16',
+    text: "Only a chat turn your owner's message or tapped answer started can save facts about them and standing notes, replace them, or forget memory. In a run or a turn you started yourself (your first message, a wake-up, a question's default or another bot's message), saves are run notes and can replace only run notes; ask your owner in the chat to forget something."
   }
 ]
 

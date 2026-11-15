@@ -3,7 +3,7 @@
  * reaches running work while it works, and a turn whose context the runtime compacted gets its memory pack and its
  * job's brief again (docs/bots.md, Lanes and The chat and its work).
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { BotEngine, MAX_BACKGROUND_SLOTS_PER_BOT, MAX_BACKGROUND_SLOTS_PER_PROFILE, MAX_RUN_SLOTS_PER_BOT, MAX_RUN_SLOTS_PER_PROFILE, NOTE_REPEAT_LINE, noteSteerText } from '../../src/mms/bots/activation/BotEngine'
 import { BOT_COMPACTION_HOLD_MS, type PreparedBotTurn } from '../../src/mms/bots/activation/dispatcher'
 import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
@@ -23,7 +23,10 @@ beforeEach(async () => {
   botId = (await createBot(f, { name: 'Pip', description: 'Keep my day in order.', reply: 'Hello.' })).botId
 })
 
-afterEach(() => f.close())
+afterEach(() => {
+  vi.unstubAllEnvs()
+  f.close()
+})
 
 const MIN = 60_000
 const command = (text: string): NormalisedCall => ({ kind: 'builtin', tool: 'shell', nativeName: 'bash', args: { command: text } })
@@ -242,6 +245,24 @@ describe('several pieces of work at once', () => {
     for (const entry of schedules) expect(f.book.get(botId, entry.scheduleId)!.skip).toEqual({ at: expect.any(String), reason: 'dropped_queue_full' })
     expect(BOT_SCHEDULE_SKIP_TEXT.dropped_queue_full).toBe('dropped: the bot had too much waiting')
     expect(chatOf(f, botId).filter((message) => message.error?.text.includes('dropping some of my scheduled runs'))).toHaveLength(1)
+  })
+
+  it.each([
+    { zone: 'Asia/Kolkata', times: ['2026-11-07T23:59:00Z', '2026-11-08T00:01:00Z', '2026-11-08T18:29:00Z', '2026-11-08T18:30:00Z'], days: ['2026-11-08', '2026-11-08', '2026-11-08', '2026-11-09'] },
+    { zone: 'America/Los_Angeles', times: ['2026-11-07T23:59:00Z', '2026-11-08T00:01:00Z', '2026-11-08T07:59:00Z', '2026-11-08T08:00:00Z'], days: ['2026-11-07', '2026-11-07', '2026-11-07', '2026-11-08'] }
+  ])('dropped-run notices change at local midnight in $zone, not UTC midnight', async ({ zone, times, days }) => {
+    vi.stubEnv('TZ', zone)
+    for (const [index, time] of times.entries()) {
+      f.clock.now = Date.parse(time)
+      expect(new Date(f.clock.now).getDate()).toBe(Number(days[index].slice(-2)))
+      // Overflow a queue of schedules through the public entry point; more than one drop shares the day's row.
+      for (let run = 0; run < 22; run++) {
+        f.bots.runScheduledOccurrence({ botId, scheduleId: `overflow-${index}-${run}`, prompt: 'Check.', occurrenceAt: time })
+      }
+      await flush()
+      const ids = chatOf(f, botId).filter((message) => message.error?.text.includes('dropping some of my scheduled runs')).map((message) => message.id)
+      expect(ids).toEqual([...new Set(days.slice(0, index + 1))].map((day) => `bm_${botId}_sched_dropped_${day}`))
+    }
   })
 
   it("only the same schedule's previous run skips it; other runs and the owner's work run beside it", async () => {

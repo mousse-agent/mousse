@@ -317,7 +317,7 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
       await options.journal.syncThread({ botId: e.botId, threadId: e.threadId, lane: e.lane, activationId: e.activationId })
       guarded(() => {
         // A standing wish the turn never saved is kept before the window moves past it.
-        if (e.lane === 'chat' && e.endedBy === 'settled') saveMissedWishes(store, e.botId, e.activationId)
+        if (e.lane === 'chat' && e.memoryLane === 'chat' && !e.consult && e.endedBy === 'settled') saveMissedWishes(store, e.botId, e.activationId)
         // The turn settled (not a consult of it): the reactions its pack carried are told.
         if (e.lane === 'chat' && e.endedBy === 'settled' && !e.consult) {
           const wishes = store.getState<number>(e.botId, `${WISH_OVER_CAP_CARRIED_KEY}${e.activationId}`)
