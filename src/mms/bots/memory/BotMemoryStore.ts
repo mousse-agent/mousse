@@ -261,7 +261,7 @@ export class BotMemoryStore {
       const key = 'request_frames_external_v1'
       if (this.getState('', key)) return
       this.run(`UPDATE bot_journal SET external = 1 WHERE kind IN ('notice', 'run_start')
-        AND (instr(text, '[output]') > 0 OR instr(text, '[data from ') > 0)`)
+        AND (instr(text, '[output]') > 0 OR instr(text, '[data from ') > 0 OR instr(text, '[Message from the bot "') > 0)`)
       this.setState('', key, true)
     })
     if (options.checkIndexes !== false) this.checkIndexes()
