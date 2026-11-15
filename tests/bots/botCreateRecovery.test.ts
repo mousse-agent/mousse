@@ -23,12 +23,14 @@ function restart(): void {
   f.bots = new BotEngine({ ...f.host, store: reopened, definitions: new BotDefinitionStore(reopened.directory, (id) => reopened!.registry(id)?.revision ?? null) })
 }
 
-for (const boundary of ['before bot', 'before turn', 'after turn'] as const) {
+for (const boundary of ['before bot', 'before home', 'before turn', 'after turn'] as const) {
   for (const recovery of ['retry', 'startup'] as const) {
     if (boundary === 'before bot' && recovery === 'startup') continue // No accepted bot exists to repair.
     it(`${recovery} keeps one bot and first turn after stopping ${boundary}`, async () => {
+      f.oneShot.fail = true
       const engine = f.bots
-      if (boundary === 'before bot') vi.spyOn(engine, 'createBot').mockImplementationOnce(() => { throw new Error('stopped') })
+      if (boundary === 'before bot') vi.spyOn(f.store, 'approve').mockImplementationOnce(() => { throw new Error('stopped') })
+      else if (boundary === 'before home') vi.spyOn(engine, 'ensureHome').mockImplementationOnce(() => { throw new Error('stopped') })
       else {
         const enqueue = engine.enqueueChat.bind(engine)
         vi.spyOn(engine, 'enqueueChat').mockImplementationOnce(async (...args) => {
@@ -38,6 +40,7 @@ for (const boundary of ['before bot', 'before turn', 'after turn'] as const) {
       }
       await expect(engine.service.create(input)).rejects.toThrow('stopped')
       const accepted = engine.service.list().bots[0]?.id
+      if (boundary === 'before bot') expect(accepted).toBeUndefined()
       restart()
       if (recovery === 'startup') {
         await f.bots.reconcileOnStartup()
@@ -50,6 +53,7 @@ for (const boundary of ['before bot', 'before turn', 'after turn'] as const) {
       const turns = reopened!.listActivations().filter((row) => row.idempotencyKey === 'create:create-once')
       expect(turns).toHaveLength(1)
       expect(turns[0]).toMatchObject({ botId: again.bot.id, lane: 'chat' })
+      expect(turns[0]!.trigger.input).toContain('set it with set_profile')
       // A different key is a separate create, even with the same description.
       await f.bots.service.create({ ...input, clientRequestId: 'another' })
       expect(f.bots.service.list().bots).toHaveLength(2)
