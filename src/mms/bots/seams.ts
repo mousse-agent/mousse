@@ -78,7 +78,7 @@ export interface BotToolHost {
     remove(botId: string, scheduleId: string): boolean
     /** The calling thread ends only the schedule on its own activation. */
     done?(threadId: string, why: string): void
-    list(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string }>
+    list(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string; leftOff?: string }>
   }
   setProfile(botId: string, p: { name?: string; description?: string }): void
   /**

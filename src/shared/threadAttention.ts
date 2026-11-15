@@ -65,6 +65,15 @@ export function worstOf(levels: Iterable<ThreadAttention>): ThreadAttention {
 }
 
 /** "1 thread needs you", "3 threads need you": the one phrase every surface uses for the count. */
-export function needsMeLabel(count: number): string {
-  return count === 1 ? '1 thread needs you' : `${count} threads need you`
+export function needsMeLabel(count: number, bots = 0): string {
+  if (bots === 0) return count === 1 ? '1 thread needs you' : `${count} threads need you`
+  const botLabel = bots === 1 ? '1 bot' : `${bots} bots`
+  if (count === 0) return `${botLabel} ${bots === 1 ? 'needs' : 'need'} you`
+  const threadLabel = count === 1 ? '1 thread' : `${count} threads`
+  return `${threadLabel} and ${botLabel} need you`
+}
+
+/** The app badge counts threads and bots together. Thread-only lists keep `needsMeLabel`. */
+export function attentionCountLabel(count: number): string {
+  return count === 1 ? '1 item needs you' : `${count} items need you`
 }

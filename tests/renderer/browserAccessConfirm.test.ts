@@ -8,6 +8,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { BrowserPanel } from '../../src/renderer/components/BrowserPanel'
 import { useAppStore } from '../../src/renderer/stores/appStore'
+import type { InAppBrowserState } from '../../src/shared/browser/inApp'
 import type { BrowserAccessState } from '../../src/shared/browser/access'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -17,16 +18,21 @@ let root: Root
 let host: HTMLElement
 let access: BrowserAccessState
 let request: ReturnType<typeof vi.fn>
+let emit: (state: InAppBrowserState) => void
+let takeControl: ReturnType<typeof vi.fn>
+let resumeAgent: ReturnType<typeof vi.fn>
 
 beforeEach(() => {
   access = { allowed: false, pending: [] }
+  takeControl = vi.fn(async () => {})
+  resumeAgent = vi.fn(async () => {})
   request = vi.fn(async (method: string, params: { allowed?: boolean }) => {
     if (method === 'browser.access.set') access = { ...access, allowed: Boolean(params.allowed) }
     return access
   })
   ;(window as unknown as { mousse: unknown }).mousse = {
     platformRequest: { request },
-    inAppBrowser: { registerTab: vi.fn(async () => ({ uiTabId: 'ui' })), onState: () => () => {} }
+    inAppBrowser: { registerTab: vi.fn(async () => ({ uiTabId: 'ui' })), takeControl, resumeAgent, onState: (listener: typeof emit) => { emit = listener; return () => {} } }
   }
   useAppStore.setState({
     profileId: 'profile_a', activeThreadId: 'thread_a', sidebarMode: 'projects', mainView: 'browser', mainAreaOpen: true,
@@ -88,5 +94,36 @@ describe('agent access from the browser toolbar', () => {
     await act(async () => { button('Allow').dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 })) })
     await settle()
     expect(sets()).toEqual([true])
+  })
+})
+
+
+describe('tab control from the browser menu', () => {
+  it.each([
+    ['agent', true, 'Take control'],
+    ['human', true, 'Resume agent'],
+    ['human', false, 'Resume agent']
+  ] as const)('%s control, access %s: %s stays available in the menu', async (owner, allowed, action) => {
+    access = { allowed, pending: [] }
+    act(() => root.render(createElement(BrowserPanel)))
+    await settle()
+    const tabId = useAppStore.getState().browserTabs[0].id
+    act(() => emit({ profileId: 'profile_a', uiTabId: tabId, threadId: 'thread_a', sessionId: 'session', owner, lifecycle: owner === 'agent' ? 'agent-controlled' : 'human-controlled', generation: 1 }))
+    await settle()
+    expect(host.querySelector('[aria-label="Agent browser controls"]')).toBeNull()
+    expect(host.querySelector('[role="status"]')?.textContent).toBe(owner === 'agent' ? 'An agent is using this tab' : 'You have control of this tab')
+    expect(toggle()).not.toBeNull()
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Browser menu"]')!.click())
+    const transfer = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((item) => item.textContent === action)!
+    expect(transfer).toBeDefined()
+    expect(transfer.closest('[inert]')).toBeNull()
+    expect(transfer.disabled).toBe(!allowed && owner === 'human')
+    await act(async () => transfer.click())
+    if (transfer.disabled) {
+      expect(resumeAgent).not.toHaveBeenCalled()
+    } else {
+      expect(owner === 'agent' ? takeControl : resumeAgent).toHaveBeenCalledWith(tabId)
+      expect(document.querySelector('[role="menu"]')).toBeNull()
+    }
   })
 })
