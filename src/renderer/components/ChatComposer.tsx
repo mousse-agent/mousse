@@ -84,6 +84,19 @@ export interface VoiceMessage {
   url: string
 }
 
+/** A row of the composer's own `/` list (`commandSuggestions`): its label and action, and the text picking it puts in. */
+export interface ComposerCommandSuggestion {
+  key: string
+  label: string
+  description: string
+  /** The box's text after picking it. */
+  fill: string
+  /** Enter (or a click) on it sends the box when it already reads `fill`, so a finished command runs in one press. */
+  complete: boolean
+}
+
+const NO_COMMAND_SUGGESTIONS: ComposerCommandSuggestion[] = []
+
 export interface ChatComposerProps {
   input: string
   onInputChange: (value: string) => void
@@ -106,6 +119,11 @@ export interface ChatComposerProps {
   run?: ComposerRunProps
   /** `/` commands (`/clear`, `/compact`, …) are offered while typing; a bot's composer has none. */
   slashCommands?: boolean
+  /**
+   * The parent's own `/` list (a bot's chat commands): the rows for what the box holds now, or none. Shown with the same
+   * keys as the thread's list: arrows move, Enter and Tab pick, Escape closes.
+   */
+  commandSuggestions?: (input: string) => ComposerCommandSuggestion[]
   loading?: boolean
   /** A run Stop can end, including one waiting on an approval or an answer; defaults to `loading`. */
   stoppable?: boolean
@@ -196,6 +214,7 @@ export function ChatComposer({
   enabledSkills,
   run,
   slashCommands = true,
+  commandSuggestions,
   loading = false,
   stoppable = loading,
   disabled = false,
@@ -369,12 +388,16 @@ export function ChatComposer({
 
   const suggestions = !slashCommands || showSkillsPicker || showMentionPicker ? [] : filterComposerCommandSuggestions(input).filter((command) => !skillsPickerDisabled || command.name !== 'skills')
   const showSuggestions = !disabled && !suggestionsDismissed && suggestions.length > 0
-  const pickerOpen = showSuggestions || showSkillsPicker || showMentionPicker
+  const ownSuggestions = commandSuggestions && !showSuggestions && !showSkillsPicker && !showMentionPicker ? commandSuggestions(input) : NO_COMMAND_SUGGESTIONS
+  const showOwnSuggestions = !disabled && !suggestionsDismissed && ownSuggestions.length > 0
+  const pickerOpen = showSuggestions || showSkillsPicker || showMentionPicker || showOwnSuggestions
   const pickerItemCount = showMentionPicker
     ? mentionItems.length
     : showSkillsPicker
       ? skillSuggestions.length
-      : suggestions.length
+      : showOwnSuggestions
+        ? ownSuggestions.length
+        : suggestions.length
   // `/skills` is a local UI command — never send it as a chat message.
   // While a turn is active, ordinary sends are still allowed (they stack on the per-thread queue).
   const canSend =
@@ -560,6 +583,19 @@ export function ChatComposer({
     requestAnimationFrame(() => composerInputRef.current?.focus())
   }
 
+  // A row of the parent's own list: a finished command the box already reads is sent; otherwise the box takes the row's
+  // text and the list follows it (after `/model ` it offers the slots).
+  const pickOwnSuggestion = (row: ComposerCommandSuggestion | undefined, run = true) => {
+    if (!row) return
+    if (run && row.complete && input.trim().toLowerCase() === row.fill.trim().toLowerCase()) {
+      submitRef.current()
+      return
+    }
+    setSuggestionsDismissed(false)
+    setSelectedSuggestion(0)
+    commitEdit({ value: row.fill, caret: row.fill.length })
+  }
+
   // Put the text box at `edit`: new value, caret after the inserted text, focus kept.
   const commitEdit = (edit: { value: string; caret: number }) => {
     onInputChange(edit.value)
@@ -743,7 +779,7 @@ export function ChatComposer({
 
     // One keyboard map for all three pickers: arrows, pages and Home/End move, Enter and Tab pick,
     // Escape closes. With no `@` rows Enter falls through and sends the text as typed.
-    const picker = showMentionPicker ? 'mention' : showSkillsPicker ? 'skills' : showSuggestions ? 'slash' : null
+    const picker = showMentionPicker ? 'mention' : showSkillsPicker ? 'skills' : showSuggestions ? 'slash' : showOwnSuggestions ? 'own' : null
     if (picker) {
       const action = pickerKeyAction(keyInfo, { count: pickerItemCount, swallowWhenEmpty: picker === 'skills' })
       if (action) {
@@ -758,6 +794,9 @@ export function ChatComposer({
           } else if (picker === 'skills') {
             const skill = skillSuggestions[selectedSuggestion]
             if (skill) applySkill(skill.id)
+          } else if (picker === 'own') {
+            // Tab only fills in; Enter also runs a finished command.
+            pickOwnSuggestion(ownSuggestions[selectedSuggestion], e.key !== 'Tab')
           } else {
             const suggestion = suggestions[selectedSuggestion]
             if (suggestion) {
@@ -1052,6 +1091,27 @@ export function ChatComposer({
             const command = suggestions[index]
             if (command) applySuggestion(command)
           }}
+          registerRow={registerSuggestionRow}
+        />
+      )}
+
+      {showOwnSuggestions && (
+        <ComposerSuggestionList
+          ariaLabel="Command suggestions"
+          rows={ownSuggestions.map(
+            (row): SuggestionRow => ({
+              key: row.key,
+              content: (
+                <>
+                  <span className="composer-command-suggestion-name">{row.label}</span>
+                  <span className="composer-command-suggestion-description">{row.description}</span>
+                </>
+              )
+            })
+          )}
+          selected={selectedSuggestion}
+          onHover={setSelectedSuggestion}
+          onPick={(index) => pickOwnSuggestion(ownSuggestions[index])}
           registerRow={registerSuggestionRow}
         />
       )}

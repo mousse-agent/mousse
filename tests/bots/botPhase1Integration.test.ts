@@ -335,6 +335,106 @@ describe('Bot Phase 1, composed', () => {
   })
 })
 
+describe('the owner\'s fresh starts: /clear, /forget history, /reset', () => {
+  /**
+   * A bot with something of everything: an owner entry and a run note, a chat with history, a schedule, a reminder, a
+   * chat turn that runs and a piece of work that runs.
+   */
+  async function lived(): Promise<{ botId: string; work: string; chatTurn: string }> {
+    const { bot } = await w.engine.service.create({ look: { colour: 'teal', accessory: 'cap' }, description: 'Plan my dinners.', clientRequestId: 'create-fresh' })
+    const botId = bot.id
+    await dispatch(chatActivation(botId).id, () => {}, 'Hello, I plan dinners.')
+    w.clock.now += 60_000
+    await w.engine.service.chatSend({ botId, text: 'I am vegetarian. Plan dinner every hour.', clientRequestId: 'fresh-1' })
+    await dispatch(chatActivation(botId).id, async ({ call }) => {
+      await call('memory_save', { text: 'The owner is vegetarian.', kind: 'owner' })
+      await call('bot_schedule_add', { when: { kind: 'interval', minutes: 60 }, prompt: 'Plan tonight\'s dinner.' })
+    }, 'Noted: lentils it is.')
+    w.clock.now += 60_000
+    await w.engine.service.chatSend({ botId, text: 'Find a risotto recipe.', clientRequestId: 'fresh-2' })
+    let first = ''
+    await dispatch(chatActivation(botId).id, async ({ call }) => {
+      first = JSON.parse((await call('work_start', { title: 'Risotto', brief: 'Find a risotto recipe.' })).text).workId
+    }, 'On it.')
+    await dispatch(first, async ({ call }) => { await call('memory_save', { text: 'The recipe site needs a login.' }) }, 'Mushroom risotto, 40 minutes.')
+    w.clock.now += 60_000
+    await w.engine.service.chatSend({ botId, text: 'And a soup?', clientRequestId: 'fresh-3' })
+    let work = ''
+    await dispatch(chatActivation(botId).id, async ({ call }) => {
+      work = JSON.parse((await call('work_start', { title: 'Soup', brief: 'Find a soup recipe.' })).text).workId
+    }, 'Looking.')
+    w.engine.tools.reminders.add(botId, chatActivation(botId)?.id ?? work, { dueAt: new Date(w.clock.now + HOUR).toISOString(), text: 'Soak the beans.' })
+    await w.engine.service.chatSend({ botId, text: 'Thanks!', clientRequestId: 'fresh-4' })
+    await flush()
+    expect(w.store.activation(work)).toMatchObject({ status: 'running' })
+    return { botId, work, chatTurn: chatActivation(botId).id }
+  }
+
+  const entries = (botId: string) => w.memory.list(botId).entries.map((entry) => [entry.kind, entry.text])
+
+  it('/clear deletes the chat and stops its turn; memory, history, work and schedules stay', async () => {
+    const { botId, work, chatTurn } = await lived()
+    await w.engine.service.chatClear(botId)
+    expect(chat(botId)).toEqual([])
+    expect(w.store.activation(chatTurn)).toMatchObject({ status: 'cancelled' })
+    expect(w.store.activation(work)).toMatchObject({ status: 'running' })
+    expect(entries(botId)).toEqual([['owner', 'The owner is vegetarian.'], ['run_note', 'The recipe site needs a login.']])
+    expect(w.memory.search(botId, { query: 'risotto' }).length).toBeGreaterThan(0)
+    expect(w.engine.listSchedules(botId)).toHaveLength(1)
+    // The bot still remembers the conversation: its next turn's pack carries it.
+    w.clock.now += 60_000
+    await w.engine.service.chatSend({ botId, text: 'What did we say?', clientRequestId: 'fresh-5' })
+    const next = await dispatch(chatActivation(botId).id, () => {}, 'Risotto and soup.')
+    expect(next.preamble).toContain('Find a risotto recipe.')
+    expect(chat(botId).map((message) => message.text)).toEqual(['What did we say?', 'Risotto and soup.'])
+  })
+
+  it('/forget history clears the chat and its history and run notes; the owner\'s entries stay and the next pack has no old chat', async () => {
+    const { botId, work } = await lived()
+    expect(await w.engine.service.memoryWipe(botId, 'saved')).toEqual({ forgotten: 1 })
+    expect(chat(botId)).toEqual([])
+    expect(entries(botId)).toEqual([['owner', 'The owner is vegetarian.']])
+    expect(w.memory.search(botId, { query: 'risotto' })).toEqual([])
+    expect(w.store.activation(work)).toMatchObject({ status: 'running' })
+    w.clock.now += 60_000
+    await w.engine.service.chatSend({ botId, text: 'Hello again.', clientRequestId: 'fresh-5' })
+    const next = await dispatch(chatActivation(botId).id, () => {}, 'Hi.')
+    expect(next.preamble).toContain('The owner is vegetarian.')
+    for (const old of ['Find a risotto recipe.', 'Noted: lentils it is.', 'And a soup?', 'site needs a login']) expect(next.preamble).not.toContain(old)
+  })
+
+  it('/forget forgets every entry; the chat stays', async () => {
+    const { botId } = await lived()
+    const before = chat(botId).length
+    expect(await w.engine.service.memoryWipe(botId)).toEqual({ forgotten: 2 })
+    expect(entries(botId)).toEqual([])
+    expect(chat(botId)).toHaveLength(before)
+  })
+
+  it('/reset stops everything and deletes the chat, memory, schedules and reminders; the name, permissions and models stay', async () => {
+    const { botId, work, chatTurn } = await lived()
+    w.engine.pauseBot(botId)
+    const definition = w.engine.definitionOf(botId)
+    const { bot } = await w.engine.service.reset(botId)
+    expect(bot).toMatchObject({ id: botId, name: definition.name })
+    expect(bot.state).not.toBe('paused')
+    for (const id of [work, chatTurn]) expect(w.store.activation(id)).toMatchObject({ status: 'cancelled' })
+    expect(w.store.activationsIn(botId, ['queued', 'running', 'waiting_grant', 'paused', 'blocked'])).toEqual([])
+    expect(chat(botId)).toEqual([])
+    expect(w.memory.list(botId, true).entries).toEqual([])
+    expect(w.memory.journal(botId)).toEqual([])
+    expect(w.engine.listSchedules(botId)).toEqual([])
+    expect(w.store.waitingReminders(botId)).toEqual([])
+    const after = w.engine.definitionOf(botId)
+    expect({ name: after.name, look: after.look, permissions: after.permissions, main: after.main }).toEqual({ name: definition.name, look: definition.look, permissions: definition.permissions, main: definition.main })
+    // It chats again from a fresh start.
+    await w.engine.service.chatSend({ botId, text: 'Hello?', clientRequestId: 'fresh-5' })
+    const next = await dispatch(chatActivation(botId).id, () => {}, 'Hello! How can I help?')
+    expect(next.preamble).toContain('Recent chat: (nothing yet)')
+    expect(next.preamble).not.toContain('vegetarian')
+  })
+})
+
 describe('a saved preference reaches every turn', () => {
   const WISH = 'The owner wants no em dashes in my messages.'
   const followsCore = (prepared: PreparedBotTurn) => {

@@ -108,6 +108,29 @@ describe('validation', () => {
     await expect(call('bots.create', { look: LOOK, description: 'Track my spending.', clientRequestId: 'c10', model: 'sonnet' })).rejects.toMatchObject({ code: 'model_unavailable' })
   })
 
+  it('the chat\'s slash commands: setCustom, chat.clear, memory.wipe and reset go through with exact keys', async () => {
+    ;(f.bots.service as unknown as { options: { modelOptions?: () => Promise<BotModelOption[]> } }).options.modelOptions = async () => [OPUS_SUB]
+    const botId = await created()
+    const refused: Array<[string, Record<string, unknown>, string]> = [
+      ['bots.model.setCustom', { botId, name: 'docs' }, 'invalid_params'],
+      ['bots.model.setCustom', { botId, name: 'docs', pick: { instanceId: 'claude', model: 'opus', credential: 'api_key' } }, 'invalid_params'],
+      ['bots.model.setCustom', { botId, name: 'work', pick: OPUS_PICK }, 'invalid_params'],
+      ['bots.model.setCustom', { botId, name: 'docs', pick: OPUS_PICK, extra: 1 }, 'unknown_field'],
+      ['bots.memory.wipe', { botId, keep: 'everything' }, 'invalid_params'],
+      ['bots.chat.clear', { botId: 'Not A Bot' }, 'invalid_params']
+    ]
+    for (const [method, params, code] of refused) await expect(call(method, params), `${method} ${JSON.stringify(params)}`).rejects.toMatchObject({ code })
+    await call('bots.model.setCustom', { botId, name: 'Docs', pick: OPUS_PICK, description: 'Writing docs' })
+    expect(await call('bots.model.get', { botId })).toMatchObject({ custom: [{ name: 'docs', pick: OPUS_PICK, description: 'Writing docs' }] })
+    expect(await call('bots.chat.clear', { botId })).toEqual({})
+    expect(f.bots.service.chatList(botId).messages).toEqual([])
+    expect(await call('bots.memory.wipe', { botId })).toEqual({ forgotten: 0 })
+    expect(await call('bots.memory.wipe', { botId, keep: 'saved' })).toEqual({ forgotten: 0 })
+    expect(await call<{ bot: BotSummary }>('bots.reset', { botId })).toMatchObject({ bot: { id: botId } })
+    // The slot is the owner's model choice: a reset keeps it.
+    expect(f.bots.customSlots(botId).map((slot) => slot.name)).toEqual(['docs'])
+  })
+
   it('setSlots saves only the rows given, each offered now; oneWork copies Medium work; a by-usage bot shows Pick a model (#673)', async () => {
     const options = (f.bots.service as unknown as { options: { modelOptions?: () => Promise<BotModelOption[]> } }).options
     options.modelOptions = async () => [OPUS_SUB, OPUS_KEY]

@@ -39,6 +39,17 @@ export interface BotSituation {
   blocked?: string[]
   /** Questions the bot's work waits on (issue #1123), each as one line with its id, for `question_answer`. */
   questions?: string[]
+  /** The owner's custom slots (`/model <name> …`): work whose job matches one runs on its model. */
+  slots?: Array<{ name: string; description?: string }>
+}
+
+/**
+ * The chat situation's line on the owner's custom slots: each by name and what it is for, and how to route work to one.
+ * At most 12 slots, each description cut to 80 characters, so the line stays within about 400 tokens.
+ */
+export function customSlotsLine(slots: ReadonlyArray<{ name: string; description?: string }>): string {
+  const listed = slots.map((slot) => (slot.description ? `${slot.name} (${cut(slot.description, 80)})` : slot.name)).join('; ')
+  return `Your owner's slots for work: ${listed}. Start work whose job matches a slot's name or description with work_start's slot set to it; other work by level, as before.`
 }
 
 export interface BotContextPackOptions {
@@ -186,8 +197,9 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
       const guarded = screened.ok ? cut(screened.text, 80) : 'ended'
       lines.push(`Last run: ${guarded}, ${agoLabel(lastEnd.at, now)}.`)
     }
-    // `extra` (the reactions) keeps its own budget: a full situation never pushes it out.
-    return `Situation:\n${[...withinBudget(lines, BOT_CHAT_PACK_BUDGET.situation), ...extra].join('\n')}`
+    // The custom slots' line and `extra` (the reactions) are bounded on their own: a full situation never pushes them out.
+    const slots = chat && facts.slots?.length ? [customSlotsLine(facts.slots)] : []
+    return `Situation:\n${[...withinBudget(lines, BOT_CHAT_PACK_BUDGET.situation), ...slots, ...extra].join('\n')}`
   }
 
   const wrap = (blocks: string[]) => [BOT_MEMORY_WRAPPER_OPEN, ...blocks.filter(Boolean), BOT_MEMORY_WRAPPER_CLOSE].join('\n\n')

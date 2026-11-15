@@ -763,7 +763,7 @@ describe('what renders again', () => {
 })
 
 describe('the composer', () => {
-  it('is the thread composer with emoji, attach, dictation and send, and no model, context, permission, commands or skills', async () => {
+  it('is the thread composer with emoji, attach, dictation and send, and no model, context, permission, thread commands or skills', async () => {
     await open()
     const form = composer()
     expect(form.querySelectorAll('textarea')).toHaveLength(1)
@@ -772,11 +772,148 @@ describe('the composer', () => {
     expect([...form.querySelectorAll('button')].map((element) => element.getAttribute('aria-label'))).toEqual(['Emoji', 'Attach files', 'Dictate', 'Send message'])
     expect(form.querySelector('.composer-run-controls, .composer-model-btn, .composer-context-anchor, .composer-permission-chip')).toBeNull()
     expect(button('Send message')?.disabled).toBe(true)
-    // Neither `/` commands nor `@` skills open a list.
-    for (const text of ['/', '/c', '/skills', '@']) {
+    // A thread's `/` commands and `@` skills open no list; `/` opens the bot's own commands (below).
+    for (const text of ['/skills', '/compact', '@']) {
       await type(box(), text)
       expect(host.querySelector('#composer-command-suggestions')).toBeNull()
     }
+  })
+
+  describe('/ commands', () => {
+    const list = () => host.querySelector('#composer-command-suggestions')
+    const rows = () => [...(list()?.querySelectorAll('[role="option"]') ?? [])].map((row) => row.textContent)
+    const notes = () => [...transcript().querySelectorAll('.bot-system-line.is-note')].map((line) => line.textContent)
+    const dialog = () => host.querySelector<HTMLElement>('[role="dialog"]')
+
+    it('a slash opens the commands, each with what it does; typing narrows them, arrows move, Escape closes', async () => {
+      await open()
+      await type(box(), '/')
+      expect(rows()).toContain('/clearWipe the chat')
+      expect(rows()).toHaveLength(10)
+      await type(box(), '/st')
+      expect(rows()).toEqual(['/stopStop all running work', '/statusShow work, threads and schedules'])
+      expect(list()!.querySelector('[aria-selected="true"]')?.textContent).toContain('/stop')
+      await press('ArrowDown')
+      expect(list()!.querySelector('[aria-selected="true"]')?.textContent).toContain('/status')
+      // Tab fills the command in; it does not run it.
+      await press('Tab')
+      expect(box().value).toBe('/status')
+      expect(fake.calls.some(([name]) => name === 'get')).toBe(false)
+      await press('Escape')
+      expect(list()).toBeNull()
+    })
+
+    it('runs /clear in Mousse: the bot is sent nothing, the chat empties and a line says so', async () => {
+      fake.chats.inbox = [message(1, { author: 'owner', text: 'Hi' }), message(2, { text: 'Hello!' })]
+      await open()
+      await settle()
+      await type(box(), '/cl')
+      // Enter on a command not typed in full fills it in; a second Enter runs it.
+      await press('Enter')
+      expect(box().value).toBe('/clear')
+      await press('Enter')
+      await settle()
+      expect(fake.client.send).not.toHaveBeenCalled()
+      expect(fake.client.clearChat).toHaveBeenCalledWith('inbox')
+      expect(transcript().querySelectorAll('.bot-you, .bot-message')).toHaveLength(0)
+      expect(notes()).toEqual(['Chat cleared.'])
+      expect(box().value).toBe('')
+    })
+
+    it('an unknown command shows a short error and is not sent; a path at the start of a message is sent as written', async () => {
+      await open()
+      await type(box(), '/xyz please')
+      await press('Enter')
+      await settle()
+      expect(fake.client.send).not.toHaveBeenCalled()
+      expect(transcript().querySelector('.bot-system-line.is-error')?.textContent).toBe("/xyz isn't a command. Type / to see them.")
+      await type(box(), '/Users/me/notes.txt is broken')
+      await press('Enter')
+      await settle()
+      expect(vi.mocked(fake.client.send).mock.calls.map((call) => call[1])).toEqual(['/Users/me/notes.txt is broken'])
+    })
+
+    it('/stop stops the chat turn, every piece of work and every background command', async () => {
+      await open(summary('inbox', { name: 'Inbox helper', state: 'working', chat: { activationId: 'c1' }, work: [{ id: 'w1', title: 'Search', status: 'running', startedAt: AT }], watchers: [{ id: 'x1', title: 'Watch', command: 'tail', startedAt: AT, until: AT }] }))
+      await type(box(), '/stop')
+      await press('Enter')
+      await settle()
+      expect(fake.client.stop).toHaveBeenCalledWith('inbox')
+      expect(vi.mocked(fake.client.stopWork).mock.calls.map((call) => call[1]).sort()).toEqual(['w1', 'x1'])
+      expect(fake.client.send).not.toHaveBeenCalled()
+      expect(notes()).toEqual(['Stopped 3 things.'])
+    })
+
+    it('/status shows the work and the schedules from the app, /pause and /resume switch the schedules', async () => {
+      fake.details.inbox = { summary: inbox, permissions: [], runs: [{ id: 's1', label: 'every weekday · 09:00', kind: 'schedule' }] }
+      await open()
+      await type(box(), '/status')
+      await press('Enter')
+      await settle()
+      expect(notes()).toEqual(['Work: none\nSchedules: every weekday · 09:00'])
+      await type(box(), '/pause')
+      await press('Enter')
+      await settle()
+      expect(fake.client.pause).toHaveBeenCalledWith('inbox')
+      await type(box(), '/resume')
+      await press('Enter')
+      await settle()
+      expect(fake.client.resume).toHaveBeenCalledWith('inbox')
+      expect(notes().slice(1)).toEqual(['Paused: schedules and wake-ups are off.', 'Resumed.'])
+      expect(fake.client.send).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      ['/forget', 'Wipe memory', ['inbox', undefined], 'Memory wiped: 0 entries.'],
+      ['/forget history', 'Wipe history', ['inbox', 'saved'], 'Chat history and run notes wiped; memory kept.']
+    ])('%s asks first: Cancel leaves everything, the confirm wipes', async (command, action, args, line) => {
+      await open()
+      await type(box(), command)
+      await press('Enter')
+      await settle()
+      expect(dialog()).not.toBeNull()
+      await click(button('Cancel', dialog()!))
+      expect(dialog()).toBeNull()
+      expect(fake.client.wipeMemory).not.toHaveBeenCalled()
+      await type(box(), command)
+      await press('Enter')
+      await settle()
+      await click(button(action, dialog()!))
+      await settle()
+      expect(fake.client.wipeMemory).toHaveBeenCalledWith(...args)
+      expect(notes()).toEqual([line])
+      expect(fake.client.send).not.toHaveBeenCalled()
+    })
+
+    it('/reset asks first, then starts the bot fresh', async () => {
+      await open()
+      await type(box(), '/reset')
+      await press('Enter')
+      await settle()
+      await click(button('Reset', dialog()!))
+      await settle()
+      expect(fake.client.reset).toHaveBeenCalledWith('inbox')
+      expect(notes()).toEqual(['Fresh start: chat, memory, schedules and reminders wiped.'])
+    })
+
+    it('/model offers the slots, then the models; a custom slot takes everything after the model as its description', async () => {
+      const providers = [{ id: 'codex' as const, instanceId: 'openai-codex', label: 'Codex', models: [{ id: 'gpt-6.1-sol', label: 'GPT 6.1 Sol' }] }]
+      vi.mocked(fake.client.model).mockImplementation(async () => ({ model: null, models: [], computer: 'this_computer', computers: [], providers, slots: { talk: null, light: null, medium: null, hard: null }, custom: [] }))
+      await open()
+      await type(box(), '/model ')
+      await settle()
+      expect(rows().map((row) => row?.split(/[A-Z]/)[0])).toEqual(['talk', 'work', 'light', 'medium', 'hard', 'images'])
+      await type(box(), '/model iosdev ')
+      expect(rows()).toEqual(['openai-codex:gpt-6.1-solGPT 6.1 Sol · Codex'])
+      await press('Enter')
+      expect(box().value).toBe('/model iosdev openai-codex:gpt-6.1-sol ')
+      await type(box(), `${box().value}iOS apps, Swift, Xcode`)
+      await press('Enter')
+      await settle()
+      expect(fake.client.setCustomSlot).toHaveBeenCalledWith('inbox', 'iosdev', { instanceId: 'openai-codex', model: 'gpt-6.1-sol' }, 'iOS apps, Swift, Xcode')
+      expect(notes()).toEqual(['iosdev now runs on GPT 6.1 Sol · Codex.'])
+      expect(fake.client.send).not.toHaveBeenCalled()
+    })
   })
 
   it('Emoji opens a small grid; a pick goes in at the caret and the grid closes', async () => {

@@ -12,7 +12,7 @@ import { createBotModelResolver } from '../../src/mms/bots/model/BotModelResolve
 import type { BotRuntimeHold } from '../../src/mms/bots/seams'
 import type { BotActivationTrigger, BotDepth, BotModelPick, BotModelSlotKey, BotModelSlots, BotThreadSpec } from '../../src/shared/bots/personal/definition'
 import type { BotModelOption } from '../../src/shared/bots/personal/methods'
-import { modelSlotsProblem, ownerNamesModel, pickProblemText, plainLabel, slotsAllOn, slotsOf, slotsWith, turnModelOf, UNPICKED_SLOTS, withSlots, workRowsDiffer } from '../../src/shared/bots/personal/modelSlots'
+import { customSlotsOf, imagePickOf, modelSlotsProblem, ownerNamesModel, pickProblemText, plainLabel, slotsAllOn, slotsOf, slotsWith, turnModelOf, UNPICKED_SLOTS, withCustomSlot, withImagePick, withSlots, workRowsDiffer } from '../../src/shared/bots/personal/modelSlots'
 import type { InstanceSnapshot } from '../../src/shared/harness/status'
 import type { InstanceModel, RunPolicy } from '../../src/shared/harness/types'
 import type { ModelCatalog } from '../../src/shared/modelCatalog'
@@ -123,6 +123,59 @@ describe('which row a turn takes', () => {
     for (const [picked, turn, slot, pick, depth] of table) expect(turnModelOf(rows(picked), turn)).toEqual({ slot, pick, depth })
     // An activation's own pick still replaces whatever the row borrows.
     expect(turnModelOf(rows({ talk: TALK }), { ...work('hard'), modelOverride: { mode: 'named', ...MEDIUM, depth: 'deep' } })).toEqual({ slot: 'hard', pick: MEDIUM, depth: 'deep' })
+  })
+})
+
+describe('custom slots', () => {
+  const IOS = { instanceId: 'codex', model: 'gpt-6', effort: 'high', credential: 'subscription' as const, account: 'acct-1' }
+  const DOCS = { instanceId: 'pi:key', model: 'haiku' }
+  const IMAGE = { instanceId: 'pi:openrouter', model: 'img' }
+  const rows = withImagePick(withSlots(thread({ mode: 'auto', depth: 'normal' }), ROWS), IMAGE)
+  const routed = (slot: string, level?: 'light' | 'medium' | 'hard') => ({ lane: 'run' as const, trigger: { ...work(level).trigger, slot } as BotActivationTrigger })
+
+  it('are kept beside the rows and the Images row, with their sign-in, changed in place and removed by name', () => {
+    const one = withCustomSlot(rows, 'iosdev', IOS, 'iOS apps, Swift, Xcode')
+    const two = withCustomSlot(one, 'docs', DOCS)
+    expect(customSlotsOf(two)).toEqual([{ name: 'iosdev', pick: IOS, description: 'iOS apps, Swift, Xcode' }, { name: 'docs', pick: DOCS }])
+    expect(slotsOf(two)).toEqual(ROWS)
+    expect(imagePickOf(two)).toEqual(IMAGE)
+    // A change keeps the slot's place; the rows and the Images row written again keep the slots.
+    expect(customSlotsOf(withCustomSlot(two, 'iosdev', DOCS)).map((slot) => [slot.name, slot.pick.model])).toEqual([['iosdev', 'haiku'], ['docs', 'haiku']])
+    expect(customSlotsOf(withImagePick(withSlots(two, { ...ROWS, talk: MEDIUM }), null))).toEqual(customSlotsOf(two))
+    expect(customSlotsOf(withCustomSlot(two, 'iosdev', null))).toEqual([{ name: 'docs', pick: DOCS }])
+    // The last one removed leaves the rows as they were stored before.
+    expect(withCustomSlot(withCustomSlot(rows, 'docs', DOCS), 'docs', null)).toEqual(rows)
+    // An older build's rewrite of the model drops them with the rows.
+    expect(customSlotsOf({ ...two, model: { mode: 'named', model: 'sonnet', depth: 'normal' } })).toEqual([])
+  })
+
+  it('a stored slot that is malformed is skipped, and the rest are read', () => {
+    const stored = (custom: unknown[]) => ({ ...rows, slots: { ...rows.slots, custom } as unknown as BotModelSlots })
+    const good = { name: 'docs', pick: DOCS }
+    const table: Array<[string, unknown]> = [
+      ['a base slot\'s name', { name: 'talk', pick: DOCS }],
+      ['upper case', { name: 'Docs', pick: DOCS }],
+      ['a name seen before', { name: 'docs', pick: IOS }],
+      ['a pick by name only', { name: 'byname', pick: { model: 'opus' } }],
+      ['no pick', { name: 'nopick' }],
+      ['a description over two lines', { name: 'twolines', pick: DOCS, description: 'one\ntwo' }],
+      ['not an object', 'docs']
+    ]
+    for (const [why, bad] of table) expect(customSlotsOf(stored([good, bad])), why).toEqual([good])
+    expect(customSlotsOf(stored(Array.from({ length: 14 }, (_, n) => ({ name: `s${n}`, pick: DOCS }))))).toHaveLength(12)
+  })
+
+  it('work routed to a slot runs on its pick while the slot is there; its own pick still wins, and the chat never takes one', () => {
+    const spec = withCustomSlot(withCustomSlot(rows, 'iosdev', IOS), 'docs', DOCS)
+    const table: Array<[string, Parameters<typeof turnModelOf>[1], ReturnType<typeof turnModelOf>]> = [
+      ['a slot that is there', routed('iosdev'), { slot: 'custom:iosdev', pick: IOS, depth: 'normal' }],
+      ['its level still sets the depth', routed('docs', 'hard'), { slot: 'custom:docs', pick: DOCS, depth: 'deep' }],
+      ['a slot removed since', routed('gone', 'light'), { slot: 'light', pick: LIGHT, depth: 'quick' }],
+      ['its own pick wins', { ...routed('iosdev'), modelOverride: { mode: 'named', ...MEDIUM, depth: 'normal' } }, { slot: 'medium', pick: MEDIUM, depth: 'normal' }],
+      ['the chat lane', { lane: 'chat', trigger: routed('iosdev').trigger }, { slot: 'talk', pick: TALK, depth: 'normal' }]
+    ]
+    for (const [why, activation, expected] of table) expect(turnModelOf(spec, activation), why).toEqual(expected)
+    expect(turnModelOf(withCustomSlot(spec, 'iosdev', null), routed('iosdev'))).toEqual({ slot: 'medium', pick: MEDIUM, depth: 'normal' })
   })
 })
 
@@ -354,6 +407,39 @@ describe('the engine on rows', () => {
     f.bots.setOwnerSlots(botId, { light: SUB_WORK })
     await f.bots.service.modelSlotsSet(botId, { oneWork: true })
     expect(f.bots.ownerSlots(botId)).toEqual({ talk: SUB_WORK, light: SUB_TALK, medium: SUB_TALK, hard: SUB_TALK })
+  })
+
+  it('/model <name>: a custom slot is saved with its sign-in and shown without it; bad names, a 13th slot and a pick not offered are refused', async () => {
+    f.bots.setOwnerSlots(botId, ROWS)
+    const options = (f.bots.service as unknown as { options: { modelOptions?: () => Promise<BotModelOption[]> } }).options
+    options.modelOptions = async () => [{ instanceId: 'claude:sub', entry: 'Claude', model: 'sonnet', label: 'Sonnet', efforts: ['high'], credential: 'subscription', account: 'acct-1' }]
+    const pick = { instanceId: 'claude:sub', model: 'sonnet', effort: 'high' }
+    const set = (name: string, given: BotModelPick | null, description?: string) => f.bots.service.modelCustomSet(botId, name, given, description)
+    await set('iOSDev', pick, '  iOS apps,\nSwift, Xcode ')
+    expect(f.bots.customSlots(botId)).toEqual([{ name: 'iosdev', pick: { ...pick, credential: 'subscription', account: 'acct-1' }, description: 'iOS apps, Swift, Xcode' }])
+    expect((await f.bots.service.modelGet(botId)).custom).toEqual([{ name: 'iosdev', pick, description: 'iOS apps, Swift, Xcode' }])
+    // The rows stay, and a new pick without words keeps the slot's description.
+    expect(f.bots.ownerSlots(botId)).toEqual(ROWS)
+    await set('iosdev', { instanceId: 'claude:sub', model: 'sonnet' })
+    expect(f.bots.customSlots(botId)[0]).toMatchObject({ pick: { model: 'sonnet' }, description: 'iOS apps, Swift, Xcode' })
+    const refused: Array<[string, () => Promise<unknown>, object]> = [
+      ['a base slot', () => set('Talk', pick), { code: 'invalid_params', message: 'talk is a base slot.' }],
+      ['Images', () => set('images', pick), { code: 'invalid_params', message: 'images is a base slot.' }],
+      ['a malformed name', () => set('ios dev', pick), { code: 'invalid_params' }],
+      ['a description too long', () => set('docs', pick, 'x'.repeat(201)), { code: 'invalid_params' }],
+      ['a pick not offered', () => set('docs', { instanceId: 'claude:sub', model: 'opus' }), { code: 'model_unavailable' }],
+      ['a reasoning level not offered', () => set('docs', { ...pick, effort: 'max' }), { code: 'model_unavailable' }],
+      ['removing a slot it doesn\'t have', () => set('docs', null), { code: 'invalid_params', message: 'No slot named docs.' }]
+    ]
+    for (const [why, call, error] of refused) await expect(call(), why).rejects.toMatchObject(error)
+    for (let n = 2; n <= 12; n += 1) await set(`s${n}`, pick)
+    await expect(set('thirteen', pick)).rejects.toMatchObject({ code: 'invalid_params', message: expect.stringMatching(/at most 12/) })
+    // Changing one of the twelve is not a 13th.
+    await set('s2', pick, 'Second')
+    await set('iosdev', null)
+    expect(f.bots.customSlots(botId).map((slot) => slot.name)).toEqual(['s2', 's3', 's4', 's5', 's6', 's7', 's8', 's9', 's10', 's11', 's12'])
+    await set('thirteen', pick)
+    expect(f.bots.customSlots(botId)).toHaveLength(12)
   })
 
   it('Talk can\'t run: every owner message gets the line with no model call, working rows keep their schedules, and it clears by itself', async () => {

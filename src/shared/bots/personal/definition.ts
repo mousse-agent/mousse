@@ -160,7 +160,28 @@ export const BOT_MODEL_SLOT_KEYS: readonly BotModelSlotKey[] = ['talk', 'light',
  * The Images row is no turn's model and is never chosen by Mousse: absent or null, the bot has no image tool. Older
  * builds ignore it (`modelSlotsProblem` skips a key it does not know) and keep it while the rows are live (`withSlots`).
  */
-export type BotStoredSlots = BotModelSlots & { image?: BotModelPick | null }
+export type BotStoredSlots = BotModelSlots & { image?: BotModelPick | null; custom?: BotCustomSlot[] }
+
+/**
+ * A slot the owner named (`/model iosdev <model> iOS apps, Swift, Xcode`): work whose job matches its name or
+ * description runs on its pick; other work runs on its level's row. Stored as `main.slots.custom` beside the rows, which
+ * older builds ignore and keep (`modelSlotsProblem`, `withSlots`). `name` is lower case, never a base slot's name.
+ */
+export interface BotCustomSlot {
+  name: string
+  pick: BotModelPick
+  /** Plain text, one line: what work it is for. */
+  description?: string
+}
+
+/** The slot names the owner can't give a custom slot: the rows, Work (all three levels) and Images. */
+export const BOT_BASE_SLOT_NAMES = ['talk', 'work', 'light', 'medium', 'hard', 'images', 'image'] as const
+/** A custom slot's name: a letter, then letters, digits, `-` or `_`; at most 24 characters, lower case. */
+export const BOT_CUSTOM_SLOT_NAME = /^[a-z][a-z0-9_-]{0,23}$/
+/** The most custom slots a bot keeps. */
+export const MAX_BOT_CUSTOM_SLOTS = 12
+/** The longest custom slot description. */
+export const MAX_BOT_CUSTOM_SLOT_DESCRIPTION = 200
 
 /** At most this many images a bot makes in a day (the owner's local day), counted by the service (#1088). */
 export const BOT_IMAGES_PER_DAY = 20
@@ -298,9 +319,11 @@ export type BotActivationTrigger =
    * chat, whose report answers `replyTo`, the owner's message that asked for it. `from`: the chat activation or
    * reminder that started it. `level`: how hard the bot judged it (#673); absent, the bot's standing level. `model`: the
    * model the owner asked for this work alone, as the work line names it, when it is not the bot's usual one for that
-   * level; the pick itself is the activation's own (`BotActivationRow.modelOverride`).
+   * level; the pick itself is the activation's own (`BotActivationRow.modelOverride`). `slot`: the owner's custom slot
+   * (`BotCustomSlot.name`) the bot routed this work to; it runs on that slot's pick while the slot exists, else on its
+   * level's row.
    */
-  | { kind: 'work'; input: string; title: string; replyTo?: string; from: string; level?: BotWorkLevel; model?: BotWorkModelName }
+  | { kind: 'work'; input: string; title: string; replyTo?: string; from: string; level?: BotWorkLevel; model?: BotWorkModelName; slot?: string }
 
 /** The model one piece of work was asked to run on, for the work line: its name, its entry's, and a reasoning level. */
 export interface BotWorkModelName {

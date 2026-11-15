@@ -5,7 +5,7 @@ import type { BotLook } from '../../shared/bots/personal/look'
 import type { BotMemoryEntry } from '../../shared/bots/personal/memory'
 import type { BotModelPick, BotModelSlots } from '../../shared/bots/personal/definition'
 import { attachmentTooLargeText } from '../../shared/bots/personal/attachments'
-import { MAX_BOT_CHAT_ATTACHMENT_BYTES, MAX_BOT_CHAT_ATTACHMENTS, type BotChatAttachment, type BotShownRows } from '../../shared/bots/personal/methods'
+import { MAX_BOT_CHAT_ATTACHMENT_BYTES, MAX_BOT_CHAT_ATTACHMENTS, type BotChatAttachment, type BotShownRows, type BotsPersonalV2Result } from '../../shared/bots/personal/methods'
 import type { BotFaceState } from '../components/bots/face/BotFace'
 import type { AttachedFile } from '../components/ChatComposer'
 import { attachmentPath, createPersonalBotsClient, errorText, personalBotsEvents, type PersonalBotsClient } from '../services/personalBotsClient'
@@ -42,7 +42,12 @@ export interface BotChatCache {
   loadingOlder: boolean
 }
 
-export type BotDialog = { kind: 'rename' | 'look' | 'delete'; botId: string }
+/** A `/` command that asks first (`/forget`, `/forget history`, `/reset`). */
+export type BotConfirmCommand = 'forget' | 'forget-history' | 'reset'
+export type BotDialog = { kind: 'rename' | 'look' | 'delete'; botId: string } | { kind: 'confirm'; botId: string; command: BotConfirmCommand }
+
+/** A line Mousse shows in a bot's chat for the owner alone (a `/` command's result): never sent, never the bot's. */
+export interface BotLocalNote { id: string; at: string; text: string; error?: true }
 
 /**
  * What the owner has put into New bot so far. It lives here, not in the dialog, so nothing that
@@ -126,6 +131,14 @@ interface BotsState {
   memoryOpen: { botId: string; focus?: string } | null
   /** The service has no `bots.memory.edit` (an older one): entries show no Edit. */
   memoryEditMissing: boolean
+  /** Each chat's own lines from `/` commands, oldest first; kept in this window only. */
+  notes: Record<string, BotLocalNote[]>
+  /** Each bot's slots and the models it can pick, for `/model`'s list and its suggestions (`bots.model.get`). */
+  modelInfo: Record<string, BotsPersonalV2Result<'bots.model.get'>>
+  /** Adds a line to the bot's chat for the owner alone. */
+  addNote(botId: string, text: string, error?: boolean): void
+  /** Reads the bot's slots and models again (`modelInfo`); the error's words when they could not be read, else null. */
+  loadModelInfo(botId: string): Promise<string | null>
   activate(profileId: string): void
   refresh(): Promise<void>
   loadChat(botId: string): Promise<void>
@@ -329,7 +342,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
   return {
     profileId: null, bots: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, statuses: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, replyingTo: {},
     reactionsMissing: false, questionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null,
-    memory: {}, memoryError: {}, memoryOpen: null, memoryEditMissing: false,
+    memory: {}, memoryError: {}, memoryOpen: null, memoryEditMissing: false, notes: {}, modelInfo: {},
 
     activate(profileId) {
       if (get().profileId === profileId) return
@@ -346,7 +359,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
       reactions.clear()
       set({ profileId, bots: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, statuses: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, replyingTo: {},
         reactionsMissing: false, questionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null,
-    memory: {}, memoryError: {}, memoryOpen: null, memoryEditMissing: false })
+    memory: {}, memoryError: {}, memoryOpen: null, memoryEditMissing: false, notes: {}, modelInfo: {} })
       subscribe()
     },
 
@@ -462,6 +475,22 @@ export const useBotsStore = create<BotsState>((set, get) => {
       readSeq.set(botId, last.seq)
       set((state) => ({ bots: state.bots.map((bot) => (bot.id === botId && bot.unread ? { ...bot, unread: 0 } : bot)) }))
       void bots().markRead(botId, last.seq).catch(() => readSeq.delete(botId))
+    },
+
+    addNote(botId, text, error) {
+      const note: BotLocalNote = { id: `note:${crypto.randomUUID()}`, at: new Date().toISOString(), text, ...(error ? { error: true as const } : {}) }
+      set((state) => ({ notes: { ...state.notes, [botId]: [...(state.notes[botId] ?? []), note] } }))
+    },
+
+    async loadModelInfo(botId) {
+      const owner = epoch
+      try {
+        const info = await bots().model(botId)
+        if (owner === epoch) set((state) => ({ modelInfo: { ...state.modelInfo, [botId]: info } }))
+        return null
+      } catch (cause) {
+        return errorText(cause)
+      }
     },
 
     setDraft(botId, text) { set((state) => ({ drafts: { ...state.drafts, [botId]: text } })) },

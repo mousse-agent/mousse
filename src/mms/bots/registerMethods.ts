@@ -1,5 +1,5 @@
 import { BOTS_PERSONAL_V2_CAPABILITY, BOTS_PERSONAL_V2_METHODS, BOTS_WORK_METHODS, MAX_BOT_CHAT_ATTACHMENTS, MAX_BOT_CHAT_PAGE, MAX_BOT_CHAT_TEXT, type BotChatAttachment, type BotsPersonalV2Method } from '../../shared/bots/personal/methods'
-import { MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_MODEL_CHARS, MAX_BOT_NAME_CHARS, type BotModelPick, type BotModelSlots, type BotSchedule } from '../../shared/bots/personal/definition'
+import { MAX_BOT_CUSTOM_SLOT_DESCRIPTION, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_MODEL_CHARS, MAX_BOT_NAME_CHARS, type BotModelPick, type BotModelSlots, type BotSchedule } from '../../shared/bots/personal/definition'
 import { modelPickProblem, modelRowsProblem } from '../../shared/bots/personal/modelSlots'
 import { MAX_CHOICE_LABEL_CHARS } from '../../shared/bots/personal/questions'
 import { isAbsolutePath } from '../../shared/bots/personal/manifest'
@@ -47,7 +47,11 @@ const KEYS: Record<BotsPersonalV2Method, readonly string[]> = {
   'bots.memory.list': ['botId', 'history'],
   'bots.memory.forget': ['botId', 'id'],
   'bots.memory.edit': ['botId', 'id', 'text'],
-  'bots.memory.export': ['botId', 'dir']
+  'bots.memory.export': ['botId', 'dir'],
+  'bots.chat.clear': ['botId'],
+  'bots.memory.wipe': ['botId', 'keep'],
+  'bots.reset': ['botId'],
+  'bots.model.setCustom': ['botId', 'name', 'pick', 'description']
 }
 
 const REQUEST_ID = /^[A-Za-z0-9._:-]{1,128}$/
@@ -204,6 +208,20 @@ function validate(method: BotsPersonalV2Method, value: unknown): Params {
     case 'bots.memory.export':
       if (!text(p.dir, 4096) || !isAbsolutePath(p.dir)) throw new DomainRpcError('invalid_params', 'The folder must be a full path')
       break
+    case 'bots.memory.wipe':
+      if (p.keep !== undefined && p.keep !== 'saved') throw new DomainRpcError('invalid_params', 'keep is saved, or left out')
+      break
+    // The service checks the name and the description in plain words; this keeps a payload of the wrong shape out.
+    case 'bots.model.setCustom':
+      if (!text(p.name, 64)) throw new DomainRpcError('invalid_params', 'A slot needs a name')
+      if (p.pick === undefined) throw new DomainRpcError('invalid_params', 'Give the pick, or null')
+      if (p.pick !== null) {
+        const problem = modelPickProblem(p.pick, { client: true })
+        if (problem) throw new DomainRpcError('invalid_params', problem)
+      }
+      if (p.description !== undefined && (typeof p.description !== 'string' || p.description.length > MAX_BOT_CUSTOM_SLOT_DESCRIPTION * 4))
+        throw new DomainRpcError('invalid_params', `Say what the slot is for in at most ${MAX_BOT_CUSTOM_SLOT_DESCRIPTION} characters`)
+      break
     default:
       break
   }
@@ -237,6 +255,10 @@ async function handle(method: BotsPersonalV2Method, p: Params, bots: BotChatServ
     case 'bots.model.set': return bots.modelSet(botId, typeof p.model === 'string' ? p.model.trim() : null)
     case 'bots.model.setSlots': return bots.modelSlotsSet(botId, p.oneWork === true ? { oneWork: true } : { slots: p.slots as Partial<BotModelSlots> })
     case 'bots.model.setImage': return bots.modelImageSet(botId, p.pick as BotModelPick | null)
+    case 'bots.model.setCustom': return bots.modelCustomSet(botId, p.name as string, p.pick as BotModelPick | null, typeof p.description === 'string' ? p.description : undefined)
+    case 'bots.chat.clear': return bots.chatClear(botId)
+    case 'bots.memory.wipe': return bots.memoryWipe(botId, p.keep === 'saved' ? 'saved' : undefined)
+    case 'bots.reset': return bots.reset(botId)
     case 'bots.schedules.remove': return bots.removeSchedule(botId, p.scheduleId as string)
     // WP6's handlers, over the profile's memory (their own checks: an entry id like m12, a folder that exists).
     case 'bots.memory.list':
