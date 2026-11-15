@@ -2178,7 +2178,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   private canHoldChatDraft(row: BotActivationRow, main: BotDispatchRow, text?: string): boolean {
-    if (hasReplyCards(row.id) || hasToolImages(row.id) || (text && extractAppletParts(text, true).some(part => part.type !== 'text'))) return false;
+    if (hasReplyCards(row.id) || hasToolImages(row.id) || (text && extractAppletParts(text, true).some(part => part.type !== 'text'))) return false
     if (row.lane !== 'chat' || this.chatDraft(row) || !this.store.pendingWorkNotes(row.id).length) return false
     if (this.store.get("SELECT 1 FROM bot_messages WHERE activation_id = ? AND author = 'bot' AND kind = 'text'", row.id)) return false
     const runs = this.host.runs()

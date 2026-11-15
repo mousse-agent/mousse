@@ -38,11 +38,12 @@ it.each(['paused', 'waiting_grant'] as const)('restart preserves an unsent draft
   await f.bots.reconcileOnStartup()
   expect(texts(one.id)).toHaveLength(0)
   // The interrupted continuation is released with the same saved request.
-  f.store.moveActivation(one.id, [status], 'running', { endReason: null })
-  await finish(f, (await start(f, one.id, 2)).payload, 'completed', { text: 'Hi — the flat is free.' })
+  f.store.moveActivation(one.id, [f.store.activation(one.id)!.status], 'running', { endReason: null })
+  await finish(f, (await start(f, one.id, f.store.lastMainDispatch(one.id)!.n)).payload, 'completed', { text: 'Hi — the flat is free.' })
   expect(texts(one.id).map(m => m.text)).toEqual(['Hi — the flat is free.'])
 })
 it.each(['read', 'edit'] as const)('Codex authority %s without a tool ledger decides whether to hold', async tool => {
+  f.host.activity = undefined
   f.candidates = [{ instanceId: 'codex:test', model: 'test' }]
   const one = await joined()
   expect(one.prepared.authority.check({ kind: 'builtin', tool, nativeName: tool === 'edit' ? 'apply_patch' : 'read', args: { path: join(one.prepared.authority.workspace!.scratch, 'note.txt') } })).toMatchObject({ ok: true })
@@ -58,6 +59,8 @@ it.each(['applet', 'card', 'picture'] as const)('a reply carrying a %s without a
   if (part === 'picture') expect(keepToolImages({ activationId: one.id, filesFolder: one.prepared.authority.workspace!.scratch, source: 'flat', images: [{ data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jvXcAAAAASUVORK5CYII=' }] })).toBeTruthy()
   await finish(f, one.payload, 'completed', { text })
   expect(texts(one.id)).toHaveLength(1)
+  if (part === 'card') expect(texts(one.id)[0]?.cards).toMatchObject([{ type: 'facts' }])
+  if (part === 'picture') expect(texts(one.id)[0]?.attachments).toHaveLength(1)
   expect(f.store.dispatch(one.id, 2)?.prompt.text).toContain('already sent')
 })
 it('a failed continuation posts the held draft before its error in one transaction', async () => {
