@@ -1481,6 +1481,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private async maintainPass(now: Date): Promise<void> {
     if (this.closed) return
     this.retryCompletedScheduleRemovals()
+    if (this.removedScheduleSweepPending) this.tryDropRemovedScheduleRuns()
     for (const botId of this.host.definitions.ids()) {
       try {
         this.endUsagePauseIfDue(botId, now)
@@ -6316,7 +6317,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       } catch (error) {
         console.warn('bot supervisor records could not be read', { error: error instanceof Error ? error.message : String(error) })
       }
-      this.dropRemovedScheduleRuns()
+      this.tryDropRemovedScheduleRuns()
       await this.reconcileAll()
       // The bot and request key committed together, but its first turn may still be missing.
       for (const created of this.store.unfinishedCreations()) {
@@ -8300,6 +8301,18 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     })
     this.usageWaits.delete(row.id)
     return true
+  }
+
+  private removedScheduleSweepPending = false
+
+  private tryDropRemovedScheduleRuns(): void {
+    try {
+      this.dropRemovedScheduleRuns()
+      this.removedScheduleSweepPending = false
+    } catch (error) {
+      if (!this.removedScheduleSweepPending) console.warn('removed bot schedules could not be checked', { error: error instanceof Error ? error.message : String(error) })
+      this.removedScheduleSweepPending = true
+    }
   }
 
   private dropRemovedScheduleRuns(botId?: string): void {
