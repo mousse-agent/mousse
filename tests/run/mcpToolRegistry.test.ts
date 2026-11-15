@@ -799,7 +799,7 @@ describe('agent access level (SPEC §15.1)', () => {
     )
     const search = async (granted: AgentAccessLevel, args: Record<string, unknown>) => JSON.parse((await call('parent', granted, 'thread_search', args)).text).results as Array<Record<string, unknown>>
     const asRead = await search('read', { query: 'work' })
-    expect(asRead).toEqual([{ threadId: 'stranger', threadName: 'Stranger work', projectId: 'p1', projectName: 'One', matchType: 'thread' }])
+    expect(asRead).toEqual([{ threadId: 'stranger', threadName: 'Stranger work', projectId: 'p1', projectName: 'One', matchType: 'thread', link: 'mousse://thread/stranger' }])
     expect(JSON.stringify(asRead)).not.toContain('secret plan')
     state.profile = profile({ level: 'manage', projectIds: ['p1'] })
     const asManage = await search('manage', { query: 'work' })
