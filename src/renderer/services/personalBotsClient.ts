@@ -52,6 +52,14 @@ export interface PersonalBotsClient {
   setSlots(botId: string, change: { slots: Partial<BotModelSlots> } | { oneWork: true }): Promise<BotSummary>
   /** The Images row (#1088): a model to make pictures with, or null for none. Only a service that sent `imageProviders` has it. */
   setImage(botId: string, pick: BotModelPick | null): Promise<BotSummary>
+  /** Adds or changes a custom slot (`pick`), or removes it (null). An older service lacks it and rejects. */
+  setCustomSlot(botId: string, name: string, pick: BotModelPick | null, description?: string): Promise<BotSummary>
+  /** Wipes the chat's messages; memory stays. An older service lacks it and rejects. */
+  clearChat(botId: string): Promise<void>
+  /** Forgets every memory entry, or (`keep: 'saved'`) the chat, its history and run notes only. */
+  wipeMemory(botId: string, keep?: 'saved'): Promise<{ forgotten: number }>
+  /** A fresh start: chat, memory, schedules and reminders go; name, look, permissions and models stay. */
+  reset(botId: string): Promise<BotSummary>
   /** What New bot's Runs on line offers before the bot exists; an older service lacks it and rejects. */
   modelChoices(): Promise<BotsPersonalV2Result<'bots.model.choices'>>
   removeSchedule(botId: string, scheduleId: string): Promise<BotDetail>
@@ -98,6 +106,11 @@ export function createPersonalBotsClient(transport: PlatformRequestApi): Persona
     setModel: async (botId, model) => (await call('bots.model.set', { botId, model })).bot,
     setSlots: async (botId, change) => (await call('bots.model.setSlots', { botId, ...change })).bot,
     setImage: async (botId, pick) => (await call('bots.model.setImage', { botId, pick })).bot,
+    setCustomSlot: async (botId, name, pick, description) =>
+      (await call('bots.model.setCustom', { botId, name, pick, ...(description ? { description } : {}) })).bot,
+    clearChat: async (botId) => { await call('bots.chat.clear', { botId }) },
+    wipeMemory: (botId, keep) => call('bots.memory.wipe', { botId, ...(keep ? { keep } : {}) }),
+    reset: async (botId) => (await call('bots.reset', { botId })).bot,
     modelChoices: () => call('bots.model.choices', {}),
     removeSchedule: (botId, scheduleId) => call('bots.schedules.remove', { botId, scheduleId }),
     cancelReminder: (botId, reminderId) => call('bots.reminders.cancel', { botId, reminderId }),
