@@ -17,7 +17,7 @@ let botId: string
 /** The thread wakes wait on, as the host reads it now. */
 let thread: { state: 'running' | 'idle' | 'archived' | 'deleted' | 'unreachable'; title?: string; lastRun?: { status: string; endedAt?: string } }
 /** The pull request wakes wait on, and how often it was read. */
-let pr: { state: 'open' | 'closed' | 'merged'; title?: string; headSha?: string; checkRuns?: Array<{ name: string; state: 'passing' | 'failing' | 'pending' | 'waiting' | 'skipped' | 'none' }>; reviews?: Array<{ state: 'approved' | 'changes_requested' | 'commented' | 'pending' | 'dismissed'; author: string; submittedAt: string | null }> } | { none: true } | { problem: string }
+let pr: { state: 'open' | 'closed' | 'merged'; title?: string; headSha?: string; checkRuns?: Array<{ name: string; state: 'passing' | 'failing' | 'pending' | 'waiting' | 'skipped' | 'none' }>; reviews?: Array<{ id: string; state: 'approved' | 'changes_requested' | 'commented' | 'pending' | 'dismissed'; author: string; submittedAt: string | null }> } | { none: true } | { problem: string }
 let prReads: number
 
 beforeEach(async () => {
@@ -281,13 +281,13 @@ describe('pull request checks and reviews', () => {
   it.each(['approved', 'changes_requested', 'commented'] as const)('ignores old and unsubmitted reviews, fires on a new %s review', async (state) => {
     const turn = await chat('Watch reviews', 'reviews')
     const old = new Date(f.clock.now).toISOString()
-    pr = { state: 'open', reviews: [{ state: 'approved', author: 'old', submittedAt: old }] }
+    pr = { state: 'open', reviews: [{ id: 'old', state: 'approved', author: 'old', submittedAt: old }] }
     const set = await wake(turn.activation.id, { brief: 'Read review.', event: { kind: 'pr', repo: 'acme/app', number: 12, on: 'review' } })
     expect(set.label).toBe('when acme/app#12 is reviewed')
     await finish(f, turn.payload, 'completed', { text: 'Watching.' })
     await tick()
     expect(wakeTurn(set.wakeId)).toBeUndefined()
-    pr = { state: 'open', reviews: [{ state: 'pending', author: 'draft', submittedAt: null }, { state, author: 'quartz', submittedAt: new Date(f.clock.now + 1).toISOString() }] }
+    pr = { state: 'open', reviews: [{ id: 'draft', state: 'pending', author: 'draft', submittedAt: null }, { id: 'new', state, author: 'quartz', submittedAt: new Date(f.clock.now + 1).toISOString() }] }
     await tick()
     expect(f.store.reminder(set.wakeId)?.fired).toMatchObject({ state: 'review', reviewState: state, reviewer: 'quartz' })
     expect(lineOf(set.wakeId)?.text).toBe(`Following up · acme/app#12 · review: ${state.replace('_', ' ')}`)
@@ -295,6 +295,29 @@ describe('pull request checks and reviews', () => {
     expect(prepared.prompt).toContain('[data from reviewer login]\nquartz\n[end of data]')
     await tick()
     expect(f.store.listActivations(botId).filter((r) => r.idempotencyKey === `wake:${set.wakeId}`)).toHaveLength(1)
+  })
+  it.each([-10, 10])('uses the review cursor when GitHub is %s minutes from this computer', async (offset) => {
+    const turn = await chat('Watch reviews', 'clock')
+    const oldAt = new Date(f.clock.now + offset * MIN).toISOString()
+    pr = { state: 'open', reviews: [{ id: 'old', state: 'approved', author: 'owner', submittedAt: oldAt }] }
+    const set = await wake(turn.activation.id, { brief: 'Read review.', event: { kind: 'pr', repo: 'acme/app', number: 12, on: 'review' } })
+    expect(f.store.reminder(set.wakeId)?.event).toMatchObject({ reviewAfter: { at: oldAt, ids: ['old'] } })
+    await finish(f, turn.payload, 'completed', { text: 'Watching.' })
+    await tick()
+    expect(wakeTurn(set.wakeId)).toBeUndefined()
+    // GitHub timestamps have second resolution: a different review in the same second is new too.
+    pr.reviews!.push({ id: 'new', state: 'commented', author: 'owner', submittedAt: oldAt })
+    await tick()
+    expect(f.store.reminder(set.wakeId)?.fired).toMatchObject({ state: 'review', reviewer: 'owner' })
+  })
+  it('with no reviews yet accepts the first review even when GitHub is behind this computer', async () => {
+    const turn = await chat('Watch reviews', 'empty-review')
+    pr = { state: 'open', reviews: [] }
+    const set = await wake(turn.activation.id, { brief: 'Read review.', event: { kind: 'pr', repo: 'acme/app', number: 12, on: 'review' } })
+    await finish(f, turn.payload, 'completed', { text: 'Watching.' })
+    pr = { state: 'open', reviews: [{ id: 'first', state: 'approved', author: 'review-bot', submittedAt: new Date(f.clock.now - 10 * MIN).toISOString() }] }
+    await tick()
+    expect(f.store.reminder(set.wakeId)?.fired).toMatchObject({ state: 'review', reviewer: 'review-bot' })
   })
   it('says checks passed with no failed checks', async () => {
     const turn = await chat('Watch checks', 'pass')
