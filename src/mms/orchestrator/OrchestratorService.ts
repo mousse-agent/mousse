@@ -5236,9 +5236,15 @@ export class OrchestratorService extends EventEmitter {
    * A thread's visible transcript for a reader that is not working in it: from the live session when it
    * is open, else straight from the store, so reading does not keep every thread it touches in memory.
    */
-  private visibleMessagesWithoutLoading(threadId: string): ChatMessage[] {
+  /** A thread's visible messages, read from disk when its session is not loaded (`thread_read`, here or routed). */
+  visibleMessagesWithoutLoading(threadId: string): ChatMessage[] {
     if (this.sessions.has(threadId) || !this.threadStore) return this.getMessages(threadId)
     return this.threadStore.loadThreadData(threadId).messages.filter((message) => !message.hidden)
+  }
+
+  /** Messages waiting in a thread's queue, read from disk without loading it (`runs.wait`). */
+  queuedCount(threadId: string): number {
+    return this.threadActivity(threadId).queuedCount
   }
 
   /** What waits on a thread without loading it: its queued messages (from disk) and unanswered questions. */
