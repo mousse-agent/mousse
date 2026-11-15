@@ -429,9 +429,9 @@ export class BotMemoryStore {
   // -- Search and read ---------------------------------------------------------------------------
 
   /**
-   * `memory_search` (bot-context.md §6): memory hits first, then journal rows. Queried searches
-   * inspect a bounded recent window; credential-bearing windows rank visible words then recency,
-   * otherwise FTS relevance is preserved within the inspected pages. Every word must match first;
+   * `memory_search` (bot-context.md §6): ordinary memory hits first, then ordinary journal rows,
+   * in full-index FTS relevance order. Credential-bearing survivors follow by recency, never by
+   * raw relevance. Every word must match first;
    * when that finds too few, any word may. No query: the latest by date.
    */
   search(botId: string, input: BotMemorySearchInput): BotMemoryHit[] {
@@ -487,64 +487,76 @@ export class BotMemoryStore {
           push(journalHit(row), row.text)
       return hits
     }
-    // Page by date, independently of raw FTS matches. A hidden match must not consume
-    // a slot, change which page is fetched, or pull a row into a relevance-ranked cutoff.
-    // The fixed ceiling also makes the candidate window independent of credential guesses.
+    // Page the full index. Only ordinary rows can fill the result while paging;
+    // credential-bearing survivors wait until all ordinary matches have had their turn.
     const batchSize = 128
-    const maxCandidates = 1024
-    const candidates = (memory: boolean, allWords: boolean): Row[] => {
-      const table = memory ? 'bot_memories' : 'bot_journal'
-      const index = memory ? 'bot_memories_fts' : 'bot_journal_fts'
-      const id = memory ? 'row_id' : 'seq'
-      const date = memory ? 'learned_at' : 'at'
-      const where = memory
-        ? "bot_id = ? AND status IN ('active','expired') AND learned_at >= ? AND learned_at <= ?"
-        : journalWhere
+    const maxPages = 4096
+    const candidates = (memory: boolean, allWords: boolean): { ordinary: Row[]; guarded: Row[]; truncated: boolean } => {
       const match = terms.join(allWords ? ' AND ' : ' OR ')
-      const kept: Array<{ row: Row; visible: number; score: number }> = []
+      const ordinary: Row[] = []
+      const guarded: Row[] = []
       const unique = new Set<string>()
-      let credentials = false
-      for (let offset = 0; offset < maxCandidates; offset += batchSize) {
-        const page = this.all(`SELECT * FROM (
-          SELECT * FROM ${table} WHERE bot_id = ? ORDER BY ${id} DESC LIMIT ${maxCandidates}
-        ) j WHERE ${where} ORDER BY ${id} DESC LIMIT ? OFFSET ?`, botId, botId, since, until, batchSize, offset)
-        if (!page.length) break
-        // Raw FTS preserves stemming and highlighting for credential-free rows only.
-        // Its scores never order, count or cut credential-bearing rows.
-        const matches = new Map(this.all(`SELECT rowid AS hit_id,
-          snippet(${index}, 0, '«', '»', '…', 16) AS snip, bm25(${index}) AS score
-          FROM ${index} WHERE ${index} MATCH ? AND rowid IN (${page.map(() => '?').join(',')})`,
-        match, ...page.map((row) => num(row[id])!)).map((row) => [num(row.hit_id)!, row]))
+      for (let pageNumber = 0; pageNumber < maxPages; pageNumber++) {
+        const page = memory
+          ? this.all(`SELECT m.*, snippet(bot_memories_fts, 0, '«', '»', '…', 16) AS snip, bm25(bot_memories_fts) AS score
+            FROM bot_memories_fts JOIN bot_memories m ON m.row_id = bot_memories_fts.rowid
+            WHERE bot_memories_fts MATCH ? AND m.bot_id = ? AND m.status IN ('active','expired') AND m.learned_at >= ? AND m.learned_at <= ?
+            ORDER BY score, m.learned_at DESC LIMIT ? OFFSET ?`, match, botId, since, until, batchSize, pageNumber * batchSize)
+          : this.all(`SELECT j.*, snippet(bot_journal_fts, 0, '«', '»', '…', 16) AS snip, bm25(bot_journal_fts) AS score
+            FROM bot_journal_fts JOIN bot_journal j ON j.seq = bot_journal_fts.rowid
+            WHERE bot_journal_fts MATCH ? AND ${journalWhere} ORDER BY score, j.seq DESC LIMIT ? OFFSET ?`,
+          match, botId, since, until, batchSize, pageNumber * batchSize)
         for (const row of page) {
           const text = row.text as string
-          // Do not let the replacement marker itself count as the owner's visible words.
+          // The marker is not one of the owner's visible words.
           const visibleText = maskMemoryCredentials(text, '')
           const masked = visibleText !== text
-          credentials ||= masked
-          const words = new Set(visibleText.normalize('NFKC').toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? [])
-          const visible = terms.filter((term) => words.has(term.slice(1, -1))).length
-          const raw = matches.get(num(row[id])!)
-          if (masked ? (allWords ? visible !== terms.length : !visible) : !raw) continue
+          if (masked) {
+            const words = new Set(visibleText.normalize('NFKC').toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? [])
+            const visible = terms.filter((term) => words.has(term.slice(1, -1))).length
+            if (allWords ? visible !== terms.length : !visible) continue
+          }
           const ref = memory ? memoryRef(row.id as string, num(row.version)!) : `j${num(row.seq)!}`
           const key = `t:${sha256(text.trim())}`
-          if (seen.has(ref) || seen.has(key) || unique.has(key)) continue
-          unique.add(key)
-          kept.push({ row: { ...row, snip: masked ? null : raw?.snip }, visible, score: masked ? 0 : Number(raw?.score ?? 0) })
+          if (seen.has(ref) || seen.has(key)) continue
+          if (masked) {
+            if (guarded.some((kept) => (kept.text as string).trim() === text.trim())) continue
+            guarded.push(row)
+            const date = memory ? 'learned_at' : 'at'
+            const id = memory ? 'row_id' : 'seq'
+            guarded.sort((a, b) => String(b[date]).localeCompare(String(a[date])) || num(b[id])! - num(a[id])!)
+            // Only the newest deferred survivors can fill the remaining slots. Keep the
+            // buffer small even when an index page contains nothing but credentials.
+            if (guarded.length > limit - hits.length) guarded.pop()
+          } else if (!unique.has(key)) {
+            unique.add(key)
+            ordinary.push(row)
+          }
         }
-        if (kept.length >= limit - hits.length || page.length < batchSize) break
+        if (ordinary.length >= limit - hits.length || page.length < batchSize)
+          return { ordinary, guarded, truncated: false }
       }
-      kept.sort((a, b) => {
-        const rank = credentials ? b.visible - a.visible : a.score - b.score
-        return rank || String(b.row[date]).localeCompare(String(a.row[date])) || num(b.row[id])! - num(a.row[id])!
-      })
-      return kept.map(({ row }) => row)
+      // With more than 524,288 candidates in one source/pass, return only the ordinary
+      // survivors examined so far. Deferred rows cannot displace unseen ordinary matches.
+      return { ordinary, guarded: [], truncated: true }
     }
     for (const allWords of terms.length > 1 ? [true, false] : [true]) {
       if (hits.length >= limit) break
-      if (kinds.has('memory'))
-        for (const row of candidates(true, allWords)) push(memoryHit(row), row.text)
-      if (hits.length < limit && journalKinds.length)
-        for (const row of candidates(false, allWords)) push(journalHit(row), row.text)
+      const deferred: Array<{ row: Row; memory: boolean }> = []
+      let truncated = false
+      for (const memory of [true, false]) {
+        if (hits.length >= limit) break
+        if (memory ? !kinds.has('memory') : !journalKinds.length) continue
+        const result = candidates(memory, allWords)
+        truncated ||= result.truncated
+        for (const row of result.ordinary) push(memory ? memoryHit(row) : journalHit(row), row.text)
+        deferred.push(...result.guarded.map((row) => ({ row, memory })))
+      }
+      if (!truncated) {
+        deferred.sort((a, b) => String(b.memory ? b.row.learned_at : b.row.at).localeCompare(String(a.memory ? a.row.learned_at : a.row.at)) ||
+          num(b.row[b.memory ? 'row_id' : 'seq'])! - num(a.row[a.memory ? 'row_id' : 'seq'])!)
+        for (const { row, memory } of deferred) push(memory ? memoryHit(row) : journalHit(row), row.text)
+      }
     }
     return hits
   }
