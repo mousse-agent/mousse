@@ -191,7 +191,7 @@ describe('the transcript', () => {
     expect(transcript().querySelector('[data-message-id="a1"] .bot-markdown')?.textContent).toBe('I need two things.')
   })
 
-  it('work it started is a 👍 and a quiet line, a note a "Noted" receipt; what their chips said stays on them, and in the steps', async () => {
+  it('work it started is a 👍 and a quiet line, a note a "Noted" receipt; a reply with words stays a message, never in a tooltip', async () => {
     const opus = 'Opus 5.5 on Claude Code, high reasoning, for this work only'
     fake.chats.inbox = [
       message(1, { id: 'o1', author: 'owner', text: 'run some command pls' }),
@@ -200,20 +200,27 @@ describe('the transcript', () => {
       message(4, { id: 'b2', text: 'I’ll use PC Part Picker from here on.', chips: [{ icon: 'think', text: 'noted', title: 'For SSD search' }] }),
       message(5, { id: 'o3', author: 'owner', text: 'And the weather?' }),
       // A reply that says more stays a message, with the line for its work before it, and its chip in its steps.
-      message(6, { id: 'b3', text: 'Rain at 4. I also started a forecast check:\n\nit runs hourly.', replyTo: { id: 'o3', author: 'owner', text: 'And the weather?' }, chips: [{ icon: 'think', text: 'started', highlight: 'Forecast' }] })
+      message(6, { id: 'b3', text: 'Rain at 4. I also started a forecast check:\n\nit runs hourly.', replyTo: { id: 'o3', author: 'owner', text: 'And the weather?' }, chips: [{ icon: 'think', text: 'started', highlight: 'Forecast' }] }),
+      message(7, { id: 'o4', author: 'owner', text: 'Check the backups' }),
+      // A start with no words at all leaves no empty bubble.
+      message(8, { id: 'b4', text: '', chips: [{ icon: 'think', text: 'started', highlight: 'Backup check' }] })
     ]
     await open()
     const log = transcript()
-    expect(log.querySelector('[data-message-id="b1"], [data-message-id="b2"]')).toBeNull()
+    // The replies' words show as messages; the 👍 only says who reacted.
+    expect(log.querySelector('[data-message-id="b1"]')?.textContent).toContain('On it, I’ll text you when it’s done.')
+    expect(log.querySelector('[data-message-id="b2"]')?.textContent).toContain('I’ll use PC Part Picker from here on.')
+    expect(log.querySelector('[data-message-id="b4"]')).toBeNull()
     expect(log.querySelector('[data-message-id="o1"] .bot-reaction')?.textContent).toBe('👍')
-    // The reply's words and the model the work runs on stay on the mark and the line, on hover.
-    expect(log.querySelector('[data-message-id="o1"] .bot-reaction')?.getAttribute('title')).toBe(`On it, I’ll text you when it’s done.\n${opus}`)
+    expect(log.querySelector('[data-message-id="o1"] .bot-reaction')?.getAttribute('title')).toBe('Inbox helper reacted')
+    expect(log.querySelector('[data-message-id="o4"] .bot-reaction')?.getAttribute('title')).toBe('Inbox helper reacted')
+    // What the chips said (the model the work runs on, the job a note is for) stays on what stands in for them.
     expect(log.querySelector('[data-message-id="o2"] .bot-receipt')?.textContent).toBe('Noted')
-    expect(log.querySelector('[data-message-id="o2"] .bot-receipt')?.getAttribute('title')).toBe('I’ll use PC Part Picker from here on.\nFor SSD search')
+    expect(log.querySelector('[data-message-id="o2"] .bot-receipt')?.getAttribute('title')).toBe('For SSD search')
     expect(log.querySelector('[data-message-id="o2"] .bot-reaction')).toBeNull()
     const lines = [...log.querySelectorAll('.bot-system-line')]
-    expect(lines.map((line) => line.textContent)).toEqual(['Inbox helper started System check', 'Inbox helper started Forecast'])
-    expect(lines[0]!.getAttribute('title')).toBe(`On it, I’ll text you when it’s done.\n${opus}`)
+    expect(lines.map((line) => line.textContent)).toEqual(['Inbox helper started System check', 'Inbox helper started Forecast', 'Inbox helper started Backup check'])
+    expect(lines[0]!.getAttribute('title')).toBe(opus)
     // No plumbing words on what stands in for the chips.
     expect(log.textContent).not.toMatch(/passed to work|the run|Passed on/)
     expect(log.querySelector('[data-message-id="o3"] .bot-reaction')?.textContent).toBe('👍')

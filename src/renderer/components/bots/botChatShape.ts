@@ -6,9 +6,6 @@ import { askNoticeText } from '../../../shared/bots/personal/askText'
  * nothing new from the engine. Browser-safe and pure.
  */
 
-/** A reply this long or longer, or with more than one paragraph, says more than "on it": it stays a message. */
-export const HANDOFF_TEXT_MAX = 200
-
 /** A chip of work the chat handed off: "started <title>" (or "will start", when it waits its turn). */
 export function isWorkStart(chip: BotChip): boolean {
   return chip.icon === 'think' && (chip.text === 'started' || chip.text === 'will start') && Boolean(chip.highlight)
@@ -27,20 +24,19 @@ function workTitle(chip: BotChip): string {
 /**
  * What a bot's message did with work, which the chat also shows outside its steps: the work it started (a 👍 on the
  * owner's message and a quiet line, "alpha started System check"), whether it noted something for work ("Noted" under
- * the owner's message), and `only`: the reply says nothing more than that ("On it.", "I'll use that tab from here on."),
- * one short paragraph with nothing else on the message, so it shows no bubble. `details`: those chips' own hover text
- * (the model of work on a model of its own, the job a note is for), kept on what stands in for them. Null for a message
- * that did neither.
+ * the owner's message), and `only`: the message has nothing but those chips (no words, nothing else on it), so it shows
+ * no bubble. A reply with any words always stays a message: a reaction never carries it. `details`: those chips' own
+ * hover text (the model of work on a model of its own, the job a note is for), kept on what stands in for them. Null for
+ * a message that did neither.
  */
 export function workSignalsOf(message: BotChatMessage): { titles: string[]; queued: boolean; noted: boolean; only: boolean; details: string[] } | null {
   if (message.author !== 'bot') return null
   const starts = message.chips.filter(isWorkStart)
   const noted = message.chips.some(isNotePassed)
   if (!starts.length && !noted) return null
-  const text = message.text.trim()
-  const only = message.kind === 'text' && !message.ask && !message.error && !message.attachments?.length && !message.cards?.length &&
-    message.chips.every((chip) => isWorkStart(chip) || isNotePassed(chip)) &&
-    text.length < HANDOFF_TEXT_MAX && !/\n\s*\n|```|^\s*[#|>-]/m.test(text)
+  const only = message.kind === 'text' && !message.text.trim() && !message.ask && !message.error && !message.question &&
+    !message.attachments?.length && !message.cards?.length && !message.applets?.length &&
+    message.chips.every((chip) => isWorkStart(chip) || isNotePassed(chip))
   const details = message.chips.filter((chip) => isWorkStart(chip) || isNotePassed(chip)).flatMap((chip) => (chip.title ? [chip.title] : []))
   return { titles: starts.map(workTitle), queued: starts.length > 0 && starts.every((chip) => chip.text === 'will start'), noted, only, details }
 }
@@ -58,7 +54,10 @@ export function tappedAnswerLine(label: string): string {
   return `You answered “${label}”`
 }
 
-/** What a bot's handling left on an owner's message: a 👍 for work it started, "Noted" for a note; `title`: its hover text. */
+/**
+ * What a bot's handling left on an owner's message: a 👍 for work it started, "Noted" for a note; `title`: the note's
+ * hover text (the job a note is for). The 👍's hover text only says who reacted; the reply's words never move here.
+ */
 export interface OwnerMarks { reaction?: string; passedOn?: boolean; title?: string }
 
 /** "alpha started System check", "alpha started A and B". */
@@ -86,11 +85,11 @@ export function askAnsweredLine(botName: string, ask: Pick<BotAskCard, 'title' |
 
 /**
  * The transcript's rows: each message, with the work a reply started as its own quiet line before it (the reply's
- * bubble left out when it said nothing more), each answered ask followed by its line, and each answer the owner tapped
+ * bubble left out only when it has no words), each answered ask followed by its line, and each answer the owner tapped
  * to a question as a quiet line where their bubble would be (its hover text the question). `marks` holds what replies
  * left on the owner's messages: the 👍 of started work and "Noted" of a note, on the message the reply answers, else the
- * owner's last message before it. A line's and a mark's hover text is the reply's words when its bubble was left out, and
- * the chips' own hover text (the model of the work, the job a note is for), so nothing a chip said is lost.
+ * owner's last message before it. A line's and a mark's hover text is the chips' own hover text (the model of the work,
+ * the job a note is for), so nothing a chip said is lost; a reply's words always show in its own bubble.
  */
 export function chatRows(messages: readonly BotChatMessage[], botName: string, answerTip?: (message: BotChatMessage) => string | undefined): { rows: BotChatRow[]; marks: Map<string, OwnerMarks> } {
   const rows: BotChatRow[] = []
@@ -111,8 +110,7 @@ export function chatRows(messages: readonly BotChatMessage[], botName: string, a
     const signals = workSignalsOf(message)
     if (signals) {
       const target = message.replyTo?.author === 'owner' ? message.replyTo.id : lastOwner
-      const words = message.text.trim()
-      const tip = [...(signals.only && words ? [words] : []), ...signals.details].join('\n')
+      const tip = signals.details.join('\n')
       if (target) {
         const mark = { ...marks.get(target) }
         if (signals.titles.length) mark.reaction = '👍'

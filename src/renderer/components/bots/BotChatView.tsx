@@ -201,7 +201,7 @@ const OwnerMessage = memo(function OwnerMessage({ botId, message, pending, botNa
         {message.text && <div className="bot-you-bubble">
           <WithSentQuotes text={message.text} render={(part) => <Markdown content={part} className="bot-markdown" images={BOT_IMAGES} />} />
           <BubbleTime message={message} pending={pending} />
-          {marks?.reaction && <span className="bot-reaction" role="img" aria-label={`${botName} reacted ${marks.reaction}`} title={marks.title}>{marks.reaction}</span>}
+          {marks?.reaction && <span className="bot-reaction" role="img" aria-label={`${botName} reacted ${marks.reaction}`} title={`${botName} reacted`}>{marks.reaction}</span>}
         </div>}
         {!!message.attachments?.length && <BotOtherFiles files={message.attachments} />}
         {!message.text && <BubbleTime message={message} pending={pending} />}
