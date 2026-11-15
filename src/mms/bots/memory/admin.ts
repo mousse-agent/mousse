@@ -13,6 +13,7 @@ import { renderMemoryBlocks } from './render'
 
 export interface BotMemoryAdminOptions {
   store: BotMemoryStore
+  name?: (botId: string) => string | undefined
   /** The bot's definition, written as `definition.json` in an export. */
   definition?: (botId: string) => unknown
   timeZone?: () => string | undefined
@@ -61,7 +62,7 @@ export function createBotMemoryAdmin(options: BotMemoryAdminOptions): BotMemoryA
       if ('error' in result) {
         const message = result.error === 'refused' ? result.reason
           : result.error === 'stale' ? 'This memory changed since you opened it.'
-            : 'Memory of this kind is full. Forget something first.'
+            : `Memory of this kind is full. Ask ${options.name?.(botId) ?? 'your bot'} to combine some, or forget one.`
         throw Object.assign(new Error(message), { code: 'invalid_params' })
       }
       return entryOf(store.versions(botId, result.id).at(-1)!)
