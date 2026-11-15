@@ -130,7 +130,7 @@ const DRAFT_READ_ONLY_TOOLS = new Set([
   'bot_schedule_list', 'work_list', 'work_models', 'watch_list', 'reminder_list', 'bot_list',
   'mcp_servers', 'list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource'
 ])
-type HeldChatDraft = { n: number; text: string; replyTo?: string }
+type HeldChatDraft = { n: number; text: string; replyTo?: string; chips: BotChip[] }
 
 export class BotEngineError extends Error {
   constructor(readonly code: string, message: string, readonly details?: Record<string, unknown>) {
@@ -4498,7 +4498,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           this.endWaitingInTx(row, 'question_gone', questionGoneText(this.workTitle(row)), ['running'])
         } else if (noted) {
           if (hold && text?.trim()) {
-            const draft: HeldChatDraft = { n: main.n, text, replyTo: this.answeredOwnerMessageOf(row.id) }
+            const draft: HeldChatDraft = { n: main.n, text, replyTo: this.answeredOwnerMessageOf(row.id), chips: this.drained.get(`${row.id}:${main.n}`) ?? [] }
             this.store.run('INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?)', row.botId, `draft:${row.id}`, JSON.stringify(draft))
             heldDraft = true
           }
@@ -4525,7 +4525,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       }
       // What it has is posted first, so a continuation that fails or is stopped never loses it; then the notes continue
       // the same thread, and its report follows with the change.
-      if (!heldDraft) this.postReply(next, main, text, options.expectText === true)
+      if (heldDraft) this.drained.delete(`${row.id}:${main.n}`)
+      else this.postReply(next, main, text, options.expectText === true)
       if (noted && next.status === 'running') {
         await this.continueWith(row.id, ['running'], { afterReport: true, ...(allowed.length ? { allowed } : {}) })
         return
@@ -4610,7 +4611,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.carried.delete(row.id)
     const stoppedChip = this.reportChips.get(key)
     this.reportChips.delete(key)
-    const chips = [...(carried?.chips ?? []), ...(this.drained.get(key) ?? []), ...(stoppedChip ? [stoppedChip] : [])]
+    const chips = [...(carried?.chips ?? []), ...(this.chatDraft(row)?.chips ?? []), ...(this.drained.get(key) ?? []), ...(stoppedChip ? [stoppedChip] : [])]
     this.drained.delete(key)
     if (!text?.trim() && carried?.text) text = carried.text
     // Its open walls, unless a card for them was posted in this activation already (a moved run ask keeps its old card too).
