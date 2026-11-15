@@ -370,6 +370,19 @@ ALTER TABLE bot_reminders ADD COLUMN fired_json TEXT;
 ALTER TABLE bot_reminders ADD COLUMN chain INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX bot_reminders_wakes ON bot_reminders(bot_id, wake, created_at);
 `
+  },
+  {
+    // All columns for always-on bots phase 1. Behavior is added by later items; old rows keep their meaning.
+    version: 10,
+    sql: `
+ALTER TABLE bot_reminders ADD COLUMN snoozed_from TEXT;
+ALTER TABLE bot_reminders ADD COLUMN owner_set INTEGER CHECK(owner_set IN (0, 1));
+ALTER TABLE bot_messages ADD COLUMN tell TEXT CHECK(tell IN ('now', 'soon', 'later'));
+ALTER TABLE bot_messages ADD COLUMN tell_at TEXT CHECK(tell IS NULL OR tell_at IS NOT NULL);
+ALTER TABLE bot_messages ADD COLUMN told_at TEXT;
+CREATE INDEX bot_messages_tell_due ON bot_messages(bot_id, tell_at) WHERE tell IS NOT NULL AND told_at IS NULL;
+ALTER TABLE bot_registry ADD COLUMN tell_json TEXT;
+`
   }
 ]
 
@@ -421,6 +434,8 @@ export interface BotRegistryRow {
    * `rows`; each row then journals its model once more.
    */
   model: BotModelState | null
+  /** Telling wishes (v10), kept as JSON until a later phase item defines them. */
+  tellJson?: string | null
 }
 
 /**
@@ -462,7 +477,8 @@ function registryOf(row: Row): BotRegistryRow {
     failureStreak: num(row.failure_streak) ?? 0,
     error: json<BotStoredError>(row.error_json),
     readSeq: num(row.read_seq) ?? 0,
-    model: json<BotRegistryRow['model']>(row.model_json)
+    model: json<BotRegistryRow['model']>(row.model_json),
+    tellJson: str(row.tell_json)
   }
 }
 
@@ -494,6 +510,10 @@ export interface BotMessageRow {
   questionId?: string
   /** A bot message's cards (`show_card`, a question's card), as the bot made them (`cards_json`, v8); absent for none. */
   cards?: BotCard[]
+  /** Telling class (v10); null means this row is never told. Unused until telling is implemented. */
+  tell?: 'now' | 'soon' | 'later' | null
+  tellAt?: string | null
+  toldAt?: string | null
 }
 
 /** One of a bot's questions to its owner (`bot_questions`, v8). */
@@ -579,6 +599,10 @@ export interface BotReminderRow {
   fired: BotWakeFired | null
   /** How many wakes in a row, with no owner's message between them, this one ends (1 for one the owner's turn set). */
   chain: number
+  /** The reminder this one was snoozed from (v10); null for none. */
+  snoozedFrom?: string | null
+  /** Whether the owner's message or tap started the turn that set it (v10); null preserves pre-v10 behavior. */
+  ownerSet?: boolean | null
 }
 
 function jsonOf<T>(value: unknown): T | null {
@@ -608,7 +632,9 @@ function reminderOf(row: Row): BotReminderRow {
     wake: num(row.wake) === 1,
     event: jsonOf<BotWakeEvent>(row.event_json),
     fired: jsonOf<BotWakeFired>(row.fired_json),
-    chain: num(row.chain) ?? 0
+    chain: num(row.chain) ?? 0,
+    snoozedFrom: str(row.snoozed_from),
+    ownerSet: num(row.owner_set) === null ? null : num(row.owner_set) === 1
   }
 }
 
@@ -628,6 +654,9 @@ function messageOf(row: Row): BotMessageRow {
     attachments: json<BotMessageRow['attachments']>(row.attachments_json),
     clientRequestId: str(row.client_request_id),
     replyTo: str(row.reply_to),
+    tell: str(row.tell) as BotMessageRow['tell'],
+    tellAt: str(row.tell_at),
+    toldAt: str(row.told_at),
     ...(str(row.owner_reaction) && str(row.owner_reaction_at) ? { ownerReaction: { emoji: row.owner_reaction as string, at: row.owner_reaction_at as string } } : {}),
     ...(str(row.question_id) ? { questionId: row.question_id as string } : {}),
     ...(cardsOf(row.cards_json) ? { cards: cardsOf(row.cards_json)! } : {})
@@ -1612,7 +1641,7 @@ export class BotStore {
    * Inserts a chat row; inside the caller's transaction, so its journal row joins it. False when a
    * row with the same id or client request id exists already.
    */
-  insertMessage(row: Omit<BotMessageRow, 'seq'>): boolean {
+  insertMessage(row: Omit<BotMessageRow, 'seq' | 'tell' | 'tellAt' | 'toldAt'>): boolean {
     return this.run(
       'INSERT INTO bot_messages(id, bot_id, at, author, kind, text, chips_json, ask_id, error_json, activation_id, attachments_json, client_request_id, reply_to, question_id, cards_json) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING',
       row.id, row.botId, row.at, row.author, row.kind, row.text, JSON.stringify(row.chips), row.askId, row.error ? JSON.stringify(row.error) : null,
@@ -1895,7 +1924,7 @@ export class BotStore {
 
   // -- Reminders (bot_reminders, v6): a bot's one-off times; repeating ones are schedules in the shared store --------
 
-  insertReminder(row: Omit<BotReminderRow, 'status' | 'deliveredAt' | 'messageId' | 'activationId' | 'wake' | 'event' | 'fired' | 'chain'> & Partial<Pick<BotReminderRow, 'wake' | 'event' | 'chain'>>): void {
+  insertReminder(row: Omit<BotReminderRow, 'status' | 'deliveredAt' | 'messageId' | 'activationId' | 'wake' | 'event' | 'fired' | 'chain' | 'snoozedFrom' | 'ownerSet'> & Partial<Pick<BotReminderRow, 'wake' | 'event' | 'chain'>>): void {
     this.run(
       "INSERT INTO bot_reminders(id, bot_id, due_at, text, work_title, work_brief, reply_to, created_at, status, wake, event_json, chain) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'waiting', ?, ?, ?)",
       row.id, row.botId, row.dueAt, row.text, row.work?.title ?? null, row.work?.brief ?? null, row.replyTo, row.createdAt,

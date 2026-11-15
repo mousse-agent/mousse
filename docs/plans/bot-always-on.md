@@ -325,12 +325,12 @@ Said plainly, because a card that seems to cover everything is worse than none.
 
 ## Data model
 
-`bots.db` is at v9. Older builds already refuse a newer one, so each phase that needs a migration starts with one small PR that carries all of it.
+`bots.db` is at v10 (the unused phase 1 columns are in place). Older builds already refuse a newer one, so each phase that needs a migration starts with one small PR that carries all of it.
 
 | Version | Phase | Change |
 |---|---|---|
 | none | 0, and all of memory | `bot_memory_state` keys (`progress:<scheduleId>`, `draft:<activationId>`, cap counters, the create request's key); values in existing columns (`external`, `superseded`); `missed` inside `trigger_json` |
-| v10 | 1 | `bot_reminders.snoozed_from`, `bot_reminders.owner_set`; `bot_messages.tell`, `tell_at`, `told_at` with a partial index; `bot_registry.tell_json` |
+| v10 | 1 | `bot_reminders.snoozed_from`, nullable `bot_reminders.owner_set` (no default; NULL means set before v10 and preserves existing reminder behavior); `bot_messages.tell`, `tell_at`, `told_at` with a partial index on `(bot_id, tell_at)`; `bot_registry.tell_json` |
 | v11 | 2 | table `bot_actions`; `bot_reminders.work_id` |
 | v12 | 4 | tables `bot_telling_devices` and `bot_events`; `bot_reminders.local_at`, `zone` |
 
