@@ -923,6 +923,7 @@ export class BotMemoryStore {
 
   /** A schedule's own cursor. Kept outside AutomationRuns so Forget reaches every copy. */
   saveProgress(botId: string, scheduleId: string, activationId: string, text: string): void {
+    text = text.trim().replace(/\s+/g, ' ')
     this.write(() => {
       const seq = this.appendInTx(this.db, {
         botId, kind: 'notice', lane: 'run', activationId,
