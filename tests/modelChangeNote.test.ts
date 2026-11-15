@@ -109,10 +109,11 @@ describe('the agent gets the model-change note', () => {
     await send('after the switch')
     expect(notes(prompts)).toEqual([0, 0, 0, 1, 0])
     expect(prompts[3]).toMatch(/^\[Mousse\] Model change: you are now Claude Sonnet\. The earlier assistant replies in this thread were written by Claude Opus\.\n\nwhat's your opinion\?$/)
-    // The person's message and the transcript keep only what they typed; the marker shows once.
+    // The person's message and the transcript keep only what they typed; each change is marked once.
     const messages = main.orchestrator.getMessages(thread.id)
     expect(messages.filter((message) => message.content.includes('[Mousse] Model change'))).toEqual([])
-    expect(messages.filter((message) => message.kind === 'context_handoff')).toHaveLength(1)
+    expect(messages.filter((message) => message.kind === 'context_handoff').map((message) => message.content))
+      .toEqual([expect.stringMatching(/^Reasoning: .+ → High$/), 'Claude Opus → Claude Sonnet'])
 
     await main.stop()
     services.splice(services.indexOf(main), 1)

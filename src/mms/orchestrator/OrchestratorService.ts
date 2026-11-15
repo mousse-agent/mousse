@@ -1,7 +1,7 @@
 import { profilerService } from '../diagnostics/profilerService'
 import type { SecretToolHost } from '../run/mcp/appTools/secrets'
 import { maskedCopy, maskInPlace, type SecretMasker } from '../secrets/secretMasking'
-import { contextHandoff, modelChangeNote, previousTurnModel } from './contextHandoff'
+import { admittedSelection, modelChangeNote, previousTurnModel, turnMarker, turnMarkerText } from './contextHandoff'
 import { GOAL_SOURCE, ThreadGoals } from './threadGoals'
 import { goalNote, type GoalTurnOutcome } from '../../shared/threadGoal'
 import { AppletStore } from '../applets/AppletStore'
@@ -67,7 +67,6 @@ import type { EffectiveAgentGrants } from '../../shared/agents/types'
 import { agentModelId, upgradeSelection } from '../../shared/modelSelection'
 import { agentModelEntries, agentModelRefusal, type AgentModelEntry } from './agentModelOptions'
 import type { InstanceSnapshot } from '../../shared/harness/status'
-import { modelChoiceOf } from '../../shared/modelChoice'
 import { EventEmitter } from 'events'
 import { nativeAgentAssistantMessage, nativeAgentHistory } from '../providers/nativeAgentHistory'
 import { v4 as uuidv4 } from 'uuid'
@@ -12196,6 +12195,8 @@ export class OrchestratorService extends EventEmitter {
       ? [{ kind: 'unknown' as const, description: 'Agent tools may affect processes, ignored files, or external services; code undo only restores tracked workspace changes.', reversible: false as const }]
       : []
     const previousModel = previousTurnModel(session.messages, this.nativeContext)
+    // An older thread names its previous model only in its replies: the level it ran at is not known.
+    const previousLevelKnown = admittedSelection(session.messages) !== undefined
     const turnPresentationStart = session.messages.length
     const turnNativeStartBoundary = {
       messageIndex: this.nativeContext.messages.length,
@@ -12482,10 +12483,13 @@ export class OrchestratorService extends EventEmitter {
         // The run this message opened; handoff transcripts group messages by run (SPEC §16.1).
         if (engineRunId) admittedUser.turnId = turnId
         this.emitMessageUpdated(admittedUser)
-        const handoff = contextHandoff(previousModel, selection)
+        // One marker where the turn runs differently from the one before: another model, another reasoning level, or both.
+        const handoff = turnMarker(previousModel, selection, previousLevelKnown
+          ? (picked) => this.harness.reasoningLevel(picked.provider, picked.model, picked.effort)
+          : undefined)
         if (handoff) {
           const marker: ChatMessage = { id: uuidv4(), role: 'assistant', kind: 'context_handoff',
-            content: `${modelChoiceOf(handoff.from).name} → ${modelChoiceOf(handoff.to).name}`, contextHandoff: handoff,
+            content: turnMarkerText(handoff), contextHandoff: handoff,
             timestamp: new Date().toISOString(), turnId }
           session.messages.push(marker)
           this.emitMessageAdded(marker)
