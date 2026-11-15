@@ -5771,7 +5771,8 @@ button.chat-user-image { background: color-mix(in oklab, var(--color-an-foregrou
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 12px;
-  background: var(--bg-secondary);
+  /* Solid like every dialog: a glass fill lets the page behind show through with acrylic on. */
+  background: var(--ui-raised);
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.35);
 }
 
