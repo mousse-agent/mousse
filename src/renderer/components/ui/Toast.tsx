@@ -22,7 +22,7 @@ const HEAD_HEIGHT = 20
 const HEAD_GAP = 6
 /** The stack's distance from the window's bottom and right edges, and its width at most (toast.css). */
 const EDGE = 12
-const TOASTER_WIDTH = 328
+const TOASTER_WIDTH = 272
 /** Space between the stack and bottom UI it stays above. */
 const OBSTRUCTION_GAP = 8
 

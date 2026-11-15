@@ -176,7 +176,7 @@ describe('a toast whose text is cut off', () => {
 })
 
 describe('the toast stack above a pane footer', () => {
-  // jsdom's window is 1024 × 768; the stack's column is its right 328px, 12px in.
+  // jsdom's window is 1024 × 768; the stack's column is its right 272px, 12px in.
   function Footer({ rect }: { rect: { left: number; right: number; top: number; bottom: number } }) {
     const ref = useRef<HTMLDivElement>(null)
     useToastObstruction(ref)
