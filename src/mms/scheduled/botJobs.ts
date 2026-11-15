@@ -238,6 +238,8 @@ export class BotScheduleBook {
    */
   add(botId: string, input: { when: BotSchedule['when']; prompt?: string; say?: string; until?: string; model?: string; pick?: BotModelPick; name?: string; tellMe?: TellMe }, createdBy: 'owner' | 'bot', options: { scheduleId?: string; ownerAsked?: boolean } = {}): BotScheduleEntry {
     if (this.list(botId).length >= MAX_BOT_SCHEDULES) throw new BotScheduleError('schedule_limit', `A bot can have at most ${MAX_BOT_SCHEDULES} schedules. Remove one first.`)
+    const ownerAsked = options.ownerAsked === true || (input.say !== undefined && createdBy === 'owner')
+    if (input.say !== undefined && !ownerAsked) throw new BotScheduleError('schedule_invalid', 'Only the owner’s message or tap can set a fixed line. Use prompt instead of say.')
     const prompt = schedulePrompt(input)
     const problem = botScheduleProblem(input.when, prompt)
     if (problem) throw new BotScheduleError('schedule_invalid', problem)
@@ -254,7 +256,7 @@ export class BotScheduleBook {
       threadId: botJobThreadGuard(botId),
       // Only the owner picks a model by hand; a bot's own schedule runs on its own rows. The name stays beside the pick,
       // for builds that read only the name.
-      bot: { botId, scheduleId, createdBy, ...(options.ownerAsked ? { ownerAsked: true } : {}), ...(input.say !== undefined ? { say: input.say.trim() } : {}), ...(createdBy === 'owner' && input.model?.trim() ? { model: input.model.trim(), ...(isPinned(input.pick) ? { pick: { ...copyPick(input.pick), instanceId: input.pick.instanceId } } : {}) } : {}) }
+      bot: { botId, scheduleId, createdBy, ...(ownerAsked ? { ownerAsked: true } : {}), ...(input.say !== undefined ? { say: input.say.trim() } : {}), ...(createdBy === 'owner' && input.model?.trim() ? { model: input.model.trim(), ...(isPinned(input.pick) ? { pick: { ...copyPick(input.pick), instanceId: input.pick.instanceId } } : {}) } : {}) }
     }, { id: botJobId(botId, scheduleId), nextRunAt: computeNextRun(jobScheduleOf(when), null, this.now()) })
     this.options.jobs.wake()
     return this.entryOf(job)!
@@ -295,7 +297,10 @@ export class BotScheduleBook {
       if (job.bot.say !== undefined) {
         const say = prompt.startsWith('Say exactly:') ? prompt.slice('Say exactly:'.length).trim() : undefined
         changes.bot = { ...job.bot, say }
-        if (say !== undefined) changes.prompt = schedulePrompt({ say })
+        if (say !== undefined) {
+          changes.prompt = schedulePrompt({ say })
+          changes.bot.ownerAsked = true
+        }
       }
     }
     if (patch.schedule !== undefined) {

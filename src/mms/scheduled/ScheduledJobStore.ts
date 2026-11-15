@@ -323,6 +323,10 @@ function mergeJob(definition: ScheduledJobDefinition, runtime?: ScheduledJobRunt
 
   return {
     ...definition,
+    // say can only be created in an owner's turn (or edited by the owner). Older
+    // writers can lose the provenance key alone: the intact line preserves it.
+    ...(definition.bot?.say !== undefined && definition.bot.ownerAsked === undefined
+      ? { bot: { ...definition.bot, ownerAsked: true } } : {}),
     state: runtime?.state ?? (definition.enabled ? 'scheduled' : 'paused'),
     // Preserve explicit null (e.g. interrupted one-shot) — do not recompute.
     nextRunAt:
@@ -618,7 +622,7 @@ export class ScheduledJobStore {
       createThread: input.createThread,
       selection: input.selection,
       ...(input.agent && !isWorkflowPrompt(input.prompt) ? { agent: { definitionId: input.agent.definitionId } } : {}),
-      ...(input.bot ? { bot: { botId: input.bot.botId, scheduleId: input.bot.scheduleId, createdBy: input.bot.createdBy, ...(input.bot.ownerAsked === true ? { ownerAsked: true } : {}), ...(input.bot.say !== undefined ? { say: input.bot.say } : {}), ...(input.bot.model ? { model: input.bot.model } : {}), ...(input.bot.model && input.bot.pick ? { pick: input.bot.pick } : {}) } } : {}),
+      ...(input.bot ? { bot: { botId: input.bot.botId, scheduleId: input.bot.scheduleId, createdBy: input.bot.createdBy, ...(input.bot.ownerAsked !== undefined ? { ownerAsked: input.bot.ownerAsked } : {}), ...(input.bot.say !== undefined ? { say: input.bot.say } : {}), ...(input.bot.model ? { model: input.bot.model } : {}), ...(input.bot.model && input.bot.pick ? { pick: input.bot.pick } : {}) } } : {}),
       mode: input.mode,
       workspace: input.workspace,
       permissionMode,

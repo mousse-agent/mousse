@@ -1353,7 +1353,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * skipped and says why. Other runs and the owner's work never skip it: they run beside it. An open ask is not a skip:
    * asks don't block. Before the startup pass nothing is inserted and the occurrence stays due.
    */
-  runScheduledOccurrence(input: { botId: string; scheduleId: string; prompt: string; say?: string; occurrenceAt: string; occurrenceKey?: string; missed?: ScheduledMissedRuns; now?: Date; model?: string; pick?: BotModelPick }):
+  runScheduledOccurrence(input: { botId: string; scheduleId: string; prompt: string; say?: string; ownerAsked?: boolean; occurrenceAt: string; occurrenceKey?: string; missed?: ScheduledMissedRuns; now?: Date; model?: string; pick?: BotModelPick }):
     | { kind: 'started'; activationId: string }
     | { kind: 'said'; messageId: string }
     | { kind: 'skipped'; reason: string }
@@ -1364,6 +1364,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const registry = this.store.registry(botId)
     if (!registry || registry.deletedAt) return { kind: 'skipped', reason: 'bot_deleted' }
     if (input.say !== undefined) {
+      if (input.ownerAsked === false) return { kind: 'skipped', reason: 'say_owner_required' }
       const occurrenceKey = input.occurrenceKey ?? occurrenceAt
       const existing = this.findScheduledOccurrence({ botId, scheduleId, occurrenceKey })
       if (existing && 'messageId' in existing) return { kind: 'said', messageId: existing.messageId }
