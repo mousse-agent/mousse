@@ -390,6 +390,7 @@ describe('the draft tool in an ordinary chat', () => {
     expect(report.listed!({ threadId: 'chat', readOnly: false, modeCeiling: 'default' } as never)).toBe(false)
     const call = { caller: { threadId: 'run-thread', runId: 'engine-1' }, turn: { threadId: 'run-thread' }, toolCallId: 'c' } as unknown as ToolCallContext
     expect(JSON.parse((await report.handler({ level: 'look', summary: 'Two flaky tests' }, call)).text)).toMatchObject({ level: 'look' })
+    expect(JSON.parse((await report.handler({ level: 'quiet', summary: 'Nothing new.', leftOff: 'Checked today.' }, call)).text)).toMatchObject({ leftOff: expect.stringContaining('not kept: only a bot scheduled run') })
     expect((await report.handler({ level: 'loud', summary: 'x' }, call)).isError).toBe(true)
     runs.finish({ jobId: 'j1', occurrenceKey: 'k1', failed: false })
     expect(report.available!({ threadId: 'run-thread', runId: 'engine-2' } as never)).toMatch(/Only an automation/)

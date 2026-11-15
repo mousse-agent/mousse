@@ -70,6 +70,7 @@ export const GIT_ACCESS = {
   'runs.list': 'none',
   'runs.get': 'none',
   'runs.events': 'none',
+  'runs.wait': 'none',
   'runs.effects': 'none',
   'runs.credentials': 'none',
   'runs.transfers': 'none',

@@ -1770,8 +1770,10 @@ export class BotStore {
   }
 
   /** The open question of any bot whose follow-up is due soonest. */
-  nextQuestionDue(): BotQuestionRow | undefined {
-    const row = this.get("SELECT * FROM bot_questions WHERE status = 'open' AND next_at IS NOT NULL AND message_id IS NOT NULL ORDER BY next_at, rowid LIMIT 1")
+  nextQuestionDue(botId?: string): BotQuestionRow | undefined {
+    const row = this.get(`SELECT * FROM bot_questions WHERE status = 'open' AND next_at IS NOT NULL AND message_id IS NOT NULL
+      AND bot_id IN (SELECT bot_id FROM bot_registry WHERE deleted_at IS NULL)
+      ${botId === undefined ? '' : 'AND bot_id = ?'} ORDER BY next_at, rowid LIMIT 1`, ...(botId === undefined ? [] : [botId]))
     return row ? questionOf(row) : undefined
   }
 
@@ -1972,8 +1974,10 @@ export class BotStore {
   }
 
   /** The soonest reminder still to come, of any bot. */
-  nextReminder(): BotReminderRow | undefined {
-    const row = this.get("SELECT * FROM bot_reminders WHERE status = 'waiting' ORDER BY due_at, id LIMIT 1")
+  nextReminder(botId?: string): BotReminderRow | undefined {
+    const row = this.get(`SELECT * FROM bot_reminders WHERE status = 'waiting'
+      AND bot_id IN (SELECT bot_id FROM bot_registry WHERE deleted_at IS NULL)
+      ${botId === undefined ? '' : 'AND bot_id = ?'} ORDER BY due_at, id LIMIT 1`, ...(botId === undefined ? [] : [botId]))
     return row ? reminderOf(row) : undefined
   }
 
