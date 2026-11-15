@@ -56,8 +56,6 @@ const THREAD_WAIT_ERROR_MAX_CHARS = 1_000
 const THREAD_SEARCH_MESSAGE_THREADS = 100
 /** Lineage walks stop here; deeper chains are treated as unrelated. */
 const LINEAGE_MAX_DEPTH = 64
-/** A personal bot starts at most this many threads in a day ("use your threads"); the next is refused. */
-export const BOT_THREAD_STARTS_PER_DAY = 20
 
 // What a bot reads of the owner's threads is short and bounded: handles and one-line summaries by default, transcript
 // text only when it asks for it, and capped.

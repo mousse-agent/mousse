@@ -84,7 +84,7 @@ import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type Effe
 import { steerReleaseWindow, stopStrategy, type SteerDelivery } from '../run/CommandPolicy'
 import { agentMessageText, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentArchiveResult, type AgentCreatedThread, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, LAUNCHED_THREAD_ACCESS_CEILING, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
-import { BOT_THREAD_STARTS_PER_DAY, botRequestPrefix, THREAD_CREATE_MAX_ACTIVE_PER_THREAD, THREAD_CREATE_MAX_PER_RUN, THREAD_SEND_MAX_PER_RUN } from '../run/mcp/appTools/thread'
+import { botRequestPrefix, THREAD_CREATE_MAX_ACTIVE_PER_THREAD, THREAD_CREATE_MAX_PER_RUN, THREAD_SEND_MAX_PER_RUN } from '../run/mcp/appTools/thread'
 import { botMessageText } from '../run/mcp/appTools/agentMessage'
 
 /**
@@ -4261,13 +4261,6 @@ export class OrchestratorService extends EventEmitter {
     const working = this.threadStore!.listAllThreads().filter((thread) => thread.createdByThreadId === options.actor.threadId && busy.has(thread.id)).length
     if (working >= THREAD_CREATE_MAX_ACTIVE_PER_THREAD)
       throw new McpToolError('mousse_conflict', `${working} of the threads this thread launched are still working (the limit is ${THREAD_CREATE_MAX_ACTIVE_PER_THREAD}); wait for some to finish (thread_wait) before launching more.`, { conflict: 'creation_limit', working })
-    // A bot starts at most so many threads a day: the per-run and working-at-once limits bound one chat turn, not days.
-    if (options.bot) {
-      const since = Date.now() - 24 * 60 * 60 * 1000
-      const today = this.threadStore!.listAllThreads().filter((thread) => thread.createdByThreadId === options.actor.threadId && Date.parse(thread.createdAt) >= since).length
-      if (today >= BOT_THREAD_STARTS_PER_DAY)
-        throw new McpToolError('mousse_conflict', `You started ${today} threads in the last day, the most a bot may start in a day (${BOT_THREAD_STARTS_PER_DAY}). Tell your owner you can start more tomorrow.`, { conflict: 'daily_limit', started: today })
-    }
     // A bot's thread never takes the bot's own model: the one it names, or the profile's default.
     const modelOverride = this.agentThreadModel(input, options.actor.threadId, project.id, options.bot !== undefined)
     // The thread runs no wider than its creator, and a looser default later cannot widen it: its mode is the stricter of

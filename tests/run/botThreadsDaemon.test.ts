@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BOT_MESSAGE_PREFIX, McpToolError, type AgentCreatedThread } from '../../src/mms/run/mcp/appTools'
-import { BOT_THREAD_STARTS_PER_DAY, THREAD_CREATE_MAX_PER_RUN, THREAD_SEND_MAX_PER_RUN } from '../../src/mms/run/mcp/appTools/thread'
+import { THREAD_CREATE_MAX_PER_RUN, THREAD_SEND_MAX_PER_RUN } from '../../src/mms/run/mcp/appTools/thread'
 import type { PermissionMode } from '../../src/shared/permissionMode'
 import { BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS } from '../../src/shared/bots/personal/manifest'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
@@ -327,16 +327,15 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     expect(w.d.orch.withdrawBotThreadMessages({ homeThreadId: w.chat.id, name: 'alpha' })).toBe(0)
   })
 
-  it(`starts at most ${BOT_THREAD_STARTS_PER_DAY} threads a day`, async () => {
+  it('has no daily cap: across chat turns it starts more than 20 threads in a day', async () => {
     const w = world()
-    for (let index = 0; index < BOT_THREAD_STARTS_PER_DAY; index += 1) {
+    const total = 25
+    for (let index = 0; index < total; index += 1) {
       // Five a chat turn: a new turn every five.
       if (index % THREAD_CREATE_MAX_PER_RUN === 0) w.turnRun(`act-day-${index}`)
       await w.create(`d${index}`, { title: `Day ${index}`, firstMessage: undefined, mode: undefined })
     }
-    w.turnRun('act-day-over')
-    await expect(w.create('d-over', { title: 'One more', firstMessage: undefined, mode: undefined })).rejects.toMatchObject({ code: 'mousse_conflict', message: expect.stringMatching(/the most a bot may start in a day/) })
-    expect(w.d.store.listAllThreads().filter((thread) => thread.createdByThreadId === w.chat.id)).toHaveLength(BOT_THREAD_STARTS_PER_DAY)
+    expect(w.d.store.listAllThreads().filter((thread) => thread.createdByThreadId === w.chat.id)).toHaveLength(total)
   })
 
   it('a thread it starts is what it manages while its run works, waits on the owner while it asks, and is listed as done once it ends; each change tells its chat thread', async () => {
