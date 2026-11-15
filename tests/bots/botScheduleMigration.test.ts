@@ -3,7 +3,7 @@
  * store. It keeps ids and next runs, marks the rows instead of deleting them, is idempotent, finishes a move cut short,
  * and can be undone.
  */
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -245,6 +245,26 @@ describe('going back to an older build and coming back', () => {
     expect(jobs.getJob(job.id)!.bot?.say).toBeUndefined()
     jobs.restoreDroppedFields()
     expect(jobs.getJob(job.id)!.bot?.say).toBeUndefined()
+  })
+
+  it.each(['explicit false', 'another bot'] as const)('kept ownerAsked cannot promote %s', (kind) => {
+    move()
+    const job = jobs.getJob('bot-a--news')!
+    const keptPath = join(base, 'home', 'scheduled', 'jobs-kept.json')
+    const kept = JSON.parse(readFileSync(keptPath, 'utf8'))
+    kept.jobs[job.id].bot.ownerAsked = true
+    writeFileSync(keptPath, JSON.stringify(kept))
+    const inside = jobs as unknown as { config: MousseConfigStore }
+    inside.config.updateScheduledSection({ jobs: jobs.listJobs().map((row) => {
+      const definition = jobToDefinition(row)
+      if (row.id === job.id) {
+        if (kind === 'explicit false') Object.assign(definition.bot!, { ownerAsked: false })
+        else definition.bot!.botId = 'another-bot'
+      }
+      return definition
+    }) })
+    jobs.restoreDroppedFields()
+    expect((jobs.getJob(job.id)!.bot as { ownerAsked?: boolean }).ownerAsked).not.toBe(true)
   })
 
   it('puts back every field an older build’s save dropped: a bot’s link, a draft, keys, Tell me and a CLI name', () => {
