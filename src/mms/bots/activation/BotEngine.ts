@@ -3546,8 +3546,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.journalEnd(row, 'schedule_removed')
       return true
     })
-    this.live.get(row.id)?.controller.abort(new BotWallAbort())
-    if (ended) this.changed({ botId: row.botId, activationId: row.id })
+    const live = this.live.get(row.id)
+    live?.controller.abort(new BotWallAbort())
+    if (ended) {
+      this.changed({ botId: row.botId, activationId: row.id })
+      // Without a live turn no executor will advance this end. Keep the usual bounded wait for late final words.
+      if (!live) void this.advance(row.id, this.carried.get(row.id)?.text ?? row.result ?? undefined, { expectText: true })
+        .catch(error => console.warn('a removed schedule report could not be posted', { activationId: row.id, error: error instanceof Error ? error.message : String(error) }))
+    }
     return { kind: 'ended' }
   }
 
@@ -4857,11 +4863,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const maxTurns = counters.limits.maxTurns
     if (maxTurns !== undefined && counters.requests >= maxTurns) {
       this.raiseWall(row.id, { dispatchN: main.n, kind: 'budget', permission: { budget: { key: 'maxTurns', amount: maxTurns } }, reason: `This bot reached its limit of ${maxTurns} model requests.` })
-      // Removing a schedule turns this wall into an end immediately. Reuse its normal end path
-      // now: this dispatch was already settled, so no later run event will post its report.
-      const ended = this.store.activation(row.id)
-      if (ended?.status === 'done' && ended.endReason === 'schedule_removed')
-        await this.advance(row.id, text ?? this.carried.get(row.id)?.text, { expectText: true })
       return
     }
     const allowed = this.allowedSinceRefused(row)
@@ -6595,6 +6596,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         const row = this.store.activation(id as string)
         const main = row ? this.store.lastMainDispatch(row.id) : undefined
         if (!row || !main?.endedAt || this.store.message(`bm_${row.id}_d${main.n}`)) continue
+        // Its end path already owns the bounded wait for the executor's final words.
+        if (this.pendingReplies.has(`${row.id}:${main.n}`)) continue
         if (!ENDED_ACTIVATION_STATUSES.has(row.status) && this.chatDraft(row)) continue
         this.postReply(row, main, row.result ?? '', false)
       } catch (error) {
