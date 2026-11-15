@@ -320,6 +320,7 @@ export interface BotReminderItem {
 
 /** About this bot. */
 export interface BotDetail {
+  telling?: string
   summary: BotSummary
   permissions: BotPermissionItem[]
   runs: BotRunItem[]

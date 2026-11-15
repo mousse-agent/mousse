@@ -179,6 +179,7 @@ export function BotAboutPanel({ bot }: { bot: BotSummary }) {
       <h2>{bot.name}</h2>
     </div>
     <BotPrompt bot={bot} />
+    {detail?.telling && <p className="bot-about-row"><Bell size={14} aria-hidden /><span>{detail.telling}</span></p>}
     <h3>CAN USE</h3>
     {detail?.permissions.length
       ? detail.permissions.map((item) => <div className="bot-about-row bot-about-permission" key={item.id}>

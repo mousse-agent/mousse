@@ -80,6 +80,7 @@ export interface BotToolHost {
     done?(threadId: string, why: string): void
     list(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string; leftOff?: string }>
   }
+  setTelling?(botId: string, activationId: string, change: import('../../shared/bots/personal/tellingSettings').TellingChange): string
   setProfile(botId: string, p: { name?: string; description?: string }): void
   /**
    * `set_depth` and `use_model` (#673). `now`: this activation only, by a reload; `always`: saved as a revision with no

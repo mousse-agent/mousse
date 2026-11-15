@@ -438,3 +438,9 @@ describe("the bot's prompt in About", () => {
     expect(body()).toBeUndefined()
   })
 })
+
+it('shows the service’s telling line only when preferences are set', async () => {
+  fake.details.b1.telling = 'Tells you when it needs you · Quiet 22:00 to 08:00 · can wake you'
+  await show()
+  expect(host.textContent).toContain(fake.details.b1.telling)
+})

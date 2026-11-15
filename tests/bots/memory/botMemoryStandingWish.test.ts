@@ -158,3 +158,17 @@ describe('nearDuplicate', () => {
     expect(nearDuplicate('Always use em dashes', ["Don't use em dashes."])).toBe(false)
   })
 })
+
+it('a telling_set call handles the wish without changing existing memory', async () => {
+  const fx = memoryFixture()
+  const original = fx.store.save('ada', { lane: 'chat', kind: 'owner', text: 'Never ping me at night.' })
+  fx.message({ botId: 'ada', id: 'wish', author: 'owner', text: 'Never ping me at night.', activationId: 'telling' })
+  fx.store.append({ botId: 'ada', kind: 'tool_call', lane: 'chat', activationId: 'telling', sourceKey: 'telling-call', who: 'bot', text: 'telling_set', json: { tool: 'telling_set' } })
+  const before = fx.store.active('ada')
+  const journal = createBotJournal({ store: fx.store, readThread: () => ({ messages: [] }), listThreads: () => [] })
+  const provider = createBotContextProvider({ store: fx.store, journal, situation: () => ({ telling: 'Tells you when it needs you' }) })
+  await provider.afterDispatch({ botId: 'ada', activationId: 'telling', dispatchId: 'd', lane: 'chat', memoryLane: 'chat', threadId: 'home', endedBy: 'settled' })
+  expect(fx.store.active('ada')).toEqual(before)
+  expect(original).not.toHaveProperty('error')
+  expect(await provider.chatPreamble({ botId: 'ada', activationId: 'next' })).toContain('Tells you when it needs you')
+})

@@ -137,6 +137,7 @@ export interface NotificationChannels {
 }
 
 export interface NotificationSettings {
+  quietHours?: { from: string; to: string }
   /**
    * The sound for every event, from before sounds were chosen per event. Still read for an event
    * whose `sound` has not been chosen.

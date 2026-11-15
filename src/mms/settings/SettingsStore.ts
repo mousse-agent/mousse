@@ -1,3 +1,4 @@
+import { validQuietHours } from '../../shared/bots/personal/tellingSettings'
 import type { ContextSettings, MousseSettings, MousseSettingsUpdate } from '../../shared/settings'
 import { THEME_CSS_MAX_LENGTH, themeCssTooLong } from '../../shared/themes/cssSafety'
 import { CONTEXT_COMPACTION_DEFAULT_MARKER, DEFAULT_CONTEXT_COMPACTION_TOKENS, REMOVED_THEME_IDS, getDefaultSettings, normalizeAgentAccessSettings, normalizeAppearance, normalizeContextSettings, normalizeExperimentalSettings, normalizePermissionSettings, normalizeRunSettings, normalizeStorageSettings } from '../../shared/settings'
@@ -182,6 +183,8 @@ export class SettingsStore {
       const long = themes.find((theme) => theme && typeof theme === 'object' && typeof (theme as { css?: unknown }).css === 'string' && ((theme as { css: string }).css.length > THEME_CSS_MAX_LENGTH))
       if (long) throw new Error(`${themeCssTooLong((long as { css: string }).css.length)} Nothing was saved.`)
     }
+    const quiet = partial.notifications?.quietHours
+    if (quiet !== undefined && !validQuietHours(quiet)) throw new Error('Quiet hours need different from and to times in HH:MM (00:00 to 23:59). Nothing was saved.')
     const current = this.get()
     const merged = deepMerge(
       current as unknown as Record<string, unknown>,
@@ -217,6 +220,7 @@ export class SettingsStore {
       normalized.integrations = { ...normalized.integrations, skills: { ...normalized.integrations.skills, model } }
     }
     this.config.applySettingsPatch(normalized)
+    if (partial.notifications && Object.hasOwn(partial.notifications, 'quietHours') && quiet === undefined) this.config.clearQuietHours()
     for (const listener of savedListeners) {
       try { listener() } catch (error) { console.warn('[SettingsStore] a settings listener failed', error) }
     }

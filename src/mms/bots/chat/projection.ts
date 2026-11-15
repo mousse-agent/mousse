@@ -207,6 +207,7 @@ export class BotChatProjection {
     emit(event: { botId: string; message: BotChatMessage }): void
     /** A bot's schedules, from the shared store (`BotEngine.listSchedules`), for About → Runs. */
     classify?(message: BotChatMessage, input: PostInput): 'now' | 'soon' | 'later' | null
+    telling?(botId: string): string | undefined
     schedules?(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string; jobId?: string; paused?: boolean }>
     /**
      * Where a granted MCP server stands now (`BotMcp.where`), for About → Can use; undefined while the servers were not
@@ -595,6 +596,7 @@ export class BotChatProjection {
     ))
     return {
       summary: this.summary(definition, now),
+      ...(this.options.telling?.(definition.id) ? { telling: this.options.telling(definition.id) } : {}),
       permissions: grant ? [
         ...this.permissionItems(definition.id, grant.manifest, grant.approvedAt).filter((item) => !this.store.disabledPermissions(definition.id).some((off) => off.id === item.id)).map((item) => ({ ...item, enabled: true })),
         ...this.store.disabledPermissions(definition.id).flatMap((off) => this.permissionItems(definition.id, off.manifest, grant.approvedAt).filter((item) => item.id === off.id).map((item) => ({ ...item, enabled: false, note: `Switched off for this bot. ${item.note}` })))
