@@ -106,8 +106,11 @@ export function remoteReachRefusal(error: unknown, computer: string, what: strin
     case 'route_unreachable':
     case 'bridge_off':
       return new RemoteThreadRefusal('computer_offline', `${computer} is offline, so ${what} did not reach it.`, computer)
-    case 'computer_forbidden':
-      return new RemoteThreadRefusal('computer_not_shared', `${computer} does not share its threads with this computer (${message}), so ${what} did not reach it.`, computer)
+    case 'computer_forbidden': {
+      // Why it refused (it blocked this device, turned sharing off), for a settle notice that says so.
+      const reason = error instanceof DomainRpcError && isRecord(error.details) && typeof error.details.reason === 'string' ? error.details.reason : undefined
+      return new RemoteThreadRefusal('computer_not_shared', `${computer} does not share its threads with this computer (${message}), so ${what} did not reach it.`, computer, reason ? { reason } : undefined)
+    }
     case 'computer_outdated':
       return new RemoteThreadRefusal('computer_outdated', `Update Mousse on ${computer}: it is too old for ${what} from an agent on this computer.`, computer)
     case 'agent_reach':
@@ -240,13 +243,21 @@ export class RemoteLaunchedThreads {
     return localized(qualifyRoutedResult(method, value, { node, ...(self ? { self } : {}) }), self)
   }
 
-  private async read(target: RemoteTarget, method: string, params: Record<string, unknown>, what: string, signal?: AbortSignal): Promise<{ value: unknown; versions: Record<string, number> | undefined }> {
+  private async read(target: Pick<RemoteTarget, 'node' | 'computer' | 'remoteThreadId'>, method: string, params: Record<string, unknown>, what: string, signal?: AbortSignal): Promise<{ value: unknown; versions: Record<string, number> | undefined }> {
     try {
       const { result, versions } = await this.call(target, method, { threadId: target.remoteThreadId, ...params }, { what, ...(signal ? { signal } : {}) })
       return { value: this.named(target.node, method, result), versions }
     } catch (error) {
       throw remoteReachRefusal(error, target.computer, what)
     }
+  }
+
+  /**
+   * One read of the thread there, named as this computer names things; a failure is the refusal that says why. The
+   * settle notice's follower finds a watched message with it (`runs.list`, `runs.get`, `queue.list`).
+   */
+  async readThread(target: Pick<RemoteTarget, 'node' | 'computer' | 'remoteThreadId'>, method: string, params: Record<string, unknown>, what: string, signal?: AbortSignal): Promise<unknown> {
+    return (await this.read(target, method, params, what, signal)).value
   }
 
   // ------------------------------------------------------------------ reading
