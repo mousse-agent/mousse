@@ -8,7 +8,7 @@ import { askText } from '../../../shared/bots/personal/askText'
 import { lookFields } from '../../../shared/bots/personal/look'
 import { BOT_HELD_POWER_TEXT, subagentHold, type BotHeldPower, type BotRuntimeHold, type BotSubagentHold } from '../../../shared/bots/personal/subagentHold'
 import type { BotAuthority, BotCheck, BotCheckDenied, BotMcpTool, BotSubagents, BotSubagentView, BotThreadRole, BotThreads, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
-import type { BotChatMessage, BotChip, BotError } from '../../../shared/bots/personal/chat'
+import type { BotChatMessage, BotChip, BotError, BotLaunchedThread } from '../../../shared/bots/personal/chat'
 import type { PermissionMode } from '../../../shared/permissionMode'
 import {
   BOT_ASK_DENY_COOLDOWN_MS,
@@ -154,6 +154,11 @@ export interface BotEngineHost {
   stopThread?(threadId: string): Promise<unknown> | void
   /** `bots.changed`. */
   changed?(event: { botId?: string; activationId?: string }): void
+  /**
+   * The threads started by any of `creatorThreadIds` (`Thread.createdByThreadId`), hidden ones too, and how each stands
+   * (`launchedThreadsOf`): what a bot manages beside its own work, and what it managed. Absent: none is listed.
+   */
+  launchedThreads?(creatorThreadIds: ReadonlySet<string>): BotLaunchedThread[]
   /** A bot's schedules may have changed (it was resumed): the scheduler ticks now. */
   schedulesChanged?(): void
   /**
@@ -598,6 +603,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // report its schedule's Tell me keeps quiet says so (`quiet`): it is in the chat, without a notification.
       emit: (event) => this.events.emit('message', { ...event, ...this.nameFor(event.botId), ...(this.quietReport(event.botId, event.message) ? { quiet: true } : {}) }),
       schedules: (botId) => this.listSchedules(botId),
+      // The threads it started that still work: it is busy while it manages them.
+      launched: (botId) => this.launchedThreads(botId),
       // About marks a permission this computer has switched off.
       computerLimit: () => this.limit(),
       // Where each granted MCP server stands now, for About (on, switched off, changed, gone, or MCP off). Before the
@@ -6565,6 +6572,24 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     // The home thread runs the chat lane's turns: as bot turns, like an activation thread's.
     return role === 'home' ? 'activation' : role === 'activation' || role === 'context' || role === 'subagent' ? role : undefined
+  }
+
+  /** The threads `botId` started from any of its threads (its chat, its work), as `BotEngineHost.launchedThreads` lists them. */
+  launchedThreads(botId: string): BotLaunchedThread[] {
+    if (!this.host.launchedThreads) return []
+    const creators = new Set(this.store.botThreads(botId).map((thread) => thread.threadId))
+    const home = this.store.registry(botId)?.homeThreadId
+    if (home) creators.add(home)
+    return creators.size ? this.host.launchedThreads(creators) : []
+  }
+
+  /**
+   * A thread some thread started changed how it works (its run started, ended, held, or asks the owner): when a bot
+   * started it, the bot's summary is read again, so its header goes busy or back to free. Never throws.
+   */
+  launchedThreadChanged(creatorThreadId: string): void {
+    const bot = this.botOf(creatorThreadId)
+    if (bot) this.changed({ botId: bot.botId })
   }
 
   /** The bot `threadId` belongs to, with its name now (`BotThreads.botOf`). Never throws. */

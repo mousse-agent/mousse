@@ -15,6 +15,9 @@ import type { PermissionMode } from '../../src/shared/permissionMode'
 import { BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS } from '../../src/shared/bots/personal/manifest'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 import type { AgentActor } from '../../src/mms/run/types'
+import type { EventEmitter } from 'node:events'
+import { launchedThreadsOf, watchLaunchedThreads } from '../../src/mms/bots/launchedThreads'
+import { launchedActive } from '../../src/shared/bots/personal/chat'
 import { appTurn } from './appToolsFixture'
 import { PI, phase6Daemon, piAdapter, waitFor, type Phase6Daemon } from './phase6Fixture'
 
@@ -298,5 +301,46 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     w.turnRun('act-day-over')
     await expect(w.create('d-over', { title: 'One more', firstMessage: undefined, mode: undefined })).rejects.toMatchObject({ code: 'mousse_conflict', message: expect.stringMatching(/the most a bot may start in a day/) })
     expect(w.d.store.listAllThreads().filter((thread) => thread.createdByThreadId === w.chat.id)).toHaveLength(BOT_THREAD_STARTS_PER_DAY)
+  })
+
+  it('a thread it starts is what it manages while its run works, waits on the owner while it asks, and is listed as done once it ends; each change tells its chat thread', async () => {
+    let release: (() => void) | undefined
+    const w = world({ script: (input) => (input.prompt.includes('Look at the login page.') ? new Promise<string>((resolve) => { release = () => resolve('done') }) : 'done') })
+    const questions = w.orch.questions as unknown as EventEmitter & { listPendingForThread(threadId: string): Array<{ requestId: string }>; dismiss(requestId: string): boolean }
+    const changed: string[] = []
+    const unwatch = watchLaunchedThreads({ runs: w.d.engine, questions, thread: (id) => w.d.store.getThread(id), changed: (creator) => changed.push(creator) })
+    const managed = (creators: string[]) => launchedThreadsOf({
+      creators: new Set(creators),
+      threads: w.d.store.listAllThreads(),
+      activeRuns: w.d.engine.store.listNonTerminalRuns(),
+      lastRun: (id) => w.d.engine.store.listRuns(id, { limit: 1 })[0],
+      asks: (id) => questions.listPendingForThread(id).length > 0,
+      projectName: (id) => (id === w.project.id ? 'Shop' : undefined)
+    })
+    const made = await w.create('c1')
+    await waitFor(() => release !== undefined, 'the launched thread\'s turn')
+    expect(managed([w.chat.id])).toEqual([{ threadId: made.threadId, title: 'Fix login', project: 'Shop', status: 'running', startedAt: expect.any(String), updatedAt: expect.any(String) }])
+    // Another thread's launches are not this bot's.
+    expect(managed(['another-thread'])).toEqual([])
+    expect(changed.length).toBeGreaterThan(0)
+    expect(new Set(changed)).toEqual(new Set([w.chat.id]))
+
+    // A question in it waits on the owner: the line says so, and goes back to working once it is answered.
+    let seen = changed.length
+    void w.orch.questions.requestAnswers([{ id: 'q', prompt: 'Which?', options: [{ id: 'a', label: 'A' }] }], made.threadId, {}).catch(() => undefined)
+    expect(managed([w.chat.id])[0]?.status).toBe('needs_input')
+    expect(changed.length).toBeGreaterThan(seen)
+    seen = changed.length
+    questions.dismiss(questions.listPendingForThread(made.threadId)[0]!.requestId)
+    expect(managed([w.chat.id])[0]?.status).toBe('running')
+    expect(changed.length).toBeGreaterThan(seen)
+
+    // Its run ends: it is listed as done, no longer keeping the bot busy, and the chat thread hears it.
+    seen = changed.length
+    release!()
+    await w.settled((made.firstMessage as { runId: string }).runId)
+    expect(managed([w.chat.id]).map((thread) => [thread.threadId, thread.status, launchedActive(thread)])).toEqual([[made.threadId, 'done', false]])
+    expect(changed.length).toBeGreaterThan(seen)
+    unwatch()
   })
 })

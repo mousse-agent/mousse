@@ -1,8 +1,10 @@
-import { Fragment, memo, useEffect, useRef, useState, type ReactNode } from 'react'
-import { Activity, AppWindow, Brain, ChevronDown, Clock, FileText, Globe, Moon, Pencil, Search, TerminalSquare, X } from '../../lib/icons'
-import type { BotChip, BotSummary, BotWorkItem } from '../../../shared/bots/personal/chat'
+import { Fragment, memo, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
+import { Activity, AppWindow, Brain, ChevronDown, ChevronRight, Circle, CircleAlert, CircleCheck, CircleDotDashed, CircleX, Clock, FileText, Globe, Moon, Pencil, Search, TerminalSquare, X } from '../../lib/icons'
+import type { BotChip, BotLaunchedThread, BotSummary, BotWorkItem } from '../../../shared/bots/personal/chat'
+import { formatAgo } from '../../lib/formatAgo'
 import { useBotsStore } from '../../stores/botsStore'
-import { presenceOf, stickerOf, type BotStickerKind } from './botChatShape'
+import { launchedGroups, launchedLook, presenceOf, stickerOf, type BotStickerKind, type LaunchedTone } from './botChatShape'
+import { openThread } from './BotSteps'
 
 /** How long work has run, in plain words: "just now", "4 min", "1 h 20 min". */
 export function workElapsed(startedAt: string, now = Date.now()): string {
@@ -51,9 +53,43 @@ const WorkLine = memo(function WorkLine({ botId, item }: { botId: string; item: 
   return <li className={`bot-work-line${running ? ' is-running' : ''}`}>
     <span className="bot-work-title">{item.title}</span>
     <span className="bot-work-doing">{details.map((part, index) => <Fragment key={index}>{index > 0 && ' · '}{part}</Fragment>)}</span>
-    <button type="button" aria-label={`Stop ${item.title}`} title="Stop" onClick={() => void useBotsStore.getState().stopWork(botId, item.id)}><X size={13} aria-hidden /></button>
+    <button type="button" data-nav aria-label={`Stop ${item.title}`} title="Stop" onClick={() => void useBotsStore.getState().stopWork(botId, item.id)}><X size={13} aria-hidden /></button>
   </li>
 })
+
+const TONE_ICONS: Record<LaunchedTone, typeof Circle> = { working: CircleDotDashed, waiting: CircleAlert, idle: Circle, done: CircleCheck, failed: CircleX }
+
+/**
+ * A thread the bot started, in the header's list: its title, where it stands (an icon and a word, the row tinted to
+ * match), its project and when it last changed. The whole row opens it. Rows that no longer work are dimmed.
+ */
+const ThreadLine = memo(function ThreadLine({ thread, now, onOpen }: { thread: BotLaunchedThread; now: number; onOpen(): void }) {
+  const { tone, label } = launchedLook(thread.status)
+  const Icon = TONE_ICONS[tone]
+  const ago = formatAgo(Date.parse(thread.updatedAt), now)
+  return <li>
+    <button type="button" className="bot-thread-line" data-tone={tone} data-nav title={`Open ${thread.title}`}
+      onClick={() => { onOpen(); openThread(thread.threadId) }}>
+      <span className="bot-thread-top">
+        <span className="bot-thread-title">{thread.title}</span>
+        <span className="bot-thread-state"><Icon size={12} aria-hidden />{label}</span>
+      </span>
+      <span className="bot-thread-meta">{[thread.project, ago && `updated ${ago}`].filter(Boolean).join(' · ')}</span>
+    </button>
+  </li>
+})
+
+/** Moves focus among the list's rows and buttons with the arrow keys, Home and End. */
+function moveFocus(event: ReactKeyboardEvent<HTMLElement>): void {
+  if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
+  const items = [...event.currentTarget.querySelectorAll<HTMLElement>('[data-nav]')]
+  if (!items.length) return
+  event.preventDefault()
+  const at = items.indexOf(document.activeElement as HTMLElement)
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1
+    : event.key === 'ArrowDown' ? (at + 1) % items.length : (at <= 0 ? items.length - 1 : at - 1)
+  items[next]!.focus()
+}
 
 const STICKER_ICONS: Record<BotStickerKind, { icon: typeof Pencil; label: string }> = {
   typing: { icon: Pencil, label: 'Typing' },
@@ -82,30 +118,63 @@ export function BotActivitySticker({ bot, typing, offline }: { bot: BotSummary; 
 }
 
 /**
- * Under the bot's name in the header: "typing…", "System check +1", "paused", "free". While work runs or waits the line
- * opens the list of that work (title, time, Stop; queued pieces last), which closes on a click away or Escape.
+ * Under the bot's name in the header: "typing…", "System check +1", "Managing 2 threads", "paused", "free". While it has
+ * work, or has started threads, the line opens their list: work with Stop (queued pieces last), then the threads it
+ * started that still go (working, then waiting on you), then the rest under "Done", folded while anything goes. A row
+ * opens its thread. Arrow keys move along the list; Escape or a click away closes it.
  */
 export function BotPresenceLine({ bot, typing, offline }: { bot: BotSummary; typing: boolean; offline: boolean }) {
   const presence = presenceOf(bot, { typing, offline })
   const work = bot.work ?? []
+  const { going, ended } = launchedGroups(bot.threads ?? [])
+  const listed = work.length + going.length + ended.length
+  const quiet = !work.length && !going.length
   const [open, setOpen] = useState(false)
+  const [doneOpen, setDoneOpen] = useState<boolean | undefined>(undefined)
+  const [now, setNow] = useState(() => Date.now())
   const root = useRef<HTMLDivElement>(null)
-  useEffect(() => { if (!work.length) setOpen(false) }, [work.length])
+  const trigger = useRef<HTMLButtonElement>(null)
+  const list = useRef<HTMLDivElement>(null)
+  // Opened from the keyboard, focus goes to the first row.
+  const focusFirst = useRef(false)
+  // "Done" stays as the owner left it; until then it is open only while nothing else is listed.
+  const showDone = doneOpen ?? quiet
+  useEffect(() => { if (!listed) setOpen(false) }, [listed])
   useEffect(() => {
     if (!open) return
+    setNow(Date.now())
+    const timer = window.setInterval(() => setNow(Date.now()), 30_000)
+    if (focusFirst.current) list.current?.querySelector<HTMLElement>('[data-nav]')?.focus()
+    focusFirst.current = false
     const away = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) setOpen(false) }
-    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') setOpen(false) }
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      setOpen(false)
+      if (root.current?.contains(document.activeElement)) trigger.current?.focus()
+    }
     document.addEventListener('pointerdown', away)
     document.addEventListener('keydown', escape)
-    return () => { document.removeEventListener('pointerdown', away); document.removeEventListener('keydown', escape) }
+    return () => { window.clearInterval(timer); document.removeEventListener('pointerdown', away); document.removeEventListener('keydown', escape) }
   }, [open])
-  if (!work.length) return <span className="bot-presence" data-kind={presence.kind} role="status">{presence.text}</span>
+  if (!listed) return <span className="bot-presence" data-kind={presence.kind} role="status">{presence.text}</span>
   // Running work first, then what waits, each in the order it came.
   const ordered = [...work.filter((item) => item.status !== 'queued'), ...work.filter((item) => item.status === 'queued')]
+  const close = () => setOpen(false)
   return <div className="bot-presence-root" ref={root}>
-    <button type="button" className="bot-presence is-button" data-kind={presence.kind} aria-expanded={open} aria-haspopup="true" onClick={() => setOpen((was) => !was)}>
+    <button type="button" ref={trigger} className="bot-presence is-button" data-kind={presence.kind} aria-expanded={open} aria-haspopup="dialog"
+      onClick={(event) => { focusFirst.current = event.detail === 0; setOpen((was) => !was) }}
+      onKeyDown={(event) => { if (event.key === 'ArrowDown' && !open) { event.preventDefault(); focusFirst.current = true; setOpen(true) } }}>
       <span role="status">{presence.text}</span><ChevronDown size={12} aria-hidden />
     </button>
-    {open && <ul className="bot-work" aria-label={`${bot.name}'s work`}>{ordered.map((item) => <WorkLine key={item.id} botId={bot.id} item={item} />)}</ul>}
+    {open && <div className="bot-work" ref={list} role="dialog" aria-label={`What ${bot.name} is running`} onKeyDown={moveFocus}>
+      {ordered.length > 0 && <ul className="bot-work-list" aria-label="Work">{ordered.map((item) => <WorkLine key={item.id} botId={bot.id} item={item} />)}</ul>}
+      {going.length > 0 && <ul className="bot-work-list" aria-label="Threads it started">{going.map((thread) => <ThreadLine key={thread.threadId} thread={thread} now={now} onOpen={close} />)}</ul>}
+      {ended.length > 0 && <>
+        <button type="button" className="bot-thread-fold" data-nav aria-expanded={showDone} onClick={() => setDoneOpen(!showDone)}>
+          <ChevronRight size={12} aria-hidden data-open={showDone || undefined} />Done<span className="bot-thread-count">{ended.length}</span>
+        </button>
+        {showDone && <ul className="bot-work-list" aria-label="Done">{ended.map((thread) => <ThreadLine key={thread.threadId} thread={thread} now={now} onOpen={close} />)}</ul>}
+      </>}
+    </div>}
   </div>
 }

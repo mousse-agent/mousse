@@ -1,4 +1,4 @@
-import type { BotAskCard, BotChatMessage, BotChip, BotSummary, BotWorkItem } from '../../../shared/bots/personal/chat'
+import { compareLaunched, launchedActive, type BotAskCard, type BotChatMessage, type BotChip, type BotLaunchedThread, type BotSummary, type BotWorkItem } from '../../../shared/bots/personal/chat'
 
 /**
  * How a bot's chat reads as a messenger: what the renderer infers from the chat's rows alone (`bot_messages`), with
@@ -135,17 +135,49 @@ export function leadWork(work: readonly BotWorkItem[]): BotWorkItem | undefined 
 
 /**
  * The bot's presence under its name: "typing…" while its chat turn writes, "System check +1" while work runs or waits
- * (the work running longest, and how many more; never "+0"), "paused", "waiting for internet", and "free" otherwise.
- * Typing wins over work; the line still opens the work's list.
+ * (the work running longest, and how many more, threads it manages included; never "+0"), "Managing Dictation mock-ups"
+ * or "Managing 2 threads" while only threads it started still work, "paused", "waiting for internet", and "free"
+ * otherwise. Threads that ended or sit idle are listed but never make it busy. Typing wins over work; the line still
+ * opens the list.
  */
-export function presenceOf(bot: Pick<BotSummary, 'state' | 'work'>, chat: { typing: boolean; offline: boolean }): BotPresence {
+export function presenceOf(bot: Pick<BotSummary, 'state' | 'work' | 'threads'>, chat: { typing: boolean; offline: boolean }): BotPresence {
   if (bot.state === 'paused') return { kind: 'paused', text: 'paused' }
   if (chat.offline) return { kind: 'offline', text: 'waiting for internet' }
   if (chat.typing) return { kind: 'typing', text: 'typing…' }
   const work = bot.work ?? []
+  const threads = (bot.threads ?? []).filter(launchedActive)
   const lead = leadWork(work)
-  if (!lead) return { kind: 'free', text: 'free' }
-  return { kind: 'busy', text: work.length > 1 ? `${lead.title} +${work.length - 1}` : lead.title, lead }
+  if (lead) {
+    const more = work.length - 1 + threads.length
+    return { kind: 'busy', text: more > 0 ? `${lead.title} +${more}` : lead.title, lead }
+  }
+  if (threads.length === 1) return { kind: 'busy', text: `Managing ${threads[0]!.title}` }
+  if (threads.length) return { kind: 'busy', text: `Managing ${threads.length} threads` }
+  return { kind: 'free', text: 'free' }
+}
+
+/** How a thread the bot started looks in its list: the tint of its row (`working` blue, `waiting` amber, `done` green, `failed` red), and its label. */
+export type LaunchedTone = 'working' | 'waiting' | 'idle' | 'done' | 'failed'
+
+/** The tone and the words for where a thread the bot started stands: "working", "waiting on you", "done", "stopped". */
+export function launchedLook(status: BotLaunchedThread['status']): { tone: LaunchedTone; label: string } {
+  if (status === 'needs_input') return { tone: 'waiting', label: 'waiting on you' }
+  if (status === 'queued') return { tone: 'working', label: 'queued' }
+  if (status === 'paused') return { tone: 'working', label: 'held' }
+  if (status === 'idle') return { tone: 'idle', label: 'idle' }
+  if (status === 'done') return { tone: 'done', label: 'done' }
+  if (status === 'failed') return { tone: 'failed', label: 'failed' }
+  if (status === 'stopped') return { tone: 'failed', label: 'stopped' }
+  return { tone: 'working', label: 'working' }
+}
+
+/**
+ * The threads the bot started, split for its list: those still going (working first, then waiting on the owner), and
+ * the rest under "Done" (idle, then ended, the most recently updated first), in the summary's order (`compareLaunched`).
+ */
+export function launchedGroups(threads: readonly BotLaunchedThread[]): { going: BotLaunchedThread[]; ended: BotLaunchedThread[] } {
+  const ordered = [...threads].sort(compareLaunched)
+  return { going: ordered.filter(launchedActive), ended: ordered.filter((thread) => !launchedActive(thread)) }
 }
 
 /** What the sticker on the header's face shows. */

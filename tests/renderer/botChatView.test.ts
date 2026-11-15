@@ -11,6 +11,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AT, fakeBots, installPreload, message, summary, type FakeBots } from './fakeBotsClient'
 import { setAnimationSpeed } from '../../src/renderer/lib/motion'
+import type { BotLaunchedThread } from '../../src/shared/bots/personal/chat'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -33,6 +34,13 @@ vi.mock('../../src/renderer/chat/components/agent-elements/markdown', async (imp
   const actual = await importOriginal<typeof import('../../src/renderer/chat/components/agent-elements/markdown')>()
   const { createElement: h } = await import('react')
   return { ...actual, Markdown: (props: Parameters<typeof actual.Markdown>[0]) => { markdown.renders++; return h(actual.Markdown, props) } }
+})
+
+// A thread opened from the bot's list is recorded, then opened as usual.
+const opened = vi.hoisted(() => ({ ids: [] as string[] }))
+vi.mock('../../src/renderer/lib/threadActions', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/renderer/lib/threadActions')>()
+  return { ...actual, selectThread: (threadId: string, ...rest: unknown[]) => { opened.ids.push(threadId); return (actual.selectThread as (...args: unknown[]) => Promise<unknown>)(threadId, ...rest) } }
 })
 
 const { ChatWorkspace } = await import('../../src/renderer/components/chats/ChatWorkspace')
@@ -1050,6 +1058,57 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
     expect(button('Stop run')).toBeDefined()
     await click(presence())
     expect(host.querySelectorAll('.bot-work-line')).toHaveLength(2)
+  })
+
+  describe('threads it started', () => {
+    const ago = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString()
+    const thread = (threadId: string, title: string, status: BotLaunchedThread['status'], minutes: number): BotLaunchedThread => ({ threadId, title, project: 'Mousse', status, startedAt: ago(minutes), updatedAt: ago(minutes) })
+    // Out of order on purpose: the list still puts working first, then waiting on you, then idle, then ended.
+    const threads = [thread('t3', 'Old run', 'done', 90), thread('t2', 'Typing dots', 'needs_input', 3), thread('t1', 'Dictation', 'running', 1), thread('t4', 'Broken', 'failed', 30), thread('t5', 'Halted', 'stopped', 40), thread('t6', 'Never ran', 'idle', 5)]
+    const rows = () => [...host.querySelectorAll('.bot-thread-line')].map((row) => [row.querySelector('.bot-thread-title')!.textContent, row.querySelector('.bot-thread-state')!.textContent, row.getAttribute('data-tone')])
+    const keydown = async (key: string) => { await act(async () => { (document.activeElement as HTMLElement).dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })) }); await act(async () => {}) }
+
+    it('lists working threads first, then those waiting on you, each with its state, project and last update; the rest fold under Done', async () => {
+      await open({ ...inbox, state: 'working', stateText: 'Managing 2 threads', threads })
+      expect(presence().textContent).toBe('Managing 2 threads')
+      await click(presence())
+      expect(rows()).toEqual([['Dictation', 'working', 'working'], ['Typing dots', 'waiting on you', 'waiting']])
+      expect(host.querySelector('.bot-thread-meta')!.textContent).toBe('Mousse · updated 1m ago')
+      const fold = host.querySelector<HTMLButtonElement>('.bot-thread-fold')!
+      expect([fold.textContent, fold.getAttribute('aria-expanded')]).toEqual(['Done4', 'false'])
+      await click(fold)
+      expect(rows().slice(2)).toEqual([['Never ran', 'idle', 'idle'], ['Broken', 'failed', 'failed'], ['Halted', 'stopped', 'failed'], ['Old run', 'done', 'done']])
+    })
+
+    it('opens a thread from its row, moves along the list with the arrow keys, and closes on Escape or a click away', async () => {
+      opened.ids.length = 0
+      await open({ ...inbox, state: 'working', stateText: 'Managing 2 threads', threads })
+      // From the keyboard: the list opens on the first row.
+      await act(async () => presence().focus())
+      await keydown('ArrowDown')
+      expect(document.activeElement?.textContent).toContain('Dictation')
+      await keydown('ArrowDown')
+      expect(document.activeElement?.textContent).toContain('Typing dots')
+      await keydown('ArrowUp')
+      expect(document.activeElement?.textContent).toContain('Dictation')
+      await keydown('Escape')
+      expect(host.querySelector('.bot-work')).toBeNull()
+      expect(document.activeElement).toBe(presence())
+      await click(presence())
+      await act(async () => { document.body.dispatchEvent(new Event('pointerdown', { bubbles: true })) })
+      expect(host.querySelector('.bot-work')).toBeNull()
+      await click(presence())
+      await click(host.querySelector('.bot-thread-line[data-tone="waiting"]'))
+      expect(opened.ids).toEqual(['t2'])
+      expect(host.querySelector('.bot-work')).toBeNull()
+    })
+
+    it('a free bot whose threads all ended still opens their list, Done unfolded', async () => {
+      await open({ ...inbox, threads: threads.filter((item) => item.status === 'done' || item.status === 'failed') })
+      expect(presence().textContent).toBe('free')
+      await click(presence())
+      expect(rows().map(([title]) => title)).toEqual(['Broken', 'Old run'])
+    })
   })
 
   it('a reply shows what it answers only when that is not right above it; Reply quotes a message and sends with it', async () => {

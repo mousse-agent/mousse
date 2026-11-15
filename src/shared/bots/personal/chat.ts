@@ -163,6 +163,53 @@ export interface BotSummary {
   chat?: { activationId: string; offline?: true }
   /** Work that runs or waits beside the chat (docs/plans/bot-always-free.md), oldest first. */
   work?: BotWorkItem[]
+  /**
+   * The owner's threads the bot started ("use your threads"), hidden ones too: those that work (oldest first), then those
+   * that wait on the owner, then the most recent of those that sit idle or ended (`BOT_LAUNCHED_ENDED_SHOWN`).
+   * The bot is busy while any is active (`launchedActive`). Absent from older services and while it started none.
+   */
+  threads?: BotLaunchedThread[]
+}
+
+/** How many of the threads a bot started that ended or sit idle its summary carries, the most recently updated. */
+export const BOT_LAUNCHED_ENDED_SHOWN = 30
+
+/**
+ * A thread the bot started: its title, its project, and how it stands now: its run works, waits its turn, is held (a
+ * usage limit), or waits on the owner (a question or approval in it); or no run works and it never ran (`idle`), or its
+ * last run finished (`done`), failed (`failed`) or was stopped or cut off (`stopped`). `startedAt`: when its current run
+ * started (the thread's creation once none runs); `updatedAt`: when it last changed.
+ */
+export interface BotLaunchedThread {
+  threadId: string
+  title: string
+  project?: string
+  status: 'running' | 'queued' | 'paused' | 'needs_input' | 'idle' | 'done' | 'failed' | 'stopped'
+  startedAt: string
+  updatedAt: string
+}
+
+/** Whether a thread the bot started keeps it busy: a run of it works, waits its turn, is held, or waits on the owner. */
+export function launchedActive(thread: Pick<BotLaunchedThread, 'status'>): boolean {
+  return thread.status === 'running' || thread.status === 'queued' || thread.status === 'paused' || thread.status === 'needs_input'
+}
+
+/** Where a thread the bot started goes in its list: what works, then what waits on the owner, then idle, then ended. */
+function launchedRank(status: BotLaunchedThread['status']): number {
+  if (status === 'needs_input') return 1
+  if (status === 'idle') return 2
+  if (status === 'done' || status === 'failed' || status === 'stopped') return 3
+  return 0
+}
+
+/**
+ * The order of the threads a bot started, in its summary and its list alike: what works, then what waits on the owner
+ * (each the longest going first), then idle ones, then ended ones (each the most recently updated first).
+ */
+export function compareLaunched(a: BotLaunchedThread, b: BotLaunchedThread): number {
+  return launchedRank(a.status) - launchedRank(b.status)
+    || (launchedActive(a) ? a.startedAt.localeCompare(b.startedAt) : b.updatedAt.localeCompare(a.updatedAt))
+    || a.threadId.localeCompare(b.threadId)
 }
 
 /** One piece of work in the line above the composer: what it is about, and whether it runs, waits or is held. */
