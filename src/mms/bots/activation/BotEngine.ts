@@ -696,8 +696,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     try {
       const row = this.store.activation(message.activationId)
       if (row?.trigger.kind !== 'schedule') return false
-      const entry = this.host.schedules?.get(botId, row.trigger.scheduleId)
-      return entry ? !tellMeNotifies(entry.tellMe, 'done', this.host.runLevel?.(message.activationId)) : false
+      const tellMe = row.trigger.completed?.tellMe ?? this.host.schedules?.get(botId, row.trigger.scheduleId)?.tellMe
+      return tellMe ? !tellMeNotifies(tellMe, 'done', this.host.runLevel?.(message.activationId)) : false
     } catch {
       return false
     }
@@ -721,6 +721,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   private changed(event: { botId?: string; activationId?: string }): void {
+    const ended = event.activationId ? this.store.activation(event.activationId) : undefined
+    if (ended && ENDED_ACTIVATION_STATUSES.has(ended.status)) this.postScheduleCompleted(ended)
     // A change may take "run commands" away (a Remove, a switch): background commands stop with it.
     if (this.watchers?.size && !this.checkingWatchers) {
       this.checkingWatchers = true
@@ -841,6 +843,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const quiet = await this.stopAndWait(live)
     // Scratch folders go only once nothing runs in them (the startup pass removes the rest).
     if (quiet) for (const activation of live) this.cleanup({ ...activation, status: 'cancelled' })
+    for (const activation of live) this.postScheduleCompleted(this.store.activation(activation.id) ?? activation)
     // Its runtimes' private temporary folder too (one still in use is emptied when its turn ends).
     try { this.host.removeRuntimeTemp?.(this.filesFolder(botId)) } catch { /* left for the system */ }
     for (const row of live) this.packs.delete(row.id)
@@ -1327,7 +1330,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   // -- Schedules (Path step 3: one scheduler) -------------------------------------------------------
 
   /** The scheduler retries a claim as started before making any new admission or lateness decision. */
-  findScheduledOccurrence(input: { botId: string; scheduleId: string; occurrenceKey: string }): { activationId: string; occurrenceAt: string } | undefined {
+  findScheduledOccurrence(input: { botId: string; scheduleId: string; occurrenceKey: string }): { activationId: string; occurrenceAt: string } | { kind: 'skipped'; reason: string } | undefined {
+    if (this.scheduleHasCompletion(input.botId, input.scheduleId)) return { kind: 'skipped', reason: 'schedule_completed' }
     const row = this.store.activationByKey(`sched:${input.botId}:${input.scheduleId}:${input.occurrenceKey}`)
     if (row?.trigger.kind === 'schedule') return { activationId: row.id, occurrenceAt: row.trigger.occurrenceAt }
     return undefined
@@ -1348,6 +1352,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     | { kind: 'not_ready' } {
     if (!this.startupPassed) return { kind: 'not_ready' }
     const { botId, scheduleId, prompt, occurrenceAt } = input
+    if (this.scheduleHasCompletion(botId, scheduleId)) return { kind: 'skipped', reason: 'schedule_completed' }
     const registry = this.store.registry(botId)
     if (!registry || registry.deletedAt) return { kind: 'skipped', reason: 'bot_deleted' }
     this.endUsagePauseIfDue(botId, input.now ?? new Date(this.now()))
@@ -1475,6 +1480,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   private async maintainPass(now: Date): Promise<void> {
     if (this.closed) return
+    this.retryCompletedScheduleRemovals()
+    if (this.removedScheduleSweepPending) this.tryDropRemovedScheduleRuns()
     for (const botId of this.host.definitions.ids()) {
       try {
         this.endUsagePauseIfDue(botId, now)
@@ -2167,7 +2174,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   private journalEnd(row: BotActivationRow, reason: string | null): void {
     if (row.trigger.kind === 'schedule') this.host.progress?.finishProgress(row.botId, row.id,
-      reason === null && this.store.activation(row.id)?.status === 'done' && Boolean(this.host.schedules?.get(row.botId, row.trigger.scheduleId)))
+      reason === null && !row.trigger.completed && this.store.activation(row.id)?.status === 'done' && Boolean(this.host.schedules?.get(row.botId, row.trigger.scheduleId)))
     // A chat turn that ended without its reply leaves one line in the recent chat, so the next turn can tell the owner.
     if (row.lane === 'chat') {
       if (reason !== null) this.journalInTx(chatTurnEndRow(row, reason))
@@ -2290,7 +2297,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // The owner's threads: reading in every lane; starting, messaging and stopping only in a chat turn the owner's own
       // message started (`chat:`), never in work, a reminder's work, a schedule or the bot's first message. The profiler:
       // in both lanes (the chat without its minutes-long watch).
-      botTools: { escalate: true, consult: definition.context.length > 0, memory: true, frontDesk: row.lane === 'chat', watcherStart: ownerChatTurn(row), threads: ownerChatTurn(row) ? 'all' : 'read', profiler: true, images: this.imagePick(row.botId) !== null, applets: true, subagents: row.lane === 'run', questions: asksOwner(row), cards: true, bots: asksOwner(row) }
+      botTools: { escalate: true, consult: definition.context.length > 0, memory: true, scheduled: row.lane === 'run' && row.trigger.kind === 'schedule', frontDesk: row.lane === 'chat', watcherStart: ownerChatTurn(row), threads: ownerChatTurn(row) ? 'all' : 'read', profiler: true, images: this.imagePick(row.botId) !== null, applets: true, subagents: row.lane === 'run', questions: asksOwner(row), cards: true, bots: asksOwner(row) }
     })
     if (!compiled.ok) return this.block(row, 'policy_unenforceable', compiled.error.reason ?? compiled.error.message)
     const checked = this.host.harness.checkPolicy(selection.instanceId, { mode: 'default', origin: 'bot', ...compiled.policy }, selection.model)
@@ -3387,6 +3394,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   raiseWall(activationId: string, input: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string }): WallReason {
     const current = this.store.activation(activationId)
+    if (current && this.removedExecutingSchedule(current)) return this.endRemovedScheduleAtWall(current)
     if (current?.lane === 'run' && input.kind === 'budget') return this.budgetEnd(current, input)
     let raised: ReturnType<BotEngine['wallInTransaction']>
     try {
@@ -3405,6 +3413,24 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // Outside a turn (before it started) no reply follows: the card is posted now.
     if (raised.kind === 'wall' && !this.live.has(activationId)) this.announceWall(raised.escalation)
     return raised.kind === 'wall' ? { kind: 'escalated', permission: this.chat.card(raised.escalation).title } : { kind: 'ended' }
+  }
+
+  private removedExecutingSchedule(row: BotActivationRow): boolean {
+    return row.status === 'running' && row.trigger.kind === 'schedule' && !row.trigger.completed
+      && this.removedSchedules.has(this.scheduleKey(row.botId, row.trigger.scheduleId))
+  }
+
+  /** The owner already ended this schedule: return what this turn has, without an ask that cannot continue it. */
+  private endRemovedScheduleAtWall(row: BotActivationRow): WallReason {
+    const ended = this.recorded(row, () => {
+      if (!this.store.moveActivation(row.id, ['running'], 'done', { endReason: 'schedule_removed' })) return false
+      this.store.closeEscalations(row.id, 'cancelled')
+      this.journalEnd(row, 'schedule_removed')
+      return true
+    })
+    this.live.get(row.id)?.controller.abort(new BotWallAbort())
+    if (ended) this.changed({ botId: row.botId, activationId: row.id })
+    return { kind: 'ended' }
   }
 
   /** A wall raised outside a turn (a continuation or the startup pass): its card on a notice row, once per activation. */
@@ -3443,6 +3469,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   private budgetEnd(row: BotActivationRow, input: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string }, options: { stuck?: boolean } = {}): WallReason {
     if (row.status !== 'running') return row.status === 'waiting_grant' ? { kind: 'waiting' } : { kind: 'ended' }
+    if (this.removedExecutingSchedule(row)) return this.endRemovedScheduleAtWall(row)
     const name = this.host.definitions.revision(row.botId, row.revision)?.name ?? 'This bot'
     const live = this.live.get(row.id)
     // A turn that still runs posts what it had, with the card, when it ends; without one the notice is posted now.
@@ -4345,6 +4372,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (ENDED_ACTIVATION_STATUSES.has(row.status)) {
       // Work that ran out of room right after a Not now to that limit ends at once, with no ask: what its turn had is
       // still posted, after the line that says it stopped.
+      if (row.trigger.kind === 'schedule' && row.status === 'done' && row.endReason === 'schedule_removed') {
+        const main = this.store.lastMainDispatch(row.id)
+        if (main?.endedAt) this.postReply(row, main, text, options.expectText === true)
+        this.afterEnd(row)
+        return
+      }
       if (row.trigger.kind === 'work' && row.endReason === 'budget_exhausted') {
         const main = this.store.lastMainDispatch(row.id)
         if (main?.endedAt) this.postReply(row, main, text, options.expectText === true)
@@ -4531,6 +4564,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           this.pendingReplies.delete(key)
           const current = this.store.activation(row.id) ?? row
           this.postReply(current, dispatch, late ?? current.result ?? '', false)
+          if (ENDED_ACTIVATION_STATUSES.has(current.status)) this.postScheduleCompleted(current)
         }
       })
       return
@@ -4833,6 +4867,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private async continueWith(activationId: string, from: readonly BotActivationRow['status'][], input: { answers?: BotEscalationRow[]; restart?: boolean; acknowledgeUncertain?: boolean; reload?: boolean; usageRetry?: boolean; ownerText?: string; network?: boolean; afterReport?: boolean; allowed?: string[]; turnCap?: boolean; moreRoom?: boolean; usageReset?: boolean; switchCut?: true; questionAnswered?: boolean }): Promise<'sent' | 'paused' | 'wall' | 'none'> {
     const row = this.store.activation(activationId)
     if (!row || !from.includes(row.status)) return 'none'
+    if (this.cancelRemovedScheduleRun(row)) return 'none'
     const definition = this.host.definitions.revision(row.botId, row.revision)
     const grant = this.store.activeGrant(row.botId)
     const previous = this.store.lastMainDispatch(row.id)
@@ -6290,6 +6325,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * is repaired by the next one. A failure pauses the activation with `reconcile_failed`.
    */
   async reconcileOnStartup(): Promise<void> {
+    this.loadPendingScheduleRemovals()
+    // Cleanup is best effort: admission enforces the saved intent even while jobs.json cannot be written.
+    this.retryCompletedScheduleRemovals()
     try {
       // Capture first (bot-context.md §4): every bot thread is copied into the journal past its
       // cursor before any activation is admitted or the scheduler starts.
@@ -6306,6 +6344,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       } catch (error) {
         console.warn('bot supervisor records could not be read', { error: error instanceof Error ? error.message : String(error) })
       }
+      this.tryDropRemovedScheduleRuns()
       await this.reconcileAll()
       // The bot and request key committed together, but its first turn may still be missing.
       for (const created of this.store.unfinishedCreations()) {
@@ -6910,6 +6949,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     for (const row of ended) {
       if (quiet || row.status !== 'running') this.cleanup({ ...row, status: 'cancelled' })
       this.packs.delete(row.id)
+      this.postScheduleCompleted(this.store.activation(row.id) ?? row)
     }
   }
 
@@ -7016,6 +7056,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         return { scheduleId: added.scheduleId, label: added.label, ...(from ? { card: true as const } : {}) }
       },
       remove: (botId, scheduleId) => this.removeSchedule(botId, scheduleId),
+      done: (threadId, why) => this.completeSchedule(threadId, why),
       list: (botId) => this.listSchedules(botId)
     },
     setProfile: (botId, profile) => this.setProfile(botId, profile),
@@ -8241,6 +8282,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /** One of a bot's schedules changed in the shared store (an edit on the Automations page): its chat and About read it again. */
   schedulesEdited(botId: string): void {
+    this.dropRemovedScheduleRuns(botId)
     this.changed({ botId })
   }
 
@@ -8290,6 +8332,141 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return when.expr
   }
 
+  /** No new dispatch may start for a schedule removed from the shared store. Running turns may finish. */
+  private readonly removedSchedules = new Set<string>()
+
+  private scheduleKey(botId: string, scheduleId: string): string {
+    return JSON.stringify([botId, scheduleId])
+  }
+
+  private cancelRemovedScheduleRun(row: BotActivationRow): boolean {
+    if (row.status === 'running' || (row.trigger.kind === 'schedule' && row.trigger.completed)) return false
+    if (row.trigger.kind !== 'schedule' || !this.removedSchedules.has(this.scheduleKey(row.botId, row.trigger.scheduleId))) return false
+    if (ENDED_ACTIVATION_STATUSES.has(row.status)) return false
+    this.store.db.transaction(() => {
+      if (!this.store.moveActivation(row.id, [row.status], 'cancelled', { endReason: 'schedule_removed' })) return
+      this.store.closeEscalations(row.id, 'cancelled')
+      const runs = this.host.runs()
+      for (const dispatch of this.store.dispatches(row.id)) {
+        const run = dispatch.runId ? runs?.getRun(dispatch.runId) : undefined
+        if (run?.status === 'queued') runs!.markTerminal(run.runId, 'cancelled', { error: 'schedule_removed' })
+      }
+      this.journalEnd(row, 'schedule_removed')
+      const ended = this.store.activation(row.id)!
+      this.store.db.afterCommit(() => this.afterEnd(ended))
+    })
+    this.usageWaits.delete(row.id)
+    return true
+  }
+
+  private removedScheduleSweepPending = false
+
+  private tryDropRemovedScheduleRuns(): void {
+    try {
+      this.dropRemovedScheduleRuns()
+      this.removedScheduleSweepPending = false
+    } catch (error) {
+      if (!this.removedScheduleSweepPending) console.warn('removed bot schedules could not be checked', { error: error instanceof Error ? error.message : String(error) })
+      this.removedScheduleSweepPending = true
+    }
+  }
+
+  private dropRemovedScheduleRuns(botId?: string): void {
+    if (!this.host.schedules) return
+    // Snapshot each bot's job list once, outside bots.db's transaction. Pumps never touch scheduler files.
+    const rows = this.store.activationsWith(['queued', 'running', 'waiting_grant', 'paused', 'blocked'])
+      .filter(row => row.trigger.kind === 'schedule' && (botId === undefined || row.botId === botId))
+    const present = new Map<string, Set<string>>()
+    for (const row of rows) {
+      if (!present.has(row.botId)) present.set(row.botId, new Set(this.host.schedules.list(row.botId).map(schedule => schedule.scheduleId)))
+      if (row.trigger.kind !== 'schedule' || present.get(row.botId)!.has(row.trigger.scheduleId)) continue
+      this.removedSchedules.add(this.scheduleKey(row.botId, row.trigger.scheduleId))
+      this.cancelRemovedScheduleRun(row)
+    }
+  }
+
+  private readonly pendingScheduleRemovals = new Map<string, string>()
+  private readonly warnedScheduleRemovals = new Set<string>()
+
+  private loadPendingScheduleRemovals(): void {
+    this.pendingScheduleRemovals.clear()
+    for (const { id } of this.store.all(`SELECT id FROM bot_activations
+      WHERE json_extract(trigger_json, '$.completed') IS NOT NULL
+      AND json_extract(trigger_json, '$.completed.removed') IS NOT 1`)) {
+      const row = this.store.activation(id as string)
+      if (row?.trigger.kind === 'schedule') this.pendingScheduleRemovals.set(this.scheduleKey(row.botId, row.trigger.scheduleId), row.id)
+    }
+  }
+
+  private retryCompletedScheduleRemovals(): void {
+    for (const [key, id] of this.pendingScheduleRemovals) {
+      const row = this.store.activation(id)
+      if (row?.trigger.kind === 'schedule' && row.trigger.completed && !row.trigger.completed.removed) this.removeCompletedSchedule(row)
+      else this.pendingScheduleRemovals.delete(key)
+    }
+  }
+
+  private markCompletedScheduleRemoved(row: BotActivationRow): void {
+    if (row.trigger.kind !== 'schedule') return
+    this.store.run("UPDATE bot_activations SET trigger_json = json_set(trigger_json, '$.completed.removed', json('true')) WHERE id = ?", row.id)
+    this.pendingScheduleRemovals.delete(this.scheduleKey(row.botId, row.trigger.scheduleId))
+  }
+
+  private removeCompletedSchedule(row: BotActivationRow): void {
+    if (row.trigger.kind !== 'schedule' || !row.trigger.completed || row.trigger.completed.removed || !this.host.schedules) return
+    try {
+      this.host.schedules.remove(row.botId, row.trigger.scheduleId)
+      this.markCompletedScheduleRemoved(row)
+    } catch (error) {
+      const key = this.scheduleKey(row.botId, row.trigger.scheduleId)
+      if (!this.warnedScheduleRemovals.has(key)) {
+        this.warnedScheduleRemovals.add(key)
+        console.warn('a completed bot schedule could not be removed', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+  }
+
+  private scheduleHasCompletion(botId: string, scheduleId: string): boolean {
+    return Boolean(this.store.get(`SELECT 1 FROM bot_activations WHERE bot_id = ?
+      AND json_extract(trigger_json, '$.kind') = 'schedule'
+      AND json_extract(trigger_json, '$.scheduleId') = ?
+      AND json_extract(trigger_json, '$.completed') IS NOT NULL LIMIT 1`, botId, scheduleId))
+  }
+
+  /** The activation chooses the schedule, never an argument supplied by the model. */
+  private completeSchedule(threadId: string, why: string): void {
+    const at = this.activationOf(threadId)
+    const row = at && this.store.activation(at.activationId)
+    if (at?.role !== 'activation' || row?.lane !== 'run' || row.trigger.kind !== 'schedule')
+      throw new BotEngineError('invalid_params', 'Only a scheduled run can end its own schedule.')
+    if (!why.trim() || why.length > 200) throw new BotEngineError('invalid_params', 'why needs 1 to 200 characters.')
+    const trigger = row.trigger
+    if (trigger.completed) {
+      if (!trigger.completed.removed) {
+        this.removeSchedule(row.botId, trigger.scheduleId)
+        this.markCompletedScheduleRemoved(row)
+      }
+      return
+    }
+    const schedule = this.host.schedules?.get(row.botId, trigger.scheduleId)
+    if (!schedule) return
+    // Persist the intent before removing the shared job: retry after a crash can finish its removal.
+    this.store.run('UPDATE bot_activations SET trigger_json = ? WHERE id = ?', JSON.stringify({ ...trigger, completed: { why, name: schedule.name, tellMe: schedule.tellMe } }), row.id)
+    this.pendingScheduleRemovals.set(this.scheduleKey(row.botId, trigger.scheduleId), row.id)
+    this.removeSchedule(row.botId, trigger.scheduleId)
+    this.markCompletedScheduleRemoved(row)
+  }
+
+  private postScheduleCompleted(row: BotActivationRow): void {
+    if (row.trigger.kind !== 'schedule' || !row.trigger.completed || !ENDED_ACTIVATION_STATUSES.has(row.status)) return
+    // A late final message still gets its report first. Its bounded reply timer finishes this settlement.
+    if ([...this.pendingReplies.keys()].some(key => key.startsWith(`${row.id}:`))) return
+    const id = `bm_schedule_done_${row.id}`
+    if (this.store.message(id)) return
+    this.removeCompletedSchedule(row)
+    if (!this.store.message(id)) this.chat.post({ id, botId: row.botId, author: 'bot', kind: 'notice', text: `Stopped ‘${row.trigger.completed.name}’.`, activationId: row.id, lane: 'run' })
+  }
+
   /** Only the activation's own existing schedule may keep a cursor; never work or a run by hand. */
   saveLeftOff(activationId: string, text: string): string {
     const row = this.host.store.activation(activationId)
@@ -8303,6 +8480,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   removeSchedule(botId: string, scheduleId: string): boolean {
     this.entry(botId)
     const removed = this.host.schedules?.remove(botId, scheduleId) ?? false
+    this.dropRemovedScheduleRuns(botId)
     if (removed) this.changed({ botId })
     return removed
   }
