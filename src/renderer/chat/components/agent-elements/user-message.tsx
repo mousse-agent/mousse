@@ -9,7 +9,7 @@ import { useImageGallery } from "./image-gallery";
 import { userMessageImages, userMessageImageTiles } from "./image-sources";
 import { ChatReferencePill } from "../../../components/ReferencePill";
 import { parseChatReference, type ChatReference } from "../../../../shared/chatReferences";
-import { routeLink } from "../../../utils/chatLinks";
+import { openFileInPanel, routeLink } from "../../../utils/chatLinks";
 import { LinkLabel } from "./link-label-view";
 import { promptSegments } from "./prompt-links";
 import { WithSentQuotes } from "../../../components/QuotePill";
@@ -47,6 +47,8 @@ type FilePart = {
   mediaType?: string;
   url?: string;
   data?: string;
+  /** Where a sent file was (`[Attached files: name (path)]`). */
+  path?: string;
 };
 
 function getFileFromPart(part: unknown) {
@@ -67,6 +69,7 @@ function getFileFromPart(part: unknown) {
     filename,
     size: filePart.size,
     isImage,
+    path: typeof filePart.path === "string" && filePart.path ? filePart.path : undefined,
   };
 }
 
@@ -151,7 +154,7 @@ export const UserMessage = memo(function UserMessage({
   }, [folded]);
 
   const images = userMessageImageTiles(message);
-  const files: Array<{ filename: string; size?: number; isImage?: boolean }> = [];
+  const files: Array<{ filename: string; size?: number; isImage?: boolean; path?: string }> = [];
   const references: ChatReference[] = [];
   for (const part of message.parts ?? []) {
     if (isRecord(part) && part.type === "data-mousse-reference") {
@@ -228,6 +231,8 @@ export const UserMessage = memo(function UserMessage({
               filename={file.filename}
               size={file.size}
               isImage={file.isImage}
+              title={file.path}
+              onOpen={file.path ? () => openFileInPanel({ path: file.path! }) : undefined}
             />
           ))}
         </div>

@@ -567,14 +567,14 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
     // become file pills below.
     const text = msg.content ?? ''
     let displayText = msg.role === 'assistant' ? assistantDisplayText(text) : text
-    let extraFileNames: string[] = []
+    let extraFiles: ReturnType<typeof parseUserMessageContent>['attachedFiles'] = []
     let references: ReturnType<typeof parseUserMessageContent>['references'] = []
     if (msg.role === 'user' && text.includes('[')) {
       try {
         const parsed = parseUserMessageContent(text)
         displayText = parsed.text
         const imageNames = msg.images?.map((i) => i.name).filter(Boolean) ?? []
-        extraFileNames = filterImageAttachmentNames(parsed.attachedFiles, imageNames)
+        extraFiles = filterImageAttachmentNames(parsed.attachedFiles, imageNames)
         references = parsed.references
       } catch {
         displayText = text
@@ -593,7 +593,7 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
     const backgroundNotice = msg.role === 'user' && msg.backgroundNotice?.length ? msg.backgroundNotice : undefined
     if (backgroundNotice) base.metadata = { ...(base.metadata as object | undefined), backgroundNotice }
     if (msg.role === 'assistant' && msg.scheduledRun) base.metadata = { ...(base.metadata as object | undefined), scheduledRun: msg.scheduledRun }
-    if (!displayText.trim() && !msg.images?.length && extraFileNames.length === 0 && references.length === 0 && !subagentNotice && !backgroundNotice) {
+    if (!displayText.trim() && !msg.images?.length && extraFiles.length === 0 && references.length === 0 && !subagentNotice && !backgroundNotice) {
       continue
     }
     // Fold exact-duplicate consecutive assistant text (provider double-adds,
@@ -635,7 +635,7 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
     for (const reference of references) {
       parts.push({ type: 'data-mousse-reference', data: reference } as unknown as UIMessage['parts'][number])
     }
-    for (const name of extraFileNames) {
+    for (const { name, path } of extraFiles) {
       // Guess a mime type from the extension so the renderer can tell
       // image attachments (data lost — e.g. legacy messages saved without
       // image payloads) from generic files. Image-named files without data
@@ -644,6 +644,8 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
       parts.push({
         type: 'file',
         filename: name,
+        // Where the file was when it was sent: its chip opens it.
+        ...(path ? { path } : {}),
         ...(mimeType ? { mediaType: mimeType, mimeType } : {}),
       } as unknown as UIMessage['parts'][number])
     }

@@ -32,7 +32,9 @@ import { BrowserElementPill } from './BrowserElementPill'
 import { FileAttachment } from '../chat/components/agent-elements/input/file-attachment'
 import { ImageGalleryProvider } from '../chat/components/agent-elements/image-gallery'
 import { formatBrowserElementBlock } from '../utils/messageAttachments'
-import { collectImageFilesFromDataTransfer } from '../utils/imageAttachments'
+import { collectFilesFromDataTransfer } from '../utils/imageAttachments'
+import { fileAttachments } from '../lib/composerFilePaths'
+import { formatAttachedFilesMarker } from '../../shared/attachedFilesMarker'
 import type { ChatReference } from '../../shared/chatReferences'
 import { formatChatReferences, MOUSSE_REFERENCE_MIME, parseReferenceDragData } from '../../shared/chatReferences'
 import { ChatReferencePill } from './ReferencePill'
@@ -62,6 +64,8 @@ export interface AttachedFile {
   id: string
   file: File
   previewUrl?: string
+  /** Where the file already is on the thread's computer (a queued message given back): sent as this path. */
+  path?: string
 }
 
 export interface VoiceMessage {
@@ -464,9 +468,9 @@ export function ChatComposer({
     event.target.value = ''
   }
 
-  const imagePasteKey = useRef({ held: false, consumed: false })
+  const filePasteKey = useRef({ held: false, consumed: false })
   useEffect(() => {
-    const reset = () => { imagePasteKey.current = { held: false, consumed: false } }
+    const reset = () => { filePasteKey.current = { held: false, consumed: false } }
     const release = (event: KeyboardEvent) => {
       if (event.key.toLowerCase() === 'v' || event.key === 'Control' || event.key === 'Meta') reset()
     }
@@ -478,15 +482,16 @@ export function ChatComposer({
     }
   }, [])
 
+  // Pasted files (images, videos, any file) are attached; a paste without files pastes its text.
   const handlePaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const images = collectImageFilesFromDataTransfer(event.clipboardData)
-    if (images.length === 0) return
+    const files = collectFilesFromDataTransfer(event.clipboardData)
+    if (files.length === 0) return
     event.preventDefault()
-    if (imagePasteKey.current.held) {
-      if (imagePasteKey.current.consumed) return
-      imagePasteKey.current.consumed = true
+    if (filePasteKey.current.held) {
+      if (filePasteKey.current.consumed) return
+      filePasteKey.current.consumed = true
     }
-    addFiles(images)
+    addFiles(files)
   }
 
   const applySuggestion = (command: ComposerCommandDef) => {
@@ -654,8 +659,8 @@ export function ChatComposer({
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
-      if (!e.repeat) imagePasteKey.current = { held: true, consumed: false }
-      if (e.repeat && imagePasteKey.current.consumed) {
+      if (!e.repeat) filePasteKey.current = { held: true, consumed: false }
+      if (e.repeat && filePasteKey.current.consumed) {
         e.preventDefault()
         return
       }
@@ -807,12 +812,13 @@ export function ChatComposer({
           <div className="composer-attachments-scroll">
             {/* An attached image opens a preview that steps through the other attached images. */}
             <ImageGalleryProvider images={() => attachedFiles.flatMap(({ id, file, previewUrl }) => (previewUrl ? [{ id, url: previewUrl, filename: file.name }] : []))}>
-              {attachedFiles.map(({ id, file, previewUrl }) => (
+              {attachedFiles.map(({ id, file, previewUrl, path }) => (
                 <FileAttachment
                   key={id}
                   id={id}
                   filename={file.name}
-                  size={file.size}
+                  size={path ? undefined : file.size}
+                  title={path}
                   isImage={previewUrl !== undefined}
                   url={previewUrl}
                   onRemove={() => removeFile(id)}
@@ -1016,25 +1022,25 @@ export function formatVoiceDuration(seconds: number): string {
   return formatDuration(seconds)
 }
 
+/**
+ * The message a send carries. Images travel as separate vision payloads; every other file is listed with its path
+ * (`filePaths`, by attached id, from `composerFilePaths`) so the model can read it. Without a path (a draft measured
+ * before sending) a file is listed by name.
+ */
 export function buildComposerMessageContent(
   input: string,
   attachedFiles: AttachedFile[],
   voiceMessages: VoiceMessage[],
   browserElements: BrowserElementAttachment[] = [],
-  references: ChatReference[] = []
+  references: ChatReference[] = [],
+  filePaths: ReadonlyMap<string, string> = new Map()
 ): string {
   const parts: string[] = []
   const typed = expandComposerQuotes(input).trim()
   if (typed) parts.push(typed)
 
-  // Images travel as separate vision payloads — only list non-image files here so
-  // auto-generated paste names (paste-*.png) never pollute queue/transcript text.
-  const nonImageNames = attachedFiles
-    .filter((f) => !f.file.type.startsWith('image/') && !f.previewUrl)
-    .map((f) => f.file.name)
-  if (nonImageNames.length) {
-    parts.push(`[Attached files: ${nonImageNames.join(', ')}]`)
-  }
+  const files = fileAttachments(attachedFiles).map((attached) => ({ name: attached.file.name, path: filePaths.get(attached.id) ?? attached.path }))
+  if (files.length) parts.push(formatAttachedFilesMarker(files))
 
   if (voiceMessages.length) {
     const voiceList = voiceMessages

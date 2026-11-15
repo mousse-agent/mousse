@@ -48,42 +48,44 @@ export async function filesToImagePayloads(files: File[]): Promise<ImageAttachme
   return payloads
 }
 
-/** Collect image File objects from a paste/drop ClipboardEvent or DataTransfer. */
-export function collectImageFilesFromDataTransfer(data: DataTransfer | null): File[] {
+/**
+ * The files of a paste or drop: every file, not only images. An image or file pasted without a usable name (a
+ * screenshot's `image.png`, a `blob`) is named `paste-<time>.<extension>`. Text alone gives none.
+ */
+export function collectFilesFromDataTransfer(data: DataTransfer | null): File[] {
   if (!data) return []
   const files: File[] = []
-
-  if (data.items) {
-    for (const item of Array.from(data.items)) {
-      if (item.kind === 'file' && item.type.startsWith('image/')) {
-        const file = item.getAsFile()
-        if (file) files.push(normalizePasteImageFile(file))
-      }
-    }
+  for (const item of Array.from(data.items ?? [])) {
+    if (item.kind !== 'file') continue
+    const file = item.getAsFile()
+    if (file) files.push(normalizePastedFile(file))
   }
-
-  if (files.length === 0 && data.files?.length) {
-    for (const file of Array.from(data.files)) {
-      if (file.type.startsWith('image/')) {
-        files.push(normalizePasteImageFile(file))
-      }
-    }
-  }
-
+  if (files.length === 0) for (const file of Array.from(data.files ?? [])) files.push(normalizePastedFile(file))
   return files
 }
 
-function normalizePasteImageFile(file: File): File {
+const PASTE_EXTENSIONS: Record<string, string> = {
+  'image/jpeg': 'jpg',
+  'image/jpg': 'jpg',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'video/quicktime': 'mov',
+  'video/x-matroska': 'mkv',
+  'audio/mpeg': 'mp3',
+  'text/plain': 'txt'
+}
+
+function pasteExtension(type: string): string {
+  if (!type) return 'bin'
+  if (type.startsWith('image/')) return PASTE_EXTENSIONS[type] ?? 'png'
+  const subtype = type.split('/')[1]?.split(/[;+]/)[0] ?? ''
+  return PASTE_EXTENSIONS[type] ?? (/^[a-z0-9]{1,8}$/i.test(subtype) ? subtype.toLowerCase() : 'bin')
+}
+
+function normalizePastedFile(file: File): File {
   if (file.name && file.name !== 'image.png' && file.name !== 'blob') return file
-  const ext =
-    file.type === 'image/jpeg' || file.type === 'image/jpg'
-      ? 'jpg'
-      : file.type === 'image/gif'
-        ? 'gif'
-        : file.type === 'image/webp'
-          ? 'webp'
-          : 'png'
-  return new File([file], `paste-${Date.now()}.${ext}`, { type: file.type || 'image/png' })
+  const type = file.type || (file.name === 'image.png' ? 'image/png' : '')
+  return new File([file], `paste-${Date.now()}.${pasteExtension(type)}`, { type })
 }
 
 export function imagePayloadToDataUrl(image: ImageAttachmentPayload): string {

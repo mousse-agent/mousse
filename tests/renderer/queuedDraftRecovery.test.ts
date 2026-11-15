@@ -40,6 +40,17 @@ describe('an unsaved edit of a queued message, back in the composer', () => {
     expect(files[0].previewUrl).toBe('blob:preview')
   })
 
+  it('gives files sent with paths back as attached files that keep their paths, not as text', () => {
+    const addFiles = vi.fn()
+    restoreQueuedDraft('t1', { text: 'Cut it', markers: '[Attached files: clip.mp4 (/tmp/mousse-attachments/t1/1a2b3c4d-clip.mp4), b.pdf (C:\\docs\\b.pdf)]' }, addFiles)
+    expect(useAppStore.getState().composerDrafts.t1).toBe('already typed\nCut it')
+    const [, files] = addFiles.mock.calls[0]!
+    expect(files.map((attached: { file: File; path?: string }) => [attached.file.name, attached.path])).toEqual([
+      ['clip.mp4', '/tmp/mousse-attachments/t1/1a2b3c4d-clip.mp4'],
+      ['b.pdf', 'C:\\docs\\b.pdf']
+    ])
+  })
+
   it('leaves the composer text alone when only the images come back', () => {
     const addFiles = vi.fn()
     restoreQueuedDraft('t1', { text: '', markers: '', images: [{ name: 'shot.png', mimeType: 'image/png', data: btoa('png bytes') }] }, addFiles)

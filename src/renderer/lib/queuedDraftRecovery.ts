@@ -7,8 +7,9 @@ import { composerPartsFromMarkers } from '../utils/messageAttachments'
 /**
  * Puts an unsaved edit whose queued message started into the thread's composer, as the composer holds a message
  * it gives back: the edited text after what the composer has, the message's images as attached files (`addFiles`,
- * since the composer keeps files by thread in memory), its browser elements and references as attachments, and the
- * markers it cannot rebuild (attached file names, voice messages) as text after the edited text.
+ * since the composer keeps files by thread in memory), its files with paths as attached files sent as those paths, its
+ * browser elements and references as attachments, and the markers it cannot rebuild (file names without paths, voice
+ * messages) as text after the edited text.
  */
 export function restoreQueuedDraft(
   threadId: string,
@@ -24,9 +25,11 @@ export function restoreQueuedDraft(
   for (const element of parts.browserElements) {
     store.addBrowserElementAttachment(threadId, { ...element, id: crypto.randomUUID(), text: element.text ?? '' })
   }
-  const files = (recovered.images ?? []).map((image): AttachedFile => {
+  const images = (recovered.images ?? []).map((image): AttachedFile => {
     const file = imagePayloadToFile(image)
     return { id: crypto.randomUUID(), file, previewUrl: URL.createObjectURL(file) }
   })
-  if (files.length) addFiles(threadId, files)
+  // The bytes are not kept with the message; the file is where its path says.
+  const files = parts.files.map(({ name, path }): AttachedFile => ({ id: crypto.randomUUID(), file: new File([], name), path }))
+  if (images.length || files.length) addFiles(threadId, [...images, ...files])
 }

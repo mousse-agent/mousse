@@ -45,6 +45,7 @@ import {
   type QuestionCardHandle
 } from './ComposerQuestionModal'
 import { filesToImagePayloads, isImageMimeType } from '../utils/imageAttachments'
+import { composerFilePaths, fileAttachments, REMOTE_FILES_REFUSAL } from '../lib/composerFilePaths'
 import { parseUserMessageContent } from '../utils/messageAttachments'
 import { MousseAgentChatShell } from '../chat/components/MousseAgentChatShell'
 import { createTurnActions, type TurnActions } from '../chat/components/agent-elements/turn-actions'
@@ -1219,6 +1220,11 @@ export function OrchestratorChat() {
 
   const handleSend = async (skillMode?: SkillChatMode, options?: { steer?: boolean }) => {
     if (!useAppStore.getState().workspaceReady) return
+    // A file is sent as its path on this computer, which the agent of a thread on another computer can't read.
+    if (remoteNode && fileAttachments(attachedFiles).length) {
+      setSendError(REMOTE_FILES_REFUSAL)
+      return
+    }
     // Lock before file decoding: a double click on the blank composer must not
     // create two threads or submit the same first message twice.
     if (blankSendPending.current) return
@@ -1275,8 +1281,11 @@ export function OrchestratorChat() {
     const resolutionThread = activeThreadId
     const resolvedReferences = await resolveChatReferences(references)
     if (useAppStore.getState().profileId !== resolutionProfile || useAppStore.getState().activeThreadId !== resolutionThread) return
+    // Files other than images go as paths: a pasted one is written to a temporary file first.
+    const filePaths = await composerFilePaths(attachedFiles, activeThreadId)
+    if (useAppStore.getState().profileId !== resolutionProfile || useAppStore.getState().activeThreadId !== resolutionThread) return
     let text = removeInlineSkillToken(
-      buildComposerMessageContent(input, attachedFiles, voiceMessages, browserElements, resolvedReferences),
+      buildComposerMessageContent(input, attachedFiles, voiceMessages, browserElements, resolvedReferences, filePaths),
       enabledSkills
     )
     const images = await filesToImagePayloads(attachedFiles.map((f) => f.file))
