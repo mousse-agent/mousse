@@ -34,6 +34,8 @@ import { ImageGalleryProvider } from '../chat/components/agent-elements/image-ga
 import { formatBrowserElementBlock } from '../utils/messageAttachments'
 import { collectFilesFromDataTransfer } from '../utils/imageAttachments'
 import { fileAttachments } from '../lib/composerFilePaths'
+import { ATTACHMENT_LINES_ROOM, isLongPaste, longPasteFile, pastedTextBlock, pastedTextName } from '../lib/longPaste'
+import { PastedTextPreview } from './PastedTextPreview'
 import { formatAttachedFilesMarker } from '../../shared/attachedFilesMarker'
 import type { ChatReference } from '../../shared/chatReferences'
 import { formatChatReferences, MOUSSE_REFERENCE_MIME, parseReferenceDragData } from '../../shared/chatReferences'
@@ -66,7 +68,14 @@ export interface AttachedFile {
   previewUrl?: string
   /** Where the file already is on the thread's computer (a queued message given back): sent as this path. */
   path?: string
+  /** What the chip and the message call the file, when not its file name: "Pasted text, 1,240 lines". */
+  label?: string
+  /** A long text paste kept as a file: it can be opened, and put back into the box as text. */
+  pastedText?: boolean
 }
+
+/** What the chip and the message call an attached file. */
+export const attachedFileName = (attached: AttachedFile): string => attached.label ?? attached.file.name
 
 export interface VoiceMessage {
   id: string
@@ -141,6 +150,8 @@ export interface ChatComposerProps {
    * no button.
    */
   sendModeThreadId?: string
+  /** The most characters a message carries: text pasted past it goes on the message as a text file. */
+  messageLimit?: number
 }
 
 const MENTION_SEARCH_DEBOUNCE_MS = 120
@@ -201,7 +212,8 @@ export function ChatComposer({
   permission,
   sendModeThreadId,
   dictateWhileStoppable = false,
-  extraActions
+  extraActions,
+  messageLimit = Infinity
 }: ChatComposerProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const composerInputRef = useRef<HTMLTextAreaElement>(null)
@@ -437,14 +449,18 @@ export function ChatComposer({
   }, [mentionQueryText, mentionScopeKey])
 
   const addFiles = useCallback(
-    (files: File[]) => {
+    (files: Array<File | Omit<AttachedFile, 'id'>>) => {
       if (!files.length) return
-      const next: AttachedFile[] = files.map((file) => ({
-        id: crypto.randomUUID(),
-        file,
-        previewUrl: file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined
-      }))
+      const next: AttachedFile[] = files.map((entry) => {
+        const attached = entry instanceof File ? { file: entry } : entry
+        return {
+          ...attached,
+          id: crypto.randomUUID(),
+          previewUrl: attached.file.type.startsWith('image/') ? URL.createObjectURL(attached.file) : undefined
+        }
+      })
       onAttachedFilesChange([...attachedFiles, ...next])
+      return next
     },
     [attachedFiles, onAttachedFilesChange]
   )
@@ -453,6 +469,33 @@ export function ChatComposer({
     const target = attachedFiles.find((f) => f.id === id)
     if (target?.previewUrl) URL.revokeObjectURL(target.previewUrl)
     onAttachedFilesChange(attachedFiles.filter((f) => f.id !== id))
+  }
+
+  // The long paste Undo takes back while the box is as the paste left it.
+  const pasteUndo = useRef<{ id: string; input: string } | null>(null)
+  const [previewing, setPreviewing] = useState<{ id: string; name: string; text: string } | null>(null)
+
+  /** Puts a long paste back into the box as text, where the caret is, and drops its chip. */
+  const insertPastedText = async (id: string) => {
+    const attached = attachedFiles.find((f) => f.id === id)
+    if (!attached) return
+    const text = await attached.file.text()
+    setPreviewing(null)
+    pasteUndo.current = null
+    removeFile(id)
+    const target = composerInputRef.current
+    if (!target) return
+    target.focus()
+    // Typed in, so Undo takes it out again.
+    if (document.execCommand?.('insertText', false, text)) return
+    const start = target.selectionStart ?? target.value.length
+    const end = target.selectionEnd ?? start
+    commitEdit({ value: target.value.slice(0, start) + text + target.value.slice(end), caret: start + text.length })
+  }
+
+  const previewPastedText = async (id: string) => {
+    const attached = attachedFiles.find((f) => f.id === id)
+    if (attached) setPreviewing({ id, name: attachedFileName(attached), text: await attached.file.text() })
   }
 
   const removeVoice = (id: string) => {
@@ -482,10 +525,19 @@ export function ChatComposer({
     }
   }, [])
 
-  // Pasted files (images, videos, any file) are attached; a paste without files pastes its text.
+  // Pasted files (images, videos, any file) are attached; a paste without files pastes its text, unless the text is
+  // long (`LONG_PASTE_BYTES`): then it goes on the message as a text file, which the chip can put back as text.
   const handlePaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const files = collectFilesFromDataTransfer(event.clipboardData)
-    if (files.length === 0) return
+    if (files.length === 0) {
+      const text = event.clipboardData?.getData('text/plain') ?? ''
+      const selected = event.currentTarget.selectionEnd - event.currentTarget.selectionStart
+      if (!isLongPaste(text, messageLimit - ATTACHMENT_LINES_ROOM - (input.length - selected))) return
+      event.preventDefault()
+      const added = addFiles([{ file: longPasteFile(text), label: pastedTextName(text), pastedText: true }])
+      if (added?.[0]) pasteUndo.current = { id: added[0].id, input }
+      return
+    }
     event.preventDefault()
     if (filePasteKey.current.held) {
       if (filePasteKey.current.consumed) return
@@ -658,6 +710,17 @@ export function ChatComposer({
   }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // Undo right after a long paste takes its chip off, as it would take pasted text out.
+    const undone = pasteUndo.current
+    if (undone && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'z') {
+      pasteUndo.current = null
+      if (e.currentTarget.value === undone.input && attachedFiles.some((f) => f.id === undone.id)) {
+        e.preventDefault()
+        removeFile(undone.id)
+        return
+      }
+    }
+
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
       if (!e.repeat) filePasteKey.current = { held: true, consumed: false }
       if (e.repeat && filePasteKey.current.consumed) {
@@ -807,23 +870,37 @@ export function ChatComposer({
   return (
     <div data-mousse="composer" className="composer" onDragOver={handleDragOver} onDrop={handleDrop}>
       {banner}
+      {previewing && (
+        <PastedTextPreview
+          name={previewing.name}
+          text={previewing.text}
+          onClose={() => setPreviewing(null)}
+          onInsert={() => void insertPastedText(previewing.id)}
+        />
+      )}
       {hasAttachments && (
         <div className="composer-attachments">
           <div className="composer-attachments-scroll">
             {/* An attached image opens a preview that steps through the other attached images. */}
             <ImageGalleryProvider images={() => attachedFiles.flatMap(({ id, file, previewUrl }) => (previewUrl ? [{ id, url: previewUrl, filename: file.name }] : []))}>
-              {attachedFiles.map(({ id, file, previewUrl, path }) => (
-                <FileAttachment
-                  key={id}
-                  id={id}
-                  filename={file.name}
-                  size={path ? undefined : file.size}
-                  title={path}
-                  isImage={previewUrl !== undefined}
-                  url={previewUrl}
-                  onRemove={() => removeFile(id)}
-                />
-              ))}
+              {attachedFiles.map((attached) => {
+                const { id, file, previewUrl, path, pastedText } = attached
+                return (
+                  <FileAttachment
+                    key={id}
+                    id={id}
+                    filename={attachedFileName(attached)}
+                    size={path ? undefined : file.size}
+                    title={pastedText ? 'Sent to the agent as a text file. Click to view.' : path}
+                    isImage={previewUrl !== undefined}
+                    url={previewUrl}
+                    onOpen={pastedText ? () => void previewPastedText(id) : undefined}
+                    onInsertText={pastedText ? () => void insertPastedText(id) : undefined}
+                    className={pastedText ? 'max-w-[280px]' : undefined}
+                    onRemove={() => removeFile(id)}
+                  />
+                )
+              })}
             </ImageGalleryProvider>
             {references.map((reference) => (
               <ChatReferencePill key={reference.id} reference={reference} onRemove={() => onRemoveReference(reference.id)} />
@@ -1033,13 +1110,15 @@ export function buildComposerMessageContent(
   voiceMessages: VoiceMessage[],
   browserElements: BrowserElementAttachment[] = [],
   references: ChatReference[] = [],
-  filePaths: ReadonlyMap<string, string> = new Map()
+  filePaths: ReadonlyMap<string, string> = new Map(),
+  pastedTexts: ReadonlyArray<{ name: string; text: string }> = []
 ): string {
   const parts: string[] = []
   const typed = expandComposerQuotes(input).trim()
   if (typed) parts.push(typed)
+  for (const pasted of pastedTexts) parts.push(pastedTextBlock(pasted.name, pasted.text))
 
-  const files = fileAttachments(attachedFiles).map((attached) => ({ name: attached.file.name, path: filePaths.get(attached.id) ?? attached.path }))
+  const files = fileAttachments(attachedFiles).map((attached) => ({ name: attachedFileName(attached), path: filePaths.get(attached.id) ?? attached.path }))
   if (files.length) parts.push(formatAttachedFilesMarker(files))
 
   if (voiceMessages.length) {

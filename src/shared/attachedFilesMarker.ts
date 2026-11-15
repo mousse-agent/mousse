@@ -50,7 +50,50 @@ export function parseAttachedFilesList(list: string): AttachedFileEntry[] {
   return list.split(', ').map((name) => name.trim()).filter(Boolean).map((name) => ({ name }))
 }
 
-/** `text` with each marker replaced by what `replace` returns for its entries. */
+/** A fenced code block's opening line: three or more backticks or tildes. */
+const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})/
+
+/**
+ * `text` cut into the parts outside fenced code blocks and the blocks themselves. A marker is never inside a block:
+ * one there is text the person pasted, such as a log quoting a message.
+ */
+function fencedParts(text: string): Array<{ text: string; fenced: boolean }> {
+  const parts: Array<{ text: string; fenced: boolean }> = []
+  const lines = text.split(/(?<=\n)/)
+  let outside = ''
+  for (let i = 0; i < lines.length; i += 1) {
+    const open = FENCE_OPEN.exec(lines[i]!)
+    if (!open) {
+      outside += lines[i]
+      continue
+    }
+    const fence = open[1]!
+    const closes = new RegExp(`^ {0,3}${fence[0] === '`' ? '`' : '~'}{${fence.length},}[ \t]*\r?\n?$`)
+    let end = i + 1
+    while (end < lines.length && !closes.test(lines[end]!)) end += 1
+    if (outside) parts.push({ text: outside, fenced: false })
+    outside = ''
+    parts.push({ text: lines.slice(i, end + 1).join(''), fenced: true })
+    i = end
+  }
+  if (outside) parts.push({ text: outside, fenced: false })
+  return parts
+}
+
+/** `text` with each marker replaced by what `replace` returns for its entries; fenced code blocks are left alone. */
 export function replaceAttachedFilesMarkers(text: string, replace: (entries: AttachedFileEntry[]) => string): string {
-  return text.replace(MARKER, (_match, list?: string, legacy?: string) => replace(parseAttachedFilesList(list ?? legacy ?? '')))
+  if (!text.includes('[Attached files: ')) return text
+  return fencedParts(text)
+    .map((part) => part.fenced ? part.text : part.text.replace(MARKER, (_match, list?: string, legacy?: string) => replace(parseAttachedFilesList(list ?? legacy ?? ''))))
+    .join('')
+}
+
+/** Every file the markers in `text` name, in order. */
+export function attachedFilesIn(text: string): AttachedFileEntry[] {
+  const entries: AttachedFileEntry[] = []
+  replaceAttachedFilesMarkers(text, (found) => {
+    entries.push(...found)
+    return ''
+  })
+  return entries
 }
