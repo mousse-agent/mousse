@@ -1,6 +1,7 @@
 import { repositoryIdentitiesFor } from '../bridge/remote/repositoryIdentity'
 import { requestWorkScope } from '../execution/workScope'
 import { expiryRefusal, isThreadExpired } from '../../shared/threadExpiry'
+import { MAX_GOAL_TEXT } from '../../shared/threadGoal'
 import { assertWorktreeFolderConnected, chosenFolderHolding, WorktreeFolderRefused } from '../worktree/worktreeLayout'
 import { listKeptWorktrees } from '../lifecycle/keptWorktrees'
 import { chooseWorktreeFolder, recordedWorktreePaths, worktreeFolderStatus } from '../worktree/worktreeFolderSetting'
@@ -55,6 +56,7 @@ import { listClaimedQueue, listPendingQueue, QueueConflictError, QueueValidation
 import { describeQuestionAnswers, formatQuestionAnswersMessage, formatQuestionDismissMessage } from '../orchestrator/OrchestratorService'
 import { answerMessageImages, answersWithImagePaths, attachmentsForQuestions, removeAnswerImages, saveAnswerImages } from '../orchestrator/questionAttachments'
 import { withoutStandingRules } from '../orchestrator/UserQuestionService'
+import { GoalError } from '../orchestrator/threadGoals'
 import type { ModelOverride } from '../../shared/providerInstances'
 import { projectRememberingPick, rememberedChoiceFor } from '../data/newThreadChoice'
 import {
@@ -2709,6 +2711,24 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       rejectUnknownKeys(p, ['runId', 'threadId'])
       const runId = asString(p.runId, 'runId', 256)
       return asRpcRejection(() => ctx.mms.orchestrator.resumePausedRun(runId))
+    }
+    case 'threads.goal': {
+      // The thread's goal (`/goal`, issue #1207): show it, set it (and queue its first turn), adopt it for the first message
+      // a new chat just sent, clear it, continue a goal that is not working, or stop it (and the turn running for it).
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'action', 'text'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const action = asString(p.action, 'action', 16)
+      if (action !== 'show' && action !== 'set' && action !== 'adopt' && action !== 'clear' && action !== 'continue' && action !== 'stop')
+        throw new DomainRpcError('invalid_params', 'action must be show, set, adopt, clear, continue or stop')
+      const text = action === 'set' || action === 'adopt' ? asString(p.text, 'text', MAX_GOAL_TEXT) : undefined
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      try {
+        return ctx.mms.orchestrator.threadGoal(threadId, action, text)
+      } catch (error) {
+        if (error instanceof GoalError) throw new DomainRpcError(error.code === 'not_found' ? 'thread_not_found' : error.code === 'invalid' ? 'invalid_params' : 'conflict', error.message, { threadId })
+        throw error
+      }
     }
     case 'runs.cancelPause': {
       // End a pause without continuing: the run is cancelled and the thread's held messages go on.

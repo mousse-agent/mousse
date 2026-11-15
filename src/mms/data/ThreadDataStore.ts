@@ -52,6 +52,7 @@ import { ThreadTrashService, type LegacyTrashDiagnostic } from './ThreadTrashSer
 import { ResourceLifecycleStore } from '../lifecycle/ResourceLifecycleStore'
 import type { TaskLifecycleRecord } from '../../shared/resourceLifecycle'
 import type { ThreadPullRequestLink } from '../../shared/pullRequests'
+import type { ThreadGoal } from '../../shared/threadGoal'
 import { registerThreadLifecycleGate, withThreadLifecyclePath, withThreadLifecyclePaths } from '../queue/ThreadLifecycleAdmission'
 import { FileLockBusyError, withFileLock } from '../scheduled/fileLock'
 import { DomainRpcError } from '../protocol/domainRegistry'
@@ -116,6 +117,8 @@ interface ThreadMeta {
   worktreeStartSha?: string
   worktreeBaseBranch?: string
   pullRequest?: ThreadPullRequestLink
+  /** See `Thread.goal`. */
+  goal?: ThreadGoal
   order: number
   pinnedAt?: string
   settledAt?: string
@@ -1615,7 +1618,7 @@ export class ThreadDataStore extends EventEmitter {
   /** `touch: false` keeps `updatedAt`, for repairs that must not reorder the sidebar. */
   updateThreadMeta(
     id: string,
-    partial: Partial<Pick<Thread, 'name' | 'titleSource' | 'modelOverride' | 'permissionMode' | 'worktreeEnabled' | 'lineage' | 'createdByThreadId' | 'startedFrom' | 'sentFrom' | 'runsOn' | 'workspaceBinding' | 'pullRequest' | 'expiresAt' | 'expiryStopsRun'>>,
+    partial: Partial<Pick<Thread, 'name' | 'titleSource' | 'modelOverride' | 'permissionMode' | 'worktreeEnabled' | 'lineage' | 'createdByThreadId' | 'startedFrom' | 'sentFrom' | 'runsOn' | 'workspaceBinding' | 'pullRequest' | 'goal' | 'expiresAt' | 'expiryStopsRun'>>,
     opts: { touch?: boolean; ifRevision?: number } = {}
   ): Thread {
     const thread = this.getThread(id)

@@ -97,6 +97,7 @@ import { PendingChangesNotice } from './PendingChangesNotice'
 import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from './ComposerNotice'
 import { ServiceLostNotice } from './ServiceLostNotice'
 import { PausedRunNotice } from '../chat/components/PausedRunNotice'
+import { CommandInfoNotice, GoalNotice } from '../chat/components/GoalNotice'
 import { composerThreadActions } from '../lib/composerThreadActions'
 import { addPendingThreadRow, afterNextPaint, claimPendingThreadRow, dropPendingThreadRows, holdNewChat, isPendingRowId, pendingThreadRow, typedAfterSend, type PendingThreadRow } from '../lib/pendingThreadRows'
 import { composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread, isWorkspacePending, rememberedChoiceOf, withoutPicks, workspaceWithExpiry, workspaceWithPrivate } from '../lib/newThread'
@@ -396,6 +397,9 @@ export function OrchestratorChat() {
   const [pendingQuestions, setPendingQuestions] = usePendingQuestions(activeThreadId)
   const [connectionFailed, setConnectionFailed] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
+  /** A line a composer command answered with (`/goal` alone), until dismissed or the thread changes. */
+  const [commandInfo, setCommandInfo] = useState<string | null>(null)
+  useEffect(() => setCommandInfo(null), [activeThreadId])
   /** Discard for a send refused over a conflict in the thread worktree; shown only while `sendError` is that refusal’s line. */
   const [sendChanges, setSendChanges] = useState<{ line: string; message: string; details: PendingChangesDetails } | null>(null)
   const addResolvedReference = useCallback(async (reference: ChatReference) => {
@@ -1222,7 +1226,8 @@ export function OrchestratorChat() {
     fork: async (threadId) => { await window.mousse.threads.fork(threadId) },
     rename: async (threadId, title) => { await window.mousse.threads.rename(threadId, title) },
     // The sidebar cancels the event when it opened the thread's rename box.
-    openRename: (threadId) => !window.dispatchEvent(new CustomEvent('mousse:rename-thread', { detail: { threadId }, cancelable: true }))
+    openRename: (threadId) => !window.dispatchEvent(new CustomEvent('mousse:rename-thread', { detail: { threadId }, cancelable: true })),
+    goal: (threadId, action, text) => window.mousse.platformRequest.request<{ text?: string }>('threads.goal', { threadId, action, ...(text !== undefined ? { text } : {}) })
   })
 
   const handleSend = async (skillMode?: SkillChatMode, options?: { steer?: boolean; skipQuestions?: boolean }) => {
@@ -1313,9 +1318,16 @@ export function OrchestratorChat() {
     const attached = images.length > 0 || attachedFiles.length > 0 || voiceMessages.length > 0 || browserElements.length > 0 || resolvedReferences.length > 0
     const command = await runSlashCommand(trimmed, slashCommandEnv(attached))
     let steerQueued = false
+    // `/goal <text>` on a new chat: the text is the first message, and the goal of the thread the send makes.
+    let goalToAdopt: string | undefined
     if (command) {
       if (command.kind === 'done') {
         setInput('')
+        return
+      }
+      if (command.kind === 'info') {
+        setInput('')
+        if (stillVisible()) setCommandInfo(command.message)
         return
       }
       if (command.kind === 'keep') return
@@ -1325,6 +1337,7 @@ export function OrchestratorChat() {
       }
       // A /steer no turn took: next-turn guidance, sent as an ordinary message.
       text = command.text
+      if (command.adoptGoal) goalToAdopt = command.text
     } else if (options?.steer && !skillMode && images.length === 0 && trimmed && !trimmed.startsWith('/')) {
       // Steer (Ctrl/Cmd+Enter) during a run: the text goes into the running turn instead of the queue. The composer
       // clears at once, as a send does: what is typed while this steer is on its way is the next message, and a clear
@@ -1543,6 +1556,11 @@ export function OrchestratorChat() {
     }
     if (typedMeanwhile) setInput(typedMeanwhile)
     const sent = await sendMessage(text, skillMode ?? chatMode, images, targetThreadId, restoreUnsent, undefined, bound, steerQueued)
+    if (goalToAdopt && sent === true && targetThreadId) {
+      const goalThread = targetThreadId
+      void window.mousse.platformRequest.request('threads.goal', { threadId: goalThread, action: 'adopt', text: goalToAdopt })
+        .catch((error: unknown) => { if (useAppStore.getState().activeThreadId === goalThread) setSendError(sendErrorLine(error)) })
+    }
     if (sent === false && stillVisible()) {
       restoreUnsent()
     } else if (sent !== 'uncertain') {
@@ -1756,6 +1774,9 @@ export function OrchestratorChat() {
           : <ComputerNotice message={sendError} onDismiss={() => setSendError(null)} />)}
         <PromptUndoNotice />
         <PausedRunNotice threadId={activeThreadId} />
+        {/* A goal is the computer's that runs the thread (`threads.goal` is not routed): none for another computer's thread. */}
+        <GoalNotice threadId={newChat || remoteNode ? null : activeThreadId} />
+        {commandInfo && <CommandInfoNotice message={commandInfo} onDismiss={() => setCommandInfo(null)} />}
         <ServiceLostNotice lost={connectionFailed} onReconnect={retryConnection} onDismiss={() => setConnectionFailed(false)} />
         <ComposerNoticeSource notice={lastSteer ? { tone: 'info', title: 'Steered', detail: lastSteer.text, onDismiss: () => setLastSteer(null) } : null} />
         <ApprovalNotice

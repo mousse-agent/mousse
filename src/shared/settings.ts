@@ -1,6 +1,7 @@
 import { normalizeProfilerSettings, type ProfilerSettings } from './diagnostics/profiler'
 import type { MousseIntegrationsSettings, SkillModelSettings } from './integrations'
 import { isExpiryPreset, type ExpiryPreset } from './threadExpiry'
+import { normalizeGoalTurnLimit } from './threadGoal'
 import { MOUSSE_BUILTIN_TOOL_IDS } from './integrations'
 import type { ChatMode } from './types'
 import type { ModelOverride } from './providerInstances'
@@ -370,6 +371,8 @@ export interface RunSettings {
   newThreadWorktree: boolean
   /** When a new private thread deletes itself (`Thread.expiresAt`); `never` keeps it. Each new chat can change it. */
   privateThreadExpiry: ExpiryPreset | 'never'
+  /** How many turns Mousse starts for a thread's goal (`/goal`) before it stops; Continue allows as many again. */
+  goalTurnLimit: number
   /**
    * How a held steer is released, per provider instance (docs/design/steer-and-interruptions.md §2.3.2). `strict`: on
    * a provider that reports a tool only when it starts, a steer held for a tool waits for the provider's own turn to
@@ -396,7 +399,8 @@ export function normalizeRunSettings(raw?: Partial<RunSettings> | null): RunSett
         ? cap
         : DEFAULT_USAGE_LIMIT_PAUSE_CAP,
     newThreadWorktree: raw?.newThreadWorktree !== false,
-    privateThreadExpiry: isExpiryPreset(raw?.privateThreadExpiry) ? raw.privateThreadExpiry : 'never'
+    privateThreadExpiry: isExpiryPreset(raw?.privateThreadExpiry) ? raw.privateThreadExpiry : 'never',
+    goalTurnLimit: normalizeGoalTurnLimit(raw?.goalTurnLimit)
   }
 }
 

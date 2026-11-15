@@ -280,6 +280,7 @@ export const PROTOCOL_METHODS = [
   'runs.handoffs',
   'runs.resumeNow',
   'runs.cancelPause',
+  'threads.goal',
   'thread.fork',
   'thread.mergeBack',
   'orchestrator.answerQuestions',
