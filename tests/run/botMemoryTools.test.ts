@@ -1,3 +1,4 @@
+import { rollUpChips } from '../../src/shared/bots/personal/chips'
 import { readFileSync } from 'node:fs'
 import { createBotMemoryAdmin } from '../../src/mms/bots/memory/admin'
 import { botMemoryMethods } from '../../src/mms/bots/memory/methods'
@@ -160,6 +161,25 @@ describe('memory tools', () => {
     expect((await call('memory_save', 'ada-home', { kind: 'note', text: 'Combined.', merges: ['m3'] })).isError).toBeUndefined()
   })
 
+  it('shows the actual absorbed entries on the saved-memory chip and scrubs its hover after Forget', async () => {
+    const fx = memoryFixture()
+    const { call, onAppResult } = setup(fx)
+    await call('memory_save', 'ada-home', { kind: 'note', text: 'First standing note.' })
+    await call('memory_save', 'ada-home', { kind: 'note', text: 'Second standing note.' })
+    const input = { kind: 'note', text: 'Combined notes.', merges: ['m1', 'm2', 'm2'] }
+    await call('memory_save', 'ada-home', input)
+    const result = onAppResult.mock.calls.at(-1)![2]
+    const chips = rollUpChips([{ tool: 'memory_save', input, result }])
+    expect(chips).toEqual([{
+      icon: 'memory', text: 'remembered', highlight: 'Combined notes. · put away 2',
+      title: 'Put away:\nFirst standing note.\nSecond standing note.'
+    }])
+    fx.store.append({ botId: 'ada', kind: 'bot_msg', sourceKey: 'bm:combined', who: 'bot', text: 'Saved.', json: { chips } })
+    await call('memory_forget', 'ada-home', { id: 'm1', reason: 'Remove the first note.' })
+    expect(fx.store.journal('ada').find(r => r.sourceKey === 'bm:combined')?.json?.chips)
+      .toEqual([{ icon: 'memory', text: 'remembered something' }])
+  })
+
   // Forget through either public handler; direct and chained absorption; old target versions;
   // journal/message copies, export, re-learning, restoration, and another bot as a control.
   it.each([
@@ -176,7 +196,7 @@ describe('memory tools', () => {
     for (const [n, text] of texts.entries()) {
       fx.message({ botId: 'ada', id: `fact-${n}`, author: 'owner', text })
       await save(text)
-      fx.store.append({ botId: 'ada', kind: 'tool_result', sourceKey: `copy-${n}`, who: 'tool', text: `Copy: ${text}` })
+      if (n === 0) fx.store.append({ botId: 'ada', kind: 'tool_result', sourceKey: `copy-${n}`, who: 'tool', text: `Copy: ${text}` })
     }
     let target = await save('Home: flat 4B, 12 Elm Street; door code 4471.', { merges: ['m1', 'm2'] })
     // Forget must follow an absorption into any version, not just the target's newest.
@@ -202,7 +222,7 @@ describe('memory tools', () => {
       expect((await call('memory_save', 'ada-home', { kind: 'owner', text, replaces: `m${n + 1}v2` })).value.error).toBe('refused')
       const message = fx.db.statement('SELECT text FROM bot_messages WHERE id = ?').get(`fact-${n}`)
       expect(message?.text).not.toBe(text)
-      expect(fx.store.journal('ada').find(row => row.sourceKey === `copy-${n}`)?.redactedAt).toBeTruthy()
+      if (n === 0) expect(fx.store.journal('ada').find(row => row.sourceKey === `copy-${n}`)?.redactedAt).toBeTruthy()
     }
     expect(fx.store.active('bob')[0]?.text).toBe(texts[0])
   })

@@ -847,6 +847,15 @@ export class BotMemoryStore {
         // Every version's words go from wherever they were copied: rows that hold them (a memory call
         // captured with its text by an older build) and the chip of the message that saved them.
         const texts = this.all('SELECT text FROM bot_memories WHERE bot_id = ? AND id = ? AND text IS NOT NULL', botId, id).map((row) => row.text as string)
+        // A cited source is known to hold the entry, even when its text is shorter than the
+        // substring-copy threshold (for example, a door code). Keep that threshold for other rows.
+        for (const source of this.all('SELECT DISTINCT source_seq FROM bot_memories WHERE bot_id = ? AND id = ? AND source_seq IS NOT NULL', botId, id)) {
+          const row = this.journalRow(botId, num(source.source_seq)!)
+          if (row && !row.redactedAt) {
+            copiesOf(row.text, row.seq).forEach(redact)
+            redact(row)
+          }
+        }
         this.run("UPDATE bot_memories SET text = NULL, status = 'forgotten', reason = 'forgotten' WHERE bot_id = ? AND id = ?", botId, id)
         for (const op of this.all("SELECT * FROM bot_journal WHERE bot_id = ? AND kind = 'memory_op' AND json_extract(json, '$.memId') = ?", botId, id))
           redact(journalRowOf(op))
