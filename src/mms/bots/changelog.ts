@@ -81,7 +81,7 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
   {
     id: 12,
     date: '2026-11-16',
-    text: 'In a scheduled run, use schedule_done with a short reason when what the schedule was waiting for has happened or can no longer happen, then finish with your report. Only that schedule ends, and Mousse says so in one quiet line. In the chat, put any end condition in the schedule prompt. Removing a schedule also ends its queued or waiting work; a turn already running can finish, but cannot start another turn for that schedule.'
+    text: 'In a scheduled run, use schedule_done with a short reason when what the schedule was waiting for has happened or can no longer happen, then finish with your report. Only that schedule ends, and Mousse says so in one quiet line. In the chat, put any end condition in the schedule prompt. Removing a schedule also ends its queued or waiting work. A run already executing can continue to its report; the run that ended its own schedule keeps going even through a wall.'
   }
 ]
 
