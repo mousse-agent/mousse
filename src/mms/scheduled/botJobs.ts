@@ -121,6 +121,22 @@ export class BotScheduleError extends Error {
   }
 }
 
+/** A local date lasts through that day; a local date/time ends at that minute. */
+export function scheduleUntil(value: string, now: Date): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2}))?)?$/.exec(value)
+  if (!match) throw new BotScheduleError('schedule_invalid', 'until needs a local date (2026-11-21) or date and time (2026-11-21T18:00) on this computer.')
+  const [, y, m, d, h, min, sec] = match
+  const date = new Date(+y, +m - 1, +d, h === undefined ? 23 : +h, min === undefined ? 59 : +min, sec === undefined ? (h === undefined ? 59 : 0) : +sec, h === undefined ? 999 : 0)
+  if (date.getFullYear() !== +y || date.getMonth() !== +m - 1 || date.getDate() !== +d || (h !== undefined && (date.getHours() !== +h || date.getMinutes() !== +min || date.getSeconds() !== +(sec ?? 0))))
+    throw new BotScheduleError('schedule_invalid', 'until is not a valid local date and time. Check the day and clock time.')
+  if (date <= now) throw new BotScheduleError('schedule_invalid', 'until is in the past. Pick a future date or time.')
+  return date.toISOString()
+}
+
+export function scheduleEndLabel(expiresAt?: string): string {
+  return expiresAt ? ` · until ${new Date(expiresAt).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' }).replace(',', '')}` : ''
+}
+
 /** The fields a bot automation can change from the Automations page: When, Do, its name and Tell me. Who, Where and May stay the bot's. */
 const BOT_PATCH_KEYS = new Set(['name', 'prompt', 'schedule', 'tellMe'])
 
@@ -150,7 +166,7 @@ export class BotScheduleBook {
       when,
       prompt: job.prompt,
       name: job.name,
-      label: this.labelOf(when),
+      label: this.labelOf(when) + scheduleEndLabel(job.expiresAt),
       createdBy: job.bot.createdBy,
       createdAt: job.createdAt,
       ...(job.bot.model ? { model: job.bot.model } : {}),
@@ -173,10 +189,15 @@ export class BotScheduleBook {
     return when.expr
   }
 
+  /** Completed schedules stay in Automations; upkeep writes their quiet end line once. */
+  ended(botId: string): Array<{ jobId: string; name: string }> {
+    return this.options.jobs.listJobs().filter((job) => job.bot?.botId === botId && job.state === 'completed' && Boolean(job.expiresAt)).map((job) => ({ jobId: job.id, name: job.name }))
+  }
+
   /** Every bot's schedules, oldest first. */
   all(): BotScheduleEntry[] {
     return this.options.jobs.listJobs()
-      .flatMap((job) => this.entryOf(job) ?? [])
+      .flatMap((job) => job.state === 'completed' ? [] : this.entryOf(job) ?? [])
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.scheduleId.localeCompare(b.scheduleId))
   }
 
@@ -202,11 +223,12 @@ export class BotScheduleBook {
    * Adds a schedule: at most 8 per bot, at least a minute apart. It needs no approval (a schedule is not a permission)
    * and starts from now, so it never runs for times before it existed.
    */
-  add(botId: string, input: { when: BotSchedule['when']; prompt: string; model?: string; pick?: BotModelPick; name?: string; tellMe?: TellMe }, createdBy: 'owner' | 'bot', options: { scheduleId?: string } = {}): BotScheduleEntry {
+  add(botId: string, input: { when: BotSchedule['when']; prompt: string; until?: string; model?: string; pick?: BotModelPick; name?: string; tellMe?: TellMe }, createdBy: 'owner' | 'bot', options: { scheduleId?: string } = {}): BotScheduleEntry {
     if (this.list(botId).length >= MAX_BOT_SCHEDULES) throw new BotScheduleError('schedule_limit', `A bot can have at most ${MAX_BOT_SCHEDULES} schedules. Remove one first.`)
     const prompt = typeof input.prompt === 'string' ? input.prompt.trim() : ''
     const problem = botScheduleProblem(input.when, prompt)
     if (problem) throw new BotScheduleError('schedule_invalid', problem)
+    const expiresAt = input.until === undefined ? undefined : scheduleUntil(input.until, this.now())
     const scheduleId = options.scheduleId ?? `s-${randomUUID().slice(0, 8)}`
     const when: BotSchedule['when'] = input.when.kind === 'interval' ? { kind: 'interval', minutes: input.when.minutes } : { kind: 'cron', expr: input.when.expr.trim() }
     const job = this.options.jobs.createJob({
@@ -214,6 +236,7 @@ export class BotScheduleBook {
       name: input.name?.trim() || botJobName(prompt),
       ...(input.tellMe ? { tellMe: input.tellMe } : {}),
       prompt,
+      ...(expiresAt ? { expiresAt } : {}),
       schedule: jobScheduleOf(when),
       threadId: botJobThreadGuard(botId),
       // Only the owner picks a model by hand; a bot's own schedule runs on its own rows. The name stays beside the pick,

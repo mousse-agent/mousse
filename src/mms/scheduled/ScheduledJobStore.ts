@@ -1138,7 +1138,7 @@ export class ScheduledJobStore {
           if (job.expiresAt && job.state !== 'completed' && isExpired(job, now)) {
             job.state = 'completed'
             job.nextRunAt = null
-            job.lastError = agentJobExpiredReason(lifetimeDays)
+            job.lastError = job.bot ? 'Ended, as planned.' : agentJobExpiredReason(lifetimeDays)
             dirty = true
             continue
           }

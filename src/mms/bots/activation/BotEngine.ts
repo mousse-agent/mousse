@@ -190,7 +190,7 @@ export interface BotEngineHost {
    * The bots' schedules, in the shared scheduled-job store (`BotScheduleBook`): automations whose Who is the bot. The
    * one scheduler claims each occurrence and hands it to `runScheduledOccurrence`. Absent: no bot has schedules here.
    */
-  schedules?: Pick<BotScheduleBook, 'list' | 'get' | 'add' | 'remove' | 'removeAll' | 'labelOf'> & Partial<Pick<BotScheduleBook, 'skipped'>>
+  schedules?: Pick<BotScheduleBook, 'list' | 'get' | 'add' | 'remove' | 'removeAll' | 'labelOf'> & Partial<Pick<BotScheduleBook, 'skipped' | 'ended'>>
   /** The level a scheduled run's activation reported with `run_report` (`AutomationRuns`). Absent: none is known. */
   runLevel?(activationId: string): RunLevel | undefined
   /** Wall-clock milliseconds, for the times `bots.db` records (default: `Date.now`). */
@@ -1473,6 +1473,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (this.closed) return
     for (const botId of this.host.definitions.ids()) {
       try {
+        for (const ended of this.host.schedules?.ended?.(botId) ?? []) {
+          if (!this.store.registry(botId)?.deletedAt)
+            this.chat.post({ id: `bm_schedule_ended_${ended.jobId}`, botId, author: 'bot', kind: 'notice', text: `‘${ended.name}’ ended, as planned.` })
+        }
         this.endUsagePauseIfDue(botId, now)
       } catch (error) {
         console.warn('a bot\'s usage pause could not be checked', { botId, error: error instanceof Error ? error.message : String(error) })
@@ -8162,7 +8166,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * apart. The bot adds its own with `bot_schedule_add`, the owner from the Automations page; it needs no approval
    * (schedules are not permissions) and changes no revision.
    */
-  addSchedule(botId: string, input: { when: BotSchedule['when']; prompt: string; model?: string; pick?: BotModelPick }, createdBy: 'owner' | 'bot'): BotScheduleEntry {
+  addSchedule(botId: string, input: { when: BotSchedule['when']; prompt: string; until?: string; model?: string; pick?: BotModelPick }, createdBy: 'owner' | 'bot'): BotScheduleEntry {
     this.entry(botId)
     let added: BotScheduleEntry
     try {
