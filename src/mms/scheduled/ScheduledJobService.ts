@@ -43,7 +43,7 @@ export interface ScheduledJobRunner {
  */
 export interface ScheduledBotRunner {
   /** The run already inserted for this claim, before a crash interrupted the hand-over. */
-  findOccurrence(input: { botId: string; scheduleId: string; occurrenceKey: string }): { activationId: string; occurrenceAt: string } | undefined
+  findOccurrence(input: { botId: string; scheduleId: string; occurrenceKey: string }): { activationId: string; occurrenceAt: string } | { kind: 'skipped'; reason: string } | undefined
   runOccurrence(input: { jobId: string; botId: string; scheduleId: string; prompt: string; occurrenceAt: string; occurrenceKey?: string; missed?: ScheduledMissedRuns; now: Date; model?: string; pick?: NonNullable<ScheduledJob['bot']>['pick'] }):
     | { kind: 'started'; activationId: string }
     | { kind: 'skipped'; reason: string }
@@ -867,7 +867,9 @@ export class ScheduledJobService extends EventEmitter {
     let outcome: ReturnType<ScheduledBotRunner['runOccurrence']>
     try {
       const existing = this.botRunner?.findOccurrence({ botId: job.bot.botId, scheduleId: job.bot.scheduleId, occurrenceKey: claim.occurrenceKey })
-      if (existing) {
+      if (existing && 'kind' in existing) {
+        outcome = existing
+      } else if (existing) {
         occurrenceAt = existing.occurrenceAt
         outcome = { kind: 'started', activationId: existing.activationId }
       } else {

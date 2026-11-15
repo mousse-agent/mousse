@@ -1327,8 +1327,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   // -- Schedules (Path step 3: one scheduler) -------------------------------------------------------
 
   /** The scheduler retries a claim as started before making any new admission or lateness decision. */
-  findScheduledOccurrence(input: { botId: string; scheduleId: string; occurrenceKey: string }): { activationId: string; occurrenceAt: string } | undefined {
-    if (this.scheduleHasCompletion(input.botId, input.scheduleId)) return undefined
+  findScheduledOccurrence(input: { botId: string; scheduleId: string; occurrenceKey: string }): { activationId: string; occurrenceAt: string } | { kind: 'skipped'; reason: string } | undefined {
+    if (this.scheduleHasCompletion(input.botId, input.scheduleId)) return { kind: 'skipped', reason: 'schedule_completed' }
     const row = this.store.activationByKey(`sched:${input.botId}:${input.scheduleId}:${input.occurrenceKey}`)
     if (row?.trigger.kind === 'schedule') return { activationId: row.id, occurrenceAt: row.trigger.occurrenceAt }
     return undefined
