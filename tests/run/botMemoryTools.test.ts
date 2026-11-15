@@ -136,6 +136,19 @@ describe('memory tools', () => {
     expect(fx.store.active('ada').map(e => e.id)).toEqual(['m1', 'm3'])
   })
 
+  it('refuses combined text that already belongs to an unabsorbed active entry, with its current ref', async () => {
+    const fx = memoryFixture()
+    const { call } = setup(fx)
+    for (const text of ['First note.', 'Second note.', 'Already saved.'])
+      await call('memory_save', 'ada-home', { kind: 'note', text })
+    const before = fx.store.allVersions('ada')
+    const result = await call('memory_save', 'ada-home', { kind: 'note', text: 'already SAVED', merges: ['m1', 'm2'] })
+    expect(result).toMatchObject({ isError: true, value: { error: 'refused', reason: expect.stringContaining('m3') } })
+    expect(fx.store.allVersions('ada')).toEqual(before)
+    expect((await call('memory_save', 'ada-home', { kind: 'note', text: 'already SAVED', merges: ['m1', 'm2', 'm3'] })).isError).toBeUndefined()
+    expect(fx.store.active('ada')).toHaveLength(1)
+  })
+
   it('leaves entries and journal unchanged when a combination still exceeds the cap', async () => {
     const fx = memoryFixture()
     const { call } = setup(fx)
