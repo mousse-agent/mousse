@@ -157,15 +157,31 @@ describe('Git mutations through the daemon', () => {
       await expect(client.request('git.pull', { ...scope, strategy: 'sideways' })).rejects.toMatchObject({ code: 'invalid_params' })
     })
 
-    it('initialises a project folder that is not a repository yet, and refuses a thread', async () => {
+    it('initialises a project folder that is not a repository yet', async () => {
       const folder = mkdtempSync(join(tmpdir(), 'mousse-daemon-init-'))
       try {
         const project = mms.projects.openProject(folder)
         const result = await client.request<Status>('git.init', { projectId: project.id })
         expect(result.status.isRepo).toBe(true)
         await expect(client.request('git.init', { projectId: project.id })).rejects.toMatchObject({ code: 'git_already_repo' })
-        await expect(client.request('git.init', { threadId: 'any' })).rejects.toMatchObject({ code: 'invalid_params' })
       } finally { rmSync(folder, { recursive: true, force: true }) }
+    })
+
+    it('starts Git in a thread\'s own folder after its worktree was removed, and leaves the project alone', async () => {
+      const { threadId, path } = await threadScope()
+      const projectHead = git(f.repo, 'rev-parse', 'HEAD')
+      const branches = () => git(f.repo, 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads')
+      const projectBranches = branches()
+      await expect(client.request('git.init', { threadId })).rejects.toMatchObject({ code: 'git_already_repo' })
+      // What the agent did: removed its worktree.
+      git(f.repo, 'worktree', 'remove', '--force', path)
+      expect((await client.request<Status>('git.status', { threadId })).status).toMatchObject({ isRepo: false, missing: true })
+      const result = await client.request<Status>('git.init', { threadId })
+      expect(result.status.isRepo).toBe(true)
+      expect(existsSync(join(path, '.git'))).toBe(true)
+      expect((await client.request<Status>('git.status', { threadId })).status.isRepo).toBe(true)
+      expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(projectHead)
+      expect(branches()).toBe(projectBranches)
     })
 
     it('commits only what is staged and leaves the other file unstaged', async () => {

@@ -1,10 +1,10 @@
 import { AppError, createErrorProvider } from '../../shared/errors'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { access, copyFile, lstat, mkdtemp, readFile, readlink, rm, stat, writeFile } from 'node:fs/promises'
+import { access, copyFile, lstat, mkdir, mkdtemp, readFile, readlink, rm, stat, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import type { SimpleGit } from 'simple-git'
 import { redactGitText } from '../../shared/gitText'
 import { holdsRepositoryMutation } from '../actions/GitOperationCoordinator'
@@ -75,7 +75,7 @@ const gitErrors = createErrorProvider({
   git_cancelled: { category: 'cancelled', retryable: false, message: 'Cancelled.' },
   git_operation_exists: { category: 'conflict', retryable: false, message: 'An action with that id is already running.' },
   git_silence_timeout: { category: 'timeout', retryable: false, message: 'Git went silent and was stopped. It may have been waiting for a prompt that cannot be answered here.' },
-  git_init_no_folder: { category: 'invalid', retryable: false, message: 'The project folder does not exist.' },
+  git_init_no_folder: { category: 'invalid', retryable: false, message: 'The folder does not exist, and neither does the folder it was in.' },
   git_already_repo: { category: 'conflict', retryable: false, message: 'This folder is already a Git repository.' },
   git_no_remote: { category: 'invalid', retryable: false, message: 'Add a remote before pushing.' },
   git_no_upstream: { category: 'invalid', retryable: false, message: 'This branch has no upstream. Push it first to set one.' },
@@ -943,14 +943,22 @@ export class GitService {
     }
   }
 
-  /** Turns a project folder into a Git repository. Never touches an existing one. */
+  /**
+   * Turns a folder into a Git repository. Never touches an existing one. A folder that is gone (a thread's worktree the
+   * agent removed) is made again, but only when the folder it was in is still there, so a folder on a drive that is not
+   * connected is never made on the disk that drive would be mounted on.
+   */
   init(cwd: string, userRequested: UserAction): Promise<void> {
     return this.asUser(userRequested, () => this.initNow(cwd))
   }
 
   private async initNow(cwd: string): Promise<void> {
     await this.serialized(cwd, async () => {
-      const info = await stat(cwd).catch(() => null)
+      let info = await stat(cwd).catch(() => null)
+      if (!info && (await stat(dirname(cwd)).catch(() => null))?.isDirectory()) {
+        await mkdir(cwd).catch(() => undefined)
+        info = await stat(cwd).catch(() => null)
+      }
       if (!info?.isDirectory()) throw gitErrors.create('git_init_no_folder')
       if (await this.isRepo(cwd)) throw gitErrors.create('git_already_repo')
       await this.gitFor(cwd).init()

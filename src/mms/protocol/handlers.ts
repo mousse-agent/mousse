@@ -4891,7 +4891,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'git.init': {
       const p = isObject(params) ? params : {}
-      if (p.threadId !== undefined) throw new DomainRpcError('invalid_params', 'git.init takes a projectId, not a threadId')
+      // The folder the side card shows: a project's, or a thread's own worktree folder after the repository there went
+      // away. A worktree a storage rule retired is brought back first, so it is never made into a new repository.
+      await materializeRequestedWorkspace(ctx, p)
       const root = projectRootContext(ctx, p)
       await ctx.mms.gitService.init(root, gitUserAction(ctx, 'Initialize Git'))
       return gitStatusResult(ctx, root)

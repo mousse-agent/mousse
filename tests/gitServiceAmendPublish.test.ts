@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -189,14 +189,26 @@ describe('GitService mutations', () => {
 })
 
 describe('GitService init', () => {
-  it('initializes a plain folder and refuses an existing repository or a missing folder', async () => {
+  it('initializes a plain folder and refuses an existing repository', async () => {
     const root = mkdtempSync(join(tmpdir(), 'mousse-git-init-')); roots.push(root)
     const folder = join(root, 'plain'); mkdirSync(folder)
     const service = new GitService()
     await service.init(folder, USER)
     expect((await service.getStatus(folder)).isRepo).toBe(true)
     await expect(service.init(folder, USER)).rejects.toMatchObject({ code: 'git_already_repo' })
-    await expect(service.init(join(root, 'missing'), USER)).rejects.toMatchObject({ code: 'git_init_no_folder' })
+  })
+
+  it('makes a folder that is gone again only when the folder it was in is still there', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mousse-git-init-')); roots.push(root)
+    const service = new GitService()
+    // A removed worktree: its folder is gone, the one it was in is not.
+    const removed = join(root, 'removed')
+    await service.init(removed, USER)
+    expect((await service.getStatus(removed)).isRepo).toBe(true)
+    // A folder on a drive that is not connected: nothing above it is there, so nothing is made.
+    const unplugged = join(root, 'unplugged-drive', 'project')
+    await expect(service.init(unplugged, USER)).rejects.toMatchObject({ code: 'git_init_no_folder' })
+    expect(existsSync(join(root, 'unplugged-drive'))).toBe(false)
   })
 })
 
