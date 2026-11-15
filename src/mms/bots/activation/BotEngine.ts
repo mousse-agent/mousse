@@ -1477,6 +1477,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   private async maintainPass(now: Date): Promise<void> {
     if (this.closed) return
+    this.retryCompletedScheduleRemovals()
     for (const botId of this.host.definitions.ids()) {
       try {
         this.endUsagePauseIfDue(botId, now)
@@ -6290,16 +6291,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * is repaired by the next one. A failure pauses the activation with `reconcile_failed`.
    */
   async reconcileOnStartup(): Promise<void> {
-    // The intent lives with the run; jobs.json and bots.db cannot commit together. Finish an interrupted removal
-    // before the scheduler can admit another occurrence, even if the reporting run has already ended.
-    for (const { id } of this.store.all("SELECT id FROM bot_activations WHERE json_extract(trigger_json, '$.completed') IS NOT NULL")) {
-      const row = this.store.activation(id as string)
-      if (row?.trigger.kind !== 'schedule') continue
-      try { this.host.schedules?.remove(row.botId, row.trigger.scheduleId) } catch (error) {
-        console.warn('a completed bot schedule could not be removed', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
-        // The hand-over guard enforces the intent even while jobs.json cannot be written.
-      }
-    }
+    // Cleanup is best effort: admission enforces the saved intent even while jobs.json cannot be written.
+    this.retryCompletedScheduleRemovals()
     this.dropRemovedScheduleRuns()
     try {
       // Capture first (bot-context.md §4): every bot thread is copied into the journal past its
@@ -8236,6 +8229,25 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     for (const row of rows) if (botId === undefined || row.botId === botId) this.cancelRemovedScheduleRun(row)
   }
 
+  private retryCompletedScheduleRemovals(): void {
+    for (const { id } of this.store.all(`SELECT id FROM bot_activations
+      WHERE json_extract(trigger_json, '$.completed') IS NOT NULL
+      AND json_extract(trigger_json, '$.completed.removed') IS NOT 1`)) {
+      const row = this.store.activation(id as string)
+      if (row) this.removeCompletedSchedule(row)
+    }
+  }
+
+  private removeCompletedSchedule(row: BotActivationRow): void {
+    if (row.trigger.kind !== 'schedule' || !row.trigger.completed || row.trigger.completed.removed) return
+    try {
+      this.host.schedules?.remove(row.botId, row.trigger.scheduleId)
+      this.store.run("UPDATE bot_activations SET trigger_json = json_set(trigger_json, '$.completed.removed', json('true')) WHERE id = ?", row.id)
+    } catch (error) {
+      console.warn('a completed bot schedule could not be removed', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
   private scheduleHasCompletion(botId: string, scheduleId: string): boolean {
     return Boolean(this.store.get(`SELECT 1 FROM bot_activations WHERE bot_id = ?
       AND json_extract(trigger_json, '$.kind') = 'schedule'
@@ -8268,7 +8280,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if ([...this.pendingReplies.keys()].some(key => key.startsWith(`${row.id}:`))) return
     const id = `bm_schedule_done_${row.id}`
     if (this.store.message(id)) return
-    this.host.schedules?.remove(row.botId, row.trigger.scheduleId)
+    this.removeCompletedSchedule(row)
     if (!this.store.message(id)) this.chat.post({ id, botId: row.botId, author: 'bot', kind: 'notice', text: `Stopped ‘${row.trigger.completed.name}’.`, activationId: row.id, lane: 'run' })
   }
 
