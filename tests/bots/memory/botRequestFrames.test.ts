@@ -3,7 +3,7 @@ import { botFixture, createBot } from '../botFixture'
 import { dataFrame, splitDataFrames } from '../../../src/shared/bots/personal/dataFrames'
 import { afterEach, expect, it } from 'vitest'
 import { createBotJournal } from '../../../src/mms/bots/memory/capture'
-import { wakeInput, type BotWakeFired } from '../../../src/shared/bots/personal/wakes'
+import { wakeInput, wakeFiredLabel, type BotWakeFired } from '../../../src/shared/bots/personal/wakes'
 import { disposeFixtures, memoryFixture } from './memoryFixture'
 
 afterEach(disposeFixtures)
@@ -14,6 +14,9 @@ it.each<BotWakeFired>([
   { kind: 'watcher', title: 'build', how: 'match', line: 'quartz match', tail: '' },
   { kind: 'watcher', title: 'build', how: 'failed', message: 'quartz failure', tail: '' },
   { kind: 'pr', repo: 'a/b', number: 1, state: 'merged', title: 'quartz title' },
+  { kind: 'pr', repo: 'a/b', number: 1, state: 'checks', passed: 1, failed: 1, failedNames: ['quartz check'] },
+  { kind: 'pr', repo: 'a/b', number: 1, state: 'checks', passed: 1, failed: 0, failedNames: [], waiting: 1, waitingNames: ['quartz approval'] },
+  { kind: 'pr', repo: 'a/b', number: 1, state: 'review', reviewState: 'approved', reviewer: 'quartz' },
   { kind: 'thread', threadId: 't', status: 'completed', title: 'quartz thread' }
 ])('keeps $kind outside text only in external rows, once, through capture and search', (fired) => {
   const fx = memoryFixture()
@@ -108,4 +111,23 @@ it('marks legacy bot-message frames in the one-time pass', () => {
   const seq = fx.store.append({ botId: 'ada', kind: 'notice', sourceKey: 'legacy-message', who: 'mousse', text: botMessageInput({ fromName: 'Pip', message: 'quartz', chain: 1 }) })!
   fx.db.statement("DELETE FROM bot_memory_state WHERE bot_id = '' AND key = 'request_frames_external_v1'").run()
   expect(fx.reopen().journalRow('ada', seq)?.external).toBe(true)
+})
+
+
+it.each([
+  [1, 0, '1 check failed'], [2, 0, '2 checks failed'],
+  [0, 1, '1 check waits for approval'], [0, 2, '2 checks wait for approval'],
+  [1, 1, '1 check failed · 1 check waits for approval']
+])('uses singular and plural check outcomes (%s failed, %s waiting)', (failed, waiting, words) => {
+  expect(wakeFiredLabel({ kind: 'pr', repo: 'a/b', number: 1, state: 'checks', passed: 0, failed: Number(failed), failedNames: [], waiting: Number(waiting), waitingNames: [] })).toBe(`Following up · a/b#1 · ${words}`)
+})
+
+it('bounds old stored names too, and keeps the observed head inside a data frame', () => {
+  const text = wakeInput({ brief: 'Report', setAt: '2026-11-16T10:00:00Z', event: { kind: 'pr', repo: 'a/b', number: 1 }, fired: { kind: 'pr', repo: 'a/b', number: 1, state: 'checks', passed: 0, failed: 22, failedNames: Array.from({ length: 22 }, (_, i) => `${i} ` + 'q'.repeat(200)), headSha: 'quartz0123456789' }, chain: 1, clock: () => 'today' })
+  const split = splitDataFrames(text)
+  expect(split.text).not.toContain('quartz')
+  expect(split.frames).toContainEqual({ source: 'head commit', text: 'quartz0' })
+  expect(text).not.toContain('q'.repeat(121))
+  expect(text).not.toContain('20 ')
+  expect(text).toContain('Failed check names: and 2 more.')
 })

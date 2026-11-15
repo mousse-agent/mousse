@@ -1391,6 +1391,8 @@ export class MmsProfileServices {
       runInProgress: (threadId) => this.lifecycleOwnedTasks(threadId).some((task) => this.orchestrator.isTurnActive(task.taskId) || this.runEngine.getActiveRun(task.taskId) !== null),
       stop: async (threadId) => { await this.orchestrator.stopThread(threadId, 'expired', { clearQueue: true }) },
       quiesce: (threadId) => {
+        // What the expired threads launched on other computers is stopped there; nothing there is deleted.
+        this.orchestrator.stopRemoteLaunches(this.lifecycleOwnedTasks(threadId).map((task) => task.taskId), 'expired')
         // A question waiting for an answer and an open terminal are not a run: they end at expiry.
         for (const task of this.lifecycleOwnedTasks(threadId)) {
           this.questions.dismissAllForThread(task.taskId, 'thread_deleted')
@@ -1817,6 +1819,9 @@ export class MmsProfileServices {
   }
 
   private async stopRunsForDelete(threadIds: readonly string[]): Promise<void> {
+    // What the deleted threads launched on other computers is stopped there, whether or not they run now; nothing there
+    // is deleted.
+    this.orchestrator.stopRemoteLaunches(threadIds, 'deleted')
     const running = (): string[] => this.runningForDelete(threadIds)
     const stopping = running()
     if (!stopping.length) return
