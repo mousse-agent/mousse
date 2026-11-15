@@ -113,6 +113,7 @@ interface BotsState {
   replyingTo: Record<string, BotChatQuote>
   /** The service has no `bots.chat.react` (an older one): messages show no reaction bar. */
   reactionsMissing: boolean
+  snoozeMissing: boolean
   /** The service has no `bots.questions.answer`: questions show no buttons, and the owner answers with Reply. */
   questionsMissing: boolean
   error: string | null
@@ -155,6 +156,7 @@ interface BotsState {
   /** Stops one piece of work (the line above the composer); the chat goes on. */
   stopWork(botId: string, workId: string): Promise<void>
   answer(botId: string, askId: string, answer: 'allow' | 'not_now'): Promise<void>
+  snoozeReminder(botId: string, messageId: string, choice: import('../../shared/bots/personal/chat').BotSnoozeChoice): Promise<boolean>
   /**
    * The owner taps one of a question's answers: it is their reply to the question, which the bot answers. False when it
    * was not sent (the error says why, or the service has no buttons for questions).
@@ -346,7 +348,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
 
   return {
     profileId: null, bots: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, statuses: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, replyingTo: {},
-    reactionsMissing: false, questionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null,
+    reactionsMissing: false, snoozeMissing: false, questionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null,
     memory: {}, memoryError: {}, memoryOpen: null, memoryEditMissing: false, notes: {}, modelInfo: {},
 
     activate(profileId) {
@@ -363,7 +365,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
       removed.clear()
       reactions.clear()
       set({ profileId, bots: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, statuses: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, replyingTo: {},
-        reactionsMissing: false, questionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null,
+        reactionsMissing: false, snoozeMissing: false, questionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null,
     memory: {}, memoryError: {}, memoryOpen: null, memoryEditMissing: false, notes: {}, modelInfo: {} })
       subscribe()
       void get().refresh()
@@ -581,6 +583,23 @@ export const useBotsStore = create<BotsState>((set, get) => {
       } catch (cause) { fail(owner, cause, botId) }
     },
 
+    async snoozeReminder(botId, messageId, choice) {
+      const owner = epoch
+      set({ error: null })
+      try {
+        const message = await bots().snoozeReminder(botId, messageId, choice)
+        if (owner !== epoch) return false
+        putMessages(botId, [message])
+        void get().refresh()
+        return true
+      } catch (cause) {
+        if (owner !== epoch) return false
+        if (missingMethod(cause)) set({ snoozeMissing: true })
+        else fail(owner, cause, botId)
+        void get().loadChat(botId)
+        return false
+      }
+    },
     async answerQuestion(botId, questionId, choice) {
       const owner = epoch
       set({ error: null })

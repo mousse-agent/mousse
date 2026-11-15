@@ -19,6 +19,7 @@ import { BotReactionBadge, BotReactionBar } from './BotReactions'
 import { replyImages } from './botReplyImages'
 import { BotEmojiButton } from './BotEmoji'
 import { BotAskReplies } from './BotAskReplies'
+import { BotReminderReplies } from './BotReminderReplies'
 import { BotQuestionReplies } from './BotQuestionReplies'
 import { BotCards, galleryPaths } from './BotCards'
 import { BotActivitySticker, BotPresenceLine } from './BotPresence'
@@ -319,6 +320,7 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settl
   const store = useBotsStore.getState
   // A question's answers are buttons under it, so its words stop where their plain copy starts; a service whose
   // questions can't be answered here keeps that copy, and the owner answers with Reply.
+  const canSnooze = useBotsStore((s) => !s.snoozeMissing)
   const canAnswer = useBotsStore((s) => !s.questionsMissing)
   const question = canAnswer ? row.question : undefined
   // Its cards are drawn under its words, so those stop at their plain copy too; the pictures a gallery shows are its
@@ -404,6 +406,8 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settl
         return after.errorBotId === bot.id && after.error ? after.error : undefined
       }}
       onExport={() => store().exportMemory(bot.id, openAsk.askId)} />}
+    {canSnooze && message.reminder && <BotReminderReplies reminder={message.reminder}
+      onSnooze={(choice) => store().snoozeReminder(bot.id, message.id, choice)} />}
     {question && <BotQuestionReplies question={question}
       onAnswer={(choice) => store().answerQuestion(bot.id, question.questionId, choice)}
       onOther={() => onReply(row)} />}
