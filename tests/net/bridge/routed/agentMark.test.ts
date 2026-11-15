@@ -169,6 +169,10 @@ describe('a routed call marked as an agent\'s (issue #1160)', () => {
     policy.set(t.callerNode, { agentReach: 'none' })
     expect(await refusal(call('threads.setModel', { threadId: id, model: null, agent: mark() }))).toBe('agent_reach')
     expect(await refusal(call('threads.create', { name: 'No', agent: mark() }))).toBe('agent_reach')
+    // A mark that is not one is a bad request, refused before anything runs.
+    policy.set(t.callerNode, { agentReach: 'all' })
+    await expect(call('orchestrator.send', { threadId: id, content: 'hi', agent: { thread: 'x' } })).rejects.toThrow()
+    expect(t.owner.runEngine.listRuns(id, { limit: 5 })).toEqual([])
     // A window on the caller is a person: naming the mark is refused, not passed through.
     await expect(t.dispatch('orchestrator.send', { threadId: t.qualified(id), content: 'hi', agent: mark() })).rejects.toMatchObject({ code: 'invalid_params' })
     // A phone cannot set it either: its threads.create takes exact keys.

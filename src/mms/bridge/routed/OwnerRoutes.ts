@@ -205,6 +205,9 @@ export function validateRoutedParams(
   for (const key of row.required ?? [])
     if (value[key] === undefined && !(isPlainObject(staged) && Object.hasOwn(staged, key)))
       throw new NetError('bad_request', `${method} needs ${key}.`)
+  // The agent mark's shape is checked with the call's, before the ledger: a malformed mark is a bad request, never a
+  // call whose outcome is unknown.
+  if (value[ROUTED_AGENT_KEY] !== undefined) parseRoutedAgentMark(value[ROUTED_AGENT_KEY])
   const threadKey = row.threadIds?.[0] ?? 'threadId'
   switch (row.target) {
     case 'thread':
