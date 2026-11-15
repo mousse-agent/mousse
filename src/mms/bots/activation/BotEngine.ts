@@ -1,3 +1,4 @@
+import type { BotMemoryStore } from '../memory/BotMemoryStore'
 import type { ScheduledMissedRuns } from '../../../shared/types'
 import { requestJournalRows } from '../memory/requestFrames'
 import { grantedPermissions, permissionId, restorePermission, withoutPermission } from '../chat/projection'
@@ -192,6 +193,7 @@ export interface BotEngineHost {
    */
   schedules?: Pick<BotScheduleBook, 'list' | 'get' | 'add' | 'remove' | 'removeAll' | 'labelOf'> & Partial<Pick<BotScheduleBook, 'skipped'>>
   /** The level a scheduled run's activation reported with `run_report` (`AutomationRuns`). Absent: none is known. */
+  progress?: Pick<BotMemoryStore, 'saveProgress' | 'progress'>
   runLevel?(activationId: string): RunLevel | undefined
   /** Wall-clock milliseconds, for the times `bots.db` records (default: `Date.now`). */
   clock?(): number
@@ -8193,6 +8195,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return when.expr
   }
 
+  /** Only the activation's own existing schedule may keep a cursor; never work or a run by hand. */
+  saveLeftOff(activationId: string, text: string): void {
+    const row = this.host.store.activation(activationId)
+    if (!row || row.trigger.kind !== 'schedule' || !this.host.schedules?.get(row.botId, row.trigger.scheduleId)) return
+    this.host.progress?.saveProgress(row.botId, row.trigger.scheduleId, row.id, text)
+  }
+
   removeSchedule(botId: string, scheduleId: string): boolean {
     this.entry(botId)
     const removed = this.host.schedules?.remove(botId, scheduleId) ?? false
@@ -8200,8 +8209,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return removed
   }
 
-  listSchedules(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string }> {
-    return this.schedulesOf(botId).map((schedule) => ({ scheduleId: schedule.scheduleId, label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}) }))
+  listSchedules(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string; leftOff?: string }> {
+    return this.schedulesOf(botId).map((schedule) => {
+      const leftOff = this.host.progress?.progress(botId, schedule.scheduleId)
+      return { scheduleId: schedule.scheduleId, label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}), ...(leftOff !== undefined ? { leftOff } : {}) }
+    })
   }
 
   /**

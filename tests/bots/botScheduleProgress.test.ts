@@ -38,9 +38,12 @@ async function setup() {
 }
 
 it('a quiet report keeps its place in the next request, only for that schedule, outside the automation database', async () => {
-  const { a, b, turn, report } = await setup()
+  const { a, b, id, turn, report } = await setup()
   const note = 'Checked inbox through 16 Nov; waiting on invoice.'
   expect((await report(note)).isError).not.toBe(true)
+  const recorded = f.automationRuns.liveRunFor({ threadId: turn.payload.threadId, activationId: id })!
+  expect(recorded).toMatchObject({ level: 'quiet', summary: 'Nothing new.' })
+  expect(JSON.stringify(f.automationRuns.get(recorded.id))).not.toContain(note)
   await finish(f, turn.payload, 'completed', { text: 'Nothing new.' })
   expect(chatOf(f, botId).some((m) => m.text === 'Nothing new.')).toBe(false)
   const { inserted } = await f.tickSchedules(new Date(T0 + 10 * 60_000))
@@ -53,7 +56,6 @@ it('a quiet report keeps its place in the next request, only for that schedule, 
   }
   expect(await f.host.context!.chatPreamble({ botId, activationId: 'chat-other', input: 'Hi' })).not.toContain(note)
   expect(memory.getState(botId, `progress:${a}`)).toBeDefined()
-  expect(JSON.stringify(f.automationRuns.liveRunFor({ threadId: turn.payload.threadId }))).not.toContain(note)
   expect(memory.search(botId, { query: 'invoice' }).length).toBeGreaterThan(0)
 })
 
@@ -73,8 +75,8 @@ it.each(['owner text', 'entry text', 'citation', 'progress row'])('Forget clears
   const saved = memory.save(botId, { lane: 'chat', kind: 'owner', text: words })
   await report(kind === 'citation' ? `Pending task (j${seq}).` : words)
   expect(memory.getState(botId, `progress:${a}`)).toBeDefined()
-  const progress = memory.search(botId, { query: 'invoice' }).find((h) => h.ref !== `j${seq}` && h.ref.startsWith('j'))
-  memory.forget(botId, { by: 'owner_ui', ...(kind === 'entry text' ? { id: 'id' in saved ? saved.id : '' } : { refs: [kind === 'progress row' ? progress!.ref : `j${seq}`] }) })
+  const progress = memory.getState<{ seq: number }>(botId, `progress:${a}`)
+  memory.forget(botId, { by: 'owner_ui', ...(kind === 'entry text' ? { id: 'id' in saved ? saved.id : '' } : { refs: [kind === 'progress row' ? `j${progress!.seq}` : `j${seq}`] }) })
   expect(memory.getState(botId, `progress:${a}`)).toBeUndefined()
 })
 

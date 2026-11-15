@@ -786,8 +786,10 @@ export class BotMemoryStore {
       const tombstone = `[removed at your request · ${dayLabel(at, this.zone())}]`
       const redacted: string[] = []
       const redactedSeqs = new Set<number>()
+      const forgottenTexts: string[] = []
       const redact = (row: BotJournalRow) => {
         if (row.redactedAt || redactedSeqs.has(row.seq)) return
+        forgottenTexts.push(row.text)
         this.run("UPDATE bot_journal SET text = ?, keys = '', json = NULL, redacted_at = ? WHERE seq = ?", tombstone, at, row.seq)
         if (row.sourceKey.startsWith('bm:')) this.redactMessage(this.db, botId, row.sourceKey.slice(3), tombstone)
         redacted.push(`j${row.seq}`)
@@ -816,10 +818,24 @@ export class BotMemoryStore {
         this.run("UPDATE bot_memories SET text = NULL, status = 'forgotten', reason = 'forgotten' WHERE bot_id = ? AND id = ?", botId, id)
         for (const op of this.all("SELECT * FROM bot_journal WHERE bot_id = ? AND kind = 'memory_op' AND json_extract(json, '$.memId') = ?", botId, id))
           redact(journalRowOf(op))
+        forgottenTexts.push(...texts)
         for (const text of texts) {
           copiesOf(text).forEach(redact)
           this.memoryCallsOf(botId, id, text).forEach(redact)
           this.dropChip(botId, shortChipText(text))
+        }
+      }
+      for (const row of this.all("SELECT key, value FROM bot_memory_state WHERE bot_id = ? AND key LIKE 'progress:%'", botId)) {
+        const progress = parseJson(row.value) as { text?: string; seq?: number } | undefined
+        if (!progress?.text) continue
+        const cites = [...progress.text.matchAll(/\bj(\d+)\b/g)].some((match) => redactedSeqs.has(Number(match[1])))
+        if (cites || (progress.seq !== undefined && redactedSeqs.has(progress.seq)) || forgottenTexts.some((text) => text.trim() && progress.text!.includes(text.trim()))) {
+          this.run('DELETE FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, row.key as string)
+          // The note may only cite the removed words; its journal copy must go as well.
+          if (progress.seq !== undefined) {
+            const source = this.journalRow(botId, progress.seq)
+            if (source) redact(source)
+          }
         }
       }
       this.dropForgotten(botId, redactedSeqs)
@@ -900,6 +916,34 @@ export class BotMemoryStore {
   /** Drops every frozen pack of the bot: each activation's next dispatch builds its pack again. */
   private dropPacks(botId: string): void {
     this.run("DELETE FROM bot_memory_state WHERE bot_id = ? AND substr(key, 1, 5) = 'pack:'", botId)
+  }
+
+  /** A schedule's own cursor. Kept outside AutomationRuns so Forget reaches every copy. */
+  saveProgress(botId: string, scheduleId: string, activationId: string, text: string): void {
+    this.write(() => {
+      const seq = this.appendInTx(this.db, {
+        botId, kind: 'notice', lane: 'run', activationId,
+        sourceKey: `progress:${scheduleId}:${activationId}:${sha256(text)}`,
+        who: 'bot', text, json: { op: 'progress', scheduleId, writtenIn: 'run' }
+      }, this.now())
+      this.setState(botId, `progress:${scheduleId}`, { text, seq })
+      this.dropPacks(botId)
+    })
+  }
+
+  progress(botId: string, scheduleId: string): string | undefined {
+    return this.getState<{ text: string }>(botId, `progress:${scheduleId}`)?.text
+  }
+
+  /** Shared scheduler deletion covers the bot, the owner and removing all of a bot's schedules. */
+  removeProgressForJob(jobId: string): void {
+    this.write(() => {
+      const rows = this.all("SELECT bot_id, key FROM bot_memory_state WHERE key LIKE 'progress:%' AND bot_id || '--' || substr(key, 10) = ?", jobId)
+      for (const row of rows) {
+        this.run('DELETE FROM bot_memory_state WHERE bot_id = ? AND key = ?', row.bot_id as string, row.key as string)
+        this.dropPacks(row.bot_id as string)
+      }
+    })
   }
 
   // -- State -----------------------------------------------------------------------------------
