@@ -96,3 +96,32 @@ it.each(['text', 'run_report', 'error'] as const)('applies every bot level to an
     expect(f.store.message(message.id)?.tell).toBe(kind !== 'error' && tellMe === 'needs_you' ? 'later' : 'soon')
   }
 })
+
+it.each(['off', { from: '23:00', to: '06:00' }] as const)('keeps bot quiet hours %j through later notification changes in windows', async quietHours => {
+  const { bridgeProtocolEvent } = await import('../../src/main/mms/protocolEventBridge')
+  const f = botFixture(); fixtures.push(f)
+  f.host.settings = new SettingsStore(MousseConfigStore.load(join(f.base, 'settings-home')))
+  f.host.settings.set({ notifications: { quietHours: { from: '22:00', to: '08:00' } } } as any)
+  // Two already-open windows receive the same IPC payload as the real settings subscription.
+  const windows = [f.host.settings.get(), f.host.settings.get()]
+  ;(f.host as any).settingsChanged = (settings: import('../../src/shared/settings').MousseSettings) => {
+    bridgeProtocolEvent({ type: 'settings.changed', data: { settings } }, (channel, data) => {
+      expect(channel).toBe('settings:changed')
+      windows.forEach((_, index) => { windows[index] = structuredClone(data as typeof settings) })
+    }, { getActiveThreadId: () => null } as any)
+  }
+  const { botId } = await createBot(f)
+  const turn = await f.bots.enqueueChat(botId, 'chat:settings-window', 'Change quiet hours')
+  f.bots.setTelling(botId, turn.id, { quietHours })
+  const expected = quietHours === 'off' ? undefined : quietHours
+  for (const window of windows) {
+    expect(window.notifications.quietHours).toEqual(expected)
+    f.host.settings.set({ notifications: { ...window.notifications, allRemoteThreads: !window.notifications.allRemoteThreads } })
+    expect(f.host.settings.get().notifications.quietHours).toEqual(expected)
+  }
+  // A window opened after the event obtains current settings, with no replay needed.
+  const reopened = new SettingsStore(MousseConfigStore.load(join(f.base, 'settings-home')))
+  const lateWindow = reopened.get()
+  reopened.set({ notifications: { ...lateWindow.notifications, threadCompletionSound: !lateWindow.notifications.threadCompletionSound } })
+  expect(reopened.get().notifications.quietHours).toEqual(expected)
+})
