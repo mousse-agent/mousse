@@ -555,7 +555,7 @@ export class ScheduledJobStore {
         const fields = kept[job.id]
         if (!fields || typeof fields !== 'object') continue
         if (job.bot && fields.bot && job.bot.botId === fields.bot.botId && job.bot.scheduleId === fields.bot.scheduleId) {
-          const missing = Object.entries(fields.bot).filter(([key]) => !(key in job.bot!))
+          const missing = Object.entries(fields.bot).filter(([key]) => (key === 'say' || key === 'ownerAsked') && !(key in job.bot!))
           if (missing.length) {
             Object.assign(job.bot, Object.fromEntries(missing))
             restored.push(job.id)
