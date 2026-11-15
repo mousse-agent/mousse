@@ -78,7 +78,7 @@ it('changes only this bot’s automations, and targets a wake exception by sched
   f.bots.setTelling(botId, turn.id, { tellMe: 'needs_you', schedules: true })
   expect(f.scheduler.getJob(a.jobId)?.tellMe).toBe('needs_you')
   expect(f.scheduler.getJob(b.jobId)?.tellMe).toBeUndefined()
-  f.bots.setTelling(botId, turn.id, { scheduleId: a.scheduleId, canWakeMe: true })
+  expect(f.bots.setTelling(botId, turn.id, { scheduleId: a.scheduleId, canWakeMe: true })).toContain('That automation can wake you.')
   expect(f.scheduler.getJob(a.jobId)?.bot?.canWakeMe).toBe(true)
   expect(readBotTelling(f.store.registry(botId)?.tellJson).canWakeMe).toBeUndefined()
   expect(() => f.bots.setTelling(botId, turn.id, { scheduleId: b.scheduleId, canWakeMe: true })).toThrow(/No automation/)

@@ -7759,7 +7759,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.store.run('UPDATE bot_registry SET tell_json = ? WHERE bot_id = ?', JSON.stringify({ ...previous, ...(change.tellMe !== undefined ? { tellMe: change.tellMe } : {}), ...(!change.scheduleId && change.canWakeMe !== undefined ? { canWakeMe: change.canWakeMe } : {}) }), botId)
     })
     this.changed({ botId })
-    return this.tellingLine(botId) ?? 'No telling preferences set.'
+    const line = this.tellingLine(botId)
+    if (change.scheduleId) return [line, `That automation ${change.canWakeMe ? 'can' : 'cannot'} wake you.`].filter(Boolean).join('\n')
+    return line ?? 'No telling preferences set.'
   }
 
   private timerOwnerSet(botId: string, from: string): boolean {
