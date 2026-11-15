@@ -328,7 +328,7 @@ export class AutomationRuns {
       if (row.ended_at) continue
       const status = activation.status
       if (status === 'done' || status === 'failed' || status === 'cancelled' || status === 'blocked') {
-        const removed = status === 'cancelled' && activation.endReason === 'schedule_removed'
+        const removed = status === 'cancelled' && (activation.endReason === 'schedule_removed' || activation.endReason === 'bot_deleted')
         const failed = status !== 'done' && !removed
         this.finish({ jobId, occurrenceKey: String(row.occurrence_key), failed, ...(removed ? { silent: true } : {}), ...(failed ? { error: activation.endReason ? reasonText(activation.endReason) : status === 'blocked' ? 'Stopped at a missing permission' : 'Failed' } : {}), ...(activation.threadId ? { threadId: activation.threadId } : {}) })
         continue
