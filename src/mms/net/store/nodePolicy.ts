@@ -38,7 +38,8 @@ export type NodePolicyChange = Partial<
 
 export type AgentReach = 'none' | 'launched' | 'all'
 export const AGENT_REACHES: readonly AgentReach[] = ['none', 'launched', 'all']
-export const isAgentReach = (value: unknown): value is AgentReach => (AGENT_REACHES as readonly unknown[]).includes(value)
+export const isAgentReach = (value: unknown): value is AgentReach =>
+  (AGENT_REACHES as readonly unknown[]).includes(value)
 /** A device's agents change only the threads they started here, until a person on this computer allows more. */
 export const DEFAULT_AGENT_REACH: AgentReach = 'launched'
 

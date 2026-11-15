@@ -183,7 +183,8 @@ export class NetDatabase {
         "ALTER TABLE net_node_policy ADD COLUMN agent_reach TEXT NOT NULL DEFAULT 'launched'"
       )
     // Who made a routed call: null for a person on the device, `agent` for a call marked as an agent's.
-    if (!has('bridge_audit', 'actor')) this.database.exec('ALTER TABLE bridge_audit ADD COLUMN actor TEXT')
+    if (!has('bridge_audit', 'actor'))
+      this.database.exec('ALTER TABLE bridge_audit ADD COLUMN actor TEXT')
   }
 
   get inTransaction(): boolean {

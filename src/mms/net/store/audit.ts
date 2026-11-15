@@ -103,14 +103,20 @@ export class SqliteBridgeAudit {
    * when named, on one thread: the owner's budget and rate limit for a device's agents read their count here, so a
    * restart does not reset them. Unknown (a failed read) counts as over any limit.
    */
-  countAgentCalls(node: NodeId, methods: readonly string[], since: number, thread?: string): number {
+  countAgentCalls(
+    node: NodeId,
+    methods: readonly string[],
+    since: number,
+    thread?: string
+  ): number {
     try {
       const marks = methods.map(() => '?').join(',')
       const row = this.db.database
         .prepare(
           `SELECT COUNT(*) AS n FROM bridge_audit WHERE node=? AND actor='agent' AND kind='change' AND outcome='ok' AND at>=? AND method IN (${marks})${thread === undefined ? '' : ' AND thread=?'}`
         )
-        .get(node, since, ...methods, ...(thread === undefined ? [] : [thread])) as { n: number } | undefined
+        .get(node, since, ...methods, ...(thread === undefined ? [] : [thread])) as
+        { n: number } | undefined
       return Number(row?.n ?? 0)
     } catch {
       return Number.MAX_SAFE_INTEGER
