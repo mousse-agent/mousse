@@ -81,3 +81,28 @@ it('leaves a bot paused by its pinned model limit alone until that limit clears'
   await f.bots.maintain(new Date(f.clock.now))
   expect(memory.versions(botId, 'm2').at(-1)?.status).toBe('superseded')
 })
+
+it('skips idle checks when the single duplicate read finds no copies', async () => {
+  const { botId, memory } = await setup()
+  memory.tidyDuplicates(botId)
+  const idle = vi.spyOn(f.bots, 'isIdle')
+  const nextDue = vi.spyOn(f.bots, 'nextDueAt')
+  const tidy = memory.tidyDuplicates.bind(memory)
+  let readCount = 0
+  let writes = 0
+  vi.spyOn(memory, 'tidyDuplicates').mockImplementation((...args) => {
+    const statements = vi.spyOn(f.store.db, 'statement')
+    const transaction = vi.spyOn(f.store.db, 'transaction')
+    try {
+      const result = tidy(...args)
+      readCount = statements.mock.calls.length
+      writes = transaction.mock.calls.length
+      return result
+    } finally { statements.mockRestore(); transaction.mockRestore() }
+  })
+  await f.bots.maintain(new Date(f.clock.now))
+  expect(readCount).toBe(1)
+  expect(writes).toBe(0)
+  expect(idle).not.toHaveBeenCalled()
+  expect(nextDue).not.toHaveBeenCalled()
+})

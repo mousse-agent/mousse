@@ -673,13 +673,15 @@ export class BotMemoryStore {
   }
 
   /** Exact hashes only. Both chat and run packs load all three kinds in full. */
-  tidyDuplicates(botId: string): number {
+  tidyDuplicates(botId: string, canTidy?: () => boolean): number {
     const rows = this.all(`SELECT m.* FROM bot_memories m JOIN (
       SELECT text_hash FROM bot_memories WHERE bot_id = ? AND status = 'active'
       AND (expires_at IS NULL OR expires_at > ?) GROUP BY text_hash HAVING COUNT(*) > 1
     ) duplicates ON duplicates.text_hash = m.text_hash
     WHERE m.bot_id = ? AND m.status = 'active' AND (m.expires_at IS NULL OR m.expires_at > ?)`,
     botId, this.now(), botId, this.now()).map(versionOf)
+    // The activity guard and retirement stay synchronous, so refs cannot change mid-turn.
+    if (!rows.length || (canTidy && !canTidy())) return 0
     const rank = { owner: 0, note: 1, run_note: 2 }
     rows.sort((a, b) => rank[a.kind] - rank[b.kind]
       || Number(b.writtenIn === 'owner_ui') - Number(a.writtenIn === 'owner_ui') || a.learnedAt.localeCompare(b.learnedAt)
