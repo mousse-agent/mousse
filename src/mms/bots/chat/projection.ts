@@ -114,6 +114,8 @@ export interface PostInput {
    * pack, search or read gives the bot, so it never learns a model's or an entry's name from its own chat.
    */
   hidden?: true
+  /** Trusted job facts from the scheduler, used only by the post-time telling classifier. */
+  scheduleLine?: { say: string; ownerAsked?: boolean }
 }
 
 /**
@@ -204,7 +206,7 @@ export class BotChatProjection {
     /** `bots.message`, after the row's transaction committed. */
     emit(event: { botId: string; message: BotChatMessage }): void
     /** A bot's schedules, from the shared store (`BotEngine.listSchedules`), for About → Runs. */
-    classify?(message: BotChatMessage): 'now' | 'soon' | 'later' | null
+    classify?(message: BotChatMessage, input: PostInput): 'now' | 'soon' | 'later' | null
     schedules?(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string; jobId?: string; paused?: boolean }>
     /**
      * Where a granted MCP server stands now (`BotMcp.where`), for About → Can use; undefined while the servers were not
@@ -311,7 +313,7 @@ export class BotChatProjection {
           ...(input.questionId ? { questionId: input.questionId } : {})
         }
       })
-      const tell = this.options.classify?.(this.toMessage(this.store.message(id)!)) ?? null
+      const tell = this.options.classify?.(this.toMessage(this.store.message(id)!), input) ?? null
       this.store.run('UPDATE bot_messages SET tell = ?, tell_at = ? WHERE id = ?', tell, tell ? at : null, id)
       return { row: this.store.message(id)!, inserted: true }
     })

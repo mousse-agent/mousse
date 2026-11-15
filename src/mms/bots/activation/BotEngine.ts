@@ -682,10 +682,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         this.tellings.read()
         this.armDue()
       },
-      classify: (message) => {
+      classify: (message, input) => {
         const activation = message.activationId ? this.store.activation(message.activationId) : undefined
         const reminder = message.id.startsWith('bm_rem_') ? this.store.reminder(message.id.slice(3)) : undefined
-        return tellingClass({ message, ownerTurn: !!activation && memoryLaneOf(activation) === 'chat',
+        return tellingClass({ message, scheduleLine: input.scheduleLine, ownerTurn: !!activation && memoryLaneOf(activation) === 'chat',
           reminder: !!reminder, reminderOwner: reminder?.ownerSet, quiet: this.quietReport(this.store.message(message.id)!.botId, message) })
       },
       schedules: (botId) => this.schedulesOf(botId).map((schedule) => ({ scheduleId: schedule.scheduleId, label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}), jobId: schedule.jobId, paused: schedule.paused })),
@@ -1419,7 +1419,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const late = (input.now?.getTime() ?? this.now()) - Date.parse(occurrenceAt) > REMINDER_LATE_MS
       this.store.db.transaction(() => {
         this.store.run('INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?) ON CONFLICT(bot_id, key) DO UPDATE SET value = excluded.value', botId, `schedule-said:${scheduleId}`, JSON.stringify({ occurrenceKey, messageId, occurrenceAt }))
-        this.chat.post({ id: messageId, botId, author: 'bot', kind: 'run_report', text: `${late ? `(For ${clockTime(occurrenceAt)}) ` : ''}${input.say}`, lane: 'run' })
+        this.chat.post({ id: messageId, botId, author: 'bot', kind: 'run_report', text: `${late ? `(For ${clockTime(occurrenceAt)}) ` : ''}${input.say}`, lane: 'run', scheduleLine: { say: input.say!, ownerAsked: input.ownerAsked } })
       })
       this.changed({ botId })
       return { kind: 'said', messageId }
