@@ -1,3 +1,4 @@
+import type { WakePullRequestState } from '../wakeSources'
 import type { ScheduledMissedRuns } from '../../../shared/types'
 import { requestJournalRows } from '../memory/requestFrames'
 import { grantedPermissions, permissionId, restorePermission, withoutPermission } from '../chat/projection'
@@ -155,7 +156,7 @@ export interface BotEngineHost {
    * A pull request's state, read through a project of the owner's whose repository is `repo` ("owner/name"). `none` when
    * no project is; `problem` when it could not be read. Absent: no wakes on pull requests here.
    */
-  pullRequestState?(repo: string, number: number): Promise<{ state: 'open' | 'closed' | 'merged'; title?: string } | { none: true } | { problem: string }>
+  pullRequestState?(repo: string, number: number): Promise<WakePullRequestState | { none: true } | { problem: string }>
   /** Starts a watcher's command (tests); default `child_process.spawn`. */
   spawnWatcher?: (command: string, options: SpawnOptions) => ChildProcess
   harness: {
@@ -7767,12 +7768,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!this.host.pullRequestState) throw new BotEngineError('invalid_params', 'Wake-ups on pull requests can\'t be set here.')
     // A watcher is started by `watch_start`, never set as a wake.
     if (event.kind === 'watcher') throw new BotEngineError('invalid_params', 'Start a background command with watch_start.')
+    if (event.on !== undefined && !['merged', 'checks', 'review'].includes(event.on)) throw new BotEngineError('invalid_params', 'on is merged, checks or review.')
     const read = await this.host.pullRequestState(event.repo, event.number)
     if ('none' in read) throw new BotEngineError('invalid_params', `${event.repo} is not one of your owner's projects in Mousse, so its pull requests can't be watched.`)
     if ('problem' in read) throw new BotEngineError('invalid_params', `${event.repo}#${event.number} couldn't be read: ${read.problem}`)
     if (read.state === 'merged') throw new BotEngineError('invalid_params', `${event.repo}#${event.number} is merged already.`)
     if (read.state === 'closed') throw new BotEngineError('invalid_params', `${event.repo}#${event.number} is closed without merging.`)
-    return { kind: 'pr', repo: event.repo, number: event.number }
+    return { kind: 'pr', repo: event.repo, number: event.number, ...(event.on ? { on: event.on } : {}) }
   }
 
   /**
@@ -7821,8 +7823,24 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const read = await this.host.pullRequestState?.(event.repo, event.number)
     // Not read now (offline, the host failed, the project went): tried again later, until the wake gives up.
     if (!read || 'none' in read || 'problem' in read) return undefined
+    if (read.state === 'merged' && event.on && event.on !== 'merged') return { kind: 'ended', reason: 'pr_merged' }
     if (read.state === 'merged') return { kind: 'pr', repo: event.repo, number: event.number, state: 'merged', ...(read.title ? { title: read.title.slice(0, 120) } : {}) }
     if (read.state === 'closed') return { kind: 'ended', reason: 'pr_closed' }
+    const pr = { kind: 'pr' as const, repo: event.repo, number: event.number, ...(read.title ? { title: read.title.slice(0, 120) } : {}) }
+    if (event.on === 'checks') {
+      const checks = read.checkRuns
+      // Missing/unknown checks cannot prove completion; skipped checks are complete but neither passed nor failed.
+      if (!read.headSha || !checks?.length || checks.some((check) => !['passing', 'failing', 'skipped'].includes(check.state))) return undefined
+      const failedNames = checks.filter((check) => check.state === 'failing').map((check) => check.name)
+      return { ...pr, state: 'checks', passed: checks.filter((check) => check.state === 'passing').length, failed: failedNames.length, failedNames }
+    }
+    if (event.on === 'review') {
+      const review = read.reviews?.filter((review) => review.submittedAt && Date.parse(review.submittedAt) > Date.parse(wake.createdAt))
+        .sort((a, b) => Date.parse(a.submittedAt!) - Date.parse(b.submittedAt!))
+        .find((review) => ['approved', 'changes_requested', 'commented'].includes(review.state))
+      if (review && (review.state === 'approved' || review.state === 'changes_requested' || review.state === 'commented'))
+        return { ...pr, state: 'review', reviewState: review.state, reviewer: review.author }
+    }
     return undefined
   }
 
