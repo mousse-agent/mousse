@@ -1494,8 +1494,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     for (const botId of this.host.definitions.ids()) {
       try {
         for (const ended of this.host.schedules?.ended?.(botId) ?? []) {
-          if (!this.store.registry(botId)?.deletedAt)
+          if (!this.store.registry(botId)?.deletedAt) this.store.db.transaction(() => {
+            const key = `schedule-ended:${ended.jobId}`
+            if (this.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, key)) return
             this.chat.post({ id: `bm_schedule_ended_${ended.jobId}`, botId, author: 'bot', kind: 'notice', text: `‘${ended.name}’ ended, as planned.` })
+            this.store.run('INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?)', botId, key, 'posted')
+          })
         }
         this.endUsagePauseIfDue(botId, now)
       } catch (error) {
