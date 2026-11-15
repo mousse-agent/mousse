@@ -317,8 +317,11 @@ export interface AppToolHost extends DelegationToolsHost {
    * under the caller's cap on new threads.
    */
   creationStarted?(clientRequestId: string): boolean
-  /** Adds a note row to the thread's transcript (the creator's: what it launched, and on which model). */
-  noteOnThread?(threadId: string, text: string): void
+  /**
+   * Adds a note row to the thread's transcript (the creator's: what it launched, and on which model). `launched` names
+   * the thread it started, which the transcript draws as a chip.
+   */
+  noteOnThread?(threadId: string, text: string, launched?: { threadId: string; summary?: string }): void
   /**
    * A thread's queue with its revision, read from disk after any unfinished agent command was finished. The
    * revision is what `queueCommand` must be given back.

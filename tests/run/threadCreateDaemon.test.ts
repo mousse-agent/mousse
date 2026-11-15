@@ -232,6 +232,8 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       expect(w.messages(w.parent.id).filter((message) => message.role === 'system').map((message) => message.content)).toEqual([
         `Created thread «Audit the logs» (${made.id}) in project ${w.project.id}: claude / vendor-model, ask mode, the project folder.`
       ])
+      // Stored with the thread it started, which the transcript draws as a chip that opens it.
+      expect(w.messages(w.parent.id).find((message) => message.role === 'system')?.launchedThread).toEqual({ threadId: made.id, summary: 'claude / vendor-model, ask mode, the project folder' })
       // Nothing ran: no first message was asked for.
       expect(w.d.engine.listRuns(made.id)).toEqual([])
     })

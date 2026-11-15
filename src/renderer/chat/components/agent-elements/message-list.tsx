@@ -57,6 +57,7 @@ import { useSubagentCards } from "./tools/subagent-cards-context";
 import { readSubagentNotice } from "../../adapters/subagentNotice";
 import { readBackgroundNotice } from "../../adapters/nativeSubagents";
 import { openThread } from "../../../lib/openThread";
+import { ThreadChip } from "../../../components/ThreadChip";
 import { normalizeAssistantToolParts } from "./utils/tool-part-normalizer";
 import { getToolStatus } from "./utils/format-tool";
 import {
@@ -237,6 +238,20 @@ function isThreadNotice(message: UIMessage | undefined): boolean {
 function ThreadNotice({ text }: { text: string }) {
   return <div role="note" className="w-full py-1.5 text-xs leading-5 text-muted-foreground [overflow-wrap:anywhere]">
     {text.split("`").map((part, index) => index % 2 ? <code key={index} className="font-mono text-[11px] text-foreground/80">{part}</code> : part)}
+  </div>;
+}
+
+/** The thread a note says this thread's agent started (`ChatMessage.launchedThread`), else undefined. */
+function readLaunchedThread(message: UIMessage): { threadId: string; summary?: string } | undefined {
+  const launched = (message.metadata as { launchedThread?: { threadId?: unknown; summary?: unknown } } | undefined)?.launchedThread;
+  if (typeof launched?.threadId !== "string") return undefined;
+  return { threadId: launched.threadId, ...(typeof launched.summary === "string" && launched.summary ? { summary: launched.summary } : {}) };
+}
+
+/** Mousse's line for a thread this thread's agent started: "Started", the thread as a chip, then what was chosen for it. */
+function LaunchedThreadNote({ threadId, summary }: { threadId: string; summary?: string }) {
+  return <div role="note" className="launched-thread-note w-full py-1.5 text-xs leading-5 text-muted-foreground [overflow-wrap:anywhere]">
+    Started <ThreadChip threadId={threadId} />{summary ? ` · ${summary}` : null}
   </div>;
 }
 
@@ -2930,7 +2945,11 @@ const AssistantParts = memo(function AssistantParts({
     toolRenderers,
   ]);
 
-  if (isThreadNotice(msg)) return <ThreadNotice text={parts.filter(isTextPart).map((part) => part.text).join('')} />;
+  if (isThreadNotice(msg)) {
+    const launched = readLaunchedThread(msg);
+    if (launched) return <LaunchedThreadNote threadId={launched.threadId} summary={launched.summary} />;
+    return <ThreadNotice text={parts.filter(isTextPart).map((part) => part.text).join('')} />;
+  }
   const handoff = (msg.metadata as { contextHandoff?: HandoffMarker } | undefined)?.contextHandoff;
   if (handoff) return <ContextHandoffMarker handoff={handoff} text={parts.filter(isTextPart).map((part) => part.text).join('')} />;
   if ((msg.metadata as { contextCleared?: boolean } | undefined)?.contextCleared)

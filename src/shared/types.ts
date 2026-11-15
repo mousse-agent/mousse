@@ -922,6 +922,12 @@ export interface ChatMessage {
    */
   scheduledRun?: { jobId: string; threadId: string; runId?: string }
   /**
+   * Set on the note Mousse writes on a thread whose agent started another thread (`thread_create`): that thread, which
+   * the transcript draws as a chip with its title and live status, and what was chosen for it (model, mode, where it
+   * runs). Notes written before this field stay plain text.
+   */
+  launchedThread?: { threadId: string; summary?: string }
+  /**
    * A user message added to a turn that was already running (a steer), so it does not start a turn.
    * Older transcripts do not carry it.
    */

@@ -2,7 +2,8 @@ import { Children, createContext, useContext, useEffect, useState, type ReactNod
 import type { Components } from 'streamdown'
 import { FileText, FolderOpen, Image as ImageIcon, X } from '../../lib/icons'
 import { Markdown, restoreMousseHref, type MarkdownImages } from '../../chat/components/agent-elements/markdown'
-import { LinkLabel } from '../../chat/components/agent-elements/link-label-view'
+import { LinkLabel, threadLinkLabel } from '../../chat/components/agent-elements/link-label-view'
+import { ThreadChip } from '../ThreadChip'
 import { classifyLink, routeLink } from '../../utils/chatLinks'
 import { fileLocation, isAbsolutePath } from '../../utils/filesBrowse'
 import { parseMousseFileLink } from '../../../shared/chatReferences'
@@ -99,12 +100,18 @@ export const BOT_IMAGES: MarkdownImages = { Image: BotMarkdownImage }
  * code stays whole. Its images follow `BOT_IMAGES`, which no element here replaces.
  * Kept for the module's life (see `Markdown`).
  */
-/** A link in a bot's message: a file of this computer is its chip, a link the app refuses is plain text. */
+/**
+ * A link in a bot's message: a file of this computer is its chip, a thread its chip too, a link the app refuses is
+ * plain text.
+ */
 export function BotLink({ href: written, children, ...props }: { href?: string; children?: ReactNode } & Record<string, unknown>) {
   const path = linkedPath(written)
   if (path) return <BotPathChip path={path} />
   const href = written && restoreMousseHref(written)
-  if (!href || classifyLink(href).kind === 'reject') return <span>{children}</span>
+  const route = href ? classifyLink(href) : undefined
+  if (!href || !route || route.kind === 'reject') return <span>{children}</span>
+  // A thread link is the same chip a thread's reply shows: the thread's title and live status.
+  if (route.kind === 'thread') return <ThreadChip threadId={route.threadId} label={threadLinkLabel(href, children)} />
   return <a {...props} href={href} className="an-md-link" onClick={(event) => { event.preventDefault(); routeLink(href) }}>
     <LinkLabel href={href}>{children}</LinkLabel>
   </a>

@@ -3957,7 +3957,7 @@ export class OrchestratorService extends EventEmitter {
       earlierSend: (threadId, clientRequestId) => this.earlierAgentSend(threadId, clientRequestId),
       createThread: (input, options) => this.createThreadAsAgent(input, options),
       creationStarted: (clientRequestId) => this.agentCreationStarted(clientRequestId),
-      noteOnThread: (threadId, text) => this.noteAgentLaunch(threadId, text),
+      noteOnThread: (threadId, text, launched) => this.noteAgentLaunch(threadId, text, launched),
       stopRun: (threadId, runId, options) => this.stopRunAsAgent(threadId, runId, options),
       setThreadArchived: (threadId, archived, options) => this.setThreadArchivedAsAgent(threadId, archived, options),
       setThreadHidden: (threadId, hidden, options) => this.setThreadHiddenAsAgent(threadId, hidden, options),
@@ -4465,10 +4465,13 @@ export class OrchestratorService extends EventEmitter {
     return readAgentThreadReceipt(this.requireRunEngine().store.getReceipt(clientRequestId)) !== undefined
   }
 
-  /** A row on the creator's thread saying what it launched: where, on which model, in which mode (the person watching sees the agent's choice). */
-  private noteAgentLaunch(creatorThreadId: string, text: string): void {
+  /**
+   * A row on the creator's thread saying what it launched: where, on which model, in which mode (the person watching sees
+   * the agent's choice). `launched` names the new thread, which the transcript draws as a chip that opens it.
+   */
+  private noteAgentLaunch(creatorThreadId: string, text: string, launched?: { threadId: string; summary?: string }): void {
     const session = this.getOrCreateSession(creatorThreadId)
-    this.sessionAls.run(session, () => this.addSystemMessage(text))
+    this.sessionAls.run(session, () => this.addSystemMessage(text, undefined, undefined, launched))
   }
 
   /**
@@ -9909,12 +9912,16 @@ export class OrchestratorService extends EventEmitter {
     return session
   }
 
-  /** `kind` `warning`: a line the thread shows, quiet, as Mousse's own (`ThreadNotice`); others are not shown. */
-  private addSystemMessage(content: string, end?: { turnId?: string; turnEnd: TurnEnd }, kind?: 'warning'): void {
+  /**
+   * `kind` `warning`: a line the thread shows, quiet, as Mousse's own (`ThreadNotice`); so is one with `launchedThread`
+   * (with the thread as a chip). Others are not shown.
+   */
+  private addSystemMessage(content: string, end?: { turnId?: string; turnEnd: TurnEnd }, kind?: 'warning', launchedThread?: ChatMessage['launchedThread']): void {
     const msg: ChatMessage = {
       id: uuidv4(),
       role: 'system',
       ...(kind ? { kind } : {}),
+      ...(launchedThread ? { launchedThread } : {}),
       content,
       timestamp: new Date().toISOString(),
       ...(end?.turnId ? { turnId: end.turnId } : {}),

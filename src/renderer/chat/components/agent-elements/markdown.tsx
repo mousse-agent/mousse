@@ -8,7 +8,8 @@ import { cn } from "./utils/cn";
 import { MessageImage } from "./message-image";
 import { codeHighlighter } from "./code-highlighter";
 import { classifyLink, routeLink, safeMarkdownUrl } from "../../../utils/chatLinks";
-import { LinkLabel } from "./link-label-view";
+import { LinkLabel, threadLinkLabel } from "./link-label-view";
+import { ThreadChip } from "../../../components/ThreadChip";
 import { THREAD_LINK_PREFIX } from "../../../../shared/threadLink";
 import { copyMathAsTex } from "../../../markdown/math/copyMathAsTex";
 import {
@@ -46,8 +47,11 @@ export function restoreMousseHref(href: string): string {
   return href;
 }
 
-/** A thread address: in a link's target, as `<…>`, inside a link's text (`[`), or bare in prose. */
-const THREAD_ADDRESS = /(\]\(\s*<?|<|\[)?mousse:\/\/thread\/([A-Za-z0-9_-]+)\/?(>)?/gi;
+/**
+ * A thread address: in a link's target, as `<…>`, inside a link's text (`[`), or bare in prose. The id may be a thread of
+ * another computer, `<node>:<id>`.
+ */
+const THREAD_ADDRESS = /(\]\(\s*<?|<|\[)?mousse:\/\/thread\/([A-Za-z0-9_-]+(?::[A-Za-z0-9_-]+)?)\/?(>)?/gi;
 
 /**
  * A thread's address (`mousse://thread/<id>`) becomes a link to the thread's marker, which the anchor restores: in a
@@ -429,7 +433,10 @@ const markdownComponents: Components = {
   a: ({ href, children, ...props }) => {
     if (!href) return <span>{children}</span>;
     const routedHref = restoreMousseHref(href);
-    if (classifyLink(routedHref).kind === "reject") return <span>{children}</span>;
+    const route = classifyLink(routedHref);
+    if (route.kind === "reject") return <span>{children}</span>;
+    // A thread link is a chip with the thread's title (or the link's own text) and its live status.
+    if (route.kind === "thread") return <ThreadChip threadId={route.threadId} label={threadLinkLabel(routedHref, children)} />;
     return (
       <a
         {...props}
