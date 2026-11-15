@@ -2,7 +2,7 @@
  * A bot's background commands (`watch_start`), over a real engine, a real `bots.db` and real processes (a small Node
  * script run through the shell, as a bot's command is). Each ends one way and wakes the bot once in its chat with what
  * happened; one stopped, or whose bot is paused, wakes nothing and leaves no process behind; a restart wakes the bot to
- * say it stopped it. Only a chat turn of a bot holding "run commands" starts one.
+ * say it stopped it. Only a chat turn the owner's own message started, of a bot holding "run commands", starts one.
  *
  * Ends: exit (code and output), a matching line, the time limit, Stop by the bot, Stop by the owner, the bot paused,
  * a restart. Refusals: no "run commands", work instead of the chat, a match that could run long, too many at once.
