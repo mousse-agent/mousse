@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, expect, it } from 'vitest'
+import { BotStore } from '../../src/mms/bots/store/BotStore'
+import { BotChatProjection } from '../../src/mms/bots/chat/projection'
 import { botFixture, createBot, type BotFixture } from './botFixture'
 let f: BotFixture
 let botId: string
@@ -77,15 +79,18 @@ it('catches up once as one fold, drops rows older than a day, and survives a ser
   for (let n = 0; n < 3; n++) f.bots.chat.post({ botId, author: 'bot', kind: 'text', text: `Missed ${n}` })
   await f.bots.deliverDueReminders(); expect(events).toHaveLength(0)
   const { BotTellings } = await import('../../src/mms/bots/chat/BotTellings')
-  const restarted = new BotTellings(f.store, f.bots.chat, () => 'Scout', e => events.push(e))
+  const reopened = new BotStore({ profileHome: f.profile, clock: () => f.clock.now })
+  const projection = new BotChatProjection({ store: reopened, emit() {} })
+  const restarted = new BotTellings(reopened, projection, () => 'Scout', e => events.push(e))
   restarted.attach(1); restarted.release(f.clock.now)
   expect(events).toHaveLength(1)
   expect(events[0].title).toContain('While Mousse was closed')
   expect(events[0].rows).toHaveLength(3)
   expect(f.store.message(old.id)?.toldAt).toBeTruthy()
-  const again = new BotTellings(f.store, f.bots.chat, () => 'Scout', e => events.push(e))
+  const again = new BotTellings(reopened, projection, () => 'Scout', e => events.push(e))
   again.attach(1); again.release(f.clock.now)
   expect(events).toHaveLength(1)
+  reopened.close()
 })
 
 it.each([true, false, null])('classifies reminder ownership %s without a migration', async owner => {
