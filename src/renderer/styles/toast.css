@@ -12,7 +12,8 @@
   right: 12px;
   bottom: 12px;
   z-index: var(--z-floating, 50000);
-  width: min(328px, calc(100vw - 24px));
+  /* As wide as the thread side card (--side-card-width), its right edge on the same 12px gutter. */
+  width: min(272px, calc(100vw - 24px));
   /* `bottom` rises above bottom UI a pane registers, such as the Changes tab's footer (useToastObstruction). */
   transition: height 0.4s var(--toast-ease), bottom var(--ui-dur-slow, 0.2s) var(--toast-ease);
 }
