@@ -1,3 +1,4 @@
+import type { ScheduledMissedRuns } from '../../../shared/types'
 import { grantedPermissions, permissionId, restorePermission, withoutPermission } from '../chat/projection'
 import { computerSwitchOf } from '../../../shared/bots/personal/computerLimit'
 import { randomUUID } from 'node:crypto'
@@ -1374,7 +1375,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * skipped and says why. Other runs and the owner's work never skip it: they run beside it. An open ask is not a skip:
    * asks don't block. Before the startup pass nothing is inserted and the occurrence stays due.
    */
-  runScheduledOccurrence(input: { botId: string; scheduleId: string; prompt: string; occurrenceAt: string; now?: Date; model?: string; pick?: BotModelPick }):
+  runScheduledOccurrence(input: { botId: string; scheduleId: string; prompt: string; occurrenceAt: string; missed?: ScheduledMissedRuns; now?: Date; model?: string; pick?: BotModelPick }):
     | { kind: 'started'; activationId: string }
     | { kind: 'skipped'; reason: string }
     | { kind: 'not_ready' } {
@@ -1431,7 +1432,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         botId,
         revision: admitted.published.revision!,
         grantDigest: admitted.grant.digest,
-        trigger: { kind: 'schedule', input: prompt, scheduleId, occurrenceAt },
+        trigger: { kind: 'schedule', input: prompt, scheduleId, occurrenceAt, ...(input.missed ? { missed: input.missed } : {}) },
         idempotencyKey: key,
         status: 'queued',
         createdAt: this.store.now(),
@@ -1709,7 +1710,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           // A chat turn takes the owner's messages that joined it while it waited to start (`joinChatTurnInTx`).
           const notes = this.workNotes(row)
           if (notes) this.store.applyWorkNotes(notes.ids)
-          const text = row.lane === 'run' ? `${row.trigger.input}${notes ? `\n\n${notes.text}` : ''}\n\n${BOT_RUN_REPORT_LINE}` : `${row.trigger.input}${notes ? `\n\n${notes.text}` : ''}`
+          const late = row.trigger.kind === 'schedule' && row.trigger.missed
+            ? `\n\nThis run was due at ${clockTime(row.trigger.occurrenceAt)}; this computer was off or asleep, and ${Math.max(0, row.trigger.missed.count - 1)} runs were skipped.` : ''
+          const text = row.lane === 'run' ? `${row.trigger.input}${late}${notes ? `\n\n${notes.text}` : ''}\n\n${BOT_RUN_REPORT_LINE}` : `${row.trigger.input}${notes ? `\n\n${notes.text}` : ''}`
           this.store.insertDispatch({ activationId: row.id, n: 1, kind: 'start', clientRequestId, threadId, prompt: { text }, policyDigest: row.grantDigest })
           if (row.lane === 'run') this.journalInTx({
             botId: row.botId, kind: 'run_start', lane: 'run', activationId: row.id, threadId, sourceKey: `act:${row.id}:start`, who: 'mousse',
@@ -4552,7 +4555,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // cards it made still show, without the marker. Work the owner asked for and chat replies are posted as written.
     const silent = report && row.trigger.kind === 'schedule' && (isSilentOutput(written) || this.quietLevel(row.id))
     if (silent && !asks.length && !waiting && !cards) return
-    const body = silent ? '' : written
+    const lateReport = report && row.trigger.kind === 'schedule' && row.trigger.missed && this.now() - Date.parse(row.trigger.occurrenceAt) > 15 * 60_000
+      ? `(Due ${clockTime(row.trigger.occurrenceAt)}, this computer was off or asleep) ` : ''
+    const body = silent ? '' : `${lateReport}${written || (report ? 'Done.' : '')}`
     if (!body && !chips.length && !asks.length && !report && !waiting && !questions.length && !cards) return
     // A turn that asked and said nothing else shows its question alone.
     const reply = Boolean(body || chips.length || asks.length || report || waiting || cards)

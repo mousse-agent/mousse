@@ -2,13 +2,13 @@ import { randomBytes } from 'node:crypto'
 import { EventEmitter } from 'events'
 import type { ProjectManager } from '../data/ProjectManager'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
-import { tellMeOf, type SchedulerStatus, type ScheduledJob, type ScheduledOccurrenceResult, type ScheduledRunAgent, type ScheduledWebhookDelivery, type ThreadEventKind } from '../../shared/types'
+import { tellMeOf, type SchedulerStatus, type ScheduledJob, type ScheduledMissedRuns, type ScheduledOccurrenceResult, type ScheduledRunAgent, type ScheduledWebhookDelivery, type ThreadEventKind } from '../../shared/types'
 import { occurrenceOutcome, tellMeNotifies, type RunEndState, type ScheduledRunEnded } from '../../shared/automations'
 import type { InboxRunState, RunLevel } from '../../shared/automationInbox'
 import { missingKeyText } from '../../shared/automationKeys'
 import { join } from 'node:path'
 import { TERMINAL_RUN_STATUSES } from '../run/types'
-import { isSilentOutput } from './computeNextRun'
+import { isSilentOutput, nextOccurrenceAfter } from './computeNextRun'
 import { FileLockBusyError, tryAcquireTickLock } from './fileLock'
 import { OwnedWorkBarrier, type OwnedWorkEntry } from '../execution/OwnedWorkBarrier'
 import {
@@ -41,7 +41,7 @@ export interface ScheduledJobRunner {
  * ready yet (the occurrence stays due).
  */
 export interface ScheduledBotRunner {
-  runOccurrence(input: { jobId: string; botId: string; scheduleId: string; prompt: string; occurrenceAt: string; now: Date; model?: string; pick?: NonNullable<ScheduledJob['bot']>['pick'] }):
+  runOccurrence(input: { jobId: string; botId: string; scheduleId: string; prompt: string; occurrenceAt: string; missed?: ScheduledMissedRuns; now: Date; model?: string; pick?: NonNullable<ScheduledJob['bot']>['pick'] }):
     | { kind: 'started'; activationId: string }
     | { kind: 'skipped'; reason: string }
     | { kind: 'not_ready' }
@@ -860,8 +860,13 @@ export class ScheduledJobService extends EventEmitter {
     const now = this.clock()
     let outcome: ReturnType<ScheduledBotRunner['runOccurrence']>
     try {
-      outcome = this.botRunner
-        ? this.botRunner.runOccurrence({ jobId: job.id, botId: job.bot.botId, scheduleId: job.bot.scheduleId, prompt: job.prompt, occurrenceAt: claim.occurrenceKey, now, ...(job.bot.model ? { model: job.bot.model } : {}), ...(job.bot.model && job.bot.pick?.model === job.bot.model ? { pick: job.bot.pick } : {}) })
+      // Only detected downtime expires an occurrence. A busy tick may be arbitrarily late.
+      const next = claim.missed ? nextOccurrenceAfter(job.schedule, claim.occurrenceKey, now) : null
+      const expired = next && now.getTime() - Date.parse(claim.occurrenceKey) >= Date.parse(next) - now.getTime()
+      const due = new Date(claim.occurrenceKey)
+      const missedReason = `Missed ${due.toLocaleDateString('en-US', { weekday: 'short' })} ${String(due.getHours()).padStart(2, '0')}:${String(due.getMinutes()).padStart(2, '0')} (computer off)`
+      outcome = expired ? { kind: 'skipped', reason: missedReason } : this.botRunner
+        ? this.botRunner.runOccurrence({ jobId: job.id, botId: job.bot.botId, scheduleId: job.bot.scheduleId, prompt: job.prompt, occurrenceAt: claim.occurrenceKey, ...(claim.missed ? { missed: claim.missed } : {}), now, ...(job.bot.model ? { model: job.bot.model } : {}), ...(job.bot.model && job.bot.pick?.model === job.bot.model ? { pick: job.bot.pick } : {}) })
         : { kind: 'skipped', reason: 'bots_unavailable' }
     } catch (error) {
       outcome = { kind: 'skipped', reason: 'bot_unavailable' }
