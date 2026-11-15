@@ -209,6 +209,11 @@ export interface ToolListing {
 export interface MousseTool {
   name: string
   description: string
+  /**
+   * What a personal bot's thread lists instead of `description`: the same tool as a bot uses it, without what does not
+   * hold for a bot (an agent's counts per run, its limit on agent messages in a row) and with what does.
+   */
+  botDescription?: string
   /** Plain JSON Schema (no TypeBox symbols), byte-identical to `definition`'s parameters. */
   inputSchema: JsonSchema
   access: ToolAccess

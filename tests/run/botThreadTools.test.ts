@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
 import { botManifestDigest, compileBotThread } from '../../src/mms/bots/grants/compile'
 import { agentMessageText, botMessageText, isPersonMessage, type BotAppToolDeps } from '../../src/mms/run/mcp/appTools'
-import { THREAD_CREATE_MAX_PER_RUN, THREAD_SEND_MAX_PER_RUN } from '../../src/mms/run/mcp/appTools/thread'
+import { BOT_NOTIFY_NEXT, THREAD_CREATE_MAX_PER_RUN, THREAD_SEND_MAX_PER_RUN } from '../../src/mms/run/mcp/appTools/thread'
 import { BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, botStarterManifest } from '../../src/shared/bots/personal/manifest'
 import { BOT_THREADS_CHAT_ONLY_TEXT } from '../../src/shared/bots/personal/walls'
 import type { BotAuthority, NormalisedCall } from '../../src/shared/bots/personal/authority'
@@ -54,7 +54,7 @@ describe('a bot\'s thread tools ("use your threads")', () => {
    * message started), `read` (work, a schedule, a reminder), or none (a consult). `disabled` is the owner's switch as the
    * engine reads it at each call (`BotEngine.permissionOff`).
    */
-  const world = async (options: { granted?: boolean; threads?: 'read' | 'all'; disabled?: (call: NormalisedCall) => string | undefined; messages?: ChatMessage[]; role?: 'activation' | 'context'; stillHolds?: () => string | undefined } = {}) => {
+  const world = async (options: { granted?: boolean; threads?: 'read' | 'all'; disabled?: (call: NormalisedCall) => string | undefined; messages?: ChatMessage[]; role?: 'activation' | 'context'; stillHolds?: () => string | undefined; wakes?: { add: (...args: unknown[]) => Promise<unknown> } } = {}) => {
     fx = delegationFixture()
     base = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-bot-threads-')))
     const profile = join(base, 'profile')
@@ -89,7 +89,7 @@ describe('a bot\'s thread tools ("use your threads")', () => {
       ['manager', thread('manager', { name: 'Automation manager', automationManager: true } as Partial<Thread>)]
     ])
     const onAppResult = vi.fn()
-    const deps = { host: { activationOf: () => ({ botId: 'b1', activationId: 'act-1', lane: 'chat' }) }, activity: { onAppResult, onAllowed: vi.fn(), drain: () => [] } } as unknown as BotAppToolDeps
+    const deps = { host: { activationOf: () => ({ botId: 'b1', activationId: 'act-1', lane: 'chat' }), ...(options.wakes ? { wakes: options.wakes } : {}) }, activity: { onAppResult, onAllowed: vi.fn(), drain: () => [] } } as unknown as BotAppToolDeps
     const fake = fakeAppToolHost({
       threadMeta: (id) => threads.get(id),
       listThreads: () => [...threads.values()],
@@ -254,6 +254,38 @@ describe('a bot\'s thread tools ("use your threads")', () => {
       expect((await text('thread_send', { threadId: 'mine', content: `Next ${index}.` })).error, `message ${index}`).toBe(false)
     expect(host.createThread).toHaveBeenCalledTimes(THREAD_CREATE_MAX_PER_RUN + 1)
     expect(host.sendToThread).toHaveBeenCalledTimes(THREAD_SEND_MAX_PER_RUN + 1)
+  })
+
+  it('notify is a wake on the thread: the bot carries on in its chat when it finishes; one that can\'t be set says why, and the message stays sent', async () => {
+    const add = vi.fn(async () => ({ wakeId: 'rem_1', dueAt: NOW, label: '' }))
+    const { text, host } = await world({ threads: 'all', wakes: { add } })
+    const sent = JSON.parse((await text('thread_send', { threadId: 'mine', content: '\n  Please also check the signup page.\nThen the footer.', notify: true })).text)
+    expect(sent.notify).toEqual({ wakeId: 'rem_1', next: BOT_NOTIFY_NEXT })
+    expect(add).toHaveBeenLastCalledWith('b1', 'act-1', {
+      brief: 'Thread "Fix the login page" finished the work you sent it ("Please also check the signup page."). Read its result (thread_read) and tell your owner what it did.',
+      event: { kind: 'thread', threadId: 'mine' }
+    })
+    vi.mocked(host.createThread!).mockResolvedValueOnce({ threadId: 'new-1', projectId: 'p1', title: 'Fix login', workspace: 'project', runsIn: 'project_folder', model: null, permissionMode: 'full', replayed: false, firstMessage: { sent: true, runId: 'run-y', sequence: 1, queued: false, replayed: false } })
+    const made = JSON.parse((await text('thread_create', { projectId: 'p1', title: 'Fix login', firstMessage: 'Look at the login page.', notify: true })).text)
+    expect(made.notify).toEqual({ wakeId: 'rem_1', next: BOT_NOTIFY_NEXT })
+    expect(add).toHaveBeenLastCalledWith('b1', 'act-1', expect.objectContaining({ event: { kind: 'thread', threadId: 'new-1' } }))
+    // The thread already finished, or the same wake again would be a loop: the bot is told, and the message went.
+    add.mockRejectedValueOnce(new Error('Thread mine is not working now.'))
+    const late = await text('thread_send', { threadId: 'mine', content: 'One more thing.', notify: true })
+    expect(late.error).toBe(false)
+    expect(JSON.parse(late.text).notify).toEqual({ set: false, why: 'Thread mine is not working now.' })
+    expect(host.sendToThread).toHaveBeenCalledTimes(2)
+  })
+
+  it('a bot reads its own description of thread_create and thread_send, with no per-run counts or in-a-row limit; an ordinary thread reads the agents\' one', async () => {
+    const { registry, runId } = await world({ threads: 'all' })
+    const described = (threadId: string, name: string) => registry.listForThread(threadId, 'default', runId).find((tool) => tool.name === name)?.description ?? ''
+    for (const name of ['thread_create', 'thread_send']) {
+      expect(described('home', name)).toMatch(/no count per turn, per run or per day/)
+      expect(described('home', name)).not.toMatch(/per run \(a personal bot|agent messages in a row without a person/)
+      expect(described('mine', name)).toMatch(/per run \(a personal bot has no such count\)/)
+    }
+    expect(described('home', 'thread_create')).toMatch(/no limit on how many work at once/)
   })
 
   it('a wait that ends once its turn no longer holds "use your threads" returns the refusal and nothing of the thread', async () => {

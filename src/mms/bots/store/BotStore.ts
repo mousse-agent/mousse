@@ -1439,24 +1439,6 @@ export class BotStore {
       botId, input.activationId ?? null, input.activationId ?? null, input.since ?? '')?.n ?? 0)
   }
 
-  /**
-   * The subagents a bot's work started since `since` (wall-clock milliseconds), across all its activations: each one's
-   * first turn, by the time its spec records (`BotSubagentSpec.at`). Turns that started before `since` are not read.
-   */
-  countSubagentsStarted(botId: string, since: number): number {
-    const threads = new Set<string>()
-    for (const row of this.all("SELECT d.thread_id, d.client_request_id, d.prompt_json FROM bot_dispatches d JOIN bot_activations a ON a.id = d.activation_id WHERE a.bot_id = ? AND d.kind = 'consult' AND (d.started_at IS NULL OR d.started_at >= ?)", botId, since)) {
-      if (!SUBAGENT_DISPATCH.test(row.client_request_id as string)) continue
-      try {
-        const at = (JSON.parse(row.prompt_json as string) as { subagent?: { at?: unknown } }).subagent?.at
-        if (typeof at === 'number' && at >= since) threads.add(row.thread_id as string)
-      } catch {
-        // Not a subagent's prompt.
-      }
-    }
-    return threads.size
-  }
-
   countEscalations(activationId: string): number {
     return Number(this.get("SELECT COUNT(*) AS n FROM bot_escalations WHERE activation_id = ? AND mode = 'wall'", activationId)?.n ?? 0)
   }
@@ -1993,17 +1975,22 @@ export class BotStore {
       ORDER BY r.due_at, r.rowid`, workId).map(reminderOf)
   }
 
-  /** How many wakes a bot set since `since`, cancelled ones too (the daily budget). */
-  wakesSince(botId: string, since: string): number {
-    return num(this.get('SELECT COUNT(*) AS n FROM bot_reminders WHERE bot_id = ? AND wake = 1 AND created_at > ?', botId, since)?.n) ?? 0
+  /** When the owner last wrote to a bot (their newest message in its chat), or '' when they never have. */
+  ownerLastWroteAt(botId: string): string {
+    return str(this.get("SELECT MAX(at) AS at FROM bot_messages WHERE bot_id = ? AND author = 'owner'", botId)?.at) ?? ''
+  }
+
+  /** The wakes a bot set at or after `since`, cancelled ones too, with their briefs and events (loop detection). */
+  wakesSetSince(botId: string, since: string): Array<Pick<BotReminderRow, 'text' | 'event'>> {
+    return this.all('SELECT * FROM bot_reminders WHERE bot_id = ? AND wake = 1 AND created_at >= ?', botId, since).map(reminderOf).map(({ text, event }) => ({ text, event }))
   }
 
   /**
-   * How many messages a bot sent to other bots since `since` (the daily budget): the chat turns its messages started,
-   * whose keys all begin with `keyStart` (`botMessageKey`).
+   * Whether bot `botId`'s chat got a message from another bot reading exactly `text` (`botMessageRowText`: the sender's
+   * name and the message) at or after `since` (loop detection).
    */
-  botMessagesSince(keyStart: string, since: string): number {
-    return num(this.get('SELECT COUNT(*) AS n FROM bot_activations WHERE substr(idempotency_key, 1, ?) = ? AND created_at > ?', keyStart.length, keyStart, since)?.n) ?? 0
+  botMessageRowSince(botId: string, text: string, since: string): boolean {
+    return this.get("SELECT 1 AS hit FROM bot_messages WHERE bot_id = ? AND substr(id, 1, 10) = 'bm_botmsg_' AND text = ? AND at >= ? LIMIT 1", botId, text, since) !== undefined
   }
 
   /** Every bot's waiting wakes on an event that has not happened yet, oldest first. */

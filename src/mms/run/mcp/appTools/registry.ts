@@ -287,13 +287,15 @@ export class ToolRegistry {
     const bot = this.botListing(threadId)
     // A bot's thread tools follow its turn: what the run's registered turn holds now.
     const turn = bot.botRole && runId ? this.options.turns?.get(runId) : undefined
-    return this.listFor({
+    const listed = this.listFor({
       threadId,
       readOnly: this.options.readOnlyThread?.(threadId) === true,
       modeCeiling: this.options.threadCeiling?.(threadId) ?? fallback,
       ...bot,
       ...(turn?.bot && turn.threadId === threadId ? { botTurnTools: turn.bot.appTools } : {})
     })
+    // A bot's thread reads each tool as a bot uses it.
+    return bot.botRole ? listed.map((tool) => (tool.botDescription ? { ...tool, description: tool.botDescription } : tool)) : listed
   }
 
   /**

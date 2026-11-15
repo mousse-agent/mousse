@@ -31,12 +31,11 @@ export type BotWakeFired =
 export type BotWakeEndReason = 'expired' | 'pr_closed' | 'pr_merged' | 'thread_archived' | 'thread_deleted' | 'unreachable' | 'restart'
 
 /**
- * How many wakes in a row may follow each other with no owner's message between them: a wake set in a turn the owner
- * started is the first; one set in that wake's turn is the second, and so on.
+ * Loop detection, the only limit on how often a bot wakes itself: since its owner last wrote, a bot sets the same wake
+ * (the same brief, waiting on the same thing) at most this many times. One more is a loop with no progress and is
+ * refused. There is no count of wakes in a row or in a day.
  */
-export const MAX_WAKE_CHAIN = 5
-/** Most wakes one bot may set in any 24 hours. */
-export const MAX_WAKES_PER_DAY = 30
+export const MAX_SAME_WAKES = 3
 /** How long a wake on an event waits for it unless the bot says otherwise, and the most it may wait. */
 export const DEFAULT_EVENT_WAKE_HOURS = 24
 export const MAX_EVENT_WAKE_HOURS = 7 * 24
@@ -56,6 +55,16 @@ export function watcherHow(fired: Extract<BotWakeFired, { kind: 'watcher' }>): s
   if (fired.how === 'time_limit') return 'reached its time limit and was stopped'
   if (fired.how === 'failed') return `could not run${fired.message ? `: ${fired.message}` : ''}`
   return fired.exitCode === null || fired.exitCode === undefined ? 'ended' : `exited with code ${fired.exitCode}`
+}
+
+/**
+ * What makes two wakes the same for loop detection: the brief, ignoring case, spacing and punctuation, and what it
+ * waits for (a time alone, or the same thread, pull request or command).
+ */
+export function wakeLoopKey(brief: string, event: BotWakeEvent | null): string {
+  const words = brief.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim()
+  const on = !event ? 'time' : event.kind === 'thread' ? `thread:${event.threadId}` : event.kind === 'pr' ? `pr:${event.repo}#${event.number}` : `watcher:${event.command}`
+  return `${on}\n${words}`
 }
 
 /** "owner/repo", as a pull request's repository is named. */
@@ -166,6 +175,6 @@ export function wakeInput(input: { brief: string; setAt: string; event: BotWakeE
   if (input.work) {
     return [...lines.map((line, index) => index === 0 ? line.replace('A wake-up', 'A work wait').replace(' Your owner did not write: you carry on by yourself.', '') : line), 'Carry on with this work in this thread, then report as usual.'].join('\n\n')
   }
-  lines.push(`Do what you planned, then tell your owner in a short message what happened. If there is nothing worth saying, say so in one line. This is wake-up ${input.chain} of at most ${MAX_WAKE_CHAIN} in a row without your owner.`)
+  lines.push(`Do what you planned, then tell your owner in a short message what happened. If there is nothing worth saying, say so in one line. This is wake-up ${input.chain} in a row without your owner. Set another only if you are still waiting on something new; repeating the same wake-up with no progress is refused.`)
   return lines.join('\n\n')
 }
