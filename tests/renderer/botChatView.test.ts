@@ -415,53 +415,82 @@ describe('the transcript', () => {
     expect(codes.map((code) => [code.textContent, code.classList.contains('is-whole')])).toEqual([['ssd-shortlist.md', true], ['Get-PhysicalDisk | Select-Object FriendlyName, MediaType, Size', false]])
   })
 
-  it('the owner reacts to a bot message: six quick emoji and +, one reaction shown on the bubble, the same again or its badge removes it', async () => {
+  it('the owner reacts to a bot message: one button opens six quick emoji and +, one reaction shown on the bubble, the same again or its badge removes it', async () => {
     fake.chats.inbox = [message(1, { id: 'b1', text: 'Here are three SSDs.' }), message(2, { id: 'o1', author: 'owner', text: 'Thanks' })]
     await open()
     const reply = () => transcript().querySelector<HTMLElement>('[data-message-id="b1"]')!
     const bar = () => reply().querySelector<HTMLElement>('[role="toolbar"]')!
+    const menu = () => bar().querySelector<HTMLElement>('[role="menu"]')
+    const add = () => button('Add reaction', bar())!
     const badge = () => reply().querySelector<HTMLButtonElement>('.bot-bubble > .bot-reaction')
+    const react = async (label: string) => { await click(add()); await click(button(label, menu()!)) }
     expect(bar().getAttribute('aria-label')).toBe('React to this message')
-    expect([...bar().querySelectorAll('button')].map((choice) => choice.getAttribute('aria-label'))).toEqual(['React 👍', 'React ❤️', 'React 😂', 'React 😮', 'React 😢', 'React 🙏', 'More reactions'])
+    // The bar holds one button; the emoji are in its popup, closed until it is pressed.
+    expect([...bar().querySelectorAll('button')].map((choice) => choice.getAttribute('aria-label'))).toEqual(['Add reaction'])
+    expect(menu()).toBeNull()
     // The owner's own messages take none.
     expect(transcript().querySelector('[data-message-id="o1"] [role="toolbar"]')).toBeNull()
 
-    await click(button('React ❤️', bar()))
+    await click(add())
+    expect(add().getAttribute('aria-expanded')).toBe('true')
+    expect(menu()?.getAttribute('aria-label')).toBe('Reactions')
+    expect([...menu()!.querySelectorAll('button')].map((choice) => choice.getAttribute('aria-label'))).toEqual(['React 👍', 'React ❤️', 'React 😂', 'React 😮', 'React 😢', 'React 🙏', 'More reactions'])
+    // By keyboard: the focus is on the first emoji, the arrows move it, Escape closes and puts it back on the button.
+    expect(document.activeElement?.getAttribute('aria-label')).toBe('React 👍')
+    await act(async () => { document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })) })
+    expect(document.activeElement?.getAttribute('aria-label')).toBe('React ❤️')
+    await act(async () => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
+    expect(menu()).toBeNull()
+    expect(document.activeElement).toBe(add())
+    expect(fake.calls.some((call) => call[0] === 'react')).toBe(false)
+    // A press outside closes it too.
+    await click(add())
+    await act(async () => { document.body.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true })) })
+    expect(menu()).toBeNull()
+    expect(add().getAttribute('aria-expanded')).toBe('false')
+
+    await react('React ❤️')
     expect(fake.calls).toContainEqual(['react', 'inbox', 'b1', '❤️'])
     expect(badge()?.textContent).toBe('❤️')
+    expect(menu()).toBeNull()
     // A pick puts the bar away: the focus is on the bubble, not on a button that would hold the bar open, and the bar
     // stays away while the pointer stays; leaving the message, or tabbing back into the bar, brings it back.
     expect(document.activeElement).toBe(reply().querySelector('.bot-bubble'))
     expect(reply().classList.contains('is-react-quiet')).toBe(true)
     await act(async () => { reply().dispatchEvent(new MouseEvent('mouseout', { bubbles: true, relatedTarget: document.body })) })
     expect(reply().classList.contains('is-react-quiet')).toBe(false)
-    await click(button('React 😂', bar()))
+    await react('React 😂')
     expect(reply().classList.contains('is-react-quiet')).toBe(true)
-    await act(async () => { button('React 👍', bar())!.focus() })
+    await act(async () => { add().focus() })
     expect(reply().classList.contains('is-react-quiet')).toBe(false)
-    await click(button('React ❤️', bar()))
-    expect(button('Remove your reaction ❤️', bar())?.getAttribute('aria-pressed')).toBe('true')
+    await react('React ❤️')
+    // Opened again, the reaction there now is marked and has the focus.
+    await click(add())
+    expect(button('Remove your reaction ❤️', menu()!)?.getAttribute('aria-checked')).toBe('true')
+    expect(document.activeElement?.getAttribute('aria-label')).toBe('Remove your reaction ❤️')
     // Another replaces it: one reaction.
-    await click(button('React 👍', bar()))
+    await click(button('React 👍', menu()!))
     expect(reply().querySelectorAll('.bot-reaction')).toHaveLength(1)
     expect(badge()?.textContent).toBe('👍')
     // The same one again removes it.
-    await click(button('Remove your reaction 👍', bar()))
+    await react('Remove your reaction 👍')
     expect(fake.calls.at(-1)).toEqual(['react', 'inbox', 'b1', null])
     expect(badge()).toBeNull()
 
-    // + opens the composer's grid; a pick sets it, and the badge takes it away again.
-    await click(button('More reactions', bar()))
-    await click(button('🔥', reply().querySelector('.bot-react-grid')!))
+    // + opens the composer's grid in its place; a pick sets it, and the badge takes it away again.
+    await click(add())
+    await click(button('More reactions', menu()!))
+    expect(menu()?.querySelectorAll('button').length).toBeGreaterThan(7)
+    await click(button('🔥', menu()!))
     expect(badge()?.textContent).toBe('🔥')
-    expect(reply().querySelector('.bot-react-grid')).toBeNull()
+    expect(menu()).toBeNull()
     await click(badge())
     expect(fake.calls.at(-1)).toEqual(['react', 'inbox', 'b1', null])
     expect(badge()).toBeNull()
 
     // Refused by the service: shown at once, then put back as it was, with why above the composer.
     vi.mocked(fake.client.react).mockRejectedValueOnce(new Error('This bot has no such message.'))
-    await click(button('React 😮', bar()))
+    await react('React 😮')
     await settle()
     expect(badge()).toBeNull()
     expect(composerError()?.textContent).toBe('This bot has no such message.')
@@ -480,8 +509,9 @@ describe('the transcript', () => {
     const refusals: Array<(error: Error) => void> = []
     const onTheWay = () => new Promise<never>((_, reject) => { refusals.push(reject) })
     vi.mocked(fake.client.react).mockImplementationOnce(onTheWay).mockImplementationOnce(onTheWay)
-    await click(button('React 👍', bar()!))
-    await click(button('React 😂', bar()!))
+    const react = async (label: string) => { await click(button('Add reaction', bar()!)); await click(button(label, bar()!.querySelector('[role="menu"]')!)) }
+    await react('React 👍')
+    await react('React 😂')
     expect(badge()?.textContent).toBe('😂')
     await act(async () => { refusals[0]!(new Error('Busy.')) })
     expect(badge()?.textContent).toBe('😂')
@@ -491,7 +521,7 @@ describe('the transcript', () => {
     // An older service has no reactions: the pick is put back, the bar goes, and nothing is shown as an error.
     await act(async () => { useBotsStore.setState({ error: null, errorBotId: null }) })
     vi.mocked(fake.client.react).mockRejectedValueOnce(Object.assign(new Error('Domain method is unavailable'), { code: 'method_not_available' }))
-    await click(button('React 👍', bar()!))
+    await react('React 👍')
     await settle()
     expect(badge()?.textContent).toBe('❤️')
     expect(bar()).toBeNull()
