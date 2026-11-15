@@ -43,7 +43,7 @@ import { createLeaseToken } from '../queue/ThreadExecutionLease'
 import { isPermissionMode, narrowPermissionMode, normalizePermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import { agentJobExpiredReason, isExpired } from './agentJobLimits'
 import { computeNextRun, nextOccurrenceAfter, occurrencesSince } from './computeNextRun'
-import { botJobThreadGuard } from './botJobs'
+import { botJobThreadGuard, schedulePrompt } from './botJobs'
 import { withFileLock } from './fileLock'
 import { isWorkflowPrompt, JobPermissionRefused, permissionAboveCeiling, type JobPermissionEdit } from './jobPermission'
 import {
@@ -551,9 +551,17 @@ export class ScheduledJobStore {
     return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
       const jobs = this.listJobs()
       const restored: string[] = []
+      let droppedStaleSay = false
       for (const job of jobs) {
-        const fields = kept[job.id]
-        if (!fields || typeof fields !== 'object') continue
+        const saved = kept[job.id]
+        if (!saved || typeof saved !== 'object') continue
+        const fields = { ...saved, ...(saved.bot ? { bot: { ...saved.bot } } : {}) }
+        if (fields.bot?.say !== undefined && job.prompt !== schedulePrompt({ say: fields.bot.say })) {
+          // The older writer changed Do. Its newer prompt wins over the kept fixed words,
+          // whether it dropped just say or the whole bot link.
+          delete fields.bot.say
+          droppedStaleSay = true
+        }
         if (job.bot && fields.bot && job.bot.botId === fields.bot.botId && job.bot.scheduleId === fields.bot.scheduleId) {
           const missing = Object.entries(fields.bot).filter(([key]) => (key === 'say' || key === 'ownerAsked') && !(key in job.bot!))
           if (missing.length) {
@@ -574,7 +582,7 @@ export class ScheduledJobStore {
         if (fields.draft) Object.assign(job, { enabled: false, ...(job.state === 'running' ? {} : { state: 'paused' as const }), nextRunAt: null, resumeAt: undefined })
         restored.push(job.id)
       }
-      if (restored.length) this.saveJobs(jobs)
+      if (restored.length || droppedStaleSay) this.saveJobs(jobs)
       return restored
     })
   }
