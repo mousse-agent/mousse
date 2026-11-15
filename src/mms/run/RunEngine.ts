@@ -316,11 +316,6 @@ export interface ForkThreadRequest {
    * fork starts from the source's current HEAD. Recorded in the transfer payload as `seedFrom`.
    */
   seedFrom?: 'checkpoint' | 'current_head'
-  /**
-   * The agent access level of the agent that forks, when an agent does (a tool call); absent for a
-   * person's fork. The host narrows the fork's own ceiling by it (SPEC §15.1).
-   */
-  accessLevel?: AgentAccessLevel
 }
 
 /**
@@ -371,7 +366,7 @@ export function narrowestAccess(tasks: ReadonlyArray<Pick<DelegationRecord, 'acc
 /** A thread the engine asks its host to create: a delegated child or a fork. */
 export type ThreadCreation =
   | { kind: 'delegation'; request: DelegationRequest }
-  | { kind: 'fork'; sourceThreadId: string; sourceRunId: string; title?: string; accessLevel?: AgentAccessLevel }
+  | { kind: 'fork'; sourceThreadId: string; sourceRunId: string; title?: string }
 
 /** Source runs a fork may start after (SPEC §16.2): never `running` or `uncertain`. */
 export const FORKABLE_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
@@ -1659,8 +1654,7 @@ export class RunEngine extends EventEmitter {
         kind: 'fork',
         sourceThreadId: input.sourceThreadId,
         sourceRunId: source.runId,
-        title: input.title,
-        ...(input.accessLevel ? { accessLevel: input.accessLevel } : {})
+        title: input.title
       })
       return this.withCreatedThread(host, threadId, () => this.store.db.transaction((): ForkAccepted => {
         this.delegations.createLineage({

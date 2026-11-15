@@ -24,9 +24,9 @@ import type { DelegationToolHost } from './delegation'
  *   only the caller's own thread, and it asks the thread's user first unless the caller's permission
  *   mode allows edits.
  * - `readsOthers`: reads threads other than the caller's own (`thread_read`, `thread_list`, `thread_search`);
- *   the registry checks the caller's agent access level before the handler runs and the handler
- *   limits what it returns by `ctx.scope`.
- * - `managesOthers`: changes threads other than the caller's own; needs the `manage` level.
+ *   the registry checks the target before the handler runs and the handler limits what it returns by
+ *   `ctx.scope`.
+ * - `managesOthers`: changes threads other than the caller's own.
  * - `changesSettings`: changes the profile's settings (the theme). Like a change in Settings it needs a turn that may
  *   edit: refused for a read-only child and under a Plan ceiling, and it asks the thread's user first unless the
  *   caller's permission mode allows edits.
@@ -38,19 +38,12 @@ export const ACCESS_CLASSES: ReadonlySet<string> = new Set<ToolAccess>(['reads',
 /**
  * How a caller reaches the thread a `readsOthers` or `managesOthers` call targets: its own thread, a
  * thread below it in the delegation tree (`descendant`), above it or beside it (`ancestor_or_sibling`),
- * a thread it launched, or any other thread through its agent access level (`read`, `manage`).
+ * a thread it launched, or any other thread (`manage`). `read` is no longer given.
  */
 export type ToolScope = 'own' | 'descendant' | 'ancestor_or_sibling' | 'launched' | 'read' | 'manage'
 
-/** How a thread other than the caller's is related to it without the access level. */
+/** How a thread other than the caller's is related to it. */
 export type ThreadRelation = 'descendant' | 'ancestor_or_sibling' | 'launched'
-
-/** Agent access levels from narrowest to widest. */
-export const ACCESS_LEVEL_ORDER: readonly AgentAccessLevel[] = ['lineage', 'read', 'manage']
-
-export function levelAtLeast(level: AgentAccessLevel, needed: AgentAccessLevel): boolean {
-  return ACCESS_LEVEL_ORDER.indexOf(level) >= ACCESS_LEVEL_ORDER.indexOf(needed)
-}
 
 /**
  * What a call does to the parent's work, read by the gate and the writer barrier of runtimes that
@@ -67,7 +60,7 @@ export interface McpCaller {
   runId: string
   provider: string
   modeCeiling: ModeCeiling
-  /** The level the run was granted at turn start; the call-time check narrows it by the profile's setting as it is then. */
+  /** The level the run's credential recorded; it no longer limits anything (every agent reads and manages every thread). */
   accessLevel: AgentAccessLevel
 }
 
@@ -101,8 +94,7 @@ export interface AppToolTurn {
    */
   permissionMode?: PermissionMode
   /**
-   * The agent access level granted to the run, decided at turn start (SPEC §15.1); absent is
-   * `lineage`. The call-time check also narrows it by the profile's setting as it is then.
+   * The agent access level recorded for the run (SPEC §15.1). It no longer limits anything.
    */
   accessLevel?: AgentAccessLevel
   /** A Mousse subagent implementing a delegated task. */
@@ -166,8 +158,6 @@ export interface ToolCallContext {
   signal: AbortSignal
   /** Set by the registry's central check for `readsOthers` and `managesOthers` tools. */
   scope?: ToolScope
-  /** The caller's effective agent access level at this call: its grant narrowed by the profile's setting now. */
-  level?: AgentAccessLevel
   transport: 'mcp' | 'in_process'
   /** In-process calls only: the caller's timeline. */
   timeline?: ToolTimeline
@@ -207,8 +197,6 @@ export interface ToolListing {
   threadId?: string
   readOnly: boolean
   modeCeiling: ModeCeiling
-  /** The caller's effective agent access level; absent is `lineage`, which hides tools that need more. */
-  accessLevel?: AgentAccessLevel
   /** The thread's role when it is a personal bot's thread (PR 6 §5): only bot threads list the bot tools. */
   botRole?: 'activation' | 'context' | 'subagent'
   /**
@@ -265,12 +253,10 @@ export interface MousseTool {
   /**
    * What a `readsOthers` or `managesOthers` call targets. Default: the thread `args.threadId` names
    * (the caller's own when absent). `undefined`: the caller's own thread. A target without a
-   * `threadId` is a listing: it needs the class's level and, with a `projectId`, that project.
+   * `threadId` is a listing.
    */
   target?(args: Record<string, unknown>, caller: McpCaller): { threadId?: string; projectId?: string } | undefined
-  /** The lowest agent access level that can use the tool; `tools/list` hides it from callers below. */
-  minLevel?: AgentAccessLevel
-  /** A `managesOthers` tool that also accepts a thread the caller launched, at any level. */
+  /** A `managesOthers` tool that keeps the `launched` scope for a thread the caller launched. */
   launchedOk?: true
   /**
    * A tool that takes a thread id the central check does not cover (the check covers `threadId` of a

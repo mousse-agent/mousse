@@ -1,7 +1,6 @@
 import { v5 as uuidv5 } from 'uuid'
 import type { ModelOverride } from '../../shared/providerInstances'
 import type { ScheduledJobAgent, ScheduledJobWorkspace, ScheduledRunAgent } from '../../shared/types'
-import type { AgentAccessLevel } from '../../shared/settings'
 import type { PermissionMode } from '../../shared/permissionMode'
 import type { WorkflowChatRun } from '../../shared/workflowChat'
 import type { WorkflowRunState } from '../../shared/workflowRunPlatform'
@@ -29,8 +28,6 @@ export interface ScheduledJobIngress {
   /** The job's permission mode and ceiling (`ScheduledJob`); the run is the stricter of the two and its thread's mode. */
   permissionMode?: PermissionMode
   permissionCeiling?: PermissionMode
-  /** The most agent access the run may be granted (`ScheduledJob.accessCap`); absent reads as `lineage`. */
-  accessCap?: AgentAccessLevel
   /** Names the occurrence; the deterministic send receipt is `schedule:<jobId>:<occurrenceKey>`. Defaults to `occurrenceAt`. */
   occurrenceKey?: string
   /** What the claim already recorded, so a retry reuses its thread. */

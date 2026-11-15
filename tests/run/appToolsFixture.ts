@@ -31,7 +31,7 @@ export function fakeAppToolHost(overrides: Partial<AppToolHost> = {}) {
   const tasks = new TaskQueue()
   const enqueued: Array<{ threadId: string; input: unknown }> = []
   /** Every queue command the tools asked for, with who asked and under which request key. */
-  const queueCommands: Array<{ threadId: string; command: AgentQueueCommand; options: { clientRequestId: string; actor: AgentActor; level: AgentAccessLevel } }> = []
+  const queueCommands: Array<{ threadId: string; command: AgentQueueCommand; options: { clientRequestId: string; actor: AgentActor } }> = []
   const host: AppToolHost = {
     delegation: vi.fn(() => delegation),
     askUser: vi.fn(async () => ({ q1: 'a' })),
@@ -95,7 +95,7 @@ export function appToolRegistry(engine: RunEngine, host: AppToolHost, extra: Pic
       runId: input.runId,
       provider: input.provider ?? 'codex',
       modeCeiling: input.modeCeiling ?? 'default',
-      accessLevel: input.accessLevel ?? 'lineage',
+      accessLevel: input.accessLevel ?? 'manage',
       binding: input.binding ?? 'drained_turn',
       current: input.current ?? (() => true)
     }

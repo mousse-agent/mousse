@@ -303,17 +303,14 @@ export function settingCompactionPoint(
 }
 
 /**
- * What an agent calling the Mousse MCP server may do on threads other than its own and its
- * delegation lineage (docs/run-engine/SPEC.md §15.1): `lineage` nothing more, `read` list, search and
- * read other threads, `manage` also change them.
+ * A level an agent's credential, delegation or run once recorded (docs/run-engine/SPEC.md §15.1). Agents are no
+ * longer limited by it: every agent reads and manages every thread, and new records carry `manage`. Kept so stored
+ * values still read.
  */
 export type AgentAccessLevel = 'lineage' | 'read' | 'manage'
 
 export interface AgentAccessSettings {
-  level: AgentAccessLevel
-  /** Projects the level applies to; empty means every project. */
-  projectIds: string[]
-  /** `manage` only: an agent may answer a pending approval on another thread. */
+  /** An agent may answer a pending approval on another thread. */
   answerApprovals: boolean
   /**
    * "Let agents start subagents on your other devices". Off, the default, refuses every remote subagent
@@ -326,13 +323,6 @@ export interface AgentAccessSettings {
    * chosen here.
    */
   computers: string[]
-  /**
-   * The stored project list was present but could not be read. Ordinary agents fall back to `lineage` (which reaches no
-   * other thread); a bot with "use your threads", which the level does not hold, reaches no project at all. Kept on
-   * every later write, so a save of something else never turns the empty list into "every project"; cleared (written
-   * as false, which reads as absent) when the owner chooses other projects (`SettingsStore.set`). Only true counts.
-   */
-  projectsUnreadable?: boolean
 }
 
 const AGENT_ACCESS_LEVELS: readonly AgentAccessLevel[] = ['lineage', 'read', 'manage']
@@ -352,32 +342,17 @@ export function narrowAgentAccess(...levels: Array<AgentAccessLevel | null | und
 }
 
 /**
- * The setting as the daemon reads it. An absent project list means every project, but a list that is
- * present and malformed (not an array, or an entry that is not a non-empty string) is a narrowing
- * that cannot be read, so it fails closed: the level becomes `lineage`, which reaches no other thread,
- * rather than widening to every project.
+ * The setting as the daemon reads it. The removed `level`, `projectIds` and `projectsUnreadable` of older profiles
+ * are dropped: they no longer limit anything.
  */
 export function normalizeAgentAccessSettings(raw?: Partial<AgentAccessSettings> | null): AgentAccessSettings {
-  const ids: unknown = raw?.projectIds
-  const malformed =
-    ids !== undefined && ids !== null && (!Array.isArray(ids) || ids.some((id) => typeof id !== 'string' || id.length === 0))
   // A computer list that cannot be read allows none, whatever else the setting says.
   const nodes: unknown = raw?.computers
   const computers = Array.isArray(nodes) && nodes.every((node) => typeof node === 'string' && node.length > 0) ? [...new Set(nodes as string[])] : []
-  const remoteSubagents = raw?.remoteSubagents === true
-  if (malformed) return { level: 'lineage', projectIds: [], answerApprovals: false, remoteSubagents, computers, projectsUnreadable: true }
-  const level = isAgentAccessLevel(raw?.level) ? raw.level : 'lineage'
   return {
-    level,
-    projectIds: Array.isArray(ids) ? [...new Set(ids as string[])] : [],
-    remoteSubagents,
-    computers,
-    // Once unreadable, still unreadable for bots until the owner chooses the projects again.
-    ...(raw?.projectsUnreadable === true ? { projectsUnreadable: true as const } : {}),
-    // Answering approvals is part of Manage. Below it the switch reads, and is saved, as off, whoever wrote the
-    // level (the Settings screen, a partial update from another client, a hand edit), so raising the level
-    // again never brings the permission back by itself.
-    answerApprovals: level === 'manage' && raw?.answerApprovals === true
+    answerApprovals: raw?.answerApprovals === true,
+    remoteSubagents: raw?.remoteSubagents === true,
+    computers
   }
 }
 

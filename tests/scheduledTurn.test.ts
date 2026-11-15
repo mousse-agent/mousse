@@ -1071,79 +1071,7 @@ describe('scheduled jobs run as turns', () => {
     })
   })
 
-  describe('what a scheduled turn may reach', () => {
-    const setProfileAccess = (w: World, level: 'lineage' | 'read' | 'manage') => {
-      ;(w.orch as any).settingsStore.get().agentAccess = { level, projectIds: [], answerApprovals: false }
-    }
-
-    it('grants at most the job creator\'s level, and `lineage` when the creator is unknown', async () => {
-      const pi = piAdapter(() => 'pi')
-      const w = boot([pi])
-      setProfileAccess(w, 'manage')
-      const project = projectOf(w)
-      const unknown = addJob(w, { name: 'Unknown', projectId: project.id })
-      const reader = addJob(w, { name: 'Reader', projectId: project.id, accessCap: 'read' })
-      const manager = addJob(w, { name: 'Manager', projectId: project.id, accessCap: 'manage' })
-
-      const records: Record<string, ScheduledJobRunRecord> = {}
-      for (const job of [unknown, reader, manager]) {
-        await runNow(w, job)
-        records[job.name] = await finished(w, job.id)
-      }
-
-      expect(w.engine.getRun(records.Unknown.runId!)?.accessGrant).toBe('lineage')
-      expect(w.engine.getRun(records.Reader.runId!)?.accessGrant).toBe('read')
-      expect(w.engine.getRun(records.Manager.runId!)?.accessGrant).toBe('manage')
-      // The per-run thread keeps the limit, as a remote turn's thread does, so what it delegates inherits it.
-      expect(w.store.getThread(records.Unknown.threadId!)?.accessCeiling).toBe('lineage')
-      expect(w.store.getThread(records.Reader.threadId!)?.accessCeiling).toBe('read')
-    })
-
-    it('never grants more than the profile allows now, whatever the job\'s cap', async () => {
-      const pi = piAdapter(() => 'pi')
-      const w = boot([pi])
-      setProfileAccess(w, 'read')
-      const project = projectOf(w)
-      const job = addJob(w, { projectId: project.id, accessCap: 'manage' })
-
-      await runNow(w, job)
-      const record = await finished(w, job.id)
-
-      expect(w.engine.getRun(record.runId!)?.accessGrant).toBe('read')
-    })
-
-    it('caps a run on a person\'s thread without narrowing the thread for the person', async () => {
-      const release = gate()
-      const pi = piAdapter(async (input) => {
-        if (input.prompt.includes('hold')) await release.promise
-        return `pi: ${input.prompt}`
-      })
-      const w = boot([pi])
-      setProfileAccess(w, 'manage')
-      const project = projectOf(w)
-      const thread = w.store.createThread('Mine', project.id, project.path, ON_PRIMARY)
-      w.orch.setThreadModelOverride(thread.id, PI)
-      const idle = addJob(w, { name: 'Idle', threadId: thread.id, projectId: project.id })
-      await runNow(w, idle)
-      const idleRecord = await finished(w, idle.id)
-
-      // The same on a busy thread: the occurrence waits in the queue and keeps its cap when drained.
-      const busy = await w.orch.send('hold', false, { threadId: thread.id, clientRequestId: 'person-1', awaitMode: 'ack' })
-      await waitFor(() => pi.turns.some((turn) => turn.prompt.includes('hold')), 'the busy turn')
-      const queued = addJob(w, { name: 'Queued', threadId: thread.id, projectId: project.id, accessCap: 'read' })
-      await runNow(w, queued)
-      await waitFor(() => w.jobs.getJob(queued.id)?.pendingOccurrence?.state === 'queued', 'the queued occurrence')
-      release.resolve()
-      const queuedRecord = await finished(w, queued.id)
-      await waitFor(() => w.engine.getRun(busy.runId!)?.status === 'completed', 'the person\'s turn')
-
-      expect(w.engine.getRun(idleRecord.runId!)?.accessGrant).toBe('lineage')
-      expect(w.engine.getRun(queuedRecord.runId!)?.accessGrant).toBe('read')
-      // The person's own turn on that thread is not capped, and the thread has no limit of its own.
-      expect(w.engine.getRun(busy.runId!)?.accessGrant).toBe('manage')
-      expect(w.store.getThread(thread.id)?.accessCeiling).toBeUndefined()
-    })
-
+  describe('what a scheduled turn may do', () => {
     it('runs in the thread\'s permission mode and never widens it', async () => {
       const pi = piAdapter(() => 'pi')
       const w = boot([pi])
@@ -1430,39 +1358,29 @@ describe('scheduled jobs run as turns', () => {
         })
         const host = () => w.orch.mcpToolHost().schedules!
         return {
-          limits: (threadId: string, runId: string, accessLevel: 'lineage' | 'read' | 'manage') => host().limits({ threadId, runId, accessLevel }),
+          limits: (threadId: string, runId: string) => host().limits({ threadId, runId }),
           person: (threadId: string, runId: string) => host().startedByPerson({ threadId, runId })
         }
       }
-      const setProfileAccess = (w: World, level: 'lineage' | 'read' | 'manage') => {
-        ;(w.orch as any).settingsStore.get().agentAccess = { level, projectIds: [], answerApprovals: false }
-      }
-      const NARROWEST = { accessCap: 'lineage', permissionCeiling: 'ask' }
+      const NARROWEST = { permissionCeiling: 'ask' }
 
-      it("a turn a person started from the app is a person's: its own access level and bound mode, narrowed by the profile as it is now", async () => {
+      it("a turn a person started from the app is a person's, and a job it makes gets its bound mode", async () => {
         const seen: Record<string, unknown> = {}
         let wired!: ReturnType<typeof wireJobs>
         const pi = piAdapter((input) => {
           seen.person = wired.person(input.threadId, input.runId)
-          seen.manage = wired.limits(input.threadId, input.runId, 'manage')
-          seen.read = wired.limits(input.threadId, input.runId, 'read')
-          setProfileAccess(world, 'read')
-          seen.lowered = wired.limits(input.threadId, input.runId, 'manage')
-          setProfileAccess(world, 'manage')
+          seen.limits = wired.limits(input.threadId, input.runId)
           return 'pi'
         })
         const world = boot([pi])
         wired = wireJobs(world)
-        setProfileAccess(world, 'manage')
         const project = projectOf(world)
         const thread = world.store.createThread('Mine', project.id, project.path, ON_PRIMARY)
         world.orch.setThreadPermissionMode(thread.id, 'full')
         const sent = await world.orch.send('hello', false, { threadId: thread.id, source: 'gui', clientRequestId: 'person-1', awaitMode: 'turn' })
         expect(mode(world, sent.runId)).toBe('full')
         expect(seen.person).toBe(true)
-        expect(seen.manage).toEqual({ accessCap: 'manage', permissionCeiling: 'full' })
-        expect(seen.read).toEqual({ accessCap: 'read', permissionCeiling: 'full' })
-        expect(seen.lowered).toEqual({ accessCap: 'read', permissionCeiling: 'full' })
+        expect(seen.limits).toEqual({ permissionCeiling: 'full' })
       })
 
       it("the same turn from the CLI is a person's too", async () => {
@@ -1480,12 +1398,11 @@ describe('scheduled jobs run as turns', () => {
         const seen: Record<string, { person: boolean; limits: unknown }> = {}
         let wired!: ReturnType<typeof wireJobs>
         const pi = piAdapter((input) => {
-          seen[input.threadId] = { person: wired.person(input.threadId, input.runId), limits: wired.limits(input.threadId, input.runId, 'manage') }
+          seen[input.threadId] = { person: wired.person(input.threadId, input.runId), limits: wired.limits(input.threadId, input.runId) }
           return 'pi'
         })
         const w = boot([pi])
         wired = wireJobs(w)
-        setProfileAccess(w, 'manage')
         const project = projectOf(w)
         const make = (name: string) => {
           const thread = w.store.createThread(name, project.id, project.path, ON_PRIMARY)
@@ -1493,9 +1410,9 @@ describe('scheduled jobs run as turns', () => {
           return thread
         }
 
-        // A scheduled run (a job's, even one with a manage cap).
+        // A scheduled run.
         const scheduledThread = make('Scheduled')
-        const job = addJob(w, { name: 'Scheduled', prompt: 'scheduled run', threadId: scheduledThread.id, projectId: project.id, accessCap: 'manage' })
+        const job = addJob(w, { name: 'Scheduled', prompt: 'scheduled run', threadId: scheduledThread.id, projectId: project.id })
         await runNow(w, job)
         await finished(w, job.id)
         expect(seen[scheduledThread.id]).toEqual({ person: false, limits: NARROWEST })
@@ -1523,7 +1440,7 @@ describe('scheduled jobs run as turns', () => {
         expect(wired.person(botThread.id, botRun.runId!)).toBe(true)
         w.orch.setBotThreads({ roleOf: (threadId: string) => (threadId === botThread.id ? 'activation' : undefined) } as never)
         expect(wired.person(botThread.id, botRun.runId!)).toBe(false)
-        expect(wired.limits(botThread.id, botRun.runId!, 'manage')).toEqual(NARROWEST)
+        expect(wired.limits(botThread.id, botRun.runId!)).toEqual(NARROWEST)
         w.orch.setBotThreads(null as never)
 
         // A wake, a continuation and any other source, none of which bound a turn.
@@ -1531,16 +1448,15 @@ describe('scheduled jobs run as turns', () => {
           const dispatched = await w.engine.dispatch({ kind: 'send', threadId: origin.id, clientRequestId: `unbound:${source}`, source })
           if (dispatched.status !== 'accepted') throw new Error('send rejected')
           expect(wired.person(origin.id, dispatched.runId), source).toBe(false)
-          expect(wired.limits(origin.id, dispatched.runId, 'manage'), source).toEqual(NARROWEST)
+          expect(wired.limits(origin.id, dispatched.runId), source).toEqual(NARROWEST)
         }
       })
 
       it("a run that cannot be read is not a person's, and records the narrowest", async () => {
         const w = boot([piAdapter(() => 'pi')])
         const wired = wireJobs(w)
-        setProfileAccess(w, 'manage')
         expect(wired.person('no-thread', 'no-run')).toBe(false)
-        expect(wired.limits('no-thread', 'no-run', 'manage')).toEqual(NARROWEST)
+        expect(wired.limits('no-thread', 'no-run')).toEqual(NARROWEST)
       })
     })
   })

@@ -947,7 +947,6 @@ export class ScheduledJobService extends EventEmitter {
         workspace: job.workspace,
         permissionMode: job.permissionMode,
         permissionCeiling: job.permissionCeiling,
-        accessCap: job.accessCap,
         claim: { threadId: claim?.threadId, runId: claim?.runId },
         resumeWaiting: job.runClaim?.resumedWaiting === true,
         onWorkflowPrepared: (invocationId) => {

@@ -176,8 +176,6 @@ describe('definitions through the gateway', () => {
     const runs = engine.listRuns(thread.id)
     expect(runs).toHaveLength(1)
     expect(runs[0]).toMatchObject({ source: 'definition', status: 'completed' })
-    // Held to the profile's agent access level, recorded on the run as any run's grant (SPEC §15.1).
-    expect(runs[0]!.accessGrant).toBe((orch as unknown as { grantFor(id: string, ceiling: string): string }).grantFor(thread.id, 'default'))
     expect(engine.bindingForRun(runs[0]!.runId)?.policy).toEqual({
       mode: 'default', origin: 'definition', approvals: 'grants', tools: { allow: ['ask_user', 'read', 'write'] }, budget: { maxTurns: 32, maxToolCalls: 64 },
       authority: { kind: 'definition', digest: expect.stringMatching(/^[0-9a-f]{64}$/) },

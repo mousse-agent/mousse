@@ -2,7 +2,7 @@ import type { ModelOverride } from '../../shared/providerInstances'
 import { upgradeSelection } from '../../shared/modelSelection'
 import type { PermissionMode } from '../../shared/permissionMode'
 import { createErrorProvider } from '../../shared/errors'
-import { isAgentAccessLevel, narrowAgentAccess, type AgentAccessLevel } from '../../shared/settings'
+import type { AgentAccessLevel } from '../../shared/settings'
 import {
   copyFileSync,
   existsSync,
@@ -1208,8 +1208,6 @@ export class ThreadDataStore extends EventEmitter {
       createdByThreadId?: string
       /** See `Thread.startedByBot`. */
       startedByBot?: { botId: string; name: string }
-      /** See `Thread.accessCeiling`. */
-      accessCeiling?: AgentAccessLevel
       scheduledJobId?: string
       /** See `Thread.runsOn`: a remote subagent's stand-in. */
       runsOn?: ThreadRunsOn
@@ -1241,7 +1239,6 @@ export class ThreadDataStore extends EventEmitter {
     if (opts?.lineage) meta.lineage = structuredClone(opts.lineage)
     if (opts?.createdByThreadId) meta.createdByThreadId = opts.createdByThreadId
     if (opts?.startedByBot) meta.startedByBot = { botId: opts.startedByBot.botId, name: opts.startedByBot.name }
-    if (isAgentAccessLevel(opts?.accessCeiling)) meta.accessCeiling = opts.accessCeiling
     if (opts?.modelOverride) meta.modelOverride = structuredClone(opts.modelOverride)
     if (opts?.permissionMode) meta.permissionMode = opts.permissionMode
     meta.settingsRevision = 0
@@ -1615,22 +1612,10 @@ export class ThreadDataStore extends EventEmitter {
 
   private nameGuard: ((thread: Thread, name: string) => void) | null = null
 
-  /**
-   * Narrows the thread's access ceiling to `level` (never widens it; see `Thread.accessCeiling`), without
-   * touching `updatedAt`. Returns the ceiling now in force.
-   */
-  capAccessCeiling(id: string, level: AgentAccessLevel): AgentAccessLevel {
-    const thread = this.getThread(id)
-    if (!thread) throw new Error(`Thread not found: ${id}`)
-    const next = narrowAgentAccess(isAgentAccessLevel(thread.accessCeiling) ? thread.accessCeiling : undefined, level) ?? level
-    if (thread.accessCeiling !== next) this.updateThreadMeta(id, { accessCeiling: next }, { touch: false })
-    return next
-  }
-
   /** `touch: false` keeps `updatedAt`, for repairs that must not reorder the sidebar. */
   updateThreadMeta(
     id: string,
-    partial: Partial<Pick<Thread, 'name' | 'titleSource' | 'modelOverride' | 'permissionMode' | 'worktreeEnabled' | 'lineage' | 'createdByThreadId' | 'startedFrom' | 'sentFrom' | 'runsOn' | 'accessCeiling' | 'workspaceBinding' | 'pullRequest' | 'expiresAt' | 'expiryStopsRun'>>,
+    partial: Partial<Pick<Thread, 'name' | 'titleSource' | 'modelOverride' | 'permissionMode' | 'worktreeEnabled' | 'lineage' | 'createdByThreadId' | 'startedFrom' | 'sentFrom' | 'runsOn' | 'workspaceBinding' | 'pullRequest' | 'expiresAt' | 'expiryStopsRun'>>,
     opts: { touch?: boolean; ifRevision?: number } = {}
   ): Thread {
     const thread = this.getThread(id)

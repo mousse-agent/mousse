@@ -19,7 +19,6 @@ import { createAppToolRegistry, type AppToolHost, type ProfilerToolHost } from '
 import type { AppToolTurn, ToolCallContext } from '../src/mms/run/mcp/appTools/types'
 import { PROFILER_TOOL_NAMES, normalizeProfilerSettings, profilerToolAllowed, type ProfilerSettings, type ProfilerToolName } from '../src/shared/diagnostics/profiler'
 import { resolveMemoryThresholds } from '../src/shared/diagnostics/memory'
-import type { AgentAccessLevel } from '../src/shared/settings'
 import type { MousseMainService } from '../src/mms/MousseMainService'
 import type { MmsProtocolServer } from '../src/mms/protocol/server'
 import type { HandlerContext } from '../src/mms/protocol/handlers'
@@ -262,14 +261,13 @@ const OWNER = { profile: 'own' }
 
 /**
  * This profile's threads: `own-1` (the caller), `own-2`, and any `extra` ones, such as the threads that delegated to
- * it or private, bot and out-of-project ones; `projectIds` is the agent's allowed project list.
+ * it or private and bot ones.
  */
 function toolsFor(
   settings: () => ProfilerSettings,
   service: ProfilerService | null,
   turnActive = (_: string) => true,
-  extra: Record<string, Record<string, unknown>> = {},
-  projectIds: string[] = []
+  extra: Record<string, Record<string, unknown>> = {}
 ) {
   const profiler: () => ProfilerToolHost = () => ({ settings: settings(), service, owner: OWNER, turnActive })
   const metas: Record<string, object> = {
@@ -283,8 +281,7 @@ function toolsFor(
     tasks: () => undefined,
     profiler,
     threadMeta: (threadId: string) => metas[threadId] as never,
-    listThreads: () => Object.values(metas) as never,
-    agentAccess: () => ({ projectIds }) as never
+    listThreads: () => Object.values(metas) as never
   } as unknown as AppToolHost
   return createAppToolRegistry({ host }).registry
 }
@@ -293,8 +290,8 @@ const turn = {
   threadId: 'own-1', runId: 'run-1', turnToken: 'tok', mode: 'agent', modeFacts: { readOnly: false, agent: true, build: false }, modeCeiling: 'default',
   subagent: false, discovery: false, actor: { kind: 'main' }, enabledSkills: [], loadedSkills: [], settingsEnabled: () => true
 } as unknown as AppToolTurn
-function ctx(signal = new AbortController().signal, level?: AgentAccessLevel): ToolCallContext {
-  return { caller: { threadId: 'own-1', runId: 'run-1', provider: 'claude', modeCeiling: 'default', accessLevel: level ?? 'lineage' }, turn, toolCallId: 'call-1', signal, transport: 'mcp', ...(level ? { level } : {}) }
+function ctx(signal = new AbortController().signal): ToolCallContext {
+  return { caller: { threadId: 'own-1', runId: 'run-1', provider: 'claude', modeCeiling: 'default', accessLevel: 'manage' }, turn, toolCallId: 'call-1', signal, transport: 'mcp' }
 }
 
 async function call(registry: ReturnType<typeof toolsFor>, name: ProfilerToolName, args: Record<string, unknown> = {}, context = ctx()) {
@@ -358,7 +355,7 @@ describe('the profiler tools', () => {
   it('profiler_service_breakdown: heap, counts, caches, this profile\'s threads by id and other profiles as totals', async () => {
     const dir = home()
     const { service, threads } = profilerFixture(dir)
-    const { value, outcome } = await call(toolsFor(() => ON, service), 'profiler_service_breakdown', {}, ctx(undefined, 'read'))
+    const { value, outcome } = await call(toolsFor(() => ON, service), 'profiler_service_breakdown', {}, ctx())
     expect(threads).toHaveBeenCalledWith(OWNER)
     expect(value).toMatchObject({
       heap: { usedMb: 60, limitMb: 4096 },
@@ -379,7 +376,7 @@ describe('the profiler tools', () => {
     expectNoPrivateData(outcome.text, dir)
   })
 
-  it('profiler_service_breakdown names only the threads thread_list would show; private, bot and out-of-project ones count in a total', async () => {
+  it('profiler_service_breakdown names only the threads thread_list would show; private and bot ones count in a total', async () => {
     const dir = home()
     const { service } = profilerFixture(dir)
     const entry = (threadId: string | undefined, cachedBytes: number): ThreadMemoryEntry =>
@@ -399,7 +396,6 @@ describe('the profiler tools', () => {
     })
     const extra = {
       'own-1': { projectId: 'p1' },
-      // Outside the allowed projects, but the caller launched it: thread_list shows it too.
       'launched-1': { projectId: 'p2', createdByThreadId: 'own-1' },
       'private-1': { projectId: 'p1', localOnly: true },
       // A subagent of a private thread is private too.
@@ -408,62 +404,17 @@ describe('the profiler tools', () => {
       'elsewhere-1': { projectId: 'p2' }
     }
     const ids = (value: { threads: Array<{ threadId: string }> }) => value.threads.map((row) => row.threadId).sort()
-    const { value, outcome } = await call(toolsFor(() => ON, service, undefined, extra, ['p1']), 'profiler_service_breakdown', {}, ctx(undefined, 'read'))
-    expect(ids(value)).toEqual(['launched-1', 'own-1'])
-    expect(value.hiddenThreads).toEqual({ threads: 6, cachedMb: 12 })
-    for (const id of ['private-', 'bot-1', 'elsewhere-1', 'unknown-1']) expect(outcome.text).not.toContain(id)
+    const { value, outcome } = await call(toolsFor(() => ON, service, undefined, extra), 'profiler_service_breakdown', {}, ctx())
+    expect(ids(value)).toEqual(['elsewhere-1', 'launched-1', 'own-1'])
+    expect(value.hiddenThreads).toEqual({ threads: 5, cachedMb: 8 })
+    for (const id of ['private-', 'bot-1', 'unknown-1']) expect(outcome.text).not.toContain(id)
     expectNoPrivateData(outcome.text, dir)
 
-    // An agent in a private thread sees the private threads, as thread_list shows them to it; another thread's
-    // subagent stays folded below `manage`.
+    // An agent in a private thread sees the private threads, as thread_list shows them to it.
     const privateCaller = { ...extra, 'own-1': { projectId: 'p1', localOnly: true } }
-    const fromPrivate = await call(toolsFor(() => ON, service, undefined, privateCaller, ['p1']), 'profiler_service_breakdown', {}, ctx(undefined, 'read'))
-    expect(ids(fromPrivate.value)).toEqual(['launched-1', 'own-1', 'private-1'])
-    expect(fromPrivate.value.hiddenThreads).toEqual({ threads: 5, cachedMb: 10 })
-    const managing = await call(toolsFor(() => ON, service, undefined, privateCaller, ['p1']), 'profiler_service_breakdown', {}, ctx(undefined, 'manage'))
-    expect(ids(managing.value)).toEqual(['launched-1', 'own-1', 'private-1', 'private-child-1'])
-  })
-
-  it('profiler_service_breakdown below the read level names only the caller, its delegators and the threads it launched', async () => {
-    const dir = home()
-    const { service } = profilerFixture(dir)
-    const entry = (threadId: string): ThreadMemoryEntry => ({ threadId, loaded: true, cached: true, turnRunning: false, cachedBytes: 1048576, idleSeconds: 60 })
-    service.threads = () => ({
-      own: [entry('own-1'), entry('parent-1'), entry('launched-1'), entry('own-2')],
-      others: { profiles: 0, loadedThreads: 0, cachedThreads: 0, cachedBytes: 0 }
-    })
-    const extra = {
-      'own-1': { projectId: 'p1', lineage: { parentThreadId: 'parent-1', rootThreadId: 'parent-1', relationship: 'subagent' } },
-      'parent-1': { projectId: 'p1' },
-      'launched-1': { projectId: 'p1', createdByThreadId: 'own-1' },
-      'own-2': { projectId: 'p1' }
-    }
-    // An absent level counts as the narrowest.
-    for (const context of [ctx(undefined, 'lineage'), ctx()]) {
-      const { value, outcome } = await call(toolsFor(() => ON, service, undefined, extra, ['p1']), 'profiler_service_breakdown', {}, context)
-      expect(value.threads.map((row: { threadId: string }) => row.threadId).sort()).toEqual(['launched-1', 'own-1', 'parent-1'])
-      expect(value.hiddenThreads).toEqual({ threads: 1, cachedMb: 1 })
-      expect(outcome.text).not.toContain('own-2')
-    }
-  })
-
-  it('profiler_service_breakdown names the caller\'s own subagents at every level', async () => {
-    const dir = home()
-    const { service } = profilerFixture(dir)
-    const entry = (threadId: string): ThreadMemoryEntry => ({ threadId, loaded: true, cached: true, turnRunning: false, cachedBytes: 1048576, idleSeconds: 60 })
-    service.threads = () => ({ own: [entry('own-1'), entry('sub-1'), entry('other-sub-1')], others: { profiles: 0, loadedThreads: 0, cachedThreads: 0, cachedBytes: 0 } })
-    const extra = {
-      'own-1': { projectId: 'p1' },
-      'own-2': { projectId: 'p1' },
-      // A subagent of the caller has no createdByThreadId: only its lineage ties it to the caller.
-      'sub-1': { projectId: 'p1', lineage: { parentThreadId: 'own-1', rootThreadId: 'own-1', relationship: 'subagent' } },
-      'other-sub-1': { projectId: 'p1', lineage: { parentThreadId: 'own-2', rootThreadId: 'own-2', relationship: 'subagent' } }
-    }
-    for (const level of ['lineage', 'read'] as const) {
-      const { value } = await call(toolsFor(() => ON, service, undefined, extra, ['p1']), 'profiler_service_breakdown', {}, ctx(undefined, level))
-      expect(value.threads.map((row: { threadId: string }) => row.threadId).sort()).toEqual(['own-1', 'sub-1'])
-      expect(value.hiddenThreads).toEqual({ threads: 1, cachedMb: 1 })
-    }
+    const fromPrivate = await call(toolsFor(() => ON, service, undefined, privateCaller), 'profiler_service_breakdown', {}, ctx())
+    expect(ids(fromPrivate.value)).toEqual(['elsewhere-1', 'launched-1', 'own-1', 'private-1', 'private-child-1'])
+    expect(fromPrivate.value.hiddenThreads).toEqual({ threads: 3, cachedMb: 5 })
   })
 
   it('profiler_service_breakdown never names the Automation manager\'s thread or a bot thread\'s subagents', async () => {
@@ -482,12 +433,10 @@ describe('the profiler tools', () => {
       'bot-sub-1': { projectId: 'p1', lineage: { parentThreadId: 'bot-1', rootThreadId: 'bot-1', relationship: 'subagent' } },
       'bot-sub-sub-1': { projectId: 'p1', lineage: { parentThreadId: 'bot-sub-1', rootThreadId: 'bot-1', relationship: 'subagent' } }
     }
-    for (const level of ['read', 'manage'] as const) {
-      const { value, outcome } = await call(toolsFor(() => ON, service, undefined, extra, ['p1']), 'profiler_service_breakdown', {}, ctx(undefined, level))
-      expect(value.threads.map((row: { threadId: string }) => row.threadId)).toEqual(['own-1'])
-      expect(value.hiddenThreads).toEqual({ threads: 4, cachedMb: 4 })
-      for (const id of ['automations-1', 'bot-']) expect(outcome.text).not.toContain(id)
-    }
+    const { value, outcome } = await call(toolsFor(() => ON, service, undefined, extra), 'profiler_service_breakdown', {}, ctx())
+    expect(value.threads.map((row: { threadId: string }) => row.threadId)).toEqual(['own-1'])
+    expect(value.hiddenThreads).toEqual({ threads: 4, cachedMb: 4 })
+    for (const id of ['automations-1', 'bot-']) expect(outcome.text).not.toContain(id)
   })
 
   it('reports an unexpected error class only when it is a known one', async () => {

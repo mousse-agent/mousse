@@ -4,7 +4,6 @@ import { APPROVALS_REFUSED_MESSAGE } from '../../../../shared/harness/types'
 import { permissionModeAllows, type PermissionMode } from '../../../../shared/permissionMode'
 import type { PendingUserQuestions, UserQuestionAnswers } from '../../../../shared/types'
 import type { ApprovalTag } from '../../../orchestrator/UserQuestionService'
-import { isAgentAccessLevel, narrowAgentAccess, type AgentAccessLevel } from '../../../../shared/settings'
 import type { AgentToolAccess } from '../../../agents/WorkspaceAccessPolicy'
 import { authorizeDefinitionCall, definitionRefusal, takeAuthorizedCall, withoutTransportFields } from '../../../agentDefinitions/definitionGate'
 import { botAppToolRefusal, botBrowserNotAllowed, botBrowserWithheld } from '../../../../shared/bots/personal/walls'
@@ -17,10 +16,10 @@ import type { ModeCeiling } from '../../types'
 import type { RelayAdmission, RelayGrant } from '../relay/types'
 import { callForBot, type BotMcp } from '../../../bots/mcp/BotMcp'
 import type { AppToolTurns } from './turns'
+import type { AgentAccessLevel } from '../../../../shared/settings'
 import { callerThreadOnly } from './thread'
 import {
   ACCESS_CLASSES,
-  levelAtLeast,
   McpToolError,
   plainSchema,
   TOOL_CLASSES,
@@ -60,7 +59,7 @@ export interface McpCredentialAuthority {
   runId: string
   provider: string
   modeCeiling: ModeCeiling
-  /** The level the credential was granted for this run (SPEC §15.1). */
+  /** The level the credential recorded for this run (SPEC §15.1); it no longer limits anything. */
   accessLevel: AgentAccessLevel
   binding: McpTurnBinding
   /** The MCP relay the turn attached (`RelayGrant`), copied from the credential; absent: none. */
@@ -79,16 +78,11 @@ export interface McpCallRequest {
 
 /**
  * What the central check of `readsOthers` and `managesOthers` tools asks of the thread owner (SPEC
- * §15.1). All of it is read at call time, so lowering the profile setting reaches a turn that is
- * already running.
+ * §15.1), read at call time.
  */
 export interface ToolAccessPolicy {
-  /** The profile's agent access level as it is now. */
-  profileLevel(): AgentAccessLevel
-  /** How `threadId` is related to the caller without the access level, or null. */
+  /** How `threadId` is related to the caller, or null. */
   relation(caller: McpCaller, threadId: string): ThreadRelation | null
-  /** The thread's project (or `projectId`) is in the profile's current project list; an empty list allows all. */
-  projectAllowed(target: { threadId?: string; projectId?: string }): boolean
   threadExists(threadId: string): boolean
   /** The thread is private (`Thread.localOnly`); absent: no thread is. */
   localOnly?(threadId: string): boolean
@@ -124,7 +118,7 @@ export interface ToolRegistryOptions {
   permissionModeFor?(runId: string): PermissionMode | undefined
   /** Asks the thread's user to approve a call (an approval request: see `ApprovalTag`). */
   askApproval?(threadId: string, questions: PendingUserQuestions['questions'], options: { signal: AbortSignal; approval: ApprovalTag }): Promise<UserQuestionAnswers>
-  /** Without it a `readsOthers` or `managesOthers` tool reaches the caller's own thread only and the effective level is `lineage`. */
+  /** Without it a `readsOthers` or `managesOthers` tool reaches the caller's own thread only. */
   access?: ToolAccessPolicy
   /**
    * The user's own MCP servers, proxied for a runtime Mousse sends its tools to per turn (a driver
@@ -267,13 +261,11 @@ export class ToolRegistry {
       if (tool.hidden) return false
       if (listing.readOnly && tool.access !== 'reads' && tool.access !== 'readsOthers' && !tool.readOnlySafe) return false
       if (listing.modeCeiling === 'plan' && (tool.access === 'startsThreads' || tool.access === 'changesSettings')) return false
-      // A bot's main thread lists the thread tools whatever its access level (a bot's is lineage): "use your threads", not
-      // the profile's agent access, is what lets it use them. Only those its turn holds now are listed (none without the
-      // permission, with the switch off, or in a turn that only reads), and every call is held to it again. A consult
-      // never has them.
+      // A bot's main thread lists the thread tools its grant allows: "use your threads" is what lets it use them. Only
+      // those its turn holds now are listed (none without the permission, with the switch off, or in a turn that only
+      // reads), and every call is held to it again. A consult never has them.
       const botThreadTool = listing.botRole !== undefined && isBotThreadTool(tool.name)
       if (botThreadTool && (listing.botRole !== 'activation' || !listing.botTurnTools?.has(tool.name))) return false
-      if (tool.minLevel && !botThreadTool && !levelAtLeast(listing.accessLevel ?? 'lineage', tool.minLevel)) return false
       // A bot's thread lists only what a bot can hold: the model is never shown delegation, queues or tools it can't use.
       if (listing.botRole && !botMayBeOffered(tool.name)) return false
       return tool.listed?.(listing) ?? true
@@ -288,10 +280,9 @@ export class ToolRegistry {
   /**
    * `listFor` a thread: its read-only status and the ceiling its delegations gave it, never the
    * current turn's mode (a Plan turn's narrower ceiling is enforced at call time). `fallback` is the
-   * ceiling when the owner does not say. `granted` is the level the caller's credential was granted;
-   * tools that need a wider effective level are left out.
+   * ceiling when the owner does not say.
    */
-  listForThread(threadId: string, fallback: ModeCeiling = 'default', granted: AgentAccessLevel = 'lineage', runId?: string): MousseTool[] {
+  listForThread(threadId: string, fallback: ModeCeiling = 'default', runId?: string): MousseTool[] {
     const bot = this.botListing(threadId)
     // A bot's thread tools follow its turn: what the run's registered turn holds now.
     const turn = bot.botRole && runId ? this.options.turns?.get(runId) : undefined
@@ -299,7 +290,6 @@ export class ToolRegistry {
       threadId,
       readOnly: this.options.readOnlyThread?.(threadId) === true,
       modeCeiling: this.options.threadCeiling?.(threadId) ?? fallback,
-      accessLevel: this.effectiveLevel(granted),
       ...bot,
       ...(turn?.bot && turn.threadId === threadId ? { botTurnTools: turn.bot.appTools } : {})
     })
@@ -312,8 +302,8 @@ export class ToolRegistry {
    * none the turn is not offered (`offered`: a browser tool outside the binding, or a screenshot a
    * model without vision cannot see). Any other turn gets the thread's stable listing.
    */
-  listForTurn(threadId: string, runId: string | undefined, granted: AgentAccessLevel = 'lineage'): Array<Pick<MousseTool, 'name' | 'description' | 'inputSchema' | 'class'>> {
-    const listed = this.listForThread(threadId, 'default', granted, runId)
+  listForTurn(threadId: string, runId: string | undefined): Array<Pick<MousseTool, 'name' | 'description' | 'inputSchema' | 'class'>> {
+    const listed = this.listForThread(threadId, 'default', runId)
     const turn = runId ? this.options.turns?.get(runId) : undefined
     const plain = (tool: MousseTool) => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema, class: tool.class })
     if (!turn?.definition || turn.threadId !== threadId) return listed.map(plain)
@@ -396,22 +386,6 @@ export class ToolRegistry {
     }
   }
 
-  /**
-   * What a caller granted `granted` may use now: that level narrowed by the profile's setting as it
-   * is at this moment (SPEC §15.1), so lowering the setting applies to a running turn at once.
-   * Fails closed: an absent or unknown grant, an owner that cannot say what the profile allows, or any
-   * error is `lineage`, the most restrictive level.
-   */
-  effectiveLevel(granted: AgentAccessLevel): AgentAccessLevel {
-    try {
-      const profile = this.options.access?.profileLevel()
-      if (!isAgentAccessLevel(granted) || !isAgentAccessLevel(profile)) return 'lineage'
-      return narrowAgentAccess(granted, profile) ?? 'lineage'
-    } catch {
-      return 'lineage'
-    }
-  }
-
   /** The tools an in-process loop offers this turn, in registration order (none that a `never` run refuses). */
   offeredFor(turn: AppToolTurn): MousseTool[] {
     return this.list().filter((tool) => (tool.offered ? tool.offered(turn) : tool.available?.(turn) ?? true) === true && !unattendedRefusal(tool, turn))
@@ -432,13 +406,13 @@ export class ToolRegistry {
     if (!tool) return this.callUserMcp(name, args, { threadId, active, turn, credential, boundToken, request })
     // A bot's thread tool ("use your threads"): its grant first, which this turn holds only in the lanes that may use the
     // tool and only while this computer allows it (a refusal there is the bot's ask, never a scope error), then where the
-    // call may reach, decided by the bot's rules rather than the profile's agent access level.
+    // call may reach, decided by the bot's rules.
     const botThreads = turn.bot !== undefined && isBotThreadTool(name)
     if (botThreads) {
       const refusal = botAppToolRefusal(turn.bot!, name, args)
       if (refusal) return { text: refusal, isError: true }
     }
-    // Scope and level are checked first: a refused call asks nobody anything and leaves no ledger row.
+    // Scope is checked first: a refused call asks nobody anything and leaves no ledger row.
     const scope = botThreads ? this.botThreadScope(tool, args, caller) : this.authorize(tool, args, caller, this.options.readOnlyThread?.(threadId) === true)
     // A bot's thread lists the browser tools whatever it holds: one its owner has not allowed says so, and how to ask,
     // not that no browser is bound to the turn. One the owner allowed after the turn started is answered as held: the
@@ -468,7 +442,7 @@ export class ToolRegistry {
       const refusal = await this.askBeforeEditing(tool, caller, request.signal, args, undefined, turn.approvals === 'never')
       if (refusal) return refusal
     }
-    const ctx: ToolCallContext = { caller, turn, toolCallId: request.toolCallId, signal: request.signal, transport: 'mcp', level: this.effectiveLevel(caller.accessLevel), ...(scope ? { scope } : {}) }
+    const ctx: ToolCallContext = { caller, turn, toolCallId: request.toolCallId, signal: request.signal, transport: 'mcp', ...(scope ? { scope } : {}) }
     const ledger = this.options.toolLedger?.(active)
     const ledgerId = ledger?.start({ type: 'toolCall', id: ctx.toolCallId, name, arguments: args } as ToolCall)
     let outcome: ToolOutcome
@@ -608,8 +582,7 @@ export class ToolRegistry {
   }
 
   /**
-   * Read-only children, thread scope, the plan ceiling and the agent access level, before anything
-   * runs. Returns how the caller reaches the target of a `readsOthers` or `managesOthers` tool.
+   * Read-only children, thread scope and the plan ceiling, before anything runs. Returns how the caller reaches the target of a `readsOthers` or `managesOthers` tool.
    */
   private authorize(tool: MousseTool, args: Record<string, unknown>, caller: McpCaller, readOnly: boolean): ToolScope | undefined {
     if (tool.access !== 'reads' && tool.access !== 'readsOthers' && !tool.readOnlySafe && readOnly)
@@ -625,9 +598,9 @@ export class ToolRegistry {
 
   /**
    * The central check of `readsOthers` and `managesOthers` tools (SPEC §15.1): how the caller reaches
-   * the target, or `mousse_scope_denied` naming the level it needs. The level is the granted one
-   * narrowed by the profile's setting now, and the project list is the current one. A thread the caller
-   * may not reach is refused the same way whether it exists or not.
+   * the target, or `mousse_scope_denied`. Every agent may read and manage every thread; what stays out
+   * of reach is a thread that does not exist and, across the private line, a private thread. A thread
+   * the caller may not reach is refused the same way whether it exists or not.
    */
   private checkOthers(tool: MousseTool, args: Record<string, unknown>, caller: McpCaller): ToolScope {
     const target = tool.target ? tool.target(args, caller) : { threadId: args.threadId as string | undefined }
@@ -637,7 +610,6 @@ export class ToolRegistry {
     if (target.threadId === undefined && !tool.target) return 'own'
     if (target.threadId === caller.threadId) return 'own'
     const manages = tool.access === 'managesOthers'
-    const needed: AgentAccessLevel = manages ? 'manage' : 'read'
     const policy = this.options.access
     // A private thread's content stays out of shared threads (their content reaches the user's other devices):
     // a shared thread's agent never sees a private thread, and a private thread's agent never sends to or changes a shared one.
@@ -649,23 +621,10 @@ export class ToolRegistry {
       if (callerPrivate && !targetPrivate && manages)
         throw new McpToolError('mousse_scope_denied', 'This is a private thread: its agents cannot send to or change a thread that is shared with the user\'s other devices.')
     }
-    const effective = this.effectiveLevel(caller.accessLevel)
-    const levelOk = levelAtLeast(effective, needed)
-    const reachable = (): boolean => {
-      try {
-        return Boolean(policy) && policy!.projectAllowed(target) && (target.threadId === undefined || policy!.threadExists(target.threadId))
-      } catch {
-        return false
-      }
-    }
-    const lacks = (what: string): McpToolError =>
-      new McpToolError('mousse_scope_denied', `${what} needs the "${needed}" agent access level (yours is "${effective}"); it is set in the profile's agent access setting.`)
     if (target.threadId === undefined) {
-      // A listing: the level, and the project when one is named; the handler filters what it returns.
-      if (!levelOk) throw lacks(tool.name)
-      if (!policy || (target.projectId !== undefined && !reachable()))
-        throw new McpToolError('mousse_scope_denied', `${tool.name} is not available for this project.`)
-      return effective === 'manage' ? 'manage' : 'read'
+      // A listing; the handler filters what it returns.
+      if (!policy) throw new McpToolError('mousse_scope_denied', `${tool.name} is not available here.`)
+      return 'manage'
     }
     let relation: ThreadRelation | null = null
     try {
@@ -673,17 +632,17 @@ export class ToolRegistry {
     } catch {
       relation = null
     }
-    if (manages) {
-      // Lineage is no shortcut for changing a thread; a thread the caller launched is the exception.
-      if (relation === 'launched' && tool.launchedOk) return 'launched'
-      if (levelOk && reachable()) return 'manage'
-    } else {
-      if (levelOk && effective === 'manage' && reachable()) return 'manage'
-      if (relation) return relation
-      if (levelOk && reachable()) return 'read'
+    // A thread the caller launched keeps that scope for the tools that treat it apart.
+    if (manages && relation === 'launched' && tool.launchedOk) return 'launched'
+    let exists = false
+    try {
+      exists = Boolean(policy?.threadExists(target.threadId))
+    } catch {
+      exists = false
     }
-    if (levelOk) throw new McpToolError('mousse_scope_denied', `Thread ${target.threadId} is not available to this credential.`)
-    throw lacks(`Thread ${target.threadId} is not this thread${manages ? '' : ' or one of its lineage'}; ${tool.name}`)
+    if (exists) return 'manage'
+    if (!manages && relation) return relation
+    throw new McpToolError('mousse_scope_denied', `Thread ${target.threadId} is not available to this credential.`)
   }
 
   /**

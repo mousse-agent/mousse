@@ -3,7 +3,6 @@ import { resolveModelChoice } from '../../lib/modelChoice'
 import type { BotComputerLimit, IdleCompactionSetting, MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../../../shared/settings'
 import { BOTS_SHELL_TIP, BOTS_THREADS_TIP, BOTS_UNREADABLE_LINE, normalizeBotSettings, normalizeContextSettings, normalizeExperimentalSettings, oneShotProviderOptions } from '../../../shared/settings'
 import { Select, type SelectOption } from '../ui/Select'
-import type { Project } from '../../../shared/types'
 import type { InstanceSnapshot } from '../../../shared/harness/status'
 import { AgentAccessSettings } from './AgentAccessSettings'
 import { AgentAutomationsSettings } from './AgentAutomationsSettings'
@@ -112,19 +111,17 @@ function BotsHereGroup({ settings, updateSettings }: { settings: MousseSettings;
 
 /**
  * Settings > Agents, in six groups: Models (default, thread titles, bots), Context (compaction and
- * the prompt cache), Access (how far agents may reach into other threads), Subagents, What bots may do
+ * the prompt cache), Access (answering approvals on other threads), Subagents, What bots may do
  * here, and the limits on Automations agents add. Replaces the old Models, Context and per-CLI Agents
  * pages; their stored keys are left untouched.
  */
 export function AgentsSettings({
   settings,
   options,
-  projects,
   updateSettings
 }: {
   settings: MousseSettings
   options: SettingsOptions
-  projects: readonly Project[]
   updateSettings: (partial: MousseSettingsUpdate) => Promise<void>
 }) {
   const providers = options.llmProviders
@@ -290,7 +287,6 @@ export function AgentsSettings({
 
       <AgentAccessSettings
         settings={settings}
-        projects={projects}
         updateSettings={updateSettings}
         subagentRows={
           <SettingsRow
