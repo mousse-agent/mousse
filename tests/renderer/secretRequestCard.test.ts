@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// #595: an agent's secret request shows as a private card above the composer of its thread. The value is typed into a
+// #595: an agent's secret request shows as a private form in the transcript of its thread, in the turn that asked. The value is typed into a
 // masked field, sent once with the chosen keep, and is gone from the window once saved; Decline and Use saved answer too.
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -8,9 +8,15 @@ import type { SecretRequestView } from '../../src/shared/secretRequests'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-vi.mock('../../src/renderer/chat/components/MousseAgentChatShell', () => ({
-  MousseAgentChatShell: ({ composer }: { composer: unknown }) => composer
-}))
+// The shell's chrome is not part of this check: it shows the real transcript list, then the composer.
+vi.mock('../../src/renderer/chat/components/MousseAgentChatShell', async () => {
+  const { createElement, Fragment } = await import('react')
+  const { MessageList } = await import('../../src/renderer/chat/components/agent-elements/message-list')
+  return {
+    MousseAgentChatShell: ({ composer, messages }: { composer: unknown; messages: unknown[] }) =>
+      createElement(Fragment, null, createElement('div', { 'data-testid': 'transcript' }, createElement(MessageList, { messages, status: 'streaming' } as never)), composer)
+  }
+})
 vi.mock('../../src/renderer/dictation/microphone', () => ({}))
 
 const VALUE = 'hf_typed-secret-value-1234'
@@ -133,7 +139,11 @@ describe('the secret card', () => {
     expect(card()).toBeNull()
     await asked('thread-a')
     const dialog = card()!
-    expect(dialog.getAttribute('role')).toBe('dialog')
+    // In the transcript, not over the composer.
+    expect(dialog.closest('[data-testid="transcript"]')).not.toBeNull()
+    expect(dialog.closest('.chat-input-area')).toBeNull()
+    expect(dialog.getAttribute('aria-labelledby')).toBeTruthy()
+    expect(document.getElementById(dialog.getAttribute('aria-labelledby')!)?.textContent).toBe('Hugging Face write token')
     expect(dialog.textContent).toContain('Hugging Face write token')
     expect(dialog.textContent).toContain('To upload the model to the Hub.')
     expect(dialog.textContent).toContain('Expected: starts with hf_')

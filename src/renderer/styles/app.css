@@ -6453,3 +6453,14 @@ html[data-theme='high-contrast'] .composer-input::placeholder {
   color: var(--text-primary);
   font-weight: 500;
 }
+
+/* The secret form in the transcript: the question card's surface, in the flow of the turn instead of over the composer. */
+.composer-question-modal.secret-request-card.is-inline {
+  position: relative;
+  left: auto;
+  right: auto;
+  bottom: auto;
+  z-index: auto;
+  max-width: 640px;
+  box-shadow: var(--ui-dialog-edge);
+}

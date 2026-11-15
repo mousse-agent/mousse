@@ -4,6 +4,8 @@ import { DEFAULT_SECRET_KEEP, SECRET_KEEPS, secretKeepLabel, secretKeepLine, sec
 
 export interface SecretRequestCardProps {
   request: SecretRequestView
+  /** In the transcript, in the turn that asked (rather than over the composer). */
+  inline?: boolean
   /** Save securely. Rejects with a message to show; the typed value is cleared once it resolves. */
   onSave(value: string, keep: SecretKeep): Promise<void>
   onUseSaved(): Promise<void>
@@ -15,7 +17,7 @@ export interface SecretRequestCardProps {
  * sent once, to this computer's daemon; it is never put in the composer, the thread or a notice, and the field is
  * cleared as soon as it is saved.
  */
-export function SecretRequestCard({ request, onSave, onUseSaved, onDecline }: SecretRequestCardProps) {
+export function SecretRequestCard({ request, inline, onSave, onUseSaved, onDecline }: SecretRequestCardProps) {
   const [value, setValue] = useState('')
   const [shown, setShown] = useState(false)
   const [keep, setKeep] = useState<SecretKeep>(DEFAULT_SECRET_KEEP)
@@ -27,8 +29,11 @@ export function SecretRequestCard({ request, onSave, onUseSaved, onDecline }: Se
   const reasonId = `${ids}-reason`
   const keepLineId = `${ids}-keep`
 
+  // The field takes the focus when the request arrives, unless the person is typing somewhere else (the composer).
   useEffect(() => {
-    inputRef.current?.focus()
+    const active = document.activeElement as HTMLElement | null
+    const typing = active && active !== document.body && (active.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName))
+    if (!typing) inputRef.current?.focus({ preventScroll: true })
   }, [request.requestId])
 
   // The value lives only in this card's state: it is gone when the card closes.
@@ -57,7 +62,7 @@ export function SecretRequestCard({ request, onSave, onUseSaved, onDecline }: Se
   }
 
   return (
-    <div className="composer-question-modal secret-request-card" role="dialog" aria-labelledby={titleId} aria-describedby={reasonId}>
+    <div className={`composer-question-modal secret-request-card${inline ? ' is-inline' : ''}`} role={inline ? 'group' : 'dialog'} aria-labelledby={titleId} aria-describedby={reasonId}>
       <div className="composer-question-modal-header">
         <h3 className="composer-question-modal-title" id={titleId}>
           <Lock size={15} aria-hidden="true" />
