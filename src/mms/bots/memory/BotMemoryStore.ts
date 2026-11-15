@@ -740,11 +740,13 @@ export class BotMemoryStore {
         if (entry.kind !== kind) return { error: 'refused', reason: 'Absorbed entries must be of the same kind as the saved entry.' }
         if (entry.id !== replaced?.id) absorbed.set(entry.id, entry)
       }
-      const duplicate = this.get("SELECT * FROM bot_memories WHERE bot_id = ? AND text_hash = ? AND status = 'active' AND kind = ? LIMIT 1", botId, hash, kind)
-      if (duplicate && input.merges?.length && duplicate.id !== replaced?.id && !absorbed.has(duplicate.id as string)) {
-        const entry = versionOf(duplicate)
-        return { error: 'refused', reason: `That text is already active as ${memoryRef(entry.id, entry.version)}. Include that entry in merges to combine it too.` }
+      const duplicates = this.all("SELECT * FROM bot_memories WHERE bot_id = ? AND text_hash = ? AND status = 'active'", botId, hash)
+      const outside = duplicates.find((entry) => entry.id !== replaced?.id && !absorbed.has(entry.id as string))
+      if (outside && input.merges?.length) {
+        const entry = versionOf(outside)
+        return { error: 'refused', reason: `That text is already active as ${memoryRef(entry.id, entry.version)}.` }
       }
+      const duplicate = duplicates.find((entry) => entry.kind === kind)
       if (duplicate && !replaced && !absorbed.size) {
         const version = versionOf(duplicate)
         return { id: version.id, version: version.version, ref: memoryRef(version.id, version.version), gauge: this.gauge(botId, input.lane) }
