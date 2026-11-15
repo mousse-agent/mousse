@@ -173,3 +173,16 @@ it('a removed schedule reports why its note is not kept', async () => {
   await finish(f, turn.payload, 'completed', { text: '[SILENT]' })
   expect(memory.progress(botId, a)).toBeUndefined()
 })
+
+it('marking a paused run done drops pending progress and keeps its last successful note', async () => {
+  const { a, id, turn, report } = await setup()
+  memory.saveProgress(botId, a, 'previous', 'Last successful place.')
+  await report('Not yet confirmed.')
+  f.runs.tools.start({ invocationId: 'pending-edit', runId: turn.payload.runId, attemptId: f.runs.getRun(turn.payload.runId)!.activeAttemptId!, tool: 'edit', argsDigest: 'd', now: new Date(T0).toISOString(), idempotent: false })
+  await finish(f, turn.payload, 'completed', { text: 'Draft result.' })
+  expect(f.store.activation(id)?.status).toBe('paused')
+  expect(memory.getState(botId, `progress_pending:${id}`)).toBeDefined()
+  expect(f.bots.markDone(id, { acknowledge: { calls: ['pending-edit'] } }).status).toBe('done')
+  expect(memory.getState(botId, `progress_pending:${id}`)).toBeUndefined()
+  expect(memory.progress(botId, a)).toBe('Last successful place.')
+})
