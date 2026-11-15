@@ -343,3 +343,11 @@ it('Forget removes a redacted message’s legacy receipt and preserves unrelated
   expect(f.store.get('SELECT 1 FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, `cursor:telling-legacy:${forgotten.id}`)).toBeUndefined()
   expect(f.store.get('SELECT 1 FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, `cursor:telling-legacy:${kept.id}`)).toBeDefined()
 })
+
+it('holds unattended reports until the configured end without hiding the chat row', () => {
+  f.clock.now = Date.parse('2026-11-07T23:00:00Z')
+  Object.assign(f.host, { quietHoursFor: () => ({ end: Date.parse('2026-11-08T08:00:00Z') }), ownerActive: () => false })
+  const message = f.bots.chat.post({ botId, author: 'bot', kind: 'run_report', text: 'Night report' })
+  expect(f.store.message(message.id)?.tellAt).toBe('2026-11-08T08:00:00.000Z')
+  expect(f.bots.service.chatList(botId).messages.some(m => m.id === message.id)).toBe(true)
+})
