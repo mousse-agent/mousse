@@ -94,6 +94,20 @@ describe('run_report and the run record', () => {
     expect(resumed.until).toBeUndefined()
     expect(runs.list().runs).toHaveLength(1)
   })
+
+  it('drops a held bot run\'s report when it starts again under another activation, and keeps it under the same one', () => {
+    begin('bot-job', 'k1', { botId: 'bot_1', activationId: 'act_1' })
+    runs.report({ threadId: '', activationId: 'act_1' }, 'quiet', 'Nothing changed')
+    runs.update('bot-job', 'k1', { state: 'paused_usage' })
+    // The same activation going on keeps what it reported.
+    begin('bot-job', 'k2', { botId: 'bot_1', activationId: 'act_1' })
+    expect(runs.levelOfActivation('act_1')).toBe('quiet')
+    runs.update('bot-job', 'k2', { state: 'paused_usage' })
+    // A later occurrence's activation takes the held run and has reported nothing yet.
+    begin('bot-job', 'k3', { botId: 'bot_1', activationId: 'act_2' })
+    expect(runs.levelOfActivation('act_2')).toBeUndefined()
+    expect(runs.list().runs).toHaveLength(1)
+  })
 })
 
 describe('the Needs you queue', () => {

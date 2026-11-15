@@ -244,12 +244,15 @@ export class AutomationRuns {
         )
         return String(existing.id)
       }
-      const held = this.row(`SELECT id FROM runs WHERE job_id = ? AND state = 'paused_usage' AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1`, input.jobId)
+      const held = this.row(`SELECT id, activation_id FROM runs WHERE job_id = ? AND state = 'paused_usage' AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1`, input.jobId)
       if (held) {
+        // A bot's held run that starts again under another activation reports anew: the old one's report is not its.
+        const another = Boolean(input.activationId && held.activation_id && held.activation_id !== input.activationId)
         this.run(
           `UPDATE runs SET occurrence_key = ?, state = ?, until = NULL, thread_id = COALESCE(?, thread_id), activation_id = COALESCE(?, activation_id) WHERE id = ?`,
           input.occurrenceKey, input.state ?? 'running', input.threadId ?? null, input.activationId ?? null, String(held.id)
         )
+        if (another) this.run('UPDATE runs SET level = NULL, summary = NULL, reported_at = NULL WHERE id = ?', String(held.id))
         return String(held.id)
       }
       const number = Number(this.row('SELECT COALESCE(MAX(number), 0) + 1 AS next FROM runs WHERE job_id = ?', input.jobId)?.next ?? 1)
