@@ -16,9 +16,9 @@ import {
   useSideCardVisible
 } from './sideCard/sideCardLogic'
 import { useAppStore } from '../stores/appStore'
-import { useNeedsMeCount } from '../lib/needsMe'
+import { useNeedsMeCounts } from '../lib/needsMe'
 import { useMainAreaAvailable } from '../lib/mainAreaAvailable'
-import { attentionCountLabel } from '../../shared/threadAttention'
+import { needsMeLabel } from '../../shared/threadAttention'
 import { channelForVersion } from '../../shared/updates'
 import stableLogoIcon from '../assets/mousse_logo_icon.svg'
 import nightlyLogoIcon from '../assets/mousse_logo_icon_nightly.webp'
@@ -37,7 +37,8 @@ export function TitleBar() {
   const sideCardVisible = useSideCardVisible()
   const sideCardMode = useSideCardMode()
   const sideCardUnavailable = useSideCardUnavailable()
-  const needsMeCount = useNeedsMeCount()
+  const needsMe = useNeedsMeCounts()
+  const needsMeCount = needsMe.threads + needsMe.bots
   // The sidebar shows who needs the person; while it is closed, its toggle carries the count.
   const showBadge = !threadsSidebarOpen && needsMeCount > 0
   // The dock or taskbar carries the same count while the window is in the background.
@@ -46,7 +47,7 @@ export function TitleBar() {
   }, [needsMeCount])
   // In the Chats tab, New starts an agent chat. Search is in the navigation rail.
   const chatsMode = useAppStore((s) => s.sidebarMode === 'chats')
-  const sidebarLabel = threadsSidebarOpen ? 'Hide sidebar' : showBadge ? `Show sidebar · ${attentionCountLabel(needsMeCount)}` : 'Show sidebar'
+  const sidebarLabel = threadsSidebarOpen ? 'Hide sidebar' : showBadge ? `Show sidebar · ${needsMeLabel(needsMe.threads, needsMe.bots)}` : 'Show sidebar'
   const sidebarTitle = useShortcutTitle(sidebarLabel, 'sidebar.toggle')
   const newThreadTitle = useShortcutTitle('New thread', 'thread.new')
   const detailsTitle = useShortcutTitle('Thread details', 'sideCard.toggle')

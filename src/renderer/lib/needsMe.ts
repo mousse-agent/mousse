@@ -43,8 +43,8 @@ export function useNeedsMeThreads(): Thread[] {
 }
 
 /** Threads and bots waiting on an answer, one per bot regardless of its number of open cards. */
-export function useNeedsMeCount(): number {
+export function useNeedsMeCounts(): { threads: number; bots: number } {
   const threads = useNeedsMeThreads()
   const bots = useBotsStore((s) => s.bots)
-  return threads.length + bots.filter((bot) => bot.state !== 'paused' && (bot.needsOwner || bot.state === 'needs_you')).length
+  return { threads: threads.length, bots: bots.filter((bot) => bot.state !== 'paused' && (bot.needsOwner || bot.state === 'needs_you')).length }
 }
