@@ -200,7 +200,7 @@ describe('going back to an older build and coming back', () => {
   it('restores a fixed line when an older build kept the bot link but lost its new keys', () => {
     move()
     const job = jobs.getJob('bot-a--news')!
-    jobs.updateJob(job.id, { bot: { ...job.bot!, say: 'Take your pills' } } as never)
+    jobs.updateJob(job.id, { prompt: 'Say exactly: Take your pills', bot: { ...job.bot!, say: 'Take your pills' } })
     const inside = jobs as unknown as { config: MousseConfigStore }
     inside.config.updateScheduledSection({ jobs: jobs.listJobs().map((row) => {
       const definition = jobToDefinition(row)
@@ -214,7 +214,7 @@ describe('going back to an older build and coming back', () => {
   it('restoring dropped bot keys does not restore an intentionally removed model', () => {
     move()
     const job = jobs.getJob('bot-a--news')!
-    jobs.updateJob(job.id, { bot: { ...job.bot!, model: 'old-model', say: 'Hello' } })
+    jobs.updateJob(job.id, { prompt: 'Say exactly: Hello', bot: { ...job.bot!, model: 'old-model', say: 'Hello' } })
     const inside = jobs as unknown as { config: MousseConfigStore }
     inside.config.updateScheduledSection({ jobs: jobs.listJobs().map((row) => {
       const definition = jobToDefinition(row)
@@ -224,6 +224,27 @@ describe('going back to an older build and coming back', () => {
     jobs.restoreDroppedFields()
     expect(jobs.getJob(job.id)!.bot?.say).toBe('Hello')
     expect(jobs.getJob(job.id)!.bot?.model).toBeUndefined()
+  })
+
+  it.each([true, false])('an older build edit wins over kept say (bot link survives: %s)', (survives) => {
+    move()
+    const job = jobs.getJob('bot-a--news')!
+    jobs.updateJob(job.id, { prompt: 'Say exactly: Take your pills', bot: { ...job.bot!, say: 'Take your pills' } })
+    const inside = jobs as unknown as { config: MousseConfigStore }
+    inside.config.updateScheduledSection({ jobs: jobs.listJobs().map((row) => {
+      const definition = jobToDefinition(row)
+      if (row.id === job.id) {
+        definition.prompt = 'Check my inbox and tell me what matters.'
+        if (survives) delete definition.bot!.say
+        else delete definition.bot
+      }
+      return definition
+    }) })
+    jobs.restoreDroppedFields()
+    expect(jobs.getJob(job.id)!.prompt).toBe('Check my inbox and tell me what matters.')
+    expect(jobs.getJob(job.id)!.bot?.say).toBeUndefined()
+    jobs.restoreDroppedFields()
+    expect(jobs.getJob(job.id)!.bot?.say).toBeUndefined()
   })
 
   it('puts back every field an older build’s save dropped: a bot’s link, a draft, keys, Tell me and a CLI name', () => {
