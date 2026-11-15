@@ -49,7 +49,7 @@ it('sends zero with no bots and counts a waiting bot once alongside threads, bef
     threadActivity: { t: 'awaiting_input' }
   }))
   expect(badge).toHaveBeenLastCalledWith(2)
-  expect(host.querySelector('button[aria-label="Show sidebar · 2 items need you"]')).not.toBeNull()
+  expect(host.querySelector('button[aria-label="Show sidebar · 1 thread and 1 bot need you"]')).not.toBeNull()
 })
 
 it('loads waiting bots on mount without a change event or opening Chats', async () => {
@@ -76,4 +76,35 @@ it('counts a waiting bot once despite multiple waiting work items, including whe
   fake.bots = [summary('a', { state: 'stuck' })]
   await change()
   expect(badge).toHaveBeenLastCalledWith(0)
+})
+
+
+it.each([
+  [1, 0, '1 thread needs you'],
+  [2, 0, '2 threads need you'],
+  [0, 1, '1 bot needs you'],
+  [0, 2, '2 bots need you'],
+  [1, 2, '1 thread and 2 bots need you'],
+  [2, 1, '2 threads and 1 bot need you']
+] as const)('names %s threads and %s bots in the sidebar toggle', async (threads, bots, label) => {
+  fake.bots = Array.from({ length: bots }, (_, i) => summary(`b${i}`, { state: 'working', needsOwner: true }))
+  useAppStore.setState({
+    threads: Array.from({ length: threads }, (_, i) => ({ id: `t${i}`, name: 'Thread', startedAt: '2026-11-01', createdAt: '2026-11-01', order: i })),
+    threadActivity: Object.fromEntries(Array.from({ length: threads }, (_, i) => [`t${i}`, 'awaiting_input']))
+  })
+  await show()
+  expect(host.querySelector(`button[aria-label="Show sidebar · ${label}"]`)).not.toBeNull()
+})
+
+it('refreshes at activation and on pushes without title bar polling', async () => {
+  vi.useFakeTimers()
+  const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
+  try {
+    await show()
+    const calls = fake.calls.filter(([method]) => method === 'list').length
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000) })
+    expect(fake.calls.filter(([method]) => method === 'list')).toHaveLength(calls)
+    await change()
+    expect(fake.calls.filter(([method]) => method === 'list')).toHaveLength(calls + 1)
+  } finally { visibility.mockRestore(); vi.useRealTimers() }
 })
