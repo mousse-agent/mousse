@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { trackChildProcess, untrackChildProcess } from '../../../diagnostics/liveCounts'
-import { accessSync, constants, existsSync, mkdirSync, readFileSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
 import type { EffortLevel, ModelInfo, Options, PermissionMode, Query, SDKMessage, SDKResultMessage, SDKUserMessage, SettingSource, Settings as SdkSettings } from '@anthropic-ai/claude-agent-sdk'
 import type {
@@ -37,7 +37,7 @@ import { TURN_TOKEN_KEY } from '../../../run/mcp/appTools/registry'
 import type { LoginSession } from '../../../providers/LoginSession'
 import { settingsMirror, type MirrorField, type VendorMirror } from '../../vendorMirror'
 import { withEnforced } from '../../env'
-import { CLAUDE_BOT_FILE_DATA_NOTE, CLAUDE_FILE_TEXT_TOOLS, CLAUDE_LOCKED_REMOVED_OPTIONS, claudeBotTemp, claudeCommandsRefusal, holdClaudeBotTemp, ClaudeLockedGate, claudeLockedOptions, claudeOwnStorage, claudeLockedSpawn, type ClaudeLockedTurn } from '../../claude/locked'
+import { CLAUDE_BOT_FILE_DATA_NOTE, CLAUDE_FILE_TEXT_TOOLS, CLAUDE_LOCKED_REMOVED_OPTIONS, claudeBotTemp, claudeCommandsRefusal, holdClaudeBotTemp, ClaudeLockedGate, claudeLockedOptions, claudeLockedSettingsFile, claudeOwnStorage, claudeLockedSpawn, type ClaudeLockedTurn } from '../../claude/locked'
 import {
   claudeExtraArgs,
   cliFingerprint,
@@ -3168,6 +3168,8 @@ export class ClaudeSubscriptionProviderService {
     const turn: TurnContext = { input, controller, integrations, editCounter, planTurn, restricted, permissionMode: threadMode, ...(lockedTurn ? { locked: new ClaudeLockedGate(lockedTurn, Boolean(input.mcp)) } : {}) }
     // The bot's private temporary folder is in use until this turn ends; the last of its turns to end empties it.
     const releaseBotTemp = botTemp ? holdClaudeBotTemp(botTemp.dir) : undefined
+    // The folder of the turn's settings file (`claudeLockedSettingsFile`), removed when it ends.
+    let lockedSettingsFolder: string | undefined
     try {
       const signedIn = await this.authenticated(controller.signal, env)
       if (!signedIn)
@@ -3318,15 +3320,17 @@ export class ClaudeSubscriptionProviderService {
       }
       // A locked turn: the locked profile over everything above, and nothing that would widen it.
       const lockedOptions = (sdkController: AbortController, turnOf: () => TurnContext): Options => {
-        const options: Options = {
-          ...buildOptions(sdkController, turnOf, false),
-          ...claudeLockedOptions(lockedTurn!, {
-            env,
-            mousseTools: Boolean(input.mcp),
-            // On the owner's entry the process is the turn's own and the SDK's: the turn's signal ends it.
-            ...(locked!.ownerEntry ? {} : { spawn: claudeLockedSpawn(locked!.onProcess ? { onProcess: locked!.onProcess } : {}) })
-          })
-        }
+        // Made before the options: a sandbox that closes Mousse's entries in the temporary folder closes this one too.
+        lockedSettingsFolder ??= mkdtempSync(join(tmpdir(), 'mousse-claude-settings-'))
+        const base = buildOptions(sdkController, turnOf, false)
+        const own = claudeLockedOptions(lockedTurn!, {
+          env,
+          mousseTools: Boolean(input.mcp),
+          // On the owner's entry the process is the turn's own and the SDK's: the turn's signal ends it.
+          ...(locked!.ownerEntry ? {} : { spawn: claudeLockedSpawn(locked!.onProcess ? { onProcess: locked!.onProcess } : {}) })
+        })
+        const settings = { ...(typeof base.settings === 'object' ? base.settings : {}), ...(own.settings as SdkSettings) }
+        const options: Options = { ...base, ...own, settings: claudeLockedSettingsFile(settings, lockedSettingsFolder) }
         for (const name of CLAUDE_LOCKED_REMOVED_OPTIONS) delete options[name]
         // The same thread's own session resumes; nothing else is carried over.
         if (resume) options.resume = resume
@@ -3658,6 +3662,14 @@ export class ClaudeSubscriptionProviderService {
       this.controllers.delete(controller)
       this.activeThreads.delete(input.threadId)
       releaseBotTemp?.()
+      // Claude Code read the settings when it started; nothing reads them once the turn ended.
+      if (lockedSettingsFolder) {
+        try {
+          rmSync(lockedSettingsFolder, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+        } catch (error) {
+          console.warn('[claude] the settings file of a bot turn could not be removed', error instanceof Error ? error.message : String(error))
+        }
+      }
       if (steerTimer) clearInterval(steerTimer)
       input.signal?.removeEventListener('abort', cancel)
       const report = metrics.report()

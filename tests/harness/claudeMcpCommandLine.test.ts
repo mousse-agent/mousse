@@ -1101,6 +1101,54 @@ describe('MCP credentials are never on Claude Code\'s command line or in its env
     expect(results[4]).toContain(`ordinary ${mark}`)
   }, 120_000)
 
+  it.skipIf(!hasBinary)(`a bot with file access where tens of thousands of Mousse's folders are left in the temporary folder: its turn starts with a command line Windows accepts, its closed places in a settings file, and Grep and Glob still skip them${NO_BINARY}`, async () => {
+    const plans: Record<string, Json[]> = { search: [] }
+    const run = await rig(plans)
+    const root = realpathSync(run.dirs.root)
+    const mark = `lefttemp${Date.now()}`
+    const mousseHome = join(root, '.mousse')
+    const temp = join(root, 'tmp')
+    // One of Mousse's folders left in the temporary folder holds a file; 25,000 more are only named, as a machine where
+    // tests or crashes left them lists them (the owner's had 22,151). An ordinary file beside them stays open.
+    const closed = [join(mousseHome, 'profiles', 'p1', 'bots', 'bots.db'), join(temp, 'mousse-left-1', 'pasted.txt')]
+    const open = [join(temp, 'ordinary.txt'), join(root, 'notes', 'plain.txt')]
+    for (const [files, text] of [[closed, 'secret'], [open, 'ordinary']] as const) for (const file of files) {
+      mkdirSync(dirname(file), { recursive: true })
+      writeFileSync(file, `${text} ${mark}\n`)
+    }
+    const left = Array.from({ length: 25_000 }, (_, index) => join(temp, `mousse-left-${index + 2}-${'x'.repeat(20)}`))
+    const outside = [...botClosedPlaces({ mousseHome, env: { CLAUDE_CONFIG_DIR: run.dirs.instanceHome }, userHome: join(root, 'home'), temps: [temp], entryEnvs: [] }), ...left]
+    expect(outside).toContain(join(temp, 'mousse-left-1'))
+    plans.search = [
+      { name: 'Grep', input: { pattern: mark, path: root, output_mode: 'content' } },
+      { name: 'Glob', input: { pattern: '**/*', path: temp } }
+    ]
+    const authority = createBotAuthority({
+      activationId: 'act-1', role: 'activation',
+      permissions: { tools: ['read', 'list', 'search'], appTools: [], mcp: [], skills: [], workspace: { roots: [root], access: 'read', writeRoots: [], scratch: run.dirs.scratch, files: run.dirs.files, computer: { closed: mousseHome, outside } } },
+      waiting: () => false, counters: { charge: vi.fn(() => ({ ok: true as const, count: 1 })) as never },
+      time: { deadline: () => Number.MAX_SAFE_INTEGER, signal: new AbortController().signal }, spend: null
+    })
+    const locked: ClaudeLockedTurn = { authority, ownerEntry: true, ledger: run.ledger, cwd: run.dirs.files, shellContained: false, temps: [temp], systemPrompt: 'You are a test bot.' }
+    const text = await run.service.chat({ threadId: 'bot-left-temp', cwd: run.dirs.files, model: 'claude-sonnet-4-5', prompt: 'PLAN:search', permissionMode: 'ask', locked, mcp: null, onText: () => undefined })
+    expect(text).toContain('done')
+    // Windows refuses a command line over 32,767 characters (`spawn ENAMETOOLONG`); the closed places are not on it.
+    const args = run.started[0]!.args
+    expect([BINARY, ...args].map((arg) => arg.length + 3).reduce((sum, length) => sum + length, 0)).toBeLessThan(32_767)
+    expect(args.join(' ')).not.toContain('Read(')
+    const settings = args[args.indexOf('--settings') + 1]!
+    expect(settings.endsWith('.json')).toBe(true)
+    // The settings file goes with the turn.
+    expect(existsSync(dirname(settings))).toBe(false)
+    const results = run.anthropic.requests.filter((request) => request.plan === 'search').at(-1)!.results
+    expect(results).toHaveLength(2)
+    const said = results.join('\n')
+    expect(said).not.toContain(`secret ${mark}`)
+    expect(said).not.toContain('mousse-left-1')
+    expect(results[0]).toContain(`ordinary ${mark}`)
+    expect(results[1]).toContain('ordinary.txt')
+  }, 120_000)
+
   /** Each way the user's servers reach Claude Code: a startup channel, or its input (Windows). */
   const PATHS = [...CHANNELS.map((channel) => ({ name: channel, options: { channel } })), { name: 'input', options: { viaInput: POSIX } }]
 

@@ -18,6 +18,7 @@ import {
   claudeLockedCaps,
   claudeLockedHoldsBots,
   claudeLockedOptions,
+  claudeReadDenyRules,
   claudeManagedPolicyIn,
   ClaudeLockedGate,
   CLAUDE_MANAGED_POLICY_REFUSAL,
@@ -74,6 +75,13 @@ function authorityFor(tools: NeutralTool[], workspace: { root: string; scratch: 
 
 type Probe = (options: Options) => Promise<void>
 
+/** The settings file each query was started with, read while the turn runs (it goes when the turn ends), by its options. */
+const settingsRead = new Map<Options, Record<string, unknown>>()
+const readSettings = (options: Options) => {
+  if (typeof options.settings === 'string') settingsRead.set(options, JSON.parse(readFileSync(options.settings, 'utf8')) as Record<string, unknown>)
+}
+const settingsOf = (options: Options): Record<string, unknown> => settingsRead.get(options) ?? {}
+
 /** The servers each query was given over its input (`setMcpServers`, #358), by its options. */
 const registered = new Map<Options, Record<string, unknown>>()
 const registering = (options: Options) => ({
@@ -96,6 +104,7 @@ function lockedService(probe: Probe, result: Record<string, unknown> = { type: '
   const captured: Options[] = []
   const query = ({ options }: { options: Options }): Query => {
     captured.push(options)
+    readSettings(options)
     const generator = (async function* () {
       await probe(options)
       yield result
@@ -144,6 +153,7 @@ function ownerService(probe: Probe, result: Record<string, unknown> = { subtype:
   const captured: Options[] = []
   const query = ({ options }: { options: Options }): Query => {
     captured.push(options)
+    readSettings(options)
     const generator = (async function* () {
       await probe(options)
       yield { type: 'result', ...result, session_id: 'owner-session' }
@@ -284,7 +294,7 @@ describe('"run commands" on the owner\'s own Claude Code entry', () => {
     expect(options.tools).toEqual(['Bash', 'Read', 'ToolSearch'])
     expect(options.disallowedTools).not.toContain('Bash')
     // Writable: the files folder and scratch; the read-only folder is denied; the network is closed.
-    expect(options.sandbox).toMatchObject({ enabled: true, allowUnsandboxedCommands: false, filesystem: { allowWrite: [files, scratch], denyWrite: expect.arrayContaining([root]) }, network: { allowedDomains: [] } })
+    expect(settingsOf(options).sandbox).toMatchObject({ enabled: true, allowUnsandboxedCommands: false, filesystem: { allowWrite: [files, scratch], denyWrite: expect.arrayContaining([root]) }, network: { allowedDomains: [] } })
     // Any command is allowed by the grant (it goes on to canUseTool, never the person); the sandbox is never left.
     expect(decisions.command).toMatchObject({ hookSpecificOutput: { permissionDecision: 'ask' } })
     expect(decisions.escape).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } })
@@ -310,12 +320,31 @@ describe('"run commands" on the owner\'s own Claude Code entry', () => {
       expect(turn).toMatchObject({ ownerEntry: true, shellContained: false, shellOpen: true })
       expect(claudeLockedTools(turn, false).tools).toEqual(['Bash', 'Read'])
       expect(new ClaudeLockedGate({ ...turn, ledger: fakeLedger().ledger }, false).preToolUse('Bash', { command: 'make' })).toEqual({ ok: true })
-      expect(claudeLockedOptions(turn, { env: {}, mousseTools: false })).not.toHaveProperty('sandbox')
+      expect(claudeLockedOptions(turn, { env: {}, mousseTools: false }).settings).not.toHaveProperty('sandbox')
     }
   })
 })
 
 describe('locked Claude Code: launch options (item 1, 4, 7)', () => {
+  it('closes Mousse\'s entries in a temporary folder with one pattern per folder, however many there are, and names every other closed place', () => {
+    const root = temp('claude-deny-root-')
+    const temps = [join(root, 'tmp'), join(root, 'tmp2')]
+    const scratch = join(root, 'scratch')
+    const other = join(root, 'apps', 'mousse-data')
+    const outside = [
+      ...Array.from({ length: 5_000 }, (_, index) => join(temps[0]!, `mousse-left-${index}`)),
+      join(temps[1]!, 'mousse-hub-1'),
+      // Not Mousse's entry in a temporary folder: named as itself.
+      join(temps[0]!, 'other.sock'),
+      other
+    ]
+    const rules = claudeReadDenyRules({ roots: [root], access: 'read', scratch, computer: { closed: join(root, '.mousse'), outside } }, temps)
+    const form = (path: string) => `/${path.replace(/\\/g, '/').replace(/^([A-Za-z]):/, (_, drive: string) => `/${drive.toLowerCase()}`)}`.replace(/^\/\/\//, '//')
+    for (const place of [join(root, '.mousse'), join(temps[0]!, 'other.sock'), other]) expect(rules, place).toEqual(expect.arrayContaining([`Read(${form(place)})`, `Read(${form(place)}/**)`]))
+    for (const temp of temps) expect(rules, temp).toEqual(expect.arrayContaining([`Read(${form(temp)}/mousse-*)`, `Read(${form(temp)}/mousse-*/**)`]))
+    expect(rules).toHaveLength(10)
+  })
+
   it('loads nothing of the user\'s setup, runs in scratch, and offers exactly the granted built-ins', async () => {
     vi.stubEnv('SOME_USER_TOKEN', 'secret-from-parent')
     vi.stubEnv('ANTHROPIC_API_KEY', 'sk-ant-api-inherited')

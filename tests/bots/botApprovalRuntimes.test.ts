@@ -293,7 +293,7 @@ describe('What bots may do here, at each runtime\'s own gate (the owner\'s Claud
     // The turn is still offered Bash, so the bot hears why; no sandbox is built for it.
     const options = claudeLockedOptions(turn, { env: {}, mousseTools: false })
     expect(options.tools).toContain('Bash')
-    expect(options.sandbox).toBeUndefined()
+    expect((options.settings as { sandbox?: unknown }).sandbox).toBeUndefined()
     // Not refused where it doesn't apply: listable, another platform, or file access (whose sandbox closes Mousse's data only).
     expect(claudeCommandsRefusal(prepared.authority, 'linux', () => ['usr'])).toBeUndefined()
     expect(claudeCommandsRefusal(prepared.authority, 'darwin', unlisted)).toBeUndefined()
