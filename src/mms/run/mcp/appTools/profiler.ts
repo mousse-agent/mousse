@@ -5,7 +5,7 @@ import {
   type ProfilerSettings,
   type ProfilerToolName
 } from '../../../../shared/diagnostics/profiler'
-import { MMS_PROTOCOL_REPLAY_RING_SIZE } from '../../../protocol/types'
+import { MMS_PROTOCOL_REPLAY_RING_BYTES, MMS_PROTOCOL_REPLAY_RING_SIZE } from '../../../protocol/types'
 import { MAX_CACHED_BYTES, MAX_CACHED_THREADS } from '../../../data/threadDb/threadDbStore'
 import { HeapSummaryError } from '../../../diagnostics/heapSummary'
 import type { ProfilerService, ThreadMemory } from '../../../diagnostics/profilerService'
@@ -223,7 +223,7 @@ async function run(
         thresholds: monitor.thresholds,
         threads: visibleThreadMemory(service.threads(env.profiler.owner), env.host, ctx, env.engine),
         cacheLimits: { threads: MAX_CACHED_THREADS, mb: MAX_CACHED_BYTES / 1048576 },
-        replayLimitPerProfile: MMS_PROTOCOL_REPLAY_RING_SIZE
+        replayLimitPerProfile: { events: MMS_PROTOCOL_REPLAY_RING_SIZE, mb: MMS_PROTOCOL_REPLAY_RING_BYTES / 1048576 }
       }))
     }
     case 'profiler_window_breakdown': {

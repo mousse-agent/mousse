@@ -84,7 +84,7 @@ export function serviceBreakdownReport(input: {
   thresholds: MemoryThresholds
   threads: ThreadMemory
   cacheLimits: { threads: number; mb: number }
-  replayLimitPerProfile: number
+  replayLimitPerProfile: { events: number; mb: number }
 }) {
   const { sample, detail, thresholds } = input
   const c: ServiceCounts = sample.counts
@@ -119,7 +119,7 @@ export function serviceBreakdownReport(input: {
     bounds: { ...thresholds.counts },
     caches: {
       threadDatabase: { threads: c.threadCacheThreads, mb: c.threadCacheMb, maxThreads: input.cacheLimits.threads, maxMb: input.cacheLimits.mb },
-      replayBuffer: { events: c.replayEvents, mb: sample.replayMb ?? null, maxEventsPerProfile: input.replayLimitPerProfile }
+      replayBuffer: { events: c.replayEvents, mb: sample.replayMb ?? null, maxEventsPerProfile: input.replayLimitPerProfile.events, maxMbPerProfile: input.replayLimitPerProfile.mb }
     },
     threads: threads.slice(0, MAX_THREADS).map((entry) => ({
       threadId: entry.threadId ?? null,

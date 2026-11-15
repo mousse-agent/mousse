@@ -23,6 +23,12 @@ export const MMS_PROTOCOL_ORCHESTRATOR_SEND_TIMEOUT_MS = 30 * 60_000
 /** Git mutations can wait on hooks, credential helpers or a slow remote; Git itself decides when they are stuck. */
 export const MMS_PROTOCOL_GIT_OPERATION_TIMEOUT_MS = 30 * 60_000
 export const MMS_PROTOCOL_REPLAY_RING_SIZE = 512
+/**
+ * The most a profile's replay ring holds, by its size estimate. Past it the oldest events leave, and a client that
+ * needed them sees a gap and takes a fresh snapshot. A subscribe replays at most 1 MiB anyway (half the outbound
+ * backlog), so this only bounds what a client that fell a little behind can catch up on.
+ */
+export const MMS_PROTOCOL_REPLAY_RING_BYTES = 8 * 1024 * 1024
 export const MMS_PROTOCOL_MAX_PENDING_REQUESTS = 64
 /** Per-connection outbound write backlog before disconnecting a slow client. */
 export const MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES = 2 * 1024 * 1024 // 2 MiB
