@@ -292,6 +292,26 @@ describe('memory tools', () => {
     for (const file of (await admin.export('ada', fx.home)).files) expect(readFileSync(file, 'utf8')).not.toContain('4471')
   })
 
+  it('the dialog names required memories by guarded first words and the bot name, without refs', async () => {
+    const fx = memoryFixture()
+    const { store } = fx
+    store.save('ada', { lane: 'chat', kind: 'note', text: 'Original note.' })
+    store.save('ada', { lane: 'chat', kind: 'note', text: 'Combined home note with enough detail to be shortened on screen.', merges: ['m1'] })
+    store.save('ada', { lane: 'chat', kind: 'note', text: 'Original note.', replaces: 'm1v2' })
+    const admin = createBotMemoryAdmin({ store, name: () => 'Ada' })
+    const methods = botMemoryMethods(admin)
+    const refusal = await methods['bots.memory.forget']({ profileId: 'p', botId: 'ada', id: 'm1v3' }).catch(error => error as Error)
+    expect(refusal).toBeInstanceOf(Error)
+    expect((refusal as Error).message).toBe('These memories still hold those words: “Original note.”; “Combined home note with enough detail…”. Ask Ada to forget these together, then save again what should stay.')
+    // Older stored text must be screened before shortening the excerpt.
+    fx.db.statement('UPDATE bot_memories SET text = ? WHERE bot_id = ? AND id = ? AND version = 1')
+      .run('Home password=fictional-legacy-value', 'ada', 'm2')
+    const guarded = await methods['bots.memory.forget']({ profileId: 'p', botId: 'ada', id: 'm1v3' }).catch(error => error as Error)
+    expect((guarded as Error).message).toContain('held back')
+    expect((guarded as Error).message).not.toContain('fictional-legacy-value')
+    expect((guarded as Error).message).not.toMatch(/m[12](?:v\d+)?/)
+  })
+
   it.each(['bot', 'dialog'])('%s Forget preserves a put-back fact that only shared a combination', async (via) => {
     const fx = memoryFixture()
     const { call } = setup(fx)
