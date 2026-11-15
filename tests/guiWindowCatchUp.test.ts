@@ -61,13 +61,17 @@ const service = {
   turn: idle as TurnState,
   activity: {} as ThreadActivitySnapshot,
   messages: [message('u1', 'user', 'first question', 0), message('a1', 'assistant', 'first answer', 1)],
-  revision: 10
+  revision: 10,
+  // The run still records its end checkpoint after its turn shows completed (#1245): the service then reports the run
+  // as active and running while its turn's phase is already `completed`.
+  runFinalizing: false
 }
+const runActive = (): boolean => service.runFinalizing || service.turn.phase === 'thinking'
 const snapshot = () => ({
   messages: [...service.messages],
   queue: [],
   claimed: [],
-  activeTurn: { active: service.turn.phase === 'thinking', running: service.turn.phase === 'thinking' },
+  activeTurn: { active: runActive(), running: runActive() },
   turnState: service.turn,
   connectionFailed: false,
   revision: service.revision
@@ -183,6 +187,7 @@ beforeEach(async () => {
   service.turn = idle
   service.activity = {}
   service.messages = service.messages.slice(0, 2)
+  service.runFinalizing = false
   binding = { profileId: PROFILE, epoch: 1 }
   profileChanging = false
   gapFlag = false
@@ -217,6 +222,25 @@ describe('a window that missed the end of a turn', () => {
     // The view comes before the turn's end, so the turn never shows ended without its reply.
     const order = sent.map((entry) => entry.channel)
     expect(order.lastIndexOf('thread:view')).toBeLessThan(order.lastIndexOf('orchestrator:turn-state'))
+  })
+
+  it('ends as completed while the service still records the run\'s checkpoint, and is not checked again (#1245)', async () => {
+    startTurn()
+    // The turn's phase is the service's truth: the run stays `finalizing` behind it for minutes.
+    service.runFinalizing = true
+    finishTurnSilently()
+
+    await vi.advanceTimersByTimeAsync(30_000)
+    await vi.waitFor(() => expect(views()).toHaveLength(1))
+    expect(views()[0].messages.at(-1)?.content).toBe(REPLY_TEXT)
+    expect(lastTurn()).toMatchObject({ threadId: 't1', turnId: 'run:2', phase: 'completed' })
+    expect(lastActivity()).toEqual({ t1: 'completed' })
+
+    // The window now shows the turn ended, so its quiet watch stops: the running checkpoint is no reason to check.
+    vi.clearAllMocks()
+    await vi.advanceTimersByTimeAsync(10 * 60_000)
+    expect(guiMms.turnStatusForSender).not.toHaveBeenCalled()
+    expect(guiMms.snapshotThreadForSender).not.toHaveBeenCalled()
   })
 
   it('logs the check and the catch-up: which thread, why and what changed, with no conversation text', async () => {
@@ -526,6 +550,28 @@ describe('a long silent turn that is really running', () => {
     expect(sent).toEqual([])
     expect(service.turn).toBe(running)
     expect(logLines.filter((line) => line.event === 'check.running')).toHaveLength(4)
+  })
+
+  it('a turn waiting for a free turn slot is left alone however long it waits, and logged with its activity (#1241)', async () => {
+    const waiting: TurnState = {
+      threadId: 't1',
+      turnId: 'run:2',
+      phase: 'queued',
+      step: { kind: 'waiting_slot', running: 4, limit: 4 },
+      updatedAt: at(2)
+    }
+    service.turn = waiting
+    service.activity = { t1: 'processing' }
+    push('activity', { state: 'processing' })
+    push('turn.state', waiting)
+    sent.length = 0
+
+    await vi.advanceTimersByTimeAsync(10 * 60_000)
+    expect(guiMms.turnStatusForSender).toHaveBeenCalledTimes(4)
+    expect(guiMms.snapshotThreadForSender).not.toHaveBeenCalled()
+    expect(sent).toEqual([])
+    expect(logLines.filter((line) => line.event === 'check.behind')).toEqual([])
+    expect(logLines.find((line) => line.event === 'check.running')?.fields).toMatchObject({ phase: 'queued', activity: 'processing', shown: 'processing' })
   })
 
   it('an update in the meantime starts the wait again', async () => {
