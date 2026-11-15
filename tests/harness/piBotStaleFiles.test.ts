@@ -3,7 +3,7 @@ import { accessSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
-import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
+import { createBotAuthority, type BotFileReadState } from '../../src/mms/bots/authority/botAuthority'
 import { RunCounters } from '../../src/mms/harness/budget'
 import { PI_RPC_CAPS } from '../../src/mms/harness/drivers/pi'
 import { PiRpcEngine, type PiRpcEngineOptions } from '../../src/mms/harness/pi/engine'
@@ -26,7 +26,7 @@ function fixture() {
   mkdirSync(files); mkdirSync(scratch)
   const path = join(files, 'todo.md')
   writeFileSync(path, 'one\n')
-  const authority = (activationId = 'a', folder = files, state = new Map<string, string>()) => createBotAuthority({
+  const authority = (activationId = 'a', folder = files, state = new Map<string, BotFileReadState>()) => createBotAuthority({
     activationId, role: 'activation', permissions: { tools: ['read', 'edit', 'write', 'shell'], appTools: [], mcp: [], skills: [], workspace: { roots: [], access: 'read', scratch, files: folder } },
     waiting: () => false, counters: new RunCounters(), time: { deadline: () => Infinity, signal: new AbortController().signal }, spend: null,
     fileReads: state
@@ -101,7 +101,7 @@ it('another activation or bot cannot lend its reads, even after a restart', asyn
   expect(await f.call(f.turn(f.authority('other', elsewhere)), 'edit', other)).toEqual({ allow: false, reason: refusal })
 })
 it('keeps reads across dispatches of the activation and resolves relative aliases', async () => {
-  const f = fixture(), state = new Map<string, string>()
+  const f = fixture(), state = new Map<string, BotFileReadState>()
   await f.call(f.turn(f.authority('a', f.files, state)), 'read')
   expect((await f.call(f.turn(f.authority('a', f.files, state)), 'edit', join(f.files, '.', 'todo.md'))).allow).toBe(true)
 })

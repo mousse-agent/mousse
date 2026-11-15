@@ -121,6 +121,13 @@ export type BotAllowedObserver = (call: NormalisedCall) => void
  * A bot activation's authority over one turn, registered with the turn's app tools (never in the
  * run policy, which carries only `RunPolicy.authority`'s kind and digest).
  */
+/** Pi's read result metadata; absent bounds are never guessed when a read was truncated. */
+export interface BotFileReadResult {
+  truncated?: boolean
+  firstLineExceedsLimit?: boolean
+  outputLines?: number
+}
+
 export interface BotAuthority {
   activationId: string
   role: BotThreadRole
@@ -162,7 +169,7 @@ export interface BotAuthority {
    */
   checkAny?(calls: readonly NormalisedCall[]): BotCheck
   /** Pi alone: prepare a file call after the grant check, before charging it. Complete only calls that ran. */
-  piFileCall?(tool: string, args: Record<string, unknown>): { refused: string } | { completed(success: boolean, partial?: boolean): void }
+  piFileCall?(tool: string, args: Record<string, unknown>): { refused: string } | { completed(success: boolean, read?: BotFileReadResult): void }
   /** The activation's request and tool-call counts: one atomic row, shared by its main run and consults. */
   counters: CounterScope
   time: ActiveTimeScope

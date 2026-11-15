@@ -465,7 +465,7 @@ class PiTurn {
   readonly startedAt = Date.now()
   readonly openTools = new Map<string, { name: string; mousse: boolean }>()
   /** Pi file calls awaiting their success and truncation result, by call id. */
-  readonly fileCalls = new Map<string, { completed(success: boolean, partial?: boolean): void }>()
+  readonly fileCalls = new Map<string, { completed(success: boolean, read?: import('../../../shared/bots/personal/authority').BotFileReadResult): void }>()
   /** A bot's built-in calls with a `started` ledger row, by call id. */
   readonly ledgerRows = new Map<string, string>()
   /** Steers the turn owns and Pi has not read, each with its drain's token: it is accepted by that token alone. */
@@ -2224,9 +2224,8 @@ export class PiRpcEngine implements ProviderAdapter {
         const failed = event.isError === true
         const fileCall = turn.fileCalls.get(callId)
         turn.fileCalls.delete(callId)
-        const details = (event.result as { details?: { truncation?: { truncated?: boolean; firstLineExceedsLimit?: boolean } } } | undefined)?.details
-        const partial = details?.truncation?.truncated === true || details?.truncation?.firstLineExceedsLimit === true
-        fileCall?.completed(!failed, partial)
+        const details = (event.result as { details?: { truncation?: { truncated?: boolean; firstLineExceedsLimit?: boolean; outputLines?: number } } } | undefined)?.details
+        fileCall?.completed(!failed, details?.truncation)
         const row = turn.ledgerRows.get(callId)
         if (row) {
           turn.ledgerRows.delete(callId)
