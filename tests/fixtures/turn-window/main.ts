@@ -395,12 +395,22 @@ async function main() {
     await execute('qa.frames(6)')
     const grown = await execute('({ windowed: qa.windowed(), mounted: qa.mountedTurns(), gap: qa.endGap() })')
 
+    // 9. A thread that is not cached opens in a transcript that is already mounted and empty; its turns arrive a moment
+    // later. It builds the rows near its end, as a thread that mounts with its turns does, not the row cap first.
+    const openedWithTurns = await execute<number>('qa.openCounted(1000, false)')
+    const afterLoadAdded = await execute<number>('qa.openCounted(1000, true)')
+    await delay(300)
+    await execute('qa.frames(3)')
+    const afterLoad = await execute<Record<string, unknown>>('({ mounted: qa.mountedTurns(), last: qa.isMounted(999), endGap: qa.endGap() })')
+    afterLoad.added = afterLoadAdded
+    afterLoad.addedWithTurns = openedWithTurns
+
     await execute('qa.unmount()')
     await delay(50)
     writeFileSync(join(directory, 'evidence.json'), JSON.stringify({
       small, large, opened, positions, hold, held, codeHold, codeGrowth, up, down, afterSweeps, toolCards, nested, thinking, table,
       followGaps, leftEnd, readingAfterStream, jumpFrames, jumped, streamFar, farSentinel, streamInside, turnFrames, afterTurn,
-      markerFrames, marker, interrupted, afterScripted, ten, small40, grown,
+      markerFrames, marker, interrupted, afterScripted, ten, small40, grown, afterLoad,
       find: {
         opened: findOpened, focusFrames: findFocusFrames, farFrames: findFarFrames, far: findFar, manyFrames: findManyFrames, many: findMany,
         last: findLast, wrapFrames: findWrapFrames, wrapped: findWrapped, backFrames: findBackFrames, back: findBack, closed: findClosed,
