@@ -84,3 +84,25 @@ it('a refused model leaves no bot and the same key can be retried', async () => 
   expect(f.bots.service.list().bots).toHaveLength(1)
   expect(reopened!.listActivations()).toHaveLength(1)
 })
+
+for (const firstTurn of ['missing', 'present'] as const) {
+  it(`a retry after soft deletion stays refused with its first turn ${firstTurn}`, async () => {
+    if (firstTurn === 'missing') {
+      vi.spyOn(f.bots, 'enqueueChat').mockRejectedValueOnce(new Error('stopped'))
+      await expect(f.bots.service.create(input)).rejects.toThrow('stopped')
+    } else await f.bots.service.create(input)
+    const botId = f.bots.service.list().bots[0]!.id
+    await f.bots.service.delete(botId)
+    const turns = f.store.listActivations()
+    const deletedAt = f.store.registry(botId)!.deletedAt
+    expect(deletedAt).toBeTruthy()
+    restart()
+    await f.bots.reconcileOnStartup()
+    await expect(f.bots.service.create(input)).rejects.toMatchObject({ code: 'bot_not_found' })
+    expect(f.bots.service.list().bots).toEqual([])
+    expect(reopened!.registry(botId)!.deletedAt).toBe(deletedAt)
+    expect(reopened!.botCreation('create:create-once')?.botId).toBe(botId)
+    expect(reopened!.listActivations()).toEqual(turns)
+    expect(reopened!.activeGrant(botId)).toBeUndefined()
+  })
+}
