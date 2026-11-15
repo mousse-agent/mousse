@@ -142,7 +142,7 @@ export const BOTS_PERSONAL_V2_METHODS = [
  * Methods added after the required Bot UI set (docs/plans/bot-always-free.md, #673): the app calls them when they are
  * there, and an older service that lacks them is still compatible (`guiDaemonCompatibility` lists only the set above).
  */
-export const BOTS_WORK_METHODS = ['bots.work.stop', 'bots.reminders.cancel', 'bots.model.choices', 'bots.model.setSlots', 'bots.model.setImage', 'bots.chat.react', 'bots.questions.answer', 'bots.memory.edit',
+export const BOTS_WORK_METHODS = ['bots.reminders.snooze', 'bots.work.stop', 'bots.reminders.cancel', 'bots.model.choices', 'bots.model.setSlots', 'bots.model.setImage', 'bots.chat.react', 'bots.questions.answer', 'bots.memory.edit',
   'bots.chat.clear', 'bots.memory.wipe', 'bots.reset', 'bots.model.setCustom'] as const
 export type BotsPersonalV2Method = (typeof BOTS_PERSONAL_V2_METHODS)[number] | (typeof BOTS_WORK_METHODS)[number]
 export const BOTS_PERSONAL_V2_CAPABILITY = 'bots.personal.v2'
@@ -198,6 +198,7 @@ export interface BotsPersonalV2Api {
   /** Stops one piece of work (or a scheduled run) of the bot; the chat goes on. `stopped` is false when it had ended. */
   'bots.work.stop': { params: { botId: string; workId: string }; result: { stopped: boolean } }
   /** Cancels one waiting reminder; it is never said or started. One already said leaves the detail as it is. */
+  'bots.reminders.snooze': { params: { botId: string; messageId: string; choice: import('./chat').BotSnoozeChoice }; result: BotChatMessage }
   'bots.reminders.cancel': { params: { botId: string; reminderId: string }; result: BotDetail }
   'bots.chat.markRead': { params: { botId: string; seq: number }; result: Record<string, never> }
   /** The owner's reaction on one of the bot's messages: an emoji, which replaces any other, or `null` to remove it. */

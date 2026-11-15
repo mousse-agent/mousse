@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, it } from 'vitest'
+import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
 import { botFixture, chatOf, createBot, type BotFixture } from './botFixture'
 
 let f: BotFixture
@@ -56,6 +57,9 @@ it.each(['10m', '1h', 'tomorrow'] as const)('snoozes %s once without a turn, the
   expect(rows).toHaveLength(1)
   expect(rows[0]).toMatchObject({ text: 'Tea', replyTo: message.id, snoozedFrom: r.reminderId, ownerSet: true, dueAt: expected.toISOString() })
   expect(updated.reminder?.snoozedUntil).toBe(expected.toISOString())
+  const clock = `${String(expected.getHours()).padStart(2, '0')}:${String(expected.getMinutes()).padStart(2, '0')}`
+  expect(updated.reminder?.snoozedLabel).toBe(`Snoozed until ${choice === 'tomorrow' ? 'tomorrow ' : ''}${clock}`)
+  expect(f.bots.tools.reminders.list(botId)).toContainEqual(expect.objectContaining({ reminderId: rows[0]!.id, ownerSet: true }))
   expect(() => f.bots.service.reminderSnooze(botId, bubble.id, choice)).toThrow('already snoozed')
   expect(f.store.listActivations(botId)).toHaveLength(count)
   f.clock.now = expected.getTime()
@@ -73,7 +77,10 @@ it('refuses the cap and leaves the original available', async () => {
 it('Forget cancels a snoozed copy of the forgotten request', async () => {
   const { bubble, message } = await said()
   f.bots.service.reminderSnooze(botId, bubble.id, '10m')
-  await f.bots.service.memoryForget(botId, message.id)
+  const memory = new BotMemoryStore({ db: f.store.db, clock: () => f.clock.now, timeZone: () => 'UTC' })
+  f.store.db.transaction(() => memory.appendInTx(f.store.db, { botId, kind: 'owner_msg', lane: 'chat', sourceKey: `bm:${message.id}`, who: 'owner', text: message.text }))
+  const journal = f.store.get('SELECT seq FROM bot_journal WHERE source_key = ?', `bm:${message.id}`)!
+  expect(memory.forget(botId, { refs: [`j${journal.seq as number}`], by: 'owner_ui' })).not.toHaveProperty('error')
   expect(f.store.waitingReminders(botId)).toEqual([])
 })
 
@@ -86,4 +93,13 @@ it('refuses an ordinary bubble, work reminder, wrong bot and invalid choice', as
   f.store.run('UPDATE bot_reminders SET work_title = ?, work_brief = ? WHERE id = ?', 'Work', 'Do work', row.id)
   expect(chatOf(f, botId).find(m => m.id === bubble.id)?.reminder).toBeUndefined()
   expect(() => f.bots.service.reminderSnooze(botId, bubble.id, '10m')).toThrow()
+})
+
+
+it('a snoozed reminder can be cancelled through the usual list', async () => {
+  const { bubble } = await said()
+  f.bots.service.reminderSnooze(botId, bubble.id, '10m')
+  const reminder = f.bots.service.get(botId).reminders![0]!
+  expect(f.bots.service.reminderCancel(botId, reminder.id).reminders).toEqual([])
+  expect(f.store.reminder(reminder.id)?.status).toBe('cancelled')
 })

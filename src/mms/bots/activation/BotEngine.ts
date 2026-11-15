@@ -7044,7 +7044,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       add: (botId, from, input) => this.addReminder(botId, from, input),
       // Wakes are listed with them: a wake on an event shows what it waits for, and its time is when it gives up.
       list: (botId) => this.store.waitingReminders(botId).map((reminder) => ({
-        reminderId: reminder.id, dueAt: reminder.dueAt, text: reminder.text,
+        reminderId: reminder.id, dueAt: reminder.dueAt, text: reminder.text, ownerSet: reminder.ownerSet,
         ...(reminder.work ? { work: reminder.work.title } : {}),
         ...(reminder.wake ? { wake: reminder.event ? (reminder.fired ? 'happened; you wake soon' : wakeEventLabel(reminder.event)) : 'at its time' } : {})
       })),
@@ -7474,6 +7474,27 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       text: `The owner added while you worked:\n${lines.join('\n')}${repeats ? `\n${NOTE_REPEAT_LINE}` : ''}`,
       ids
     }
+  }
+
+  snoozeReminder(botId: string, messageId: string, choice: import('../../../shared/bots/personal/chat').BotSnoozeChoice): void {
+    this.entry(botId)
+    this.store.db.transaction(() => {
+      const reminder = this.store.reminderForMessage(botId, messageId)
+      if (!reminder || reminder.work || reminder.wake || reminder.status !== 'delivered' || this.store.messageForgotten(botId, messageId))
+        throw new BotEngineError('reminder_not_found', 'This message has no reminder to snooze.')
+      if (this.store.snoozedCopy(reminder.id)) throw new BotEngineError('reminder_snoozed', 'This reminder is already snoozed.')
+      if (this.store.waitingReminders(botId).length >= MAX_WAITING_REMINDERS)
+        throw new BotEngineError('reminder_limit', 'You already have 50 reminders waiting. Cancel one first.')
+      const due = new Date(this.now())
+      if (choice === 'tomorrow') { due.setDate(due.getDate() + 1); due.setHours(9, 0, 0, 0) }
+      else if (choice === '10m' || choice === '1h') due.setTime(due.getTime() + (choice === '10m' ? 10 : 60) * 60_000)
+      else throw new BotEngineError('invalid_params', 'Choose In 10 min, In 1 hour or Tomorrow 9:00.')
+      this.store.insertReminder({ id: `rem_${randomUUID()}`, botId, dueAt: due.toISOString(), text: reminder.text,
+        work: null, replyTo: reminder.replyTo, createdAt: this.store.now(), snoozedFrom: reminder.id, ownerSet: true })
+    })
+    this.armDue()
+    this.chat.republish(messageId)
+    this.changed({ botId })
   }
 
   private timerOwnerSet(botId: string, from: string): boolean {

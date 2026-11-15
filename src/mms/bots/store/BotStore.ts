@@ -1956,6 +1956,20 @@ export class BotStore {
     return this.run("UPDATE bot_reminders SET fired_json = ?, due_at = ? WHERE id = ? AND status = 'waiting' AND wake = 1 AND fired_json IS NULL", JSON.stringify(fired), dueAt, id) > 0
   }
 
+  messageForgotten(botId: string, messageId: string): boolean {
+    return !!this.get('SELECT 1 FROM bot_journal WHERE bot_id = ? AND source_key = ? AND redacted_at IS NOT NULL', botId, `bm:${messageId}`)
+  }
+
+  reminderForMessage(botId: string, messageId: string): BotReminderRow | undefined {
+    const row = this.get('SELECT * FROM bot_reminders WHERE bot_id = ? AND message_id = ?', botId, messageId)
+    return row ? reminderOf(row) : undefined
+  }
+
+  snoozedCopy(reminderId: string): BotReminderRow | undefined {
+    const row = this.get('SELECT * FROM bot_reminders WHERE snoozed_from = ? LIMIT 1', reminderId)
+    return row ? reminderOf(row) : undefined
+  }
+
   reminder(id: string): BotReminderRow | undefined {
     const row = this.get('SELECT * FROM bot_reminders WHERE id = ?', id)
     return row ? reminderOf(row) : undefined

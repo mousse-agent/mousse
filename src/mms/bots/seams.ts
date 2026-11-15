@@ -148,7 +148,7 @@ export interface BotToolHost {
   reminders: {
     add(botId: string, from: string, input: { dueAt: string; text: string; work?: { title: string; brief: string } }): { reminderId: string; dueAt: string }
     /** `wake`: it is a wake, and what it waits for ("when acme/app#12 merges", "at its time"). */
-    list(botId: string): Array<{ reminderId: string; dueAt: string; text: string; work?: string; wake?: string }>
+    list(botId: string): Array<{ reminderId: string; dueAt: string; text: string; ownerSet?: boolean | null; work?: string; wake?: string }>
     cancel(botId: string, reminderId: string): boolean
   }
   /**
