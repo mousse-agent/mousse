@@ -671,12 +671,13 @@ describe('while it works', () => {
   const presence = () => host.querySelector('.chat-conversation-header .bot-presence')
   const sticker = () => host.querySelector('.bot-header-about .bot-sticker')
 
-  it('types as a messenger does: dots in a bubble, "typing…" and a pen in the header, no spinner or chip; Stop and the mic stay', async () => {
+  it('types as a messenger does: dots in a bubble with "Working…" until it says more, "typing…" and a pen in the header, no spinner or chip; Stop and the mic stay', async () => {
     fake.chats.inbox = [message(1, { id: 'o1', author: 'owner', text: 'again' })]
     fake.live.inbox = { activationId: 'act1', chip: { icon: 'search', text: 'searching the web' } }
     await open({ ...inbox, state: 'working', stateText: 'Working…' })
     const typing = transcript().querySelector('.bot-typing')!
-    expect(typing.getAttribute('aria-label')).toBe('Inbox helper is typing')
+    expect(typing.getAttribute('aria-label')).toBe('Inbox helper: Working…')
+    expect(typing.querySelector('.bot-typing-status')?.firstChild?.textContent).toBe('Working…')
     expect(typing.querySelectorAll('.bot-typing-bubble i')).toHaveLength(3)
     expect(transcript().querySelector('.chat-spin, .bot-chip, .chat-run-status')).toBeNull()
     expect(transcript().textContent).not.toContain('is working')
@@ -704,22 +705,27 @@ describe('while it works', () => {
     try {
       await open({ ...inbox, state: 'working', stateText: 'Working…' })
       const dots = [...transcript().querySelectorAll('.bot-typing-bubble i')]
+      const words = () => transcript().querySelector('.bot-typing-status')!
       const running = () => started.filter((record) => !record.cancelled)
-      expect(running().map((record) => [dots.indexOf(record.element), record.options.delay, record.options.iterations]))
+      const onDots = () => running().filter((record) => dots.includes(record.element))
+      const shimmer = () => running().filter((record) => words().contains(record.element))
+      expect(onDots().map((record) => [dots.indexOf(record.element), record.options.delay, record.options.iterations]))
         .toEqual([[0, 0, Infinity], [1, 150, Infinity], [2, 300, Infinity]])
+      // "Working…" shimmers on the dots' cycle, its band reaching the words one dot step after the last dot peaks
+      // (300 + 360 + 150 ms).
+      expect(shimmer().map((record) => [record.options.duration, record.options.iterations, (record.options.delay as number) + 0.25 * 1200]))
+        .toEqual([[1200, Infinity, 300 + 360 + 150], [1200, Infinity, 300 + 360 + 150]])
       act(() => setAnimationSpeed('off'))
       expect(running()).toEqual([])
       act(() => setAnimationSpeed('normal'))
-      expect(running()).toHaveLength(3)
-      // A status shimmers on the dots' cycle, its band reaching the words one dot step after the last dot peaks
-      // (300 + 360 + 150 ms), and is still with them; the dots keep moving as it comes.
-      const dotsBefore = running()
+      expect(onDots()).toHaveLength(3)
+      expect(shimmer()).toHaveLength(2)
+      // The bot's own line takes its place and shimmers the same way; nothing restarts as it comes.
+      const before = running()
       await act(async () => fake.emit.activity('inbox', null, 'act1', 'Checking prices at Indian stores now'))
-      const words = transcript().querySelector('.bot-typing-status')!
-      const shimmer = running().filter((record) => words.contains(record.element))
-      expect(shimmer.map((record) => [record.options.duration, record.options.iterations, (record.options.delay as number) + 0.25 * 1200]))
-        .toEqual([[1200, Infinity, 300 + 360 + 150], [1200, Infinity, 300 + 360 + 150]])
-      expect(dotsBefore.every((record) => !record.cancelled)).toBe(true)
+      expect(words().firstChild?.textContent).toBe('Checking prices at Indian stores now')
+      expect(shimmer()).toHaveLength(2)
+      expect(before.every((record) => !record.cancelled)).toBe(true)
       act(() => setAnimationSpeed('off'))
       expect(running()).toEqual([])
       expect(transcript().querySelector('.bot-typing-status')?.textContent).toBe('Checking prices at Indian stores now')
@@ -1329,10 +1335,10 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
     const long = 'Reading the three store pages you sent and checking which of them still have the 2 TB drive in stock, with delivery to Pune before Friday'
     await act(async () => fake.emit.activity('inbox', { icon: 'web', text: 'reading a page' }, 'act_c1', long))
     expect(words()?.textContent).toBe(long)
-    // An event without one: the dots alone again.
+    // An event without one: "Working…" again, never the dots alone.
     await act(async () => fake.emit.activity('inbox', null, 'act_c1'))
-    expect(words()).toBeNull()
-    expect(typing().getAttribute('aria-label')).toBe('Inbox helper is typing')
+    expect(words()?.textContent).toBe('Working…')
+    expect(typing().getAttribute('aria-label')).toBe('Inbox helper: Working…')
   })
 
   it("the chat's own turn types and has Stop; the header still opens the work", async () => {

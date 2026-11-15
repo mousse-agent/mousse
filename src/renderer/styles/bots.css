@@ -120,13 +120,11 @@ html:not([data-acrylic='true']) .bot-conversation .chat-input-area.bot-input-are
 .bot-step-open:hover { background: color-mix(in srgb, var(--accent) 20%, transparent); }
 /* While the chat's turn runs: three dots in a bubble, the only thing that moves (TypingDots in BotChatView.tsx moves
    them; with Animation speed Off or reduced motion they hold still a little brighter). Beside them, what the bot said
-   it is doing now, in full (it wraps), with a light band that runs on from the dots' wave through the words: a bright
+   it is doing now, in full (it wraps; "Working…" until it says), with a light band that runs on from the dots' wave through the words: a bright
    copy of them, seen through a band as wide as they are whose mask is bright only in its middle third. TypingDots moves
    the band across and the copy against it, so the copy's letters stay on the words. Still, the words are plain. */
-.bot-typing-bubble { display: inline-flex; align-items: center; padding: 11px 14px; }
-.bot-typing-bubble.has-status { align-items: flex-start; gap: 8px; padding: 7px 13px; }
-.bot-typing-dots { display: inline-flex; flex: none; align-items: center; gap: 4px; }
-.bot-typing-bubble.has-status .bot-typing-dots { height: 18px; }
+.bot-typing-bubble { display: inline-flex; align-items: flex-start; gap: 8px; padding: 7px 13px; }
+.bot-typing-dots { display: inline-flex; flex: none; align-items: center; gap: 4px; height: 18px; }
 .bot-typing-dots > i { width: 6px; height: 6px; border-radius: 50%; background: var(--text-secondary); opacity: .35; }
 .bot-typing-bubble.is-still .bot-typing-dots > i { opacity: .6; }
 .bot-typing-status { position: relative; min-width: 0; font-size: var(--bot-meta); line-height: 18px; color: var(--text-secondary); overflow-wrap: anywhere; }

@@ -50,6 +50,8 @@ const NO_MARKS = new Map<string, OwnerMarks>()
 const NO_NOTES: BotLocalNote[] = []
 /** The chat's turn waits for the internet (its work, if any, says so in the header's list). */
 const OFFLINE_TEXT = 'Waiting for internet'
+/** Beside the typing dots until the bot says what it is doing now. */
+const WORKING_TEXT = 'Working…'
 const ignore = () => {}
 
 /**
@@ -380,14 +382,15 @@ function SystemLine({ row }: { row: Extract<BotChatRow, { kind: 'system' }> }) {
 /**
  * While the chat's turn runs: the bot's next message, typing, as a messaging app shows it: three dots in a small bubble
  * in the bot's column, the only thing in the chat that moves, and beside them what the bot said it is doing now (its
- * latest line before a step), in full. Waiting for the internet, it says so instead, still.
+ * latest line before a step), in full, or "Working…" until it says. Waiting for the internet, it says so instead, still.
  */
 function BotTyping({ bot, starts, offline, status }: { bot: BotSummary; starts: boolean; offline: boolean; status?: string }) {
-  return <article className={`chat-participant-message from-agent bot-message bot-typing${starts ? ' is-group-start' : ''}`} role="status" aria-label={offline ? OFFLINE_TEXT : status ? `${bot.name}: ${status}` : `${bot.name} is typing`}>
+  const doing = status || WORKING_TEXT
+  return <article className={`chat-participant-message from-agent bot-message bot-typing${starts ? ' is-group-start' : ''}`} role="status" aria-label={offline ? OFFLINE_TEXT : `${bot.name}: ${doing}`}>
     <div className="bot-message-line">
       {offline
         ? <p className="bot-bubble bot-status-line">{OFFLINE_TEXT}</p>
-        : <TypingDots status={status} />}
+        : <TypingDots status={doing} />}
     </div>
   </article>
 }
@@ -431,11 +434,10 @@ const TYPING_SHIMMER_DELAY_MS = 2 * TYPING_DOT_STEP_MS + 0.3 * TYPING_CYCLE_MS +
  * at every iteration because React listens for `animationiteration`. The status's shimmer is transforms too. With
  * Animation speed Off or reduced motion all of it stays still, and the words are plain.
  */
-function TypingDots({ status }: { status?: string }) {
+function TypingDots({ status }: { status: string }) {
   const dotsRef = useRef<HTMLSpanElement>(null)
   const glintRef = useRef<HTMLSpanElement>(null)
   const still = useMotionScale() === 0
-  const said = Boolean(status)
   useLayoutEffect(() => {
     if (still) return
     const dots = Array.from(dotsRef.current?.children ?? [])
@@ -455,13 +457,13 @@ function TypingDots({ status }: { status?: string }) {
     const lead = dotsRef.current?.firstElementChild?.getAnimations?.()[0]
     if (lead?.startTime !== null && lead?.startTime !== undefined) for (const animation of shimmer) animation.startTime = lead.startTime
     return () => shimmer.forEach((animation) => animation.cancel())
-  }, [still, said])
-  return <span className={`bot-bubble bot-typing-bubble${still ? ' is-still' : ''}${said ? ' has-status' : ''}`}>
+  }, [still])
+  return <span className={`bot-bubble bot-typing-bubble${still ? ' is-still' : ''}`}>
     <span ref={dotsRef} className="bot-typing-dots" aria-hidden><i /><i /><i /></span>
-    {said && <span className="bot-typing-status">
+    <span className="bot-typing-status">
       {status}
       {!still && <span ref={glintRef} className="bot-typing-glint" aria-hidden><span>{status}</span></span>}
-    </span>}
+    </span>
   </span>
 }
 
