@@ -50,7 +50,7 @@ vi.mock('electron', async () => {
     static getAllWindows() { return startup.windows }
   }
   return {
-    app, BrowserWindow,
+    app, BrowserWindow, ipcMain: new EventEmitter(),
     nativeTheme: { shouldUseDarkColors: true },
     dialog: { showErrorBox: vi.fn() }, shell: { openExternal: vi.fn() },
     session: { fromPartition: () => ({ getUserAgent: () => 'test', setUserAgent: vi.fn() }) }
