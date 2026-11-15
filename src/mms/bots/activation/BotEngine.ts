@@ -7461,7 +7461,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   async addWake(botId: string, from: string, input: { brief: string; dueAt?: string; event?: BotWakeEvent; hours?: number }): Promise<{ wakeId: string; dueAt: string; label: string }> {
     this.entry(botId)
-    const brief = input.brief.trim().slice(0, MAX_WAKE_BRIEF_CHARS)
+    const brief = input.brief.trim()
+    if (brief.length > MAX_WAKE_BRIEF_CHARS) throw new BotEngineError('invalid_params', 'Keep the brief under 2,000 characters: say what to do more briefly, then try again.')
     if (!brief) throw new BotEngineError('invalid_params', 'A wake-up needs a brief: what you will do then.')
     const chain = this.wakeAllowance(botId, from)
     let dueAt: string
@@ -7516,7 +7517,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const command = input.command.trim()
     if (!command) throw new BotEngineError('invalid_params', 'watch_start needs a command.')
     if (command.length > MAX_WATCHER_COMMAND_CHARS) throw new BotEngineError('invalid_params', `Keep the command to ${MAX_WATCHER_COMMAND_CHARS} characters.`)
-    const brief = input.brief.trim().slice(0, MAX_WAKE_BRIEF_CHARS)
+    const brief = input.brief.trim()
+    if (brief.length > MAX_WAKE_BRIEF_CHARS) throw new BotEngineError('invalid_params', 'Keep the brief under 2,000 characters: say what to do more briefly, then try again.')
     if (!brief) throw new BotEngineError('invalid_params', 'watch_start needs a brief: what you will do when it ends.')
     const match = input.match?.trim() || undefined
     const problem = match ? watcherMatchProblem(match) : undefined
