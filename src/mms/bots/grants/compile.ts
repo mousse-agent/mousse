@@ -85,6 +85,8 @@ export interface CompileInput {
     escalate: boolean
     consult: boolean
     memory?: boolean
+    /** Only the main turn of a scheduled run ends its own schedule. Never grantable. */
+    scheduled?: boolean
     frontDesk?: boolean
     /** Only a chat turn the owner's own message started may start an unsandboxed background command. */
     watcherStart?: boolean
@@ -200,6 +202,7 @@ export function compileBotThread(input: CompileInput): CompileResult {
     ...(manifest.skills.length ? ['list_skills', 'load_skill'] : []),
     ...(own?.escalate ? ['escalate'] : []),
     ...(own?.consult ? ['consult'] : []),
+    ...(own?.scheduled ? ['schedule_done'] : []),
     // Always on, like memory: the listing of the owner's MCP servers, so the bot can ask for the right one.
     ...(own?.memory ? [...BOT_MEMORY_TOOLS, BOT_MCP_LIST_TOOL] : []),
     ...(own?.frontDesk ? BOT_WORK_TOOLS.filter((tool) => tool !== 'watch_start' || own.watcherStart === true) : []),

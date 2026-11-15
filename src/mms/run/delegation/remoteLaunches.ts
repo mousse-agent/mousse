@@ -48,8 +48,22 @@ export interface RemoteLaunchRecord {
   firstMessageState: RemoteLaunchFirstMessage
   /** Why the latest call there failed; cleared by the next one that works. */
   lastError: string | null
+  /** A Stop of the launcher sent (or still to send) there; null when none was asked for. */
+  stop: RemoteLaunchStop | null
   createdAt: string
   updatedAt: string
+}
+
+/** The launcher was stopped, deleted or expired: what reaches the thread there (migration 22). */
+export interface RemoteLaunchStop {
+  state: 'pending' | 'sent' | 'expired'
+  /** The idempotency key of every attempt, so the Stop acts once there. */
+  key: string
+  reason: 'stopped' | 'deleted' | 'expired'
+  /** Given up after this, if not delivered by then. */
+  deadline: string
+  /** What that computer said: what it stopped, or why it left the run. */
+  result: string | null
 }
 
 const STATES: ReadonlySet<string> = new Set(['starting', 'created', 'launched', 'abandoned'])
@@ -68,6 +82,20 @@ function parseMark(raw: unknown): RoutedAgentMark {
     }
   } catch {
     return { thread: '', run: '', title: '', hops: 1, mode: 'ask' }
+  }
+}
+
+function stopOf(row: Row): RemoteLaunchStop | null {
+  const state = str(row.stop_state)
+  const key = str(row.stop_key)
+  if (!state || !key) return null
+  const reason = str(row.stop_reason)
+  return {
+    state: state === 'sent' || state === 'expired' ? state : 'pending',
+    key,
+    reason: reason === 'deleted' || reason === 'expired' ? reason : 'stopped',
+    deadline: str(row.stop_deadline) ?? new Date(0).toISOString(),
+    result: str(row.stop_result)
   }
 }
 
@@ -97,6 +125,7 @@ function fromRow(row: Row): RemoteLaunchRecord {
     state: (STATES.has(state) ? state : 'abandoned') as RemoteLaunchState,
     firstMessageState: (FIRST.has(first) ? first : 'uncertain') as RemoteLaunchFirstMessage,
     lastError: str(row.last_error),
+    stop: stopOf(row),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at)
   }
@@ -114,7 +143,7 @@ const COLUMNS: Record<keyof RemoteLaunchPatch, string> = {
   lastError: 'last_error'
 }
 
-export type NewRemoteLaunch = Omit<RemoteLaunchRecord, 'remoteThreadId' | 'remoteRunId' | 'remoteMode' | 'state' | 'firstMessageState' | 'lastError' | 'createdAt' | 'updatedAt'>
+export type NewRemoteLaunch = Omit<RemoteLaunchRecord, 'remoteThreadId' | 'remoteRunId' | 'remoteMode' | 'state' | 'firstMessageState' | 'lastError' | 'stop' | 'createdAt' | 'updatedAt'>
 
 /** The rows of `remote_launches`. Synchronous; every write joins the caller's transaction. */
 export class RemoteLaunchRecords {
@@ -184,6 +213,43 @@ export class RemoteLaunchRecords {
         .statement(`SELECT 1 FROM remote_launches WHERE state IN ('starting', 'created') OR first_message_state IN ('pending', 'uncertain') LIMIT 1`)
         .get()
     )
+  }
+
+  /**
+   * Keeps a Stop for the launch: a new one with `stop.key`, or the one already pending (its key is kept, so it still acts
+   * once there). Returns the row as it is now.
+   */
+  requestStop(creationKey: string, stop: { key: string; reason: RemoteLaunchStop['reason']; deadline: string }): RemoteLaunchRecord | null {
+    this.store.db
+      .statement(
+        `UPDATE remote_launches SET stop_state = 'pending', stop_key = ?, stop_reason = ?, stop_deadline = ?, stop_result = NULL, updated_at = ?
+         WHERE creation_key = ? AND (stop_state IS NULL OR stop_state != 'pending')`
+      )
+      .run(stop.key, stop.reason, stop.deadline, this.now(), creationKey)
+    return this.get(creationKey)
+  }
+
+  /** Records what became of a kept Stop: `sent` with what that computer said, or `expired`. */
+  settleStop(creationKey: string, key: string, state: 'sent' | 'expired', result: string | null): RemoteLaunchRecord | null {
+    this.store.db
+      .statement(`UPDATE remote_launches SET stop_state = ?, stop_result = ?, updated_at = ? WHERE creation_key = ? AND stop_key = ? AND stop_state = 'pending'`)
+      .run(state, result, this.now(), creationKey, key)
+    return this.get(creationKey)
+  }
+
+  /** Notes why a kept Stop is still pending (it stays pending). */
+  updateStopResult(creationKey: string, key: string, result: string): void {
+    this.store.db
+      .statement(`UPDATE remote_launches SET stop_result = ?, updated_at = ? WHERE creation_key = ? AND stop_key = ? AND stop_state = 'pending'`)
+      .run(result, this.now(), creationKey, key)
+  }
+
+  /** Every Stop not delivered yet, oldest first. */
+  listPendingStops(): RemoteLaunchRecord[] {
+    return this.store.db
+      .statement(`SELECT * FROM remote_launches WHERE stop_state = 'pending' ORDER BY updated_at, rowid`)
+      .all()
+      .map(fromRow)
   }
 
   update(creationKey: string, patch: RemoteLaunchPatch): RemoteLaunchRecord | null {
