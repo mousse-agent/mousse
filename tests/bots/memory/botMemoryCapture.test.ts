@@ -322,3 +322,20 @@ describe('scheduled progress and Forget', () => {
     expect(fx.store.progress('ada', 's2')).toBe('Unrelated task is pending.')
   })
 })
+
+it('capture ignores system packs and compaction or handoff metadata', async () => {
+  const fx = memoryFixture()
+  const { t, journal } = setup(fx)
+  const pack = '<bot_memory>Where I left off: waiting for the clinic.</bot_memory>'
+  // Hand-authored transcript boundary cases. Runtime native context is separate from messages.
+  t.data.set('run', [
+    { id: 'system-pack', role: 'system', content: pack, timestamp: at(0) },
+    { id: 'compaction', role: 'assistant', kind: 'context_compaction', content: pack, timestamp: at(1) },
+    { id: 'handoff', role: 'assistant', kind: 'context_handoff', content: pack, timestamp: at(2) },
+    user('request', 'Check inbox.'),
+    assistant('reply', 'Nothing new.')
+  ])
+  await journal.syncThread({ botId: 'ada', threadId: 'run', lane: 'run', activationId: 'a1' })
+  expect(fx.store.journal('ada').map((row) => row.text)).toEqual(['Check inbox.', 'Nothing new.'])
+  expect(fx.store.search('ada', { query: 'clinic' })).toEqual([])
+})
