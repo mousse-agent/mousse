@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { closeSync, fstatSync, openSync, readSync, realpathSync, type Stats } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import type { ActiveTimeScope, BotAllowedObserver, BotAuthority, BotCheck, BotFileReadResult, BotThreadRole, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
 import type { CounterScope } from '../../../shared/harness/counters'
 import type { SpendScope } from '../../../shared/harness/spend'
@@ -97,7 +97,10 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
       if (!insideAny([files], raw, files)) return { completed() {} }
       const absolute = resolve(files, raw)
       let path = absolute
-      try { path = realpathSync.native(absolute) } catch { /* A new file has no real path yet. */ }
+      try { path = realpathSync.native(absolute) } catch {
+        // Creation under a symlinked folder must use the same key as its next edit.
+        try { path = join(realpathSync.native(dirname(absolute)), basename(absolute)) } catch { /* The tool reports a missing parent. */ }
+      }
       const before = fileVersion(path)
       const previous = fileReads.get(path)
       if (tool !== 'read' && (before === null || (before !== undefined && previous?.version !== before.version))) {
@@ -302,7 +305,7 @@ function insideAny(roots: readonly string[], raw: string, scratch: string): bool
 export const BOT_FILE_HASH_MAX_BYTES = 2 * 1024 * 1024
 
 function metadataVersion(stat: Stats): string {
-  return `stat:${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}`
+  return `stat:${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`
 }
 
 function fileVersion(path: string): FileObservation | undefined | null {
