@@ -695,8 +695,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     try {
       const row = this.store.activation(message.activationId)
       if (row?.trigger.kind !== 'schedule') return false
-      const entry = this.host.schedules?.get(botId, row.trigger.scheduleId)
-      const tellMe = entry?.tellMe ?? row.trigger.completed?.tellMe
+      const tellMe = row.trigger.completed?.tellMe ?? this.host.schedules?.get(botId, row.trigger.scheduleId)?.tellMe
       return tellMe ? !tellMeNotifies(tellMe, 'done', this.host.runLevel?.(message.activationId)) : false
     } catch {
       return false
@@ -2174,7 +2173,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   private journalEnd(row: BotActivationRow, reason: string | null): void {
     if (row.trigger.kind === 'schedule') this.host.progress?.finishProgress(row.botId, row.id,
-      reason === null && this.store.activation(row.id)?.status === 'done' && Boolean(this.host.schedules?.get(row.botId, row.trigger.scheduleId)))
+      reason === null && !row.trigger.completed && this.store.activation(row.id)?.status === 'done' && Boolean(this.host.schedules?.get(row.botId, row.trigger.scheduleId)))
     // A chat turn that ended without its reply leaves one line in the recent chat, so the next turn can tell the owner.
     if (row.lane === 'chat') {
       if (reason !== null) this.journalInTx(chatTurnEndRow(row, reason))
