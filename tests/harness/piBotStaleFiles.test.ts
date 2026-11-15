@@ -10,6 +10,11 @@ import { PiRpcEngine, type PiRpcEngineOptions } from '../../src/mms/harness/pi/e
 import { WriterEpisode } from '../../src/mms/harness/pi/episode'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>()
+  return { ...actual, readFileSync: vi.fn(actual.readFileSync), readSync: vi.fn(actual.readSync) }
+})
+
 const roots: string[] = []
 afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 const refusal = 'This file changed since you read it. Read it again, then make your change.'
