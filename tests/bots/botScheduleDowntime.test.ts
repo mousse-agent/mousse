@@ -2,7 +2,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { clockTime } from '../../src/mms/bots/chat/projection'
 import { recordTickerHeartbeat } from '../../src/mms/scheduled/ScheduledJobStore'
-import { botFixture, chatOf, createBot, runDispatch, T0, type BotFixture } from './botFixture'
+import { botFixture, chatOf, createBot, flush, runDispatch, T0, type BotFixture } from './botFixture'
 
 const MIN = 60_000
 const iso = (ms: number) => new Date(ms).toISOString()
@@ -32,7 +32,7 @@ describe('bot schedules after downtime', () => {
     const { inserted } = await f.tickSchedules(new Date(due + 10 * MIN))
     expect(inserted).toHaveLength(1)
     expect(f.store.activation(inserted[0]!)!.trigger).toMatchObject({ occurrenceAt: iso(due), missed: { count: 1, since: iso(due) } })
-    expect(f.store.dispatch(inserted[0]!, 1)!.prompt.text).toContain(`This run was due at ${clockTime(iso(due))}; this computer was off or asleep, and 0 runs were skipped.`)
+    expect(f.store.dispatch(inserted[0]!, 1)!.prompt.text).toContain(`This run was due at ${clockTime(iso(due))}; this computer was off or asleep.`)
   })
 
   // Claims must collapse to the latest occurrence: Sat/Sun are skipped, Monday is still useful.
@@ -59,6 +59,7 @@ describe('bot schedules after downtime', () => {
     const { inserted } = await f.tickSchedules(new Date(first + 80 * MIN))
     expect(inserted).toHaveLength(1)
     expect(f.store.activation(inserted[0]!)!.trigger).toMatchObject({ occurrenceAt: iso(first + 60 * MIN), missed: { count: 2, since: iso(first) } })
+    expect(f.store.dispatch(inserted[0]!, 1)!.prompt.text).toContain(`This run was due at ${clockTime(iso(first + 60 * MIN))}; this computer was off or asleep, and 1 run was skipped.`)
   })
 
   it.each([[15, true], [21, false], [22, false]])('a daily 09:00 schedule at %i:00 runs %s', async (hour, runs) => {
@@ -70,6 +71,24 @@ describe('bot schedules after downtime', () => {
     expect((await f.tickSchedules(new Date(2026, 10, 10, hour))).inserted).toHaveLength(runs ? 1 : 0)
     expect(entry().nextAt).toBe(new Date(2026, 10, 11, 9).toISOString())
     if (!runs) expect(entry().skip).toEqual({ at: iso(due), reason: 'Missed Tue 09:00 (computer off)' })
+  })
+
+  it('names the missed day when a caught-up run waits until tomorrow to start or report', async () => {
+    const due = await schedule()
+    for (const id of ['owner1', 'owner2', 'owner3']) await f.bots.activate({ botId, input: id, clientRequestId: id })
+    await flush()
+    const owners = f.store.listActivations(botId).filter((row) => row.lane === 'run')
+    heartbeat(T0)
+    const { inserted } = await f.tickSchedules(new Date(due + 10 * MIN))
+    expect(f.store.activation(inserted[0]!)!.status).toBe('queued')
+    f.clock.now = due + 1440 * MIN
+    for (const row of owners) await runDispatch(f, row.id, 1, { text: 'Finished.' })
+    await f.bots.maintain(new Date(f.clock.now))
+    await flush()
+    const label = `${new Date(due).toLocaleDateString('en-US', { weekday: 'short' })} ${clockTime(iso(due))}`
+    expect(f.store.dispatch(inserted[0]!, 1)!.prompt.text).toContain(`This run was due at ${label}; this computer was off or asleep.`)
+    await runDispatch(f, inserted[0]!, 1, { text: 'All checked.' })
+    expect(chatOf(f, botId).find((row) => row.kind === 'run_report' && row.activationId === inserted[0])!.text).toBe(`(Due ${label}, this computer was off or asleep) All checked.`)
   })
 
   // Posting time, rather than start time, decides the label. A busy tick has no downtime marker.
