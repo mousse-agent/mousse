@@ -101,7 +101,8 @@ describe('theme_read and theme_set', () => {
     const result = await parsed('theme_set', { userTheme: { name: 'Leaky', base: 'dark', css } })
     expect(result.dropped).toEqual([
       expect.objectContaining({ rule: expect.stringContaining('@import') }),
-      expect.objectContaining({ rule: expect.stringContaining('b {') })
+      // Declaration by declaration, as the window drops it: the rule b stays, without its background.
+      expect.objectContaining({ rule: expect.stringContaining('background: \\75 rl(https://evil.example/y)') })
     ])
     expect(settings.get().appearance.userThemes[0]!.css).toBe(css)
   })
@@ -117,6 +118,17 @@ describe('theme_read and theme_set', () => {
     const { call, saves } = await setup()
     await expect(call('theme_set', args)).resolves.toMatchObject({ isError: true, text: expect.stringMatching(message) })
     expect(saves).toEqual([])
+  })
+
+  it('refuses CSS over 50,000 characters with the limit in the error, and saves nothing; 50,000 is allowed', async () => {
+    const { call, saves, settings } = await setup({ mode: 'full' })
+    const css = (length: number) => `a{}${' '.repeat(length - 3)}`
+    const long = await call('theme_set', { userTheme: { name: 'Long', base: 'dark', css: css(50_001) } })
+    expect(long).toMatchObject({ isError: true, text: expect.stringContaining('50,001 characters; the limit is 50,000') })
+    expect(long.text).toContain('Nothing was saved')
+    expect(saves).toEqual([])
+    await expect(call('theme_set', { userTheme: { name: 'Edge', base: 'dark', css: css(50_000) } })).resolves.not.toMatchObject({ isError: true })
+    expect(settings.get().appearance.userThemes.map((theme) => theme.css.length)).toEqual([50_000])
   })
 
   it('theme_read gives the themes in use and the guide with the stable selectors, also in a read-only turn', async () => {

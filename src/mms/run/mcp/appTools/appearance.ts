@@ -1,6 +1,6 @@
 import { PERMISSION_KEYS } from '../../../../shared/permissionKeys'
 import { THEME_OPTIONS, type AppearanceSettings, type ThemeId } from '../../../../shared/settings'
-import { externalLoadIn } from '../../../../shared/themes/cssSafety'
+import { themeCssTooLong, withoutExternalLoads } from '../../../../shared/themes/cssSafety'
 import {
   activeUserTheme,
   isThemeColorValue,
@@ -28,28 +28,11 @@ export const THEME_SET_TOOL = 'theme_set'
 
 const BUILT_IN_IDS: ReadonlySet<string> = new Set(THEME_OPTIONS.map((option) => option.id))
 
-/** The pieces of `css` (top-level rules, split at their closing brace) that the window will drop. */
+/** What the window will leave out of `css`, as written (the same check it runs before parsing). */
 function rulesThatWillBeDropped(css: string): Array<{ rule: string; reason: string }> {
-  const out: Array<{ rule: string; reason: string }> = []
-  let depth = 0
-  let start = 0
-  const check = (piece: string): void => {
-    const reason = piece.trim() ? externalLoadIn(piece) : null
-    if (reason && out.length < 20) out.push({ rule: piece.replace(/\s+/g, ' ').trim().slice(0, 160), reason })
-  }
-  for (let index = 0; index < css.length; index++) {
-    const ch = css[index]
-    if (ch === '{') depth++
-    else if (ch === '}' && depth > 0 && --depth === 0) {
-      check(css.slice(start, index + 1))
-      start = index + 1
-    } else if (ch === ';' && depth === 0) {
-      check(css.slice(start, index + 1))
-      start = index + 1
-    }
-  }
-  check(css.slice(start))
-  return out
+  const dropped: Array<{ text: string; reason: string }> = []
+  withoutExternalLoads(css, dropped)
+  return dropped.slice(0, 20).map((entry) => ({ rule: entry.text, reason: entry.reason }))
 }
 
 function summary(theme: UserTheme, withCss: boolean): Record<string, unknown> {
@@ -134,7 +117,7 @@ export function appearanceTools(host: AppToolHost): MousseTool[] {
               base: { type: 'string', enum: [...USER_THEME_BASES], description: 'The built-in theme it starts from: dark or light, usually. Needed for a new theme.' },
               accent: { type: 'string', description: 'Accent color as #rrggbb; leave out to keep the person\'s accent.' },
               colors: { type: 'object', additionalProperties: { type: 'string' }, description: 'Color tokens by name (--surface-base: "#101418"). Plain colors only.' },
-              css: { type: 'string', description: 'Extra CSS, using the stable selectors from theme_read.' }
+              css: { type: 'string', description: `Extra CSS, using the stable selectors from theme_read; at most ${USER_THEME_LIMITS.css} characters. The only url() allowed is a quoted data: address.` }
             },
           }
         }
@@ -174,7 +157,7 @@ export function appearanceTools(host: AppToolHost): MousseTool[] {
         if (badColor) return { text: `colors["${badColor[0]}"] is not a plain color token (a lower-case --name and a hex, rgb(), hsl() or named color).`, isError: true }
         if (input.accent !== undefined && input.accent !== '' && !(typeof input.accent === 'string' && /^#[0-9a-f]{6}$/i.test(input.accent)))
           return { text: 'accent must be #rrggbb.', isError: true }
-        if (typeof input.css === 'string' && input.css.length > USER_THEME_LIMITS.css) return { text: `css is longer than ${USER_THEME_LIMITS.css} characters.`, isError: true }
+        if (typeof input.css === 'string' && input.css.length > USER_THEME_LIMITS.css) return { text: `${themeCssTooLong(input.css.length)} Nothing was saved; shorten the CSS and call theme_set again.`, isError: true }
         if (!existing && appearance.userThemes.length >= USER_THEME_LIMITS.themes)
           return { text: `There are already ${USER_THEME_LIMITS.themes} user themes; update one instead.`, isError: true }
         const id = existing?.id ?? userThemeIdFor(typeof input.name === 'string' ? input.name : '', appearance.userThemes.map((theme) => theme.id))

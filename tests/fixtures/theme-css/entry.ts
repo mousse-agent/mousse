@@ -47,7 +47,16 @@ function computeAll(): void {
     inMedia: style('#in-media', 'color'),
     keepData: style('#keep-data', 'background-image'),
     keyframes: style('#keep-anim', 'animation-name'),
-    nested: style('#keep-nest .inner', 'color')
+    nested: style('#keep-nest .inner', 'color'),
+    unquotedDataColor: style('#unquoted-data', 'color'),
+    unquotedDataImage: style('#unquoted-data', 'background-image'),
+    idUrlImage: style('#id-url', 'background-image'),
+    stringHiddenColor: style('#string-hidden', 'color'),
+    stringHiddenImage: style('#string-hidden', 'background-image'),
+    escapedSvg: style('#escaped-svg', 'background-image'),
+    braceColor: style('#brace', 'color'),
+    braceImage: style('#brace', 'background-image'),
+    afterBraceColor: style('#after-brace', 'color')
   }),
   errors: () => errors
 }

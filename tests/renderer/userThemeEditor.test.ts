@@ -86,6 +86,21 @@ describe('user themes in Settings → Appearance', () => {
     expect(checked()).toEqual(['Paper'])
   })
 
+  it('says when Custom CSS is over 50,000 characters and will not save it', () => {
+    show()
+    act(() => button('New').click())
+    typeInto(host.querySelector<HTMLTextAreaElement>('#user-theme-css')!, 'a'.repeat(50_001))
+    expect(host.querySelector('[data-settings-anchor="appearance-custom-css"] [role="alert"]')?.textContent).toMatch(/50,001 characters; the limit is 50,000/)
+    expect(button('Save').disabled).toBe(true)
+    act(() => button('Save').click())
+    expect(store.get().appearance.userThemes[0]!.css).toBe('')
+    // Back under the limit, it saves.
+    typeInto(host.querySelector<HTMLTextAreaElement>('#user-theme-css')!, 'a'.repeat(50_000))
+    expect(host.querySelector('[data-settings-anchor="appearance-custom-css"] [role="alert"]')).toBeNull()
+    act(() => button('Save').click())
+    expect(store.get().appearance.userThemes[0]!.css).toHaveLength(50_000)
+  })
+
   it('Discard drops the draft, and a built-in card turns the user theme off but keeps it', () => {
     show()
     act(() => button('New').click())

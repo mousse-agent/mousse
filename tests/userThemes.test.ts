@@ -60,6 +60,15 @@ describe('user themes in settings', () => {
     expect(open().get().appearance.userTheme).toBe('')
   })
 
+  it('refuses a theme whose CSS is over 50,000 characters and saves nothing in that update', () => {
+    const store = open()
+    const long = { ...OCEAN, css: 'a'.repeat(50_001) }
+    expect(() => store.set(appearance({ theme: 'light', userThemes: [long], userTheme: 'user-ocean' }))).toThrow(/50,001 characters; the limit is 50,000\. Nothing was saved\./)
+    expect(open().get().appearance).toMatchObject({ theme: 'blacksphere-plus', userThemes: [], userTheme: '' })
+    store.set(appearance({ userThemes: [{ ...OCEAN, css: 'a'.repeat(50_000) }] }))
+    expect(open().get().appearance.userThemes[0]!.css).toHaveLength(50_000)
+  })
+
   it('switching to a user theme by id alone takes its base', () => {
     const store = open()
     store.set(appearance({ theme: 'github-dark', userThemes: [OCEAN] }))
@@ -109,7 +118,7 @@ describe('theme files', () => {
     ['another kind of file', JSON.stringify({ kind: 'mousse-agent', version: 1, name: 'x', base: 'dark' }), /not a Mousse theme/],
     ['a newer format', JSON.stringify({ kind: 'mousse-theme', version: 2, name: 'x', base: 'dark' }), /newer Mousse/],
     ['no name', JSON.stringify({ kind: 'mousse-theme', version: 1, name: '  ', base: 'dark' }), /no name/],
-    ['CSS that is too long', JSON.stringify({ kind: 'mousse-theme', version: 1, name: 'x', base: 'dark', css: 'a{}'.repeat(30_000) }), /too long/]
+    ['CSS over 50,000 characters', JSON.stringify({ kind: 'mousse-theme', version: 1, name: 'x', base: 'dark', css: 'a'.repeat(50_001) }), /50,001 characters; the limit is 50,000/]
   ])('refuses %s', (_name, text, message) => {
     const read = parseUserThemeFile(text, [])
     expect('error' in read && read.error).toMatch(message)
