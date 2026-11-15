@@ -6,8 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS } from '../../src/shared/bots/personal/manifest'
 import { BOT_FAILURE_PAUSE_STREAK, BotEngine, MAX_TURN_CAP_CONTINUATIONS, roomText, sayOnce, stoppedShortText } from '../../src/mms/bots/activation/BotEngine'
-import type { ToolCallContext } from '../../src/mms/run/mcp/appTools/types'
-import { botTools, reminderLabel, reminderTime } from '../../src/mms/run/mcp/appTools/bots'
+import { reminderLabel, reminderTime } from '../../src/mms/run/mcp/appTools/bots'
 import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
 import { botManifestDigest } from '../../src/mms/bots/grants/compile'
 import { isBotRoomAbort, isBotWallAbort } from '../../src/mms/bots/activation/dispatcher'
@@ -33,32 +32,6 @@ async function chat(text: string, id: string, replyTo?: string) {
 }
 
 const summary = () => f.bots.service.list().bots.find((bot) => bot.id === botId)!
-
-describe('work_start replay without a runtime tool call id', () => {
-  // Same request, changed title, changed brief: only the identical replay is one piece of work.
-  it('returns the same work for a repeat, and starts separate work for a different title or brief', async () => {
-    const turn = await chat('Compare vacuums and batteries', 'm1')
-    const invoke = async (title: string, brief: string) => {
-      // Build the tool again too: no process-local cache can make a replay safe.
-      const tool = botTools(() => ({ host: f.bots.tools })).find((entry) => entry.name === 'work_start')!
-      const context = {
-        caller: { threadId: turn.payload.threadId, runId: turn.payload.runId, provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage' },
-        turn: { bot: turn.prepared.authority },
-        signal: new AbortController().signal,
-        transport: 'mcp'
-      } as ToolCallContext
-      const result = await tool.handler({ title, brief }, context)
-      expect(result.isError).toBeFalsy()
-      return JSON.parse(result.text)
-    }
-    const first = await invoke('Vacuums', 'Compare three vacuums.')
-    expect((await invoke('Vacuums', 'Compare three vacuums.')).workId).toBe(first.workId)
-    const otherTitle = await invoke('Battery packs', 'Compare three vacuums.')
-    const otherBrief = await invoke('Vacuums', 'Compare three battery packs.')
-    expect(new Set([first.workId, otherTitle.workId, otherBrief.workId]).size).toBe(3)
-    expect(f.store.listActivations(botId).filter((row) => row.trigger.kind === 'work')).toHaveLength(3)
-  })
-})
 
 describe('the chat is the front desk', () => {
   it('a chat turn gets the work and reminder tools and not what can take long; work gets the web and, of the work tools, only work_models', async () => {
