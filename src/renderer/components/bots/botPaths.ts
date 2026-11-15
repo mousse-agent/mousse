@@ -60,12 +60,18 @@ function linkTo(path: string): string {
   return `[${pathName(path).replace(/[[\]\\]/g, '\\$&')}](${botFileHref(path)})`
 }
 
+/** A path without the separators a folder is often written with at its end (`C:\Users\me\net\`). */
+function withoutClosingSeparator(path: string): string {
+  return path.replace(/(?<=[^\\/:])[\\/]+$/, '')
+}
+
 function linkProse(prose: string): string {
   return prose.replace(BARE_PATH, (match) => {
-    const path = trimPath(match)
+    const written = trimPath(match)
+    const path = withoutClosingSeparator(written)
     // A path that is only a drive or a home folder is not a file to open.
     if (path.length < 4 || !/[\\/][^\\/]+$/.test(path)) return match
-    return linkTo(path) + match.slice(path.length)
+    return linkTo(path) + match.slice(written.length)
   })
 }
 
@@ -82,7 +88,7 @@ function linkLine(line: string): string {
     if (close < 0) break
     out += linkProse(line.slice(at, tick))
     const inside = line.slice(tick + run, close)
-    const path = inside.trim()
+    const path = withoutClosingSeparator(inside.trim())
     out += WHOLE_PATH.test(path) && /[\\/][^\\/]+$/.test(path) ? linkTo(path) : line.slice(tick, close + run)
     at = close + run
   }

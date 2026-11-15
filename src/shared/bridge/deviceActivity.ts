@@ -39,6 +39,8 @@ export interface DeviceActivityEntry {
   thread?: { id: string; name: string | null }
   /** The project the call was about, by name. A folder that was refused is never named. */
   project?: { name: string | null }
+  /** `agent`: one of the device's agents made the call (it was marked as an agent's); absent for a person's. */
+  actor?: 'agent'
 }
 
 export interface DeviceActivityCount {
@@ -354,7 +356,8 @@ const CODE_WORDS: Record<string, string> = {
   queue_conflict: 'the queue had changed',
   forbidden: 'not allowed',
   rate_limited: 'too many at once',
-  bad_request: 'not a valid request'
+  bad_request: 'not a valid request',
+  agent_reach: 'outside what its agents may change here'
 }
 
 /** "End; in 12 B; out 1.2 KiB" as the audit keeps it, in words. */

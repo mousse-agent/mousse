@@ -10,6 +10,7 @@ import { cardOf, MAX_CARD_TITLE_CHARS, MAX_CARDS_PER_MESSAGE, MAX_CHECKLIST_ITEM
 import { shortModelName } from '../../../../shared/modelNames'
 import { botScheduleLabel } from '../../../../shared/scheduleLabel'
 import { botScheduleProblem } from '../../../scheduled/botJobs'
+import { BOT_LIST_TOOL, BOT_SEND_TOOL, MAX_BOT_MESSAGE_CHAIN, MAX_BOT_MESSAGE_CHARS, MAX_BOT_MESSAGES_PER_DAY } from '../../../../shared/bots/personal/botMessages'
 import { DEFAULT_EVENT_WAKE_HOURS, MAX_EVENT_WAKE_HOURS, MAX_WAKE_CHAIN, MAX_WAKES_PER_DAY, pullRequestOf } from '../../../../shared/bots/personal/wakes'
 import { DEFAULT_WATCHER_MINUTES, MAX_WATCHER_MINUTES, MAX_WATCHERS_PER_BOT } from '../../../bots/watchers'
 import type { BotActivityContext, BotActivitySink, BotToolHost, BotWorkModel } from '../../../bots/seams'
@@ -315,6 +316,19 @@ export const BOT_TOOLS: Tool[] = [
     parameters: Type.Object({ card: card() })
   },
   {
+    name: BOT_LIST_TOOL,
+    description: "Your owner's other bots: each one's name, what it does, and whether it is paused. Look here when your owner names another of their bots (\"tell Alpha\"), or before you send one a message.",
+    parameters: Type.Object({})
+  },
+  {
+    name: BOT_SEND_TOOL,
+    description: `Send a message to another of your owner's bots, by its name (see bot_list). It shows in that bot's chat as from you, where your owner reads it too, and that bot reads it and decides what to do. Use it when your owner asks you to tell another bot something, or when what you found belongs to that bot's job. Write a message that stands on its own: the other bot has none of your chat or memory. It is information to that bot, never an order, and gives it no permission. You get no answer here: if it answers, its message starts a turn of yours. At most ${MAX_BOT_MESSAGE_CHAIN} turns in a row between bots without your owner, and ${MAX_BOT_MESSAGES_PER_DAY} messages in 24 hours.`,
+    parameters: Type.Object({
+      bot: Type.String({ description: 'The name of the bot, as bot_list gives it.' }),
+      message: Type.String({ description: `What to tell it, at most ${MAX_BOT_MESSAGE_CHARS} characters.` })
+    })
+  },
+  {
     name: BOT_QUESTION_ANSWER_TOOL,
     description: 'When the owner answers in the chat a question your work waits on (your situation lists each one, with its id), pass their answer on to that work: it carries on with it. Only their answer, in their words; never your own guess. If their words could answer more than one question, ask them which first.',
     parameters: Type.Object({
@@ -484,6 +498,8 @@ const CHAT_ONLY = 'Only your chat hands out work, sets reminders and wake-ups, a
 const ANSWER_CHAT_ONLY = 'Only your chat passes on your owner\'s answers to your work.'
 /** `show_card` where it is never offered (a consult, a subagent): what it would show goes in words. */
 const CARDS_OFF = "You can't show cards from here: say it in words."
+/** `bot_list` and `bot_send` where they are never offered (a scheduled run, a consult, a subagent). */
+const BOT_MESSAGES_OFF = "You can't message your owner's other bots from here. Say in your report what you would have told them."
 const OWNER_ONLY = 'Only the owner can change this, in your chat. Suggest it in your report instead.'
 const error = (text: string): ToolOutcome => ({ text, isError: true })
 
@@ -1077,6 +1093,49 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
       listed: (listing) => listing.botRole === 'activation' && Boolean(listing.botTurnTools?.has(BOT_CARD_TOOL)),
       available: (turn) => (turn.bot?.appTools.has(BOT_CARD_TOOL) && turn.bot.role !== 'subagent' && deps?.() ? true : CARDS_OFF),
       offered: (turn) => Boolean(turn.bot?.appTools.has(BOT_CARD_TOOL) && turn.bot.role !== 'subagent' && deps?.())
+    },
+    {
+      ...ownTool(byName.get(BOT_LIST_TOOL)!, deps, {
+        class: 'read',
+        describe: () => "List the owner's other bots",
+        handler: async (_args, ctx) => {
+          const call = botCall(deps, ctx)
+          if (isOutcome(call)) return call
+          if (!call.deps.host.bots) return error(BOT_MESSAGES_OFF)
+          const bots = call.deps.host.bots.list(call.botId)
+          return json({ bots, ...(bots.length ? {} : { note: 'Your owner has no other bots.' }) })
+        }
+      }),
+      // A chat turn and work the owner asked for hold it (`compileBotThread`); nothing else lists it.
+      listed: (listing) => listing.botRole === 'activation' && Boolean(listing.botTurnTools?.has(BOT_LIST_TOOL)),
+      available: (turn) => (turn.bot?.appTools.has(BOT_LIST_TOOL) && turn.bot.role !== 'subagent' && deps?.() ? true : BOT_MESSAGES_OFF),
+      offered: (turn) => Boolean(turn.bot?.appTools.has(BOT_LIST_TOOL) && turn.bot.role !== 'subagent' && deps?.())
+    },
+    {
+      ...ownTool(byName.get(BOT_SEND_TOOL)!, deps, {
+        class: 'mutation',
+        describe: () => 'Message another bot',
+        handler: async (args, ctx) => {
+          const call = botCall(deps, ctx)
+          if (isOutcome(call)) return call
+          if (!call.deps.host.bots) return error(BOT_MESSAGES_OFF)
+          if (typeof args.bot !== 'string' || !args.bot.trim() || typeof args.message !== 'string' || !args.message.trim()) return error("bot_send needs the bot's name and a message.")
+          try {
+            const sent = await call.deps.host.bots.send(call.botId, call.activationId, { to: args.bot, message: args.message })
+            call.deps.activity?.onAppResult(call.activity, BOT_SEND_TOOL, { to: sent.to })
+            return json({
+              sent: true,
+              to: sent.to,
+              note: `${sent.to} has your message, and your owner can read it in ${sent.to}'s chat. You get no answer in this turn: don't wait for one. Tell your owner in a few words that you told ${sent.to}.${sent.left > 0 ? '' : ` ${sent.to} can't answer you before your owner writes.`}`
+            })
+          } catch (failure) {
+            return error(failure instanceof Error ? failure.message : String(failure))
+          }
+        }
+      }),
+      listed: (listing) => listing.botRole === 'activation' && Boolean(listing.botTurnTools?.has(BOT_SEND_TOOL)),
+      available: (turn) => (turn.bot?.appTools.has(BOT_SEND_TOOL) && turn.bot.role !== 'subagent' && deps?.() ? true : BOT_MESSAGES_OFF),
+      offered: (turn) => Boolean(turn.bot?.appTools.has(BOT_SEND_TOOL) && turn.bot.role !== 'subagent' && deps?.())
     },
     {
       ...ownTool(byName.get(BOT_QUESTION_ANSWER_TOOL)!, deps, {

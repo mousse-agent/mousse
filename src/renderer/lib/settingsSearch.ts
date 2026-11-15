@@ -85,7 +85,7 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Access', section: 'agents', anchor: 'agents-access', keywords: ['agent access', 'other threads'] },
   { title: 'Answer approvals on other threads', section: 'agents', anchor: 'agents-access-approvals', keywords: ['permissions', 'agents may answer approvals'] },
   { title: 'Subagents', section: 'agents', anchor: 'agents-subagents', keywords: ['subagent'] },
-  { title: 'Subagents on other devices', section: 'agents', anchor: 'agents-remote-subagents', keywords: ['computers', 'remote', 'let agents start subagents on your other devices'] },
+  { title: 'Let agents work on your other devices', section: 'agents', anchor: 'agents-remote-subagents', keywords: ['computers', 'remote', 'subagents on other devices', 'let agents start subagents on your other devices'] },
   { title: 'Worktree per subagent', section: 'agents', anchor: 'agents-subagent-worktrees', keywords: ['experimental', 'branch', 'give each subagent its own worktree'] },
   { title: 'What bots may do here', section: 'agents', anchor: 'agents-bots-here', keywords: ['bots', 'personal bots', 'bot permissions', 'this computer', 'limit'] },
   { title: 'Run commands', section: 'agents', anchor: 'agents-bots-shell', keywords: ['bots', 'shell', 'terminal', 'commands'] },

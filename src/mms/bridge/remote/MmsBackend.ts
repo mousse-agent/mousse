@@ -7,7 +7,7 @@ import {
   sensitiveFolderHolding,
   type FolderRuleEnvironment
 } from '../../files/sensitiveFolders'
-import { matchProjectWithEvidence, type ProjectIdentity } from './projectMatch'
+import { matchProjectWithEvidence, possibleProjects, type ProjectIdentity } from './projectMatch'
 import { repositoryIdentitiesFor } from './repositoryIdentity'
 import { withoutStandingRules } from '../../orchestrator/UserQuestionService'
 import type { MmsProfileServices } from '../../MmsProfileServices'
@@ -105,6 +105,8 @@ const WARM_PAGES_MAX = 4
 const MATCH_PROJECT_LIMIT = 256
 /** Folders read at once for a match. */
 const MATCH_CONCURRENCY = 4
+/** At most this many candidates are named when no single project matches. */
+const MATCH_CANDIDATES_SHOWN = 10
 
 /**
  * A Windows network or device path (`\\host\share`, `\\?\C:\x`, `\\.\pipe\x`). Resolving one makes
@@ -265,7 +267,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
    */
   private async matchProject(
     params: Record<string, unknown>
-  ): Promise<{ projectId?: string; weak?: true }> {
+  ): Promise<{ projectId?: string; weak?: true; candidates?: Array<{ projectId: string; name: string; weak?: true }> }> {
     // Projects are matched by the repository they are in, not by their folder: a project that is a
     // subfolder, or is reached through a link, has the identity of its repository. When two projects are
     // the same repository, the one at its top folder stands for it (else the first), so they do not
@@ -301,7 +303,16 @@ export class MmsRemoteBackend implements RemoteBackendPort {
       candidates
     )
     // A match that rests on the root commit alone says so: the caller does not group by it.
-    return found ? { projectId: found.id, ...(found.weak ? { weak: true as const } : {}) } : {}
+    if (found) return { projectId: found.id, ...(found.weak ? { weak: true as const } : {}) }
+    // No single answer: the projects that may be it, by id and name, so an agent can be told which to name.
+    const names = new Map(projects.map((project) => [project.id, project.name]))
+    const possible = possibleProjects(
+      { roots: params.roots as string[], remotes: (params.remotes as string[] | undefined) ?? [] },
+      candidates
+    ).slice(0, MATCH_CANDIDATES_SHOWN)
+    return possible.length
+      ? { candidates: possible.map(({ id, weak }) => ({ projectId: id, name: names.get(id) ?? '', ...(weak ? { weak: true as const } : {}) })) }
+      : {}
   }
   /**
    * Registers an existing directory on this machine as a project. The path comes from another

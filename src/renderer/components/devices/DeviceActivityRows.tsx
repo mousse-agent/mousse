@@ -57,6 +57,7 @@ export function DeviceActivityView({ name, activity, now, open, busy, blocked, o
                 <li key={`${entry.at}-${entry.method}-${index}`}>
                   <span className="devices-activity-when">{formatAgo(entry.at, now)}</span>
                   <span className={entry.kind === 'refused' ? 'devices-activity-what refused' : 'devices-activity-what'}>{describeActivityEntry(entry)}</span>
+                  {entry.actor === 'agent' && <span className="devices-activity-who">by an agent</span>}
                   {entry.thread && <span className="devices-activity-where">in <ThreadLink id={entry.thread.id} name={entry.thread.name} onOpen={onOpenThread} /></span>}
                   {entry.project?.name && <span className="devices-activity-where">project {entry.project.name}</span>}
                 </li>

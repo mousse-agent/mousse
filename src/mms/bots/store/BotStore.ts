@@ -1888,6 +1888,14 @@ export class BotStore {
     return num(this.get('SELECT COUNT(*) AS n FROM bot_reminders WHERE bot_id = ? AND wake = 1 AND created_at > ?', botId, since)?.n) ?? 0
   }
 
+  /**
+   * How many messages a bot sent to other bots since `since` (the daily budget): the chat turns its messages started,
+   * whose keys all begin with `keyStart` (`botMessageKey`).
+   */
+  botMessagesSince(keyStart: string, since: string): number {
+    return num(this.get('SELECT COUNT(*) AS n FROM bot_activations WHERE substr(idempotency_key, 1, ?) = ? AND created_at > ?', keyStart.length, keyStart, since)?.n) ?? 0
+  }
+
   /** Every bot's waiting wakes on an event that has not happened yet, oldest first. */
   waitingEventWakes(): BotReminderRow[] {
     return this.all("SELECT * FROM bot_reminders WHERE status = 'waiting' AND wake = 1 AND event_json IS NOT NULL AND fired_json IS NULL ORDER BY created_at, id").map(reminderOf)

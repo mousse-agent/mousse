@@ -18,6 +18,7 @@ import { NODE_CAPABILITIES, type NodeCapability } from '../../shared/net/capabil
 import { NET_ERRORS, isNetErrorCode, type NetErrorCode } from '../../shared/net/errors'
 import { isId } from '../../shared/net/ids'
 import { isJoinVia } from '../../shared/net/via'
+import { isAgentReach } from '../../shared/net/local'
 import { isPermissionMode } from '../../shared/permissionMode'
 
 export const NET_HELP = `Usage:
@@ -97,7 +98,7 @@ export const BRIDGE_HELP = `Usage:
   mousse-cli bridge block <node-id>
   mousse-cli bridge unblock <node-id>
   mousse-cli bridge limits <node-id> [--max-mode ask|accept_edits|auto|full] [--terminal on|off]
-    [--editor on|off] [--bots on|off]
+    [--editor on|off] [--bots on|off] [--agent-reach none|launched|all]
   mousse-cli bridge caps <node-id> --caps read,chat,write,settings
   mousse-cli bridge kind <node-id> computer|phone
   mousse-cli bridge threads [on|off]
@@ -354,7 +355,7 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
     'bridge.rename': [],
     'bridge.setCaps': ['caps'],
     'bridge.setKind': [],
-    'bridge.policy': args.subcommand === 'limits' ? ['max-mode', 'terminal', 'editor', 'bots'] : [],
+    'bridge.policy': args.subcommand === 'limits' ? ['max-mode', 'terminal', 'editor', 'bots', 'agent-reach'] : [],
     'bridge.workOnThreads': [],
     'bridge.shareBots': [],
     'bridge.editorServer': []
@@ -625,10 +626,17 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
       const mode = stringFlag(args, 'max-mode'),
         terminal = stringFlag(args, 'terminal'),
         editor = stringFlag(args, 'editor'),
-        bots = stringFlag(args, 'bots')
-      if (mode === undefined && terminal === undefined && editor === undefined && bots === undefined)
+        bots = stringFlag(args, 'bots'),
+        reach = stringFlag(args, 'agent-reach')
+      if (
+        mode === undefined &&
+        terminal === undefined &&
+        editor === undefined &&
+        bots === undefined &&
+        reach === undefined
+      )
         invalid(
-          'bridge limits requires --max-mode ask|accept_edits|auto|full, --terminal on|off, --editor on|off and/or --bots on|off.'
+          'bridge limits requires --max-mode ask|accept_edits|auto|full, --terminal on|off, --editor on|off, --bots on|off and/or --agent-reach none|launched|all.'
         )
       if (mode !== undefined) {
         if (!isPermissionMode(mode)) invalid('--max-mode requires ask, accept_edits, auto or full.')
@@ -645,6 +653,10 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
       if (bots !== undefined) {
         if (bots !== 'on' && bots !== 'off') invalid('--bots requires on or off.')
         params.bots = bots === 'on'
+      }
+      if (reach !== undefined) {
+        if (!isAgentReach(reach)) invalid('--agent-reach requires none, launched or all.')
+        params.agentReach = reach
       }
     }
   }
