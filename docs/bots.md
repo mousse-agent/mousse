@@ -597,6 +597,10 @@ Claude Code and Codex on the owner's entries report no process: Codex's app-serv
 
 Mousse keeps an append-only **bot journal** in `bots.db` of everything it sees a bot do and be told. Capped, dated **bot memory** entries, the **chat summary** and FTS5 search sit on top of it. Every activation's first dispatch gets a context pack built from it: the chat pack in the chat lane, the run brief in the run lane. The bot has five tools that are always on and never grantable: `memory_search`, `memory_read`, `memory_list`, `memory_save` and `memory_forget`; runs may only save run notes and never forget. Details: [`bot-memory.md`](bot-memory.md).
 
+### What's new for bots
+
+A bot made before a change still has memory and chat history that say the old thing. `src/mms/bots/changelog.ts` lists each change a bot would otherwise get wrong, one short entry with an id and a date. A bot's next pack after an update carries the entries it has not seen, after the `<bot_memory>` wrapper, as winning over its memory and history; a chat pack also tells it to replace the memory entries they contradict with `memory_save`, without mentioning it to the owner. A settled chat turn that carried them marks them seen (`changelog_seen` in the memory state); a run follows them but marks nothing. A bot with no history yet is marked as having seen every entry and told nothing. The owner's chat shows nothing of this. An entry for a removed behaviour lists its old words in `gone`, and `tests/bots/botChangelog.test.ts` fails while a bot's instructions or tool descriptions still say them.
+
 ### Fresh starts from the chat
 
 The owner's slash commands in the bot's chat, on the computer only (not in `REMOTE_BOT_METHODS`):
