@@ -228,6 +228,33 @@ describe('switching threads', () => {
     expect(frames.filter((frame) => frame.empty || frame.logo)).toEqual([])
   })
 
+  it('answers a click on a cached thread in its own frame, then shows the thread with its messages', async () => {
+    await mount()
+    await switchTo('thread-e')
+    await deliverView('thread-e', [message('e-1', 'Fifth thread')])
+    await switchTo('thread-f')
+    await deliverView('thread-f', [message('f-1', 'Sixth thread')])
+    frames = []
+
+    // Frames are drawn when the test says so.
+    const drawFrame: Array<() => void> = []
+    vi.stubGlobal('requestAnimationFrame', (callback: () => void) => { drawFrame.push(callback); return drawFrame.length })
+    const { selectThread } = await import('../../src/renderer/lib/threadActions')
+    const useAppStore = await store()
+    // thread-e is cached from when it was left: the click marks it chosen and draws nothing heavier.
+    await act(async () => { void selectThread('thread-e').catch(() => undefined) })
+    expect(useAppStore.getState().openingThreadId).toBe('thread-e')
+    expect(shownThread()).toEqual({ thread: 'thread-f', messages: 'f-1' })
+
+    // Once that frame is drawn, the thread shows with its messages, with no waiting frame between.
+    await act(async () => { for (const callback of drawFrame.splice(0)) callback() })
+    await settle()
+    expect(useAppStore.getState().openingThreadId).toBeNull()
+    expect(useAppStore.getState().transcriptPending).toBe(false)
+    expect(shownThread()).toEqual({ thread: 'thread-e', messages: 'e-1' })
+    expect(framesWithoutOwnMessages()).toEqual([])
+  })
+
   it('shows the empty page for a started thread once its view says it has no messages', async () => {
     await mount()
     await switchTo('thread-cleared')
