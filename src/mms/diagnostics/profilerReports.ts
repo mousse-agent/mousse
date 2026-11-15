@@ -20,7 +20,7 @@ import type { AppViewInfo, WindowCounters } from '../../shared/diagnostics/profi
 import type { AppWindowDetail } from './MemoryMonitor'
 import type { ThreadMemory } from './profilerService'
 
-const UNITS = 'MB is private memory where the OS reports it, else the working set. CPU is percent of one core since the previous sample.'
+const UNITS = "privateMb is the footprint on macOS (with GPU memory), private bytes on Windows, private memory or else the working set on Linux. CPU is percent of one core since the previous sample. detail splits a row: a window's JS heap, Blink and resource cache; each agent CLI or tool."
 
 function r1(n: number): number {
   return Math.round(n * 10) / 10
@@ -39,7 +39,8 @@ function processRows(sample: MemorySample) {
     ...(row.rss !== undefined ? { workingSetMb: row.rss } : {}),
     ...(row.cpu !== undefined ? { cpuPercent: row.cpu } : {}),
     ...(row.heapUsed !== undefined ? { heapUsedMb: row.heapUsed } : {}),
-    ...(row.heapTotal !== undefined ? { heapTotalMb: row.heapTotal } : {})
+    ...(row.heapTotal !== undefined ? { heapTotalMb: row.heapTotal } : {}),
+    ...(row.detail !== undefined ? { detail: row.detail } : {})
   }))
 }
 
@@ -155,9 +156,15 @@ export function windowBreakdownReport(detail: AppWindowDetail | null, sample: Me
     reportedSecondsAgo: Math.max(0, Math.round((now - detail.at) / 1000)),
     windows: detail.windows.map(windowEntry),
     windowProcessesMb: windowRows.map((p) => p.private ?? p.rss),
+    windowProcesses: windowRows.map((p) => ({
+      mb: p.private ?? p.rss,
+      ...(p.heapUsed !== undefined ? { jsHeapUsedMb: p.heapUsed, jsHeapTotalMb: p.heapTotal ?? p.heapUsed } : {}),
+      ...(p.blinkUsed !== undefined ? { blinkUsedMb: p.blinkUsed, blinkTotalMb: p.blinkTotal ?? p.blinkUsed } : {}),
+      ...(p.resourcesMb !== undefined ? { resourceCacheMb: p.resourcesMb } : {})
+    })),
     views: viewSummary(detail.views),
     estimates:
-      "imagesDecodedMbEstimated and canvasMbEstimated assume 4 bytes a pixel. imageCacheMb and the JS heap are measured. A cache's kbEstimated is an estimate of the heap its entries hold; limitKb is its budget."
+      "imagesDecodedMbEstimated and canvasMbEstimated assume 4 bytes a pixel. imageCacheMb, the JS heap, Blink and the resource cache are measured. browserTabs counts the window's in-app browser processes. A cache's kbEstimated is an estimate of the heap its entries hold; limitKb is its budget."
   }
 }
 
@@ -180,7 +187,8 @@ export function gpuHintsReport(sample: MemorySample, detail: AppWindowDetail | n
           webglContexts: hints.webglContexts,
           canvases: hints.canvases,
           views: hints.views,
-          ...(hints.imagesMb !== undefined ? { decodedImagesMb: hints.imagesMb } : {})
+          ...(hints.imagesMb !== undefined ? { decodedImagesMb: hints.imagesMb } : {}),
+          ...(hints.footprintMs !== undefined ? { footprintReadMs: hints.footprintMs } : {})
         }
       : null,
     viewSizes: detail ? viewSummary(detail.views) : null,
@@ -202,7 +210,7 @@ export function childrenReport(children: readonly ChildMemory[]) {
     processes: children.map((child) => ({ kind: fixedName(child.kind), mb: child.mb })),
     byKind: [...byKind].map(([kind, entry]) => ({ kind, count: entry.count, mb: r1(entry.mb) })).sort((a, b) => b.mb - a.mb),
     totalMb: r1(children.reduce((sum, child) => sum + (child.mb ?? 0), 0)),
-    note: 'mb is each process\'s working set as the OS lists it; null when it could not be read.'
+    note: 'mb is each process\'s footprint on macOS, its working set elsewhere; null when it could not be read. They count in the app\'s total.'
   }
 }
 

@@ -203,6 +203,13 @@ describe('the profiler in the service', () => {
     expect(() => validateAppReport({ processes: [], requestId: '../../etc' })).toThrow(/requestId/)
   })
 
+  it("takes a window's Blink numbers and resource cache, and the footprint's read time", () => {
+    const window = { kind: 'renderer', role: 'window', rss: 900, private: 2_155, heapUsed: 140, heapTotal: 180, blinkUsed: 45, blinkTotal: 1_584, resourcesMb: 30 }
+    const hints = { windows: [], surfaceMb: 0, acrylic: false, views: { applet: 0, browser: 0, devtools: 0 }, webglContexts: 0, canvases: 0, footprintMs: 180 }
+    expect(validateAppReport({ processes: [window], hints })).toEqual({ processes: [window], hints })
+    expect(() => validateAppReport({ processes: [{ ...window, blinkUsed: 'lots' }] })).toThrow(/MB/)
+  })
+
   it('lists each thread of the caller\'s profile once, and other profiles only as totals', () => {
     const ownOrchestrator = { loadedThreadIds: () => ['t1', 't2'], isTurnActive: (id: string) => id === 't2' }
     const other = {
@@ -347,7 +354,7 @@ describe('the profiler tools', () => {
     const { service } = profilerFixture(dir)
     const { value, outcome } = await call(toolsFor(() => ON, service), 'profiler_overview')
     expect(value).toMatchObject({ profiler: 'on', serviceUptimeMinutes: expect.any(Number), service: { mb: 150 }, app: { gpuMb: 334, largestWindowMb: 320 }, trend: { serviceMb: [150] }, breaches: [] })
-    expect(value.processes.map((row: { label: string }) => row.label)).toEqual(['Service', 'Service workers (1)', 'Provider: claude', 'Provider: other', 'Main', 'Window', 'GPU', 'App total'])
+    expect(value.processes.map((row: { label: string }) => row.label)).toEqual(['Service', 'Service workers (1)', 'Main', 'Window', 'GPU', 'Agents and tools (2)', 'App total'])
     expect(value.processes.find((row: { label: string }) => row.label === 'GPU')).toMatchObject({ privateMb: 334, workingSetMb: 380, cpuPercent: 3 })
     expectNoPrivateData(outcome.text, dir)
   })

@@ -40,7 +40,7 @@ import { MemoryLog } from './memoryLog'
 import { readChildMemory, readHeapDetail, sampleOwnProcess } from './processMemory'
 import { liveChildProcesses } from './liveCounts'
 
-/** Child memory and the replay buffer's bytes are read on every Nth sample. */
+/** The replay buffer's bytes are read on every Nth sample. */
 const DETAIL_EVERY = 5
 /** History kept in memory for the trend and the growth check. */
 const HISTORY_MS = 6 * 3_600_000
@@ -111,7 +111,6 @@ export class MemoryMonitor {
   private timer: NodeJS.Timeout | null = null
   private ticks = 0
   private running: Promise<void> | null = null
-  private lastChildren: ChildMemory[] | undefined
   private lastReplayMb: number | undefined
   private started = false
   /** Set by `stop()`: a sample that was reading then writes nothing and raises no notice. */
@@ -214,8 +213,8 @@ export class MemoryMonitor {
   }
 
   /**
-   * A sample now, for a profiler tool: not kept in the history or written to the log. With `children`, the child
-   * processes' memory is read again too.
+   * A sample now, for a profiler tool: not kept in the history or written to the log. With `children`, the replay
+   * buffer's size is read again too (the child processes are read with every sample).
    */
   async measure(options: { children?: boolean } = {}): Promise<MemorySample> {
     return this.takeSample(options.children === true)
@@ -257,10 +256,9 @@ export class MemoryMonitor {
       this.options.readCounts()
     ])
     this.detail = (this.options.readDetail ?? readHeapDetail)()
-    if (withDetail) {
-      this.lastChildren = await (this.options.readChildren ?? (() => readChildMemory(liveChildProcesses())))()
-      if (this.options.readReplayBytes) this.lastReplayMb = toMb(this.options.readReplayBytes())
-    }
+    // Every sample: the agent CLIs and tools count in the app's total, which would jump if they were read less often.
+    const children = await this.readChildrenNow()
+    if (withDetail && this.options.readReplayBytes) this.lastReplayMb = toMb(this.options.readReplayBytes())
     const { processes: app, hints } = this.freshAppReport(t)
     return {
       t,
@@ -269,7 +267,7 @@ export class MemoryMonitor {
       service: cpu !== undefined ? { ...service, cpu } : service,
       counts: { ...reading.counts, providerProcesses: (this.options.childCount ?? (() => liveChildProcesses().length))() },
       ...(reading.workerHeaps.length ? { workers: reading.workerHeaps.map(toMb) } : {}),
-      ...(withDetail && this.lastChildren?.length ? { children: this.lastChildren } : {}),
+      ...(children.length ? { children } : {}),
       ...(app.length ? { app } : {}),
       ...(hints ? { hints } : {}),
       ...(withDetail && this.lastReplayMb !== undefined ? { replayMb: this.lastReplayMb } : {})
@@ -314,12 +312,8 @@ export class MemoryMonitor {
       this.active.set(breach.kind, { breach, loggedAt: toLog.includes(breach) ? sample.t : known?.loggedAt ?? sample.t })
     }
     if (toLog.length) {
-      // The full breakdown, with the children's memory read now.
-      const children = await (this.options.readChildren ?? (() => readChildMemory(liveChildProcesses())))().catch(() => undefined)
-      if (this.stopped) return
-      const full: MemorySample = { ...sample, ...(children?.length ? { children } : {}) }
-      this.history[this.history.length - 1] = full
-      this.log.append({ type: 'breach', t: sample.t, breaches: toLog, sample: full, detail: this.detail ?? readHeapDetail() })
+      // The full breakdown; the sample has the children's memory already.
+      this.log.append({ type: 'breach', t: sample.t, breaches: toLog, sample, detail: this.detail ?? readHeapDetail() })
       logWarn('memory', `out of bounds: ${toLog.map((breach) => breach.summary).join('; ')}`)
     }
     // One notice a day, whatever its kind.

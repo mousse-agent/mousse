@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { appHintsLine, appMb, memoryTable, serviceMb, type MemoryStatus, type MemoryTrendPoint } from '../../../shared/diagnostics/memory'
+import { appHintsLine, appMb, memorySource, memoryTable, serviceMb, type MemoryStatus, type MemoryTrendPoint } from '../../../shared/diagnostics/memory'
 import { ExternalLink } from '../../lib/icons'
 import { openMemoryReport } from '../../hooks/useMemoryNotices'
 import { SettingsRow } from './SettingsRow'
@@ -114,12 +114,12 @@ export function MemoryRows() {
         {sample && (
           <table className="memory-table">
             <thead>
-              <tr><th scope="col">Process</th><th scope="col" title="Private memory">Private MB</th><th scope="col">Working set MB</th><th scope="col">CPU %</th><th scope="col" title="JavaScript heap used of total">Heap MB</th></tr>
+              <tr><th scope="col">Process</th><th scope="col" title={`Memory: ${memorySource(window.mousse?.platform ?? '')}`}>Memory MB</th><th scope="col">Working set MB</th><th scope="col">CPU %</th><th scope="col" title="JavaScript heap used of total">Heap MB</th></tr>
             </thead>
             <tbody>
               {memoryTable(sample).map((row, index) => (
                 <tr key={`${row.label}-${index}`} className={row.group === 'total' ? 'memory-table-total' : undefined}>
-                  <th scope="row">{row.label}</th>
+                  <th scope="row" title={row.detail}>{row.label}</th>
                   <td>{cell(row.private)}</td>
                   <td>{cell(row.rss)}</td>
                   <td>{row.cpu === undefined ? '-' : row.cpu.toFixed(1)}</td>

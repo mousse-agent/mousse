@@ -18,7 +18,7 @@
 import { DomainRpcError, domainObject, type DomainHandlerRegistry } from '../protocol/domainRegistry'
 import { connectionIsLocal } from '../protocol/threadVisibility'
 import type { HandlerContext } from '../protocol/handlers'
-import { APP_PROCESS_KINDS, APP_PROCESS_ROLES, BREACH_KINDS, type AppHints, type AppProcessKind, type AppProcessMemory, type AppProcessRole, type BreachKind } from '../../shared/diagnostics/memory'
+import { APP_PROCESS_KINDS, APP_PROCESS_ROLES, BREACH_KINDS, NEWER_APP_PROCESS_FIELDS, type AppHints, type AppProcessKind, type AppProcessMemory, type AppProcessRole, type BreachKind } from '../../shared/diagnostics/memory'
 import type { AppViewInfo, ProfilerState, WindowCounters } from '../../shared/diagnostics/profiler'
 import type { MemoryMonitor } from './MemoryMonitor'
 
@@ -76,7 +76,7 @@ function count(value: unknown, name: string): number {
 }
 
 function validateHints(value: unknown): AppHints {
-  const raw = domainObject(value, ['windows', 'surfaceMb', 'acrylic', 'views', 'webglContexts', 'canvases', 'imagesMb'])
+  const raw = domainObject(value, ['windows', 'surfaceMb', 'acrylic', 'views', 'webglContexts', 'canvases', 'imagesMb', 'footprintMs'])
   if (!Array.isArray(raw.windows) || raw.windows.length > MAX_WINDOWS) throw new DomainRpcError('invalid_params', 'windows must be a list of at most 32')
   const windows = raw.windows.map((entry) => {
     const w = domainObject(entry, ['w', 'h', 'scale', 'visible'])
@@ -87,6 +87,7 @@ function validateHints(value: unknown): AppHints {
   const views = domainObject(raw.views, ['applet', 'browser', 'devtools'])
   if (typeof raw.acrylic !== 'boolean') throw new DomainRpcError('invalid_params', 'acrylic must be a boolean')
   const imagesMb = mb(raw.imagesMb, false)
+  const footprintMs = mb(raw.footprintMs, false)
   return {
     windows,
     surfaceMb: mb(raw.surfaceMb, true)!,
@@ -94,7 +95,8 @@ function validateHints(value: unknown): AppHints {
     views: { applet: count(views.applet, 'applet'), browser: count(views.browser, 'browser'), devtools: count(views.devtools, 'devtools') },
     webglContexts: count(raw.webglContexts, 'webglContexts'),
     canvases: count(raw.canvases, 'canvases'),
-    ...(imagesMb !== undefined ? { imagesMb } : {})
+    ...(imagesMb !== undefined ? { imagesMb } : {}),
+    ...(footprintMs !== undefined ? { footprintMs } : {})
   }
 }
 
@@ -158,12 +160,12 @@ export function validateAppReport(params: unknown): {
   const raw = domainObject(params, ['processes', 'hints', 'requestId', 'windows', 'views'])
   if (!Array.isArray(raw.processes) || raw.processes.length > MAX_APP_PROCESSES) throw new DomainRpcError('invalid_params', 'processes must be a list of at most 64')
   const processes = raw.processes.map((entry) => {
-    const value = domainObject(entry, ['kind', 'role', 'cpu', 'rss', 'private', 'heapUsed', 'heapTotal', 'external', 'arrayBuffers'])
+    const value = domainObject(entry, ['kind', 'role', 'cpu', 'rss', 'private', 'heapUsed', 'heapTotal', 'external', 'arrayBuffers', ...NEWER_APP_PROCESS_FIELDS])
     if (!APP_PROCESS_KINDS.includes(value.kind as AppProcessKind)) throw new DomainRpcError('invalid_params', 'Unknown process kind')
     if (value.role !== undefined && !APP_PROCESS_ROLES.includes(value.role as AppProcessRole)) throw new DomainRpcError('invalid_params', 'Unknown process role')
     const out: AppProcessMemory = { kind: value.kind as AppProcessKind, rss: mb(value.rss, true)! }
     if (value.role !== undefined) out.role = value.role as AppProcessRole
-    for (const key of ['private', 'heapUsed', 'heapTotal', 'external', 'arrayBuffers', 'cpu'] as const) {
+    for (const key of ['private', 'heapUsed', 'heapTotal', 'external', 'arrayBuffers', 'cpu', ...NEWER_APP_PROCESS_FIELDS] as const) {
       const n = mb(value[key], false)
       if (n !== undefined) out[key] = n
     }

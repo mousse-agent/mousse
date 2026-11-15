@@ -129,7 +129,7 @@ function mb(n: number | undefined): string {
 export function formatMemoryTable(sample: MemorySample): string[] {
   const rows = memoryTable(sample)
   const width = Math.max(16, ...rows.map((r) => r.label.length + 2))
-  const head = `  ${'Process'.padEnd(width)}${'Private'.padStart(9)}${'Working set'.padStart(13)}${'CPU %'.padStart(8)}${'Heap used/total'.padStart(18)}`
+  const head = `  ${'Process'.padEnd(width)}${'Memory'.padStart(9)}${'Working set'.padStart(13)}${'CPU %'.padStart(8)}${'Heap used/total'.padStart(18)}`
   return [head, ...rows.map((r) => `  ${r.label.padEnd(width)}${mb(r.private).padStart(9)}${mb(r.rss).padStart(13)}${mb(r.cpu).padStart(8)}${(r.heapUsed === undefined ? '-' : `${mb(r.heapUsed)}/${mb(r.heapTotal)}`).padStart(18)}`)]
 }
 
