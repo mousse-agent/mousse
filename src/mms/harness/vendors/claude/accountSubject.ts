@@ -3,7 +3,6 @@ import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { isClaudeSignInVariable } from '../../claude/apiKey'
-import { PI_AMBIENT_ENV } from '../../pi/envKeys'
 
 /** Variables whose value is the credential Claude Code sends: the value identifies it. */
 const CLAUDE_DIRECT_CREDENTIALS = ['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN']
@@ -67,45 +66,29 @@ export function claudeEffectiveEnvironment(env: NodeJS.ProcessEnv, options: Acco
   return readClaudeSettings(env, options).effective
 }
 
-/** Cloud sign-in inputs are allowed only while their route is enabled in the effective settings. */
-const CLOUD_SIGN_IN_VARIABLES: ReadonlyArray<{ route: string; names: readonly string[] }> = [
-  { route: 'CLAUDE_CODE_USE_BEDROCK', names: [...PI_AMBIENT_ENV['amazon-bedrock'], 'AWS_SDK_LOAD_CONFIG', 'AWS_CA_BUNDLE'] },
-  { route: 'CLAUDE_CODE_USE_VERTEX', names: [...PI_AMBIENT_ENV['google-vertex'], 'CLOUD_ML_REGION'] },
-  { route: 'CLAUDE_CODE_USE_FOUNDRY', names: [
-    'AZURE_CLIENT_ID', 'AZURE_TENANT_ID', 'AZURE_CLIENT_SECRET', 'AZURE_CLIENT_CERTIFICATE_PATH',
-    'AZURE_CLIENT_CERTIFICATE_PASSWORD', 'AZURE_CLIENT_SEND_CERTIFICATE_CHAIN', 'AZURE_AUTHORITY_HOST',
-    'AZURE_FEDERATED_TOKEN_FILE', 'AZURE_USERNAME', 'AZURE_PASSWORD', 'AZURE_CONFIG_DIR', 'AZURE_TOKEN_CREDENTIALS'
-  ] }
+/** A cloud's own environment is allowed only while one of its Claude routes is enabled. */
+const CLOUD_SIGN_IN_VARIABLES: ReadonlyArray<{ routes: readonly string[]; names: RegExp }> = [
+  { routes: ['CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_MANTLE', 'CLAUDE_CODE_USE_ANTHROPIC_AWS'], names: /^AWS_/ },
+  { routes: ['CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD'], names: /^(GOOGLE_|GCLOUD_|CLOUDSDK_|CLOUD_ML_REGION$)/ },
+  { routes: ['CLAUDE_CODE_USE_FOUNDRY'], names: /^AZURE_/ }
 ]
-/** Model/endpoint/region selectors in https://code.claude.com/docs/en/env-vars (not display copy or tuning switches). */
-const MODEL_ROUTE_VARIABLES = new Set([
-  'ANTHROPIC_MODEL', 'ANTHROPIC_DEFAULT_MODEL', 'ANTHROPIC_CUSTOM_MODEL_OPTION',
-  'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_FABLE_MODEL',
-  'ANTHROPIC_SMALL_FAST_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION',
-  'CLAUDE_CODE_AUTO_MODE_MODEL', 'CLAUDE_CODE_SUBAGENT_MODEL',
-  'ANTHROPIC_BEDROCK_REGION_PREFIX', 'ANTHROPIC_FOUNDRY_RESOURCE',
-  'ANTHROPIC_GOOGLE_CLOUD_LOCATION', 'ANTHROPIC_GOOGLE_CLOUD_PROJECT', 'ANTHROPIC_VERTEX_PROJECT_ID', 'CLOUD_ML_REGION',
-  'VERTEX_REGION_CLAUDE_3_5_HAIKU', 'VERTEX_REGION_CLAUDE_3_5_SONNET', 'VERTEX_REGION_CLAUDE_3_7_SONNET',
-  'VERTEX_REGION_CLAUDE_4_0_OPUS', 'VERTEX_REGION_CLAUDE_4_0_SONNET', 'VERTEX_REGION_CLAUDE_4_1_OPUS',
-  'VERTEX_REGION_CLAUDE_4_5_OPUS', 'VERTEX_REGION_CLAUDE_4_5_SONNET', 'VERTEX_REGION_CLAUDE_4_6_OPUS', 'VERTEX_REGION_CLAUDE_4_6_SONNET',
-  'VERTEX_REGION_CLAUDE_4_7_OPUS', 'VERTEX_REGION_CLAUDE_4_8_OPUS', 'VERTEX_REGION_CLAUDE_5_5_OPUS', 'VERTEX_REGION_CLAUDE_5_5_SONNET',
-  'VERTEX_REGION_CLAUDE_5_OPUS', 'VERTEX_REGION_CLAUDE_5_SONNET', 'VERTEX_REGION_CLAUDE_FABLE_5',
-  'VERTEX_REGION_CLAUDE_FABLE_5_1', 'VERTEX_REGION_CLAUDE_FABLE_5_2', 'VERTEX_REGION_CLAUDE_HAIKU_4_5', 'VERTEX_REGION_CLAUDE_HAIKU_5_5'
-])
-const SIGN_IN_SUPPORT_VARIABLE = /^(CLAUDE_SECURESTORAGE_CONFIG_DIR|(HTTPS?|ALL|NO)_PROXY|(https?|all|no)_proxy)$/
+
+/** Claude's own configuration families, kept as families so a new model or setting needs no Mousse update. */
+const CLAUDE_CONFIGURATION_VARIABLE = /^(ANTHROPIC_|CLAUDE_CODE_USE_|CLAUDE_.*CONFIG_DIR$|VERTEX_REGION_CLAUDE_|ENABLE_PROMPT_CACHING_)/
+const SIGN_IN_SUPPORT_VARIABLE = /^(NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|(HTTPS?|ALL|NO)_PROXY|(https?|all|no)_proxy)$/
 
 /**
  * `base` (default `env`) with only the sign-in variables of the user's and the managed settings' `env` applied over it
- * (including the active cloud route and model/endpoint/region choices), for a request that loads no settings files yet must keep a sign-in kept there
+ * (including Claude configuration families and the active cloud environment), for a request that loads no settings files yet must keep a sign-in kept there
  * (a proxy's address and token). Nothing that changes what runs at start-up is copied: no
  * `NODE_OPTIONS`, `NODE_PATH`, `PATH`, `LD_*`/`DYLD_*`, `PYTHON*` or `ELECTRON_RUN_AS_NODE`.
  */
 export function claudeSignInEnvironment(env: NodeJS.ProcessEnv, options: AccountSubjectOptions = {}, base: NodeJS.ProcessEnv = env): NodeJS.ProcessEnv {
   const { effective } = readClaudeSettings(env, options)
   const signIn: NodeJS.ProcessEnv = { ...base }
-  const cloudNames = new Set(CLOUD_SIGN_IN_VARIABLES.filter(({ route }) => on(effective[route])).flatMap(({ names }) => names))
+  const clouds = CLOUD_SIGN_IN_VARIABLES.filter(({ routes }) => routes.some((route) => on(effective[route])))
   for (const [name, value] of Object.entries(effective)) {
-    if (isClaudeSignInVariable(name) || SIGN_IN_SUPPORT_VARIABLE.test(name) || cloudNames.has(name) || MODEL_ROUTE_VARIABLES.has(name)) signIn[name] = value
+    if (CLAUDE_CONFIGURATION_VARIABLE.test(name) || isClaudeSignInVariable(name) || SIGN_IN_SUPPORT_VARIABLE.test(name) || clouds.some(({ names }) => names.test(name))) signIn[name] = value
   }
   return signIn
 }
