@@ -100,7 +100,7 @@ describe('memory tools', () => {
     for (let n = 0; n < count; n++) expect((await call('memory_save', thread, { kind, text: words(n) })).isError).toBeUndefined()
     expect((await call('memory_save', thread, { kind, text: words(9) })).value.error).toBe('over_cap')
     const before = fx.store.journal('ada')
-    const combined = await call('memory_save', thread, { kind, text: 'Combined facts.', merges: ['m1', 'm2', 'm2'] })
+    const combined = await call('memory_save', thread, { kind, text: words(10), merges: ['m1', 'm2', 'm2'] })
     expect(combined.isError).toBeUndefined()
     expect(fx.store.active('ada')).toHaveLength(count - 1)
     expect(fx.store.journal('ada').slice(0, before.length)).toEqual(before)

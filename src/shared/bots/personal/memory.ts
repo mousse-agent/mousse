@@ -97,6 +97,8 @@ export interface BotMemoryEntry {
   until?: string
   learnedAt: string
   by: 'you said' | 'a run' | 'cleanup'
+  /** The version that put this entry away, when absorbed. */
+  absorbedBy?: string
   status: BotMemoryStatus
 }
 
@@ -144,6 +146,8 @@ export interface BotMemorySaveInput {
   kind: 'owner' | 'note'
   /** The current id of the entry this replaces; an older version gets `stale`. */
   replaces?: string
+  /** Current entries of the same kind this entry absorbs, without forgetting their text. */
+  merges?: string[]
   validFrom?: string
   expiresAt?: string
 }
