@@ -10,7 +10,7 @@ import { BOT_RUN_REPORT_LINE } from '../../src/mms/bots/memory/contextPack'
 import { botJobId, botScheduleProblem, scheduleProblem } from '../../src/mms/scheduled/botJobs'
 import { nextOccurrenceAfter } from '../../src/mms/scheduled/computeNextRun'
 import { slotsAllOn } from '../../src/shared/bots/personal/modelSlots'
-import type { RunLevel } from '../../src/shared/automationInbox'
+import type { NotifyLevel, RunLevel } from '../../src/shared/automationInbox'
 import { botFixture, chatOf, createBot, finish, flush, runDispatch, start, T0, type BotFixture } from './botFixture'
 
 const MIN = 60_000
@@ -306,18 +306,42 @@ describe('bot schedules in the shared scheduler', () => {
     expect(f.scheduler.getJob(entry().jobId)).toMatchObject({ enabled: false, pausedReason: 'Owner paused it' })
   })
 
-  it('a run report of a schedule told Only problems is quiet; other rows notify as before', async () => {
+  // Tell me floors × every reported level, plus no report (Worth a look).
+  const notificationRows = (['needs_you', 'look', 'fyi', 'every'] as const).flatMap((tellMe) =>
+    ([undefined, 'quiet', 'fyi', 'look', 'needs_you'] as const).map((level) => ({
+      tellMe, level,
+      notifies: tellMe === 'every' || (tellMe === 'needs_you' ? level === 'needs_you' : tellMe === 'look' ? level !== 'fyi' && level !== 'quiet' : level !== 'quiet')
+    })))
+
+  it.each(notificationRows)('Tell me $tellMe with report level $level', async ({ tellMe, level, notifies }) => {
     await scheduled()
-    f.book.update(f.scheduler.getJob(entry().jobId)!, { tellMe: 'problems' })
+    f.book.update(f.scheduler.getJob(entry().jobId)!, { tellMe })
     const events: Array<{ message: { kind: string }; quiet?: true }> = []
     f.bots.events.on('message', (event) => events.push(event))
     const { inserted } = await f.tickSchedules(new Date(T0 + 5 * MIN))
-    await runDispatch(f, inserted[0]!, 1, { text: 'All tidy.' })
-    expect(events.find((event) => event.message.kind === 'run_report')).toMatchObject({ quiet: true })
-    f.book.update(f.scheduler.getJob(entry().jobId)!, { tellMe: 'every' })
-    const next = await f.tickSchedules(new Date(T0 + 10 * MIN))
-    await runDispatch(f, next.inserted[0]!, 1, { text: 'Tidy again.' })
-    expect(events.filter((event) => event.message.kind === 'run_report').at(-1)!.quiet).toBeUndefined()
+    if (level) f.automationRuns.report({ threadId: '', activationId: inserted[0]! }, level, 'Site checked.')
+    await runDispatch(f, inserted[0]!, 1, { text: 'Site checked.' })
+    const report = events.find((event) => event.message.kind === 'run_report')
+    // Quiet runs have no chat row at all, even under Every run.
+    if (level === 'quiet') expect(report).toBeUndefined()
+    else {
+      expect(report).toBeDefined()
+      expect(!report!.quiet).toBe(notifies)
+    }
+  })
+
+  it.each<NotifyLevel>(['needs_you', 'look', 'fyi', 'every'])('failures notify under Tell me %s', async (tellMe) => {
+    await scheduled()
+    f.book.update(f.scheduler.getJob(entry().jobId)!, { tellMe })
+    const events: Array<{ message: { kind: string }; quiet?: true }> = []
+    f.bots.events.on('message', (event) => events.push(event))
+    const { inserted } = await f.tickSchedules(new Date(T0 + 5 * MIN))
+    f.automationRuns.report({ threadId: '', activationId: inserted[0]! }, 'quiet', 'Nothing to report.')
+    const { payload } = await start(f, inserted[0]!)
+    await finish(f, payload, 'failed', { outcome: { error: 'Site unavailable.' } })
+    const error = events.find((event) => event.message.kind === 'error')
+    expect(error).toBeDefined()
+    expect(error!.quiet).toBeUndefined()
   })
 
   it('a scheduled run that reports quiet or says [SILENT] posts nothing in the chat; a report, and work the owner asked for, still show', async () => {
