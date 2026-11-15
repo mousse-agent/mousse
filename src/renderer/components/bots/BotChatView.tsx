@@ -465,26 +465,42 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   }, [bot.id])
   useEffect(() => { if (lastSeq !== undefined) store().markRead(bot.id) }, [bot.id, lastSeq, store])
 
-  // New messages keep the end in view; a page loaded above keeps the reader where they were.
-  // Scrolled up, a new message from the bot leaves the reader where they are and offers New message instead.
-  const anchor = useRef<{ firstId?: string; lastSeq?: number; height: number; atEnd: boolean }>({ height: 0, atEnd: true })
+  // New messages keep the end in view; a page loaded above keeps the reader where they were. A message the owner sends
+  // from here always goes to the end, as in a messenger.
+  // Scrolled up, a new message from the bot leaves the reader where they are; Go to latest shows while scrolled up, and
+  // says New message once one has come in. `heading`: on the way to the end after Go to latest, so the smooth scroll's
+  // own steps don't bring the button back. `top`: where the last scroll left it.
+  const anchor = useRef<{ firstId?: string; lastSeq?: number; height: number; atEnd: boolean; sent: number; heading?: boolean; top?: number }>({ height: 0, atEnd: true, sent: 0 })
   const [unseen, setUnseen] = useState(false)
+  const [away, setAway] = useState(false)
   useLayoutEffect(() => {
     const element = transcript.current
     if (!element) return
     const held = anchor.current
+    const sent = pending.length > held.sent
+    if (sent) {
+      held.atEnd = true
+      setAway(false)
+      setUnseen(false)
+    }
     if (held.firstId && firstId !== held.firstId && !held.atEnd) element.scrollTop += element.scrollHeight - held.height
     else if (held.atEnd) element.scrollTop = element.scrollHeight
     if (!held.atEnd && held.lastSeq !== undefined && lastSeq !== undefined && lastSeq > held.lastSeq && messages.at(-1)?.author === 'bot') setUnseen(true)
-    anchor.current = { firstId, lastSeq, height: element.scrollHeight, atEnd: held.atEnd }
+    anchor.current = { firstId, lastSeq, height: element.scrollHeight, atEnd: held.atEnd, sent: pending.length, heading: held.heading, top: held.top }
   }, [firstId, lastSeq, messages, pending.length, working, offline, replying?.id])
-  useEffect(() => { anchor.current = { lastSeq: anchor.current.lastSeq, height: 0, atEnd: true }; setUnseen(false) }, [bot.id])
+  useEffect(() => {
+    anchor.current = { lastSeq: anchor.current.lastSeq, height: 0, atEnd: true, sent: anchor.current.sent }
+    setUnseen(false)
+    setAway(false)
+  }, [bot.id])
   const toEnd = () => {
     const element = transcript.current
     if (element?.scrollTo) element.scrollTo({ top: element.scrollHeight, behavior: 'smooth' })
     else if (element) element.scrollTop = element.scrollHeight
     anchor.current.atEnd = true
+    anchor.current.heading = true
     setUnseen(false)
+    setAway(false)
   }
   // A pinned line hides while its full message is on screen, so it never shows twice.
   const pinned = useMemo(() => pinnedOf(messages, bot), [messages, bot])
@@ -548,7 +564,11 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
         const element = event.currentTarget
         anchor.current.atEnd = element.scrollHeight - element.scrollTop - element.clientHeight < 40
         anchor.current.height = element.scrollHeight
+        // Reaching the end, or any scroll back up (the reader took over), ends the way to the end.
+        if (anchor.current.atEnd || element.scrollTop < (anchor.current.top ?? 0)) anchor.current.heading = false
+        anchor.current.top = element.scrollTop
         if (anchor.current.atEnd) setUnseen(false)
+        if (!anchor.current.heading) setAway(!anchor.current.atEnd)
         measure()
         if (element.scrollTop < 60 && chat?.hasMore) void store().loadOlder(bot.id)
       }}>
@@ -581,7 +601,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
         {bot.state === 'paused' && <p className="bot-paused-line" role="status">{bot.stateText.startsWith('Paused') ? bot.stateText : 'Paused'}. <button type="button" onClick={() => void store().resume(bot.id)}>Resume</button></p>}
       </div>
       <div className="chat-input-area bot-input-area" data-applet-composer>
-        {unseen && <button type="button" className="bot-jump" onClick={toEnd}><ArrowDown size={14} aria-hidden />New message</button>}
+        {(unseen || away) && <button type="button" className="bot-jump" onClick={toEnd}><ArrowDown size={14} aria-hidden />{unseen ? 'New message' : 'Go to latest'}</button>}
         {!!pinnedOff.length && <div className="bot-pins" role="status" aria-label="Waiting on you">{pinnedOff.map((item) => <PinnedLine key={item.kind} botId={bot.id} item={item} />)}</div>}
         <ComposerNoticeProvider>
           <ComposerNoticeSource notice={error ? { tone: 'error', title: error, onDismiss: () => useBotsStore.setState({ error: null, errorBotId: null }) } : null} />
