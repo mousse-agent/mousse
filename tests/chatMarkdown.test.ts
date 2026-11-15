@@ -297,3 +297,29 @@ describe('MarkdownPreview highlighting', () => {
     expect(second).toContain('<span class="hljs-keyword">def</span>')
   })
 })
+
+describe('chat Markdown text in angle brackets', () => {
+  const botImages = { Image: () => null }
+  const renderers: Array<[string, (content: string) => string]> = [
+    ['a thread', render],
+    ['a bot chat', (content) => renderToStaticMarkup(createElement(Markdown, { content, images: botImages }))],
+  ]
+
+  it.each(renderers)('shows tags it does not draw as written in %s', (_, draw) => {
+    const markup = draw('bug : <command> <stuff> (angular brackets content vanishing?)')
+    expect(markup).toContain('bug : &lt;command&gt; &lt;stuff&gt; (angular brackets content vanishing?)')
+
+    const block = draw('<thinking>\nplan it\n</thinking>')
+    expect(block).toContain('&lt;thinking&gt;')
+    expect(block).toContain('&lt;/thinking&gt;')
+    expect(block).not.toContain('<thinking>')
+  })
+
+  it.each(renderers)('still draws kept HTML and keeps code as written in %s', (_, draw) => {
+    expect(draw('press <kbd>Enter</kbd>')).toContain('<kbd>Enter</kbd>')
+    expect(draw('<script>alert(1)</script>')).not.toContain('<script>')
+    expect(draw('run `git <command>` now')).toContain('git &lt;command&gt;')
+    expect(draw('```\n<command> <stuff>\n```\n')).toContain('&lt;command&gt;')
+    expect(draw('see <https://example.com>')).toContain('href="https://example.com/"')
+  })
+})
