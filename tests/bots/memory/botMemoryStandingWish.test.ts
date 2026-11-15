@@ -61,7 +61,7 @@ describe('the missed-wish fallback', () => {
     expect(situation).toContain('full')
     expect(situation).toContain('which')
     expect(await packs.runPreamble({ botId: 'ada', activationId: 'run' })).not.toContain('2 standing wishes')
-    const end = { botId: 'ada', activationId: 'next', dispatchId: 'd-next', lane: 'chat' as const, threadId: 'home' }
+    const end = { botId: 'ada', activationId: 'next', dispatchId: 'd-next', lane: 'chat' as const, memoryLane: 'chat' as const, threadId: 'home' }
     await packs.afterDispatch({ ...end, endedBy: 'failed' })
     expect(await packs.chatPreamble({ botId: 'ada', activationId: 'retry' })).toContain('2 standing wishes')
     await packs.afterDispatch({ ...end, endedBy: 'settled', consult: true })
