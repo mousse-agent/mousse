@@ -1,4 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest'
+import { createBotJournal } from '../../../src/mms/bots/memory/capture'
+import { createBotContextProvider } from '../../../src/mms/bots/memory/contextPack'
+import { renderMemoryBlocks } from '../../../src/mms/bots/memory/render'
 import { createBotMemoryAdmin } from '../../../src/mms/bots/memory/admin'
 import { disposeFixtures, memoryFixture } from './memoryFixture'
 
@@ -20,7 +23,7 @@ it('puts away cross-kind copies without changing the kept entry, and Forget take
     expect(store.forget('ada', { id, by: 'owner_ui' })).toMatchObject({ error: expect.stringContaining('m1') })
     for (const key of ['replaces', 'merges'] as const) {
       expect(store.save('ada', { lane: 'chat', kind: 'note', text: 'A replacement.', [key]: key === 'merges' ? [id] : id }))
-        .toMatchObject({ error: 'refused', reason: expect.stringContaining('m1') })
+        .toMatchObject({ error: 'stale', current: { absorbedBy: 'm1' } })
     }
   }
   expect(store.journal('ada').at(-1)).toMatchObject({ who: 'mousse', kind: 'memory_op' })
@@ -66,6 +69,51 @@ it('uses one indexed read and no transaction or write with no duplicates', () =>
   expect(statements).toHaveBeenCalledTimes(1)
   expect(transaction).not.toHaveBeenCalled()
   const sql = statements.mock.calls[0]![0]
-  const plan = db.statement(`EXPLAIN QUERY PLAN ${sql}`).all('ada', new Date().toISOString())
+  const plan = db.statement(`EXPLAIN QUERY PLAN ${sql}`).all('ada', new Date().toISOString(), 'ada', new Date().toISOString())
   expect(JSON.stringify(plan)).toContain('bot_memories_')
+})
+
+it.each(['kind', 'oldest', 'id'])('breaks duplicate ties by %s', (tie) => {
+  const { store, clock } = memoryFixture()
+  store.save('ada', { lane: 'chat', kind: 'note', text: 'A repeated fact.' })
+  clock.now += tie === 'oldest' ? 1_000 : 0
+  store.save('ada', { lane: tie === 'kind' ? 'run' : 'chat', kind: 'note', text: 'Different words.' })
+  store.save('ada', { lane: tie === 'kind' ? 'run' : 'chat', kind: 'note', text: 'A repeated fact.', replaces: 'm2' })
+  expect(store.tidyDuplicates('ada')).toBe(1)
+  expect(store.active('ada').map(e => e.ref)).toEqual(['m1'])
+})
+
+it('never keeps an expired or forgotten entry', () => {
+  const { store, clock } = memoryFixture()
+  store.save('ada', { lane: 'chat', kind: 'owner', text: 'A dated fact.', expiresAt: '2026-11-08' })
+  store.save('ada', { lane: 'chat', kind: 'note', text: 'A dated fact.' })
+  clock.now += 2 * 24 * 60 * 60 * 1_000
+  store.expireMemories('ada')
+  expect(store.tidyDuplicates('ada')).toBe(0)
+  expect(store.active('ada').map(e => e.ref)).toEqual(['m2'])
+  store.forget('ada', { id: 'm2', by: 'owner_ui' })
+  expect(store.tidyDuplicates('ada')).toBe(0)
+  expect(store.save('ada', { lane: 'run', kind: 'note', text: 'A dated fact.' })).toMatchObject({ error: 'refused' })
+})
+
+
+it('refreshes frozen chat and run packs, preserving every other block byte for byte', async () => {
+  const { store } = memoryFixture()
+  for (const lane of ['chat', 'run'] as const) store.save('ada', { lane, kind: 'note', text: 'The feed is at /rss.' })
+  store.save('ada', { lane: 'chat', kind: 'owner', text: 'Keep replies short.' })
+  const packs = createBotContextProvider({ store, journal: createBotJournal({ store, readThread: () => ({ messages: [] }), listThreads: () => [] }) })
+  const beforeBlocks = renderMemoryBlocks(store.active('ada'), store.zone())
+  const chat = await packs.chatPreamble({ botId: 'ada', activationId: 'chat-pack' })
+  const run = await packs.runPreamble({ botId: 'ada', activationId: 'run-pack' })
+  expect(chat).toContain('m2')
+  expect(run).toContain('m2')
+  store.tidyDuplicates('ada')
+  const afterBlocks = renderMemoryBlocks(store.active('ada'), store.zone())
+  for (const [before, after] of [
+    [chat, await packs.chatPreamble({ botId: 'ada', activationId: 'chat-pack' })],
+    [run, await packs.runPreamble({ botId: 'ada', activationId: 'run-pack' })]
+  ]) {
+    expect(after).toBe(before!.replace(beforeBlocks.core, afterBlocks.core).replace(beforeBlocks.runNotes, afterBlocks.runNotes))
+    expect(after).not.toContain('m2')
+  }
 })

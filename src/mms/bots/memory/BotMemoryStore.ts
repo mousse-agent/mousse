@@ -626,7 +626,7 @@ export class BotMemoryStore {
         rows: versions.map((version) => ({
           ref: memoryRef(version.id, version.version),
           at: version.learnedAt,
-          kind: `memory:${version.kind} (${version.status})`,
+          kind: `memory:${version.kind} (${version.status}${version.reason?.startsWith('merged into ') ? `, ${version.reason}` : ''})`,
           who: version.writtenIn === 'run' ? 'bot' : 'owner',
           text: maskMemoryCredentials(version.text ?? '[removed at your request]')
         }))
@@ -647,6 +647,51 @@ export class BotMemoryStore {
   }
 
   // -- Memory entries ---------------------------------------------------------------------------
+
+  /** Same retirement representation as memory_save.merges, including the Forget links. */
+  private absorb(botId: string, entry: BotMemoryVersion, absorbedBy: string): void {
+    this.run("UPDATE bot_memories SET status = 'superseded', reason = ? WHERE bot_id = ? AND id = ? AND status = 'active'", `merged into ${absorbedBy}`, botId, entry.id)
+    this.run(`INSERT INTO bot_memories(id, version, bot_id, kind, text, text_hash, learned_at, valid_from, expires_at, written_in, source_seq, status, reason)
+      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'superseded', ?)`,
+    entry.id, entry.version + 1, botId, entry.kind, entry.text, entry.textHash, entry.learnedAt,
+    entry.validFrom, entry.expiresAt, entry.writtenIn, entry.sourceSeq, `merged into ${absorbedBy}`)
+  }
+
+  /** Exact hashes only. Both chat and run packs load all three kinds in full. */
+  tidyDuplicates(botId: string): number {
+    const rows = this.all(`SELECT m.* FROM bot_memories m JOIN (
+      SELECT text_hash FROM bot_memories WHERE bot_id = ? AND status = 'active'
+      AND (expires_at IS NULL OR expires_at > ?) GROUP BY text_hash HAVING COUNT(*) > 1
+    ) duplicates ON duplicates.text_hash = m.text_hash
+    WHERE m.bot_id = ? AND m.status = 'active' AND (m.expires_at IS NULL OR m.expires_at > ?)`,
+    botId, this.now(), botId, this.now()).map(versionOf)
+    const rank = { owner: 0, note: 1, run_note: 2 }
+    rows.sort((a, b) => Number(b.writtenIn === 'owner_ui') - Number(a.writtenIn === 'owner_ui')
+      || rank[a.kind] - rank[b.kind] || a.learnedAt.localeCompare(b.learnedAt)
+      || Number(a.id.slice(1)) - Number(b.id.slice(1)))
+    const kept = new Map<string, BotMemoryVersion>()
+    const retired: Array<{ entry: BotMemoryVersion; into: string }> = []
+    for (const entry of rows) {
+      const winner = kept.get(entry.textHash)
+      if (!winner) { kept.set(entry.textHash, entry); continue }
+      if (winner.validFrom && (!entry.validFrom || winner.validFrom > entry.validFrom)) continue
+      if (winner.expiresAt && (!entry.expiresAt || winner.expiresAt < entry.expiresAt)) continue
+      retired.push({ entry, into: memoryRef(winner.id, winner.version) })
+    }
+    if (!retired.length) return 0
+    return this.write(() => {
+      for (const { entry, into } of retired) this.absorb(botId, entry, into)
+      const refs = retired.map(({ entry, into }) => ({ ref: memoryRef(entry.id, entry.version), into }))
+      this.appendInTx(this.db, {
+        botId, kind: 'memory_op', who: 'mousse',
+        sourceKey: `tidy:${refs.map(({ ref }) => ref).join(':')}`,
+        text: `put away · ${refs.map(({ ref, into }) => `${ref} merged into ${into}`).join(', ')}`,
+        json: { op: 'tidy', merges: refs }
+      })
+      this.dropPacks(botId)
+      return retired.length
+    })
+  }
 
   /** Moves entries whose `expires_at` passed to `expired`: out of the pack, still listed and searchable. */
   expireMemories(botId: string): void {
@@ -732,7 +777,7 @@ export class BotMemoryStore {
         if (replaced.status === 'forgotten') return { error: 'refused', reason: `${ref.id} was forgotten: save a new entry instead.` }
         if (input.lane === 'run' && replaced.kind !== 'run_note') return { error: 'refused', reason: 'A run or a turn you started yourself can only replace run notes. Ask the owner in the chat.' }
         if ((ref.version ?? 1) !== replaced.version)
-          return { error: 'stale', current: { id: replaced.id, version: replaced.version, ref: memoryRef(replaced.id, replaced.version), text: replaced.text ?? '' } }
+          return { error: 'stale', current: { id: replaced.id, version: replaced.version, ref: memoryRef(replaced.id, replaced.version), text: replaced.text ?? '', ...(replaced.reason?.startsWith('merged into ') ? { absorbedBy: replaced.reason.slice(12) } : {}) } }
       }
       const absorbed = new Map<string, BotMemoryVersion>()
       for (const value of input.merges ?? []) {
@@ -740,8 +785,8 @@ export class BotMemoryStore {
         const entry = ref ? this.current(botId, ref.id) : undefined
         if (!ref || !entry) return { error: 'refused', reason: `There is no memory entry ${value}.` }
         if ((ref.version ?? 1) !== entry.version)
-          return { error: 'stale', current: { id: entry.id, version: entry.version, ref: memoryRef(entry.id, entry.version), text: entry.text ?? '' } }
-        if (entry.status !== 'active') return { error: 'refused', reason: `${value} is not an active memory entry.` }
+          return { error: 'stale', current: { id: entry.id, version: entry.version, ref: memoryRef(entry.id, entry.version), text: entry.text ?? '', ...(entry.reason?.startsWith('merged into ') ? { absorbedBy: entry.reason.slice(12) } : {}) } }
+        if (entry.status !== 'active') return { error: 'refused', reason: entry.reason?.startsWith('merged into ') ? `${value} was ${entry.reason}. Read that entry instead.` : `${value} is not an active memory entry.` }
         if (input.lane === 'run' && (entry.kind !== 'run_note' || entry.writtenIn === 'owner_ui'))
           return { error: 'refused', reason: 'A run or a turn you started yourself can only absorb run notes that the owner has not edited. Ask the owner in the chat.' }
         if (entry.kind !== kind) return { error: 'refused', reason: 'Absorbed entries must be of the same kind as the saved entry.' }
@@ -775,11 +820,7 @@ export class BotMemoryStore {
       id, version, botId, kind, text, hash, at, validFrom ?? null, expiresAt ?? null, writtenIn, this.sourceSeq(botId, input.lane, input.activationId))
       const absorbedBy = memoryRef(id, version)
       for (const entry of absorbed.values()) {
-        this.run("UPDATE bot_memories SET status = 'superseded', reason = ? WHERE bot_id = ? AND id = ? AND status = 'active'", `merged into ${absorbedBy}`, botId, entry.id)
-        this.run(`INSERT INTO bot_memories(id, version, bot_id, kind, text, text_hash, learned_at, valid_from, expires_at, written_in, source_seq, status, reason)
-          VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'superseded', ?)`,
-        entry.id, entry.version + 1, botId, entry.kind, entry.text, entry.textHash, entry.learnedAt,
-        entry.validFrom, entry.expiresAt, entry.writtenIn, entry.sourceSeq, `merged into ${absorbedBy}`)
+        this.absorb(botId, entry, absorbedBy)
       }
       this.appendInTx(this.db, {
         botId,

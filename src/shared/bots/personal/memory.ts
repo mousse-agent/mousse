@@ -157,7 +157,7 @@ export type BotMemorySaveResult =
   | { id: string; version: number; ref: string; gauge: string; absorbed?: Array<{ ref: string; text: string }> }
   | { error: 'over_cap'; gauge: string; core: Array<{ id: string; ref: string; text: string }> }
   | { error: 'refused'; reason: string }
-  | { error: 'stale'; current: { id: string; version: number; ref: string; text: string } }
+  | { error: 'stale'; current: { id: string; version: number; ref: string; text: string; absorbedBy?: string } }
 
 export interface BotMemoryForgetInput {
   id?: string
