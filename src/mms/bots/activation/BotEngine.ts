@@ -2132,6 +2132,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (!this.store.moveActivation(row.id, ['running', 'queued'], 'failed', { endReason: reason })) return false
       this.store.closeEscalations(row.id, 'cancelled')
       if (stuck) this.store.setError(row.botId, stuck)
+      this.postChatDraft(this.store.activation(row.id) ?? row)
       this.chat.post({ botId: row.botId, author: 'bot', kind: 'error', text: '', error, activationId: row.id, lane: row.lane, id: `bm_${row.id}_failed` })
       this.journalEnd(row, reason)
       return true
