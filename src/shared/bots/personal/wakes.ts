@@ -14,19 +14,21 @@ import { dataFrame } from './dataFrames'
  */
 export type BotWakeEvent =
   | { kind: 'thread'; threadId: string; title?: string }
-  | { kind: 'pr'; repo: string; number: number }
+  | { kind: 'pr'; repo: string; number: number; on?: 'merged' | 'checks' | 'review'; reviewAfter?: { at: string | null; ids: string[] } }
   | { kind: 'watcher'; title: string; command: string; match?: string; minutes: number }
 
 /** What happened: the event, with its fixed fields, or why it ended without it. */
 export type BotWakeFired =
   | { kind: 'thread'; threadId: string; status: string; title?: string }
   | { kind: 'pr'; repo: string; number: number; state: 'merged'; title?: string }
+  | { kind: 'pr'; repo: string; number: number; state: 'checks'; passed: number; failed: number; failedNames: string[]; waiting?: number; waitingNames?: string[]; headSha?: string; title?: string }
+  | { kind: 'pr'; repo: string; number: number; state: 'review'; reviewState: 'approved' | 'changes_requested' | 'commented'; reviewer: string; title?: string }
   /** A watcher: it exited (with its code), printed a matching line, or reached its time limit; the end of its output. */
   | { kind: 'watcher'; title: string; how: 'exit' | 'match' | 'time_limit' | 'failed'; exitCode?: number | null; line?: string; message?: string; tail: string }
   | { kind: 'ended'; reason: BotWakeEndReason }
 
 /** Why a wake that waited on an event woke without it. */
-export type BotWakeEndReason = 'expired' | 'pr_closed' | 'thread_archived' | 'thread_deleted' | 'unreachable' | 'restart'
+export type BotWakeEndReason = 'expired' | 'pr_closed' | 'pr_merged' | 'thread_archived' | 'thread_deleted' | 'unreachable' | 'restart'
 
 /**
  * How many wakes in a row may follow each other with no owner's message between them: a wake set in a turn the owner
@@ -81,13 +83,14 @@ export function pullRequestOf(given: unknown): { repo: string; number: number } 
 
 /** "when PR #12 merges", "when Fix login finishes": what a wake waits for, for its row in About → Runs and its list. */
 export function wakeEventLabel(event: BotWakeEvent): string {
-  if (event.kind === 'pr') return `when ${event.repo}#${event.number} merges`
+  if (event.kind === 'pr') return event.on === 'checks' ? `when ${event.repo}#${event.number}'s checks finish` : event.on === 'review' ? `when ${event.repo}#${event.number} is reviewed` : `when ${event.repo}#${event.number} merges`
   if (event.kind === 'watcher') return `when "${event.title}" ends`
   return `when ${event.title ? `"${event.title}"` : `thread ${event.threadId}`} finishes`
 }
 
 const END_WORDS: Record<BotWakeEndReason, string> = {
   expired: 'it didn\'t happen in time',
+  pr_merged: 'the pull request was merged',
   pr_closed: 'the pull request was closed without merging',
   thread_archived: 'the thread was archived',
   thread_deleted: 'the thread was deleted',
@@ -100,10 +103,25 @@ export function wakeEndWords(reason: BotWakeEndReason): string {
   return END_WORDS[reason] ?? 'it ended'
 }
 
+/** Bound outside names both when storing a completion and when reading older stored completions. */
+export function wakeCheckNames(names: string[]): string[] {
+  return names.slice(0, 20).map((name) => name.slice(0, 120))
+}
+
 /** What happened, in a few words for the quiet line above the bot's reply: "PR #12 merged", "Ended: …". */
 export function wakeFiredLabel(fired: BotWakeFired | null): string {
   if (!fired) return 'Following up'
-  if (fired.kind === 'pr') return `Following up · ${fired.repo}#${fired.number} merged`
+  if (fired.kind === 'pr') {
+    const pr = `${fired.repo}#${fired.number}`
+    if (fired.state === 'checks') {
+      const outcomes = []
+      if (fired.failed) outcomes.push(`${fired.failed} ${fired.failed === 1 ? 'check' : 'checks'} failed`)
+      if (fired.waiting) outcomes.push(`${fired.waiting} ${fired.waiting === 1 ? 'check waits' : 'checks wait'} for approval`)
+      return `Following up · ${pr} · ${outcomes.length ? outcomes.join(' · ') : 'checks passed'}`
+    }
+    if (fired.state === 'review') return `Following up · ${pr} · review: ${fired.reviewState.replace('_', ' ')}`
+    return `Following up · ${pr} merged`
+  }
   if (fired.kind === 'thread') return `Following up · ${fired.title ? `"${fired.title}"` : 'thread'} ${fired.status === 'completed' ? 'finished' : fired.status}`
   if (fired.kind === 'watcher') return `Following up · "${fired.title}" ${watcherHow(fired)}`
   return `Following up · ${wakeEndWords(fired.reason)}`
@@ -118,7 +136,20 @@ export function wakeInput(input: { brief: string; setAt: string; event: BotWakeE
   const set = input.clock(input.setAt)
   const fired = input.fired
   if (!input.event) lines.push(`[Mousse] A wake-up you set at ${set} is due${input.late ? ` (it was for ${input.late})` : ''}. Your owner did not write: you carry on by yourself.`)
-  else if (fired?.kind === 'pr') lines.push(`[Mousse] A wake-up you set at ${set}: pull request ${fired.repo}#${fired.number}${fired.title ? ` ("${dataFrame('pull request title', fired.title)}")` : ''} merged.`)
+  else if (fired?.kind === 'pr' && fired.state === 'checks') {
+    lines.push(`[Mousse] A wake-up you set at ${set}: pull request ${fired.repo}#${fired.number}'s checks have settled. Passed: ${fired.passed}. Failed: ${fired.failed}. Waiting for approval: ${fired.waiting ?? 0}.`)
+    if (fired.title) lines.push(dataFrame('pull request title', fired.title))
+    if (fired.headSha) lines.push(dataFrame('head commit', fired.headSha.slice(0, 7)))
+    const failedNames = wakeCheckNames(fired.failedNames), waitingNames = wakeCheckNames(fired.waitingNames ?? [])
+    if (failedNames.length) lines.push(dataFrame('failed check names', failedNames.join('\n')))
+    if (fired.failed > failedNames.length) lines.push(`Failed check names: and ${fired.failed - failedNames.length} more.`)
+    if (waitingNames.length) lines.push(dataFrame('checks waiting for approval', waitingNames.join('\n')))
+    if ((fired.waiting ?? 0) > waitingNames.length) lines.push(`Checks waiting for approval: and ${fired.waiting! - waitingNames.length} more.`)
+  } else if (fired?.kind === 'pr' && fired.state === 'review') {
+    lines.push(`[Mousse] A wake-up you set at ${set}: pull request ${fired.repo}#${fired.number} has a new review. State: ${fired.reviewState.replace('_', ' ')}.`)
+    if (fired.title) lines.push(dataFrame('pull request title', fired.title))
+    lines.push(dataFrame('reviewer login', fired.reviewer))
+  } else if (fired?.kind === 'pr') lines.push(`[Mousse] A wake-up you set at ${set}: pull request ${fired.repo}#${fired.number}${fired.title ? ` ("${dataFrame('pull request title', fired.title)}")` : ''} merged.`)
   else if (fired?.kind === 'thread') lines.push(`[Mousse] A wake-up you set at ${set}: thread ${fired.threadId}${fired.title ? ` ("${dataFrame('thread title', fired.title)}")` : ''} finished its turn (status: ${fired.status}).`)
   else if (fired?.kind === 'watcher') {
     const command = input.event.kind === 'watcher' ? `\nCommand: ${input.event.command}` : ''

@@ -3,6 +3,9 @@ import type { AgentJobLimits } from '../../../../shared/agentJobLimits'
 import type { PermissionMode } from '../../../../shared/permissionMode'
 import type { ModelOverride } from '../../../../shared/providerInstances'
 import type { ApprovalTag } from '../../../orchestrator/UserQuestionService'
+import type { RemoteReach, RemoteTarget, RemoteUncertain, RemoteWaitResult } from '../../../orchestrator/RemoteLaunchedThreads'
+import type { MessageRow } from './messageRows'
+import type { ThreadEvent } from '../../types'
 import type { ChatMessage, CreateScheduledJobInput, PendingUserQuestions, QueuedMessage, ScheduledJob, Thread, UserQuestion, UserQuestionAnswers, UserQuestionAttachments } from '../../../../shared/types'
 import type { ScheduledJobOptionsInput } from '../../../scheduled/validateJobOptions'
 import type { DevGuiTools } from '../../../devgui/DevGuiTools'
@@ -111,6 +114,21 @@ export type AgentRemoteThreadResult =
   /** That computer did not confirm whether it made the thread; Mousse keeps trying under the same key. */
   | { status: 'uncertain'; computer: string; message: string }
   | { status: 'refused'; code: string; message: string; computer?: string; candidates?: RemoteProjectCandidate[]; computers?: Array<{ id: string; name: string }> }
+
+/**
+ * The thread tools on a thread this computer's agents launched on another computer (issue #1160), named by its qualified
+ * id. `reach` decides which threads a caller may reach; every other call takes what it returned. Refusals are thrown with
+ * their code (`RemoteThreadRefusal`); a write that computer did not confirm comes back `uncertain`.
+ */
+export interface RemoteThreadsHost {
+  reach(callerThreadId: string, threadId: string): RemoteReach
+  events(target: RemoteTarget, page: { afterSeq: number; limit: number }): Promise<{ events: ThreadEvent[]; maxSeq: number }>
+  messages(target: RemoteTarget, page: { afterIndex: number; limit: number; textOffset: number; textMax: number }): Promise<{ messages: MessageRow[]; total: number }>
+  wait(target: RemoteTarget, request: { runId?: string; timeoutMs: number; signal?: AbortSignal }): Promise<RemoteWaitResult>
+  send(target: RemoteTarget, input: { content: string; mode: 'agent' | 'plan' }, options: { clientRequestId: string; actor: AgentActor }): Promise<{ status: 'sent'; runId?: string; queued: boolean; replayed: boolean; mode?: string } | RemoteUncertain>
+  steer(target: RemoteTarget, runId: string, text: string, options: { clientRequestId: string; actor: AgentActor }): Promise<{ status: 'accepted'; runId: string } | { status: 'ignored'; reason: string; runId?: string } | RemoteUncertain>
+  interrupt(target: RemoteTarget, runId: string, options: { clientRequestId: string; actor: AgentActor }): Promise<{ status: 'stopped' | 'left'; runId?: string; left?: string } | RemoteUncertain>
+}
 
 /** A thread an agent created, as the creation decided it (never as the retry's arguments say). */
 export interface AgentCreatedThread {
@@ -377,6 +395,8 @@ export interface AppToolHost extends DelegationToolsHost {
    * the caller's, and a retry with the same `clientRequestId` continues that one launch. Refusals are returned, not thrown.
    */
   createRemoteThread?(input: AgentRemoteThreadRequest, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRemoteThreadResult>
+  /** The thread tools on threads launched on other computers; absent without Bridge's run engine. */
+  remoteThreads?: RemoteThreadsHost
   /**
    * Adds a note row to the thread's transcript (the creator's: what it launched, and on which model). `launched` names
    * the thread it started, which the transcript draws as a chip.

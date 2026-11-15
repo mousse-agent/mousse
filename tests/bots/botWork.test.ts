@@ -191,7 +191,7 @@ describe('reminders', () => {
     const turn = await chat('Remind me in 7 minutes to drink water', 'm1')
     const added = f.bots.tools.reminders.add(botId, turn.activation.id, { dueAt: new Date(f.clock.now + 7 * 60_000).toISOString(), text: 'Time to drink some water.' })
     await finish(f, turn.payload, 'completed', { text: "I'll remind you at 09:07." })
-    expect(f.bots.tools.reminders.list(botId)).toEqual([{ reminderId: added.reminderId, dueAt: added.dueAt, text: 'Time to drink some water.' }])
+    expect(f.bots.tools.reminders.list(botId)).toEqual([{ reminderId: added.reminderId, dueAt: added.dueAt, text: 'Time to drink some water.', ownerSet: true }])
     const activations = f.store.listActivations(botId).length
     f.clock.now += 7 * 60_000
     await fireDue()
@@ -280,8 +280,8 @@ describe('reminders', () => {
     const two = f.bots.tools.reminders.add(botId, turn.activation.id, { dueAt: new Date(f.clock.now + 120_000).toISOString(), text: 'Two.', work: { title: 'Two', brief: 'Do two.' } })
     await finish(f, turn.payload, 'completed', { text: 'Set.' })
     expect(f.bots.service.get(botId).reminders).toEqual([
-      { id: one.reminderId, dueAt: one.dueAt, text: 'One.' },
-      { id: two.reminderId, dueAt: two.dueAt, text: 'Two.', work: true }
+      { id: one.reminderId, dueAt: one.dueAt, text: 'One.', ownerSet: true },
+      { id: two.reminderId, dueAt: two.dueAt, text: 'Two.', work: true, ownerSet: true }
     ])
     const detail = f.bots.service.reminderCancel(botId, one.reminderId)
     expect(detail.reminders!.map((reminder) => reminder.id)).toEqual([two.reminderId])

@@ -173,6 +173,19 @@ export interface RoutedAgentMark {
   mode: string
 }
 
+/**
+ * `runs.wait`: the longest one call waits on the owner, and the deadline the caller gives the call. The deadline is above
+ * the wait (the owner answers at its end) and below the minute an MCP client waits on a tool call.
+ */
+export const ROUTED_RUN_WAIT_MAX_MS = 40_000
+export const ROUTED_RUN_WAIT_DEADLINE_MS = 50_000
+
+/**
+ * What an agent's read of a thread on another computer asks for (`thread.messages` with `index`): the most characters of
+ * one message, and the bytes of rows the owner sends for one page. The caller's tool cuts its own response to the same.
+ */
+export const ROUTED_AGENT_READ = Object.freeze({ textMax: 16_384, pageBytes: 64 * 1024 })
+
 /** The longest sender title an envelope carries. */
 export const ROUTED_AGENT_TITLE_MAX = 80
 /** The longest message an agent on another computer may send (an agent on the same computer may send 100,000). */
@@ -208,7 +221,13 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
     since: { transcript: 2 }
   }),
   // Older messages of a long thread, a page at a time, newest first from `before` (a message id).
-  'thread.messages': read('thread', ['threadId', 'before', 'after', 'limit'], { version: 2, since: { after: 2 } }),
+  // Version 3: `index`, `textOffset` and `textMax`, the page an agent's `thread_read` reads on another computer: from
+  // the message at `index`, each message's text cut to `textMax` characters (the first one from `textOffset`), so only
+  // what the tool returns crosses (`ROUTED_AGENT_READ`).
+  'thread.messages': read('thread', ['threadId', 'before', 'after', 'limit', 'index', 'textOffset', 'textMax'], {
+    version: 3,
+    since: { after: 2, index: 3, textOffset: 3, textMax: 3 }
+  }),
   'thread.changesSince': read('thread', ['threadId', 'seq', 'epoch']),
   // The image of one message or queued message, by its place in it (the stream carries only the newest images' data).
   'thread.messageImage': read('thread', ['threadId', 'messageId', 'queueItemId', 'index'], {
@@ -224,6 +243,11 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
     owned: { runId: 'run' }
   }),
   'runs.events': read('thread', ['threadId', 'afterSeq', 'limit']),
+  // Waits up to `timeoutMs` (at most `ROUTED_RUN_WAIT_MAX_MS`) for a run of the thread to end or to wait on a person,
+  // answered from the owner's run events: `thread_wait` on a thread of another computer (issue #1160). Without `runId`,
+  // the run that is active or paused now; a thread with a run that is preparing or a message waiting in its queue is
+  // never answered idle.
+  'runs.wait': read('thread', ['threadId', 'runId', 'timeoutMs'], { owned: { runId: 'run' } }),
   'activity.get': read('thread', ['threadId']),
   'subagents.list': read('thread', ['threadId']),
   'agents.list': read('thread', ['threadId']),

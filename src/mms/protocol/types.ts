@@ -282,6 +282,7 @@ export const PROTOCOL_METHODS = [
   'runs.list',
   'runs.get',
   'runs.events',
+  'runs.wait',
   'runs.effects',
   'runs.credentials',
   'runs.transfers',

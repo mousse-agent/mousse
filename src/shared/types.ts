@@ -109,6 +109,8 @@ export interface ScheduledRunAgent {
  * and its chat know the schedule by (`bot_schedule_list`), kept across the move from `bots.db`.
  */
 export interface ScheduledJobBot {
+  /** The owner's message or tapped answer started the turn that added this timer. */
+  ownerAsked?: boolean
   botId: string
   scheduleId: string
   /** Who added it: the owner (the Automations page, `bots.schedules.add`) or the bot itself (`bot_schedule_add`). */
