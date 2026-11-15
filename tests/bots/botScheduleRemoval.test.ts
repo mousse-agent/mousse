@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { botTools } from '../../src/mms/run/mcp/appTools/bots'
 import type { ToolCallContext } from '../../src/mms/run/mcp/appTools/types'
@@ -92,4 +93,32 @@ it('deleting the bot also cancels its queued schedule work', async () => {
   await f.bots.remove(botId)
   expect(f.store.activation(row.id)).toMatchObject({ status: 'cancelled', endReason: 'bot_deleted' })
   expect(f.store.dispatches(row.id)).toHaveLength(0)
+})
+
+it('cancelling waiting schedule work takes the normal end path', async () => {
+  const a = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'A' }, 'owner')
+  await f.tickSchedules(new Date(T0 + 5 * 60_000))
+  const row = f.store.listActivations(botId).find(row => row.trigger.kind === 'schedule')!
+  const turn = await start(f, row.id)
+  f.bots.raiseWall(row.id, { dispatchN: 1, kind: 'gate', permission: { tool: 'write' }, reason: 'Need write.' })
+  const browser = vi.fn()
+  f.host.browser = { activationEnded: browser } as NonNullable<typeof f.host.browser>
+  const changed = vi.fn()
+  f.host.changed = changed
+  f.bots.removeSchedule(botId, a.scheduleId)
+  expect(f.journal.some(event => event.kind === 'run_end' && event.activationId === row.id && event.text === 'schedule_removed')).toBe(true)
+  expect(browser).toHaveBeenCalledWith({ botId, activationId: row.id })
+  expect(existsSync(turn.prepared.scratch)).toBe(false)
+  expect(changed).toHaveBeenCalledWith({ botId, activationId: row.id })
+})
+
+it('starting unrelated work does not read the shared scheduler under the bot transaction', async () => {
+  const a = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'A' }, 'owner')
+  await f.tickSchedules(new Date(T0 + 5 * 60_000))
+  const row = f.store.listActivations(botId).find(row => row.trigger.kind === 'schedule')!
+  f.bots.raiseWall(row.id, { dispatchN: 1, kind: 'gate', permission: { tool: 'write' }, reason: 'Need write.' })
+  const get = vi.spyOn(f.book, 'get')
+  await f.bots.activate({ botId, input: 'Other work', clientRequestId: 'other' })
+  expect(get).not.toHaveBeenCalled()
+  expect(f.book.list(botId).some(entry => entry.scheduleId === a.scheduleId)).toBe(true)
 })
