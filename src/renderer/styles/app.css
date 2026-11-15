@@ -6296,3 +6296,17 @@ html[data-theme='high-contrast'] .composer-input::placeholder {
   opacity: 1;
   background-image: var(--ui-focus-layer);
 }
+
+/* A long paste opened from its chip: the text as it will reach the agent, monospace and scrollable. */
+.pasted-text-preview .modal { width: 760px; }
+.pasted-text-preview-body {
+  margin: 0;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+}
+.pasted-text-preview-body:focus-visible { outline: none; }
+.modal-body > .pasted-text-preview-cut { margin: 12px 0 0; color: var(--text-tertiary, var(--text-secondary)); font-size: 12px; }

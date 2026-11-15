@@ -889,6 +889,20 @@ describe('the composer', () => {
     expect([...sent.querySelectorAll('.bot-images .bot-image')].map((tile) => tile.getAttribute('title'))).toEqual([expect.stringMatching(/^paste-.*\.png$/)])
   })
 
+  it('sends a long text paste as a text file, which the composer names by its lines', async () => {
+    await open()
+    const log = Array.from({ length: 900 }, (_, i) => `line ${i} `.padEnd(60, '.')).join('\n')
+    await fire(box(), 'paste', 'clipboardData', { items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }], files: [], getData: () => log })
+    expect(box().value).toBe('')
+    expect(composer().querySelector('.composer-attachments')?.textContent).toContain('Pasted text, 900 lines')
+    await click(button('Send message'))
+    await settle()
+    const send = fake.calls.find(([name]) => name === 'send')!
+    expect(send[4]).toEqual([{ name: expect.stringMatching(/^pasted-text-\d+\.txt$/), path: expect.stringMatching(/pasted-text-\d+\.txt$/) }])
+    const [file] = vi.mocked(fake.events.attachmentPath!).mock.calls.at(-1)!
+    expect(await file.text()).toBe(log)
+  })
+
   it('sends files alone, and refuses a file over the limit before sending anything', async () => {
     await open()
     const huge = new File(['x'], 'film.mov', { type: 'video/quicktime' })

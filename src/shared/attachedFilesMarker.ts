@@ -54,3 +54,13 @@ export function parseAttachedFilesList(list: string): AttachedFileEntry[] {
 export function replaceAttachedFilesMarkers(text: string, replace: (entries: AttachedFileEntry[]) => string): string {
   return text.replace(MARKER, (_match, list?: string, legacy?: string) => replace(parseAttachedFilesList(list ?? legacy ?? '')))
 }
+
+/** Every file the markers in `text` name, in order. */
+export function attachedFilesIn(text: string): AttachedFileEntry[] {
+  const entries: AttachedFileEntry[] = []
+  replaceAttachedFilesMarkers(text, (found) => {
+    entries.push(...found)
+    return ''
+  })
+  return entries
+}

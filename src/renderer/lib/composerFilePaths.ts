@@ -4,6 +4,9 @@ import { ipcErrorLine } from './errorText'
 /** What a thread's composer says when files are attached to a thread whose agent runs on another computer. */
 export const REMOTE_FILES_REFUSAL = "Files can't be attached to threads on another computer yet."
 
+/** What it says when pasted text, written into the message for a thread on another computer, makes it too long. */
+export const REMOTE_PASTE_TOO_LONG = 'This pasted text is too long for a thread on another computer.'
+
 /** A file the composer holds: its bytes, or (given back from a queued message) only its path. */
 interface ComposerFile {
   id: string

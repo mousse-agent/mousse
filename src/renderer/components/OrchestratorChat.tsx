@@ -29,8 +29,11 @@ import {
   ChatComposer,
   type AttachedFile,
   type VoiceMessage,
+  attachedFileName,
   buildComposerMessageContent
 } from './ChatComposer'
+import { MMS_PROTOCOL_MAX_TEXT_LENGTH } from '../../mms/protocol/types'
+import { attachedFilesIn, formatAttachedFilesMarker } from '../../shared/attachedFilesMarker'
 import { QUEUE_DRAFT_MOVED_NOTICE, useThreadQueue, type RecoveredQueueDraft } from '../hooks/useThreadQueue'
 import { nextSteerableQueueItem } from '../lib/queuedContent'
 import { restoreQueuedDraft } from '../lib/queuedDraftRecovery'
@@ -45,7 +48,7 @@ import {
   type QuestionCardHandle
 } from './ComposerQuestionModal'
 import { filesToImagePayloads, isImageMimeType } from '../utils/imageAttachments'
-import { composerFilePaths, fileAttachments, REMOTE_FILES_REFUSAL } from '../lib/composerFilePaths'
+import { composerFilePaths, fileAttachments, REMOTE_FILES_REFUSAL, REMOTE_PASTE_TOO_LONG } from '../lib/composerFilePaths'
 import { parseUserMessageContent } from '../utils/messageAttachments'
 import { MousseAgentChatShell } from '../chat/components/MousseAgentChatShell'
 import { createTurnActions, type TurnActions } from '../chat/components/agent-elements/turn-actions'
@@ -1164,22 +1167,26 @@ export function OrchestratorChat() {
       },
       // An edited prompt: the conversation goes back to before that prompt on a new branch, made and switched to in
       // one step by the daemon; the files stay as they are. The edited text is sent there, naming that branch, with the
-      // prompt's images. The original stays a version to switch back to.
+      // prompt's images and attached files. The original stays a version to switch back to.
       editPrompt: async (promptId, turnId, text) => {
         try {
           const history = await readThreadActionHistory(activeThreadId, true)
           const action = editablePrompt(history, turnId)
           if (!action) throw new Error("This message can't be edited now.")
-          // The prompt's images go with the edit. They are read now, before the switch puts back the conversation
-          // from before the prompt; one known here by name only (another computer's thread) is fetched first.
-          const original = useAppStore.getState().messages.find((message) => message.id === promptId && message.role === 'user')?.images ?? []
+          // The prompt's images and files go with the edit. They are read now, before the switch puts back the
+          // conversation from before the prompt; an image known here by name only (another computer's thread) is
+          // fetched first. The editor shows only the text, so the files are named again after it.
+          const prompt = useAppStore.getState().messages.find((message) => message.id === promptId && message.role === 'user')
+          const original = prompt?.images ?? []
+          const files = attachedFilesIn(prompt?.content ?? '')
+          const content = files.length ? [text.trim(), formatAttachedFilesMarker(files)].filter(Boolean).join('\n\n') : text
           const images = await Promise.all(original.map(async (image, index) => image.data ? image
             : { ...image, ...await window.mousse.threads.messageImage(activeThreadId, promptId, index) }))
           const { branch } = await window.mousse.actions.fork({
             threadId: activeThreadId, actionId: action.id, at: 'start', activate: true, name: 'Edited', expectedJournalGeneration: history.journalGeneration
           }) as { branch: { id: string } }
           invalidateThreadActionHistory(activeThreadId)
-          await sendMessage(text, chatMode, images.length ? images : undefined, activeThreadId, undefined, branch.id)
+          await sendMessage(content, chatMode, images.length ? images : undefined, activeThreadId, undefined, branch.id)
         } catch (error) {
           showToast({ tone: 'error', message: readableError(error, "The edited message wasn't sent. Try again.") })
           throw error
@@ -1220,8 +1227,11 @@ export function OrchestratorChat() {
 
   const handleSend = async (skillMode?: SkillChatMode, options?: { steer?: boolean }) => {
     if (!useAppStore.getState().workspaceReady) return
-    // A file is sent as its path on this computer, which the agent of a thread on another computer can't read.
-    if (remoteNode && fileAttachments(attachedFiles).length) {
+    // A file is sent as its path on this computer, which the agent of a thread on another computer can't read. A long
+    // paste is text, so there it goes in the message itself.
+    const inlinePastes = remoteNode ? attachedFiles.filter((attached) => attached.pastedText && !attached.path) : []
+    const sentFiles = inlinePastes.length ? attachedFiles.filter((attached) => !inlinePastes.includes(attached)) : attachedFiles
+    if (remoteNode && fileAttachments(sentFiles).length) {
       setSendError(REMOTE_FILES_REFUSAL)
       return
     }
@@ -1282,12 +1292,17 @@ export function OrchestratorChat() {
     const resolvedReferences = await resolveChatReferences(references)
     if (useAppStore.getState().profileId !== resolutionProfile || useAppStore.getState().activeThreadId !== resolutionThread) return
     // Files other than images go as paths: a pasted one is written to a temporary file first.
-    const filePaths = await composerFilePaths(attachedFiles, activeThreadId)
+    const filePaths = await composerFilePaths(sentFiles, activeThreadId)
+    const pastedTexts = await Promise.all(inlinePastes.map(async (attached) => ({ name: attachedFileName(attached), text: await attached.file.text() })))
     if (useAppStore.getState().profileId !== resolutionProfile || useAppStore.getState().activeThreadId !== resolutionThread) return
     let text = removeInlineSkillToken(
-      buildComposerMessageContent(input, attachedFiles, voiceMessages, browserElements, resolvedReferences, filePaths),
+      buildComposerMessageContent(input, sentFiles, voiceMessages, browserElements, resolvedReferences, filePaths, pastedTexts),
       enabledSkills
     )
+    if (pastedTexts.length && text.length > MMS_PROTOCOL_MAX_TEXT_LENGTH) {
+      setSendError(REMOTE_PASTE_TOO_LONG)
+      return
+    }
     const images = await filesToImagePayloads(attachedFiles.map((f) => f.file))
     if (!stillVisible()) return
     const trimmed = text.trim()
@@ -1810,6 +1825,7 @@ export function OrchestratorChat() {
               onInputChange={setInput}
               attachedFiles={attachedFiles}
               onAttachedFilesChange={setAttachedFiles}
+              messageLimit={MMS_PROTOCOL_MAX_TEXT_LENGTH}
               voiceMessages={voiceMessages}
               onVoiceMessagesChange={setVoiceMessages}
               browserElements={browserElements}

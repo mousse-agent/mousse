@@ -5,6 +5,7 @@ import {
   IconFileCode as FileCode,
   IconFileTypeJs as FileJson,
   IconPhoto as ImageIcon,
+  TextFont,
 } from "../../../../lib/icons";
 import { cn } from "../utils/cn";
 import { ImageLightbox } from "../image-lightbox";
@@ -20,6 +21,8 @@ export type FileAttachmentProps = {
   title?: string;
   /** A file chip that opens the file: its name and icon become a button. */
   onOpen?: () => void;
+  /** A pasted text kept as a file: a button puts it into the message box instead. */
+  onInsertText?: () => void;
   onRemove?: () => void;
   className?: string;
   display?: "chip" | "image-only";
@@ -122,6 +125,7 @@ export function FileAttachment({
   url,
   title,
   onOpen,
+  onInsertText,
   onRemove,
   className,
   display = "chip",
@@ -218,6 +222,22 @@ export function FileAttachment({
             />
           )}
         </>
+      )}
+
+      {onInsertText && !isImageOnly && (
+        <button
+          type="button"
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={(e) => {
+            e.stopPropagation();
+            onInsertText();
+          }}
+          className="shrink-0 size-5 rounded-full flex items-center justify-center z-10 text-an-foreground-muted hover:text-an-foreground hover:bg-an-background"
+          aria-label="Insert as text"
+          title="Insert as text"
+        >
+          <TextFont className="size-3.5" />
+        </button>
       )}
 
       {/* On a chip the × has its own slot after the name, so a long name ellipsizes before it;

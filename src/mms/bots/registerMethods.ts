@@ -1,4 +1,4 @@
-import { BOTS_PERSONAL_V2_CAPABILITY, BOTS_PERSONAL_V2_METHODS, BOTS_WORK_METHODS, MAX_BOT_CHAT_ATTACHMENTS, MAX_BOT_CHAT_PAGE, type BotChatAttachment, type BotsPersonalV2Method } from '../../shared/bots/personal/methods'
+import { BOTS_PERSONAL_V2_CAPABILITY, BOTS_PERSONAL_V2_METHODS, BOTS_WORK_METHODS, MAX_BOT_CHAT_ATTACHMENTS, MAX_BOT_CHAT_PAGE, MAX_BOT_CHAT_TEXT, type BotChatAttachment, type BotsPersonalV2Method } from '../../shared/bots/personal/methods'
 import { MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_MODEL_CHARS, MAX_BOT_NAME_CHARS, type BotModelPick, type BotModelSlots, type BotSchedule } from '../../shared/bots/personal/definition'
 import { modelPickProblem, modelRowsProblem } from '../../shared/bots/personal/modelSlots'
 import { MAX_CHOICE_LABEL_CHARS } from '../../shared/bots/personal/questions'
@@ -54,7 +54,6 @@ const REQUEST_ID = /^[A-Za-z0-9._:-]{1,128}$/
 const ASK_ID = /^esc_[0-9a-f-]{36}$/
 const QUESTION_ID = /^q_[0-9a-f-]{36}$/
 const SCHEDULE_ID = /^[a-z0-9][a-z0-9-]{0,31}$/
-const MAX_CHAT_TEXT = 64 * 1024
 /**
  * Emoji code points: pictographs, with their joiners, variation selectors, skin tones and keycaps, at most 16 code points,
  * and at least one pictograph, flag letter or keycap (a digit or `#` alone is no emoji). `isReaction` adds: one character.
@@ -144,7 +143,7 @@ function validate(method: BotsPersonalV2Method, value: unknown): Params {
     case 'bots.chat.send':
       if (p.attachments !== undefined) p.attachments = attachments(p.attachments)
       // Files alone are a message too.
-      if (typeof p.text !== 'string' || p.text.length > MAX_CHAT_TEXT || (!p.text.trim() && !(p.attachments as BotChatAttachment[] | undefined)?.length))
+      if (typeof p.text !== 'string' || p.text.length > MAX_BOT_CHAT_TEXT || (!p.text.trim() && !(p.attachments as BotChatAttachment[] | undefined)?.length))
         throw new DomainRpcError('invalid_params', 'The message is empty or too long')
       if (p.replyTo !== undefined && !text(p.replyTo, 200)) throw new DomainRpcError('invalid_params', 'replyTo is a message id')
       break
@@ -182,7 +181,7 @@ function validate(method: BotsPersonalV2Method, value: unknown): Params {
         (when.kind === 'interval' && Object.keys(when).every((key) => key === 'kind' || key === 'minutes') && whole(when.minutes, 1)) ||
         (when.kind === 'cron' && Object.keys(when).every((key) => key === 'kind' || key === 'expr') && text(when.expr, 128)))
       if (!ok) throw new DomainRpcError('invalid_params', 'When is every N minutes or a five-field cron')
-      if (!text(p.prompt, MAX_CHAT_TEXT)) throw new DomainRpcError('invalid_params', 'Say what the bot should do')
+      if (!text(p.prompt, MAX_BOT_CHAT_TEXT)) throw new DomainRpcError('invalid_params', 'Say what the bot should do')
       if (p.model !== undefined && !text(p.model, MAX_BOT_MODEL_CHARS)) throw new DomainRpcError('invalid_params', MODEL_NAME_TEXT)
       break
     }
@@ -200,7 +199,7 @@ function validate(method: BotsPersonalV2Method, value: unknown): Params {
       break
     case 'bots.memory.edit':
       if (!text(p.id, 64)) throw new DomainRpcError('invalid_params', 'A memory id is required')
-      if (!text(p.text, MAX_CHAT_TEXT)) throw new DomainRpcError('invalid_params', 'Write what it should remember.')
+      if (!text(p.text, MAX_BOT_CHAT_TEXT)) throw new DomainRpcError('invalid_params', 'Write what it should remember.')
       break
     case 'bots.memory.export':
       if (!text(p.dir, 4096) || !isAbsolutePath(p.dir)) throw new DomainRpcError('invalid_params', 'The folder must be a full path')

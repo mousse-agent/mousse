@@ -3,6 +3,7 @@ import { ArrowDown, Brain, ChevronRight, CircleAlert, Loader2, Reply, Shield, X 
 import { withAppletNames, type BotChatApplet, type BotChatMessage, type BotChatQuote, type BotError, type BotSummary } from '../../../shared/bots/personal/chat'
 import { BOT_COLOUR_HEX, normalizeBotLook } from '../../../shared/bots/personal/look'
 import { plainCards } from '../../../shared/bots/personal/cards'
+import { MAX_BOT_CHAT_TEXT } from '../../../shared/bots/personal/methods'
 import { botFaceState, useBotsStore } from '../../stores/botsStore'
 import { openProvider, openSettingsSection } from '../../lib/settingsNavigation'
 import { Markdown } from '../../chat/components/agent-elements/markdown'
@@ -687,6 +688,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
             onInputChange={(value) => store().setDraft(bot.id, value)}
             attachedFiles={files}
             onAttachedFilesChange={(next) => store().setAttachments(bot.id, next)}
+            messageLimit={MAX_BOT_CHAT_TEXT}
             voiceMessages={NO_VOICE}
             onVoiceMessagesChange={ignore}
             enabledSkills={NO_SKILLS}

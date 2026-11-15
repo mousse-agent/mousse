@@ -158,6 +158,8 @@ export interface BotChatAttachment {
   path: string
 }
 
+/** The most characters one chat message's text carries. */
+export const MAX_BOT_CHAT_TEXT = 64 * 1024
 /** Most files one chat message carries. */
 export const MAX_BOT_CHAT_ATTACHMENTS = 10
 /** The largest file a chat message carries. */
