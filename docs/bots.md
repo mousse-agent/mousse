@@ -47,7 +47,7 @@ The chat is the record. **Telling** is the banner and possible sound for an unre
 
 - **Now:** a reminder the owner set (including older reminders whose ownership is unknown), a schedule’s fixed line whose job records that the owner asked for it, or a reply, ask or question in a chat turn started by the owner's message or tap. These go by themselves and are exempt from sound caps.
 - **Soon:** reports at or above a schedule's Tell me level, work reports, unattended replies, asks, questions, errors, question nudges, and the notice that schedules were paused after failures. Failures always tell.
-- **Later:** reports below Tell me, waiting for internet, and dropped scheduled runs. These never cause a banner or sound alone; they count in the next fold.
+- **Later:** reports below Tell me, waiting for internet, and dropped scheduled runs. These never cause a banner or sound alone; they count in the next fold. Older windows connected to a newer service also keep waiting-for-internet and dropped-run notices silent, through the per-message quiet flag.
 - Owner messages, service lines and answered cards tell nothing.
 
 The first soon message is told immediately. Others within two minutes update the same banner, with asks and questions before reports. Sounds are limited to one per bot in ten minutes and six per profile in an hour; banners still update silently beyond those limits. The sound counters start again when the service restarts.
