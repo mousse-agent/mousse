@@ -1,6 +1,8 @@
 /**
  * Bot memory's tables in `bots.db` (docs/plans/bot-context.md §3), run by WP2's v4 migration after
- * its own statements. `BotMemoryStore` is the only module that reads or writes them.
+ * its own statements. `BotMemoryStore` reads and writes them; `BotStore` also writes creation
+ * records at `cursor:create:<clientRequestId>`. These are not capture cursors: they use the
+ * `cursor:` prefix so `BotMemoryStore.wipe` keeps the create request's identity.
  *
  * - `bot_journal`: the append-only record of everything Mousse observed of a bot. Rows are never
  *   deleted except by the 30-day purge and the owner's wipes (`/forget history`, `/reset`); a
