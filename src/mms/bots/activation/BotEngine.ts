@@ -1346,10 +1346,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /**
    * A scheduled run dropped from a full queue (inside its transaction): its automation says why, as a skipped occurrence
-   * does, and the chat says scheduled runs are being dropped, at most once a day (`bm_<botId>_sched_dropped_<day>`).
+   * does, and the chat says scheduled runs are being dropped, at most once a local day (`bm_<botId>_sched_dropped_<day>`).
    */
   private droppedScheduledRun(botId: string, trigger: Extract<BotActivationTrigger, { kind: 'schedule' }>): void {
-    const day = new Date(this.now()).toISOString().slice(0, 10)
+    const at = new Date(this.now())
+    const day = `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, '0')}-${String(at.getDate()).padStart(2, '0')}`
     this.chat.post({ botId, author: 'bot', kind: 'error', text: '', error: { text: 'I have too much waiting, so I\'m dropping some of my scheduled runs. They run again at their next times once I\'m less busy.' }, lane: 'run', id: `bm_${botId}_sched_dropped_${day}` })
     this.store.db.afterCommit(() => {
       try {
