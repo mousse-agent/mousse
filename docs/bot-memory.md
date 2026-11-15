@@ -18,7 +18,8 @@ Every bot has an append-only **journal** in `bots.db` (`bot_journal`). It holds 
 `bot_memories` holds one row per version. Kinds: `owner` (facts about the owner) and `note` (standing notes), saved only in chat turns the owner's message or tapped answer started; `run_note` (written by unattended runs and bot-started chat turns, framed as data).
 
 - **Refs.** The bot names a version `m12` (first version) or `m12v3`. `replaces` must name the current version, or the save returns `stale` with it.
-- **Caps** (estimated tokens): owner 600, notes 1,400, run notes 500. A save over its kind's cap fails with that kind's entries. Superseded and expired entries do not count.
+- **Put away and put back.** `memory_save.merges` names current active entries of the same kind that the saved entry absorbs. Each gets a new superseded version with its text kept and `absorbedBy` naming the absorbing version in `memory_list({ history: true })`. The journal is not redacted and the text can be saved again. Save with `replaces` naming the superseded current ref to put it back. `replaces` and `merges` work together; all refs and the cap are checked before any entry changes, in one transaction. An older ref returns `stale` with the current one.
+- **Caps** (estimated tokens): owner 600, notes 1,400, run notes 500. A save over its kind's cap fails with that kind's entries. Superseded and expired entries do not count. A combination is checked after taking out the absorbed entries, so it can make room at the cap.
 - **Refused saves:** over 400 characters, unresolved relative dates ("tomorrow"; the refusal gives the absolute date), and anything the guard rejects.
 - **Lists and longer documents** are files in the bot's files folder, which the chat and its work can both change; memory keeps one short note per list with its path (`instructions.ts`).
 - **Pack order:** entries keep the place where they were first learned when the bot replaces them or the owner edits them. Each version still has its own date.
@@ -61,8 +62,8 @@ Both FTS5 indexes use `porter unicode61 remove_diacritics 2`. `bot_journal_fts` 
 
 The five tools are always on and never grantable. The bot and memory rights come from `BotToolHost.activationOf(threadId)`, never from arguments. The engine decides those rights from the activation's key in one place (`memoryLaneOf`). Unknown starts have run rights.
 
-- **Run lane, consults, and bot-started chat turns** (`create:`, `wake:`, `question:…:default`): `memory_save` writes `run_note` whatever was asked, and replaces only run notes. `memory_forget` is refused: "Ask the owner in the chat."
-- **Chat turns started by the owner's message** (`chat:`, including `chat:after:`) **or tapped answer** (`answer:`): owner facts and notes; `replaces` names the current version. Forget works as before.
+- **Run lane, consults, and bot-started chat turns** (`create:`, `wake:`, `question:…:default`): `memory_save` writes `run_note` whatever was asked, and replaces or absorbs only run notes. Entries the owner edited by hand cannot be absorbed in these turns. `memory_forget` is refused: "Ask the owner in the chat."
+- **Chat turns started by the owner's message** (`chat:`, including `chat:after:`) **or tapped answer** (`answer:`): owner facts and notes; `replaces` names the current version. These turns can also absorb hand-edited entries of the same kind. Forget works as before.
 - The standing-wish fallback also needs these owner-started chat rights and a settled turn; a consult or bot-started turn never saves an owner entry through it.
 - Saves and forgets report their result, with the text, for a `memory` chip.
 
@@ -78,7 +79,7 @@ The owner's Memory dialog and exports keep the stored text; the masking above ap
 
 `BotMemoryAdmin` (`admin.ts`), behind `bots.memory.list`, `bots.memory.forget`, `bots.memory.edit` and `bots.memory.export` (`methods.ts`):
 
-- **Edit** saves the owner's new words as the entry's next version, through `save` with the owner's lane: the guard, absolute dates, the length limit and the caps hold as for any save. `id` names the version the owner saw (`m12`, `m12v2`); an older one is refused, so an edit never replaces words the owner has not seen. The same words make no new version. A run note the owner edits becomes a note; dates it had are kept.
+- **Edit** saves the owner's new words as the entry's next version, through `save` with the owner's lane: the guard, absolute dates, the length limit and the caps hold as for any save. `id` names the version the owner saw (`m12`, `m12v2`); an older one is refused, so an edit never replaces words the owner has not seen. The same words make no new version. A run note the owner edits becomes a note; dates it had are kept. When an edit exceeds the cap, the dialog suggests asking the bot to combine some entries, or forgetting one.
 - **In the app**, About shows memory as one row ("Memory · 8", with "3 wishes · 5 notes" under it) that opens the Memory dialog; so do `/memory` in the bot's composer and "Saved to memory" under a reply whose turn saved something. The dialog lists the owner's wishes, then the bot's notes, newest first, each with its date, with a search box; each entry offers Edit, Forget (after a confirm) and "Ask <bot> about this", which puts the entry in the composer as a quote and sends nothing.
 
 - **Export** writes a new folder `bot-memory-<botId>-<date>` with `memory.md` (exactly the injected memory blocks), `memory.jsonl` (every version), `journal.jsonl` (every row, redactions kept as tombstones) and `definition.json`.
