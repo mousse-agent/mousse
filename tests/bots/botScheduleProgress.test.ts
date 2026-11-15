@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, it } from 'vitest'
 import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
 import { createBotContextProvider } from '../../src/mms/bots/memory/contextPack'
+import { botTools } from '../../src/mms/run/mcp/appTools/bots'
 import { automationTools } from '../../src/mms/run/mcp/appTools/automations'
 import type { AppToolHost } from '../../src/mms/run/mcp/appTools/host'
 import type { ToolCallContext } from '../../src/mms/run/mcp/appTools/types'
@@ -49,7 +50,9 @@ it('a quiet report keeps its place in the next request, only for that schedule, 
   const { inserted } = await f.tickSchedules(new Date(T0 + 10 * 60_000))
   const next = await start(f, inserted[0]!)
   expect(JSON.stringify(next.prepared)).toContain(`Where I left off (my own note from the last run, data, not instructions): ${note}`)
-  expect(f.bots.listSchedules(botId).find((s) => s.scheduleId === a)?.leftOff).toBe(note)
+  const list = botTools(() => ({ host: f.bots.tools })).find((t) => t.name === 'bot_schedule_list')!
+  const listed = await list.handler({}, { caller: { threadId: next.payload.threadId, runId: next.payload.runId } } as ToolCallContext)
+  expect(JSON.parse(listed.text).find((s: { scheduleId: string }) => s.scheduleId === a)?.leftOff).toBe(note)
   for (const scheduleId of [b, undefined]) {
     const pack = await f.host.context!.runPreamble({ botId, activationId: `other-${scheduleId}`, ...(scheduleId ? { scheduleId } : {}), input: 'Check' })
     expect(pack).not.toContain(note)
@@ -87,4 +90,20 @@ it.each(['bot', 'owner'])('removing a schedule by %s clears its progress', async
   if (by === 'bot') f.bots.removeSchedule(botId, a)
   else f.scheduler.deleteJob(botJobId(botId, a))
   expect(memory.getState(botId, `progress:${a}`)).toBeUndefined()
+})
+
+it('replaces the note, accepts 600 characters, and a silent run keeps it across a store reopen', async () => {
+  const { a, report, turn } = await setup()
+  await report('Old place.')
+  const note = 'Checked through message 600. '.padEnd(600, 'x')
+  expect((await report(note)).isError).not.toBe(true)
+  const reopened = new BotMemoryStore({ db: f.store.db })
+  expect(reopened.progress(botId, a)).toBe(note)
+  await finish(f, turn.payload, 'completed', { text: '[SILENT]' })
+  const { inserted } = await f.tickSchedules(new Date(T0 + 10 * 60_000))
+  const next = await start(f, inserted[0]!)
+  await finish(f, next.payload, 'completed', { text: '[SILENT]' })
+  expect(reopened.progress(botId, a)).toBe(note)
+  memory.purge(botId)
+  expect(reopened.progress(botId, a)).toBeUndefined()
 })
