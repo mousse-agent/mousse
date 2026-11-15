@@ -227,6 +227,10 @@ export interface BotEngineHost {
   progress?: Pick<BotMemoryStore, 'stageProgress' | 'finishProgress' | 'progress'>
   /** The level a scheduled run's activation reported with `run_report` (`AutomationRuns`). */
   runLevel?(activationId: string): RunLevel | undefined
+  /** Profile quiet-hours reader and activity measured by Mousse, never by bot turns. */
+  quietHoursFor?(botId?: string, at?: number): { end: number } | undefined
+  ownerActive?(): boolean
+  ownerActivity?(): void
   /** Wall-clock milliseconds, for the times `bots.db` records (default: `Date.now`). */
   clock?(): number
   /** Monotonic milliseconds, for measured active time (default: `performance.now`). */
@@ -682,10 +686,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         this.tellings.read()
         this.armDue()
       },
+      tellAt: (botId, tell, at) => tell === 'soon' && !this.ownerActive() && !this.canWake(botId) ? new Date(this.host.quietHoursFor?.(botId, Date.parse(at))?.end ?? Date.parse(at)).toISOString() : at,
       classify: (message, input) => {
         const activation = message.activationId ? this.store.activation(message.activationId) : undefined
         const reminder = message.id.startsWith('bm_rem_') ? this.store.reminder(message.id.slice(3)) : undefined
-        return tellingClass({ message, scheduleLine: input.scheduleLine, ownerTurn: !!activation && memoryLaneOf(activation) === 'chat',
+        return tellingClass({ message, active: !!this.host.quietHoursFor?.(this.store.message(message.id)!.botId, this.now()) && (this.ownerActive() || this.canWake(this.store.message(message.id)!.botId)), scheduleLine: input.scheduleLine, ownerTurn: !!activation && memoryLaneOf(activation) === 'chat',
           reminder: !!reminder, reminderOwner: reminder?.ownerSet, quiet: this.quietReport(this.store.message(message.id)!.botId, message) })
       },
       schedules: (botId) => this.schedulesOf(botId).map((schedule) => ({ scheduleId: schedule.scheduleId, label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}), jobId: schedule.jobId, paused: schedule.paused })),
@@ -4162,6 +4167,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const amount = input.amount ?? ('budget' in escalation.permission ? escalation.permission.budget.amount : undefined)
     if (budget && input.answer !== 'deny' && (amount === undefined || !Number.isFinite(amount) || amount <= 0))
       throw new BotEngineError('invalid_answer', 'Say how much more to allow.')
+    this.noteOwnerActivity()
     const special = isSpecialAsk(escalation.permission)
     // Allow never grants tools the owner has not seen: an MCP ask whose server has not listed them waits for them.
     if (input.answer !== 'deny' && waitsForTools(escalation.permission)) throw new BotEngineError('ask_not_ready', MCP_ASK_LOADING_TEXT)
@@ -4213,6 +4219,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       throw new BotEngineError('ask_not_ready', 'Wait until the bot finishes its message.')
     // Allow never grants tools the owner has not seen: an MCP ask whose server has not listed them waits for them.
     if (answer === 'allow' && waitsForTools(escalation.permission)) throw new BotEngineError('ask_not_ready', MCP_ASK_LOADING_TEXT)
+    this.noteOwnerActivity()
     const special = isSpecialAsk(escalation.permission)
     // A limit: the work that waits on it, read before the answer widens the grant.
     const limit = 'budget' in escalation.permission ? escalation.permission.budget.key : undefined
@@ -6519,6 +6526,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * is repaired by the next one. A failure pauses the activation with `reconcile_failed`.
    */
   async reconcileOnStartup(): Promise<void> {
+    this.quietHoursChanged()
     this.loadPendingScheduleRemovals()
     // Cleanup is best effort: admission enforces the saved intent even while jobs.json cannot be written.
     this.retryCompletedScheduleRemovals()
@@ -7239,6 +7247,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** `bots.chat.markRead`: the unread count drops to what follows `seq`. */
   markRead(botId: string, seq: number): void {
     this.entry(botId)
+    this.noteOwnerActivity()
     this.store.setReadSeq(botId, seq)
     this.tellings.read()
     this.changed({ botId })
@@ -7733,6 +7742,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   snoozeReminder(botId: string, messageId: string, choice: import('../../../shared/bots/personal/chat').BotSnoozeChoice): void {
+    this.noteOwnerActivity()
     this.entry(botId)
     this.store.db.transaction(() => {
       const reminder = this.store.reminderForMessage(botId, messageId)
@@ -8170,6 +8180,29 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.tellings.noteLegacy(event.botId, event.message, event.quiet === true)
   }
 
+  private ownerActive(): boolean { return this.host.ownerActive?.() ?? false }
+  private canWake(botId: string): boolean {
+    try { return JSON.parse(this.store.registry(botId)?.tellJson ?? '{}').canWakeMe === true } catch { return false }
+  }
+  private followUpTime(botId: string, at: number): number { return this.host.quietHoursFor?.(botId, at)?.end ?? at }
+  noteOwnerActivity(): void { this.host.ownerActivity?.(); this.quietHoursChanged() }
+  /** Only future tell_at on a soon row denotes a hold; no additional stored state. */
+  quietHoursChanged(): void {
+    const now = this.now()
+    for (const row of this.store.all("SELECT id, bot_id, at FROM bot_messages WHERE tell = 'soon' AND told_at IS NULL AND tell_at > at")) {
+      const botId = String(row.bot_id)
+      const end = !this.ownerActive() && !this.canWake(botId) ? this.host.quietHoursFor?.(botId, now)?.end : undefined
+      this.store.run('UPDATE bot_messages SET tell_at = ? WHERE id = ?', new Date(end ?? Math.max(now, Date.parse(String(row.at)) + 1)).toISOString(), String(row.id))
+    }
+    // Settings changes also move a question that was due outside the old quiet interval.
+    for (const row of this.store.all("SELECT id, bot_id, next_at FROM bot_questions WHERE status = 'open' AND next_at IS NOT NULL")) {
+      const at = Date.parse(String(row.next_at))
+      const end = this.host.quietHoursFor?.(String(row.bot_id), at)?.end
+      if (end) this.store.setQuestionNext(String(row.id), new Date(end).toISOString())
+    }
+    this.armDue()
+  }
+
   setTellingWindows(count: number): void { this.tellings.attach(count); this.armDue() }
 
   nextDueAt(botId?: string): string | undefined {
@@ -8390,9 +8423,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   // was withdrawn or forgotten, never is.
 
   /** When a question's first follow-up is due, its bubble shown at `shownAt`: the time the bot gave after that. */
-  private firstFollowUpAt(question: Pick<BotQuestionRow, 'follow'>, shownAt: string): string | null {
+  private firstFollowUpAt(question: Pick<BotQuestionRow, 'follow' | 'botId'>, shownAt: string): string | null {
     if (!question.follow) return null
-    return new Date(Date.parse(shownAt) + question.follow.afterMs).toISOString()
+    return new Date(this.followUpTime(question.botId, Date.parse(shownAt) + question.follow.afterMs)).toISOString()
   }
 
   /**
@@ -8405,13 +8438,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.store.setQuestionNext(question.id, null)
       return
     }
+    const allowed = this.followUpTime(question.botId, now.getTime())
+    if (allowed > now.getTime()) { this.moveFollowUp(question, allowed); return }
     if (question.follow.kind === 'nudge') this.nudge(question, now)
     else await this.goWithDefault(question, question.follow, now)
   }
 
   /** A question's follow-up moves later; a bubble that says when its default goes ahead shows the new time. */
   private moveFollowUp(question: BotQuestionRow, at: number): void {
-    if (!this.store.setQuestionNext(question.id, new Date(at).toISOString())) return
+    if (!this.store.setQuestionNext(question.id, new Date(this.followUpTime(question.botId, at)).toISOString())) return
     if (question.follow?.kind === 'default') for (const row of this.store.messagesForQuestion(question.id)) if (row.author === 'bot') this.chat.republish(row.id)
   }
 
@@ -8435,7 +8470,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return
     }
     const count = question.nudges + 1
-    const next = count < MAX_NUDGES_PER_QUESTION ? new Date(at + NUDGE_AGAIN_MS).toISOString() : null
+    const next = count < MAX_NUDGES_PER_QUESTION ? new Date(this.followUpTime(question.botId, at + NUDGE_AGAIN_MS)).toISOString() : null
     const posted = this.store.db.transaction(() => {
       if (!this.store.recordNudge(question.id, count, next)) return false
       this.chat.post({

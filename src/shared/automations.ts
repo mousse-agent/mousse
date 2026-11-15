@@ -175,6 +175,8 @@ export const TELL_ME_LABELS: Record<TellMe, string> = NOTIFY_LEVEL_LABELS
 
 /** What the scheduler tells listeners when an occurrence ends (`scheduled.runEnded`). */
 export interface ScheduledRunEnded {
+  /** The owner was away during their quiet hours: show silently, never hold. */
+  quietHours?: true
   jobId: string
   jobName: string
   outcome: RunEndState

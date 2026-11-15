@@ -1,3 +1,4 @@
+import { isQuietHours } from '../../shared/settings'
 import type { ContextSettings, MousseSettings, MousseSettingsUpdate } from '../../shared/settings'
 import { THEME_CSS_MAX_LENGTH, themeCssTooLong } from '../../shared/themes/cssSafety'
 import { CONTEXT_COMPACTION_DEFAULT_MARKER, DEFAULT_CONTEXT_COMPACTION_TOKENS, REMOVED_THEME_IDS, getDefaultSettings, normalizeAgentAccessSettings, normalizeAppearance, normalizeContextSettings, normalizeExperimentalSettings, normalizePermissionSettings, normalizeRunSettings, normalizeStorageSettings } from '../../shared/settings'
@@ -65,6 +66,7 @@ function namesProviderOnly(selection: { llmProvider?: unknown; instanceId?: unkn
 
 function normalizeSettings(settings: MousseSettings): MousseSettings {
   const defaults = getDefaultSettings()
+  if (settings.notifications && !isQuietHours(settings.notifications.quietHours)) delete settings.notifications.quietHours
   const integrations = settings.integrations as MousseSettings['integrations'] & {
     tools?: { enabled?: unknown; enabledTools?: unknown; knownTools?: unknown }
   }
@@ -182,6 +184,8 @@ export class SettingsStore {
       const long = themes.find((theme) => theme && typeof theme === 'object' && typeof (theme as { css?: unknown }).css === 'string' && ((theme as { css: string }).css.length > THEME_CSS_MAX_LENGTH))
       if (long) throw new Error(`${themeCssTooLong((long as { css: string }).css.length)} Nothing was saved.`)
     }
+    const quietHours = partial.notifications?.quietHours
+    if (quietHours != null && !isQuietHours(quietHours)) throw new Error('Quiet hours need different from and to times in HH:MM (00:00 to 23:59). Nothing was saved.')
     const current = this.get()
     const merged = deepMerge(
       current as unknown as Record<string, unknown>,
@@ -216,6 +220,8 @@ export class SettingsStore {
       for (const [skillId, update] of skillModels) if (model[skillId] && update) model[skillId] = cleared(model[skillId]!, update)
       normalized.integrations = { ...normalized.integrations, skills: { ...normalized.integrations.skills, model } }
     }
+    // null is the update-only clear operation; the config removes the key before saving.
+    if (partial.notifications?.quietHours === null) normalized.notifications = { ...normalized.notifications, quietHours: null as never }
     this.config.applySettingsPatch(normalized)
     for (const listener of savedListeners) {
       try { listener() } catch (error) { console.warn('[SettingsStore] a settings listener failed', error) }

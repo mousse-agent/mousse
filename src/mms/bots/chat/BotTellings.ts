@@ -100,13 +100,14 @@ export class BotTellings {
         if ((this.retryAt.get(row.botId) ?? 0) <= now) due.push(row)
       }
     }
-    const closed = due.filter(r => r.seq <= this.closedThrough && r.tell !== 'later')
+    const held = (r: BotMessageRow): boolean => r.tell === 'soon' && !!r.tellAt && r.tellAt > r.at
+    const closed = due.filter(r => (r.seq <= this.closedThrough || held(r)) && r.tell !== 'later')
     if (closed.length) {
-      closed.push(...due.filter(r => r.seq <= this.closedThrough && r.tell === 'later'))
-      if (!this.attempt(closed, now, () => this.releaseBacklog(closed, now))) {
+      closed.push(...due.filter(r => r.tell === 'later' && (r.seq <= this.closedThrough || closed.some(held))))
+      if (!this.attempt(closed, now, () => this.releaseBacklog(closed, now, closed.some(held) ? 'While you were away' : 'While Mousse was closed'))) {
         for (const bot of new Set(closed.map(r => r.botId))) {
           const rows = closed.filter(r => r.botId === bot)
-          if (rows.some(r => r.tell !== 'later')) this.attempt(rows, now, () => this.releaseBacklog(rows, now))
+          if (rows.some(r => r.tell !== 'later')) this.attempt(rows, now, () => this.releaseBacklog(rows, now, rows.some(held) ? 'While you were away' : 'While Mousse was closed'))
         }
       }
     }
@@ -152,9 +153,9 @@ export class BotTellings {
     const { body } = botNotificationContent(this.name(rows[0]!.botId), first)
     const summary = names.map(name => {
       const group = rows.filter(r => this.name(r.botId) === name)
-      return group.some(r => r.askId || r.questionId || r.error) ? `${name} needs you` : `${name} ${group.length} ${group.length === 1 ? 'message' : 'messages'}`
+      return group.some(r => r.askId || r.questionId || r.error) ? `${name} needs you` : `${name} ${group.length} ${closed === 'While you were away' ? group.length === 1 ? 'update' : 'updates' : group.length === 1 ? 'message' : 'messages'}`
     }).join(' · ')
-    const title = rows.length === 1 ? names[0]! : closed ? `${closed}: ${summary}` : `${names.join(', ')} · ${rows.length} messages`
+    const title = rows.length === 1 && closed !== 'While you were away' ? names[0]! : closed ? `${closed}: ${summary}` : `${names.join(', ')} · ${rows.length} messages`
     this.emit({ id, rows: rows.map(r => ({ botId: r.botId, messageId: r.id, seq: r.seq, tell: r.tell! })), title, body, kind: first.ask || first.question ? 'question' : 'completed', sound })
     this.banners.set(id, rows)
   }

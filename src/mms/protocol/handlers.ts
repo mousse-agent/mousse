@@ -1,3 +1,4 @@
+import { APP_PRESENCE_CAPABILITY } from '../notifications/OwnerQuietHours'
 import { repositoryIdentitiesFor } from '../bridge/remote/repositoryIdentity'
 import { requestWorkScope } from '../execution/workScope'
 import { agentMessageWords } from '../../shared/agentMessageWords'
@@ -1934,6 +1935,16 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (params.format === 'html') return {content:ctx.mms.applets.exportHtml(threadId, appletId, revisionId, params.appearance===undefined?undefined:validateAppletAppearance(params.appearance))}
       if (params.format === 'source') return {content:ctx.mms.applets.exportSource(threadId, appletId, revisionId)}
       throw new Error('Unsupported applet export format.')
+    }
+    case 'app.presence': {
+      if (ctx.connection?.clientType !== 'gui' || !ctx.connection.capabilities.has(APP_PRESENCE_CAPABILITY)) throw new Error('App presence requires a capable local window.')
+      const p = params as { activeAt?: unknown; timeZone?: unknown }
+      if (!p || typeof p.activeAt !== 'number' || !Number.isFinite(p.activeAt) || typeof p.timeZone !== 'string') throw new Error('Presence needs activeAt and timeZone.')
+      // Validate before changing activity or the zone.
+      new Intl.DateTimeFormat('en', { timeZone: p.timeZone }).format()
+      ctx.mms.ownerQuietHours.reportPresence(ctx.connection.id, p.activeAt, p.timeZone)
+      ctx.mms.personalBots?.quietHoursChanged()
+      return { ok: true }
     }
     case 'health':
       return {

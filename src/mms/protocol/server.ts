@@ -1,3 +1,4 @@
+import { APP_PRESENCE_CAPABILITY } from '../notifications/OwnerQuietHours'
 import { BOT_TELLING_CAPABILITY } from '../../shared/bots/personal/telling'
 import { AgentDefinitionError } from '../../shared/agents/errors'
 import { ERROR_INFO_CAPABILITY, errorDiagnostic, knownAppError, normalizeAppError, serializeAppError } from '../../shared/errors'
@@ -871,7 +872,9 @@ export class MmsProtocolServer {
     })
     // How an automation's run ended and whether its Tell me lets it notify; the GUI shows the notification.
     onEmitter(services.scheduled, 'runEnded', (event: { threadId?: string }) => {
-      emitToSubscribers(this.ring.push('scheduled.runEnded', event, event.threadId))
+      const quiet = services.ownerQuietHours
+      const data = quiet?.quietHoursFor() && !quiet.active() ? { ...event, quietHours: true } : event
+      emitToSubscribers(this.ring.push('scheduled.runEnded', data, event.threadId))
     })
     // A watched pull request changed (checks finished, a review arrived, the watch ended): clients refresh that thread's detail.
     onEmitter(services.pullRequestWatch, 'updated', (payload: { threadId: string }) => {
@@ -1001,11 +1004,13 @@ export class MmsProtocolServer {
             capability !== MMS_PROTOCOL_CHUNK_CAPABILITY &&
             capability !== PROFILES_V1_CAPABILITY &&
             capability !== ERROR_INFO_CAPABILITY &&
+            capability !== APP_PRESENCE_CAPABILITY &&
             capability !== BOT_TELLING_CAPABILITY &&
             capability !== BROWSER_ATTACHED_V1_CAPABILITY
         )
       )
       if (requested.has(MMS_PROTOCOL_CHUNK_CAPABILITY) && advertised.includes(MMS_PROTOCOL_CHUNK_CAPABILITY)) session.capabilities.add(MMS_PROTOCOL_CHUNK_CAPABILITY)
+      if (v.hello.clientType === 'gui' && requested.has(APP_PRESENCE_CAPABILITY)) session.capabilities.add(APP_PRESENCE_CAPABILITY)
       if (v.hello.clientType === 'gui' && requested.has(BOT_TELLING_CAPABILITY)) session.capabilities.add(BOT_TELLING_CAPABILITY)
       if (requested.has(ERROR_INFO_CAPABILITY)) session.capabilities.add(ERROR_INFO_CAPABILITY)
       // A window says it binds a chat's first message; nothing else may claim it.
@@ -1253,6 +1258,10 @@ export class MmsProtocolServer {
         method,
         params
       )
+      if ((session.clientType === 'gui' || session.clientType === 'bridge') && ['orchestrator.send', 'orchestrator.steer', 'orchestrator.steerNow', 'orchestrator.answerQuestions'].includes(method)) {
+        resolved.services.ownerQuietHours?.report()
+        resolved.services.personalBots?.quietHoursChanged()
+      }
       // Profile creation/restore starts a new service while dispatch is in
       // flight. Attach its producers before acknowledging the lifecycle call.
       if (isInstallationMethod(method)) this.wireLiveProfileEvents()

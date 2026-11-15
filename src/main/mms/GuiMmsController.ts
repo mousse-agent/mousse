@@ -1,3 +1,4 @@
+import { APP_PRESENCE_CAPABILITY } from '../../mms/notifications/OwnerQuietHours'
 import { BOT_TELLING_CAPABILITY } from '../../shared/bots/personal/telling'
 import { ERROR_INFO_CAPABILITY } from '../../shared/errors'
 import { connectGuiClient } from './guiDaemonCompatibility'
@@ -199,7 +200,8 @@ const GUI_PLATFORM_CAPABILITIES = [
   BROWSER_VIEWER_CAPABILITY,
   BROWSER_SETUP_CAPABILITY,
   FIRST_SEND_BINDING_CAPABILITY,
-  BOT_TELLING_CAPABILITY
+  BOT_TELLING_CAPABILITY,
+  APP_PRESENCE_CAPABILITY
 ] as const
 
 export class GuiMmsController extends EventEmitter {
@@ -581,6 +583,16 @@ export class GuiMmsController extends EventEmitter {
   /** The service a window's connection talks to: answers and updates are numbered per service instance. */
   tellsForSender(senderId: number): boolean {
     return this.windowSessions.get(senderId)?.client.hello?.capabilities.includes(BOT_TELLING_CAPABILITY) ?? false
+  }
+
+  presenceAudience(senderId: number): string | undefined {
+    const session = this.windowSessions.get(senderId)
+    if (!session?.client.connected || !session.binding || !session.client.hello?.capabilities.includes(APP_PRESENCE_CAPABILITY)) return undefined
+    return `${session.client.hello.instanceId}:${session.binding.profileId}`
+  }
+  async sendPresence(senderId: number, presence: { activeAt: number; timeZone: string }): Promise<void> {
+    if (!this.presenceAudience(senderId)) return
+    await this.windowSessions.get(senderId)!.client.request('app.presence', presence)
   }
 
   instanceForSender(senderId: number): string | undefined {

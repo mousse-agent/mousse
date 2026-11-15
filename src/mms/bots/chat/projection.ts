@@ -206,6 +206,7 @@ export class BotChatProjection {
     /** `bots.message`, after the row's transaction committed. */
     emit(event: { botId: string; message: BotChatMessage }): void
     /** A bot's schedules, from the shared store (`BotEngine.listSchedules`), for About → Runs. */
+    tellAt?(botId: string, tell: 'now' | 'soon' | 'later', at: string): string
     classify?(message: BotChatMessage, input: PostInput): 'now' | 'soon' | 'later' | null
     schedules?(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string; jobId?: string; paused?: boolean }>
     /**
@@ -314,7 +315,7 @@ export class BotChatProjection {
         }
       })
       const tell = this.options.classify?.(this.toMessage(this.store.message(id)!), input) ?? null
-      this.store.run('UPDATE bot_messages SET tell = ?, tell_at = ? WHERE id = ?', tell, tell ? at : null, id)
+      this.store.run('UPDATE bot_messages SET tell = ?, tell_at = ? WHERE id = ?', tell, tell ? this.options.tellAt?.(input.botId, tell, at) ?? at : null, id)
       return { row: this.store.message(id)!, inserted: true }
     })
     const message = this.toMessage(row)
