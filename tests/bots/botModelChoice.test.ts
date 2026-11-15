@@ -42,7 +42,8 @@ describe('chooseBotModel', () => {
 
   it('Pi only: a Pi model of the right tier for each depth', () => {
     expect(chooseBotModel({ mode: 'auto', depth: 'normal' }, PI, now)).toEqual({ selection: { instanceId: 'pi:openai', model: 'gpt-5.1', effort: 'medium' } })
-    expect(chooseBotModel({ mode: 'auto', depth: 'deep' }, PI, now)).toEqual({ selection: { instanceId: 'pi:openai', model: 'gpt-5-pro', effort: 'high' } })
+    // Deep on a key paid by use: the standard model at high effort, never the pricier frontier one.
+    expect(chooseBotModel({ mode: 'auto', depth: 'deep' }, PI, now)).toEqual({ selection: { instanceId: 'pi:openai', model: 'gpt-5.1', effort: 'high' } })
     expect(chooseBotModel({ mode: 'auto', depth: 'quick' }, PI, now)).toEqual({ selection: { instanceId: 'pi:openai', model: 'gpt-5.1', effort: 'low' } })
   })
 
@@ -54,6 +55,14 @@ describe('chooseBotModel', () => {
     // A reset that passed counts for nothing.
     const passed = BOTH.map((candidate) => ({ ...candidate, limitedUntil: '2026-11-07T09:00:00.000Z' }))
     expect(chooseBotModel({ mode: 'auto', depth: 'normal' }, passed, now)).toMatchObject({ selection: { model: 'claude-sonnet-5-5' } })
+  })
+
+  it('deep by usage takes a frontier model first only on a subscription; one paid by use comes after standard, and alone it is still used', () => {
+    const gateway = [pi('anthropic/claude-opus-5', 'frontier'), pi('deepseek/flash', 'standard')]
+    expect(chooseBotModel({ mode: 'auto', depth: 'deep' }, gateway, now)).toMatchObject({ selection: { model: 'deepseek/flash' } })
+    expect(chooseBotModel({ mode: 'auto', depth: 'deep' }, [...gateway, ...BOTH], now)).toMatchObject({ selection: { instanceId: 'claude:bots', model: 'claude-opus-5-5' } })
+    // Nothing but the paid frontier model: the chat would run on it too.
+    expect(chooseBotModel({ mode: 'auto', depth: 'deep' }, [pi('anthropic/claude-opus-5', 'frontier')], now)).toMatchObject({ selection: { model: 'anthropic/claude-opus-5' } })
   })
 
   it('small is used only when no standard model exists; unknown only when no known tier does', () => {
