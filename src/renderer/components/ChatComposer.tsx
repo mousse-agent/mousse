@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ComponentProps, ReactNode } from 'react'
-import { Loader2, Mic, RefreshCw, Reply, X } from '../lib/icons'
-import { SpeechWave } from '../speech/SpeechWave'
+import { Mic, RefreshCw, Reply, X } from '../lib/icons'
 import type {
   BrowserElementAttachment,
   FileSearchResponse,
@@ -26,7 +25,7 @@ import {
   type MentionItem
 } from '../../shared/composerCommands'
 import { ComposerSuggestionList, MentionRowContent, type SuggestionRow } from './ComposerSuggestionList'
-import { ComposerFooter, STEER_BINDING, isSteerKey, type ComposerRunProps } from './ComposerFooter'
+import { ComposerFooter, STEER_BINDING, formatRecordingTime as formatDuration, isSteerKey, type ComposerRunProps } from './ComposerFooter'
 import { markSteerKey, steersOnEnter, type SendMode } from '../lib/steerKey'
 import { useThreadSendMode } from '../lib/sendMode'
 import { BrowserElementPill } from './BrowserElementPill'
@@ -164,12 +163,6 @@ function isShown(input: HTMLElement | null): boolean {
 
 function readCaret(node: HTMLTextAreaElement): number {
   return node.selectionStart === node.selectionEnd ? node.selectionStart : -1
-}
-
-function formatDuration(seconds: number): string {
-  const m = Math.floor(seconds / 60)
-  const s = Math.floor(seconds % 60)
-  return `${m}:${s.toString().padStart(2, '0')}`
 }
 
 export function ChatComposer({
@@ -809,26 +802,9 @@ export function ChatComposer({
   return (
     <div data-mousse="composer" className="composer" onDragOver={handleDragOver} onDrop={handleDrop}>
       {banner}
-      {(hasAttachments || isRecording || transcribing) && (
+      {hasAttachments && (
         <div className="composer-attachments">
           <div className="composer-attachments-scroll">
-            {isRecording && (
-              <div
-                className="composer-attachment-pill composer-attachment-pill-recording"
-                role="status"
-                aria-label={`Recording ${formatDuration(recordingDuration)}`}
-              >
-                <Mic size={12} strokeWidth={2} />
-                <SpeechWave levels={dictation.levels} />
-                <span>{formatDuration(recordingDuration)}</span>
-              </div>
-            )}
-            {transcribing && (
-              <div className="composer-attachment-pill composer-attachment-pill-transcribing" role="status">
-                <Loader2 size={12} strokeWidth={2} className="composer-transcribing-spin" />
-                <span>Transcribing…</span>
-              </div>
-            )}
             {/* An attached image opens a preview that steps through the other attached images. */}
             <ImageGalleryProvider images={() => attachedFiles.flatMap(({ id, file, previewUrl }) => (previewUrl ? [{ id, url: previewUrl, filename: file.name }] : []))}>
               {attachedFiles.map(({ id, file, previewUrl }) => (
@@ -1023,6 +999,9 @@ export function ChatComposer({
         onStop={handleStop}
         onStartRecording={startDictation}
         onStopRecording={dictation.stop}
+        onCancelRecording={dictation.cancel}
+        recordingDuration={recordingDuration}
+        recordingLevels={dictation.levels}
         allowAttachWhileLoading
         permission={permission}
         dictateWhileStoppable={dictateWhileStoppable}

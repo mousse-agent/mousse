@@ -1465,6 +1465,59 @@ html[data-chat-width='full'] .chat {
   min-width: 0;
 }
 
+/* While dictating, the footer is the recorder: a still red dot, the time and the live wave across the
+   width, then Cancel and Done. The dot does not pulse; the wave already shows the microphone is live. */
+.composer-recorder-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  min-height: 30px;
+  padding-left: 4px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.composer-recorder-dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--danger);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 18%, transparent);
+}
+
+.composer-recorder-time {
+  flex-shrink: 0;
+  min-width: 30px;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.composer-recorder-wave {
+  flex: 1;
+  margin-right: 8px;
+}
+
+.composer-recorder-cancel {
+  color: var(--text-secondary);
+}
+
+.app .composer .composer-recorder-done {
+  background: var(--text-primary);
+  color: var(--ui-raised);
+}
+
+.app .composer .composer-recorder-done:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text-primary) 86%, transparent);
+}
+
+.app .composer .composer-recorder-done:disabled {
+  background: color-mix(in srgb, var(--text-primary) 10%, transparent);
+  color: var(--text-secondary);
+}
+
 .composer-pill-btn,
 .composer-model-btn {
   display: inline-flex;
@@ -2275,16 +2328,6 @@ html[data-chat-width='full'] .chat {
   position: relative;
 }
 
-.composer-action-btn-recording {
-  background: rgba(239, 68, 68, 0.25);
-  color: #f87171;
-}
-
-.composer-action-btn-recording:hover {
-  background: rgba(239, 68, 68, 0.35);
-  color: #fca5a5;
-}
-
 .composer-action-btn-stop {
   background: rgba(239, 68, 68, 0.3);
   color: #f87171;
@@ -2613,16 +2656,6 @@ html[data-chat-width='full'] .chat {
   min-width: 0;
 }
 
-.composer-attachment-pill-recording {
-  color: #f87171;
-  border-color: rgba(239, 68, 68, 0.3);
-  animation: composer-recording-pulse 1.5s ease-in-out infinite;
-}
-
-.composer-attachment-pill-transcribing {
-  color: var(--text-secondary);
-}
-
 .composer-attachment-remove {
   display: inline-flex;
   align-items: center;
@@ -2638,11 +2671,6 @@ html[data-chat-width='full'] .chat {
 .composer-attachment-remove:hover {
   background: rgba(var(--accent-rgb), 0.2);
   color: var(--text-primary);
-}
-
-@keyframes composer-recording-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.65; }
 }
 
 /* The ring takes the level's colour: accent, then warning from 75%, danger from 90%. */

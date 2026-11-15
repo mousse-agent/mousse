@@ -14,7 +14,7 @@ import { TURNING_CLASSES } from '../../src/renderer/lib/turning'
 const SMOOTH_ALLOWED = [
   'ambient-glow-a', 'ambient-glow-b', 'ambient-glow-rim-a', 'ambient-glow-rim-b', // var(--ambient-glow-ease): a stepped linear()
   'empty-logo-wobble',
-  'composer-recording-pulse', 'orb-liquid-drift',
+  'orb-liquid-drift',
   'threads-sidebar-skeleton-shimmer', 'usage-skeleton-pulse', 'usage-bar-stripes', 'ui-loader-breathe',
   'watched-browser-loading' // a watched browser's address bar while a page loads
 ]
