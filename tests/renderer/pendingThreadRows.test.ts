@@ -58,7 +58,7 @@ describe('the pending row a send makes', () => {
   it('is named from the first words of the prompt, on top of its project, and is new until the service makes the thread', () => {
     const row = rowFor('Please plan the release notes for 0.2. Then draft them.')!
     expect(row.key).toBe('pending:k1')
-    expect(row.thread).toMatchObject({ id: 'pending:k1', name: 'Plan the release notes', titleSource: 'provisional', projectId: 'p1', order: -3 })
+    expect(row.thread).toMatchObject({ id: 'pending:k1', name: 'Plan the release notes for 0.2', titleSource: 'provisional', projectId: 'p1', order: -3 })
     expect(row.thread.startedAt).toBe(new Date(now).toISOString())
     expect(row.threadId).toBeUndefined()
   })
