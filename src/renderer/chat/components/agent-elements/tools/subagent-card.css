@@ -210,10 +210,25 @@
 }
 
 .subagent-group-title {
+  display: flex;
+  min-width: 0;
   color: var(--text-primary);
   font-size: 12px;
   font-weight: 500;
   line-height: 15px;
+  white-space: nowrap;
+}
+
+/* A folded group's first name gives way to its "+ N", which always stays visible. */
+.subagent-group-name {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+}
+
+.subagent-group-rest {
+  flex: 0 0 auto;
+  white-space: pre;
 }
 
 .subagent-group-summary {

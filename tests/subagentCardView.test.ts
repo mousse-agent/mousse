@@ -372,26 +372,19 @@ describe('a subagent tool row', () => {
   })
 
   it('folds two or more cards into a group with stacked icons, a coloured summary and a toggle', () => {
-    const cards = ['a', 'b', 'c', 'd', 'e'].map((id, index) => card({ toolCallId: id, state: index < 2 ? 'working' : 'done', completedAt: NOW - 1000 }))
+    const cards = ['a', 'b', 'c', 'd', 'e'].map((id, index) => card({ toolCallId: id, title: index === 0 ? 'Archive builder' : 'Other', state: index < 2 ? 'working' : 'done', completedAt: NOW - 1000 }))
     const html = withCards(cards, createElement(SubagentCardGroup, { toolCallIds: cards.map((entry) => entry.toolCallId) }, createElement('span', null, 'rows')))
     expect(html).toContain('aria-label="5 subagents · 2 working · 3 done"')
-    expect(html).toContain('>5 subagents<')
+    // Folded: the first subagent's name and how many more.
+    expect(html).toContain('title="Archive builder + 4"')
     expect(html).toContain('data-tone="running">2 working<')
     expect(html).toContain('data-tone="done">3 done<')
     expect(html.match(/class="subagent-avatar is-chip"/g)).toHaveLength(3)
     expect(html).toMatch(/class="subagent-group-more">\+(<!-- -->)?2</)
     expect(html).toContain('subagent-group-elapsed')
-    // Open while any task is going.
-    expect(html).toContain('aria-expanded="true"')
-    expect(html).toContain('rows')
-  })
-
-  it('keeps listing its subagents once every task has finished', () => {
-    const done = [card({ toolCallId: 'a', state: 'done', completedAt: NOW }), card({ toolCallId: 'b', state: 'failed', completedAt: NOW })]
-    const html = withCards(done, createElement(SubagentCardGroup, { toolCallIds: ['a', 'b'] }, createElement('span', null, 'rows')))
-    expect(html).toContain('aria-expanded="true"')
-    expect(html).toContain('1 failed')
-    expect(html).toContain('rows')
+    // Folded by default, even while tasks are going.
+    expect(html).toContain('aria-expanded="false"')
+    expect(html).not.toContain('rows')
   })
 
   it('leaves a single card alone, with no group header', () => {
@@ -451,12 +444,10 @@ describe('the transcript with cards and notices', () => {
     // A subagent still works, so the turn does too: its commands are one group, titled with what they did.
     const group = html.indexOf('Ran 2 commands')
     expect(group).toBeGreaterThan(-1)
-    expect(html).toContain('Reviewer one')
-    expect(html).toContain('Reviewer two')
     expect(html).toContain('2 subagents · 1 working · 1 done')
-    // The group holds its two rows; the cards come after it, not inside it.
+    // The subagents' card, folded to its first name, comes after the tool group, not inside it.
+    expect(html).toContain('title="Reviewer one + 1"')
     expect(html.indexOf('Reviewer one')).toBeGreaterThan(group)
-    expect(html.match(/class="subagent-card"/g)).toHaveLength(2)
   })
 
   it('draws a wake message as a notice, not as something the user wrote', () => {
