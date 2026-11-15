@@ -56,7 +56,8 @@ function paramsFor(botId: string): Record<Exclude<RemoteBotMethod, 'bots.create'
     'bots.schedules.remove': { botId, scheduleId: 'daily' },
     'bots.permissions.set': { botId, permissionId: 'p1', enabled: false },
     'bots.permissions.revoke': { botId, permissionId: 'p1' },
-    'bots.memory.forget': { botId, id: 'm1' }
+    'bots.memory.forget': { botId, id: 'm1' },
+    'bots.memory.edit': { botId, id: 'm1', text: 'Call me Sam.' }
   }
 }
 const NAMED = Object.keys(REMOTE_BOT_METHODS).filter((name) => name !== 'bots.create') as Array<Exclude<RemoteBotMethod, 'bots.create'>>

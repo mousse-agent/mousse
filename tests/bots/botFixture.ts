@@ -167,6 +167,7 @@ export function botFixture(): BotFixture {
     memory: {
       list: () => ({ entries: [], gauge: 'core 0/2,000' }),
       forget: () => ({ redacted: [] }),
+      edit: (_botId, id) => { throw Object.assign(new Error(`There is no memory entry ${id}.`), { code: 'not_found' }) },
       export: async () => ({ files: [] }),
       reindex: async () => {},
       purge: async (botId) => { fixture.purged.push(botId) }

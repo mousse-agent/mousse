@@ -81,6 +81,7 @@ describe('bot method params', () => {
     expect(validateRemoteBotParams('bots.reminders.cancel', { botId: BOT, reminderId: REM })).toBeTruthy()
     expect(validateRemoteBotParams('bots.schedules.remove', { botId: BOT, scheduleId: 'daily-1' })).toBeTruthy()
     expect(validateRemoteBotParams('bots.memory.forget', { botId: BOT, id: 'm12' })).toBeTruthy()
+    expect(validateRemoteBotParams('bots.memory.edit', { botId: BOT, id: 'm12v2', text: 'Call me Sam.' })).toBeTruthy()
     bad('bots.chat.attachment', { botId: BOT, messageId: 'm1', index: 10 })
     bad('bots.chat.attachment', { botId: BOT, messageId: 'm1', index: 0, offset: -1 })
     bad('bots.chat.attachment', { botId: BOT, messageId: 'm1', index: 0, path: '/etc/passwd' })
@@ -92,6 +93,8 @@ describe('bot method params', () => {
     bad('bots.schedules.remove', { botId: BOT, scheduleId: '../x' })
     bad('bots.permissions.revoke', { botId: BOT, permissionId: '' })
     bad('bots.memory.forget', { botId: BOT, id: 'all' })
+    bad('bots.memory.edit', { botId: BOT, id: 'm12', text: ' ' })
+    bad('bots.memory.edit', { botId: BOT, id: 'j3', text: 'Call me Sam.' })
   })
 
   it('refuses attachments, an empty or oversized message and a bad request id', () => {
@@ -123,7 +126,8 @@ describe('bot method params', () => {
       'bots.reminders.cancel': { capability: 'write', mutating: true },
       'bots.schedules.remove': { capability: 'write', mutating: true },
       'bots.permissions.revoke': { capability: 'write', mutating: true },
-      'bots.memory.forget': { capability: 'write', mutating: true }
+      'bots.memory.forget': { capability: 'write', mutating: true },
+      'bots.memory.edit': { capability: 'write', mutating: true }
     })
     // Nothing a remote device must not do: no delete, no model, no memory export, no new schedule.
     for (const name of ['bots.delete', 'bots.model.get', 'bots.model.set', 'bots.memory.export', 'bots.schedules.add', 'bots.personal.list'])
@@ -417,7 +421,8 @@ describe('"Share bots with other devices"', () => {
       'bots.schedules.remove': { botId: BOT, scheduleId: 'daily' },
       'bots.permissions.set': { botId: BOT, permissionId: 'p1', enabled: false },
       'bots.permissions.revoke': { botId: BOT, permissionId: 'p1' },
-      'bots.memory.forget': { botId: BOT, id: 'm1' }
+      'bots.memory.forget': { botId: BOT, id: 'm1' },
+      'bots.memory.edit': { botId: BOT, id: 'm1', text: 'Call me Sam.' }
     }
     for (const name of Object.keys(REMOTE_BOT_METHODS) as RemoteBotMethod[]) {
       const error = await refused(() => call(methods, name, params[name]))
@@ -541,7 +546,8 @@ describe('images and About from another device', () => {
       ['bots.reminders.cancel', { botId, reminderId: 'rem_00000000-0000-0000-0000-000000000000' }],
       ['bots.schedules.remove', { botId, scheduleId: 'nope' }],
       ['bots.permissions.revoke', { botId, permissionId: 'nope' }],
-      ['bots.memory.forget', { botId, id: 'm999' }]
+      ['bots.memory.forget', { botId, id: 'm999' }],
+      ['bots.memory.edit', { botId, id: 'm999', text: 'Call me Sam.' }]
     ] as const) {
       const method = methods.find((entry) => entry.method === name)!
       // Refused by \`authorizeNew\`, before the dispatcher admits the call, so it is never an uncertain outcome.

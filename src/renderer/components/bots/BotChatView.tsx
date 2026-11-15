@@ -1,5 +1,5 @@
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react'
-import { ArrowDown, ChevronRight, CircleAlert, Loader2, Reply, Shield, X } from '../../lib/icons'
+import { ArrowDown, Brain, ChevronRight, CircleAlert, Loader2, Reply, Shield, X } from '../../lib/icons'
 import type { BotChatApplet, BotChatMessage, BotChatQuote, BotError, BotSummary } from '../../../shared/bots/personal/chat'
 import { BOT_COLOUR_HEX, normalizeBotLook } from '../../../shared/bots/personal/look'
 import { botFaceState, useBotsStore } from '../../stores/botsStore'
@@ -23,6 +23,7 @@ import { BotActivitySticker, BotPresenceLine } from './BotPresence'
 import { askAnswerLine } from '../asks/AskCard'
 import { BotMenu } from './BotMenu'
 import { BotAboutPanel, RUNS_ON_ID } from './BotAboutPanel'
+import { BotMemoryDialog } from './BotMemoryDialog'
 import { BotBrowserPane, BotBrowserPreview } from './BotBrowser'
 import { useBotBrowser, useBotBrowserStore } from '../../stores/botBrowserStore'
 import { ChatComposer, type AttachedFile, type VoiceMessage } from '../ChatComposer'
@@ -269,6 +270,8 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, brows
   const quoted = quote && message.replyTo
   const [stepsOpen, setStepsOpen] = useState(false)
   const steps = message.chips
+  // This turn saved something to memory (its "remembered" chip): a tag under the bubble opens it in Memory.
+  const saved = steps.find((chip) => chip.icon === 'memory' && chip.text.startsWith('remembered'))
   const openAsk = message.ask?.status === 'open' ? message.ask : undefined
   // Its pictures show above its words, as a messenger's image message; the words keep the rest.
   const media = useMemo(() => replyImages(message), [message])
@@ -326,6 +329,9 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, brows
         </span>
       </span>
     </div>
+    {saved && <button type="button" className="bot-memory-tag" title="Open it in Memory" onClick={() => store().openMemory(bot.id, saved.highlight)}>
+      <Brain size={12} aria-hidden />Saved to memory
+    </button>}
     {!!message.applets?.length && <BotMessageApplets botId={bot.id} applets={message.applets} onOpen={onApplet} />}
     {openAsk && <BotAskReplies ask={openAsk}
       onAnswer={async (answer) => {
@@ -406,6 +412,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   const attachments = useBotsStore((s) => s.attachments[bot.id])
   const replying = useBotsStore((s) => s.replyingTo[bot.id])
   const aboutOpen = useBotsStore((s) => s.aboutOpen)
+  const memoryOpen = useBotsStore((s) => (s.memoryOpen?.botId === bot.id ? s.memoryOpen : null))
   // Another bot's error stays with that bot's chat.
   const error = useBotsStore((s) => (s.errorBotId === bot.id ? s.error : null))
   const store = useBotsStore.getState
@@ -599,7 +606,15 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
             stoppable={working}
             dictateWhileStoppable
             extraActions={<BotEmojiButton field={composerField} value={draft} onChange={(value) => store().setDraft(bot.id, value)} />}
-            onSend={() => void store().send(bot.id)}
+            onSend={() => {
+              // `/memory` opens the Memory dialog; it is not sent.
+              if (draft.trim().toLowerCase() === '/memory') {
+                store().setDraft(bot.id, '')
+                store().openMemory(bot.id)
+                return
+              }
+              void store().send(bot.id)
+            }}
             onStop={() => void store().stop(bot.id)}
             lastPrompt={lastPrompt}
           />
@@ -610,5 +625,6 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
     {paneOpen && browser && <BotBrowserPane bot={bot} view={browser} />}
     {appletOpen && <BotAppletPane botId={bot.id} applet={appletOpen} onClose={() => setAppletOpen(null)} />}
     {aboutOpen && <BotAboutPanel bot={bot} />}
+    {memoryOpen && <BotMemoryDialog bot={bot} {...(memoryOpen.focus ? { focus: memoryOpen.focus } : {})} />}
   </ImageGalleryProvider></BotFilesProvider>
 }

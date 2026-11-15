@@ -1,8 +1,8 @@
 import { mkdir, stat, writeFile } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
 import type { BotMemoryAdmin } from '../seams'
-import { memoryRef } from '../../../shared/bots/personal/memory'
-import type { BotMemoryStore } from './BotMemoryStore'
+import { memoryRef, parseMemoryRef } from '../../../shared/bots/personal/memory'
+import { entryOf, type BotMemoryStore } from './BotMemoryStore'
 import { renderMemoryBlocks } from './render'
 
 /**
@@ -41,6 +41,30 @@ export function createBotMemoryAdmin(options: BotMemoryAdminOptions): BotMemoryA
       const result = store.forget(botId, { id, by: 'owner_ui' })
       if ('error' in result) throw Object.assign(new Error(result.error), { code: 'not_found' })
       return result
+    },
+    edit: (botId, ref, words) => {
+      const parsed = parseMemoryRef(ref)
+      const current = parsed ? store.versions(botId, parsed.id).at(-1) : undefined
+      if (!parsed || !current || current.status === 'forgotten' || current.status === 'superseded')
+        throw Object.assign(new Error('This memory is gone.'), { code: 'not_found' })
+      const text = words.trim().replace(/\s+/g, ' ')
+      // The same words again change nothing: no new version.
+      if (text === current.text && (parsed.version ?? 1) === current.version) return entryOf(current)
+      const result = store.save(botId, {
+        lane: 'owner_ui',
+        kind: current.kind === 'owner' ? 'owner' : 'note',
+        text,
+        replaces: ref,
+        ...(current.validFrom ? { validFrom: current.validFrom } : {}),
+        ...(current.expiresAt && current.status === 'active' ? { expiresAt: current.expiresAt } : {})
+      })
+      if ('error' in result) {
+        const message = result.error === 'refused' ? result.reason
+          : result.error === 'stale' ? 'This memory changed since you opened it.'
+            : 'Memory of this kind is full. Forget something first.'
+        throw Object.assign(new Error(message), { code: 'invalid_params' })
+      }
+      return entryOf(store.versions(botId, result.id).at(-1)!)
     },
     export: async (botId, dir) => {
       if (!isAbsolute(dir)) throw Object.assign(new Error('Pick a folder to save into.'), { code: 'invalid_params' })

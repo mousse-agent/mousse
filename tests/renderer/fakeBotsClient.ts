@@ -159,6 +159,14 @@ export function fakeBots(initial: { bots?: BotSummary[]; chats?: Record<string, 
     exportMemory: vi.fn((botId, dir) => record('exportMemory', [botId, dir], () => ({ files: [`${dir}/memory.md`] }))),
     memory: vi.fn((botId) => record('memory', [botId], () => ({ entries: (fake.memory[botId] ?? []).map((entry) => ({ ...entry })), gauge: 'core 0/2,000' }))),
     forgetMemory: vi.fn((botId, id) => record('forgetMemory', [botId, id], () => { fake.memory[botId] = (fake.memory[botId] ?? []).filter((entry) => entry.id !== id) })),
+    editMemory: vi.fn((botId, ref, text) => record('editMemory', [botId, ref, text], () => {
+      const at = (fake.memory[botId] ?? []).findIndex((entry) => entry.ref === ref)
+      if (at < 0) throw Object.assign(new Error('This memory changed since you opened it.'), { code: 'invalid_params' })
+      const old = fake.memory[botId]![at]!
+      const entry = { ...old, version: old.version + 1, ref: `${old.id}v${old.version + 1}`, text, by: 'you said' as const }
+      fake.memory[botId]![at] = entry
+      return { ...entry }
+    })),
     devices: vi.fn((botId) => record('devices', [botId], () => fake.devices[botId] ?? { access: { mode: 'all' as const }, devices: [] })),
     setDevices: vi.fn((botId, access) => record('setDevices', [botId, access], () => {
       const next = { ...(fake.devices[botId] ?? { devices: [] }), access }

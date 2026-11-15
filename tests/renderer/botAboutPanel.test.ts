@@ -269,31 +269,32 @@ describe('About this bot', () => {
     await show()
     expect([...host.querySelectorAll('.bot-about-empty')].map((element) => element.textContent)).toEqual([
       'Nothing yet. It asks in the chat the first time it needs something.',
-      'Only when you message it. Ask it to run on a schedule.',
-      'Nothing yet. Tell it what to remember.'
+      'Only when you message it. Ask it to run on a schedule.'
     ])
   })
 
-  it('lists what it remembers and forgets one with Remove', async () => {
-    const entry = (id: string, text: string, status: 'active' | 'expired' = 'active') => ({ id, version: 1, ref: id, kind: 'owner' as const, text, since: AT, learnedAt: AT, by: 'you said' as const, status })
-    fake.memory.b1 = [entry('m1', 'The owner wants no em dashes in my messages.'), entry('m2', 'The owner lives in London.'), entry('m3', 'On leave until 1 Nov 2026.', 'expired')]
+  it('shows its memory as one row with the count and the split, which opens Memory', async () => {
+    const entry = (id: string, kind: 'owner' | 'note' | 'run_note', status: 'active' | 'expired' = 'active') => ({ id, version: 1, ref: id, kind, text: `Entry ${id}.`, since: AT, learnedAt: AT, by: 'you said' as const, status })
+    fake.memory.b1 = [entry('m1', 'owner'), entry('m2', 'note'), entry('m3', 'run_note'), entry('m4', 'owner', 'expired'), entry('m5', 'note')]
     await show()
-    // Only what every turn carries: an expired entry is not listed.
-    expect(rows('MEMORY')).toEqual(['The owner wants no em dashes in my messages.', 'The owner lives in London.'])
-    await click(button('Remove memory: The owner wants no em dashes in my messages.'))
-    expect(fake.calls).toContainEqual(['forgetMemory', 'b1', 'm1'])
-    expect(rows('MEMORY')).toEqual(['The owner lives in London.'])
+    // Only what every turn carries is counted: the expired entry is not.
+    const row = host.querySelector<HTMLButtonElement>('[data-testid="bot-about-memory"]')!
+    expect(row.textContent).toBe('Memory · 41 wish · 3 notes')
+    expect(host.querySelectorAll('[data-testid="bot-about-memory"]')).toHaveLength(1)
+    await click(row)
+    expect(useBotsStore.getState().memoryOpen).toEqual({ botId: 'b1' })
   })
 
-  it('reads its memory again when the bot changes, so an entry it just saved shows up', async () => {
+  it('counts its memory again when the bot changes, so an entry it just saved is counted', async () => {
     await show()
-    expect(rows('MEMORY')).toEqual([])
+    const row = () => host.querySelector('[data-testid="bot-about-memory"]')!.textContent
+    expect(row()).toBe('Memory · 0Nothing yet')
     fake.memory.b1 = [{ id: 'm1', version: 1, ref: 'm1', kind: 'owner', text: 'Call the owner Sam.', since: AT, learnedAt: AT, by: 'you said', status: 'active' }]
     // A detail read over the bridge is a new object each time.
     fake.details.b1 = { ...fake.details.b1! }
     await act(async () => { await useBotsStore.getState().loadDetail('b1') })
     await act(async () => {})
-    expect(rows('MEMORY')).toEqual(['Call the owner Sam.'])
+    expect(row()).toBe('Memory · 11 wish')
   })
 
   it('pauses, resumes and asks before deleting', async () => {

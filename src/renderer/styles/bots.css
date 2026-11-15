@@ -365,6 +365,39 @@ button.bot-image:focus-visible > img { opacity: 0.82; }
 .bot-about-row button { font-size: 11px; color: var(--text-secondary); }
 .bot-about-row button:hover { color: var(--text-primary); }
 .bot-about-empty { font-size: 11px; color: var(--text-secondary); margin: 0; line-height: 1.5; }
+/* About's one Memory row: the count and its split; it opens the Memory dialog. */
+.bot-about-row.bot-about-memory { width: 100%; margin: 0 -8px; width: calc(100% + 16px); padding: 7px 8px; border-radius: 8px; text-align: left; color: var(--text-primary); font-size: 12px; }
+.bot-about-row.bot-about-memory:hover, .bot-about-row.bot-about-memory:focus-visible { background: color-mix(in srgb, var(--text-secondary) 10%, transparent); color: var(--text-primary); }
+
+/* The Memory dialog: a search box, then the owner's wishes and the bot's notes, each entry with its date. */
+.bot-memory-search { display: flex; align-items: center; gap: 8px; padding: 0 12px; margin-bottom: 12px; border-radius: 9px; border: 1px solid rgba(var(--accent-pale-rgb), .15); background: #0002; color: var(--text-secondary); }
+.bot-memory-search input { flex: 1; min-width: 0; padding: 9px 0; border: 0; background: none; color: var(--text-primary); font: inherit; font-size: 13px; outline: none; }
+.bot-memory-search input::placeholder { color: var(--text-secondary); }
+.bot-memory-list { max-height: min(60vh, 520px); overflow: auto; margin: 0 -8px; padding: 0 8px; }
+.bot-memory-group + .bot-memory-group { margin-top: 14px; }
+.bot-memory-group h3 { margin: 0 0 4px; font-size: 11px; font-weight: 500; letter-spacing: .075em; text-transform: uppercase; color: var(--text-secondary); }
+.bot-memory-group ul { list-style: none; margin: 0; padding: 0; }
+.bot-memory-entry { margin: 0 -8px; padding: 8px; border-radius: 8px; }
+.bot-memory-entry:hover, .bot-memory-entry:focus-within, .bot-memory-entry.is-open { background: color-mix(in srgb, var(--text-secondary) 8%, transparent); }
+.bot-memory-entry.is-focused { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.bot-memory-text { margin: 0; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; white-space: pre-wrap; }
+.chat-dialog .bot-memory-edit { min-height: 64px; margin: 0; resize: vertical; }
+.bot-memory-foot { display: flex; align-items: center; gap: 10px; min-height: 20px; margin-top: 2px; }
+.bot-memory-date { font-size: 11px; color: var(--text-secondary); }
+.bot-memory-actions { display: flex; align-items: center; gap: 12px; margin-left: auto; opacity: 0; }
+.bot-memory-entry:hover .bot-memory-actions, .bot-memory-entry:focus-within .bot-memory-actions, .bot-memory-actions.is-shown { opacity: 1; }
+.bot-memory-actions button { font-size: 11px; color: var(--text-secondary); }
+.bot-memory-actions button:hover { color: var(--text-primary); }
+.bot-memory-actions button.is-strong { color: var(--accent); font-weight: 600; }
+.bot-memory-actions button.is-danger { color: var(--error, #e79090); font-weight: 600; }
+.bot-memory-actions button:disabled { opacity: .5; }
+.bot-memory-ask { font-size: 11px; color: var(--text-primary); }
+.bot-memory-error { margin: 4px 0 0; font-size: 11px; color: var(--error, #e79090); }
+.bot-memory-empty { padding: 12px 0; }
+/* Under a reply whose turn saved a memory: opens it in Memory. */
+.bot-memory-tag { display: inline-flex; align-items: center; gap: 5px; margin: 4px 0 0 4px; padding: 2px 8px; border-radius: 999px; font-size: 11px; color: var(--text-secondary); background: color-mix(in srgb, var(--text-secondary) 9%, transparent); }
+.bot-memory-tag:hover { color: var(--text-primary); background: color-mix(in srgb, var(--text-secondary) 15%, transparent); }
+@media (prefers-reduced-motion: no-preference) { .bot-memory-actions { transition: opacity .12s; } }
 /* A bot's model rows (#673, About → Runs on and New bot): a label, then the app's model picker, every picker as wide as
    the one column they share (the label column is fixed, so Advanced never moves it). The picker reads the settings
    control tokens, declared here because neither place is inside Settings. */
