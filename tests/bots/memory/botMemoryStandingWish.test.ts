@@ -159,11 +159,12 @@ describe('nearDuplicate', () => {
   })
 })
 
-// Runtime recordings: Claude Code names the MCP tool with its server prefix;
-// Codex and Pi can record the bare tool name. Both forms pass through capture.
+// Hand-authored rows follow the runtime translators: Claude and Codex MCP calls
+// carry the server prefix, Codex dynamic calls and Pi carry the bare name.
 it.each([
   ['Claude Code', 'mcp__mousse__telling_set'],
-  ['Codex', 'telling_set'],
+  ['Codex MCP', 'mcp__mousse__telling_set'],
+  ['Codex dynamic', 'telling_set'],
   ['Pi', 'telling_set'],
   ['no telling call', undefined]
 ])('%s capture handles telling wishes without creating a memory', async (_runtime, toolName) => {
