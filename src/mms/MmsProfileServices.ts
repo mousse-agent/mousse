@@ -1931,15 +1931,17 @@ export class MmsProfileServices {
   /** Brings the inbox's bot runs up to date with their activations. */
   syncBotRuns(): void {
     const runs = this.automationRuns
-    const bots = this.personalBots
-    if (!runs || !bots) return
-    for (const job of this.scheduled.listJobs()) {
-      if (!job.bot) continue
+    const store = this.botStore
+    if (!runs || !store) return
+    for (const open of runs.openBotRuns()) {
       try {
-        const facts = bots.service.automationFacts(job.bot.botId, job.bot.scheduleId)
-        if (facts) runs.syncBotRuns(job.id, facts.runs)
+        const row = store.activation(open.activationId)
+        if (!row || row.botId !== open.botId || row.trigger.kind !== 'schedule') continue
+        runs.syncBotRuns(open.jobId, [{ id: row.id, status: row.status, at: row.createdAt,
+          ...(row.endedAt ? { endedAt: row.endedAt } : {}), ...(row.endReason ? { endReason: row.endReason } : {}),
+          ...(row.threadId ? { threadId: row.threadId } : {}) }])
       } catch {
-        // That bot's runs follow at the next read.
+        // That run follows at the next read, including when its job no longer exists.
       }
     }
   }

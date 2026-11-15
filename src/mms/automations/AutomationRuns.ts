@@ -309,6 +309,12 @@ export class AutomationRuns {
     return this.get(id)!
   }
 
+  /** Open bot runs still need settlement even after their automation has been removed. */
+  openBotRuns(): Array<{ jobId: string; botId: string; activationId: string }> {
+    return this.rows('SELECT job_id, bot_id, activation_id FROM runs WHERE ended_at IS NULL AND bot_id IS NOT NULL AND activation_id IS NOT NULL')
+      .map(row => ({ jobId: String(row.job_id), botId: String(row.bot_id), activationId: String(row.activation_id) }))
+  }
+
   /** A bot's activations, as the bot engine reports them: a run's state follows its activation, and its end finishes it. */
   syncBotRuns(jobId: string, runs: ReadonlyArray<{ id: string; status: string; at: string; endedAt?: string; endReason?: string; threadId?: string }>): void {
     let touched = false
@@ -322,8 +328,9 @@ export class AutomationRuns {
       if (row.ended_at) continue
       const status = activation.status
       if (status === 'done' || status === 'failed' || status === 'cancelled' || status === 'blocked') {
-        const failed = status !== 'done'
-        this.finish({ jobId, occurrenceKey: String(row.occurrence_key), failed, ...(failed ? { error: activation.endReason ? reasonText(activation.endReason) : status === 'blocked' ? 'Stopped at a missing permission' : 'Failed' } : {}), ...(activation.threadId ? { threadId: activation.threadId } : {}) })
+        const removed = status === 'cancelled' && activation.endReason === 'schedule_removed'
+        const failed = status !== 'done' && !removed
+        this.finish({ jobId, occurrenceKey: String(row.occurrence_key), failed, ...(removed ? { silent: true } : {}), ...(failed ? { error: activation.endReason ? reasonText(activation.endReason) : status === 'blocked' ? 'Stopped at a missing permission' : 'Failed' } : {}), ...(activation.threadId ? { threadId: activation.threadId } : {}) })
         continue
       }
       const state: InboxRunState = status === 'queued' ? 'queued' : status === 'paused' ? 'paused_usage' : 'running'
