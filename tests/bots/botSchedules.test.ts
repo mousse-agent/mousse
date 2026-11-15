@@ -10,7 +10,7 @@ import { BOT_RUN_REPORT_LINE } from '../../src/mms/bots/memory/contextPack'
 import { botJobId, botScheduleProblem, scheduleProblem } from '../../src/mms/scheduled/botJobs'
 import { nextOccurrenceAfter } from '../../src/mms/scheduled/computeNextRun'
 import { slotsAllOn } from '../../src/shared/bots/personal/modelSlots'
-import { botFixture, createBot, flush, runDispatch, T0, type BotFixture } from './botFixture'
+import { botFixture, chatOf, createBot, finish, flush, runDispatch, start, T0, type BotFixture } from './botFixture'
 
 const MIN = 60_000
 const iso = (ms: number) => new Date(ms).toISOString()
@@ -295,6 +295,36 @@ describe('bot schedules in the shared scheduler', () => {
     const next = await f.tickSchedules(new Date(T0 + 10 * MIN))
     await runDispatch(f, next.inserted[0]!, 1, { text: 'Tidy again.' })
     expect(events.filter((event) => event.message.kind === 'run_report').at(-1)!.quiet).toBeUndefined()
+  })
+
+  it('a scheduled run that says [SILENT] posts nothing in the chat; a report, and work the owner asked for, still show', async () => {
+    await scheduled()
+    const events: Array<{ message: { kind: string; text: string } }> = []
+    f.bots.events.on('message', (event) => events.push(event))
+    const before = chatOf(f, botId).length
+    // Each row is one occurrence's last message, and whether the chat shows it.
+    const rows: Array<[reply: string, shown: boolean]> = [
+      ['[SILENT]', false],
+      ['Nothing new on the site.\n[SILENT]', false],
+      ['Fixed two broken links.', true]
+    ]
+    for (const [index, [reply]] of rows.entries()) {
+      const { inserted } = await f.tickSchedules(new Date(T0 + (index + 1) * 5 * MIN))
+      await runDispatch(f, inserted[0]!, 1, { text: reply })
+      expect(f.store.activation(inserted[0]!)).toMatchObject({ status: 'done' })
+    }
+    const shown = rows.filter(([, keep]) => keep).map(([reply]) => reply)
+    expect(chatOf(f, botId).slice(before).map((message) => message.text)).toEqual(shown)
+    expect(events.filter((event) => event.message.kind === 'run_report').map((event) => event.message.text)).toEqual(shown)
+    // Work the owner asked for is not a scheduled run: its reply is posted as written.
+    await f.bots.service.chatSend({ botId, text: 'Check the site now', clientRequestId: 'm1' })
+    const turn = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    const asked = await start(f, turn.id)
+    const work = await f.bots.tools.work.start(botId, turn.id, { title: 'Site check', brief: 'Check the site.', key: 'k1' })
+    await finish(f, asked.payload, 'completed', { text: 'On it.' })
+    if (work.status !== 'started') throw new Error(`work did not start: ${work.status}`)
+    await runDispatch(f, work.workId, 1, { text: '[SILENT]' })
+    expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'run_report', text: '[SILENT]' })
   })
 
   it('a model picked by hand for an owner\'s automation is its runs\' pick, on its entry; one saved by name only is matched by name (#673)', async () => {
