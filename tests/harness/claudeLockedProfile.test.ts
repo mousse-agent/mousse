@@ -208,6 +208,40 @@ describe('a bot on the owner\'s own Claude Code entry', () => {
     for (const name of Object.keys(unrelated).filter((name) => !(name in cloud))) expect(env, name).not.toHaveProperty(name)
   })
 
+  it.each(['', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY']
+    .flatMap((route) => ['environment', 'settings'].map((source) => ({ route, source }))))('keeps model and endpoint choices from $source with route "$route"', async ({ route, source }) => {
+    const root = temp('claude-model-root-')
+    const scratch = temp('claude-model-scratch-')
+    const choices = {
+      ANTHROPIC_MODEL: 'proxy-primary', ANTHROPIC_DEFAULT_MODEL: 'proxy-default',
+      ANTHROPIC_DEFAULT_OPUS_MODEL: 'profile/opus', ANTHROPIC_DEFAULT_SONNET_MODEL: 'profile/sonnet',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'profile/haiku', ANTHROPIC_DEFAULT_FABLE_MODEL: 'profile/fable',
+      ANTHROPIC_SMALL_FAST_MODEL: 'proxy-small', ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION: 'eu-west-1',
+      ANTHROPIC_CUSTOM_MODEL_OPTION: 'proxy-custom', CLAUDE_CODE_AUTO_MODE_MODEL: 'proxy-classifier',
+      CLAUDE_CODE_SUBAGENT_MODEL: 'proxy-child', ANTHROPIC_BEDROCK_REGION_PREFIX: 'eu',
+      ANTHROPIC_FOUNDRY_RESOURCE: 'my-resource', ANTHROPIC_GOOGLE_CLOUD_LOCATION: 'global',
+      ANTHROPIC_GOOGLE_CLOUD_PROJECT: 'google-project', ANTHROPIC_VERTEX_PROJECT_ID: 'vertex-project',
+      CLOUD_ML_REGION: 'us-east5', VERTEX_REGION_CLAUDE_4_6_SONNET: 'europe-west1',
+      ANTHROPIC_BASE_URL: 'https://proxy.test', ANTHROPIC_AWS_BASE_URL: 'https://aws.test',
+      ANTHROPIC_BEDROCK_BASE_URL: 'https://bedrock.test', ANTHROPIC_BEDROCK_MANTLE_BASE_URL: 'https://mantle.test',
+      ANTHROPIC_FOUNDRY_BASE_URL: 'https://foundry.test', ANTHROPIC_GOOGLE_CLOUD_BASE_URL: 'https://google.test',
+      ANTHROPIC_VERTEX_BASE_URL: 'https://vertex.test'
+    }
+    const excluded = { GITHUB_TOKEN: 'github', OPENAI_API_KEY: 'openai', MY_SECRET: 'arbitrary', NODE_OPTIONS: '--require /untrusted.js',
+      ANTHROPIC_UNLISTED_MODEL: 'unknown', ANTHROPIC_DEFAULT_CUSTOM_MODEL: 'unknown',
+      ANTHROPIC_SMALL_FAST_MODEL_EXTRA: 'unknown', VERTEX_REGION_CLAUDE_UNKNOWN: 'unknown',
+      ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION: 'display copy' }
+    const variables = { ...choices, ...excluded, ...(route ? { [route]: '1' } : {}) }
+    if (source === 'environment') for (const [name, value] of Object.entries(variables)) vi.stubEnv(name, value)
+    else writeFileSync(join(process.env.CLAUDE_CONFIG_DIR!, 'settings.json'), JSON.stringify({ env: variables }))
+    const { service, captured } = ownerService(async () => {})
+    const locked: ClaudeLockedTurn = { authority: authorityFor(['read'], { root, scratch }), ownerEntry: true, cwd: root, shellContained: false, temps: [], systemPrompt: '', ledger: fakeLedger().ledger }
+    await service.chat({ threadId: 'bot-thread', cwd: root, model: 'sonnet', prompt: 'go', locked, onText: vi.fn() })
+    const env = captured.find((entry) => entry.hooks)!.env!
+    expect(env).toMatchObject(choices)
+    for (const name of Object.keys(excluded)) expect(env, name).not.toHaveProperty(name)
+  })
+
   it('runs one query in Claude Code\'s asking mode with the owner\'s sign-in, none of their settings files, and no process of its own to supervise', async () => {
     const root = temp('claude-owner-root-')
     const scratch = temp('claude-owner-scratch-')
