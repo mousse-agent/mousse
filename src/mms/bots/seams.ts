@@ -76,7 +76,9 @@ export interface BotToolHost {
     /** `from`: the turn that adds it; its next message shows the automation as a card (`card`). */
     add(botId: string, s: { when: BotSchedule['when']; prompt: string }, from?: string): { scheduleId: string; label: string; card?: true }
     remove(botId: string, scheduleId: string): boolean
-    list(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string }>
+    /** The calling thread ends only the schedule on its own activation. */
+    done?(threadId: string, why: string): void
+    list(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string; leftOff?: string }>
   }
   setProfile(botId: string, p: { name?: string; description?: string }): void
   /**

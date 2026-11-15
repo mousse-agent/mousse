@@ -139,7 +139,7 @@ describe('schedule tools', () => {
   it('lists and removes the bot\'s schedules', async () => {
     const bots = fakeBots()
     await bots.call('bot_schedule_add', { when: { kind: 'interval', minutes: 30 }, prompt: 'x' })
-    expect((await bots.call('bot_schedule_list', {})).value).toEqual([{ scheduleId: 's1', label: 'every 30 minutes', nextAt: '2026-11-09T09:00:00.000Z' }])
+    expect((await bots.call('bot_schedule_list', {})).value).toMatchObject({ schedules: [{ scheduleId: 's1', label: 'every 30 minutes', nextAt: '2026-11-09T09:00:00.000Z' }] })
     expect((await bots.call('bot_schedule_remove', { scheduleId: 's1' })).value).toEqual({ removed: true })
     expect(await bots.call('bot_schedule_remove', { scheduleId: 's1' })).toMatchObject({ isError: true })
   })
@@ -147,7 +147,7 @@ describe('schedule tools', () => {
   it('an unattended run can look at its schedules but not change them', async () => {
     const bots = fakeBots('run')
     expect(await bots.call('bot_schedule_add', { when: { kind: 'interval', minutes: 30 }, prompt: 'x' })).toMatchObject({ isError: true, text: expect.stringContaining('owner') })
-    expect((await bots.call('bot_schedule_list', {})).value).toEqual([])
+    expect((await bots.call('bot_schedule_list', {})).value).toEqual({ schedules: [] })
   })
 
   it('acts only for the bot the engine names: another thread or activation is refused', async () => {
@@ -378,7 +378,7 @@ describe('ask_owner (#1123)', () => {
 describe('registration', () => {
   it('lists the bot tools in the bots family, and WP6\'s memory tools beside them', () => {
     const { families } = createAppToolRegistry({ host: fakeAppToolHost().host, bots: () => undefined })
-    expect(families.bots).toEqual(['escalate', 'consult', 'bot_schedule_add', 'bot_schedule_remove', 'bot_schedule_list', 'mcp_servers', 'set_profile', 'set_depth', 'work_start', 'work_models', 'work_list', 'work_stop', 'work_note', 'remind', 'wake', 'watch_start', 'watch_list', 'watch_stop', 'reminder_list', 'reminder_cancel', 'make_image', 'ask_owner', 'show_card', 'bot_list', 'bot_send', 'question_answer', 'use_model', 'subagent_start', 'subagent_send', 'subagent_wait', 'subagent_result', 'subagent_stop'])
+    expect(families.bots).toEqual(['escalate', 'consult', 'bot_schedule_add', 'schedule_done', 'bot_schedule_remove', 'bot_schedule_list', 'mcp_servers', 'set_profile', 'set_depth', 'work_start', 'work_models', 'work_list', 'work_stop', 'work_note', 'remind', 'wake', 'watch_start', 'watch_list', 'watch_stop', 'reminder_list', 'reminder_cancel', 'make_image', 'ask_owner', 'show_card', 'bot_list', 'bot_send', 'question_answer', 'use_model', 'subagent_start', 'subagent_send', 'subagent_wait', 'subagent_result', 'subagent_stop'])
     // With `botMemory`, WP6's memory tools follow them in the same family.
     const withMemory = createAppToolRegistry({ host: fakeAppToolHost().host, botMemory: { activationOf: () => undefined } })
     expect(withMemory.families.bots.slice(0, families.bots.length)).toEqual(families.bots)
@@ -392,6 +392,19 @@ describe('registration', () => {
 })
 
 describe('wake', () => {
+  it.each(['checks', 'review'] as const)('passes the PR %s condition to the engine', async (on) => {
+    const bots = fakeBots()
+    await bots.call('wake', { brief: 'Report.', pr: 'acme/app#12', on })
+    expect(bots.wakes[0]?.input.event).toMatchObject({ kind: 'pr', on })
+  })
+  it('rejects an invalid condition or one without a pull request', async () => {
+    const bots = fakeBots()
+    for (const args of [{ pr: 'acme/app#12', on: 'other' }, { inMinutes: 2, on: 'review' }]) {
+      expect(await bots.call('wake', { brief: 'Report.', ...args })).toMatchObject({ isError: true })
+    }
+    expect(bots.wakes).toHaveLength(0)
+  })
+
   it('sets a wake at a time, on a pull request, or on a thread (with "use your threads"), from the chat turn, with a chip', async () => {
     const bots = fakeBots()
     bots.activity.onAllowed({ botId: 'b1', activationId: 'a1', dispatchId: 'd1' }, { tool: 'wake', input: {} })

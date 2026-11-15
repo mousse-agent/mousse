@@ -545,7 +545,8 @@ export class BridgeProfileService {
       services,
       client: this.router.client,
       computers: () => (this.router.enabled() ? this.router.pairedComputers() : undefined),
-      online: (node) => this.router.isOnline(node)
+      online: (node) => this.router.isOnline(node),
+      self: () => rt.identity.self()?.node
     })
     services.orchestrator.setRemoteComputers(computersPort)
     this.disposers.add(() => services.orchestrator.setRemoteComputers(undefined))

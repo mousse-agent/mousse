@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BOT_CHANGELOG, BOT_CHANGELOG_LATEST } from '../../src/mms/bots/changelog'
+import { BOT_CHANGELOG, BOT_CHANGELOG_LATEST, BOT_CHANGELOG_PACK_ENTRIES } from '../../src/mms/bots/changelog'
 import { BotChatProjection } from '../../src/mms/bots/chat/projection'
 import { BOT_BASE_INSTRUCTIONS, BOT_CHAT_INSTRUCTIONS, BOT_RUN_INSTRUCTIONS, BOT_SUBAGENT_INSTRUCTIONS } from '../../src/mms/bots/instructions'
 import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
@@ -49,12 +49,12 @@ const existingBot = () => {
 }
 
 describe('the bot changelog in the pack', () => {
-  it('tells a bot with history every unseen change after its memory, with the fix, until a chat turn carrying it settles', async () => {
+  it('tells a bot with history the newest unseen changes after its memory, with the fix, until a chat turn carrying it settles', async () => {
     existingBot()
     const provider = packs()
     const first = await provider.chatPreamble({ botId: 'ada', activationId: 'act-1' })
     expect(first.indexOf(HEADER)).toBeGreaterThan(first.indexOf('</bot_memory>'))
-    for (const entry of BOT_CHANGELOG) expect(first).toContain(entry.text)
+    for (const entry of BOT_CHANGELOG.slice(-BOT_CHANGELOG_PACK_ENTRIES)) expect(first).toContain(entry.text)
     expect(first).toContain(FIX)
 
     // A run follows the changes but can't fix core memory, and does not mark them seen.

@@ -352,7 +352,7 @@ export class BotChatProjection {
       kind: row.kind,
       // Reserved ids keep permission switch lines quiet after a restart without a message schema change.
       // A wake's line too: it says why the bot speaks unasked.
-      ...(row.kind === 'notice' && (row.id.startsWith('bm_permission_') || row.id.startsWith(WAKE_LINE_PREFIX)) ? { systemLine: true as const } : {}),
+      ...(row.kind === 'notice' && (row.id.startsWith('bm_permission_') || row.id.startsWith('bm_schedule_done_') || row.id.startsWith(WAKE_LINE_PREFIX)) ? { systemLine: true as const } : {}),
       text: plain ? (row.text ? `${row.text}\n\n${plain}` : plain) : row.text,
       ...(plain ? { plainFrom: row.text.length } : {}),
       ...(cards.length ? { cards } : {}),
