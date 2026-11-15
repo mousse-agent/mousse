@@ -117,10 +117,6 @@ export type BotCheckDenied = Exclude<BotCheck, { ok: true }>
  */
 export type BotAllowedObserver = (call: NormalisedCall) => void
 
-/**
- * A bot activation's authority over one turn, registered with the turn's app tools (never in the
- * run policy, which carries only `RunPolicy.authority`'s kind and digest).
- */
 /** Pi's read result metadata; absent bounds are never guessed when a read was truncated. */
 export interface BotFileReadResult {
   truncated?: boolean
@@ -128,6 +124,10 @@ export interface BotFileReadResult {
   outputLines?: number
 }
 
+/**
+ * A bot activation's authority over one turn, registered with the turn's app tools (never in the
+ * run policy, which carries only `RunPolicy.authority`'s kind and digest).
+ */
 export interface BotAuthority {
   activationId: string
   role: BotThreadRole

@@ -51,6 +51,7 @@ import { piCredentialHandler, piOAuthCredential, piOAuthHandle, writePiAuth, typ
 import type { PiRpcEvent, PiRpcExit, PiRpcRequest } from './rpcClient'
 import { preparePiHome, type PiSettingsInput } from './settings'
 import { PI_NATIVE_TOOLS } from './nativeTools'
+import type { BotFileReadResult } from '../../../shared/bots/personal/authority'
 import { botAppToolRefusal, checkBuiltinCall, checkMessage } from '../../../shared/bots/personal/walls'
 import { neutralToolIdempotent, neutralToolsOf } from '../../../shared/harness/tools'
 
@@ -465,7 +466,7 @@ class PiTurn {
   readonly startedAt = Date.now()
   readonly openTools = new Map<string, { name: string; mousse: boolean }>()
   /** Pi file calls awaiting their success and truncation result, by call id. */
-  readonly fileCalls = new Map<string, { completed(success: boolean, read?: import('../../../shared/bots/personal/authority').BotFileReadResult): void }>()
+  readonly fileCalls = new Map<string, { completed(success: boolean, read?: BotFileReadResult): void }>()
   /** A bot's built-in calls with a `started` ledger row, by call id. */
   readonly ledgerRows = new Map<string, string>()
   /** Steers the turn owns and Pi has not read, each with its drain's token: it is accepted by that token alone. */

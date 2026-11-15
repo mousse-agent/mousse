@@ -12,7 +12,7 @@ import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>()
-  return { ...actual, readFileSync: vi.fn(actual.readFileSync), readSync: vi.fn(actual.readSync) }
+  return { ...actual, readFileSync: vi.fn(actual.readFileSync), readSync: vi.fn(actual.readSync), fstatSync: vi.fn(actual.fstatSync) }
 })
 
 const roots: string[] = []
@@ -248,10 +248,17 @@ it('metadata catches a same-size rewrite with restored mtime', async () => {
   const f = fixture(), t = f.turn()
   const fd = fs.openSync(f.path, 'r+')
   fs.ftruncateSync(fd, 4 * 1024 * 1024); fs.closeSync(fd)
-  const stat = fs.statSync(f.path)
+  // Keep mtime exact and advance ctime explicitly: do not depend on clock resolution
+  // or Date's loss of fractional milliseconds when restoring a real timestamp.
+  const original = (await vi.importActual<typeof import('node:fs')>('node:fs')).fstatSync
+  let changed = false
+  vi.spyOn(fs, 'fstatSync').mockImplementation(((fd: number) => {
+    const stat = original(fd)
+    return Object.assign(stat, { mtimeMs: 1000, ctimeMs: changed ? 2000 : 1000 })
+  }) as typeof fs.fstatSync)
   await f.call(t, 'read')
   const writer = fs.openSync(f.path, 'r+')
   fs.writeSync(writer, 'two', 0, 'utf8'); fs.closeSync(writer)
-  fs.utimesSync(f.path, stat.atime, stat.mtime)
+  changed = true
   expect(await f.call(t, 'write')).toEqual({ allow: false, reason: refusal })
 })
