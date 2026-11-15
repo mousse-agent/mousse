@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ImageLightbox, type LightboxImage } from '../../src/renderer/chat/components/agent-elements/image-lightbox'
 import { collectThreadImages, markdownImages } from '../../src/renderer/chat/components/agent-elements/image-sources'
 import { MessageList } from '../../src/renderer/chat/components/agent-elements/message-list'
+import { resetBotFileImages } from '../../src/renderer/components/bots/BotImages'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -183,5 +184,36 @@ describe('in a thread', () => {
     click(previous())
     expect(shownSrc()).toBe('data:image/png;base64,AAAA')
     expect(previous()).toBeNull()
+  })
+})
+
+describe("an image file outside the thread's folder", () => {
+  const FOLDER = 'C:/Users/me/.mousse/bots/files/bot-1/mockups'
+  const reply = (text: string) => [{ id: 'a1', role: 'assistant', parts: [{ type: 'text', text }] }] as unknown as UIMessage[]
+  let readAsset: ReturnType<typeof vi.fn>
+
+  beforeEach(() => {
+    readAsset = vi.fn(async () => ({ data: new Uint8Array([1, 2, 3]), mimeType: 'image/png', size: 3 }))
+    ;(window as unknown as { mousse: unknown }).mousse = { fs: { readAsset } }
+    URL.createObjectURL = vi.fn(() => 'blob:mockup')
+    URL.revokeObjectURL = vi.fn()
+    resetBotFileImages()
+  })
+
+  afterEach(() => { delete (window as unknown as { mousse?: unknown }).mousse })
+
+  it('shows in a reply, read from its own folder, and opens in the preview', async () => {
+    await act(async () => root.render(createElement(MessageList, { messages: reply(`Here: ![before](${FOLDER}/before.png)`), status: 'ready' })))
+    expect(readAsset.mock.calls.map((call) => [call[0], String(call[3]).replace(/\\/g, '/')])).toEqual([['before.png', FOLDER]])
+    expect(host.textContent).not.toContain('Image blocked')
+    click(host.querySelector('button[aria-label="Open image: before"]'))
+    expect(shownSrc()).toBe('blob:mockup')
+  })
+
+  it('shows only its name when it is not a picture type Mousse shows', async () => {
+    await act(async () => root.render(createElement(MessageList, { messages: reply(`![diagram](${FOLDER}/diagram.svg)`), status: 'ready' })))
+    expect(readAsset).not.toHaveBeenCalled()
+    expect(host.querySelector(`[aria-label="diagram (can't be shown)"]`)).not.toBeNull()
+    expect(host.querySelector('img')).toBeNull()
   })
 })

@@ -24,10 +24,10 @@ import { CopyButton } from "./copy-button";
 import { AfterTurnsLayoutProvider, type AfterTurnsLayout } from "./after-turns";
 import { ImageGalleryProvider } from "./image-gallery";
 import { collectThreadImages } from "./image-sources";
-import { safeMarkdownUrl } from "../../../utils/chatLinks";
 import { AppletCard, isAppletPart } from "../../../components/applets/AppletCard";
 import { holdReplyPacing } from "../../../lib/replyPacingSetting";
 import { LiveMarkdown } from "./live-markdown";
+import { THREAD_IMAGES, threadImageUrl } from "./thread-images";
 import { ErrorMessage } from "./error-message";
 import { useTurnActions } from "./turn-actions";
 import type { CustomToolRendererProps } from "./types";
@@ -2036,7 +2036,7 @@ export const MessageList = memo(function MessageList({
   // An image opened anywhere in the thread steps through all of the thread's images (subagent results joined
   // to a reply show none of their own).
   const threadImages = () =>
-    collectThreadImages(normalizedMessages.filter((message) => !isResultNotice(message)), safeMarkdownUrl);
+    collectThreadImages(normalizedMessages.filter((message) => !isResultNotice(message)), threadImageUrl);
 
   return (
     <ToolOpenContext.Provider value={toolOpenStore}>
@@ -2856,6 +2856,7 @@ const AssistantParts = memo(function AssistantParts({
             >
               <LiveMarkdown
                 messageId={msg.id}
+                images={THREAD_IMAGES}
                 content={text}
                 className="leading-relaxed [&_p]:leading-relaxed"
                 streaming={isLast && isStreaming}

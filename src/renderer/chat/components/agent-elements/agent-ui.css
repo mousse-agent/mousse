@@ -1012,3 +1012,20 @@ html[data-theme="high-contrast"] .permission-request-btn-primary {
     background-color: var(--ui-selected);
   }
 }
+
+/* An image in a reply that can't be shown (gone, unreadable, an SVG, a share): its name, quiet (thread-images.tsx). */
+.an-md-image-blocked {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  line-height: 20px;
+  vertical-align: middle;
+}
+.an-md-image-blocked > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
