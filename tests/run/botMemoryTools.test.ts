@@ -277,7 +277,7 @@ describe('memory tools', () => {
     expect(rollUpChips([{ tool: 'memory_save', input: { text: 'Door 4471, flat 4B, 12 Elm.' }, result: absorbedResult }])[0]?.highlight)
       .toBe('Door 4471, flat 4B, 12 Elm. · put away 2')
     const before = { versions: fx.store.allVersions('ada'), journal: fx.store.journal('ada') }
-    for (const ref of [m1, restored, m5]) {
+    for (const ref of [m1, restored]) {
       const refused = await call('memory_forget', 'ada-home', { id: ref, reason: 'Forget the door code.' })
       expect(refused.isError).toBe(true)
       expect(refused.text).toContain(restored)

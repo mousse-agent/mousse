@@ -848,31 +848,41 @@ export class BotMemoryStore {
       }
       for (const seq of cited)
         for (const memory of this.all('SELECT DISTINCT id FROM bot_memories WHERE bot_id = ? AND source_seq = ?', botId, seq)) ids.add(memory.id as string)
-      // Forget removes every version of an entry. Therefore every historical absorption
-      // link matters, even after put-back or correction. Walk both ways: a holder brings its
-      // absorbed entries, and those entries may have other holders that must also be named.
-      const links = new Map<string, Set<string>>()
-      const connect = (from: string, to: string) => {
+      // Require upward holders through every historical version. Downward retirement
+      // only follows current superseded entries: put-back co-sources belong to the owner again.
+      const upward = new Map<string, Set<string>>()
+      const downward = new Map<string, Set<string>>()
+      const current = new Map<string, BotMemoryVersion | undefined>()
+      const entry = (id: string) => {
+        if (!current.has(id)) current.set(id, this.current(botId, id))
+        return current.get(id)
+      }
+      const connect = (links: Map<string, Set<string>>, from: string, to: string) => {
         if (!links.has(from)) links.set(from, new Set())
         links.get(from)!.add(to)
       }
       for (const row of this.all("SELECT DISTINCT id, reason FROM bot_memories WHERE bot_id = ? AND reason LIKE 'merged into %'", botId)) {
         const target = parseMemoryRef((row.reason as string).slice(12))
         if (!target) continue
-        connect(row.id as string, target.id)
-        connect(target.id, row.id as string)
+        const id = row.id as string
+        connect(upward, id, target.id)
+        const latest = entry(id)
+        if (latest?.status === 'superseded' && latest.reason?.startsWith('merged into ')
+          && parseMemoryRef(latest.reason.slice(12))?.id === target.id)
+          connect(downward, target.id, id)
       }
-      const affected = new Set(ids)
-      for (const id of affected)
-        for (const linked of links.get(id) ?? []) affected.add(linked)
-      const holders = [...affected].map((id) => this.current(botId, id))
-        .filter((entry): entry is BotMemoryVersion => !!entry && (entry.status === 'active' || entry.status === 'expired'))
+      const required = new Set(ids)
+      for (const id of required)
+        for (const holder of upward.get(id) ?? []) required.add(holder)
+      const holders = [...required].map(entry)
+        .filter((value): value is BotMemoryVersion => !!value && (value.status === 'active' || value.status === 'expired'))
         .sort((a, b) => Number(a.id.slice(1)) - Number(b.id.slice(1)))
-      if (holders.some((entry) => !ids.has(entry.id))) {
-        const refs = holders.map((entry) => memoryRef(entry.id, entry.version)).join(', ')
+      if (holders.some((value) => !ids.has(value.id))) {
+        const refs = holders.map((value) => memoryRef(value.id, value.version)).join(', ')
         return { error: `This memory is held by ${refs}, including earlier versions. Name all these entries together in one Forget in the chat, then save again what should stay.` }
       }
-      for (const id of affected) ids.add(id)
+      for (const id of ids)
+        for (const absorbed of downward.get(id) ?? []) ids.add(absorbed)
       for (const seq of cited) redact(this.journalRow(botId, seq)!)
       for (const id of ids) {
         // Every version's words go from wherever they were copied: rows that hold them (a memory call
