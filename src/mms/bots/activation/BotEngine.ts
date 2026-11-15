@@ -1482,7 +1482,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.maintainAgainAt = now
       // A slow network read must not hold back the later tick's reminder backstop.
       await this.deliverDueReminders(now).catch(() => {})
-      return this.maintaining
+      return
     }
     // Hold upkeep before it starts. Calls during a pass request one more, at the latest tick's time.
     this.maintainAgainAt = undefined
