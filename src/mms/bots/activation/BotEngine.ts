@@ -89,6 +89,7 @@ import { botFilesFolder, botManifestDigest, compileBotThread, subagentManifest, 
 import { shortModelName } from '../../../shared/modelNames'
 import { isCodexBotRefusal } from '../../../shared/harness/codexBotVersion'
 import { BOT_RUN_REPORT_LINE } from '../memory/contextPack'
+import { BOT_CHAT_TURN_END_KEY } from '../../../shared/bots/personal/memory'
 import type { BotActivityContext, BotActivitySink, BotContextProvider, BotDispatchEnd, BotJournal, BotJournalInput, BotMcpListing, BotMemoryAdmin, BotModelChange, BotModelProblem, BotModelResolution, BotModelResolver, BotProcessSupervision, BotToolHost, BotWorkList, BotWorkModel, BotWorkStarted } from '../seams'
 import { workWaits, type BotActivationRow, type BotDispatchRow, type BotSubagentSpec, type BotEntryLimit, type BotEscalationRow, type BotMessageRow, type BotModelState, type BotQuestionRow, type BotReminderRow, type BotStore, type BotStoredError } from '../store/BotStore'
 import { BotCounterScope, BotSpendScope, type ActivationLimits } from '../store/scopes'
@@ -2126,7 +2127,23 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   private stoppedRow(row: BotActivationRow): void {
     const reason = row.endReason ?? row.status
-    this.recorded(row, () => this.chat.post({ botId: row.botId, author: 'bot', kind: 'error', text: '', error: { text: failureText(reason) }, activationId: row.id, lane: row.lane, id: `bm_${row.id}_stop_${reason}` }))
+    this.recorded(row, () => {
+      this.chat.post({ botId: row.botId, author: 'bot', kind: 'error', text: '', error: { text: failureText(reason) }, activationId: row.id, lane: row.lane, id: `bm_${row.id}_stop_${reason}` })
+      if (row.lane === 'chat') this.journalEnd(row, reason)
+    })
+  }
+
+  /**
+   * A chat turn's end written outside the transaction that ended it (the owner's Stop, a turn a restart ended): its line
+   * in the recent chat, kept apart so a journal that cannot be written never undoes the end itself.
+   */
+  private noteChatTurnEnd(row: BotActivationRow, reason: string): void {
+    if (row.lane !== 'chat') return
+    try {
+      this.store.db.transaction(() => this.journalEnd(row, reason))
+    } catch (error) {
+      console.warn('a bot chat turn end could not be journaled', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   /** What follows any end of an activation: its scratch and pack go, the lane moves on. */
@@ -2140,7 +2157,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   private journalEnd(row: BotActivationRow, reason: string | null): void {
-    if (row.lane !== 'run') return
+    // A chat turn that ended without its reply leaves one line in the recent chat, so the next turn can tell the owner.
+    if (row.lane === 'chat') {
+      if (reason !== null) this.journalInTx(chatTurnEndRow(row, reason))
+      return
+    }
     this.journalInTx({ botId: row.botId, kind: 'run_end', lane: 'run', activationId: row.id, sourceKey: `act:${row.id}:end`, who: 'mousse', text: reason ?? 'done', json: { v: 1, reason: reason ?? 'done' } })
   }
 
@@ -6424,6 +6445,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         }
       })
       this.cleanup(this.store.activation(row.id)!)
+      // A chat turn a restart cut off is told to the next one (a deleted bot has no next turn).
+      if (reason !== 'bot_deleted') this.noteChatTurnEnd(row, reason)
       this.changed({ botId: row.botId, activationId: row.id })
     }
     // Row 1: the bot was deleted (a crash during its deletion): its threads are archived again.
@@ -6815,7 +6838,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** `bots.chat.stop`: the chat lane's running or waiting activation stops. */
   async stopChat(botId: string): Promise<void> {
     this.entry(botId)
-    for (const row of this.store.laneActivations(botId, 'chat', ['running', 'waiting_grant'])) await this.stop(row.id)
+    for (const row of this.store.laneActivations(botId, 'chat', ['running', 'waiting_grant'])) {
+      await this.stop(row.id)
+      const after = this.store.activation(row.id)
+      if (after?.status === 'cancelled' && after.endReason === 'stopped') this.noteChatTurnEnd(after, 'stopped')
+    }
   }
 
   /** `bots.chat.markRead`: the unread count drops to what follows `seq`. */
@@ -8500,6 +8527,32 @@ export function stoppedShortText(body: string): string {
 function isJournalFailure(error: unknown): boolean {
   const code = (error as { code?: unknown } | null)?.code
   return code === 'bot_journal_failed' || code === 'storage_full'
+}
+
+/** What cut a chat turn off, as opposed to failing it: an interruption, a cancel, calls it can't account for, restarts. */
+const CHAT_TURN_CUT_REASONS = new Set(['interrupted', 'cancelled', 'unknown_calls', 'uncertain', 'restarted_twice', 'bot_dispatch_restarted', 'bot_dispatch_ended'])
+/** At most this much of an error goes into the recent chat: enough to say what went wrong, never a whole stack. */
+const CHAT_TURN_ERROR_CHARS = 200
+
+/**
+ * The recent-chat line a chat turn leaves when it ends without its reply (journaled as Mousse's notice, keyed by the
+ * activation and how it ended, so a turn that reports the same end twice leaves one line): the owner's Stop, a cut, or
+ * a failure with its error on one line, capped. The bot reads it in its next turn's recent chat and can say what
+ * happened; the owner's chat shows only its own error line, as before.
+ */
+function chatTurnEndRow(row: Pick<BotActivationRow, 'id' | 'botId' | 'threadId'>, reason: string): BotJournalInput {
+  const detail = reason.replace(/\s+/g, ' ').trim()
+  const error = detail.length > CHAT_TURN_ERROR_CHARS ? `${detail.slice(0, CHAT_TURN_ERROR_CHARS - 1)}…` : detail
+  const end = reason === 'stopped' ? 'stopped' : CHAT_TURN_CUT_REASONS.has(reason) ? 'interrupted' : 'failed'
+  const text = end === 'stopped'
+    ? 'The owner stopped your turn before it finished.'
+    : end === 'interrupted'
+      ? `Your turn was interrupted before it finished${reason === 'interrupted' || reason === 'cancelled' ? '' : ` (${error})`}.`
+      : `Your turn failed before it finished: ${error}`
+  return {
+    botId: row.botId, kind: 'notice', lane: 'chat', activationId: row.id, ...(row.threadId ? { threadId: row.threadId } : {}),
+    sourceKey: `${BOT_CHAT_TURN_END_KEY}${row.id}:${end}`, who: 'mousse', text, json: { v: 1, turnEnd: end, ...(end === 'stopped' ? {} : { reason: error }) }
+  }
 }
 
 /** Why an activation stopped, in plain words for its chat; never a provider's own message (it may name a model). */

@@ -54,6 +54,11 @@ export const BOT_CHAT_PACK_BUDGET = {
 export const BOT_CHAT_PACK_TOKENS = 12_000
 /** When the verbatim window passes `BOT_CHAT_PACK_BUDGET.window`, its oldest rows fold into the summary down to this. */
 export const BOT_CHAT_WINDOW_KEEP_TOKENS = 4_000
+/**
+ * The journal key prefix of the line a chat turn leaves when it ends without its reply (failed, interrupted, stopped):
+ * `turn:<activationId>:<end>`. The verbatim window keeps these notices beside the chat's own rows.
+ */
+export const BOT_CHAT_TURN_END_KEY = 'turn:'
 
 /** The run brief's blocks (bot-context.md §5.2): about 6.5k tokens. */
 export const BOT_RUN_PACK_BUDGET = {
