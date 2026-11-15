@@ -78,16 +78,18 @@ describe('messages sent one after another', () => {
   })
 
   // Inputs: no calls / reads / mutations; success / Stop / failure / restart; third message.
-  it.each(['none', 'thread_read', 'memory_list', 'work_start', 'memory_save', 'set_profile'])('unread follow-up after %s keeps the right replies and quotes', async (tool) => {
+  it.each(['none', 'read', 'memory_list', 'work_start', 'memory_save', 'set_profile'])('unread follow-up after %s keeps the right replies and quotes', async (tool) => {
     const first = await f.bots.service.chatSend({ botId, text: 'hi', clientRequestId: 'm1' })
     const turn = first.message.activationId!
     const { payload, prepared: firstPrepared } = await start(f, turn)
-    if (tool !== 'none') expect(firstPrepared.authority.check({ kind: 'app', tool, args: {} })).toMatchObject({ ok: true })
-    if (tool === 'thread_read') f.chips.set(`${turn}:d1`, [{ icon: 'read', text: 'read your threads' }])
+    if (tool !== 'none') expect(firstPrepared.authority.check(tool === 'read'
+      ? { kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: `${firstPrepared.authority.workspace!.scratch}/note.txt` } }
+      : { kind: 'app', tool, args: {} })).toMatchObject({ ok: true })
+    if (tool === 'read') f.chips.set(`${turn}:d1`, [{ icon: 'read', text: 'read your threads' }])
     const second = await f.bots.service.chatSend({ botId, text: 'check the flat', clientRequestId: 'm2' })
     f.bots.service.markRead(botId, second.message.seq)
     await finish(f, payload, 'completed', { text: 'Hi! What can I do?' })
-    const held = ['none', 'thread_read', 'memory_list'].includes(tool)
+    const held = ['none', 'read', 'memory_list'].includes(tool)
     const replies = () => chatOf(f, botId).filter((m) => m.activationId === turn && m.author === 'bot' && m.kind === 'text')
     expect(replies()).toHaveLength(held ? 0 : 1)
     expect(f.bots.service.get(botId).summary.unread).toBe(held ? 0 : 1)
@@ -98,7 +100,7 @@ describe('messages sent one after another', () => {
     expect(prepared.prompt).toContain('check the flat')
     await finish(f, next, 'completed', { text: 'Hi — checking the flat.' })
     expect(replies()).toHaveLength(held ? 1 : 2)
-    if (tool === 'thread_read') expect(replies().at(-1)?.chips).toContainEqual({ icon: 'read', text: 'read your threads' })
+    if (tool === 'read') expect(replies().at(-1)?.chips).toContainEqual({ icon: 'read', text: 'read your threads' })
     expect(replies().at(-1)).toMatchObject({ text: 'Hi — checking the flat.', replyTo: { id: second.message.id } })
     if (!held) expect(replies()[0]).toMatchObject({ replyTo: { id: first.message.id } })
     expect(replies().at(-1)!.seq).toBeGreaterThan(second.message.seq)

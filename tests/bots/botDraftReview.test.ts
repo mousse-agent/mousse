@@ -73,3 +73,10 @@ it('a failed continuation posts the held draft before its error in one transacti
   expect(rows.map(m => m.kind)).toEqual(['text', 'error'])
   expect(rows[0]).toMatchObject({ text: 'Hi! What can I do?' })
 })
+
+it('a code example naming a picture remains an unsent draft', async () => {
+  const one = await joined()
+  await finish(f, one.payload, 'completed', { text: 'Example:\n```text\n![Flat](file:///tmp/flat.png)\n```' })
+  expect(texts(one.id)).toHaveLength(0)
+  expect(f.store.dispatch(one.id, 2)?.prompt.text).toContain('Your draft, not sent')
+})

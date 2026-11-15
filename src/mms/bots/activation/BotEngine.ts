@@ -133,6 +133,23 @@ const DRAFT_READ_ONLY_TOOLS = new Set([
   'bot_schedule_list', 'work_list', 'work_models', 'watch_list', 'reminder_list', 'bot_list',
   'mcp_servers', 'list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource'
 ])
+/** A reply can carry a picture as Markdown or as a path, without calling a tool.
+ * Keep these replies conservatively; code fences describe pictures rather than showing them. */
+function replyMayCarryPicture(text: string): boolean {
+  let fence: string | undefined
+  for (const line of text.split('\n')) {
+    const marker = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1]
+    if (fence) {
+      if (marker && marker[0] === fence[0] && marker.length >= fence.length) fence = undefined
+      continue
+    }
+    if (marker) { fence = marker; continue }
+    if (/!\[[^\]\n]*\]\(/.test(line)) return true
+    if (/(?:file:\/\/|[A-Za-z]:[\\/]|(?:~|\/(?:Users|home|tmp|var|opt|private|mnt|Volumes|srv|etc|root))\/)[^\n]*?\.(?:png|jpe?g|gif|webp)(?=$|[\s`"'.,;!?<>()[\]])/i.test(line)) return true
+  }
+  return false
+}
+
 type HeldChatDraft = { n: number; text: string; replyTo?: string; chips: BotChip[] }
 
 export class BotEngineError extends Error {
@@ -2178,7 +2195,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   private canHoldChatDraft(row: BotActivationRow, main: BotDispatchRow, text?: string): boolean {
-    if (hasReplyCards(row.id) || hasToolImages(row.id) || (text && extractAppletParts(text, true).some(part => part.type !== 'text'))) return false
+    if (hasReplyCards(row.id) || hasToolImages(row.id) || (text && (replyMayCarryPicture(text) || extractAppletParts(text, true).some(part => part.type !== 'text')))) return false
     if (row.lane !== 'chat' || this.chatDraft(row) || !this.store.pendingWorkNotes(row.id).length) return false
     if (this.store.get("SELECT 1 FROM bot_messages WHERE activation_id = ? AND author = 'bot' AND kind = 'text'", row.id)) return false
     return this.replyEffects.get(`${row.id}:${main.n}`) === false
