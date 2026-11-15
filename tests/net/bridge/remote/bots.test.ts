@@ -345,7 +345,7 @@ describe('bot methods on a real bot', () => {
     await f.bots.service.chatSend({ botId, text: 'Read my invoices', clientRequestId: 'm2' })
     const activation = f.store.laneActivations(botId, 'chat', ['running'])[0]!
     const { payload, prepared } = await start(f, activation.id)
-    prepared.authority.escalate!({ permission: { path: f.base, access: 'read' }, reason: 'To read them.' })
+    prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'To read them.' })
     await finish(f, payload, 'completed', { text: 'May I?' })
     const card = chatOf(f, botId).at(-1)!.ask!
     expect(card.kind).toBe('permission')

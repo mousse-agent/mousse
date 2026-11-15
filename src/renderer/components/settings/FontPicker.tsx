@@ -3,13 +3,13 @@ import {
   DEFAULT_FONT_STACKS,
   fontChoiceLabel,
   fontStack,
-  googleFontsForRole,
   sameFontChoice,
   searchFontNames,
   SYSTEM_FONT_STACKS,
   type FontChoice,
   type FontRole
 } from '../../../shared/fontSettings'
+import { googleFontsForRole } from '../../../shared/googleFontCatalog'
 import { isGoogleFontLoaded, loadGoogleFont, useAppFontsVersion } from '../../lib/appFonts'
 import { isMonospaceFamily, listInstalledFontFamilies } from '../../lib/localFonts'
 import { FloatingPortal, useFloatingPosition } from '../../lib/floatingLayer'

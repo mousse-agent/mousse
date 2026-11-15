@@ -1,12 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
   DEFAULT_FONT_STACKS,
-  findGoogleFont,
   fontCacheSlug,
   fontChoiceLabel,
   fontStack,
   googleFontCssUrl,
-  googleFontsForRole,
   isSafeFontFamily,
   normalizeFontChoice,
   parseGoogleFontCss,
@@ -14,6 +12,7 @@ import {
   searchFontNames,
   SYSTEM_FONT_STACKS
 } from '../src/shared/fontSettings'
+import { findGoogleFont, googleFontsForRole } from '../src/shared/googleFontCatalog'
 import { getDefaultSettings, normalizeAppearance } from '../src/shared/settings'
 
 describe('font settings', () => {
