@@ -279,3 +279,67 @@ it('does not infer a fixed line from a schedule-shaped id or its words', () => {
   const message = f.bots.chat.post({ id: `bm_sched:${botId}:test:occurrence`, botId, author: 'bot', kind: 'run_report', text: 'Take a break' })
   expect(f.store.message(message.id)?.tell).toBe('soon')
 })
+
+it.each([
+  [false, 1, 0, 'Scout'],
+  [false, 2, 0, 'Scout · 2 messages'],
+  [false, 1, 1, 'Scout, Ledger · 2 messages'],
+  [true, 1, 0, 'Scout'],
+  [true, 2, 0, 'While Mousse was closed: Scout 2 messages'],
+  [true, 1, 1, 'While Mousse was closed: Scout 1 message · Ledger 1 message'],
+  [true, 2, 1, 'While Mousse was closed: Scout 2 messages · Ledger 1 message']
+] as const)('uses ordinary or counted banner grammar (closed=%s, Scout=%i, Ledger=%i)', async (closed, scoutCount, ledgerCount, title) => {
+  const scout = (await createBot(f, { name: 'Scout' })).botId
+  const ledger = (await createBot(f, { name: 'Ledger' })).botId
+  const events: any[] = []; f.bots.events.on('tell', event => events.push(event))
+  if (!closed) f.bots.setTellingWindows(1)
+  for (const [id, count] of [[scout, scoutCount], [ledger, ledgerCount]] as const)
+    for (let n = 0; n < count; n++) f.bots.chat.post({ botId: id, author: 'bot', kind: 'run_report', text: 'An ordinary report' })
+  if (closed) f.bots.setTellingWindows(1)
+  await f.bots.deliverDueReminders()
+  expect(events.at(-1)).toMatchObject({ title, body: 'An ordinary report' })
+})
+
+it('expires legacy receipts in the same release as later rows without needing a capable window', () => {
+  const old = f.bots.chat.post({ botId, author: 'bot', kind: 'text', text: 'Old legacy announcement' })
+  f.bots.noteLegacyTelling({ botId, message: old })
+  const later = f.bots.chat.post({ id: 'bm_expiring_offline', botId, author: 'bot', kind: 'notice', text: 'Waiting' })
+  f.store.run("INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, 'cursor:kept-thread', 'true')", botId)
+  f.clock.now += 86_400_000 - 1
+  const recent = f.bots.chat.post({ botId, author: 'bot', kind: 'text', text: 'Recent legacy announcement' })
+  f.bots.noteLegacyTelling({ botId, message: recent })
+  const receipt = (id: string) => f.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, `cursor:telling-legacy:${id}`)
+  f.bots.tellings.release(f.clock.now)
+  expect(receipt(old.id)).toBeDefined()
+  f.clock.now++
+  f.bots.tellings.release(f.clock.now)
+  expect(receipt(old.id)).toBeUndefined()
+  expect(receipt(recent.id)).toBeDefined()
+  expect(f.store.message(later.id)?.toldAt).toBe(f.store.now())
+  expect(f.store.get("SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = 'cursor:kept-thread'", botId)).toBeDefined()
+})
+it.each(['clear', 'reset'] as const)('%s drops only that bot’s legacy receipts along with its messages', async action => {
+  const other = (await createBot(f)).botId
+  for (const id of [botId, other]) {
+    const message = f.bots.chat.post({ botId: id, author: 'bot', kind: 'text', text: 'Legacy announcement' })
+    f.bots.noteLegacyTelling({ botId: id, message })
+  }
+  f.store.run("INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, 'cursor:kept-thread', 'true')", botId)
+  if (action === 'clear') await f.bots.clearChat(botId)
+  else await f.bots.resetBot(botId)
+  const receipts = f.store.all("SELECT bot_id FROM bot_memory_state WHERE key GLOB 'cursor:telling-legacy:*'")
+  expect(receipts.map(row => row.bot_id)).toEqual([other])
+  expect(f.store.get("SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = 'cursor:kept-thread'", botId)).toBeDefined()
+})
+it('Forget removes a redacted message’s legacy receipt and preserves unrelated receipts', async () => {
+  const { BotMemoryStore } = await import('../../src/mms/bots/memory/BotMemoryStore')
+  const memory = new BotMemoryStore({ db: f.store.db, clock: () => f.clock.now, timeZone: () => 'UTC' })
+  const forgotten = f.bots.chat.post({ botId, author: 'bot', kind: 'text', text: 'The private appointment is at the clinic on Thursday afternoon.' })
+  const kept = f.bots.chat.post({ botId, author: 'bot', kind: 'text', text: 'An unrelated announcement remains available.' })
+  for (const message of [forgotten, kept]) f.bots.noteLegacyTelling({ botId, message })
+  const seq = f.store.db.transaction(() => memory.appendInTx(f.store.db, { botId, kind: 'bot_msg', lane: 'chat', who: 'bot', sourceKey: `bm:${forgotten.id}`, text: forgotten.text }))!
+  expect(memory.forget(botId, { refs: [`j${seq}`], by: 'owner_ui' })).not.toHaveProperty('error')
+  expect(f.store.message(forgotten.id)?.text).not.toContain('private appointment')
+  expect(f.store.get('SELECT 1 FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, `cursor:telling-legacy:${forgotten.id}`)).toBeUndefined()
+  expect(f.store.get('SELECT 1 FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, `cursor:telling-legacy:${kept.id}`)).toBeDefined()
+})
