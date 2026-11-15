@@ -832,6 +832,17 @@ export class BotMemoryStore {
       }
       for (const seq of cited)
         for (const memory of this.all('SELECT DISTINCT id FROM bot_memories WHERE bot_id = ? AND source_seq = ?', botId, seq)) ids.add(memory.id as string)
+      // Only the current version's absorption counts: putting an entry back breaks that link.
+      // Match the absorbing id across all its versions and visit newly found ids to follow chains.
+      const absorbed = this.all(`SELECT current.id, current.reason FROM bot_memories current
+        WHERE current.bot_id = ? AND current.reason LIKE 'merged into %'
+        AND current.version = (SELECT MAX(version) FROM bot_memories WHERE bot_id = current.bot_id AND id = current.id)`, botId)
+      for (const id of ids) {
+        for (const entry of absorbed) {
+          const target = parseMemoryRef((entry.reason as string).slice(12))
+          if (target?.id === id) ids.add(entry.id as string)
+        }
+      }
       for (const id of ids) {
         // Every version's words go from wherever they were copied: rows that hold them (a memory call
         // captured with its text by an older build) and the chip of the message that saved them.
