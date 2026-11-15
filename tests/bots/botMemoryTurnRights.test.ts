@@ -13,7 +13,7 @@ afterEach(() => { f?.close(); disposeFixtures() })
 // and an unknown future kind: memory rights must never come from the requested kind.
 it.each([
   ['chat:message', true], ['chat:after:message', true], ['answer:question', true],
-  ['create:bot', false], ['wake:event', false], ['question:q:default', false], ['future:start', false]
+  ['create:bot', false], ['wake:event', false], ['question:q:default', false], ['botmsg:sender:message', false], ['future:start', false]
 ])('%s saves and forgets only with its turn’s memory rights', async (key, ownerStarted) => {
   f = botFixture()
   const { botId } = await createBot(f, { reply: 'Hello' })
