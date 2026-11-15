@@ -2,13 +2,13 @@
 
 import { memo, useEffect, useState, type ReactNode } from "react";
 import {
-  CodeBlock,
   CodeBlockContainer,
   CodeBlockCopyButton,
   CodeBlockHeader,
   type CustomRenderer,
   type CustomRendererProps,
 } from "streamdown";
+import { CodeBlock } from "./code-block";
 import { peekDiagram, renderDiagram, type DiagramOutcome } from "./mermaid-diagram";
 
 const ACTION_BUTTON =

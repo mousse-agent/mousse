@@ -5,6 +5,7 @@ import type { McpToolInfo } from "./tool-registry";
 import { Wrench } from "../../../../lib/icons";
 import { ToolRowBase } from "./tool-row-base";
 import { codeHighlighter } from "../code-highlighter";
+import { codeOnlyComponents } from "../code-block";
 
 export type McpToolProps = {
   part: any;
@@ -229,7 +230,7 @@ export const McpTool = memo(function McpTool({
         {codeBlock && (
           // The output in the same plain block as a command's: no header bar, no border.
           <div className="an-markdown an-tool-quiet-output text-[14px]">
-            <Streamdown plugins={{ code: codeHighlighter }} controls={{ code: false }}>
+            <Streamdown plugins={{ code: codeHighlighter }} controls={{ code: false }} components={codeOnlyComponents}>
               {codeBlock}
             </Streamdown>
           </div>

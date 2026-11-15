@@ -7,6 +7,7 @@ import { Children, cloneElement, isValidElement } from "react";
 import { cn } from "./utils/cn";
 import { MessageImage } from "./message-image";
 import { codeHighlighter } from "./code-highlighter";
+import { codeBlockPre } from "./code-block";
 import { classifyLink, routeLink, safeMarkdownUrl } from "../../../utils/chatLinks";
 import { LinkLabel } from "./link-label-view";
 import { THREAD_LINK_PREFIX } from "../../../../shared/threadLink";
@@ -419,8 +420,10 @@ const markdownComponents: Components = {
     </li>
   ),
   // Inline code is plain text on a light tint: no border and no token colours, so it reads as part
-  // of the sentence. (Block code goes through the code plugin.)
+  // of the sentence.
   inlineCode: ({ children, ...props }) => renderInlineCode(children, props),
+  // Fenced code draws with few nodes per line (code-block.tsx). Mermaid goes to its renderer.
+  pre: codeBlockPre(markdownPlugins.renderers),
   strong: ({ children, ...props }) => (
     <strong className="an-md-strong" {...props}>
       {children}
@@ -494,6 +497,8 @@ const markdownComponents: Components = {
 // Inline math arrives as inline code tagged by remarkMousseMath.
 const markdownMathComponents: Components = {
   ...markdownComponents,
+  // Math fences go to the math renderer.
+  pre: codeBlockPre(markdownMathPlugins.renderers),
   inlineCode: ({ children, ...props }) => {
     const math = readMathClass(props.className);
     if (!math) return renderInlineCode(children, props);

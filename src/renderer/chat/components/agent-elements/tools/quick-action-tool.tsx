@@ -11,6 +11,7 @@ import {
 } from "../../../../lib/icons";
 import { Markdown } from "../markdown";
 import { codeHighlighter } from "../code-highlighter";
+import { codeOnlyComponents } from "../code-block";
 import { IconSpinner } from "../icons";
 import { areToolPropsEqual, getToolStatus } from "../utils/format-tool";
 import { useQuickActionApproval } from "./quick-action-approval";
@@ -234,7 +235,7 @@ export const QuickActionTool = memo(function QuickActionTool({
                   <div className="px-3 text-base text-an-tool-color-muted">
                   {isBash ? (
                     <div className="an-markdown an-code-no-header">
-                      <Streamdown plugins={{ code: codeHighlighter }} controls={{ code: false }}>
+                      <Streamdown plugins={{ code: codeHighlighter }} controls={{ code: false }} components={codeOnlyComponents}>
                         {"```bash\n" +
                           (payload.length > 4000
                             ? `${payload.slice(0, 4000)}…`
