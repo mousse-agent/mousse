@@ -47,6 +47,34 @@ describe('bot schedules after downtime', () => {
     expect(f.store.activation(inserted[0]!)!.trigger).toMatchObject({ occurrenceAt: iso(T0) })
   })
 
+  it('retrying an unfinished claim after another period reuses its first activation', async () => {
+    const due = await schedule()
+    heartbeat(T0)
+    const store = new ScheduledJobStore(MousseConfigStore.load(join(f.base, 'mousse-home')))
+    const fresh = new ScheduledJobService({ runIsolated: async () => { throw new Error('not an agent job') } }, store)
+    fresh.setClock(() => new Date(f.clock.now))
+    fresh.setBotRunner({ runOccurrence: (input) => f.bots.runScheduledOccurrence(input) })
+    // Crash window: the bot inserted the run but the scheduler never finished its claim.
+    vi.spyOn(store, 'finishBotClaim').mockReturnValueOnce(null)
+    try {
+      f.clock.now = due + 10 * MIN
+      await fresh.tickNow()
+      await f.bots.maintain(new Date(f.clock.now))
+      await flush()
+      const first = f.store.listActivations(botId).find((row) => row.trigger.kind === 'schedule')!
+      await runDispatch(f, first.id, 1, { text: 'Finished.' })
+      const claim = store.getJob(entry().jobId)!.runClaim!
+      expect(claim.occurrenceKey).toBe(iso(due))
+      expect(store.releaseClaim(entry().jobId, claim.token)).not.toBeNull()
+      f.clock.now = due + 70 * MIN
+      await fresh.tickNow()
+      await f.bots.maintain(new Date(f.clock.now))
+      await flush()
+      expect(f.store.listActivations(botId).filter((row) => row.trigger.kind === 'schedule').map((row) => row.id)).toEqual([first.id])
+      expect(first.idempotencyKey).toBe(`sched:${botId}:${entry().scheduleId}:${iso(due)}`)
+    } finally { fresh.beginShutdown() }
+  })
+
   it('passes the due time and missed counts into the saved trigger and the model request', async () => {
     const due = await schedule()
     heartbeat(T0)
