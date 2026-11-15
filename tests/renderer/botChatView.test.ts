@@ -1887,11 +1887,11 @@ describe('memory', () => {
 
 it('a reminder offers snooze replies and a tap leaves a quiet confirmation', async () => {
   fake.chats.inbox = [message(1, { text: 'Tea', reminder: {} })]
-  fake.client.snoozeReminder = vi.fn(async () => ({ ...fake.chats.inbox![0]!, reminder: { snoozedUntil: '2026-11-07T09:10:00.000Z', snoozedLabel: 'Snoozed until 09:10' } }))
+  fake.client.snoozeReminder = vi.fn(async () => ({ ...fake.chats.inbox![0]!, reminder: { snoozedUntil: '2026-11-07T09:10:00.000Z' } }))
   await open()
   expect(button('In 10 min')).toBeDefined()
   expect(button('In 1 hour')).toBeDefined()
-  expect(button('Tomorrow 9:00')).toBeDefined()
+  expect([...host.querySelectorAll('button')].some(b => b.textContent?.startsWith('Tomorrow '))).toBe(true)
   await click(button('In 10 min'))
   expect(fake.client.snoozeReminder).toHaveBeenCalledWith('inbox', 'm1', '10m')
   expect(button('In 10 min')).toBeUndefined()

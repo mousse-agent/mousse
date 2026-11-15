@@ -57,8 +57,6 @@ it.each(['10m', '1h', 'tomorrow'] as const)('snoozes %s once without a turn, the
   expect(rows).toHaveLength(1)
   expect(rows[0]).toMatchObject({ text: 'Tea', replyTo: message.id, snoozedFrom: r.reminderId, ownerSet: true, dueAt: expected.toISOString() })
   expect(updated.reminder?.snoozedUntil).toBe(expected.toISOString())
-  const clock = `${String(expected.getHours()).padStart(2, '0')}:${String(expected.getMinutes()).padStart(2, '0')}`
-  expect(updated.reminder?.snoozedLabel).toBe(`Snoozed until ${choice === 'tomorrow' ? 'tomorrow ' : ''}${clock}`)
   expect(f.bots.tools.reminders.list(botId)).toContainEqual(expect.objectContaining({ reminderId: rows[0]!.id, ownerSet: true }))
   expect(() => f.bots.service.reminderSnooze(botId, bubble.id, choice)).toThrow('already snoozed')
   expect(f.store.listActivations(botId)).toHaveLength(count)

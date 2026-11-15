@@ -80,7 +80,7 @@ export type BotSnoozeChoice = '10m' | '1h' | 'tomorrow'
 /** One row of a bot's chat (`bot_messages`). */
 export interface BotChatMessage {
   /** Only delivered text reminders carry snooze replies; older services omit it. */
-  reminder?: { expiresAt?: string; snoozedUntil?: string; snoozedLabel?: string }
+  reminder?: { expiresAt?: string; snoozedUntil?: string }
   seq: number
   id: string
   at: string

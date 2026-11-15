@@ -1,12 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { BotChatMessage, BotSnoozeChoice } from '../../../shared/bots/personal/chat'
 import { BotQuestionReplies } from './BotQuestionReplies'
-
-const choices = [
-  { label: 'In 10 min', choice: '10m' },
-  { label: 'In 1 hour', choice: '1h' },
-  { label: 'Tomorrow 9:00', choice: 'tomorrow' }
-] as const
+import { botDayLabel, botGroupTime } from './messageGroups'
 
 /** A text reminder shares the question's quick replies and settled line. No owner message is sent. */
 export function BotReminderReplies({ reminder, onSnooze }: {
@@ -22,7 +17,19 @@ export function BotReminderReplies({ reminder, onSnooze }: {
     return () => clearTimeout(timer)
   }, [reminder.expiresAt])
   if (expired) return null
-  if (reminder.snoozedUntil) return <p className="bot-question-settled" role="note">{reminder.snoozedLabel}</p>
+  if (reminder.snoozedUntil) {
+    const due = reminder.snoozedUntil
+    const day = new Date(due).toDateString() === new Date().toDateString() ? '' : `${botDayLabel(due)} `
+    return <p className="bot-question-settled" role="note">Snoozed until {day}{botGroupTime(due)}</p>
+  }
+  const tomorrow = new Date()
+  tomorrow.setDate(tomorrow.getDate() + 1)
+  tomorrow.setHours(9, 0, 0, 0)
+  const choices = [
+    { label: 'In 10 min', choice: '10m' },
+    { label: 'In 1 hour', choice: '1h' },
+    { label: `Tomorrow ${botGroupTime(tomorrow.toISOString())}`, choice: 'tomorrow' }
+  ] as const
   return <BotQuestionReplies question={{ questionId: 'snooze', status: 'open', choices: choices.map(({ label }) => ({ label })), other: false }}
     onAnswer={(label) => onSnooze(choices.find((item) => item.label === label)!.choice)} onOther={() => {}} />
 }
