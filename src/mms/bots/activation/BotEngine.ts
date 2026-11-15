@@ -8215,11 +8215,18 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!this.host.schedules || row.trigger.kind !== 'schedule' || this.host.schedules.get(row.botId, row.trigger.scheduleId)) return false
     if (ENDED_ACTIVATION_STATUSES.has(row.status)) return false
     this.store.db.transaction(() => {
-      this.store.moveActivation(row.id, [row.status], 'cancelled', { endReason: 'schedule_removed' })
+      if (!this.store.moveActivation(row.id, [row.status], 'cancelled', { endReason: 'schedule_removed' })) return
       this.store.closeEscalations(row.id, 'cancelled')
+      const runs = this.host.runs()
+      for (const dispatch of this.store.dispatches(row.id)) {
+        const run = dispatch.runId ? runs?.getRun(dispatch.runId) : undefined
+        if (run?.status === 'queued') runs!.markTerminal(run.runId, 'cancelled', { error: 'schedule_removed' })
+      }
+      this.journalEnd(row, 'schedule_removed')
+      const ended = this.store.activation(row.id)!
+      this.store.db.afterCommit(() => this.afterEnd(ended))
     })
     this.usageWaits.delete(row.id)
-    this.packs.delete(row.id)
     return true
   }
 
