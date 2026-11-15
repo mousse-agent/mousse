@@ -156,3 +156,20 @@ it('Forget of a short word does not erase unrelated progress', async () => {
   memory.forget(botId, { refs: [`j${seq}`], by: 'owner_ui' })
   expect(memory.progress(botId, a)).toContain('bookings')
 })
+
+it('Forget reaches pending progress before a successful run can publish it', async () => {
+  const { a, turn, report } = await setup()
+  const seq = memory.append({ botId, kind: 'owner_msg', sourceKey: 'pending-source', who: 'owner', text: 'Private appointment details for next week.' })!
+  await report(`Still waiting on j${seq}.`)
+  memory.forget(botId, { refs: [`j${seq}`], by: 'owner_ui' })
+  await finish(f, turn.payload, 'completed', { text: '[SILENT]' })
+  expect(memory.progress(botId, a)).toBeUndefined()
+})
+
+it('a removed schedule reports why its note is not kept', async () => {
+  const { a, turn, report } = await setup()
+  f.bots.removeSchedule(botId, a)
+  expect((await report('Checked today.')).text).toContain('not kept: the schedule was removed')
+  await finish(f, turn.payload, 'completed', { text: '[SILENT]' })
+  expect(memory.progress(botId, a)).toBeUndefined()
+})

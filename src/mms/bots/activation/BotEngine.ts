@@ -192,8 +192,9 @@ export interface BotEngineHost {
    * one scheduler claims each occurrence and hands it to `runScheduledOccurrence`. Absent: no bot has schedules here.
    */
   schedules?: Pick<BotScheduleBook, 'list' | 'get' | 'add' | 'remove' | 'removeAll' | 'labelOf'> & Partial<Pick<BotScheduleBook, 'skipped'>>
-  /** The level a scheduled run's activation reported with `run_report` (`AutomationRuns`). Absent: none is known. */
+  /** Per-schedule progress in bot memory; pending reports are published only on successful completion. */
   progress?: Pick<BotMemoryStore, 'stageProgress' | 'finishProgress' | 'progress'>
+  /** The level a scheduled run's activation reported with `run_report` (`AutomationRuns`). */
   runLevel?(activationId: string): RunLevel | undefined
   /** Wall-clock milliseconds, for the times `bots.db` records (default: `Date.now`). */
   clock?(): number
