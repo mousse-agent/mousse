@@ -152,7 +152,7 @@ describe('messages sent one after another', () => {
     expect(f.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, `draft:${turn}`)).toBeUndefined()
   })
 
-  it('late final words are held and a late combined reply replaces the draft', async () => {
+  it.each([true, false])('late final words are held; combined reply arrives=%s', async (arrives) => {
     const first = await f.bots.service.chatSend({ botId, text: 'hi', clientRequestId: 'm1' })
     const turn = first.message.activationId!
     const one = await start(f, turn)
@@ -167,9 +167,10 @@ describe('messages sent one after another', () => {
     await flush()
     const replies = () => chatOf(f, botId).filter((m) => m.activationId === turn && m.author === 'bot' && m.kind === 'text')
     expect(replies()).toHaveLength(0)
-    f.bots.settle(two.payload, { text: 'Hi — checking the flat.' })
+    if (arrives) f.bots.settle(two.payload, { text: 'Hi — checking the flat.' })
+    else f.timers.at(-1)!.fn()
     await flush()
-    expect(replies().map((m) => m.text)).toEqual(['Hi — checking the flat.'])
+    expect(replies().map((m) => m.text)).toEqual([arrives ? 'Hi — checking the flat.' : 'Hi! What can I do?'])
   })
 
   it('a follow-up the turn never read before it failed gets a turn of its own that holds it', async () => {
