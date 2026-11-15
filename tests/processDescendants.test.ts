@@ -12,7 +12,9 @@ vi.mock('node:child_process', () => ({ execFile: (...args: unknown[]) => {
   done(os.failed ? new Error('private path or command') : null, os.output)
 } }))
 vi.mock('../src/mms/diagnostics/processMemory', () => ({ readChildMemory: os.read }))
+vi.mock('../src/mms/diagnostics/liveCounts', () => ({ liveChildProcesses: () => [{ pid: 10, kind: 'codex' }] }))
 import { parseProcessParents, readChildTreeMemory, selectProcessTree } from '../src/mms/diagnostics/processDescendants'
+import { MemoryMonitor } from '../src/mms/diagnostics/MemoryMonitor'
 
 const actualProcess = process
 function platform(value: string) {
@@ -88,5 +90,25 @@ describe('on-demand process ancestry', () => {
     expect(result.children).toHaveLength(1_024)
     expect(os.read.mock.calls).toHaveLength(32)
     expect(os.read.mock.calls.every(([batch]) => batch.length <= 32)).toBe(true)
+  })
+
+  it('keeps ancestry scans out of regular samples and shares an in-flight child-tool read', async () => {
+    platform('linux')
+    const monitor = new MemoryMonitor({
+      homeDir: process.env.MOUSSE_HOME!, version: 'test',
+      sampleProcess: async () => ({ rss: 1, heapUsed: 1, heapTotal: 1, external: 0, arrayBuffers: 0 }),
+      readCounts: async () => ({ counts: {} as never, workerHeaps: [] }),
+      readDetail: () => ({} as never)
+    })
+    try {
+      await monitor.measure()
+      await monitor.measure({ children: true })
+      expect(os.list).not.toHaveBeenCalled()
+      const first = monitor.readChildTreeNow()
+      const second = monitor.readChildTreeNow()
+      expect(second).toBe(first)
+      expect((await first).children).toHaveLength(3)
+      expect(os.list).toHaveBeenCalledTimes(1)
+    } finally { monitor.stop() }
   })
 })

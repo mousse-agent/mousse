@@ -10,7 +10,7 @@ import { MAX_CACHED_BYTES, MAX_CACHED_THREADS } from '../../../data/threadDb/thr
 import { HeapSummaryError } from '../../../diagnostics/heapSummary'
 import type { ProfilerService, ThreadMemory } from '../../../diagnostics/profilerService'
 import {
-  childrenReport,
+  childTreeReport,
   gpuHintsReport,
   overviewReport,
   sampleNowReport,
@@ -110,7 +110,7 @@ const DESCRIPTIONS: Record<ProfilerToolName, string> = {
   profiler_gpu_hints:
     "When the GPU process is big: its memory, the windows' sizes and scale, the pixels they draw, acrylic, WebGL contexts, canvases, and applet, browser and DevTools views.",
   profiler_children:
-    "When provider or tool processes may hold memory: every process the service started, by kind (claude, codex, mcp...), with its memory, and totals by kind.",
+    "When provider or tool processes may hold memory: tracked processes and their current descendants, discovered on demand, by fixed provider kind with memory and totals by kind. No command lines or paths.",
   profiler_sample_now:
     "A fresh sample now, and what changed since the previous one. Use it before and after an action to see what it costs.",
   profiler_watch:
@@ -236,7 +236,7 @@ async function run(
       return json({ ...gpuHintsReport(sample, answered ? monitor.appWindowDetail() : null), ...(answered ? {} : { app: null }) })
     }
     case 'profiler_children':
-      return json(childrenReport(await monitor.readChildrenNow()))
+      return json(childTreeReport(await monitor.readChildTreeNow()))
     case 'profiler_sample_now': {
       const previous = latest()
       await service.collectApp(false)

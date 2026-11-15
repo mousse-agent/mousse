@@ -19,6 +19,7 @@ import {
 import type { AppViewInfo, WindowCounters } from '../../shared/diagnostics/profiler'
 import type { AppWindowDetail } from './MemoryMonitor'
 import type { ThreadMemory } from './profilerService'
+import type { ChildTreeReading } from './processDescendants'
 
 const UNITS = "privateMb is the footprint on macOS (with GPU memory), private bytes on Windows, private memory or else the working set on Linux. CPU is percent of one core since the previous sample. detail splits a row: a window's JS heap, Blink and resource cache; each agent CLI or tool."
 
@@ -211,6 +212,16 @@ export function childrenReport(children: readonly ChildMemory[]) {
     byKind: [...byKind].map(([kind, entry]) => ({ kind, count: entry.count, mb: r1(entry.mb) })).sort((a, b) => b.mb - a.mb),
     totalMb: r1(children.reduce((sum, child) => sum + (child.mb ?? 0), 0)),
     note: 'mb is each process\'s footprint on macOS, its working set elsewhere; null when it could not be read. They count in the app\'s total.'
+  }
+}
+
+/** The child tool's on-demand tree, kept separate from the periodic sample's tracked processes. */
+export function childTreeReport(reading: ChildTreeReading) {
+  return {
+    ...childrenReport(reading.children),
+    processes: reading.children.map((child) => ({ kind: fixedName(child.kind), mb: child.mb, relationship: child.relationship })),
+    discovery: reading.discovery,
+    note: 'Tracked providers and tools plus their current descendants, each PID counted once. Descendants inherit the nearest tracked provider kind. Ancestry requests only PID and parent PID; output uses fixed kinds. Discovery is on demand and best effort; limited means the 1,024-process or 65,536-row cap was reached. Reparented processes cannot be linked back to former parents. Exited or inaccessible memory is null. mb uses the existing child memory reader (macOS footprint with resident fallback; resident or working set elsewhere). This tool includes descendants that periodic samples and app totals do not yet include.'
   }
 }
 
