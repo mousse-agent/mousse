@@ -53,7 +53,10 @@ it.each([
   // Run notes may still be replaced in an unattended turn.
   if (!ownerStarted) {
     const note = store.active(botId).find((entry) => entry.kind === 'run_note')!
-    expect((await call('memory_save', { kind: 'note', text: 'Updated run note', replaces: note.ref })).isError).toBeUndefined()
+    const updated = await call('memory_save', { kind: 'note', text: 'Updated run note', replaces: note.ref })
+    expect(updated.isError).toBeUndefined()
+    expect((await call('memory_save', { kind: 'note', text: 'Combined run note', merges: [updated.value.ref] })).isError).toBeUndefined()
+    expect(store.active(botId).some(e => e.id === note.id)).toBe(false)
   }
   const said = memory.message({ botId, id: 'owner-row', author: 'owner', text: 'Original owner' })
   const forgot = await call('memory_forget', { id: 'm1', refs: [`j${said}`], reason: 'Remove this' })

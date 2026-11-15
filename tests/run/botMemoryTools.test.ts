@@ -132,6 +132,18 @@ describe('memory tools', () => {
     expect(fx.store.active('ada').map(e => e.id)).toEqual(['m1', 'm3'])
   })
 
+  it('leaves entries and journal unchanged when a combination still exceeds the cap', async () => {
+    const fx = memoryFixture()
+    const { call } = setup(fx)
+    await call('memory_save', 'ada-home', { kind: 'owner', text: 'Tiny.' })
+    for (let n = 0; n < 6; n++) await call('memory_save', 'ada-home', { kind: 'owner', text: `Fact ${n}: ${'x'.repeat(370)}` })
+    const entries = fx.store.allVersions('ada')
+    const journal = fx.store.journal('ada')
+    expect((await call('memory_save', 'ada-home', { kind: 'owner', text: 'y'.repeat(400), merges: ['m1'] })).value.error).toBe('over_cap')
+    expect(fx.store.allVersions('ada')).toEqual(entries)
+    expect(fx.store.journal('ada')).toEqual(journal)
+  })
+
   it.each(['ada-run', 'ada-ctx'])('%s cannot absorb owner facts, notes, or hand-edited entries', async (thread) => {
     const fx = memoryFixture()
     const { call } = setup(fx)
