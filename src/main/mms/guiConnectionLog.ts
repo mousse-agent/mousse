@@ -51,7 +51,8 @@ function homePattern(home: string): RegExp | null {
 }
 
 let homeRegex: RegExp | null | undefined
-function withoutHome(text: string): string {
+/** The text with the home folder replaced by `<home>`. */
+export function withoutHome(text: string): string {
   if (homeRegex === undefined) {
     try {
       homeRegex = homePattern(homedir())

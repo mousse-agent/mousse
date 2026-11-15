@@ -1,6 +1,7 @@
 import React, { Suspense, useState } from 'react'
-import ReactDOM from 'react-dom/client'
 import App from './App'
+import { createAppRoot, RootErrorBoundary } from './lib/appRoot'
+import { installWindowErrorReporting } from './services/rendererErrors'
 // Settings loads as its own chunk the first time it opens (preloaded once the workspace has painted).
 import { SettingsPage } from './lib/lazySurfaces'
 import { applyAppearance, useTheme } from './hooks/useTheme'
@@ -19,6 +20,9 @@ import './styles/sentence-case.css'
 import './styles/polish.css'
 import './styles/ambient-glow.css'
 import './styles/geist-fonts.css'
+
+// Uncaught errors and rejected promises outside React go to main's log, from here on.
+installWindowErrorReporting()
 
 // Apply the saved profile's appearance before React paints or MMS connects.
 const startupAppearance = window.mousse?.startupAppearance
@@ -66,9 +70,12 @@ function Root() {
   )
 }
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
+// A component that throws shows one line with Reload in place of the app (never a blank window), and is logged.
+createAppRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <Root />
+    <RootErrorBoundary>
+      <Root />
+    </RootErrorBoundary>
   </React.StrictMode>
 )
 
