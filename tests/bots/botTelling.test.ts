@@ -254,3 +254,28 @@ it('does not let a failed bot already in the fold hold back another bot', async 
   await f.bots.deliverDueReminders()
   expect(f.store.message(good.id)?.toldAt).toBe(f.store.now())
 })
+
+it('tells an owner-asked fixed schedule line now, alone in a fold and beyond both sound caps', async () => {
+  f.bots.setTellingWindows(1)
+  const events: any[] = []; f.bots.events.on('tell', event => events.push(event))
+  const bots = [botId]
+  for (let i = 0; i < 5; i++) bots.push((await createBot(f)).botId)
+  for (const id of bots) {
+    f.bots.chat.post({ botId: id, author: 'bot', kind: 'run_report', text: 'Report' })
+    await f.bots.deliverDueReminders()
+  }
+  expect(events.filter(event => event.sound)).toHaveLength(6)
+  const foldId = events.at(-1).id
+  const schedule = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 1 }, say: 'Take a break' }, 'owner')
+  expect(f.scheduler.getJob(schedule.jobId)!.bot).toMatchObject({ say: 'Take a break', ownerAsked: true })
+  await f.tickSchedules(new Date(f.clock.now + 60_000))
+  await f.bots.deliverDueReminders()
+  const message = f.bots.service.chatList(botId).messages.find(row => row.text === 'Take a break')!
+  expect(f.store.message(message.id)).toMatchObject({ tell: 'now', toldAt: f.store.now(), activationId: null })
+  expect(events.at(-1)).toMatchObject({ sound: true, rows: [{ messageId: message.id, tell: 'now' }] })
+  expect(events.at(-1).id).not.toBe(foldId)
+})
+it('does not infer a fixed line from a schedule-shaped id or its words', () => {
+  const message = f.bots.chat.post({ id: `bm_sched:${botId}:test:occurrence`, botId, author: 'bot', kind: 'run_report', text: 'Take a break' })
+  expect(f.store.message(message.id)?.tell).toBe('soon')
+})
