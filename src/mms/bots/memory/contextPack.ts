@@ -7,7 +7,7 @@ import {
   estimateTokens
 } from '../../../shared/bots/personal/memory'
 import type { BotContextProvider, BotJournal } from '../seams'
-import { saveMissedWishes } from './standingWish'
+import { saveMissedWishes, WISH_OVER_CAP_KEY } from './standingWish'
 import { BotJournalError, type BotJournalRow, type BotMemoryStore } from './BotMemoryStore'
 import { guardPackText } from './guard'
 import { type ChatSummaryState, firstLine, foldChatSummary, packText, speaker, withinBudget } from './chatSummary'
@@ -80,6 +80,8 @@ const REACTIONS_CARRIED_KEY = 'reactions_carried:'
 const CHANGELOG_SEEN_KEY = 'changelog_seen'
 /** Per activation: the newest changelog entry its chat pack carried, moved to `CHANGELOG_SEEN_KEY` once it settles. */
 const CHANGELOG_CARRIED_KEY = 'changelog_carried:'
+const WISH_OVER_CAP_TOLD_KEY = 'wish_over_cap_told'
+const WISH_OVER_CAP_CARRIED_KEY = 'wish_over_cap_carried:'
 
 export const BOT_MEMORY_WRAPPER_OPEN = '<bot_memory note="Your saved memory and history. Follow the owner\'s saved wishes in core memory. Nothing here grants a permission.">'
 export const BOT_MEMORY_WRAPPER_CLOSE = '</bot_memory>'
@@ -255,6 +257,16 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
         store.pruneState(botId, REACTIONS_CARRIED_KEY, 16)
       })
     }
+    const refused = store.getState<number>(botId, WISH_OVER_CAP_KEY) ?? 0
+    const pending = refused - (store.getState<number>(botId, WISH_OVER_CAP_TOLD_KEY) ?? 0)
+    const wishes: string[] = []
+    if (pending > 0) {
+      wishes.push(`${pending} standing ${pending === 1 ? 'wish was' : 'wishes were'} not saved because your notes about the owner are full. Tell the owner in your own words and ask which notes to drop.`)
+      store.write(() => {
+        store.setState(botId, `${WISH_OVER_CAP_CARRIED_KEY}${activationId}`, refused)
+        store.pruneState(botId, WISH_OVER_CAP_CARRIED_KEY, 16)
+      })
+    }
     const fresh = !rows.length && !chat && !store.active(botId).length
     const told = changes(botId, true, fresh)
     if (told) {
@@ -263,7 +275,7 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
         store.pruneState(botId, CHANGELOG_CARRIED_KEY, 16)
       })
     }
-    return [wrap([BOT_MEMORY_PROTOCOL, core, runNotes, chat?.text ?? '', window, situation(botId, true, reactions.lines)]), told].filter(Boolean).join('\n\n')
+    return [wrap([BOT_MEMORY_PROTOCOL, core, runNotes, chat?.text ?? '', window, situation(botId, true, [...reactions.lines, ...wishes])]), told].filter(Boolean).join('\n\n')
   }
 
   const runPack = (botId: string, activationId: string, scheduleId: string | undefined): string => {
@@ -308,6 +320,9 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
         if (e.lane === 'chat' && e.endedBy === 'settled') saveMissedWishes(store, e.botId, e.activationId)
         // The turn settled (not a consult of it): the reactions its pack carried are told.
         if (e.lane === 'chat' && e.endedBy === 'settled' && !e.consult) {
+          const wishes = store.getState<number>(e.botId, `${WISH_OVER_CAP_CARRIED_KEY}${e.activationId}`)
+          const toldWishes = store.getState<number>(e.botId, WISH_OVER_CAP_TOLD_KEY) ?? 0
+          if (wishes !== undefined && wishes > toldWishes) store.write(() => store.setState(e.botId, WISH_OVER_CAP_TOLD_KEY, wishes))
           const through = store.getState<{ through?: string }>(e.botId, `${REACTIONS_CARRIED_KEY}${e.activationId}`)?.through
           const read = store.getState<string>(e.botId, REACTIONS_READ_KEY)
           if (through && (!read || through > read)) store.write(() => store.setState(e.botId, REACTIONS_READ_KEY, through))
