@@ -256,7 +256,8 @@ html[data-theme='high-contrast'] {
 
 /* ---------- Sidebar ---------- */
 .app .threads-sidebar {
-  --threads-sidebar-row-height: var(--ui-row-height);
+  /* Sidebar rows sit 1px taller than other rows, and their text 1px larger. */
+  --threads-sidebar-row-height: calc(var(--ui-row-height) + 1px);
 }
 
 .app .threads-sidebar-toolbar-button {
@@ -369,10 +370,10 @@ html[data-theme='high-contrast'] {
 }
 
 .app .threads-sidebar-project-toggle {
-  min-height: var(--ui-row-height);
+  min-height: var(--threads-sidebar-row-height);
   gap: 8px;
   padding: 0 var(--ui-row-x);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 550;
   color: var(--text-primary);
 }
@@ -400,7 +401,7 @@ html[data-theme='high-contrast'] {
   gap: 8px;
   padding: 0 var(--ui-row-x);
   border-radius: var(--ui-row-radius);
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .app .threads-sidebar-thread-root {
@@ -465,10 +466,10 @@ html[data-theme='high-contrast'] {
 }
 
 .app .threads-sidebar-show-more {
-  min-height: 26px;
+  min-height: 27px;
   padding: 0 var(--ui-row-x);
   border-radius: var(--ui-row-radius);
-  font-size: 12px;
+  font-size: 13px;
   color: var(--ui-faint);
   opacity: 1;
 }
