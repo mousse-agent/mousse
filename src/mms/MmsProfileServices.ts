@@ -797,6 +797,8 @@ export class MmsProfileServices {
         removeAll: (botId) => this.botSchedules?.removeAll(botId) ?? 0,
         labelOf: (when) => botScheduleLabel(when)
       },
+      // A scheduled run's reported level: a quiet one posts nothing in the bot chat (made below, like the book).
+      runLevel: (activationId) => this.automationRuns?.levelOfActivation(activationId),
       models: botModels,
       activity: botActivity,
       clearContext: (threadId) => this.orchestrator.clearConversationContext(threadId),
