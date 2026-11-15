@@ -162,6 +162,13 @@ describe('idleness (no caller outside tests yet)', () => {
     expect(f.bots.isIdle(botId)).toBe(idle)
   })
 
+  it('answers not idle when the launched-thread lookup throws, then recovers', () => {
+    f.launched = () => { throw new Error('Thread store unavailable') }
+    expect(f.bots.isIdle(botId)).toBe(false)
+    f.launched = () => []
+    expect(f.bots.isIdle(botId)).toBe(true)
+  })
+
   it('is busy while a background command runs beyond the idle window, and idle after Stop', async () => {
     const activation = await f.bots.activate({ botId, input: 'Run', clientRequestId: 'grant' })
     const turn = await start(f, activation.id)
