@@ -17,7 +17,7 @@ import { useContextRingInComposer } from '../lib/contextRingSetting'
 import { cacheGoneCold, contextTokens, idleCompactionChip, promptCacheState, promptCacheText, suggestsCompaction, uncachedCostText, useMinuteClock } from '../lib/promptCache'
 import type { ContextSettings } from '../../shared/settings'
 import { formatBinding } from '../../shared/commands'
-import { useCommandBindings } from '../commands/commandRegistry'
+import { shortcutTitle, useCommandBindings } from '../commands/commandRegistry'
 import { useAppStore } from '../stores/appStore'
 
 import { STEER_BINDING, type SendMode } from '../lib/steerKey'
@@ -407,6 +407,7 @@ export function ComposerFooter({
   const steers = sendMode?.mode === 'steer'
   const runningTitle = steers ? `Steer · ${enterKey} — Queue · ${steerKey}` : `Queue · ${enterKey} — Steer · ${steerKey}`
   const switchBinding = bindings['composer.switchSendMode']
+  const dictateBinding = bindings['composer.dictate']
   const modeTitle = [
     steers ? 'Steer' : 'Queue',
     `${steerKey} ${steers ? 'queues' : 'steers'}`,
@@ -458,7 +459,7 @@ export function ComposerFooter({
           <button
             type="button"
             className="composer-action-btn composer-recorder-done"
-            title="Done · insert the text"
+            title={shortcutTitle('Done · insert the text', dictateBinding, platform)}
             aria-label="Finish recording"
             onMouseDown={(event) => event.preventDefault()}
             onClick={onStopRecording}
@@ -497,7 +498,7 @@ export function ComposerFooter({
           <button
             type="button"
             className="composer-icon-btn composer-dictate-btn"
-            title="Dictate"
+            title={shortcutTitle('Dictate', dictateBinding, platform)}
             aria-label="Dictate"
             aria-busy={recordingPending}
             // The box keeps focus, so its selection stays highlighted while recording.

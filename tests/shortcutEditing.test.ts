@@ -191,7 +191,7 @@ describe('the list', () => {
     expect(groups.map((group) => group.category)).toEqual(['Go', 'Threads', 'Composer', 'View', 'Surfaces', 'Model picker', 'Workflow editor', 'Editor'])
     const rows = (category: string) => groups.find((group) => group.category === category)!.rows.map((row) => row.command.id)
     expect(rows('Go').slice(0, 3)).toEqual(['palette.open', 'thread.back', 'thread.forward'])
-    expect(rows('Composer')).toEqual(['composer.focus', 'composer.steer', 'composer.switchSendMode', 'run.stop', 'approval.allow', 'approval.deny'])
+    expect(rows('Composer')).toEqual(['composer.focus', 'composer.dictate', 'composer.steer', 'composer.switchSendMode', 'run.stop', 'approval.allow', 'approval.deny'])
     expect(rows('Threads')).toHaveLength(10)
   })
 

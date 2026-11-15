@@ -327,6 +327,13 @@ export function ChatComposer({
     dictationRangeRef.current = node ? { start: node.selectionStart, end: node.selectionEnd, value: node.value } : null
     dictation.start()
   }
+  // The dictation key starts recording where the microphone button is offered and finishes it (Done) while recording.
+  const dictationOffered = !stoppable || dictateWhileStoppable
+  useCommand(
+    'composer.dictate',
+    () => (isRecording ? dictation.stop() : startDictation()),
+    () => !disabled && isShown(composerInputRef.current) && (isRecording || (dictationOffered && !recordingPending && !transcribing))
+  )
   const [pendingReferences, setPendingReferences] = useState(0)
   // Dictation and reference progress share the composer's one notice line, so the composer never changes height.
   useComposerNotice(pendingReferences > 0 ? { tone: 'info', title: 'Attaching reference…' } : null)

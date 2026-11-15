@@ -28,6 +28,19 @@ export function remoteComputersPort(options: {
       const versions = await client.versionsOrRefusal(node as NodeId)
       return Object.entries(ROUTED_AGENT_METHODS).every(([method, since]) => (versions?.[method] ?? 0) >= since)
     },
+    projectCandidates: async (node, projectPath, signal) => {
+      const identity = await repositoryIdentitiesFor(services).of(projectPath)
+      if (!identity) return null
+      const found = await client.call(node as NodeId, 'projects.match', { roots: identity.roots, remotes: identity.remotes }, { ...(signal ? { signal } : {}) })
+      const listed = isRecord(found) && Array.isArray(found.candidates) ? found.candidates : []
+      return {
+        match: isRecord(found) && typeof found.projectId === 'string' ? { projectId: found.projectId, weak: found.weak === true } : null,
+        candidates: listed.flatMap((entry) =>
+          isRecord(entry) && typeof entry.projectId === 'string'
+            ? [{ projectId: entry.projectId, ...(typeof entry.name === 'string' && entry.name ? { name: entry.name } : {}), ...(entry.weak === true ? { weak: true } : {}) }]
+            : [])
+      }
+    },
     matchProject: async (node, projectPath, signal) => {
       const identity = await repositoryIdentitiesFor(services).of(projectPath)
       if (!identity) return null
