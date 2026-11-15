@@ -111,7 +111,7 @@ export interface UsageLimitSummary {
   heading: string
   /** The summary's label ("5-hour · all accounts", "Weekly · Fable · 2 accounts"). */
   label: string
-  /** How many active accounts report this limit (for the 5-hour limit, those with weekly limit left). */
+  /** How many active accounts report this limit (for the 5-hour and per-model weekly limits, those with weekly limit left). */
   accounts: number
   /** The average share left across them, a whole percent; undefined when none has a number. */
   remaining?: number
@@ -161,25 +161,31 @@ function limitHeading(window: Pick<ProviderUsageWindow, 'id' | 'label'>): string
 }
 
 /**
- * Whether an account's weekly limit is used up (0% left): its 5-hour limit cannot be used until the
- * weekly one resets, however much of it is left. An account that reports no weekly number is not.
+ * Whether an account's weekly limit is used up (0% left): its 5-hour limit and its per-model weekly
+ * limits (Weekly · Fable) cannot be used until the weekly one resets, however much of them is left. An
+ * account that reports no weekly number is not.
  */
 export function weeklyExhausted(account: Pick<UsageAccount, 'windows'>, now: number): boolean {
   const weekly = account.windows.find((window) => window.id === 'seven_day')
   return weekly !== undefined && remainingNow(weekly, now) === 0
 }
 
+/** The limits the overall weekly limit holds back when it is used up: the 5-hour one and the per-model weekly ones. */
+function heldByWeekly(id: string): boolean {
+  return id === 'five_hour' || id.startsWith('seven_day_') || id.startsWith('model_')
+}
+
 /**
  * The limits of several accounts, one per window id, in window order: the average left across the
  * active accounts that report it and the soonest reset among them. Accounts with a problem count for
- * nothing, and the 5-hour limit leaves out accounts whose weekly limit is used up.
+ * nothing, and the 5-hour and per-model weekly limits leave out accounts whose weekly limit is used up.
  */
 export function summarizeAccounts(accounts: readonly UsageAccount[], now: number): UsageLimitSummary[] {
   const active = accounts.filter(accountActive)
   const firsts = new Map<string, ProviderUsageWindow>()
   for (const account of active) for (const window of account.windows) if (!firsts.has(window.id)) firsts.set(window.id, window)
   return orderUsageWindows([...firsts.values()]).map((first) => {
-    const counted = first.id === 'five_hour' ? active.filter((account) => !weeklyExhausted(account, now)) : active
+    const counted = heldByWeekly(first.id) ? active.filter((account) => !weeklyExhausted(account, now)) : active
     const reporting = counted.flatMap((account) => account.windows.filter((window) => window.id === first.id))
     const lefts = reporting.map((window) => remainingNow(window, now)).filter((left): left is number => left !== undefined)
     const resets = reporting.map((window) => window.resetsAt).filter((reset): reset is string => !!reset && Date.parse(reset) > now)
