@@ -681,8 +681,8 @@ export class BotMemoryStore {
     WHERE m.bot_id = ? AND m.status = 'active' AND (m.expires_at IS NULL OR m.expires_at > ?)`,
     botId, this.now(), botId, this.now()).map(versionOf)
     const rank = { owner: 0, note: 1, run_note: 2 }
-    rows.sort((a, b) => Number(b.writtenIn === 'owner_ui') - Number(a.writtenIn === 'owner_ui')
-      || rank[a.kind] - rank[b.kind] || a.learnedAt.localeCompare(b.learnedAt)
+    rows.sort((a, b) => rank[a.kind] - rank[b.kind]
+      || Number(b.writtenIn === 'owner_ui') - Number(a.writtenIn === 'owner_ui') || a.learnedAt.localeCompare(b.learnedAt)
       || Number(a.id.slice(1)) - Number(b.id.slice(1)))
     const kept = new Map<string, BotMemoryVersion>()
     const retired: Array<{ entry: BotMemoryVersion; into: string }> = []

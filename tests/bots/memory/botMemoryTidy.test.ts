@@ -37,7 +37,7 @@ it('puts away cross-kind copies without changing the kept entry, and Forget take
   expect(store.versions('ada', 'm2').every(v => v.text === null)).toBe(true)
 })
 
-it('keeps an owner-edited note ahead of a bot-written owner fact, leaving near text and other bots alone', () => {
+it('keeps owner facts ahead of owner-edited notes, leaving near text and other bots alone', () => {
   const { store } = memoryFixture()
   store.save('ada', { lane: 'chat', kind: 'owner', text: 'Gym Tuesday 7pm' })
   store.save('ada', { lane: 'chat', kind: 'note', text: 'Old note' })
@@ -45,7 +45,7 @@ it('keeps an owner-edited note ahead of a bot-written owner fact, leaving near t
   store.save('ada', { lane: 'run', kind: 'note', text: 'Gym Wednesday 7pm' })
   store.save('bea', { lane: 'chat', kind: 'note', text: 'Gym Tuesday 7pm' })
   expect(store.tidyDuplicates('ada')).toBe(1)
-  expect(store.list('ada').entries.map(e => e.ref)).toEqual(['m2v2', 'm3'])
+  expect(store.list('ada').entries.map(e => e.ref)).toEqual(['m1', 'm3'])
   expect(store.list('bea').entries).toHaveLength(1)
 })
 
@@ -116,4 +116,14 @@ it('refreshes frozen chat and run packs, preserving every other block byte for b
     expect(after).toBe(before!.replace(beforeBlocks.core, afterBlocks.core).replace(beforeBlocks.runNotes, afterBlocks.runNotes))
     expect(after).not.toContain('m2')
   }
+})
+
+
+it('prefers an owner edit within the same kind before the oldest entry', () => {
+  const { store } = memoryFixture()
+  store.save('ada', { lane: 'chat', kind: 'note', text: 'Gym Tuesday 7pm.' })
+  store.save('ada', { lane: 'chat', kind: 'note', text: 'Old note.' })
+  createBotMemoryAdmin({ store }).edit('ada', 'm2', 'Gym Tuesday 7pm.')
+  expect(store.tidyDuplicates('ada')).toBe(1)
+  expect(store.active('ada').map(e => e.ref)).toEqual(['m2v2'])
 })
