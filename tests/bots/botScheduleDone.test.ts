@@ -156,7 +156,7 @@ it('finishes startup and refuses completed schedules while the shared store cann
   vi.spyOn(f.book, 'remove').mockImplementation(() => { throw new Error('store is read only') })
   await s.tool.handler({ why: 'Finished.' }, s.ctx)
   await expect(f.bots.reconcileOnStartup()).resolves.toBeUndefined()
-  expect(f.bots.findScheduledOccurrence({ botId, scheduleId: s.own.scheduleId, occurrenceKey: s.row.trigger.kind === 'schedule' ? s.row.trigger.occurrenceAt : '' })).toBeUndefined()
+  expect(f.bots.findScheduledOccurrence({ botId, scheduleId: s.own.scheduleId, occurrenceKey: s.row.trigger.kind === 'schedule' ? s.row.trigger.occurrenceAt : '' })).toMatchObject({ kind: 'skipped', reason: 'schedule_completed' })
   expect(f.bots.runScheduledOccurrence({ botId, scheduleId: s.own.scheduleId, prompt: 'Do not run', occurrenceAt: new Date(T0 + 10 * 60_000).toISOString() })).toMatchObject({ kind: 'skipped', reason: 'schedule_completed' })
   await f.tickSchedules(new Date(T0 + 10 * 60_000))
   expect(f.book.get(botId, s.own.scheduleId)?.skip?.reason).toBe('schedule_completed')
