@@ -7325,9 +7325,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       own = { mode: 'named', ...copyPick(input.model.pick), model: input.model.pick.model, depth: startDepthOf(main, { lane: 'run', trigger }) }
       if (!samePick(row.pick, input.model.pick)) trigger.model = { ...input.model.name }
     }
+    // enqueue writes before its first await, so concurrent repeats also see the first request's row.
+    const replayed = this.store.activationByKey(`work:${input.key}`) !== undefined
     const summary = await this.enqueue(botId, `work:${input.key}`, trigger, 'run', undefined, own)
     const row = this.store.activation(summary.id)!
-    const named = row.trigger.kind === 'work' && row.trigger.model ? { model: row.trigger.model } : {}
+    const named = {
+      ...(replayed ? { replayed: true as const } : {}),
+      ...(row.trigger.kind === 'work' && row.trigger.model ? { model: row.trigger.model } : {})
+    }
     if (ENDED_ACTIVATION_STATUSES.has(row.status)) return { workId: row.id, status: 'ended', ahead: [], ...named }
     if (row.status !== 'queued') return { workId: row.id, status: 'started', ahead: [], ...named }
     return { workId: row.id, status: 'queued', ahead: this.waitsBehind(row), ...named }

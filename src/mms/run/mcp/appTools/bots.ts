@@ -808,7 +808,14 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         try {
           const started = await call.deps.host.work.start(call.botId, call.activationId, { title, brief, key: `${call.activationId}:${requestKey}`, ...(level ? { level } : {}), ...(model ? { model } : {}), ...(slot !== undefined ? { slot } : {}) })
           const where = model ? ` It runs on ${model.name.name} on ${model.name.entry}${model.name.effort ? `, ${model.name.effort} reasoning` : ''}, for this work only.` : ''
-          const result = { ...started, note: (started.status === 'queued' ? `You start on it when there is room, after: ${started.ahead.join('; ')}. Tell the owner you'll get to it after that.` : started.status === 'ended' ? 'You already did this and finished; work_list has the start of your report.' : 'You are on it now, beside anything else you are working on. Tell the owner in one short line that you are on it; when you finish, your report reaches them by itself.') + where }
+          const note = started.status === 'ended'
+            ? 'This work already ended; nothing new was started. work_list has its result.'
+            : started.status === 'queued'
+              ? `${started.replayed ? 'This work is already queued; nothing new was started. ' : ''}You start on it when there is room, after: ${started.ahead.join('; ')}. Tell the owner you'll get to it after that.`
+              : started.replayed
+                ? 'This work is already in progress; nothing new was started. Tell the owner you are already on it; its report reaches them by itself.'
+                : 'You are on it now, beside anything else you are working on. Tell the owner in one short line that you are on it; when you finish, your report reaches them by itself.'
+          const result = { ...started, note: note + where }
           call.deps.activity?.onAppResult(call.activity, 'work_start', started)
           return json(result)
         } catch (failure) {
