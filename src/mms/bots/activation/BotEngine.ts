@@ -125,9 +125,10 @@ export const BOT_FILE_ASK_GONE_TEXT = 'A bot can no longer use files outside its
 
 // Unknown tools are deliberately effects: only these recorded calls can leave an unsent draft.
 const DRAFT_READ_ONLY_TOOLS = new Set([
-  'thread_list', 'thread_search', 'thread_read', 'thread_wait', 'memory_list', 'memory_search',
+  'thread_list', 'thread_search', 'thread_read', 'thread_wait', 'memory_list', 'memory_search', 'memory_read',
+  'read', 'list', 'search', 'ls', 'find', 'grep', 'Read', 'Glob', 'Grep',
   'bot_schedule_list', 'work_list', 'work_models', 'watch_list', 'reminder_list', 'bot_list',
-  'mcp_list', 'list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource'
+  'mcp_servers', 'list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource'
 ])
 type HeldChatDraft = { n: number; text: string; replyTo?: string }
 
@@ -6444,10 +6445,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * activations from before the chat (no selection) never had one.
    */
   private postMissingReplies(): void {
-    for (const entry of this.store.all("SELECT a.id FROM bot_activations a JOIN bot_memory_state s ON s.bot_id = a.bot_id AND s.key = 'draft:' || a.id WHERE a.lane = 'chat' AND a.status IN ('done', 'failed', 'cancelled', 'paused', 'waiting_grant')")) {
-      const row = this.store.activation(String(entry.id))
-      if (row) this.postChatDraft(row)
-    }
     const rows = this.store.all(`SELECT id FROM bot_activations a WHERE selection_json IS NOT NULL AND (status IN ('waiting_grant', 'paused')
       OR (status = 'done' AND (SELECT COUNT(*) FROM bot_activations b WHERE b.bot_id = a.bot_id AND b.lane = a.lane AND b.status = 'done' AND b.ended_at > a.ended_at) < CASE a.lane WHEN 'run' THEN ? ELSE 1 END))`, MAX_RUN_SLOTS_PER_BOT)
     for (const { id } of rows) {
@@ -6459,6 +6456,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       } catch (error) {
         console.warn('a bot message could not be written at startup', { activationId: id, error: error instanceof Error ? error.message : String(error) })
       }
+    }
+    for (const entry of this.store.all("SELECT a.id FROM bot_activations a JOIN bot_memory_state s ON s.bot_id = a.bot_id AND s.key = 'draft:' || a.id WHERE a.lane = 'chat' AND a.status IN ('done', 'failed', 'cancelled', 'paused', 'waiting_grant')")) {
+      const row = this.store.activation(String(entry.id))
+      if (row) this.postChatDraft(row)
     }
   }
 
