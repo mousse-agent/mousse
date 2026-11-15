@@ -418,6 +418,15 @@ describe('mousseToUIMessages standardize layer', () => {
     expect(files.some((p) => p.type === 'file' && p.filename === 'notes.md')).toBe(true)
   })
 
+  it('gives a file sent with its path a pill that knows the path, and shows no path in the text', () => {
+    const out = mousseToUIMessages([
+      base({ id: 'u3', role: 'user', content: 'cut it\n\n[Attached files: clip.mp4 (/tmp/mousse-attachments/t1/1a2b3c4d-clip.mp4)]' }),
+    ])
+    const parts = out[0].parts as unknown as Array<{ type: string; text?: string; filename?: string; path?: string }>
+    expect(parts.filter((p) => p.type === 'text').map((p) => p.text)).toEqual(['cut it'])
+    expect(parts.filter((p) => p.type === 'file')).toEqual([expect.objectContaining({ filename: 'clip.mp4', path: '/tmp/mousse-attachments/t1/1a2b3c4d-clip.mp4' })])
+  })
+
   it('routes timeline-rewritten quick-action calls to the rich card, not the MCP fallback', () => {
     // OrchestratorService rewrites build_tool_* to mcp_tool_* with no Server
     // detail; without RICH membership this rendered as "Created Quick Action".

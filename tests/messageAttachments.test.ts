@@ -84,8 +84,14 @@ describe('formatBrowserElementBlock / parseUserMessageContent', () => {
     const content = `Review\n\n[Attached files: notes.md, shot.png]\n\n${block}`
     const parsed = parseUserMessageContent(content)
     expect(parsed.text).toBe('Review')
-    expect(parsed.attachedFiles).toEqual(['notes.md', 'shot.png'])
+    expect(parsed.attachedFiles).toEqual([{ name: 'notes.md' }, { name: 'shot.png' }])
     expect(parsed.browserElements).toHaveLength(1)
+  })
+
+  it('gives each file its name and path, and leaves the paths out of the text', () => {
+    const parsed = parseUserMessageContent('Cut the intro\n\n[Attached files: clip (1).mp4 (C:\\My Videos, 2026\\clip (1).mp4), b.pdf (/tmp/b.pdf)]')
+    expect(parsed.text).toBe('Cut the intro')
+    expect(parsed.attachedFiles).toEqual([{ name: 'clip (1).mp4', path: 'C:\\My Videos, 2026\\clip (1).mp4' }, { name: 'b.pdf', path: '/tmp/b.pdf' }])
   })
 })
 

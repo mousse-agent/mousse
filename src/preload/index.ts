@@ -4,6 +4,7 @@ import type { BreachKind, MemoryNotice, MemoryStatus } from '../shared/diagnosti
 import type { WindowCacheSize } from '../shared/diagnostics/profiler'
 import { readStartupAppearanceArgument } from '../shared/startupAppearance'
 import { readHomeFolderArgument } from '../shared/homeFolderArgument'
+import { MAX_STAGED_FILE_BYTES, stagedFileTooLargeText } from '../shared/attachedFilesMarker'
 import type { FontRole, LoadedGoogleFont } from '../shared/fontSettings'
 import type { NetStatus } from '../shared/net/local'
 import type { ThreadToastPayload } from '../shared/threadToast'
@@ -191,6 +192,14 @@ async function storageInvoke<T>(channel: string, ...args: unknown[]): Promise<T>
 
 /** The window's own counters for the profiler (`diagnostics.provideCounters`), read only when main asks. */
 let windowCountersProvider: (() => { mountedTurns?: number; mountedRows?: number; caches?: Record<string, WindowCacheSize> }) | null = null
+
+/**
+ * A composer file's path on this computer: where it is, or, for a pasted file (it has none), a temporary copy the
+ * app writes for the bot or thread it is attached in.
+ */
+async function attachmentPath(file: File, target: { kind: 'bot' } | { kind: 'thread'; threadId: string | null }): Promise<string> {
+  return webUtils.getPathForFile(file) || ipcRenderer.invoke('attachments:stage', target, file.name, new Uint8Array(await file.arrayBuffer()))
+}
 
 const api = {
   platform: process.platform,
@@ -804,8 +813,7 @@ const api = {
       return () => ipcRenderer.removeListener('bots:browserFrame', handler)
     },
     /** A composer file's path on this computer: where it is, or, for a pasted one, a temporary copy. */
-    attachmentPath: async (file: File): Promise<string> =>
-      webUtils.getPathForFile(file) || ipcRenderer.invoke('bots:stageAttachment', file.name, new Uint8Array(await file.arrayBuffer())),
+    attachmentPath: (file: File): Promise<string> => attachmentPath(file, { kind: 'bot' }),
     /**
      * A page in a bot's browser asks for files: the app opens this computer's own file dialog, naming
      * the site, and answers a one-time token for what the person chose (never the paths), or that they
@@ -915,6 +923,14 @@ const api = {
     }
   },
   threads: {
+    /**
+     * A file attached in a thread's composer as a path on this computer: where it is, or, for a pasted one, a
+     * temporary copy under the thread's folder (`new` before the thread is made).
+     */
+    attachmentPath: async (file: File, threadId?: string | null): Promise<string> => {
+      if (!webUtils.getPathForFile(file) && file.size > MAX_STAGED_FILE_BYTES) throw new Error(stagedFileTooLargeText(file.name))
+      return attachmentPath(file, { kind: 'thread', threadId: threadId ?? null })
+    },
     initialize: (): Promise<void> => ipcRenderer.invoke('threads:initialize'),
     list: (): Promise<Thread[]> => ipcRenderer.invoke('threads:list'),
     listAll: (): Promise<Thread[]> => ipcRenderer.invoke('threads:listAll'),

@@ -16,6 +16,10 @@ export type FileAttachmentProps = {
   size?: number;
   isImage?: boolean;
   url?: string;
+  /** The chip's tooltip; defaults to the file name. */
+  title?: string;
+  /** A file chip that opens the file: its name and icon become a button. */
+  onOpen?: () => void;
   onRemove?: () => void;
   className?: string;
   display?: "chip" | "image-only";
@@ -116,6 +120,8 @@ export function FileAttachment({
   size,
   isImage,
   url,
+  title,
+  onOpen,
   onRemove,
   className,
   display = "chip",
@@ -187,7 +193,7 @@ export function FileAttachment({
           <div className="flex flex-col flex-1 min-w-0">
             <span
               className="text-sm font-medium text-an-foreground truncate"
-              title={filename}
+              title={title ?? filename}
             >
               {filename}
             </span>
@@ -197,6 +203,20 @@ export function FileAttachment({
               </span>
             )}
           </div>
+          {/* The whole chip opens the file; the button lies over it, below the remove button. */}
+          {onOpen && (
+            <button
+              type="button"
+              className="absolute inset-0 rounded-[inherit] cursor-pointer hover:bg-an-foreground/5"
+              aria-label={`Open ${filename}`}
+              title={title ?? filename}
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onOpen();
+              }}
+            />
+          )}
         </>
       )}
 

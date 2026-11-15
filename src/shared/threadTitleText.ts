@@ -1,4 +1,5 @@
 import { extractChatReferences } from './chatReferences'
+import { replaceAttachedFilesMarkers } from './attachedFilesMarker'
 import type { ChatMessage } from './types'
 
 /**
@@ -172,16 +173,16 @@ export function cleanTitleText(content: string, max = REQUEST_BUDGET): CleanedTi
     if (path) addFile(hints, path)
     else if (reference.title) addFile(hints, reference.title)
   }
-  let text = withoutReferences
+  const withoutElements = withoutReferences
     .replace(/\r\n?/g, '\n')
     .replace(/\[Selected browser element\][\s\S]*?(\[\/Selected browser element\]|$)/g, () => {
       hints.browserElement = true
       return '\n\n'
     })
-    .replace(/\[Attached files: ([^\]]+)\]/g, (_match, list: string) => {
-      for (const name of list.split(',')) addFile(hints, name)
-      return '\n\n'
-    })
+  let text = replaceAttachedFilesMarkers(withoutElements, (entries) => {
+    for (const entry of entries) addFile(hints, entry.name)
+    return '\n\n'
+  })
     .replace(/\[(?:Voice message \([^)]+\)(?:, )?)+\]/g, '\n\n')
     // Fenced code, including a fence the message never closes.
     .replace(/(^|\n)[ \t]*(```|~~~)[^\n]*\n[\s\S]*?(\n[ \t]*\2[ \t]*(?=\n|$)|$)/g, () => {

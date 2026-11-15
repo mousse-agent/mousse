@@ -5,11 +5,12 @@
  */
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { copyBotAttachments, removeBotAttachments } from '../../src/mms/bots/chat/attachments'
 import { chatInput } from '../../src/mms/bots/chat/BotChatService'
-import { stageBotAttachment } from '../../src/main/ipc/botAttachments'
+import { stageBotAttachment, stageThreadAttachment } from '../../src/main/ipc/botAttachments'
+import { MAX_STAGED_FILE_BYTES } from '../../src/shared/attachedFilesMarker'
 import { attachmentFileName } from '../../src/shared/bots/personal/attachments'
 import { MAX_BOT_CHAT_ATTACHMENT_BYTES } from '../../src/shared/bots/personal/methods'
 
@@ -114,5 +115,46 @@ describe('stageBotAttachment', () => {
     stageBotAttachment(base, 'next.png', new Uint8Array([1]), at)
     expect(readdirSync(join(base, 'mousse-bot-attachments'))).not.toContain(old.split(/[\\/]/).at(-2))
     expect(readdirSync(join(base, 'mousse-bot-attachments'))).toContain(recent.split(/[\\/]/).at(-2))
+  })
+})
+
+describe('stageThreadAttachment', () => {
+  it("writes a pasted file into its thread's temporary folder, under a unique name, and returns its path", async () => {
+    const path = await stageThreadAttachment(base, 't-1', 'clip.mp4', new Uint8Array([0, 0, 0, 24]), at)
+    expect(dirname(path)).toBe(join(base, 'mousse-attachments', 't-1'))
+    expect(basename(path)).toMatch(/^[0-9a-f]{8}-clip\.mp4$/)
+    expect([...readFileSync(path)]).toEqual([0, 0, 0, 24])
+    // The same name again never overwrites the first.
+    expect(await stageThreadAttachment(base, 't-1', 'clip.mp4', new Uint8Array([1]), at)).not.toBe(path)
+    // A thread not made yet gets the `new` folder.
+    expect(dirname(await stageThreadAttachment(base, undefined, 'a.txt', new Uint8Array([1]), at))).toBe(join(base, 'mousse-attachments', 'new'))
+  })
+
+  it('keeps every write inside the thread folder, whatever the name or thread id says', async () => {
+    const folder = join(base, 'mousse-attachments', 't-1')
+    for (const name of ['../../evil.sh', '..\\..\\evil.sh', '/etc/passwd', 'C:\\Windows\\evil.dll', 'con.txt', 'a<b>:c?.mp4', '..']) {
+      expect(dirname(await stageThreadAttachment(base, 't-1', name, new Uint8Array([1]), at))).toBe(folder)
+    }
+    for (const thread of ['../t', 't/../../x', 'a\\b', '.']) {
+      await expect(stageThreadAttachment(base, thread, 'a.txt', new Uint8Array([1]), at)).rejects.toThrow('A pasted file needs a thread.')
+    }
+    expect(readdirSync(join(base, 'mousse-attachments')).sort()).toEqual(['t-1'])
+  })
+
+  it('takes only a name and bytes up to the limit', async () => {
+    await expect(stageThreadAttachment(base, 't-1', '', new Uint8Array([1]), at)).rejects.toThrow('A pasted file needs a name.')
+    await expect(stageThreadAttachment(base, 't-1', 'a.mp4', 'not bytes', at)).rejects.toThrow('A pasted file needs its bytes.')
+    await expect(stageThreadAttachment(base, 't-1', 'big.mp4', { byteLength: MAX_STAGED_FILE_BYTES + 1 }, at)).rejects.toThrow('A pasted file needs its bytes.')
+    await expect(stageThreadAttachment(base, 't-1', 'big.mp4', new Uint8Array(MAX_STAGED_FILE_BYTES + 1), at)).rejects.toThrow('big.mp4 is larger than 200 MB.')
+  })
+
+  it("clears a thread's folder a week after its last paste", async () => {
+    const old = await stageThreadAttachment(base, 'old', 'a.txt', new Uint8Array([1]), at)
+    const recent = await stageThreadAttachment(base, 'recent', 'b.txt', new Uint8Array([1]), at)
+    const day = 24 * 60 * 60 * 1000
+    utimesSync(dirname(old), new Date(at - 8 * day), new Date(at - 8 * day))
+    utimesSync(dirname(recent), new Date(at - 6 * day), new Date(at - 6 * day))
+    await stageThreadAttachment(base, 'next', 'c.txt', new Uint8Array([1]), at)
+    expect(readdirSync(join(base, 'mousse-attachments')).sort()).toEqual(['next', 'recent'])
   })
 })

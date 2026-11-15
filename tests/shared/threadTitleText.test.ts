@@ -67,6 +67,12 @@ describe('cleaning what the title model sees', () => {
     expect(text).not.toContain('data=')
   })
 
+  it('takes file names, not their folders, from a marker that gives paths', () => {
+    const { text, hints } = cleanTitleText('trim the intro\n\n[Attached files: clip, final.mp4 (C:\\My Videos, 2026\\clip, final.mp4), b.pdf (/tmp/b.pdf)]')
+    expect(text).toBe('trim the intro')
+    expect(hints.files).toEqual(['clip, final.mp4', 'b.pdf'])
+  })
+
   it('turns paths into file names and links into hosts, and leaves "and/or" alone', () => {
     const { text } = cleanTitleText('see C:\\work\\mousse\\src\\main\\index.ts and https://github.com/mousse-agent/mousse/pull/373?x=1 and/or src/a/b.ts')
     expect(text).toBe('see index.ts and github.com and/or b.ts')

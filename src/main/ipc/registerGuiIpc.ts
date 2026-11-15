@@ -89,7 +89,7 @@ import { surfaceToWindowBackground } from '../../shared/accentPalette'
 import { appearanceSurfaceBase } from '../../shared/themeSurfaces'
 import { showCopyMenu } from '../contextMenu'
 import { pickExecutable } from './pickExecutable'
-import { stageBotAttachment } from './botAttachments'
+import { stageBotAttachment, stageThreadAttachment } from './botAttachments'
 import { chooseBrowserViewFiles, type BrowserViewFilesDeps } from './browserViewFiles'
 import { botBrowserWindow, type BotBrowserWindowDeps } from './botBrowserWindow'
 import { stat } from 'node:fs/promises'
@@ -3575,10 +3575,14 @@ export function registerGuiIpc(
     const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
     return result.canceled ? null : (result.filePaths[0] ?? null)
   })
-  // A file pasted into a bot's composer has no path: it waits in the temporary folder until the service copies it.
-  registerHandler('bots:stageAttachment', async (_event, name: unknown, bytes: unknown) =>
-    stageBotAttachment(app.getPath('temp'), name, bytes)
-  )
+  // A file pasted into a composer has no path: it is written to the temporary folder. A bot's waits there until the
+  // service copies it; a thread's is read there by the thread's agent.
+  registerHandler('attachments:stage', async (_event, target: unknown, name: unknown, bytes: unknown) => {
+    const scope = target as { kind?: unknown; threadId?: unknown } | null
+    if (scope?.kind === 'bot') return stageBotAttachment(app.getPath('temp'), name, bytes)
+    if (scope?.kind === 'thread') return stageThreadAttachment(app.getPath('temp'), scope.threadId, name, bytes)
+    throw new Error('A pasted file needs a bot or a thread.')
+  })
   // A page in a browser without a window (a bot's, or a thread's) asks for files: this computer's own dialog
   // picks them, and the window's renderer gets a one-time token for them, never the paths.
   const browserFilesDeps = (event: Electron.IpcMainInvokeEvent): BrowserViewFilesDeps => {
