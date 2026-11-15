@@ -1087,8 +1087,8 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
     expect(presence().textContent).toBe('Waiting on Nightly build')
     await click(presence())
     const list = host.querySelector('[aria-label="Background work"]')!
-    expect([...list.querySelectorAll('.bot-work-line')].map((line) => line.textContent)).toEqual(['Nightly build12m · Waiting for build'])
-    expect(list.querySelector('.bot-work-line')!.getAttribute('title')).toBe('gh run watch 123')
+    expect([...list.querySelectorAll('.bot-work-line')].map((line) => line.textContent)).toEqual(['Nightly build12m'])
+    expect(list.querySelector('.bot-work-line')!.getAttribute('title')).toBe('gh run watch 123\nWaiting for build')
     await click(button('Stop Nightly build'))
     expect(fake.calls).toContainEqual(['stopWork', 'inbox', 'rem_w1'])
   })

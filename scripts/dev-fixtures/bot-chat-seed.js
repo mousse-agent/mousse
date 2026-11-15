@@ -163,8 +163,8 @@
     // A background command it started: the reply's card says it runs, with Stop; the header lists it under Background work.
     if (scenario === 'watching') {
       rows.push(
-        owner(ids.nightly, ago(14), "tell me when tonight's nightly build is done"),
-        bot(ids.watcher, ago(13), "I'm watching the nightly build and will tell you how it went.", [], { replyTo: quote(ids.nightly, "tell me when tonight's nightly build is done"), cards: [WATCHER] })
+        owner(ids.nightly, today(22, 10), "tell me when tonight's nightly build is done"),
+        bot(ids.watcher, today(22, 10), "I'm watching the nightly build and will tell you how it went.", [], { replyTo: quote(ids.nightly, "tell me when tonight's nightly build is done"), cards: [WATCHER] })
       )
     }
     if (scenario === 'typing') rows.push(owner(ids.again, ago(0.2), 'again'))

@@ -58,11 +58,11 @@ const WorkLine = memo(function WorkLine({ botId, item }: { botId: string; item: 
   </li>
 })
 
-/** A background command in the header's list: its title, how long it has run, its last line; Stop. */
+/** A background command in the header's list: its title and how long it has run; the command and its last line on hover; Stop. */
 const WatcherLine = memo(function WatcherLine({ botId, item, now }: { botId: string; item: BotWatcherItem; now: number }) {
-  return <li className="bot-work-line is-running" title={item.command}>
+  return <li className="bot-work-line is-running" title={item.lastLine ? `${item.command}\n${item.lastLine}` : item.command}>
     <span className="bot-work-title">{item.title}</span>
-    <span className="bot-work-doing">{[runningFor(item.startedAt, now), item.lastLine].filter(Boolean).join(' · ')}</span>
+    <span className="bot-work-doing">{runningFor(item.startedAt, now)}</span>
     <button type="button" data-nav aria-label={`Stop ${item.title}`} title="Stop" onClick={() => void useBotsStore.getState().stopWork(botId, item.id)}><X size={13} aria-hidden /></button>
   </li>
 })
