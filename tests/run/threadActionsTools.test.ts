@@ -8,7 +8,7 @@ import type { Thread } from '../../src/shared/types'
 import { McpToolError, type AgentRunCommandResult, type AgentSendResult, type McpCallRequest } from '../../src/mms/run/mcp/appTools'
 import { AGENT_MESSAGE_END, agentMessage, agentMessageText } from '../../src/mms/run/mcp/appTools/agentMessage'
 import { agentMessageWords } from '../../src/shared/agentMessageWords'
-import { THREAD_SEND_MAX_PER_RUN } from '../../src/mms/run/mcp/appTools/thread'
+import { AGENT_QUEUE_MAX_PER_SENDER, AGENT_QUEUE_MAX_PER_THREAD, THREAD_RESULT_MAX_CHARS, THREAD_SEND_MAX_PER_RUN } from '../../src/mms/run/mcp/appTools/thread'
 import type { RunPause } from '../../src/mms/run/types'
 import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
@@ -200,11 +200,11 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
 
     it('shows the transcript row once, for the call that made the send and not for its replay', async () => {
       const { call, answers, host } = await world()
-      expect(JSON.parse((await call('thread_send', { threadId: 'target', content: 'x' })).text)).toMatchObject({ threadId: 'target', queued: false, replayed: false })
+      expect(JSON.parse((await call('thread_send', { threadId: 'target', content: 'x' })).text)).toMatchObject({ threadId: 'target', queued: false, delivery: 'started', replayed: false })
       expect(host.showAgentAction).toHaveBeenCalledTimes(1)
       expect(host.showAgentAction).toHaveBeenLastCalledWith({ threadId: 'target' }, expect.objectContaining({ kind: 'agent', threadId: 'caller' }), expect.stringContaining('sent a message'))
       answers.send = async () => ({ runId: 'run:first', sequence: 10, queued: true, replayed: true })
-      expect(JSON.parse((await call('thread_send', { threadId: 'target', content: 'x' }, { toolCallId: 'mcp:again' })).text)).toMatchObject({ runId: 'run:first', queued: true, replayed: true })
+      expect(JSON.parse((await call('thread_send', { threadId: 'target', content: 'x' }, { toolCallId: 'mcp:again' })).text)).toMatchObject({ runId: 'run:first', queued: true, delivery: 'queued', replayed: true })
       expect(host.showAgentAction).toHaveBeenCalledTimes(1)
     })
 
@@ -225,11 +225,12 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
     })
 
     it(`is capped at ${THREAD_SEND_MAX_PER_RUN} messages per caller run: a loop of sends is cut off, retries and failures do not count, another run starts fresh`, async () => {
-      const { call, answers, host, sent, fx, turns, runs, callerRun } = await world()
+      const { call, denied, answers, host, sent, fx, turns, runs, callerRun } = await world()
       for (let index = 0; index < THREAD_SEND_MAX_PER_RUN; index += 1)
         expect((await call('thread_send', { threadId: 'target', content: `m${index}` })).isError, `send ${index}`).toBeUndefined()
-      const over = await call('thread_send', { threadId: 'target', content: 'one too many' })
-      expect(over).toMatchObject({ isError: true, text: expect.stringContaining(`limited to ${THREAD_SEND_MAX_PER_RUN}`) })
+      const over = await denied(call('thread_send', { threadId: 'target', content: 'one too many' }))
+      expect(over).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'sends_per_run_exceeded', limit: THREAD_SEND_MAX_PER_RUN } })
+      expect(over!.message).toContain(`limited to ${THREAD_SEND_MAX_PER_RUN}`)
       expect(host.sendToThread).toHaveBeenCalledTimes(THREAD_SEND_MAX_PER_RUN)
       expect(sent).toHaveLength(THREAD_SEND_MAX_PER_RUN)
 
@@ -246,7 +247,7 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
       answers.send = async () => ({ runId: 'run:fresh', sequence: 10, queued: false, replayed: false })
       for (let index = 0; index < THREAD_SEND_MAX_PER_RUN; index += 1)
         expect((await call('thread_send', { threadId: 'target', content: `n${index}` })).isError, `fresh ${index}`).toBeUndefined()
-      expect((await call('thread_send', { threadId: 'target', content: 'over again' })).isError).toBe(true)
+      expect(await denied(call('thread_send', { threadId: 'target', content: 'over again' }))).toMatchObject({ details: { conflict: 'sends_per_run_exceeded' } })
     })
 
     it('validates its input before it reaches the host', async () => {
@@ -324,27 +325,32 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
 
   describe('limits and boundaries (review of PR 3)', () => {
     it('a retry of an earlier send is answered with its first result after the run has used its budget; a new send is still refused', async () => {
-      const { call, host, answers } = await world()
+      const { call, denied, host, answers } = await world()
       for (let index = 0; index < THREAD_SEND_MAX_PER_RUN; index += 1) await call('thread_send', { threadId: 'target', content: `m${index}`, clientRequestId: `req-${index}` })
       // The host knows what `req-19` sent; it knows nothing of `brand-new`.
       host.earlierSend = vi.fn((_threadId: string, key: string) => key === 'thread_send:caller:req-19' ? { runId: 'run:first', sequence: 3, queued: true, replayed: true } : undefined)
       const retry = await call('thread_send', { threadId: 'target', content: 'm19', clientRequestId: 'req-19' })
-      expect(JSON.parse(retry.text)).toEqual({ threadId: 'target', runId: 'run:first', sequence: 3, queued: true, replayed: true })
-      const fresh = await call('thread_send', { threadId: 'target', content: 'one more', clientRequestId: 'brand-new' })
-      expect(fresh).toMatchObject({ isError: true, text: expect.stringContaining('limited to') })
+      expect(JSON.parse(retry.text)).toEqual({ threadId: 'target', runId: 'run:first', sequence: 3, queued: true, delivery: 'queued', replayed: true })
+      const fresh = await denied(call('thread_send', { threadId: 'target', content: 'one more', clientRequestId: 'brand-new' }))
+      expect(fresh).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'sends_per_run_exceeded' } })
       expect(host.sendToThread).toHaveBeenCalledTimes(THREAD_SEND_MAX_PER_RUN)
       expect(answers).toBeDefined()
     })
 
+    // Each limit the owner enforces has its own code and says which limit it is and what to do (one "limit reached" sends
+    // agents looking for the wrong cause). The send-per-run count is the tool's own, tested above.
     it.each([
       ['agent_hops_exceeded', /agent messages in a row/],
-      ['agent_queue_full', /messages from agents waiting/]
-    ])('a send refused for the chain it would extend or the queue it would join (%s) is a conflict that says so', async (code, message) => {
+      ['agent_queue_full_per_sender', new RegExp(`${AGENT_QUEUE_MAX_PER_SENDER} messages from your thread .*the most one thread may have`)],
+      ['agent_queue_full', new RegExp(`${AGENT_QUEUE_MAX_PER_THREAD} messages from agents .*from all agents together`)],
+      ['duplicate_message', /same text .*same clientRequestId/]
+    ])('a send refused by the limit %s is a conflict that names it and what to do', async (code, message) => {
       const { call, denied, answers } = await world()
-      answers.send = async () => { throw refusal(code) }
+      answers.send = async () => { throw Object.assign(refusal(code), code === 'duplicate_message' ? { details: { retryAfterMs: 4_000 } } : {}) }
       const error = await denied(call('thread_send', { threadId: 'target', content: 'x' }))
       expect(error).toMatchObject({ code: 'mousse_conflict', details: { conflict: code } })
       expect(error!.message).toMatch(message)
+      if (code === 'duplicate_message') expect(error!.details).toMatchObject({ retryAfterMs: 4_000 })
     })
 
     it('a steer past the hop limit, or into a run that has not started its turn, is a conflict that says so', async () => {
@@ -500,6 +506,20 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
       fx.finish(targetRun.runId, 'the active one')
       expect(await waiting).toMatchObject({ status: 'finished', run: { runId: targetRun.runId }, resultText: 'the active one' })
       expect(await result(call('thread_wait', { threadId: 'target' }))).toEqual({ status: 'idle', threadId: 'target' })
+    })
+
+    it(`cuts a long result to ${THREAD_RESULT_MAX_CHARS} characters with a marker and a pointer to thread_read; the subagent\'s result its parent receives keeps the whole text`, async () => {
+      const { call, result, fx, callerRun, threads } = await world()
+      const long = 'r'.repeat(THREAD_RESULT_MAX_CHARS) + 'TAIL'.repeat(500)
+      const child = await fx.delegate(callerRun.runId, 'call-long')
+      threads.set(child.childThreadId, { id: child.childThreadId, name: 'Child', createdAt: '', updatedAt: '' } as never)
+      fx.finish(child.childRunId, long)
+      const waited = await result(call('thread_wait', { threadId: child.childThreadId, runId: child.childRunId }))
+      expect(waited).toMatchObject({ status: 'finished', resultTruncated: true, resultChars: long.length, hint: expect.stringContaining('thread_read') })
+      expect(waited.resultText).toBe(`${'r'.repeat(THREAD_RESULT_MAX_CHARS)}…`)
+      // The delegation path reads the stored result, not the tool's: the parent's notice row has every character.
+      const row = fx.engine.inbox.listForChildThread(child.childThreadId, 'child_result')[0]
+      expect((row.payload as { result: { text: string } }).result.text).toBe(long)
     })
 
     it('a run that left no text is finished without resultText', async () => {

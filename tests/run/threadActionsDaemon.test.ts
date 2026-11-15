@@ -14,6 +14,7 @@ import { readDurableQueue } from '../../src/mms/queue/durableQueue'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/harness/drivers/claudeCode/adapter'
 import type { AdapterHost, ProviderAdapter, ProviderCapabilities, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/harness/adapter'
 import { AGENT_MESSAGE_PREFIX, agentMessage, agentMessageText, TURN_TOKEN_KEY } from '../../src/mms/run/mcp/appTools'
+import { AGENT_REPEAT_WINDOW_MS } from '../../src/mms/run/mcp/appTools/thread'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
 import { MCP_ERROR_CODES, MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
@@ -634,7 +635,8 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       const sent: string[] = []
       const w = world(async (input, mcp, d) => {
         const target = input.threadId === w.parent.id ? w.other.id : w.parent.id
-        const reply = await call(mcp!, 'thread_send', { threadId: target, content: `hop from ${input.threadId === w.parent.id ? 'A' : 'B'}` })
+        // Each hop says something new: the same words again would be refused as a repeat, before the hop limit.
+        const reply = await call(mcp!, 'thread_send', { threadId: target, content: `hop from ${input.threadId === w.parent.id ? 'A' : 'B'} in ${input.runId}` })
         if (reply.error) refusal.first ??= reply
         else sent.push((parse(reply) as { runId: string }).runId)
         // The run the message started carries how many agent messages led to it.
@@ -655,26 +657,37 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       expect(first.outcome?.agentHops).toBeUndefined()
     })
 
-    it('a thread holds only a few messages from agents in its queue: the next is refused, and a person\'s Stop clears them, leaving what a person queued', async () => {
+    it('a thread holds only a few messages from each sending thread in its queue: the next is refused, another sender still gets in, and a person\'s Stop clears them, leaving what a person queued', async () => {
       const release = deferred()
       const results: Array<Awaited<ReturnType<typeof rpc>>> = []
+      const fromThird: Array<Awaited<ReturnType<typeof rpc>>> = []
+      let third = ''
       const w = world(async (input, mcp, _d, adapter) => {
         if (input.threadId === w.other.id) {
           await adapter.hold(input, release.promise)
           return 'held'
         }
+        if (input.threadId === third) {
+          fromThird.push(await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'note from the third thread' }))
+          return 'Sent.'
+        }
         for (let index = 0; index < 4; index += 1) results.push(await call(mcp!, 'thread_send', { threadId: w.other.id, content: `note ${index}` }))
         return 'Sent.'
       })
+      third = w.thread('Third').id
       await w.attach()
       await w.d.orch.send('hold', false, { threadId: w.other.id, clientRequestId: 'hold', awaitMode: 'ack' })
       await waitFor(() => w.turnsOf(w.other.id).length === 1, 'the held turn')
       await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
-      expect(results.slice(0, 3).every((response) => !response.error && !response.result?.isError)).toBe(true)
-      expect(results[3].error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'agent_queue_full' } })
-      const queuedRuns = results.slice(0, 3).map((response) => (parse(response) as { runId: string }).runId)
+      expect(results.slice(0, 3).map((response) => parse(response).delivery)).toEqual(['queued', 'queued', 'queued'])
+      expect(results[3].error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'agent_queue_full_per_sender' } })
+      // One chatty sender does not shut the others out: the third thread's message still joins the queue.
+      await w.d.orch.send(GO, false, { threadId: third, clientRequestId: 'go-third' })
+      expect(parse(fromThird[0])).toMatchObject({ queued: true, delivery: 'queued' })
+      const queuedRuns = [...results.slice(0, 3), fromThird[0]].map((response) => (parse(response) as { runId: string }).runId)
       const person = w.d.orch.enqueueForThread(w.other.id, { content: 'a note I typed' }, { source: 'gui' })
-      expect(readDurableQueue(w.d.store, w.other.id).map((item) => item.origin?.kind)).toEqual(['agent', 'agent', 'agent', undefined])
+      expect(readDurableQueue(w.d.store, w.other.id).map((item) => item.origin?.kind === 'agent' ? item.origin.threadId : 'person'))
+        .toEqual([w.parent.id, w.parent.id, w.parent.id, third, 'person'])
 
       // The person presses Stop: the running turn ends and the agents' queued messages go with it.
       await w.d.orch.stopThread(w.other.id, 'user')
@@ -682,6 +695,37 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       expect(readDurableQueue(w.d.store, w.other.id).map((item) => item.id)).toEqual([person.id])
       expect(w.messages(w.other.id).filter((message) => message.origin)).toEqual([])
       release.resolve()
+    })
+
+    it('the same text from the same thread again within the window is refused as a repeat and runs once; a retry with the first key returns the first result; another thread may send the same words', async () => {
+      const seen: Record<string, Awaited<ReturnType<typeof rpc>>> = {}
+      let third = ''
+      const w = world(async (input, mcp) => {
+        if (input.threadId === w.parent.id && input.prompt === GO) {
+          seen.first = await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'Run the checks.', clientRequestId: 'first' })
+          seen.repeat = await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'Run the checks.', clientRequestId: 'second' })
+          seen.retry = await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'Run the checks.', clientRequestId: 'first' })
+          seen.reworded = await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'Run the checks again, please.', clientRequestId: 'third' })
+        }
+        if (input.threadId === third) seen.otherSender = await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'Run the checks.' })
+        return 'ok'
+      })
+      third = w.thread('Third').id
+      await w.attach()
+      await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
+      const first = parse(seen.first) as { runId: string; delivery: string }
+      expect(first.delivery).toBe('started')
+      expect(seen.repeat.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'duplicate_message', retryAfterMs: expect.any(Number) } })
+      expect(seen.repeat.error!.data!.retryAfterMs as number).toBeGreaterThan(0)
+      expect(seen.repeat.error!.data!.retryAfterMs as number).toBeLessThanOrEqual(AGENT_REPEAT_WINDOW_MS)
+      expect(parse(seen.retry)).toMatchObject({ runId: first.runId, replayed: true })
+      expect(seen.reworded.error).toBeUndefined()
+      await w.d.orch.send(GO, false, { threadId: third, clientRequestId: 'go-third' })
+      expect(seen.otherSender.error).toBeUndefined()
+      // The repeated words reached the other thread's model once from the parent: its first message, and the reworded one.
+      await waitFor(() => w.d.engine.listRuns(w.other.id).every((run) => run.status === 'completed') && w.turnsOf(w.other.id).length === 3, 'the other thread\'s turns')
+      const fromParent = w.turnsOf(w.other.id).filter((turn) => String(turn.prompt).includes(`(${w.parent.id})`))
+      expect(fromParent.map((turn) => String(turn.prompt).includes('Run the checks.\n'))).toEqual([true, false])
     })
 
     it('an agent\'s own Stop of a run leaves the messages other agents queued on that thread', async () => {
