@@ -1,5 +1,6 @@
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import * as scheduleTimes from '../../src/mms/scheduled/computeNextRun'
 import { clockTime } from '../../src/mms/bots/chat/projection'
 import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
 import { ScheduledJobService } from '../../src/mms/scheduled/ScheduledJobService'
@@ -15,7 +16,7 @@ beforeEach(async () => {
   f = botFixture()
   ;({ botId } = await createBot(f))
 })
-afterEach(() => f.close())
+afterEach(() => { vi.restoreAllMocks(); f.close() })
 
 async function schedule(minutes = 60) {
   f.bots.addSchedule(botId, { when: { kind: 'interval', minutes }, prompt: 'Check the site.' }, 'owner')
@@ -28,6 +29,24 @@ function heartbeat(at: number) {
 const entry = () => f.book.list(botId)[0]!
 
 describe('bot schedules after downtime', () => {
+  it.each([1, 366])('an every-minute cron after %i days away searches only a short window', async (days) => {
+    const now = T0 + 4000
+    f.clock.now = T0 - days * 1440 * MIN
+    f.bots.addSchedule(botId, { when: { kind: 'cron', expr: '* * * * *' }, prompt: 'Check.' }, 'owner')
+    await f.bots.reconcileOnStartup()
+    heartbeat(f.clock.now)
+    let steps = 0
+    const compute = scheduleTimes.computeNextRun
+    vi.spyOn(scheduleTimes, 'computeNextRun').mockImplementation((...args) => {
+      if (++steps > 80) throw new Error('cron search exceeded its step budget')
+      return compute(...args)
+    })
+    const { inserted } = await f.tickSchedules(new Date(now))
+    expect(steps).toBeLessThanOrEqual(65)
+    expect(inserted).toHaveLength(1)
+    expect(f.store.activation(inserted[0]!)!.trigger).toMatchObject({ occurrenceAt: iso(T0) })
+  })
+
   it('passes the due time and missed counts into the saved trigger and the model request', async () => {
     const due = await schedule()
     heartbeat(T0)
