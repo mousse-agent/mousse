@@ -105,14 +105,11 @@ export function createBotMemoryAdmin(options: BotMemoryAdminOptions): BotMemoryA
     // Each entry goes through the owner's Forget, in one transaction: its words leave the journal, the chat and the
     // packs as they do for one, and its hash is kept so it is not learned again.
     forgetAll: (botId) => store.write(() => {
-      const forgotten = new Set<string>()
-      for (const entry of store.list(botId).entries) {
-        if (forgotten.has(entry.id) || store.versions(botId, entry.id).at(-1)?.status === 'forgotten') continue
-        const result = store.forget(botId, { id: entry.id, by: 'owner_ui' })
-        if ('error' in result) continue
-        for (const id of result.forgotten?.split(', ') ?? []) forgotten.add(id)
-      }
-      return forgotten.size
+      const entries = store.list(botId).entries
+      if (!entries.length) return 0
+      const result = store.forget(botId, { refs: entries.map((entry) => entry.ref), by: 'owner_ui' })
+      if ('error' in result) throw new Error(result.error)
+      return result.forgotten?.split(', ').length ?? 0
     }),
     wipeHistory: (botId) => store.wipe(botId, true),
     reset: (botId) => {
