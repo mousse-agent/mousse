@@ -7856,7 +7856,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return due === undefined ? undefined : new Date(due).toISOString()
   }
 
-  /** No active or resumable work, watchers, managed threads, joined messages, or due time within `within` milliseconds. */
+  /**
+   * No active or resumable work, watchers, managed threads, joined messages, or due time within `within` milliseconds.
+   * An unknown thread lookup answers not idle. Idle does not mean nothing waits on the owner: an open chat question
+   * or an ask a run carried on past holds no resumable turn, so alone it is idle unless a follow-up is due within the
+   * window. Callers that must not act behind the owner's back must also check the summary's `needsOwner`.
+   */
   isIdle(botId: string, { within = 30 * 60_000 }: { within?: number } = {}): boolean {
     if (this.store.activationsIn(botId, ['queued', 'running', 'waiting_grant', 'blocked'])
       .some((row) => row.status !== 'blocked' || workWaits(row))) return false
