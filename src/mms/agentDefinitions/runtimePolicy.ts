@@ -33,7 +33,7 @@ export const BUILTIN_TOOL_ALIASES: Readonly<Record<string, string>> = {
 const READ_FS_TOOLS = new Set(['read', 'grep', 'find', 'ls', 'git_status', 'git_diff'])
 const WRITE_FS_TOOLS = new Set(['write', 'edit'])
 const SCRIPT_TOOLS = new Set(['bash'])
-const ASK_TOOLS = new Set(['ask_user', 'present_plan'])
+const ASK_TOOLS = new Set(['ask_user'])
 const PATH_ARG_KEYS = ['path', 'file_path', 'filePath', 'directory', 'dir'] as const
 const SUPPORTED_WORKSPACE_INTERPRETERS = new Set(['bash', 'sh', 'shell', 'powershell', 'pwsh', 'cmd'])
 

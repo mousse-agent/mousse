@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
 import { MCP_ERROR_CODES, MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
 import type { BrowserRuntimePort } from '../../src/shared/browser/runtime'
+import { PLAN_TURN_NOTE } from '../../src/mms/run/mcp/appTools/assemble'
 import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
 import { callTool, listTools, VendorAdapter, vendorDaemon, type Mcp, type ToolCallResult, type VendorDaemon } from './appToolVendorFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
@@ -62,6 +63,16 @@ describe('a vendor thread\'s tool list across a plan turn and an agent turn', ()
     expect(agentNote).toContain('thread_fork')
     expect(agentNote.filter((name) => !planNote.includes(name))).toEqual(['thread_fork'])
     for (const name of agentNote) expect(onAgent.tools).toContain(name)
+
+    // Plan mode has no tool to submit a plan: the plan turn neither lists nor may use one, and is told its reply is the plan.
+    expect(vendor.inputs[0].mode).toBe('plan')
+    for (const name of ['present_plan', 'show_document']) {
+      expect(onPlan.tools).not.toContain(name)
+      expect(planNote).not.toContain(name)
+    }
+    expect(planNote).toContain('ask_user')
+    expect(vendor.bridges[0].turnPreamble).toContain(PLAN_TURN_NOTE)
+    expect(vendor.bridges[1].turnPreamble).not.toContain(PLAN_TURN_NOTE)
   }, 30_000)
 
   it('the usable-tools note leaves out tools Settings turned off and browser tools without a binding', async () => {
@@ -73,7 +84,7 @@ describe('a vendor thread\'s tool list across a plan turn and an agent turn', ()
     tools.enabledTools = tools.enabledTools!.filter((name) => name !== 'ask_user' && name !== 'create_task')
     await d.send('Hello')
     const note = usableNow(vendor.bridges[0].turnPreamble)
-    expect(note).toEqual(expect.arrayContaining(['delegate_task', 'present_plan', 'list_tasks', 'thread_read', 'thread_fork', 'queue_enqueue']))
+    expect(note).toEqual(expect.arrayContaining(['delegate_task', 'list_tasks', 'thread_read', 'thread_fork', 'queue_enqueue']))
     expect(note).not.toContain('ask_user')
     expect(note).not.toContain('create_task')
     expect(note.filter((name) => name.startsWith('browser_'))).toEqual([])
@@ -185,7 +196,7 @@ describe('listing and per-turn availability over the server', () => {
     const tools = await listTools(mcp)
     const expected = registry.listFor({ readOnly: false, modeCeiling: 'default' }).filter((tool) => tool.access === 'reads' || tool.access === 'readsOthers' || tool.readOnlySafe).map((tool) => tool.name).sort()
     expect(tools).toEqual(expected)
-    expect(tools).toEqual(expect.arrayContaining(['thread_read', 'queue_list', 'ask_user', 'present_plan']))
+    expect(tools).toEqual(expect.arrayContaining(['thread_read', 'queue_list', 'ask_user']))
     expect(tools).not.toContain('thread_fork')
     expect(tools).not.toContain('queue_enqueue')
     const refused = await callTool(mcp, 'queue_enqueue', { content: 'x' })

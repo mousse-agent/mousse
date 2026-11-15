@@ -280,7 +280,6 @@ function toolsFor(
   const host: AppToolHost = {
     delegation: () => undefined as never,
     askUser: async () => ({}),
-    presentPlan: () => {},
     tasks: () => undefined,
     profiler,
     threadMeta: (threadId: string) => metas[threadId] as never,

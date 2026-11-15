@@ -76,7 +76,7 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     const names = list.body.result.tools.map((tool: { name: string }) => tool.name).sort()
     // The fake host offers no browser, skills, quick actions, web or dev GUI: only the tools it can serve are listed.
     expect(names).toEqual(['answer_subagent', 'ask_user', 'continue_subagent', 'create_task', 'delegate_task', 'list_computers', 'list_models', 'list_subagents', 'list_tasks',
-      'present_plan', 'publish_applet', 'queue_edit', 'queue_enqueue', 'queue_list', 'queue_promote_to_steer', 'queue_remove', 'queue_reorder', 'task_cancel', 'task_status',
+      'publish_applet', 'queue_edit', 'queue_enqueue', 'queue_list', 'queue_promote_to_steer', 'queue_remove', 'queue_reorder', 'task_cancel', 'task_status',
       'thread_fork', 'thread_interrupt', 'thread_merge_back', 'thread_read', 'thread_wait', 'update_task'])
 
     const read = await rpc(server.url, attachment.token, call(4, 'thread_read'))
@@ -162,15 +162,15 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
   })
 
   it('a Claude call is accepted only with the active turn\'s token in its input', async () => {
-    const { server, bearer, registered, host } = await setup()
+    const { server, bearer, registered, tasks } = await setup()
     const claude = bearer({ instanceId: 'claude', binding: 'per_call', generation: 'claude|default|0|0' })
-    const plan = { title: 'P', markdown: '1.' }
-    const unstamped = await rpc(server.url, claude.token, call(1, 'present_plan', plan))
+    const task = { description: 'P' }
+    const unstamped = await rpc(server.url, claude.token, call(1, 'create_task', task))
     expect(unstamped.body.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_caller_not_live })
-    expect(host.presentPlan).not.toHaveBeenCalled()
-    const stamped = await rpc(server.url, claude.token, call(2, 'present_plan', { ...plan, [TURN_TOKEN_KEY]: registered.turn.turnToken }))
+    expect(tasks.list()).toHaveLength(0)
+    const stamped = await rpc(server.url, claude.token, call(2, 'create_task', { ...task, [TURN_TOKEN_KEY]: registered.turn.turnToken }))
     expect(stamped.body.result.isError).toBeUndefined()
-    expect(host.presentPlan).toHaveBeenCalledWith('thread-a', plan)
+    expect(tasks.list()).toHaveLength(1)
   })
 
   it('sends a tool\'s images as MCP image content', async () => {

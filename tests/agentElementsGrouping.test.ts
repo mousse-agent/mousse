@@ -194,8 +194,8 @@ describe('analyzeAssistantMessage', () => {
     expect(analyzeAssistantMessage([tool('tool-Question', 'q')], false).toolsOnly).toBe(false)
   })
 
-  it('keeps approval and plan cards out of a group', () => {
-    for (const type of ['tool-QuickAction', 'tool-ExitPlanMode', 'tool-PlanWrite']) {
+  it('keeps quick-action and plan cards out of a group', () => {
+    for (const type of ['tool-QuickAction', 'tool-PlanWrite']) {
       expect(analyzeAssistantMessage([tool(type, 'x')], false).toolsOnly).toBe(false)
     }
   })

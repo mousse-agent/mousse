@@ -440,8 +440,6 @@ const SEND_CONFLICTS: Readonly<Record<string, string>> = {
     'Too many agent messages in a row without a person in between: this message would be past the limit. Stop here and let a person reply before agents go on.',
   agent_queue_full:
     'The thread already has several messages from agents waiting in its queue. Wait for them to run (thread_wait), or try again later.',
-  plan_review_pending:
-    'The thread shows a plan waiting for your owner to review; a bot never answers it. Tell your owner, and send again once they have replied in that thread.',
   device_limit:
     "Your owner wrote to you from a device this computer holds below that thread's access, so you can't send to it in this turn. Ask your owner to send it from the computer, or to message the thread themselves."
 }

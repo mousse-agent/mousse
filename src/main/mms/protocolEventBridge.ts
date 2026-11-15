@@ -171,10 +171,6 @@ export function bridgeProtocolEvent(
       // optional — UI may refresh list
       return true
     }
-    case 'ui.document-open': {
-      broadcast('document:opened', event.data)
-      return true
-    }
     case 'ui.quick-action-created': {
       broadcast('quickActions:created', event.data)
       return true

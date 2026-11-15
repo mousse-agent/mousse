@@ -549,12 +549,10 @@ describe('a live Claude query', () => {
     const named = (index: number) => f.cli.processes[index].options.env?.CLAUDE_CODE_ENTRYPOINT
     await f.turn({ permissionMode: 'full' })
     expect(named(0)).toBe('mousse')
-    expect((f.cli.processes[0].options.settings as Record<string, unknown> | undefined)?.useAutoModeDuringPlan).toBe(false)
     // Idle: Auto needs the default name, so the process is replaced.
     await f.turn({ permissionMode: 'auto' })
     expect(f.cli.processes).toHaveLength(2)
     expect(named(1)).toBeUndefined()
-    expect((f.cli.processes[1].options.settings as Record<string, unknown> | undefined)?.useAutoModeDuringPlan).toBeUndefined()
     // Back in Full access, a named process again; it starts background work and is kept for it.
     await f.turn({ permissionMode: 'full' })
     expect(f.cli.processes).toHaveLength(3)
@@ -658,12 +656,13 @@ describe('a live Claude query', () => {
     session.close()
   })
 
-  it('switches the permission mode for each turn: plan, then bypass on the same process', async () => {
+  it('switches the permission mode for each turn: a read-only plan turn, then bypass on the same process', async () => {
     const { cli, turn } = fixture()
     await turn({ mode: 'plan' })
     const process = cli.last
-    expect(process.options.permissionMode).toBe('plan')
-    // A live query that may switch to bypass later is created with the flag even in plan mode.
+    // A plan turn is read-only by Mousse's hook and allowlist, in Claude Code's default mode (not its plan mode).
+    expect(process.options.permissionMode).toBe('default')
+    // A live query that may switch to bypass later is created with the flag even for a plan turn.
     expect(process.options.allowDangerouslySkipPermissions).toBe(true)
     const hook = (name: string) => process.options.hooks!.PreToolUse![0].hooks[0](
       { hook_event_name: 'PreToolUse', tool_use_id: 't', tool_name: name, tool_input: {} } as never, 't', { signal: new AbortController().signal }

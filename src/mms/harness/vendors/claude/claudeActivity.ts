@@ -218,11 +218,6 @@ export function claudeActivityStart(name: string, input: unknown, isRoot: boolea
       if (items && isRoot) return { kind: 'todo', items }
       break
     }
-    case 'ExitPlanMode': {
-      const text = str(args.plan)
-      if (text) return { kind: 'plan', text }
-      break
-    }
     case 'Agent':
     case 'Task': {
       const agentType = str(args.subagent_type)

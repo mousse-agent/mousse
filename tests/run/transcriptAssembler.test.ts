@@ -494,7 +494,7 @@ describe('TranscriptAssembler typed activity', () => {
     assembler.tool(piResult('done-1', 'bash', 'ok'))
     assembler.tool(piStart('open-1', 'bash', { command: 'sleep 99' }))
     assembler.tool(vendor('start', 'open-2', 'Agent', { activity: { kind: 'subagent', background: true } }))
-    assembler.tool(vendor('start', 'open-3', 'ExitPlanMode', { activity: { kind: 'plan', text: 'p' } }))
+    assembler.tool(vendor('start', 'open-3', 'update_plan', { activity: { kind: 'plan', text: 'p' } }))
     const forced = log.filter((entry) => entry === 'persist!').length
     assembler.closeOpenTools(reason)
     expect(log.filter((entry) => entry === 'persist!').length).toBe(forced + 1)
@@ -611,7 +611,7 @@ describe('TranscriptAssembler typed activity', () => {
       assembler.tool(vendor('start', 'e1', 'Edit', { activity: { kind: 'file_change', changes: [{ path: 'a.ts', change: 'update', diff: huge }] } as never }))
       assembler.tool(vendor('start', 'g2', 'mcp__srv__tool', { activity: { kind: 'generic', input: { blob: huge } } as never }))
       assembler.tool(vendor('start', 'a1', 'Agent', { activity: { kind: 'subagent', description: huge } as never }))
-      assembler.tool(vendor('start', 'p1', 'ExitPlanMode', { activity: { kind: 'plan', text: huge } as never }))
+      assembler.tool(vendor('start', 'p1', 'update_plan', { activity: { kind: 'plan', text: huge } as never }))
       for (const message of messages) expect(size(message)).toBeLessThan(100_000)
       expect(activityOf(messages[0])).toMatchObject({ changes: [{ path: 'a.ts', diffTruncated: true }] })
       expect(activityOf(messages[1])).toMatchObject({ input: { truncated: true } })

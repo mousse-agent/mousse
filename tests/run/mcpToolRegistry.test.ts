@@ -22,7 +22,6 @@ const PHASE5_TOOLS: Record<string, string> = {
   task_cancel: 'actsAsCaller',
   list_subagents: 'actsAsCaller',
   ask_user: 'actsAsCaller',
-  present_plan: 'actsAsCaller',
   create_task: 'actsAsCaller',
   update_task: 'actsAsCaller',
   list_tasks: 'actsAsCaller',
@@ -83,7 +82,7 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
     }
     expect((registry.get('delegate_task')!.inputSchema.properties as Record<string, unknown>).modeCeiling).toBeTruthy()
     // The older delegation names stay dispatchable in process but are never listed.
-    for (const hidden of ['create_subagent', 'create_subagents', 'recall_subagent', 'integrate_delegation', 'integrate_subagent', 'list_delegations', 'show_document'])
+    for (const hidden of ['create_subagent', 'create_subagents', 'recall_subagent', 'integrate_delegation', 'integrate_subagent', 'list_delegations'])
       expect(listed.some((tool) => tool.name === hidden), hidden).toBe(false)
   })
 
@@ -190,23 +189,24 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
     })
 
     it('per_call: a Claude call must carry the active turn token, which is stripped before the handler', async () => {
-      const { registry, ctx, registered, host } = await setup()
-      const claude = (args: Record<string, unknown>) => registry.call('present_plan', args, ctx({ binding: 'per_call', provider: 'claude' }))
-      await expect(claude({ title: 'P', markdown: '1.' })).rejects.toMatchObject({ code: 'mousse_caller_not_live' })
-      await expect(claude({ title: 'P', markdown: '1.', [TURN_TOKEN_KEY]: 'an-earlier-turn' })).rejects.toMatchObject({ code: 'mousse_caller_not_live' })
-      expect(host.presentPlan).not.toHaveBeenCalled()
-      await claude({ title: 'P', markdown: '1.', [TURN_TOKEN_KEY]: registered.turn.turnToken })
-      expect(host.presentPlan).toHaveBeenCalledWith('parent', { title: 'P', markdown: '1.' })
+      const { registry, ctx, registered, tasks } = await setup()
+      const claude = (args: Record<string, unknown>) => registry.call('create_task', args, ctx({ binding: 'per_call', provider: 'claude' }))
+      await expect(claude({ description: 'P' })).rejects.toMatchObject({ code: 'mousse_caller_not_live' })
+      await expect(claude({ description: 'P', [TURN_TOKEN_KEY]: 'an-earlier-turn' })).rejects.toMatchObject({ code: 'mousse_caller_not_live' })
+      expect(tasks.list()).toHaveLength(0)
+      const created = await claude({ description: 'P', [TURN_TOKEN_KEY]: registered.turn.turnToken })
+      expect(created.isError).toBeFalsy()
+      expect(tasks.list()).toHaveLength(1)
     })
 
     it('per_call: a runtime that tags calls by attempt must carry the active attempt token', async () => {
-      const { registry, ctx, turns, run, host } = await setup()
+      const { registry, ctx, turns, run, tasks } = await setup()
       turns.register(appTurn({ threadId: 'parent', runId: run.runId, attemptToken: 'attempt-2' }))
-      const pi = (token: string) => registry.call('present_plan', { title: 'P', markdown: '1.', [ATTEMPT_TOKEN_KEY]: token }, ctx({ binding: 'per_call', provider: 'pi:openai' }))
+      const pi = (token: string) => registry.call('create_task', { description: 'P', [ATTEMPT_TOKEN_KEY]: token }, ctx({ binding: 'per_call', provider: 'pi:openai' }))
       await expect(pi('attempt-1')).rejects.toMatchObject({ code: 'mousse_caller_not_live' })
-      expect(host.presentPlan).not.toHaveBeenCalled()
+      expect(tasks.list()).toHaveLength(0)
       await pi('attempt-2')
-      expect(host.presentPlan).toHaveBeenCalledTimes(1)
+      expect(tasks.list()).toHaveLength(1)
     })
   })
 
@@ -291,20 +291,19 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
   it('a tool Settings turned off is refused at call time with the reason, and writes no ledger row', async () => {
     const ledger = { start: vi.fn(() => 'inv'), commit: vi.fn(), failed: vi.fn() }
     const { registry, ctx, turns, run, host } = await setup('default', { toolLedger: () => ledger })
-    turns.register(appTurn({ threadId: 'parent', runId: run.runId, settingsEnabled: (name) => name !== 'present_plan' }))
-    const outcome = await registry.call('present_plan', { title: 'P', markdown: '1.' }, ctx())
-    expect(outcome).toEqual({ text: 'Tool "present_plan" is disabled in Settings → Skills & MCP.', isError: true })
-    expect(host.presentPlan).not.toHaveBeenCalled()
+    turns.register(appTurn({ threadId: 'parent', runId: run.runId, settingsEnabled: (name) => name !== 'ask_user' }))
+    const outcome = await registry.call('ask_user', { questions: [{ id: 'q1', prompt: 'Which?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }] }, ctx())
+    expect(outcome).toEqual({ text: 'Tool "ask_user" is disabled in Settings → Skills & MCP.', isError: true })
+    expect(host.askUser).not.toHaveBeenCalled()
     expect(ledger.start).not.toHaveBeenCalled()
   })
 
-  it('runs ask_user, present_plan and the task tools through the shared handlers for the caller thread', async () => {
+  it('runs ask_user and the task tools through the shared handlers for the caller thread, and no plan tool exists', async () => {
     const { registry, ctx, host, tasks } = await setup()
     const asked = await registry.call('ask_user', { questions: [{ id: 'q1', prompt: 'Which?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }] }, ctx())
     expect(JSON.parse(asked.text)).toEqual({ q1: 'a' })
     expect(host.askUser).toHaveBeenCalledWith('parent', expect.any(Array), expect.objectContaining({ timeoutMs: 60 * 60 * 1000 }))
-    await registry.call('present_plan', { title: 'Plan', markdown: '1. do' }, ctx())
-    expect(host.presentPlan).toHaveBeenCalledWith('parent', { title: 'Plan', markdown: '1. do' })
+    for (const removed of ['present_plan', 'show_document']) expect(registry.get(removed), removed).toBeUndefined()
     const created = JSON.parse((await registry.call('create_task', { description: 'Write tests' }, ctx())).text)
     expect(tasks.list().map((task) => task.id)).toEqual([created.id])
     const failed = await registry.call('update_task', { id: '' }, ctx())

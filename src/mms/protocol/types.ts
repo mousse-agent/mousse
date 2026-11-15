@@ -592,7 +592,6 @@ export type ProtocolEventType =
   | 'settings.changed'
   | 'mcp.changed'
   | 'ui.focus-intent'
-  | 'ui.document-open'
   | 'ui.quick-action-created'
   | 'ui.open-path'
   | 'ui.notify'

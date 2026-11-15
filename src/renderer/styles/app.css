@@ -2239,18 +2239,6 @@ html[data-chat-width='full'] .chat {
   color: var(--text-secondary);
 }
 
-.composer-implement-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 6px 12px;
-  border-radius: 8px;
-  font-size: 12px;
-  font-weight: 600;
-  flex-shrink: 0;
-  transition: background 0.15s, opacity 0.15s;
-}
-
 .composer-action-btn {
   display: inline-flex;
   align-items: center;

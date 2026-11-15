@@ -662,11 +662,6 @@ export interface QuestionAnswerOutcome {
   cancelReason?: string
 }
 
-export interface DocumentOpenPayload {
-  title: string
-  markdown: string
-}
-
 export interface DocumentTab {
   id: string
   title: string
@@ -836,11 +831,6 @@ export interface Task {
   createdAt: string
 }
 
-export interface PlanCardMetadata {
-  originalRequest: string
-  planMarkdown: string
-}
-
 /** Full transcript delivery; restoration snapshots replace retired presentation rows. */
 export interface ThreadMessagesSnapshot {
   threadId: string
@@ -956,6 +946,7 @@ export interface ChatMessage {
   permissionMode?: PermissionMode
   kind?:
     | 'message'
+    /** Legacy: how older threads stored a Plan-mode reply. Its content is the reply's text and shows as a plain reply. */
     | 'plan_card'
     | 'thinking'
     | 'tool_call'
@@ -1001,7 +992,6 @@ export interface ChatMessage {
    * failed, or cut short by a daemon restart).
    */
   compaction?: { manual?: true; kept?: 'stopped' | 'failed' | 'interrupted' }
-  planCard?: PlanCardMetadata
   thinking?: {
     content: string
     status?: 'processing' | 'complete'

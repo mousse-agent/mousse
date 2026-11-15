@@ -21,63 +21,17 @@ const base = (overrides: Partial<ChatMessage>): ChatMessage => ({
 })
 
 describe('mousseToUIMessages standardize layer', () => {
-  it('maps plan_card to an inline tool-PlanWrite approval card, not plain text', () => {
-    const out = mousseToUIMessages([
-      base({
-        id: 'plan-1',
-        role: 'assistant',
-        kind: 'plan_card',
-        content: '',
-        planCard: {
-          originalRequest: 'Build a login form',
-          planMarkdown: '# Implementation Plan\n\n1. Add form',
-        },
-      }),
-    ])
+  it("shows an older thread's stored plan card as a plain reply, with no approval card", () => {
+    // As older versions stored a Plan-mode reply: the plan is the content, with card metadata beside it.
+    const plan = '# Implementation Plan\n\n1. Add form'
+    const stored = { ...base({ id: 'plan-1', role: 'assistant', kind: 'plan_card', content: plan }), planCard: { originalRequest: 'Build a login form', planMarkdown: plan } }
+    const out = mousseToUIMessages([stored as ChatMessage])
     expect(out).toHaveLength(1)
     expect(out[0].role).toBe('assistant')
-    const part = out[0].parts[0] as unknown as Record<string, any>
-    expect(part.type).toBe('tool-PlanWrite')
-    expect(part.toolCallId).toBe('plan-1')
-    expect(part.state).toBe('output-available')
-    expect(part.input?.plan?.title).toBe('Build a login form')
-    expect(part.input?.plan?.summary).toBe('# Implementation Plan\n\n1. Add form')
+    expect(out[0].parts).toHaveLength(1)
+    expect(out[0].parts[0]).toMatchObject({ type: 'text', text: plan })
   })
 
-  it('falls back to message content when planMarkdown is empty', () => {
-    const out = mousseToUIMessages([
-      base({
-        id: 'plan-2',
-        role: 'assistant',
-        kind: 'plan_card',
-        content: '# From content',
-        planCard: { originalRequest: 'ship it', planMarkdown: '' },
-      }),
-    ])
-    const part = out[0].parts[0] as unknown as Record<string, any>
-    expect(part.type).toBe('tool-PlanWrite')
-    expect(part.input?.plan?.summary).toBe('# From content')
-  })
-
-  it('routes present_plan tool calls to the PlanWrite card', () => {
-    const out = mousseToUIMessages([
-      base({
-        id: 'tool-plan-1',
-        kind: 'build_tool_call',
-        toolCall: {
-          title: 'Plan tool present_plan',
-          summary: 'The assistant called a plan tool.',
-          details: ['Tool: present_plan'],
-          response: JSON.stringify({ title: 'Auth plan', markdown: '# Plan' }),
-          status: 'processing',
-          toolName: 'present_plan',
-          input: { title: 'Auth plan', markdown: '# Plan' },
-        },
-      }),
-    ])
-    const part = out[0].parts[0] as unknown as Record<string, unknown>
-    expect(part.type).toBe('tool-PlanWrite')
-  })
   it('uses structured provider toolName/input instead of title string-matching', () => {
     const out = mousseToUIMessages([
       base({

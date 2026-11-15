@@ -85,7 +85,7 @@ import { steerReleaseWindow, stopStrategy, type SteerDelivery } from '../run/Com
 import { agentMessageText, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentArchiveResult, type AgentCreatedThread, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, LAUNCHED_THREAD_ACCESS_CEILING, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
 import { BOT_THREAD_STARTS_PER_DAY, botRequestPrefix, THREAD_CREATE_MAX_ACTIVE_PER_THREAD, THREAD_CREATE_MAX_PER_RUN, THREAD_SEND_MAX_PER_RUN } from '../run/mcp/appTools/thread'
-import { botMessageText, isPersonMessage } from '../run/mcp/appTools/agentMessage'
+import { botMessageText } from '../run/mcp/appTools/agentMessage'
 
 /**
  * The owner's bot behind a start, message or Stop ("use your threads"): its id and name, the chat turn (activation) it
@@ -96,7 +96,7 @@ import { notOnThisComputerText } from '../../shared/bots/personal/computerLimit'
 import { createHash, randomUUID } from 'node:crypto'
 import { QueueCommands, type QueueIntent } from '../run/QueueCommands'
 import type { PlannedQueueCommand, QueueEffects } from '../queue/queueJournal'
-import { modeFactsFor, prepareSkills, sessionInstructions, settingsToolEnabled, turnPreamble } from '../run/mcp/appTools/assemble'
+import { modeFactsFor, PLAN_TURN_NOTE, prepareSkills, sessionInstructions, settingsToolEnabled, turnPreamble } from '../run/mcp/appTools/assemble'
 import type { AutomationToolHost } from '../run/mcp/appTools/automations'
 import type { AppearanceToolHost } from '../run/mcp/appTools/appearance'
 import { AUTOMATION_MANAGER_INSTRUCTIONS } from '../automations/automationManager'
@@ -3717,8 +3717,11 @@ export class OrchestratorService extends EventEmitter {
       ...(registered.bot ? { ...grantedSkills(skills, registered.bot.skills), toolImages: this.harness.catalog.toolImages(input.instanceId, input.model) } : skills)
     }) ?? registered
     const descriptor = typeof turn.mode === 'string' ? this.modeRegistry.getModeSync(turn.mode, { projectPath: turn.projectPath }) : undefined
-    // Agent and Plan run natively in the runtime; another mode's own instructions go into the preamble.
-    const modePrompt = descriptor && !['agent', 'plan', 'build'].includes(descriptor.id) ? descriptor.prompt : undefined
+    // Agent and Plan run natively in the runtime; another mode's own instructions go into the preamble. A person's
+    // Plan turn is told that its reply is the plan (a planning subagent follows its own brief).
+    const modePrompt = descriptor && !['agent', 'plan', 'build'].includes(descriptor.id)
+      ? descriptor.prompt
+      : descriptor?.id === 'plan' && !turn.subagent && !turn.bot ? PLAN_TURN_NOTE : undefined
     // A bot's turn runs on its own instructions (`botInstructions`) as its whole system text: Mousse's orchestration
     // and applet guidance would point it at tools its grant never holds. Its runtime takes them as its system prompt
     // (Claude Code's replaced one, Codex's developer instructions, added to Pi's), with none of the owner's own
@@ -3861,11 +3864,6 @@ export class OrchestratorService extends EventEmitter {
         this.delegationTools(this.getOrCreateSession(caller.threadId), caller.runId, caller.modeCeiling, caller.accessLevel),
       askUser: (threadId, questions, options) => this.questions.requestAnswers(questions, threadId, options),
       dismissQuestions: (threadId) => this.questions.dismissAllForThread(threadId),
-      presentPlan: (threadId, payload) => {
-        if (!threadId) return
-        const session = this.getOrCreateSession(threadId)
-        this.sessionAls.run(session, () => this.presentPlanCard(payload, threadId))
-      },
       tasks: (threadId) => (threadId ? this.getTasksForThread(threadId) : null),
       queueSnapshot: (threadId) => this.queueSnapshot(threadId),
       queueCommand: (threadId, command, options) => this.queueCommandAsAgent(threadId, command, options),
@@ -4080,10 +4078,6 @@ export class OrchestratorService extends EventEmitter {
     // wider is refused, so a phone held to Ask never gets a Full access turn through its bot.
     if (turnBot?.limit && isStricter(turnBot.limit, this.storedPermissionMode(threadId)))
       throw new DomainRpcError('device_limit', `The thread runs in ${describePermissionMode(this.storedPermissionMode(threadId))}, more than the device your owner wrote from may run (${describePermissionMode(turnBot.limit)}).`)
-    // A plan shown for review is answered by the person sending the next message ("Implement"): a bot's message would
-    // answer it for them, so it is refused while the thread's latest exchange is a plan nobody has replied to.
-    if (bot && this.awaitsPlanReview(threadId))
-      throw new DomainRpcError('plan_review_pending', 'The thread shows a plan waiting for your owner to review.')
     const sender = this.withAgentHops(options.actor)
     this.assertQueueOpen(threadId)
     // A turn's messages are counted from their receipts, with the ones still being sent: 20 per chat turn, however many
@@ -4105,7 +4099,7 @@ export class OrchestratorService extends EventEmitter {
         // An agent's message runs no wider than the agent's own run. The owner's bot's runs in the thread's own mode, as
         // the owner's own message would: the owner allowed it to message their threads.
         ...(bot ? {} : { permissionMode: this.runPermissionMode(sender.runId) }),
-        // Neither ever answers or skips a question, an approval or a plan review waiting in the thread.
+        // Neither ever answers or skips a question or an approval waiting in the thread.
         preemptQuestions: false,
         refuseWhileAsking: true
       }
@@ -4122,19 +4116,6 @@ export class OrchestratorService extends EventEmitter {
       queued: response.queued === true || (replayed && engine.getRun(response.runId)?.status === 'queued'),
       replayed,
       mode
-    }
-  }
-
-  /** Whether the thread's latest exchange is a plan card no one has replied to: a plan waiting for its person's review. */
-  private awaitsPlanReview(threadId: string): boolean {
-    try {
-      const messages = this.visibleMessagesWithoutLoading(threadId)
-      // Only a message the person sent answers it: never an agent's or a bot's, nor one a schedule sent.
-      const last = [...messages].reverse().find((message) => isPersonMessage(message) || message.kind === 'plan_card')
-      return last?.kind === 'plan_card'
-    } catch {
-      // Unreadable: a bot's message is refused rather than risk answering a review.
-      return true
     }
   }
 
@@ -4487,7 +4468,7 @@ export class OrchestratorService extends EventEmitter {
     const engine = this.requireRunEngine()
     // A bot's thread stops another thread's turn only as the owner's bot, from a chat turn the owner's message started.
     const bot = this.botSenderOf(options.actor, 'thread_interrupt')
-    // A Stop would close what waits on the owner there (an approval, a question, a plan to review): a bot leaves those to
+    // A Stop would close what waits on the owner there (an approval, a question): a bot leaves those to
     // them, with the same words as a message it may not send.
     if (bot) {
       // The Stop reaches the thread's subagents too: a question card or a saved approval (which a Stop closes as
@@ -4495,7 +4476,6 @@ export class OrchestratorService extends EventEmitter {
       const subtree = new Set([threadId, ...subagentDescendants(threadId, this.threadStore?.listAllThreads() ?? [])])
       const waiting = [...subtree].some((id) => this.questions.listPendingForThread(id).length > 0) || engine.approvals.listPending().some((row) => subtree.has(row.threadId))
       if (waiting) return { status: 'rejected', reason: 'questions_pending' }
-      if (this.awaitsPlanReview(threadId)) return { status: 'rejected', reason: 'plan_review_pending' }
     }
     const result = await this.stopThread(threadId, 'agent', { runId, clientRequestId: options.clientRequestId, requesterThreadId: options.actor.threadId, actor: options.actor })
     return this.agentRunCommandResult(engine, threadId, runId, result)
@@ -9887,42 +9867,6 @@ export class OrchestratorService extends EventEmitter {
     this.persist()
   }
 
-  private addPlanCardMessage(
-    originalRequest: string,
-    planMarkdown: string,
-    responseMetadata?: ChatMessage['responseMetadata']
-  ): ChatMessage {
-    const msg: ChatMessage = {
-      id: uuidv4(),
-      role: 'assistant',
-      kind: 'plan_card',
-      content: planMarkdown,
-      planCard: { originalRequest, planMarkdown },
-      responseMetadata,
-      timestamp: new Date().toISOString()
-    }
-    this.messages.push(msg)
-    this.emitMessageAdded(msg)
-    this.persist()
-    return msg
-  }
-
-  /** present_plan tool target: emit an inline approval card from any mode
-   * (notably Agent mode). The model decides when planning beats answering,
-   * editing, or delegating. */
-  private presentPlanCard(
-    payload: { title: string; markdown: string },
-    threadId?: string
-  ): void {
-    const markdown = payload.markdown?.trim()
-    if (!markdown) return
-    const title = payload.title?.trim()
-    const lastUser = [...this.messages].reverse().find((message) => message.role === 'user')
-    const originalRequest = title || lastUser?.content?.trim() || 'Implementation plan'
-    this.addPlanCardMessage(originalRequest, markdown)
-    if (threadId) this.emitThreadMessages(threadId, this.messages)
-  }
-
   private appletCatalogue(): string {
     const references = this.messages.filter(message => !message.hidden).flatMap(message => message.presentationParts ?? []).filter(part => part.type === 'applet').map(part => part.reference)
     return references.length ? '\nExisting applets in this conversation (use appletId and expectedRevision to revise; latest visible revision per applet):\n' + JSON.stringify([...new Map(references.map(ref => [ref.appletId, ref])).values()].slice(-20)) : ''
@@ -12939,41 +12883,6 @@ export class OrchestratorService extends EventEmitter {
 
     // Applets published by tool join the turn's last reply as fences, so they publish with it.
     const appletFences = stagedApplets.map(source => '\n\n```mousse-applet\n' + JSON.stringify(source) + '\n```').join('')
-    if (mode === 'plan') {
-      const planMarkdown = (stripActionBlocks(assistantText) || assistantText.trim() || 'No plan generated.') + appletFences
-      if (this.activeAssistantMessageId) {
-        const streamingId = this.activeAssistantMessageId
-        this.activeAssistantMessageId = null
-        this.removeMessage(streamingId)
-      }
-      // The plan card holds the turn's whole text, its notes before tool calls too.
-      for (const reply of this.transcript.closedReplies()) this.removeMessage(reply.id)
-      const planMsg = this.addPlanCardMessage(userContent, planMarkdown, responseMetadata)
-      if (this.appletStore && !executionFailed) {
-        planMsg.turnId = turnId
-        this.persist(true)
-        planMsg.presentationParts = publishAppletPresentation(this.appletStore, {threadId:session.threadId,messageId:planMsg.id,turnId,content:planMsg.content})
-        this.persist(true)
-        this.emitMessageUpdated(planMsg)
-      }
-      const response: OrchestratorResponse = {
-        message: planMsg.content,
-        actions: []
-      }
-      this.setTurnPhase(session.threadId, 'finalizing')
-      this.markRun(engineRunId, (engine, id) => engine.markFinalizing(id))
-      await checkpointTurn('completed')
-      this.persist(true)
-      this.setTurnPhase(session.threadId, 'completed')
-      markRunTerminal('completed', undefined, planMsg.content)
-      this.emit('response', response)
-      this.emitThreadMessages(session.threadId, session.messages)
-      settleOnce(false)
-      this.releaseSessionExecutionLease(session)
-      if (!suppressAutoQueueDrain) session.drainAfterSettle = true
-      return response
-    }
-
     // Vendor runtimes act through their own tools; `mousse-actions` blocks are a pi-loop protocol.
     const parsedActions: ReturnType<typeof parseActions> = []
     const actions = filterActionsForChatMode(parsedActions, mode)

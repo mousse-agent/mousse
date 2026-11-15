@@ -11,7 +11,6 @@ import { normalizeContextSettings, type ContextSettings, type LlmProviderOption 
 import type {
   BrowserElementAttachment,
   ContextUsageSnapshot,
-  PlanCardMetadata,
   QueuedMessage,
   SendExpectation,
   SkillChatMode,

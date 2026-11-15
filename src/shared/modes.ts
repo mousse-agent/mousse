@@ -34,8 +34,6 @@ export const TOOL_PERMISSION_MAP: Record<string, string> = {
   git_status: 'read',
   git_diff: 'read',
   ask_user: 'question',
-  present_plan: 'question',
-  show_document: 'read',
 }
 
 export function toolToPermissionKey(toolName: string): string {

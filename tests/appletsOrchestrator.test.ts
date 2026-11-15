@@ -231,7 +231,7 @@ it('keeps one reply row when a tool-published applet follows a reply that alread
   expect(replies[0].presentationParts?.filter((part) => part.type === 'applet')).toHaveLength(1)
 })
 
-it('publishes native plan-mode applets once while retaining the plan message', async () => {
+it('publishes plan-mode applets once on the plan, which is an ordinary reply', async () => {
   const { main, thread } = await fixture()
   const content = 'Plan explanation\n' + fence(source)
   vi.spyOn(main.claudeSubscription, 'chat').mockImplementation(async (input) => {
@@ -247,7 +247,8 @@ it('publishes native plan-mode applets once while retaining the plan message', a
     message.presentationParts?.some((part) => part.type === 'applet')
   )
   expect(published).toHaveLength(1)
-  expect(published[0].kind).toBe('plan_card')
+  // The plan is the turn's reply, not a card.
+  expect(published[0].kind).toBeUndefined()
   expect(published[0].content).toContain('Plan explanation')
   expect(main.applets.list(thread.id)).toHaveLength(1)
   const ref = reference(main, thread.id)
