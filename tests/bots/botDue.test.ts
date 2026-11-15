@@ -71,6 +71,24 @@ describe('next due time', () => {
     expect(f.bots.nextDueAt(botId)).toBeUndefined()
   })
 
+  it.each(['owner', 'failures', 'usage_limit'] as const)('skips enabled schedules while the bot is paused for %s', (reason) => {
+    const entry = schedule()
+    f.clock.now = Date.parse(entry.nextAt!) - MIN
+    f.store.setPaused(botId, reason, at(60))
+    expect(f.bots.schedulesOf(botId)[0]?.paused).toBe(false)
+    expect(f.bots.nextDueAt(botId)).toBeUndefined()
+    expect(f.bots.nextDueAt()).toBeUndefined()
+    expect(f.bots.isIdle(botId)).toBe(true)
+    // Pausing the bot excludes schedules only: fixed reminders can still be delivered.
+    reminder('r', 20)
+    expect(f.bots.nextDueAt(botId)).toBe(at(20))
+    f.store.settleReminder('r', 'cancelled')
+    f.store.setPaused(botId, null)
+    expect(f.bots.nextDueAt(botId)).toBe(entry.nextAt)
+    expect(f.bots.nextDueAt()).toBe(entry.nextAt)
+    expect(f.bots.isIdle(botId)).toBe(false)
+  })
+
   it('ignores a deleted bot across all sources, even with rows still present', () => {
     reminder('r', 1)
     question('q', 2)
