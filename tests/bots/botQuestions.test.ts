@@ -6,7 +6,7 @@
  * What each case covers, by what can happen to a question:
  * - states: open, moved on, answered, withdrawn (stopped turn, wall), redacted (Forget)
  * - actors: a tap, a typed reply, another message, a second tap (or another device), Stop, escalate before and after
- * - owner's words: a tapped label never counts as theirs (threads, models, and its text says so); a typed answer does
+ * - owner's words: a tapped label never counts as theirs (threads, models, and its turn says so); a typed answer does
  * - limits: one per chat turn, six open per bot, twenty a day (questions from work: botWorkQuestions.test.ts)
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -22,7 +22,7 @@ import type { BotModelOption } from '../../src/shared/bots/personal/methods'
 import type { PreparedBotTurn } from '../../src/mms/bots/activation/dispatcher'
 import { QUESTION_AFTER_ASK_TEXT, QUESTION_ASKED_TEXT, QUESTIONS_ENOUGH_TEXT } from '../../src/shared/bots/personal/questions'
 import { BOT_ASK_DEFERRED_TEXT } from '../../src/mms/bots/activation/BotEngine'
-import { BOT_THREADS_READ_ONLY_TURN_ANSWER, BOT_THREADS_READ_ONLY_TURN_LINE, botInstructions } from '../../src/mms/bots/instructions'
+import { BOT_THREADS_READ_ONLY_TURN_NOTE, botInstructions } from '../../src/mms/bots/instructions'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -128,7 +128,7 @@ describe('a question in the chat', () => {
     expect(JSON.parse((await tool('use_model', typed.prepared, typed.payload.threadId, { model: 'Opus 4.6', scope: 'now' })).text)).toMatchObject({ ok: true })
   })
 
-  it('with "use your threads", a tapped answer’s turn is told it only reads threads and why; a typed one is told it may act', async () => {
+  it('with "use your threads", a tapped answer’s turn is told in its preamble that it only reads threads, and why; its system text is a typed turn’s', async () => {
     f.host.instructions = (bot) => botInstructions(bot)
     const granting = await chatTurn('Send the build to my design thread.', 'grant')
     granting.prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'You asked me to message a thread.' })
@@ -141,14 +141,14 @@ describe('a question in the chat', () => {
     await tap(bubble.question!.questionId, 'Gold')
     const tapped = await start(f, f.store.laneActivations(botId, 'chat', ['running'])[0]!.id)
     expect(sends(tapped.prepared)).toBe(false)
-    expect(tapped.prepared.instructions).toContain(`- Use your owner's threads: ${BOT_THREADS_READ_ONLY_TURN_ANSWER}`)
-    expect(tapped.prepared.instructions).toContain(BOT_THREADS_READ_ONLY_TURN_LINE)
+    expect(tapped.prepared.preamble).toContain(BOT_THREADS_READ_ONLY_TURN_NOTE)
     await finish(f, tapped.payload, 'completed', { text: 'I’ll send Gold when you reply.' })
 
     const typed = await chatTurn('Send Gold.', 'typed-gold')
     expect(sends(typed.prepared)).toBe(true)
-    expect(typed.prepared.instructions).not.toContain(BOT_THREADS_READ_ONLY_TURN_ANSWER)
-    expect(typed.prepared.instructions).not.toContain(BOT_THREADS_READ_ONLY_TURN_LINE)
+    expect(typed.prepared.preamble ?? '').not.toContain(BOT_THREADS_READ_ONLY_TURN_NOTE)
+    // The system text is the same on both turns: a changed one would start a new Codex thread and miss the cache.
+    expect(tapped.prepared.instructions).toBe(typed.prepared.instructions)
   })
 
   it('a reply in the owner’s own words on the bubble answers it, and those words are theirs', async () => {
