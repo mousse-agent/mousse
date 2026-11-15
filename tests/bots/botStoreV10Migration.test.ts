@@ -112,10 +112,22 @@ describe('bots.db v9 → v10', () => {
     }
     for (const tell of ['never', '', 1])
       expect(() => store!.run('UPDATE bot_messages SET tell = ?', tell)).toThrow()
+    store.run('UPDATE bot_messages SET tell_at = ?', T)
     for (const tell of ['now', 'soon', 'later', null])
       expect(() => store!.run('UPDATE bot_messages SET tell = ?', tell)).not.toThrow()
     for (const table of tables)
       expect(store.get('SELECT strict FROM pragma_table_list WHERE name = ?', table)).toEqual({ strict: 1 })
+  })
+
+  it('refuses a telling without its release time', () => {
+    buildV9()
+    store = new BotStore({ profileHome: profile })
+    for (const tell of ['now', 'soon', 'later']) {
+      expect(() => store!.run('UPDATE bot_messages SET tell = ?, tell_at = NULL', tell)).toThrow()
+      store.run('UPDATE bot_messages SET tell = ?, tell_at = ?', tell, T)
+      expect(() => store!.run('UPDATE bot_messages SET tell_at = NULL')).toThrow()
+      store.run('UPDATE bot_messages SET tell = NULL, tell_at = NULL')
+    }
   })
 
   it('uses the partial index to find only rows waiting to be told', () => {
@@ -123,7 +135,7 @@ describe('bots.db v9 → v10', () => {
     store = new BotStore({ profileHome: profile })
     for (const [id, tell, tellAt, toldAt] of [
       ['pending', 'now', T, null], ['future', 'later', '2026-11-17T08:00:00.000Z', null],
-      ['told', 'soon', T, T], ['never', null, T, null], ['no-time', 'later', null, null]
+      ['told', 'soon', T, T], ['never', null, T, null]
     ]) {
       store.run("INSERT INTO bot_messages(id, bot_id, at, author, kind, text, tell, tell_at, told_at) VALUES (?, 'b', ?, 'bot', 'text', 'Report', ?, ?, ?)",
         id, T, tell, tellAt, toldAt)
