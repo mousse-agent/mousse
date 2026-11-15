@@ -16,7 +16,8 @@ export function ChatsSidebar() {
   const snapshot = useChatsStore((s) => s.snapshot)
   const activeId = useChatsStore((s) => s.activeChatId)
   const openChat = useChatsStore((s) => s.openChat)
-  const activeBotId = useChatsStore((s) => s.activeBotId)
+  // A bot being opened shows as chosen from the click on (`openingBotId`).
+  const activeBotId = useChatsStore((s) => s.openingBotId ?? s.activeBotId)
   const openBot = useChatsStore((s) => s.openBot)
   const bots = useBotsStore((s) => s.bots)
   const happy = useBotsStore((s) => s.happy)
