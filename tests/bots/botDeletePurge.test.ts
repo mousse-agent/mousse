@@ -26,7 +26,7 @@ async function workedBot(description = 'Tidy my notes every evening.'): Promise<
   await runDispatch(f, run.id, 1, {
     text: 'Tidied what I could.',
     during: (prepared) => {
-      expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(f.base, 'Notes', 'a.md') } })).toMatchObject({ ok: false, refused: {} })
+      expect(prepared.authority.check({ kind: 'builtin', tool: 'shell', nativeName: 'Bash', args: { command: 'ls' } })).toMatchObject({ ok: false, refused: {} })
     }
   })
   f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 60 }, prompt: 'Tidy.' }, 'bot')
