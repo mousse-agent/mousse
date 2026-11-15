@@ -916,10 +916,11 @@ export class BotMemoryStore {
       let changed = false
       const next = chips.map((chip) => {
         const value = chip as { icon?: unknown; highlight?: unknown; title?: unknown }
+        if (value?.icon !== 'memory') return chip
         const matches = value.highlight === highlight
           || (typeof value.highlight === 'string' && value.highlight.startsWith(`${highlight} · put away `))
           || (typeof value.title === 'string' && value.title.split('\n').includes(highlight))
-        if (value?.icon !== 'memory' || !matches) return chip
+        if (!matches) return chip
         changed = true
         return { icon: 'memory', text: 'remembered something' }
       })
