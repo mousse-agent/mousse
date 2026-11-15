@@ -191,7 +191,7 @@ describe('memory tools', () => {
       title: 'Put away:\nFirst standing note.\nSecond standing note.'
     }])
     fx.store.append({ botId: 'ada', kind: 'bot_msg', sourceKey: 'bm:combined', who: 'bot', text: 'Saved.', json: { chips } })
-    await call('memory_forget', 'ada-home', { id: 'm1', reason: 'Remove the first note.' })
+    await call('memory_forget', 'ada-home', { id: 'm3', reason: 'Remove the combined notes.' })
     expect(fx.store.journal('ada').find(r => r.sourceKey === 'bm:combined')?.json?.chips)
       .toEqual([{ icon: 'memory', text: 'remembered something' }])
   })

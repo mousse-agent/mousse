@@ -844,12 +844,25 @@ export class BotMemoryStore {
       for (const seq of seqs) {
         const row = this.journalRow(botId, seq)!
         const copies = row.redactedAt ? [] : copiesOf(row.text, seq)
-        redact(row)
-        copies.forEach(redact)
         for (const copy of copies) cited.add(copy.seq)
       }
       for (const seq of cited)
         for (const memory of this.all('SELECT DISTINCT id FROM bot_memories WHERE bot_id = ? AND source_seq = ?', botId, seq)) ids.add(memory.id as string)
+      // Resolve the current top absorber before any write: removing just a hidden original
+      // would leave its words in the combined entry. The owner decides what to save again.
+      for (const id of ids) {
+        let entry = this.current(botId, id)
+        const seen = new Set([id])
+        while (entry?.reason?.startsWith('merged into ')) {
+          const target = parseMemoryRef(entry.reason.slice(12))
+          if (!target || seen.has(target.id)) break
+          seen.add(target.id)
+          entry = this.current(botId, target.id)
+        }
+        if (entry && entry.id !== id && entry.status !== 'forgotten' && !ids.has(entry.id))
+          return { error: `${id} was combined into ${memoryRef(entry.id, entry.version)}, which still holds its words. To forget them, forget ${memoryRef(entry.id, entry.version)}, then save again what should stay.` }
+      }
+      for (const seq of cited) redact(this.journalRow(botId, seq)!)
       // Only the current version's absorption counts: putting an entry back breaks that link.
       // Match the absorbing id across all its versions and visit newly found ids to follow chains.
       const absorbed = this.all(`SELECT current.id, current.reason FROM bot_memories current
