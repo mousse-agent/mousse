@@ -2183,6 +2183,16 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!draft) return
     const later = this.store.get("SELECT 1 FROM bot_messages WHERE activation_id = ? AND author = 'bot' AND kind = 'text'", row.id)
     if (later) return this.clearChatDraft(row)
+    const latest = this.store.lastMainDispatch(row.id)
+    // Cleanup can also run during startup, before postMissingReplies. A completed continuation's
+    // saved result wins there too. Its executor may still be delivering the final text in-process.
+    if (latest && latest.n > draft.n) {
+      if (this.pendingReplies.has(`${row.id}:${latest.n}`)) return
+      if (row.status === 'done' && latest.endedAt && row.result?.trim()) {
+        this.postReply(row, latest, row.result, false)
+        return
+      }
+    }
     const dispatch = this.store.dispatch(row.id, draft.n)
     if (dispatch) this.postReply(row, dispatch, draft.text, false, draft.replyTo)
   }
