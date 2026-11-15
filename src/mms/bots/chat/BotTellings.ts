@@ -22,10 +22,13 @@ export class BotTellings {
   }
   read(): void {
     for (const [id, rows] of this.banners) {
-      const unread = rows.filter(r => this.unread(r))
-      if (unread.length === rows.length) continue
-      if (unread.length) this.announce(unread, false, id)
-      else { this.emit({ id, rows: [], title: '', body: '', kind: 'completed', sound: false }); this.banners.delete(id) }
+      if (rows.some(r => this.unread(r))) continue
+      const now = Date.parse(this.store.now())
+      if (rows.some(r => (this.retryAt.get(r.botId) ?? 0) > now)) continue
+      this.attempt(rows, now, () => {
+        this.emit({ id, rows: [], title: '', body: '', kind: 'completed', sound: false })
+        this.banners.delete(id)
+      })
     }
   }
   next(botId?: string): number | undefined {
