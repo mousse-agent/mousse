@@ -204,3 +204,27 @@ it('does not label a live reply as closed-window catch-up because later rows wai
   expect(events[0].title).not.toContain('While Mousse was closed')
   expect(events[0].sound).toBe(true)
 })
+it.each([
+  ['- **Check the build**\nNot in the banner', 'Check the build'],
+  ['x'.repeat(160), `${'x'.repeat(139)}…`]
+])('keeps the existing banner wording for %s', async (text, body) => {
+  f.bots.setTellingWindows(1)
+  const events: any[] = []; f.bots.events.on('tell', e => events.push(e))
+  f.bots.chat.post({ botId, author: 'bot', kind: 'text', text })
+  await f.bots.deliverDueReminders()
+  expect(events[0].body).toBe(body)
+})
+it.each([false, true])('keeps question answers and nudge wording (nudge=%s)', async nudge => {
+  f.bots.setTellingWindows(1)
+  const activation = f.store.listActivations(botId)[0]!
+  f.store.insertQuestion({ id: 'banner-question', botId, activationId: activation.id, dispatchN: 1, lane: 'chat',
+    spec: { question: 'Which flat?', choices: ['Flat A', 'Flat B'] }, createdAt: f.store.now() })
+  const question = f.bots.chat.post({ botId, author: 'bot', kind: 'text', text: 'Which flat?', questionId: 'banner-question' })
+  if (nudge) {
+    f.store.run('UPDATE bot_messages SET told_at = ? WHERE id = ?', f.store.now(), question.id)
+    f.bots.chat.post({ botId, author: 'bot', kind: 'text', text: 'Still need your answer on this one.', questionId: 'banner-question', replyTo: question.id })
+  }
+  const events: any[] = []; f.bots.events.on('tell', e => events.push(e))
+  await f.bots.deliverDueReminders()
+  expect(events[0].body).toBe(`${nudge ? 'Still need your answer: ' : ''}Which flat? — Flat A / Flat B`)
+})
