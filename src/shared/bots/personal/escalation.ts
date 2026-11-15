@@ -215,6 +215,9 @@ export function permissionProblem(value: unknown): string | undefined {
   return 'The permission is not one a bot can ask for.'
 }
 
+/** What a bot is told it may ask for, after an ask it wrote wrongly. */
+export const WHAT_TO_ASK_TEXT = "Ask for a tool, a skill, the tools of one of your owner's MCP servers, a limit, or to export your memory."
+
 /** Why a value is not something `escalate` may ask for, or undefined when it is one. */
 export function askProblem(value: unknown): string | undefined {
   if (value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 1 && 'ask' in value)
