@@ -143,7 +143,8 @@ export interface BotModelPick {
 
 /**
  * A bot's models (#673): Talk for every chat turn, and one per work level. A bot made with picks has a pick on every
- * row. null is "Mousse chooses" (by usage), only on a bot from before picks until its owner picks that row. The simple
+ * row. null is a row a bot from before picks has not been given yet: it runs on another picked row's model
+ * (`pickSourceOf`: Medium work's, else Talk's), and only while no row is picked does Mousse choose (by usage). The simple
  * view shows Talk and Work, where Work is all three levels on one pick; Advanced shows the levels apart.
  */
 export interface BotModelSlots {

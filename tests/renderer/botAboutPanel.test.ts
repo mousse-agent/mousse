@@ -130,6 +130,28 @@ describe('About this bot', () => {
       expect(host.textContent).not.toMatch(/Automatic|By usage/)
     })
 
+    it('a row with no pick says which model it runs on: Work the same as Talk, Light and Hard the same as Medium work', async () => {
+      const talk = { instanceId: 'pi:key', model: 'opus', effort: 'low' }
+      withRows({ ...EMPTY, talk })
+      await show()
+      expect(picker('Work')?.getAttribute('aria-label')).toBe("Inbox helper's Work model: Same as Talk")
+      expect(picker('Work')?.title).toBe("Runs on Opus on Anthropic API, Talk's model. Pick a model to change it.")
+      // Medium work picked: Light and Hard follow it, not Talk.
+      act(() => root.unmount())
+      root = createRoot(host)
+      withRows({ ...EMPTY, talk, medium: { instanceId: 'claude', model: 'haiku' } })
+      await show()
+      expect(labels()).toEqual(['Talk', 'Light work', 'Medium work', 'Hard work'])
+      expect(picker('Hard work')?.getAttribute('aria-label')).toBe("Inbox helper's Hard work model: Same as Medium work")
+      expect(picker('Light work')?.title).toBe("Runs on Haiku on Claude Code, Medium work's model. Pick a model to change it.")
+      // Talk's entry no longer offers its model: the row says so instead of naming it.
+      act(() => root.unmount())
+      root = createRoot(host)
+      withRows({ ...EMPTY, talk: { instanceId: 'pi:gone', model: 'opus' } })
+      await show()
+      expect(picker('Work')?.title).toBe("Runs on Talk's model, which is not available now. Pick a model to change it.")
+    })
+
     it('a pick saves only its own rows, so a change the bot made meanwhile stays', async () => {
       withRows(EMPTY)
       await show()
@@ -198,7 +220,8 @@ describe('About this bot', () => {
       vi.mocked(fake.client.setSlots).mockRejectedValueOnce({ code: 'model_unavailable', message: 'The model you picked is not available now. Pick another one.' })
       await pick('Work', 'Opus', 'Anthropic API')
       expect(host.querySelector('[role="alert"]')?.textContent).toBe('The model you picked is not available now. Pick another one.')
-      expect(picker('Work')?.getAttribute('aria-label')).toBe('Inbox helper\'s Work model: Pick a model')
+      // Back to what it was: no pick, so it runs on Talk's model (which is not available now either).
+      expect(picker('Work')?.getAttribute('aria-label')).toBe("Inbox helper's Work model: Same as Talk")
     })
   })
 

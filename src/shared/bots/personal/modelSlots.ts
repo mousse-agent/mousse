@@ -244,20 +244,39 @@ export interface BotTurnModel {
   depth: BotDepth
 }
 
+/** Where a row with no pick of its own borrows one, first that has one: Medium work, then Talk, then the other work rows. */
+const BORROW_ORDER: readonly BotModelSlotKey[] = ['medium', 'talk', 'light', 'hard']
+
+/**
+ * The row whose pick `key` runs on: its own while it has one, else the first picked row in `BORROW_ORDER` (a Work row
+ * left unpicked runs on Medium work's model, else Talk's). Undefined when no row of the bot is picked: Mousse chooses,
+ * as on a bot from before picks. A row never borrows a model by name from an older bot, only a pick on an entry, so an
+ * unpicked row never runs on a model the owner did not pick.
+ */
+export function pickSourceOf(slots: BotModelSlots, key: BotModelSlotKey): BotModelSlotKey | undefined {
+  if (isPinned(slots[key])) return key
+  return BORROW_ORDER.find((row) => row !== key && isPinned(slots[row]))
+}
+
 /**
  * The model of an activation's turn. A chat turn takes Talk; a run takes the row of its level: `set_depth now` in that
  * run, else the level its work names (`work_start`), else the bot's standing level (`set_depth always`, medium unless
- * changed). An activation's own pick (`use_model now`, an automation's model by hand) replaces the row. A pick keeps its
- * model and reasoning level whatever the depth; only a row on which Mousse chooses follows it.
+ * changed). A row with no pick runs on the row it borrows from (`pickSourceOf`), and `slot` names that row, so its
+ * stuck state and usage limit are the ones checked. An activation's own pick (`use_model now`, an automation's model
+ * by hand) replaces the row. A pick keeps its model and reasoning level whatever the depth; only a row on which Mousse
+ * chooses follows it.
  */
 export function turnModelOf(spec: Pick<BotThreadSpec, 'model' | 'slots'>, activation: { lane: BotLane; trigger: BotActivationTrigger; modelOverride?: BotModelOverride | null }): BotTurnModel {
   const override = activation.modelOverride ?? undefined
   const depth = override && BOT_DEPTHS.includes(override.depth) ? override.depth : startDepthOf(spec, activation)
-  const slot: BotModelSlotKey = activation.lane === 'chat' ? 'talk' : DEPTH_LEVEL[depth]
+  const level: BotModelSlotKey = activation.lane === 'chat' ? 'talk' : DEPTH_LEVEL[depth]
   const own: BotModelPick | null = override?.mode === 'named'
     ? copyPick({ model: override.model, ...(override.instanceId ? { instanceId: override.instanceId } : {}), ...(override.effort ? { effort: override.effort } : {}), ...(override.credential ? { credential: override.credential } : {}), ...(override.account ? { account: override.account } : {}) })
     : null
-  return { slot, pick: own ?? slotsOf(spec)[slot], depth }
+  if (own) return { slot: level, pick: own, depth }
+  const slots = slotsOf(spec)
+  const slot = pickSourceOf(slots, level) ?? level
+  return { slot, pick: slots[slot], depth }
 }
 
 /**
