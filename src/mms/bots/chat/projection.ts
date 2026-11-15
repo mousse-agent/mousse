@@ -85,6 +85,8 @@ function oneLine(text: string, max = 120): string {
 }
 
 export interface PostInput {
+  /** Journal provenance only: the chat keeps the original author and text. */
+  external?: boolean
   botId: string
   author: 'owner' | 'bot'
   kind: BotMessageKind
@@ -297,7 +299,8 @@ export class BotChatProjection {
         ...(input.activationId ? { activationId: input.activationId } : {}),
         ...(input.threadId ? { threadId: input.threadId } : {}),
         sourceKey: `bm:${id}`,
-        who: input.author === 'owner' ? 'owner' : input.kind === 'error' ? 'mousse' : 'bot',
+        who: input.external ? 'tool' : input.author === 'owner' ? 'owner' : input.kind === 'error' ? 'mousse' : 'bot',
+        ...(input.external ? { external: true } : {}),
         text: shown.journal || (input.error?.text ?? ''),
         json: {
           v: 1,

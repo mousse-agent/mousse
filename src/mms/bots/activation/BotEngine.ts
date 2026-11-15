@@ -1,3 +1,4 @@
+import { requestJournalRows } from '../memory/requestFrames'
 import { grantedPermissions, permissionId, restorePermission, withoutPermission } from '../chat/projection'
 import { computerSwitchOf } from '../../../shared/bots/personal/computerLimit'
 import { randomUUID } from 'node:crypto'
@@ -1740,7 +1741,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /** A journal row in the caller's `bots.db` transaction (engine events, bot-context.md §4). */
   private journalInTx(row: BotJournalInput): void {
-    this.host.journal?.appendInTx(this.store.db, row)
+    for (const part of row.kind === 'run_start' ? requestJournalRows(row) : [row]) this.host.journal?.appendInTx(this.store.db, part)
   }
 
   /**
@@ -7942,6 +7943,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   private async deliverWake(wake: BotReminderRow, late: boolean): Promise<void> {
     const fired: BotWakeFired | null = wake.fired ?? (wake.event ? { kind: 'ended', reason: 'expired' } : null)
+    // The owner sees the original label; titles and command errors remain outside data in memory.
+    const external = Boolean((fired?.kind === 'thread' || fired?.kind === 'pr') && fired.title
+      || fired?.kind === 'watcher' && fired.message)
     const input = wakeInput({ brief: wake.text, setAt: wake.createdAt, event: wake.event, fired, chain: Math.max(1, wake.chain), clock: clockTime, ...(late && !wake.event ? { late: clockTime(wake.dueAt) } : {}) })
     const paused = Boolean(this.store.registry(wake.botId)?.pausedReason)
     const activationId = newActivationId()
@@ -7953,12 +7957,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (!paused && !refused) {
         this.store.settleReminder(wake.id, 'delivered', { activationId })
         // A quiet line says why the bot speaks unasked.
-        this.chat.post({ id: `${WAKE_LINE_PREFIX}${wake.id}`, botId: wake.botId, author: 'bot', kind: 'notice', text: wakeFiredLabel(fired), lane: 'chat' })
+        this.chat.post({ id: `${WAKE_LINE_PREFIX}${wake.id}`, botId: wake.botId, author: 'bot', kind: 'notice', text: wakeFiredLabel(fired), external, lane: 'chat' })
         return true
       }
       const id = `bm_${wake.id}`
       this.store.settleReminder(wake.id, 'delivered', { messageId: id })
-      this.chat.post({ id, botId: wake.botId, author: 'bot', kind: 'run_report', text: `${wakeFiredLabel(fired)}. I didn't follow up on this: ${paused ? 'I\'m paused.' : refused!.message}\n\n${wake.text}`, lane: 'chat' })
+      this.chat.post({ id, botId: wake.botId, author: 'bot', kind: 'run_report', text: `${wakeFiredLabel(fired)}. I didn't follow up on this: ${paused ? 'I\'m paused.' : refused!.message}\n\n${wake.text}`, external, lane: 'chat' })
       return false
     })
     if (started === undefined) return
