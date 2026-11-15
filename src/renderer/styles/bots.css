@@ -414,6 +414,8 @@ button.bot-image:focus-visible > img { opacity: 0.82; }
 .bot-prompt-more { margin-top: 6px; font-size: 12px; font-weight: 500; color: var(--accent); }
 .bot-prompt-more:hover { color: var(--text-primary); }
 .bot-prompt-field { display: block; width: 100%; min-height: 4.8em; max-height: 320px; padding: 0; border: 0; outline: none; resize: none; background: transparent; color: var(--text-primary); font: inherit; font-size: 13px; line-height: 1.6; overflow-y: auto; }
+/* The card carries the fill; light and acrylic themes paint every textarea white. */
+html[data-theme] .bot-prompt-card textarea.bot-prompt-field { background: transparent; }
 .bot-prompt-count { margin-top: 8px; text-align: right; font-size: 11px; font-variant-numeric: tabular-nums; color: var(--text-secondary); }
 .bot-prompt-count.is-over, .bot-prompt-error { color: var(--danger, #e79090); }
 .bot-prompt-actions { display: flex; align-items: center; gap: 8px; margin-top: 10px; }

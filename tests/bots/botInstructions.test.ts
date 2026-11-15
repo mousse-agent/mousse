@@ -78,7 +78,7 @@ describe('BOT_BASE_INSTRUCTIONS', () => {
   it('asks for short, casual replies that answer first, in chat replies and in reports', () => {
     expect(BOT_BASE_INSTRUCTIONS).toContain('Answer first; no preamble, recap or sign-off')
     expect(BOT_BASE_INSTRUCTIONS).toContain('only the detail the question needs')
-    expect(BOT_RUN_INSTRUCTIONS).toContain('then only what they must decide or know, written like a chat reply')
+    expect(BOT_RUN_INSTRUCTIONS).toContain('your report, your only message to them, written like a chat reply: the result first, then only what they must decide or know')
   })
 
   it('says the owner changed their words only while replies from before the change are in view', () => {
