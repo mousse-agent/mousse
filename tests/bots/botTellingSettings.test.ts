@@ -29,13 +29,28 @@ it('omits an unset line and keeps service times in HH:MM', () => {
 it.each([
   ['chat:message', true], ['answer:question', true], ['chat:after:message', true],
   ['wake:event', false], ['question:q:default', false], ['botmsg:sender:message', false],
-  ['outside:request', false], ['reminder:r:work', false], ['create:bot', false], ['future:start', false]
+  ['outside:request', false], ['work', false], ['reminder:r:work', false], ['create:bot', false], ['future:start', false]
 ])('telling_set checks the source of %s', async (key, accepted) => {
   const { botTools } = await import('../../src/mms/run/mcp/appTools/bots')
   const { start, flush } = await import('./botFixture')
   const f = botFixture(); fixtures.push(f)
   const { botId } = await createBot(f, { reply: 'Hello' })
-  const activation = await f.bots.enqueueChat(botId, key, 'Never ping me at night')
+  await f.bots.reconcileOnStartup()
+  let activation: { id: string }
+  if (key === 'work' || key === 'reminder:r:work') {
+    await f.bots.service.chatSend({ botId, text: 'Do this work', clientRequestId: 'owner-work' })
+    const owner = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    if (key === 'work') {
+      const work = await f.bots.tools.work.start(botId, owner.id, { title: 'Check', brief: 'Check for news', key: 'work' })
+      activation = { id: work.workId }
+    } else {
+      f.bots.addReminder(botId, owner.id, { dueAt: f.store.now(), text: 'Check later', work: { title: 'Check', brief: 'Check for news' } })
+      await f.bots.deliverDueReminders()
+      await flush()
+      activation = f.store.laneActivations(botId, 'run', ['running'])[0]!
+    }
+    expect(f.store.activation(activation.id)?.lane).toBe('run')
+  } else activation = await f.bots.enqueueChat(botId, key, 'Never ping me at night')
   await flush()
   const { payload, prepared } = await start(f, activation.id)
   const tool = botTools(() => ({ host: f.bots.tools })).find(t => t.name === 'telling_set')!
@@ -44,7 +59,10 @@ it.each([
     turn: { threadId: payload.threadId, bot: prepared.authority }, toolCallId: 'telling', signal: new AbortController().signal, transport: 'mcp'
   } as any)
   expect(result.isError === true).toBe(!accepted)
-  if (!accepted) expect(result.text).toMatch(/owner.*message or tap/)
+  if (!accepted) {
+    expect(result.text).toMatch(/owner.*message or tap/)
+    expect(() => f.bots.setTelling(botId, activation.id, { tellMe: 'needs_you' })).toThrow(/owner.*message or tap/)
+  }
   expect(readBotTelling(f.store.registry(botId)?.tellJson).tellMe).toBe(accepted ? 'needs_you' : undefined)
 })
 
