@@ -26,3 +26,60 @@ it('removing a schedule drops a queued occurrence before a slot opens', async ()
   expect(f.store.activation(queued.id)!.status).toBe('cancelled')
   expect(f.store.dispatches(queued.id)).toHaveLength(0)
 })
+
+// Removal paths and states: About, bot tool host, Automations; queued, waiting at a wall,
+// parked, paused, already running; deletion of the bot; a restart between the two stores.
+it.each(['about', 'bot', 'automations'])('%s removal cancels queued work quietly and leaves other schedules alone', async actor => {
+  for (let i = 0; i < 3; i++) await f.bots.activate({ botId, input: 'Busy', clientRequestId: `busy-${i}` })
+  const a = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'A' }, 'owner')
+  const b = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'B' }, 'owner')
+  await f.tickSchedules(new Date(T0 + 5 * 60_000))
+  const own = f.store.listActivations(botId).find(row => row.trigger.kind === 'schedule' && row.trigger.scheduleId === a.scheduleId)!
+  const before = chatOf(f, botId).length
+  // The profile forwards shared-store edits to this hook, also for Automations removals.
+  f.scheduler.on('updated', () => f.bots.schedulesEdited(botId))
+  if (actor === 'about') f.bots.service.removeSchedule(botId, a.scheduleId)
+  else if (actor === 'bot') f.bots.tools.schedules.remove(botId, a.scheduleId)
+  else f.scheduler.deleteJob(a.jobId)
+  expect(f.store.activation(own.id)).toMatchObject({ status: 'cancelled', endReason: 'schedule_removed' })
+  expect(f.book.get(botId, b.scheduleId)).toBeDefined()
+  expect(chatOf(f, botId)).toHaveLength(before)
+  expect(f.store.registry(botId)!.pausedReason).toBeNull()
+})
+
+it.each(['waiting_grant', 'blocked', 'paused'] as const)('removal ends a %s run without another dispatch', async status => {
+  const a = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'A' }, 'owner')
+  await f.tickSchedules(new Date(T0 + 5 * 60_000))
+  const row = f.store.listActivations(botId).find(row => row.trigger.kind === 'schedule')!
+  f.bots.raiseWall(row.id, { dispatchN: 1, kind: 'gate', permission: { tool: 'write' }, reason: 'Need write' })
+  if (status !== 'waiting_grant') f.store.moveActivation(row.id, ['waiting_grant'], status)
+  f.bots.removeSchedule(botId, a.scheduleId)
+  await f.bots.maintain()
+  expect(f.store.activation(row.id)).toMatchObject({ status: 'cancelled', endReason: 'schedule_removed' })
+  expect(f.store.escalations({ activationId: row.id, status: 'open' })).toHaveLength(0)
+  expect(f.store.dispatches(row.id)).toHaveLength(1)
+  expect(chatOf(f, botId).filter(row => row.kind === 'error')).toHaveLength(0)
+})
+
+it('a turn already running finishes its report after removal', async () => {
+  const a = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'A' }, 'owner')
+  await f.tickSchedules(new Date(T0 + 5 * 60_000))
+  const row = f.store.listActivations(botId).find(row => row.trigger.kind === 'schedule')!
+  const turn = await start(f, row.id)
+  f.bots.removeSchedule(botId, a.scheduleId)
+  expect(f.store.activation(row.id)!.status).toBe('running')
+  await finish(f, turn.payload, 'completed', { text: 'Finished.' })
+  expect(f.store.activation(row.id)!.status).toBe('done')
+  expect(chatOf(f, botId).some(row => row.kind === 'run_report' && row.text === 'Finished.')).toBe(true)
+})
+
+it('startup drops work left queued when only the shared-store removal committed', async () => {
+  for (let i = 0; i < 3; i++) await f.bots.activate({ botId, input: 'Busy', clientRequestId: `busy-${i}` })
+  const a = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'A' }, 'owner')
+  await f.tickSchedules(new Date(T0 + 5 * 60_000))
+  const row = f.store.listActivations(botId).find(row => row.trigger.kind === 'schedule')!
+  f.scheduler.deleteJob(a.jobId)
+  await f.bots.reconcileOnStartup()
+  expect(f.store.activation(row.id)).toMatchObject({ status: 'cancelled', endReason: 'schedule_removed' })
+  expect(f.store.dispatches(row.id)).toHaveLength(0)
+})
