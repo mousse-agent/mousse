@@ -95,8 +95,11 @@ describe('bots.db v9 → v10', () => {
     expect(store.registry('b')).toMatchObject({ tellJson: '{"canWakeMe":true}' })
     expect(store.reminder('r')).toMatchObject({ snoozedFrom: 'original', ownerSet: true })
     expect(store.message('m')).toMatchObject({ tell: 'soon', tellAt: T, toldAt: T })
-    store.insertMessage({ ...store.message('m')!, id: 'm2' })
-    store.insertReminder({ ...store.reminder('r')!, id: 'r2' })
+    store.insertMessage({
+      id: 'm2', botId: 'b', at: T, author: 'bot', kind: 'text', text: 'New message', chips: [],
+      askId: null, error: null, activationId: null, attachments: null, clientRequestId: null, replyTo: null
+    })
+    store.insertReminder({ id: 'r2', botId: 'b', dueAt: T, text: 'New reminder', createdAt: T, work: null, replyTo: null })
     expect(store.message('m2')).toMatchObject({ tell: null, tellAt: null, toldAt: null })
     expect(store.reminder('r2')).toMatchObject({ snoozedFrom: null, ownerSet: null })
   })

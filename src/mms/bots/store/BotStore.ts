@@ -1641,7 +1641,7 @@ export class BotStore {
    * Inserts a chat row; inside the caller's transaction, so its journal row joins it. False when a
    * row with the same id or client request id exists already.
    */
-  insertMessage(row: Omit<BotMessageRow, 'seq'>): boolean {
+  insertMessage(row: Omit<BotMessageRow, 'seq' | 'tell' | 'tellAt' | 'toldAt'>): boolean {
     return this.run(
       'INSERT INTO bot_messages(id, bot_id, at, author, kind, text, chips_json, ask_id, error_json, activation_id, attachments_json, client_request_id, reply_to, question_id, cards_json) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING',
       row.id, row.botId, row.at, row.author, row.kind, row.text, JSON.stringify(row.chips), row.askId, row.error ? JSON.stringify(row.error) : null,
@@ -1922,7 +1922,7 @@ export class BotStore {
 
   // -- Reminders (bot_reminders, v6): a bot's one-off times; repeating ones are schedules in the shared store --------
 
-  insertReminder(row: Omit<BotReminderRow, 'status' | 'deliveredAt' | 'messageId' | 'activationId' | 'wake' | 'event' | 'fired' | 'chain'> & Partial<Pick<BotReminderRow, 'wake' | 'event' | 'chain'>>): void {
+  insertReminder(row: Omit<BotReminderRow, 'status' | 'deliveredAt' | 'messageId' | 'activationId' | 'wake' | 'event' | 'fired' | 'chain' | 'snoozedFrom' | 'ownerSet'> & Partial<Pick<BotReminderRow, 'wake' | 'event' | 'chain'>>): void {
     this.run(
       "INSERT INTO bot_reminders(id, bot_id, due_at, text, work_title, work_brief, reply_to, created_at, status, wake, event_json, chain) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'waiting', ?, ?, ?)",
       row.id, row.botId, row.dueAt, row.text, row.work?.title ?? null, row.work?.brief ?? null, row.replyTo, row.createdAt,
