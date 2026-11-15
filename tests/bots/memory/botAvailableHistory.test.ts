@@ -87,3 +87,16 @@ it('keeps twelve long names within each combined budget', async () => {
     expect(lines(pack)).not.toMatch(/a{61}/)
   }
 })
+
+it('omits a missing folder in both lanes and preserves the earlier run blocks when files change', async () => {
+  const fx = fixture()
+  fs.rmdirSync(fx.folder)
+  const before = await fx.packs.runPreamble({ botId: 'ada', activationId: 'r', input: 'Go' })
+  expect(lines(before)).toBe('')
+  expect(lines(await fx.packs.chatPreamble({ botId: 'ada', activationId: 'c' }))).toBe('')
+  fx.file('todo.md')
+  const after = await fx.packs.runPreamble({ botId: 'ada', activationId: 'r2', input: 'Go' })
+  expect(lines(after)).toContain('todo.md')
+  expect(prefix(after)).toBe(prefix(before))
+  expect(await fx.packs.runPreamble({ botId: 'ada', activationId: 'r', input: 'Go' })).toBe(before)
+})
