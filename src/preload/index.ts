@@ -2,6 +2,7 @@ import type { AppletApi, AppletUiEvent } from '../shared/appletRuntime'
 import { contextBridge, ipcRenderer, webFrame, webUtils } from 'electron'
 import type { BreachKind, MemoryNotice, MemoryStatus } from '../shared/diagnostics/memory'
 import type { WindowCacheSize } from '../shared/diagnostics/profiler'
+import { RENDERER_ERROR_CHANNEL, type RendererErrorReport } from '../shared/diagnostics/rendererError'
 import { readStartupAppearanceArgument } from '../shared/startupAppearance'
 import { readHomeFolderArgument } from '../shared/homeFolderArgument'
 import { MAX_STAGED_FILE_BYTES, stagedFileTooLargeText } from '../shared/attachedFilesMarker'
@@ -1306,6 +1307,10 @@ const api = {
   },
   /** The profiler's memory monitor (Settings → Labs, and its notice). */
   diagnostics: {
+    /** An error in this window's page, for main's `logs/renderer-errors.log`. Nothing is answered. */
+    reportError: (report: RendererErrorReport): void => {
+      try { ipcRenderer.send(RENDERER_ERROR_CHANNEL, report) } catch { /* the window is closing */ }
+    },
     memoryStatus: (): Promise<MemoryStatus> => ipcRenderer.invoke('diagnostics:memoryStatus'),
     memoryNoticeShown: (kind: BreachKind): Promise<void> => ipcRenderer.invoke('diagnostics:memoryNoticeShown', kind),
     /** Opens the prefilled GitHub issue in the browser; nothing is sent until the person submits it there. */

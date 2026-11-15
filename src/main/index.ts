@@ -14,6 +14,7 @@ import { MousseConfigStore } from '../mms/config/MousseConfigStore'
 import { SettingsStore } from '../mms/settings/SettingsStore'
 import { GuiMmsController } from './mms/GuiMmsController'
 import { GuiConnectionLog } from './mms/guiConnectionLog'
+import { registerRendererErrorIpc, RendererErrorLog } from './diagnostics/rendererErrorLog'
 import { PresentationState } from './mms/PresentationState'
 import {
   attachWindowListeners,
@@ -354,6 +355,7 @@ function startGuiApp(): void {
 
       if (!ipcRegistered) {
         registerFontIpc()
+        registerRendererErrorIpc(new RendererErrorLog(homeDir, { connectionLog }))
         registerGuiIpc(
           {
             guiMms,

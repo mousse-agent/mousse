@@ -574,6 +574,64 @@ html.platform-darwin .overlay-titlebar {
   text-decoration: underline;
 }
 
+/* The whole window after a component threw while drawing (lib/appRoot.tsx). The window can still be dragged by its
+   empty area; the line, its button and the details stay clickable. */
+.root-render-failed {
+  position: fixed;
+  inset: 0;
+  overflow: auto;
+  padding: calc(var(--titlebar-height, 48px) + 8px) 24px 24px;
+  background: var(--app-window-bg, Canvas);
+  color: var(--text-secondary, CanvasText);
+  font-size: 13px;
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+.root-render-failed-line,
+.root-render-failed-details {
+  width: fit-content;
+  max-width: 100%;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.root-render-failed-line {
+  margin: 0;
+}
+
+.root-render-failed-reload {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent, LinkText);
+  font: inherit;
+  cursor: pointer;
+}
+
+.root-render-failed-reload:hover {
+  text-decoration: underline;
+}
+
+.root-render-failed-details {
+  margin-top: 8px;
+  opacity: 0.8;
+}
+
+.root-render-failed-details summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.root-render-failed-details pre {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  user-select: text;
+}
+
 .overlay-page[hidden] {
   display: none !important;
 }
