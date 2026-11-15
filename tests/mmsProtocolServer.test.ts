@@ -1,3 +1,4 @@
+import { BOT_TELLING_CAPABILITY } from '../src/shared/bots/personal/telling'
 import { createConnection, type Socket } from 'net'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
@@ -1016,6 +1017,35 @@ describe('MmsProtocolServer + LocalMmsClient', () => {
     expect(caps.methods).toContain('orchestrator.send')
 
     await client.close()
+  })
+
+  it('negotiates bot tellings per window without duplicating the legacy path or replaying banners', async () => {
+    const clients = [
+      new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType: 'gui', requestedCapabilities: [BOT_TELLING_CAPABILITY] }),
+      new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType: 'gui' }),
+      new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType: 'cli', requestedCapabilities: [BOT_TELLING_CAPABILITY] })
+    ]
+    const received: string[][] = [[], [], []]
+    try {
+      for (const [i, client] of clients.entries()) {
+        const hello = await client.connect()
+        expect(hello.capabilities).toContain(BOT_TELLING_CAPABILITY)
+        client.onEvent(e => received[i]!.push(e.type))
+        await client.subscribe(0)
+      }
+      const services = await mms.getProfileServices(mms.profileId)
+      services.personalBots!.events.emit('message', { botId: 'b', message: { id: 'm' } })
+      services.personalBots!.events.emit('tell', { id: 'telling', rows: [], title: 'Scout', body: 'Report', sound: false })
+      // A response fences the writes on each socket; no sleeps.
+      for (const client of clients) await client.request('capabilities')
+      expect(received[0]).toContain('bots.tell')
+      expect(received[1]).not.toContain('bots.tell')
+      expect(received[2]).not.toContain('bots.tell')
+      expect(received.every(events => events.includes('bots.message'))).toBe(true)
+      received[0] = []
+      await clients[0]!.subscribe(0)
+      expect(received[0]).not.toContain('bots.tell')
+    } finally { await Promise.all(clients.map(c => c.close())) }
   })
 
   it("grants a window's first-send binding only when a window asks for it, and holds each window to what it said", async () => {

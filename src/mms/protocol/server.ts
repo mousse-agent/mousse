@@ -1236,6 +1236,7 @@ export class MmsProtocolServer {
           // A profile switch changes the event cursor namespace. Pause delivery
           // until the client establishes a fresh replay boundary for that profile.
           session.subscribeState = 'none'
+          this.refreshTellingWindows()
           session.eventBuffer = []
           session.lastSeq = 0
         }
