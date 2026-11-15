@@ -675,10 +675,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.lastLimit = this.limit()
   }
 
-  /**
-   * Whether a run report stays out of notifications: its schedule's Tell me is Only problems, and a report is a run
-   * that ended done. Every run, Only news and a failure's error row notify as before.
-   */
   /** Whether a run's activation reported `quiet`: nothing worth saying. A lookup that fails counts as not quiet. */
   private quietLevel(activationId: string): boolean {
     try {
@@ -688,13 +684,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
   }
 
+  /** A scheduled report below Tell me stays quiet; failure error rows always notify. */
   private quietReport(botId: string, message: { kind?: string; activationId?: string } | undefined): boolean {
     if (message?.kind !== 'run_report' || !message.activationId) return false
     try {
       const row = this.store.activation(message.activationId)
       if (row?.trigger.kind !== 'schedule') return false
       const entry = this.host.schedules?.get(botId, row.trigger.scheduleId)
-      return entry ? !tellMeNotifies(entry.tellMe, 'done') : false
+      return entry ? !tellMeNotifies(entry.tellMe, 'done', this.host.runLevel?.(message.activationId)) : false
     } catch {
       return false
     }
@@ -1349,10 +1346,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /**
    * A scheduled run dropped from a full queue (inside its transaction): its automation says why, as a skipped occurrence
-   * does, and the chat says scheduled runs are being dropped, at most once a day (`bm_<botId>_sched_dropped_<day>`).
+   * does, and the chat says scheduled runs are being dropped, at most once a local day (`bm_<botId>_sched_dropped_<day>`).
    */
   private droppedScheduledRun(botId: string, trigger: Extract<BotActivationTrigger, { kind: 'schedule' }>): void {
-    const day = new Date(this.now()).toISOString().slice(0, 10)
+    const at = new Date(this.now())
+    const day = `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, '0')}-${String(at.getDate()).padStart(2, '0')}`
     this.chat.post({ botId, author: 'bot', kind: 'error', text: '', error: { text: 'I have too much waiting, so I\'m dropping some of my scheduled runs. They run again at their next times once I\'m less busy.' }, lane: 'run', id: `bm_${botId}_sched_dropped_${day}` })
     this.store.db.afterCommit(() => {
       try {
