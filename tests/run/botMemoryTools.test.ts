@@ -312,7 +312,7 @@ describe('memory tools', () => {
     expect((guarded as Error).message).not.toMatch(/m[12](?:v\d+)?/)
   })
 
-  it.each(['bot', 'dialog'])('%s Forget preserves a put-back fact that only shared a combination', async (via) => {
+  it.each(['bot', 'dialog', 'remerged'])('%s Forget preserves a put-back fact that only shared a combination', async (via) => {
     const fx = memoryFixture()
     const { call } = setup(fx)
     const save = async (text: string, args: Record<string, unknown> = {}) => {
@@ -325,6 +325,13 @@ describe('memory tools', () => {
     const tea = await save('Likes green tea.')
     const combined = await save('Door 4471 and green tea.', { merges: [door, tea] })
     const restoredTea = await save('Likes green tea.', { replaces: 'm3v2' })
+    let activeTea = restoredTea
+    let activeTeaText = 'Likes green tea.'
+    if (via === 'remerged') {
+      const other = await save('Tea is served at 4pm.')
+      activeTeaText = 'Green tea is served at 4pm.'
+      activeTea = await save(activeTeaText, { merges: [restoredTea, other] })
+    }
     const admin = createBotMemoryAdmin({ store: fx.store, name: () => 'Ada' })
     if (via === 'bot') {
       const refusal = await call('memory_forget', 'ada-home', { id: door, reason: 'Forget the door code.' })
@@ -336,13 +343,13 @@ describe('memory tools', () => {
       await botMemoryMethods(admin)['bots.memory.forget']({ profileId: 'p', botId: 'ada', id: combined })
     }
     expect(fx.store.active('ada').map(e => [e.ref, e.text])).toEqual([
-      ['m2', 'The owner lives in Leeds.'], [restoredTea, 'Likes green tea.']
+      ['m2', 'The owner lives in Leeds.'], [activeTea, activeTeaText]
     ])
-    expect(fx.store.versions('ada', 'm3').at(-1)).toMatchObject({ status: 'active', text: 'Likes green tea.' })
+    expect(fx.store.versions('ada', 'm3').at(-1)).toMatchObject({ status: via === 'remerged' ? 'superseded' : 'active', text: 'Likes green tea.' })
     expect(fx.store.versions('ada', 'm1').every(e => e.text === null)).toBe(true)
     expect(fx.store.versions('ada', 'm4').every(e => e.text === null)).toBe(true)
     expect(fx.store.search('ada', { query: '4471', kinds: ['memory'] })).toEqual([])
-    expect(fx.store.search('ada', { query: 'green tea', kinds: ['memory'] }).map(e => e.ref)).toContain(restoredTea)
+    expect(fx.store.search('ada', { query: 'green tea', kinds: ['memory'] }).map(e => e.ref)).toContain(activeTea)
   })
 
   // Forget through either public handler; direct and chained absorption; old target versions;
