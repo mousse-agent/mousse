@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
 import { botManifestDigest, compileBotThread } from '../../src/mms/bots/grants/compile'
 import { agentMessageText, botMessageText, isPersonMessage, type BotAppToolDeps } from '../../src/mms/run/mcp/appTools'
+import { THREAD_CREATE_MAX_PER_RUN, THREAD_SEND_MAX_PER_RUN } from '../../src/mms/run/mcp/appTools/thread'
 import { BOT_COMPUTER_OPEN, type BotComputerLimit } from '../../src/shared/bots/personal/computerLimit'
 import { BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, botStarterManifest } from '../../src/shared/bots/personal/manifest'
 import { BOT_THREADS_CHAT_ONLY_TEXT } from '../../src/shared/bots/personal/walls'
@@ -227,9 +228,19 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(onAppResult).toHaveBeenCalledWith(expect.anything(), 'thread_send', { threadId: 'mine', title: 'Fix the login page', sent: 'Please also check the signup page.' })
     expect((await text('thread_create', { projectId: 'p1', title: 'Fix login', firstMessage: 'Look at the login page.\nThen the form.' })).error).toBe(false)
     expect(onAppResult).toHaveBeenCalledWith(expect.anything(), 'thread_create', { threadId: 'new-1', title: 'Fix login', sent: 'Look at the login page.' })
-    // Its requests name its chat turn, so the service counts them per turn.
+    // Its requests name its chat turn, which the service checks.
     expect(vi.mocked(host.sendToThread!).mock.calls[0]![2].clientRequestId).toMatch(/^thread_send:home:act-1:/)
     expect(vi.mocked(host.createThread!).mock.calls[0]![1].clientRequestId).toMatch(/^thread_create:home:act-1:/)
+  })
+
+  it(`a bot is not held to the thread agents' counts per run: one run starts more than ${THREAD_CREATE_MAX_PER_RUN} threads and sends more than ${THREAD_SEND_MAX_PER_RUN} messages`, async () => {
+    const { text, host } = await world({ threads: 'all' })
+    for (let index = 0; index <= THREAD_CREATE_MAX_PER_RUN; index += 1)
+      expect((await text('thread_create', { projectId: 'p1', title: `Fix ${index}`, firstMessage: 'Look.' })).error, `start ${index}`).toBe(false)
+    for (let index = 0; index <= THREAD_SEND_MAX_PER_RUN; index += 1)
+      expect((await text('thread_send', { threadId: 'mine', content: `Next ${index}.` })).error, `message ${index}`).toBe(false)
+    expect(host.createThread).toHaveBeenCalledTimes(THREAD_CREATE_MAX_PER_RUN + 1)
+    expect(host.sendToThread).toHaveBeenCalledTimes(THREAD_SEND_MAX_PER_RUN + 1)
   })
 
   it('a wait that ends once its turn no longer holds "use your threads" returns the refusal and nothing of the thread', async () => {

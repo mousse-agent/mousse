@@ -440,21 +440,6 @@ export class RunStore {
   }
 
   /**
-   * How many receipts of `commandKind` have a request id that starts with `prefix` (a range over the primary key): a
-   * bot's starts and messages of one chat turn, whose request ids name the turn.
-   */
-  countReceipts(prefix: string, commandKind: string, status?: ReceiptRecord['status']): number {
-    const row = (status
-      ? this.db
-          .statement('SELECT COUNT(*) AS n FROM receipts WHERE client_request_id >= ? AND client_request_id < ? AND command_kind = ? AND status = ?')
-          .get(prefix, `${prefix}￿`, commandKind, status)
-      : this.db
-          .statement('SELECT COUNT(*) AS n FROM receipts WHERE client_request_id >= ? AND client_request_id < ? AND command_kind = ?')
-          .get(prefix, `${prefix}￿`, commandKind)) as { n?: number } | undefined
-    return Number(row?.n ?? 0)
-  }
-
-  /**
    * The threads where a receipt of `commandKind` whose request id starts with `prefix` admitted a run that has not
    * started yet (queued, or starting), oldest first: where such a request's message may still wait in a queue.
    */
