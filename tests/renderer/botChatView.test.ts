@@ -1905,10 +1905,10 @@ it('a service without snooze support offers no snooze replies', async () => {
 })
 
 it('removes snooze replies in an open chat when their day expires', async () => {
+  vi.useFakeTimers()
   fake.chats.inbox = [message(1, { text: 'Tea', reminder: { expiresAt: new Date(Date.now() + 60_000).toISOString() } })]
   await open()
   expect(button('In 10 min')).toBeDefined()
-  vi.useFakeTimers()
   try {
     await act(async () => { await vi.advanceTimersByTimeAsync(60_001) })
     expect(button('In 10 min')).toBeUndefined()
