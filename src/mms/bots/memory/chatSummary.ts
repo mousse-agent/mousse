@@ -1,6 +1,6 @@
 import { BOT_CHAT_PACK_BUDGET, estimateTokens } from '../../../shared/bots/personal/memory'
 import type { BotJournalRow } from './BotMemoryStore'
-import { guardPackText } from './guard'
+import { guardPackText, MEMORY_SECRET_MARKER } from './guard'
 import { cut, dayLabel } from './render'
 
 /**
@@ -34,7 +34,7 @@ export function speaker(row: BotJournalRow): Who {
  */
 export function packText(row: BotJournalRow): string {
   if (row.redactedAt) return row.text
-  const guard = guardPackText(row.text, row.who, `[held back: looks like a secret · memory_read j${row.seq} shows it]`)
+  const guard = guardPackText(row.text, row.who, MEMORY_SECRET_MARKER)
   return guard.ok ? guard.text : `(held back: ${guard.message.toLowerCase().replace(/\.$/, '')}. memory_read j${row.seq} shows it.)`
 }
 

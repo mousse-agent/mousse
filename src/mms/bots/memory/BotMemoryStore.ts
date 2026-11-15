@@ -34,7 +34,7 @@ import {
 import type { BotJournalInput, BotStoreTx } from '../seams'
 import { type ChatSummaryState, foldChatSummary } from './chatSummary'
 import { shortChipText } from '../../../shared/bots/personal/chips'
-import { guardMemoryText, relativeDateRefusal } from './guard'
+import { guardMemoryText, maskMemoryCredentials, relativeDateRefusal } from './guard'
 import { agoLabel, coreGauge, cut, dayLabel, runNotesGauge, usedTokens } from './render'
 
 /**
@@ -453,13 +453,20 @@ export class BotMemoryStore {
       seen.add(hit.ref)
       hits.push(hit)
     }
+    // FTS snippets can cut a credential or insert highlights inside it. Mask the full text
+    // first; when it contains a secret, use that safe text rather than the raw FTS excerpt.
+    const snippet = (row: Row, fallback: (text: string) => string): string => {
+      const text = row.text as string
+      const masked = maskMemoryCredentials(text)
+      return masked === text ? str(row.snip) ?? fallback(text) : cut(masked, 240)
+    }
     const memoryHit = (row: Row): BotMemoryHit => ({
       ref: memoryRef(row.id as string, num(row.version)!),
       at: row.learned_at as string,
       ago: agoLabel(row.learned_at as string, now),
       kind: `memory:${row.kind as string}${row.status === 'expired' ? ' (expired)' : ''}`,
       who: row.written_in === 'run' ? 'bot' : 'owner',
-      snippet: str(row.snip) ?? (row.text as string)
+      snippet: snippet(row, (text) => text)
     })
     const journalHit = (row: Row): BotMemoryHit => ({
       ref: `j${num(row.seq)!}`,
@@ -467,7 +474,7 @@ export class BotMemoryStore {
       ago: agoLabel(row.at as string, now),
       kind: row.kind as string,
       who: row.who as string,
-      snippet: str(row.snip) ?? cut(row.text as string, 240)
+      snippet: snippet(row, (text) => cut(text, 240))
     })
     const journalWhere = `j.bot_id = ? AND j.redacted_at IS NULL AND j.kind NOT IN (${HIDDEN_KINDS}) AND (${journalKinds.join(' OR ')}) AND j.at >= ? AND j.at <= ?`
     if (!terms.length) {
@@ -502,13 +509,16 @@ export class BotMemoryStore {
    */
   read(botId: string, input: { ref: string; before?: number; after?: number } | { activationId: string; cursor?: string }): { rows: BotMemoryRow[]; cursor?: string } | { error: string } {
     const budget = BOT_MEMORY_READ_PAGE_TOKENS * 4
-    const rowOf = (row: BotJournalRow, max: number): BotMemoryRow => ({
-      ref: `j${row.seq}`,
-      at: row.at,
-      kind: row.kind,
-      who: row.who,
-      text: row.text.length > max ? `${row.text.slice(0, max)}\n…[${row.text.length - max} more characters: read j${row.seq} alone]` : row.text
-    })
+    const rowOf = (row: BotJournalRow, max: number): BotMemoryRow => {
+      const text = maskMemoryCredentials(row.text)
+      return {
+        ref: `j${row.seq}`,
+        at: row.at,
+        kind: row.kind,
+        who: row.who,
+        text: text.length > max ? `${text.slice(0, max)}\n…[${text.length - max} more characters: read j${row.seq} alone]` : text
+      }
+    }
     if ('activationId' in input) {
       const after = input.cursor ? Number(/^j(\d+)$/.exec(input.cursor)?.[1] ?? NaN) : 0
       if (!Number.isFinite(after)) return { error: 'That cursor is not one memory_read gave.' }
@@ -534,7 +544,7 @@ export class BotMemoryStore {
           at: version.learnedAt,
           kind: `memory:${version.kind} (${version.status})`,
           who: version.writtenIn === 'run' ? 'bot' : 'owner',
-          text: version.text ?? '[removed at your request]'
+          text: maskMemoryCredentials(version.text ?? '[removed at your request]')
         }))
       }
     }

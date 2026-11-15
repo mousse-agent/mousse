@@ -140,15 +140,22 @@ export type PackTextResult = { ok: true; text: string } | Extract<GuardResult, {
 export function guardPackText(text: string, who: string, marker: string): PackTextResult {
   const refused = invisible(text) ?? (who === 'owner' ? undefined : instruction(text))
   if (refused && !refused.ok) return refused
+  return { ok: true, text: maskMemoryCredentials(text, marker) }
+}
+
+export const MEMORY_SECRET_MARKER = '[held back: looks like a secret]'
+
+/** Mask credentials without refusing instructions or hidden text in explicitly requested history. */
+export function maskMemoryCredentials(text: string, marker = MEMORY_SECRET_MARKER): string {
   const spans = credentialSpans(text)
-  if (!spans.length) return { ok: true, text }
+  if (!spans.length) return text
   let out = ''
   let at = 0
   for (const [start, end] of spans) {
     out += text.slice(at, start) + marker
     at = end
   }
-  return { ok: true, text: out + text.slice(at) }
+  return out + text.slice(at)
 }
 
 const WEEKDAY = '(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)'
