@@ -44,6 +44,8 @@ import type { LightboxImage } from '../../chat/components/agent-elements/image-l
 import { BotImageFiles, BotOtherFiles, botFileImageUrl, useFailedFileImages } from './BotImages'
 import { botChatImages } from './imageSources'
 import type { RevealNavigation } from '../../chat/components/agent-elements/find/reveal'
+import { useBotChatFind } from './useBotChatFind'
+import { FindInThreadBar } from '../../chat/components/agent-elements/find/FindInThreadBar'
 
 const EMPTY: BotChatMessage[] = []
 const NO_FILES: AttachedFile[] = []
@@ -234,7 +236,7 @@ interface OwnerMessageProps { botId: string; message: BotChatMessage; pending: b
 // Messages render again only when they change: a poll, a live chip or the bot starting work leaves them alone.
 const OwnerMessage = memo(function OwnerMessage({ botId, message, pending, botName, quote, starts, marks, onReply }: OwnerMessageProps) {
   const quoted = quote && message.replyTo
-  return <article className={`chat-participant-message from-person bot-you${starts ? ' is-group-start' : ''}${quoted ? ' is-quoted' : ''}${pending ? ' is-pending' : ''}`} data-message-id={message.id}>
+  return <article className={`chat-participant-message from-person bot-you${starts ? ' is-group-start' : ''}${quoted ? ' is-quoted' : ''}${pending ? ' is-pending' : ''}`} data-message-id={message.id} data-turn-key={message.id}>
     {quoted && <BotReplyQuote botId={botId} quote={message.replyTo!} botName={botName} />}
     <div className="bot-you-line">
       {!pending && onReply && <span className="bot-you-actions">
@@ -245,7 +247,9 @@ const OwnerMessage = memo(function OwnerMessage({ botId, message, pending, botNa
       <div className="bot-you-content">
         {!!message.attachments?.length && <BotImageFiles files={message.attachments} />}
         {message.text && <div className="bot-you-bubble">
-          <WithSentQuotes text={message.text} render={(part) => <Markdown content={part} className="bot-markdown" images={BOT_IMAGES} />} />
+          <div className="bot-find-text" data-find-text data-message-id={message.id} data-part-index="0">
+            <WithSentQuotes text={message.text} render={(part) => <Markdown content={part} className="bot-markdown" images={BOT_IMAGES} />} />
+          </div>
           <BubbleTime message={message} pending={pending} />
           {marks?.reaction && <span className="bot-reaction" role="img" aria-label={`${botName} reacted ${marks.reaction}`} title={`${botName} reacted`}>{marks.reaction}</span>}
         </div>}
@@ -363,13 +367,13 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settl
   // The tools hang off the bubble's right edge: beside a wide bubble they move left, inside the transcript.
   const tools = useRef<HTMLSpanElement>(null)
   const clampTools = () => { if (tools.current) clampBotTools(tools.current) }
-  return <article className={`chat-participant-message from-agent bot-message${starts ? ' is-group-start' : ''}${reacted ? ' is-react-quiet' : ''}${message.reaction ? ' has-reaction' : ''}${menuOpen ? ' is-menu-open' : ''}`} data-message-id={message.id}
+  return <article className={`chat-participant-message from-agent bot-message${starts ? ' is-group-start' : ''}${reacted ? ' is-react-quiet' : ''}${message.reaction ? ' has-reaction' : ''}${menuOpen ? ' is-menu-open' : ''}`} data-message-id={message.id} data-turn-key={message.id}
     onMouseEnter={clampTools} onFocus={clampTools} onMouseLeave={reacted ? () => setReacted(false) : undefined}>
     <div className="bot-message-line">
       <div ref={bubble} tabIndex={-1} className={`bot-bubble${pictures ? ' has-media' : ''}${pictures && !media.text && !lostChips.length && !cards ? ' is-media-only' : ''}`}>
         {quoted && <BotReplyQuote botId={bot.id} quote={message.replyTo!} botName={bot.name} />}
         <BotReplyMedia images={shownImages} onMenuOpen={setMenuOpen} />
-        {media.text && <BotMarkdown text={media.text} className="bot-markdown" />}
+        {media.text && <div className="bot-find-text" data-find-text data-message-id={message.id} data-part-index="0"><BotMarkdown text={media.text} className="bot-markdown" /></div>}
         {cards && <BotCards cards={cards} botId={bot.id} />}
         {lostChips.length > 0 && <p className="bot-picture-chips">{lostChips.map((image) => <BotPathChip key={image.key} path={image.path!} />)}</p>}
         {openAsk && <p className="bot-bubble-ask"><Shield size={14} aria-hidden /><span>Wants to <strong>{openAsk.title}</strong></span></p>}
@@ -681,6 +685,20 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   }, [pinned])
   useLayoutEffect(measure, [measure, messages.length, pending.length])
   const pinnedOff = pinned.filter((item) => !onScreen.split(' ').includes(item.kind))
+  // Find in chat: a match shown stops the chat following its end, as a scroll up does.
+  const scrollToFound = useMemo(() => botMessageScroller(bot.id), [bot.id])
+  const find = useBotChatFind({
+    botId: bot.id,
+    rows: shown,
+    transcript,
+    hasMore: Boolean(chat?.hasMore),
+    // The chat draws only its newest rows: a match further back is drawn first, then scrolled to.
+    scrollToMessage: scrollToFound,
+    onNavigate: () => {
+      anchor.current.atEnd = false
+      anchor.current.heading = false
+    }
+  })
 
   const act = useCallback((action: NonNullable<BotError['action']>) => {
     // Sign in opens the card of the owner's provider entry the bot would run on; Set up opens the list.
@@ -730,8 +748,10 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
           <button type="button" className="bot-header-name" tabIndex={-1} aria-hidden onClick={toggleAbout}><h1>{bot.name}</h1></button>
           <BotPresenceLine bot={bot} typing={typing} offline={offline} />
         </div>
-        <BotMenu bot={bot} />
+        {/* From the menu, whose item goes as it closes: Escape then gives the focus to the composer. */}
+        <BotMenu bot={bot} {...(find.openFind ? { onFind: () => { composerField()?.focus({ preventScroll: true }); find.openFind!() } } : {})} />
       </header>
+      {find.barProps && <div className="bot-find-anchor"><FindInThreadBar {...find.barProps} /></div>}
       <div className="chat-transcript" data-applet-scroller data-quote-source ref={transcript} role="log" aria-label={`${bot.name} messages`} onScroll={(event) => {
         const element = event.currentTarget
         const down = element.scrollTop >= (anchor.current.top ?? 0)

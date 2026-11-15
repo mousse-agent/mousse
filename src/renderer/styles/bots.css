@@ -98,7 +98,11 @@ html:not([data-acrylic='true']) .bot-conversation .chat-input-area.bot-input-are
 .bot-message:not(.is-group-start) .bot-bubble { border-top-left-radius: 6px; }
 /* The thread's Markdown (an-md-*), at the bubble's size. Inline code keeps a short piece whole: it moves to the next line
    as one, and breaks only when it is wider than the bubble. Tables keep the thread's padding inside the bubble's own. */
-.bot-bubble > .bot-markdown { margin: 0; }
+.bot-bubble > .bot-markdown, .bot-bubble > .bot-find-text > .bot-markdown { margin: 0; }
+/* What find reads in a bubble: its words, in a box that takes no part in the layout. */
+.bot-find-text { display: contents; }
+/* The find bar hangs over the transcript's top right corner, under the header. */
+.bot-find-anchor { position: relative; height: 0; z-index: 20; }
 .bot-markdown > :first-child { margin-top: 0; }
 .bot-markdown > :last-child { margin-bottom: 0; }
 .bot-markdown .an-md-code { margin: 0; overflow-wrap: anywhere; }
