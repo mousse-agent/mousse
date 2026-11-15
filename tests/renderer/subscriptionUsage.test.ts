@@ -185,10 +185,33 @@ describe('limits across several accounts', () => {
     expect(week).toMatchObject({ accounts: 5, remaining: 53 })
   })
 
-  it('with every weekly limit used up nothing of the 5-hour limit is left', () => {
-    const out = [{ id: 'a', label: 'a', windows: [{ id: 'five_hour', label: '5-hour limit', remainingPercent: 100, resetsAt: at(2) }, { id: 'seven_day', label: 'Weekly limit', remainingPercent: 0, resetsAt: at(8) }] }]
-    expect(summarizeAccounts(out, now)[0]).toMatchObject({ label: '5-hour · weekly limits used up', accounts: 0, remaining: 0 })
-    expect(summarizeAccounts(out, now)[0]!.gain).toBeUndefined()
+  it('a per-model weekly limit (Weekly · Fable) leaves out accounts whose weekly limit is used up', () => {
+    const windows = (weekly: number, fable: number, fableHours: number) => [
+      { id: 'seven_day', label: 'Weekly limit', remainingPercent: weekly, resetsAt: at(20) },
+      { id: 'model_fable', label: 'Weekly · Fable', remainingPercent: fable, resetsAt: at(fableHours) }
+    ]
+    // The screenshot's accounts: three are at 0% weekly with Fable left that they cannot use.
+    const team = [
+      { id: 'a', label: 'a', windows: windows(33, 56, 116) },
+      { id: 'b', label: 'b', windows: windows(0, 44, 8) },
+      { id: 'c', label: 'c', windows: windows(0, 56, 28) },
+      { id: 'd', label: 'd', windows: windows(79, 93, 73) },
+      { id: 'e', label: 'e', windows: windows(0, 50, 1) }
+    ]
+    const fable = summarizeAccounts(team, now).find((summary) => summary.id === 'model_fable')
+    expect(fable).toMatchObject({ label: 'Weekly · Fable · 2 accounts', accounts: 2, remaining: 75, resetsAt: at(73) })
+    expect(fable!.gain).toMatchObject({ accounts: [{ label: 'd' }] })
+    // Other scoped weekly ids follow the same rule.
+    const opus = summarizeAccounts([{ id: 'x', label: 'x', windows: [{ id: 'seven_day', label: 'Weekly limit', remainingPercent: 0 }, { id: 'seven_day_opus', label: 'Weekly · Opus', remainingPercent: 90 }] }], now)
+    expect(opus.find((summary) => summary.id === 'seven_day_opus')).toMatchObject({ accounts: 0, remaining: 0 })
+  })
+
+  it('with every weekly limit used up nothing of the 5-hour or per-model limits is left', () => {
+    const out = [{ id: 'a', label: 'a', windows: [{ id: 'five_hour', label: '5-hour limit', remainingPercent: 100, resetsAt: at(2) }, { id: 'seven_day', label: 'Weekly limit', remainingPercent: 0, resetsAt: at(8) }, { id: 'model_fable', label: 'Weekly · Fable', remainingPercent: 60, resetsAt: at(8) }] }]
+    const [five, , fable] = summarizeAccounts(out, now)
+    expect(five).toMatchObject({ label: '5-hour · weekly limits used up', accounts: 0, remaining: 0 })
+    expect(five!.gain).toBeUndefined()
+    expect(fable).toMatchObject({ label: 'Weekly · Fable · weekly limits used up', accounts: 0, remaining: 0 })
   })
 
   it('with every account failing there is nothing to sum', () => {
