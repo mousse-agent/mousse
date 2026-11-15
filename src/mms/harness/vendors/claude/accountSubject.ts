@@ -67,10 +67,20 @@ export function claudeEffectiveEnvironment(env: NodeJS.ProcessEnv, options: Acco
 }
 
 /** A cloud's own environment is allowed only while one of its Claude routes is enabled. */
-const CLOUD_SIGN_IN_VARIABLES: ReadonlyArray<{ routes: readonly string[]; names: RegExp }> = [
+const CLOUD_SIGN_IN_VARIABLES: ReadonlyArray<{ routes: readonly string[]; names: RegExp | ReadonlySet<string> }> = [
   { routes: ['CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_MANTLE', 'CLAUDE_CODE_USE_ANTHROPIC_AWS'], names: /^AWS_/ },
-  { routes: ['CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD'], names: /^(GOOGLE_|GCLOUD_|CLOUDSDK_|CLOUD_ML_REGION$)/ },
-  { routes: ['CLAUDE_CODE_USE_FOUNDRY'], names: /^AZURE_/ }
+  // ADC/GoogleAuth inputs, plus Claude's project, location and quota inputs; no other Google product's keys.
+  { routes: ['CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD'], names: new Set([
+    'GOOGLE_APPLICATION_CREDENTIALS', 'GOOGLE_CLOUD_PROJECT', 'GCLOUD_PROJECT',
+    'GOOGLE_CLOUD_LOCATION', 'GOOGLE_CLOUD_QUOTA_PROJECT', 'CLOUDSDK_CONFIG', 'CLOUD_ML_REGION'
+  ]) },
+  // Azure Identity's default credential chain and the Azure CLI configuration it may use.
+  { routes: ['CLAUDE_CODE_USE_FOUNDRY'], names: new Set([
+    'AZURE_CLIENT_ID', 'AZURE_TENANT_ID', 'AZURE_CLIENT_SECRET', 'AZURE_CLIENT_CERTIFICATE_PATH',
+    'AZURE_CLIENT_CERTIFICATE_PASSWORD', 'AZURE_CLIENT_SEND_CERTIFICATE_CHAIN', 'AZURE_ADDITIONALLY_ALLOWED_TENANTS',
+    'AZURE_AUTHORITY_HOST', 'AZURE_FEDERATED_TOKEN_FILE', 'AZURE_USERNAME', 'AZURE_PASSWORD',
+    'AZURE_CONFIG_DIR', 'AZURE_TOKEN_CREDENTIALS'
+  ]) }
 ]
 
 /** Claude's own configuration families, kept as families so a new model or setting needs no Mousse update. */
@@ -88,7 +98,7 @@ export function claudeSignInEnvironment(env: NodeJS.ProcessEnv, options: Account
   const signIn: NodeJS.ProcessEnv = { ...base }
   const clouds = CLOUD_SIGN_IN_VARIABLES.filter(({ routes }) => routes.some((route) => on(effective[route])))
   for (const [name, value] of Object.entries(effective)) {
-    if (CLAUDE_CONFIGURATION_VARIABLE.test(name) || isClaudeSignInVariable(name) || SIGN_IN_SUPPORT_VARIABLE.test(name) || clouds.some(({ names }) => names.test(name))) signIn[name] = value
+    if (CLAUDE_CONFIGURATION_VARIABLE.test(name) || isClaudeSignInVariable(name) || SIGN_IN_SUPPORT_VARIABLE.test(name) || clouds.some(({ names }) => names instanceof RegExp ? names.test(name) : names.has(name))) signIn[name] = value
   }
   return signIn
 }
