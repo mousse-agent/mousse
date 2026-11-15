@@ -1,5 +1,6 @@
 import type { NeutralTool } from '../../harness/tools'
 import type { ProviderSelection } from '../../harness/types'
+import type { BotMessageSender } from './botMessages'
 import type { BotEscalationSummary } from './escalation'
 import type { BotLook } from './look'
 import type { PermissionMode } from '../../permissionMode'
@@ -319,7 +320,11 @@ export interface BotOwnerTurn {
 }
 
 export type BotActivationTrigger =
-  | { kind: 'manual'; input: string; owner?: BotOwnerTurn }
+  /**
+   * `fromBot`: the turn was started by a message from another of the owner's bots (`bot_send`), never by the owner: who
+   * sent it and which turn in a row without the owner it is.
+   */
+  | { kind: 'manual'; input: string; owner?: BotOwnerTurn; fromBot?: BotMessageSender }
   | { kind: 'schedule'; input: string; scheduleId: string; occurrenceAt: string }
   /**
    * Work the chat handed off (`work_start`) or a reminder started (docs/plans/bot-always-free.md): a run beside the

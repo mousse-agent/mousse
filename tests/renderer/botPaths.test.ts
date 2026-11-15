@@ -24,6 +24,9 @@ describe('linkBotPaths', () => {
     ['a Markdown link keeps its own target', `[the plan](${FILES}\\plan.md)`, `[the plan](${FILES}\\plan.md)`],
     ['a web address is not a path', 'https://example.com/home/me/x', 'https://example.com/home/me/x'],
     ['and/or and a network size are text', 'Use and/or with a /24 network', 'Use and/or with a /24 network'],
+    ['a folder written with its closing separator', 'Rename C:\\Users\\me\\.mousse\\net\\ first', `Rename ${link('C:\\Users\\me\\.mousse\\net')} first`],
+    ['a folder with its closing separator, then a full stop', 'It is in /home/me/.mousse/net/.', `It is in ${link('/home/me/.mousse/net')}.`],
+    ['a code span that is one folder, with spaces and a closing separator', '`C:\\My keys\\net\\`', link('C:\\My keys\\net')],
     ['a drive alone is not a file', 'Free space on C:\\ is low', 'Free space on C:\\ is low'],
     ['a list item keeps its marker', `- ${FILES}\\a.png`, `- ${link(`${FILES}\\a.png`)}`]
   ]

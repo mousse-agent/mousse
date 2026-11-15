@@ -233,7 +233,8 @@ describe('the transcript', () => {
     fake.chats.inbox = [message(1, { id: 'b1', text: `Picture: ${folder}\\chip-clouds-boy.png\n\nNotes in \`${folder}\\notes\\plan.md\`.` })]
     const readFile = vi.fn(async () => '# Plan\n\nThree steps.')
     const showInFolder = vi.fn(async () => undefined)
-    installPreload(fake, { app: { setViewedBot }, fs: { readFile, readAsset: vi.fn(async () => { throw new Error('none') }) }, localFiles: { showInFolder } })
+    const openPath = vi.fn(async () => 'file' as const)
+    installPreload(fake, { app: { setViewedBot }, fs: { readFile, readAsset: vi.fn(async () => { throw new Error('none') }) }, localFiles: { showInFolder, open: openPath } })
     await open()
     const chips = [...transcript().querySelectorAll<HTMLButtonElement>('.bot-path-open')]
     // The name only (inside the bot's files folder, the path there), never the profile's folders; the full path on hover.
@@ -251,12 +252,33 @@ describe('the transcript', () => {
     // The file itself, selected in its folder; a refusal is said above the composer.
     await click(button('Show notes/plan.md in folder'))
     expect(showInFolder).toHaveBeenCalledWith(`${folder}\\notes\\plan.md`)
-    showInFolder.mockRejectedValueOnce(new Error("Error invoking remote method 'localFiles:showInFolder': Error: That file does not exist."))
+    showInFolder.mockRejectedValueOnce(new Error("Error invoking remote method 'localFiles:showInFolder': Error: Can't find plan.md. It may have been moved or deleted."))
     await click(button('Show in folder', pane))
     await settle()
-    expect(composerError()?.textContent).toBe('That file does not exist.')
+    expect(composerError()?.textContent).toBe("Can't find plan.md. It may have been moved or deleted.")
     await click(button('Close file'))
     expect(host.querySelector('aside.bot-file-pane')).toBeNull()
+  })
+
+  it('a folder’s chip opens the folder in the file manager, not the Files pane; a path with nothing at it is said', async () => {
+    const net = 'C:\\Users\\me\\.mousse\\net'
+    fake.chats.inbox = [message(1, { id: 'b1', text: `Rename this folder: ${net}\\\n\nOld copy: C:\\Users\\me\\old-net` })]
+    const readFile = vi.fn(async () => { throw new Error('EISDIR') })
+    const openPath = vi.fn(async (path: string) => { if (path !== net) throw new Error("Error invoking remote method 'localFiles:open': Error: Can't find old-net. It may have been moved or deleted."); return 'folder' as const })
+    installPreload(fake, { app: { setViewedBot }, fs: { readFile, readAsset: vi.fn(async () => { throw new Error('none') }) }, localFiles: { open: openPath } })
+    await open()
+    const chips = [...transcript().querySelectorAll<HTMLButtonElement>('.bot-path-open')]
+    expect(chips.map((chip) => [chip.textContent, chip.title])).toEqual([['net', net], ['old-net', 'C:\\Users\\me\\old-net']])
+    await click(chips[0])
+    await settle()
+    expect(openPath).toHaveBeenCalledWith(net)
+    expect(host.querySelector('aside.bot-file-pane')).toBeNull()
+    expect(readFile).not.toHaveBeenCalled()
+    expect(composerError()).toBeNull()
+    await click(chips[1])
+    await settle()
+    expect(host.querySelector('aside.bot-file-pane')).toBeNull()
+    expect(composerError()?.textContent).toBe("Can't find old-net. It may have been moved or deleted.")
   })
 
   describe('pictures', () => {

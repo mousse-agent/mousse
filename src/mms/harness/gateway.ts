@@ -245,6 +245,11 @@ export interface HarnessGateway {
   selectionOf(binding: ExecutionBinding): Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model' | 'effort'>
   /** The model's name as Mousse shows it: the instance's listing (an instance id, or a provider name), else a name it listed before, else one made from the id. */
   modelName(instanceId: string, model: string): string
+  /**
+   * The reasoning level a turn on a model runs at (an instance id, or a provider name): the chosen one when the
+   * model offers it or lists no levels, else the default its agent reports. Undefined when neither is known.
+   */
+  reasoningLevel(instanceId: string, model: string, effort?: string): string | undefined
   /** The name of the agent a model runs on, as Mousse shows it (an instance id, or a provider name): Claude Code, Codex, a Pi provider's name. */
   providerName(instanceId: string): string
   /**
@@ -2132,6 +2137,13 @@ export class Harness implements HarnessGateway {
     const { modelId } = modelChoiceOf({ provider: instanceId, model })
     const label = listed?.label?.trim() || findListedModel(this.prefs.get(instanceId).custom, model)?.label || this.names.get(instanceId)[modelId]
     return modelChoiceOf({ provider: instanceId, model }, label).name
+  }
+
+  reasoningLevel(named: string, model: string, effort?: string): string | undefined {
+    const listed = findListedModel(this.recordOrUndefined(this.namedInstance(named))?.runtime.models() ?? [], model)
+    const levels = listed?.efforts ?? []
+    if (effort && (effort === 'off' || !levels.length || levels.includes(effort))) return effort
+    return listed?.defaultEffort && levels.includes(listed.defaultEffort) ? listed.defaultEffort : undefined
   }
 
   providerName(named: string): string {

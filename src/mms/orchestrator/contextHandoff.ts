@@ -1,14 +1,22 @@
-import { modelChoiceOf } from '../../shared/modelChoice'
+import { modelChoiceOf, reasoningChange } from '../../shared/modelChoice'
 import { upgradeSelection } from '../../shared/modelSelection'
 import type { ChatMessage, NativeLlmContext } from '../../shared/types'
 
 type Selection = NonNullable<ChatMessage['modelSelection']>
 
-/** Find the last admitted selection; native assistant identity supports older threads. */
-export function previousTurnModel(messages: ChatMessage[], context: NativeLlmContext): Selection | undefined {
-  for (const message of [...messages].reverse()) {
+/** The selection the last visible message of a person was admitted with: its model and the reasoning level chosen for it. */
+export function admittedSelection(messages: readonly ChatMessage[]): Selection | undefined {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]!
     if (!message.hidden && message.role === 'user' && message.modelSelection) return message.modelSelection
   }
+  return undefined
+}
+
+/** Find the last admitted selection; native assistant identity supports older threads. */
+export function previousTurnModel(messages: ChatMessage[], context: NativeLlmContext): Selection | undefined {
+  const admitted = admittedSelection(messages)
+  if (admitted) return admitted
   for (const message of [...context.messages].reverse()) {
     if (message.role === 'assistant' && message.model !== 'legacy-text-only') return { provider: message.provider, model: message.model }
   }
@@ -21,6 +29,34 @@ export function contextHandoff(previous: Selection | undefined, next: Selection)
   const from = upgradeSelection({ ...previous })
   const to = upgradeSelection({ ...next })
   return from.provider !== to.provider || from.model !== to.model ? { from, to } : undefined
+}
+
+/**
+ * The transcript marker a turn gets when it runs differently from the turn before it: on another provider or model,
+ * at another reasoning level, or both, in one marker. `levelOf` gives the level a selection runs at (the chosen one,
+ * else the model's default, so choosing the default by name is no change); without it only the model is compared,
+ * as for an older thread whose previous model is known from its replies alone. A changed level is written into both
+ * sides, so the marker names it.
+ */
+export function turnMarker(
+  previous: Selection | undefined,
+  next: Selection,
+  levelOf?: (selection: Selection) => string | undefined
+): ChatMessage['contextHandoff'] {
+  if (!previous) return undefined
+  const from = upgradeSelection({ ...previous })
+  const to = upgradeSelection({ ...next })
+  const switched = from.provider !== to.provider || from.model !== to.model
+  const levels = levelOf ? { from: levelOf(from), to: levelOf(to) } : undefined
+  if (!levels || levels.from === levels.to) return switched ? { from, to } : undefined
+  const at = ({ effort: _effort, ...selection }: Selection, level: string | undefined): Selection => ({ ...selection, ...(level ? { effort: level } : {}) })
+  return { from: at(from, levels.from), to: at(to, levels.to) }
+}
+
+/** A marker in plain words, for readers that show a message's text: "Reasoning: Medium → High", "Claude Opus 5.5 → GPT-6.1". */
+export function turnMarkerText(marker: NonNullable<ChatMessage['contextHandoff']>): string {
+  const reasoning = reasoningChange(marker.from, marker.to)
+  return reasoning ? `Reasoning: ${reasoning.from} → ${reasoning.to}` : `${modelChoiceOf(marker.from).name} → ${modelChoiceOf(marker.to).name}`
 }
 
 /** A prompt that is a slash command (`/review src`): agents parse it at the start of the prompt, so nothing goes before it. */

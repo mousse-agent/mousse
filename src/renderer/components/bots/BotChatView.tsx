@@ -12,7 +12,7 @@ import { ReadAloudButton } from '../../readAloud/ReadAloudButton'
 import { useMotionScale } from '../../lib/motion'
 import { BotFace } from './face/BotFace'
 import { BotSteps } from './BotSteps'
-import { BOT_IMAGES, BotFilePane, BotFilesProvider, BotMarkdown, BotPathChip } from './BotFiles'
+import { BOT_IMAGES, BotFilePane, BotFilesProvider, BotMarkdown, BotPathChip, fileActions } from './BotFiles'
 import { BotAppletPane, BotMessageApplets } from './BotApplets'
 import { BotPictureActions, BotReplyMedia } from './BotReplyMedia'
 import { BotReactionBadge, BotReactionBar } from './BotReactions'
@@ -527,11 +527,14 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
     setAppletOpen(applet)
     setFile(null)
   }, [])
-  const openFile = useCallback((path: string) => {
-    setFile(path)
+  // An action on a file that the computer refused ("Can't find notes.md…") is said above the composer.
+  const fileFailed = useCallback((text: string) => useBotsStore.setState({ error: text, errorBotId: bot.id }), [bot.id])
+  // A chip's click: a file shows in the pane, a folder opens in the file manager, one that is gone is said.
+  const openFile = useCallback((path: string) => fileActions.open(path, (shown) => {
+    setFile(shown)
     useBotsStore.setState({ aboutOpen: false })
     useBotBrowserStore.getState().closePane()
-  }, [])
+  }, fileFailed), [fileFailed])
   // The bot's own browser: the reply of the run whose tab it shows has a live preview, and Expand opens the split view.
   // Each watches the browser's pictures only while it is on screen.
   const browser = useBotBrowser(bot.id)
@@ -625,8 +628,6 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   const last = shown.at(-1)
   const typingStarts = !(last?.kind === 'message' && last.message.author === 'bot')
   const toggleAbout = () => useBotsStore.setState({ aboutOpen: !aboutOpen })
-  // An action on a file that the computer refused ("That file does not exist.") is said above the composer.
-  const fileFailed = useCallback((text: string) => useBotsStore.setState({ error: text, errorBotId: bot.id }), [bot.id])
   const pictureActions = useCallback((image: LightboxImage) => <BotPictureActions image={image} />, [])
   // `/` commands: the list follows what is typed; after `/model` it offers the bot's slots and models, read once.
   const modelInfo = useBotsStore((s) => s.modelInfo[bot.id])

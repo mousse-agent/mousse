@@ -131,7 +131,18 @@ export interface BridgeNodePolicy {
    * it off. Absent from a service from before the switch.
    */
   bots?: boolean
+  /**
+   * Which threads here the device's agents may change with calls marked as an agent's: none, the threads its agents
+   * started here (the default), or all. Absent from a service from before the setting.
+   */
+  agentReach?: AgentReach
 }
+
+/** What a device's agents may change on this computer (`net_node_policy.agent_reach`). */
+export type AgentReach = 'none' | 'launched' | 'all'
+export const AGENT_REACHES: readonly AgentReach[] = ['none', 'launched', 'all']
+export const isAgentReach = (value: unknown): value is AgentReach =>
+  (AGENT_REACHES as readonly unknown[]).includes(value)
 export interface NetStatus {
   enabled: boolean
   features?: import('../featureFlags').NetFeatureFlags

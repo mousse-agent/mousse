@@ -632,5 +632,47 @@ CREATE TABLE thread_watches(
 CREATE INDEX thread_watches_state ON thread_watches(state, target_thread_id);
 CREATE INDEX thread_watches_watcher ON thread_watches(watcher_thread_id);
 `
+  },
+  {
+    version: 21,
+    sql: `
+-- A thread an agent here launched on another of the user's computers (thread_create with computer, issue #1160):
+-- this computer's record of the launch. The thread there is that computer's own. One row per launch, keyed by
+-- the thread_create receipt's key, and written with it before any call, so a launch cut off by a lost link or a
+-- restart is finished from this row.
+--   starting:  nothing is confirmed there yet; the next attempt creates the thread (the same key finds the first);
+--   created:   the thread exists there (remote_thread_id); its model, mode and first message are not all set;
+--   launched:  the thread is set up there; first_message_state says what became of the first message;
+--   abandoned: refused for good before a thread existed, or the thread there was archived (last_error says why).
+-- first_message_state: none (the launch has none), pending, sent, failed (refused for good, the thread is kept),
+-- uncertain (that computer did not confirm it; the next attempt asks again under the same key).
+CREATE TABLE remote_launches(
+  creation_key        TEXT PRIMARY KEY,
+  launcher_thread_id  TEXT NOT NULL,
+  launcher_run_id     TEXT NOT NULL,
+  node                TEXT NOT NULL,
+  computer_name       TEXT NOT NULL,
+  title               TEXT NOT NULL,
+  remote_project_id   TEXT NOT NULL,
+  worktree            INTEGER NOT NULL CHECK(worktree IN (0,1)),
+  instance_id         TEXT,
+  model               TEXT,
+  permission_mode     TEXT NOT NULL CHECK(permission_mode IN ('ask','accept_edits','auto','full')),
+  remote_mode         TEXT CHECK(remote_mode IS NULL OR remote_mode IN ('ask','accept_edits','auto','full')),
+  first_message       TEXT,
+  first_message_mode  TEXT CHECK(first_message_mode IS NULL OR first_message_mode IN ('agent','plan')),
+  mark                TEXT NOT NULL,
+  remote_thread_id    TEXT,
+  remote_run_id       TEXT,
+  state               TEXT NOT NULL CHECK(state IN ('starting','created','launched','abandoned')),
+  first_message_state TEXT NOT NULL CHECK(first_message_state IN ('none','pending','sent','failed','uncertain')),
+  last_error          TEXT,
+  created_at          TEXT NOT NULL,
+  updated_at          TEXT NOT NULL
+) STRICT;
+CREATE INDEX remote_launches_launcher ON remote_launches(launcher_thread_id);
+CREATE INDEX remote_launches_remote ON remote_launches(node, remote_thread_id);
+CREATE INDEX remote_launches_open ON remote_launches(state, first_message_state);
+`
   }
 ]

@@ -125,6 +125,11 @@ function sameKeys(a: readonly string[], b: readonly string[]): boolean {
   return true;
 }
 
+/**
+ * The window of a thread that opens with its turns: the rows near where it
+ * opens, from estimated heights. Also used when a long thread arrives in a
+ * transcript that was empty, so it opens the same way.
+ */
 function initialWindow(options: TurnWindowOptions): WindowState {
   const n = options.keys.length;
   if (!options.enabled || n <= 2) {
@@ -688,9 +693,31 @@ export function useTurnWindow(options: TurnWindowOptions): TurnWindowApi {
   const keysVersion = versionRef.current;
 
   const n = options.keys.length;
+  // The turn count of the last commit. A transcript that showed two turns or
+  // fewer (empty while its thread loads) mounted no rows between the first and
+  // the last, so it has no window to keep. When a long thread arrives in it,
+  // the window opens near the viewport as if the thread had mounted with its
+  // turns, instead of growing from the end up to the row cap. A thread that
+  // grows past the threshold one turn at a time had every row mounted, and
+  // keeps them for that commit so they are measured.
+  const committedCountRef = useRef<number | null>(null);
+  let current = stored;
+  if (
+    options.enabled &&
+    n > 2 &&
+    stored.n !== n &&
+    committedCountRef.current !== null &&
+    committedCountRef.current <= 2
+  ) {
+    current = initialWindow(options);
+    setStored(current);
+  }
   const range = options.enabled
-    ? reconcileWindow(stored, n)
+    ? reconcileWindow(current, n)
     : { start: Math.min(1, n), end: Math.max(Math.min(1, n), n - 1) };
+  useLayoutEffect(() => {
+    committedCountRef.current = n;
+  });
 
   const openedRef = useRef(false);
   const seenVersionRef = useRef(keysVersion);

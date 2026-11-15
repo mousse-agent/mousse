@@ -34,7 +34,7 @@ export interface BotChipCall {
 type ChipKind =
   | 'search' | 'fetch' | 'browse' | 'read' | 'change' | 'save' | 'draft' | 'lookback' | 'consult' | 'skill' | 'tool' | 'mcp' | 'schedules'
   | 'schedule' | 'unschedule' | 'remember' | 'forget' | 'depth' | 'profile' | 'model'
-  | 'work' | 'work_stop' | 'work_note' | 'remind' | 'unremind' | 'work_look' | 'wake' | 'watch' | 'unwatch'
+  | 'work' | 'work_stop' | 'work_note' | 'remind' | 'unremind' | 'work_look' | 'wake' | 'watch' | 'unwatch' | 'bot_send' | 'bot_look'
   | 'threads_look' | 'profiler' | 'thread_wait' | 'thread_start' | 'thread_send' | 'thread_stop' | 'thread_archive' | 'thread_hide' | 'picture'
   | 'subagent' | 'subagent_wait' | 'subagent_look'
 
@@ -184,6 +184,9 @@ function classify(tool: string, input: unknown, ctx: BotChipContext): Classified
     case 'work_models': return { kind: 'work_look', icon: 'think', live: 'looking at your models' }
     case 'remind': return { kind: 'remind', icon: 'schedule', live: 'setting a reminder' }
     case 'wake': return { kind: 'wake', icon: 'schedule', live: 'setting a wake-up' }
+    // Messages to the owner's other bots: each one sent is a chip; a look at who they are is not.
+    case 'bot_send': return { kind: 'bot_send', icon: 'think', live: 'telling another bot' }
+    case 'bot_list': return { kind: 'bot_look', icon: 'think', live: 'looking at your other bots' }
     case 'watch_start': return { kind: 'watch', icon: 'schedule', live: 'starting a background command' }
     case 'watch_stop': return { kind: 'unwatch', icon: 'schedule', live: 'stopping a background command' }
     case 'watch_list': return { kind: 'work_look', icon: 'think', live: 'checking its background work' }
@@ -299,6 +302,11 @@ function outcomeChip(kind: ChipKind, call: BotChipCall): BotChip | null {
     // A background command shows as a card on the message instead.
     case 'watch': return null
     case 'unwatch': return { icon: 'schedule', text: 'stopped a background command' }
+    // A message to another of the owner's bots: "told · Alpha".
+    case 'bot_send': {
+      const to = str(result.to)
+      return to ? { icon: 'think', text: 'told', highlight: shortChipText(to, 40) } : null
+    }
     // A wake: what it waits for ("when acme/app#12 merges") or its time.
     case 'wake': {
       const label = str(result.waitsFor) ?? str(result.when)
@@ -376,11 +384,11 @@ function groupChip(kind: ChipKind, icon: BotChipIcon, calls: readonly Classified
 }
 
 /** Kinds whose every successful call is its own chip. */
-const OUTCOME_KINDS: ReadonlySet<ChipKind> = new Set(['schedule', 'remember', 'forget', 'work', 'work_stop', 'work_note', 'remind', 'unremind', 'wake', 'watch', 'unwatch', 'model', 'thread_start', 'thread_send', 'thread_stop', 'thread_archive', 'thread_hide'])
+const OUTCOME_KINDS: ReadonlySet<ChipKind> = new Set(['schedule', 'remember', 'forget', 'work', 'work_stop', 'work_note', 'remind', 'unremind', 'wake', 'watch', 'unwatch', 'bot_send', 'model', 'thread_start', 'thread_send', 'thread_stop', 'thread_archive', 'thread_hide'])
 /** Kinds that settle to one chip for the last call only. */
 const LAST_KINDS: ReadonlySet<ChipKind> = new Set(['profile'])
 /** Kinds that settle to nothing: a look at its own schedules is not worth a chip. */
-const QUIET_KINDS: ReadonlySet<ChipKind> = new Set(['schedules', 'work_look', 'subagent_wait', 'subagent_look'])
+const QUIET_KINDS: ReadonlySet<ChipKind> = new Set(['schedules', 'work_look', 'bot_look', 'subagent_wait', 'subagent_look'])
 
 /**
  * The settled chips of one dispatch: grouped by kind, with counts and a short highlight (a domain,

@@ -49,7 +49,7 @@ import type {
 import type { PermissionMode } from '../../shared/permissionMode'
 import { routedVersions } from '../../shared/bridge/routed'
 import { bridgeRemoteMethodNames } from '../bridge/remote/capabilities'
-import type { NodePolicy } from './store/nodePolicy'
+import type { AgentReach, NodePolicy } from './store/nodePolicy'
 import type {
   AddonRecordStore,
   Clock,
@@ -150,7 +150,8 @@ const policyView = (policy: NodePolicy): BridgeNodePolicy => ({
   maxPermissionMode: policy.maxPermissionMode,
   terminal: policy.terminal,
   editor: policy.editor,
-  bots: policy.bots
+  bots: policy.bots,
+  agentReach: policy.agentReach
 })
 
 interface NetConfiguration {
@@ -1036,7 +1037,10 @@ export class NetService {
               : { maxPermissionMode: params.maxPermissionMode as PermissionMode }),
             ...(params.terminal === undefined ? {} : { terminal: params.terminal as boolean }),
             ...(params.editor === undefined ? {} : { editor: params.editor as boolean }),
-            ...(params.bots === undefined ? {} : { bots: params.bots as boolean })
+            ...(params.bots === undefined ? {} : { bots: params.bots as boolean }),
+            ...(params.agentReach === undefined
+              ? {}
+              : { agentReach: params.agentReach as AgentReach })
           })
           this.emit()
           return { policy: policyView(policy) }

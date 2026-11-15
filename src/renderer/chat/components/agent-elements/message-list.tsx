@@ -16,7 +16,7 @@ import { ProviderIcon } from "../../../lib/providerIcons";
 import { inferModelBrand } from "../../../../shared/modelVariants";
 import { useProviderSnapshotsStore } from "../../../lib/providerSnapshots";
 import { resolveModelChoice } from "../../../lib/modelChoice";
-import { modelLabel } from "../../../../shared/modelChoice";
+import { modelLabel, reasoningChange } from "../../../../shared/modelChoice";
 import type { TurnEnd } from "../../../../shared/types";
 
 import { agentSenderOf, UserMessage } from "./user-message";
@@ -2685,7 +2685,7 @@ const TurnRow = memo(function TurnRow({
   );
 });
 
-type HandoffSelection = { provider: string; model: string };
+type HandoffSelection = { provider: string; model: string; effort?: string };
 type HandoffMarker = {
   from: HandoffSelection;
   to: HandoffSelection;
@@ -2703,10 +2703,6 @@ function handoffStatus(handoff: HandoffMarker, text: string): string {
   return handoff.strategy && handoff.strategy !== "native_resume" ? "Context handoff" : "Model changed";
 }
 
-/**
- * "Model changed / Claude Opus 4.5 · High → GPT-5": a model switch in the transcript, by the names
- * the instances list, under a line saying what happened.
- */
 /** Where `/clear` started the model context again: a quiet rule across the thread with its label. */
 function ContextClearedDivider({ text }: { text: string }) {
   return <div role="separator" aria-label={text} className="context-cleared">
@@ -2716,9 +2712,25 @@ function ContextClearedDivider({ text }: { text: string }) {
   </div>;
 }
 
+/**
+ * "Model changed / Claude Opus 4.5 · High → GPT-5": a model switch in the transcript, by the names
+ * the instances list, under a line saying what happened. A turn that changed only the reasoning
+ * level of its model says that on one line ("Reasoning: Medium → High"); a model change names each
+ * side's level in its label, so both changing at once is still one marker.
+ */
 function ContextHandoffMarker({ handoff, text }: { handoff: HandoffMarker; text: string }) {
   // Names come from the provider snapshots: show them once those arrive.
   useProviderSnapshotsStore((state) => state.scopes);
+  const reasoning = handoff.transfer ? undefined : reasoningChange(handoff.from, handoff.to);
+  if (reasoning) {
+    return <div role="status" aria-label={`Reasoning changed: ${reasoning.from} to ${reasoning.to}`}
+      className="flex w-full items-center justify-center gap-2 py-1.5 text-xs text-muted-foreground">
+      <span className="text-[11px] opacity-70">Reasoning:</span>
+      <span>{reasoning.from}</span>
+      <span aria-hidden="true">→</span>
+      <span>{reasoning.to}</span>
+    </div>;
+  }
   const iconId = (selection: HandoffSelection) => {
     const brand = inferModelBrand(selection.model, undefined, selection.provider).brandId;
     // An unknown model falls back to its provider's id, which ProviderIcon maps to the vendor logo.

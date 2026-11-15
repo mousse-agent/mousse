@@ -76,6 +76,7 @@ import { checkedCard, hasReplyCards, keepMousseCard, keepReplyCard } from '../ch
 import { nudgeSlot } from './questionFollowUps'
 import { BotWatchers, DEFAULT_WATCHER_MINUTES, MAX_WATCHER_COMMAND_CHARS, MAX_WATCHER_MINUTES, MAX_WATCHERS_PER_BOT, watcherMatchProblem, type WatcherEnd, type WatcherSpec, type WatcherView } from '../watchers'
 import { lockedEnv } from '../../harness/env'
+import { BOT_MESSAGE_ROW_PREFIX, MAX_BOT_MESSAGE_CHAIN, MAX_BOT_MESSAGE_CHARS, MAX_BOT_MESSAGES_PER_DAY, botMessageInput, botMessageKey, botMessageRowText, type BotMessageSender } from '../../../shared/bots/personal/botMessages'
 import { DEFAULT_EVENT_WAKE_HOURS, MAX_EVENT_WAKE_HOURS, MAX_WAKE_BRIEF_CHARS, MAX_WAKE_CHAIN, MAX_WAKES_PER_DAY, WAKE_LINE_PREFIX, wakeEventLabel, wakeFiredLabel, wakeInput, type BotWakeEvent, type BotWakeFired } from '../../../shared/bots/personal/wakes'
 import type { LlmProviderOption } from '../../../shared/settings'
 import { botAllowedOf, type BotAllowed } from '../instructions'
@@ -1273,7 +1274,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * Why the bot cannot run is returned, not thrown, so the message is still kept; `startQueuedChat`
    * starts the activation after the commit.
    */
-  queueChatInTx(botId: string, key: string, input: string, activationId: string, owner?: BotOwnerTurn): BotEngineError | undefined {
+  queueChatInTx(botId: string, key: string, input: string, activationId: string, owner?: BotOwnerTurn, fromBot?: BotMessageSender): BotEngineError | undefined {
     if (this.store.activationByKey(key)) return undefined
     let admitted: ReturnType<BotEngine['admissible']>
     try {
@@ -1284,7 +1285,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       throw error
     }
     // A message from another device holds what the turn starts or messages to that device's limit (`BotOwnerTurn`).
-    const trigger: BotActivationTrigger = { kind: 'manual', input, ...(owner?.limit ? { owner: { limit: owner.limit, ...(owner.node ? { node: owner.node } : {}) } } : {}) }
+    // One another bot's message started says who sent it, and which turn in a row without the owner it is.
+    const trigger: BotActivationTrigger = { kind: 'manual', input, ...(owner?.limit ? { owner: { limit: owner.limit, ...(owner.node ? { node: owner.node } : {}) } } : {}), ...(fromBot ? { fromBot } : {}) }
     if (this.insertQueued(botId, activationId, key, trigger, 'chat', admitted)) this.store.db.afterCommit(() => this.changed({ botId }))
     return undefined
   }
@@ -2284,7 +2286,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // The owner's threads: reading in every lane; starting, messaging and stopping only in a chat turn the owner's own
       // message started (`chat:`), never in work, a reminder's work, a schedule or the bot's first message. The profiler:
       // in both lanes (the chat without its minutes-long watch).
-      botTools: { escalate: true, consult: definition.context.length > 0, memory: true, frontDesk: row.lane === 'chat', threads: ownerChatTurn(row) ? 'all' : 'read', profiler: true, images: this.imagePick(row.botId) !== null, applets: true, subagents: row.lane === 'run', questions: asksOwner(row), cards: true },
+      botTools: { escalate: true, consult: definition.context.length > 0, memory: true, frontDesk: row.lane === 'chat', threads: ownerChatTurn(row) ? 'all' : 'read', profiler: true, images: this.imagePick(row.botId) !== null, applets: true, subagents: row.lane === 'run', questions: asksOwner(row), cards: true, bots: asksOwner(row) },
       limit
     })
     if (!compiled.ok) return this.block(row, 'policy_unenforceable', compiled.error.reason ?? compiled.error.message)
@@ -7026,6 +7028,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     cards: {
       show: (botId, activationId, card) => this.showCard(botId, activationId, card)
     },
+    bots: {
+      list: (botId) => this.otherBots(botId).map((bot) => ({ name: bot.name, does: bot.does, ...(bot.paused ? { paused: true as const } : {}) })),
+      send: (botId, from, input) => this.sendBotMessage(botId, from, input)
+    },
     wakes: {
       add: (botId, from, input) => this.addWake(botId, from, input)
     },
@@ -7643,10 +7649,85 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
   }
 
-  /** How many wakes in a row led to the chat turn `row`: 0 for one the owner (or anything but a wake) started. */
-  private wakeChainOf(row: Pick<BotActivationRow, 'idempotencyKey'>): number {
+  /**
+   * How many turns in a row that no owner's message started led to the chat turn `row`, wakes and other bots' messages
+   * counted together: 0 for one the owner (or anything but a wake or a bot's message) started.
+   */
+  private wakeChainOf(row: Pick<BotActivationRow, 'idempotencyKey' | 'trigger'>): number {
+    if (row.trigger.kind === 'manual' && row.trigger.fromBot) return Math.max(1, row.trigger.fromBot.chain)
     if (!row.idempotencyKey.startsWith('wake:')) return 0
     return this.store.reminder(row.idempotencyKey.slice('wake:'.length))?.chain ?? MAX_WAKE_CHAIN
+  }
+
+  // -- Messages between the owner's bots (`bot_list`, `bot_send`) ---------------------------------------------------
+  //
+  // A bot tells another of its owner's bots something: the message shows in that bot's chat, labelled as the sender's,
+  // and starts a chat turn there that no person started (`botmsg:`), so it is held as a wake's turn is: it reads the
+  // owner's threads and never starts or messages one. The message is information, never the owner's instruction, and
+  // changes no grant.
+
+  /** The owner's other bots, as `bot_list` names them: each one's name, what it does, and whether it is paused. */
+  private otherBots(botId: string): Array<{ botId: string; name: string; does: string; paused: boolean }> {
+    return this.store.listRegistry().filter((row) => row.botId !== botId).flatMap((row) => {
+      const entry = this.host.definitions.get(row.botId)
+      if (!entry) return []
+      const definition = entry.published ?? entry.draft
+      return [{ botId: row.botId, name: definition.name, does: plainLabel(definition.description, 200), paused: Boolean(row.pausedReason) }]
+    })
+  }
+
+  /**
+   * How many turns in a row that no owner's message started led to the turn `row`: a chat turn's own count, and for work
+   * the count of the chat turn that handed it off, so work never starts a chain again.
+   */
+  private unownedChainOf(row: BotActivationRow): number {
+    if (row.lane === 'chat') return this.wakeChainOf(row)
+    const from = row.trigger.kind === 'work' ? this.store.activation(row.trigger.from) : undefined
+    return from?.lane === 'chat' ? this.wakeChainOf(from) : 0
+  }
+
+  /**
+   * `bot_send`: the turn `from` (a chat turn, or work the owner asked for) sends another of the owner's bots a message.
+   * It is posted in that bot's chat, labelled as the sender's, in the transaction that queues the chat turn that reads
+   * it. Refused, in words for the sender: no such bot, a name two bots share, a paused bot or one that can't run now,
+   * more than `MAX_BOT_MESSAGE_CHAIN` turns in a row without the owner, or `MAX_BOT_MESSAGES_PER_DAY` sent in 24 hours.
+   */
+  async sendBotMessage(botId: string, from: string, input: { to: string; message: string }): Promise<{ to: string; left: number }> {
+    const row = this.store.activation(from)
+    if (!row || row.botId !== botId || !asksOwner(row)) throw new BotEngineError('invalid_params', 'Only your chat, and work your owner asked for, message their other bots. Say in your report what you would have told it.')
+    if (row.status !== 'running') throw new BotEngineError('invalid_params', 'This turn has ended; nothing was sent.')
+    const message = input.message.trim()
+    if (!message) throw new BotEngineError('invalid_params', 'bot_send needs a message.')
+    if (message.length > MAX_BOT_MESSAGE_CHARS) throw new BotEngineError('invalid_params', `A message to another bot is at most ${MAX_BOT_MESSAGE_CHARS} characters. Shorten it; nothing was sent.`)
+    const others = this.otherBots(botId)
+    const named = input.to.replace(/\s+/g, ' ').trim()
+    const matches = others.filter((bot) => bot.botId === named || bot.name.trim().toLowerCase() === named.toLowerCase())
+    if (!matches.length)
+      throw new BotEngineError('bot_not_found', others.length
+        ? `Your owner has no other bot named "${plainLabel(named, 60)}". Their other bots: ${others.map((bot) => bot.name).join(', ')}. Nothing was sent.`
+        : 'Your owner has no other bots. Nothing was sent: tell your owner instead.')
+    if (matches.length > 1) throw new BotEngineError('invalid_params', `Your owner has ${matches.length} bots named "${plainLabel(named, 60)}", so the message can't go to one of them. Nothing was sent: tell your owner instead.`)
+    const target = matches[0]!
+    const chain = this.unownedChainOf(row) + 1
+    if (chain > MAX_BOT_MESSAGE_CHAIN)
+      throw new BotEngineError('bot_message_chain', `Bots have already taken ${MAX_BOT_MESSAGE_CHAIN} turns in a row without your owner. Nothing was sent: tell your owner where things stand, and carry on when they write.`)
+    if (this.store.botMessagesSince(botMessageKey(botId), new Date(this.now() - 24 * HOUR_MS).toISOString()) >= MAX_BOT_MESSAGES_PER_DAY)
+      throw new BotEngineError('bot_message_limit', `You have sent ${MAX_BOT_MESSAGES_PER_DAY} messages to other bots in the last 24 hours, the most a bot may. Nothing was sent: tell your owner instead.`)
+    if (target.paused) throw new BotEngineError('bot_paused', `${target.name} is paused, so it reads no messages now. Nothing was sent: tell your owner instead.`)
+    const entry = this.entry(botId)
+    const sender: BotMessageSender = { botId, name: (entry.published ?? entry.draft).name, chain }
+    const messageId = randomUUID()
+    const activationId = newActivationId()
+    const refused = this.store.db.transaction(() => {
+      const error = this.queueChatInTx(target.botId, botMessageKey(botId, messageId), botMessageInput({ fromName: sender.name, message, chain }), activationId, undefined, sender)
+      // The owner reads it in the receiving bot's chat, labelled as the sender's.
+      if (!error) this.chat.post({ id: `${BOT_MESSAGE_ROW_PREFIX}${messageId}`, botId: target.botId, author: 'bot', kind: 'notice', text: botMessageRowText(sender.name, message), lane: 'chat' })
+      return error
+    })
+    if (refused) throw new BotEngineError(refused.code, `${target.name} can't take messages now. Nothing was sent: tell your owner instead.`)
+    this.changed({ botId: target.botId })
+    await this.startQueuedChat(target.botId, activationId)
+    return { to: target.name, left: MAX_BOT_MESSAGE_CHAIN - chain }
   }
 
   /**

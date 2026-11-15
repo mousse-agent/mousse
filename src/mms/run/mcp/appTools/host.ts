@@ -64,6 +64,54 @@ export interface AgentThreadRequest {
   hidden?: boolean
 }
 
+/** `thread_create` with `computer`: a thread on another of the user's computers, in its copy of the caller's repository. */
+export interface AgentRemoteThreadRequest {
+  /** A computer's name or id from `list_computers`. */
+  computer: string
+  /** A project of that computer, to choose among several checkouts of the repository there. */
+  projectId?: string
+  title?: string
+  workspace: 'project' | 'new_worktree'
+  /** Both or neither: a model that computer offers, else its default. */
+  instanceId?: string
+  model?: string
+  effort?: string
+  firstMessage?: string
+  mode?: 'agent' | 'plan'
+}
+
+/** A project of another computer that may be the caller's repository, offered when the launch cannot choose one. */
+export interface RemoteProjectCandidate {
+  projectId: string
+  name?: string
+  /** Only the first commit matched: it may be a fork or a copy, not this repository. */
+  weak?: boolean
+}
+
+/** What `thread_create` with `computer` did. */
+export type AgentRemoteThreadResult =
+  | {
+      status: 'launched'
+      /** The thread, qualified: `<node>:<id>`. */
+      threadId: string
+      computer: string
+      title: string
+      /** The mode it was set to there; null until that computer confirmed it. */
+      permissionMode: PermissionMode | null
+      model: { instanceId: string; model: string } | null
+      /** The run the first message started there. */
+      runId?: string
+      /** What became of the first message; absent when none was asked for. */
+      firstMessage?: 'sent' | 'failed' | 'uncertain'
+      /** Why the first message failed, or is not confirmed. */
+      firstMessageReason?: string
+      /** The same `clientRequestId` launched this thread before; nothing new was made. */
+      replayed: boolean
+    }
+  /** That computer did not confirm whether it made the thread; Mousse keeps trying under the same key. */
+  | { status: 'uncertain'; computer: string; message: string }
+  | { status: 'refused'; code: string; message: string; computer?: string; candidates?: RemoteProjectCandidate[]; computers?: Array<{ id: string; name: string }> }
+
 /** A thread an agent created, as the creation decided it (never as the retry's arguments say). */
 export interface AgentCreatedThread {
   threadId: string
@@ -323,6 +371,12 @@ export interface AppToolHost extends DelegationToolsHost {
    * under the caller's cap on new threads.
    */
   creationStarted?(clientRequestId: string): boolean
+  /**
+   * `thread_create` with `computer` (issue #1160): a top-level thread on another of the user's computers, in its project
+   * that is the caller's repository. The launch is recorded before any call (`remote_launches`), every call is marked as
+   * the caller's, and a retry with the same `clientRequestId` continues that one launch. Refusals are returned, not thrown.
+   */
+  createRemoteThread?(input: AgentRemoteThreadRequest, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRemoteThreadResult>
   /**
    * Adds a note row to the thread's transcript (the creator's: what it launched, and on which model). `launched` names
    * the thread it started, which the transcript draws as a chip.
