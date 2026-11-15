@@ -51,9 +51,11 @@ it.each(['read', 'edit'] as const)('Codex authority %s without a tool ledger dec
   await finish(f, one.payload, 'completed', { text: 'Here is what I found.' })
   expect(texts(one.id)).toHaveLength(tool === 'read' ? 0 : 1)
 })
-it.each(['applet', 'card', 'picture'] as const)('a reply carrying a %s without a recorded tool is posted before continuing', async part => {
+it.each(['applet', 'card', 'picture', 'markdown-picture', 'picture-path'] as const)('a reply carrying a %s without a recorded tool is posted before continuing', async part => {
   const one = await joined()
   let text = 'Here is the result.'
+  if (part === 'markdown-picture') text += '\n![Flat](file:///tmp/flat.png)'
+  if (part === 'picture-path') text += '\n/tmp/flat.png'
   if (part === 'applet') text += '\n```mousse-applet\n'+JSON.stringify({schemaVersion:1,title:'Flat',description:'Availability',html:'<p>Free</p>',css:'',js:''})+'\n```'
   if (part === 'card') expect(keepReplyCard(one.id, { type: 'facts', title: 'Flat', rows: [{ label: 'Status', value: 'Free' }] })).toMatchObject({ kept: true })
   if (part === 'picture') expect(keepToolImages({ activationId: one.id, filesFolder: one.prepared.authority.workspace!.scratch, source: 'flat', images: [{ data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jvXcAAAAASUVORK5CYII=' }] })).toBeTruthy()
