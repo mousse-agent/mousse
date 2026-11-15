@@ -325,7 +325,7 @@ Said plainly, because a card that seems to cover everything is worse than none.
 
 ## Data model
 
-`bots.db` is at v9. Older builds already refuse a newer one, so each phase that needs a migration starts with one small PR that carries all of it.
+`bots.db` is at v10 (the unused phase 1 columns are in place). Older builds already refuse a newer one, so each phase that needs a migration starts with one small PR that carries all of it.
 
 | Version | Phase | Change |
 |---|---|---|
