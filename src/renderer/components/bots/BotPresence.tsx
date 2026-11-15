@@ -1,7 +1,8 @@
 import { Fragment, memo, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
-import { Activity, AppWindow, Brain, ChevronDown, ChevronRight, Circle, CircleAlert, CircleCheck, CircleDotDashed, CircleX, Clock, FileText, Globe, Moon, Pencil, Search, TerminalSquare, X } from '../../lib/icons'
+import { Activity, AppWindow, Brain, ChevronDown, ChevronRight, Circle, CircleAlert, CircleCheck, CircleDotDashed, CircleX, Clock, Eye, EyeOff, FileText, Globe, Moon, Pencil, Search, TerminalSquare, X } from '../../lib/icons'
 import type { BotChip, BotLaunchedThread, BotSummary, BotWatcherItem, BotWorkItem } from '../../../shared/bots/personal/chat'
 import { formatAgo } from '../../lib/formatAgo'
+import { setThreadHidden } from '../../lib/threadActions'
 import { useBotsStore } from '../../stores/botsStore'
 import { launchedGroups, launchedLook, presenceOf, stickerOf, type BotStickerKind, type LaunchedTone } from './botChatShape'
 import { openThread } from './BotSteps'
@@ -71,21 +72,32 @@ const TONE_ICONS: Record<LaunchedTone, typeof Circle> = { working: CircleDotDash
 
 /**
  * A thread the bot started, in the header's list: its title, where it stands (an icon and a word, the row tinted to
- * match), its project and when it last changed. The whole row opens it. Rows that no longer work are dimmed.
+ * match), its project and when it last changed. The whole row opens it. Rows that no longer work are dimmed. A thread the
+ * bot keeps out of the sidebar says "Hidden", and has Show in sidebar beside it.
  */
 const ThreadLine = memo(function ThreadLine({ thread, now, onOpen }: { thread: BotLaunchedThread; now: number; onOpen(): void }) {
   const { tone, label } = launchedLook(thread.status)
   const Icon = TONE_ICONS[tone]
   const ago = formatAgo(Date.parse(thread.updatedAt), now)
-  return <li>
-    <button type="button" className="bot-thread-line" data-tone={tone} data-nav title={`Open ${thread.title}`}
+  const [showing, setShowing] = useState(false)
+  const meta: ReactNode[] = [
+    ...(thread.hidden ? [<span className="bot-thread-hidden" title="Not in your sidebar"><EyeOff size={11} aria-hidden />Hidden</span>] : []),
+    ...(thread.project ? [thread.project] : []),
+    ...(ago ? [`updated ${ago}`] : [])
+  ]
+  return <li className="bot-thread-item">
+    <button type="button" className="bot-thread-line" data-tone={tone} data-hidden={thread.hidden || undefined} data-nav title={`Open ${thread.title}`}
       onClick={() => { onOpen(); openThread(thread.threadId) }}>
       <span className="bot-thread-top">
         <span className="bot-thread-title">{thread.title}</span>
         <span className="bot-thread-state"><Icon size={12} aria-hidden />{label}</span>
       </span>
-      <span className="bot-thread-meta">{[thread.project, ago && `updated ${ago}`].filter(Boolean).join(' · ')}</span>
+      <span className="bot-thread-meta">{meta.map((part, index) => <Fragment key={index}>{index > 0 && ' · '}{part}</Fragment>)}</span>
     </button>
+    {thread.hidden && <button type="button" className="bot-thread-show" data-nav aria-label={`Show ${thread.title} in sidebar`} title="Show in sidebar" disabled={showing}
+      onClick={() => { setShowing(true); void setThreadHidden(thread.threadId, false).finally(() => setShowing(false)) }}>
+      <Eye size={13} aria-hidden />
+    </button>}
   </li>
 })
 

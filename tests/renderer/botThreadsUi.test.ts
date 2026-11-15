@@ -108,6 +108,44 @@ describe('a bot\'s threads, as the owner sees them', () => {
     expect(host.textContent).toBe('Started by Keeper')
   })
 
+  it('above a thread the bot keeps out of the sidebar: "Hidden" and Show in sidebar, which brings it back; also once the bot is deleted, never for another computer\'s', async () => {
+    const started = { id: 'started', name: 'Quick check', createdAt: NOW, updatedAt: NOW, createdByThreadId: 'bot-chat', startedByBot: { botId: 'b1', name: 'Alpha' }, hidden: true } as Thread
+    const { hidden: _hidden, ...shown } = started
+    const request = vi.fn(async () => ({ thread: shown }))
+    ;(window as unknown as { mousse: unknown }).mousse = { threads: { select }, platformRequest: { request } }
+    useBotsStore.setState({ bots: [{ id: 'b1', name: 'Alpha', homeThreadId: 'bot-chat' } as BotSummary], loaded: true })
+    useAppStore.setState({ threads: [started], activeThreadId: 'started' })
+    act(() => root.render(createElement(ThreadStartedByBar)))
+    expect(host.textContent).toBe('Started by Alpha · HiddenShow in sidebar')
+    await act(async () => { [...host.querySelectorAll('button')].find((button) => button.textContent === 'Show in sidebar')!.click() })
+    expect(request).toHaveBeenCalledWith('threads.setHidden', { threadId: 'started', hidden: false })
+    // The store has the thread as the service answered: listed again, and the line is the plain one.
+    expect(useAppStore.getState().threads.find((thread) => thread.id === 'started')!.hidden).toBeUndefined()
+    expect(host.textContent).toBe('Started by Alpha')
+    // The bot is gone: its chat no longer lists the thread, so the line is where it comes back.
+    act(() => {
+      useBotsStore.setState({ bots: [], loaded: true })
+      useAppStore.setState({ threads: [started] })
+    })
+    expect(host.textContent).toBe('Started by Alpha (deleted) · HiddenShow in sidebar')
+    // Another computer's hidden thread: that computer's bot chat brings it back, not this line.
+    act(() => useAppStore.setState({ threads: [{ ...started, id: 'nod_desk:started', node: 'nod_desk' }], activeThreadId: 'nod_desk:started' }))
+    expect(host.textContent).toBe('Started by Alpha')
+  })
+
+  it('a hidden start, a hide and a show are steps with the thread\'s title, each with Open, at once', () => {
+    const calls = [
+      { tool: 'thread_create', input: { title: 'Quick check' }, result: { threadId: 't-new', title: 'Quick check', hidden: true } },
+      { tool: 'thread_hide', input: { threadId: 't-old' }, result: { threadId: 't-old', title: 'Lookup', hidden: true } },
+      { tool: 'thread_hide', input: { threadId: 't-back', hidden: false }, result: { threadId: 't-back', title: 'Big job', hidden: false } }
+    ]
+    const chips = rollUpChips(calls)
+    expect(chips.map((chip) => [chip.text, chip.highlight, chip.thread])).toEqual([['started hidden thread', 'Quick check', 't-new'], ['hid from sidebar', 'Lookup', 't-old'], ['showed in sidebar', 'Big job', 't-back']])
+    for (const [index, call] of calls.entries()) expect(actedChip(call.tool, call.input, call.result)).toEqual(chips[index])
+    act(() => root.render(createElement(BotSteps, { chips })))
+    expect([...host.querySelectorAll('button')].filter((button) => button.textContent === 'Open')).toHaveLength(3)
+  })
+
   it('a start or a message shows what the bot sent there on the chip\'s hover, at once', () => {
     const chips = rollUpChips([
       { tool: 'thread_send', input: { threadId: 't-old' }, result: { threadId: 't-old', title: 'Signup', sent: 'Please also check the signup page.' } }

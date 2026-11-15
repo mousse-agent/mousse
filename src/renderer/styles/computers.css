@@ -57,6 +57,16 @@
   outline: none;
 }
 
+/* Show in sidebar, after "Hidden" on a thread a bot keeps out of the sidebar. */
+.thread-started-by-show {
+  flex: none;
+}
+
+.thread-started-by-show:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 .thread-computer-bar[data-state='offline'],
 .thread-computer-bar[data-state='not-shared'] {
   color: var(--warning, var(--text-secondary));

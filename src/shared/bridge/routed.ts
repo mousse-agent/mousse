@@ -900,6 +900,10 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
     reason: 'A goal is set and changed from the desktop composer of the computer that runs the thread (issue #1207).'
   },
   {
+    methods: ['threads.setHidden'],
+    reason: "A hidden thread is one a bot of the computer that runs it started; that bot's chat lists it, and Show in sidebar is offered there (issue #1217)."
+  },
+  {
     methods: ['threads.focus'],
     reason:
       'A window asks its own daemon to keep a thread of another computer in view; the router answers it.'

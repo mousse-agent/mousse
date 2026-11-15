@@ -99,6 +99,23 @@ describe('the Needs me group', () => {
   })
 })
 
+describe('a thread a bot keeps out of the sidebar', () => {
+  const hidden = thread('h', 'Quick check', { projectId: 'p1', updatedAt: at(6), hidden: true, startedByBot: { botId: 'b1', name: 'Alpha' } })
+
+  // The Threads view and the Projects tree list the same threads (`availableThreads`); the Threads view draws every row.
+  it('is not in the thread list, and still in Needs me while it waits on the person', () => {
+    setStore({ projects, threads: [...threads, hidden], threadActivity: {}, threadsSidebarView: 'threads' })
+    expect(titlesIn(sidebar())).toEqual(expect.arrayContaining(['Fix tests', 'Ship docs', 'Refactor']))
+    expect(titlesIn(sidebar())).not.toContain('Quick check')
+    // A question in it is the person's: Needs me lists it, and opens it from there.
+    setStore({ projects, threads: [...threads, hidden], threadActivity: { h: 'awaiting_input', a: 'awaiting_input' }, threadsSidebarView: 'threads' })
+    expect(titlesIn(needsMeSection(sidebar()))).toEqual(['Quick check', 'Fix tests'])
+    // Shown again, it is an ordinary row.
+    setStore({ projects, threads: [...threads, { ...hidden, hidden: undefined }], threadActivity: {}, threadsSidebarView: 'threads' })
+    expect(titlesIn(sidebar())).toContain('Quick check')
+  })
+})
+
 describe('the project row', () => {
   it('shows a dot for the worst thread state and, while closed, how many threads need the person', () => {
     setStore({ projects, threads, threadActivity: { a: 'awaiting_input', c: 'awaiting_input' }, threadsSidebarView: 'projects' })

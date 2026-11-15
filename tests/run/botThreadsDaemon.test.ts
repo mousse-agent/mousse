@@ -75,6 +75,7 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
       sendToThreadAsAgent(threadId: string, input: { content: string; mode: 'agent' | 'plan' }, options: Record<string, unknown>): Promise<{ runId: string }>
       stopRunAsAgent(threadId: string, runId: string, options: Record<string, unknown>): Promise<unknown>
       setThreadArchivedAsAgent(threadId: string, archived: boolean, options: Record<string, unknown>): Promise<unknown>
+      setThreadHiddenAsAgent(threadId: string, hidden: boolean, options: Record<string, unknown>): { hidden: boolean; changed: boolean }
       showAgentAction(threadId: string, actor: AgentActor, summary: string, options?: { notice?: boolean }): void
       questions: { requestAnswers(questions: unknown, threadId: string, options: unknown): Promise<unknown>; listPendingForThread(threadId: string): unknown[] }
     }
@@ -84,9 +85,10 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     const send = (threadId: string, key: string) => orch.sendToThreadAsAgent(threadId, { content: 'Please also check the signup page.', mode: 'agent' }, { clientRequestId: `thread_send:${chat.id}:${activationId}:${key}`, actor })
     const stop = (threadId: string, runId: string, key: string) => orch.stopRunAsAgent(threadId, runId, { clientRequestId: `thread_interrupt:${chat.id}:${key}`, actor })
     const archive = (threadId: string, archived = true) => orch.setThreadArchivedAsAgent(threadId, archived, { actor })
+    const hide = (threadId: string, hidden = true) => orch.setThreadHiddenAsAgent(threadId, hidden, { actor })
     const runMode = (runId: string) => d.engine.bindingForRun(runId)?.policy.permissionMode
     const settled = (runId: string) => waitFor(() => ['completed', 'failed', 'cancelled', 'interrupted'].includes(d.engine.getRun(runId)?.status ?? ''), `run ${runId}`)
-    return { d, pi, project, chat, get actor() { return actor }, orch, create, send, stop, archive, runMode, settled, turnRun }
+    return { d, pi, project, chat, get actor() { return actor }, orch, create, send, stop, archive, hide, runMode, settled, turnRun }
   }
 
   it('a thread it starts is an ordinary thread in Full access, launched by its chat thread, on the default model unless it names one, and its first message is the bot\'s', async () => {
@@ -277,6 +279,66 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     expect(w.d.engine.getRun(owner.runId!)!.status).toBe('completed')
     expect(await w.archive(target.id)).toMatchObject({ status: 'accepted', changed: true })
     expect(await w.archive(parent.id)).toMatchObject({ status: 'accepted', changed: true })
+  })
+
+  it('a thread it starts hidden is kept out of the sidebar and listed as hidden in its chat; it hides or shows only threads it started, and each change tells its chat thread', async () => {
+    const w = world()
+    const questions = w.orch.questions as unknown as EventEmitter & { listPendingForThread(threadId: string): unknown[] }
+    const changed: string[] = []
+    const unwatch = watchLaunchedThreads({ runs: w.d.engine, questions, threads: w.d.store, thread: (id) => w.d.store.getThread(id), changed: (creator) => changed.push(creator) })
+    const listed = () => launchedThreadsOf({
+      creators: new Set([w.chat.id]),
+      threads: w.d.store.listAllThreads(),
+      activeRuns: w.d.engine.store.listNonTerminalRuns(),
+      lastRun: (id) => w.d.engine.store.listRuns(id, { limit: 1 })[0],
+      asks: () => false
+    }).map((thread) => [thread.title, thread.hidden ?? false])
+    const actions = (threadId: string) => w.d.engine.store.listEvents(threadId).filter((event) => event.type === 'agent.action').map((event) => (event.payload as { action: string }).action)
+    const made = await w.create('h1', { title: 'Quick check', hidden: true })
+    const visible = await w.create('h2', { title: 'Big refactor' })
+    await w.settled((made.firstMessage as { runId: string }).runId)
+    // Hidden from the first write, and it still runs its first message like any thread.
+    expect(w.d.store.getThread(made.threadId)).toMatchObject({ hidden: true, startedByBot: { botId: 'b1', name: 'alpha' } })
+    expect(w.d.store.getThread(visible.threadId)!.hidden).toBeUndefined()
+    expect(w.d.engine.getRun((made.firstMessage as { runId: string }).runId)!.status).toBe('completed')
+    expect(listed()).toEqual(expect.arrayContaining([['Quick check', true], ['Big refactor', false]]))
+    // A retry of the same request finds the same hidden thread.
+    expect(await w.create('h1', { title: 'Quick check', hidden: true })).toMatchObject({ threadId: made.threadId, replayed: true })
+
+    // Shown again, then hidden again: each a change of the thread, recorded as the bot's, and heard by its chat thread.
+    let seen = changed.length
+    expect(w.hide(made.threadId, false)).toEqual({ hidden: false, changed: true })
+    expect(w.d.store.getThread(made.threadId)!.hidden).toBeUndefined()
+    expect(changed.length).toBeGreaterThan(seen)
+    expect(listed()).toEqual(expect.arrayContaining([['Quick check', false]]))
+    expect(w.hide(made.threadId, false)).toEqual({ hidden: false, changed: false })
+    seen = changed.length
+    expect(w.hide(visible.threadId)).toEqual({ hidden: true, changed: true })
+    expect(w.d.store.getThread(visible.threadId)!.hidden).toBe(true)
+    expect(changed.length).toBeGreaterThan(seen)
+    expect(actions(made.threadId)).toEqual(expect.arrayContaining(['unhid_thread']))
+    expect(actions(visible.threadId)).toEqual(expect.arrayContaining(['hid_thread']))
+
+    // Never a thread it did not start: its owner's own, or its own chat.
+    const refusal = (attempt: () => unknown): string | undefined => {
+      try {
+        attempt()
+        return undefined
+      } catch (error) {
+        return (error as McpToolError).code
+      }
+    }
+    const owners = w.d.store.createThread('Owner work', w.project.id)
+    expect(refusal(() => w.hide(owners.id))).toBe('mousse_scope_denied')
+    expect(refusal(() => w.hide(w.chat.id))).toBe('mousse_scope_denied')
+    expect(w.d.store.getThread(owners.id)!.hidden).toBeUndefined()
+    unwatch()
+
+    // A turn that may only read threads (work, a schedule, a reminder) hides nothing, even a thread the bot started.
+    const reading = world({ held: BOT_THREAD_READ_TOOLS })
+    const started = reading.d.store.createThread('Started earlier', reading.project.id, undefined, { createdByThreadId: reading.chat.id, startedByBot: { botId: 'b1', name: 'alpha' } })
+    expect(refusal(() => reading.hide(started.id))).toBe('mousse_scope_denied')
+    expect(reading.d.store.getThread(started.id)!.hidden).toBeUndefined()
   })
 
   it('when "use your threads" goes, its messages still waiting in a queue are withdrawn with a line in the thread, and never run', async () => {

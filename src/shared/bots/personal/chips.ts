@@ -35,7 +35,7 @@ type ChipKind =
   | 'search' | 'fetch' | 'browse' | 'read' | 'change' | 'save' | 'draft' | 'lookback' | 'consult' | 'skill' | 'tool' | 'mcp' | 'schedules'
   | 'schedule' | 'unschedule' | 'remember' | 'forget' | 'depth' | 'profile' | 'model'
   | 'work' | 'work_stop' | 'work_note' | 'remind' | 'unremind' | 'work_look' | 'wake' | 'watch' | 'unwatch'
-  | 'threads_look' | 'profiler' | 'thread_wait' | 'thread_start' | 'thread_send' | 'thread_stop' | 'thread_archive' | 'picture'
+  | 'threads_look' | 'profiler' | 'thread_wait' | 'thread_start' | 'thread_send' | 'thread_stop' | 'thread_archive' | 'thread_hide' | 'picture'
   | 'subagent' | 'subagent_wait' | 'subagent_look'
 
 interface Classified {
@@ -210,6 +210,7 @@ function classify(tool: string, input: unknown, ctx: BotChipContext): Classified
     case 'thread_send': return { kind: 'thread_send', icon: 'think', live: 'messaging a thread' }
     case 'thread_interrupt': return { kind: 'thread_stop', icon: 'think', live: 'stopping a thread' }
     case 'thread_archive': return { kind: 'thread_archive', icon: 'think', live: args.archived === false ? 'unarchiving a thread' : 'archiving a thread' }
+    case 'thread_hide': return { kind: 'thread_hide', icon: 'think', live: args.hidden === false ? 'showing a thread' : 'hiding a thread' }
     // Its work's subagents: each one it starts or sends more work by its title; waiting on them is one chip.
     case 'subagent_start':
     case 'subagent_send': {
@@ -303,15 +304,20 @@ function outcomeChip(kind: ChipKind, call: BotChipCall): BotChip | null {
       const label = str(result.waitsFor) ?? str(result.when)
       return { icon: 'schedule', text: 'wake-up', ...(label ? { highlight: label } : {}) }
     }
-    // A thread it started, messaged, stopped, archived or unarchived: its title, and the thread, which the chip opens.
+    // A thread it started, messaged, stopped, archived, unarchived, hid or showed: its title, and the thread, which the chip
+    // opens (a hidden thread too).
     case 'thread_start':
     case 'thread_send':
     case 'thread_stop':
-    case 'thread_archive': {
+    case 'thread_archive':
+    case 'thread_hide': {
       const threadId = str(result.threadId)
       if (!threadId) return null
       const title = str(result.title)
-      const text = kind === 'thread_start' ? 'started thread' : kind === 'thread_send' ? 'messaged' : kind === 'thread_stop' ? 'stopped' : result.archived === false ? 'unarchived' : 'archived'
+      const text = kind === 'thread_start' ? (result.hidden === true ? 'started hidden thread' : 'started thread')
+        : kind === 'thread_send' ? 'messaged' : kind === 'thread_stop' ? 'stopped'
+          : kind === 'thread_hide' ? (result.hidden === false ? 'showed in sidebar' : 'hid from sidebar')
+            : result.archived === false ? 'unarchived' : 'archived'
       // The first line of what it sent there, which the chip shows on hover.
       const said = str(result.sent)
       return { icon: 'think', text, ...(title ? { highlight: shortChipText(title, 40) } : {}), thread: threadId, ...(said ? { said: shortChipText(said, 160) } : {}) }
@@ -370,7 +376,7 @@ function groupChip(kind: ChipKind, icon: BotChipIcon, calls: readonly Classified
 }
 
 /** Kinds whose every successful call is its own chip. */
-const OUTCOME_KINDS: ReadonlySet<ChipKind> = new Set(['schedule', 'remember', 'forget', 'work', 'work_stop', 'work_note', 'remind', 'unremind', 'wake', 'watch', 'unwatch', 'model', 'thread_start', 'thread_send', 'thread_stop', 'thread_archive'])
+const OUTCOME_KINDS: ReadonlySet<ChipKind> = new Set(['schedule', 'remember', 'forget', 'work', 'work_stop', 'work_note', 'remind', 'unremind', 'wake', 'watch', 'unwatch', 'model', 'thread_start', 'thread_send', 'thread_stop', 'thread_archive', 'thread_hide'])
 /** Kinds that settle to one chip for the last call only. */
 const LAST_KINDS: ReadonlySet<ChipKind> = new Set(['profile'])
 /** Kinds that settle to nothing: a look at its own schedules is not worth a chip. */
@@ -386,7 +392,8 @@ const QUIET_KINDS: ReadonlySet<ChipKind> = new Set(['schedules', 'work_look', 's
  * shows it at once, before the turn ends and its message carries every chip. Null for any other call.
  */
 export function actedChip(tool: string, input: unknown, result: unknown): BotChip | null {
-  const kind = tool === 'thread_create' ? 'thread_start' : tool === 'thread_send' ? 'thread_send' : tool === 'thread_interrupt' ? 'thread_stop' : tool === 'thread_archive' ? 'thread_archive' : undefined
+  const kind = tool === 'thread_create' ? 'thread_start' : tool === 'thread_send' ? 'thread_send' : tool === 'thread_interrupt' ? 'thread_stop'
+    : tool === 'thread_archive' ? 'thread_archive' : tool === 'thread_hide' ? 'thread_hide' : undefined
   return kind ? outcomeChip(kind, { tool, input, result }) : null
 }
 

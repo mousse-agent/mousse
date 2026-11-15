@@ -113,7 +113,7 @@ function botThreadCall(bots: (() => BotAppToolDeps | undefined) | undefined, ctx
  * the thread, which the chip opens, and the first line of what it sent there (shown with the chip), so the owner sees at
  * once what the bot said.
  */
-function botChip(call: BotThreadCall, tool: string, threadId: string, title: string | undefined, sent?: unknown, extra?: { archived: boolean }): void {
+function botChip(call: BotThreadCall, tool: string, threadId: string, title: string | undefined, sent?: unknown, extra?: { archived?: boolean; hidden?: boolean }): void {
   const said = typeof sent === 'string' ? oneLine(sent.trim().split(/\r?\n/).find((line) => line.trim()) ?? '', 160) : ''
   try {
     call.activity?.onAppResult(call.chips, tool, { threadId, ...(title ? { title } : {}), ...(said ? { sent: said } : {}), ...extra })
@@ -734,7 +734,9 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
               project: (thread.projectId && projectNames.get(thread.projectId)) || null,
               status,
               updatedAt: thread.updatedAt,
-              ...(thread.createdByThreadId === ctx.caller.threadId ? { startedByYou: true } : {})
+              ...(thread.createdByThreadId === ctx.caller.threadId ? { startedByYou: true } : {}),
+              // Out of the owner's sidebar (`thread_hide`).
+              ...(thread.hidden ? { hidden: true } : {})
             })
             if (rows.length >= limit) break
           }
@@ -1104,6 +1106,48 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       }
     },
     {
+      name: 'thread_hide',
+      description: 'Hide a thread you started from your owner\'s sidebar, or show it there again with hidden: false. Nothing in the thread changes: it keeps working, and your chat lists it, where your owner opens it. Hide a short background job your owner will not follow; show it again when its work becomes something your owner will want to follow, answer or continue. Only threads you started.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          threadId: { type: 'string' },
+          hidden: { type: 'boolean', description: 'Defaults to true; false shows the thread in the sidebar again.' }
+        },
+        required: ['threadId']
+      },
+      access: 'managesOthers',
+      class: 'mutation',
+      // A personal bot's tool ("use your threads"): no other thread lists it.
+      listed: (listing) => listing.botRole !== undefined,
+      offered: () => false,
+      handler: async (args, ctx) => {
+        const threadId = requiredId(args, 'threadId')
+        if (args.hidden !== undefined && typeof args.hidden !== 'boolean') throw new Error('hidden must be true or false')
+        const hidden = args.hidden !== false
+        const bot = botThreadCall(bots, ctx)
+        if (!bot) throw new McpToolError('mousse_scope_denied', 'thread_hide is for personal bots: a thread an agent starts always shows in the sidebar.')
+        if (!host.setThreadHidden) return notAvailable('thread_hide')
+        requireBotReach(host, engine, ctx.caller.threadId, threadId)
+        assertNotBotThread(host, threadId, 'thread_hide')
+        const actor = actorOf(ctx)
+        const result = host.setThreadHidden(threadId, hidden, { actor })
+        const title = titleOf(threadId)
+        if (result.changed) {
+          showAction(host, threadId, actor, hidden ? 'hid this thread from the sidebar' : 'showed this thread in the sidebar again')
+          botChip(bot, 'thread_hide', threadId, title, undefined, { hidden })
+        }
+        return json({
+          threadId,
+          link: threadLink(threadId),
+          title: title ?? null,
+          hidden,
+          changed: result.changed,
+          note: hidden ? 'It is out of your owner\'s sidebar; your chat lists it.' : 'It is in your owner\'s sidebar again.'
+        })
+      }
+    },
+    {
       name: 'thread_steer',
       description: 'Add guidance to the turn another thread is running now. Name the run you read; if it is not the thread\'s active run, or is paused, nothing is sent and you are told why. The thread\'s model receives the text labelled as a message from an agent, not from the user. Refused when the run is running under a looser permission mode than yours (a running turn cannot be narrowed): send a message instead.',
       inputSchema: {
@@ -1213,6 +1257,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           effort: { type: 'string', description: 'The reasoning level of the model, one of its efforts in list_models; needs model.' },
           firstMessage: { type: 'string', description: 'Sent to the new thread as your message, so it starts working.' },
           mode: { type: 'string', enum: ['agent', 'plan'], description: 'The mode of firstMessage; defaults to agent.' },
+          hidden: { type: 'boolean', description: 'Personal bots only. true keeps the thread out of your owner\'s sidebar: your chat lists it, and your owner opens it or shows it in the sidebar from there. Hide short background jobs your owner will not follow (a quick check, a lookup, a cleanup); leave visible work your owner will want to follow, answer or continue. thread_hide changes it later. Defaults to false.' },
           clientRequestId: CLIENT_REQUEST_ID_SCHEMA
         },
         required: ['projectId']
@@ -1260,6 +1305,9 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           throw new Error(`firstMessage must be at most ${THREAD_FIRST_MESSAGE_MAX_CHARS} characters`)
         if (args.mode !== undefined && args.mode !== 'agent' && args.mode !== 'plan') throw new Error('mode must be agent or plan')
         if (args.mode !== undefined && args.firstMessage === undefined) throw new Error('mode is the mode of firstMessage: give a firstMessage, or leave mode out.')
+        if (args.hidden !== undefined && typeof args.hidden !== 'boolean') throw new Error('hidden must be true or false')
+        // Only a bot's chat lists the threads it started, so only a bot's thread can be hidden and still be found.
+        if (args.hidden === true && !bot) throw new Error('hidden is for personal bots: a thread an agent starts always shows in the sidebar.')
         const request: AgentThreadRequest = {
           projectId,
           ...(title ? { title } : {}),
@@ -1267,7 +1315,8 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           ...(instanceId ? { instanceId } : {}),
           ...(model ? { model } : {}),
           ...(effort ? { effort } : {}),
-          ...(typeof args.firstMessage === 'string' ? { firstMessage: args.firstMessage, mode: (args.mode as 'agent' | 'plan' | undefined) ?? 'agent' } : {})
+          ...(typeof args.firstMessage === 'string' ? { firstMessage: args.firstMessage, mode: (args.mode as 'agent' | 'plan' | undefined) ?? 'agent' } : {}),
+          ...(args.hidden === true ? { hidden: true } : {})
         }
         const actor = actorOf(ctx)
         // A bot's starts are not counted: its key names its chat turn.
@@ -1292,9 +1341,11 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         // A personal bot: the new thread says the bot started it, and the bot's chat gets a chip that opens it, with the
         // first line of what it asked there. The bot's own thread is its chat, read from bots.db: no note goes there.
         if (bot) {
+          // As the thread is now: a retry reports the thread the first call made.
+          const hidden = host.threadMeta?.(created.threadId)?.hidden === true
           if (!created.replayed) {
             showAction(host, created.threadId, actor, 'started this thread')
-            botChip(bot, 'thread_create', created.threadId, created.title, args.firstMessage)
+            botChip(bot, 'thread_create', created.threadId, created.title, args.firstMessage, hidden ? { hidden } : undefined)
           }
           return json({
             threadId: created.threadId,
@@ -1306,7 +1357,8 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
             permissionMode: created.permissionMode,
             ...(created.firstMessage ? { firstMessage: created.firstMessage } : {}),
             ...(created.replayed ? { replayed: true } : {}),
-            note: `${botThreadModeText(created.permissionMode)} It shows in your owner's sidebar, started by you. Its approvals and questions are your owner's. Tell your owner in one line what you started.`
+            ...(hidden ? { hidden: true } : {}),
+            note: `${botThreadModeText(created.permissionMode)} ${hidden ? 'It is hidden from your owner\'s sidebar: your chat lists it, started by you.' : 'It shows in your owner\'s sidebar, started by you.'} Its approvals and questions are your owner's. Tell your owner in one line what you started.`
           })
         }
         if (!created.replayed) {

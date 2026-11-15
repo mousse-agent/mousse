@@ -211,6 +211,8 @@ export interface BotLaunchedThread {
   status: 'running' | 'queued' | 'paused' | 'needs_input' | 'idle' | 'done' | 'failed' | 'stopped'
   startedAt: string
   updatedAt: string
+  /** Kept out of the owner's sidebar (`Thread.hidden`): this list is where the owner finds it, and shows it again. */
+  hidden?: true
 }
 
 /** Whether a thread the bot started keeps it busy: a run of it works, waits its turn, is held, or waits on the owner. */

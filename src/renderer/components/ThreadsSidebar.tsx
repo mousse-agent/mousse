@@ -495,8 +495,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
 
-  // Subagent threads sit under their parent, not beside it: the list holds the threads people started.
-  const listedThreads = useMemo(() => visibleThreads(threads), [threads])
+  // Subagent threads sit under their parent, not beside it: the list holds the threads people started. A thread a bot
+  // keeps out of the sidebar (`Thread.hidden`) is listed in the bot's chat instead.
+  const listedThreads = useMemo(() => visibleThreads(threads).filter((thread) => !thread.hidden), [threads])
   // A parent row shows what its subagents are doing, however deep they are nested.
   const rolledUpActivity = useMemo(() => rollUpActivities(threads, threadActivity), [threads, threadActivity])
   // While a subagent's thread is open, the row it sits under is highlighted instead.
@@ -559,7 +560,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   // The group in focus: the open thread's (a draft's project too), whose header stays bright while the other
   // groups dim (threads-sidebar.css). None for a Chats thread or with nothing open, and then nothing dims.
   const focusedThread = threads.find((thread) => thread.id === (openSubagentParentId ?? activeThreadId))
-  const activeGroupId = focusedThread && !agentThreadIds.has(focusedThread.id) ? listGroupOf(focusedThread.projectId) : undefined
+  const activeGroupId = focusedThread && !agentThreadIds.has(focusedThread.id) && !focusedThread.hidden ? listGroupOf(focusedThread.projectId) : undefined
   // The Threads tab dims its other cards only while the open thread has a card there.
   const feedHasActive = Boolean(focusedThread && availableThreads.some((thread) => thread.id === focusedThread.id))
 
@@ -572,7 +573,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     const shownId = openSubagentParentId ?? activeThreadId
     if (!shownId || revealedRow.current === shownId) return
     const shown = threads.find((thread) => thread.id === shownId)
-    if (!shown || !isThreadStarted(shown) || agentThreadIds.has(shown.id)) return
+    // A hidden thread has no row to reveal (`Thread.hidden`).
+    if (!shown || !isThreadStarted(shown) || agentThreadIds.has(shown.id) || shown.hidden) return
     revealedRow.current = shownId
     if (shown.settledAt) {
       setArchivedExpanded(true)

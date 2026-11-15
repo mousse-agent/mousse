@@ -167,6 +167,27 @@ describe('the snapshot an owner sends', () => {
     await expect(backend.stop(bot.id)).rejects.toMatchObject({ code: 'stream_unknown' })
   })
 
+  it('lists no thread a bot keeps out of the sidebar, nor a subagent below one, on a phone or another computer, and still opens it by id', async () => {
+    const shown = row(1)
+    const hidden = row(2, { hidden: true, startedByBot: { botId: 'b1', name: 'Alpha' }, name: 'Quick check' })
+    const below = row(3, { lineage: { parentThreadId: hidden.id, rootThreadId: hidden.id, relationship: 'subagent' } } as Partial<Thread>)
+    const fake = {
+      projects: { listProjects: () => [] },
+      threads: { listAllThreads: () => [shown, hidden, below], getThread: (id: string) => [shown, hidden, below].find((thread) => thread.id === id) },
+      orchestrator: { getTurnSnapshot: () => ({}), getTurnState: () => ({}), getMessages: () => [], listQueue: () => [], isTurnActive: () => false, isActiveTurnRunning: () => false },
+      threadRuntimes: { getActivitySnapshot: () => ({ [shown.id]: 'processing', [hidden.id]: 'processing', [below.id]: 'processing' }) },
+      questions: { listPendingForThread: () => [] },
+      platform: { chats: { snapshot: () => ({ chats: [] }), onChange: () => () => undefined } }
+    } as never
+    for (const options of [{}, { private: true }]) {
+      const snapshot = new MmsListsSource(fake, undefined, options).snapshot()
+      expect(snapshot.threads.map((thread) => thread.id), JSON.stringify(options)).toEqual([shown.id])
+      expect(Object.keys(snapshot.status)).toEqual([shown.id])
+    }
+    // Hidden is not private: the bot's chat on any device opens it by id.
+    expect(new MmsRemoteBackend(fake).snapshot(hidden.id)).toMatchObject({ thread: { id: hidden.id } })
+  })
+
   it('gives a phone its whole list past the wire bound: a phone parses it with plain JSON.parse', () => {
     // A phone's list is its own: no trimming. It used to stop at the wire's 16,384 nodes (about 700 threads).
     const few = Array.from({ length: 400 }, (_, n) => row(n))

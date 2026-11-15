@@ -144,10 +144,11 @@ export const BOT_THREADS_PERMISSION = 'threads'
 export const BOT_THREAD_READ_TOOLS: readonly string[] = ['thread_list', 'thread_search', 'thread_read', 'thread_wait']
 
 /**
- * What changes threads: start one, message one, stop one's turn, archive or unarchive one. Only a chat turn the owner's
- * own message started gets them, so nothing a bot read in its work, a reminder or a schedule starts or steers a thread.
+ * What changes threads: start one, message one, stop one's turn, archive or unarchive one, hide one it started from the
+ * owner's sidebar or show it again. Only a chat turn the owner's own message started gets them, so nothing a bot read in
+ * its work, a reminder or a schedule starts or steers a thread.
  */
-export const BOT_THREAD_ACT_TOOLS: readonly string[] = ['thread_create', 'thread_send', 'thread_interrupt', 'thread_archive']
+export const BOT_THREAD_ACT_TOOLS: readonly string[] = ['thread_create', 'thread_send', 'thread_interrupt', 'thread_archive', 'thread_hide']
 
 /**
  * "Use the profiler": one permission, asked for once, for Mousse's own profiler (Settings → Labs → Profiler). The grant

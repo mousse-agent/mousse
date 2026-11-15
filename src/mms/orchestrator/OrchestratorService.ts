@@ -3928,6 +3928,7 @@ export class OrchestratorService extends EventEmitter {
       noteOnThread: (threadId, text) => this.noteAgentLaunch(threadId, text),
       stopRun: (threadId, runId, options) => this.stopRunAsAgent(threadId, runId, options),
       setThreadArchived: (threadId, archived, options) => this.setThreadArchivedAsAgent(threadId, archived, options),
+      setThreadHidden: (threadId, hidden, options) => this.setThreadHiddenAsAgent(threadId, hidden, options),
       steerRun: (threadId, runId, text, options) => this.steerRunAsAgent(threadId, runId, text, options),
       approvalRequest: (requestId) => this.approvalRequestInfo(requestId),
       answerApproval: (threadId, requestId, answers, options) => this.answerApprovalAsAgent(threadId, requestId, answers, options),
@@ -4338,6 +4339,8 @@ export class OrchestratorService extends EventEmitter {
       createdByThreadId: intent.createdByThreadId,
       // The bot that started it, by its name then: the thread says so after the bot is renamed or deleted.
       ...(intent.bot ? { startedByBot: intent.bot } : {}),
+      // A bot's short background job stays out of the owner's sidebar; its chat lists it.
+      ...(intent.bot && intent.request.hidden === true ? { hidden: true } : {}),
       localOnly: intent.localOnly === true
     })
     // The marker: a thread is complete only once this event exists. Ids and names, never the message.
@@ -4516,6 +4519,30 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
+   * `thread_hide`: the owner's bot hides a thread it started from the owner's sidebar, or shows it there again
+   * (`Thread.hidden`), only from its chat in a chat turn its owner's message started (`botSenderOf`). Only a thread this
+   * bot started (`Thread.startedByBot`), since its chat is where the owner finds a hidden one. Nothing stops or changes in
+   * the thread. The change is recorded as an `agent.action` of the thread.
+   */
+  private setThreadHiddenAsAgent(threadId: string, hidden: boolean, options: { actor: AgentActor }): { hidden: boolean; changed: boolean } {
+    const engine = this.requireRunEngine()
+    const bot = this.botSenderOf(options.actor, 'thread_hide')
+    if (!bot) throw new McpToolError('mousse_scope_denied', 'Only a bot\'s chat hides threads this way.')
+    const thread = this.threadStore?.getThread(threadId)
+    if (!thread || thread.startedByBot?.botId !== bot.botId)
+      throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is not one you started: you hide or show only threads you started.`)
+    if (Boolean(thread.hidden) === hidden) return { hidden, changed: false }
+    this.threadStore!.setThreadHidden(threadId, hidden)
+    engine.store.appendEvent({
+      threadId,
+      runId: null,
+      type: 'agent.action',
+      payload: { action: hidden ? 'hid_thread' : 'unhid_thread', actorThreadId: options.actor.threadId, actorRunId: options.actor.runId, toolCallId: options.actor.toolCallId }
+    })
+    return { hidden, changed: true }
+  }
+
+  /**
    * `thread_steer`: joins a run that is live. A running turn cannot be narrowed, so a caller whose permission
    * mode is stricter than the one the run is bound to is refused: its words would run with more authority than
    * the caller itself has. A run bound to a stricter mode than the caller's takes the steer.
@@ -4568,7 +4595,7 @@ export class OrchestratorService extends EventEmitter {
    * stopping only in a chat turn the owner's own message started), and this computer has "use your threads" on. Undefined
    * for a thread that is no bot's. A bot's thread that may not make the call is refused here, whatever let it this far.
    */
-  private botSenderOf(actor: AgentActor, tool: 'thread_create' | 'thread_send' | 'thread_interrupt' | 'thread_archive'): BotSender | undefined {
+  private botSenderOf(actor: AgentActor, tool: 'thread_create' | 'thread_send' | 'thread_interrupt' | 'thread_archive' | 'thread_hide'): BotSender | undefined {
     let role: string | undefined
     try {
       role = this.botThreads?.roleOf(actor.threadId)

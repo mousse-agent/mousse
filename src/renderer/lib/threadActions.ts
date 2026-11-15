@@ -10,6 +10,7 @@ import { useChatsStore } from '../stores/chatsStore'
 import { orderedThreadIds, threadAfterArchive } from './threadOrder'
 import { afterNextPaint } from './pendingThreadRows'
 import { fadeOutThreadRows } from './archiveMotion'
+import { runWithToast } from './actionToast'
 import { loadProviderSnapshots, pickerListsModel, pickerProviders, projectScope, scopeKey, useProviderSnapshotsStore } from './providerSnapshots'
 
 /**
@@ -161,6 +162,18 @@ export async function togglePinOpenThread(): Promise<void> {
   const thread = openStartedThread()
   if (!thread) return
   await window.mousse.threads.pin(thread.id, !thread.pinnedAt)
+}
+
+/**
+ * Show in sidebar: a thread one of the owner's bots keeps out of the sidebar (`Thread.hidden`) is listed there again
+ * (`hidden: true` hides it again). A failure shows as a toast with Retry. Resolves to whether it went through.
+ */
+export function setThreadHidden(threadId: string, hidden: boolean): Promise<boolean> {
+  return runWithToast(hidden ? 'hide the thread' : 'show the thread in the sidebar', async () => {
+    const result = await window.mousse.platformRequest.request<{ thread?: Thread }>('threads.setHidden', { threadId, hidden })
+    // At once, before the list's push arrives.
+    if (result?.thread) useAppStore.getState().upsertThread(result.thread)
+  }, { retry: true })
 }
 
 /** Archives the open thread, and opens the next one in its project (see `archiveThread`). */
