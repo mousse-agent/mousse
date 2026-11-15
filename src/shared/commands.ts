@@ -33,6 +33,7 @@ export type CommandId =
   | 'automations.open'
   | 'usage.open'
   | 'composer.focus'
+  | 'composer.dictate'
   | 'files.quickOpen'
   | 'files.textSearch'
   | 'surface.browser'
@@ -445,6 +446,19 @@ export const COMMANDS: readonly CommandDefinition[] = [
     when: threadIsOpen
   },
   {
+    // Starts dictation in the shown composer, and pressed again while recording finishes it (Done: the text goes
+    // in). Its handler is enabled only while the composer offers the microphone or is recording.
+    id: 'composer.dictate',
+    title: 'Start or finish dictation',
+    category: 'Composer',
+    searchTerms: ['dictate', 'voice', 'microphone', 'speech', 'record', 'talk'],
+    defaultBinding: `${MOD}+Shift+Space`,
+    scope: 'global',
+    textInput: 'allow',
+    terminal: 'deny',
+    guest: 'deny'
+  },
+  {
     // Only while the key is typed inside the Files panel (its tree, search box or editor): Ctrl/Cmd+P
     // elsewhere, such as the composer, is left to whatever the page does with it.
     id: 'files.quickOpen',
@@ -588,7 +602,7 @@ export const COMMANDS: readonly CommandDefinition[] = [
 ]
 
 /** Rows that lead their group where commands are listed, in this order; the rest follow in table order. */
-const LEADING_ROWS: readonly CommandId[] = ['palette.open', 'thread.back', 'thread.forward', 'composer.focus', 'composer.steer', 'composer.switchSendMode']
+const LEADING_ROWS: readonly CommandId[] = ['palette.open', 'thread.back', 'thread.forward', 'composer.focus', 'composer.dictate', 'composer.steer', 'composer.switchSendMode']
 
 /**
  * The commands as the Shortcuts page and the palette list them: by group (`COMMAND_CATEGORIES`), the
