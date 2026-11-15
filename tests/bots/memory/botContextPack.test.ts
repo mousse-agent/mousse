@@ -5,6 +5,7 @@ import { createBotJournal } from '../../../src/mms/bots/memory/capture'
 import { BOT_MEMORY_PROTOCOL, BOT_MEMORY_WRAPPER_CLOSE, BOT_MEMORY_WRAPPER_OPEN, BOT_RUN_REPORT_LINE, createBotContextProvider, type BotContextPackOptions } from '../../../src/mms/bots/memory/contextPack'
 import type { ChatMessage } from '../../../src/shared/types'
 import { DAY, HOUR, disposeFixtures, later, memoryFixture, type MemoryFixture } from './memoryFixture'
+import { reminderTime } from '../../../src/mms/run/mcp/appTools/bots'
 import { BOT_CHANGELOG_LATEST } from '../../../src/mms/bots/changelog'
 
 /**
@@ -33,6 +34,18 @@ function chat(fx: MemoryFixture, n: number, tokens = 100, activationId = `act-${
 }
 
 describe('the chat pack', () => {
+  it('reads a reminder at 9 in the zone named by Now, with the service defaults', async () => {
+    // MmsProfileServices supplies neither the memory store nor the pack a zone override.
+    const fx = memoryFixture({ timeZone: () => undefined })
+    const due = reminderTime(undefined, '2026-11-14T09:00')
+    expect(due).toBeInstanceOf(Date)
+    fx.clock.now = (due as Date).getTime()
+    const { packs } = provider(fx)
+    const pack = await packs.chatPreamble({ botId: 'ada', activationId: 'at-nine' })
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone
+    expect(pack).toContain(`Now: Sat 14 Nov 2026, 09:00 (${zone}).`)
+  })
+
   it('orders its blocks from stable to volatile, inside the bot_memory wrapper', async () => {
     const fx = memoryFixture()
     const { packs } = provider(fx, { situation: () => ({ ownerName: 'Sam', language: 'English', openAsks: ['change files in ~/Notes'], schedules: [{ label: 'every weekday · 09:00', nextAt: '2026-11-09T09:00:00.000Z' }] }) })
