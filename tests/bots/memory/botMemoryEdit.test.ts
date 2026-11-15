@@ -44,6 +44,17 @@ describe('bots.memory.edit', () => {
     expect((await edit('m3', 'The feed is at /rss now.')).entry).toMatchObject({ kind: 'note', ref: 'm3v2' })
   })
 
+  it.each([
+    [() => 'Ada', 'Ada'],
+    [() => { throw new Error('Missing bot') }, 'your bot']
+  ])('suggests combining entries when an edit exceeds the cap, even if the name lookup fails', async (name, label) => {
+    const { store } = memoryFixture()
+    store.save('ada', { lane: 'chat', kind: 'owner', text: 'Short fact.' })
+    for (let n = 0; n < 6; n++) store.save('ada', { lane: 'chat', kind: 'owner', text: `Fact ${n}: ${'x'.repeat(370)}` })
+    const admin = createBotMemoryAdmin({ store, name })
+    expect(() => admin.edit!('ada', 'm1', 'x'.repeat(400))).toThrow(`Memory of this kind is full. Ask ${label} to combine some, or forget one.`)
+  })
+
   it('makes no new version for the same words', async () => {
     const { fx, edit } = setup()
     expect((await edit('m1', 'The owner lives in Leeds.')).entry).toMatchObject({ ref: 'm1', version: 1 })

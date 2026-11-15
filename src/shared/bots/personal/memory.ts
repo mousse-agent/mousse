@@ -97,6 +97,8 @@ export interface BotMemoryEntry {
   until?: string
   learnedAt: string
   by: 'you said' | 'a run' | 'cleanup'
+  /** The version that put this entry away, when absorbed. */
+  absorbedBy?: string
   status: BotMemoryStatus
 }
 
@@ -144,13 +146,15 @@ export interface BotMemorySaveInput {
   kind: 'owner' | 'note'
   /** The current id of the entry this replaces; an older version gets `stale`. */
   replaces?: string
+  /** Current entries of the same kind this entry absorbs, without forgetting their text. */
+  merges?: string[]
   validFrom?: string
   expiresAt?: string
 }
 
 /** `ref` is how the bot names that version next (`memoryRef`). */
 export type BotMemorySaveResult =
-  | { id: string; version: number; ref: string; gauge: string }
+  | { id: string; version: number; ref: string; gauge: string; absorbed?: Array<{ ref: string; text: string }> }
   | { error: 'over_cap'; gauge: string; core: Array<{ id: string; ref: string; text: string }> }
   | { error: 'refused'; reason: string }
   | { error: 'stale'; current: { id: string; version: number; ref: string; text: string } }
