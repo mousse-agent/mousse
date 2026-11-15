@@ -119,12 +119,13 @@ describe('presence and sticker', () => {
     const thread = (threadId: string, status: BotLaunchedThread['status']): BotLaunchedThread => ({ threadId, title: threadId, status, startedAt: '2026-11-13T21:40:00.000Z', updatedAt: '2026-11-13T21:40:00.000Z' })
     const statuses: Array<[BotLaunchedThread['status'], string, string]> = [
       ['done', 'done', 'done'], ['needs_input', 'waiting', 'waiting on you'], ['running', 'working', 'working'], ['failed', 'failed', 'failed'],
-      ['queued', 'working', 'queued'], ['idle', 'idle', 'idle'], ['stopped', 'failed', 'stopped'], ['paused', 'working', 'held']
+      ['queued', 'working', 'queued'], ['idle', 'idle', 'idle'], ['stopped', 'failed', 'stopped'], ['paused', 'working', 'held'],
+      ['subagents', 'working', 'waiting on subagents']
     ]
     for (const [status, tone, label] of statuses) expect([status, launchedLook(status)]).toEqual([status, { tone, label }])
     const { going, ended } = launchedGroups(statuses.map(([status]) => thread(status, status)))
     // Started at the same time here, so ties go by id.
-    expect(going.map((item) => item.status)).toEqual(['paused', 'queued', 'running', 'needs_input'])
+    expect(going.map((item) => item.status)).toEqual(['paused', 'queued', 'running', 'subagents', 'needs_input'])
     expect(ended.map((item) => item.status)).toEqual(['idle', 'done', 'failed', 'stopped'])
   })
 
