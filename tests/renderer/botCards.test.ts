@@ -81,16 +81,11 @@ afterEach(() => {
 })
 
 describe('cards in the bot chat', () => {
-  it('draws facts as the same key-value card a reply\'s list of bold keys is, with only links, bold and code drawn', async () => {
+  it('draws facts as a key-value card, with only links, bold and code drawn', async () => {
     await open([
-      message(1, { id: 'md', text: '- **CPU:** Ryzen 9\n- **RAM:** 32 GB' }),
       carded(2, 'Here it is.', [{ type: 'facts', title: 'Roborock Q7', rows: [{ label: 'Suction', value: '**8,000 Pa**' }, { label: 'Note', value: '<img src=x onerror="alert(1)"> `x` [shop](https://example.com)' }] }])
     ])
-    const fromList = bubbleOf('md').querySelector('dl')!
     const fromCard = bubbleOf('c2').querySelector('dl')!
-    expect(rowsOf(fromList)).toEqual([['CPU', 'Ryzen 9'], ['RAM', '32 GB']])
-    // One component draws both: the same element and look.
-    expect(fromCard.className).toBe(fromList.className)
     expect(fromCard.getAttribute('aria-label')).toBe('Roborock Q7')
     expect(rowsOf(fromCard)).toEqual([['Suction', '8,000 Pa'], ['Note', '<img src=x onerror="alert(1)"> x shop']])
     expect(fromCard.querySelector('strong')?.textContent).toBe('8,000 Pa')

@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import type { BotChatMessage, BotChip, BotLaunchedThread, BotWorkItem } from '../../src/shared/bots/personal/chat'
-import { chatRows, isKeyValueList, launchedGroups, launchedLook, presenceOf, stickerOf, workSignalsOf } from '../../src/renderer/components/bots/botChatShape'
+import { chatRows, launchedGroups, launchedLook, presenceOf, stickerOf, workSignalsOf } from '../../src/renderer/components/bots/botChatShape'
 
 const started = (title: string, text = 'started'): BotChip => ({ icon: 'think', text, highlight: title })
 const noted: BotChip = { icon: 'think', text: 'passed on your note' }
@@ -127,20 +127,5 @@ describe('presence and sticker', () => {
     for (const [shown, kind] of kinds) expect(shown).toBe(kind)
     // A task that waits shows no activity of its own.
     expect(stickerOf(presenceOf({ state: 'working', work: [item('q', 'Later', 'queued', '2026-11-13T21:55:00.000Z')] }, { typing: false, offline: false }), { icon: 'search', text: 'searching the web' })).toBe('working')
-  })
-})
-
-describe('isKeyValueList', () => {
-  const text = (value: string) => ({ type: 'text', value })
-  const li = (...children: unknown[]) => ({ type: 'element', tagName: 'li', children })
-  const strong = (value: string) => ({ type: 'element', tagName: 'strong', children: [text(value)] })
-  const ul = (...items: unknown[]) => ({ type: 'element', tagName: 'ul', children: items.flatMap((item) => [text('\n'), item]) }) as never
-
-  it('is a list whose every item starts with a bold key, two items at least', () => {
-    expect(isKeyValueList(ul(li(strong('CPU:'), text(' Ryzen 9')), li(strong('RAM'), text(': 19.7 GB'))))).toBe(true)
-    expect(isKeyValueList(ul(li(strong('CPU:'), text(' Ryzen 9'))))).toBe(false)
-    expect(isKeyValueList(ul(li(strong('CPU:'), text(' Ryzen 9')), li(text('plain'))))).toBe(false)
-    expect(isKeyValueList(ul(li(strong('Note'), text(' this is bold, not a key')), li(strong('Other'), text(' one'))))).toBe(false)
-    expect(isKeyValueList(ul(li(strong('A:'), text(' x'), { type: 'element', tagName: 'ul', children: [] }), li(strong('B:'), text(' y'))))).toBe(false)
   })
 })

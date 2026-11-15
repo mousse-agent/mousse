@@ -202,26 +202,3 @@ export function stickerOf(presence: BotPresence, chip: BotChip | undefined): Bot
   if (chip.icon === 'memory') return 'memory'
   return 'working'
 }
-
-/** A hast node, as Markdown components receive it (`node`). */
-interface HastNode { type: string; tagName?: string; value?: string; children?: HastNode[] }
-
-const textOf = (node: HastNode): string => node.type === 'text' ? node.value ?? '' : (node.children ?? []).map(textOf).join('')
-const blank = (node: HastNode) => node.type === 'text' && !node.value?.trim()
-
-/**
- * A list whose every item starts with a bold key ("**CPU:** AMD Ryzen 9", "**RAM**: 19.7 GB free"): it reads as a small
- * card of keys and values. At least two items, keys of at most 32 characters.
- */
-export function isKeyValueList(node: HastNode | undefined): boolean {
-  const items = (node?.children ?? []).filter((child) => !blank(child))
-  if (items.length < 2) return false
-  return items.every((item) => {
-    if (item.type !== 'element' || item.tagName !== 'li') return false
-    const parts = (item.children ?? []).filter((child) => !blank(child))
-    const [key, after] = parts
-    if (key?.type !== 'element' || key.tagName !== 'strong' || parts.some((part) => part.type === 'element' && ['ul', 'ol', 'p'].includes(part.tagName ?? ''))) return false
-    const name = textOf(key).trim()
-    return name.length > 0 && name.length <= 33 && (name.endsWith(':') || (after?.type === 'text' && /^\s*:/.test(after.value ?? '')))
-  })
-}
