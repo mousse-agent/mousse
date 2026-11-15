@@ -45,6 +45,11 @@ it.each([
     expect(result.isError === true).toBe(!ownerStarted)
     if (!ownerStarted) expect(result.value.reason).toContain('A run or a turn you started yourself')
   }
+  const hand = store.save(botId, { lane: 'owner_ui', kind: 'note', text: 'Owner edited words.' })
+  if ('error' in hand) throw new Error(hand.error)
+  const absorbed = await call('memory_save', { kind: 'note', text: 'Combined owner note.', merges: [hand.ref], ownerStarted: true })
+  expect(absorbed.isError === true).toBe(!ownerStarted)
+  if (!ownerStarted) expect(store.active(botId).find(e => e.id === hand.id)?.text).toBe('Owner edited words.')
   // Run notes may still be replaced in an unattended turn.
   if (!ownerStarted) {
     const note = store.active(botId).find((entry) => entry.kind === 'run_note')!

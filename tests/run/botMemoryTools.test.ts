@@ -88,6 +88,63 @@ describe('memory tools', () => {
     expect(onAppResult).toHaveBeenCalledTimes(2)
   })
 
+  // Inputs: chat/run/bot-started turns; owner/note/run_note/owner_ui; current/stale/
+  // unknown/foreign/retired refs; merges alone, with replaces, duplicates, and an over-cap rollback.
+  it.each(['ada-home', 'ada-run'])('%s combines entries at the cap without redacting history, then puts one back', async (thread) => {
+    const fx = memoryFixture()
+    const { call } = setup(fx)
+    const kind = thread === 'ada-home' ? 'owner' : 'note'
+    const words = (n: number) => `Fact ${n}: ${'x'.repeat(370)}`
+    fx.message({ botId: 'ada', id: 'original', author: 'owner', text: words(0) })
+    const count = thread === 'ada-home' ? 6 : 5
+    for (let n = 0; n < count; n++) expect((await call('memory_save', thread, { kind, text: words(n) })).isError).toBeUndefined()
+    expect((await call('memory_save', thread, { kind, text: words(9) })).value.error).toBe('over_cap')
+    const before = fx.store.journal('ada')
+    const combined = await call('memory_save', thread, { kind, text: 'Combined facts.', merges: ['m1', 'm2', 'm2'] })
+    expect(combined.isError).toBeUndefined()
+    expect(fx.store.active('ada')).toHaveLength(count - 1)
+    expect(fx.store.journal('ada').slice(0, before.length)).toEqual(before)
+    const history = await call('memory_list', thread, { history: true })
+    expect(history.value.entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'm1v2', status: 'superseded', text: words(0), absorbedBy: combined.value.ref })
+    ]))
+    expect((await call('memory_save', thread, { kind, text: words(0), replaces: 'm1v2' })).isError).toBeUndefined()
+    expect(fx.store.active('ada').find(e => e.id === 'm1')?.ref).toBe('m1v3')
+    // Absorption keeps no forgotten hash: the other text can be saved as a fresh entry.
+    expect((await call('memory_save', thread, { kind, text: 'Tiny', replaces: 'm3' })).isError).toBeUndefined()
+    expect((await call('memory_save', thread, { kind, text: words(1) })).isError).toBeUndefined()
+  })
+
+  it('validates every merge before writing, and permits merges alongside replaces', async () => {
+    const fx = memoryFixture()
+    const { call } = setup(fx)
+    for (const text of ['First note.', 'Second note.', 'Third note.']) await call('memory_save', 'ada-home', { kind: 'note', text })
+    await call('memory_save', 'ada-home', { kind: 'note', text: 'Changed.', replaces: 'm2' })
+    const before = fx.store.allVersions('ada')
+    expect((await call('memory_save', 'ada-home', { kind: 'note', text: 'Combined.', merges: ['m1', 'm2'] })).value)
+      .toMatchObject({ error: 'stale', current: { ref: 'm2v2' } })
+    for (const ref of ['m99', 'j1']) expect((await call('memory_save', 'ada-home', { kind: 'note', text: 'Combined.', merges: [ref] })).isError).toBe(true)
+    await call('memory_save', 'bob-home', { kind: 'note', text: 'Other bot.' })
+    expect((await call('memory_save', 'ada-home', { kind: 'owner', text: 'Combined.', merges: ['m1'] })).isError).toBe(true)
+    expect(fx.store.allVersions('ada')).toEqual(before)
+    const result = await call('memory_save', 'ada-home', { kind: 'note', text: 'Combined.', replaces: 'm1', merges: ['m1', 'm2v2'] })
+    expect(result.value.ref).toBe('m1v2')
+    expect(fx.store.active('ada').map(e => e.id)).toEqual(['m1', 'm3'])
+  })
+
+  it.each(['ada-run', 'ada-ctx'])('%s cannot absorb owner facts, notes, or hand-edited entries', async (thread) => {
+    const fx = memoryFixture()
+    const { call } = setup(fx)
+    fx.store.save('ada', { lane: 'chat', kind: 'owner', text: 'Owner fact.' })
+    fx.store.save('ada', { lane: 'chat', kind: 'note', text: 'Standing note.' })
+    fx.store.save('ada', { lane: 'owner_ui', kind: 'note', text: 'Hand edited.' })
+    for (const ref of ['m1', 'm2', 'm3']) {
+      expect((await call('memory_save', thread, { kind: 'note', text: 'Combined.', merges: [ref], lane: 'chat' })).isError).toBe(true)
+    }
+    expect(fx.store.active('ada')).toHaveLength(3)
+    expect((await call('memory_save', 'ada-home', { kind: 'note', text: 'Combined.', merges: ['m3'] })).isError).toBeUndefined()
+  })
+
   it('over the cap: fails with the current list', async () => {
     const fx = memoryFixture()
     const { call } = setup(fx)
