@@ -220,9 +220,9 @@ interface GitSectionViewProps {
   pullRequestError?: string | null
   /** The pull request the thread is linked to, if any. */
   pullRequestLink?: ThreadPullRequestLink | null
-  /** When set, the section shows only this muted line, and starts collapsed once the folder is known to have no repository. */
+  /** When set, the section shows only this muted line, and starts collapsed once the folder is known to have no repository (unless it offers Initialize Git). */
   collapsedLabel: string | null
-  /** The folder is not a repository, so the collapsed section offers to make it one. */
+  /** The folder is not a repository (or is gone), so the section offers Initialize Git, open from the start. */
   canInitialize?: boolean
   /** "Worktree removed by cleanup on …" while a cleanup rule's retirement of the thread's worktree stands. */
   retiredNote?: string | null
@@ -277,14 +277,16 @@ export function GitSectionView({
     }
     const initLock = gitActionLock(running, 'init')
     const label = collapsedLabel ?? 'No project folder'
-    // Only a settled answer collapses the section; it keeps its own remembered choice, apart from a repository's.
     const settled = label !== GIT_CHECKING_LABEL
+    // A folder Git can be started in shows its button right away and opens like a repository's section; any other
+    // settled answer collapses the section and keeps its own remembered choice.
+    const quiet = settled && !(canInitialize && path)
     return (
       <SideCardSection
         title="Git"
         threadId={threadId}
-        collapseKey={settled ? GIT_NO_REPOSITORY_KEY : GIT_KEY}
-        defaultCollapsed={settled}
+        collapseKey={quiet ? GIT_NO_REPOSITORY_KEY : GIT_KEY}
+        defaultCollapsed={quiet}
         collapsedNote={settled ? label : null}
       >
         <p className="side-card-git-quiet side-card-git-collapsed">{label}</p>
@@ -298,7 +300,7 @@ export function GitSectionView({
             disabled={initLock.disabled}
             onClick={() => void initialize()}
           >
-            {running === 'init' ? 'Initializing…' : 'Initialize repository'}
+            {running === 'init' ? 'Initializing…' : 'Initialize Git'}
           </button>
         )}
         {actionError && (

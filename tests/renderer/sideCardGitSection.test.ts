@@ -132,13 +132,23 @@ describe('the side card Git section, mounted', () => {
     expect(host.querySelector('.side-card-git-branch')).not.toBeNull()
   })
 
-  it('starts collapsed without a repository, and opening it there leaves repositories as they were', async () => {
-    await mount({ git: view({ status: status({ isRepo: false, branch: null }) }), collapsedLabel: 'Not a repository', canInitialize: true })
+  it('starts open with Initialize Git in a folder Git can start in, and collapsed with nothing to offer', async () => {
     const toggle = () => host.querySelector('.side-card-section-toggle')
+    await mount({ git: view({ status: status({ isRepo: false, branch: null }) }), collapsedLabel: 'Not a repository', canInitialize: true })
+    expect(toggle()?.getAttribute('aria-expanded')).toBe('true')
+    expect(host.querySelector('.side-card-git-init')?.textContent).toBe('Initialize Git')
+
+    await mount({ path: null, git: view({ status: null }), collapsedLabel: 'No project folder', canInitialize: false })
     expect(toggle()?.getAttribute('aria-expanded')).toBe('false')
-    expect(toggle()?.textContent).toContain('Not a repository')
+    expect(toggle()?.textContent).toContain('No project folder')
+  })
+
+  it('opening a section with nothing to offer leaves repositories as they were', async () => {
+    const toggle = () => host.querySelector('.side-card-section-toggle')
+    await mount({ path: null, git: view({ status: null }), collapsedLabel: 'No project folder', canInitialize: false })
     await click(toggle())
-    expect(host.querySelector('.side-card-git-init')).not.toBeNull()
+    expect(toggle()?.getAttribute('aria-expanded')).toBe('true')
+    await click(toggle())
 
     await mount({ threadId: 't2' })
     expect(toggle()?.getAttribute('aria-expanded')).toBe('true')

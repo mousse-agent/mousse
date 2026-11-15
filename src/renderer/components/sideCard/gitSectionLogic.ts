@@ -295,8 +295,9 @@ export function gitCollapsedLabel(input: GitCollapseInput): string | null {
 }
 
 /**
- * Whether the section offers "Initialize repository": the folder exists and is loaded,
- * and Git says it is not a repository. Never while the folder or its status is unknown.
+ * Whether the section offers "Initialize Git": the status is loaded and says the folder is not a repository, or that
+ * the folder is gone (the daemon makes it again when the folder it was in is still there). Never while the folder or
+ * its status is unknown.
  */
 export function canInitRepository(input: GitCollapseInput): boolean {
   return (
@@ -305,8 +306,7 @@ export function canInitRepository(input: GitCollapseInput): boolean {
     input.hasPath &&
     input.loaded &&
     input.status !== null &&
-    !input.status.isRepo &&
-    input.status.missing !== true
+    !input.status.isRepo
   )
 }
 

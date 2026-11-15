@@ -450,13 +450,15 @@ export async function pushGitBranch(key: string, scope: GitScope): Promise<void>
 }
 
 /**
- * Make the folder a Git repository, then refresh so the section switches to its normal view.
- * Rejects with Git's message. Only a project folder can be initialised, so the thread is left out.
+ * Make the folder the scope names a Git repository (a thread's own worktree folder once its repository is gone, else the
+ * project's), then refresh so the section switches to its normal view. Rejects with Git's message.
  */
 export async function initGitRepository(key: string, scope: GitScope): Promise<void> {
-  const projectScope = { projectId: scope.projectId, workspaceThreadId: null }
-  await window.mousse.git.init(projectScope)
-  await refreshAfterMutation(key, projectScope)
+  try {
+    await window.mousse.git.init(scope)
+  } finally {
+    await refreshAfterMutation(key, scope)
+  }
 }
 
 const retained = new Map<string, { count: number; scope: GitScope }>()
