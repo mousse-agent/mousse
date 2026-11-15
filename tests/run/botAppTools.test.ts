@@ -29,7 +29,7 @@ const ON_SUB = { instanceId: 'claude', model: 'claude-opus-4-6', credential: 'su
 const ON_KEY = { instanceId: 'pi:key', model: 'claude-opus-4-6', credential: 'api_key' }
 const ROWS_ON_SUB: BotModelSlots = { talk: ON_SUB, light: ON_SUB, medium: ON_SUB, hard: ON_SUB } as BotModelSlots
 
-function fakeBots(lane: BotLane = 'chat', options: { owner?: string; changes?: boolean; rows?: BotModelSlots; choices?: BotModelOption[]; work?: Partial<BotToolHost['work']>; cards?: boolean } = {}) {
+function fakeBots(lane: BotLane = 'chat', options: { dispatchId?: string; owner?: string; changes?: boolean; rows?: BotModelSlots; choices?: BotModelOption[]; work?: Partial<BotToolHost['work']>; cards?: boolean } = {}) {
   const schedules: Array<{ scheduleId: string; when: BotSchedule['when']; prompt: string; label: string; from?: string }> = []
   const wakes: Array<{ from: string; input: Parameters<NonNullable<BotToolHost['wakes']>['add']>[2] }> = []
   const watched: Array<{ from: string; input: Parameters<NonNullable<BotToolHost['watchers']>['start']>[2] }> = []
@@ -40,7 +40,7 @@ function fakeBots(lane: BotLane = 'chat', options: { owner?: string; changes?: b
     // The owner's message the chat turn holds.
     ownerWords: () => options.owner ?? 'Please use Opus 4.6 from now on',
     rows: () => options.rows ?? ROWS_ON_SUB,
-    activationOf: (threadId) => (threadId === 'home' ? { botId: 'b1', activationId: 'a1', lane } : undefined),
+    activationOf: (threadId) => (threadId === 'home' ? { botId: 'b1', activationId: 'a1', lane, dispatchId: options.dispatchId } : undefined),
     schedules: {
       add: (_botId, s, from) => {
         const entry = { scheduleId: `s${schedules.length + 1}`, ...s, label: botScheduleLabel(s.when), ...(options.cards && from ? { from } : {}) }
@@ -279,6 +279,23 @@ describe('set_depth and use_model', () => {
     // A family word names two models on Talk's entry: refused.
     const two = fakeBots('chat', { owner: 'use gpt for this', rows: { talk: { instanceId: 'pi:openai', model: 'gpt-5' }, light: ON_SUB, medium: ON_SUB, hard: ON_SUB } as BotModelSlots })
     expect((await two.call('use_model', { model: 'gpt', scope: 'now' })).value).toEqual({ ok: false, reason: USE_MODEL_REFUSED })
+  })
+})
+
+describe('work_start request identity', () => {
+  it('scopes the fallback to a dispatch and keeps runtime tool call ids across dispatches', async () => {
+    const options = { dispatchId: 'd1' }
+    const bots = fakeBots('chat', options)
+    const noId = { ...bots.ctx(), toolCallId: undefined }
+    const input = { title: 'Opening hours', brief: 'Find the opening hours.' }
+    await bots.call('work_start', input, noId)
+    options.dispatchId = 'd2'
+    await bots.call('work_start', input, noId)
+    expect(bots.works[1]!.key).not.toBe(bots.works[0]!.key)
+    await bots.call('work_start', input)
+    options.dispatchId = 'd3'
+    await bots.call('work_start', input)
+    expect(bots.works[3]!.key).toBe(bots.works[2]!.key)
   })
 })
 
