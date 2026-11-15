@@ -297,7 +297,7 @@ describe('OrchestratorService over the Run Engine', () => {
     const internals = orch as unknown as { setTurnPhase: (threadId: string, phase: string, ...rest: unknown[]) => void }
     const setTurnPhase = internals.setTurnPhase.bind(orch)
     internals.setTurnPhase = (threadId, phase, ...rest) => {
-      if (phase === 'finalizing') throw new Error('Workspace branch changed during execution; recovery is required.')
+      if (phase === 'completed') throw new Error('Workspace branch changed during execution; recovery is required.')
       setTurnPhase(threadId, phase, ...rest)
     }
     const first = await orch.send('push and open a PR', false, { threadId: thread.id, clientRequestId: 'failed-send' })
