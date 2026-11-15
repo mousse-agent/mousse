@@ -8189,7 +8189,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** Only future tell_at on a soon row denotes a hold; no additional stored state. */
   quietHoursChanged(): void {
     const now = this.now()
-    for (const row of this.store.all("SELECT id, bot_id, at FROM bot_messages WHERE tell = 'soon' AND told_at IS NULL AND tell_at > at")) {
+    for (const row of this.store.all("SELECT id, bot_id, at FROM bot_messages INDEXED BY bot_messages_tell_due WHERE tell IS NOT NULL AND tell = 'soon' AND told_at IS NULL AND tell_at > at")) {
       const botId = String(row.bot_id)
       const end = !this.ownerActive() && !this.canWake(botId) ? this.host.quietHoursFor?.(botId, now)?.end : undefined
       this.store.run('UPDATE bot_messages SET tell_at = ? WHERE id = ?', new Date(end ?? Math.max(now, Date.parse(String(row.at)) + 1)).toISOString(), String(row.id))

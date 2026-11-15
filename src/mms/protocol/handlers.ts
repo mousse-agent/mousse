@@ -1937,9 +1937,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       throw new Error('Unsupported applet export format.')
     }
     case 'app.presence': {
-      if (ctx.connection?.clientType !== 'gui' || !ctx.connection.capabilities.has(APP_PRESENCE_CAPABILITY)) throw new Error('App presence requires a capable local window.')
+      if (ctx.connection?.clientType !== 'gui' || !ctx.connection.capabilities.has(APP_PRESENCE_CAPABILITY)) throw new DomainRpcError('method_not_allowed', 'App presence requires a capable local window.')
       const p = params as { activeAt?: unknown; timeZone?: unknown }
-      if (!p || typeof p.activeAt !== 'number' || !Number.isFinite(p.activeAt) || typeof p.timeZone !== 'string') throw new Error('Presence needs activeAt and timeZone.')
+      if (!p || typeof p.activeAt !== 'number' || !Number.isFinite(p.activeAt) || typeof p.timeZone !== 'string') throw new DomainRpcError('invalid_params', 'Presence needs activeAt and timeZone.')
       // Validate before changing activity or the zone.
       new Intl.DateTimeFormat('en', { timeZone: p.timeZone }).format()
       ctx.mms.ownerQuietHours.reportPresence(ctx.connection.id, p.activeAt, p.timeZone)

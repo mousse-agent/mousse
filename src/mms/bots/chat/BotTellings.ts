@@ -124,9 +124,7 @@ export class BotTellings {
       if (!this.attempt(rows, now, () => {
         const base = previous && previous.until >= now ? previous : { id: `bt_${randomUUID()}`, until: now + 120_000, rows: [] }
         this.fold = { ...base, rows: [...base.rows.filter(r => this.unread(r) && (this.retryAt.get(r.botId) ?? 0) <= now), ...rows] }
-        this.profileSounds = this.profileSounds.filter(at => now - at < 3600_000)
-        const sound = now - (this.botSounds.get(bot) ?? -Infinity) >= 600_000 && this.profileSounds.length < 6
-        if (sound) { this.profileSounds.push(now); this.botSounds.set(bot, now) }
+        const sound = this.soundFor([bot], now)
         this.announce(this.fold.rows, sound, this.fold.id)
         for (const row of rows) this.told(row, now)
       })) this.fold = previous
@@ -134,8 +132,16 @@ export class BotTellings {
   }
   /** A held backlog is released as one fold; usable for future quiet-hour release too. */
   releaseBacklog(rows: BotMessageRow[], now: number, label = 'While Mousse was closed'): void {
-    this.announce(rows, false, `bt_${randomUUID()}`, label)
+    this.announce(rows, label === 'While you were away' && this.soundFor([...new Set(rows.map(r => r.botId))], now), `bt_${randomUUID()}`, label)
     for (const row of rows) this.told(row, now)
+  }
+
+  private soundFor(bots: string[], now: number): boolean {
+    this.profileSounds = this.profileSounds.filter(at => now - at < 3600_000)
+    if (this.profileSounds.length >= 6 || !bots.some(bot => now - (this.botSounds.get(bot) ?? -Infinity) >= 600_000)) return false
+    this.profileSounds.push(now)
+    for (const bot of bots) this.botSounds.set(bot, now)
+    return true
   }
 
   private told(row: BotMessageRow, now: number): void {
