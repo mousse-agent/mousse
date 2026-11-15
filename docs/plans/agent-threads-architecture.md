@@ -2,7 +2,10 @@
 
 Status: proposal, not implemented. Checked against `origin/master` dbbf9adee (2026-11-14). Three researchers reviewed two drafts of it: one read Mousse's code, one read T3 Code and other orchestrators, one read Codex, Claude Code and Cursor. All three signed off on the second draft with changes, and this version includes those changes; it has not been reviewed again since. Their findings are in §10.
 
-Revised on 2026-11-15 with two product decisions that the reviewers did not see: agent access defaults to `manage` (decision 10, §4.7), and no fixed permission mode caps an agent's work on another computer (decision 11, §4.7).
+Revised on 2026-11-15, after the reviews:
+
+- A product decision: no fixed permission mode caps an agent's work on another computer (decision 11, §4.7).
+- Master moved to 0bfd7f476. #1197 removed the agent access level: every agent now reads and manages every thread, and no ceiling is stored on a thread. That replaces this plan's decision to default the level to `manage`, and removes the `read` ceiling it relied on for launched threads. #1170 added thread links (`mousse://thread/<id>`). #1186 removed the plan tools. The sections below are updated for these; line numbers still refer to dbbf9adee.
 
 ## 1. Goal
 
@@ -16,11 +19,11 @@ A thread's agent can:
 
 | Ability | This computer | Another computer |
 |---|---|---|
-| Start | `thread_create` works. The launched thread shows no "Started by", and the launcher gets a plain note with no link (#488). | Missing. Only subagents cross (`delegate_task` with `computer`, #469). |
-| See | `thread_read`, `thread_list`, `thread_search` and `thread_wait` work, by access level. | Missing for agents. Only the app's windows see threads of other computers. |
+| Start | `thread_create` works. The launched thread shows no "Started by", and the launcher gets a plain note. A thread link in a reply opens the thread (#1170), without a status chip or Back (#488). | Missing. Only subagents cross (`delegate_task` with `computer`, #469). |
+| See | `thread_read`, `thread_list`, `thread_search` and `thread_wait` work on any thread (#1197). | Missing for agents. Only the app's windows see threads of other computers. |
 | Message | `thread_send` and `thread_steer` work, with a stored sender (`origin`) and limits. The bubble shows the raw `[Message from an agent in thread …]` text with no label, and a queued agent message loses its sender in the queue view. The sender is never told when the other thread finishes. | Missing. The far computer would record the message as a person's. |
 
-All of the first column sits behind the agent access level, which is `lineage` by default today. At that level none of these tools is offered to an agent, so out of the box an agent asked to start a thread cannot.
+Until #1197 all of the first column sat behind an agent access level that was `lineage` by default, so none of these tools was offered. That level is gone: every agent may use them on any thread of the profile.
 
 ## 3. Decisions
 
@@ -32,8 +35,8 @@ All of the first column sits behind the agent access level, which is `lineage` b
 6. **The owner trusts no number the caller sends.** Mode and hop count from the caller only narrow further. The owner enforces its own limits (§6).
 7. **The sender is told when the other thread settles, if it asked.** Waiting on demand alone leaves results unread: in a week of Codex logs, 31 of 31 parents that were idle when a child finished were never woken (openai/codex #46120); T3 Code hit the same (#23399).
 8. **Labels come from the stored sender, never from reading message text.**
-9. **No cascade.** A launched thread keeps access ceiling `read`. A thread another device started cannot start work on a third computer. Agent messages in a row are capped.
-10. **Agent access defaults to `manage`.** Starting, reading and messaging other threads on this computer work without a visit to Settings.
+9. **Chains are bounded.** A thread another device started cannot start work on a third computer. Agent messages in a row are capped at three, and so are thread creations per run and launched threads working at once. Since #1197 a launched thread's agents are no longer held to reading: they can start and message threads too, within those caps.
+10. **Agents may start, read and message other threads without a visit to Settings.** Done by #1197, which removed the access level instead of raising its default.
 11. **On another computer an agent's work runs at the agent's own mode, narrowed only by the limit that computer set for this one.** No fixed mode caps it. Full access is used there when that computer allows this one Full access, and not otherwise.
 
 ## 4. Design
@@ -59,7 +62,7 @@ Display:
 Launch visibility:
 
 - `ThreadStartedByBar` shows "Started by an agent in «title»", linked to the launcher, when `createdByThreadId` names a thread that is not a bot's.
-- The launcher's note carries a structured `launchedThread` field and draws as a thread chip: title and live status; a click switches to the thread and Back returns. The link scheme and the deleted and offline states are #488's remaining boxes.
+- The launcher's note carries a structured `launchedThread` field and draws as a thread chip: title and live status; a click switches to the thread and Back returns. Thread links exist (#1170: `mousse://thread/<id>`, opening on click, a toast for a missing thread). The chip with live status, Back, and links to a thread on another computer are #488's remaining boxes.
 
 Names Mousse derives from a thread's first message use the body, not the envelope. Today they use the whole stored text: a thread launched on 2026-11-15 with the first message "Hi" got the branch `mousse/message-from-an-agent-in-thread-cross`.
 
@@ -70,7 +73,7 @@ Envelope wording gains one sentence, which fixed relaunching in T3 Code (#28999)
 `thread_send` and `thread_create` take `notify: true`. Mousse keeps one durable watch for that message and tells the sending thread when its work settles.
 
 - **Keyed on the message, not the run.** The run id returned at send time is not stable: a person's edit of a queued message gives it a new run, a steer handed back becomes a run of its own, and a usage-limit pause continues in a new run. The watch follows those, as `thread_wait` already follows a pause.
-- **At most two notices per watch:** one the first time the work waits on a person (question, approval, plan review, MCP request), one when it ends. The first never uses up the second.
+- **At most two notices per watch:** one the first time the work waits on a person (question, approval, MCP request), one when it ends. The first never uses up the second.
 - **Written by Mousse**, not by the other agent, as a notice kind of its own: status, the result cut to 2,000 characters with a pointer to `thread_read`, and the thread link.
 - **It starts a turn when the sender is idle and queues when it is busy.** It never starts a turn in a subagent's thread (its result is owed to its parent), in a sender the person stopped after it subscribed, or in Plan mode; there it is queued.
 - **Hops.** The turn a notice starts carries the watched run's count and adds nothing of its own. Each further send adds one, so a launcher and a launched thread can go back and forth three times before a person must step in, while a launcher that started five threads still hears from all five.
@@ -116,10 +119,10 @@ Stored sender for a message from another computer: `origin.from {node, thread, r
 
 `thread_create` takes `computer` (a name from `list_computers`) and, to choose among several checkouts, a project id of that computer.
 
-1. Local checks: level `manage`; "Let agents work on your other devices" is on and the computer is ticked (the existing `agentAccess.remoteSubagents` key and list, reworded; off and empty by default, read at every call); the caller is not a private thread and was not itself started from another device; caps and hops.
+1. Local checks: "Let agents work on your other devices" is on and the computer is ticked (the existing `agentAccess.remoteSubagents` key and list, reworded; off and empty by default, read at every call); the caller is not a private thread and was not itself started from another device; caps and hops.
 2. Project: `projects.match` (a root commit and a remote in common). No strong match, or several, refuses with the candidates and their ids. Nothing is cloned (#484).
 3. The local receipt is written (`thread_create:<caller>:<key>`, now with the computer). The launch then runs as the durable sequence `RemoteSubagents.advanceStart` already uses, moved into a state machine both features share: `threads.create` → `threads.setModel` → `composer.options` → `threads.setPermissionMode` → `orchestrator.send`, each with its own idempotency key, every write marked.
-4. The owner stores the limits **with the thread** at the first call: `startedFrom.agent`, access ceiling `read`, and the mode (the launcher's own, narrowed to the device limit; §4.7). A launch cut off there leaves a thread already held to those limits, with no turn. A marked `setPermissionMode` above the stored mode is refused.
+4. The owner stores the limits **with the thread** at the first call: `startedFrom.agent` and the mode (the launcher's own, narrowed to the device limit; §4.7). A launch cut off there leaves a thread already held to those limits, with no turn. A marked `setPermissionMode` above the stored mode is refused.
 5. The caller records the launch in a new table `remote_launches {launcherThreadId, node, remoteThreadId, creationKey, state}`, writes the launcher's note with a chip, and returns `{threadId: "<node>:<id>", runId?, computer, link, firstMessage: "sent" | "failed" | "uncertain"}`. A thread that was created is returned even when its first message failed, so a retry with the same `clientRequestId` continues the same launch and never makes a second thread.
 6. A launch nobody completes is finished at boot, or archived there with `threads.settle`.
 
@@ -127,12 +130,12 @@ Remote subagents keep working with an older far computer exactly as today. They 
 
 ### 4.5 Seeing a thread on another computer
 
-- `thread_read` and `thread_wait` accept a qualified id. Each handler branches at the top on `parseQualifiedId` and hands the call to the service; the local checks are not threaded through a remote case. `ToolRegistry` gets the `launched` relation from `remote_launches`.
+- `thread_read` and `thread_wait` accept a qualified id. Each handler branches at the top on `parseQualifiedId` and hands the call to the service; the local checks are not threaded through a remote case. `remote_launches` tells the service which threads on another computer this thread launched.
 - Reads use the existing routed read rows (`runs.get`, `runs.events`, `thread.messages`, `orchestrator.pendingQuestions`). The service qualifies every id in a result, including `origin.from`, before a tool sees it; otherwise a far id would resolve to a local thread. It asks for the tool's limit, not whole pages: large reads share two slots per computer with this computer's windows.
-- The tool applies the same projections as on one computer: a launched thread shows the lineage view and the run's result; `read` shows the lifecycle only; `manage` shows events and transcript.
+- The tool returns what it returns on one computer: since #1197, events and transcript for any thread.
 - Bounds, on both computers: events 200 (500 at most), messages 50 (200 at most), 4,096 characters per message with `textOffset` to read on, 64 KB per response, a run's result cut to 4,000 characters with a pointer.
 - `thread_wait` uses one new read row, `runs.wait`: a wait of at most 40 s that the owner answers from its run events, with a deadline above 40 s and below the minute an MCP client waits. On a computer without it the service asks `runs.get` every 4 s. A thread with a queued agent message or a run that is preparing is never reported idle. The result says `needsInput` when the run waits on a person.
-- `thread_list` and `thread_search` take `computer` (routed `threads.list`, `threads.search`) and need the local `read` level.
+- `thread_list` and `thread_search` take `computer` (routed `threads.list`, `threads.search`).
 
 ### 4.6 Stop, approvals, reachability
 
@@ -143,13 +146,11 @@ Remote subagents keep working with an older far computer exactly as today. They 
 
 ### 4.7 Defaults and settings
 
-**Agent access defaults to `manage`** (`src/shared/settings.ts`; SPEC §15.1 says `lineage`).
+**Agent access.** This plan first proposed defaulting the agent access level to `manage`. #1197 went further and removed the level: every agent turn reads and manages every thread, a ceiling an older version stored on a thread is ignored, and none is written. Nothing remains to build here.
 
-- A profile with no stored level reads as `manage`. A stored level that cannot be read, a malformed project list, or any failure to decide a turn's grant still reads as `lineage`: only the default changes, not the fail-closed rule.
-- Existing profiles store `lineage` whether or not the person chose it, so the two cannot be told apart. A one-time migration raises a stored `lineage` to `manage` and tells the person once, with a link to Settings → Agents → Agent access. A stored `read` stays.
 - What stays off until the person turns it on: answering approvals on other threads, working on other devices, and scheduled jobs made by agents.
-- What still holds at `manage`: a launched thread's agents stay at `read`; a bot's thread and a thread a phone drove stay at `lineage`; a read-only subagent stays at `read`; a turn under a plan ceiling gets `read` at most; a shared thread's agent never sees a private thread; a message runs at no more than its sender's mode; three agent messages in a row.
-- What the default opens: any thread's agent can read the transcripts of the profile's other threads, in every project, and message or Stop them. An agent misled by something it read (a web page, a file) has that reach too. The limits above bound what it can cause, not what it can read.
+- What still holds: a read-only subagent, the plan ceiling (a plan turn cannot start threads), private threads, the bot-thread refusal, a message running at no more than its sender's mode, three agent messages in a row, and the creation caps.
+- What it opens: any thread's agent can read the transcripts of the profile's other threads, in every project, and message or Stop them, and so can the agents of a thread it launched. An agent misled by something it read (a web page, a file) has that reach too. The limits above bound what it can cause, not what it can read.
 
 **No fixed mode cap on another computer.** Today a remote subagent runs at no more than Auto-accept edits, whatever either computer allows (`OrchestratorService` 6679, `remoteSubagents.ts`, and the threat model's remote subagents section). That cap goes, for remote subagents and for the launched threads and messages of this design:
 
@@ -171,7 +172,6 @@ Remote subagents keep working with an older far computer exactly as today. They 
 | `thread_list`, `thread_search` | `computer` |
 | `approval_respond` | unchanged; refuses a qualified id |
 
-Messaging a launched thread needs the `manage` level, on this computer and across computers, as today; only Stop reaches a launched thread at any level.
 
 ## 6. Limits
 
@@ -192,10 +192,10 @@ Each refusal has its own error code. Codex's single "limit reached" error sent a
 
 ## 7. Phases
 
-1. **Whose message it is, and on by default** (this computer; no protocol change): the default level `manage` with its one-time settings migration and notice; the Agent bubble, the queued label and editor, "Started by an agent", the launch chip, the envelope sentence, names from the body. The bubble work lands on top of PR #871.
+1. **Whose message it is** (this computer; no protocol change): the Agent bubble, the queued label and editor, "Started by an agent", the launch chip, the envelope sentence, names from the body. The bubble work lands on top of PR #871.
 2. **The settle notice** (this computer): `notify`, the watch, the notice kind, the tool wording.
 3. **Other computers:** the fixed Auto-accept edits cap removed (it can go first, on its own, for remote subagents); the `agent` key and the remote agent actor; `thread_create` with `computer`; `remote_launches`; read, wait, send, steer and Stop for launched threads; `runs.wait`; the notice across computers; agent reach; settings wording; reachability rules. Remote subagents take the key where the far computer knows it. Migrations: `remote_launches` and the watch table in the run database, a reach column in `net_node_policy`, an actor column in `bridge_audit`.
-4. **Beyond launched threads:** `thread_list` and `thread_search` with `computer`; reading and messaging any thread on an allowed computer (the local level, and to send, reach "all threads").
+4. **Beyond launched threads:** `thread_list` and `thread_search` with `computer`; reading and messaging any thread on an allowed computer (to send, reach "all threads").
 
 Later, each on its own: setting up the project on the far computer (#484); grouping several agent bubbles in a row; a per-thread switch to hold agent messages for the person.
 
@@ -203,7 +203,11 @@ Tests the design names, on one computer and through the remote agent actor: `ori
 
 ## 8. Related work
 
-- **#488** (open): the link chip, switching with Back, the deleted and offline states. Phase 1 does its remaining boxes.
+- **#1197** (merged 2026-11-15): removed the agent access level and the ceilings stored on threads. It replaces decision 10 and the first half of §4.7.
+- **#1170** (merged): thread links in replies. Phase 1 builds the status chip on it.
+- **#1186** (merged): the plan tools are gone; a Plan-mode turn replies with its plan as a message.
+- **#1219** (merged): a bot's thread starts and messages are no longer capped per turn; §6's caps must not put that back.
+- **#488** (open): the chip with live status, switching with Back, links to a thread on another computer. Phase 1 does its remaining boxes.
 - **PR #871** (open): message authors. It edits the same lines of `user-message.tsx`, `mousseToUI.ts` and `QueuedMessages.tsx`. Phase 1 lands after it. Its author badge sits under the bubble; the Agent header sits inside it, and a queued message can carry both.
 - **PR #868** (open): the `crossUser` mark and the routed table's security digest. Phase 3 changes the same table and lands after it; marked calls stay out of `CROSS_USER_METHODS`.
 - **PR #869** (open): the simpler Devices page. The agent reach setting goes on it; phase 3 lands after it.
@@ -211,7 +215,7 @@ Tests the design names, on one computer and through the remote agent actor: `ori
 - **#685** (open): remote subagents outlive their parent's expiry. Phase 3's kept stop can cover them.
 - **#1049** (open): replying to an agent's reply. Shares the message actions; no conflict in design.
 
-No PR merged since 31 October overlaps.
+
 
 ## 9. Not chosen
 
@@ -234,4 +238,4 @@ Read from source at `openai/codex@65a5410f` and `pingdotgg/t3code@ee4ef064` (bot
 | **Claude Code** | Subagents and teams; a Projects coordinator with a per-thread "Allow once" | Remote Control and cloud sessions | `ListAgents`; a one-shot notice when a session goes idle | `SendMessage`; a peer message cannot answer an approval; the receiver can accept, hold or refuse; rate limits and duplicate refusal |
 | **Cursor** | API and a Projects coordinator | Self-hosted machines; first use of a machine needs a person's approval | Run stream and statuses | Follow-up run or steer; another person's agent is answered in a side chat |
 
-Where Mousse is already ahead: the envelope the receiving model reads (T3 Code has had this bug open since its first version), the hop cap and queue cap (T3 Code has neither), launched threads that cannot start more threads, and refusing an agent message while a person's question waits.
+Where Mousse is already ahead: the envelope the receiving model reads (T3 Code has had this bug open since its first version), the hop cap and queue cap (T3 Code has neither), and refusing an agent message while a person's question waits.
