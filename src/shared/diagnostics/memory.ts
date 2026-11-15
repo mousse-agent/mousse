@@ -9,11 +9,12 @@
 export const MEMORY_LOG_RELATIVE_PATH = 'diagnostics/memory.jsonl'
 export const MEMORY_ISSUE_REPO = 'mousse-agent/mousse'
 
-/** One process's memory, in MB with one decimal. `private` is the OS's private bytes when the OS reports them. */
+/** One process's memory, in MiB with one decimal (legacy fields call this MB). */
 export interface ProcessMemory {
   rss: number
   /** CPU use since the last sample, percent of one core. */
   cpu?: number
+  /** Legacy platform counter: private bytes, Electron private memory, or Linux RssAnon (resident anonymous pages). */
   private?: number
   heapUsed?: number
   heapTotal?: number
@@ -353,7 +354,7 @@ export function memoryTotals(sample: MemorySample) {
   }
 }
 
-export const MEMORY_TOTAL_SCOPE = 'Working-set totals sum RSS/working sets, including shared pages more than once; they are not unique physical RAM. Desktop covers reported Electron processes only. Workload covers the service, reported desktop processes and measured service children only; untracked descendants are excluded. Workers are already in the service. Null means unavailable or incomplete; measuredWorkingSetMb is only the available subtotal. macOS child footprints are not RSS and are excluded from these totals.'
+export const MEMORY_TOTAL_SCOPE = 'Working-set totals sum RSS/working sets, including shared pages more than once; they are not unique physical RAM. Desktop covers reported Electron processes only. Workload covers the service, reported desktop processes and measured service children only; untracked descendants are excluded. Desktop reports can predate the service sample. Workers are already in the service. Null means unavailable or incomplete; measuredWorkingSetMb is only the available subtotal. macOS child footprints are not RSS and are excluded from these totals.'
 
 /** The largest process of `kind`, or null when the app has not reported one. */
 export function largestOfKind(sample: MemorySample, kind: AppProcessKind): number | null {
