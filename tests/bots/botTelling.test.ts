@@ -38,3 +38,52 @@ it('releases due unread rows once and keeps read rows silent', async () => {
   expect(events).toHaveLength(0)
   expect(f.store.message(read.id)?.toldAt).toBeTruthy()
 })
+
+it('folds five reports into one replaceable banner, caps sounds, and never holds now', async () => {
+  const events: import('../../src/shared/bots/personal/telling').BotTelling[] = []
+  f.bots.events.on('tell', e => events.push(e))
+  f.bots.setTellingWindows(1)
+  for (let n = 0; n < 5; n++) {
+    f.bots.chat.post({ botId, author: 'bot', kind: 'run_report', text: `Report ${n}` })
+    await f.bots.deliverDueReminders()
+    f.clock.now += 1000
+  }
+  expect(new Set(events.map(e => e.id)).size).toBe(1)
+  expect(events.at(-1)?.rows).toHaveLength(5)
+  expect(events.filter(e => e.sound)).toHaveLength(1)
+  const now = f.bots.chat.post({ botId, author: 'bot', kind: 'text', text: 'Reminder' })
+  f.store.run("UPDATE bot_messages SET tell = 'now' WHERE id = ?", now.id)
+  await f.bots.deliverDueReminders()
+  expect(events.at(-1)).toMatchObject({ sound: true, rows: [{ messageId: now.id, tell: 'now' }] })
+  expect(events.at(-1)?.id).not.toBe(events[0]?.id)
+  f.clock.now += 121_000
+  f.bots.chat.post({ botId, author: 'bot', kind: 'run_report', text: 'More' })
+  await f.bots.deliverDueReminders()
+  expect(events.at(-1)?.sound).toBe(false)
+})
+it('later rows only join a subsequent fold', async () => {
+  const events: any[] = []
+  f.bots.events.on('tell', e => events.push(e)); f.bots.setTellingWindows(1)
+  f.bots.chat.post({ id: 'bm_x_offline', botId, author: 'bot', kind: 'notice', text: 'Waiting for internet' })
+  await f.bots.deliverDueReminders(); expect(events).toHaveLength(0)
+  f.bots.chat.post({ botId, author: 'bot', kind: 'text', text: 'Done' })
+  await f.bots.deliverDueReminders(); expect(events[0].rows).toHaveLength(2)
+})
+
+it('catches up once as one fold, drops rows older than a day, and survives a service restart', async () => {
+  const events: any[] = []; f.bots.events.on('tell', e => events.push(e))
+  const old = f.bots.chat.post({ botId, author: 'bot', kind: 'text', text: 'Yesterday' })
+  f.clock.now += 86_400_001
+  for (let n = 0; n < 3; n++) f.bots.chat.post({ botId, author: 'bot', kind: 'text', text: `Missed ${n}` })
+  await f.bots.deliverDueReminders(); expect(events).toHaveLength(0)
+  const { BotTellings } = await import('../../src/mms/bots/chat/BotTellings')
+  const restarted = new BotTellings(f.store, f.bots.chat, () => 'Scout', e => events.push(e))
+  restarted.attach(1); restarted.release(f.clock.now)
+  expect(events).toHaveLength(1)
+  expect(events[0].title).toContain('While Mousse was closed')
+  expect(events[0].rows).toHaveLength(3)
+  expect(f.store.message(old.id)?.toldAt).toBeTruthy()
+  const again = new BotTellings(f.store, f.bots.chat, () => 'Scout', e => events.push(e))
+  again.attach(1); again.release(f.clock.now)
+  expect(events).toHaveLength(1)
+})

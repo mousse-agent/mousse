@@ -7011,6 +7011,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   markRead(botId: string, seq: number): void {
     this.entry(botId)
     this.store.setReadSeq(botId, seq)
+    this.tellings.read()
     this.changed({ botId })
   }
 
