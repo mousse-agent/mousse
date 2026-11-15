@@ -325,3 +325,13 @@ describe('boundText', () => {
     expect(Buffer.byteLength(bounded.text)).toBeLessThanOrEqual(1_000)
   })
 })
+
+it('forgetting a short owner message drops its turn’s unsent draft and keeps other drafts', () => {
+  const f = memoryFixture()
+  const seq = f.message({ botId: 'ada', id: 'm-owner', author: 'owner', text: 'hi', activationId: 'turn' })
+  f.store.setState('ada', 'draft:turn', { n: 1, text: 'Hi!', replyTo: 'm-owner' })
+  f.store.setState('ada', 'draft:other', { n: 1, text: 'Other' })
+  ok(f.store.forget('ada', { refs: [`j${seq}`] }))
+  expect(f.store.getState('ada', 'draft:turn')).toBeUndefined()
+  expect(f.store.getState('ada', 'draft:other')).toMatchObject({ text: 'Other' })
+})

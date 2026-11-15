@@ -59,7 +59,7 @@ describe('a wake at a time', () => {
     const turn = await chat('Check the deploy in 20 minutes', 'm1')
     const set = await wake(turn.activation.id, { brief: 'Check whether the deploy finished and tell them.', dueAt: inMinutes(20) })
     await finish(f, turn.payload, 'completed', { text: 'I\'ll check in 20 minutes.' })
-    expect(f.bots.tools.reminders.list(botId)).toEqual([{ reminderId: set.wakeId, dueAt: set.dueAt, text: 'Check whether the deploy finished and tell them.', wake: 'at its time' }])
+    expect(f.bots.tools.reminders.list(botId)).toEqual([{ reminderId: set.wakeId, dueAt: set.dueAt, text: 'Check whether the deploy finished and tell them.', wake: 'at its time', ownerSet: false }])
     f.clock.now += 19 * MIN
     await f.bots.deliverDueReminders()
     expect(wakeTurn(set.wakeId)).toBeUndefined()
@@ -221,7 +221,7 @@ describe('About → Runs', () => {
     const turn = await chat('Tell me when #12 merges', 'm1')
     const set = await wake(turn.activation.id, { brief: 'Tell them it shipped.', event: { kind: 'pr', repo: 'acme/app', number: 12 } })
     await finish(f, turn.payload, 'completed', { text: 'Will do.' })
-    expect(f.bots.service.get(botId).reminders).toEqual([{ id: set.wakeId, dueAt: set.dueAt, text: 'Tell them it shipped.', wake: 'when acme/app#12 merges' }])
+    expect(f.bots.service.get(botId).reminders).toEqual([{ id: set.wakeId, dueAt: set.dueAt, text: 'Tell them it shipped.', wake: 'when acme/app#12 merges', ownerSet: false }])
     f.bots.service.reminderCancel(botId, set.wakeId)
     pr = { state: 'merged' }
     f.clock.now += 3 * MIN

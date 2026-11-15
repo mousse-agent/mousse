@@ -75,8 +75,12 @@ export interface BotAskCard {
 
 export type BotMessageKind = 'text' | 'run_report' | 'notice' | 'error'
 
+export type BotSnoozeChoice = '10m' | '1h' | 'tomorrow'
+
 /** One row of a bot's chat (`bot_messages`). */
 export interface BotChatMessage {
+  /** Only delivered text reminders carry snooze replies; older services omit it. */
+  reminder?: { expiresAt?: string; snoozedUntil?: string }
   seq: number
   id: string
   at: string
@@ -301,6 +305,7 @@ export interface BotRunItem {
 
 /** One of a bot's waiting reminders (one-off, not yet said), in About → Runs. */
 export interface BotReminderItem {
+  ownerSet?: boolean | null
   id: string
   dueAt: string
   text: string

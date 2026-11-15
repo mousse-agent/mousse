@@ -365,3 +365,32 @@ describe('Bot UI wiring', () => {
     expect(bridgeProtocolEvent({ type: 'bots.escalation', data: {} } as never, broadcast as never, presentation)).toBe(false)
   })
 })
+
+
+it('snoozes through the optional reminder method without writing an owner message', async () => {
+  const botId = await created()
+  await f.bots.reconcileOnStartup()
+  const first = f.store.listActivations(botId)[0]!
+  const { reminderId } = f.bots.addReminder(botId, first.id, { dueAt: new Date(f.clock.now).toISOString(), text: 'Tea' })
+  await f.bots.deliverDueReminders()
+  const before = f.store.listActivations(botId).length
+  const messageId = `bm_${reminderId}`
+  const message = await call<BotChatMessage>('bots.reminders.snooze', { botId, messageId, choice: '10m' })
+  expect(message.reminder?.snoozedUntil).toBe(new Date(f.clock.now + 600_000).toISOString())
+  expect(f.store.listActivations(botId)).toHaveLength(before)
+  await expect(call('bots.reminders.snooze', { botId, messageId, choice: '10m' })).rejects.toMatchObject({ code: 'reminder_snoozed' })
+  await expect(call('bots.reminders.snooze', { botId, messageId, choice: 'bad' })).rejects.toMatchObject({ code: 'invalid_params' })
+})
+
+it('refuses a stale snooze after Clear chat without making a reminder', async () => {
+  const botId = await created()
+  await f.bots.reconcileOnStartup()
+  const turn = f.store.listActivations(botId)[0]!
+  const { reminderId } = f.bots.addReminder(botId, turn.id, { dueAt: new Date(f.clock.now).toISOString(), text: 'Tea' })
+  await f.bots.deliverDueReminders()
+  await call('bots.chat.clear', { botId })
+  await expect(call('bots.reminders.snooze', { botId, messageId: `bm_${reminderId}`, choice: '10m' })).rejects.toMatchObject({
+    code: 'reminder_not_found', message: 'This message has no reminder to snooze.'
+  })
+  expect(f.store.waitingReminders(botId)).toEqual([])
+})

@@ -336,6 +336,9 @@ export class BotChatProjection {
   }
 
   toMessage(row: BotMessageRow): BotChatMessage {
+    const reminder = row.id.startsWith('bm_rem_') ? this.store.reminderForMessage(row.botId, row.id) : undefined
+    const expiresAt = reminder?.deliveredAt ? new Date(Date.parse(reminder.deliveredAt) + 24 * 60 * 60_000).toISOString() : undefined
+    const snoozed = reminder && this.store.snoozedCopy(row.botId, reminder.id)
     const escalation = row.askId ? this.store.escalation(row.askId) : undefined
     const question = row.questionId ? this.store.question(row.questionId) : undefined
     // A question's bubble, or a nudge of it (any other bot row that carries it): its words, then its answers as plain text
@@ -345,6 +348,7 @@ export class BotChatProjection {
     const cards = row.author === 'bot' ? chatCards(row.cards) : []
     const plain = [plainCards(cards), asks && asks.spec.choices.length ? plainChoices(asks.spec) : ''].filter(Boolean).join('\n\n')
     return {
+      ...(reminder && expiresAt && expiresAt > this.store.now() && !reminder.work && !reminder.wake && !this.store.messageForgotten(row.botId, row.id) ? { reminder: { expiresAt, ...(snoozed ? { snoozedUntil: snoozed.dueAt } : {}) } } : {}),
       seq: row.seq,
       id: row.id,
       at: row.at,
@@ -582,7 +586,7 @@ export class BotChatProjection {
       { id: schedule.scheduleId, label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}), kind: 'schedule' as const, ...(schedule.jobId ? { jobId: schedule.jobId } : {}), ...(schedule.paused ? { paused: true as const } : {}) }
     ))
     const reminders: BotReminderItem[] = this.store.waitingReminders(definition.id).map((reminder) => (
-      { id: reminder.id, dueAt: reminder.dueAt, text: reminder.text, ...(reminder.work ? { work: true as const } : {}), ...(reminder.wake ? { wake: reminder.event ? wakeEventLabel(reminder.event) : '' } : {}) }
+      { id: reminder.id, dueAt: reminder.dueAt, text: reminder.text, ownerSet: reminder.ownerSet, ...(reminder.work ? { work: true as const } : {}), ...(reminder.wake ? { wake: reminder.event ? wakeEventLabel(reminder.event) : '' } : {}) }
     ))
     return {
       summary: this.summary(definition, now),
