@@ -95,6 +95,8 @@ export default defineConfig({
       // the one stylesheet loaded at startup: shared rules (markdown, settings controls) style the first paint
       // too, and nothing restyles when a chunk arrives.
       cssCodeSplit: false,
+      // electron-vite defaults to unminified output, including production renderer builds.
+      minify: 'esbuild',
       rollupOptions: {
         plugins: [asciiSourcePlugin()],
         input: {
