@@ -24,7 +24,7 @@ import { confirmNavigation } from '../services/navigationGuards'
 import { useChatsStore } from '../stores/chatsStore'
 import { archiveThread, createAndSelectProjectThread, createAndSelectThread, selectThread } from '../lib/threadActions'
 import { dropPendingThreadRows, isPendingRowId, pruneRowKeys, servedPendingRows, usePendingThreadRows, withPendingRows } from '../lib/pendingThreadRows'
-import { runWithToast, showUndoToast } from '../lib/actionToast'
+import { runWithToast } from '../lib/actionToast'
 import { Modal } from './ui/Modal'
 import { PillTabs, type PillTab } from './ui/PillTabs'
 import { ChatsSidebar } from './chats/ChatsSidebar'
@@ -877,10 +877,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const setPinned = (type: 'thread' | 'project', id: string, pinned: boolean) =>
     runWithToast(pinned ? 'pin' : 'unpin', () => (type === 'thread' ? window.mousse.threads.pin(id, pinned) : window.mousse.projects.pin(id, pinned)), { retry: true })
 
-  const setArchived = async (threadId: string, archived: boolean) => {
-    const done = await runWithToast(archived ? 'archive' : 'unarchive', () => (archived ? archiveThread(threadId) : window.mousse.threads.settle(threadId, false)), { retry: true })
-    if (done && archived) showUndoToast('Archived', 'unarchive', () => window.mousse.threads.settle(threadId, false))
-  }
+  // Archiving shows no toast: the row moving to Archived says it. Only a failure toasts.
+  const setArchived = (threadId: string, archived: boolean) =>
+    runWithToast(archived ? 'archive' : 'unarchive', () => (archived ? archiveThread(threadId) : window.mousse.threads.settle(threadId, false)), { retry: true })
 
   // A thread is archived first; deleting an archived thread is permanent, so it asks first and has no Undo.
   const askDelete = (request: DeleteRequest) => {

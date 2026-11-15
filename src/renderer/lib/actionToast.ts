@@ -25,8 +25,3 @@ export async function runWithToast(verb: string, run: () => Promise<unknown>, op
     return false
   }
 }
-
-/** Shows a toast for something done, with Undo. A failed undo shows its own toast with Retry. */
-export function showUndoToast(message: string, undoVerb: string, undo: () => Promise<unknown>): void {
-  showToast({ message, action: { label: 'Undo', run: () => void runWithToast(undoVerb, undo, { retry: true }) } })
-}

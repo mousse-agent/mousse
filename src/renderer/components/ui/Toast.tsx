@@ -85,8 +85,8 @@ function useToastBottom(): number | undefined {
 
 /**
  * What a toast is about, shown by a faint wash of the status colour over the toast: finished
- * (success), needs you (attention), stopped (paused), failed (error). Neutral (something done,
- * such as "Archived") is untinted.
+ * (success), needs you (attention), stopped (paused), failed (error). Neutral (something done)
+ * is untinted.
  */
 export type ToastTone = 'neutral' | 'error' | 'success' | 'attention' | 'paused'
 
