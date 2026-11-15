@@ -46,4 +46,3 @@ export function botNotificationContent(
   if (!line) return { title, body: 'New message' }
   return { title, body: line.length > 140 ? `${line.slice(0, 139)}…` : line }
 }
-
