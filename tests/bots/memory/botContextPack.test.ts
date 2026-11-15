@@ -5,7 +5,9 @@ import { createBotJournal } from '../../../src/mms/bots/memory/capture'
 import { BOT_MEMORY_PROTOCOL, BOT_MEMORY_WRAPPER_CLOSE, BOT_MEMORY_WRAPPER_OPEN, BOT_RUN_REPORT_LINE, createBotContextProvider, type BotContextPackOptions } from '../../../src/mms/bots/memory/contextPack'
 import type { ChatMessage } from '../../../src/shared/types'
 import { DAY, HOUR, disposeFixtures, later, memoryFixture, type MemoryFixture } from './memoryFixture'
-import { reminderTime } from '../../../src/mms/run/mcp/appTools/bots'
+import { botTools } from '../../../src/mms/run/mcp/appTools/bots'
+import type { BotToolHost } from '../../../src/mms/bots/seams'
+import type { ToolCallContext } from '../../../src/mms/run/mcp/appTools/types'
 import { BOT_CHANGELOG_LATEST } from '../../../src/mms/bots/changelog'
 
 /**
@@ -37,13 +39,29 @@ describe('the chat pack', () => {
   it('reads a reminder at 9 in the zone named by Now, with the service defaults', async () => {
     // MmsProfileServices supplies neither the memory store nor the pack a zone override.
     const fx = memoryFixture({ timeZone: () => undefined })
-    const due = reminderTime(undefined, '2026-11-14T09:00')
-    expect(due).toBeInstanceOf(Date)
-    fx.clock.now = (due as Date).getTime()
+    let dueAt = ''
+    const host = {
+      activationOf: () => ({ botId: 'ada', activationId: 'at-nine', lane: 'chat' }),
+      reminders: { add: (_bot: string, _from: string, input: { dueAt: string }) => {
+        dueAt = input.dueAt
+        return { reminderId: 'r1', dueAt }
+      } },
+      wakes: { add: async (_bot: string, _from: string, input: { dueAt: string }) => {
+        dueAt = input.dueAt
+        return { wakeId: 'w1', dueAt }
+      } }
+    } as unknown as BotToolHost
+    const ctx = { caller: { threadId: 'home' }, turn: { bot: { activationId: 'at-nine' } } } as ToolCallContext
     const { packs } = provider(fx)
-    const pack = await packs.chatPreamble({ botId: 'ada', activationId: 'at-nine' })
-    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone
-    expect(pack).toContain(`Now: Sat 14 Nov 2026, 09:00 (${zone}).`)
+    for (const name of ['remind', 'wake']) {
+      const tool = botTools(() => ({ host })).find((entry) => entry.name === name)!
+      const result = await tool.handler({ text: 'At nine.', brief: 'Check back.', at: '2026-11-14T09:00' }, ctx)
+      expect(result.isError).not.toBe(true)
+      fx.clock.now = Date.parse(dueAt)
+      const pack = await packs.chatPreamble({ botId: 'ada', activationId: 'at-nine' })
+      const zone = Intl.DateTimeFormat().resolvedOptions().timeZone
+      expect(pack).toContain(`Now: Sat 14 Nov 2026, 09:00 (${zone}).`)
+    }
   })
 
   it('orders its blocks from stable to volatile, inside the bot_memory wrapper', async () => {
