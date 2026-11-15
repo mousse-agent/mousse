@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   ArrowRight,
   BrowserTab,
+  Bot,
   Check,
   Clean,
   Code2,
@@ -14,7 +15,8 @@ import {
   MoreVertical,
   Plus,
   RefreshCw,
-  Smartphone
+  Smartphone,
+  User
 } from '../lib/icons'
 import { isTurnActivePhase, type BrowserElementAttachment, type BrowserTabState } from '../../shared/types'
 import type { BrowserAccessState } from '../../shared/browser/access'
@@ -374,7 +376,7 @@ function BrowserWebview({ tab, profileId, active, agentControlled, agentCursor, 
         data-agent-controlled={agentControlled ? '' : undefined}
         webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"
       />
-      {agentControlled && <div className="browser-agent-shield" aria-label="Agent is controlling this tab; use Take control to interact" />}
+      {agentControlled && <div className="browser-agent-shield" aria-label="Agent is controlling this tab; use Take control in the browser menu to interact" />}
       {!blank && <AgentCursor cursor={agentCursor} zoom={tab.zoomFactor || 1} />}
     </KeepMounted>
   )
@@ -747,11 +749,6 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
       </div>}
       {/* The thread agent's browser without a window, when it has one open: its line, and its view over the tabs. */}
       {activeThreadId && <ThreadBrowserRow threadId={activeThreadId} active={active} />}
-      {hasVisibleTabs && (agentControlled || activeControl?.owner === 'human') && <div className="browser-agent-controls" aria-label="Agent browser controls">
-        <span>{agentControlled ? 'Agent is using this tab' : 'You have control'}</span>
-        {agentControlled ? <button type="button" disabled={browserBusy} onClick={() => void browserControl('take')}>Take control</button>
-          : <button type="button" disabled={browserBusy || !access.allowed} onClick={() => void browserControl('resume')}>Resume agent</button>}
-      </div>}
       {!hasVisibleTabs && noticeView}
       {hasVisibleTabs ? (
         <>
@@ -796,6 +793,12 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
                     onPointerDown={() => setMenuOpen(false)}
                   />
                   <div className="browser-menu browser-menu-floating" ref={menuRef} style={menuStyle} role="menu" aria-label="Browser menu">
+                    {(agentControlled || activeControl?.owner === 'human') && <>
+                      <button type="button" role="menuitem" disabled={browserBusy || (!agentControlled && !access.allowed)} onClick={() => { setMenuOpen(false); void browserControl(agentControlled ? 'take' : 'resume') }}>
+                        <span className="browser-menu-label">{agentControlled ? <User size={14} /> : <Bot size={14} />}{agentControlled ? 'Take control' : 'Resume agent'}</span>
+                      </button>
+                      <div className="browser-menu-separator" />
+                    </>}
                     <div className="browser-menu-actions" style={{ display: 'contents' }} inert={agentControlled}>
                     <button type="button" role="menuitem" onClick={() => { withWebview(getActiveWebview(), (wv) => wv.reloadIgnoringCache(), undefined); setMenuOpen(false) }}>
                       <span className="browser-menu-label"><RefreshCw size={14} />Hard reload</span>
