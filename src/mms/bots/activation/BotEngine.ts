@@ -1,3 +1,4 @@
+import type { BotMemoryStore } from '../memory/BotMemoryStore'
 import type { ScheduledMissedRuns } from '../../../shared/types'
 import { requestJournalRows } from '../memory/requestFrames'
 import { grantedPermissions, permissionId, restorePermission, withoutPermission } from '../chat/projection'
@@ -10,7 +11,7 @@ import { askNoticeText, askText } from '../../../shared/bots/personal/askText'
 import { lookFields } from '../../../shared/bots/personal/look'
 import { BOT_HELD_POWER_TEXT, subagentHold, type BotHeldPower, type BotRuntimeHold, type BotSubagentHold } from '../../../shared/bots/personal/subagentHold'
 import type { BotAuthority, BotCheck, BotCheckDenied, BotMcpTool, BotSubagents, BotSubagentView, BotThreadRole, BotThreads, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
-import type { BotChatMessage, BotChip, BotError, BotLaunchedThread } from '../../../shared/bots/personal/chat'
+import { launchedActive, type BotChatMessage, type BotChip, type BotError, type BotLaunchedThread } from '../../../shared/bots/personal/chat'
 import type { PermissionMode } from '../../../shared/permissionMode'
 import {
   BOT_ASK_DENY_COOLDOWN_MS,
@@ -200,7 +201,9 @@ export interface BotEngineHost {
    * one scheduler claims each occurrence and hands it to `runScheduledOccurrence`. Absent: no bot has schedules here.
    */
   schedules?: Pick<BotScheduleBook, 'list' | 'get' | 'add' | 'remove' | 'removeAll' | 'labelOf'> & Partial<Pick<BotScheduleBook, 'skipped'>>
-  /** The level a scheduled run's activation reported with `run_report` (`AutomationRuns`). Absent: none is known. */
+  /** Per-schedule progress in bot memory; pending reports are published only on successful completion. */
+  progress?: Pick<BotMemoryStore, 'stageProgress' | 'finishProgress' | 'progress'>
+  /** The level a scheduled run's activation reported with `run_report` (`AutomationRuns`). */
   runLevel?(activationId: string): RunLevel | undefined
   /** Wall-clock milliseconds, for the times `bots.db` records (default: `Date.now`). */
   clock?(): number
@@ -2199,6 +2202,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /** What follows any end of an activation: its scratch and pack go, the lane moves on. */
   private afterEnd(row: BotActivationRow): void {
+    this.host.progress?.finishProgress(row.botId, row.id, false)
     this.clearInternetCheck(row.id)
     this.cleanup(row)
     this.packs.delete(row.id)
@@ -2208,6 +2212,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   private journalEnd(row: BotActivationRow, reason: string | null): void {
+    if (row.trigger.kind === 'schedule') this.host.progress?.finishProgress(row.botId, row.id,
+      reason === null && this.store.activation(row.id)?.status === 'done' && Boolean(this.host.schedules?.get(row.botId, row.trigger.scheduleId)))
     // A chat turn that ended without its reply leaves one line in the recent chat, so the next turn can tell the owner.
     if (row.lane === 'chat') {
       if (reason !== null) this.journalInTx(chatTurnEndRow(row, reason))
@@ -5204,6 +5210,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const run = main?.runId ? this.host.runs()?.getRun(main.runId) : undefined
     if (row.status !== 'paused' || run?.status !== 'completed') throw new BotEngineError('bot_not_done', 'Only a paused activation whose run completed can be marked done.')
     this.acknowledge(row, options.acknowledge)
+    // The owner accepted the draft result; the unattended run did not finish successfully.
+    this.host.progress?.finishProgress(row.botId, row.id, false)
     this.store.moveActivation(row.id, ['paused'], 'done', { endReason: null })
     const next = this.store.activation(row.id)!
     this.cleanup(next)
@@ -7929,6 +7937,71 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }, RESUME_WATCH_MS)
   }
 
+  /** The soonest due time for one bot, or the profile when omitted. Schedules remain the scheduler's to claim. */
+  nextDueAt(botId?: string): string | undefined {
+    const due = this.dueAt(botId)
+    return due === undefined ? undefined : new Date(due).toISOString()
+  }
+
+  /**
+   * No active or resumable work, watchers, managed threads, joined messages, or due time within `within` milliseconds.
+   * An unknown thread lookup answers not idle. Idle does not mean nothing waits on the owner: an open chat question
+   * or an ask a run carried on past holds no resumable turn, so alone it is idle unless a follow-up is due within the
+   * window. Callers that must not act behind the owner's back must also check the summary's `needsOwner`.
+   */
+  isIdle(botId: string, { within = 30 * 60_000 }: { within?: number } = {}): boolean {
+    if (this.store.activationsIn(botId, ['queued', 'running', 'waiting_grant', 'blocked'])
+      .some((row) => row.status !== 'blocked' || workWaits(row))) return false
+    if (this.watchers.list(botId).length) return false
+    try {
+      if (this.launchedThreads(botId).some(launchedActive)) return false
+    } catch {
+      // Unknown activity is not idle: a host lookup failure must not stop the caller's upkeep pass.
+      return false
+    }
+    // A turn can have ended before its joined messages are requeued by upkeep.
+    if (this.store.get(`SELECT 1 FROM bot_work_notes n JOIN bot_activations a ON a.id = n.activation_id
+      WHERE n.bot_id = ? AND a.lane = 'chat' AND n.applied_at IS NULL LIMIT 1`, botId)) return false
+    const due = this.nextDueAt(botId)
+    return due === undefined || Date.parse(due) > this.now() + within
+  }
+
+  /**
+   * The single list of due sources. Timer reads retain delivery retry backoff and exclude schedules: the shared
+   * scheduler starts those, so an overdue schedule must never spin the engine's delivery timer.
+   */
+  private dueAt(botId?: string, forTimer = false): number | undefined {
+    const sources: Array<() => number | undefined> = [
+      () => {
+        const row = this.store.nextReminder(botId)
+        return row ? Math.max(Date.parse(row.dueAt), forTimer ? this.reminderRetryAt.get(row.id) ?? 0 : 0) : undefined
+      },
+      () => {
+        const row = this.store.nextQuestionDue(botId)
+        return row?.nextAt ? Math.max(Date.parse(row.nextAt), forTimer ? this.questionRetryAt.get(row.id) ?? 0 : 0) : undefined
+      },
+      () => {
+        if (forTimer) return undefined
+        let soonest: number | undefined
+        for (const id of botId === undefined ? this.host.definitions.ids() : [botId]) {
+          const registry = this.store.registry(id)
+          if (!registry || registry.deletedAt || registry.pausedReason) continue
+          for (const schedule of this.schedulesOf(id)) {
+            if (schedule.paused || !schedule.nextAt) continue
+            const at = Date.parse(schedule.nextAt)
+            if (soonest === undefined || at < soonest) soonest = at
+          }
+        }
+        return soonest
+      }
+    ]
+    const times = sources.flatMap((read) => {
+      const at = read()
+      return at === undefined ? [] : [at]
+    })
+    return times.length ? Math.min(...times) : undefined
+  }
+
   /**
    * Arms the one timer for the soonest waiting reminder or question follow-up of any bot (long waits re-arm, so a far
    * timer never overflows).
@@ -7937,15 +8010,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.reminderTimer?.clear()
     this.reminderTimer = undefined
     if (!this.startupPassed || this.closed) return
-    const reminder = this.store.nextReminder()
-    const question = this.store.nextQuestionDue()
-    // One that failed waits for its retry time; the others behind it are settled at the next pass.
-    const times = [
-      ...(reminder ? [Math.max(Date.parse(reminder.dueAt), this.reminderRetryAt.get(reminder.id) ?? 0)] : []),
-      ...(question?.nextAt ? [Math.max(Date.parse(question.nextAt), this.questionRetryAt.get(question.id) ?? 0)] : [])
-    ]
-    if (!times.length) return
-    const wait = Math.min(Math.max(0, Math.min(...times) - this.now()), REMINDER_REARM_MS)
+    const due = this.dueAt(undefined, true)
+    if (due === undefined) return
+    const wait = Math.min(Math.max(0, due - this.now()), REMINDER_REARM_MS)
     this.reminderTimer = (this.host.setTimer ?? defaultTimer)(() => {
       this.reminderTimer = undefined
       void this.deliverDueReminders().catch((error: unknown) => {
@@ -8272,6 +8339,16 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return when.expr
   }
 
+  /** Only the activation's own existing schedule may keep a cursor; never work or a run by hand. */
+  saveLeftOff(activationId: string, text: string): string {
+    const row = this.host.store.activation(activationId)
+    if (!row || row.trigger.kind !== 'schedule') return 'not kept: only a bot scheduled run keeps leftOff'
+    if (!this.host.schedules?.get(row.botId, row.trigger.scheduleId)) return 'not kept: the schedule was removed'
+    if (!this.host.progress) return 'not kept: bot memory is unavailable'
+    this.host.progress.stageProgress(row.botId, row.trigger.scheduleId, row.id, text)
+    return 'pending: kept only when this run ends done'
+  }
+
   removeSchedule(botId: string, scheduleId: string): boolean {
     this.entry(botId)
     const removed = this.host.schedules?.remove(botId, scheduleId) ?? false
@@ -8279,8 +8356,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return removed
   }
 
-  listSchedules(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string }> {
-    return this.schedulesOf(botId).map((schedule) => ({ scheduleId: schedule.scheduleId, label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}) }))
+  listSchedules(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string; leftOff?: string }> {
+    return this.schedulesOf(botId).map((schedule) => {
+      const leftOff = this.host.progress?.progress(botId, schedule.scheduleId)
+      return { scheduleId: schedule.scheduleId, label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}), ...(leftOff !== undefined ? { leftOff } : {}) }
+    })
   }
 
   /**
