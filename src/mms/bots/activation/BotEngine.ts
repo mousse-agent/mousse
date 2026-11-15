@@ -5136,6 +5136,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const run = main?.runId ? this.host.runs()?.getRun(main.runId) : undefined
     if (row.status !== 'paused' || run?.status !== 'completed') throw new BotEngineError('bot_not_done', 'Only a paused activation whose run completed can be marked done.')
     this.acknowledge(row, options.acknowledge)
+    // The owner accepted the draft result; the unattended run did not finish successfully.
+    this.host.progress?.finishProgress(row.botId, row.id, false)
     this.store.moveActivation(row.id, ['paused'], 'done', { endReason: null })
     const next = this.store.activation(row.id)!
     this.cleanup(next)
