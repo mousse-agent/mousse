@@ -1513,6 +1513,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           // Expiry makes the schedule absent from the active list, like removal. Snapshot
           // that absence outside the transaction so waiting runs end and executing walls report.
           this.dropRemovedScheduleRuns(botId)
+          // A saved self-completion intent wins even if its shared-store removal is
+          // still retrying when until passes. Its report owns the Stopped line.
+          if (this.scheduleHasCompletion(botId, ended.scheduleId)) continue
           this.store.db.transaction(() => {
             const key = `schedule-ended:${ended.jobId}`
             if (this.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, key)) return
