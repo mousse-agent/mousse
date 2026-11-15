@@ -3,6 +3,7 @@
  * owner's messages in order on the home thread; the run lane runs manual and scheduled runs on
  * threads of their own, each with the run pack of its schedule, and posts a run report.
  */
+import { BotEngine } from '../../src/mms/bots/activation/BotEngine'
 import { existsSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { botFixture, chatOf, createBot, finish, flush, runDispatch, start, type BotFixture } from './botFixture'
@@ -76,23 +77,75 @@ describe('messages sent one after another', () => {
     expect(lane('chat', ['queued', 'running'])).toEqual([])
   })
 
-  it('a follow-up the turn never read is answered next in the same thread, after the reply to the first', async () => {
-    const first = await f.bots.service.chatSend({ botId, text: "wdym you can't reach the thread?", clientRequestId: 'm1' })
-    const [turn] = lane('chat', ['running'])
-    const { payload } = await start(f, turn!.id)
-    const second = await f.bots.service.chatSend({ botId, text: 'mousse', clientRequestId: 'm2' })
-    await finish(f, payload, 'completed', { text: 'The thread is there; I can only message it from this chat.' })
-    // The reply so far answers the first message only, and the same turn goes on with the follow-up.
-    expect(chatOf(f, botId).at(-1)).toMatchObject({ text: 'The thread is there; I can only message it from this chat.', replyTo: { id: first.message.id } })
-    expect(f.store.activation(turn!.id)?.status).toBe('running')
-    expect(lane('chat', ['queued'])).toEqual([])
-    const { payload: next, prepared } = await start(f, turn!.id, 2)
+  // Inputs: no calls / reads / mutations; success / Stop / failure / restart; third message.
+  it.each(['none', 'thread_read', 'memory_list', 'work_start', 'memory_save', 'new_unknown_tool'])('unread follow-up after %s keeps the right replies and quotes', async (tool) => {
+    const first = await f.bots.service.chatSend({ botId, text: 'hi', clientRequestId: 'm1' })
+    const turn = first.message.activationId!
+    const { payload } = await start(f, turn)
+    if (tool !== 'none') {
+      const now = new Date(f.clock.now).toISOString()
+      f.runs.tools.start({ invocationId: 'call', runId: payload.runId, attemptId: f.runs.store.getRun(payload.runId)!.activeAttemptId!, tool, argsDigest: 'test', now })
+      f.runs.tools.commit('call', now)
+    }
+    const second = await f.bots.service.chatSend({ botId, text: 'check the flat', clientRequestId: 'm2' })
+    f.bots.service.markRead(botId, second.message.seq)
+    await finish(f, payload, 'completed', { text: 'Hi! What can I do?' })
+    const held = ['none', 'thread_read', 'memory_list'].includes(tool)
+    const replies = () => chatOf(f, botId).filter((m) => m.activationId === turn && m.author === 'bot' && m.kind === 'text')
+    expect(replies()).toHaveLength(held ? 0 : 1)
+    expect(f.bots.service.get(botId).summary.unread).toBe(held ? 0 : 1)
+    expect(f.store.activation(turn)?.status).toBe('running')
+    const { payload: next, prepared } = await start(f, turn, 2)
     expect(prepared.history).toBe('thread')
-    expect(prepared.prompt).toContain('The owner wrote again while you were answering; your reply so far was already sent to them.')
-    expect(prepared.prompt).toContain('mousse')
-    await finish(f, next, 'completed', { text: 'Done: I told the mousse thread.' })
-    expect(chatOf(f, botId).at(-1)).toMatchObject({ text: 'Done: I told the mousse thread.', replyTo: { id: second.message.id } })
-    expect(f.store.activation(turn!.id)?.status).toBe('done')
+    expect(prepared.prompt).toContain(held ? 'Your draft, not sent: «Hi! What can I do?»' : 'your reply so far was already sent')
+    expect(prepared.prompt).toContain('check the flat')
+    await finish(f, next, 'completed', { text: 'Hi — checking the flat.' })
+    expect(replies()).toHaveLength(held ? 1 : 2)
+    expect(replies().at(-1)).toMatchObject({ text: 'Hi — checking the flat.', replyTo: { id: second.message.id } })
+    if (!held) expect(replies()[0]).toMatchObject({ replyTo: { id: first.message.id } })
+    expect(replies().at(-1)!.seq).toBeGreaterThan(second.message.seq)
+    expect(f.bots.service.get(botId).summary.unread).toBe(held ? 1 : 2)
+  })
+
+  it.each(['stop', 'fail', 'restart-cancelled', 'restart-failed', 'restart-running', 'third'] as const)('a held reply survives %s, once', async (end) => {
+    const first = await f.bots.service.chatSend({ botId, text: 'hi', clientRequestId: 'm1' })
+    const turn = first.message.activationId!
+    const { payload } = await start(f, turn)
+    await send('check the flat', 'm2')
+    await finish(f, payload, 'completed', { text: 'Hi! What can I do?' })
+    const replies = () => chatOf(f, botId).filter((m) => m.activationId === turn && m.kind === 'text' && m.author === 'bot')
+    expect(replies()).toHaveLength(0)
+    if (end.startsWith('restart')) {
+      f.bots.close()
+      if (end !== 'restart-running') f.store.moveActivation(turn, ['running'], end === 'restart-failed' ? 'failed' : 'cancelled', { endReason: 'stopped' })
+      f.bots = new BotEngine(f.host)
+      await f.bots.reconcileOnStartup()
+      await flush()
+      if (f.store.activation(turn)?.status === 'running') {
+        const dispatch = f.store.lastMainDispatch(turn)!
+        await finish(f, (await start(f, turn, dispatch.n)).payload, 'completed', { text: 'Hi — checking the flat.' })
+      }
+      await f.bots.reconcileOnStartup()
+      expect(replies()).toHaveLength(1)
+    } else {
+      const { payload: next } = await start(f, turn, 2)
+      if (end === 'third') {
+        const third = await f.bots.service.chatSend({ botId, text: 'and the roof', clientRequestId: 'm3' })
+        await finish(f, next, 'completed', { text: 'Checking the flat.' })
+        expect(replies()).toHaveLength(1)
+        expect(replies()[0]).toMatchObject({ replyTo: { text: 'check the flat' } })
+        const last = await start(f, turn, 3)
+        expect(last.prepared.prompt).toContain('already sent')
+        await finish(f, last.payload, 'completed', { text: 'The roof too.' })
+        expect(replies().at(-1)).toMatchObject({ replyTo: { id: third.message.id } })
+      } else {
+        if (end === 'stop') await f.bots.service.chatStop(botId)
+        await finish(f, next, end === 'stop' ? 'interrupted' : 'failed', { outcome: { error: 'boom' } })
+        expect(replies()).toHaveLength(1)
+        expect(replies()[0]).toMatchObject({ text: 'Hi! What can I do?', replyTo: { id: first.message.id } })
+      }
+    }
+    expect(f.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, `draft:${turn}`)).toBeUndefined()
   })
 
   it('a follow-up the turn never read before it failed gets a turn of its own that holds it', async () => {
