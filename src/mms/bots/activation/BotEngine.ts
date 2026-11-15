@@ -7515,7 +7515,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * A schedule (§5.5): an automation whose Who is the bot, in the shared store. At most 8 per bot, at least 5 minutes
+   * A schedule (§5.5): an automation whose Who is the bot, in the shared store. At most 8 per bot, at least a minute
    * apart. The bot adds its own with `bot_schedule_add`, the owner from the Automations page; it needs no approval
    * (schedules are not permissions) and changes no revision.
    */

@@ -634,7 +634,7 @@ bot_schedule_remove({ scheduleId }) → { removed: true }
 bot_schedule_list() → Array<{ scheduleId, label, nextAt }>
 ```
 
-- Each tool is checked with `scheduleProblem` (`triggers/scheduler.ts`). There are at most 8 schedules per bot (`MAX_BOT_SCHEDULES`), and the minimum interval is 5 minutes.
+- Each tool is checked with `scheduleProblem` (`triggers/scheduler.ts`). There are at most 8 schedules per bot (`MAX_BOT_SCHEDULES`), and the minimum interval is 1 minute.
 - The tools write `bot_schedules` and call `schedulesChanged` (`MmsProfileServices.ts:571`).
 - **Label.** `describeSchedule` and `humanCron` move from `src/renderer/components/scheduled/scheduledLabels.ts` to `src/shared/scheduleLabel.ts`, as pure code with the locale passed in. The renderer file re-exports them. Examples: "every weekday · 09:00", "every 30 minutes".
 - **`BotScheduler.tickBot`** reads `bot_schedules` instead of the revision. The idempotency key `sched:<bot>:<schedule>:<occurrenceAt>` is unchanged.
@@ -1599,7 +1599,7 @@ Re-run on 7 Nov against `a6e46bbe`: open PRs, PRs merged since 4 Nov, issues ope
 - A deleted bot is kept, archived, for 30 days with no restore UI in Phase 1.
 - The `setsid` sweep moves to Phase 2 (a known gap for Pi bots with "run commands" since revision 5).
 - An hour of active time per activation, chat or run. Time spent waiting for the internet is not charged (docs/bots.md, No internet).
-- Minimum schedule interval 5 minutes; at most 8 schedules per bot.
+- Minimum schedule interval 1 minute; at most 8 schedules per bot.
 - Not now on a run ask: no new ask for 24 hours.
 - Pause stops schedules only. Chat works while paused.
 - Three failed runs pause schedules. Chat failures, refused asks, usage-limit pauses and waiting for the internet don't count.
