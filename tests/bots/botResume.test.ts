@@ -36,18 +36,47 @@ describe('bot timers after sleep', () => {
     f.bots.tools.reminders.add(botId, activation.id, { dueAt, text: 'Drink some water.' })
     const wake = await f.bots.tools.wakes!.add(botId, activation.id, { dueAt, brief: 'Check the deploy.' })
     await finish(f, turn.payload, 'completed', { text: 'Will do.' })
-    const due = vi.spyOn(f.bots, 'deliverDueReminders')
+    const upkeep = vi.spyOn(f.bots, 'maintain')
 
     // Sleeping changes wall time without running the timers that would have fired meanwhile.
     vi.setSystemTime(Date.now() + 120_000)
     f.clock.now = Date.now()
     await vi.advanceTimersByTimeAsync(10_000)
     await flush()
-    expect(due).toHaveBeenCalledTimes(1)
+    expect(upkeep).toHaveBeenCalledTimes(1)
     expect(chatOf(f, botId).some((row) => row.text.includes('Drink some water.'))).toBe(true)
     expect(f.store.listActivations(botId).filter((row) => row.idempotencyKey === `wake:${wake.wakeId}`)).toHaveLength(1)
     await vi.advanceTimersByTimeAsync(10_000)
-    expect(due).toHaveBeenCalledTimes(1)
+    expect(upkeep).toHaveBeenCalledTimes(1)
+  })
+
+  it('delivers due timers after resume while a pull request read is blocked', async () => {
+    const { botId } = await createBot(f, { reply: 'Hello.' })
+    await f.bots.service.chatSend({ botId, text: 'Remind me and check the deploy.', clientRequestId: 'offline-resume' })
+    const activation = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    const turn = await start(f, activation.id)
+    const dueAt = new Date(Date.now() + 60_000).toISOString()
+    f.bots.tools.reminders.add(botId, activation.id, { dueAt, text: 'Drink water offline.' })
+    const wake = await f.bots.tools.wakes!.add(botId, activation.id, { dueAt, brief: 'Check back.' })
+    f.host.pullRequestState = async () => ({ state: 'open' })
+    await f.bots.tools.wakes!.add(botId, activation.id, { brief: 'Watch deploy.', event: { kind: 'pr', repo: 'acme/app', number: 1 } })
+    await finish(f, turn.payload, 'completed', { text: 'Will do.' })
+    let release!: () => void
+    const read = new Promise<{ state: 'open' }>((resolve) => { release = () => resolve({ state: 'open' }) })
+    const network = vi.fn(() => read)
+    f.host.pullRequestState = network
+    try {
+      vi.setSystemTime(Date.now() + 120_000)
+      f.clock.now = Date.now()
+      await vi.advanceTimersByTimeAsync(10_000)
+      await flush()
+      expect(network).toHaveBeenCalledTimes(1)
+      expect(chatOf(f, botId).some((row) => row.text.includes('Drink water offline.'))).toBe(true)
+      expect(f.store.listActivations(botId).filter((row) => row.idempotencyKey === `wake:${wake.wakeId}`)).toHaveLength(1)
+    } finally {
+      release()
+      await flush()
+    }
   })
 
   it('shares a running scheduler pass with other ticks and repeated resume checks', async () => {
