@@ -44,6 +44,7 @@ import {
   BOT_MODEL_SLOT_KEYS,
   ENDED_ACTIVATION_STATUSES,
   MAX_BOT_CUSTOM_SLOTS,
+  MAX_BOT_DESCRIPTION_CHARS,
   MAX_BOT_SCHEDULES,
   MAX_QUEUED_ACTIVATIONS,
   type BotAcknowledgement,
@@ -230,7 +231,7 @@ export interface BotEngineHost {
    * instructions and what its owner allows now (`allowed`). Built at each dispatch, never stored, so
    * a rename or a changed permission applies at the next turn.
    */
-  instructions?(bot: { name: string; description: string; filesFolder: string; lane?: BotLane; allowed?: BotAllowed; browserOffline?: boolean; subagent?: true; withheld?: readonly string[] }): string
+  instructions?(bot: { name: string; description: string; filesFolder: string; lane?: BotLane; allowed?: BotAllowed; browserOffline?: boolean; subagent?: true; withheld?: readonly string[]; promptChanged?: true }): string
   /** A schedule in plain words ("every weekday · 09:00"; WP3's `describeSchedule`). */
   scheduleLabel?(when: BotSchedule['when']): string
   /** The provider family of an instance in plain words ("Claude"), never a model. */
@@ -276,6 +277,9 @@ export interface BotEngineHost {
 }
 
 export type { BotAcknowledgement, BotSummaryV1 as BotSummary, BotThreadCheck } from '../../../shared/bots/personal/definition'
+
+/** Why `set_profile` leaves the description alone once the owner edited it in About. */
+export const BOT_OWNER_PROMPT_TEXT = 'Your owner wrote your description themselves in About, so only they can change it, there.'
 
 /** What a run-lane call is refused with when its permission waits for the owner (§5.4): a card for it is in the chat. */
 export const BOT_ASK_REFUSED_TEXT = 'The owner has not allowed this yet. You asked them; carry on without it and say in your report what you skipped.'
@@ -2492,7 +2496,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /**
    * A thread's instructions: the bot's system text (its name, description and files folder, then
    * the base instructions), its role when that says more than its description (a bot made before the
-   * Bot UI), then the thread's own. Built at each dispatch, so a rename applies at the next turn.
+   * Bot UI), then the thread's own. Built at each dispatch from the words published now, so a rename or the owner's
+   * prompt edit applies at the next turn, while a turn already running keeps the text it was given.
    */
   private instructionsOf(definition: BotDefinition, thread: BotThreadSpec, lane?: BotLane, permissions?: { allowed: BotAllowed; browserOffline?: boolean; subagent?: true; withheld?: readonly string[] }): { instructions?: string } {
     if (permissions) {
@@ -2505,18 +2510,42 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       }
       if (Object.keys(off).length) permissions = { ...permissions, allowed: { ...permissions.allowed, off } }
     }
+    // Its name and prompt as they are now, read as this turn is prepared: the owner's edit in About (or a rename) reaches
+    // the next turn even within an activation made before it. Permissions stay those of the activation's revision.
+    const words = this.wordsNow(definition)
+    // Replies of its own written before the owner's last prompt edit may still be in view: they must not set the style.
+    const promptChanged = Boolean(words.promptChangedAt) && !permissions?.subagent && this.repliedBefore(definition.id, words.promptChangedAt!)
     let system: string | undefined
     try {
-      system = this.host.instructions?.({ name: definition.name, description: definition.description, filesFolder: this.filesFolder(definition.id), ...(lane ? { lane } : {}), ...permissions })
+      system = this.host.instructions?.({ name: words.name, description: words.description, filesFolder: this.filesFolder(definition.id), ...(lane ? { lane } : {}), ...permissions, ...(promptChanged ? { promptChanged: true as const } : {}) })
     } catch {
       system = undefined
     }
     const own = 'instructions' in thread.agent ? thread.agent.instructions : undefined
-    const role = system && definition.role.trim() === definition.description.trim() ? undefined : definition.role.trim()
+    const role = system && words.role.trim() === words.description.trim() ? undefined : words.role.trim()
     const disabled = this.store.disabledPermissions(definition.id).flatMap((off) => grantedPermissions(off.manifest).filter((item) => permissionId(item) === off.id).map((item) => askText(item).title))
     const offNote = disabled.length ? `Your owner has switched off for now: ${disabled.join(', ')}. These are not offered and you must not ask for them. Carry on without them.` : undefined
     const parts = [system?.trim(), role, own?.trim(), offNote].filter((part): part is string => Boolean(part))
     return parts.length ? { instructions: [...new Set(parts)].join('\n\n') } : {}
+  }
+
+  /** The words a turn works under from the published revision now, else from `definition` (the activation's own). */
+  private wordsNow(definition: BotDefinition): Pick<BotDefinition, 'name' | 'description' | 'role' | 'promptChangedAt'> {
+    try {
+      const now = this.published(definition.id)
+      return { name: now.name, description: now.description, role: now.role, ...(now.promptChangedAt ? { promptChangedAt: now.promptChangedAt } : {}) }
+    } catch {
+      return definition
+    }
+  }
+
+  /** Whether the bot's last 50 chat messages hold a reply of its own from before `at`. */
+  private repliedBefore(botId: string, at: string): boolean {
+    try {
+      return this.store.messages(botId, { limit: 50 }).some((row) => row.author === 'bot' && row.at < at)
+    } catch {
+      return false
+    }
   }
 
   /**
@@ -8100,18 +8129,42 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return this.schedulesOf(botId).map((schedule) => ({ scheduleId: schedule.scheduleId, label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}) }))
   }
 
-  /** The bot renames itself or changes its description (`set_profile`), or the owner renames it or changes its look. */
+  /**
+   * The bot renames itself or changes its description (`set_profile`), or the owner renames it or changes its look. A
+   * description the owner wrote in About (`setOwnerPrompt`) is theirs: the bot can't change it.
+   */
   setProfile(botId: string, profile: { name?: string; description?: string; look?: { colour: string; accessory: string; kind?: string; eyes?: string } }): BotDefinition {
     const name = profile.name?.trim()
     if (profile.name !== undefined && (!name || name.length > 60)) throw new BotEngineError('invalid_profile', 'A name is 1 to 60 characters.')
     const description = profile.description?.trim()
     if (profile.description !== undefined && (!description || description.length > 500)) throw new BotEngineError('invalid_profile', 'A description is 1 to 500 characters.')
+    if (description && this.published(botId).promptDefault) throw new BotEngineError('owner_prompt', BOT_OWNER_PROMPT_TEXT)
     return this.publishProfile(botId, (definition) => ({
       ...definition,
       ...(name ? { name } : {}),
       ...(description ? { description } : {}),
       ...(profile.look ? { look: lookFields(profile.look) } : {})
     }))
+  }
+
+  /**
+   * The owner edits the bot's prompt in About (`description`), or resets it (null) to what it was before their first
+   * edit. An edit is the owner's own words, so it replaces the role too (a role that differs is added to the system
+   * text). One revision written whole, then pointed at: a turn that already started keeps the text it was given, and
+   * every turn prepared after this returns reads the new one (`instructionsOf`). Saving the same text changes nothing.
+   */
+  setOwnerPrompt(botId: string, description: string | null): BotDefinition {
+    const text = description?.trim()
+    if (description !== null && (!text || text.length > MAX_BOT_DESCRIPTION_CHARS))
+      throw new BotEngineError('invalid_profile', `A description is 1 to ${MAX_BOT_DESCRIPTION_CHARS} characters.`)
+    const current = this.published(botId)
+    const before = current.promptDefault ?? { description: current.description, role: current.role }
+    const next = text === undefined ? before : { description: text, role: text }
+    if (next.description === current.description && next.role === current.role && (text !== undefined || !current.promptDefault)) return current
+    return this.publishProfile(botId, (definition) => {
+      const { promptDefault: _default, ...rest } = definition
+      return { ...rest, ...next, promptChangedAt: this.store.now(), ...(text === undefined ? {} : { promptDefault: before }) }
+    })
   }
 
   /**

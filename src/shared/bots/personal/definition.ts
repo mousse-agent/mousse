@@ -232,8 +232,15 @@ export interface BotDefinition {
   owner: { kind: 'person'; id: 'self' }
   /** Reserved for bot servers (Phase 3). */
   placement: { kind: 'this_computer' }
-  /** The bot's own working instructions; starts as the description. */
+  /** The bot's own working instructions; starts as the description, and the owner's prompt edit in About sets both. */
   role: string
+  /**
+   * The description and role from before the owner first edited the prompt in About: Reset to default puts them back.
+   * Absent: never edited, or reset since.
+   */
+  promptDefault?: { description: string; role: string }
+  /** When the owner last edited or reset the prompt in About (ISO): replies written before it may follow older words. */
+  promptChangedAt?: string
   main: BotThreadSpec
   /** Context threads it consults (6c-2); at most 8. */
   context: BotThreadSpec[]

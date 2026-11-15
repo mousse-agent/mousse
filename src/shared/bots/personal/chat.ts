@@ -153,6 +153,8 @@ export interface BotSummary {
   id: string
   name: string
   description: string
+  /** The owner edited the description (its prompt) in About: Reset to default can put the earlier one back. */
+  promptEdited?: true
   look: BotLook
   state: BotState
   /** The Recent line: "Working…", "Waiting for internet", "Wants to read files in …", "Paused". */

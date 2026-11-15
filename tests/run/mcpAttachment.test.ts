@@ -398,6 +398,32 @@ describe('Antigravity attachment', () => {
     await antigravity.stop()
   })
 
+  it("a bot's session given other instructions (its owner edited its prompt) is replaced: a new session gets them and the history", async () => {
+    const sent: Sent[] = []
+    const launch = vi.fn(fakeAcp(true, sent))
+    const { antigravity, workspace } = service(true, sent, launch)
+    const chat = { threadId: 't', cwd: workspace, model: 'm1', onText: vi.fn(), mcp: MCP, bot: true as const }
+    await antigravity.chat({ ...chat, prompt: 'first', orchestrationInstructions: 'OLD WORDS' })
+    antigravity.commitConversation('t', 'history-1')
+    // Same instructions: the live session goes on, nothing is sent again.
+    await antigravity.chat({ ...chat, prompt: 'second', history: 'history-1', orchestrationInstructions: 'OLD WORDS' })
+    antigravity.commitConversation('t', 'history-2')
+    expect(launch).toHaveBeenCalledTimes(1)
+    sent.length = 0
+    await antigravity.chat({ ...chat, prompt: 'third', history: 'history-2', orchestrationInstructions: 'NEW WORDS' })
+    expect(launch).toHaveBeenCalledTimes(2)
+    expect(sent.map((frame) => frame.method)).toContain('session/new')
+    expect(sent.some((frame) => frame.method === 'session/resume' || frame.method === 'session/load')).toBe(false)
+    expect(prompts(sent)).toEqual(['<mousse_orchestration_instructions>\nNEW WORDS\n</mousse_orchestration_instructions>\n\nPrevious conversation (context only; do not repeat earlier actions):\nhistory-2\n\nCurrent request:\nthird'])
+    // The new session holds the new words: the next turn goes on in it.
+    antigravity.commitConversation('t', 'history-3')
+    sent.length = 0
+    await antigravity.chat({ ...chat, prompt: 'fourth', history: 'history-3', orchestrationInstructions: 'NEW WORDS' })
+    expect(launch).toHaveBeenCalledTimes(2)
+    expect(prompts(sent)).toEqual(['fourth'])
+    await antigravity.stop()
+  })
+
   it('falls back to the stdio bridge when the agent does not advertise http; the token stays out of argv', async () => {
     const sent: Sent[] = []
     const { antigravity, workspace } = service(false, sent)

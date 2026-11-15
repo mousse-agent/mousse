@@ -11,6 +11,7 @@ import { BotComputerSelect, BotModelRows, BotModelSelect } from './BotRunsOn'
 import { BotFace } from './face/BotFace'
 import { BotDevicesRow } from './BotDevices'
 import { memorySplitText } from './BotMemoryDialog'
+import { BotPrompt } from './BotPrompt'
 
 /** About's Runs on section, which a bot's Pick a model scrolls to. */
 export const RUNS_ON_ID = 'bot-about-runs-on'
@@ -160,8 +161,8 @@ function Memory({ botId, detail }: { botId: string; detail: unknown }) {
 }
 
 /**
- * About this bot (bot-ui §4.8): the whole mouse, the name and the description; what it can use and
- * when it runs, each with Remove; how much it remembers, which opens Memory; what it runs on, by hand or by usage (#673), and
+ * About this bot (bot-ui §4.8): the whole mouse and the name, then its prompt (the description, which the owner edits
+ * here); what it can use and when it runs, each with Remove; how much it remembers, which opens Memory; what it runs on, by hand or by usage (#673), and
  * which of the owner's devices reach it; Pause and Delete.
  */
 export function BotAboutPanel({ bot }: { bot: BotSummary }) {
@@ -176,8 +177,8 @@ export function BotAboutPanel({ bot }: { bot: BotSummary }) {
     <div className="bot-about-head">
       <BotFace look={bot.look} state={botFaceState(bot, happy)} size={88} view="full" />
       <h2>{bot.name}</h2>
-      <p>{bot.description}</p>
     </div>
+    <BotPrompt bot={bot} />
     <h3>CAN USE</h3>
     {detail?.permissions.length
       ? detail.permissions.map((item) => <div className="bot-about-row bot-about-permission" key={item.id}>

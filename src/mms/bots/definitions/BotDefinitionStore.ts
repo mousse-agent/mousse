@@ -63,6 +63,10 @@ export function definitionProblem(definition: BotDefinition): string | undefined
   if (definition.owner?.kind !== 'person' || definition.owner.id !== 'self') return 'Bots for a team are not available yet.'
   if (definition.placement?.kind !== 'this_computer') return 'Bots run on this computer only for now.'
   if (typeof definition.role !== 'string' || definition.role.length > 64 * 1024) return 'The role is invalid.'
+  const before = definition.promptDefault as Partial<{ description: unknown; role: unknown }> | undefined
+  if (before !== undefined && (!before || typeof before !== 'object' || typeof before.description !== 'string' || before.description.length > MAX_BOT_DESCRIPTION_CHARS || typeof before.role !== 'string' || before.role.length > 64 * 1024))
+    return 'The default prompt is invalid.'
+  if (definition.promptChangedAt !== undefined && (typeof definition.promptChangedAt !== 'string' || Number.isNaN(Date.parse(definition.promptChangedAt)))) return 'The prompt change time is invalid.'
   const thread = threadProblem(definition.main)
   if (thread) return thread
   if (!Array.isArray(definition.context)) return 'The context threads are invalid.'

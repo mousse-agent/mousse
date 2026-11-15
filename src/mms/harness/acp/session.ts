@@ -206,6 +206,12 @@ export interface AcpChatInput {
   mcp?: McpAttachment | null
   /** Session instructions: in the session's first prompt, and again on a resumed session they changed for. */
   orchestrationInstructions?: string
+  /**
+   * A bot's turn: its session instructions are its system text (the owner's words, what it may use), so a session given
+   * other ones is not reused, where they would only be a message beside the old ones. A new session gets them and the
+   * history in its first prompt, as Codex starts a new thread.
+   */
+  bot?: true
   onText: (text: string) => void
   drainSteer?: () => string | undefined
   /**
@@ -641,10 +647,15 @@ export class AcpSessions {
     const stored = store.saved(input.threadId)
     let saved = stored && (stored.instanceId ?? this.options.defaultInstanceId) === instanceId ? stored : undefined
     let active = this.sessions.get(input.threadId)
+    const instructionsHash = input.orchestrationInstructions ? createHash('sha256').update(input.orchestrationInstructions).digest('hex').slice(0, 32) : undefined
+    // A bot's session given other instructions is neither reused nor resumed (`AcpChatInput.bot`): a new one is opened.
+    const opened = active ? active.instructionsHash : saved?.instructionsHash
+    const botStale = input.bot === true && instructionsHash !== undefined && opened !== undefined && opened !== instructionsHash
+    if (botStale) saved = undefined
     const mcpToken = input.mcp?.token ?? null
     // A new relay catalogue reopens the session too: an agent reads its tool lists when the session opens.
     const relayKey = input.mcp?.relay ? `${input.mcp.relay.url}|${input.mcp.relay.revision}` : null
-    if (active && (active.connection.signal.aborted || active.generation !== this.options.launchGeneration() || active.cwd !== input.cwd || saved?.historyKey !== historyKey || (active.mcpToken ?? null) !== mcpToken || (active.relayKey ?? null) !== relayKey || (active.instanceId ?? this.options.defaultInstanceId) !== instanceId)) {
+    if (active && (botStale || active.connection.signal.aborted || active.generation !== this.options.launchGeneration() || active.cwd !== input.cwd || saved?.historyKey !== historyKey || (active.mcpToken ?? null) !== mcpToken || (active.relayKey ?? null) !== relayKey || (active.instanceId ?? this.options.defaultInstanceId) !== instanceId)) {
       this.close(active)
       this.sessions.delete(input.threadId)
       active = undefined
@@ -921,7 +932,6 @@ export class AcpSessions {
       // when they changed since (their hash is kept with the session). A slash command goes out
       // without them: the next prompt that is not a command carries them.
       const command = slashCommand(input.prompt, active.commands)
-      const instructionsHash = input.orchestrationInstructions ? createHash('sha256').update(input.orchestrationInstructions).digest('hex').slice(0, 32) : undefined
       const orchestration = !command && input.orchestrationInstructions && (!resumed || active.instructionsHash !== instructionsHash)
         ? `<mousse_orchestration_instructions>\n${input.orchestrationInstructions}\n</mousse_orchestration_instructions>\n\n`
         : ''

@@ -73,7 +73,7 @@ describe('About this bot', () => {
     expect(toggle()).toBeNull()
     expect(fake.details.b1.permissions.some((item) => item.id === 'fp1')).toBe(false)
   })
-  it('shows the whole mouse, the name and the description', async () => {
+  it('shows the whole mouse, the name and the prompt', async () => {
     await show()
     const head = host.querySelector('.bot-about-head')!
     const face = head.querySelector('.bot-face')!
@@ -81,8 +81,8 @@ describe('About this bot', () => {
     expect(face.getAttribute('width')).toBe('88')
     expect(face.getAttribute('data-colour')).toBe('green')
     expect(head.querySelector('h2')?.textContent).toBe('Inbox helper')
-    expect(head.querySelector('p')?.textContent).toBe('Tells me which emails need a reply.')
-    expect([...host.querySelectorAll('h3')].map((element) => element.textContent)).toEqual(['CAN USE', 'RUNS', 'RUNS ON'])
+    expect(host.querySelector('.bot-prompt-body')?.textContent).toBe('Tells me which emails need a reply.')
+    expect([...host.querySelectorAll('h3')].map((element) => element.textContent)).toEqual(['PROMPT', 'CAN USE', 'RUNS', 'RUNS ON'])
   })
 
   it('with an older service (no rows): one Model picker, by usage until the owner picks a model by hand, on this computer (#673)', async () => {
@@ -352,5 +352,89 @@ describe('About this bot', () => {
     expect(nextRunText(new Date(2026, 10, 7, 9, 0).toISOString(), now)).toMatch(/^\d{2}:\d{2}$|^\d{1,2}:\d{2}\s?[AP]M$/i)
     expect(nextRunText(new Date(2026, 10, 9, 9, 0).toISOString(), now)).toMatch(/^Mon /)
     expect(nextRunText('not a date', now)).toBe('')
+  })
+})
+
+describe("the bot's prompt in About", () => {
+  /** About as the chat mounts it: the bot as the store holds it now, so a save shows. */
+  const Host = () => {
+    const current = useBotsStore((s) => s.bots.find((entry) => entry.id === 'b1'))
+    return current ? createElement(BotAboutPanel, { bot: current }) : null
+  }
+  async function mount(current = bot) {
+    fake.bots = [current]
+    fake.details.b1 = { ...fake.details.b1!, summary: current }
+    useBotsStore.setState({ bots: [current] })
+    await act(async () => root.render(createElement(Host)))
+    await act(async () => {})
+  }
+  const field = () => host.querySelector<HTMLTextAreaElement>('textarea[aria-label="Inbox helper\'s prompt"]')
+  const body = () => host.querySelector('.bot-prompt-body')?.textContent
+  const edit = () => click(button("Edit Inbox helper's prompt"))
+  const type = async (value: string) => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!
+    await act(async () => {
+      setter.call(field(), value)
+      field()!.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+  }
+  const updates = () => vi.mocked(fake.client.update).mock.calls
+
+  it('keeps its line breaks, and Edit then Save sends the new words and shows them', async () => {
+    await mount({ ...bot, description: 'Check my mail.\n\nKeep it short.' })
+    expect(body()).toBe('Check my mail.\n\nKeep it short.')
+    await edit()
+    expect(field()!.value).toBe('Check my mail.\n\nKeep it short.')
+    // Nothing changed yet: nothing to save.
+    expect(button('Save')!.disabled).toBe(true)
+    await type('Answer in one line.')
+    await click(button('Save'))
+    expect(updates()).toEqual([['b1', { description: 'Answer in one line.' }]])
+    expect(field()).toBeNull()
+    expect(body()).toBe('Answer in one line.')
+  })
+
+  it('Cancel and Escape leave the words as they were, and save nothing', async () => {
+    await mount()
+    await edit()
+    await type('Something else.')
+    await click(button('Cancel'))
+    expect(field()).toBeNull()
+    expect(body()).toBe('Tells me which emails need a reply.')
+    await edit()
+    expect(field()!.value).toBe('Tells me which emails need a reply.')
+    await type('Something else.')
+    await act(async () => { field()!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
+    expect(field()).toBeNull()
+    expect(body()).toBe('Tells me which emails need a reply.')
+    expect(updates()).toEqual([])
+  })
+
+  it('offers Reset to default once the owner edited it, and it puts the earlier words back', async () => {
+    await mount()
+    await edit()
+    expect(button('Reset to default')!.disabled).toBe(true)
+    await click(button('Cancel'))
+
+    await mount({ ...bot, description: 'My own words.', promptEdited: true })
+    expect(host.querySelector('.bot-prompt-mark')?.textContent).toBe('Edited')
+    vi.mocked(fake.client.update).mockImplementationOnce(async () => ({ ...bot }))
+    await edit()
+    await click(button('Reset to default'))
+    expect(updates()).toEqual([['b1', { description: null }]])
+    expect(field()).toBeNull()
+    expect(body()).toBe('Tells me which emails need a reply.')
+    expect(host.querySelector('.bot-prompt-mark')).toBeNull()
+  })
+
+  it('keeps the editor open with why when a save fails', async () => {
+    await mount()
+    vi.mocked(fake.client.update).mockRejectedValueOnce(Object.assign(new Error('Say what the bot should do in 1 to 500 characters'), { code: 'invalid_params' }))
+    await edit()
+    await type('New words.')
+    await click(button('Save'))
+    expect(host.querySelector('.bot-prompt-error')?.textContent).toContain('1 to 500 characters')
+    expect(field()!.value).toBe('New words.')
+    expect(body()).toBeUndefined()
   })
 })

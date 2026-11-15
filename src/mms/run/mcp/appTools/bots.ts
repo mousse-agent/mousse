@@ -727,11 +727,17 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         if (name === undefined && description === undefined) return error('set_profile needs a name or a description.')
         if (name !== undefined && (!name || name.length > MAX_BOT_NAME_CHARS)) return error(`A name is 1 to ${MAX_BOT_NAME_CHARS} characters.`)
         if (description !== undefined && (!description || description.length > MAX_BOT_DESCRIPTION_CHARS)) return error(`A description is 1 to ${MAX_BOT_DESCRIPTION_CHARS} characters.`)
-        const profile = { ...(name !== undefined ? { name } : {}), ...(description !== undefined ? { description } : {}) }
+        // The name first and on its own: a description the owner wrote in About is refused, and the name still changes.
+        let renamed = false
         try {
-          call.deps.host.setProfile(call.botId, profile)
+          if (name !== undefined) {
+            call.deps.host.setProfile(call.botId, { name })
+            renamed = true
+          }
+          if (description !== undefined) call.deps.host.setProfile(call.botId, { description })
         } catch (failure) {
-          return error(failure instanceof Error ? failure.message : String(failure))
+          const message = failure instanceof Error ? failure.message : String(failure)
+          return error(renamed ? `Your name is now ${name}. ${message}` : message)
         }
         const result = { ok: true as const }
         call.deps.activity?.onAppResult(call.activity, 'set_profile', result)

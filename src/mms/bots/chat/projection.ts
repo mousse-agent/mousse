@@ -529,6 +529,7 @@ export class BotChatProjection {
       id: definition.id,
       name: definition.name,
       description: definition.description,
+      ...(definition.promptDefault ? { promptEdited: true as const } : {}),
       look: normalizeBotLook(definition.look),
       state,
       stateText,
