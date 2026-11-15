@@ -760,6 +760,18 @@ const ADMITTED_TURN_FAILURES = new WeakMap<object, { workflowRun?: WorkflowChatR
 
 /** Agent messages in a row, without a person in between, that a message may be the end of; the next one is refused. */
 export const AGENT_MESSAGE_MAX_HOPS = 3
+
+/**
+ * Who sent an agent's message, as the caps and the repeat check count senders: its thread here, or for an agent on
+ * another computer that computer and its thread there (`AgentActor.remote`, `AgentOrigin.from`), so one computer and
+ * two computers follow one rule.
+ */
+function agentSenderKey(agent: AgentActor | AgentOrigin): string {
+  if ('remote' in agent && agent.remote) return `${agent.remote.node}:${agent.threadId}`
+  if ('from' in agent && agent.from) return `${agent.from.node}:${agent.from.thread}`
+  return agent.threadId ?? ''
+}
+
 /**
  * Why one more agent message from `senderThreadId` does not fit in the queue `items` (SPEC §15.1): its sender already has
  * `AGENT_QUEUE_MAX_PER_SENDER` waiting there, or all agents together `AGENT_QUEUE_MAX_PER_THREAD`. `replacing` is an item
@@ -767,7 +779,8 @@ export const AGENT_MESSAGE_MAX_HOPS = 3
  */
 function agentQueueRefusal(threadId: string, items: QueuedMessage[], senderThreadId: string, replacing?: QueuedMessage): DomainRpcError | undefined {
   const waiting = listPendingQueue(items).filter((item) => item.origin?.kind === 'agent' && item.id !== replacing?.id)
-  const fromSender = waiting.filter((item) => item.origin?.kind === 'agent' && item.origin.threadId === senderThreadId).length
+  // `senderThreadId` is the sender's key (`agentSenderKey`).
+  const fromSender = waiting.filter((item) => item.origin?.kind === 'agent' && agentSenderKey(item.origin) === senderThreadId).length
   if (fromSender >= AGENT_QUEUE_MAX_PER_SENDER)
     return new DomainRpcError('agent_queue_full_per_sender', `Thread ${threadId} already has ${AGENT_QUEUE_MAX_PER_SENDER} messages from thread ${senderThreadId} waiting, the most one sender may have there; try again after they run.`)
   if (waiting.length >= AGENT_QUEUE_MAX_PER_THREAD)
@@ -786,16 +799,20 @@ function agentRepeatKey(threadId: string, senderThreadId: string, content: strin
  */
 type AgentSender = AgentActor & Pick<AgentOrigin, 'body' | 'title'>
 
-/** The origin an agent's message is stored with: who sent it, how many agent hops led to it, and where its own words are. */
-function agentOriginOf(agent: Pick<AgentOrigin, 'threadId' | 'runId' | 'hops' | 'body' | 'title'>): AgentOrigin {
-  return {
-    kind: 'agent',
-    threadId: agent.threadId,
-    runId: agent.runId,
+/**
+ * The origin an agent's message is stored with: who sent it, how many agent hops led to it, and where its own words
+ * are. A sender on another computer is stored as `from` (its computer, its ids there and its title), never in
+ * `threadId`: a foreign id there would be read as, and rewritten to, a thread of this computer that does not exist.
+ */
+function agentOriginOf(agent: AgentSender | AgentOrigin): AgentOrigin {
+  const extra = {
     ...(agent.hops !== undefined ? { hops: agent.hops } : {}),
-    ...(agent.body ? { body: { head: agent.body.head, tail: agent.body.tail } } : {}),
-    ...(agent.title ? { title: agent.title } : {})
+    ...(agent.body ? { body: { head: agent.body.head, tail: agent.body.tail } } : {})
   }
+  if ('remote' in agent && agent.remote)
+    return { kind: 'agent', from: { node: agent.remote.node, thread: agent.threadId, run: agent.runId, title: agent.remote.title }, ...extra }
+  if ('from' in agent && agent.from) return { kind: 'agent', from: { ...agent.from }, ...extra }
+  return { kind: 'agent', threadId: agent.threadId ?? '', runId: agent.runId ?? '', ...extra, ...(agent.title ? { title: agent.title } : {}) }
 }
 
 /** The longest sender title an agent's message keeps (`AgentOrigin.title`). */
@@ -3611,8 +3628,9 @@ export class OrchestratorService extends EventEmitter {
       const origin = actor ? agentOriginOf(actor) : undefined
       // A person on another computer carries that computer's limit with the text, wherever it ends up.
       const limit = actor ? ceiling ?? 'ask' : deviceLimit
-      this.enqueueControlEffect('turn.steer', target, runId, { runId, threadId: target, text, ...(origin ? { origin, permissionMode: limit } : deviceLimit ? { deviceLimit } : {}), ...(sentFrom && !origin ? { sentFrom } : {}) }, () => {
-        if (!this.steerThread(target, text, undefined, undefined, origin, limit, undefined, origin ? undefined : sentFrom, { durable: !origin })) {
+      // The computer it came from goes with it too (a person's, or an agent's there), so blocking that computer removes it.
+      this.enqueueControlEffect('turn.steer', target, runId, { runId, threadId: target, text, ...(origin ? { origin, permissionMode: limit } : deviceLimit ? { deviceLimit } : {}), ...(sentFrom ? { sentFrom } : {}) }, () => {
+        if (!this.steerThread(target, text, undefined, undefined, origin, limit, undefined, sentFrom, { durable: !origin })) {
           console.warn('run engine steer accepted but the legacy turn did not take it', { runId })
         }
       })
@@ -4125,12 +4143,12 @@ export class OrchestratorService extends EventEmitter {
   private async sendToThreadAsAgent(
     threadId: string,
     input: { content: string; mode: 'agent' | 'plan' },
-    options: { clientRequestId: string; actor: AgentActor; bot?: { botId: string; name: string } }
+    options: { clientRequestId: string; actor: AgentActor; bot?: { botId: string; name: string }; forceQueue?: boolean; refuseWhilePaused?: boolean }
   ): Promise<AgentSendResult> {
     const engine = this.requireRunEngine()
     // A bot's thread sends only as the owner's bot, with "use your threads" held by the turn that sends (or, for a thread
     // it just started, by the creation that carries it, whose mode was already held to the turn's device).
-    const turnBot = options.bot ? undefined : this.botSenderOf(options.actor, 'thread_send')
+    const turnBot = options.bot || options.actor.remote ? undefined : this.botSenderOf(options.actor, 'thread_send')
     const bot = options.bot ?? turnBot
     // A turn another device's message started runs no wider than that device may: a message into a thread that runs
     // wider is refused, so a phone held to Ask never gets a Full access turn through its bot.
@@ -4144,7 +4162,7 @@ export class OrchestratorService extends EventEmitter {
     const mode: 'agent' | 'plan' = this.lastChatModeOf(threadId) === 'plan' ? 'plan' : input.mode
     // The same text from the same thread again within the window is refused as a repeat, decided at admission (under the
     // thread's lock, so two at once cannot both pass) and only for a new request: a retry with the same key replays.
-    const repeatKey = agentRepeatKey(threadId, options.actor.threadId, input.content)
+    const repeatKey = agentRepeatKey(threadId, agentSenderKey(options.actor), input.content)
     const claim = { at: 0 }
     const response = await this.sendGuardedAgainstRepeat(repeatKey, claim, () => this.send(
       { content: letter ? letter.content : botMessageText(bot!.name, input.content), mode },
@@ -4158,10 +4176,14 @@ export class OrchestratorService extends EventEmitter {
         agent: letter ? letter.sender : sender,
         // An agent's message runs no wider than the agent's own run. The owner's bot's runs in the thread's own mode, as
         // the owner's own message would: the owner allowed it to message their threads.
-        ...(bot ? {} : { permissionMode: this.runPermissionMode(sender.runId) }),
+        ...(bot ? {} : { permissionMode: this.senderMode(sender) }),
         // Neither ever answers or skips a question or an approval waiting in the thread.
         preemptQuestions: false,
         refuseWhileAsking: true,
+        // An agent on another computer: the thread and the run say which, so blocking that computer takes its work away.
+        ...(sender.remote ? { sentFrom: { node: sender.remote.node } } : {}),
+        ...(options.forceQueue ? { forceQueue: true } : {}),
+        ...(options.refuseWhilePaused ? { refuseWhilePaused: true } : {}),
         onAdmit: () => this.claimAgentMessage(repeatKey, claim)
       }
     ))
@@ -4222,10 +4244,17 @@ export class OrchestratorService extends EventEmitter {
    * answering each other stops by itself and needs a person to go on.
    */
   private withAgentHops(actor: AgentActor): AgentActor {
-    const hops = (this.requireRunEngine().getRun(actor.runId)?.outcome?.agentHops ?? 0) + 1
+    // A sender on another computer has no run here: its count was set by this computer when the call came in
+    // (`bridge/routed/remoteAgent.ts`), the larger of what it carried and this computer's own count.
+    const hops = actor.remote ? actor.hops ?? 1 : (this.requireRunEngine().getRun(actor.runId)?.outcome?.agentHops ?? 0) + 1
     if (hops > AGENT_MESSAGE_MAX_HOPS)
       throw new DomainRpcError('agent_hops_exceeded', `This message would be agent message number ${hops} in a row without a person in between; the limit is ${AGENT_MESSAGE_MAX_HOPS}. Wait for a person to reply before going on.`)
     return { ...actor, hops }
+  }
+
+  /** The most an agent's message may do: its own run's mode here, or for a sender on another computer the mode it was held to. */
+  private senderMode(actor: AgentActor): PermissionMode {
+    return actor.remote ? actor.remote.mode : this.runPermissionMode(actor.runId)
   }
 
   /**
@@ -4234,9 +4263,10 @@ export class OrchestratorService extends EventEmitter {
    * origin the message is stored with.
    */
   private agentLetter(sender: AgentActor, content: string, labelled = true): { content: string; sender: AgentSender } {
-    const name = this.titleOf(sender.threadId)
+    // A sender on another computer has no thread here: its title came with the call, and the label names its computer.
+    const name = sender.remote ? sender.remote.title : this.titleOf(sender.threadId)
     const title = name?.trim().slice(0, AGENT_TITLE_MAX_CHARS)
-    const envelope = labelled ? agentMessage(sender.threadId, name, content) : { text: content, head: 0, tail: 0 }
+    const envelope = labelled ? agentMessage(sender.threadId, name, content, sender.remote ? { computer: sender.remote.computer } : undefined) : { text: content, head: 0, tail: 0 }
     return { content: envelope.text, sender: { ...sender, body: { head: envelope.head, tail: envelope.tail }, ...(title ? { title } : {}) } }
   }
 
@@ -4659,7 +4689,7 @@ export class OrchestratorService extends EventEmitter {
   private async steerRunAsAgent(threadId: string, runId: string, text: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult> {
     const engine = this.requireRunEngine()
     // A bot never steers a turn: it messages a thread, which queues behind the running turn.
-    if (this.botThreads?.roleOf(options.actor.threadId)) return { status: 'rejected', reason: 'bot_thread' }
+    if (!options.actor.remote && this.botThreads?.roleOf(options.actor.threadId)) return { status: 'rejected', reason: 'bot_thread' }
     let sender: AgentActor
     try {
       sender = this.withAgentHops(options.actor)
@@ -4669,11 +4699,67 @@ export class OrchestratorService extends EventEmitter {
     // The comparison with the run's own mode is made by the engine, inside the transaction that accepts the
     // steer, against the binding it reads there: a run that has not bound its turn yet is refused, and the
     // sender's mode travels with the steer wherever it ends up (SPEC §15.1).
-    const callerMode = this.runPermissionMode(sender.runId)
+    const callerMode = this.senderMode(sender)
     const letter = this.agentLetter(sender, text)
-    const result = await this.steerRun(runId, letter.content, options.clientRequestId, threadId, letter.sender, callerMode)
+    const result = await this.steerRun(runId, letter.content, options.clientRequestId, threadId, letter.sender, callerMode, undefined, sender.remote ? { node: sender.remote.node } : undefined)
     if (result.status === 'rejected' && result.reason === 'ceiling_exceeded') return { status: 'ceiling_exceeded', callerMode, targetMode: this.runPermissionMode(runId) }
     return this.agentRunCommandResult(engine, threadId, runId, result)
+  }
+
+  /**
+   * A routed `orchestrator.send` or `queue.enqueue` another computer marked as an agent's (`bridge/routed/remoteAgent.ts`):
+   * the path `thread_send` takes on this computer, with the sender carried in the actor (`AgentActor.remote`) instead of
+   * looked up here. Its run's source is `mcp`, its text is labelled by this computer and never read for `/skill` or
+   * workflow commands, it runs no wider than the actor's mode (and the thread's own), and it is refused while a question or
+   * approval waits. The run and a queued item record the calling computer (`sentFrom`).
+   */
+  async sendForRemoteAgent(
+    threadId: string,
+    input: { content: string; mode: 'agent' | 'plan' },
+    options: { clientRequestId: string; actor: AgentActor; forceQueue?: boolean; refuseWhilePaused?: boolean }
+  ): Promise<AgentSendResult> {
+    if (!options.actor.remote) throw new Error('sendForRemoteAgent needs an agent on another computer.')
+    this.assertNotBotThread(threadId)
+    return this.sendToThreadAsAgent(threadId, input, options)
+  }
+
+  /** A routed `orchestrator.steer` marked as an agent's: `thread_steer`'s path, refused for a run looser than the sender. */
+  async steerForRemoteAgent(threadId: string, runId: string, text: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult> {
+    if (!options.actor.remote) throw new Error('steerForRemoteAgent needs an agent on another computer.')
+    this.assertNotBotThread(threadId)
+    return this.steerRunAsAgent(threadId, runId, text, options)
+  }
+
+  /**
+   * A routed `orchestrator.abort` marked as an agent's: it stops only a run an agent of the calling computer started (an
+   * agent's run that records that computer), and leaves anything else, such as the turn of a person who took the thread
+   * over, as it is. Leaving it is no failure: the answer says what was stopped.
+   */
+  async stopForRemoteAgent(
+    threadId: string,
+    runId: string | undefined,
+    options: { clientRequestId: string; actor: AgentActor }
+  ): Promise<{ stopped: boolean; runId?: string; left?: 'run_not_active' | 'not_started_by_this_computer' }> {
+    const remote = options.actor.remote
+    if (!remote) throw new Error('stopForRemoteAgent needs an agent on another computer.')
+    const engine = this.requireRunEngine()
+    const run = runId ? engine.getRun(runId) : engine.getActiveRun(threadId) ?? engine.store.getPausedRun(threadId)
+    if (!run || run.threadId !== threadId || TERMINAL_RUN_STATUSES.has(run.status)) return { stopped: false, left: 'run_not_active' }
+    if (!this.runStartedByAgentOf(run, remote.node)) return { stopped: false, runId: run.runId, left: 'not_started_by_this_computer' }
+    const result = await this.stopThread(threadId, 'agent', { runId: run.runId, clientRequestId: options.clientRequestId, actor: options.actor })
+    return { stopped: result.status === 'stopped', runId: run.runId }
+  }
+
+  /** Whether an agent's message from computer `node` started the run: the run is an agent's and records that computer. */
+  private runStartedByAgentOf(run: RunRecord, node: string): boolean {
+    if (run.outcome?.sentByAgent !== true) return false
+    try {
+      return Boolean(this.requireRunEngine().store.db
+        .statement("SELECT 1 AS found FROM thread_events WHERE thread_id = ? AND run_id = ? AND type = 'run.sent_from' AND json_extract(payload, '$.node') = ? LIMIT 1")
+        .get(run.threadId, run.runId, node))
+    } catch {
+      return false
+    }
   }
 
   private agentRunCommandResult(engine: RunEngine, threadId: string, runId: string, result: CommandResult | StopThreadOutcome): AgentRunCommandResult {
@@ -5708,6 +5794,11 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /** The mode a thread was set to, else the profile default. */
+  /** The thread's own mode: the one it stores, else the profile's default. */
+  threadPermissionMode(threadId: string): PermissionMode {
+    return this.storedPermissionMode(threadId)
+  }
+
   private storedPermissionMode(threadId: string): PermissionMode {
     return normalizePermissionMode(this.threadStore?.getThread(threadId)?.permissionMode ?? this.settingsStore.get().permissions.defaultMode)
   }
@@ -9316,7 +9407,7 @@ export class OrchestratorService extends EventEmitter {
     const authoredBy = (item: QueuedMessage): boolean => item.origin?.kind === 'agent' && item.origin.threadId === actor.threadId
     // One more message of this agent in the queue: refused past its sender's cap or the cap of all agents together.
     const assertRoom = (items: QueuedMessage[], replacing?: QueuedMessage): void => {
-      const full = agentQueueRefusal(threadId, items, actor.threadId, replacing)
+      const full = agentQueueRefusal(threadId, items, agentSenderKey(actor), replacing)
       if (full) throw full
     }
     const found = (items: QueuedMessage[], itemId: string): QueuedMessage => {
@@ -11085,7 +11176,7 @@ export class OrchestratorService extends EventEmitter {
           // A thread holds only a few messages from agents at a time, and a few from each sender: a fan-out cannot pile up
           // behind it, and one chatty sender cannot shut the others out.
           if (opts?.agent) {
-            const full = agentQueueRefusal(threadId, this.queueForAgentCaps(threadId), opts.agent.threadId)
+            const full = agentQueueRefusal(threadId, this.queueForAgentCaps(threadId), agentSenderKey(opts.agent))
             if (full) throw full
           }
           this.assertSendableSelection(session, input, opts?.modelOverride, opts?.origin === 'schedule')
@@ -11221,6 +11312,8 @@ export class OrchestratorService extends EventEmitter {
         runId: run?.runId,
         permissionMode: opts?.permissionMode,
         origin: opts?.queueOrigin ?? (opts?.agent ? agentOriginOf(opts.agent) : undefined),
+        // A message from another computer that waits is still that computer's: blocking it removes the item.
+        ...(opts?.sentFrom ? { sentFrom: opts.sentFrom } : {}),
         ...(externalLease ? { waitsForLease: true } : {})
       })
       // Another process holds the thread: its turn drains the queue when it ends, but other work it holds the lease

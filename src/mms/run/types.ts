@@ -1,5 +1,6 @@
 import type { ExecutionBinding } from '../../shared/harness/types'
 import type { AgentAccessLevel } from '../../shared/settings'
+import type { PermissionMode } from '../../shared/permissionMode'
 export type RunStatus =
   | 'queued'
   | 'starting'
@@ -417,6 +418,14 @@ export interface AgentActor {
   toolCallId: string
   /** How many agent messages in a row led to this one (the sender's own count plus one); set by the thread owner. */
   hops?: number
+  /**
+   * Set when the agent is on another of the user's computers (a routed call marked as an agent's): `threadId` and `runId`
+   * are then its ids on that computer, and nothing about the sender is looked up here. `node` is the calling computer
+   * as the authenticated link names it, `computer` its name from this computer's pairing record, `title` the sender's
+   * cleaned title, and `mode` the most the sender may do here: the narrowest of the mode it carried and the limit this
+   * computer set for that device. `hops` is already the owner's own count (the larger of the carried count and its own).
+   */
+  remote?: { node: string; computer: string; title: string; mode: PermissionMode }
 }
 
 /** `pr_update` is no longer written (see `isRetiredInboxRow`). */

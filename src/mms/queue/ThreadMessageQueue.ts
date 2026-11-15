@@ -110,7 +110,7 @@ export function queueRevision(items: QueuedMessage[]): string {
       item.state,
       item.mode ?? null,
       item.permissionMode ?? null,
-      item.origin?.kind === 'agent' ? `agent:${item.origin.threadId}` : item.origin?.kind ?? null,
+      item.origin?.kind === 'agent' ? `agent:${item.origin.from ? `${item.origin.from.node}:${item.origin.from.thread}` : item.origin.threadId}` : item.origin?.kind ?? null,
       createHash('sha256').update(item.content).digest('hex')
     ])
   return createHash('sha256').update(JSON.stringify(rows)).digest('hex').slice(0, 16)
@@ -163,15 +163,24 @@ function normalizeOrigin(raw: unknown): QueuedMessage['origin'] {
   const kind = (raw as { kind?: unknown }).kind
   if (kind === 'agent') {
     const agent = raw as Partial<AgentOrigin>
-    if (typeof agent.threadId !== 'string' || !agent.threadId || typeof agent.runId !== 'string' || !agent.runId) return undefined
+    const hops = typeof agent.hops === 'number' && Number.isSafeInteger(agent.hops) && agent.hops >= 0 ? { hops: agent.hops } : {}
     const body = agent.body
     const validBody = typeof body === 'object' && body !== null && [body.head, body.tail].every((length) => Number.isSafeInteger(length) && length >= 0)
+    const words = validBody ? { body: { head: body.head, tail: body.tail } } : {}
+    // A sender on another computer: its computer, its ids there and its title, kept as they were written.
+    const from = agent.from as Partial<NonNullable<AgentOrigin['from']>> | undefined
+    if (from && typeof from === 'object') {
+      const fields = [from.node, from.thread, from.run] as unknown[]
+      if (!fields.every((value) => typeof value === 'string' && value) || typeof from.title !== 'string') return undefined
+      return { kind: 'agent', from: { node: from.node!, thread: from.thread!, run: from.run!, title: from.title }, ...hops, ...words }
+    }
+    if (typeof agent.threadId !== 'string' || !agent.threadId || typeof agent.runId !== 'string' || !agent.runId) return undefined
     return {
       kind: 'agent',
       threadId: agent.threadId,
       runId: agent.runId,
-      ...(typeof agent.hops === 'number' && Number.isSafeInteger(agent.hops) && agent.hops >= 0 ? { hops: agent.hops } : {}),
-      ...(validBody ? { body: { head: body.head, tail: body.tail } } : {}),
+      ...hops,
+      ...words,
       ...(typeof agent.title === 'string' && agent.title ? { title: agent.title } : {})
     }
   }

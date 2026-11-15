@@ -19,6 +19,8 @@ export interface BridgeAuditEntry {
   /** `ok`, `uncertain`, or the reason the call was refused here (`thread_not_found`, ...). */
   outcome: string
   kind: BridgeAuditKind
+  /** `agent`: the call was marked as an agent's on the device (`ROUTED_AGENT_KEY`); absent for a person's. */
+  actor?: 'agent'
 }
 
 /** What a computer read from this one in one hour: how many calls and how many bytes of results. */
@@ -63,7 +65,7 @@ export class SqliteBridgeAudit {
         this.db.charge(1, 192)
         this.db.database
           .prepare(
-            'INSERT INTO bridge_audit(at,node,kind,method,thread,project,outcome) VALUES(?,?,?,?,?,?,?)'
+            'INSERT INTO bridge_audit(at,node,kind,method,thread,project,outcome,actor) VALUES(?,?,?,?,?,?,?,?)'
           )
           .run(
             this.clock.now(),
@@ -72,7 +74,8 @@ export class SqliteBridgeAudit {
             entry.method.slice(0, 96),
             entry.thread?.slice(0, 256) ?? null,
             entry.project?.slice(0, 256) ?? null,
-            entry.outcome.slice(0, 96)
+            entry.outcome.slice(0, 96),
+            entry.actor === 'agent' ? 'agent' : null
           )
         if (++this.inserts % PRUNE_EVERY === 0) this.prune(entry.node)
       })
@@ -92,6 +95,25 @@ export class SqliteBridgeAudit {
     } catch {
       // Unknown means a notice that may repeat, never one that is lost.
       return false
+    }
+  }
+
+  /**
+   * How many calls marked as an agent's went through for `node` since `since` (`outcome` ok), of the given methods and,
+   * when named, on one thread: the owner's budget and rate limit for a device's agents read their count here, so a
+   * restart does not reset them. Unknown (a failed read) counts as over any limit.
+   */
+  countAgentCalls(node: NodeId, methods: readonly string[], since: number, thread?: string): number {
+    try {
+      const marks = methods.map(() => '?').join(',')
+      const row = this.db.database
+        .prepare(
+          `SELECT COUNT(*) AS n FROM bridge_audit WHERE node=? AND actor='agent' AND kind='change' AND outcome='ok' AND at>=? AND method IN (${marks})${thread === undefined ? '' : ' AND thread=?'}`
+        )
+        .get(node, since, ...methods, ...(thread === undefined ? [] : [thread])) as { n: number } | undefined
+      return Number(row?.n ?? 0)
+    } catch {
+      return Number.MAX_SAFE_INTEGER
     }
   }
 
@@ -115,7 +137,7 @@ export class SqliteBridgeAudit {
   since(node: NodeId, method: string, since: number, limit = 50): BridgeAuditEntry[] {
     const rows = this.db.database
       .prepare(
-        'SELECT at,node,kind,method,thread,project,outcome FROM bridge_audit WHERE node=? AND method=? AND at>=? ORDER BY id DESC LIMIT ?'
+        'SELECT at,node,kind,method,thread,project,outcome,actor FROM bridge_audit WHERE node=? AND method=? AND at>=? ORDER BY id DESC LIMIT ?'
       )
       .all(node, method, since, limit) as Array<Record<string, unknown>>
     return rows.map((row) => ({
@@ -125,12 +147,13 @@ export class SqliteBridgeAudit {
       method: String(row.method),
       ...(row.thread ? { thread: String(row.thread) } : {}),
       ...(row.project ? { project: String(row.project) } : {}),
-      outcome: String(row.outcome)
+      outcome: String(row.outcome),
+      ...(row.actor === 'agent' ? { actor: 'agent' as const } : {})
     }))
   }
 
   recent(limit = 100, node?: NodeId): BridgeAuditEntry[] {
-    const columns = 'at,node,kind,method,thread,project,outcome'
+    const columns = 'at,node,kind,method,thread,project,outcome,actor'
     const rows = (
       node
         ? this.db.database
@@ -147,7 +170,8 @@ export class SqliteBridgeAudit {
       method: String(row.method),
       ...(row.thread === null ? {} : { thread: String(row.thread) }),
       ...(row.project === null ? {} : { project: String(row.project) }),
-      outcome: String(row.outcome)
+      outcome: String(row.outcome),
+      ...(row.actor === 'agent' ? { actor: 'agent' as const } : {})
     }))
   }
 

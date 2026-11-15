@@ -27,7 +27,7 @@ import type { BridgeOrdinaryMethod } from './capabilities'
 import { COMPOSER_COMMANDS } from '../../../shared/composerCommands'
 import { withHiddenBots } from './botReach'
 import { resolveThreadProjectPath } from '../../data/resolveActiveProjectPath'
-import type { ChatMessage, OrchestratorSendRequest, QueuedMessage, Thread } from '../../../shared/types'
+import type { ChatMessage, OrchestratorSendRequest, QueuedMessage, Thread, ThreadStartedFrom } from '../../../shared/types'
 import { defaultIntegrationActor } from '../../../shared/integrations/actor'
 import { resolveEffectiveSkills } from '../../integrations/catalog/EffectiveIntegrationResolver'
 
@@ -170,7 +170,23 @@ export class MmsRemoteBackend implements RemoteBackendPort {
       ...(value.names ? { names: { ...value.names, threads: Object.fromEntries(Object.entries(value.names.threads ?? {}).filter(([id]) => !bots.has(id))) } } : {})
     }
   }
+  /**
+   * `threads.create` for an agent on another of the user's computers (a routed call marked as an agent's, `remoteAgent.ts`):
+   * the thread records the agent that started it and is held to `permissionMode` from the start. Only the owner's routed
+   * API calls it; a phone's call never carries the mark (`dto.ts` takes exact keys, and `executeFor` refuses it).
+   */
+  async createThreadForAgent(
+    params: Record<string, unknown>,
+    caller: { node: NodeId },
+    started: { agent: NonNullable<ThreadStartedFrom['agent']>; permissionMode: PermissionMode }
+  ): Promise<unknown> {
+    if (typeof params.projectId === 'string' && !this.services.projects.listProjects().some((project) => project.id === params.projectId))
+      throw new NetError('bad_request', 'Project is outside this profile inventory.')
+    return mmsJson(await this.createThread(params, caller, started))
+  }
   private async executeFor(method: BridgeOrdinaryMethod, params: Record<string, unknown>, caller?: { node: NodeId }): Promise<unknown> {
+    // The mark of an agent's call is set only by another computer's daemon, through the routed API, never by a phone.
+    if (Object.hasOwn(params, 'agent')) throw new NetError('bad_request', `${method} does not take agent.`)
     if (typeof params.threadId === 'string' && !this.remoteThread(params.threadId))
       throw new NetError('stream_unknown', 'Thread is outside this profile inventory.')
     if (
@@ -221,14 +237,22 @@ export class MmsRemoteBackend implements RemoteBackendPort {
    * Creates the thread as the local protocol does, then records the device that asked (and its own
    * project id) on it, so every device that lists this machine's threads can show where it began.
    */
-  private async createThread(params: Record<string, unknown>, caller?: { node: NodeId }): Promise<unknown> {
+  private async createThread(
+    params: Record<string, unknown>,
+    caller?: { node: NodeId },
+    started?: { agent: NonNullable<ThreadStartedFrom['agent']>; permissionMode: PermissionMode }
+  ): Promise<unknown> {
     const { startedFromProjectId, ...create } = params
     const result = (await dispatchMethod({ mms: this.services, globalSequence: this.revision }, 'threads.create', create)) as
       { thread: { id: string } } & Record<string, unknown>
     if (!caller) return result
+    // A thread an agent of the device started holds who started it and its mode from this same write on.
     const thread = this.services.threads.updateThreadMeta(
       result.thread.id,
-      { startedFrom: { node: caller.node, ...(typeof startedFromProjectId === 'string' ? { projectId: startedFromProjectId } : {}) } },
+      {
+        startedFrom: { node: caller.node, ...(typeof startedFromProjectId === 'string' ? { projectId: startedFromProjectId } : {}), ...(started ? { agent: started.agent } : {}) },
+        ...(started ? { permissionMode: started.permissionMode } : {})
+      },
       { touch: false }
     )
     this.services.events.broadcast('threads:updated', { threads: this.services.threads.listAllThreads() })

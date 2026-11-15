@@ -23,11 +23,24 @@ export interface NodePolicy {
    * none of them: they are in none of its lists and every bot call from it is refused.
    */
   bots: boolean
+  /**
+   * Which threads here the device's agents may change with calls marked as an agent's (`ROUTED_AGENT_KEY`): `none`,
+   * the threads its agents started here (`launched`, the default), or `all`. Decided at each call from this computer's
+   * own record of who started a thread (`startedFrom`), so a change applies at once. A policy for honest callers, not a
+   * boundary: a person's calls from the device are not marked and are held to the other fields only.
+   */
+  agentReach: AgentReach
   createdAt: number
 }
 export type NodePolicyChange = Partial<
-  Pick<NodePolicy, 'blocked' | 'maxPermissionMode' | 'terminal' | 'editor' | 'bots'>
+  Pick<NodePolicy, 'blocked' | 'maxPermissionMode' | 'terminal' | 'editor' | 'bots' | 'agentReach'>
 >
+
+export type AgentReach = 'none' | 'launched' | 'all'
+export const AGENT_REACHES: readonly AgentReach[] = ['none', 'launched', 'all']
+export const isAgentReach = (value: unknown): value is AgentReach => (AGENT_REACHES as readonly unknown[]).includes(value)
+/** A device's agents change only the threads they started here, until a person on this computer allows more. */
+export const DEFAULT_AGENT_REACH: AgentReach = 'launched'
 
 /** A new computer starts at Auto-accept edits; the owner raises it to Full access per device. */
 export const DEFAULT_MAX_PERMISSION_MODE: PermissionMode = 'accept_edits'
@@ -51,10 +64,11 @@ interface Row {
   terminal: number
   editor: number
   bots: number
+  agent_reach: string
   created_at: number
 }
 
-const COLUMNS = 'node,blocked,max_permission_mode,terminal,editor,bots,created_at'
+const COLUMNS = 'node,blocked,max_permission_mode,terminal,editor,bots,agent_reach,created_at'
 
 /** `net_node_policy`, in the Net database. A node without a row has the defaults. */
 export class SqliteNodePolicy {
@@ -99,7 +113,8 @@ export class SqliteNodePolicy {
       (change.terminal !== undefined && typeof change.terminal !== 'boolean') ||
       (change.editor !== undefined && typeof change.editor !== 'boolean') ||
       (change.bots !== undefined && typeof change.bots !== 'boolean') ||
-      (change.maxPermissionMode !== undefined && !isPermissionMode(change.maxPermissionMode))
+      (change.maxPermissionMode !== undefined && !isPermissionMode(change.maxPermissionMode)) ||
+      (change.agentReach !== undefined && !isAgentReach(change.agentReach))
     )
       throw new NetError('bad_request')
     let event: NodePolicyEvent | undefined
@@ -111,6 +126,7 @@ export class SqliteNodePolicy {
           ...(change.terminal === undefined ? {} : { terminal: change.terminal }),
           ...(change.editor === undefined ? {} : { editor: change.editor }),
           ...(change.bots === undefined ? {} : { bots: change.bots }),
+          ...(change.agentReach === undefined ? {} : { agentReach: change.agentReach }),
           ...(change.maxPermissionMode === undefined
             ? {}
             : { maxPermissionMode: change.maxPermissionMode })
@@ -118,8 +134,8 @@ export class SqliteNodePolicy {
       this.db.charge(1)
       this.db.database
         .prepare(
-          'INSERT INTO net_node_policy(node,blocked,max_permission_mode,terminal,editor,bots,created_at) VALUES(?,?,?,?,?,?,?) ' +
-            'ON CONFLICT(node) DO UPDATE SET blocked=excluded.blocked,max_permission_mode=excluded.max_permission_mode,terminal=excluded.terminal,editor=excluded.editor,bots=excluded.bots'
+          'INSERT INTO net_node_policy(node,blocked,max_permission_mode,terminal,editor,bots,agent_reach,created_at) VALUES(?,?,?,?,?,?,?,?) ' +
+            'ON CONFLICT(node) DO UPDATE SET blocked=excluded.blocked,max_permission_mode=excluded.max_permission_mode,terminal=excluded.terminal,editor=excluded.editor,bots=excluded.bots,agent_reach=excluded.agent_reach'
         )
         .run(
           node,
@@ -128,6 +144,7 @@ export class SqliteNodePolicy {
           after.terminal ? 1 : 0,
           after.editor ? 1 : 0,
           after.bots ? 1 : 0,
+          after.agentReach,
           after.createdAt || this.clock.now()
         )
       event = { node, before, after: this.get(node) }
@@ -162,6 +179,7 @@ export class SqliteNodePolicy {
       terminal: DEFAULT_TERMINAL_ACCESS,
       editor: DEFAULT_EDITOR_ACCESS,
       bots: DEFAULT_BOTS_ACCESS,
+      agentReach: DEFAULT_AGENT_REACH,
       createdAt: 0
     }
   }
@@ -178,6 +196,8 @@ export class SqliteNodePolicy {
       editor: row.editor === 1,
       // Only a stored 1 is on: a value this version does not know never lets a device reach a bot.
       bots: row.bots === 1,
+      // A value this version does not know reaches nothing.
+      agentReach: isAgentReach(row.agent_reach) ? row.agent_reach : 'none',
       createdAt: row.created_at
     }
   }

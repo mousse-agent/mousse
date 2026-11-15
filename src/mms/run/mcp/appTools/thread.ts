@@ -390,7 +390,10 @@ function queueFailure(error: unknown): McpToolError | undefined {
 function originView(origin: QueuedMessage['origin']): Record<string, unknown> | null {
   if (!origin) return null
   return origin.kind === 'agent'
-    ? { kind: 'agent', threadId: origin.threadId, runId: origin.runId, ...(origin.hops !== undefined ? { hops: origin.hops } : {}) }
+    ? origin.from
+      // An agent on another computer: which computer, and its title there. Its ids there name nothing on this computer.
+      ? { kind: 'agent', computer: origin.from.node, title: origin.from.title, ...(origin.hops !== undefined ? { hops: origin.hops } : {}) }
+      : { kind: 'agent', threadId: origin.threadId, runId: origin.runId, ...(origin.hops !== undefined ? { hops: origin.hops } : {}) }
     : { kind: origin.kind }
 }
 
