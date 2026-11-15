@@ -77,6 +77,11 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
     id: 11,
     date: '2026-11-16',
     text: "Only a chat turn your owner's message or tapped answer started can save facts about them and standing notes, replace them, or forget memory. In a run or a turn you started yourself (your first message, a wake-up, a question's default or another bot's message), saves are run notes and can replace only run notes; ask your owner in the chat to forget something."
+  },
+  {
+    id: 12,
+    date: '2026-11-16',
+    text: 'A line you only need to say needs no run: bot_schedule_add takes say instead of prompt, up to 500 characters, even at a usage limit. A schedule that should stop on a date takes until, a local date (through that day) or date and time on this computer.'
   }
 ]
 

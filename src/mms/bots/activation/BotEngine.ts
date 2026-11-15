@@ -1323,7 +1323,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   // -- Schedules (Path step 3: one scheduler) -------------------------------------------------------
 
   /** The scheduler retries a claim as started before making any new admission or lateness decision. */
-  findScheduledOccurrence(input: { botId: string; scheduleId: string; occurrenceKey: string }): { activationId: string; occurrenceAt: string } | undefined {
+  findScheduledOccurrence(input: { botId: string; scheduleId: string; occurrenceKey: string }): { activationId: string; occurrenceAt: string } | { messageId: string; occurrenceAt: string } | undefined {
+    const said = this.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', input.botId, `schedule-said:${input.scheduleId}:${input.occurrenceKey}`)
+    if (said) return JSON.parse(String(said.value)) as { messageId: string; occurrenceAt: string }
     const row = this.store.activationByKey(`sched:${input.botId}:${input.scheduleId}:${input.occurrenceKey}`)
     if (row?.trigger.kind === 'schedule') return { activationId: row.id, occurrenceAt: row.trigger.occurrenceAt }
     return undefined
@@ -1338,14 +1340,29 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * skipped and says why. Other runs and the owner's work never skip it: they run beside it. An open ask is not a skip:
    * asks don't block. Before the startup pass nothing is inserted and the occurrence stays due.
    */
-  runScheduledOccurrence(input: { botId: string; scheduleId: string; prompt: string; occurrenceAt: string; occurrenceKey?: string; missed?: ScheduledMissedRuns; now?: Date; model?: string; pick?: BotModelPick }):
+  runScheduledOccurrence(input: { botId: string; scheduleId: string; prompt: string; say?: string; occurrenceAt: string; occurrenceKey?: string; missed?: ScheduledMissedRuns; now?: Date; model?: string; pick?: BotModelPick }):
     | { kind: 'started'; activationId: string }
+    | { kind: 'said'; messageId: string }
     | { kind: 'skipped'; reason: string }
     | { kind: 'not_ready' } {
     if (!this.startupPassed) return { kind: 'not_ready' }
     const { botId, scheduleId, prompt, occurrenceAt } = input
     const registry = this.store.registry(botId)
     if (!registry || registry.deletedAt) return { kind: 'skipped', reason: 'bot_deleted' }
+    if (input.say !== undefined) {
+      const occurrenceKey = input.occurrenceKey ?? occurrenceAt
+      const existing = this.findScheduledOccurrence({ botId, scheduleId, occurrenceKey })
+      if (existing && 'messageId' in existing) return { kind: 'said', messageId: existing.messageId }
+      if (registry.pausedReason && registry.pausedReason !== 'usage_limit') return { kind: 'skipped', reason: 'paused' }
+      const messageId = `bm_sched:${botId}:${scheduleId}:${occurrenceKey}`
+      const late = (input.now?.getTime() ?? this.now()) - Date.parse(occurrenceAt) > REMINDER_LATE_MS
+      this.store.db.transaction(() => {
+        this.store.run('INSERT OR IGNORE INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?)', botId, `schedule-said:${scheduleId}:${occurrenceKey}`, JSON.stringify({ messageId, occurrenceAt }))
+        this.chat.post({ id: messageId, botId, author: 'bot', kind: 'run_report', text: `${late ? `(For ${clockTime(occurrenceAt)}) ` : ''}${input.say}`, lane: 'run' })
+      })
+      this.changed({ botId })
+      return { kind: 'said', messageId }
+    }
     this.endUsagePauseIfDue(botId, input.now ?? new Date(this.now()))
     const paused = this.store.registry(botId)?.pausedReason
     let skip: string | undefined = paused ? (paused === 'usage_limit' ? 'usage_limited' : 'paused') : undefined
@@ -8166,7 +8183,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * apart. The bot adds its own with `bot_schedule_add`, the owner from the Automations page; it needs no approval
    * (schedules are not permissions) and changes no revision.
    */
-  addSchedule(botId: string, input: { when: BotSchedule['when']; prompt: string; until?: string; model?: string; pick?: BotModelPick }, createdBy: 'owner' | 'bot'): BotScheduleEntry {
+  addSchedule(botId: string, input: { when: BotSchedule['when']; prompt?: string; say?: string; until?: string; model?: string; pick?: BotModelPick }, createdBy: 'owner' | 'bot'): BotScheduleEntry {
     this.entry(botId)
     let added: BotScheduleEntry
     try {

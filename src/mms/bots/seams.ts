@@ -74,7 +74,7 @@ export interface BotToolHost {
   activationOf(threadId: string): { botId: string; activationId: string; lane: BotLane; memoryLane?: BotLane; role?: 'home' | 'activation' | 'context' | 'subagent' } | undefined
   schedules: {
     /** `from`: the turn that adds it; its next message shows the automation as a card (`card`). */
-    add(botId: string, s: { when: BotSchedule['when']; prompt: string }, from?: string): { scheduleId: string; label: string; card?: true }
+    add(botId: string, s: { when: BotSchedule['when']; prompt?: string; say?: string; until?: string }, from?: string): { scheduleId: string; label: string; card?: true }
     remove(botId: string, scheduleId: string): boolean
     list(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string }>
   }

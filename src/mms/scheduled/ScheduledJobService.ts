@@ -43,8 +43,9 @@ export interface ScheduledJobRunner {
  */
 export interface ScheduledBotRunner {
   /** The run already inserted for this claim, before a crash interrupted the hand-over. */
-  findOccurrence(input: { botId: string; scheduleId: string; occurrenceKey: string }): { activationId: string; occurrenceAt: string } | undefined
-  runOccurrence(input: { jobId: string; botId: string; scheduleId: string; prompt: string; occurrenceAt: string; occurrenceKey?: string; missed?: ScheduledMissedRuns; now: Date; model?: string; pick?: NonNullable<ScheduledJob['bot']>['pick'] }):
+  findOccurrence(input: { botId: string; scheduleId: string; occurrenceKey: string }): { activationId: string; occurrenceAt: string } | { messageId: string; occurrenceAt: string } | undefined
+  runOccurrence(input: { jobId: string; botId: string; scheduleId: string; prompt: string; say?: string; occurrenceAt: string; occurrenceKey?: string; missed?: ScheduledMissedRuns; now: Date; model?: string; pick?: NonNullable<ScheduledJob['bot']>['pick'] }):
+    | { kind: 'said'; messageId: string }
     | { kind: 'started'; activationId: string }
     | { kind: 'skipped'; reason: string }
     | { kind: 'not_ready' }
@@ -869,7 +870,7 @@ export class ScheduledJobService extends EventEmitter {
       const existing = this.botRunner?.findOccurrence({ botId: job.bot.botId, scheduleId: job.bot.scheduleId, occurrenceKey: claim.occurrenceKey })
       if (existing) {
         occurrenceAt = existing.occurrenceAt
-        outcome = { kind: 'started', activationId: existing.activationId }
+        outcome = 'messageId' in existing ? { kind: 'said', messageId: existing.messageId } : { kind: 'started', activationId: existing.activationId }
       } else {
         // Only detected downtime expires an occurrence. A busy tick may be arbitrarily late.
         let next = claim.missed ? computeNextRun(job.schedule, occurrenceAt, now) : null
@@ -906,7 +907,7 @@ export class ScheduledJobService extends EventEmitter {
         const expired = next && now.getTime() - Date.parse(occurrenceAt) >= Date.parse(next) - now.getTime()
         const missedReason = `Missed ${new Date(occurrenceAt).toLocaleDateString('en-US', { weekday: 'short' })} ${clockTime(occurrenceAt)} (computer off)`
         outcome = expired ? { kind: 'skipped', reason: missedReason } : this.botRunner
-          ? this.botRunner.runOccurrence({ jobId: job.id, botId: job.bot.botId, scheduleId: job.bot.scheduleId, prompt: job.prompt, occurrenceAt, occurrenceKey: claim.occurrenceKey, ...(claim.missed ? { missed: claim.missed } : {}), now, ...(job.bot.model ? { model: job.bot.model } : {}), ...(job.bot.model && job.bot.pick?.model === job.bot.model ? { pick: job.bot.pick } : {}) })
+          ? this.botRunner.runOccurrence({ jobId: job.id, botId: job.bot.botId, scheduleId: job.bot.scheduleId, prompt: job.prompt, ...(job.bot.say !== undefined ? { say: job.bot.say } : {}), occurrenceAt, occurrenceKey: claim.occurrenceKey, ...(claim.missed ? { missed: claim.missed } : {}), now, ...(job.bot.model ? { model: job.bot.model } : {}), ...(job.bot.model && job.bot.pick?.model === job.bot.model ? { pick: job.bot.pick } : {}) })
           : { kind: 'skipped', reason: 'bots_unavailable' }
       }
     } catch (error) {

@@ -1,3 +1,4 @@
+import { guardMemoryText } from '../bots/memory/guard'
 import { randomUUID } from 'node:crypto'
 import type { BotModelPick, BotSchedule } from '../../shared/bots/personal/definition'
 import { MAX_BOT_SCHEDULES } from '../../shared/bots/personal/definition'
@@ -121,6 +122,17 @@ export class BotScheduleError extends Error {
   }
 }
 
+/** A fixed line is the owner's words, so only the reminder text's hidden-character guard applies. */
+export function schedulePrompt(input: { prompt?: string; say?: string }): string {
+  if (input.say === undefined) return typeof input.prompt === 'string' ? input.prompt.trim() : ''
+  if (input.prompt !== undefined) throw new BotScheduleError('schedule_invalid', 'Give either prompt or say, not both.')
+  if (typeof input.say !== 'string' || !input.say.trim() || input.say.length > 500)
+    throw new BotScheduleError('schedule_invalid', 'say needs 1 to 500 characters.')
+  const guarded = guardMemoryText(input.say)
+  if (!guarded.ok && guarded.reason === 'invisible') throw new BotScheduleError('schedule_invalid', guarded.message)
+  return `Say exactly: ${input.say}`
+}
+
 /** A local date lasts through that day; a local date/time ends at that minute. */
 export function scheduleUntil(value: string, now: Date): string {
   const match = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2}))?)?$/.exec(value)
@@ -166,7 +178,7 @@ export class BotScheduleBook {
       when,
       prompt: job.prompt,
       name: job.name,
-      label: this.labelOf(when) + scheduleEndLabel(job.expiresAt),
+      label: `${job.bot.say !== undefined ? `Says “${job.bot.say}” · ` : ''}${this.labelOf(when)}${scheduleEndLabel(job.expiresAt)}`,
       createdBy: job.bot.createdBy,
       createdAt: job.createdAt,
       ...(job.bot.model ? { model: job.bot.model } : {}),
@@ -223,9 +235,9 @@ export class BotScheduleBook {
    * Adds a schedule: at most 8 per bot, at least a minute apart. It needs no approval (a schedule is not a permission)
    * and starts from now, so it never runs for times before it existed.
    */
-  add(botId: string, input: { when: BotSchedule['when']; prompt: string; until?: string; model?: string; pick?: BotModelPick; name?: string; tellMe?: TellMe }, createdBy: 'owner' | 'bot', options: { scheduleId?: string } = {}): BotScheduleEntry {
+  add(botId: string, input: { when: BotSchedule['when']; prompt?: string; say?: string; until?: string; model?: string; pick?: BotModelPick; name?: string; tellMe?: TellMe }, createdBy: 'owner' | 'bot', options: { scheduleId?: string } = {}): BotScheduleEntry {
     if (this.list(botId).length >= MAX_BOT_SCHEDULES) throw new BotScheduleError('schedule_limit', `A bot can have at most ${MAX_BOT_SCHEDULES} schedules. Remove one first.`)
-    const prompt = typeof input.prompt === 'string' ? input.prompt.trim() : ''
+    const prompt = schedulePrompt(input)
     const problem = botScheduleProblem(input.when, prompt)
     if (problem) throw new BotScheduleError('schedule_invalid', problem)
     const expiresAt = input.until === undefined ? undefined : scheduleUntil(input.until, this.now())
@@ -241,7 +253,7 @@ export class BotScheduleBook {
       threadId: botJobThreadGuard(botId),
       // Only the owner picks a model by hand; a bot's own schedule runs on its own rows. The name stays beside the pick,
       // for builds that read only the name.
-      bot: { botId, scheduleId, createdBy, ...(createdBy === 'owner' && input.model?.trim() ? { model: input.model.trim(), ...(isPinned(input.pick) ? { pick: { ...copyPick(input.pick), instanceId: input.pick.instanceId } } : {}) } : {}) }
+      bot: { botId, scheduleId, createdBy, ...(input.say !== undefined ? { say: input.say } : {}), ...(createdBy === 'owner' && input.model?.trim() ? { model: input.model.trim(), ...(isPinned(input.pick) ? { pick: { ...copyPick(input.pick), instanceId: input.pick.instanceId } } : {}) } : {}) }
     }, { id: botJobId(botId, scheduleId), nextRunAt: computeNextRun(jobScheduleOf(when), null, this.now()) })
     this.options.jobs.wake()
     return this.entryOf(job)!
@@ -279,6 +291,7 @@ export class BotScheduleBook {
       if (!prompt || prompt.length > 64 * 1024) throw new BotScheduleError('schedule_invalid', 'Each schedule needs something to do.')
       if (prompt.startsWith('/')) throw new BotScheduleError('schedule_locked', 'A bot does the work itself; a workflow can\'t be its Do.')
       changes.prompt = prompt
+      if (job.bot.say !== undefined) changes.bot = { ...job.bot, say: undefined }
     }
     if (patch.schedule !== undefined) {
       const when = botWhenOf(patch.schedule)
