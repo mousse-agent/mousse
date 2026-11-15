@@ -58,15 +58,27 @@ export class BotTellings {
     return (!message.ask || message.ask.status === 'open') && (!message.question || message.question.status === 'open')
   }
   release(now: number): void {
+    // Expiration is one bulk write over the waiting-row index, including with no window.
+    try { this.store.run(`UPDATE bot_messages INDEXED BY bot_messages_tell_due SET told_at = ?
+      WHERE tell IS NOT NULL AND told_at IS NULL AND tell = 'later' AND at <= ?`,
+      new Date(now).toISOString(), new Date(now - 86_400_000).toISOString()) } catch { /* The next upkeep pass retries expiration; it never arms the due timer. */ }
     if (!this.windows) return
     for (const [id, rows] of this.banners) if (rows.every(r => now - Date.parse(r.at) > 86_400_000)) this.banners.delete(id)
-    const ids = this.store.all('SELECT id FROM bot_messages WHERE tell IS NOT NULL AND told_at IS NULL AND tell_at <= ? ORDER BY seq', new Date(now).toISOString())
+    const ids = this.store.all(`SELECT id FROM bot_messages INDEXED BY bot_messages_tell_due WHERE tell IS NOT NULL AND tell != 'later' AND told_at IS NULL AND tell_at <= ? ORDER BY seq`, new Date(now).toISOString())
     const due: BotMessageRow[] = []
     for (const { id } of ids) {
       const row = this.store.message(String(id))!
       if ((this.retryAt.get(row.botId) ?? 0) > now) continue
       if (!this.unread(row) || this.catchup && now - Date.parse(row.at) > 86_400_000) { this.attempt([row], now, () => this.told(row, now)); continue }
       due.push(row)
+    }
+    // Only project later rows if this release can count them in a fold.
+    if (due.some(r => r.tell === 'soon') || this.catchup && due.length) {
+      for (const { id } of this.store.all(`SELECT id FROM bot_messages INDEXED BY bot_messages_tell_due
+        WHERE tell IS NOT NULL AND tell = 'later' AND told_at IS NULL AND tell_at <= ? ORDER BY seq`, new Date(now).toISOString())) {
+        const row = this.store.message(String(id))!
+        if ((this.retryAt.get(row.botId) ?? 0) <= now) due.push(row)
+      }
     }
     if (this.catchup) {
       this.catchup = false
@@ -86,7 +98,7 @@ export class BotTellings {
     const rest = due.filter(r => r.tell !== 'now')
     if (!rest.some(r => r.tell === 'soon')) return
     for (const bot of new Set(rest.filter(r => r.tell === 'soon').map(r => r.botId))) {
-      const rows = rest.filter(r => r.botId === bot)
+      const rows = rest.filter(r => r.botId === bot || r.tell === 'later' && !this.store.message(r.id)?.toldAt && (this.retryAt.get(r.botId) ?? 0) <= now)
       const previous = this.fold
       if (!this.attempt(rows, now, () => {
         const base = previous && previous.until >= now ? previous : { id: `bt_${randomUUID()}`, until: now + 120_000, rows: [] }
