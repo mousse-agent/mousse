@@ -299,3 +299,26 @@ describe('a subagent of the bot\'s work', () => {
     expect(kinds(fx)).toEqual([])
   })
 })
+
+describe('scheduled progress and Forget', () => {
+  it.each(['citation', 'copied text'])('capture and older progress rows cannot retain a forgotten %s', async (kind) => {
+    const fx = memoryFixture()
+    const { t, journal } = setup(fx)
+    const text = 'Waiting for the clinic about "the diagnosis"\nand the next appointment.'
+    const seq = fx.message({ botId: 'ada', id: 'owner', author: 'owner', text })
+    const note = kind === 'citation' ? `Waiting for the clinic (j${seq}).` : text
+    t.data.set('run', [toolCall('report', 'mcp__mousse__run_report', { level: 'quiet', summary: 'Nothing new.', leftOff: note })])
+    await journal.syncThread({ botId: 'ada', threadId: 'run', lane: 'run', activationId: 'a1' })
+    const call = fx.store.journal('ada').find((row) => row.kind === 'tool_call')!
+    expect(JSON.stringify(call)).not.toContain('leftOff')
+    expect(call.text).not.toContain('clinic')
+    fx.store.saveProgress('ada', 's1', 'a1', note)
+    fx.store.saveProgress('ada', 's1', 'a2', note + ' Still pending.')
+    fx.store.saveProgress('ada', 's2', 'b1', 'Unrelated task is pending.')
+    fx.store.forget('ada', { refs: [`j${seq}`], by: 'owner_ui' })
+    expect(fx.store.progress('ada', 's1')).toBeUndefined()
+    expect(fx.store.search('ada', { query: 'clinic' })).toEqual([])
+    expect(fx.store.journal('ada').filter((row) => row.json?.op === 'progress' && row.json?.scheduleId === 's1' && !row.redactedAt)).toEqual([])
+    expect(fx.store.progress('ada', 's2')).toBe('Unrelated task is pending.')
+  })
+})
