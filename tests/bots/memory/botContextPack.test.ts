@@ -215,7 +215,7 @@ describe('the chat pack', () => {
     const pack = await packs.chatPreamble({ botId: 'ada', activationId: 'act-2' })
     expect(pack).not.toContain('ghp_')
     expect(pack).not.toContain('Ignore all previous')
-    expect(pack).toContain('] Owner: My token is [held back: looks like a secret · memory_read j1 shows it]')
+    expect(pack).toContain('] Owner: My token is [held back: looks like a secret]')
     expect(pack).toContain('memory_read j2 shows it.)')
     expect(pack).not.toContain('What is the weather?')
   })

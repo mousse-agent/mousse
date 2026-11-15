@@ -43,15 +43,17 @@ Every bot has an append-only **journal** in `bots.db` (`bot_journal`). It holds 
 - A run's request (its prompt, after the pack) ends with "Your last message is your report to the owner …" (`BOT_RUN_REPORT_LINE`), which the engine appends.
 - **Missed standing wishes.** After a settled chat turn, the fallback saves a standing wish the turn did not save. If the owner entries are full, the refusal is counted in `bot_memory_state`. The next chat situation gives the count and asks the bot to tell the owner in its own words that its notes about them are full and ask which to drop. Only a settled turn that carried the count acknowledges it; failures and consults leave it pending, and a run is not told.
 - The rows of the current activation (the owner's new message) are left out: they arrive as the request.
-- The **guard** checks every row entering a pack. A piece that looks like a credential is replaced in place by "[held back: looks like a secret · memory_read j12 shows it]", and the rest of the row stays (after "password:" the rest of the line goes with it, since a password may have spaces). A row with hidden characters or instruction-shaped text is held back whole: "(held back: … memory_read j12 shows it.)". The owner's own words skip only the instruction check.
+- The **guard** checks every row entering a pack. A piece that looks like a credential is replaced in place by "[held back: looks like a secret]", and the rest of the row stays (after "password:" the rest of the line goes with it, since a password may have spaces). A row with hidden characters or instruction-shaped text is held back whole: "(held back: … memory_read j12 shows it.)". The owner's own words skip only the instruction check.
 
 ## Search
 
 Both FTS5 indexes use `porter unicode61 remove_diacritics 2`. `bot_journal_fts` is an external-content index; `bot_memories_fts` indexes versions that still have text. Triggers keep them in the writer's transaction.
 
-- `memory_search`: memory hits first, then journal rows, by bm25 with recency breaking ties, filtered to the bot before the limit. Every word must match first; when that finds too few, any word may. Query text is reduced to quoted words, so no FTS syntax passes through. `model_change`, `memory_op` and `redaction` rows are never returned.
+- `memory_search`: searches the full indexes, without a recency window. In each pass, rows without credential-shaped text come first: memory entries, then journal rows, in their existing FTS relevance order with recency breaking ties. Credential-bearing rows qualify only through the words left visible after masking and follow all ordinary rows in that pass, newest first. Every word must match in the first pass; when too few distinct rows survive, any word may match in the fallback. Query text is reduced to quoted words, so no FTS syntax passes through. `model_change`, `memory_op` and `redaction` rows are never returned.
+- **Search work:** one statement per source and pass classifies each full-index match once with a connection-local guard function, then sorts once. Ordinary prose takes the guard's quick negative check. SQLite filters hidden-only matches before sorting; ordinary survivors come first by relevance, eligible credential-bearing survivors follow by date. The result iterator stops after enough distinct survivors; hidden matches and duplicates consume no result slots. There is no cutoff over raw matches: whether a guessed hidden word adds candidates cannot change a cutoff or the fallback's surviving count. The guard work is linear in matching rows, plus a single SQLite sort, rather than repeated full-match sorts for OFFSET pages. A large match set still has a synchronous cost; an index over masked text is planned with the next `bots.db` version to remove that work. Ordinary queries keep stemming, snippets and full-history relevance order; iteration may fill slots previously left empty by duplicate hits. No-query lists still show the latest by date.
+- `memory_read`: rows around a hit, an entry's versions, or one activation page by page (about 8k tokens a page). Credential pieces are masked in every row, including the owner's words and rows held back from a pack for hidden characters or instruction-shaped text. The rest of those rows can still be read.
+- Search snippets also mask credentials, before cutting or highlighting can split a secret. A hit whose text contains a credential shows the start of its masked text instead of the highlighted excerpt. Such a hit is kept only when its query words still occur in the full masked text: every word in the all-words pass, any word in the fallback. A word found only inside a held-back secret returns no hit, so search cannot confirm password guesses.
 - Outside text from a request is searchable and readable as external data from a tool, rather than as a Mousse notice. Older framed rows keep their original kind and carry the external mark.
-- `memory_read`: rows around a hit, an entry's versions, or one activation page by page (about 8k tokens a page).
 - Zero-hit searches and turns with three searches and no read are counted in `search_stats`, locally.
 - At open, a failed integrity check rebuilds an index; `BotMemoryAdmin.reindex` rebuilds both.
 
@@ -66,11 +68,13 @@ The five tools are always on and never grantable. The bot and memory rights come
 
 ## The guard (`guard.ts`)
 
-Heuristics, not proofs. It rejects invisible and bidi characters (keeping ZWJ and ZWNJ), credential shapes (`sk-`, `ghp_`, `AKIA`, JWTs, PEM keys, `password=`, chat webhooks, a password in a web address, long high-entropy tokens; secrets belong in a vault, #595), and instruction-shaped text ("ignore previous instructions", "you must now", role and tool-call markup). A save with any of them is refused; in a pack only the credential piece is held back.
+Heuristics, not proofs. It rejects invisible and bidi characters (keeping ZWJ and ZWNJ), credential shapes (`sk-`, `ghp_`, `AKIA`, JWTs, PEM keys, `password=`, chat webhooks, a password in a web address, long high-entropy tokens; secrets belong in a vault, #595), and instruction-shaped text ("ignore previous instructions", "you must now", role and tool-call markup). A save with any of them is refused; in a pack only the credential piece is held back. The same credential replacement applies to `memory_read` and `memory_search`, without a pointer to read the secret back.
 
 The named shapes are found everywhere, web addresses included. Inside a web address (`http://` or `https://`), the high-entropy check is skipped for the host, the path and most query values, since a document's or a parcel's ID is not a secret; it still holds back a long value whose name says it is one (`?token=`, `&sig=`, `#access_token=`, `…key=`, `…secret=`, `…code=`).
 
 ## Owner operations
+
+The owner's Memory dialog and exports keep the stored text; the masking above applies to the bot's read and search tools.
 
 `BotMemoryAdmin` (`admin.ts`), behind `bots.memory.list`, `bots.memory.forget`, `bots.memory.edit` and `bots.memory.export` (`methods.ts`):
 

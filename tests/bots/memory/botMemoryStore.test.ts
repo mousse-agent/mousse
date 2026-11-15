@@ -113,6 +113,7 @@ describe('the journal', () => {
     const fx = memoryFixture()
     const failing = new BotMemoryStore({
       db: {
+        database: fx.db.database,
         inTransaction: false,
         transaction: (work) => fx.db.transaction(work),
         statement: (sql) => {
