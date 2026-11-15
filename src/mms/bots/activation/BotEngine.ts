@@ -1578,6 +1578,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   private async pump(botId: string): Promise<void> {
     if (this.store.registry(botId)?.error?.code !== 'bot_journal_failed') {
+      this.requeueChatNotes(botId)
       // The chat lane's thread is the home thread: a stopped activation's turn lets go of it first.
       const chatHeld = [...this.live.keys()].some((id) => {
         const live = this.store.activation(id)
@@ -1641,9 +1642,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         if (!this.store.dispatch(row.id, 1)) {
           // A run's request ends with what its last message is for: the report (bot-context.md §5.2). Work that waited
           // takes what the owner added meanwhile.
+          // A chat turn takes the owner's messages that joined it while it waited to start (`joinChatTurnInTx`).
           const notes = this.workNotes(row)
           if (notes) this.store.applyWorkNotes(notes.ids)
-          const text = row.lane === 'run' ? `${row.trigger.input}${notes ? `\n\n${notes.text}` : ''}\n\n${BOT_RUN_REPORT_LINE}` : row.trigger.input
+          const text = row.lane === 'run' ? `${row.trigger.input}${notes ? `\n\n${notes.text}` : ''}\n\n${BOT_RUN_REPORT_LINE}` : `${row.trigger.input}${notes ? `\n\n${notes.text}` : ''}`
           this.store.insertDispatch({ activationId: row.id, n: 1, kind: 'start', clientRequestId, threadId, prompt: { text }, policyDigest: row.grantDigest })
           if (row.lane === 'run') this.journalInTx({
             botId: row.botId, kind: 'run_start', lane: 'run', activationId: row.id, threadId, sourceKey: `act:${row.id}:start`, who: 'mousse',
@@ -2390,14 +2392,16 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const outstanding = [...live.steering.values()]
     const taken = new Set(outstanding.flatMap((entry) => entry.ids))
     const regive = live.compactions > live.regiven && !outstanding.some((entry) => entry.regiveFor !== undefined) ? this.regiveText(row) : undefined
-    const notes = row.lane === 'run' && live.deadline - this.now() >= 2 * ACTIVE_TIME_CHUNK_MS
+    // A run's notes, or the owner's messages that joined a chat turn while it answers (`joinChatTurnInTx`).
+    const notes = live.deadline - this.now() >= 2 * ACTIVE_TIME_CHUNK_MS
       ? this.store.pendingWorkNotes(row.id).filter((note) => !taken.has(note.id))
       : []
     // Its subagents that ended since it last looked, each told once.
     const told = new Set(outstanding.flatMap((entry) => entry.subagents ?? []))
     const ended = [...(this.subagentNotices.get(row.id) ?? new Map<string, string>()).entries()].filter(([thread]) => !told.has(thread))
     if (!regive && !notes.length && !ended.length) return undefined
-    const parts = [...(regive ? [regive] : []), ...(notes.length ? [noteSteerText(notes.map((note) => note.text))] : []), ...ended.map(([, text]) => text)]
+    const noteText = row.lane === 'chat' ? chatSteerText(notes.map((note) => note.text)) : noteSteerText(notes.map((note) => note.text))
+    const parts = [...(regive ? [regive] : []), ...(notes.length ? [noteText] : []), ...ended.map(([, text]) => text)]
     return { text: parts.join('\n\n'), ids: notes.map((note) => note.id), ...(regive ? { regiveFor: live.compactions } : {}), ...(ended.length ? { subagents: ended.map(([thread]) => thread) } : {}) }
   }
 
@@ -2409,9 +2413,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private regiveText(row: BotActivationRow): string {
     const pack = this.packs.get(row.id)?.trim()
     const request = this.store.dispatch(row.id, 1)?.prompt.text.trim()
-    const added = row.lane === 'run'
-      ? this.store.all('SELECT text FROM bot_work_notes WHERE activation_id = ? AND applied_at IS NOT NULL ORDER BY id', row.id).map((entry) => String(entry.text).trim()).filter(Boolean)
-      : []
+    const added = this.store.all('SELECT text FROM bot_work_notes WHERE activation_id = ? AND applied_at IS NOT NULL ORDER BY id', row.id).map((entry) => String(entry.text).trim()).filter(Boolean)
     return [
       '[Mousse] Your context was just summarised to make room. Here again is your memory and what you were asked, so you keep to them. Nothing about the job changed; carry on where you left off.',
       ...(pack ? [pack] : []),
@@ -4337,7 +4339,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const allowed = !reload && run.status === 'completed' ? this.allowedSinceRefused(row) : []
       let noted = false
       const next = this.recorded(row, () => {
-        noted = !reload && run.status === 'completed' && ((row.lane === 'run' && this.store.pendingWorkNotes(row.id).length > 0) || allowed.length > 0) && (this.remainingMs(row) ?? 0) >= 2 * ACTIVE_TIME_CHUNK_MS
+        // A chat turn the owner wrote to again while it answered, and that never read it, answers it now in its thread;
+        // without the time for it the turn ends and the message gets a turn of its own (`requeueChatNotes`).
+        noted = !reload && run.status === 'completed' && (this.store.pendingWorkNotes(row.id).length > 0 || allowed.length > 0) && (this.remainingMs(row) ?? 0) >= 2 * ACTIVE_TIME_CHUNK_MS
         const unknown = this.store.unknownCalls(row.id).some((call) => !call.acknowledged)
         // Work that asked its owner a question (`ask_owner`) waits for the answer, holding no run slot, and never reports
         // now: its question's bubble is what the owner sees. Answered while its turn was ending, it goes on at once.
@@ -4489,8 +4493,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const name = this.host.definitions.revision(row.botId, row.revision)?.name ?? 'This bot'
     const room = waiting ? this.roomAskOf(row) : undefined
     const [first, ...more] = room ? [room] : asks
-    // What the message answers: the owner's message a chat turn holds, or the one that asked for the work.
-    const replyTo = row.lane === 'chat' ? this.ownerMessageOf(row.id) : row.trigger.kind === 'work' ? row.trigger.replyTo : undefined
+    // What the message answers: the owner's message a chat turn holds and has read, or the one that asked for the work.
+    const replyTo = row.lane === 'chat' ? this.answeredOwnerMessageOf(row.id) : row.trigger.kind === 'work' ? row.trigger.replyTo : undefined
     try {
       this.store.db.transaction(() => {
         if (reply) this.chat.post({
@@ -4944,6 +4948,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const interrupted = (calls.length
       ? ` Interrupted tool calls (their effects are unknown; check before repeating them): ${calls.map((call) => `${call.tool} (${roleOf(call)} run ${call.runId}, call ${call.invocationId})`).join('; ')}.`
       : '') + this.stoppedSubagentsLine(row)
+    // A chat turn the owner wrote to again while it answered: their messages, answered as part of the same conversation.
+    if (row.lane === 'chat' && input.notes) {
+      const before = input.afterReport ? 'The owner wrote again while you were answering; your reply so far was already sent to them.' : lead
+      const allowed = input.allowed?.length ? ` The owner also allowed you to ${input.allowed.join(' and ')}; you have it now.` : ''
+      const owner = input.ownerText !== undefined ? `\n\n${input.ownerText}` : ''
+      const first = neverRan !== undefined ? `${neverRan}\n\n` : ''
+      return `[Mousse] ${before}${allowed}${interrupted}\n\n${first}${input.notes}${owner}\n\nAnswer it now, reading it together with what they wrote before.`
+    }
     // A turn that the owner allowed something while it ran (issue #983): this turn has it (`allowedSinceRefused`). Work
     // that goes on after it waited, or after the turn cap, hears it with why it goes on.
     if (input.allowed?.length && (carryOn || input.usageReset || input.turnCap))
@@ -6801,6 +6813,64 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
+   * The newest owner's message a chat activation holds that its turn has read: one that joined it while it answered
+   * (`joinChatTurnInTx`) and is still unread is answered later, so the reply posted now never claims to answer it.
+   */
+  private answeredOwnerMessageOf(activationId: string): string | undefined {
+    const row = this.store.get(`SELECT m.id FROM bot_messages m WHERE m.activation_id = ? AND m.author = 'owner'
+      AND NOT EXISTS (SELECT 1 FROM bot_work_notes n WHERE n.from_message = m.id AND n.activation_id = m.activation_id AND n.applied_at IS NULL)
+      ORDER BY m.seq DESC LIMIT 1`, activationId)
+    return row ? row.id as string : this.ownerMessageOf(activationId)
+  }
+
+  /**
+   * The chat turn the owner's next message joins instead of starting a turn of its own (inside the `bots.chat.send`
+   * transaction): the turn their own message started (`chat:`) that runs now, or else the newest one waiting to start,
+   * written from the same device's limit. A message sent while the bot answers is part of the same conversation: the
+   * running turn takes it as it works (`steerFor`) or answers it in its thread when it ends; one waiting to start takes
+   * it with its request. A tap, a turn the bot started itself, or another device's message never joins.
+   */
+  chatTurnToJoinInTx(botId: string, owner: BotOwnerTurn): string | undefined {
+    const turns = this.store.laneActivations(botId, 'chat', ['running', 'queued'])
+      .filter((row) => ownerChatTurn(row) && row.trigger.kind === 'manual' && (row.trigger.owner?.limit ?? null) === (owner.limit ?? null))
+    return turns.find((row) => row.status === 'running')?.id ?? turns.filter((row) => row.status === 'queued').at(-1)?.id
+  }
+
+  /** The owner's message joins chat turn `activationId` (inside the transaction that wrote it): a note it reads next. */
+  joinChatTurnInTx(botId: string, activationId: string, messageId: string, input: string): void {
+    this.store.addWorkNote(activationId, botId, input, messageId)
+    this.store.db.afterCommit(() => this.changed({ botId, activationId }))
+  }
+
+  /**
+   * The owner's messages that joined a chat turn which ended before it read them (a Stop, a failure, or no time left to
+   * answer them): they start a turn of their own, together, holding those messages, so none goes unanswered.
+   */
+  private requeueChatNotes(botId: string): void {
+    const ended = this.store.all(`SELECT DISTINCT n.activation_id FROM bot_work_notes n JOIN bot_activations a ON a.id = n.activation_id
+      WHERE n.bot_id = ? AND n.applied_at IS NULL AND a.lane = 'chat' AND a.status IN (${[...ENDED_ACTIVATION_STATUSES].map(() => '?').join(', ')})`, botId, ...ENDED_ACTIVATION_STATUSES)
+    for (const entry of ended) {
+      const row = this.store.activation(String(entry.activation_id))
+      if (!row) continue
+      const id = newActivationId()
+      const key = `chat:after:${row.id}`
+      const refused = this.store.db.transaction((): BotEngineError | undefined => {
+        const notes = this.store.pendingWorkNotes(row.id)
+        if (!notes.length) return undefined
+        this.store.applyWorkNotes(notes.map((note) => note.id))
+        if (this.store.activationByKey(key)) return undefined
+        const owner = row.trigger.kind === 'manual' ? row.trigger.owner : undefined
+        const error = this.queueChatInTx(botId, key, notes.map((note) => note.text).join('\n\n'), id, owner ?? {})
+        // The new turn holds the messages it answers: its reply quotes them, and they are its owner's own words.
+        if (!error) this.store.moveOwnerMessages(row.id, id, notes.flatMap((note) => (note.fromMessage ? [note.fromMessage] : [])))
+        return error
+      })
+      // The bot can't run now: the chat says why, as it does for a message that could not start a turn.
+      if (refused) this.chatError(botId, refused.code)
+    }
+  }
+
+  /**
    * The owner's own words in a chat activation (#673, `use_model always`): the messages it holds (the one it answers,
    * and any sent at a wall that continued it), oldest first. Empty for a run, which has no owner message of its own. An
    * answer the owner tapped (`bots.questions.answer`) is the bot's label, not their words, so it is left out.
@@ -7099,17 +7169,19 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * after a restart, any note: what the process before knew is gone), so it says it may be a repeat.
    */
   private workNotes(row: BotActivationRow, restart = false): { text: string; ids: number[] } | undefined {
-    if (row.lane !== 'run') return undefined
     // A note a live turn took and has not read yet is that turn's until it reads it or hands it back.
     const taken = new Set([...(this.live.get(row.id)?.steering.values() ?? [])].flatMap((entry) => entry.ids))
     const notes = this.store.pendingWorkNotes(row.id).filter((note) => !taken.has(note.id))
     if (!notes.length) return undefined
     const offered = this.offeredNotes.get(row.id)
     const repeat = (id: number): boolean => restart || offered?.has(id) === true
-    const lines = notes.map((note) => `- ${repeat(note.id) ? '(may be a repeat) ' : ''}${note.text}`)
+    const marked = notes.map((note) => `${repeat(note.id) ? '(may be a repeat) ' : ''}${note.text}`)
     const ids = notes.map((note) => note.id)
     const repeats = ids.some(repeat)
     this.notOffered(row.id, ids)
+    // The owner's messages to a chat turn, whole and in order: each may run to several lines.
+    if (row.lane === 'chat') return { text: `The owner also wrote:\n\n${marked.join('\n\n')}${repeats ? `\n\n${CHAT_NOTE_REPEAT_LINE}` : ''}`, ids }
+    const lines = marked.map((note) => `- ${note}`)
     return {
       text: `The owner added while you worked:\n${lines.join('\n')}${repeats ? `\n${NOTE_REPEAT_LINE}` : ''}`,
       ids
@@ -7993,6 +8065,17 @@ function contextKey(stored: string): [string, number] {
 
 /** What a continuation says of notes that may have reached the work already (delivery is at least once). */
 export const NOTE_REPEAT_LINE = 'A note marked "may be a repeat" may have reached you already while you worked: if you already acted on it, don\'t do it again.'
+
+/** What a chat turn hears of the owner's messages that may have reached it already while it answered. */
+export const CHAT_NOTE_REPEAT_LINE = 'A message marked "may be a repeat" may have reached you already while you answered: if you already answered it, don\'t answer it again.'
+
+/**
+ * The owner's messages as they reach a chat turn while it answers (sent quickly, one after another): part of the same
+ * conversation, answered in the one reply the turn is writing, never as a separate request.
+ */
+export function chatSteerText(messages: readonly string[]): string {
+  return `[Mousse] The owner wrote again while you were answering:\n\n${messages.join('\n\n')}\n\nRead it together with their earlier message and answer both in the one reply you are writing.`
+}
 
 /**
  * The owner's notes as they reach running work in the middle of its turn: framed as the owner's addition to the job,

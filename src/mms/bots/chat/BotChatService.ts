@@ -365,8 +365,9 @@ export class BotChatService {
    * `bots.chat.send` (§5.3.2): the owner's row and its journal row first, in one transaction
    * (idempotent on `clientRequestId`); then a chat waiting at a wall continues with this message
    * (its asks count as Not now), or the chat activation queued with the message (in the same
-   * transaction) starts behind the lane. Sending the same request again answers a wall the first
-   * one never reached.
+   * transaction) starts behind the lane. A message sent while the bot answers the owner's last one
+   * (or before that turn starts) joins that turn instead (`chatTurnToJoinInTx`): one conversation,
+   * answered together. Sending the same request again answers a wall the first one never reached.
    */
   async chatSend(input: { botId: string; text: string; attachments?: BotChatAttachment[]; clientRequestId: string; replyTo?: string; from?: { limit: PermissionMode; node?: string } }): Promise<{ message: BotChatMessage }> {
     return this.send(input)
@@ -543,8 +544,14 @@ export class BotChatService {
     let prompt = ''
     let refused: BotEngineError | undefined
     let touched: BotQuestionRow[] = []
+    // The chat turn this message joins, when the owner writes while the bot answers them (or before that turn starts).
+    let joined: string | undefined
     try {
       messageId = this.store.db.transaction(() => {
+        // Read in the transaction, so the turn is still running (or waiting) when the message joins it: one that ended
+        // meanwhile is not joined, and the message starts a turn of its own.
+        joined = !tap && !target.continues ? this.engine.chatTurnToJoinInTx(input.botId, owner) : undefined
+        const activationId = joined ?? target.activationId
         // The question this message answers: the one tapped, or the one its reply names (its bubble, or a nudge of it),
         // when a tap could still answer it. Read in the transaction, so a tap on another device is never answered twice.
         const asked = tap ? this.store.question(tap.questionId) : replyTo?.questionId && replyTo.author === 'bot' ? this.store.question(replyTo.questionId) : undefined
@@ -561,7 +568,7 @@ export class BotChatService {
           text,
           ...(saved.length ? { attachments: saved } : {}),
           clientRequestId: input.clientRequestId,
-          activationId: target.activationId,
+          activationId,
           lane: 'chat',
           ...(replyTo ? { replyTo: replyTo.id } : {}),
           ...(answers ? { questionId: answers.id } : {})
@@ -574,9 +581,11 @@ export class BotChatService {
         const body = messageInput({ id: posted.id, botId: input.botId, text, attachments: saved, replyTo: replyTo?.id ?? null, ...(answers ? { questionId: answers.id } : {}) }, (id) => this.store.message(id), (id) => this.store.question(id))
         // The late answer's line quotes the question and the default: kept with the question, so forgetting the bubble
         // finds it in the turn this message starts or continues.
-        if (late) this.store.recordQuestionCopy(late.id, target.activationId, lateLineOf(this.store.question(late.id) ?? late))
+        if (late) this.store.recordQuestionCopy(late.id, activationId, lateLineOf(this.store.question(late.id) ?? late))
         prompt = [...moved.map((question) => movedOnLine(question.spec)), body].join('\n\n')
-        if (!target.continues) refused = this.engine.queueChatInTx(input.botId, key, prompt, target.activationId, owner)
+        // A message that joins a turn is read by it as it answers, or with its request: it starts no turn of its own.
+        if (joined) this.engine.joinChatTurnInTx(input.botId, joined, posted.id, prompt)
+        else if (!target.continues) refused = this.engine.queueChatInTx(input.botId, key, prompt, target.activationId, owner)
         // A message from another device that continues a turn waiting at a wall holds the rest of that turn to the
         // device's limit, written with the message: a restart before the turn continues (`admitWallMessage`) keeps it.
         else if (owner.limit) this.store.narrowOwnerLimit(target.activationId, owner.limit)
@@ -594,6 +603,8 @@ export class BotChatService {
     // The bubbles of the questions it answered or moved past show it, in every window.
     for (const question of touched) for (const row of this.store.messagesForQuestion(question.id)) if (row.author === 'bot') this.engine.chat.republish(row.id)
     const message = this.engine.chat.toMessage(this.store.message(messageId)!)
+    // A turn that runs now takes it as it answers: nothing else starts.
+    if (joined && this.store.activation(joined)?.status !== 'queued') return { message }
     try {
       // A limit answered Not now ends its walled turn first; the queued activation then starts. A tap leaves the wall be.
       const continued = tap ? false : await this.engine.continueChatWith(input.botId, prompt, owner)
@@ -603,7 +614,7 @@ export class BotChatService {
         this.engine.approveStarterIfNeeded(definition.id)
         await this.engine.enqueueChat(input.botId, key, prompt, undefined, owner)
       } else if (refused) throw refused
-      else await this.engine.startQueuedChat(input.botId, target.activationId)
+      else await this.engine.startQueuedChat(input.botId, joined ?? target.activationId)
     } catch (error) {
       // The message is kept; the chat says why nothing answered it.
       if (!(error instanceof BotEngineError)) throw error

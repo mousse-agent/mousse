@@ -209,8 +209,8 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
     const { core, runNotes } = memoryBlocks(botId)
     const chat = summary(botId)
     const start = store.getState<number>(botId, 'window_start_seq') ?? 0
-    // The rows of this activation (the owner's new message) arrive as the request itself. Owner
-    // messages sent after it wait in the queue for turns of their own: this turn never answers them.
+    // The rows of this activation (the owner's new message, and any they sent while it answered) arrive as the request
+    // itself or as they come. Other owner messages sent after it wait for turns of their own: this turn never answers them.
     const all = store.windowRows(botId, start)
     const own = all.find((row) => row.activationId === activationId)?.seq
     const rows = all.filter((row) => row.activationId !== activationId && !(own !== undefined && row.kind === 'owner_msg' && row.seq > own))
