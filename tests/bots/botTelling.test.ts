@@ -243,3 +243,14 @@ it('keeps legacy-announced rows untold until a capable window consumes durable r
     expect(reopened.message(m.id)?.toldAt).toBe(f.store.now())
   } finally { reopened.close() }
 })
+it('does not let a failed bot already in the fold hold back another bot', async () => {
+  const other = (await createBot(f)).botId
+  f.bots.setTellingWindows(1)
+  f.bots.chat.post({ botId, author: 'bot', kind: 'text', text: 'Earlier' })
+  await f.bots.deliverDueReminders()
+  f.bots.events.on('tell', event => { if (event.rows.some((r: any) => r.botId === botId)) throw new Error('Bot failed') })
+  f.bots.chat.post({ botId, author: 'bot', kind: 'text', text: 'Fails' })
+  const good = f.bots.chat.post({ botId: other, author: 'bot', kind: 'text', text: 'Still delivered' })
+  await f.bots.deliverDueReminders()
+  expect(f.store.message(good.id)?.toldAt).toBe(f.store.now())
+})
