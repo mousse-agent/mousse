@@ -1,3 +1,5 @@
+import type { BashSpawnContext } from '@earendil-works/pi-coding-agent'
+import { lockedEnv } from '../../env'
 import { spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { access } from 'node:fs/promises'
@@ -23,6 +25,11 @@ import { constants as osConstants } from 'node:os'
  * Windows keeps Pi's own shell: `taskkill /T` follows the tree, and the engine finds a dead Pi's
  * children by their parent id.
  */
+
+/** A bot's model process may need cloud credentials; its commands never inherit them. */
+export function botBashSpawn(context: BashSpawnContext): BashSpawnContext {
+  return { ...context, env: lockedEnv({ platform: process.platform, base: context.env, driver: 'pi', credential: 'unknown', scratch: context.cwd }) }
+}
 
 export interface ShellExecOptions {
   onData: (data: Buffer) => void

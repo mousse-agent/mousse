@@ -188,7 +188,7 @@ describe('a bot on the owner\'s own Claude Code entry', () => {
     }
   })
 
-  it('runs one query in Claude Code\'s asking mode with the owner\'s environment, none of their settings files, and no process of its own to supervise', async () => {
+  it('runs one query in Claude Code\'s asking mode with the owner\'s sign-in, none of their settings files, and no process of its own to supervise', async () => {
     const root = temp('claude-owner-root-')
     const scratch = temp('claude-owner-scratch-')
     const { service, captured } = ownerService(async () => {})
@@ -200,8 +200,8 @@ describe('a bot on the owner\'s own Claude Code entry', () => {
     // Mousse's own server only, over Claude Code's input; none on its command line (#358).
     expect(options.mcpServers).toEqual({})
     expect(Object.keys(registered.get(options) ?? {})).toEqual(['mousse'])
-    // The owner's own sign-in: their entry's environment, not a locked one.
-    expect(options.env?.USER_VARIABLE).toBe('from-settings')
+    // The owner's own sign-in, without unrelated launch variables.
+    expect(options.env).not.toHaveProperty('USER_VARIABLE')
     expect(options.env?.CLAUDE_CONFIG_DIR).toBe(process.env.CLAUDE_CONFIG_DIR)
     // One query per turn: no live process is kept for the bot's thread.
     expect(captured.filter((entry) => entry.hooks)).toHaveLength(1)
@@ -216,7 +216,7 @@ describe('a bot on the owner\'s own Claude Code entry', () => {
     await service.chat({ threadId: 'bot-thread', cwd: root, model: 'sonnet', prompt: 'go', locked, onText: vi.fn() })
     const options = captured.find((entry) => entry.hooks)!
     expect(options.settingSources).toEqual([])
-    expect(options.env).toMatchObject({ ANTHROPIC_BASE_URL: 'http://proxy.test:8317', ANTHROPIC_AUTH_TOKEN: 'proxy-key', USER_VARIABLE: 'from-settings' })
+    expect(options.env).toMatchObject({ ANTHROPIC_BASE_URL: 'http://proxy.test:8317', ANTHROPIC_AUTH_TOKEN: 'proxy-key' })
   })
 
   it('a failed turn reports Claude Code\'s own reason', async () => {

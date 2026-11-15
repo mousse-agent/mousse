@@ -36,7 +36,7 @@ import type { McpAttachment, McpRelayAttachment } from '../../../run/mcp/MousseM
 import { TURN_TOKEN_KEY } from '../../../run/mcp/appTools/registry'
 import type { LoginSession } from '../../../providers/LoginSession'
 import { settingsMirror, type MirrorField, type VendorMirror } from '../../vendorMirror'
-import { withEnforced } from '../../env'
+import { lockedEnv, withEnforced } from '../../env'
 import { CLAUDE_BOT_FILE_DATA_NOTE, CLAUDE_FILE_TEXT_TOOLS, CLAUDE_LOCKED_REMOVED_OPTIONS, CLAUDE_PLAN_TOOLS, claudeBotTemp, claudeCommandsRefusal, holdClaudeBotTemp, ClaudeLockedGate, claudeLockedOptions, claudeLockedSettingsFile, claudeOwnStorage, claudeLockedSpawn, type ClaudeLockedTurn } from '../../claude/locked'
 import {
   claudeExtraArgs,
@@ -52,7 +52,7 @@ import {
   type StoredCliConfig
 } from '../../cliConfig'
 import { resolveWindowsShim } from '../../resolveWindowsShim'
-import { claudeAccountSubject, claudeAutoModeDisabled, claudeBypassDisabled, claudeChoosesCacheTtl, claudeEffectiveEnvironment, claudeEffectiveVariable, claudeSignInEnvironment, claudeTurnVariable } from './accountSubject'
+import { claudeAccountSubject, claudeAutoModeDisabled, claudeBypassDisabled, claudeChoosesCacheTtl, claudeEffectiveVariable, claudeSignInEnvironment, claudeTurnVariable } from './accountSubject'
 import {
   ClaudeMetricsCollector,
   ClaudeNativeEditCounter,
@@ -2862,17 +2862,16 @@ export class ClaudeSubscriptionProviderService {
     // The compaction threshold is set over both: Claude Code's own session holds the tool calls and
     // results that fill its context, so only its auto-compact can keep it under the threshold.
     const compaction = { ...claudeAutoCompactEnv(input.autoCompactTokens), ...this.promptCacheEnv(input.promptCacheHour, locked ? undefined : input.cwd) }
-    // A bot turn on the owner's own entry runs in that entry's environment (their sign-in), without
-    // the variables of the user's MCP servers, which it never gets. It loads no settings files, so
-    // the `env` of the owner's Claude settings, where a proxy sign-in often lives, is applied here.
-    // The client name is Mousse's unless that environment names its own (`entrypointEnv`).
+    // Bot turns start with the platform allowlist. The owner's entry keeps only its sign-in,
+    // including one stored in Claude settings, since the turn loads none of those settings.
+    const ownerEnv = this.environment()
     const baseEnv = locked && !locked.ownerEntry
       ? this.dependencies.lockedEnv!(locked.cwd)
       : locked
-        ? claudeEffectiveEnvironment(this.environment())
-        : this.environment()
+        ? claudeSignInEnvironment(ownerEnv, {}, lockedEnv({ platform: process.platform, base: ownerEnv, driver: 'claude', credential: 'subscription', scratch: locked.cwd }))
+        : ownerEnv
     const entrypoint = this.entrypointEnv(baseEnv)
-    const turnEnv = this.finalEnv({ ...baseEnv, ...compaction, ...entrypoint })
+    const turnEnv = { ...this.finalEnv({ ...baseEnv, ...compaction, ...entrypoint }), ...(locked ? { CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1' } : {}) }
     // A bot turn's commands (Linux): Claude Code keeps its temporary files in a private folder, and
     // the shared one, which holds every session's command output, is closed to them (`claudeBotTemp`).
     const botTemp = locked ? claudeBotTemp(locked.authority, turnEnv, locked.cwd) : undefined

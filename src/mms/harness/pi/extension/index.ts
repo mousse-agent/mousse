@@ -22,7 +22,7 @@ import { guardProvider, guardStreams, isGuarded, type GuardObserver, type Reques
 import { BUDGET_EXHAUSTED, GATE_REFUSALS, GATE_UNAVAILABLE, REQUEST_REFUSED } from './messages'
 import { brokerOAuth, type PiCredentialPost } from './oauth'
 import { inputBound, sizedMaxTokens, wirePlan, type PiReasoning, type ThinkingBudgets } from '../reservation'
-import { containedBashOperations } from './shell'
+import { botBashSpawn, containedBashOperations } from './shell'
 
 /** The input key the app-tool registry reads a `per_call` runtime's turn token from (`registry.ts`). */
 const TURN_TOKEN_KEY = '_mousse_turn'
@@ -218,9 +218,14 @@ export default async function mousseExtension(pi: ExtensionAPI): Promise<void> {
     }
   }
 
-  // Linux and macOS: every shell runs in a process group the engine recorded first (`shell.ts`).
-  if (process.platform !== 'win32')
-    pi.registerTool(createBashToolDefinition(process.cwd(), { operations: containedBashOperations({ report: (pgid, signal) => call('group', { pgid }, signal), ended: (pgid) => call('group', { pgid, ended: true }) }) }) as never)
+  // Linux and macOS record each command's process group. Bot commands on every platform
+  // get only the platform allowlist, even when the model process needs cloud credentials.
+  const botCommands = Boolean(process.env.MOUSSE_BOT_ACTIVATION)
+  if (process.platform !== 'win32' || botCommands)
+    pi.registerTool(createBashToolDefinition(process.cwd(), {
+      ...(process.platform !== 'win32' ? { operations: containedBashOperations({ report: (pgid, signal) => call('group', { pgid }, signal), ended: (pgid) => call('group', { pgid, ended: true }) }) } : {}),
+      ...(botCommands ? { spawnHook: botBashSpawn } : {})
+    }) as never)
 
   pi.registerCommand(MOUSSE_EXTENSION_MARKER, { description: "Mousse's extension is loaded (does nothing)", handler: async () => {} })
 
