@@ -3091,7 +3091,13 @@ export class ClaudeSubscriptionProviderService {
         // From the cut's check to the interrupt landing, a bot's gate lets no call start: none is cut mid-run.
         turn.locked?.cut(true)
         this.questions.autoRejectPendingForThread(input.threadId)
-        void query.interrupt().catch(() => cancel())
+        // An interrupt that fails never ends the turn: the query had already answered (its input ends with its result,
+        // and the SDK then rejects the interrupt as "Query closed before response received"), or it runs to its end.
+        // Either way the steer waits in `steers` and restarts the turn once the query ends, as an interrupted one would.
+        // Ending the turn here stopped a bot's chat reply as an error when the owner wrote just as it finished.
+        void query.interrupt().catch((error: unknown) => {
+          console.warn('[claude] the interrupt for a steer did not land; the steer goes in once the query ends', { threadId: input.threadId, error: error instanceof Error ? error.message : String(error) })
+        })
       }
     }
     // Claude Code holds a turn after a rejected plan window and may never answer it: past the hold

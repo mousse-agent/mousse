@@ -29,6 +29,8 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
+const later = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
 const SESSION = 'bot-session'
 const init = { type: 'system', subtype: 'init', session_id: SESSION }
 const interrupted = { type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['interrupted'], session_id: SESSION }
@@ -382,5 +384,58 @@ describe('a steer into a bot\'s Claude Code turn (#920)', () => {
     expect(turn.queries).toHaveLength(2)
     expect(turn.steer.onSteer).not.toHaveBeenCalled()
     expect(turn.steer.returnSteer).toHaveBeenCalledExactlyOnceWith('use the other file', 'drain-1')
+  })
+})
+
+/**
+ * The owner writes just as the bot's reply ends: the steer's interrupt reaches a query that already answered. Claude
+ * Code's input ends with its result, so the SDK rejects the interrupt ("Query closed before response received") when
+ * the query closes. That is no Stop: the reply is kept and the steer restarts the turn, as after an interrupt.
+ */
+describe('a steer whose interrupt does not land', () => {
+  const reply = { type: 'result', subtype: 'success', is_error: false, result: 'The reply.', session_id: SESSION }
+  /** The steer's answer: the restarted query reads its prompt, then answers. */
+  const answersTheSteer: Script = async function* (prompt) {
+    const { uuid } = await firstMessage(prompt)
+    yield { type: 'command_lifecycle', command_uuid: uuid, state: 'started', session_id: SESSION }
+    yield done
+  }
+
+  it('an interrupt the closed query rejects after its reply keeps the reply, and the steer is answered in the same turn', async () => {
+    const turn = botTurn([
+      async function* (_prompt, query) {
+        let closed!: (error: Error) => void
+        query.interrupt.mockImplementation(() => new Promise((_resolve, reject) => { closed = reject }))
+        yield init
+        await vi.waitFor(() => expect(query.interrupt).toHaveBeenCalled(), { timeout: 2_000, interval: 10 })
+        // The reply had already ended when the interrupt was sent; the query closes with the interrupt unanswered.
+        yield reply
+        closed(new Error('Query closed before response received'))
+        await later(20)
+      },
+      answersTheSteer
+    ])
+    expect(await turn.run()).toBe('The reply.\n\ndone')
+    expect(turn.queries).toHaveLength(2)
+    expect(turn.prompts[1]!.message.content).toBe('use the other file')
+    expect(turn.steer.onSteer).toHaveBeenCalledExactlyOnceWith('use the other file', 'drain-1')
+    expect(turn.steer.returnSteer).not.toHaveBeenCalled()
+  })
+
+  it('an interrupt that fails while the query still runs lets it finish, then the steer is answered', async () => {
+    const turn = botTurn([
+      async function* (_prompt, query) {
+        query.interrupt.mockRejectedValue(new Error('ProcessTransport is not ready for writing'))
+        yield init
+        await vi.waitFor(() => expect(query.interrupt).toHaveBeenCalled(), { timeout: 2_000, interval: 10 })
+        await later(20)
+        yield reply
+      },
+      answersTheSteer
+    ])
+    expect(await turn.run()).toBe('The reply.\n\ndone')
+    expect(turn.queries).toHaveLength(2)
+    expect(turn.steer.onSteer).toHaveBeenCalledExactlyOnceWith('use the other file', 'drain-1')
+    expect(turn.steer.returnSteer).not.toHaveBeenCalled()
   })
 })
