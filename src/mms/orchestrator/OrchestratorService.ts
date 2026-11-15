@@ -1839,8 +1839,16 @@ export class OrchestratorService extends EventEmitter {
     loadedThreadIds: () => this.sessions.keys(),
     holdReason: (threadId) => this.releaseHoldReason(threadId),
     releaseIfIdle: (threadId) => this.releaseIfIdle(threadId),
-    releaseIdleData: (idleMs, now) => { this.threadStore?.releaseIdleThreadData(idleMs, now) }
+    releaseIdleData: (idleMs, now) => { this.threadStore?.releaseIdleThreadData(idleMs, now) },
+    releaseIdleRuntimes: (idleMs, now) => { this.runtimeManager?.releaseIdleRuntimes(idleMs, now, (threadId) => this.runtimeKeepReason(threadId)) }
   })
+
+  /** What the orchestrator alone knows keeps a thread's runtime: a window shows it, or a reload is reading it. */
+  private runtimeKeepReason(threadId: string): string | undefined {
+    if (this.residency.isViewed(threadId)) return 'shown in a window'
+    if (this.residency.isWarming(threadId)) return 'reloading'
+    return undefined
+  }
 
   /** How many threads have a session in memory (the memory monitor's count). */
   loadedSessionCount(): number {
@@ -4968,6 +4976,8 @@ export class OrchestratorService extends EventEmitter {
       await this.stopThread(threadId, 'settled').catch((error: unknown) => {
         console.warn('settling a thread could not stop its work', { threadId, error: error instanceof Error ? error.message : String(error) })
       })
+      // An archived thread's runtime goes now when nothing holds it; otherwise the idle sweep drops it once free.
+      this.runtimeManager?.releaseRuntime(threadId, (id) => this.runtimeKeepReason(id))
     }
     return thread
   }
@@ -8219,6 +8229,7 @@ export class OrchestratorService extends EventEmitter {
     manager: import('../runtime/ThreadRuntimeManager').ThreadRuntimeManager | null
   ): void {
     this.runtimeManager = manager
+    manager?.setClock(() => this.residency.now())
   }
 
   /** Public access to session agents for a thread (hydrates via runtime manager when present). */
