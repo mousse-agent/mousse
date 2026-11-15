@@ -1,7 +1,6 @@
 /**
  * `schedule_list`, `schedule_create`, `schedule_update`, `schedule_pause` and `schedule_run` through the registry's
- * central check (docs/run-engine/SPEC.md §15.1), over a real scheduled-job store: the `manage` agent access level and
- * the `scheduled.agentJobs` setting, that only a turn a person started may create or start jobs, that an agent sees and
+ * central check (docs/run-engine/SPEC.md §15.1), over a real scheduled-job store: the `scheduled.agentJobs` setting, that only a turn a person started may create or start jobs, that an agent sees and
  * changes only the jobs its own thread made, what a job records of its creator, that an agent can never raise a job's
  * limits, the total cap, the lifetime and the cadence floor, Run now's refusals, and that every change is recorded.
  */
@@ -14,7 +13,6 @@ import { McpToolError, type AgentScheduleHost, type McpCallRequest } from '../..
 import { AGENT_JOB_LIMIT_DEFAULTS } from '../../src/mms/scheduled/agentJobLimits'
 import { ScheduledJobStore } from '../../src/mms/scheduled/ScheduledJobStore'
 import type { PermissionMode } from '../../src/shared/permissionMode'
-import type { AgentAccessLevel, AgentAccessSettings } from '../../src/shared/settings'
 import type { ScheduledJob, Thread } from '../../src/shared/types'
 import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
@@ -22,7 +20,6 @@ import { delegationFixture, type DelegationFixture } from './delegationFixture'
 const NOW = '2026-10-27T00:00:00.000Z'
 const DAY = 24 * 60 * 60 * 1000
 const thread = (id: string, patch: Partial<Thread> = {}): Thread => ({ id, name: `Thread ${id}`, createdAt: NOW, updatedAt: NOW, startedAt: NOW, projectId: 'p1', ...patch }) as Thread
-const profile = (patch: Partial<AgentAccessSettings> = {}): AgentAccessSettings => ({ level: 'manage', projectIds: [], answerApprovals: false, ...patch })
 const TOOLS = ['schedule_create', 'schedule_list', 'schedule_pause', 'schedule_run', 'schedule_update']
 /** What the profile allows until a person changes it. */
 const { maxActive: MAX_ACTIVE, minIntervalMinutes: MIN_INTERVAL, lifetimeDays: LIFETIME_DAYS } = AGENT_JOB_LIMIT_DEFAULTS
@@ -42,10 +39,10 @@ describe('the schedule tools (SPEC §15.1)', () => {
   })
 
   /**
-   * `caller` holds a live run in project p1. `state` is what the profile says now (setting, limits, whether a person
+   * `caller` holds a live run in project p1. `state` is what the profile says now (limits, whether a person
    * started the run): read at every call. The jobs live in a real store, so what a call changes is what a reload would find.
    */
-  const world = async (initial: Partial<AgentAccessSettings> = {}) => {
+  const world = async () => {
     fx = delegationFixture()
     home = mkdtempSync(join(tmpdir(), 'mousse-schedule-tools-'))
     previousHome = process.env.MOUSSE_HOME
@@ -53,12 +50,11 @@ describe('the schedule tools (SPEC §15.1)', () => {
     const callerRun = await fx.runningRun('caller')
     const jobs = new ScheduledJobStore(MousseConfigStore.load(home))
     const state = {
-      profile: profile(initial),
       /** Whether the person allowed the caller's thread (Allow on its first ask); read at every call. */
       allowed: true,
       /** Whether a person started the calling run (`startedByPerson`); the real rule is tested against a daemon. */
       person: true,
-      limits: { accessCap: 'manage' as AgentAccessLevel, permissionCeiling: 'full' as PermissionMode },
+      limits: { permissionCeiling: 'full' as PermissionMode },
       /** The limits on agent jobs a person set (`scheduled.agentJob*`): read at every call. */
       jobLimits: { ...AGENT_JOB_LIMIT_DEFAULTS }
     }
@@ -87,7 +83,6 @@ describe('the schedule tools (SPEC §15.1)', () => {
     } satisfies AgentScheduleHost
     const recordAgentAction = vi.fn()
     const fake = fakeAppToolHost({
-      agentAccess: () => state.profile,
       threadMeta: (id) => threads.get(id),
       botRole: (id) => (botThreads.has(id) ? 'activation' : undefined),
       readOnlyThread: (id) => readOnly.has(id),
@@ -96,14 +91,14 @@ describe('the schedule tools (SPEC §15.1)', () => {
     })
     const { registry, turns, request } = appToolRegistry(fx.engine, fake.host)
     turns.register(appTurn({ threadId: 'caller', runId: callerRun.runId }))
-    const as = (granted: AgentAccessLevel, extra: Partial<Parameters<typeof request>[0]> = {}): McpCallRequest =>
-      request({ threadId: 'caller', runId: callerRun.runId, accessLevel: granted, ...extra })
-    const call = (name: string, args: Record<string, unknown> = {}, granted: AgentAccessLevel = 'manage', extra: Partial<Parameters<typeof request>[0]> = {}) =>
-      registry.call(name, args, as(granted, extra))
+    const as = (extra: Partial<Parameters<typeof request>[0]> = {}): McpCallRequest =>
+      request({ threadId: 'caller', runId: callerRun.runId, ...extra })
+    const call = (name: string, args: Record<string, unknown> = {}, extra: Partial<Parameters<typeof request>[0]> = {}) =>
+      registry.call(name, args, as(extra))
     const denied = (promise: Promise<unknown>) => promise.then(() => undefined, (error: McpToolError) => error)
     const result = async (promise: Promise<{ text: string }>) => JSON.parse((await promise).text)
     /** A job made by a call of `caller`, as stored. */
-    const create = async (extra: Record<string, unknown> = {}, granted: AgentAccessLevel = 'manage') => (await result(call('schedule_create', { ...CREATE, ...extra }, granted))).job as { id: string }
+    const create = async (extra: Record<string, unknown> = {}) => (await result(call('schedule_create', { ...CREATE, ...extra }))).job as { id: string }
     const stored = (id: string): ScheduledJob => jobs.getJob(id)!
     /** A job a person made (no creator). */
     const personJob = (extra: Partial<Parameters<ScheduledJobStore['createJob']>[0]> = {}) => jobs.createJob({ name: 'By a person', prompt: 'Do it', schedule: { kind: 'manual' }, ...extra })
@@ -113,26 +108,7 @@ describe('the schedule tools (SPEC §15.1)', () => {
     return { fx, jobs, state, threads, botThreads, readOnly, schedules, woke, recordAgentAction, registry, request, turns, callerRun, call, as, denied, result, create, stored, personJob, otherJob, ...fake }
   }
 
-  describe('the access level and the first ask', () => {
-    it.each(['lineage', 'read'] as const)('a credential granted %s is refused all five tools before anything runs', async (level) => {
-      const { call, denied, schedules, jobs } = await world()
-      for (const name of TOOLS) {
-        const error = await denied(call(name, { ...CREATE, jobId: 'x' }, level))
-        expect(error, name).toBeInstanceOf(McpToolError)
-        expect(error!.code, name).toBe('mousse_scope_denied')
-        expect(error!.message, name).toMatch(new RegExp(`needs the "manage" agent access level \\(yours is "${level}"\\)`))
-      }
-      expect(schedules.create).not.toHaveBeenCalled()
-      expect(jobs.listJobs()).toEqual([])
-    })
-
-    it('a manage credential under a profile that was lowered is refused at once', async () => {
-      const { call, denied, state, create } = await world()
-      await create()
-      state.profile = profile({ level: 'read' })
-      for (const name of TOOLS) expect((await denied(call(name, { ...CREATE, jobId: 'x' })))!.code, name).toBe('mousse_scope_denied')
-    })
-
+  describe('the first ask and the listing', () => {
     it('the first job a thread asks for is an ask the person answers: nothing is made, and the agent is told it waits', async () => {
       const { call, state, jobs, schedules } = await world()
       state.allowed = false
@@ -148,19 +124,16 @@ describe('the schedule tools (SPEC §15.1)', () => {
       expect(JSON.parse((await call('schedule_create', { ...CREATE, clientRequestId: 'second' })).text).job).toMatchObject({ name: CREATE.name })
     })
 
-    it('lists the five tools for a manage credential, and none below manage', async () => {
+    it('lists the five tools for a host that has scheduled jobs', async () => {
       const { registry } = await world()
-      const names = (granted: AgentAccessLevel) => registry.listForThread('caller', 'default', granted).map((tool) => tool.name).filter((name) => name.startsWith('schedule_')).sort()
-      expect(names('manage')).toEqual(TOOLS)
-      expect(names('read')).toEqual([])
-      expect(names('lineage')).toEqual([])
+      expect(registry.listForThread('caller', 'default').map((tool) => tool.name).filter((name) => name.startsWith('schedule_')).sort()).toEqual(TOOLS)
     })
 
     it('the tools are only for a host that has scheduled jobs', async () => {
       fx = delegationFixture()
       const { registry } = appToolRegistry(fx.engine, fakeAppToolHost().host)
       // Registered, so a host that gets its jobs later lists them then; until it does, none is listed.
-      expect(registry.listFor({ readOnly: false, modeCeiling: 'default', accessLevel: 'manage' }).filter((tool) => tool.name.startsWith('schedule_'))).toEqual([])
+      expect(registry.listFor({ readOnly: false, modeCeiling: 'default' }).filter((tool) => tool.name.startsWith('schedule_'))).toEqual([])
     })
   })
 
@@ -244,7 +217,7 @@ describe('the schedule tools (SPEC §15.1)', () => {
   describe('schedule_create', () => {
     it('makes a job in the caller\'s project and records who made it, labelled as an agent\'s', async () => {
       const { call, result, schedules, stored, callerRun } = await world()
-      const { job } = await result(call('schedule_create', { ...CREATE, mode: 'plan' }, 'manage', { toolCallId: 'mcp:c1' }))
+      const { job } = await result(call('schedule_create', { ...CREATE, mode: 'plan' }, { toolCallId: 'mcp:c1' }))
       expect(job).toMatchObject({ name: 'Nightly report', prompt: 'Write the nightly report', schedule: { kind: 'interval', minutes: 30 }, projectId: 'p1', threadId: null, mode: 'plan', createdByAgent: true, createdByYou: true })
       expect(stored(job.id)).toMatchObject({
         projectId: 'p1',
@@ -257,18 +230,18 @@ describe('the schedule tools (SPEC §15.1)', () => {
 
     it('records the caller\'s limits on the job, asking the owner who is calling', async () => {
       const { call, result, schedules, stored, state, callerRun } = await world()
-      state.limits = { accessCap: 'read', permissionCeiling: 'accept_edits' }
-      const { job } = await result(call('schedule_create', CREATE, 'manage'))
-      expect(schedules.limits).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'caller', runId: callerRun.runId, accessLevel: 'manage' }))
-      expect(stored(job.id)).toMatchObject({ accessCap: 'read', permissionCeiling: 'accept_edits' })
-      expect(job).toMatchObject({ accessCap: 'read', permissionCeiling: 'accept_edits' })
+      state.limits = { permissionCeiling: 'accept_edits' }
+      const { job } = await result(call('schedule_create', CREATE))
+      expect(schedules.limits).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'caller', runId: callerRun.runId }))
+      expect(stored(job.id)).toMatchObject({ permissionCeiling: 'accept_edits' })
+      expect(job).toMatchObject({ permissionCeiling: 'accept_edits' })
     })
 
     it('survives a reload with its creator, key, limits and end', async () => {
       const { create, stored, callerRun } = await world()
       const job = await create()
       const reloaded = new ScheduledJobStore(MousseConfigStore.load(home!))
-      expect(reloaded.getJob(job.id)).toMatchObject({ createdBy: { threadId: 'caller', runId: callerRun.runId }, accessCap: 'manage', permissionCeiling: 'full', expiresAt: stored(job.id).expiresAt })
+      expect(reloaded.getJob(job.id)).toMatchObject({ createdBy: { threadId: 'caller', runId: callerRun.runId }, permissionCeiling: 'full', expiresAt: stored(job.id).expiresAt })
       expect(stored(job.id).createdBy?.requestId).toMatch(/^schedule_create:caller:/)
     })
 
@@ -356,8 +329,8 @@ describe('the schedule tools (SPEC §15.1)', () => {
 
     it('a plan ceiling makes plan jobs only, and defaults to plan', async () => {
       const { call, denied, result, stored } = await world()
-      expect((await denied(call('schedule_create', { ...CREATE, mode: 'agent' }, 'manage', { modeCeiling: 'plan' })))!.code).toBe('mousse_ceiling_exceeded')
-      const { job } = await result(call('schedule_create', CREATE, 'manage', { modeCeiling: 'plan' }))
+      expect((await denied(call('schedule_create', { ...CREATE, mode: 'agent' }, { modeCeiling: 'plan' })))!.code).toBe('mousse_ceiling_exceeded')
+      const { job } = await result(call('schedule_create', CREATE, { modeCeiling: 'plan' }))
       expect(stored(job.id).mode).toBe('plan')
     })
 
@@ -449,7 +422,7 @@ describe('the schedule tools (SPEC §15.1)', () => {
   })
 
   describe('the limits are settings a person changes', () => {
-    const toolOf = (registry: Awaited<ReturnType<typeof world>>['registry'], name: string) => registry.listForThread('caller', 'default', 'manage').find((tool) => tool.name === name)!
+    const toolOf = (registry: Awaited<ReturnType<typeof world>>['registry'], name: string) => registry.listForThread('caller', 'default').find((tool) => tool.name === name)!
     const scheduleOf = (tool: { inputSchema: unknown }) => (tool.inputSchema as { properties: { schedule: { properties: { minutes: { minimum: number } }; description: string } } }).properties.schedule
 
     it('enforces a changed number of active jobs at the next create, without a restart', async () => {
@@ -538,15 +511,13 @@ describe('the schedule tools (SPEC §15.1)', () => {
   })
 
   describe('an agent sees and changes only the jobs its own thread made', () => {
-    it('lists them and no others: not a person\'s, not another thread\'s, whatever the project list says', async () => {
-      const { call, result, personJob, otherJob, create, state } = await world({ projectIds: [] })
+    it('lists them and no others: not a person\'s, not another thread\'s', async () => {
+      const { call, result, personJob, otherJob, create } = await world()
       const mine = await create()
       personJob({ name: 'In p1', projectId: 'p1' })
       personJob({ name: 'Nowhere' })
       otherJob({ name: 'Other agent, p1', projectId: 'p1' })
       const ids = async () => (await result(call('schedule_list'))).jobs.map((job: { id: string }) => job.id)
-      expect(await ids()).toEqual([mine.id])
-      state.profile = profile({ projectIds: ['p1'] })
       expect(await ids()).toEqual([mine.id])
     })
 
@@ -568,7 +539,7 @@ describe('the schedule tools (SPEC §15.1)', () => {
       ['schedule_pause', {}],
       ['schedule_run', {}]
     ])('%s of a person\'s job is refused the same way as one that does not exist, and changes nothing', async (name, args) => {
-      const { call, denied, personJob, schedules, stored } = await world({ projectIds: [] })
+      const { call, denied, personJob, schedules, stored } = await world()
       const theirs = personJob({ name: 'In p1', projectId: 'p1' })
       const before = stored(theirs.id)
       const real = await denied(call(name, { jobId: theirs.id, ...args }))
@@ -596,20 +567,12 @@ describe('the schedule tools (SPEC §15.1)', () => {
       expect(stored(hooked.id).trigger).toBeDefined()
     })
 
-    it('a job its own thread made stays its own after the project list changes', async () => {
-      const { call, create, state, result } = await world()
-      const mine = await create()
-      state.profile = profile({ projectIds: ['p2'] })
-      expect((await result(call('schedule_list'))).jobs.map((job: { id: string }) => job.id)).toEqual([mine.id])
-      expect((await call('schedule_pause', { jobId: mine.id })).isError).toBeUndefined()
-    })
-
     it('another thread made job under the same caller project is not reachable by a different thread of the same person', async () => {
       const { create, registry, request, turns, fx: f, denied } = await world()
       const job = await create()
       const second = await f.runningRun('second')
       turns.register(appTurn({ threadId: 'second', runId: second.runId }))
-      const as = request({ threadId: 'second', runId: second.runId, accessLevel: 'manage' })
+      const as = request({ threadId: 'second', runId: second.runId })
       expect((await denied(registry.call('schedule_pause', { jobId: job.id }, as)))!.code).toBe('mousse_scope_denied')
       expect(JSON.parse((await registry.call('schedule_list', {}, as)).text).jobs).toEqual([])
     })
@@ -619,7 +582,7 @@ describe('the schedule tools (SPEC §15.1)', () => {
     it('records a creation, a change, a pause and a run as agent actions on the caller\'s thread, with the call as the actor', async () => {
       const { call, create, recordAgentAction, callerRun } = await world()
       const job = await create({ schedule: { kind: 'manual' } })
-      await call('schedule_update', { jobId: job.id, prompt: 'Better' }, 'manage', { toolCallId: 'mcp:u1' })
+      await call('schedule_update', { jobId: job.id, prompt: 'Better' }, { toolCallId: 'mcp:u1' })
       await call('schedule_run', { jobId: job.id })
       await call('schedule_pause', { jobId: job.id })
       expect(recordAgentAction.mock.calls.map((entry) => entry[2])).toEqual(['scheduled_job_created', 'scheduled_job_updated', 'scheduled_job_run', 'scheduled_job_paused'])
@@ -719,11 +682,11 @@ describe('the schedule tools (SPEC §15.1)', () => {
       const { call, create, denied, stored } = await world()
       const planJob = await create({ mode: 'plan' })
       const agentJob = await create({ name: 'Agent mode' })
-      expect((await denied(call('schedule_update', { jobId: agentJob.id, name: 'x' }, 'manage', { modeCeiling: 'plan' })))!.code).toBe('mousse_ceiling_exceeded')
-      expect((await denied(call('schedule_run', { jobId: agentJob.id }, 'manage', { modeCeiling: 'plan' })))!.code).toBe('mousse_ceiling_exceeded')
-      expect((await denied(call('schedule_update', { jobId: planJob.id, mode: 'agent' }, 'manage', { modeCeiling: 'plan' })))!.code).toBe('mousse_ceiling_exceeded')
-      expect((await denied(call('schedule_update', { jobId: planJob.id, mode: null }, 'manage', { modeCeiling: 'plan' })))!.code).toBe('mousse_ceiling_exceeded')
-      expect((await call('schedule_update', { jobId: planJob.id, prompt: 'still planning' }, 'manage', { modeCeiling: 'plan' })).isError).toBeUndefined()
+      expect((await denied(call('schedule_update', { jobId: agentJob.id, name: 'x' }, { modeCeiling: 'plan' })))!.code).toBe('mousse_ceiling_exceeded')
+      expect((await denied(call('schedule_run', { jobId: agentJob.id }, { modeCeiling: 'plan' })))!.code).toBe('mousse_ceiling_exceeded')
+      expect((await denied(call('schedule_update', { jobId: planJob.id, mode: 'agent' }, { modeCeiling: 'plan' })))!.code).toBe('mousse_ceiling_exceeded')
+      expect((await denied(call('schedule_update', { jobId: planJob.id, mode: null }, { modeCeiling: 'plan' })))!.code).toBe('mousse_ceiling_exceeded')
+      expect((await call('schedule_update', { jobId: planJob.id, prompt: 'still planning' }, { modeCeiling: 'plan' })).isError).toBeUndefined()
       expect(stored(planJob.id).mode).toBe('plan')
     })
 
@@ -741,40 +704,40 @@ describe('the schedule tools (SPEC §15.1)', () => {
   describe('an agent can never raise a job\'s limits', () => {
     it('keeps the narrower limits of a job when a wider caller changes what it does', async () => {
       const { call, create, state, stored } = await world()
-      state.limits = { accessCap: 'lineage', permissionCeiling: 'ask' }
+      state.limits = { permissionCeiling: 'ask' }
       const job = await create()
-      state.limits = { accessCap: 'manage', permissionCeiling: 'full' }
+      state.limits = { permissionCeiling: 'full' }
       await call('schedule_update', { jobId: job.id, prompt: 'Do something else' })
-      expect(stored(job.id)).toMatchObject({ accessCap: 'lineage', permissionCeiling: 'ask' })
+      expect(stored(job.id)).toMatchObject({ permissionCeiling: 'ask' })
     })
 
     it('brings the limits of a job down to a narrower caller', async () => {
       const { call, create, state, stored } = await world()
       const job = await create()
-      expect(stored(job.id)).toMatchObject({ accessCap: 'manage', permissionCeiling: 'full' })
-      state.limits = { accessCap: 'read', permissionCeiling: 'accept_edits' }
+      expect(stored(job.id)).toMatchObject({ permissionCeiling: 'full' })
+      state.limits = { permissionCeiling: 'accept_edits' }
       await call('schedule_update', { jobId: job.id, schedule: { kind: 'interval', minutes: 60 } })
-      expect(stored(job.id)).toMatchObject({ accessCap: 'read', permissionCeiling: 'accept_edits' })
-      state.limits = { accessCap: 'manage', permissionCeiling: 'full' }
+      expect(stored(job.id)).toMatchObject({ permissionCeiling: 'accept_edits' })
+      state.limits = { permissionCeiling: 'full' }
       await call('schedule_update', { jobId: job.id, prompt: 'again' })
-      expect(stored(job.id)).toMatchObject({ accessCap: 'read', permissionCeiling: 'accept_edits' })
+      expect(stored(job.id)).toMatchObject({ permissionCeiling: 'accept_edits' })
     })
 
     it('clearing a restrictive setting keeps the ceiling', async () => {
       const { call, create, state, stored } = await world()
-      state.limits = { accessCap: 'read', permissionCeiling: 'ask' }
+      state.limits = { permissionCeiling: 'ask' }
       const job = await create({ mode: 'plan' })
-      state.limits = { accessCap: 'manage', permissionCeiling: 'full' }
+      state.limits = { permissionCeiling: 'full' }
       await call('schedule_update', { jobId: job.id, mode: null })
-      expect(stored(job.id)).toMatchObject({ accessCap: 'read', permissionCeiling: 'ask' })
+      expect(stored(job.id)).toMatchObject({ permissionCeiling: 'ask' })
     })
 
     it('a change of the name alone leaves the limits as they were', async () => {
       const { call, create, state, stored } = await world()
       const job = await create()
-      state.limits = { accessCap: 'lineage', permissionCeiling: 'ask' }
+      state.limits = { permissionCeiling: 'ask' }
       await call('schedule_update', { jobId: job.id, name: 'Renamed' })
-      expect(stored(job.id)).toMatchObject({ name: 'Renamed', accessCap: 'manage', permissionCeiling: 'full' })
+      expect(stored(job.id)).toMatchObject({ name: 'Renamed', permissionCeiling: 'full' })
     })
   })
 
@@ -859,12 +822,6 @@ describe('the schedule tools (SPEC §15.1)', () => {
       expect(woke).not.toHaveBeenCalled()
     })
 
-    it('needs the manage level', async () => {
-      const { call, create, denied, schedules } = await world()
-      const job = await create({ schedule: { kind: 'manual' } })
-      expect((await denied(call('schedule_run', { jobId: job.id }, 'read')))!.code).toBe('mousse_scope_denied')
-      expect(schedules.trigger).not.toHaveBeenCalled()
-    })
   })
 
   describe('the central check', () => {

@@ -902,27 +902,23 @@ describe('a usage limit pauses the run', () => {
   })
 
   describe('the continuation', () => {
-    it('keeps the grant and the mode of the run it continues, whatever the settings say by then', async () => {
+    it('keeps the mode of the run it continues, whatever the thread is set to by then', async () => {
       const pi = scripted([{ fail: () => limit({ ms: 60_000 }) }])
       const d = boot(newHome(), [pi], { runs: { resumeAfterUsageLimit: false } })
-      d.settings.agentAccess = { level: 'lineage', projectIds: [], answerApprovals: false }
       const thread = d.store.createThread('Planning')
       d.orch.setThreadModelOverride(thread.id, PI)
       d.orch.setThreadPermissionMode(thread.id, 'ask')
       const first = await d.orch.send({ content: 'Plan it', mode: 'plan' }, false, { threadId: thread.id, clientRequestId: 'plan-1' })
       const pausedRun = d.engine.getRun(first.runId!)!
       expect(pausedRun.status).toBe('paused')
-      expect(pausedRun.accessGrant).toBe('lineage')
       const mode = d.orch.runPermissionMode(pausedRun.runId)
 
-      // The profile is loosened while the run waits.
-      d.settings.agentAccess = { level: 'manage', projectIds: [], answerApprovals: false }
+      // The thread is loosened while the run waits.
       d.orch.setThreadPermissionMode(thread.id, 'full')
       await d.orch.resumePausedRun(pausedRun.runId)
       await waitFor(() => runsOf(d, thread.id).length === 2 && settled(d, thread.id), 'the continuation to finish')
 
       const continued = runsOf(d, thread.id)[1]
-      expect(continued.accessGrant).toBe('lineage')
       const [start] = effectsOf(d, continued.runId, 'turn.start')
       expect(start.payload).toMatchObject({ input: { mode: 'plan' }, permissionMode: mode })
       expect(d.orch.runPermissionMode(continued.runId)).toBe(mode)
@@ -934,11 +930,9 @@ describe('a usage limit pauses the run', () => {
       const thread = d.store.createThread('Timer')
       d.orch.setThreadModelOverride(thread.id, PI)
       const first = await d.orch.send({ content: 'Plan it', mode: 'plan' }, false, { threadId: thread.id, clientRequestId: 'plan-1' })
-      d.settings.agentAccess = { level: 'manage', projectIds: [], answerApprovals: false }
       await waitFor(() => runsOf(d, thread.id).length === 2 && settled(d, thread.id), 'the continuation to finish')
       const continued = runsOf(d, thread.id)[1]
       expect(continued).toMatchObject({ source: 'resume', outcome: { continuationOf: first.runId } })
-      expect(continued.accessGrant).toBe('lineage')
       expect(effectsOf(d, continued.runId, 'turn.start')[0].payload).toMatchObject({ input: { mode: 'plan' } })
     })
   })

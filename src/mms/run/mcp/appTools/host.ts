@@ -2,7 +2,6 @@ import type { BrowserRuntimePort } from '../../../../shared/browser/runtime'
 import type { AgentJobLimits } from '../../../../shared/agentJobLimits'
 import type { PermissionMode } from '../../../../shared/permissionMode'
 import type { ModelOverride } from '../../../../shared/providerInstances'
-import type { AgentAccessLevel, AgentAccessSettings } from '../../../../shared/settings'
 import type { ApprovalTag } from '../../../orchestrator/UserQuestionService'
 import type { ChatMessage, CreateScheduledJobInput, PendingUserQuestions, QueuedMessage, ScheduledJob, Thread, UserQuestion, UserQuestionAnswers } from '../../../../shared/types'
 import type { ScheduledJobOptionsInput } from '../../../scheduled/validateJobOptions'
@@ -198,11 +197,10 @@ export interface AgentScheduleHost {
    */
   startedByPerson(caller: { threadId: string; runId: string }): boolean
   /**
-   * What a job created or changed by this caller may be granted: the access level its run holds (narrowed by the profile
-   * now) and the permission mode its run is bound to. The narrowest of both when the run is not a person's turn, which
-   * the tools refuse before they ask.
+   * What a job created or changed by this caller may run in: the permission mode its run is bound to, the narrowest
+   * when the run is not a person's turn, which the tools refuse before they ask.
    */
-  limits(caller: { threadId: string; runId: string; accessLevel: AgentAccessLevel }): { accessCap: AgentAccessLevel; permissionCeiling: PermissionMode }
+  limits(caller: { threadId: string; runId: string }): { permissionCeiling: PermissionMode }
   create(input: CreateScheduledJobInput): ScheduledJob
   update(id: string, patch: Partial<ScheduledJob>): ScheduledJob | null
   pause(id: string, reason?: string): ScheduledJob | null
@@ -253,10 +251,8 @@ export interface AppToolHost extends DelegationToolsHost {
   permissionModeFor?(runId: string): PermissionMode | undefined
   /** Asks the thread's user to approve a call (an approval request: see `ApprovalTag`). */
   askApproval?(threadId: string, questions: PendingUserQuestions['questions'], options: { signal: AbortSignal; approval: ApprovalTag }): Promise<UserQuestionAnswers>
-  // Agent access (SPEC §15.1). Optional like the methods above: a tool whose method is absent answers
-  // "not available in this host", and a host without `agentAccess` grants no one more than `lineage`.
-  /** The profile's agent access setting as it is now. */
-  agentAccess?(): AgentAccessSettings
+  // Other threads (SPEC §15.1). Optional like the methods above: a tool whose method is absent answers
+  // "not available in this host".
   /** The thread's metadata, or undefined when it does not exist. */
   threadMeta?(threadId: string): Thread | undefined
   /** Every thread of the profile, subagents included, unfiltered. */
@@ -302,10 +298,9 @@ export interface AppToolHost extends DelegationToolsHost {
    * asked for or the caller's, with a permission mode no wider than the caller's, recorded as launched by the
    * caller's thread (never nested under it), and optionally with a first message sent as the caller's. The
    * creation is decided and recorded before anything exists, so a retry with the same `clientRequestId` finishes
-   * or returns that one thread, whatever the caller's run or the settings look like by then. `accessLevel` is
-   * the level the caller's credential was granted.
+   * or returns that one thread, whatever the caller's run or the settings look like by then.
    */
-  createThread?(input: AgentThreadRequest, options: { clientRequestId: string; actor: AgentActor; accessLevel: AgentAccessLevel }): Promise<AgentCreatedThread>
+  createThread?(input: AgentThreadRequest, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentCreatedThread>
   /**
    * The key has a stored creation already: a retry finishes that one thread (or its first message) and does not use up a place
    * under the caller's cap on new threads.
@@ -321,10 +316,9 @@ export interface AppToolHost extends DelegationToolsHost {
   /**
    * One agent command on a thread's queue (`queue_enqueue`, `queue_edit`, `queue_remove`, `queue_reorder`,
    * `queue_promote_to_steer`). `options.clientRequestId` is the full request key: a retry returns the first
-   * result. `options.level` is the caller's effective agent access level (it decides who may edit a message a
-   * person queued). Throws a `QueueConflictError` when the queue is not as the caller expects.
+   * result. Throws a `QueueConflictError` when the queue is not as the caller expects.
    */
-  queueCommand?(threadId: string, command: AgentQueueCommand, options: { clientRequestId: string; actor: AgentActor; level: AgentAccessLevel }): AgentQueueResult
+  queueCommand?(threadId: string, command: AgentQueueCommand, options: { clientRequestId: string; actor: AgentActor }): AgentQueueResult
   /** Stops run `runId` of another thread and what is below it, as `actor`'s Stop (`thread_interrupt`). */
   stopRun?(threadId: string, runId: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult>
   /** Archives (`archived`) or unarchives another thread through the app's own Archive, as a personal bot's call (`thread_archive`). */
@@ -344,8 +338,7 @@ export interface AppToolHost extends DelegationToolsHost {
   /**
    * Answers an approval of another thread as `actor` (`approval_respond`) through the one settlement the app,
    * the CLI and `answer_subagent` use: the rule `canAnswerApproval` decides, one answer wins and the loser learns
-   * who did. `accessLevel` is the level the caller's credential was granted; the host narrows it by the profile's
-   * setting and the thread's own cap as they are now and reads the profile's switch and project list there too.
+   * who did. The host reads the profile's switch "Agents may answer approvals on other threads" as it is now.
    * The call is recorded as a receipt under `clientRequestId` before it answers, so a retry is told from another
    * caller's answer. A winning answer is shown in the target thread's transcript ("Approved by an agent in thread …").
    */
@@ -353,6 +346,6 @@ export interface AppToolHost extends DelegationToolsHost {
     threadId: string,
     requestId: string,
     answers: UserQuestionAnswers,
-    options: { clientRequestId: string; actor: AgentActor; accessLevel: AgentAccessLevel }
+    options: { clientRequestId: string; actor: AgentActor }
   ): AgentApprovalResult
 }

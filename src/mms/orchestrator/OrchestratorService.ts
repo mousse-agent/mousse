@@ -18,8 +18,6 @@ import { getMousseHomeDir } from '../data/paths'
 import { tmpdir } from 'node:os'
 import { readFileSync } from 'node:fs'
 import {
-  isAgentAccessLevel,
-  narrowAgentAccess,
   normalizeAgentAccessSettings,
   normalizeContextSettings,
   normalizeExperimentalSettings,
@@ -69,7 +67,7 @@ import { modelChoiceOf } from '../../shared/modelChoice'
 import { EventEmitter } from 'events'
 import { nativeAgentAssistantMessage, nativeAgentHistory } from '../providers/nativeAgentHistory'
 import { v4 as uuidv4 } from 'uuid'
-import { narrowestAccess, TitleTakenRejection, type CommandResult, type RunEngine, type SendDelegation, type StopResult } from '../run/RunEngine'
+import { TitleTakenRejection, type CommandResult, type RunEngine, type SendDelegation, type StopResult } from '../run/RunEngine'
 import { isFencedSource, isPauseHeldSource, isResumeSource } from '../run/delegation/sources'
 import { deleteRunResults } from '../run/delegation/hold'
 import { decideUsageLimit, usageLimitOf, type UsageLimitDecision } from '../run/pausePolicy'
@@ -83,7 +81,7 @@ import { CommandRejection, RunStoreError } from '../run/db/RunStoreError'
 import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
 import { steerReleaseWindow, stopStrategy, type SteerDelivery } from '../run/CommandPolicy'
 import { agentMessageText, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentArchiveResult, type AgentCreatedThread, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
-import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, LAUNCHED_THREAD_ACCESS_CEILING, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
+import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
 import { botRequestPrefix, THREAD_CREATE_MAX_ACTIVE_PER_THREAD, THREAD_CREATE_MAX_PER_RUN, THREAD_SEND_MAX_PER_RUN } from '../run/mcp/appTools/thread'
 import { botMessageText } from '../run/mcp/appTools/agentMessage'
 
@@ -755,22 +753,6 @@ function agentOriginOf(agent: Pick<AgentOrigin, 'threadId' | 'runId' | 'hops'>):
 /** The longest removed message an `agent.action` event keeps whole. */
 const REMOVED_TEXT_MAX_CHARS = 8_000
 
-/**
- * Whether the new order puts any message ahead of one `own` does not count as the agent's that it was behind before: the
- * agent postpones that message by it.
- */
-function putsAheadOfOthers(items: QueuedMessage[], orderedIds: readonly string[], authored: (item: QueuedMessage) => boolean): boolean {
-  const pending = listPendingQueue(items).filter((item) => !item.internal)
-  const before = pending.map((item) => item.id)
-  for (const other of pending) {
-    if (authored(other)) continue
-    const wasAhead = new Set(before.slice(0, before.indexOf(other.id)))
-    const nowAhead = orderedIds.slice(0, orderedIds.indexOf(other.id))
-    if (nowAhead.some((id) => !wasAhead.has(id))) return true
-  }
-  return false
-}
-
 /** A standing rule as the windows show it, `active` when the thread's mode (`mode`) is not stricter than the one it was granted under. */
 function approvalRuleInfo(rule: ApprovalRule, mode: PermissionMode): ApprovalRuleInfo {
   return {
@@ -1428,10 +1410,9 @@ export class OrchestratorService extends EventEmitter {
       mcpTools
     }
     const projectPath = turn.projectPath
-    // A definition acts at `lineage`, as on the loop, whatever the profile's agent access level
-    // (SPEC §15.1); the grant is kept on the run.
+    // Every agent may read and manage every thread (SPEC §15.1); a definition is held to its own grants.
     const modeCeiling = this.modeCeilingFor(threadId, 'agent')
-    const accessLevel: AgentAccessLevel = 'lineage'
+    const accessLevel: AgentAccessLevel = 'manage'
     try {
       engine.recordAccessGrant(runId, accessLevel)
     } catch (error) {
@@ -3492,89 +3473,12 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * The agent access level granted to a run on `threadId` (SPEC §15.1), decided at turn start: the
-   * profile's level now, never above what its delegations gave it (the first and the last, as for the
-   * ceiling: a follow-up may narrow, never widen), and at most `read` under a `plan` ceiling. What a
-   * thread keeps whatever the profile says is `staticAccessCeiling`. Any failure to decide is `lineage`,
-   * as `modeCeilingFor` fails to `plan`.
+   * What a job created or changed by an agent's run may run in: the permission mode the run is bound to. A run that is
+   * not a person's turn (a remote turn, a bot, a scheduled run, a workflow or a definition) gets the narrowest, and so
+   * does any run whose origin cannot be read, so a job made by an unattended agent is never wider than that agent was.
    */
-  private grantFor(threadId: string, ceiling: ModeCeiling): AgentAccessLevel {
-    try {
-      return narrowAgentAccess(this.agentAccessSettings().level, this.staticAccessCeiling(threadId), ceiling === 'plan' ? 'read' : undefined) ?? 'lineage'
-    } catch {
-      return 'lineage'
-    }
-  }
-
-  /**
-   * The most an agent in `threadId` may be granted whatever the profile says (SPEC §15.1), or undefined
-   * when the thread has no limit of its own (a person's thread). It only narrows: the narrowest of
-   * - a bot thread: `lineage` (its turns act for a person outside Mousse, who must not reach the owner's
-   *   other threads through the setting; takes effect once the bot engine registers its threads);
-   * - a read-only subagent: `read`;
-   * - the thread's stored ceiling (`Thread.accessCeiling`: a fork's, and a thread a remote send drove);
-   * - every delegation that gave the thread work, not just the first and the latest, so a follow-up
-   *   never restores a level an earlier one narrowed (a row from before levels existed is `lineage`);
-   * - `lineage` for a fork or subagent that has no trustworthy grant (no stored ceiling, no delegation).
-   * Throws when it cannot be read; callers treat that as `lineage`.
-   */
-  private staticAccessCeiling(threadId: string): AgentAccessLevel | undefined {
-    if (this.botThreads?.roleOf(threadId)) return 'lineage'
-    const stored = this.threadStore?.getThread(threadId)?.accessCeiling
-    const tasks = this.runEngine?.delegations.listForChildThread(threadId) ?? []
-    const lineage = this.runEngine?.delegations.getLineage(threadId)
-    return narrowAgentAccess(
-      this.isReadOnlyChild(threadId) ? 'read' : undefined,
-      stored === undefined ? undefined : isAgentAccessLevel(stored) ? stored : 'lineage',
-      narrowestAccess(tasks),
-      lineage && !tasks.length && stored === undefined ? 'lineage' : undefined
-    )
-  }
-
-  /**
-   * A run that continues another (the resume after a usage-limit pause, whether the timer or a person
-   * made it, a "Continue" after a restart, or a turn a provider started itself) is never granted more
-   * than the run it continues, whatever the setting says now. The earlier run's grant is the one recorded
-   * when its turn started (`RunRecord.accessGrant`); one that was never recorded, or a continuation whose original cannot be read,
-   * is `lineage`.
-   */
-  private continuedGrant(runId: string, threadId: string, grant: AgentAccessLevel): AgentAccessLevel {
-    try {
-      const engine = this.runEngine
-      const run = engine?.getRun(runId)
-      if (!engine || !run) return grant
-      let earlier: RunRecord | null | undefined
-      if (run.outcome?.continuationOf) {
-        earlier = engine.getRun(run.outcome.continuationOf)
-        if (!earlier) return 'lineage'
-      } else if (run.source === 'provider-continuation') {
-        earlier = engine.listRuns(threadId).filter((candidate) => candidate.ordinal < run.ordinal).sort((a, b) => b.ordinal - a.ordinal)[0]
-      }
-      if (!earlier) return grant
-      const held = earlier.accessGrant
-      return narrowAgentAccess(grant, isAgentAccessLevel(held) ? held : 'lineage') ?? 'lineage'
-    } catch {
-      return 'lineage'
-    }
-  }
-
-  /** The access level a scheduled job's runs are capped at: its creator's, `lineage` when that is not known. */
-  private scheduledAccessCap(cap: AgentAccessLevel | undefined): AgentAccessLevel {
-    return isAgentAccessLevel(cap) ? cap : 'lineage'
-  }
-
-  /**
-   * What a job created or changed by an agent's run may be granted: the access level the run holds (its grant narrowed by
-   * the profile's setting now) and the permission mode it is bound to. A run that is not a person's turn (a remote turn,
-   * a bot, a scheduled run, a workflow or a definition) gets the narrowest of both, and so does any run whose
-   * origin cannot be read, so a job made by an unattended agent is never wider than that agent was.
-   */
-  private scheduledCreatorLimits(caller: { threadId: string; runId: string; accessLevel: AgentAccessLevel }): { accessCap: AgentAccessLevel; permissionCeiling: PermissionMode } {
-    const person = this.runStartedByPerson(caller)
-    return {
-      accessCap: person ? this.effectiveAccess(caller.accessLevel) : 'lineage',
-      permissionCeiling: person ? this.runPermissionMode(caller.runId) : 'ask'
-    }
+  private scheduledCreatorLimits(caller: { threadId: string; runId: string }): { permissionCeiling: PermissionMode } {
+    return { permissionCeiling: this.runStartedByPerson(caller) ? this.runPermissionMode(caller.runId) : 'ask' }
   }
 
   /**
@@ -3594,36 +3498,10 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
-  /**
-   * A scheduled run is never granted more than the cap recorded on it when it was admitted (the job
-   * creator's level), whatever the profile or its thread allow now. A scheduled run with none recorded
-   * is `lineage`; any other run is returned as it is.
-   */
-  private scheduledGrant(runId: string, grant: AgentAccessLevel): AgentAccessLevel {
-    try {
-      const run = this.runEngine?.getRun(runId)
-      if (run?.source !== 'schedule') return grant
-      return narrowAgentAccess(grant, isAgentAccessLevel(run.accessGrant) ? run.accessGrant : 'lineage') ?? 'lineage'
-    } catch {
-      return 'lineage'
-    }
-  }
-
   /** The delegation tools of an in-process turn, holding the grant its registered turn was given at its start. */
-  private turnDelegationTools(session: ThreadSession, runId: string, mode: ChatMode, granted: AgentAccessLevel | undefined): DelegationToolHost {
+  private turnDelegationTools(session: ThreadSession, runId: string, mode: ChatMode): DelegationToolHost {
     const ceiling = this.modeCeilingFor(session.threadId, mode)
-    return this.delegationTools(session, runId, ceiling, granted ?? 'lineage')
-  }
-
-  /** The caller's granted level narrowed by the profile's level now: what its tool calls and delegations may use. */
-  private effectiveAccess(granted: AgentAccessLevel): AgentAccessLevel {
-    try {
-      // An absent or unknown grant is the most restrictive level, never the profile's.
-      if (!isAgentAccessLevel(granted)) return 'lineage'
-      return narrowAgentAccess(granted, this.agentAccessSettings().level) ?? 'lineage'
-    } catch {
-      return 'lineage'
-    }
+    return this.delegationTools(session, runId, ceiling)
   }
 
   private agentAccessSettings() {
@@ -3646,10 +3524,8 @@ export class OrchestratorService extends EventEmitter {
   private registerAppTurn(session: ThreadSession, runId: string, mode: ChatMode, continuation: boolean, bot?: PreparedBotTurn): { turn: AppToolTurn; drop(): void } {
     const projectPath = bot ? undefined : session.projectCwd ?? undefined
     const modeCeiling = this.modeCeilingFor(session.threadId, mode)
-    // A bot is held to its grant, which never reaches other threads: it gets the narrowest access
-    // level whatever the profile's setting, and nothing continues a bot run as a plain turn.
-    const accessLevel: AgentAccessLevel = bot ? 'lineage' : this.scheduledGrant(runId, this.continuedGrant(runId, session.threadId, this.grantFor(session.threadId, modeCeiling)))
-    // Kept on the run, so whatever continues it is never granted more than it was.
+    // Every agent may read and manage every thread (SPEC §15.1); a bot is held to its own grant. Kept on the run.
+    const accessLevel: AgentAccessLevel = 'manage'
     try {
       this.runEngine?.recordAccessGrant(runId, accessLevel)
     } catch (error) {
@@ -3772,7 +3648,7 @@ export class OrchestratorService extends EventEmitter {
   /** The Mousse tools a thread's credential lists that the turn may use now. */
   private usableAppTools(turn: AppToolTurn): string[] {
     return this.mcpToolRegistry()
-      .listForThread(turn.threadId, 'default', turn.accessLevel, turn.runId)
+      .listForThread(turn.threadId, 'default', turn.runId)
       // A Plan turn cannot start threads; everything else listed is usable when available now.
       .filter((tool) => !(turn.modeCeiling === 'plan' && tool.access === 'startsThreads'))
       .filter((tool) => (tool.available?.(turn) ?? true) === true)
@@ -3861,7 +3737,7 @@ export class OrchestratorService extends EventEmitter {
         return scheduleHost()
       },
       delegation: (caller: McpCaller) =>
-        this.delegationTools(this.getOrCreateSession(caller.threadId), caller.runId, caller.modeCeiling, caller.accessLevel),
+        this.delegationTools(this.getOrCreateSession(caller.threadId), caller.runId, caller.modeCeiling),
       askUser: (threadId, questions, options) => this.questions.requestAnswers(questions, threadId, options),
       dismissQuestions: (threadId) => this.questions.dismissAllForThread(threadId),
       tasks: (threadId) => (threadId ? this.getTasksForThread(threadId) : null),
@@ -3884,7 +3760,6 @@ export class OrchestratorService extends EventEmitter {
       awaitLiveRun: (threadId) => this.continuationGate(threadId),
       permissionModeFor: (runId) => this.runPermissionMode(runId),
       askApproval: (threadId, questions, options) => this.questions.requestAnswers(questions, threadId, options),
-      agentAccess: () => this.agentAccessSettings(),
       // Settings → Labs → Profiler, read at every listing and call; the service's profiler is installation-wide.
       profiler: () => ({
         settings: this.settingsStore.get().experimental.profiler,
@@ -3929,9 +3804,8 @@ export class OrchestratorService extends EventEmitter {
    * `approval_respond`: an agent answers an approval of another thread (SPEC §17). It goes through the settlement every
    * client uses, so the rule `canAnswerApproval` decides (the agent's own permission mode bounds what it may approve,
    * "always" and its own thread are refused, a thread of its own lineage is only its direct subagents'), one answer wins
-   * and the loser is told who did. What the profile allows is read here, at the moment of the answer: the agent's
-   * granted level narrowed by the setting and by the thread's own cap, the switch for answering approvals, and the
-   * project list, so lowering any of them applies to a turn that is already running.
+   * and the loser is told who did. The profile's switch for answering approvals is read here, at the moment of the
+   * answer, so turning it off applies to a turn that is already running.
    *
    * The command key is saved as a receipt before the answer. A retry names the same request; the same key for another
    * request is a conflict. A retry that finds its own answer (same thread and tool call) is `replayed`, never a loss.
@@ -3940,7 +3814,7 @@ export class OrchestratorService extends EventEmitter {
     threadId: string,
     requestId: string,
     answers: UserQuestionAnswers,
-    options: { clientRequestId: string; actor: AgentActor; accessLevel: AgentAccessLevel }
+    options: { clientRequestId: string; actor: AgentActor }
   ): AgentApprovalResult {
     const engine = this.requireRunEngine()
     const request = this.questions.getRequest(requestId)
@@ -3960,13 +3834,6 @@ export class OrchestratorService extends EventEmitter {
     // answered or closed is settled below so the loser learns who won.
     const asking = engine.approvals.get(requestId)
     if (asking?.status === 'pending' && this.askedInPersonTurn(asking.runId)) return { ok: false, reason: 'person_turn' }
-    let level: AgentAccessLevel
-    try {
-      // The most the thread may have whatever the profile says (a bot or remote turn's thread is lineage) narrows what the credential was granted.
-      level = narrowAgentAccess(this.effectiveAccess(options.accessLevel), this.staticAccessCeiling(actor.threadId)) ?? 'lineage'
-    } catch {
-      level = 'lineage'
-    }
     const answerer: Answerer = {
       kind: 'agent',
       threadId: actor.threadId,
@@ -3975,16 +3842,7 @@ export class OrchestratorService extends EventEmitter {
       // The mode of the run, and of its thread now when that is stricter: a tighter mode applies to the next turn, but an
       // answer for another thread acts like a rule and stops at once, as a rule does.
       permissionMode: this.answeringMode(actor),
-      access: {
-        level,
-        answerApprovals: this.agentAccessSettings().answerApprovals,
-        projectAllowed: (id) => {
-          const projectIds = this.agentAccessSettings().projectIds
-          if (projectIds.length === 0) return true
-          const projectId = this.threadStore?.getThread(id)?.projectId
-          return projectId !== undefined && projectIds.includes(projectId)
-        }
-      }
+      access: { answerApprovals: this.agentAccessSettings().answerApprovals }
     }
     const settled = this.questions.settle(requestId, answers, answerer)
     if (settled.ok) {
@@ -4163,7 +4021,7 @@ export class OrchestratorService extends EventEmitter {
    */
   private createThreadAsAgent(
     input: AgentThreadRequest,
-    options: { clientRequestId: string; actor: AgentActor; accessLevel: AgentAccessLevel }
+    options: { clientRequestId: string; actor: AgentActor }
   ): Promise<AgentCreatedThread> {
     const key = options.clientRequestId
     const fingerprint = agentThreadFingerprint(input)
@@ -4186,7 +4044,7 @@ export class OrchestratorService extends EventEmitter {
   private async createThreadAsAgentOnce(
     input: AgentThreadRequest,
     fingerprint: string,
-    options: { clientRequestId: string; actor: AgentActor; accessLevel: AgentAccessLevel }
+    options: { clientRequestId: string; actor: AgentActor }
   ): Promise<AgentCreatedThread> {
     const engine = this.requireRunEngine()
     if (!this.threadStore || !this.projectManager) throw new Error('Creating threads needs the thread store and the project manager.')
@@ -4249,7 +4107,7 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /** `gitBacked`: {@link projectGitBacked} of the project, read by the caller before the receipt lookup. */
-  private planAgentThread(input: AgentThreadRequest, options: { actor: AgentActor; accessLevel: AgentAccessLevel; bot?: BotSender }, gitBacked: boolean): AgentThreadIntent {
+  private planAgentThread(input: AgentThreadRequest, options: { actor: AgentActor; bot?: BotSender }, gitBacked: boolean): AgentThreadIntent {
     const engine = this.requireRunEngine()
     const project = this.projectManager?.getProject(input.projectId)
     if (!project) throw new Error(`Project ${input.projectId} was not found.`)
@@ -4279,7 +4137,6 @@ export class OrchestratorService extends EventEmitter {
       modelOverride,
       // One a turn of another device's message starts is held to that device's limit.
       permissionMode: options.bot ? narrowPermissionMode('full', options.bot.limit) : narrowPermissionMode(profileMode, callerMode),
-      accessCeiling: narrowAgentAccess(this.effectiveAccess(options.accessLevel), LAUNCHED_THREAD_ACCESS_CEILING) ?? 'lineage',
       // Its launcher: for a bot, the bot's chat thread, which is how the app shows "Started by <bot>".
       createdByThreadId: options.actor.threadId,
       // An agent in a private thread only ever starts private threads.
@@ -4347,7 +4204,6 @@ export class OrchestratorService extends EventEmitter {
       createdByThreadId: intent.createdByThreadId,
       // The bot that started it, by its name then: the thread says so after the bot is renamed or deleted.
       ...(intent.bot ? { startedByBot: intent.bot } : {}),
-      accessCeiling: intent.accessCeiling,
       localOnly: intent.localOnly === true
     })
     // The marker: a thread is complete only once this event exists. Ids and names, never the message.
@@ -5610,8 +5466,7 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * A run that continues another (the resume after a usage-limit pause, a "Continue" after a restart, a turn a
-   * provider started itself) never runs in a looser permission mode than the run it continues was bound to,
-   * as it is never granted a wider agent access level (`continuedGrant`). So a turn an agent narrowed stays
+   * provider started itself) never runs in a looser permission mode than the run it continues was bound to. So a turn an agent narrowed stays
    * narrowed when its work carries on, with no person's message in between. Undefined: the run continues
    * nothing, or the earlier run never bound a turn.
    */
@@ -6084,19 +5939,8 @@ export class OrchestratorService extends EventEmitter {
     if (!sourceThread) throw new Error(`Thread not found: ${creation.sourceThreadId}`)
     const source = this.getOrCreateSession(creation.sourceThreadId)
     const title = creation.title?.trim() || `Fork of ${sourceThread.name}`.slice(0, 120)
-    // The fork keeps the source's limits and those of the agent that forks it (SPEC §15.1), stored on the
-    // thread so every later turn applies them; a source with no limit of its own stores `manage`, which
-    // leaves the profile's setting in charge. A source whose limits cannot be read is `lineage`.
-    let sourceCeiling: AgentAccessLevel | undefined
-    try {
-      sourceCeiling = this.staticAccessCeiling(creation.sourceThreadId)
-    } catch {
-      sourceCeiling = 'lineage'
-    }
-    const accessCeiling = narrowAgentAccess(sourceCeiling ?? 'manage', creation.accessLevel === undefined ? undefined : this.effectiveAccess(creation.accessLevel)) ?? 'lineage'
     const fork = this.threadStore.createThread(title, sourceThread.projectId, undefined, {
       ...(sourceThread.worktreeEnabled === undefined ? {} : { worktreeEnabled: sourceThread.worktreeEnabled }),
-      accessCeiling,
       // A fork carries the conversation, so a private thread's fork is private too.
       localOnly: this.isLocalOnly(sourceThread.id)
     })
@@ -6480,12 +6324,12 @@ export class OrchestratorService extends EventEmitter {
    * loop and the Mousse MCP server so both enforce the caller's ceiling the same way (SPEC §15.1):
    * a `plan` caller cannot start a `default` child or integrate (integration writes the workspace).
    */
-  private delegationTools(session: ThreadSession, parentRunId: string, callerCeiling?: ModeCeiling, callerAccess?: AgentAccessLevel): DelegationToolHost {
+  private delegationTools(session: ThreadSession, parentRunId: string, callerCeiling?: ModeCeiling): DelegationToolHost {
     const parentThreadId = session.threadId
     const delegateTask = (input: DelegateTaskInput, call: DelegationToolCall) =>
-      this.delegateTask(parentThreadId, parentRunId, input, call, callerCeiling, callerAccess)
+      this.delegateTask(parentThreadId, parentRunId, input, call, callerCeiling)
     const continueSubagent = (input: { subagent: string; prompt: string }, call: DelegationToolCall) =>
-      this.continueSubagent(parentThreadId, parentRunId, input, call, callerCeiling, callerAccess)
+      this.continueSubagent(parentThreadId, parentRunId, input, call, callerCeiling)
     // The retired merge tools (`integrate_delegation`, `integrate_subagent`) merge nothing: they return the task's
     // frozen result, which the caller brings in with Git.
     const reportResult = (ref: SubagentRef) => {
@@ -6548,16 +6392,15 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
-  private async delegateTask(parentThreadId: string, parentRunId: string, input: DelegateTaskInput, call: DelegationToolCall, callerCeiling?: ModeCeiling, callerAccess?: AgentAccessLevel) {
+  private async delegateTask(parentThreadId: string, parentRunId: string, input: DelegateTaskInput, call: DelegationToolCall, callerCeiling?: ModeCeiling) {
     const engine = this.requireRunEngine()
     if (!this.effectsEnabled()) throw new Error('Delegation needs the run engine worker')
     // SPEC §15.1: a child inherits its caller's ceiling and can never exceed it.
     if (callerCeiling === 'plan' && input.modeCeiling === 'default')
       throw new McpToolError('mousse_ceiling_exceeded', 'A plan-ceiling caller cannot start a child with the default ceiling.')
     const modeCeiling = narrowCeiling(callerCeiling, input.modeCeiling)
-    // The same for the agent access level (SPEC §15.1): the child is granted the caller's level as it
-    // stands now (its grant narrowed by the profile setting), never one the model chose.
-    const accessLevel = this.effectiveAccess(callerAccess ?? 'lineage')
+    // Every agent may read and manage every thread (SPEC §15.1).
+    const accessLevel: AgentAccessLevel = 'manage'
     const role = input.role?.trim() || undefined
     // Experimental: every subagent gets a worktree of its own, whatever the main agent asked for. A read-only subagent's
     // own subagents stay read-only, since authority only narrows down the tree.
@@ -6958,8 +6801,7 @@ export class OrchestratorService extends EventEmitter {
     parentRunId: string,
     input: { subagent: string; prompt: string },
     call: DelegationToolCall,
-    callerCeiling?: ModeCeiling,
-    callerAccess?: AgentAccessLevel
+    callerCeiling?: ModeCeiling
   ) {
     const engine = this.requireRunEngine()
     if (!this.effectsEnabled()) throw new Error('Delegation needs the run engine worker')
@@ -6975,7 +6817,7 @@ export class OrchestratorService extends EventEmitter {
       if (task) return this.followUpValue(task, target.title, { replayed: true })
     }
     if (this.threadStore?.getThread(childThreadId)?.runsOn)
-      return this.continueRemoteSubagent(parentThreadId, parentRunId, { childThreadId, title: target.title, requestId, prompt: input.prompt }, callerCeiling, callerAccess)
+      return this.continueRemoteSubagent(parentThreadId, parentRunId, { childThreadId, title: target.title, requestId, prompt: input.prompt }, callerCeiling)
     const pending = this.questions.listPendingForThread(childThreadId)
     if (pending.length)
       return {
@@ -6992,9 +6834,7 @@ export class OrchestratorService extends EventEmitter {
     const tasks = engine.delegations.listForChildThread(childThreadId)
     const first = tasks.find((task) => task.parentThreadId === parentThreadId)
     const modeCeiling = narrowCeiling(callerCeiling, first?.modeCeiling)
-    // And the access level: the narrower of the caller's now and the narrowest level any earlier task of
-    // this subagent was given (a row from before levels existed is `lineage`).
-    const accessLevel = narrowAgentAccess(this.effectiveAccess(callerAccess ?? 'lineage'), narrowestAccess(tasks)) ?? 'lineage'
+    const accessLevel: AgentAccessLevel = 'manage'
     let response: OrchestratorResponse
     try {
       response = await this.send({ content: input.prompt, mode: modeCeiling === 'plan' ? 'plan' : 'agent' }, false, {
@@ -7037,8 +6877,7 @@ export class OrchestratorService extends EventEmitter {
     parentThreadId: string,
     parentRunId: string,
     target: { childThreadId: string; title: string; requestId: string; prompt: string },
-    callerCeiling?: ModeCeiling,
-    callerAccess?: AgentAccessLevel
+    callerCeiling?: ModeCeiling
   ) {
     const engine = this.requireRunEngine()
     const remote = this.remoteSubagents
@@ -7061,7 +6900,7 @@ export class OrchestratorService extends EventEmitter {
     const tasks = engine.delegations.listForChildThread(target.childThreadId)
     const task = tasks.find((entry) => entry.parentThreadId === parentThreadId)
     const modeCeiling = narrowCeiling(callerCeiling, task?.modeCeiling)
-    const accessLevel = narrowAgentAccess(this.effectiveAccess(callerAccess ?? 'lineage'), narrowestAccess(tasks)) ?? 'lineage'
+    const accessLevel: AgentAccessLevel = 'manage'
     const base = bindings[0]
     let accepted: Awaited<ReturnType<RunEngine['requestRemoteFollowUp']>>
     try {
@@ -9163,7 +9002,7 @@ export class OrchestratorService extends EventEmitter {
   private queueCommandAsAgent(
     threadId: string,
     command: AgentQueueCommand,
-    options: { clientRequestId: string; actor: AgentActor; level: AgentAccessLevel }
+    options: { clientRequestId: string; actor: AgentActor }
   ): AgentQueueResult {
     const store = this.threadStore
     this.requireRunEngine()
@@ -9228,9 +9067,6 @@ export class OrchestratorService extends EventEmitter {
           if (refusal) throw new QueueValidationError(refusal)
           if (item.origin?.kind === 'schedule') throw new QueueValidationError('A scheduled prompt keeps the text of its job; it cannot be edited by an agent.')
           const authored = authoredBy(item)
-          // Changing a message nobody told this agent it wrote (a person's, another agent's) needs manage, on its own thread too.
-          if (!authored && options.level !== 'manage')
-            throw new QueueAccessError(`Editing a message ${item.origin ? 'another agent' : 'a person'} queued needs the "manage" agent access level (yours is "${options.level}").`)
           if (command.mode === 'agent' && item.mode === 'plan' && !authored)
             throw new QueueAccessError('A message queued as a plan turn cannot be turned into an agent turn by another writer.')
           if (command.mode === 'agent' && cross && this.lastChatModeOf(threadId) === 'plan')
@@ -9262,9 +9098,6 @@ export class OrchestratorService extends EventEmitter {
           const item = found(items, command.itemId)
           notSteering(item)
           if (item.workflowInvocationId) throw new QueueValidationError('A workflow command can only be removed from the app.')
-          // Removing a message nobody told this agent it wrote would replace a person's words as surely as editing it: manage.
-          if (!authoredBy(item) && options.level !== 'manage')
-            throw new QueueAccessError(`Removing a message ${item.origin ? 'another agent' : 'a person'} queued needs the "manage" agent access level (yours is "${options.level}").`)
           removed = item
           return {
             intent: {
@@ -9283,10 +9116,6 @@ export class OrchestratorService extends EventEmitter {
         case 'reorder': {
           // Validated now (a permutation of the pending items); the same function applies it.
           reorderQueuedMessages(items, command.orderedIds)
-          // Putting anything ahead of a message the agent did not write (it was behind it) postpones that message as surely as
-          // removing it replaces it: manage. Moving the agent's own messages behind others', or among themselves, is free.
-          if (options.level !== 'manage' && putsAheadOfOthers(items, command.orderedIds, authoredBy))
-            throw new QueueAccessError(`Putting a message ahead of one a person or another agent queued needs the "manage" agent access level (yours is "${options.level}").`)
           const touchesOthers = listPendingQueue(items).some((item) => !item.internal && !authoredBy(item))
           return {
             intent: { ...base, op: 'reorder', itemId: command.orderedIds[0] ?? '', orderedIds: command.orderedIds, expectedRevision: command.expectedRevision },
@@ -12619,7 +12448,7 @@ export class OrchestratorService extends EventEmitter {
         tools: {
           onPublishApplet,
           browser: browserExecution,
-          delegation: engineRunId && this.effectsEnabled() ? this.turnDelegationTools(session, engineRunId, mode, appTurn?.turn.accessLevel) : undefined,
+          delegation: engineRunId && this.effectsEnabled() ? this.turnDelegationTools(session, engineRunId, mode) : undefined,
           toolAccess: session.sharedWorkspace
             ? createAgentToolAccess(SHARED_READER_POLICY, session.sharedWorkspace.path)
             : turnAuthority && turnWriter ? { allows: () => true, execute: (_name, _args, run) => { conversationToolsUsed = true; return turnAuthority.runWriter(turnWriter, run) } } : undefined,
@@ -14904,8 +14733,6 @@ export class OrchestratorService extends EventEmitter {
     const thread = store.createThread('Scheduled: ' + (ingress.jobName ?? 'job'), ingress.projectId, projectPath, {
       ...(ingress.selection ? { modelOverride: ingress.selection } : {}),
       scheduledJobId: ingress.jobId,
-      // What agents in this thread may reach, fixed like a remote turn's thread: the job creator's level, `lineage` when unknown.
-      accessCeiling: this.scheduledAccessCap(ingress.accessCap),
       ...(ingress.projectId && ingress.workspace?.kind !== 'newWorktree' ? { workspaceBinding: { policy: 'primary' as const } } : {})
     })
     return { threadId: thread.id, created: true }
@@ -14951,12 +14778,6 @@ export class OrchestratorService extends EventEmitter {
         schedule,
         onAdmitted: (runId) => {
           admittedRunId = runId
-          // Recorded on the run before anything starts (only ever narrower); a run with none is granted `lineage`.
-          try {
-            this.runEngine?.recordAccessGrant(runId, this.scheduledAccessCap(ingress.accessCap))
-          } catch (error) {
-            logDebug('OrchestratorService', 'scheduled access cap could not be recorded', error, { runId })
-          }
           ingress.onAdmitted?.(runId)
         },
         awaitMode: 'turn'
@@ -15067,13 +14888,6 @@ export class OrchestratorService extends EventEmitter {
       const botRefusal = this.botThreadRefusal(threadId)
       if (botRefusal) return { text: '', silent: false, error: botRefusal.message }
       if (this.isExpired(threadId)) return { text: '', silent: false, error: 'This thread has expired and is being deleted.' }
-      // A turn sent from outside this computer: agents in it reach no other thread through the profile's
-      // setting, now or in any later turn, and what they delegate inherits the limit (SPEC §15.1).
-      try {
-        threadStore.capAccessCeiling(threadId, 'lineage')
-      } catch (error) {
-        return { text: '', silent: false, error: error instanceof Error ? error.message : String(error) }
-      }
 
       try {
         lease = await waitAcquireExecutionLease(threadStore.getThreadDir(threadId), {

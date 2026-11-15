@@ -9,7 +9,7 @@ import { isKeyName, MAX_KEYS_PER_AUTOMATION } from '../../shared/automationKeys'
 import { parseTellMe, isThreadEventKind, THREAD_EVENT_KINDS, type ChatImageAttachment, type ChatMode, type ScheduledJobAgent, type ScheduledJobWorkspace, type TellMe, type ThreadEventKind } from '../../shared/types'
 import { PROVIDER_DRIVER_KINDS, type ModelOverride } from '../../shared/providerInstances'
 import { upgradeSelection } from '../../shared/modelSelection'
-import { isAgentAccessLevel, MAX_USAGE_LIMIT_PAUSE_CAP } from '../../shared/settings'
+import { MAX_USAGE_LIMIT_PAUSE_CAP } from '../../shared/settings'
 import { isPermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import {
   RESERVED_AGENT_IDS,
@@ -1051,21 +1051,15 @@ function assertRunsPatch(value: unknown): void {
     throw new Error(`partial.runs.usageLimitPauseCap must be a whole number from 1 to ${MAX_USAGE_LIMIT_PAUSE_CAP}`)
 }
 
-/** `agentAccess` narrows what agents may reach, so a malformed patch is refused rather than guessed at. */
+/** `agentAccess` widens what agents may do, so a malformed patch is refused rather than guessed at. */
 function assertAgentAccessPatch(value: unknown): void {
   const patch = asPlainObject(value, 'partial.agentAccess')
   for (const key of Object.keys(patch)) {
-    if (key !== 'level' && key !== 'projectIds' && key !== 'answerApprovals' && key !== 'remoteSubagents' && key !== 'computers' && key !== 'projectsUnreadable') throw new Error(`partial.agentAccess.${key} is not allowed`)
+    // `level`, `projectIds` and `projectsUnreadable` are the removed access level's: an older client may still send them, and they are dropped.
+    if (key !== 'level' && key !== 'projectIds' && key !== 'projectsUnreadable' && key !== 'answerApprovals' && key !== 'remoteSubagents' && key !== 'computers') throw new Error(`partial.agentAccess.${key} is not allowed`)
   }
-  // Only the daemon marks a list unreadable; a client may only say the owner chose the projects again.
-  if (patch.projectsUnreadable !== undefined && patch.projectsUnreadable !== false) throw new Error('partial.agentAccess.projectsUnreadable can only be false')
-  if (patch.level !== undefined && !isAgentAccessLevel(patch.level)) throw new Error('partial.agentAccess.level must be lineage, read or manage')
   if (patch.answerApprovals !== undefined && typeof patch.answerApprovals !== 'boolean') throw new Error('partial.agentAccess.answerApprovals must be a boolean')
   if (patch.remoteSubagents !== undefined && typeof patch.remoteSubagents !== 'boolean') throw new Error('partial.agentAccess.remoteSubagents must be a boolean')
-  if (patch.projectIds !== undefined) {
-    if (!Array.isArray(patch.projectIds) || patch.projectIds.some((id) => typeof id !== 'string' || id.length === 0 || id.length > 256))
-      throw new Error('partial.agentAccess.projectIds must be an array of project ids')
-  }
   if (patch.computers !== undefined) {
     if (!Array.isArray(patch.computers) || patch.computers.some((node) => typeof node !== 'string' || node.length === 0 || node.length > 256))
       throw new Error('partial.agentAccess.computers must be an array of computer ids')

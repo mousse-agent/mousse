@@ -123,42 +123,13 @@ function botChip(call: BotThreadCall, tool: string, threadId: string, title: str
 }
 
 /**
- * The projects a bot ("use your threads") reaches: the agent access project list, where empty is every project. A list
- * that is present but could not be read (`AgentAccessSettings.projectsUnreadable`) is no project: the bot is not held to
- * the access level, which is what keeps ordinary agents out then. A host that says nothing about access: every project.
- */
-export type BotProjects = { kind: 'all' } | { kind: 'some'; ids: readonly string[] } | { kind: 'unreadable' }
-
-export function botProjectsOf(host: AppToolHost): BotProjects {
-  let access: ReturnType<NonNullable<AppToolHost['agentAccess']>> | undefined
-  try {
-    access = host.agentAccess?.()
-  } catch {
-    return { kind: 'unreadable' }
-  }
-  if (access?.projectsUnreadable === true) return { kind: 'unreadable' }
-  const ids = access?.projectIds ?? []
-  return ids.length ? { kind: 'some', ids } : { kind: 'all' }
-}
-
-/** Whether a bot reaches `projectId` (undefined: a thread with no project, which only "every project" covers). */
-export function botProjectAllowed(projects: BotProjects, projectId: string | undefined): boolean {
-  if (projects.kind === 'unreadable') return false
-  return projects.kind === 'all' || (projectId !== undefined && projects.ids.includes(projectId))
-}
-
-/** What a bot is told when its owner's project list could not be read: it reaches none of their projects. */
-export const BOT_PROJECTS_UNREADABLE_TEXT =
-  "Your owner's project list (Settings → Agents) could not be read, so you reach none of their projects' threads. Tell your owner to choose the projects there again."
-
-/**
  * Whether a personal bot ("use your threads") may reach `threadId`, and how: the one rule that list, search, read, wait,
  * start, send and stop all go through (the registry's scope check and each handler), so a thread the list and search
- * hide is never reachable by its id. A bot reaches its owner's ordinary threads in its projects (`botProjectsOf`), and
- * the threads it started (`launched`, wherever they are). Never its own chat, a bot's thread, the Automation manager's,
- * a private thread or a subagent; a thread that does not exist is refused like one out of reach, in the same words.
+ * hide is never reachable by its id. A bot reaches its owner's ordinary threads in every project. Never its own chat, a
+ * bot's thread, the Automation manager's, a private thread or a subagent; a thread that does not exist is refused like
+ * one out of reach, in the same words.
  */
-export function botThreadReach(host: AppToolHost, engine: RunEngine, callerThreadId: string, threadId: string): { scope: 'manage' | 'launched' } | { refused: string } {
+export function botThreadReach(host: AppToolHost, engine: RunEngine, callerThreadId: string, threadId: string): { scope: 'manage' } | { refused: string } {
   const unreachable = { refused: `Thread ${threadId} is not available to you.` }
   if (!threadId || threadId === callerThreadId) return unreachable
   let meta: Thread | undefined
@@ -169,10 +140,7 @@ export function botThreadReach(host: AppToolHost, engine: RunEngine, callerThrea
   }
   if (!meta) return unreachable
   if (botThreadHidden(host, engine, meta, () => host.listThreads?.() ?? [])) return unreachable
-  const projects = botProjectsOf(host)
-  if (botProjectAllowed(projects, meta.projectId)) return { scope: 'manage' }
-  if (meta.createdByThreadId === callerThreadId) return { scope: 'launched' }
-  return projects.kind === 'unreadable' ? { refused: BOT_PROJECTS_UNREADABLE_TEXT } : unreachable
+  return { scope: 'manage' }
 }
 
 /**
@@ -199,26 +167,16 @@ export function botThreadModeText(mode: PermissionMode): string {
   }
 }
 
-/**
- * Why a bot may not message a thread it started (`launched` reach): its project is not one the bot may use now. The
- * thread can still be read, waited on and stopped.
- */
-function botProjectNotNowText(host: AppToolHost, threadId: string): string {
-  const unreadable = botProjectsOf(host).kind === 'unreadable'
-  return `Thread ${threadId} is in a project you may not use now${unreadable ? " (your owner's project list in Settings → Agents could not be read)" : ' (Settings → Agents)'}, so you can't message it. You can still read it, wait on it and stop it. Tell your owner if it needs a message.`
-}
-
 /** `botThreadReach` for a handler: the scope, or the refusal thrown as a scope error. */
-function requireBotReach(host: AppToolHost, engine: RunEngine, callerThreadId: string, threadId: string): 'manage' | 'launched' {
+function requireBotReach(host: AppToolHost, engine: RunEngine, callerThreadId: string, threadId: string): 'manage' {
   const reach = botThreadReach(host, engine, callerThreadId, threadId)
   if ('refused' in reach) throw new McpToolError('mousse_scope_denied', reach.refused)
   return reach.scope
 }
 
 /** Whether a bot may list or find `thread` (the same rule as `botThreadReach`, over a thread already read). */
-function botMayList(host: AppToolHost, engine: RunEngine, callerThreadId: string, thread: Thread, projects: BotProjects, inventory: readonly Thread[]): boolean {
-  if (thread.id === callerThreadId || botThreadHidden(host, engine, thread, () => inventory)) return false
-  return botProjectAllowed(projects, thread.projectId) || thread.createdByThreadId === callerThreadId
+function botMayList(host: AppToolHost, engine: RunEngine, callerThreadId: string, thread: Thread, inventory: readonly Thread[]): boolean {
+  return thread.id !== callerThreadId && !botThreadHidden(host, engine, thread, () => inventory)
 }
 
 /**
@@ -247,19 +205,13 @@ function lineageVisible(type: string): boolean {
  * ignored commands, restart notes, the lineage row and `agent.action` rows; plus `delegation.status`
  * rows whose result is shown only to the delegation's own child (a sibling's result and the parent's
  * other prompts stay private). The final text of a run (`run.result`, kept for every conversational run)
- * is the caller's to read only for a thread below it or one it launched; an ancestor, a sibling and a
- * caller that reaches the thread only through its access level (`read`) get none.
+ * is the caller's to read only for a thread below it or one it launched; an ancestor and a sibling get none.
  * Inbox, effect (turn payloads carry prompts), tool and transfer events are left out.
  */
 function lineageView(events: ThreadEvent[], callerThreadId: string, scope: ToolScope): ThreadEvent[] {
   const out: ThreadEvent[] = []
   for (const event of events) {
     if (event.type === 'run.result' && !resultTextVisible(scope)) continue
-    // Through the `read` level alone (any thread of the allowed projects), only a trimmed copy.
-    if (scope === 'read') {
-      if (lineageVisible(event.type) || event.type === 'delegation.status') out.push(readProjection(event))
-      continue
-    }
     // The text a removal took out of a queue is for the thread's own reader and a manager, not for a lineage relative.
     if (event.type === 'agent.action') out.push(withoutRemovedText(event))
     else if (lineageVisible(event.type)) out.push(event)
@@ -283,41 +235,6 @@ function resultTextVisible(scope: ToolScope): boolean {
   return scope === 'own' || scope === 'manage' || scope === 'descendant' || scope === 'launched'
 }
 
-/**
- * What the `read` level sees of an event: ids, status and times. Never an error text, a request id, a
- * prompt digest, a provider session or the home and account a run was bound to; an event type this does
- * not know keeps no payload.
- */
-function readProjection(event: ThreadEvent): ThreadEvent {
-  const payload = (event.payload && typeof event.payload === 'object' ? event.payload : {}) as Record<string, unknown>
-  const pick = (...keys: string[]): Record<string, unknown> =>
-    Object.fromEntries(keys.filter((key) => payload[key] !== undefined).map((key) => [key, payload[key]]))
-  switch (event.type) {
-    case 'run.created':
-    case 'run.status': {
-      const outcome = payload.outcome as { interruptedBy?: unknown } | null | undefined
-      return {
-        ...event,
-        payload: {
-          ...pick('runId', 'threadId', 'ordinal', 'status', 'source', 'requestedAt', 'startedAt', 'completedAt'),
-          ...(outcome?.interruptedBy ? { outcome: { interruptedBy: outcome.interruptedBy } } : {})
-        }
-      }
-    }
-    case 'attempt.created':
-    case 'attempt.status':
-      return { ...event, payload: pick('attemptId', 'runId', 'ordinal', 'reason', 'status', 'startedAt', 'completedAt') }
-    case 'delegation.status':
-      return { ...event, payload: pick('delegationId', 'parentThreadId', 'childThreadId', 'status', 'createdAt', 'completedAt') }
-    case 'thread.lineage':
-      return { ...event, payload: pick('threadId', 'parentThreadId', 'rootThreadId', 'relationship') }
-    case 'agent.action':
-      return { ...event, payload: pick('action', 'actorThreadId', 'actorRunId') }
-    default:
-      return { ...event, payload: null }
-  }
-}
-
 /** How `targetThreadId` sits in the caller's delegation tree: below it, above it, or neither. */
 export function lineageRelation(engine: RunEngine, callerThreadId: string, targetThreadId: string): 'descendant' | 'ancestor' | null {
   const ancestors = (threadId: string): string[] => {
@@ -335,13 +252,9 @@ export function lineageRelation(engine: RunEngine, callerThreadId: string, targe
   return ancestors(callerThreadId).includes(targetThreadId) ? 'ancestor' : null
 }
 
+
 function isRelated(engine: RunEngine, callerThreadId: string, targetThreadId: string): boolean {
   return lineageRelation(engine, callerThreadId, targetThreadId) !== null
-}
-
-/** A non-empty project list allows only its projects; a thread without a project is allowed only by an empty list. */
-function inProjects(projectIds: readonly string[], projectId: string | undefined): boolean {
-  return projectIds.length === 0 || (projectId !== undefined && projectIds.includes(projectId))
 }
 
 const notAvailable = (tool: string): ToolOutcome => ({ text: `${tool} is not available in this host.`, isError: true })
@@ -485,11 +398,10 @@ export function isBotThread(host: AppToolHost, threadId: string, meta: Pick<Thre
   }
 }
 
-/** What an agent in `callerThreadId` lists threads against: every thread, the allowed projects, and whether its own thread is private. */
+/** What an agent in `callerThreadId` lists threads against: every thread, and whether its own thread is private. */
 export interface AgentThreadView {
   all: Thread[]
   callerThreadId: string
-  projectIds: string[]
   callerPrivate: boolean
 }
 
@@ -497,18 +409,16 @@ export function agentThreadView(host: AppToolHost, callerThreadId: string): Agen
   return {
     all: host.listThreads?.() ?? [],
     callerThreadId,
-    projectIds: host.agentAccess?.().projectIds ?? [],
     callerPrivate: host.threadMeta?.(callerThreadId)?.localOnly === true
   }
 }
 
 /**
  * Whether an agent may see `thread` named in a list (`thread_list`, the profiler's threads): a private thread only
- * from a private thread, a thread outside the allowed projects only when the caller launched it, and never a bot's.
+ * from a private thread, and never a bot's.
  */
 export function threadVisibleToAgent(host: AppToolHost, thread: Thread, view: AgentThreadView): boolean {
   if (!view.callerPrivate && isLocalOnlyThread(thread, view.all)) return false
-  if (thread.createdByThreadId !== view.callerThreadId && !inProjects(view.projectIds, thread.projectId)) return false
   // A bot's threads are its chat: no other thread's agent lists them.
   return !isBotThread(host, thread.id, thread)
 }
@@ -598,7 +508,6 @@ export const BOT_WAIT_CHECK_MS = 1_000
  * run engine's own threads, offered over MCP only (the pi loop never had them).
  */
 export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => BotAppToolDeps | undefined): MousseTool[] {
-  const allowedProjectIds = (): string[] => host.agentAccess?.().projectIds ?? []
   const projectName = (projectId: string | undefined): string | null =>
     (projectId && host.listProjects?.().find((project) => project.id === projectId)?.name) || null
   const titleOf = (threadId: string): string | undefined => host.threadMeta?.(threadId)?.name
@@ -690,7 +599,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     const actor = actorOf(ctx)
     let result
     try {
-      result = host.queueCommand(threadId, command, { clientRequestId: `${tool}:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`, actor, level: ctx.level ?? 'lineage' })
+      result = host.queueCommand(threadId, command, { clientRequestId: `${tool}:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`, actor })
     } catch (error) {
       throw queueFailure(error) ?? error
     }
@@ -702,7 +611,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
   return [
     {
       name: 'thread_read',
-      description: 'Read a thread. view "events" (default): run events (runs, attempts, delegations, tool calls) of your thread, or of a thread you delegated to or were delegated from; with the profile\'s read or manage agent access level, the run lifecycle of any thread, and with manage everything. Page with afterSeq. view "messages": the transcript of your thread, or of any thread with manage access; page with afterIndex. A personal bot reads its owner\'s threads with view "summary" (default: one line on the thread and its last reply) or "messages" (the newest ones, or from afterIndex, capped).',
+      description: 'Read a thread. view "events" (default): run events (runs, attempts, delegations, tool calls) of any thread. Page with afterSeq. view "messages": the transcript of any thread; page with afterIndex. A personal bot reads its owner\'s threads with view "summary" (default: one line on the thread and its last reply) or "messages" (the newest ones, or from afterIndex, capped).',
       inputSchema: {
         type: 'object',
         properties: {
@@ -726,10 +635,11 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         if (view !== 'events' && view !== 'messages') throw new Error("view must be 'events' or 'messages'")
         // A bot's threads are its chat: only the bot's own turn reads them.
         if (threadId !== ctx.caller.threadId) assertNotBotThread(host, threadId, 'thread_read')
-        // The whole record is the caller's own, or a manager's; every other reach is the filtered lineage view.
+        // The whole record is the caller's own, or any thread that exists; a relative the caller reaches only through its
+        // lineage (a thread that is gone) gets the filtered lineage view.
         const full = scope === 'own' || scope === 'manage'
         if (view === 'messages') {
-          if (!full) throw new McpToolError('mousse_scope_denied', `Reading the messages of thread ${threadId} needs the "manage" agent access level.`)
+          if (!full) throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is not available to this credential.`)
           if (!host.threadMessages) return notAvailable('thread_read messages')
           const afterIndex = boundedInt(args.afterIndex, 'afterIndex', 0, Number.MAX_SAFE_INTEGER, 0)
           const limit = boundedInt(args.limit, 'limit', 1, THREAD_MESSAGES_MAX_LIMIT, THREAD_MESSAGES_DEFAULT_LIMIT)
@@ -758,7 +668,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_list',
-      description: 'List the profile\'s threads with their project, activity and what is waiting on them (needs the read or manage agent access level; limited to the projects the profile allows). Subagent threads are folded under their parents unless includeSubagents (manage only). Threads you launched are always listed.',
+      description: 'List the profile\'s threads with their project, activity and what is waiting on them. Subagent threads are folded under their parents unless includeSubagents. Threads you launched are always listed.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -766,13 +676,12 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           status: { type: 'string', enum: ['active', 'idle', 'awaiting_input'], description: 'active: a run is going; awaiting_input: a question waits for an answer; idle: neither.' },
           includeUnstarted: { type: 'boolean', description: 'Include empty drafts (default false).' },
           includeSettled: { type: 'boolean', description: 'Include archived threads (default false).' },
-          includeSubagents: { type: 'boolean', description: 'Include subagent threads (manage only; default false).' },
+          includeSubagents: { type: 'boolean', description: 'Include subagent threads (default false).' },
           limit: { type: 'integer', minimum: 1, maximum: THREAD_LIST_MAX_LIMIT, description: `Most recently updated first; default ${THREAD_LIST_DEFAULT_LIMIT}.` }
         }
       },
       access: 'readsOthers',
       class: 'read',
-      minLevel: 'read',
       offered: () => false,
       target: (args) => ({ projectId: typeof args.projectId === 'string' && args.projectId ? args.projectId : undefined }),
       handler: (args, ctx) => {
@@ -786,14 +695,13 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         const limit = bot ? boundedInt(args.limit, 'limit', 1, BOT_LIST_MAX, BOT_LIST_DEFAULT) : boundedInt(args.limit, 'limit', 1, THREAD_LIST_MAX_LIMIT, THREAD_LIST_DEFAULT_LIMIT)
         const manage = ctx.scope === 'manage' && !bot
         if (args.includeSubagents === true && !manage)
-          throw new McpToolError('mousse_scope_denied', bot ? 'You reach your owner\'s own threads only, never subagents.' : 'includeSubagents needs the "manage" agent access level.')
+          throw new McpToolError('mousse_scope_denied', bot ? 'You reach your owner\'s own threads only, never subagents.' : 'includeSubagents is not available here.')
         const view = agentThreadView(host, ctx.caller.threadId)
-        const { all, projectIds } = view
+        const { all } = view
         // A personal bot lists exactly what it may reach by id (`botThreadReach`).
-        const botProjects = bot ? botProjectsOf(host) : undefined
         const candidates = (args.includeSubagents === true ? all : visibleThreads(all)).filter((thread) => {
-          // Private, out-of-project (unless launched) and bot threads are not listed.
-          if (bot ? !botMayList(host, engine, ctx.caller.threadId, thread, botProjects!, all) : !threadVisibleToAgent(host, thread, view)) return false
+          // Private and bot threads are not listed.
+          if (bot ? !botMayList(host, engine, ctx.caller.threadId, thread, all) : !threadVisibleToAgent(host, thread, view)) return false
           const launched = thread.createdByThreadId === ctx.caller.threadId
           if (args.projectId !== undefined && thread.projectId !== args.projectId) return false
           if (!launched && args.includeUnstarted !== true && !thread.startedAt) return false
@@ -823,9 +731,8 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           const models = bot.appTools.has('thread_create') ? host.threadModels?.() ?? [] : undefined
           return botData('Your owner\'s threads', {
             threads: rows,
-            projects: [...projectNames].filter(([id]) => botProjectAllowed(botProjects!, id)).map(([id, name]) => ({ id, name })),
-            ...(models ? { models } : {}),
-            ...(botProjects!.kind === 'unreadable' ? { note: BOT_PROJECTS_UNREADABLE_TEXT } : {})
+            projects: [...projectNames].map(([id, name]) => ({ id, name })),
+            ...(models ? { models } : {})
           })
         }
         for (const thread of candidates) {
@@ -854,13 +761,13 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           })
           if (rows.length >= limit) break
         }
-        const projects = [...projectNames].filter(([id]) => inProjects(projectIds, id)).map(([id, name]) => ({ id, name }))
+        const projects = [...projectNames].map(([id, name]) => ({ id, name }))
         return json({ threads: rows, projects })
       }
     },
     {
       name: 'thread_search',
-      description: 'Search thread titles and project names (needs the read or manage agent access level; limited to the projects the profile allows). With manage, message text is searched too and results carry a snippet. Subagent threads are not searched.',
+      description: 'Search thread titles, project names and message text; message matches carry a snippet. Subagent threads are not searched.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -871,7 +778,6 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       },
       access: 'readsOthers',
       class: 'read',
-      minLevel: 'read',
       offered: () => false,
       target: () => ({}),
       handler: async (args, ctx) => {
@@ -881,23 +787,20 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         const bot = ctx.turn.bot
         const limit = bot ? boundedInt(args.limit, 'limit', 1, BOT_SEARCH_MAX, BOT_SEARCH_DEFAULT) : boundedInt(args.limit, 'limit', 1, THREAD_SEARCH_MAX_LIMIT, THREAD_SEARCH_DEFAULT_LIMIT)
         const manage = ctx.scope === 'manage'
-        const projectIds = allowedProjectIds()
-        // Message matches (and so their existence) are transcript content: a manager's.
-        // Who may be seen, and titles only below manage, are decided by the host before it applies the limit
-        // or reads any transcript; transcripts are scanned for the most recent threads only.
+        // Who may be seen is decided by the host before it applies the limit or reads any transcript; transcripts are
+        // scanned for the most recent threads only.
         const callerPrivate = host.threadMeta?.(ctx.caller.threadId)?.localOnly === true
         // A personal bot finds exactly what it may reach by id (`botThreadReach`).
-        const projects = bot ? botProjectsOf(host) : undefined
         const inventory = bot ? host.listThreads?.() ?? [] : []
         const results = (await host.searchThreads(args.query, limit, {
           allow: (found) => bot
-            ? botMayList(host, engine, ctx.caller.threadId, found, projects!, inventory)
-            : (callerPrivate || found.localOnly !== true) && (inProjects(projectIds, found.projectId) || found.createdByThreadId === ctx.caller.threadId) && !isBotThread(host, found.id, found),
+            ? botMayList(host, engine, ctx.caller.threadId, found, inventory)
+            : (callerPrivate || found.localOnly !== true) && !isBotThread(host, found.id, found),
           titlesOnly: !manage,
           maxMessageThreads: THREAD_SEARCH_MESSAGE_THREADS
         }))
           .filter((hit) => manage || hit.matchType !== 'message')
-          .filter((hit) => bot ? 'scope' in botThreadReach(host, engine, ctx.caller.threadId, hit.threadId) : inProjects(projectIds, hit.projectId) || host.threadMeta?.(hit.threadId)?.createdByThreadId === ctx.caller.threadId)
+          .filter((hit) => !bot || 'scope' in botThreadReach(host, engine, ctx.caller.threadId, hit.threadId))
           .slice(0, limit)
           .map(({ snippet, ...hit }) => ({ ...hit, link: threadLink(hit.threadId), ...(manage && snippet !== undefined ? { snippet } : {}) }))
         // A personal bot: each hit as a handle and one line, framed as data from the owner's threads.
@@ -917,7 +820,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_send',
-      description: `Send a message to another thread (needs the manage agent access level and a project the profile allows). The thread's model receives it labelled as a message from an agent in your thread, not from the user, and runs it under your permission mode when that is stricter than the thread's own; it never gets more than the thread itself allows. It starts a turn when the thread is idle and queues behind the running turn otherwise (it never steers the running turn). A thread kept in Plan takes it as a plan turn. Refused while the thread waits for the user to answer a question or approval, is paused by a usage limit, or is archived, when it already has several messages from agents waiting, and when it would be more than a few agent messages in a row without a person in between. You may send ${THREAD_SEND_MAX_PER_RUN} messages per run. Returns the run it created: use thread_wait with it to wait for the answer, only when you need it this turn. Subagents are reached with continue_subagent.`,
+      description: `Send a message to another thread. The thread's model receives it labelled as a message from an agent in your thread, not from the user, and runs it under your permission mode when that is stricter than the thread's own; it never gets more than the thread itself allows. It starts a turn when the thread is idle and queues behind the running turn otherwise (it never steers the running turn). A thread kept in Plan takes it as a plan turn. Refused while the thread waits for the user to answer a question or approval, is paused by a usage limit, or is archived, when it already has several messages from agents waiting, and when it would be more than a few agent messages in a row without a person in between. You may send ${THREAD_SEND_MAX_PER_RUN} messages per run. Returns the run it created: use thread_wait with it to wait for the answer, only when you need it this turn. Subagents are reached with continue_subagent.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -930,7 +833,6 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       },
       access: 'managesOthers',
       class: 'mutation',
-      minLevel: 'manage',
       offered: () => false,
       handler: async (args, ctx) => {
         const threadId = requiredId(args, 'threadId')
@@ -939,14 +841,10 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         const mode = (args.mode as 'agent' | 'plan' | undefined) ?? 'agent'
         if (!host.sendToThread) return notAvailable('thread_send')
         if (threadId === ctx.caller.threadId) throw new Error('thread_send is for other threads; use queue_enqueue to queue a message on your own thread.')
-        // Defence in depth: a plan ceiling is held to `read` and never gets here.
         if (mode === 'agent' && ctx.caller.modeCeiling === 'plan') throw new McpToolError('mousse_ceiling_exceeded', 'A plan-ceiling caller can only send plan turns.')
         // A personal bot reaches only what it may (`botThreadReach`: never a subagent, a bot's, a private thread or the
         // Automation manager's).
-        // A thread it started in a project it may not use now (removed from the list, or a list that can't be read) is
-        // read, waited on and stopped, never messaged, as for ordinary agents: a message would run in that project's folder.
-        if (ctx.turn.bot && requireBotReach(host, engine, ctx.caller.threadId, threadId) === 'launched')
-          throw new McpToolError('mousse_scope_denied', botProjectNotNowText(host, threadId))
+        if (ctx.turn.bot) requireBotReach(host, engine, ctx.caller.threadId, threadId)
         // A subagent is reached through its parent: a message sent to it directly would run untracked.
         if (engine.delegations.getLineage(threadId)?.relationship === 'subagent')
           throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is a subagent; its parent reaches it with continue_subagent, and a message from here would run without its parent hearing the result.`)
@@ -988,7 +886,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_wait',
-      description: `Wait for a run of another thread to finish (needs the read agent access level; a thread you launched with thread_create, or one in your delegation lineage, needs none, though you see its final text only for a thread you launched or one below you), for at most timeoutMs (default ${THREAD_WAIT_DEFAULT_MS}, up to ${THREAD_WAIT_MAX_MS}). Pass the runId thread_send returned; without one, the run that is active now. Returns status finished (with the run's outcome, and its final text where you may read it), timeout (the run is still going: call again; the wait never interrupts it), paused (a usage limit paused the run and it was still paused when the wait ran out: it resumes by itself, and the result says when to ask again; a wait that is running when it resumes follows it into the run that continues it), idle (no run to wait for) or caller_ended (your own run ended). Wait only when you need the answer this turn; otherwise end your turn and read the thread later.`,
+      description: `Wait for a run of another thread to finish, for at most timeoutMs (default ${THREAD_WAIT_DEFAULT_MS}, up to ${THREAD_WAIT_MAX_MS}). Pass the runId thread_send returned; without one, the run that is active now. Returns status finished (with the run's outcome, and its final text where you may read it), timeout (the run is still going: call again; the wait never interrupts it), paused (a usage limit paused the run and it was still paused when the wait ran out: it resumes by itself, and the result says when to ask again; a wait that is running when it resumes follows it into the run that continues it), idle (no run to wait for) or caller_ended (your own run ended). Wait only when you need the answer this turn; otherwise end your turn and read the thread later.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -1000,8 +898,6 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       },
       access: 'readsOthers',
       class: 'read',
-      // No `minLevel`: the central check lets a caller wait on a thread it launched or one below it at any
-      // level, so the tool is listed at every level (as `thread_interrupt` is); another thread needs `read`.
       offered: () => false,
       handler: async (args, ctx) => {
         const threadId = requiredId(args, 'threadId')
@@ -1118,7 +1014,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_interrupt',
-      description: 'Stop a run of another thread: the run you name, which must still be the thread\'s active (or paused) run, and the subagents below it, as a Stop in the app does (needs the manage agent access level and a project the profile allows; a thread you launched needs no level). Queued messages a person sent stay. Name the run you read; if it has ended or another run started, nothing is stopped and you are told which run is active. A paused run is ended too.',
+      description: 'Stop a run of another thread: the run you name, which must still be the thread\'s active (or paused) run, and the subagents below it, as a Stop in the app does. Queued messages a person sent stay. Name the run you read; if it has ended or another run started, nothing is stopped and you are told which run is active. A paused run is ended too.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1163,7 +1059,6 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       },
       access: 'managesOthers',
       class: 'mutation',
-      minLevel: 'manage',
       // A personal bot's tool ("use your threads"): no other thread lists it.
       listed: (listing) => listing.botRole !== undefined,
       offered: () => false,
@@ -1200,7 +1095,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_steer',
-      description: 'Add guidance to the turn another thread is running now (needs the manage agent access level and a project the profile allows). Name the run you read; if it is not the thread\'s active run, or is paused, nothing is sent and you are told why. The thread\'s model receives the text labelled as a message from an agent, not from the user. Refused when the run is running under a looser permission mode than yours (a running turn cannot be narrowed): send a message instead.',
+      description: 'Add guidance to the turn another thread is running now. Name the run you read; if it is not the thread\'s active run, or is paused, nothing is sent and you are told why. The thread\'s model receives the text labelled as a message from an agent, not from the user. Refused when the run is running under a looser permission mode than yours (a running turn cannot be narrowed): send a message instead.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1213,7 +1108,6 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       },
       access: 'managesOthers',
       class: 'mutation',
-      minLevel: 'manage',
       offered: () => false,
       handler: async (args, ctx) => {
         const threadId = requiredId(args, 'threadId')
@@ -1232,7 +1126,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'approval_respond',
-      description: `Answer a pending approval of another thread (a command, a file change or a tool its agent asked to run), as the user would. Needs the manage agent access level, a project the profile allows AND the profile's switch "Agents may answer approvals on other threads", which is off by default; a refusal names what is missing. You can approve only what your own permission mode would allow without asking, never your own thread's request (nor one of a thread in your lineage other than your direct subagents', which answer_subagent covers), and never "always for this thread": approve once or reject. Read the request first with thread_list (with manage it lists each thread's pending requests with their option ids), then answer with the question id and the option id. The thread's transcript shows "Approved by an agent in thread ..." and the user sees who answered. A request the provider asks for itself (its own safety check, a path outside the allowed folders, one of the user's own ask rules) and one on a turn the user started are the user's alone; they are refused. A plain question for the user (ask_user) cannot be answered here. If a person or another agent answered first you get already_answered with who decided what, and nothing changes.`,
+      description: `Answer a pending approval of another thread (a command, a file change or a tool its agent asked to run), as the user would. Needs the profile's switch "Agents may answer approvals on other threads", which is off by default; a refusal names what is missing. You can approve only what your own permission mode would allow without asking, never your own thread's request (nor one of a thread in your lineage other than your direct subagents', which answer_subagent covers), and never "always for this thread": approve once or reject. Read the request first with thread_list (it lists each thread's pending requests with their option ids), then answer with the question id and the option id. The thread's transcript shows "Approved by an agent in thread ..." and the user sees who answered. A request the provider asks for itself (its own safety check, a path outside the allowed folders, one of the user's own ask rules) and one on a turn the user started are the user's alone; they are refused. A plain question for the user (ask_user) cannot be answered here. If a person or another agent answered first you get already_answered with who decided what, and nothing changes.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -1249,7 +1143,6 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       },
       access: 'managesOthers',
       class: 'mutation',
-      minLevel: 'manage',
       offered: () => false,
       handler: (args, ctx) => {
         const threadId = requiredId(args, 'threadId')
@@ -1270,8 +1163,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           throw new McpToolError('mousse_scope_denied', 'An agent cannot approve "always for this thread"; approve once or reject.')
         const result = host.answerApproval(threadId, requestId, answers, {
           clientRequestId: `approval_respond:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`,
-          actor: actorOf(ctx),
-          accessLevel: ctx.caller.accessLevel
+          actor: actorOf(ctx)
         })
         if (result.ok) return json({ ok: true, threadId, requestId, decision: result.decision, ...(result.replayed ? { replayed: true } : {}) })
         switch (result.reason) {
@@ -1299,7 +1191,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_create',
-      description: `Start a new thread in a project (needs the manage agent access level and a project the profile allows). Where the thread works is decided by the project, not by workspace: on a Git project a turn that edits gets a worktree of its own, and on any other project the thread works in the project folder (the result's runsIn says which). workspace "new_worktree" records the thread as a worktree thread and is refused on a project that is not Git-backed; "project" (default) records it as an ordinary project thread; "existing_worktree" is not supported. instanceId and model name the thread's model together, and effort its reasoning level (take them from list_models; the person sees your choice); without them the thread uses your own model, or the profile's default when you have none. A model that is not offered in the project, or an agent that is signed out, is refused with the reason and no thread is made: tell the user, never pick another yourself. The thread runs in a permission mode no wider than yours, which a later change of the profile's default does not widen, and its agents may read and wait but never create threads or message others (they can still start subagents). It is recorded as launched by your thread: you can read it, wait on it and interrupt it afterwards at any level, a person's Stop of your thread also stops it while it runs work you started, and it is not nested under yours. firstMessage (with mode agent or plan) is sent to it as a message from you, so it starts at once; it counts toward the limit on agent messages in a row without a person in between. You may create ${THREAD_CREATE_MAX_PER_RUN} threads per run, and have at most ${THREAD_CREATE_MAX_ACTIVE_PER_THREAD} launched threads working at once. Pass a clientRequestId and reuse it to retry: the same thread comes back, never a second one, and a first message that was not sent is sent. Returns the thread's id, the model, mode and place it got, and what became of the first message; use thread_wait with its run id to wait for the answer, only when you need it this turn. A personal bot gives a title and a firstMessage, names the model with instanceId and model from thread_list's models (else the profile's default, never its own model), and its thread runs in Full access: it runs commands and changes files without asking.`,
+      description: `Start a new thread in a project. Where the thread works is decided by the project, not by workspace: on a Git project a turn that edits gets a worktree of its own, and on any other project the thread works in the project folder (the result's runsIn says which). workspace "new_worktree" records the thread as a worktree thread and is refused on a project that is not Git-backed; "project" (default) records it as an ordinary project thread; "existing_worktree" is not supported. instanceId and model name the thread's model together, and effort its reasoning level (take them from list_models; the person sees your choice); without them the thread uses your own model, or the profile's default when you have none. A model that is not offered in the project, or an agent that is signed out, is refused with the reason and no thread is made: tell the user, never pick another yourself. The thread runs in a permission mode no wider than yours, which a later change of the profile's default does not widen. It is recorded as launched by your thread: you can read it, wait on it and interrupt it afterwards, a person's Stop of your thread also stops it while it runs work you started, and it is not nested under yours. firstMessage (with mode agent or plan) is sent to it as a message from you, so it starts at once; it counts toward the limit on agent messages in a row without a person in between. You may create ${THREAD_CREATE_MAX_PER_RUN} threads per run, and have at most ${THREAD_CREATE_MAX_ACTIVE_PER_THREAD} launched threads working at once. Pass a clientRequestId and reuse it to retry: the same thread comes back, never a second one, and a first message that was not sent is sent. Returns the thread's id, the model, mode and place it got, and what became of the first message; use thread_wait with its run id to wait for the answer, only when you need it this turn. A personal bot gives a title and a firstMessage, names the model with instanceId and model from thread_list's models (else the profile's default, never its own model), and its thread runs in Full access: it runs commands and changes files without asking.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -1317,7 +1209,6 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       },
       access: 'managesOthers',
       class: 'mutation',
-      minLevel: 'manage',
       offered: () => false,
       // A new thread has no id yet: the project is what the central check holds the caller to.
       target: (args) => ({ projectId: typeof args.projectId === 'string' && args.projectId ? args.projectId : undefined }),
@@ -1381,7 +1272,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         if (!uncounted) reserveCreation(actor.runId)
         let created: AgentCreatedThread
         try {
-          created = await host.createThread(request, { clientRequestId: requestKey, actor, accessLevel: ctx.caller.accessLevel })
+          created = await host.createThread(request, { clientRequestId: requestKey, actor })
         } catch (error) {
           if (!uncounted) releaseCreation(actor.runId)
           throw sendConflict(error) ?? error
@@ -1423,7 +1314,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'queue_list',
-      description: 'List the messages queued on a thread (they run after the current turn), with the queue\'s revision: pass it as expectedRevision to the queue tools that change the queue. Defaults to your thread. On your own thread, and on any thread with the manage agent access level, each item carries its text; anywhere else you get its order, state, mode and size only. Items a turn has claimed are listed apart; they can no longer be changed.',
+      description: 'List the messages queued on a thread (they run after the current turn), with the queue\'s revision: pass it as expectedRevision to the queue tools that change the queue. Defaults to your thread. Each item carries its text. Items a turn has claimed are listed apart; they can no longer be changed.',
       inputSchema: { type: 'object', properties: { threadId: { type: 'string', description: 'Defaults to your thread.' } } },
       access: 'readsOthers',
       class: 'read',
@@ -1447,7 +1338,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'queue_enqueue',
-      description: 'Queue a message on a thread (default: yours); it runs as a new turn after the current one. It is stored as an agent\'s message wherever it goes: it carries your run\'s count of agent messages in a row and your permission mode as its limit, counts toward the few agent messages a thread keeps waiting, waits behind a usage pause or a question the user has not answered, and a person\'s Stop clears it. On another thread (needs the manage agent access level and a project the profile allows) it is labelled as a message from an agent in your thread, not from the user, runs under your permission mode when that is stricter than the thread\'s own, counts toward the few agent messages a thread keeps waiting and toward the limit on agent messages in a row, and needs expectedRevision (from queue_list). Subagents are reached with continue_subagent.',
+      description: 'Queue a message on a thread (default: yours); it runs as a new turn after the current one. It is stored as an agent\'s message wherever it goes: it carries your run\'s count of agent messages in a row and your permission mode as its limit, counts toward the few agent messages a thread keeps waiting, waits behind a usage pause or a question the user has not answered, and a person\'s Stop clears it. On another thread it is labelled as a message from an agent in your thread, not from the user, runs under your permission mode when that is stricter than the thread\'s own, counts toward the few agent messages a thread keeps waiting and toward the limit on agent messages in a row, and needs expectedRevision (from queue_list). Subagents are reached with continue_subagent.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1484,7 +1375,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'queue_edit',
-      description: 'Change the text or chat mode of a message queued on a thread (default: yours) that no turn has started. Needs expectedRevision (queue_list). Your words replace the message: when they go to another thread, or the message is not one you wrote, it becomes a message from an agent in your thread (labelled, under the stricter of its own mode limit and yours; the earlier writer is no longer its author) and counts toward the agent messages a thread keeps waiting. Editing a message a person (or another agent) queued needs the manage agent access level, on your own thread too, and is recorded. You cannot turn a plan turn into an agent turn by editing a message you did not write. A message already steering the running turn cannot be edited.',
+      description: 'Change the text or chat mode of a message queued on a thread (default: yours) that no turn has started. Needs expectedRevision (queue_list). Your words replace the message: when they go to another thread, or the message is not one you wrote, it becomes a message from an agent in your thread (labelled, under the stricter of its own mode limit and yours; the earlier writer is no longer its author) and counts toward the agent messages a thread keeps waiting. Editing a message a person (or another agent) queued is recorded. You cannot turn a plan turn into an agent turn by editing a message you did not write. A message already steering the running turn cannot be edited.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1520,7 +1411,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'queue_remove',
-      description: 'Remove a message queued on a thread (default: yours) that no turn has started (needs the manage agent access level for another thread). Removing a message you did not write (a person\'s, or another agent\'s) needs the manage level on your own thread too. Needs expectedRevision (queue_list). A message already steering the running turn cannot be removed. Every removal is recorded on the thread with the text that was removed, so a person can see and recover it.',
+      description: 'Remove a message queued on a thread (default: yours) that no turn has started. Needs expectedRevision (queue_list). A message already steering the running turn cannot be removed. Every removal is recorded on the thread with the text that was removed, so a person can see and recover it.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1543,7 +1434,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'queue_reorder',
-      description: 'Put the pending messages queued on a thread (default: yours) in a new order: orderedIds names every pending item once (needs the manage agent access level for another thread). Putting a message ahead of one you did not write needs the manage level on your own thread too; moving your own messages behind others\' is always allowed. Needs expectedRevision (queue_list). Reordering changes nothing else about the messages.',
+      description: 'Put the pending messages queued on a thread (default: yours) in a new order: orderedIds names every pending item once. Needs expectedRevision (queue_list). Reordering changes nothing else about the messages.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1566,7 +1457,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'queue_promote_to_steer',
-      description: 'Turn a queued message into guidance for the turn the thread is running now (default: your thread; needs the manage agent access level for another thread). Refused while the user has a question or approval waiting on the thread: a steer would settle it for them.Name the run you read (expectedRunId) and the queue revision (queue_list): if that run is not the thread\'s active run, or is paused, nothing changes. A message with a mode limit (one an agent sent or edited) joins only a run whose permission mode is no looser than that limit, and your own mode counts too: a running turn cannot be narrowed. The message joins only that run; if the run ends first it goes back to the queue and runs as its own turn.',
+      description: 'Turn a queued message into guidance for the turn the thread is running now (default: your thread). Refused while the user has a question or approval waiting on the thread: a steer would settle it for them.Name the run you read (expectedRunId) and the queue revision (queue_list): if that run is not the thread\'s active run, or is paused, nothing changes. A message with a mode limit (one an agent sent or edited) joins only a run whose permission mode is no looser than that limit, and your own mode counts too: a running turn cannot be narrowed. The message joins only that run; if the run ends first it goes back to the queue and runs as its own turn.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1617,8 +1508,6 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           throw new Error("seedFrom must be 'checkpoint' or 'current_head'")
         const forked = await engine.forkThread({
           sourceThreadId,
-          // The fork keeps the limits of the agent that makes it (SPEC §15.1).
-          accessLevel: ctx.caller.accessLevel,
           atRunOrdinal,
           title: args.title as string | undefined,
           seedFrom: args.seedFrom as 'checkpoint' | 'current_head' | undefined,

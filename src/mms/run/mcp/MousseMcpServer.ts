@@ -38,7 +38,7 @@ export interface McpAttachment {
   /** The MCP relay, under the same bearer; absent: the turn attaches only `mousse`. */
   relay?: McpRelayAttachment
   /**
-   * What decides the tools the server lists under this bearer: the caller's policy and the agent access level, as the
+   * What decides the tools the server lists under this bearer: the caller's policy (and a recorded access level), as the
    * gateway keys the credential epoch on them. Equal for two bearers that differ only by a rotation, so a runtime that
    * caches the tool list knows a new bearer alone from new tools; absent counts as one value.
    */
@@ -237,11 +237,9 @@ export class MousseMcpServer implements McpAttachmentProvider {
       { capabilities: { tools: {} }, ...(registry.isBotThread(resolved.threadId) ? {} : { instructions: mousseOrchestrationInstructions() }) }
     )
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      // For the thread's ceiling, not the turn's mode, and for the credential's agent access level as it
-      // is now. A runtime that caches the list gets a new bearer when the level changes (the level is part
-      // of the runtime generation), and the call-time check refuses a tool the list left out in any case.
+      // For the thread's ceiling, not the turn's mode; the call-time check refuses a tool the list left out in any case.
       // A bot's thread tools follow the run the credential acts for now (`ToolListing.botTurnTools`).
-      tools: ((current) => registry.listForThread(resolved.threadId, 'default', current.accessLevel, current.runId))(credentials.current(resolved.tokenHash) ?? resolved).map(listedTool)
+      tools: ((current) => registry.listForThread(resolved.threadId, 'default', current.runId))(credentials.current(resolved.tokenHash) ?? resolved).map(listedTool)
     }))
     server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       const { clientRequestId, ...args } = (request.params.arguments ?? {}) as Record<string, unknown>

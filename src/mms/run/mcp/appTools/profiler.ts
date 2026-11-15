@@ -20,11 +20,10 @@ import {
   watchReport,
   windowBreakdownReport
 } from '../../../diagnostics/profilerReports'
-import type { AgentAccessLevel } from '../../../../shared/settings'
 import type { Thread } from '../../../../shared/types'
 import type { AppToolHost } from './host'
 import { agentThreadView, isBotThread, threadVisibleToAgent } from './thread'
-import { json, levelAtLeast, type JsonSchema, type MousseTool, type ToolCallContext, type ToolOutcome } from './types'
+import { json, type JsonSchema, type MousseTool, type ToolCallContext, type ToolOutcome } from './types'
 
 /** What the profiler tools read, at every call: the profile's switches (Settings → Labs) and the service's profiler. */
 export interface ProfilerToolHost {
@@ -53,23 +52,17 @@ function delegationChain(host: AppToolHost, threadId: string): string[] {
 
 /**
  * The caller's profile's threads held to what `thread_list` shows the calling agent: a thread that is private (unless
- * the caller's is), a bot's or below a bot's, the Automation manager's, or outside the allowed projects (unless the
- * caller launched it) counts only in a total, as does a cache entry no thread of the profile owns, which cannot be
- * checked.
+ * the caller's is), a bot's or below a bot's, or the Automation manager's (unless related to the caller) counts only in
+ * a total, as does a cache entry no thread of the profile owns, which cannot be checked.
  */
-function visibleThreadMemory(threads: ThreadMemory, host: AppToolHost, callerThreadId: string, level: AgentAccessLevel): ThreadMemory {
+function visibleThreadMemory(threads: ThreadMemory, host: AppToolHost, callerThreadId: string): ThreadMemory {
   const view = agentThreadView(host, callerThreadId)
   const byId = new Map(view.all.map((thread) => [thread.id, thread]))
   const chain = new Set(delegationChain(host, callerThreadId))
-  // Below `read`, `thread_list` refuses: only the caller, the threads that delegated to it, its own subagents (which
-  // `thread_read` reaches as descendants) and the threads it launched are named. Below `manage`, other threads'
-  // subagents stay folded, as `thread_list` folds them.
   const related = (thread: Thread) =>
     chain.has(thread.id) || thread.lineage?.parentThreadId === callerThreadId || thread.createdByThreadId === callerThreadId
   // `thread_list` never lists the Automation manager's thread; it is opened from Automations.
-  const named = (thread: Thread) =>
-    related(thread) ||
-    (!thread.automationManager && levelAtLeast(level, 'read') && (levelAtLeast(level, 'manage') || !thread.lineage?.parentThreadId))
+  const named = (thread: Thread) => related(thread) || !thread.automationManager
   // A bot thread's subagent inherits its private flag but not `botOwned`, so its lineage root is checked too.
   const belowBot = (thread: Thread) => {
     const rootId = thread.lineage?.rootThreadId
@@ -224,7 +217,7 @@ async function run(
         sample,
         detail: monitor.readDetailNow(),
         thresholds: monitor.thresholds,
-        threads: visibleThreadMemory(service.threads(env.profiler.owner), env.host, ctx.caller.threadId, ctx.level ?? 'lineage'),
+        threads: visibleThreadMemory(service.threads(env.profiler.owner), env.host, ctx.caller.threadId),
         cacheLimits: { threads: MAX_CACHED_THREADS, mb: MAX_CACHED_BYTES / 1048576 },
         replayLimitPerProfile: MMS_PROTOCOL_REPLAY_RING_SIZE
       }))

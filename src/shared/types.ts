@@ -312,10 +312,7 @@ export interface ScheduledJob {
    * creating call's key, so a retried call finds the job it already made.
    */
   createdBy?: { threadId: string; runId?: string; requestId?: string }
-  /**
-   * The most agent access (SPEC §15.1) a run of this job may be granted: the level of whoever created it. Absent
-   * (a creator whose level is not known) reads as `lineage`; a run is never granted more than the profile's setting either.
-   */
+  /** An agent access cap older versions stored on agent-made jobs (SPEC §15.1). Ignored and no longer written. */
   accessCap?: import('./settings').AgentAccessLevel
   /** When the job ends: set on jobs agents create (7 days); only a person extends it. Absent: no end. */
   expiresAt?: string
@@ -1445,7 +1442,7 @@ export interface Thread {
   lineage?: ThreadLineage
   /**
    * Set on a thread an agent launched with `thread_create`: the creating thread. Unlike `lineage` it
-   * is not a subagent relation; it only lets the creator read and stop the thread at any agent access level.
+   * is not a subagent relation; it marks the thread as the creator's (the `launched` scope of the thread tools).
    */
   createdByThreadId?: string
   /**
@@ -1495,10 +1492,8 @@ export interface Thread {
   /** At expiry a run in progress is stopped; without it the thread waits for the run to end. */
   expiryStopsRun?: true
   /**
-   * The most an agent running in this thread may reach beyond its own thread and lineage (agent access
-   * level, SPEC §15.1), fixed for the thread's life. Set on a fork from its source and the forking agent,
-   * and on a thread a remote send drives (a linked phone's); it only ever narrows. Absent: no limit of its own
-   * (the profile's setting and the thread's delegations still apply).
+   * An agent access ceiling older versions stored on forks, launched, scheduled and remote-driven threads (SPEC §15.1).
+   * Ignored: every agent reads and manages every thread. No longer written.
    */
   accessCeiling?: import('./settings').AgentAccessLevel
   /** Set on a subagent created after workspace bindings were recorded, and on a scheduled per-run thread. */

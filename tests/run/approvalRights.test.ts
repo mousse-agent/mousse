@@ -86,12 +86,12 @@ describe('canAnswerApproval', () => {
  * The access is what the host read at the moment of the answer.
  */
 describe('canAnswerApproval for an agent with access beyond its subagents', () => {
-  const access = (patch: Partial<AgentApprovalAccess> = {}): AgentApprovalAccess => ({ level: 'manage', answerApprovals: true, projectAllowed: () => true, ...patch })
+  const access = (patch: Partial<AgentApprovalAccess> = {}): AgentApprovalAccess => ({ answerApprovals: true, ...patch })
   const manager = (threadId: string, mode: PermissionMode, patch: Partial<AgentApprovalAccess> = {}): Answerer => ({ ...agent(threadId, mode), access: access(patch) })
   const answers = (who: Answerer, threadId: string, action: PermissionAction = 'command', answer: Parameters<typeof canAnswerApproval>[2] = once) =>
     canAnswerApproval(request(threadId, action), who, answer, lineage)
 
-  it('answers a thread outside its lineage when it manages, the switch is on and the project is allowed', () => {
+  it('answers a thread outside its lineage when the switch is on', () => {
     expect(answers(manager('stranger', 'full'), 'unrelated')).toEqual({ ok: true })
     // It can reject as well as approve.
     expect(answers(manager('stranger', 'full'), 'unrelated', 'edit', { decision: 'reject' })).toEqual({ ok: true })
@@ -113,22 +113,12 @@ describe('canAnswerApproval for an agent with access beyond its subagents', () =
     expect(answers(manager('child', 'full'), 'grandchild2')).toEqual({ ok: false, code: 'not_parent' })
   })
 
-  it('refuses every agent without the manage level, whatever else it holds', () => {
-    for (const level of ['lineage', 'read'] as const) expect(answers(manager('stranger', 'full', { level }), 'unrelated')).toEqual({ ok: false, code: 'not_parent' })
+  it('refuses an agent the host gave no access to other threads', () => {
     expect(answers(agent('stranger', 'full'), 'unrelated')).toEqual({ ok: false, code: 'not_parent' })
   })
 
   it('needs the profile switch, which is off until the user turns it on', () => {
     expect(answers(manager('stranger', 'full', { answerApprovals: false }), 'unrelated')).toEqual({ ok: false, code: 'approvals_disabled' })
-  })
-
-  it('needs the thread\'s project to be one agents may reach, read when the agent answers, and fails closed', () => {
-    const asked: string[] = []
-    const only = (allowed: string): Partial<AgentApprovalAccess> => ({ projectAllowed: (id) => { asked.push(id); return id === allowed } })
-    expect(answers(manager('stranger', 'full', only('listed')), 'listed')).toEqual({ ok: true })
-    expect(answers(manager('stranger', 'full', only('listed')), 'other')).toEqual({ ok: false, code: 'project_not_allowed' })
-    expect(asked).toEqual(['listed', 'other'])
-    expect(answers(manager('stranger', 'full', { projectAllowed: () => { throw new Error('project index unreadable') } }), 'unrelated')).toEqual({ ok: false, code: 'project_not_allowed' })
   })
 
   it('never answers its own thread, with every switch on', () => {
@@ -144,7 +134,6 @@ describe('canAnswerApproval for an agent with access beyond its subagents', () =
     expect(answers(manager('grandchild', 'full'), 'child')).toEqual({ ok: false, code: 'not_parent' })
     // Its direct subagent stays the parent's own business, and the switch does not touch it.
     expect(answers(manager('parent', 'full', { answerApprovals: false }), 'child')).toEqual({ ok: true })
-    expect(answers(manager('parent', 'full', { level: 'lineage', projectAllowed: () => false }), 'child')).toEqual({ ok: true })
   })
 
   it('never approves what its own mode would ask about, so it widens nothing', () => {
@@ -164,9 +153,8 @@ describe('canAnswerApproval for an agent with access beyond its subagents', () =
     expect(answers(manager('stranger', 'full'), 'unrelated', 'edit', { decision: 'reject' })).toEqual({ ok: true })
   })
 
-  it('checks the access before the mode, and the mode before "always"', () => {
+  it('checks the switch before the mode, and the mode before "always"', () => {
     expect(answers(manager('stranger', 'ask', { answerApprovals: false }), 'unrelated')).toEqual({ ok: false, code: 'approvals_disabled' })
-    expect(answers(manager('stranger', 'ask', { projectAllowed: () => false }), 'unrelated')).toEqual({ ok: false, code: 'project_not_allowed' })
     expect(answers(manager('stranger', 'ask'), 'unrelated', 'command', { decision: 'allow', scope: 'always' })).toEqual({ ok: false, code: 'mode_forbids' })
   })
 
@@ -220,7 +208,6 @@ describe('canAnswerApproval for an agent with access beyond its subagents', () =
 
   it('says in plain words why an agent was refused', () => {
     expect(describeApprovalRefusal('approvals_disabled')).toMatch(/not allowed agents to answer approvals on other threads/)
-    expect(describeApprovalRefusal('project_not_allowed')).toMatch(/project the user has not given agents access to/)
     expect(describeApprovalRefusal('person_only')).toMatch(/only the user can answer it/)
     expect(describeApprovalRefusal('person_turn')).toMatch(/user started the turn/)
   })

@@ -6,48 +6,24 @@ import { MousseConfigStore } from '../src/mms/config/MousseConfigStore'
 import { SettingsStore } from '../src/mms/settings/SettingsStore'
 import { SETTINGS_CLASSIFICATION } from '../src/shared/profiles/settingsClassification'
 import { asSettingsPartial } from '../src/mms/protocol/validators'
-import { getDefaultSettings, isAgentAccessLevel, narrowAgentAccess, normalizeAgentAccessSettings } from '../src/shared/settings'
+import { getDefaultSettings, normalizeAgentAccessSettings } from '../src/shared/settings'
 
 describe('agent access settings (SPEC §15.1)', () => {
-  it('defaults to the narrowest level, every project, and no approval answers', () => {
-    expect(normalizeAgentAccessSettings()).toEqual({ level: 'lineage', projectIds: [], answerApprovals: false, remoteSubagents: false, computers: [] })
-    expect(getDefaultSettings().agentAccess).toEqual({ level: 'lineage', projectIds: [], answerApprovals: false, remoteSubagents: false, computers: [] })
+  it('defaults to no approval answers and no subagents on other devices', () => {
+    expect(normalizeAgentAccessSettings()).toEqual({ answerApprovals: false, remoteSubagents: false, computers: [] })
+    expect(getDefaultSettings().agentAccess).toEqual({ answerApprovals: false, remoteSubagents: false, computers: [] })
+    expect(normalizeAgentAccessSettings(null)).toEqual({ answerApprovals: false, remoteSubagents: false, computers: [] })
   })
 
-  it('normalizes an unknown level to lineage, drops non-string and empty project ids, and coerces the toggle to a boolean', () => {
-    expect(normalizeAgentAccessSettings({ level: 'root' as never }).level).toBe('lineage')
-    expect(normalizeAgentAccessSettings({ level: undefined }).level).toBe('lineage')
-    expect(normalizeAgentAccessSettings({ level: 'manage' }).level).toBe('manage')
-    expect(normalizeAgentAccessSettings({ projectIds: ['a', 'b', 'a'] }).projectIds).toEqual(['a', 'b'])
-    expect(normalizeAgentAccessSettings({ level: 'manage', projectIds: [] })).toMatchObject({ level: 'manage', projectIds: [] })
+  it('drops the removed level and project list of an older profile, and keeps its approvals switch', () => {
+    expect(normalizeAgentAccessSettings({ level: 'lineage', projectIds: ['p1'], projectsUnreadable: true, answerApprovals: true } as never)).toEqual({ answerApprovals: true, remoteSubagents: false, computers: [] })
     expect(normalizeAgentAccessSettings({ answerApprovals: 'yes' as never }).answerApprovals).toBe(false)
-    expect(normalizeAgentAccessSettings({ level: 'manage', answerApprovals: true }).answerApprovals).toBe(true)
-    expect(normalizeAgentAccessSettings(null)).toEqual({ level: 'lineage', projectIds: [], answerApprovals: false, remoteSubagents: false, computers: [] })
-  })
-
-  it('the answer switch reads as off below the manage level, whoever wrote the level', () => {
-    for (const level of ['lineage', 'read', undefined, 'root'] as const)
-      expect(normalizeAgentAccessSettings({ level: level as never, answerApprovals: true }).answerApprovals, String(level)).toBe(false)
-    expect(normalizeAgentAccessSettings({ answerApprovals: true }).answerApprovals).toBe(false)
-  })
-
-  it('a malformed project list fails closed to lineage, never to every project', () => {
-    for (const projectIds of ['a', 7, {}, [123], ['a', 7], ['a', ''], [null]]) {
-      // Marked as unreadable: a bot, which the level does not hold, then reaches no project at all.
-      expect(normalizeAgentAccessSettings({ level: 'manage', projectIds: projectIds as never, answerApprovals: true }), JSON.stringify(projectIds)).toEqual({
-        level: 'lineage', projectIds: [], answerApprovals: false, remoteSubagents: false, computers: [], projectsUnreadable: true
-      })
-    }
-    // An absent list is every project, which is what an empty one means.
-    expect(normalizeAgentAccessSettings({ level: 'read' })).toMatchObject({ level: 'read', projectIds: [] })
   })
 
   it('allows no other computer by default, and reads a malformed computer list as none', () => {
     expect(normalizeAgentAccessSettings({ computers: ['node-a', 'node-b', 'node-a'] }).computers).toEqual(['node-a', 'node-b'])
     for (const computers of ['node-a', 7, [7], ['node-a', ''], [null]])
-      expect(normalizeAgentAccessSettings({ level: 'read', computers: computers as never }).computers, JSON.stringify(computers)).toEqual([])
-    // A malformed project list fails closed for the level; the computers chosen are kept, they are a separate grant.
-    expect(normalizeAgentAccessSettings({ projectIds: 'p' as never, computers: ['node-a'] })).toEqual({ level: 'lineage', projectIds: [], answerApprovals: false, remoteSubagents: false, computers: ['node-a'], projectsUnreadable: true })
+      expect(normalizeAgentAccessSettings({ computers: computers as never }).computers, JSON.stringify(computers)).toEqual([])
     expect(asSettingsPartial({ agentAccess: { computers: ['node-a'] } })).toEqual({ agentAccess: { computers: ['node-a'] } })
     for (const bad of [{ computers: 'node-a' }, { computers: [''] }, { computers: [1] }])
       expect(() => asSettingsPartial({ agentAccess: bad }), JSON.stringify(bad)).toThrow(/agentAccess/)
@@ -61,80 +37,26 @@ describe('agent access settings (SPEC §15.1)', () => {
     expect(() => asSettingsPartial({ agentAccess: { remoteSubagents: 'yes' } })).toThrow(/agentAccess/)
   })
 
-  it('the settings protocol refuses a malformed agentAccess patch', () => {
-    expect(asSettingsPartial({ agentAccess: { level: 'read', projectIds: ['p1'], answerApprovals: false } })).toEqual({ agentAccess: { level: 'read', projectIds: ['p1'], answerApprovals: false } })
-    expect(asSettingsPartial({ agentAccess: { projectIds: [] } })).toEqual({ agentAccess: { projectIds: [] } })
-    for (const bad of [{ projectIds: 'p1' }, { projectIds: [123] }, { projectIds: [''] }, { level: 'root' }, { answerApprovals: 'yes' }, { extra: 1 }])
+  it('the settings protocol refuses a malformed agentAccess patch, and lets an older client send the removed keys', () => {
+    expect(() => asSettingsPartial({ agentAccess: { level: 'read', projectIds: ['p1'], answerApprovals: false } })).not.toThrow()
+    for (const bad of [{ answerApprovals: 'yes' }, { extra: 1 }])
       expect(() => asSettingsPartial({ agentAccess: bad }), JSON.stringify(bad)).toThrow(/agentAccess/)
     expect(() => asSettingsPartial({ agentAccess: 'manage' })).toThrow()
-  })
-
-  it('narrows to the narrower level and ignores an absent or unknown one', () => {
-    expect(narrowAgentAccess('manage', 'read')).toBe('read')
-    expect(narrowAgentAccess('read', 'manage', 'lineage')).toBe('lineage')
-    expect(narrowAgentAccess('manage', undefined, null)).toBe('manage')
-    expect(narrowAgentAccess(undefined, null)).toBeUndefined()
-    expect(narrowAgentAccess('bogus' as never, 'read')).toBe('read')
-    expect(isAgentAccessLevel('read')).toBe(true)
-    expect(isAgentAccessLevel('admin')).toBe(false)
-    expect(isAgentAccessLevel(undefined)).toBe(false)
   })
 
   it('is a profile setting', () => {
     expect(SETTINGS_CLASSIFICATION.find((entry) => entry.path === 'settings.agentAccess')).toMatchObject({ scope: 'profile' })
   })
 
-  it('a project list that could not be read stays marked through every later save, until the owner chooses projects again', () => {
-    const home = mkdtempSync(join(tmpdir(), 'mousse-agent-access-unreadable-'))
-    const whole = { answerApprovals: false, remoteSubagents: false, computers: [] }
-    try {
-      const settings = new SettingsStore(MousseConfigStore.load(home))
-      // A list no reader can take (a hand edit, an older or newer build) is written back marked.
-      settings.set({ agentAccess: { level: 'read', projectIds: 'p' } } as never)
-      const reread = () => new SettingsStore(MousseConfigStore.load(home)).get().agentAccess
-      expect(reread()).toMatchObject({ level: 'lineage', projectIds: [], projectsUnreadable: true })
-      // A save of the whole setting that keeps the same empty list, as Settings sends a change of level, keeps the mark:
-      // the empty list never turns into "every project" for bots.
-      settings.set({ agentAccess: { level: 'manage', projectIds: [], ...whole } })
-      expect(reread()).toEqual({ level: 'manage', projectIds: [], ...whole, projectsUnreadable: true })
-      // Choosing projects (Settings sends the mark cleared with them) clears it.
-      settings.set({ agentAccess: { level: 'manage', projectIds: ['p1'], ...whole, projectsUnreadable: false } })
-      expect(reread()).toEqual({ level: 'manage', projectIds: ['p1'], ...whole })
-      // Only the daemon marks a list: a client may clear the mark, never set it.
-      expect(asSettingsPartial({ agentAccess: { projectsUnreadable: false } })).toEqual({ agentAccess: { projectsUnreadable: false } })
-      expect(() => asSettingsPartial({ agentAccess: { projectsUnreadable: true } })).toThrow(/agentAccess/)
-    } finally {
-      rmSync(home, { recursive: true, force: true })
-    }
-  })
-
-  it('persists the level, the project list and the toggle through a configuration reload, and normalizes what was stored', () => {
+  it('persists the switches through a configuration reload', () => {
     const home = mkdtempSync(join(tmpdir(), 'mousse-agent-access-settings-'))
     try {
       const settings = new SettingsStore(MousseConfigStore.load(home))
-      expect(settings.get().agentAccess).toEqual({ level: 'lineage', projectIds: [], answerApprovals: false, remoteSubagents: false, computers: [] })
-      settings.set({ agentAccess: { level: 'manage', projectIds: ['p1', 'p2'], answerApprovals: true } })
-      let reloaded = new SettingsStore(MousseConfigStore.load(home))
-      expect(reloaded.get().agentAccess).toEqual({ level: 'manage', projectIds: ['p1', 'p2'], answerApprovals: true, remoteSubagents: false, computers: [] })
-      // A narrower project list replaces the earlier one rather than merging into it.
-      reloaded.set({ agentAccess: { projectIds: ['p2'] } as never })
-      reloaded = new SettingsStore(MousseConfigStore.load(home))
-      expect(reloaded.get().agentAccess).toEqual({ level: 'manage', projectIds: ['p2'], answerApprovals: true, remoteSubagents: false, computers: [] })
-      // A partial update that only lowers the level (from the CLI, another client or a script) clears the switch in the
-      // store itself, and raising the level again does not bring it back.
-      reloaded.set({ agentAccess: { level: 'read' } as never })
-      expect(new SettingsStore(MousseConfigStore.load(home)).get().agentAccess).toEqual({ level: 'read', projectIds: ['p2'], answerApprovals: false, remoteSubagents: false, computers: [] })
-      reloaded.set({ agentAccess: { level: 'manage' } as never })
-      expect(new SettingsStore(MousseConfigStore.load(home)).get().agentAccess).toEqual({ level: 'manage', projectIds: ['p2'], answerApprovals: false, remoteSubagents: false, computers: [] })
-      // Turning it on is its own, explicit write at the manage level.
-      reloaded.set({ agentAccess: { answerApprovals: true } as never })
-      expect(new SettingsStore(MousseConfigStore.load(home)).get().agentAccess.answerApprovals).toBe(true)
-      reloaded.set({ agentAccess: { level: 'lineage' } as never })
-      reloaded.set({ agentAccess: { level: 'manage' } as never })
-      expect(new SettingsStore(MousseConfigStore.load(home)).get().agentAccess.answerApprovals).toBe(false)
-      // A level that is not one of the three reads back as the narrowest.
-      reloaded.set({ agentAccess: { level: 'superuser' } as never })
-      expect(new SettingsStore(MousseConfigStore.load(home)).get().agentAccess.level).toBe('lineage')
+      settings.set({ agentAccess: { answerApprovals: true, remoteSubagents: true, computers: ['node-a'] } })
+      const reloaded = new SettingsStore(MousseConfigStore.load(home))
+      expect(reloaded.get().agentAccess).toEqual({ answerApprovals: true, remoteSubagents: true, computers: ['node-a'] })
+      reloaded.set({ agentAccess: { answerApprovals: false } as never })
+      expect(new SettingsStore(MousseConfigStore.load(home)).get().agentAccess).toEqual({ answerApprovals: false, remoteSubagents: true, computers: ['node-a'] })
     } finally {
       rmSync(home, { recursive: true, force: true })
     }

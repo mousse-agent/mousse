@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { AgentAccessLevel, AgentAccessSettings } from '../../src/shared/settings'
 import type { Thread } from '../../src/shared/types'
 import { AppToolTurns, McpToolError, ToolRegistry, TURN_TOKEN_KEY, type McpTurnBinding } from '../../src/mms/run/mcp/appTools'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
@@ -44,10 +43,10 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     server = new MousseMcpServer({ credentials, registry })
     await server.start()
     const registered = turns.register(appTurn({ threadId: 'thread-a', runId: run.runId }))
-    const bearer = (input: { runId?: string; instanceId?: string; modeCeiling?: 'plan' | 'default'; accessLevel?: AgentAccessLevel; binding?: McpTurnBinding; generation?: string } = {}) =>
+    const bearer = (input: { runId?: string; instanceId?: string; modeCeiling?: 'plan' | 'default'; binding?: McpTurnBinding; generation?: string } = {}) =>
       server!.bearerForTurn({
         threadId: 'thread-a', instanceId: input.instanceId ?? 'codex', runId: input.runId ?? run.runId,
-        modeCeiling: input.modeCeiling ?? 'default', ...(input.accessLevel ? { accessLevel: input.accessLevel } : {}), binding: input.binding ?? 'drained_turn', generation: input.generation ?? 'codex|default|0|0'
+        modeCeiling: input.modeCeiling ?? 'default', binding: input.binding ?? 'drained_turn', generation: input.generation ?? 'codex|default|0|0'
       })!
     const attachment = bearer()
     return { fx, run, credentials, server, attachment, bearer, turns, registered, ...fake }
@@ -75,9 +74,9 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     const list = await rpc(server.url, attachment.token, { jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} })
     const names = list.body.result.tools.map((tool: { name: string }) => tool.name).sort()
     // The fake host offers no browser, skills, quick actions, web or dev GUI: only the tools it can serve are listed.
-    expect(names).toEqual(['answer_subagent', 'ask_user', 'continue_subagent', 'create_task', 'delegate_task', 'list_computers', 'list_models', 'list_subagents', 'list_tasks',
+    expect(names).toEqual(['answer_subagent', 'approval_respond', 'ask_user', 'continue_subagent', 'create_task', 'delegate_task', 'list_computers', 'list_models', 'list_subagents', 'list_tasks',
       'publish_applet', 'queue_edit', 'queue_enqueue', 'queue_list', 'queue_promote_to_steer', 'queue_remove', 'queue_reorder', 'task_cancel', 'task_status',
-      'thread_fork', 'thread_interrupt', 'thread_merge_back', 'thread_read', 'thread_wait', 'update_task'])
+      'thread_create', 'thread_fork', 'thread_interrupt', 'thread_list', 'thread_merge_back', 'thread_read', 'thread_search', 'thread_send', 'thread_steer', 'thread_wait', 'update_task'])
 
     const read = await rpc(server.url, attachment.token, call(4, 'thread_read'))
     expect(read.body.result.isError).toBeUndefined()
@@ -187,44 +186,12 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     expect(result.body.result.content).toEqual([{ type: 'text', text: 'see' }, { type: 'image', data: 'AAAA', mimeType: 'image/png' }])
   })
 
-  describe('agent access level (SPEC §15.1)', () => {
-    const listed = async (url: string, token: string): Promise<string[]> =>
-      (await rpc(url, token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} })).body.result.tools.map((tool: { name: string }) => tool.name)
-
-    it('lists the read-others tools only for a credential whose level, narrowed by the profile now, reaches them', async () => {
-      const state = { profile: { level: 'manage', projectIds: [], answerApprovals: false } as AgentAccessSettings }
-      const { server, bearer } = await setup({ agentAccess: () => state.profile })
-      const lineage = bearer({ instanceId: 'a' })
-      expect(await listed(server.url, lineage.token)).not.toContain('thread_list')
-      expect(await listed(server.url, lineage.token)).toContain('thread_read')
-      const read = bearer({ instanceId: 'b', accessLevel: 'read' })
-      expect(await listed(server.url, read.token)).toEqual(expect.arrayContaining(['thread_list', 'thread_search', 'thread_read']))
-      const manage = bearer({ instanceId: 'c', accessLevel: 'manage' })
-      expect(await listed(server.url, manage.token)).toEqual(expect.arrayContaining(['thread_list', 'thread_search']))
-      // The profile is lowered while the credential is held: the next listing narrows with it.
-      state.profile = { level: 'lineage', projectIds: [], answerApprovals: false }
-      expect(await listed(server.url, manage.token)).not.toContain('thread_list')
-    })
-
-    it('refuses another thread over the wire with -32003 at lineage, and the same credential is refused at once when the profile drops', async () => {
-      const state = { profile: { level: 'manage', projectIds: [], answerApprovals: false } as AgentAccessSettings }
-      const other = { id: 'thread-b', name: 'Other', createdAt: 'x', updatedAt: 'x' } as Thread
-      const { server, bearer, credentials } = await setup({ agentAccess: () => state.profile, threadMeta: (id) => (id === 'thread-b' ? other : undefined) })
-      const lineage = bearer({ instanceId: 'a' })
-      const refused = await rpc(server.url, lineage.token, call(1, 'thread_read', { threadId: 'thread-b' }))
-      expect(refused.body.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_scope_denied, data: { reason: 'mousse_scope_denied' } })
-      expect(refused.body.error.message).toMatch(/needs the "read" agent access level \(yours is "lineage"\)/)
-      // thread_list is not listed at lineage and is refused if called anyway.
-      expect((await rpc(server.url, lineage.token, call(2, 'thread_list'))).body.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_scope_denied })
-
-      const manage = bearer({ instanceId: 'c', accessLevel: 'manage' })
-      expect(credentials.resolve(manage.token)).toMatchObject({ accessLevel: 'manage' })
-      const allowed = await rpc(server.url, manage.token, call(3, 'thread_read', { threadId: 'thread-b' }))
-      expect(allowed.body.error).toBeUndefined()
-      expect(JSON.parse(allowed.body.result.content[0].text)).toMatchObject({ threadId: 'thread-b', scope: 'manage' })
-      state.profile = { level: 'lineage', projectIds: [], answerApprovals: false }
-      expect((await rpc(server.url, manage.token, call(4, 'thread_read', { threadId: 'thread-b' }))).body.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_scope_denied })
-    })
+  it('a credential that recorded the default level reads another thread over the wire', async () => {
+    const other = { id: 'thread-b', name: 'Other', createdAt: 'x', updatedAt: 'x' } as Thread
+    const { server, attachment } = await setup({ threadMeta: (id) => (id === 'thread-b' ? other : undefined) })
+    const read = await rpc(server.url, attachment.token, call(1, 'thread_read', { threadId: 'thread-b' }))
+    expect(read.body.error).toBeUndefined()
+    expect(JSON.parse(read.body.result.content[0].text)).toMatchObject({ threadId: 'thread-b', scope: 'manage' })
   })
 
   it('reports a conflict as -32006 with its details in the error data', async () => {

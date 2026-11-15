@@ -1,5 +1,4 @@
 import { permissionModeAllows, type PermissionAction, type PermissionMode } from '../../shared/permissionMode'
-import type { AgentAccessLevel } from '../../shared/settings'
 import type { LineageRecord } from './types'
 
 /**
@@ -13,12 +12,8 @@ import type { LineageRecord } from './types'
  * (`approval_respond`). Absent for every other way an agent answers: those reach the agent's own subagents only.
  */
 export interface AgentApprovalAccess {
-  /** The agent's effective access level now (what it was granted, narrowed by the profile's setting). */
-  level: AgentAccessLevel
   /** The profile's switch "Agents may answer approvals on other threads" (off by default). */
   answerApprovals: boolean
-  /** Whether the profile's project list lets agents reach this thread's project. */
-  projectAllowed(threadId: string): boolean
 }
 
 export type Answerer =
@@ -60,7 +55,6 @@ export type ApprovalRefusal =
   | 'person_turn'
   | 'not_parent'
   | 'approvals_disabled'
-  | 'project_not_allowed'
   | 'mode_forbids'
   | 'agent_no_standing_grant'
   | 'bridge_no_standing_grant'
@@ -139,7 +133,7 @@ export function canAnswerApproval(
   const ownSubagent = link !== null && link.parentThreadId === answerer.threadId && link.relationship === 'subagent'
   if (!ownSubagent) {
     const access = answerer.access
-    if (!access || access.level !== 'manage') return { ok: false, code: 'not_parent' }
+    if (!access) return { ok: false, code: 'not_parent' }
     // A subagent is answered by its parent alone. Nothing in the answerer's own lineage is answered through the access
     // branch: not below it, not above it, and not beside it (a sibling or cousin shares an ancestor with it).
     if (link !== null && link.relationship === 'subagent') return { ok: false, code: 'not_parent' }
@@ -148,13 +142,6 @@ export function canAnswerApproval(
     if (above.includes(answerer.threadId) || mine.includes(request.threadId) || above.some((id) => mine.includes(id)))
       return { ok: false, code: 'not_parent' }
     if (!access.answerApprovals) return { ok: false, code: 'approvals_disabled' }
-    let projectAllowed = false
-    try {
-      projectAllowed = access.projectAllowed(request.threadId)
-    } catch {
-      projectAllowed = false
-    }
-    if (!projectAllowed) return { ok: false, code: 'project_not_allowed' }
   }
   if (!permissionModeAllows(answerer.permissionMode, request.action)) return { ok: false, code: 'mode_forbids' }
   if (answer.decision === 'allow' && answer.scope === 'always') return { ok: false, code: 'agent_no_standing_grant' }
@@ -169,7 +156,6 @@ export function describeApprovalRefusal(code: ApprovalRefusal): string {
     case 'person_turn': return 'The user started the turn that asks, so the user answers it. Agents answer for turns that agents, jobs or subagents started.'
     case 'not_parent': return 'Only the parent of a subagent can answer its approval requests.'
     case 'approvals_disabled': return 'The user has not allowed agents to answer approvals on other threads (Settings > Agents). Ask the user to answer it.'
-    case 'project_not_allowed': return 'That thread is in a project the user has not given agents access to. Ask the user to answer it.'
     case 'mode_forbids': return 'Your permission mode would ask the user before this kind of action, so you cannot approve it for your subagent. Ask the user to answer it.'
     case 'agent_no_standing_grant': return 'Only the user can approve an action for the whole thread. Approve it once, or ask the user.'
     case 'bridge_no_standing_grant': return 'A linked device can allow a request once. "Always for this thread" is made in the app or the CLI, where the rule can be seen and revoked.'

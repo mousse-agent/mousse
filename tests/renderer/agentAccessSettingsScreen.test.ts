@@ -5,16 +5,12 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { AgentAccessSettings, AGENT_ACCESS_LEVELS, CAPPED_THREADS } from '../../src/renderer/components/settings/AgentAccessSettings'
+import { AgentAccessSettings } from '../../src/renderer/components/settings/AgentAccessSettings'
 import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
 import { SettingsStore } from '../../src/mms/settings/SettingsStore'
 import { getDefaultSettings, normalizeAgentAccessSettings, type AgentAccessSettings as AccessSetting, type MousseSettings } from '../../src/shared/settings'
-import type { Project } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
-
-const project = (id: string, name: string, order: number): Project => ({ id, name, path: `/work/${id}`, createdAt: '2026-10-01T00:00:00.000Z', order })
-const PROJECTS = [project('p1', 'Alpha', 0), project('p2', 'Beta', 1), project('p3', 'Gamma', 2)]
 
 let root: Root
 let host: HTMLElement
@@ -36,12 +32,11 @@ afterEach(() => {
 })
 
 /** The screen wired to a real settings store, the way Settings wires it to the daemon. */
-function show(initial?: Partial<AccessSetting>, projects: readonly Project[] = PROJECTS) {
+function show(initial?: Partial<AccessSetting>) {
   if (initial) store.set({ agentAccess: initial })
   const updates = vi.fn()
   const draw = () => act(() => root.render(createElement(AgentAccessSettings, {
     settings: store.get() as MousseSettings,
-    projects,
     updateSettings: async (partial) => {
       updates(partial)
       store.set(partial)
@@ -56,146 +51,29 @@ function show(initial?: Partial<AccessSetting>, projects: readonly Project[] = P
 const savedByDaemon = (): AccessSetting => normalizeAgentAccessSettings(new SettingsStore(MousseConfigStore.load(home)).get().agentAccess)
 
 const text = () => host.textContent ?? ''
-const trigger = () => host.querySelector<HTMLButtonElement>('[aria-label="Agent access level"]')!
-/** The project and computer switches, each named by its row. */
-const rows = () => Array.from(host.querySelectorAll<HTMLButtonElement>('[role="switch"][id^="agent-access-project-"], [role="switch"][id^="agent-access-computer-"]'))
+/** The computer switches, each named by its row. */
+const rows = () => Array.from(host.querySelectorAll<HTMLButtonElement>('[role="switch"][id^="agent-access-computer-"]'))
 const row = (name: string) => rows().find((entry) => entry.getAttribute('aria-label') === name)!
-const checked = () => rows().filter((entry) => entry.getAttribute('aria-checked') === 'true').map((entry) => entry.getAttribute('aria-label'))
-const key = (target: Element, name: string) => act(() => { target.dispatchEvent(new KeyboardEvent('keydown', { key: name, bubbles: true, cancelable: true })) })
 const click = (target: Element) => act(() => { (target as HTMLElement).click() })
-const pickLevel = (label: string) => {
-  click(trigger())
-  const option = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).find((entry) => entry.textContent?.startsWith(label))!
-  click(option)
-}
-
 describe('Settings > Agents > Access', () => {
-  it('shows the saved level with its explanation in plain words', () => {
-    for (const { value, label, summary } of AGENT_ACCESS_LEVELS) {
-      show({ level: value })
-      expect(trigger().textContent).toContain(label)
-      expect(text()).toContain(summary)
-    }
-  })
-
-  it('starts at Lineage only for a profile that never touched the setting', () => {
+  it('has no access level or project list: agents read and manage every thread', () => {
     show()
-    expect(trigger().textContent).toContain('Lineage only')
-    expect(text()).toContain('see only their own thread')
-    expect(rows()).toHaveLength(0)
-  })
-
-  it('changing the level saves the whole setting, and the daemon reads it for new turns', () => {
-    // A stored switch below Manage reads as off (it cannot be on while the level is lower), so raising never turns it on.
-    const { updates } = show({ level: 'read', projectIds: ['p2'], answerApprovals: true })
-    pickLevel('Manage')
-    // The project list travels with the level, so a save never drops it.
-    expect(updates).toHaveBeenCalledTimes(1)
-    expect(updates).toHaveBeenCalledWith({ agentAccess: { level: 'manage', projectIds: ['p2'], answerApprovals: false, remoteSubagents: false, computers: [] } })
-    expect(trigger().textContent).toContain('Manage')
-    expect(text()).toContain('full events and messages of other threads')
-    expect(savedByDaemon()).toEqual({ level: 'manage', projectIds: ['p2'], answerApprovals: false, remoteSubagents: false, computers: [] })
-
-    pickLevel('Lineage only')
-    expect(savedByDaemon().level).toBe('lineage')
-    expect(text()).toContain('Lowering this applies to agents that are already running; raising it applies from their next turn.')
-  })
-
-  it('choosing the level that is already saved writes nothing', () => {
-    const { updates } = show({ level: 'read' })
-    pickLevel('Read')
-    expect(updates).not.toHaveBeenCalled()
-  })
-
-  it('offers the project list only when agents may reach other threads', () => {
-    show({ level: 'lineage' })
-    expect(rows()).toHaveLength(0)
+    expect(host.querySelector('[aria-label="Agent access level"]')).toBeNull()
     expect(text()).not.toContain('All projects')
-    pickLevel('Read')
-    expect(rows().map((entry) => entry.getAttribute('aria-label'))).toEqual(['All projects', 'Alpha', 'Beta', 'Gamma'])
+    expect(text()).not.toContain('Lineage only')
   })
 
-  it('picks projects one at a time, and saves each pick', () => {
-    const { updates } = show({ level: 'manage' })
-    expect(checked()).toEqual(['All projects'])
-    expect(text()).toContain('Every project, including threads without a project')
-    // Every project is left by turning a project on, not by switching it off.
-    expect(row('All projects').disabled).toBe(true)
-
-    click(row('Beta'))
-    expect(updates).toHaveBeenLastCalledWith({ agentAccess: { level: 'manage', projectIds: ['p2'], answerApprovals: false, remoteSubagents: false, computers: [] } })
-    expect(checked()).toEqual(['Beta'])
-    expect(text()).toContain('Only the projects turned on')
-
-    click(row('Alpha'))
-    expect(checked()).toEqual(['Alpha', 'Beta'])
-    expect(savedByDaemon().projectIds).toEqual(['p2', 'p1'])
-
-    click(row('Beta'))
-    expect(checked()).toEqual(['Alpha'])
-    expect(savedByDaemon().projectIds).toEqual(['p1'])
-  })
-
-  it('never turns a limited list into an empty one, which the daemon reads as every project', () => {
-    const { updates } = show({ level: 'manage', projectIds: ['p1'] })
-    expect(checked()).toEqual(['Alpha'])
-    expect(row('Alpha').disabled).toBe(true)
-
-    click(row('Alpha'))
-    expect(updates).not.toHaveBeenCalled()
-    expect(checked()).toEqual(['Alpha'])
-    expect(savedByDaemon().projectIds).toEqual(['p1'])
-    expect(text()).toContain('Keep at least one project on, or turn on All projects.')
-
-    // Widening to every project is its own, named choice.
-    click(row('All projects'))
-    expect(updates).toHaveBeenCalledWith({ agentAccess: { level: 'manage', projectIds: [], answerApprovals: false, remoteSubagents: false, computers: [] } })
-    expect(checked()).toEqual(['All projects'])
-    // And choosing it again changes nothing.
-    updates.mockClear()
-    click(row('All projects'))
-    expect(updates).not.toHaveBeenCalled()
-  })
-
-  it('a stored list that cannot be read fails closed: agents at the narrowest level, no project on, one line for bots, until a project is chosen', () => {
-    show()
-    // Straight into the screen, as a hand-edited or damaged file would reach it.
-    const damaged = { ...getDefaultSettings(), agentAccess: { level: 'manage', projectIds: 'p1', answerApprovals: true } } as unknown as MousseSettings
-    act(() => root.render(createElement(AgentAccessSettings, { settings: damaged, projects: PROJECTS, updateSettings: async () => undefined })))
-    expect(trigger().textContent).toContain('Lineage only')
-    // Bots with "Use your threads" follow the list at every level: it shows, with nothing on, "All projects" included.
-    expect(checked()).toEqual([])
-    expect(text()).toContain("Couldn't read the saved list. Bots reach no project until you turn one on.")
-
-    // Saved that way by the daemon, then a project chosen here: the mark goes, and only that project is reached.
-    store.set({ agentAccess: { level: 'manage', projectIds: 'p1' } } as never)
-    expect(savedByDaemon()).toMatchObject({ projectIds: [], projectsUnreadable: true })
-    const { updates } = show()
-    expect(checked()).toEqual([])
-    click(row('Alpha'))
-    expect(updates).toHaveBeenLastCalledWith({ agentAccess: expect.objectContaining({ projectIds: ['p1'], projectsUnreadable: false }) })
-    expect(savedByDaemon()).toEqual({ level: 'lineage', projectIds: ['p1'], answerApprovals: false, remoteSubagents: false, computers: [] })
-    expect(text()).not.toContain("Couldn't read the saved list")
-  })
-
-  it('keeps a listed project that no longer exists visible, and removable while another stays', () => {
-    show({ level: 'read', projectIds: ['p1', 'gone'] })
-    expect(checked()).toEqual(['Alpha', 'Removed project'])
-    click(row('Removed project'))
-    expect(savedByDaemon().projectIds).toEqual(['p1'])
-    expect(rows().map((entry) => entry.getAttribute('aria-label'))).not.toContain('Removed project')
+  it('an older profile that stored a level and projects reads as the switches alone', () => {
+    show({ level: 'read', projectIds: ['p2'], answerApprovals: true } as Partial<AccessSetting>)
+    expect(savedByDaemon()).toEqual({ answerApprovals: true, remoteSubagents: false, computers: [] })
   })
 
   describe('answering approvals on other threads', () => {
     const answerSwitch = () => host.querySelector<HTMLButtonElement>('[role="switch"][aria-label="Answer approvals on other threads"]')
     const on = () => answerSwitch()!.getAttribute('aria-checked') === 'true'
 
-    it('is offered only at the Manage level, off for a profile that never touched it, with a clear warning', () => {
-      for (const level of ['lineage', 'read'] as const) {
-        show({ level })
-        expect(answerSwitch(), level).toBeNull()
-      }
-      show({ level: 'manage' })
+    it('is off for a profile that never touched it, with a clear warning', () => {
+      show()
       expect(answerSwitch()).not.toBeNull()
       expect(on()).toBe(false)
       expect(normalizeAgentAccessSettings(getDefaultSettings().agentAccess).answerApprovals).toBe(false)
@@ -207,30 +85,14 @@ describe('Settings > Agents > Access', () => {
     })
 
     it('saves the whole setting when switched, and the daemon reads it back', () => {
-      const { updates } = show({ level: 'manage', projectIds: ['p2'] })
+      const { updates } = show({ computers: ['node-a'] })
       click(answerSwitch()!)
       expect(updates).toHaveBeenCalledTimes(1)
-      expect(updates).toHaveBeenCalledWith({ agentAccess: { level: 'manage', projectIds: ['p2'], answerApprovals: true, remoteSubagents: false, computers: [] } })
+      expect(updates).toHaveBeenCalledWith({ agentAccess: { answerApprovals: true, remoteSubagents: false, computers: ['node-a'] } })
       expect(on()).toBe(true)
-      expect(savedByDaemon()).toEqual({ level: 'manage', projectIds: ['p2'], answerApprovals: true, remoteSubagents: false, computers: [] })
+      expect(savedByDaemon()).toEqual({ answerApprovals: true, remoteSubagents: false, computers: ['node-a'] })
       click(answerSwitch()!)
       expect(savedByDaemon().answerApprovals).toBe(false)
-    })
-
-    it('is switched off when the level is lowered from Manage, so raising it again does not bring the permission back', () => {
-      show({ level: 'manage', answerApprovals: true })
-      expect(on()).toBe(true)
-      pickLevel('Read')
-      expect(savedByDaemon()).toEqual({ level: 'read', projectIds: [], answerApprovals: false, remoteSubagents: false, computers: [] })
-      pickLevel('Manage')
-      expect(on()).toBe(false)
-      expect(savedByDaemon().answerApprovals).toBe(false)
-    })
-
-    it('a project pick keeps the switch as it is', () => {
-      show({ level: 'manage', answerApprovals: true })
-      click(row('Beta'))
-      expect(savedByDaemon()).toEqual({ level: 'manage', projectIds: ['p2'], answerApprovals: true, remoteSubagents: false, computers: [] })
     })
   })
 
@@ -238,25 +100,21 @@ describe('Settings > Agents > Access', () => {
     const remoteSwitch = () => host.querySelector<HTMLElement>('#agent-access-remote-subagents')
     const on = () => remoteSwitch()!.getAttribute('aria-checked') === 'true'
 
-    it('is offered at every level, off for a profile that never touched it', () => {
-      for (const level of ['lineage', 'read', 'manage'] as const) {
-        show({ level })
-        expect(remoteSwitch(), level).not.toBeNull()
-        expect(on(), level).toBe(false)
-      }
-      expect(text()).toContain('Subagents on other devices')
+    it('is off for a profile that never touched it, in its own Subagents group after Access', () => {
+      show()
+      expect(remoteSwitch()).not.toBeNull()
+      expect(on()).toBe(false)
       expect(remoteSwitch()!.getAttribute('aria-label')).toBe('Subagents on other devices')
       expect(host.querySelector('label[for="agent-access-remote-subagents"]')?.textContent).toBe('Subagents on other devices')
-      // It is in its own Subagents group, after Access.
       expect(remoteSwitch()!.closest('section.settings-group')?.querySelector('h3')?.textContent?.trim()).toBe('Subagents')
-      expect(trigger().closest('section.settings-group')?.querySelector('h3')?.textContent?.trim()).toBe('Access')
+      expect(host.querySelector('#agent-access-answer-approvals')!.closest('section.settings-group')?.querySelector('h3')?.textContent?.trim()).toBe('Access')
       expect(normalizeAgentAccessSettings(getDefaultSettings().agentAccess).remoteSubagents).toBe(false)
     })
 
     it('saves the whole setting when switched, and says to pair computers when none are connected', () => {
-      const { updates } = show({ level: 'read' })
+      const { updates } = show({ answerApprovals: true })
       click(remoteSwitch()!)
-      expect(updates).toHaveBeenCalledWith({ agentAccess: { level: 'read', projectIds: [], answerApprovals: false, remoteSubagents: true, computers: [] } })
+      expect(updates).toHaveBeenCalledWith({ agentAccess: { answerApprovals: true, remoteSubagents: true, computers: [] } })
       expect(savedByDaemon().remoteSubagents).toBe(true)
       expect(text()).toContain('Pair them in Settings → Devices')
     })
@@ -271,62 +129,8 @@ describe('Settings > Agents > Access', () => {
     })
   })
 
-  it('shows the threads whose level stays capped, at every level', () => {
-    for (const level of ['lineage', 'read', 'manage'] as const) {
-      show({ level })
-      const caps = Array.from(host.querySelectorAll('.agent-access-cap')).map((entry) => entry.textContent)
-      expect(caps).toHaveLength(CAPPED_THREADS.length)
-      expect(caps.join('|')).toContain('Threads driven by a remote send')
-      expect(caps.join('|')).toContain('Bot threads')
-      expect(caps.filter((entry) => entry?.endsWith('Lineage only'))).toHaveLength(2)
-      expect(caps.join('|')).toContain('Read at most')
-    }
-  })
-
-  describe('keyboard', () => {
-    it('opens the level list, moves through it and commits with the keyboard alone', () => {
-      show({ level: 'lineage' })
-      act(() => trigger().focus())
-      key(trigger(), 'Enter')
-      expect(trigger().getAttribute('aria-expanded')).toBe('true')
-      key(trigger(), 'ArrowDown')
-      key(trigger(), 'ArrowDown')
-      key(trigger(), 'Enter')
-      expect(trigger().getAttribute('aria-expanded')).toBe('false')
-      expect(savedByDaemon().level).toBe('manage')
-      expect(document.activeElement).toBe(trigger())
-    })
-
-    it('Escape closes the level list without a change', () => {
-      const { updates } = show({ level: 'read' })
-      key(trigger(), 'Enter')
-      key(trigger(), 'ArrowDown')
-      key(trigger(), 'Escape')
-      expect(trigger().getAttribute('aria-expanded')).toBe('false')
-      expect(updates).not.toHaveBeenCalled()
-    })
-
-    it('every project is a labelled switch in the tab order', () => {
-      show({ level: 'read' })
-      for (const entry of rows()) {
-        expect(entry.tagName).toBe('BUTTON')
-        expect(entry.tabIndex).toBe(0)
-        expect(host.querySelector(`label[for="${CSS.escape(entry.id)}"]`)?.textContent).toBe(entry.getAttribute('aria-label'))
-      }
-    })
-
-    it('a focused project row is picked by activating it', () => {
-      show({ level: 'read' })
-      act(() => row('Beta').focus())
-      // A button's Enter and Space press is a click.
-      click(document.activeElement!)
-      expect(savedByDaemon().projectIds).toEqual(['p2'])
-      expect(document.activeElement).toBe(row('Beta'))
-    })
-  })
-
   it('keeps each rule in one line, with the exact terms one keyboard step away', () => {
-    show({ level: 'manage' })
+    show()
     const approvals = host.querySelector('#agent-access-answer-approvals')!.closest('.settings-item')!
     const toggle = approvals.querySelector<HTMLButtonElement>('.settings-more-btn')!
     const body = document.getElementById(toggle.getAttribute('aria-controls')!)!

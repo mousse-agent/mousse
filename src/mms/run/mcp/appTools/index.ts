@@ -16,7 +16,7 @@ import { scheduleTools } from './schedules'
 import { automationTools } from './automations'
 import { skillTools } from './skills'
 import { taskTools } from './tasks'
-import { BOT_PROJECTS_UNREADABLE_TEXT, botProjectAllowed, botProjectsOf, botThreadReach, lineageRelation, threadTools } from './thread'
+import { botThreadReach, lineageRelation, threadTools } from './thread'
 import type { AppToolTurns } from './turns'
 import { webTools } from './web'
 
@@ -48,19 +48,9 @@ export {
 export const APP_TOOL_FAMILIES = ['skills', 'questions', 'tasks', 'quickActions', 'devGui', 'web', 'browser', 'applets', 'delegation', 'thread', 'schedules', 'bots', 'projectGit', 'profiler', 'appearance'] as const
 export type AppToolFamily = (typeof APP_TOOL_FAMILIES)[number]
 
-/**
- * What the central check of `readsOthers` and `managesOthers` tools reads (SPEC §15.1), all of it at
- * call time. A host that cannot say what the profile allows grants no more than `lineage`.
- */
+/** What the central check of `readsOthers` and `managesOthers` tools reads (SPEC §15.1), all of it at call time. */
 function agentAccessPolicy(host: AppToolHost, engine: RunEngine): ToolAccessPolicy {
   return {
-    profileLevel: () => host.agentAccess?.().level ?? 'lineage',
-    projectAllowed: (target) => {
-      const projectIds = host.agentAccess?.().projectIds ?? []
-      if (projectIds.length === 0) return true
-      const projectId = target.projectId ?? (target.threadId ? host.threadMeta?.(target.threadId)?.projectId : undefined)
-      return projectId !== undefined && projectIds.includes(projectId)
-    },
     threadExists: (threadId) => host.threadMeta?.(threadId) !== undefined,
     localOnly: (threadId) => host.threadMeta?.(threadId)?.localOnly === true,
     relation: (caller, threadId) => {
@@ -68,12 +58,10 @@ function agentAccessPolicy(host: AppToolHost, engine: RunEngine): ToolAccessPoli
       const lineage = lineageRelation(engine, caller.threadId, threadId)
       return lineage === 'descendant' ? 'descendant' : lineage ? 'ancestor_or_sibling' : null
     },
-    // A personal bot: its own projects (an unreadable list is none) and its own rule for threads, never the level's.
+    // A personal bot: its own rule for threads; it reaches every project.
     botReach: (caller, target) => {
       if (target.threadId !== undefined) return botThreadReach(host, engine, caller.threadId, target.threadId)
-      const projects = botProjectsOf(host)
-      if (botProjectAllowed(projects, target.projectId)) return { scope: 'manage' }
-      return { refused: projects.kind === 'unreadable' ? BOT_PROJECTS_UNREADABLE_TEXT : "That project is not one of the projects your owner lets you reach." }
+      return { scope: 'manage' }
     }
   }
 }

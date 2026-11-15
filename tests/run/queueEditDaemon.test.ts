@@ -1,7 +1,7 @@
 /**
  * `queue_enqueue`, `queue_edit`, `queue_remove`, `queue_reorder` and `queue_promote_to_steer` end to end
  * (docs/run-engine/SPEC.md §15.1): a real `OrchestratorService`, Run Engine, effect worker and Mousse MCP server, with
- * scripted provider runtimes whose turns call the tools over HTTP. Covers each access level on the caller's own
+ * scripted provider runtimes whose turns call the tools over HTTP. Covers each operation on the caller's own
  * thread and on another's, the queue revision (a stale one is refused and nothing changes), receipts that survive a
  * restart, the mode and origin a queued message keeps through an edit, a reorder and a promotion, and a promotion
  * into a running, paused or replaced run.
@@ -17,7 +17,6 @@ import { AGENT_MESSAGE_PREFIX, agentMessageText, TURN_TOKEN_KEY } from '../../sr
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
 import { MCP_ERROR_CODES, MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
-import type { AgentAccessLevel } from '../../src/shared/settings'
 import type { ChatMessage, QueuedMessage } from '../../src/shared/types'
 import type { PermissionMode } from '../../src/shared/permissionMode'
 import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
@@ -133,7 +132,7 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
    * A daemon whose threads all run on one scripted runtime that talks to the real MCP server. `parent` is the
    * usual caller and `other` the usual target; more threads are made with `thread`.
    */
-  const world = (script: Script, level: AgentAccessLevel = 'manage') => {
+  const world = (script: Script) => {
     home = mkdtempSync(join(tmpdir(), 'mousse-queue-edit-'))
     previousHome = process.env.MOUSSE_HOME
     process.env.MOUSSE_HOME = home
@@ -161,15 +160,11 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
     }
     const parent = thread('Parent')
     const other = thread('Other work')
-    const setProfile = (next: AgentAccessLevel, projectIds: string[] = []): void => {
-      ;(d.orch as unknown as { settingsStore: { get(): { agentAccess: unknown } } }).settingsStore.get().agentAccess = { level: next, projectIds, answerApprovals: false }
-    }
-    setProfile(level)
     const events = (threadId: string, type: string) => d.engine.listEvents(threadId).filter((event) => event.type === type)
     const messages = (threadId: string): ChatMessage[] => d.orch.getOrCreateSession(threadId).messages
     const queue = (threadId: string): QueuedMessage[] => readDurableQueue(d.store, threadId)
     return {
-      d, adapter, credentials, server, project, parent, other, thread, setProfile, events, messages, queue,
+      d, adapter, credentials, server, project, parent, other, thread, events, messages, queue,
       attach: async () => { await server.start(); d.orch.setMcpAttachment(server) },
       turnsOf: (threadId: string) => adapter.turns.filter((turn) => turn.threadId === threadId),
       latestRun: (threadId: string) => d.engine.listRuns(threadId)[0],
@@ -181,10 +176,8 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
   /** The queue of `threadId` as the caller reads it, and its revision. */
   const list = async (mcp: Mcp, threadId?: string) => parse(await call(mcp, 'queue_list', threadId ? { threadId } : {})) as { items: Array<Record<string, unknown>>; claimed: Array<Record<string, unknown>>; revision: string; open: boolean }
 
-  describe('each operation under each access level', () => {
-    const LEVELS: AgentAccessLevel[] = ['lineage', 'read', 'manage']
-
-    it.each(LEVELS)('on the caller\'s own thread at %s: its own messages are its to change; a message a person queued can be edited only with manage', async (level) => {
+  describe('each operation', () => {
+    it('on the caller\'s own thread: its own messages and a message a person queued are its to change', async () => {
       const seen: Record<string, Response> = {}
       const ids: Record<string, string> = {}
       const w = world(async (input, mcp, d) => {
@@ -203,28 +196,26 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
         rev = (await list(mcp!)).revision
         seen.removeOwn = await call(mcp!, 'queue_remove', { itemId: ids.own, expectedRevision: rev })
         return 'ok'
-      }, level)
+      })
       await w.attach()
       await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
 
       expect(verdict(seen.editOwn)).toBe('ok')
-      expect(verdict(seen.editPerson)).toBe(level === 'manage' ? 'ok' : 'mousse_scope_denied')
+      expect(verdict(seen.editPerson)).toBe('ok')
       expect(verdict(seen.reorder)).toBe('ok')
       expect(verdict(seen.promote)).toBe('ok')
       expect(verdict(seen.removeOwn)).toBe('ok')
       const actions = w.events(w.parent.id, 'agent.action').map((event) => (event.payload as { action: string }).action)
       // Changes to a message the agent wrote itself leave no audit row (a removal always does, with the removed text); a change
-      // to a person's message always does. With manage the agent rewrote the person's message first, so it is the agent's own then.
-      if (level === 'manage') expect(actions).toEqual(['edited_queued_message', 'removed_queued_message'])
-      else expect(actions).toEqual(['reordered_queue', 'promoted_queued_message', 'removed_queued_message'])
-      // Without manage the person's text is untouched (it was promoted into the turn as it was typed).
+      // to a person's message always does. The agent rewrote the person's message first, so it is the agent's own then.
+      expect(actions).toEqual(['edited_queued_message', 'removed_queued_message'])
       const edited = parse(seen.promote) as { outcome: string }
       expect(edited.outcome).toBe('promoted')
       const stored = w.messages(w.parent.id).find((message) => message.steered)
-      expect(stored?.content).toBe(level === 'manage' ? agentMessageText(w.parent.id, 'Parent', 'the agent rewrote this') : 'typed by the user')
+      expect(stored?.content).toBe(agentMessageText(w.parent.id, 'Parent', 'the agent rewrote this'))
     })
 
-    it.each(LEVELS)('on another thread at %s: nothing below manage reads its text or changes its queue; manage does all five, each recorded on that thread', async (level) => {
+    it('on another thread: it reads the text and does all five, each recorded on that thread', async () => {
       const release = deferred()
       const seen: Record<string, Response> = {}
       const ids: Record<string, string> = {}
@@ -236,41 +227,28 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
         if (input.threadId !== w.parent.id) return 'ok'
         const revision = async () => (parse(await call(mcp!, 'queue_list', { threadId: w.other.id })) as { revision: string }).revision
         seen.list = await call(mcp!, 'queue_list', { threadId: w.other.id })
-        const rev = () => (level === 'lineage' ? 'unread' : revision())
+        const rev = revision
         seen.enqueue = await call(mcp!, 'queue_enqueue', { threadId: w.other.id, content: 'a note from me', expectedRevision: await rev() })
-        const queued = level === 'manage' ? (parse(seen.enqueue) as { item: { id: string } }).item.id : ids.one
+        const queued = (parse(seen.enqueue) as { item: { id: string } }).item.id
         seen.edit = await call(mcp!, 'queue_edit', { threadId: w.other.id, itemId: ids.one, content: 'reworded', expectedRevision: await rev() })
-        seen.reorder = await call(mcp!, 'queue_reorder', { threadId: w.other.id, orderedIds: [ids.two, ids.one, queued].filter(Boolean), expectedRevision: await rev() })
+        seen.reorder = await call(mcp!, 'queue_reorder', { threadId: w.other.id, orderedIds: [ids.two, ids.one, queued], expectedRevision: await rev() })
         seen.promote = await call(mcp!, 'queue_promote_to_steer', { threadId: w.other.id, itemId: ids.two, expectedRevision: await rev(), expectedRunId: d.engine.getActiveRun(w.other.id)!.runId })
         seen.remove = await call(mcp!, 'queue_remove', { threadId: w.other.id, itemId: ids.one, expectedRevision: await rev() })
         return 'ok'
-      }, level)
+      })
       await w.attach()
       await w.d.orch.send('hold', false, { threadId: w.other.id, clientRequestId: 'hold', awaitMode: 'ack' })
       await waitFor(() => w.turnsOf(w.other.id).length === 1, 'the held turn')
       ids.one = w.typed(w.other.id, 'typed one').id
       ids.two = w.typed(w.other.id, 'typed two').id
-      const before = w.queue(w.other.id).map((item) => [item.id, item.content, item.state])
       await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
 
-      if (level === 'manage') {
-        for (const name of ['list', 'enqueue', 'edit', 'reorder', 'promote', 'remove']) expect(verdict(seen[name]), name).toBe('ok')
-        expect((parse(seen.list) as { items: Array<{ content: string }> }).items.map((item) => item.content)).toEqual(['typed one', 'typed two'])
-        expect(w.events(w.other.id, 'agent.action').map((event) => (event.payload as { action: string }).action)).toEqual([
-          'queued_message', 'edited_queued_message', 'reordered_queue', 'promoted_queued_message', 'removed_queued_message'
-        ])
-        expect(w.messages(w.other.id).filter((message) => message.role === 'system' && message.content.startsWith('Changed by an agent')).map((message) => message.content)).toHaveLength(5)
-      } else {
-        // A read-level agent sees where messages stand and how big they are, never their text.
-        if (level === 'read') {
-          const listed = parse(seen.list) as { items: Array<Record<string, unknown>> }
-          expect(listed.items.map((item) => item.contentLength)).toEqual(['typed one'.length, 'typed two'.length])
-          expect(JSON.stringify(listed)).not.toContain('typed one')
-        } else expect(verdict(seen.list)).toBe('mousse_scope_denied')
-        for (const name of ['enqueue', 'edit', 'reorder', 'promote', 'remove']) expect(verdict(seen[name]), name).toBe('mousse_scope_denied')
-        expect(w.queue(w.other.id).map((item) => [item.id, item.content, item.state])).toEqual(before)
-        expect(w.events(w.other.id, 'agent.action')).toEqual([])
-      }
+      for (const name of ['list', 'enqueue', 'edit', 'reorder', 'promote', 'remove']) expect(verdict(seen[name]), name).toBe('ok')
+      expect((parse(seen.list) as { items: Array<{ content: string }> }).items.map((item) => item.content)).toEqual(['typed one', 'typed two'])
+      expect(w.events(w.other.id, 'agent.action').map((event) => (event.payload as { action: string }).action)).toEqual([
+        'queued_message', 'edited_queued_message', 'reordered_queue', 'promoted_queued_message', 'removed_queued_message'
+      ])
+      expect(w.messages(w.other.id).filter((message) => message.role === 'system' && message.content.startsWith('Changed by an agent')).map((message) => message.content)).toHaveLength(5)
       release.resolve()
     })
   })
@@ -415,7 +393,7 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       const a = w.typed(w.other.id, 'typed a')
       const b = w.typed(w.other.id, 'typed b')
       const command = (host: ReturnType<typeof w.d.orch.mcpToolHost>, key: string, content: string, itemId: string) =>
-        host.queueCommand!(w.other.id, { op: 'edit', itemId, content, expectedRevision: host.queueSnapshot!(w.other.id).revision }, { clientRequestId: key, actor, level: 'manage' })
+        host.queueCommand!(w.other.id, { op: 'edit', itemId, content, expectedRevision: host.queueSnapshot!(w.other.id).revision }, { clientRequestId: key, actor })
       const first = command(w.d.orch.mcpToolHost(), 'queue_edit:caller:1', 'a, rewritten', a.id)
       expect(first).toMatchObject({ outcome: 'edited', itemId: a.id, replayed: false, effectsSettled: true })
 
@@ -453,7 +431,7 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       const actor = { kind: 'agent' as const, threadId: w.parent.id, runId: 'run:caller', toolCallId: 'mcp:t1' }
       const host = w.d.orch.mcpToolHost()
       const save = vi.spyOn(w.d.store, 'saveMessageQueue').mockImplementationOnce(() => { throw new Error('the daemon died here') })
-      expect(() => host.queueCommand!(w.other.id, { op: 'enqueue', content: 'remember this', mode: 'agent', expectedRevision: host.queueSnapshot!(w.other.id).revision }, { clientRequestId: 'queue_enqueue:caller:1', actor, level: 'manage' })).toThrow(/died here/)
+      expect(() => host.queueCommand!(w.other.id, { op: 'enqueue', content: 'remember this', mode: 'agent', expectedRevision: host.queueSnapshot!(w.other.id).revision }, { clientRequestId: 'queue_enqueue:caller:1', actor })).toThrow(/died here/)
       save.mockRestore()
       expect(w.queue(w.other.id)).toEqual([])
       await w.d.crash()
@@ -466,9 +444,9 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       expect(item[0]).toMatchObject({ source: 'mcp', permissionMode: 'ask', origin: { kind: 'agent', threadId: w.parent.id } })
       expect(item[0].content).toBe(agentMessageText(w.parent.id, 'Parent', 'remember this'))
       // A retry (a second daemon is the same caller) returns that very item, however the arguments are retyped.
-      const again = d2.orch.mcpToolHost().queueCommand!(w.other.id, { op: 'enqueue', content: 'remember this', mode: 'agent', expectedRevision: 'whatever' }, { clientRequestId: 'queue_enqueue:caller:1', actor, level: 'manage' })
+      const again = d2.orch.mcpToolHost().queueCommand!(w.other.id, { op: 'enqueue', content: 'remember this', mode: 'agent', expectedRevision: 'whatever' }, { clientRequestId: 'queue_enqueue:caller:1', actor })
       expect(again).toMatchObject({ replayed: true, outcome: 'enqueued', item: { id: item[0].id } })
-      expect(() => d2.orch.mcpToolHost().queueCommand!(w.other.id, { op: 'enqueue', content: 'retyped', mode: 'agent', expectedRevision: 'whatever' }, { clientRequestId: 'queue_enqueue:caller:1', actor, level: 'manage' })).toThrow(expect.objectContaining({ code: 'request_conflict' }))
+      expect(() => d2.orch.mcpToolHost().queueCommand!(w.other.id, { op: 'enqueue', content: 'retyped', mode: 'agent', expectedRevision: 'whatever' }, { clientRequestId: 'queue_enqueue:caller:1', actor })).toThrow(expect.objectContaining({ code: 'request_conflict' }))
       expect(readDurableQueue(d2.store, w.other.id)).toHaveLength(1)
     })
   })
@@ -591,37 +569,26 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       expect(w.turnsOf(target.id)[1]).toMatchObject({ permissionMode: 'ask', fromAgent: true })
     })
 
-    it('an agent cannot hand a person\'s or another agent\'s message words of its own below manage, nor change a scheduled prompt at all', async () => {
+    it('an agent cannot change a scheduled prompt: it keeps the text of its job', async () => {
       const seen: Record<string, Response> = {}
       const ids: Record<string, string> = {}
       const w = world(async (input, mcp) => {
         if (input.threadId !== w.parent.id || input.prompt !== GO) return 'ok'
-        const rev = async () => (await list(mcp!)).revision
-        seen.person = await call(mcp!, 'queue_edit', { itemId: ids.typed, content: 'mine now', expectedRevision: await rev() })
-        seen.other = await call(mcp!, 'queue_edit', { itemId: ids.agent, content: 'mine now', expectedRevision: await rev() })
-        seen.schedule = await call(mcp!, 'queue_edit', { itemId: ids.schedule, content: 'mine now', expectedRevision: await rev() })
+        seen.schedule = await call(mcp!, 'queue_edit', { itemId: ids.schedule, content: 'mine now', expectedRevision: (await list(mcp!)).revision })
         return 'ok'
-      }, 'read')
+      })
       await w.attach()
-      // The parent's own queue while it runs: a typed message, one another thread's agent sent, and a scheduled prompt.
-      const seed = deferred()
-      void seed
+      // The parent's own queue while it runs: a scheduled prompt.
       w.d.orch.bindThread(w.parent.id, [], undefined, [])
-      const typed = w.typed(w.parent.id, 'typed by the user')
-      const agent = w.d.orch.enqueueForThread(w.parent.id, { content: 'from someone else' }, { source: 'mcp', origin: { kind: 'agent', threadId: w.other.id, runId: 'run:x', hops: 1 }, permissionMode: 'ask' })
       const scheduled = w.d.orch.enqueueForThread(w.parent.id, { content: 'nightly report' }, { source: 'schedule', origin: { kind: 'schedule', jobId: 'job-1', occurrenceKey: 'k-1' } })
-      Object.assign(ids, { typed: typed.id, agent: agent.id, schedule: scheduled.id })
-      const before = w.queue(w.parent.id).map((item) => [item.id, item.content])
+      ids.schedule = scheduled.id
       await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
-      expect(verdict(seen.person)).toBe('mousse_scope_denied')
-      expect(verdict(seen.other)).toBe('mousse_scope_denied')
-      // A scheduled prompt keeps the text of its job whatever the level: refused as a message that cannot be edited.
+      // Refused as a message that cannot be edited.
       expect(verdict(seen.schedule)).toBe('error')
       expect(seen.schedule.result?.content?.[0].text).toMatch(/scheduled prompt/)
-      expect(before).toHaveLength(3)
-      // Nothing was edited: the same three messages were queued behind the turn, and ran as they were.
-      await waitFor(() => w.turnsOf(w.parent.id).length === 4, 'the three queued turns', 30_000)
-      expect(w.turnsOf(w.parent.id).slice(1).map((turn) => turn.prompt).sort()).toEqual(['from someone else', 'nightly report', 'typed by the user'].sort())
+      // Nothing was edited: the prompt was queued behind the turn, and ran as it was.
+      await waitFor(() => w.turnsOf(w.parent.id).length === 2, 'the queued turn', 30_000)
+      expect(w.turnsOf(w.parent.id)[1].prompt).toBe('nightly report')
     })
   })
 
@@ -857,7 +824,7 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       await w.attach()
       const writer = agentRun(w, 2)
       const host = w.d.orch.mcpToolHost()
-      const enqueue = (content: string, key: string, runId = writer.runId) => host.queueCommand!(w.other.id, { op: 'enqueue', content, mode: 'agent' }, { clientRequestId: key, actor: actorOf(w, runId), level: 'lineage' })
+      const enqueue = (content: string, key: string, runId = writer.runId) => host.queueCommand!(w.other.id, { op: 'enqueue', content, mode: 'agent' }, { clientRequestId: key, actor: actorOf(w, runId) })
       const paused = await pausedRun(w)
 
       const first = enqueue('note to myself', 'k1')
@@ -886,7 +853,7 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       const noteRun = w.d.engine.listRuns(w.other.id).find((run) => run.outcome?.sentByAgent && run.outcome.agentHops === 3 && run.status !== 'queued' && run.runId !== third.runId && run.runId !== writer.runId)!
       expect(noteRun).toBeDefined()
       // The chain does not restart: what the note's turn sends is the fourth agent message in a row, and is refused.
-      expect(() => host.queueCommand!(w.parent.id, { op: 'enqueue', content: 'start over', mode: 'agent', expectedRevision: host.queueSnapshot!(w.parent.id).revision }, { clientRequestId: 'k6', actor: actorOf(w, noteRun.runId), level: 'manage' }))
+      expect(() => host.queueCommand!(w.parent.id, { op: 'enqueue', content: 'start over', mode: 'agent', expectedRevision: host.queueSnapshot!(w.parent.id).revision }, { clientRequestId: 'k6', actor: actorOf(w, noteRun.runId) }))
         .toThrow(expect.objectContaining({ code: 'agent_hops_exceeded' }))
     })
 
@@ -902,7 +869,7 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       await w.attach()
       const host = w.d.orch.mcpToolHost()
       const writer = agentRun(w, 0)
-      const enqueue = (content: string, key: string) => host.queueCommand!(w.other.id, { op: 'enqueue', content, mode: 'agent' }, { clientRequestId: key, actor: actorOf(w, writer.runId), level: 'lineage' })
+      const enqueue = (content: string, key: string) => host.queueCommand!(w.other.id, { op: 'enqueue', content, mode: 'agent' }, { clientRequestId: key, actor: actorOf(w, writer.runId) })
 
       // A question waits on the thread: the note stays queued, at startup too.
       const questions = (w.d.orch as unknown as { questions: { requestAnswers(questions: unknown, threadId: string, options: unknown): Promise<unknown>; listPendingForThread(threadId: string): Array<{ requestId: string }>; submitAnswers(requestId: string, answers: unknown): boolean } }).questions
@@ -936,93 +903,59 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       const paused = await pausedRun(w)
       const early = agentRun(w, 0)
       const late = agentRun(w, 2)
-      const note = host.queueCommand!(w.other.id, { op: 'enqueue', content: 'first words', mode: 'agent' }, { clientRequestId: 'e1', actor: actorOf(w, early.runId), level: 'lineage' })
+      const note = host.queueCommand!(w.other.id, { op: 'enqueue', content: 'first words', mode: 'agent' }, { clientRequestId: 'e1', actor: actorOf(w, early.runId) })
       expect(w.queue(w.other.id)[0].origin).toMatchObject({ hops: 1 })
-      host.queueCommand!(w.other.id, { op: 'edit', itemId: note.itemId, content: 'better words', expectedRevision: host.queueSnapshot!(w.other.id).revision }, { clientRequestId: 'e2', actor: actorOf(w, late.runId), level: 'lineage' })
+      host.queueCommand!(w.other.id, { op: 'edit', itemId: note.itemId, content: 'better words', expectedRevision: host.queueSnapshot!(w.other.id).revision }, { clientRequestId: 'e2', actor: actorOf(w, late.runId) })
       expect(w.queue(w.other.id)[0]).toMatchObject({ content: 'better words', origin: { kind: 'agent', threadId: w.other.id, runId: late.runId, hops: 3 } })
-      // A message a person typed whose source says `mcp` (only a label) is still a person's: no edit below manage.
+      // A message a person typed whose source says `mcp` (only a label) is still a person's: an agent's edit of it is labelled
+      // as the agent's words and recorded, as for any message the agent did not write.
       const lookalike = w.d.orch.enqueueForThread(w.other.id, { content: 'typed, labelled mcp' }, { source: 'mcp' })
-      expect(() => host.queueCommand!(w.other.id, { op: 'edit', itemId: lookalike.id, content: 'mine', expectedRevision: host.queueSnapshot!(w.other.id).revision }, { clientRequestId: 'e3', actor: actorOf(w, early.runId), level: 'lineage' }))
-        .toThrow(expect.objectContaining({ name: 'QueueAccessError' }))
-      expect(() => host.queueCommand!(w.other.id, { op: 'remove', itemId: lookalike.id, expectedRevision: host.queueSnapshot!(w.other.id).revision }, { clientRequestId: 'e4', actor: actorOf(w, early.runId), level: 'lineage' }))
-        .toThrow(expect.objectContaining({ name: 'QueueAccessError' }))
+      host.queueCommand!(w.other.id, { op: 'edit', itemId: lookalike.id, content: 'mine', expectedRevision: host.queueSnapshot!(w.other.id).revision }, { clientRequestId: 'e3', actor: actorOf(w, early.runId) })
+      expect(w.queue(w.other.id).find((item) => item.id === lookalike.id)?.content).toBe(agentMessageText(w.other.id, 'Other work', 'mine'))
+      expect(w.events(w.other.id, 'agent.action').map((event) => event.payload)).toEqual([expect.objectContaining({ action: 'edited_queued_message', itemId: lookalike.id, wasOrigin: 'mcp' })])
       w.d.engine.endPause(paused, 'cancel')
     })
   })
 
-  describe('an agent cannot replace a person\'s queue by removing, reordering or promoting into a question', () => {
-    it('removing a message the agent did not write needs manage, on its own thread too; every removal records the text it took out, and a lineage reader never sees it', async () => {
-      const seen: Record<string, Response> = {}
-      const ids: Record<string, string> = {}
-      const run = async (level: AgentAccessLevel) => {
-        const w = world(async (input, mcp) => {
-          if (input.threadId !== w.parent.id || input.prompt !== GO) return 'ok'
-          const rev = async () => (await list(mcp!)).revision
-          seen.own = await call(mcp!, 'queue_enqueue', { content: 'my own note' })
-          ids.own = (parse(seen.own) as { item: { id: string } }).item.id
-          ids.person = w.typed(w.parent.id, 'stop doing X, and do not push').id
-          seen.person = await call(mcp!, 'queue_remove', { itemId: ids.person, expectedRevision: await rev() })
-          seen.removeOwn = await call(mcp!, 'queue_remove', { itemId: ids.own, expectedRevision: await rev(), clientRequestId: 'rm-1' })
-          ids.left = w.queue(w.parent.id).map((item) => item.id).join(',')
-          return 'ok'
-        }, level)
-        await w.attach()
-        await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
-        return w
-      }
-      const lineage = await run('lineage')
-      expect(seen.person.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_scope_denied })
-      expect(seen.person.error!.message).toMatch(/Removing a message a person queued needs the "manage" agent access level/)
-      // The person's message is untouched. The agent's own note went, and the removal is recorded with its text.
-      expect(ids.left).toBe(ids.person)
-      const removal = lineage.events(lineage.parent.id, 'agent.action').filter((event) => (event.payload as { action: string }).action === 'removed_queued_message')
-      expect(removal).toEqual([expect.objectContaining({ payload: expect.objectContaining({ itemId: ids.own, removedText: 'my own note', wasOrigin: 'agent' }) })])
-      expect(parse(seen.removeOwn)).toMatchObject({ outcome: 'removed', removedText: 'my own note' })
-      expect(lineage.messages(lineage.parent.id).some((message) => message.role === 'system' && message.content.includes('removed queued message') && message.content.includes('my own note'))).toBe(true)
-
-      const manage = await run('manage')
-      expect(verdict(seen.person)).toBe('ok')
-      expect(ids.left).toBe('')
-      const taken = manage.events(manage.parent.id, 'agent.action').filter((event) => (event.payload as { action: string }).action === 'removed_queued_message')
-      // The person can read what was removed, from the event and the transcript, and put it back.
-      expect(taken[0].payload).toMatchObject({ itemId: ids.person, removedText: 'stop doing X, and do not push', wasOrigin: 'gui' })
-      expect(manage.messages(manage.parent.id).some((message) => message.role === 'system' && message.content.includes('stop doing X, and do not push'))).toBe(true)
-    })
-
-    it('putting anything ahead of a message the agent did not write needs manage; moving its own messages behind others\' or among themselves is free', async () => {
+  describe('what removing or reordering leaves for the person, and no promotion into a question', () => {
+    it('every removal records the text it took out, a person\'s message and the agent\'s own note alike', async () => {
       const seen: Record<string, Response> = {}
       const ids: Record<string, string> = {}
       const w = world(async (input, mcp) => {
         if (input.threadId !== w.parent.id || input.prompt !== GO) return 'ok'
         const rev = async () => (await list(mcp!)).revision
-        ids.a = (parse(await call(mcp!, 'queue_enqueue', { content: 'note a' })) as { item: { id: string } }).item.id
-        ids.person = w.typed(w.parent.id, 'typed by the user').id
-        ids.b = (parse(await call(mcp!, 'queue_enqueue', { content: 'note b' })) as { item: { id: string } }).item.id
-        // [a, person, b]: b ahead of the person's message would postpone it; a behind it, or a and b swapped, would not.
-        seen.ahead = await call(mcp!, 'queue_reorder', { orderedIds: [ids.a, ids.b, ids.person], expectedRevision: await rev() })
-        seen.personFirst = await call(mcp!, 'queue_reorder', { orderedIds: [ids.person, ids.a, ids.b], expectedRevision: await rev() })
-        seen.swap = await call(mcp!, 'queue_reorder', { orderedIds: [ids.person, ids.b, ids.a], expectedRevision: await rev() })
-        // Now [person, b, a]: moving a to the front puts it ahead of the person's message.
-        seen.front = await call(mcp!, 'queue_reorder', { orderedIds: [ids.a, ids.person, ids.b], expectedRevision: await rev() })
+        seen.own = await call(mcp!, 'queue_enqueue', { content: 'my own note' })
+        ids.own = (parse(seen.own) as { item: { id: string } }).item.id
+        ids.person = w.typed(w.parent.id, 'stop doing X, and do not push').id
+        seen.person = await call(mcp!, 'queue_remove', { itemId: ids.person, expectedRevision: await rev() })
+        seen.removeOwn = await call(mcp!, 'queue_remove', { itemId: ids.own, expectedRevision: await rev(), clientRequestId: 'rm-1' })
+        ids.left = w.queue(w.parent.id).map((item) => item.id).join(',')
         return 'ok'
-      }, 'lineage')
+      })
       await w.attach()
       await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
-      expect(seen.ahead.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_scope_denied })
-      expect(seen.ahead.error!.message).toMatch(/ahead of one a person or another agent queued needs the "manage"/)
-      expect(verdict(seen.personFirst)).toBe('ok')
-      expect(verdict(seen.swap)).toBe('ok')
-      expect(verdict(seen.front)).toBe('mousse_scope_denied')
-      expect(w.queue(w.parent.id).map((item) => item.id)).toEqual([ids.person, ids.b, ids.a])
+      expect(verdict(seen.person)).toBe('ok')
+      expect(parse(seen.removeOwn)).toMatchObject({ outcome: 'removed', removedText: 'my own note' })
+      expect(ids.left).toBe('')
+      // The person can read what was removed, from the event and the transcript, and put it back.
+      const removals = w.events(w.parent.id, 'agent.action').filter((event) => (event.payload as { action: string }).action === 'removed_queued_message')
+      expect(removals.map((event) => event.payload)).toEqual([
+        expect.objectContaining({ itemId: ids.person, removedText: 'stop doing X, and do not push', wasOrigin: 'gui' }),
+        expect.objectContaining({ itemId: ids.own, removedText: 'my own note', wasOrigin: 'agent' })
+      ])
+      for (const text of ['stop doing X, and do not push', 'my own note'])
+        expect(w.messages(w.parent.id).some((message) => message.role === 'system' && message.content.includes('removed queued message') && message.content.includes(text)), text).toBe(true)
+    })
 
-      // With manage the same reorder goes through, and is recorded because it moves past a person's message.
+    it('a reorder of a queue that holds a person\'s message is recorded', async () => {
+      const seen: Record<string, Response> = {}
       const m = world(async (input, mcp) => {
         if (input.threadId !== m.parent.id || input.prompt !== GO) return 'ok'
         const first = (parse(await call(mcp!, 'queue_enqueue', { content: 'note a' })) as { item: { id: string } }).item.id
         const person = m.typed(m.parent.id, 'typed by the user').id
         seen.managed = await call(mcp!, 'queue_reorder', { orderedIds: [person, first].reverse(), expectedRevision: (await list(mcp!)).revision })
         return 'ok'
-      }, 'manage')
+      })
       await m.attach()
       await m.d.orch.send(GO, false, { threadId: m.parent.id, clientRequestId: 'go' })
       expect(verdict(seen.managed)).toBe('ok')
@@ -1083,7 +1016,8 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
         }
         return input.threadId === w.parent.id && input.prompt === GO ? script(input, mcp, d, adapter) : 'ok'
       })
-      ;(w.d.orch as unknown as { settingsStore: { get(): { agentAccess: unknown } } }).settingsStore.get().agentAccess = { level: 'manage', projectIds: [], answerApprovals: true }
+      const settings = (w.d.orch as unknown as { settingsStore: { get(): { agentAccess: Record<string, unknown> } } }).settingsStore.get()
+      settings.agentAccess = { ...settings.agentAccess, answerApprovals: true }
       w.d.orch.setThreadPermissionMode(w.parent.id, 'full')
       await w.attach()
       await w.d.orch.send('hold', false, { threadId: w.other.id, clientRequestId: 'hold', awaitMode: 'ack', source })
@@ -1247,14 +1181,14 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       const actor = { kind: 'agent' as const, threadId: w.parent.id, runId: 'run:p', toolCallId: 'mcp:t' }
       const own = { kind: 'agent' as const, threadId: w.other.id, runId: 'run:b', toolCallId: 'mcp:t' }
       const rev = () => host.queueSnapshot!(w.other.id).revision
-      for (const [who, level] of [[actor, 'manage'], [own, 'lineage']] as const) {
+      for (const who of [actor, own]) {
         for (const command of [
           { op: 'remove', itemId: typed.id, expectedRevision: rev() },
           { op: 'reorder', orderedIds: [second.id, typed.id], expectedRevision: rev() },
           { op: 'edit', itemId: typed.id, content: 'x', expectedRevision: rev() },
           { op: 'enqueue', content: 'x', mode: 'agent' }
         ] as const)
-          expect(() => host.queueCommand!(w.other.id, command, { clientRequestId: `k-${who.threadId}-${command.op}`, actor: who, level }), `${who.threadId} ${command.op}`).toThrow(expect.objectContaining({ code: 'bot_thread_read_only' }))
+          expect(() => host.queueCommand!(w.other.id, command, { clientRequestId: `k-${who.threadId}-${command.op}`, actor: who }), `${who.threadId} ${command.op}`).toThrow(expect.objectContaining({ code: 'bot_thread_read_only' }))
       }
       expect(w.queue(w.other.id).map((item) => item.id)).toEqual([typed.id, second.id])
     })
@@ -1303,7 +1237,7 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       const host = w.d.orch.mcpToolHost()
       const actor = (runId: string) => ({ kind: 'agent' as const, threadId: w.parent.id, runId, toolCallId: 'mcp:t' })
       const revision = () => host.queueSnapshot!(w.other.id).revision
-      const options = (runId: string, key: string) => ({ clientRequestId: key, actor: actor(runId), level: 'manage' as const })
+      const options = (runId: string, key: string) => ({ clientRequestId: key, actor: actor(runId) })
       expect(() => host.queueCommand!(w.other.id, { op: 'enqueue', content: 'one hop too many', mode: 'agent', expectedRevision: revision() }, options(third.runId, 'k1')))
         .toThrow(expect.objectContaining({ code: 'agent_hops_exceeded' }))
       expect(() => host.queueCommand!(w.other.id, { op: 'edit', itemId: typed.id, content: 'one hop too many', expectedRevision: revision() }, options(third.runId, 'k2')))

@@ -17,7 +17,6 @@ import { AGENT_MESSAGE_PREFIX, agentMessageText, TURN_TOKEN_KEY } from '../../sr
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
 import { MCP_ERROR_CODES, MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
-import type { AgentAccessLevel } from '../../src/shared/settings'
 import type { ChatMessage } from '../../src/shared/types'
 import type { PermissionMode } from '../../src/shared/permissionMode'
 import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
@@ -108,7 +107,6 @@ const parse = (response: Awaited<ReturnType<typeof rpc>>): Record<string, unknow
   if (response.result?.isError) throw new Error(response.result.content?.[0]?.text ?? 'tool error')
   return JSON.parse(response.result!.content![0].text)
 }
-const names = async (mcp: Mcp): Promise<string[]> => (await rpc(mcp, 'tools/list', {})).result!.tools!.map((tool) => tool.name)
 
 describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end (SPEC §15.1)', () => {
   let home: string | undefined
@@ -129,7 +127,7 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
    * A daemon whose threads all run on one scripted runtime that talks to the real MCP server. `parent`
    * is the usual caller and `other` the usual target; more threads are made with `thread`.
    */
-  const world = (script: Script, level: AgentAccessLevel = 'manage') => {
+  const world = (script: Script) => {
     home = mkdtempSync(join(tmpdir(), 'mousse-thread-actions-'))
     previousHome = process.env.MOUSSE_HOME
     process.env.MOUSSE_HOME = home
@@ -157,14 +155,10 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
     }
     const parent = thread('Parent')
     const other = thread('Other work')
-    const setProfile = (next: AgentAccessLevel, projectIds: string[] = []): void => {
-      ;(d.orch as unknown as { settingsStore: { get(): { agentAccess: unknown } } }).settingsStore.get().agentAccess = { level: next, projectIds, answerApprovals: false }
-    }
-    setProfile(level)
     const events = (threadId: string, type: string) => d.engine.listEvents(threadId).filter((event) => event.type === type)
     const messages = (threadId: string): ChatMessage[] => d.orch.getOrCreateSession(threadId).messages
     return {
-      d, adapter, credentials, server, project, parent, other, thread, setProfile, events, messages,
+      d, adapter, server, project, parent, other, thread, events, messages,
       attach: async () => { await server.start(); d.orch.setMcpAttachment(server) },
       turnsOf: (threadId: string) => adapter.turns.filter((turn) => turn.threadId === threadId),
       /** The run `send` admitted for a thread: its latest. */
@@ -518,19 +512,6 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
         // The Stop is not refused for the thread's state; there is simply no such run.
         expect.objectContaining({ conflict: 'run_not_found' })
       ])
-      expect(w.d.engine.listRuns(w.other.id)).toEqual([])
-    })
-
-    it('a thread in a project outside the list is refused like an unknown one', async () => {
-      const seen: Array<Awaited<ReturnType<typeof rpc>>> = []
-      const w = world(async (_input, mcp) => {
-        seen.push(await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'x' }))
-        return 'ok'
-      })
-      await w.attach()
-      w.setProfile('manage', ['some-other-project'])
-      await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
-      expect(seen[0].error).toMatchObject({ code: MCP_ERROR_CODES.mousse_scope_denied })
       expect(w.d.engine.listRuns(w.other.id)).toEqual([])
     })
   })
@@ -971,61 +952,19 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
     })
   })
 
-  describe('callers that are capped', () => {
-    it('a thread a remote send drives is held at lineage: send and steer are not listed; they and wait are refused for an unrelated thread, and nothing reaches the target', async () => {
-      const seen: Record<string, unknown> = {}
+  describe('a plan turn', () => {
+    it('cannot start an agent turn on another thread, and may wait for one', async () => {
+      const seen: Record<string, Awaited<ReturnType<typeof rpc>>> = {}
       const w = world(async (_input, mcp) => {
-        seen.listed = await names(mcp!)
         seen.send = await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'x' })
-        seen.steer = await call(mcp!, 'thread_steer', { threadId: w.other.id, runId: 'run:any', text: 'x' })
-        seen.wait = await call(mcp!, 'thread_wait', { threadId: w.other.id })
-        return 'ok'
-      })
-      await w.attach()
-      // What the first remote turn of a thread stores (`Thread.accessCeiling`), whatever the profile says.
-      w.d.store.updateThreadMeta(w.parent.id, { accessCeiling: 'lineage' })
-      await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
-      expect(w.credentials.listForThread(w.parent.id).map((row) => row.accessLevel)).toEqual(['lineage'])
-      for (const name of ['thread_send', 'thread_steer', 'thread_create']) expect(seen.listed as string[], name).not.toContain(name)
-      // Waiting is listed at every level (a thread the caller launched or one below it needs no level); an unrelated thread is still refused.
-      expect(seen.listed as string[]).toContain('thread_wait')
-      for (const key of ['send', 'steer', 'wait']) expect((seen[key] as Awaited<ReturnType<typeof rpc>>).error, key).toMatchObject({ code: MCP_ERROR_CODES.mousse_scope_denied })
-      expect(w.d.engine.listRuns(w.other.id)).toEqual([])
-      expect(w.d.engine.tools.listForRun(w.latestRun(w.parent.id).runId).filter((entry) => /^thread_(send|steer|wait)$/.test(entry.tool))).toEqual([])
-    })
-
-    it('a plan turn is held at read: it may wait for a thread, never send to it, steer it or stop it', async () => {
-      const seen: Record<string, unknown> = {}
-      const w = world(async (_input, mcp) => {
-        seen.listed = await names(mcp!)
-        seen.send = await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'x' })
-        seen.interrupt = await call(mcp!, 'thread_interrupt', { threadId: w.other.id, runId: 'run:any' })
         seen.wait = await call(mcp!, 'thread_wait', { threadId: w.other.id })
         return 'planned'
       })
       await w.attach()
       await w.d.orch.send({ content: 'Plan it', mode: 'plan' }, false, { threadId: w.parent.id, clientRequestId: 'plan' })
-      expect(seen.listed).toEqual(expect.arrayContaining(['thread_wait']))
-      expect(seen.listed).not.toEqual(expect.arrayContaining(['thread_send']))
-      expect((seen.send as Awaited<ReturnType<typeof rpc>>).error).toMatchObject({ code: MCP_ERROR_CODES.mousse_scope_denied })
-      expect((seen.interrupt as Awaited<ReturnType<typeof rpc>>).error).toMatchObject({ code: MCP_ERROR_CODES.mousse_scope_denied })
-      expect(parse(seen.wait as Awaited<ReturnType<typeof rpc>>)).toMatchObject({ status: 'idle' })
+      expect(seen.send!.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_ceiling_exceeded })
+      expect(parse(seen.wait!)).toMatchObject({ status: 'idle' })
       expect(w.d.engine.listRuns(w.other.id)).toEqual([])
-    })
-
-    it('the profile lowered mid-turn refuses the next call of a running manage turn', async () => {
-      const seen: Record<string, unknown> = {}
-      const w = world(async (_input, mcp) => {
-        seen.first = parse(await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'one' }))
-        w.setProfile('read')
-        seen.second = await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'two' })
-        return 'ok'
-      })
-      await w.attach()
-      await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
-      expect(seen.first).toMatchObject({ replayed: false })
-      expect((seen.second as Awaited<ReturnType<typeof rpc>>).error).toMatchObject({ code: MCP_ERROR_CODES.mousse_scope_denied })
-      expect(w.d.engine.listRuns(w.other.id)).toHaveLength(1)
     })
   })
 })

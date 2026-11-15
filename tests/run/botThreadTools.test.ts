@@ -14,9 +14,7 @@ import { agentMessageText, botMessageText, isPersonMessage, type BotAppToolDeps 
 import { BOT_COMPUTER_OPEN, type BotComputerLimit } from '../../src/shared/bots/personal/computerLimit'
 import { BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, botStarterManifest } from '../../src/shared/bots/personal/manifest'
 import { BOT_THREADS_CHAT_ONLY_TEXT } from '../../src/shared/bots/personal/walls'
-import { BOT_PROJECTS_UNREADABLE_TEXT } from '../../src/mms/run/mcp/appTools/thread'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
-import type { AgentAccessSettings } from '../../src/shared/settings'
 import type { ChatMessage, Thread } from '../../src/shared/types'
 import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
@@ -56,7 +54,7 @@ describe('a bot\'s thread tools ("use your threads")', () => {
    * message started), `read` (work, a schedule, a reminder), or none (a consult). `limit` is what the computer allows at
    * each call; the turn is compiled under `compiledWith`.
    */
-  const world = async (options: { granted?: boolean; threads?: 'read' | 'all'; compiledWith?: BotComputerLimit; limit?: () => BotComputerLimit; messages?: ChatMessage[]; role?: 'activation' | 'context'; access?: Partial<AgentAccessSettings>; stillHolds?: () => string | undefined } = {}) => {
+  const world = async (options: { granted?: boolean; threads?: 'read' | 'all'; compiledWith?: BotComputerLimit; limit?: () => BotComputerLimit; messages?: ChatMessage[]; role?: 'activation' | 'context'; stillHolds?: () => string | undefined } = {}) => {
     fx = delegationFixture()
     base = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-bot-threads-')))
     const profile = join(base, 'profile')
@@ -77,8 +75,8 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     // The engine's re-check after a wait (`BotEngine.authorityFor`), as the test says it answers.
     const authority: BotAuthority = options.stillHolds ? { ...created, stillHolds: options.stillHolds } : created
     const homeRun = await fx.runningRun('home')
-    // The owner's threads: one in an allowed project, one elsewhere, one with no project, one private, one the bot started
-    // elsewhere, an archived one, a subagent, the Automation manager's, and two bot threads (its own chat and another bot's).
+    // The owner's threads: one in each of two projects, one with no project, one private, an archived one, a subagent, the
+    // Automation manager's, and two bot threads (its own chat and another bot's).
     const threads = new Map<string, Thread>([
       ['home', thread('home', { botOwned: true } as Partial<Thread>)],
       ['other-bot', thread('other-bot', { botOwned: true } as Partial<Thread>)],
@@ -86,17 +84,13 @@ describe('a bot\'s thread tools ("use your threads")', () => {
       ['elsewhere', thread('elsewhere', { projectId: 'p2' })],
       ['no-project', thread('no-project', { projectId: undefined })],
       ['private', thread('private', { localOnly: true })],
-      ['started', thread('started', { projectId: 'p2', createdByThreadId: 'home' })],
       ['archived', thread('archived', { settledAt: NOW })],
       ['subagent', thread('subagent', { lineage: { parentThreadId: 'mine', rootThreadId: 'mine', relationship: 'subagent' } } as Partial<Thread>)],
       ['manager', thread('manager', { name: 'Automation manager', automationManager: true } as Partial<Thread>)]
     ])
-    const access: AgentAccessSettings = { level: 'lineage', projectIds: ['p1'], answerApprovals: false, remoteSubagents: false, computers: [], ...options.access }
     const onAppResult = vi.fn()
     const deps = { host: { activationOf: () => ({ botId: 'b1', activationId: 'act-1', lane: 'chat' }) }, activity: { onAppResult, onAllowed: vi.fn(), drain: () => [] } } as unknown as BotAppToolDeps
     const fake = fakeAppToolHost({
-      // The profile's agent access level stays at its default, lineage: the bot's permission is what lets it in.
-      agentAccess: () => access,
       threadMeta: (id) => threads.get(id),
       listThreads: () => [...threads.values()],
       listProjects: () => [{ id: 'p1', name: 'Web app' }, { id: 'p2', name: 'Other' }],
@@ -145,8 +139,7 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(await allowed({ threads: 'all', compiledWith: { ...BOT_COMPUTER_OPEN, threads: false } })).toEqual([])
   })
 
-  // What a bot's thread is shown, at its lineage level, for the run its credential acts for: only the thread tools that
-  // turn can call. The Mousse MCP server and Pi's per-turn list both list for the run (`listForThread`'s `runId`).
+  // What a bot's thread is shown for the run its credential acts for: only the thread tools that turn can call. The Mousse MCP server and Pi's per-turn list both list for the run (`listForThread`'s `runId`).
   const listings: Array<[string, Parameters<typeof world>[0], readonly string[]]> = [
     ['a chat turn its owner started', { threads: 'all' }, [...BOT_THREAD_READ_TOOLS, ...BOT_THREAD_ACT_TOOLS]],
     ['work, a schedule or a reminder', { threads: 'read' }, BOT_THREAD_READ_TOOLS],
@@ -157,28 +150,26 @@ describe('a bot\'s thread tools ("use your threads")', () => {
   it.each(listings)('the thread tools listed to %s', async (_name, options, shown) => {
     const { registry, runId } = await world(options)
     const thread = (names: string[]) => names.filter((name) => name.startsWith('thread_')).sort()
-    expect(thread(registry.listForThread('home', 'default', 'lineage', runId).map((tool) => tool.name))).toEqual([...shown].sort())
-    expect(thread(registry.listForTurn('home', runId, 'lineage').map((tool) => tool.name))).toEqual([...shown].sort())
-    // With no turn of its own running, none; and never what no bot can hold, nor anything on an ordinary lineage thread.
-    expect(thread(registry.listForThread('home', 'default', 'lineage').map((tool) => tool.name))).toEqual([])
-    expect(registry.listForThread('home', 'default', 'lineage', runId).map((tool) => tool.name).filter((name) => name.startsWith('queue_') || name === 'approval_respond' || name === 'thread_steer')).toEqual([])
-    expect(registry.listForThread('mine', 'default', 'lineage').map((tool) => tool.name)).not.toContain('thread_list')
-    // Archiving is a bot's tool only: an ordinary thread does not list it, even with the manage level.
-    expect(registry.listForThread('mine', 'default', 'manage').map((tool) => tool.name)).not.toContain('thread_archive')
+    expect(thread(registry.listForThread('home', 'default', runId).map((tool) => tool.name))).toEqual([...shown].sort())
+    expect(thread(registry.listForTurn('home', runId).map((tool) => tool.name))).toEqual([...shown].sort())
+    // With no turn of its own running, none; and never what no bot can hold.
+    expect(thread(registry.listForThread('home', 'default').map((tool) => tool.name))).toEqual([])
+    expect(registry.listForThread('home', 'default', runId).map((tool) => tool.name).filter((name) => name.startsWith('queue_') || name === 'approval_respond' || name === 'thread_steer')).toEqual([])
+    // Archiving is a bot's tool only: an ordinary thread does not list it.
+    expect(registry.listForThread('mine', 'default').map((tool) => tool.name)).not.toContain('thread_archive')
   })
 
   // Who the bot may reach, by each tool that names a thread: whether read, send, wait, stop and archive go ahead. Every thread the
   // list and search hide is refused by id, in the same words; an archived thread is read, waited on and stopped, and
-  // takes no new message; so is a thread it started in a project it may not use now, as for ordinary agents. Archive follows the Stop.
+  // takes no new message. A thread in any project, or in none, is reached. Archive follows the Stop.
   const reach: Array<[string, string, { read: boolean; send: boolean; wait: boolean; stop: boolean; archive: boolean }]> = [
-    ['an ordinary thread in an allowed project', 'mine', { read: true, send: true, wait: true, stop: true, archive: true }],
-    ['a thread it started, now outside the allowed projects', 'started', { read: true, send: false, wait: true, stop: true, archive: true }],
+    ['an ordinary thread', 'mine', { read: true, send: true, wait: true, stop: true, archive: true }],
+    ['a thread in another project', 'elsewhere', { read: true, send: true, wait: true, stop: true, archive: true }],
+    ['a thread with no project', 'no-project', { read: true, send: true, wait: true, stop: true, archive: true }],
     ['an archived thread', 'archived', { read: true, send: false, wait: true, stop: true, archive: true }],
     ['its own chat thread', 'home', { read: false, send: false, wait: false, stop: false, archive: false }],
     ['another bot\'s thread', 'other-bot', { read: false, send: false, wait: false, stop: false, archive: false }],
     ['a private thread', 'private', { read: false, send: false, wait: false, stop: false, archive: false }],
-    ['a thread outside the allowed projects', 'elsewhere', { read: false, send: false, wait: false, stop: false, archive: false }],
-    ['a thread with no project', 'no-project', { read: false, send: false, wait: false, stop: false, archive: false }],
     ['a subagent', 'subagent', { read: false, send: false, wait: false, stop: false, archive: false }],
     ['the Automation manager\'s thread', 'manager', { read: false, send: false, wait: false, stop: false, archive: false }],
     ['a thread that does not exist', 'missing', { read: false, send: false, wait: false, stop: false, archive: false }]
@@ -198,7 +189,6 @@ describe('a bot\'s thread tools ("use your threads")', () => {
       // A thread out of reach is refused in one form of words, whatever kind it is.
       if (!ok[tool] && !(tool === 'send' && ok.read)) expect(outcome.text, `${tool} ${threadId}`).toContain(`Thread ${threadId} is not available to you.`)
     }
-    if (threadId === 'started') expect((await calls.send()).text).toContain(`Thread started is in a project you may not use now (Settings → Agents), so you can't message it.`)
     expect(vi.mocked(host.sendToThread!).mock.calls.length).toBe(ok.send ? 1 : 0)
     expect(vi.mocked(host.stopRun!).mock.calls.length).toBe(ok.stop ? 1 : 0)
     expect(vi.mocked(host.setThreadArchived!).mock.calls.length).toBe(ok.archive ? 1 : 0)
@@ -226,28 +216,6 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(body(await text('thread_search', { query: 'login' })).results).toEqual([expect.objectContaining({ threadId: 'mine', link: 'mousse://thread/mine' })])
     expect(body(await text('thread_read', { threadId: 'mine' }))).toMatchObject({ threadId: 'mine', link: 'mousse://thread/mine' })
     expect(JSON.parse((await text('thread_create', { projectId: 'p1', title: 'Fix login', firstMessage: 'Look.' })).text)).toMatchObject({ threadId: 'new-1', link: 'mousse://thread/new-1' })
-  })
-
-  it('a project list that could not be read is no project for a bot, and the bot is told why; what it started stays its own', async () => {
-    const { text, host } = await world({ threads: 'all', access: { level: 'lineage', projectIds: [], projectsUnreadable: true } })
-    const listed = await text('thread_list', {})
-    const body = JSON.parse(listed.text.split('\n').slice(1, -1).join('\n'))
-    expect(body.threads.map((row: { id: string }) => row.id)).toEqual(['started'])
-    expect(body.projects).toEqual([])
-    expect(body.note).toBe(BOT_PROJECTS_UNREADABLE_TEXT)
-    expect(await text('thread_read', { threadId: 'mine' })).toEqual({ error: true, text: expect.stringContaining(BOT_PROJECTS_UNREADABLE_TEXT) })
-    expect(await text('thread_create', { projectId: 'p1', title: 'X', firstMessage: 'Y' })).toEqual({ error: true, text: expect.stringContaining(BOT_PROJECTS_UNREADABLE_TEXT) })
-    expect((await text('thread_read', { threadId: 'started' })).error).toBe(false)
-    // Read, waited on and stopped, but never messaged: its project is not one the bot may use now.
-    expect(await text('thread_send', { threadId: 'started', content: 'Go on.' })).toEqual({ error: true, text: expect.stringContaining("in a project you may not use now (your owner's project list in Settings → Agents could not be read)") })
-    expect((await text('thread_interrupt', { threadId: 'started', runId: 'run-x' })).error).toBe(false)
-    expect(host.createThread).not.toHaveBeenCalled()
-    expect(host.sendToThread).not.toHaveBeenCalled()
-    fx?.dispose()
-    fx = undefined
-    // A list never set is every project, as before.
-    const open = await world({ threads: 'all', access: { projectIds: [] } })
-    expect((await open.text('thread_read', { threadId: 'elsewhere' })).error).toBe(false)
   })
 
   it('a Stop of a running turn leaves a line naming the bot, and every start and message is a chip with what it sent', async () => {
@@ -328,8 +296,9 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(host.noteOnThread).not.toHaveBeenCalled()
     expect(host.showAgentAction).toHaveBeenCalledWith({ threadId: 'new-1' }, expect.objectContaining({ threadId: 'home' }), 'started this thread')
     expect(onAppResult).toHaveBeenCalledWith(expect.objectContaining({ activationId: 'act-1' }), 'thread_create', { threadId: 'new-1', title: 'Fix login', sent: 'Look at the login page.' })
-    // Only in a project the profile allows.
-    expect(await text('thread_create', { projectId: 'p2', title: 'X', firstMessage: 'Y' })).toMatchObject({ error: true, text: expect.stringMatching(/not one of the projects your owner lets you reach/) })
+    // In any of its owner's projects.
+    expect((await text('thread_create', { projectId: 'p2', title: 'Elsewhere', firstMessage: 'Look.' })).error).toBe(false)
+    expect(host.createThread).toHaveBeenLastCalledWith(expect.objectContaining({ projectId: 'p2' }), expect.anything())
   })
 
   it('the switch turned off on this computer refuses the next call of a turn that started with it, and the thread_list models only show to a turn that may start one', async () => {
@@ -372,15 +341,15 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(await text('thread_archive', { threadId: 'mine' })).toEqual({ error: true, text: expect.stringContaining('is still working, so it was not archived. If your owner wants it archived anyway, stop it first with thread_interrupt') })
     expect(host.showAgentAction).not.toHaveBeenCalled()
     expect(onAppResult).not.toHaveBeenCalled()
-    // An ordinary thread's agent never archives through it, even with the manage level and if it names the tool.
+    // An ordinary thread's agent never archives through it, even if it names the tool.
     fx?.dispose()
     fx = undefined
-    const managed = await world({ threads: 'all', access: { level: 'manage' } })
+    const fresh = await world({ threads: 'all' })
     const plain = await fx!.runningRun('mine')
-    managed.turns.register(appTurn({ threadId: 'mine', runId: plain.runId }))
-    const asAgent = await managed.registry.call('thread_archive', { threadId: 'archived' }, managed.request({ threadId: 'mine', runId: plain.runId, accessLevel: 'manage' })).catch((error: Error) => ({ isError: true, text: error.message }))
+    fresh.turns.register(appTurn({ threadId: 'mine', runId: plain.runId }))
+    const asAgent = await fresh.registry.call('thread_archive', { threadId: 'archived' }, fresh.request({ threadId: 'mine', runId: plain.runId })).catch((error: Error) => ({ isError: true, text: error.message }))
     expect(asAgent).toMatchObject({ isError: true, text: expect.stringContaining('thread_archive is for personal bots') })
-    expect(managed.host.setThreadArchived).not.toHaveBeenCalled()
+    expect(fresh.host.setThreadArchived).not.toHaveBeenCalled()
   })
 
   it('what it reads is framed as data from the thread, short by default, and the transcript only when asked, capped', async () => {
