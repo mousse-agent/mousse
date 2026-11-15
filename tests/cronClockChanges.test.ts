@@ -77,3 +77,42 @@ describe.each(zones)('cron clock changes in $zone', (row) => {
     }
   })
 })
+
+// Santiago repeats the preceding day's 23:00; Havana repeats 00:00 on the transition day.
+const midnightFolds = [
+  {
+    zone: 'America/Santiago', hour: 23, before: '2026-04-04T22:00:00-03:00',
+    first: '2026-04-04T23:30:00-03:00', second: '2026-04-04T23:10:00-04:00',
+    dailyNext: '2026-04-05T23:30:00-04:00', hourlyNext: '2026-04-05T00:30:00-04:00',
+    lastFive: '2026-04-04T23:55:00-03:00', fiveNext: '2026-04-05T00:00:00-04:00'
+  },
+  {
+    zone: 'America/Havana', hour: 0, before: '2026-10-31T23:00:00-04:00',
+    first: '2026-11-01T00:30:00-04:00', second: '2026-11-01T00:10:00-05:00',
+    dailyNext: '2026-11-02T00:30:00-05:00', hourlyNext: '2026-11-01T01:30:00-05:00',
+    lastFive: '2026-11-01T00:55:00-04:00', fiveNext: '2026-11-01T01:00:00-05:00'
+  }
+]
+
+describe.each(midnightFolds)('a repeated hour at the date boundary in $zone', (row) => {
+  it('runs a daily time once and advances to the right calendar day', () => {
+    process.env.TZ = row.zone
+    const schedule = { kind: 'cron', expr: `30 ${row.hour} * * *` } as const
+    expect(computeNextRun(schedule, null, new Date(row.before))).toBe(new Date(row.first).toISOString())
+    expect(computeNextRun(schedule, row.first)).toBe(new Date(row.dailyNext).toISOString())
+    expect(computeNextRun(schedule, null, new Date(row.second))).toBe(new Date(row.dailyNext).toISOString())
+    expect(occurrencesSince(schedule, row.first, new Date(row.second))).toBe(1)
+  })
+
+  it('skips the second pass for hourly and five-minute cron too', () => {
+    process.env.TZ = row.zone
+    for (const [expr, from, next] of [
+      ['30 * * * *', row.first, row.hourlyNext],
+      ['30 * * * *', row.second, row.hourlyNext],
+      ['*/5 * * * *', row.lastFive, row.fiveNext],
+      ['*/5 * * * *', row.second, row.fiveNext]
+    ]) {
+      expect(computeNextRun({ kind: 'cron', expr: expr! }, from), `${expr} from ${from}`).toBe(new Date(next!).toISOString())
+    }
+  })
+})
