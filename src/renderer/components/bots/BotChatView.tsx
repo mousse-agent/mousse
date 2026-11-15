@@ -1,4 +1,4 @@
-import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react'
 import { ArrowDown, ChevronRight, CircleAlert, Loader2, Reply, Shield, X } from '../../lib/icons'
 import type { BotChatApplet, BotChatMessage, BotChatQuote, BotError, BotSummary } from '../../../shared/bots/personal/chat'
 import { BOT_COLOUR_HEX, normalizeBotLook } from '../../../shared/bots/personal/look'
@@ -206,6 +206,45 @@ const sameBotMessage = (a: BotMessageProps, b: BotMessageProps) => a.message ===
 interface BotMessageProps { bot: BotSummary; message: BotChatMessage; onAction(action: NonNullable<BotError['action']>): void; browser?: ReactNode; quote: boolean; starts: boolean; onReply(message: BotChatMessage): void; asked?: BotChatMessage; onApplet(applet: BotChatApplet): void }
 
 /**
+ * A reply's tools hang off its bubble's right edge: beside a wide bubble they move left, inside the transcript. Measured
+ * by their contents, which sit where they will show even while the box is still folded (its fold or open can lag the
+ * pointer by a frame).
+ */
+function clampBotTools(element: HTMLElement) {
+  const lane = element.closest('.chat-transcript')
+  if (!lane || !lane.clientWidth) return
+  element.style.removeProperty('--bot-tools-shift')
+  const right = Math.max(...Array.from(element.children, (child) => child.getBoundingClientRect().right))
+  const over = right - (lane.getBoundingClientRect().left + lane.clientWidth - 8)
+  if (over > 0) element.style.setProperty('--bot-tools-shift', `${-Math.ceil(over)}px`)
+}
+
+/**
+ * Tools left open while the transcript changes width (the pointer still on the reply, the focus in them, the emoji grid
+ * open, a reply read aloud) move again, so they never hang past it. Hidden tools take no width and are skipped. They
+ * move in the next frame: moving them inside the observer's callback changes the layout it is reporting.
+ */
+function useReclampOpenTools(transcript: RefObject<HTMLDivElement | null>) {
+  useEffect(() => {
+    const lane = transcript.current
+    if (!lane || typeof ResizeObserver === 'undefined') return
+    let width = lane.clientWidth
+    let pending = 0
+    const observer = new ResizeObserver(() => {
+      if (lane.clientWidth === width || pending) return
+      pending = requestAnimationFrame(() => {
+        pending = 0
+        width = lane.clientWidth
+        const open = Array.from(lane.querySelectorAll<HTMLElement>('.bot-message-tools')).filter((tools) => tools.getBoundingClientRect().width > 0)
+        open.forEach(clampBotTools)
+      })
+    })
+    observer.observe(lane)
+    return () => { observer.disconnect(); cancelAnimationFrame(pending) }
+  }, [transcript])
+}
+
+/**
  * A bot's message as a messenger shows it in a one-to-one chat: a bubble on the left, with no face or name (the header
  * says who it is), the time in its corner. A report reads as any reply that quotes the request; a list of keys and
  * values reads as a small card; the files it names are chips, its pictures a picture message above its words (the
@@ -255,14 +294,7 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, brows
   const [menuOpen, setMenuOpen] = useState(false)
   // The tools hang off the bubble's right edge: beside a wide bubble they move left, inside the transcript.
   const tools = useRef<HTMLSpanElement>(null)
-  const clampTools = () => {
-    const element = tools.current
-    const lane = element?.closest('.chat-transcript')
-    if (!element || !lane || !lane.clientWidth) return
-    element.style.removeProperty('--bot-tools-shift')
-    const over = element.getBoundingClientRect().right - (lane.getBoundingClientRect().left + lane.clientWidth - 8)
-    if (over > 0) element.style.setProperty('--bot-tools-shift', `${-Math.ceil(over)}px`)
-  }
+  const clampTools = () => { if (tools.current) clampBotTools(tools.current) }
   return <article className={`chat-participant-message from-agent bot-message${starts ? ' is-group-start' : ''}${reacted ? ' is-react-quiet' : ''}${message.reaction ? ' has-reaction' : ''}${menuOpen ? ' is-menu-open' : ''}`} data-message-id={message.id}
     onMouseEnter={clampTools} onFocus={clampTools} onMouseLeave={reacted ? () => setReacted(false) : undefined}>
     <div className="bot-message-line">
@@ -378,6 +410,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   const error = useBotsStore((s) => (s.errorBotId === bot.id ? s.error : null))
   const store = useBotsStore.getState
   const transcript = useRef<HTMLDivElement>(null)
+  useReclampOpenTools(transcript)
   const messages = chat?.messages ?? EMPTY
   // The chat's own turn: its typing bubble and Stop. Work beside it is in the header's list, and the chat stays free.
   // A service from before work (no `chat` or `work` in its summary) says only that the bot works: that is the chat's.
