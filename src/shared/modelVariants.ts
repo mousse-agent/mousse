@@ -313,10 +313,34 @@ export function compareModelsNewestFirst(a: string, b: string): number {
   return b.localeCompare(a, undefined, { numeric: true, sensitivity: 'base' })
 }
 
+/**
+ * Families already grouped, per model list and provider. The composer asks for a provider's families several
+ * times on each render (the level, the speed and the model button's name), and grouping a large catalog
+ * (OpenRouter lists hundreds of models) took most of a thread switch. Model lists are built once and replaced,
+ * not edited, so a list's families are kept with it; the length check catches a list that grew after grouping.
+ */
+const familiesOfList = new WeakMap<readonly LlmModelOption[], { length: number; byProvider: Map<string, ModelFamily[]> }>()
+
+/** The families of `models`, newest first. The result is shared between callers: do not change it. */
 export function groupModelsByFamily(
   providerId: string,
   models: LlmModelOption[]
 ): ModelFamily[] {
+  let kept = familiesOfList.get(models)
+  if (!kept || kept.length !== models.length) {
+    kept = { length: models.length, byProvider: new Map() }
+    familiesOfList.set(models, kept)
+  }
+  const known = kept.byProvider.get(providerId)
+  if (known) return known
+  const families = groupFamilies(providerId, models)
+  kept.byProvider.set(providerId, families)
+  return families
+}
+
+const newestFirstCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
+
+function groupFamilies(providerId: string, models: LlmModelOption[]): ModelFamily[] {
   const byFamily = new Map<string, ParsedModelVariant[]>()
 
   for (const model of models) {
@@ -353,12 +377,14 @@ export function groupModelsByFamily(
         brandLabel: brand.brandLabel
       } satisfies ModelFamily
     })
-    // Newest published/versioned models first (catalog order is often oldest-first).
-    .sort((a, b) => {
-      const aKey = `${a.familyLabel} ${a.variants[0]?.id ?? ''}`
-      const bKey = `${b.familyLabel} ${b.variants[0]?.id ?? ''}`
-      return compareModelsNewestFirst(aKey, bKey)
+    // Newest published/versioned models first (catalog order is often oldest-first), as `compareModelsNewestFirst`
+    // orders them, with each family's score worked out once instead of on every comparison.
+    .map((family) => {
+      const key = `${family.familyLabel} ${family.variants[0]?.id ?? ''}`
+      return { family, key, score: modelNewnessScore(key) }
     })
+    .sort((a, b) => b.score - a.score || newestFirstCollator.compare(b.key, a.key))
+    .map(({ family }) => family)
 }
 
 export function groupFamiliesByBrand(families: ModelFamily[]): ModelBrandSection[] {

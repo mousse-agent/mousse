@@ -60,6 +60,20 @@ describe('composer picker from snapshots', () => {
     expect(providers[0].caps?.planMode).toBe(true)
   })
 
+  it('gives the same entries for the same snapshots, so switching threads does not group the models again', () => {
+    const snapshots = [snapshot({ models: { entries: claudeModels, source: 'live' } })]
+    const first = pickerProviders(snapshots, catalog)
+    expect(pickerProviders(snapshots, catalog)).toBe(first)
+    // The composer groups the entry's models on every render: the same list keeps its families.
+    expect(groupModelsByFamily('claude-subscription', pickerProviders(snapshots, catalog)[0].models)).toBe(groupModelsByFamily('claude-subscription', first[0].models))
+    // New snapshots or a new catalog are read again; the catalog still fills in what the snapshot lacks.
+    const next = pickerProviders([...snapshots], catalog)
+    expect(next).not.toBe(first)
+    expect(next).toEqual(first)
+    expect(pickerProviders(snapshots, [{ ...catalog[0], models: [{ id: 'claude-opus-4', label: 'Claude Opus 4' }] }])[0].models[0].speed).toBeUndefined()
+    expect(first[0].models[0].speed).toBe('fast')
+  })
+
   it('carries an older model\'s flag to the picker', () => {
     const [entry] = pickerProviders([snapshot({ models: { entries: [model('ember'), model('ember-1', { older: true })], source: 'live' } })], [])
     expect(entry.models).toEqual([{ id: 'ember', label: 'ember' }, { id: 'ember-1', label: 'ember-1', older: true }])

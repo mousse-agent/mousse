@@ -166,6 +166,30 @@ describe('modelVariants', () => {
     ])
   })
 
+  it('groups a model list once, in the same order as before, and again after it grows', () => {
+    // A catalog the size of OpenRouter's, where grouping on every composer render made thread switches slow.
+    const vendors = ['openai/gpt', 'anthropic/claude-opus', 'google/gemini', 'meta-llama/llama', 'qwen/qwen', 'mistral/mistral']
+    const models: LlmModelOption[] = Array.from({ length: 360 }, (_, index) => {
+      const vendor = vendors[index % vendors.length]
+      const version = `${index % 9}.${index % 7}`
+      return { id: `${vendor}-${version}-v${index}`, label: `${vendor.split('/')[1]} ${version} v${index}` }
+    })
+    const families = groupModelsByFamily('openrouter', models)
+    // The composer asks for the same list's families several times per render: no regrouping.
+    expect(groupModelsByFamily('openrouter', models)).toBe(families)
+    expect(findModelFamily('openrouter', models, models[5].id)).toBe(families.find((family) => family.variants.some((variant) => variant.id === models[5].id)))
+    // A copy of the list groups to the same families, in the order compareModelsNewestFirst gives.
+    expect(groupModelsByFamily('openrouter', [...models])).toEqual(families)
+    const keys = families.map((family) => `${family.familyLabel} ${family.variants[0]?.id ?? ''}`)
+    expect(keys).toEqual([...keys].sort(compareModelsNewestFirst))
+    // Another provider over the same list, and a list that grew, are grouped afresh.
+    expect(groupModelsByFamily('other', models)).not.toBe(families)
+    models.push({ id: 'openai/gpt-99.9', label: 'GPT 99.9' })
+    const grown = groupModelsByFamily('openrouter', models)
+    expect(grown).not.toBe(families)
+    expect(grown[0].variants[0].id).toBe('openai/gpt-99.9')
+  })
+
   it('infers model brands for section headers', () => {
     expect(inferModelBrand('claude-sonnet-4', 'Claude Sonnet 4')).toMatchObject({
       brandId: 'anthropic',
