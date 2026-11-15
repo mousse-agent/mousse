@@ -49,7 +49,20 @@
 .bot-conversation .bot-markdown { font-size: var(--bot-text); }
 .bot-conversation .bot-you-bubble.bot-markdown { line-height: 1.5; }
 .bot-conversation .chat-message-meta { font-size: var(--bot-meta); line-height: 18px; margin-bottom: 4px; }
-.bot-conversation .chat-transcript { padding: 12px 0 14px; scrollbar-gutter: stable both-edges; -webkit-mask-image: linear-gradient(to bottom, transparent, #000 12px, #000 calc(100% - 12px), transparent); mask-image: linear-gradient(to bottom, transparent, #000 12px, #000 calc(100% - 12px), transparent); }
+.bot-conversation .chat-transcript { padding: 12px 0 14px; scrollbar-gutter: stable both-edges; }
+/* The transcript fades in over its first 12px and out over its last 12px. Over the solid workspace the fades are two
+   bands in its colour (`--pane-backdrop`, polish.css) laid over the transcript's edges, scrollbar included (anchored to
+   its box, outside its scrolled content); a mask would make the GPU keep a transcript-sized copy of it, its mask and
+   their tiles (about 39 MB). In a see-through (acrylic) window the mask stays. */
+html[data-acrylic='true'] .bot-conversation .chat-transcript { -webkit-mask-image: linear-gradient(to bottom, transparent, #000 12px, #000 calc(100% - 12px), transparent); mask-image: linear-gradient(to bottom, transparent, #000 12px, #000 calc(100% - 12px), transparent); }
+html:not([data-acrylic='true']) .bot-conversation { anchor-scope: --bot-transcript; }
+html:not([data-acrylic='true']) .bot-conversation .chat-transcript { anchor-name: --bot-transcript; isolation: isolate; }
+html:not([data-acrylic='true']) .bot-conversation::before,
+html:not([data-acrylic='true']) .bot-conversation::after { content: ''; position: absolute; position-anchor: --bot-transcript; left: anchor(left); right: anchor(right); z-index: 1; height: 12px; pointer-events: none; }
+html:not([data-acrylic='true']) .bot-conversation::before { top: anchor(top); background: linear-gradient(to bottom, var(--pane-backdrop), transparent); }
+html:not([data-acrylic='true']) .bot-conversation::after { bottom: anchor(bottom); background: linear-gradient(to bottom, transparent, var(--pane-backdrop)); }
+/* The composer's shadow falls over the transcript's bottom edge, so the composer sits above the band. */
+html:not([data-acrylic='true']) .bot-conversation .chat-input-area.bot-input-area { z-index: 2; }
 .bot-conversation .chat-transcript > * { width: var(--bot-column); margin-inline: auto; box-sizing: border-box; }
 
 /* Messages in groups (messageGroups.ts): one sender's messages close in time sit tight; a new sender, a quiet line or a

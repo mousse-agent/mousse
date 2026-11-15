@@ -823,9 +823,11 @@ html[data-theme='light'] .app .chat--empty .chat-input-area .composer {
 }
 
 /* ---------- Agent chat workspace ---------- */
-/* Same canvas as the thread pane, so Chats never falls through to the window. */
+/* Same canvas as the thread pane, so Chats never falls through to the window. The bot chat's fades paint it too
+   (bots.css). */
 .app .chat-workspace {
-  background-color: var(--vscode-sideBar-background, var(--surface-strong));
+  --pane-backdrop: var(--vscode-sideBar-background, var(--surface-strong));
+  background-color: var(--pane-backdrop);
 }
 
 .app .chat-workspace:has(.chat-workspace-empty) {
@@ -1196,8 +1198,17 @@ html .chat-avatar[class*='chat-color-']:not(.group) {
   padding-bottom: calc(var(--chat-composer-stack, 160px) + 16px);
 }
 
-/* The transcript runs down to the composer and fades out only in the last 12px above its top edge. */
-.chat:not(.chat--empty) .an-message-list {
+/*
+ * The transcript runs down to the composer and fades out only in the last 12px above its top edge, and fades in
+ * over its first 28px.
+ *
+ * Over a solid pane the fades are painted: two bands in the pane's own colour (`--pane-backdrop`) lie over
+ * the top and the bottom of the transcript, under the composer, the prompt rail and the jump pill. A mask on the
+ * scroller would look the same but makes the GPU keep a transcript-sized copy of it, its mask and their tiles:
+ * about 75 MB at 1400x870 on a 2x screen. Only a see-through window (acrylic) or the frosted composer, where no
+ * colour can stand in for what lies behind, keeps the mask.
+ */
+:is(html[data-acrylic='true'], html[data-frosted-composer='true']) .chat:not(.chat--empty) .an-message-list {
   --transcript-mask: linear-gradient(
     to bottom,
     transparent 0,
@@ -1208,6 +1219,35 @@ html .chat-avatar[class*='chat-color-']:not(.group) {
   );
   -webkit-mask-image: var(--transcript-mask);
   mask-image: var(--transcript-mask);
+}
+
+/* The transcript is one stacking context, so nothing in it can rise above the bands. */
+html:not([data-acrylic='true']):not([data-frosted-composer='true']) .chat:not(.chat--empty) .an-message-list {
+  isolation: isolate;
+}
+
+html:not([data-acrylic='true']):not([data-frosted-composer='true']) .chat:not(.chat--empty) .an-message-list-wrap::before,
+html:not([data-acrylic='true']):not([data-frosted-composer='true']) .chat:not(.chat--empty) .an-message-list-wrap::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 1;
+  pointer-events: none;
+}
+
+html:not([data-acrylic='true']):not([data-frosted-composer='true']) .chat:not(.chat--empty) .an-message-list-wrap::before {
+  top: 0;
+  height: 28px;
+  background: linear-gradient(to bottom, var(--pane-backdrop), transparent);
+}
+
+/* From 12px above the composer's top edge to the bottom of the pane: the fade, then the pane's colour. */
+html:not([data-acrylic='true']):not([data-frosted-composer='true']) .chat:not(.chat--empty) .an-message-list-wrap::after {
+  --chat-composer-stack: inherit;
+  bottom: 0;
+  height: min(calc(var(--chat-composer-stack, 160px) + 12px), calc(100% - 28px));
+  background: linear-gradient(to bottom, transparent, var(--pane-backdrop) 12px);
 }
 
 .chat:not(.chat--empty) .an-message-list-wrap .chat-prompt-rail {

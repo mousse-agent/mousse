@@ -60,6 +60,25 @@ describe('no blur where nothing shows through', () => {
   })
 })
 
+/** A mask, not a custom property that holds one (`--transcript-mask`), set to anything but none. */
+const MASK = /(?<![\w-])(-webkit-)?mask(-image)?\s*:\s*(?!none\b)/
+/** Selector parts that apply only in a see-through window or with the frosted composer on. */
+const SEE_THROUGH = /(^|[\s(])html\[data-(acrylic|frosted-composer)='true'\]/
+
+describe('no mask on a whole pane where nothing shows through', () => {
+  // A mask on a scroller makes the GPU keep a copy of the scroller, its mask and their tiles as long as it is on
+  // screen: about 75 MB for the thread transcript at 1400x870 on a 2x screen. Over a solid pane the fades are painted
+  // in the pane's colour instead; only a see-through window, where no colour can stand in for what lies behind, masks.
+  it('masks the thread transcript, the thread list and the bot chat only in a see-through window or with the frosted composer', () => {
+    const panes = ['.an-message-list', '.threads-sidebar-scroll', '.chat-transcript']
+    const masking = allRules().filter(({ selector, body }) => MASK.test(body) && panes.some((pane) => new RegExp(`${pane.replace(/[.-]/g, '\\$&')}(?![\\w-])`).test(selector)))
+    expect(masking.length).toBeGreaterThan(0)
+    for (const { file, selector } of masking) {
+      for (const part of selector.split(',')) expect(part.trim(), `${file}: ${selector}`).toMatch(SEE_THROUGH)
+    }
+  })
+})
+
 describe('blur that stays: something varied shows through it', () => {
   it('keeps the frosted composer setting and toasts', () => {
     const frosted = rules(source('styles/polish.css')).find(([selector]) => selector.includes("html[data-frosted-composer='true'] .app .chat:not(.chat--empty) .chat-input-area .composer"))!
