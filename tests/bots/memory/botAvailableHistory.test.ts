@@ -8,7 +8,7 @@ import { disposeFixtures, memoryFixture } from './memoryFixture'
 afterEach(() => { vi.restoreAllMocks(); disposeFixtures() })
 const lines = (pack: string) => {
   const situation = pack.slice(pack.indexOf('Situation:'))
-  return situation.split('\n').filter((line) => /^(Files|History):|^- \"/.test(line)).join('\n')
+  return situation.split('\n').filter((line) => /^(Files|History):|^- \"|^(?:and|plus) /.test(line)).join('\n')
 }
 const prefix = (pack: string) => pack.slice(0, pack.indexOf('\n\nSituation:'))
 function fixture() {
