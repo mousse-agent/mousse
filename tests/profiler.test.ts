@@ -398,7 +398,7 @@ describe('the profiler tools', () => {
       expect(outcome.isError).not.toBe(true)
       expect(value.memoryTotals.serviceWorkingSetMb).toBeGreaterThan(0)
       expect(value.memoryTotals.measuredWorkingSetMb).toBe(value.memoryTotals.serviceWorkingSetMb)
-      expect(value.memoryTotals).toMatchObject({ desktopWorkingSetMb: null, workloadWorkingSetMb: null, childrenWorkingSetMb: 0, desktopSampleAvailable: false })
+      expect(value.memoryTotals).toMatchObject({ desktopWorkingSetMb: null, workloadWorkingSetMb: null, childrenWorkingSetMb: null, desktopSampleAvailable: false, childrenSampleAvailable: false })
       expect(value.processes.find((row: { label: string }) => row.label === 'Measured workload subtotal')).toMatchObject({ workingSetMb: value.memoryTotals.serviceWorkingSetMb })
     } finally {
       monitor.stop()
