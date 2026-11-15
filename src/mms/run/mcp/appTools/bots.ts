@@ -504,7 +504,6 @@ const OWNER_ONLY = 'Only the owner can change this, in your chat. Suggest it in 
 const error = (text: string): ToolOutcome => ({ text, isError: true })
 
 interface BotCall {
-  dispatchId?: string
   deps: BotAppToolDeps
   botId: string
   activationId: string
@@ -524,7 +523,6 @@ function botCall(deps: (() => BotAppToolDeps | undefined) | undefined, ctx: Tool
     botId: activation.botId,
     activationId: activation.activationId,
     lane: activation.lane,
-    dispatchId: activation.dispatchId,
     // App tools know the activation; the sink finds its current dispatch.
     activity: { botId: activation.botId, activationId: activation.activationId, dispatchId: '' }
   }
@@ -800,8 +798,13 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         // A custom slot needs no words of the owner's: the owner set it up for jobs like this. The engine checks it is one.
         if (args.slot !== undefined && args.slot !== null && typeof args.slot !== 'string') return error('slot is the name of one of the owner\'s custom slots.')
         const slot = typeof args.slot === 'string' ? args.slot : undefined
-        // Replayed calls without a runtime id share the dispatch's durable identity and request digest.
-        const requestKey = ctx.toolCallId ?? `dispatch:${call.dispatchId ?? ''}:${createHash('sha256').update(JSON.stringify([title, brief])).digest('hex')}`
+        // MCP assigns fresh call ids, and a restarted chat gets a new dispatch. Request identity belongs to the
+        // whole chat activation instead; include every choice that can change which work the owner asked for.
+        const requestKey = createHash('sha256').update(JSON.stringify([
+          title, brief, level ?? null,
+          model ? [model.pick.instanceId, model.pick.model, model.pick.effort ?? null] : null,
+          slot ?? null
+        ])).digest('hex')
         try {
           const started = await call.deps.host.work.start(call.botId, call.activationId, { title, brief, key: `${call.activationId}:${requestKey}`, ...(level ? { level } : {}), ...(model ? { model } : {}), ...(slot !== undefined ? { slot } : {}) })
           const where = model ? ` It runs on ${model.name.name} on ${model.name.entry}${model.name.effort ? `, ${model.name.effort} reasoning` : ''}, for this work only.` : ''
