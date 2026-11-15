@@ -695,15 +695,15 @@ export class BotChatService {
     return { stopped: result === 'stopped' }
   }
 
-  /**
-   * `bots.reminders.cancel`: a waiting reminder is cancelled through the bot's own cancel path, so it is never said or
-   * started. One said meanwhile is left as it is; one this bot never had is an error.
-   */
   reminderSnooze(botId: string, messageId: string, choice: import('../../../shared/bots/personal/chat').BotSnoozeChoice): BotChatMessage {
     this.engine.snoozeReminder(botId, messageId, choice)
     return this.engine.chat.toMessage(this.store.message(messageId)!)
   }
 
+  /**
+   * `bots.reminders.cancel`: a waiting reminder is cancelled through the bot's own cancel path, so it is never said or
+   * started. One said meanwhile is left as it is; one this bot never had is an error.
+   */
   reminderCancel(botId: string, reminderId: string): BotDetail {
     this.engine.definitionOf(botId)
     if (this.store.reminder(reminderId)?.botId !== botId) throw new BotEngineError('reminder_not_found', 'This bot has no such reminder.')

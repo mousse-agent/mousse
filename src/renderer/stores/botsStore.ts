@@ -113,8 +113,8 @@ interface BotsState {
   replyingTo: Record<string, BotChatQuote>
   /** The service has no `bots.chat.react` (an older one): messages show no reaction bar. */
   reactionsMissing: boolean
-  /** The service has no `bots.questions.answer`: questions show no buttons, and the owner answers with Reply. */
   snoozeMissing: boolean
+  /** The service has no `bots.questions.answer`: questions show no buttons, and the owner answers with Reply. */
   questionsMissing: boolean
   error: string | null
   /** The bot `error` is about; null when it is about none (a new bot). Only that bot's chat shows it. */
@@ -156,11 +156,11 @@ interface BotsState {
   /** Stops one piece of work (the line above the composer); the chat goes on. */
   stopWork(botId: string, workId: string): Promise<void>
   answer(botId: string, askId: string, answer: 'allow' | 'not_now'): Promise<void>
+  snoozeReminder(botId: string, messageId: string, choice: import('../../shared/bots/personal/chat').BotSnoozeChoice): Promise<boolean>
   /**
    * The owner taps one of a question's answers: it is their reply to the question, which the bot answers. False when it
    * was not sent (the error says why, or the service has no buttons for questions).
    */
-  snoozeReminder(botId: string, messageId: string, choice: import('../../shared/bots/personal/chat').BotSnoozeChoice): Promise<boolean>
   answerQuestion(botId: string, questionId: string, choice: string): Promise<boolean>
   /**
    * The owner's reaction on one of the bot's messages: shown at once, and put back as it was when the service refuses

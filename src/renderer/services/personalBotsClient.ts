@@ -34,11 +34,11 @@ export interface PersonalBotsClient {
   /** The owner's reaction on one of the bot's messages: an emoji, or `null` to remove it. The message as it is now. */
   react(botId: string, messageId: string, emoji: string | null): Promise<BotChatMessage>
   answer(botId: string, askId: string, answer: 'allow' | 'not_now'): Promise<BotChatMessage>
+  snoozeReminder(botId: string, messageId: string, choice: import('../../shared/bots/personal/chat').BotSnoozeChoice): Promise<BotsPersonalV2Result<'bots.reminders.snooze'>>
   /**
    * The owner taps one of a question's answers: their reply, and the question's bubble as it is now. An older service
    * lacks it and rejects; the owner answers with Reply there.
    */
-  snoozeReminder(botId: string, messageId: string, choice: import('../../shared/bots/personal/chat').BotSnoozeChoice): Promise<BotsPersonalV2Result<'bots.reminders.snooze'>>
   answerQuestion(botId: string, questionId: string, choice: string, clientRequestId: string): Promise<BotsPersonalV2Result<'bots.questions.answer'>>
   setPermission(botId: string, permissionId: string, enabled: boolean): Promise<BotDetail>
   revokePermission(botId: string, permissionId: string): Promise<BotDetail>

@@ -197,8 +197,8 @@ export interface BotsPersonalV2Api {
   'bots.chat.stop': { params: { botId: string }; result: Record<string, never> }
   /** Stops one piece of work (or a scheduled run) of the bot; the chat goes on. `stopped` is false when it had ended. */
   'bots.work.stop': { params: { botId: string; workId: string }; result: { stopped: boolean } }
-  /** Cancels one waiting reminder; it is never said or started. One already said leaves the detail as it is. */
   'bots.reminders.snooze': { params: { botId: string; messageId: string; choice: import('./chat').BotSnoozeChoice }; result: BotChatMessage }
+  /** Cancels one waiting reminder; it is never said or started. One already said leaves the detail as it is. */
   'bots.reminders.cancel': { params: { botId: string; reminderId: string }; result: BotDetail }
   'bots.chat.markRead': { params: { botId: string; seq: number }; result: Record<string, never> }
   /** The owner's reaction on one of the bot's messages: an emoji, which replaces any other, or `null` to remove it. */
