@@ -26,6 +26,7 @@ import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { browserTabsOpenedThisSession, useAppStore } from '../stores/appStore'
 import { MousseLogoOutline } from './MousseLogoOutline'
 import { KeepMounted, KeepMountedStack } from './KeepMounted'
+import { NO_LOADED_BROWSER_TABS, nextLoadedBrowserTabs, type LoadedBrowserTabs } from '../lib/loadedBrowserTabs'
 import {
   BrowserAccessControl,
   BrowserDeviceToolbar,
@@ -244,9 +245,11 @@ interface BrowserWebviewProps {
   onReady: (id: string, webview: HTMLWebViewElement | null) => void
   onState: (id: string, patch: Partial<BrowserTabState>) => void
   onNavState: (id: string, nav: WebviewNavState) => void
+  /** The page started or stopped playing audio or video. */
+  onMedia: (id: string, playing: boolean) => void
 }
 
-function BrowserWebview({ tab, profileId, active, agentControlled, agentCursor, onReady, onState, onNavState }: BrowserWebviewProps) {
+function BrowserWebview({ tab, profileId, active, agentControlled, agentCursor, onReady, onState, onNavState, onMedia }: BrowserWebviewProps) {
   const ref = useRef<HTMLWebViewElement>(null)
   // src is the mount URL. Observed URLs (including redirects) must never be
   // written back to src: doing so starts a second, competing guest navigation.
@@ -257,10 +260,12 @@ function BrowserWebview({ tab, profileId, active, agentControlled, agentCursor, 
   const onReadyRef = useRef(onReady)
   const onStateRef = useRef(onState)
   const onNavStateRef = useRef(onNavState)
+  const onMediaRef = useRef(onMedia)
   zoomRef.current = tab.zoomFactor
   onReadyRef.current = onReady
   onStateRef.current = onState
   onNavStateRef.current = onNavState
+  onMediaRef.current = onMedia
 
   useEffect(() => {
     const webview = ref.current
@@ -306,12 +311,19 @@ function BrowserWebview({ tab, profileId, active, agentControlled, agentCursor, 
       onNavStateRef.current(tab.id, { ...readNav(), isLoading: false })
     }
 
+    const onMediaStarted = () => onMediaRef.current(tab.id, true)
+    const onMediaPaused = () => onMediaRef.current(tab.id, false)
+    // A new page in the tab has stopped whatever the last one played.
+    const onNavigate = () => { onMediaPaused(); update() }
+
     webview.addEventListener('dom-ready', onDomReady)
     webview.addEventListener('did-start-loading', onStartLoading)
     webview.addEventListener('did-stop-loading', onStopLoading)
-    webview.addEventListener('did-navigate', update)
+    webview.addEventListener('did-navigate', onNavigate)
     webview.addEventListener('did-navigate-in-page', update)
     webview.addEventListener('page-title-updated', update)
+    webview.addEventListener('media-started-playing', onMediaStarted)
+    webview.addEventListener('media-paused', onMediaPaused)
 
     // If the guest was already ready (effect re-bind / remount), re-register immediately.
     // dom-ready will not fire again for an already-loaded document.
@@ -323,12 +335,15 @@ function BrowserWebview({ tab, profileId, active, agentControlled, agentCursor, 
       readyRef.current = false
       onReadyRef.current(tab.id, null)
       onNavStateRef.current(tab.id, { canGoBack: false, canGoForward: false, isLoading: false })
+      onMediaPaused()
       webview.removeEventListener('dom-ready', onDomReady)
       webview.removeEventListener('did-start-loading', onStartLoading)
       webview.removeEventListener('did-stop-loading', onStopLoading)
-      webview.removeEventListener('did-navigate', update)
+      webview.removeEventListener('did-navigate', onNavigate)
       webview.removeEventListener('did-navigate-in-page', update)
       webview.removeEventListener('page-title-updated', update)
+      webview.removeEventListener('media-started-playing', onMediaStarted)
+      webview.removeEventListener('media-paused', onMediaPaused)
     }
   }, [tab.id])
 
@@ -388,7 +403,8 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
   const setActiveTab = useAppStore((s) => s.setActiveBrowserTab)
   const addElementAttachment = useAppStore((s) => s.addBrowserElementAttachment)
   const webviews = useRef(new Map<string, HTMLWebViewElement>())
-  const loadedTabs = useRef(new Set<string>())
+  const loadedTabs = useRef<LoadedBrowserTabs>(NO_LOADED_BROWSER_TABS)
+  const [mediaTabs, setMediaTabs] = useState<ReadonlySet<string>>(() => new Set())
   const registrations = useRef(new Map<string, Promise<unknown>>())
   const editingAddress = useRef(false)
   const menuButtonRef = useRef<HTMLButtonElement>(null)
@@ -557,14 +573,29 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
         })
         registrations.current.set(id, registration)
         void registration.catch((error) => {
+          // A tab that unloaded meanwhile has nothing to report.
+          if (registrations.current.get(id) !== registration) return
           registrations.current.delete(id)
           // A kept tab can outlive its thread; a failure there is not this view's to report.
           if (!threadId || threadId === useAppStore.getState().activeThreadId) setBrowserError(error)
         })
       }
     }
-    else webviews.current.delete(id)
+    else {
+      // An unloaded tab's page is gone with its registration; the page it loads when shown again registers anew.
+      webviews.current.delete(id)
+      registrations.current.delete(id)
+    }
   }, [setBrowserError])
+  const handleMedia = useCallback((id: string, playing: boolean) => {
+    setMediaTabs((previous) => {
+      if (previous.has(id) === playing) return previous
+      const next = new Set(previous)
+      if (playing) next.add(id)
+      else next.delete(id)
+      return next
+    })
+  }, [])
   const handleWebviewState = useCallback((id: string, patch: Partial<BrowserTabState>) => {
     updateTab(id, patch)
     if (id === activeTab?.id && !editingAddress.current && patch.url) {
@@ -595,6 +626,18 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
   const canGoBack = activeNav?.canGoBack ?? false
   const canGoForward = activeNav?.canGoForward ?? false
   const loading = activeNav?.isLoading ?? false
+
+  // A tab an agent works in (or a person took over from one) keeps its page, so the agent's session goes on.
+  const busyTabs = useMemo(() => {
+    const busy = new Set(mediaTabs)
+    for (const [id, state] of Object.entries(controlByTab)) if (state.owner === 'agent' || state.owner === 'human') busy.add(id)
+    return busy
+  }, [controlByTab, mediaTabs])
+  const tabIds = useMemo(() => tabs.map((tab) => tab.id), [tabs])
+  loadedTabs.current = nextLoadedBrowserTabs(loadedTabs.current, {
+    tabIds, activeTabId: activeTab?.id, shown: active, openedThisSession: browserTabsOpenedThisSession, busy: busyTabs
+  })
+  const loaded = loadedTabs.current.loaded
 
   const navigate = () => {
     const webview = getActiveWebview()
@@ -797,14 +840,9 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
           </button>
         </div>
       )}
-      {/* All guests stay mounted so switching threads does not reload pages or lose DOM state. */}
+      {/* Loaded guests stay mounted across threads, so going back to a recent tab neither reloads it nor loses its page. */}
       <KeepMounted active={hasVisibleTabs} preserveLayout className="browser-content">
-        {tabs.filter((tab) => {
-          // A restored tab loads the first time it is shown or an agent drives it, then stays mounted.
-          if (!loadedTabs.current.has(tab.id) && (browserTabsOpenedThisSession.has(tab.id)
-            || (active && tab.id === activeTab?.id) || controlByTab[tab.id]?.owner === 'agent')) loadedTabs.current.add(tab.id)
-          return loadedTabs.current.has(tab.id)
-        }).map((tab) => (
+        {tabs.filter((tab) => loaded.has(tab.id)).map((tab) => (
           <BrowserWebview
             key={`${profileId}:${tab.id}`}
             tab={tab}
@@ -815,6 +853,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
             onReady={registerWebview}
             onState={handleWebviewState}
             onNavState={handleNavState}
+            onMedia={handleMedia}
           />
         ))}
       </KeepMounted>

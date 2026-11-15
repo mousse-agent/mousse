@@ -471,6 +471,8 @@ interface AppState {
   /** Create a default tab only when none are visible for this thread (incl. pinned). Idempotent. */
   ensureBrowserTab: (ownerThreadId: string | null) => string
   closeBrowserTab: (id: string) => void
+  /** Closes the tabs these threads own; tabs kept in every thread stay. */
+  closeThreadBrowserTabs: (threadIds: readonly string[]) => void
   updateBrowserTab: (id: string, patch: Partial<Omit<BrowserTabState, 'id'>>) => void
   setActiveBrowserTab: (threadId: string | null, id: string) => void
   addBrowserElementAttachment: (threadId: string | null, attachment: BrowserElementAttachment) => void
@@ -1258,6 +1260,15 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       }
       return { browserTabs, browserActiveTabByThread }
     }),
+  closeThreadBrowserTabs: (threadIds) =>
+    set((s) => {
+      const owners = new Set(threadIds)
+      const browserTabs = s.browserTabs.filter((tab) => tab.ownerThreadId === null || !owners.has(tab.ownerThreadId))
+      if (browserTabs.length === s.browserTabs.length) return s
+      const browserActiveTabByThread = { ...s.browserActiveTabByThread }
+      for (const threadId of owners) delete browserActiveTabByThread[threadId]
+      return { browserTabs, browserActiveTabByThread }
+    }),
   updateBrowserTab: (id, patch) =>
     set((s) => {
       const index = s.browserTabs.findIndex((tab) => tab.id === id)
@@ -1389,6 +1400,21 @@ export function deletedThreadIds(previous: AppState, state: AppState): string[] 
 useAppStore.subscribe((state, previous) => {
   const gone = deletedThreadIds(previous, state).filter((id) => id in state.queueEditDrafts || id in state.queueDraftNotices)
   if (gone.length) state.forgetQueueEdits(gone)
+})
+
+/** Threads archived since the last list: they were listed without `settledAt` and now have it. */
+export function newlyArchivedThreadIds(previous: AppState, state: AppState): string[] {
+  if (state.threads === previous.threads || state.profileId !== previous.profileId) return []
+  const wasOpen = new Set(previous.threads.filter((thread) => !thread.settledAt).map((thread) => thread.id))
+  return state.threads.filter((thread) => thread.settledAt && wasOpen.has(thread.id)).map((thread) => thread.id)
+}
+
+// An archived or deleted thread's browser tabs close, so their pages stop using memory.
+useAppStore.subscribe((state, previous) => {
+  const gone = [...deletedThreadIds(previous, state), ...newlyArchivedThreadIds(previous, state)]
+  if (gone.length && state.browserTabs.some((tab) => tab.ownerThreadId !== null && gone.includes(tab.ownerThreadId))) {
+    state.closeThreadBrowserTabs(gone)
+  }
 })
 
 /**

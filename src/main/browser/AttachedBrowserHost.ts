@@ -115,7 +115,13 @@ export class AttachedBrowserHost {
     let host = this.windows.get(sender.id)
     if (host && (!sameBinding(binding, host.binding) || host.stopping)) invalid('Previous browser profile is still closing')
     if (!host) { host = this.createWindow(sender, binding); this.windows.set(sender.id, host) }
-    const existing = host.records.get(localTabId)
+    let existing = host.records.get(localTabId)
+    if (existing && existing.guest !== guest && existing.guest.isDestroyed()) {
+      // The window unloaded this tab's last page and is loading it again: the old page's registration ends first.
+      await this.releaseRecord(host, existing).catch(() => { /* Retained for window shutdown retry. */ })
+      existing = host.records.get(localTabId)
+      if (host.stopping || guest.isDestroyed() || this.windows.get(sender.id) !== host) invalid('Browser binding changed during registration')
+    }
     if (existing) {
       if (!existing.artifactRoot) invalid('Tab registration is still in progress')
       if (existing.guest !== guest || (existing.threadId && threadId && existing.threadId !== threadId)) invalid('Replaced tab must be released before registration')
