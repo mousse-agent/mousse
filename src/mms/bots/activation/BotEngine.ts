@@ -2599,7 +2599,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // What the owner allows now, from the permissions this dispatch runs with: a chat turn is told what its work
       // holds (it hands those jobs off), a run what it holds itself, and whether its browser could be offered.
       ...this.instructionsOf(definition, definition.main, row.lane, {
-        allowed: { ...botAllowedOf(narrowManifest(effective, definition.main.narrow), (ids) => this.mcpServerNames(ids)), ...(compiled.permissions.appTools.includes(BOT_IMAGE_TOOL) ? { images: true } : {}) },
+        allowed: {
+          ...botAllowedOf(narrowManifest(effective, definition.main.narrow), (ids) => this.mcpServerNames(ids)),
+          ...(compiled.permissions.appTools.includes(BOT_IMAGE_TOOL) ? { images: true } : {}),
+          // A chat turn the owner's typed message did not start reads their threads only: its text says so, and why.
+          ...(threadsReadOnlyOf(row) === 'not_owner' ? { threadsReadOnly: true as const } : {})
+        },
         ...(row.lane !== 'chat' && compiled.permissions.browser && !browser ? { browserOffline: true } : {})
       }),
       selection: { ...selection },
