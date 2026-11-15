@@ -64,7 +64,7 @@ describe('bot schedules after downtime', () => {
     expect(entry().skip).toEqual({ at: new Date(2026, 0, 1, 23, 59).toISOString(), reason: 'Missed Thu 23:59 (computer off)' })
   })
 
-  it('retrying an unfinished claim after another period reuses its first activation', async () => {
+  it.each([70, 100])('retrying an unfinished claim %i minutes late records the original run as started', async (late) => {
     const due = await schedule()
     heartbeat(T0)
     const store = new ScheduledJobStore(MousseConfigStore.load(join(f.base, 'mousse-home')))
@@ -79,16 +79,24 @@ describe('bot schedules after downtime', () => {
       await f.bots.maintain(new Date(f.clock.now))
       await flush()
       const first = f.store.listActivations(botId).find((row) => row.trigger.kind === 'schedule')!
-      await runDispatch(f, first.id, 1, { text: 'Finished.' })
+      if (late === 70) await runDispatch(f, first.id, 1, { text: 'Finished.' })
       const claim = store.getJob(entry().jobId)!.runClaim!
       expect(claim.occurrenceKey).toBe(iso(due))
       expect(store.releaseClaim(entry().jobId, claim.token)).not.toBeNull()
-      f.clock.now = due + 70 * MIN
+      f.clock.now = due + late * MIN
       await fresh.tickNow()
       await f.bots.maintain(new Date(f.clock.now))
       await flush()
       expect(f.store.listActivations(botId).filter((row) => row.trigger.kind === 'schedule').map((row) => row.id)).toEqual([first.id])
       expect(first.idempotencyKey).toBe(`sched:${botId}:${entry().scheduleId}:${iso(due)}`)
+      expect(store.getJob(entry().jobId)).toMatchObject({ state: 'scheduled', lastRunAt: iso(due), lastStatus: 'ok' })
+      expect(entry().skip).toBeUndefined()
+      if (late === 100) {
+        expect(f.store.activation(first.id)!.status).toBe('running')
+        await runDispatch(f, first.id, 1, { text: 'Finished after the retry.' })
+        expect(chatOf(f, botId).find((row) => row.kind === 'run_report' && row.activationId === first.id)!.text).toContain('Finished after the retry.')
+        expect(entry().skip).toBeUndefined()
+      }
     } finally { fresh.beginShutdown() }
   })
 
