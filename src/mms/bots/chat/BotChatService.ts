@@ -278,6 +278,11 @@ export class BotChatService {
     const key = `create:${input.clientRequestId}`
     const made = this.store.activationByKey(key)
     if (made) return { bot: this.summaryOf(made.botId) }
+    const created = this.store.botCreation(key)
+    if (created) {
+      await this.engine.finishCreation(key)
+      return { bot: this.summaryOf(created.botId) }
+    }
     let slots: BotModelSlots = { ...UNPICKED_SLOTS }
     const picked = input.model?.trim() || undefined
     if (input.slots) {
@@ -315,9 +320,12 @@ export class BotChatService {
       triggers: { manual: true }
     }
     // A duplicate create in flight at the same time found nothing yet: the first one wins.
-    const raced = this.store.activationByKey(key)
-    if (raced) return { bot: this.summaryOf(raced.botId) }
-    this.engine.createBot(definition)
+    const raced = this.store.activationByKey(key) ?? this.store.botCreation(key)
+    if (raced) {
+      await this.engine.finishCreation(key)
+      return { bot: this.summaryOf(raced.botId) }
+    }
+    this.engine.createBot(definition, { key, input: firstMessagePrompt(description, !named.chosen) })
     await this.engine.enqueueChat(botId, key, firstMessagePrompt(description, !named.chosen))
     return { bot: this.summaryOf(botId) }
   }
