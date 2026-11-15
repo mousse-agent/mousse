@@ -292,6 +292,39 @@ describe('memory tools', () => {
     for (const file of (await admin.export('ada', fx.home)).files) expect(readFileSync(file, 'utf8')).not.toContain('4471')
   })
 
+  it.each(['bot', 'dialog'])('%s Forget preserves a put-back fact that only shared a combination', async (via) => {
+    const fx = memoryFixture()
+    const { call } = setup(fx)
+    const save = async (text: string, args: Record<string, unknown> = {}) => {
+      const result = await call('memory_save', 'ada-home', { kind: 'owner', text, ...args })
+      expect(result.isError).toBeUndefined()
+      return result.value.ref as string
+    }
+    const door = await save('Door code 4471.')
+    await save('The owner lives in Leeds.')
+    const tea = await save('Likes green tea.')
+    const combined = await save('Door 4471 and green tea.', { merges: [door, tea] })
+    const restoredTea = await save('Likes green tea.', { replaces: 'm3v2' })
+    const admin = createBotMemoryAdmin({ store: fx.store, name: () => 'Ada' })
+    if (via === 'bot') {
+      const refusal = await call('memory_forget', 'ada-home', { id: door, reason: 'Forget the door code.' })
+      expect(refusal.isError).toBe(true)
+      expect(refusal.text).toContain(combined)
+      expect(refusal.text).not.toContain(restoredTea)
+      expect((await call('memory_forget', 'ada-home', { id: door, refs: [combined], reason: 'Forget the code and its combination.' })).isError).toBeUndefined()
+    } else {
+      await botMemoryMethods(admin)['bots.memory.forget']({ profileId: 'p', botId: 'ada', id: combined })
+    }
+    expect(fx.store.active('ada').map(e => [e.ref, e.text])).toEqual([
+      ['m2', 'The owner lives in Leeds.'], [restoredTea, 'Likes green tea.']
+    ])
+    expect(fx.store.versions('ada', 'm3').at(-1)).toMatchObject({ status: 'active', text: 'Likes green tea.' })
+    expect(fx.store.versions('ada', 'm1').every(e => e.text === null)).toBe(true)
+    expect(fx.store.versions('ada', 'm4').every(e => e.text === null)).toBe(true)
+    expect(fx.store.search('ada', { query: '4471', kinds: ['memory'] })).toEqual([])
+    expect(fx.store.search('ada', { query: 'green tea', kinds: ['memory'] }).map(e => e.ref)).toContain(restoredTea)
+  })
+
   // Forget through either public handler; direct and chained absorption; old target versions;
   // journal/message copies, export, re-learning, restoration, and another bot as a control.
   it.each([
