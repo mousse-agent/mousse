@@ -366,6 +366,12 @@ export class BotMemoryStore {
     return row ? journalRowOf(row) : undefined
   }
 
+  /** The journal provenance of a chat message, including service lines shown with a bot author. */
+  journalMessage(botId: string, messageId: string): BotJournalRow | undefined {
+    const row = this.get('SELECT * FROM bot_journal WHERE bot_id = ? AND source_key = ?', botId, `bm:${messageId}`)
+    return row ? journalRowOf(row) : undefined
+  }
+
   /** Every journal row of a bot, oldest first (export). */
   journal(botId: string): BotJournalRow[] {
     return this.all('SELECT * FROM bot_journal WHERE bot_id = ? ORDER BY seq', botId).map(journalRowOf)

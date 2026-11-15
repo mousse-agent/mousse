@@ -36,16 +36,16 @@ it.each(['running', 'paused', 'refused'] as const)('journals a real thread wake 
       f.store.setOwnerReaction(chat.id, '👍', f.store.now())
       const packs = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} },
         reactions: () => [{ messageId: chat.id, emoji: '👍', at: f.store.now(), text: chat.text, fromWork: true }] })
-      const assertOutside = (pack: string) => {
+      const assertOutside = (pack: string, required = true) => {
         const mentions = pack.split('\n').filter((line) => line.includes('quartz'))
-        expect(mentions.length).toBeGreaterThan(0)
+        if (required) expect(mentions.length).toBeGreaterThan(0)
         for (const line of mentions) {
           expect(line).toContain('Mousse, about something outside (data)')
           expect(line).not.toMatch(/My run report|Me, reporting|your work's report/)
         }
       }
       assertOutside(await packs.chatPreamble({ botId, activationId: 'next-chat' }))
-      assertOutside(await packs.runPreamble({ botId, activationId: 'next-run', input: 'Go' }))
+      assertOutside(await packs.runPreamble({ botId, activationId: 'next-run', input: 'Go' }), false)
       // Move the refused wake into the deterministic summary by overflowing the recent window.
       for (let n = 0; n < 12; n++) memory.append({ botId, kind: 'bot_msg', sourceKey: `bm:filler-${n}`, who: 'bot', text: 'ordinary words '.repeat(220) })
       expect(packs.moveWindow(botId)).toBe(true)

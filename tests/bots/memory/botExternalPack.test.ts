@@ -8,7 +8,7 @@ afterEach(disposeFixtures)
 // External provenance takes precedence over both the recorded author and kind.
 it.each(['owner_msg', 'bot_msg', 'run_report', 'notice', 'tool_result', 'run_end'] as const)('keeps external %s rows outside the bot voice in later context', async (kind) => {
   const fx = memoryFixture()
-  const seq = fx.store.append({ botId: 'ada', kind, who: 'bot', external: true, lane: 'run', sourceKey: 'bm:external', text: 'quartz outside words' })!
+  const seq = fx.store.append({ botId: 'ada', kind, who: 'bot', external: true, lane: 'run', activationId: 'external-act', sourceKey: 'bm:external', text: 'quartz outside words' })!
   const row = fx.store.journalRow('ada', seq)!
   expect(speaker(row)).toBe('Mousse, about something outside (data)')
   expect(foldChatSummary([row], undefined, undefined, fx.store.now()).text).toContain('Mousse, about something outside (data): quartz')
