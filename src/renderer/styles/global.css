@@ -81,14 +81,14 @@ html[data-theme='light'] {
 /* Mousse agent-elements deltas — live here (not the vendored agent-ui.css)
    so registry re-syncs can't silently drop them. Unlayered, so they also
    hold regardless of Tailwind layer ordering. */
-/* The image preview's Previous and Next: the whole edge strip is the button, but the focus shows on its round arrow
+/* The image preview's Previous and Next: the whole edge strip is the button, but the focus shows around its chevron
    only (group-focus-visible). The app's focus fill would paint the strip, a tall grey slab at the edge. */
 .image-preview-overlay .image-preview-edge:focus-visible {
   background-image: none;
 }
-/* Keyboard focus on an edge: a stronger fill on its arrow, so it reads apart from hover's lighter fill. */
+/* Keyboard focus on an edge: a faint fill around its chevron, which has none otherwise, so focus reads apart from hover. */
 .image-preview-overlay .image-preview-edge:focus-visible > span {
-  background-color: rgba(255, 255, 255, .38);
+  background-color: rgba(255, 255, 255, .16);
 }
 /* Headerless highlighted code (quick-action bash preview): the surrounding
    "Action" label already names the block, so the Streamdown language header
