@@ -40,17 +40,111 @@ describe('two lanes', () => {
     expect(chatOf(f, botId).slice(-2)).toMatchObject([{ kind: 'text', text: 'Halfway.' }, { kind: 'run_report', text: 'Notes tidied.', activationId: run.id }])
   })
 
-  it('two chat messages run in order', async () => {
+})
+
+/**
+ * Messages the owner sends one after another, while the bot answers the first or before its turn starts, are one
+ * conversation: they are answered together, never by a turn that sees the later one alone. The paths a follow-up takes:
+ * - the turn runs on a runtime that takes steers: it reads the follow-up as it works, and its one reply answers both;
+ * - the runtime can't take steers, or the turn ends first: the turn posts its reply, then answers the follow-up in the
+ *   same thread (its history holds the first message);
+ * - the turn ends without reading it (a failure, a Stop): the follow-up gets a turn of its own that holds it;
+ * - the first message's turn has not started yet: the follow-up joins it, and that turn's request carries both;
+ * - another device's message, or a tap on an answer, starts its own turn (it is held to its own limit).
+ */
+describe('messages sent one after another', () => {
+  const ownerRows = () => chatOf(f, botId).filter((message) => message.author === 'owner')
+  const botTexts = () => chatOf(f, botId).filter((message) => message.author === 'bot').map((message) => message.text)
+
+  it('a follow-up sent while the bot answers reaches its turn, and one reply answers both', async () => {
+    await send("wdym you can't reach the thread? It's right there and moves", 'm1')
+    const [turn] = lane('chat', ['running'])
+    const { payload, prepared } = await start(f, turn!.id)
+    prepared.steer!.attached()
+    await send('mousse', 'm2')
+    // No turn of its own: the follow-up belongs to the turn that is answering.
+    expect(lane('chat', ['queued'])).toEqual([])
+    expect(ownerRows().at(-1)).toMatchObject({ text: 'mousse', activationId: turn!.id })
+    const taken = prepared.steer!.take()!
+    expect(taken.text).toContain('The owner wrote again while you were answering')
+    expect(taken.text).toContain('mousse')
+    prepared.steer!.accepted(taken.token)
+    await finish(f, payload, 'completed', { text: 'You were right: I told the acrylic thread in mousse to retake the screenshots.' })
+    expect(f.store.activation(turn!.id)).toMatchObject({ status: 'done' })
+    expect(f.store.dispatch(turn!.id, 2)).toBeUndefined()
+    expect(botTexts().slice(-1)).toEqual(['You were right: I told the acrylic thread in mousse to retake the screenshots.'])
+    expect(lane('chat', ['queued', 'running'])).toEqual([])
+  })
+
+  it('a follow-up the turn never read is answered next in the same thread, after the reply to the first', async () => {
+    const first = await f.bots.service.chatSend({ botId, text: "wdym you can't reach the thread?", clientRequestId: 'm1' })
+    const [turn] = lane('chat', ['running'])
+    const { payload } = await start(f, turn!.id)
+    const second = await f.bots.service.chatSend({ botId, text: 'mousse', clientRequestId: 'm2' })
+    await finish(f, payload, 'completed', { text: 'The thread is there; I can only message it from this chat.' })
+    // The reply so far answers the first message only, and the same turn goes on with the follow-up.
+    expect(chatOf(f, botId).at(-1)).toMatchObject({ text: 'The thread is there; I can only message it from this chat.', replyTo: { id: first.message.id } })
+    expect(f.store.activation(turn!.id)?.status).toBe('running')
+    expect(lane('chat', ['queued'])).toEqual([])
+    const { payload: next, prepared } = await start(f, turn!.id, 2)
+    expect(prepared.history).toBe('thread')
+    expect(prepared.prompt).toContain('The owner wrote again while you were answering; your reply so far was already sent to them.')
+    expect(prepared.prompt).toContain('mousse')
+    await finish(f, next, 'completed', { text: 'Done: I told the mousse thread.' })
+    expect(chatOf(f, botId).at(-1)).toMatchObject({ text: 'Done: I told the mousse thread.', replyTo: { id: second.message.id } })
+    expect(f.store.activation(turn!.id)?.status).toBe('done')
+  })
+
+  it('a follow-up the turn never read before it failed gets a turn of its own that holds it', async () => {
     await send('first', 'm1')
+    const [turn] = lane('chat', ['running'])
+    const { payload } = await start(f, turn!.id)
+    const second = await f.bots.service.chatSend({ botId, text: 'second', clientRequestId: 'm2' })
+    await finish(f, payload, 'failed', { outcome: { error: 'boom' } })
+    expect(f.store.activation(turn!.id)?.status).toBe('failed')
+    const [again] = lane('chat', ['running'])
+    expect(again).toMatchObject({ trigger: { input: 'second' } })
+    expect(ownerRows().at(-1)).toMatchObject({ id: second.message.id, activationId: again!.id })
+    // It is the owner's own message: the turn may act on their threads, as any turn their message started.
+    expect(f.bots.ownerTurn(again!.id)).toEqual({})
+    await runDispatch(f, again!.id, 1, { text: 'two' })
+    expect(chatOf(f, botId).at(-1)).toMatchObject({ text: 'two', replyTo: { id: second.message.id } })
+  })
+
+  it('a follow-up the turn never read before a Stop still gets its answer', async () => {
+    await send('first', 'm1')
+    const [turn] = lane('chat', ['running'])
+    const { payload } = await start(f, turn!.id)
     await send('second', 'm2')
-    const [running] = lane('chat', ['running'])
-    const [queued] = lane('chat', ['queued'])
-    expect(running?.trigger.input).toBe('first')
-    expect(queued?.trigger.input).toBe('second')
-    await runDispatch(f, running!.id, 1, { text: 'one' })
-    expect(f.store.activation(queued!.id)?.status).toBe('running')
-    await runDispatch(f, queued!.id, 1, { text: 'two' })
-    expect(chatOf(f, botId).filter((message) => message.author === 'bot').map((message) => message.text).slice(-2)).toEqual(['one', 'two'])
+    await f.bots.service.chatStop(botId)
+    await finish(f, payload, 'interrupted', { outcome: { interruptedBy: 'user' } })
+    expect(f.store.activation(turn!.id)?.status).toBe('cancelled')
+    expect(lane('chat', ['running', 'queued']).map((row) => row.trigger.input)).toEqual(['second'])
+  })
+
+  it("messages sent before the first one's turn starts are one request", async () => {
+    const g = botFixture()
+    try {
+      // The bot's first message still runs: the owner's messages wait behind it.
+      const { botId: id, firstActivation } = await createBot(g, { name: 'Ticker' })
+      await g.bots.service.chatSend({ botId: id, text: 'first', clientRequestId: 'm1' })
+      await g.bots.service.chatSend({ botId: id, text: 'second', clientRequestId: 'm2' })
+      const queued = g.store.laneActivations(id, 'chat', ['queued'])
+      expect(queued).toHaveLength(1)
+      await runDispatch(g, firstActivation, 1, { text: 'Hi.' })
+      const { prepared } = await start(g, queued[0]!.id)
+      expect(prepared.prompt).toBe('first\n\nThe owner also wrote:\n\nsecond')
+    } finally {
+      g.close()
+    }
+  })
+
+  it("another device's message starts a turn of its own", async () => {
+    await send('first', 'm1')
+    const [turn] = lane('chat', ['running'])
+    await f.bots.service.chatSend({ botId, text: 'From my phone', clientRequestId: 'p1', from: { limit: 'ask' } })
+    expect(ownerRows().at(-1)?.activationId).not.toBe(turn!.id)
+    expect(lane('chat', ['queued']).map((row) => row.trigger.input)).toEqual(['From my phone'])
   })
 })
 

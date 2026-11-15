@@ -1864,9 +1864,14 @@ export class BotStore {
   }
 
   /** The notes a piece of work has not been given yet, oldest first. */
-  pendingWorkNotes(activationId: string): Array<{ id: number; text: string; at: string }> {
-    return this.all('SELECT id, text, at FROM bot_work_notes WHERE activation_id = ? AND applied_at IS NULL ORDER BY id', activationId)
-      .map((row) => ({ id: num(row.id)!, text: row.text as string, at: row.at as string }))
+  pendingWorkNotes(activationId: string): Array<{ id: number; text: string; at: string; fromMessage: string | null }> {
+    return this.all('SELECT id, text, at, from_message FROM bot_work_notes WHERE activation_id = ? AND applied_at IS NULL ORDER BY id', activationId)
+      .map((row) => ({ id: num(row.id)!, text: row.text as string, at: row.at as string, fromMessage: str(row.from_message) }))
+  }
+
+  /** The owner's messages `ids` of chat activation `from` belong to activation `to` now (inside the caller's transaction). */
+  moveOwnerMessages(from: string, to: string, ids: readonly string[]): void {
+    for (const id of ids) this.run("UPDATE bot_messages SET activation_id = ? WHERE id = ? AND activation_id = ? AND author = 'owner'", to, id, from)
   }
 
   /** The notes are in the dispatch just written (inside its transaction). */
