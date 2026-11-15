@@ -675,7 +675,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // A question's follow-up counts from when its bubble is shown.
       followUpAt: (question, shownAt) => this.firstFollowUpAt(question, shownAt)
     })
-    this.tellings = new BotTellings(this.store, this.chat, id => this.nameFor(id).botName ?? 'Your bot', event => this.events.emit('tell', event))
+    this.tellings = new BotTellings(this.store, this.chat, id => this.nameFor(id).botName ?? 'Your bot', event => this.events.emit('tell', event), REMINDER_RETRY_MS)
     this.service = new BotChatService(this, {
       store: host.store,
       ...(host.memory ? { memory: host.memory } : {}),
