@@ -2871,7 +2871,7 @@ export class ClaudeSubscriptionProviderService {
         ? claudeSignInEnvironment(ownerEnv, {}, lockedEnv({ platform: process.platform, base: ownerEnv, driver: 'claude', credential: 'subscription', scratch: locked.cwd }))
         : ownerEnv
     const entrypoint = this.entrypointEnv(baseEnv)
-    const turnEnv = { ...this.finalEnv({ ...baseEnv, ...compaction, ...entrypoint }), ...(locked ? { CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1' } : {}) }
+    const turnEnv: NodeJS.ProcessEnv = { ...this.finalEnv({ ...baseEnv, ...compaction, ...entrypoint }), ...(locked ? { CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1' } : {}) }
     // A bot turn's commands (Linux): Claude Code keeps its temporary files in a private folder, and
     // the shared one, which holds every session's command output, is closed to them (`claudeBotTemp`).
     const botTemp = locked ? claudeBotTemp(locked.authority, turnEnv, locked.cwd) : undefined
