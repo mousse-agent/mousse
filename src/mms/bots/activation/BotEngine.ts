@@ -696,7 +696,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     try {
       const row = this.store.activation(message.activationId)
       if (row?.trigger.kind !== 'schedule') return false
-      const tellMe = row.trigger.completed?.tellMe ?? this.host.schedules?.get(botId, row.trigger.scheduleId)?.tellMe
+      const scheduleId = row.trigger.scheduleId
+      const tellMe = row.trigger.completed?.tellMe ?? this.host.schedules?.get(botId, scheduleId)?.tellMe
+        ?? this.host.schedules?.ended?.(botId).find(schedule => schedule.scheduleId === scheduleId)?.tellMe
       return tellMe ? !tellMeNotifies(tellMe, 'done', this.host.runLevel?.(message.activationId)) : false
     } catch {
       return false
@@ -1505,7 +1507,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     for (const botId of this.host.definitions.ids()) {
       try {
         for (const ended of this.host.schedules?.ended?.(botId) ?? []) {
-          if (!this.store.registry(botId)?.deletedAt) this.store.db.transaction(() => {
+          if (this.store.registry(botId)?.deletedAt) continue
+          const endedKey = `schedule-ended:${ended.jobId}`
+          if (this.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, endedKey)) continue
+          // Expiry makes the schedule absent from the active list, like removal. Snapshot
+          // that absence outside the transaction so waiting runs end and executing walls report.
+          this.dropRemovedScheduleRuns(botId)
+          this.store.db.transaction(() => {
             const key = `schedule-ended:${ended.jobId}`
             if (this.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, key)) return
             this.chat.post({ id: `bm_schedule_ended_${ended.jobId}`, botId, author: 'bot', kind: 'notice', text: `‘${ended.name}’ ended, as planned.` })

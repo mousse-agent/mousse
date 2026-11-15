@@ -203,8 +203,8 @@ export class BotScheduleBook {
   }
 
   /** Completed schedules stay in Automations; upkeep writes their quiet end line once. */
-  ended(botId: string): Array<{ jobId: string; name: string }> {
-    return this.options.jobs.listJobs().filter((job) => job.bot?.botId === botId && job.state === 'completed' && Boolean(job.expiresAt)).map((job) => ({ jobId: job.id, name: job.name }))
+  ended(botId: string): Array<{ jobId: string; scheduleId: string; name: string; tellMe: TellMe }> {
+    return this.options.jobs.listJobs().filter((job) => job.bot?.botId === botId && job.state === 'completed' && Boolean(job.expiresAt)).map((job) => ({ jobId: job.id, scheduleId: job.bot!.scheduleId, name: job.name, tellMe: tellMeOf(job) }))
   }
 
   /** Every bot's schedules, oldest first. */
