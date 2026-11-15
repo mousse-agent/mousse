@@ -1624,7 +1624,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * nothing (it is stuck until the owner tries again).
    */
   private nextRun(tried: ReadonlySet<string>): { resume: BotActivationRow } | { start: BotActivationRow } | undefined {
-    this.dropRemovedScheduleRuns()
     if (this.profileRunsHeld() >= MAX_RUN_SLOTS_PER_PROFILE) return undefined
     const stuck = new Map<string, boolean>()
     const may = (row: BotActivationRow): boolean => {
@@ -6293,7 +6292,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   async reconcileOnStartup(): Promise<void> {
     // Cleanup is best effort: admission enforces the saved intent even while jobs.json cannot be written.
     this.retryCompletedScheduleRemovals()
-    this.dropRemovedScheduleRuns()
     try {
       // Capture first (bot-context.md §4): every bot thread is copied into the journal past its
       // cursor before any activation is admitted or the scheduler starts.
@@ -6310,6 +6308,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       } catch (error) {
         console.warn('bot supervisor records could not be read', { error: error instanceof Error ? error.message : String(error) })
       }
+      this.dropRemovedScheduleRuns()
       await this.reconcileAll()
       // The bot and request key committed together, but its first turn may still be missing.
       for (const created of this.store.unfinishedCreations()) {
@@ -8210,9 +8209,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /** No new dispatch may start for a schedule removed from the shared store. Running turns may finish. */
+  private readonly removedSchedules = new Set<string>()
+
+  private scheduleKey(botId: string, scheduleId: string): string {
+    return JSON.stringify([botId, scheduleId])
+  }
+
   private cancelRemovedScheduleRun(row: BotActivationRow): boolean {
     if (row.status === 'running' || (row.trigger.kind === 'schedule' && row.trigger.completed)) return false
-    if (!this.host.schedules || row.trigger.kind !== 'schedule' || this.host.schedules.get(row.botId, row.trigger.scheduleId)) return false
+    if (row.trigger.kind !== 'schedule' || !this.removedSchedules.has(this.scheduleKey(row.botId, row.trigger.scheduleId))) return false
     if (ENDED_ACTIVATION_STATUSES.has(row.status)) return false
     this.store.db.transaction(() => {
       if (!this.store.moveActivation(row.id, [row.status], 'cancelled', { endReason: 'schedule_removed' })) return
@@ -8231,9 +8236,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   private dropRemovedScheduleRuns(botId?: string): void {
-    // These hold no executing turn: cancel their queued work and withdraw their asks atomically in bots.db.
-    const rows = this.store.activationsWith(['queued', 'waiting_grant', 'paused', 'blocked'])
-    for (const row of rows) if (botId === undefined || row.botId === botId) this.cancelRemovedScheduleRun(row)
+    if (!this.host.schedules) return
+    // Snapshot each bot's job list once, outside bots.db's transaction. Pumps never touch scheduler files.
+    const rows = this.store.activationsWith(['queued', 'running', 'waiting_grant', 'paused', 'blocked'])
+      .filter(row => row.trigger.kind === 'schedule' && (botId === undefined || row.botId === botId))
+    const present = new Map<string, Set<string>>()
+    for (const row of rows) {
+      if (!present.has(row.botId)) present.set(row.botId, new Set(this.host.schedules.list(row.botId).map(schedule => schedule.scheduleId)))
+      if (row.trigger.kind !== 'schedule' || present.get(row.botId)!.has(row.trigger.scheduleId)) continue
+      this.removedSchedules.add(this.scheduleKey(row.botId, row.trigger.scheduleId))
+      this.cancelRemovedScheduleRun(row)
+    }
   }
 
   private retryCompletedScheduleRemovals(): void {
