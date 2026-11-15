@@ -1,3 +1,4 @@
+import { tellingClass } from '../chat/telling'
 import type { BotMemoryStore } from '../memory/BotMemoryStore'
 import type { ScheduledMissedRuns } from '../../../shared/types'
 import { requestJournalRows } from '../memory/requestFrames'
@@ -642,6 +643,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // The bot's name rides along: a notification for a new bot's first row comes before any list names it. A run
       // report its schedule's Tell me keeps quiet says so (`quiet`): it is in the chat, without a notification.
       emit: (event) => this.events.emit('message', { ...event, ...this.nameFor(event.botId), ...(this.quietReport(event.botId, event.message) ? { quiet: true } : {}) }),
+      classify: (message) => {
+        const activation = message.activationId ? this.store.activation(message.activationId) : undefined
+        const reminder = message.id.startsWith('bm_rem_') ? this.store.reminder(message.id.slice(3)) : undefined
+        return tellingClass({ message, ownerTurn: !!activation && memoryLaneOf(activation) === 'chat',
+          reminder: !!reminder, reminderOwner: reminder?.ownerSet, quiet: this.quietReport(this.store.message(message.id)!.botId, message) })
+      },
       schedules: (botId) => this.schedulesOf(botId).map((schedule) => ({ scheduleId: schedule.scheduleId, label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}), jobId: schedule.jobId, paused: schedule.paused })),
       // The threads it started that still work: it is busy while it manages them.
       launched: (botId) => this.launchedThreads(botId),

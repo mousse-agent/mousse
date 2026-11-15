@@ -204,6 +204,7 @@ export class BotChatProjection {
     /** `bots.message`, after the row's transaction committed. */
     emit(event: { botId: string; message: BotChatMessage }): void
     /** A bot's schedules, from the shared store (`BotEngine.listSchedules`), for About → Runs. */
+    classify?(message: BotChatMessage): 'now' | 'soon' | 'later' | null
     schedules?(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string; jobId?: string; paused?: boolean }>
     /**
      * Where a granted MCP server stands now (`BotMcp.where`), for About → Can use; undefined while the servers were not
@@ -310,6 +311,8 @@ export class BotChatProjection {
           ...(input.questionId ? { questionId: input.questionId } : {})
         }
       })
+      const tell = this.options.classify?.(this.toMessage(this.store.message(id)!)) ?? null
+      this.store.run('UPDATE bot_messages SET tell = ?, tell_at = ? WHERE id = ?', tell, tell ? at : null, id)
       return { row: this.store.message(id)!, inserted: true }
     })
     const message = this.toMessage(row)
