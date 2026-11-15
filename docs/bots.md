@@ -235,9 +235,9 @@ A bot's main turns, chat and work (scheduled runs too), can attach a small card 
 
 A deleted bot's reminders are cancelled at once and purged with it. Forgetting the owner's message that asked for a reminder or work (`memory_forget`, Forget in About) cancels the reminder and removes its words, and the work's brief and notes. Repeating reminders are schedules.
 
-The engine's `nextDueAt(botId)` reads one list of due sources: waiting reminders and wakes, shown open question follow-ups, and active schedules' next times. Omitting the bot reads the profile. Settled, cancelled and deleted rows and paused schedules do not count. The delivery timer uses that list with its existing retry backoff, excluding schedules: the shared scheduler still claims and starts those. The wake-from-sleep watchdog and single upkeep pass are unchanged.
+The engine's `nextDueAt(botId)` reads one list of due sources: waiting reminders and wakes, shown open question follow-ups, and active schedules' next times. Omitting the bot reads the profile. Settled, cancelled and deleted rows and paused schedules do not count. Schedules also do not count while their bot is paused by the owner, after failures, or for a usage limit. The delivery timer uses that list with its existing retry backoff, excluding schedules: the shared scheduler still claims and starts those. The wake-from-sleep watchdog and single upkeep pass are unchanged.
 
-`isIdle(botId, { within })` is an internal check with no callers outside tests yet. It requires no unfinished activation in either lane, no unread joined chat messages, and nothing due within the window (milliseconds, 30 minutes by default, including the boundary).
+`isIdle(botId, { within })` is an internal check with no callers outside tests yet. It requires no queued, running or walled activation, no blocked work that still waits to go on (`workWaits`), no running background command or active thread the bot started (`launchedActive`), no unread joined chat messages, and nothing due within the window (milliseconds, 30 minutes by default, including the boundary). Paused activations and blocked rows stopped short with nothing to resume do not keep the bot busy.
 
 ## Wakes
 

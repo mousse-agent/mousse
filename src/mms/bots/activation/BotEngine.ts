@@ -7856,7 +7856,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return due === undefined ? undefined : new Date(due).toISOString()
   }
 
-  /** No unfinished work, unread joined chat messages, or due time within `within` milliseconds (default 30 minutes). */
+  /** No active or resumable work, watchers, managed threads, joined messages, or due time within `within` milliseconds. */
   isIdle(botId: string, { within = 30 * 60_000 }: { within?: number } = {}): boolean {
     if (this.store.activationsIn(botId, ['queued', 'running', 'waiting_grant', 'blocked'])
       .some((row) => row.status !== 'blocked' || workWaits(row))) return false
