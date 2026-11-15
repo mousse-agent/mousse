@@ -236,7 +236,7 @@ export class BotScheduleBook {
    * Adds a schedule: at most 8 per bot, at least a minute apart. It needs no approval (a schedule is not a permission)
    * and starts from now, so it never runs for times before it existed.
    */
-  add(botId: string, input: { when: BotSchedule['when']; prompt?: string; say?: string; until?: string; model?: string; pick?: BotModelPick; name?: string; tellMe?: TellMe }, createdBy: 'owner' | 'bot', options: { scheduleId?: string } = {}): BotScheduleEntry {
+  add(botId: string, input: { when: BotSchedule['when']; prompt?: string; say?: string; until?: string; model?: string; pick?: BotModelPick; name?: string; tellMe?: TellMe }, createdBy: 'owner' | 'bot', options: { scheduleId?: string; ownerAsked?: boolean } = {}): BotScheduleEntry {
     if (this.list(botId).length >= MAX_BOT_SCHEDULES) throw new BotScheduleError('schedule_limit', `A bot can have at most ${MAX_BOT_SCHEDULES} schedules. Remove one first.`)
     const prompt = schedulePrompt(input)
     const problem = botScheduleProblem(input.when, prompt)
@@ -254,7 +254,7 @@ export class BotScheduleBook {
       threadId: botJobThreadGuard(botId),
       // Only the owner picks a model by hand; a bot's own schedule runs on its own rows. The name stays beside the pick,
       // for builds that read only the name.
-      bot: { botId, scheduleId, createdBy, ...(input.say !== undefined ? { say: input.say.trim() } : {}), ...(createdBy === 'owner' && input.model?.trim() ? { model: input.model.trim(), ...(isPinned(input.pick) ? { pick: { ...copyPick(input.pick), instanceId: input.pick.instanceId } } : {}) } : {}) }
+      bot: { botId, scheduleId, createdBy, ...(options.ownerAsked ? { ownerAsked: true } : {}), ...(input.say !== undefined ? { say: input.say.trim() } : {}), ...(createdBy === 'owner' && input.model?.trim() ? { model: input.model.trim(), ...(isPinned(input.pick) ? { pick: { ...copyPick(input.pick), instanceId: input.pick.instanceId } } : {}) } : {}) }
     }, { id: botJobId(botId, scheduleId), nextRunAt: computeNextRun(jobScheduleOf(when), null, this.now()) })
     this.options.jobs.wake()
     return this.entryOf(job)!

@@ -111,6 +111,8 @@ export interface ScheduledRunAgent {
 export interface ScheduledJobBot {
   /** A fixed reminder line, posted without a model run. */
   say?: string
+  /** The owner's message or tapped answer started the turn that added this timer. */
+  ownerAsked?: boolean
   botId: string
   scheduleId: string
   /** Who added it: the owner (the Automations page, `bots.schedules.add`) or the bot itself (`bot_schedule_add`). */

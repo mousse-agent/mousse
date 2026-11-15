@@ -1924,11 +1924,11 @@ export class BotStore {
 
   // -- Reminders (bot_reminders, v6): a bot's one-off times; repeating ones are schedules in the shared store --------
 
-  insertReminder(row: Omit<BotReminderRow, 'status' | 'deliveredAt' | 'messageId' | 'activationId' | 'wake' | 'event' | 'fired' | 'chain' | 'snoozedFrom' | 'ownerSet'> & Partial<Pick<BotReminderRow, 'wake' | 'event' | 'chain'>>): void {
+  insertReminder(row: Omit<BotReminderRow, 'status' | 'deliveredAt' | 'messageId' | 'activationId' | 'wake' | 'event' | 'fired' | 'chain' | 'snoozedFrom' | 'ownerSet'> & Partial<Pick<BotReminderRow, 'wake' | 'event' | 'chain' | 'ownerSet' | 'snoozedFrom'>>): void {
     this.run(
-      "INSERT INTO bot_reminders(id, bot_id, due_at, text, work_title, work_brief, reply_to, created_at, status, wake, event_json, chain) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'waiting', ?, ?, ?)",
+      "INSERT INTO bot_reminders(id, bot_id, due_at, text, work_title, work_brief, reply_to, created_at, status, wake, event_json, chain, owner_set, snoozed_from) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'waiting', ?, ?, ?, ?, ?)",
       row.id, row.botId, row.dueAt, row.text, row.work?.title ?? null, row.work?.brief ?? null, row.replyTo, row.createdAt,
-      row.wake ? 1 : 0, row.event ? JSON.stringify(row.event) : null, row.chain ?? 0
+      row.wake ? 1 : 0, row.event ? JSON.stringify(row.event) : null, row.chain ?? 0, row.ownerSet == null ? null : row.ownerSet ? 1 : 0, row.snoozedFrom ?? null
     )
   }
 
@@ -1956,6 +1956,20 @@ export class BotStore {
    */
   fireWake(id: string, fired: BotWakeFired, dueAt: string): boolean {
     return this.run("UPDATE bot_reminders SET fired_json = ?, due_at = ? WHERE id = ? AND status = 'waiting' AND wake = 1 AND fired_json IS NULL", JSON.stringify(fired), dueAt, id) > 0
+  }
+
+  messageForgotten(botId: string, messageId: string): boolean {
+    return !!this.get('SELECT 1 FROM bot_journal WHERE bot_id = ? AND source_key = ? AND redacted_at IS NOT NULL', botId, `bm:${messageId}`)
+  }
+
+  reminderForMessage(botId: string, messageId: string): BotReminderRow | undefined {
+    const row = this.get('SELECT * FROM bot_reminders WHERE bot_id = ? AND message_id = ?', botId, messageId)
+    return row ? reminderOf(row) : undefined
+  }
+
+  snoozedCopy(botId: string, reminderId: string): BotReminderRow | undefined {
+    const row = this.get("SELECT * FROM bot_reminders WHERE bot_id = ? AND snoozed_from = ? AND status != 'cancelled' LIMIT 1", botId, reminderId)
+    return row ? reminderOf(row) : undefined
   }
 
   reminder(id: string): BotReminderRow | undefined {

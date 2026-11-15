@@ -417,6 +417,7 @@ describe('"Share bots with other devices"', () => {
       'bots.personal.resume': { botId: BOT },
       'bots.create': { look: { colour: 'teal', accessory: 'cap' }, description: 'Tidy', clientRequestId: 'c1' },
       'bots.update': { botId: BOT, name: 'Pip' },
+      'bots.reminders.snooze': { botId: BOT, messageId: 'm1', choice: '10m' },
       'bots.reminders.cancel': { botId: BOT, reminderId: 'rem_00000000-0000-0000-0000-000000000000' },
       'bots.schedules.remove': { botId: BOT, scheduleId: 'daily' },
       'bots.permissions.set': { botId: BOT, permissionId: 'p1', enabled: false },

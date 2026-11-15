@@ -30,6 +30,7 @@ const KEYS: Record<BotsPersonalV2Method, readonly string[]> = {
   'bots.chat.send': ['botId', 'text', 'attachments', 'clientRequestId', 'replyTo'],
   'bots.chat.stop': ['botId'],
   'bots.work.stop': ['botId', 'workId'],
+  'bots.reminders.snooze': ['botId', 'messageId', 'choice'],
   'bots.reminders.cancel': ['botId', 'reminderId'],
   'bots.chat.markRead': ['botId', 'seq'],
   'bots.chat.react': ['botId', 'messageId', 'emoji'],
@@ -157,6 +158,9 @@ function validate(method: BotsPersonalV2Method, value: unknown): Params {
     case 'bots.work.stop':
       if (typeof p.workId !== 'string' || !/^act_[0-9a-f-]{36}$/.test(p.workId)) throw new DomainRpcError('invalid_params', 'A work id is required')
       break
+    case 'bots.reminders.snooze':
+      if (!text(p.messageId, 200) || !['10m', '1h', 'tomorrow'].includes(p.choice as string)) throw new DomainRpcError('invalid_params', 'Choose a reminder and snooze time.')
+      break
     case 'bots.reminders.cancel':
       if (typeof p.reminderId !== 'string' || !/^rem_[0-9a-f-]{36}$/.test(p.reminderId)) throw new DomainRpcError('invalid_params', 'A reminder id is required')
       break
@@ -245,6 +249,7 @@ async function handle(method: BotsPersonalV2Method, p: Params, bots: BotChatServ
     case 'bots.chat.send': return bots.chatSend({ botId, text: p.text as string, ...(p.attachments ? { attachments: p.attachments as BotChatAttachment[] } : {}), clientRequestId: p.clientRequestId as string, ...(typeof p.replyTo === 'string' ? { replyTo: p.replyTo } : {}) })
     case 'bots.chat.stop': return bots.chatStop(botId)
     case 'bots.work.stop': return bots.workStop(botId, p.workId as string)
+    case 'bots.reminders.snooze': return bots.reminderSnooze(botId, p.messageId as string, p.choice as import('../../shared/bots/personal/chat').BotSnoozeChoice)
     case 'bots.reminders.cancel': return bots.reminderCancel(botId, p.reminderId as string)
     case 'bots.chat.markRead': return bots.markRead(botId, p.seq as number)
     case 'bots.chat.react': return bots.react(botId, p.messageId as string, p.emoji as string | null)
