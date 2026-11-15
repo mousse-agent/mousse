@@ -70,7 +70,7 @@ describe('bot schedules after downtime', () => {
     const store = new ScheduledJobStore(MousseConfigStore.load(join(f.base, 'mousse-home')))
     const fresh = new ScheduledJobService({ runIsolated: async () => { throw new Error('not an agent job') } }, store)
     fresh.setClock(() => new Date(f.clock.now))
-    fresh.setBotRunner({ runOccurrence: (input) => f.bots.runScheduledOccurrence(input) })
+    fresh.setBotRunner({ findOccurrence: (input) => f.bots.findScheduledOccurrence(input), runOccurrence: (input) => f.bots.runScheduledOccurrence(input) })
     // Crash window: the bot inserted the run but the scheduler never finished its claim.
     vi.spyOn(store, 'finishBotClaim').mockReturnValueOnce(null)
     try {
@@ -168,7 +168,7 @@ describe('bot schedules after downtime', () => {
   it.each([11, 780])('a restart before bots are ready keeps downtime at %i minutes late', async (late) => {
     const due = await schedule(1440)
     heartbeat(T0)
-    f.scheduler.setBotRunner({ runOccurrence: () => ({ kind: 'not_ready' }) })
+    f.scheduler.setBotRunner({ findOccurrence: () => undefined, runOccurrence: () => ({ kind: 'not_ready' }) })
     await f.tickSchedules(new Date(due + 10 * MIN))
     expect(entry().nextAt).toBe(iso(due))
     // Other ticks may have run while bots were unavailable; restart immediately after one.
@@ -176,7 +176,7 @@ describe('bot schedules after downtime', () => {
     const fresh = new ScheduledJobService({ runIsolated: async () => { throw new Error('not an agent job') } }, new ScheduledJobStore(MousseConfigStore.load(join(f.base, 'mousse-home'))))
     f.clock.now = due + late * MIN
     fresh.setClock(() => new Date(f.clock.now))
-    fresh.setBotRunner({ runOccurrence: (input) => f.bots.runScheduledOccurrence(input) })
+    fresh.setBotRunner({ findOccurrence: (input) => f.bots.findScheduledOccurrence(input), runOccurrence: (input) => f.bots.runScheduledOccurrence(input) })
     try {
       await fresh.tickNow()
       await f.bots.maintain(new Date(f.clock.now))

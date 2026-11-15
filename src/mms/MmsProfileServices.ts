@@ -1041,7 +1041,7 @@ export class MmsProfileServices {
       })
     }
     if (personalBots) {
-      this.scheduled.setBotRunner({ runOccurrence: (input) => personalBots.runScheduledOccurrence(input) })
+      this.scheduled.setBotRunner({ findOccurrence: (input) => personalBots.findScheduledOccurrence(input), runOccurrence: (input) => personalBots.runScheduledOccurrence(input) })
       // Each tick also brings the inbox's bot runs up to date, so their items appear without the page open.
       this.scheduled.setTickHook(async (now) => {
         await personalBots.maintain(now)

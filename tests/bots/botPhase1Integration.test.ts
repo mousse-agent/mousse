@@ -145,7 +145,7 @@ function world(): World {
     schedules: book
   }
   engine = new BotEngine(host)
-  scheduler.setBotRunner({ runOccurrence: (input) => engine.runScheduledOccurrence(input) })
+  scheduler.setBotRunner({ findOccurrence: (input) => engine.findScheduledOccurrence(input), runOccurrence: (input) => engine.runScheduledOccurrence(input) })
   scheduler.setTickHook((now) => engine.maintain(now))
   const own = botTools(() => ({ host: engine.tools, activity }))
   const remembered = botMemoryTools(() => ({

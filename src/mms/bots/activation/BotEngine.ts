@@ -1311,6 +1311,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   // -- Schedules (Path step 3: one scheduler) -------------------------------------------------------
 
+  /** The scheduler retries a claim as started before making any new admission or lateness decision. */
+  findScheduledOccurrence(input: { botId: string; scheduleId: string; occurrenceKey: string }): { activationId: string; occurrenceAt: string } | undefined {
+    const row = this.store.activationByKey(`sched:${input.botId}:${input.scheduleId}:${input.occurrenceKey}`)
+    if (row?.trigger.kind === 'schedule') return { activationId: row.id, occurrenceAt: row.trigger.occurrenceAt }
+    return undefined
+  }
+
   /**
    * One occurrence of a bot's schedule, handed over by the shared scheduler (`ScheduledJobService`), which owns the
    * schedule's time and moves it on. In one transaction this inserts the occurrence's run activation, keyed

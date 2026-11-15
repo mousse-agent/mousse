@@ -207,7 +207,7 @@ export function botFixture(): BotFixture {
   fixture.automationRuns = automationRuns
   fixture.host = host
   fixture.bots = new BotEngine(host)
-  scheduler.setBotRunner({ runOccurrence: (input) => fixture.bots.runScheduledOccurrence(input) })
+  scheduler.setBotRunner({ findOccurrence: (input) => fixture.bots.findScheduledOccurrence(input), runOccurrence: (input) => fixture.bots.runScheduledOccurrence(input) })
   scheduler.setTickHook((now) => fixture.bots.maintain(now))
   fixture.tickSchedules = async (now) => {
     if (now) clock.now = now.getTime()
