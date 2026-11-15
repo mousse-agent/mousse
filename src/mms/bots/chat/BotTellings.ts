@@ -26,19 +26,22 @@ export class BotTellings {
       else { this.emit({ id, rows: [], title: '', body: '', kind: 'completed', sound: false }); this.banners.delete(id) }
     }
   }
-  next(botId?: string): number | undefined {
-    if (!this.windows) return undefined
-    const row = this.store.get(`SELECT MIN(tell_at) AS at FROM bot_messages WHERE tell IS NOT NULL AND tell != 'later' AND told_at IS NULL${botId ? ' AND bot_id = ?' : ''}`, ...(botId ? [botId] : []))
+  next(botId?: string, forTimer = false): number | undefined {
+    if (!this.windows && forTimer) return undefined
+    const row = this.store.get(`SELECT MIN(tell_at) AS at FROM bot_messages WHERE tell IS NOT NULL ${forTimer ? "AND tell != 'later'" : ''} AND told_at IS NULL${botId ? ' AND bot_id = ?' : ''}`, ...(botId ? [botId] : []))
     return typeof row?.at === 'string' ? Date.parse(row.at) : undefined
   }
   private unread(row: BotMessageRow): boolean {
     const bot = this.store.registry(row.botId)
     if (!bot || bot.deletedAt || row.seq <= bot.readSeq) return false
-    const message = this.chat.toMessage(row)
+    const live = this.store.message(row.id)
+    if (!live) return false
+    const message = this.chat.toMessage(live)
     return (!message.ask || message.ask.status === 'open') && (!message.question || message.question.status === 'open')
   }
   release(now: number): void {
     if (!this.windows) return
+    for (const [id, rows] of this.banners) if (rows.every(r => now - Date.parse(r.at) > 86_400_000)) this.banners.delete(id)
     const ids = this.store.all('SELECT id FROM bot_messages WHERE tell IS NOT NULL AND told_at IS NULL AND tell_at <= ? ORDER BY seq', new Date(now).toISOString())
     const due: BotMessageRow[] = []
     for (const { id } of ids) {
@@ -74,12 +77,17 @@ export class BotTellings {
     this.store.run('UPDATE bot_messages SET told_at = ? WHERE id = ? AND told_at IS NULL', new Date(now).toISOString(), row.id)
   }
   private announce(rows: BotMessageRow[], sound: boolean, id = `bt_${randomUUID()}`, closed = false): void {
+    rows = rows.map(r => this.store.message(r.id)!).filter(Boolean)
     rows.sort((a, b) => Number(!!(b.askId || b.questionId || b.error)) - Number(!!(a.askId || a.questionId || a.error)) || a.seq - b.seq)
     const first = this.chat.toMessage(rows[0]!)
     const names = [...new Set(rows.map(r => this.name(r.botId)))]
     const line = (first.error?.text ?? (first.ask ? `Wants to ${first.ask.title}` : first.text)).split('\n').map(s => s.replace(/[*_`#>[\]]/g, '').trim()).find(Boolean) ?? 'New message'
     this.banners.set(id, rows)
-    const title = closed ? `While Mousse was closed: ${names.join(', ')} · ${rows.length} messages` : rows.length > 1 ? `${names.join(', ')} · ${rows.length} messages` : names[0]!
+    const summary = names.map(name => {
+      const group = rows.filter(r => this.name(r.botId) === name)
+      return group.some(r => r.askId || r.questionId || r.error) ? `${name} needs you` : `${name} ${group.length} messages`
+    }).join(' · ')
+    const title = closed ? `While Mousse was closed: ${summary}` : rows.length > 1 ? `${names.join(', ')} · ${rows.length} messages` : names[0]!
     this.emit({ id, rows: rows.map(r => ({ botId: r.botId, messageId: r.id, seq: r.seq, tell: r.tell! })), title, body: line.slice(0, 140), kind: first.ask || first.question ? 'question' : 'completed', sound })
   }
 }

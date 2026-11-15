@@ -69,6 +69,7 @@ describe('a wake at a time', () => {
     expect(row.lane).toBe('chat')
     // Not the owner's turn: it can't start, message or stop their threads.
     expect(ownerChatTurn(row)).toBe(false)
+    expect(f.store.message(`bm_wake_${set.wakeId}`)?.tell).toBeNull()
     expect(lineOf(set.wakeId)).toMatchObject({ kind: 'notice', systemLine: true, text: 'Following up' })
     const { prepared } = await start(f, row.id)
     expect(prepared.prompt).toContain('[Mousse] A wake-up you set at')

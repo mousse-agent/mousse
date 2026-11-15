@@ -89,6 +89,7 @@ async function workThatAsks(title = 'Flat hunt', key = 'w1', args: Record<string
   const answer = await tool('ask_owner', work.prepared, work.payload.threadId, args)
   expect(JSON.parse(answer.text)).toEqual({ asked: true, note: QUESTION_WORK_ASKED_TEXT })
   const bubble = chatOf(f, botId).find((message) => message.question && message.activationId === workId)!
+  expect(f.store.message(bubble.id)?.tell).toBe('soon')
   return { workId, work, asked, bubble, questionId: bubble.question!.questionId }
 }
 

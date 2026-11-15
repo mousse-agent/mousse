@@ -327,6 +327,7 @@ describe('bot schedules in the shared scheduler', () => {
     else {
       expect(report).toBeDefined()
       expect(!report!.quiet).toBe(notifies)
+      expect(f.store.message((report!.message as { id: string }).id)?.tell).toBe(notifies ? 'soon' : 'later')
     }
   })
 
@@ -342,6 +343,7 @@ describe('bot schedules in the shared scheduler', () => {
     const error = events.find((event) => event.message.kind === 'error')
     expect(error).toBeDefined()
     expect(error!.quiet).toBeUndefined()
+    expect(f.store.message((error!.message as { id: string }).id)?.tell).toBe('soon')
   })
 
   it('a scheduled run that reports quiet or says [SILENT] posts nothing in the chat; a report, and work the owner asked for, still show', async () => {

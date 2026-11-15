@@ -87,3 +87,33 @@ it('catches up once as one fold, drops rows older than a day, and survives a ser
   again.attach(1); again.release(f.clock.now)
   expect(events).toHaveLength(1)
 })
+
+it.each([true, false, null])('classifies reminder ownership %s without a migration', async owner => {
+  const reminder = f.bots.addReminder(botId, 'test', { dueAt: new Date(f.clock.now + 1000).toISOString(), text: 'Take a break' })
+  f.store.run('UPDATE bot_reminders SET owner_set = ? WHERE id = ?', owner === null ? null : Number(owner), reminder.reminderId)
+  f.clock.now += 1000; await f.bots.deliverDueReminders()
+  expect(f.store.message(`bm_${reminder.reminderId}`)?.tell).toBe(owner === false ? 'soon' : 'now')
+})
+it('limits profile sounds to six an hour without limiting banners', async () => {
+  f.bots.setTellingWindows(1)
+  const events: any[] = []; f.bots.events.on('tell', e => events.push(e))
+  for (let n = 0; n < 7; n++) {
+    const other = (await createBot(f, { name: `Bot ${n}` })).botId
+    f.bots.chat.post({ botId: other, author: 'bot', kind: 'run_report', text: 'Report' })
+    await f.bots.deliverDueReminders()
+    f.clock.now += 121_000
+  }
+  expect(events).toHaveLength(7)
+  expect(events.filter(e => e.sound)).toHaveLength(6)
+})
+it('withdraws a banner when any window reads and keeps the next update free of read rows', async () => {
+  f.bots.setTellingWindows(2)
+  const events: any[] = []; f.bots.events.on('tell', e => events.push(e))
+  const read = f.bots.chat.post({ botId, author: 'bot', kind: 'text', text: 'Done' })
+  await f.bots.deliverDueReminders()
+  f.bots.markRead(botId, read.seq)
+  expect(events.at(-1)).toMatchObject({ id: events[0].id, rows: [], sound: false })
+  f.bots.chat.post({ botId, author: 'bot', kind: 'text', text: 'Another' })
+  await f.bots.deliverDueReminders()
+  expect(events.at(-1).rows).toHaveLength(1)
+})

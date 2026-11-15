@@ -7909,7 +7909,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   private dueAt(botId?: string, forTimer = false): number | undefined {
     const sources: Array<() => number | undefined> = [
-      () => this.tellings.next(botId),
+      () => this.tellings.next(botId, forTimer),
       () => {
         const row = this.store.nextReminder(botId)
         return row ? Math.max(Date.parse(row.dueAt), forTimer ? this.reminderRetryAt.get(row.id) ?? 0 : 0) : undefined

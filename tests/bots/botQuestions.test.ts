@@ -86,6 +86,7 @@ const tap = (questionId: string, choice: string, clientRequestId = `tap-${Math.r
 describe('a question in the chat', () => {
   it('shows as its own bubble under the reply, with its answers to tap and, for an app that does not draw them, as text', async () => {
     const { turn, bubble } = await asked()
+    expect(f.store.message(bubble.id)?.tell).toBe('now')
     const rows = chatOf(f, botId).filter((message) => message.activationId === turn.activation.id && message.author === 'bot')
     expect(rows.map((message) => message.text.split('\n')[0])).toEqual(['I found two.', 'Which flat should I book a viewing for?'])
     expect(bubble.question).toMatchObject({ choices: [{ label: 'Flat A', detail: '2 bed, Hackney, £1,900' }, { label: 'Flat B' }], other: true, status: 'open' })
