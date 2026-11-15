@@ -2868,7 +2868,7 @@ export class ClaudeSubscriptionProviderService {
     const baseEnv = locked && !locked.ownerEntry
       ? this.dependencies.lockedEnv!(locked.cwd)
       : locked
-        ? claudeSignInEnvironment(ownerEnv, {}, lockedEnv({ platform: process.platform, base: ownerEnv, driver: 'claude', credential: 'subscription', scratch: locked.cwd }))
+        ? claudeSignInEnvironment(ownerEnv, {}, lockedEnv({ platform: process.platform, base: ownerEnv, driver: 'claude', credential: 'subscription', scratch: locked.authority.workspace?.scratch ?? locked.cwd }))
         : ownerEnv
     const entrypoint = this.entrypointEnv(baseEnv)
     const turnEnv: NodeJS.ProcessEnv = { ...this.finalEnv({ ...baseEnv, ...compaction, ...entrypoint }), ...(locked ? { CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1' } : {}) }

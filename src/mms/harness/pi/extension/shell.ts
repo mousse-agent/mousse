@@ -28,7 +28,11 @@ import { constants as osConstants } from 'node:os'
 
 /** A bot's model process may need cloud credentials; its commands never inherit them. */
 export function botBashSpawn(context: BashSpawnContext): BashSpawnContext {
-  return { ...context, env: lockedEnv({ platform: process.platform, base: context.env, driver: 'pi', credential: 'unknown', scratch: context.cwd }) }
+  const env = lockedEnv({ platform: process.platform, base: context.env, driver: 'pi', credential: 'unknown', scratch: context.cwd })
+  // The Pi process already points at the activation's created scratch/tmp, not its files folder.
+  if (context.env.TMPDIR !== undefined) env.TMPDIR = context.env.TMPDIR
+  else delete env.TMPDIR
+  return { ...context, env }
 }
 
 export interface ShellExecOptions {
