@@ -248,7 +248,7 @@ describe('foldTurnWork', () => {
   const call = { kind: 'message' as const, toolsOnly: true }
   const keep = { kind: 'message' as const, keep: true }
   const steer = { kind: 'message' as const, steer: true }
-  const cards = (running = false) => ({ kind: 'cards' as const, running })
+  const cards = { kind: 'cards' as const }
 
   it('folds the work and the narration, never the answer', () => {
     expect(foldTurnWork([text, tools, text, call, tools, text])).toEqual([true, true, true, true, true, false])
@@ -268,9 +268,12 @@ describe('foldTurnWork', () => {
     expect(foldTurnWork([text, tools])).toEqual([true, true])
   })
 
-  it('keeps steered messages and the replies written before them, and subagents still working', () => {
+  it('keeps steered messages and the replies written before them in view', () => {
     expect(foldTurnWork([text, tools, steer, tools, text])).toEqual([false, true, false, true, false])
-    expect(foldTurnWork([tools, cards(true), cards(false), text])).toEqual([true, false, true, false])
+  })
+
+  it('keeps subagent cards in view, finished or not, and still finds the answer after them', () => {
+    expect(foldTurnWork([tools, cards, tools, cards, text])).toEqual([true, false, true, false, false])
   })
 })
 
