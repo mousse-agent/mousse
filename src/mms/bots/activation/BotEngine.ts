@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import { askText } from '../../../shared/bots/personal/askText'
+import { askNoticeText, askText } from '../../../shared/bots/personal/askText'
 import { lookFields } from '../../../shared/bots/personal/look'
 import { BOT_HELD_POWER_TEXT, subagentHold, type BotHeldPower, type BotRuntimeHold, type BotSubagentHold } from '../../../shared/bots/personal/subagentHold'
 import type { BotAuthority, BotCheck, BotCheckDenied, BotMcpTool, BotSubagents, BotSubagentView, BotThreadRole, BotThreads, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
@@ -3322,7 +3322,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const row = this.store.activation(escalation.activationId)
     if (!row) return
     const name = this.host.definitions.revision(row.botId, row.revision)?.name ?? 'This bot'
-    this.recorded(row, () => this.chat.post({ botId: row.botId, author: 'bot', kind: 'notice', text: `${name} wants to ${this.chat.card(escalation).title}.`, askId: escalation.id, activationId: row.id, lane: row.lane }))
+    this.recorded(row, () => this.chat.post({ botId: row.botId, author: 'bot', kind: 'notice', text: askNoticeText(name, this.chat.card(escalation).title), askId: escalation.id, activationId: row.id, lane: row.lane }))
   }
 
   /**
@@ -3798,7 +3798,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           createdAt: this.store.now(), expiresAt: null, mode: 'ask', fingerprint, title: text.title, note: text.note, messageId: null
         })
         const name = this.host.definitions.revision(row.botId, row.revision)?.name ?? 'This bot'
-        this.chat.post({ botId: row.botId, author: 'bot', kind: 'notice', text: `${name} wants to ${text.title}.`, askId: id, activationId: row.id, lane: 'run', ...(row.threadId ? { threadId: row.threadId } : {}) })
+        this.chat.post({ botId: row.botId, author: 'bot', kind: 'notice', text: askNoticeText(name, text.title), askId: id, activationId: row.id, lane: 'run', ...(row.threadId ? { threadId: row.threadId } : {}) })
         return { askId: id, created: true }
       })
     } catch (error) {
@@ -4509,7 +4509,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           botId: row.botId,
           author: 'bot',
           kind,
-          text: waiting ? roomText(body) : body || (first ? `${name} wants to ${this.chat.card(first).title}.` : report ? 'Done.' : ''),
+          text: waiting ? roomText(body) : body || (first ? askNoticeText(name, this.chat.card(first).title) : report ? 'Done.' : ''),
           chips,
           ...(first ? { askId: first.id } : {}),
           ...(replyTo ? { replyTo } : {}),
@@ -4518,7 +4518,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           threadId: dispatch.threadId
         })
         for (const ask of more)
-          this.chat.post({ botId: row.botId, author: 'bot', kind: 'notice', text: `${name} wants to ${this.chat.card(ask).title}.`, askId: ask.id, activationId: row.id, lane: row.lane, threadId: dispatch.threadId })
+          this.chat.post({ botId: row.botId, author: 'bot', kind: 'notice', text: askNoticeText(name, this.chat.card(ask).title), askId: ask.id, activationId: row.id, lane: row.lane, threadId: dispatch.threadId })
         // Each question as a bubble of its own under the reply, carrying its answers (its id is the question's place in
         // the turn, so it is written once). No thread: the reply already took the turn's pictures and applets.
         for (const question of questions)

@@ -168,6 +168,28 @@ describe('the transcript', () => {
     expect(answered.nextElementSibling?.textContent).toBe('You let Inbox helper use the browser')
   })
 
+  it('a second ask of a turn, posted on its own, shows as the ask alone, as on a reply; answered, only its quiet line stays', async () => {
+    fake.chats.inbox = [
+      message(1, { id: 'a1', text: 'I need two things.', ask: { askId: 'k1', title: 'use files on this computer', note: 'Any file or folder.', status: 'open' } }),
+      message(2, { id: 'a2', kind: 'notice', text: 'Inbox helper wants to run commands.', ask: { askId: 'k2', title: 'run commands', note: 'Any command.', status: 'open' } })
+    ]
+    await open()
+    const alone = transcript().querySelector('[data-message-id="a2"]')!
+    // No words of its own beside the ask: the ask line and its replies, as on the reply above it.
+    expect(alone.querySelector('.bot-markdown')).toBeNull()
+    expect(alone.querySelector('.bot-bubble-ask')?.textContent).toBe('Wants to run commands')
+    expect([...alone.querySelectorAll('.bot-ask-buttons button')].map((choice) => choice.textContent)).toEqual(['Allow', 'Not now', 'Details'])
+    expect(alone.textContent).not.toContain('Inbox helper wants to run commands.')
+    await click(button('Allow', alone))
+    expect(fake.calls).toContainEqual(['answer', 'inbox', 'k2', 'allow'])
+    // Answered: no bubble is left, only the line the answer leaves, as for the reply's ask once answered.
+    expect(transcript().querySelector('article[data-message-id="a2"]')).toBeNull()
+    const line = transcript().querySelector('[role="note"][data-message-id="a2"]')
+    expect(line?.textContent).toBe('You let Inbox helper run commands')
+    // The reply's own ask is untouched: its words stay, with the ask under them.
+    expect(transcript().querySelector('[data-message-id="a1"] .bot-markdown')?.textContent).toBe('I need two things.')
+  })
+
   it('work it started is a 👍 and a quiet line, a note a "Noted" receipt; what their chips said stays on them, and in the steps', async () => {
     const opus = 'Opus 5.5 on Claude Code, high reasoning, for this work only'
     fake.chats.inbox = [

@@ -222,6 +222,26 @@ describe('asks in the chat', () => {
     expect(f.store.dispatch(activation.id, 3)).toBeUndefined()
   })
 
+  it('both asks of one turn allowed: the turn carries on with the owner\'s request, on its own history, with file access', async () => {
+    const { activation, payload, prepared } = await chat('List my repos', 'm1')
+    prepared.authority.escalate!({ permission: { path: f.base, access: 'write' }, reason: 'To find your repos.' })
+    f.clock.now += 1
+    prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'To run git.' })
+    await finish(f, payload, 'completed', { text: 'I need two things.' })
+    const asks = chatOf(f, botId).filter((row) => row.activationId === activation.id && row.ask).map((row) => row.ask!)
+    expect(asks.map((ask) => ask.title)).toEqual(['use files on this computer', 'run commands'])
+    for (const ask of asks) await f.bots.service.answer(botId, ask.askId, 'allow')
+    const next = await start(f, activation.id, 2)
+    // The same activation goes on: the owner's request is in the thread's own history, not asked again.
+    expect(next.prepared).toMatchObject({ history: 'thread', lane: 'chat' })
+    expect(next.prepared.prompt).toContain('The owner allowed: use files on this computer.')
+    expect(next.prepared.prompt).toContain('The owner allowed: run commands. Your work has it now: hand the job to work_start.')
+    expect(next.prepared.authority.workspace?.computer).toBeDefined()
+    await finish(f, next.payload, 'completed', { text: 'Here are your repos.' })
+    expect(f.store.activation(activation.id)!.status).toBe('done')
+    expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'text', text: 'Here are your repos.' })
+  })
+
   it('an export_memory ask grants nothing', async () => {
     const before = f.store.activeGrant(botId)!.digest
     const { activation, payload, prepared } = await chat('Export your memory', 'm1')
