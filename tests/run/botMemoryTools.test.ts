@@ -232,6 +232,61 @@ describe('memory tools', () => {
     expect((await call('memory_save', 'ada-home', { kind: 'owner', text: 'The door code is 4471.' })).value.error).toBe('refused')
   })
 
+  // Every historical absorption link matters after put-back, correction, or expiry.
+  // The dialog and tool both refuse partial deletion; one explicit group Forget removes all.
+  it.each(['restored', 'corrected', 'expired'])('requires every historical holder after a combined entry is %s', async (state) => {
+    const fx = memoryFixture()
+    const { call, onAppResult } = setup(fx)
+    const save = async (text: string, args: Record<string, unknown> = {}) => {
+      const result = await call('memory_save', 'ada-home', { kind: 'owner', text, ...args })
+      expect(result.isError).toBeUndefined()
+      return result.value.ref as string
+    }
+    const m1 = await save('The door code is 4471.')
+    const m2 = await save('The flat is 4B.')
+    const m3 = await save('The address is 12 Elm.')
+    const m4 = await save('Door 4471, flat 4B.', { merges: [m1, m2] })
+    const m5 = await save('Door 4471, flat 4B, 12 Elm.', {
+      merges: [m4, m3], ...(state === 'expired' ? { expiresAt: '2026-11-08' } : {})
+    })
+    let restored = await save('Door 4471, flat 4B.', { replaces: 'm4v2' })
+    if (state === 'corrected') restored = await save('The owner prefers tea.', { replaces: restored })
+    if (state === 'expired') {
+      fx.clock.now += 2 * 24 * 60 * 60 * 1000
+      fx.store.expireMemories('ada')
+    }
+    const admin = createBotMemoryAdmin({ store: fx.store })
+    const history = (await call('memory_list', 'ada-home', { history: true })).value.entries as Array<Record<string, unknown>>
+    expect(history.find(e => e.id === restored)).toMatchObject({ status: 'active' })
+    expect(history.find(e => e.id === restored)).not.toHaveProperty('absorbedBy')
+    expect(fx.store.list('ada').entries.filter(e => e.status === 'active').map(e => e.ref).sort())
+      .toEqual(state === 'expired' ? [restored] : [restored, m5])
+    const hits = fx.store.search('ada', { query: '4471', kinds: ['memory'] }).map(hit => hit.ref)
+    expect(hits).toContain(m5)
+    expect(hits.includes(restored)).toBe(state !== 'corrected')
+    expect(hits).not.toContain('m4v2')
+    const versionsFile = (await admin.export('ada', fx.home)).files.find(file => file.endsWith('memory.jsonl'))!
+    const versions = readFileSync(versionsFile, 'utf8').trim().split('\n').map(line => JSON.parse(line))
+    expect(versions.find(e => e.ref === restored)).toMatchObject({ status: 'active', reason: null })
+    // The chip counts the entries absorbed by that save, not all historical ancestors.
+    const absorbedResult = onAppResult.mock.calls.find(([, , result]) => result.ref === m5)![2]
+    expect(rollUpChips([{ tool: 'memory_save', input: { text: 'Door 4471, flat 4B, 12 Elm.' }, result: absorbedResult }])[0]?.highlight)
+      .toBe('Door 4471, flat 4B, 12 Elm. · put away 2')
+    const before = { versions: fx.store.allVersions('ada'), journal: fx.store.journal('ada') }
+    for (const ref of [m1, restored, m5]) {
+      const refused = await call('memory_forget', 'ada-home', { id: ref, reason: 'Forget the door code.' })
+      expect(refused.isError).toBe(true)
+      expect(refused.text).toContain(restored)
+      expect(refused.text).toContain(m5)
+      expect(() => admin.forget('ada', ref)).toThrow()
+    }
+    expect({ versions: fx.store.allVersions('ada'), journal: fx.store.journal('ada') }).toEqual(before)
+    expect((await call('memory_forget', 'ada-home', { id: restored, refs: [m5], reason: 'Forget these details together.' })).isError).toBeUndefined()
+    expect(fx.store.allVersions('ada').every(e => e.status === 'forgotten' && e.text === null)).toBe(true)
+    expect(fx.store.search('ada', { query: '4471' })).toEqual([])
+    for (const file of (await admin.export('ada', fx.home)).files) expect(readFileSync(file, 'utf8')).not.toContain('4471')
+  })
+
   // Forget through either public handler; direct and chained absorption; old target versions;
   // journal/message copies, export, re-learning, restoration, and another bot as a control.
   it.each([
