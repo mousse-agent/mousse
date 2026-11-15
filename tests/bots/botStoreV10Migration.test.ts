@@ -127,6 +127,15 @@ describe('bots.db v9 → v10', () => {
     const query = 'SELECT id FROM bot_messages WHERE tell IS NOT NULL AND told_at IS NULL AND tell_at <= ? ORDER BY tell_at'
     expect(store.all(query, T)).toEqual([{ id: 'pending' }])
     expect(store.all(`EXPLAIN QUERY PLAN ${query}`, T).some((row) => String(row.detail).includes('bot_messages_tell_due'))).toBe(true)
+    for (const perBot of [
+      'SELECT MIN(tell_at) AS next FROM bot_messages WHERE bot_id = ? AND tell IS NOT NULL AND told_at IS NULL',
+      'SELECT id FROM bot_messages WHERE bot_id = ? AND tell IS NOT NULL AND told_at IS NULL AND tell_at <= ? ORDER BY tell_at LIMIT 1'
+    ]) {
+      const params = perBot.includes('tell_at <= ?') ? ['b', T] : ['b']
+      const plan = store.all(`EXPLAIN QUERY PLAN ${perBot}`, ...params).map((row) => String(row.detail)).join(' ')
+      expect(plan).toContain('USING INDEX bot_messages_tell_due (bot_id=?')
+      expect(plan).not.toContain('TEMP B-TREE')
+    }
     expect(store.all('PRAGMA index_list(bot_messages)')).toContainEqual(expect.objectContaining({ name: 'bot_messages_tell_due', partial: 1 }))
   })
 })

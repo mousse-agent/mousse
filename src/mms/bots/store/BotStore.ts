@@ -380,7 +380,7 @@ ALTER TABLE bot_reminders ADD COLUMN owner_set INTEGER NOT NULL DEFAULT 0 CHECK(
 ALTER TABLE bot_messages ADD COLUMN tell TEXT CHECK(tell IN ('now', 'soon', 'later'));
 ALTER TABLE bot_messages ADD COLUMN tell_at TEXT;
 ALTER TABLE bot_messages ADD COLUMN told_at TEXT;
-CREATE INDEX bot_messages_tell_due ON bot_messages(tell_at) WHERE tell IS NOT NULL AND told_at IS NULL;
+CREATE INDEX bot_messages_tell_due ON bot_messages(bot_id, tell_at) WHERE tell IS NOT NULL AND told_at IS NULL;
 ALTER TABLE bot_registry ADD COLUMN tell_json TEXT;
 `
   }
