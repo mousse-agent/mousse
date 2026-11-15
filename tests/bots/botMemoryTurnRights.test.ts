@@ -54,7 +54,7 @@ it.each([
   else {
     expect(forgot).toMatchObject({ isError: true, value: { reason: 'Ask the owner in the chat.' } })
     expect(store.active(botId).find((entry) => entry.id === 'm1')?.text).toBe('Original owner')
-    expect(store.search(botId, { query: 'Original owner' }).some((hit) => hit.ref === `j${said}`)).toBe(true)
+    expect(store.search(botId, { query: 'Original owner', kinds: ['chat'] }).some((hit) => hit.ref === `j${said}`)).toBe(true)
   }
   await finish(f, payload)
 })

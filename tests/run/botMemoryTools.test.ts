@@ -14,12 +14,12 @@ import { appTurn } from './appToolsFixture'
 
 afterEach(disposeFixtures)
 
-const activations: Record<string, { botId: string; activationId: string; lane: 'chat' | 'run'; role?: 'home' | 'activation' | 'context' }> = {
-  'ada-home': { botId: 'ada', activationId: 'act-chat', lane: 'chat' },
+const activations: Record<string, { botId: string; activationId: string; lane: 'chat' | 'run'; memoryLane?: 'chat' | 'run'; role?: 'home' | 'activation' | 'context' }> = {
+  'ada-home': { botId: 'ada', activationId: 'act-chat', lane: 'chat', memoryLane: 'chat' },
   // A consult of the chat's turn, on a context thread.
-  'ada-ctx': { botId: 'ada', activationId: 'act-chat', lane: 'chat', role: 'context' },
+  'ada-ctx': { botId: 'ada', activationId: 'act-chat', lane: 'chat', memoryLane: 'chat', role: 'context' },
   'ada-run': { botId: 'ada', activationId: 'act-run', lane: 'run' },
-  'bob-home': { botId: 'bob', activationId: 'act-bob', lane: 'chat' }
+  'bob-home': { botId: 'bob', activationId: 'act-bob', lane: 'chat', memoryLane: 'chat' }
 }
 
 const turn = (threadId: string, runId: string, activationId?: string): AppToolTurn => ({

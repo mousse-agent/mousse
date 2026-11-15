@@ -15,9 +15,10 @@ import { json, plainSchema, type MousseTool, type ToolCallContext, type ToolOutc
 
 /**
  * The bot's memory tools (docs/plans/bot-context.md §7): always on, never grantable. The bot and
- * its lane always come from `activationOf(threadId)`, never from arguments, so a bot only ever
- * sees its own rows. A run saves only run notes and cannot forget; the chat writes owner facts and
- * notes, and replaces only the current version of an entry. Saves and forgets report their result
+ * its memory rights always come from `activationOf(threadId)`, never from arguments, so a bot only ever
+ * sees its own rows. Runs and bot-started chat turns save only run notes and cannot forget. Only
+ * chat turns the owner's message or tap started write owner facts and notes, and replace only
+ * the current version of an entry. Saves and forgets report their result
  * for a `memory` chip; WP3 words the chip.
  */
 
@@ -74,7 +75,7 @@ export const BOT_MEMORY_TOOL_DEFINITIONS: Record<BotMemoryTool, Tool> = {
   },
   memory_save: {
     name: 'memory_save',
-    description: `Save something to remember in every later turn. Save the owner's wishes and corrections ("don't…", "always…", "call me Sam") as kind owner the moment they say them; every later turn follows them. One fact or note an entry, under ${MAX_BOT_MEMORY_TEXT_CHARS} characters, with absolute dates ("12 Nov 2026", never "tomorrow"). kind owner: a fact about the owner, only from what the owner said; kind note: your own standing note. When it changes or contradicts an entry, pass replaces with that entry's ref (m12, or m12v2 for its second version). When memory is full, the save fails with the current list: merge or replace entries first. In a run, saves become run notes.`,
+    description: `Save something to remember in every later turn. Save the owner's wishes and corrections ("don't…", "always…", "call me Sam") as kind owner the moment they say them; every later turn follows them. One fact or note an entry, under ${MAX_BOT_MEMORY_TEXT_CHARS} characters, with absolute dates ("12 Nov 2026", never "tomorrow"). kind owner: a fact about the owner, only from what the owner said; kind note: your own standing note. When it changes or contradicts an entry, pass replaces with that entry's ref (m12, or m12v2 for its second version). When memory is full, the save fails with the current list: merge or replace entries first. In a run or a chat turn you started yourself, saves become run notes.`,
     parameters: Type.Object({
       text: Type.String(),
       kind: Type.Union([Type.Literal('owner'), Type.Literal('note')]),
@@ -85,7 +86,7 @@ export const BOT_MEMORY_TOOL_DEFINITIONS: Record<BotMemoryTool, Tool> = {
   },
   memory_forget: {
     name: 'memory_forget',
-    description: 'Forget something the owner asked you to forget: a memory entry (id m12) and the history rows that say it (refs from memory_search, like j123). Only in the chat. Afterwards say what you removed and offer to look for other mentions. Copies in app transcripts outside your memory are not covered: say so if asked.',
+    description: 'Forget something the owner asked you to forget: a memory entry (id m12) and the history rows that say it (refs from memory_search, like j123). Only in a chat turn the owner\'s message or tapped answer started. Afterwards say what you removed and offer to look for other mentions. Copies in app transcripts outside your memory are not covered: say so if asked.',
     parameters: Type.Object({
       id: Type.Optional(Type.String({ description: 'The memory entry: m12.' })),
       refs: Type.Optional(Type.Array(Type.String(), { description: 'History rows to remove: j123.' })),
@@ -121,7 +122,7 @@ export function botMemoryTools(source: BotMemoryToolHost | (() => BotMemoryToolH
     if (!activation) return 'Only a bot has a memory.'
     if (ctx.turn.bot && ctx.turn.bot.activationId !== activation.activationId) return 'This turn does not belong to that bot.'
     // A consult (a context thread) has a run's memory rights, even inside a chat: run notes only, no forget.
-    return { botId: activation.botId, activationId: activation.activationId, lane: activation.role === 'context' ? 'run' : activation.lane }
+    return { botId: activation.botId, activationId: activation.activationId, lane: activation.role === 'context' || activation.role === 'subagent' || activation.lane === 'run' ? 'run' : activation.memoryLane ?? 'run' }
   }
 
   const report = (ctx: ToolCallContext, activation: { botId: string; activationId: string }, tool: BotMemoryTool, result: unknown) => {
