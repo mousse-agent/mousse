@@ -8198,7 +8198,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     for (const row of this.store.all("SELECT id, bot_id, next_at FROM bot_questions WHERE status = 'open' AND next_at IS NOT NULL")) {
       const at = Date.parse(String(row.next_at))
       const end = this.host.quietHoursFor?.(String(row.bot_id), at)?.end
-      if (end) this.store.setQuestionNext(String(row.id), new Date(end).toISOString())
+      if (end) {
+        const question = this.store.question(String(row.id))
+        if (question) this.moveFollowUp(question, end)
+      }
     }
     this.armDue()
   }
