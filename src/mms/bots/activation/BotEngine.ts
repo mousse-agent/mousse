@@ -7830,9 +7830,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (event.on === 'checks') {
       const checks = read.checkRuns
       // Missing/unknown checks cannot prove completion; skipped checks are complete but neither passed nor failed.
-      if (!read.headSha || !checks?.length || checks.some((check) => !['passing', 'failing', 'skipped'].includes(check.state))) return undefined
+      if (!read.headSha || !checks?.length || checks.some((check) => !['passing', 'failing', 'skipped', 'waiting'].includes(check.state))) return undefined
       const failedNames = checks.filter((check) => check.state === 'failing').map((check) => check.name)
-      return { ...pr, state: 'checks', passed: checks.filter((check) => check.state === 'passing').length, failed: failedNames.length, failedNames }
+      const waitingNames = checks.filter((check) => check.state === 'waiting').map((check) => check.name)
+      return { ...pr, state: 'checks', waiting: waitingNames.length, waitingNames, passed: checks.filter((check) => check.state === 'passing').length, failed: failedNames.length, failedNames }
     }
     if (event.on === 'review') {
       const review = read.reviews?.filter((review) => review.submittedAt && Date.parse(review.submittedAt) > Date.parse(wake.createdAt))
