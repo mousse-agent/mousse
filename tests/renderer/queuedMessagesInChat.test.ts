@@ -7,6 +7,7 @@ import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from
 import { QUEUE_DRAFT_MOVED_NOTICE, STARTING_ITEM_HOLD_MS, startingItem, useThreadQueue, withDraftAppended, type QueueHold } from '../../src/renderer/hooks/useThreadQueue'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import type { QueuedMessage, Thread } from '../../src/shared/types'
+import { agentMessage } from '../../src/mms/run/mcp/appTools/agentMessage'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -97,6 +98,24 @@ describe('queued messages in the conversation', () => {
     expect(queuedContentWithText('Plain', 'Changed')).toBe('Changed')
     await show([queued('a', content)])
     expect(row('a').querySelector('.chat-user-bubble p')?.textContent).toBe('Look at this')
+  })
+
+  it('labels a message another thread\'s agent queued before it runs, showing only its words; its editor starts from them and saves the person\'s own text', async () => {
+    useAppStore.setState({ threads: [{ id: 'sender', name: 'Fix flaky test' } as Thread] })
+    const letter = agentMessage('sender', 'Fix flaky test', 'Also rerun the integration suite')
+    const origin = { kind: 'agent' as const, threadId: 'sender', runId: 'run-s', hops: 1, title: 'Fix flaky test', body: { head: letter.head, tail: letter.tail } }
+    await show([queued('a', letter.text, { source: 'mcp', origin }), queued('b', 'typed by the person')])
+    expect(row('a').querySelector('.chat-agent-sender')?.textContent).toBe('Agent·Fix flaky test')
+    expect(row('a').querySelector('.chat-user-bubble p')?.textContent).toBe('Also rerun the integration suite')
+    expect(row('b').querySelector('.chat-agent-sender')).toBeNull()
+
+    await click(button('a', 'Edit'))
+    const area = row('a').querySelector('textarea')!
+    expect(area.value).toBe('Also rerun the integration suite')
+    await type(area, 'Rerun only the flaky test')
+    await key(area, { key: 'Enter' })
+    // The saved text carries no label: the daemon then stores it as the person's (it drops the agent origin on a person's edit).
+    expect(api.edit).toHaveBeenCalledWith('t1', 'a', 'Rerun only the flaky test', letter.text)
   })
 
   it('says "Queued" once, on the last line', async () => {
@@ -461,6 +480,15 @@ describe('queued messages in the conversation', () => {
     expect(row('n').textContent).toContain('API reviewer')
     expect(row('n').textContent).not.toContain('SECRET RESULT')
     expect(button('n', 'Edit')).toBeNull()
+  })
+
+  it('shows a queued settle notice by the thread it is about, never by the text the model reads, and offers no edit', async () => {
+    const notice = [{ watchId: 'w1', threadId: 't2', title: 'Fix build', event: 'ended' as const, status: 'completed' }]
+    await show([queued('s', '[Mousse notice, not from the user or any agent]\nSECRET RESULT', { source: 'thread-notice', settleNotice: notice })])
+    expect(row('s').textContent).toContain('Fix build')
+    expect(row('s').textContent).toContain('finished')
+    expect(row('s').textContent).not.toContain('SECRET RESULT')
+    expect(button('s', 'Edit')).toBeNull()
   })
 
   it('leaves internal items out', async () => {

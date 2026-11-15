@@ -1,5 +1,6 @@
 import { streamingAppletPresentation } from '../../components/applets/streamPresentation'
 import type { ChatMessage, TurnEnd } from '../../../shared/types'
+import { agentMessageWords } from '../../../shared/agentMessageWords'
 import type { UIMessage } from 'ai'
 import { isToolTimelineMessage, RESTART_INTERRUPTED_TEXT, TURN_STOPPED_TEXT } from '../../../shared/types'
 import {
@@ -459,6 +460,17 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
       continue
     }
 
+    // The note Mousse writes when this thread's agent started another thread: a quiet line of its own with that thread as
+    // a chip. An older note (no `launchedThread`) is not shown, as Mousse's other plain lines are not.
+    if (msg.role === 'system' && msg.launchedThread) {
+      base.role = 'assistant'
+      base.metadata = { ...(base.metadata as object | undefined), notice: true, launchedThread: msg.launchedThread }
+      base.parts = [{ type: 'text', text: msg.content } as unknown as UIMessage['parts'][number]]
+      out.push(base)
+      lastAssistantText = null
+      continue
+    }
+
     // Thinking -> tool-Thinking so ThinkingTool renders with shimmer
     if (msg.kind === 'thinking' && msg.thinking) {
       const state = msg.thinking.status === 'processing' ? 'input-available' : 'output-available'
@@ -572,7 +584,10 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
     // browser blocks) that the model needs but the transcript must not show
     // raw — images already render as previews via msg.images, other files
     // become file pills below.
-    const text = msg.content ?? ''
+    // A message another thread's agent sent shows that agent's words, without the header and closing line Mousse wrote
+    // around them for the model; which agent is said by the bubble's header, from the stored origin.
+    const agentOrigin = msg.role === 'user' && msg.origin?.kind === 'agent' ? msg.origin : undefined
+    const text = agentOrigin ? agentMessageWords(msg.content ?? '', agentOrigin) : msg.content ?? ''
     let displayText = msg.role === 'assistant' ? assistantDisplayText(text) : text
     let extraFiles: ReturnType<typeof parseUserMessageContent>['attachedFiles'] = []
     let references: ReturnType<typeof parseUserMessageContent>['references'] = []
@@ -594,13 +609,17 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
     // The turn a person on another of the user's computers sent says so (the sender is kept on the run, not on the message).
     const sender = msg.role === 'user' && msg.turnId && !msg.steered ? senders?.[msg.turnId] : undefined
     if (sender) base.metadata = { ...(base.metadata as object | undefined), sentFrom: { name: sender.name } }
+    if (agentOrigin) base.metadata = { ...(base.metadata as object | undefined), origin: agentOrigin }
     const subagentNotice = msg.role === 'user' && msg.subagentNotice?.length ? msg.subagentNotice : undefined
     if (subagentNotice) base.metadata = { ...(base.metadata as object | undefined), subagentNotice }
     // The same for the message a turn the provider started itself opens with: the background tasks it reports.
     const backgroundNotice = msg.role === 'user' && msg.backgroundNotice?.length ? msg.backgroundNotice : undefined
     if (backgroundNotice) base.metadata = { ...(base.metadata as object | undefined), backgroundNotice }
+    // And for what Mousse told the agent about work it asked to hear about (`notify`).
+    const settleNotice = msg.role === 'user' && msg.settleNotice?.length ? msg.settleNotice : undefined
+    if (settleNotice) base.metadata = { ...(base.metadata as object | undefined), settleNotice }
     if (msg.role === 'assistant' && msg.scheduledRun) base.metadata = { ...(base.metadata as object | undefined), scheduledRun: msg.scheduledRun }
-    if (!displayText.trim() && !msg.images?.length && extraFiles.length === 0 && references.length === 0 && !subagentNotice && !backgroundNotice) {
+    if (!displayText.trim() && !msg.images?.length && extraFiles.length === 0 && references.length === 0 && !subagentNotice && !backgroundNotice && !settleNotice) {
       continue
     }
     // Fold exact-duplicate consecutive assistant text (provider double-adds,

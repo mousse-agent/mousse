@@ -50,6 +50,7 @@ export function DeviceLimitsDialog({ node, name, policy, onClose, onDone }: {
             {PERMISSION_MODES.map((value) => <option key={value} value={value}>{describePermissionMode(value)}</option>)}
           </select>
         </label>
+        <p className="settings-muted">Subagents that {name}&rsquo;s agents start on this computer run no higher than this either.</p>
         <div className="devices-field">
           <span>Terminals from this device</span>
           <Switch checked={terminal} label={`Terminals from ${name}`} disabled={busy} onChange={setTerminal} />

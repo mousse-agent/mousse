@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ChatImageAttachment, QueuedMessage } from '../../shared/types'
 import { readableError } from '../lib/errorText'
-import { canEditQueued, isOptimisticQueueItem, splitQueuedContent, type QueueEditDraft } from '../lib/queuedContent'
+import { canEditQueued, isOptimisticQueueItem, queuedWords, splitQueuedContent, type QueueEditDraft } from '../lib/queuedContent'
 import { useAppStore } from '../stores/appStore'
 
 export { isOptimisticQueueItem }
@@ -237,10 +237,10 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     const draft = store.queueEditDrafts[thread]
     if (!draft || draft.saving) return
     const item = list.find((entry) => entry.id === draft.itemId)
-    const base = splitQueuedContent(draft.base)
+    const base = splitQueuedContent(queuedWords(draft.base, item?.origin))
     if (item && canEditQueued(item)) {
       if (item.content !== draft.base && draft.draft === base.text) {
-        store.updateQueueEditDraft(thread, draft.itemId, (open) => ({ ...open, base: item.content, draft: splitQueuedContent(item.content).text, images: item.images }))
+        store.updateQueueEditDraft(thread, draft.itemId, (open) => ({ ...open, base: item.content, draft: splitQueuedContent(queuedWords(item.content, item.origin)).text, images: item.images }))
       } else if (!draft.images && item.images?.length && item.content === draft.base) {
         store.updateQueueEditDraft(thread, draft.itemId, (open) => ({ ...open, images: item.images }))
       }
@@ -491,7 +491,8 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
   const startEdit = useCallback((item: QueuedMessage, width: number | null) => {
     const thread = threadIdRef.current
     if (!thread) return
-    useAppStore.getState().setQueueEditDraft(thread, { itemId: item.id, width, base: item.content, draft: splitQueuedContent(item.content).text, ...(item.images?.length ? { images: item.images } : {}) })
+    // An agent's message opens on its words, not on the header Mousse wrote around them.
+    useAppStore.getState().setQueueEditDraft(thread, { itemId: item.id, width, base: item.content, draft: splitQueuedContent(queuedWords(item.content, item.origin)).text, ...(item.images?.length ? { images: item.images } : {}) })
   }, [])
   const updateEdit = useCallback((patch: Partial<Pick<QueueEditDraft, 'base' | 'draft' | 'images'>>) => {
     const thread = threadIdRef.current

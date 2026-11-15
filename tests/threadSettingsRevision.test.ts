@@ -102,8 +102,10 @@ describe("a thread's settings revision", () => {
   it('is new in the routed rows, so an older computer is never sent it (the caller refuses the call as outdated)', () => {
     for (const method of ['threads.setModel', 'threads.setPermissionMode']) {
       const row = ROUTED_METHODS[method]!
-      expect(routedKeysAt(row, row.version)).toContain('ifRevision')
-      expect(routedKeysAt(row, row.version - 1)).not.toContain('ifRevision')
+      // The version that added it (later versions added other keys), and not the one before it.
+      const since = row.since!.ifRevision!
+      expect(routedKeysAt(row, since)).toContain('ifRevision')
+      expect(routedKeysAt(row, since - 1)).not.toContain('ifRevision')
     }
   })
 })

@@ -1,3 +1,4 @@
+import { agentMessageWords } from './agentMessageWords'
 import { extractChatReferences } from './chatReferences'
 import { replaceAttachedFilesMarkers } from './attachedFilesMarker'
 import type { ChatMessage } from './types'
@@ -297,12 +298,12 @@ export interface TitleContext {
   images?: number
 }
 
-type TitleMessage = Pick<ChatMessage, 'role' | 'content' | 'kind' | 'hidden' | 'streaming' | 'images' | 'subagentNotice' | 'questionAnswers' | 'scheduledRun'>
+type TitleMessage = Pick<ChatMessage, 'role' | 'content' | 'kind' | 'hidden' | 'streaming' | 'images' | 'subagentNotice' | 'settleNotice' | 'questionAnswers' | 'scheduledRun' | 'origin'>
 
 /** A message the person or the agent wrote in the conversation, not a tool row, notice or hidden input. */
 function conversational(message: TitleMessage): boolean {
   return (!message.kind || message.kind === 'message') && !message.hidden && !message.streaming &&
-    !message.subagentNotice && !message.questionAnswers && !message.scheduledRun && Boolean(message.content.trim())
+    !message.subagentNotice && !message.settleNotice && !message.questionAnswers && !message.scheduledRun && Boolean(message.content.trim())
 }
 
 /**
@@ -315,9 +316,11 @@ export function titleContextOf(messages: readonly TitleMessage[]): TitleContext 
   if (!first) return null
   const firstAt = messages.indexOf(first)
   const reply = messages.slice(firstAt + 1).find((message) => message.role === 'assistant' && conversational(message))
+  // An agent's message is read for its words, never for the header Mousse wrote around them.
+  const words = (message: TitleMessage) => agentMessageWords(message.content, message.origin)
   return {
-    request: first.content,
-    later: requests.slice(1).slice(-2).map((message) => message.content),
+    request: words(first),
+    later: requests.slice(1).slice(-2).map(words),
     ...(reply ? { reply: reply.content } : {}),
     ...(first.images?.length ? { images: first.images.length } : {})
   }

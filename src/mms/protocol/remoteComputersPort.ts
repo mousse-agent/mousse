@@ -21,6 +21,11 @@ export interface RemoteComputersPort {
   /** One routed call to `node`. Throws a `DomainRpcError` a person could read (offline, outdated, refused). */
   call(node: string, method: string, params: Record<string, unknown>, options?: { idem?: string; signal?: AbortSignal }): Promise<unknown>
   /**
+   * Whether `node` takes calls marked as an agent's (`ROUTED_AGENT_KEY`) on every row that has the mark. Throws like
+   * `call` when the computer cannot be asked (offline, Bridge off), so nothing is decided from a guess.
+   */
+  takesAgentMark(node: string, signal?: AbortSignal): Promise<boolean>
+  /**
    * The project of `node` that is the same Git repository as the folder `projectPath` here: its id, and
    * `weak` when only the root commit matched. Null when it has none, or the folder is not a repository.
    */

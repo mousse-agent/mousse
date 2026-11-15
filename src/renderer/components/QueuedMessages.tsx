@@ -8,9 +8,9 @@ import { useAfterTurnsLayout } from '../chat/components/agent-elements/after-tur
 import { shortTokens } from '../lib/promptCache'
 import { mousseToUIMessages } from '../chat/adapters/mousseToUI'
 import { UserMessage } from '../chat/components/agent-elements/user-message'
-import { SubagentNotice } from '../chat/components/agent-elements/tools/SubagentNotice'
+import { SettleNotice, SubagentNotice } from '../chat/components/agent-elements/tools/SubagentNotice'
 import { isOptimisticQueueItem, type ThreadQueue } from '../hooks/useThreadQueue'
-import { canEditQueued, queuedContentWithText, splitQueuedContent } from '../lib/queuedContent'
+import { canEditQueued, queuedContentWithText, queuedWords, splitQueuedContent } from '../lib/queuedContent'
 import { formatBinding } from '../../shared/commands'
 import { useAppStore } from '../stores/appStore'
 import { isSteerKey, markSteerKey, STEER_BINDING, steerKeyRecently } from '../lib/steerKey'
@@ -70,10 +70,12 @@ function moveId(ids: string[], id: string, to: number): string[] {
 /** A queued message drawn as the prompt it will be, so it reads the same once it is sent. */
 const QueuedBubble = memo(function QueuedBubble({ item }: { item: QueuedMessage }) {
   const message = useMemo(
-    () => mousseToUIMessages([{ id: `queued:${item.id}`, role: 'user', content: item.content, timestamp: item.enqueuedAt, images: item.images }])[0],
-    [item.id, item.content, item.enqueuedAt, item.images]
+    // A message another thread's agent queued is labelled as that agent's before it runs, as it will be once it has.
+    () => mousseToUIMessages([{ id: `queued:${item.id}`, role: 'user', content: item.content, timestamp: item.enqueuedAt, images: item.images, ...(item.origin?.kind === 'agent' ? { origin: item.origin } : {}) }])[0],
+    [item.id, item.content, item.enqueuedAt, item.images, item.origin]
   )
   if (item.subagentNotice?.length) return <SubagentNotice items={item.subagentNotice} />
+  if (item.settleNotice?.length) return <SettleNotice items={item.settleNotice} />
   return message ? <UserMessage message={message} /> : null
 })
 
@@ -364,7 +366,8 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
     queue.startEdit(item, width ? Math.ceil(width) + 8 : null)
   }
   const saveEdit = (item: QueuedMessage, base: string, text: string) => {
-    const content = queuedContentWithText(item.content, text)
+    // An agent's message is edited as its words: the person's saved text is their own, with no header.
+    const content = queuedContentWithText(queuedWords(item.content, item.origin), text)
     if (content === item.content) { queue.closeEdit(); return }
     // Saved only if the message still has the text this edit started from; otherwise the line says it changed.
     // A save closes the edit; anything else keeps it open with the draft.
@@ -443,11 +446,11 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
                 draft={edit.draft}
                 width={edit.width}
                 saving={Boolean(edit.saving)}
-                canBeEmpty={Boolean(item.images?.length || splitQueuedContent(item.content).markers)}
-                changed={!edit.saving && item.content !== edit.base && edit.draft !== splitQueuedContent(edit.base).text}
+                canBeEmpty={Boolean(item.images?.length || splitQueuedContent(queuedWords(item.content, item.origin)).markers)}
+                changed={!edit.saving && item.content !== edit.base && edit.draft !== splitQueuedContent(queuedWords(edit.base, item.origin)).text}
                 label={label}
                 onDraftChange={(draft) => queue.updateEdit({ draft })}
-                onLoadChanged={() => queue.updateEdit({ base: item.content, draft: splitQueuedContent(item.content).text, images: item.images })}
+                onLoadChanged={() => queue.updateEdit({ base: item.content, draft: splitQueuedContent(queuedWords(item.content, item.origin)).text, images: item.images })}
                 onKeepDraft={() => queue.updateEdit({ base: item.content, images: item.images })}
                 onSave={(text) => saveEdit(item, edit.base, text)}
                 onCancel={queue.closeEdit}

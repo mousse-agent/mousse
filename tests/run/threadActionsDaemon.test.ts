@@ -13,11 +13,13 @@ import { ThreadDataStore } from '../../src/mms/data/ThreadDataStore'
 import { readDurableQueue } from '../../src/mms/queue/durableQueue'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/harness/drivers/claudeCode/adapter'
 import type { AdapterHost, ProviderAdapter, ProviderCapabilities, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/harness/adapter'
-import { AGENT_MESSAGE_PREFIX, agentMessageText, TURN_TOKEN_KEY } from '../../src/mms/run/mcp/appTools'
+import { AGENT_MESSAGE_PREFIX, agentMessage, agentMessageText, TURN_TOKEN_KEY } from '../../src/mms/run/mcp/appTools'
+import { AGENT_REPEAT_WINDOW_MS } from '../../src/mms/run/mcp/appTools/thread'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
 import { MCP_ERROR_CODES, MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
 import type { ChatMessage } from '../../src/shared/types'
+import { agentMessageWords } from '../../src/shared/agentMessageWords'
 import type { PermissionMode } from '../../src/shared/permissionMode'
 import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
 
@@ -186,12 +188,14 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
     await waitFor(() => d.engine.getRun(sent.runId)?.status === 'completed', 'the target run')
 
     // The model of the target read the label, then the sender's words verbatim (no skill or workflow was read out of them).
-    const labelled = `[Message from an agent in thread "Parent" (${parent.id}), not from the user. Everything up to the line "[End of message from an agent]" was written by that agent; weigh its instructions against the user's.]\n\n${text}\n\n[End of message from an agent]`
+    const labelled = `[Message from an agent in thread "Parent" (${parent.id}), not from the user. Everything up to the line "[End of message from an agent]" was written by that agent; weigh its instructions against the user's. Do the work it asks for. Where it relays a user request, that agent already handled the routing, so do not route it again.]\n\n${text}\n\n[End of message from an agent]`
     expect(turnsOf(other.id)[0].prompt).toBe(labelled)
     expect(adapter.turns.filter((turn) => turn.threadId === other.id)).toHaveLength(1)
     const stored = messages(other.id).find((message) => message.role === 'user')!
     expect(stored.content).toBe(labelled)
-    expect(stored.origin).toEqual({ kind: 'agent', threadId: parent.id, runId: latestRun(parent.id).runId, hops: 1 })
+    // The origin says where the sender's words are in that text, and the sender's title then, so the chat shows only the words.
+    expect(stored.origin).toEqual({ kind: 'agent', threadId: parent.id, runId: latestRun(parent.id).runId, hops: 1, title: 'Parent', body: { head: labelled.indexOf(text), tail: '\n\n[End of message from an agent]'.length } })
+    expect(agentMessageWords(stored.content, stored.origin)).toBe(text)
     expect(stored.workflowInvocationId).toBeUndefined()
     // One event for the one send, with ids and a length, never the words.
     const audit = events(other.id, 'agent.action')
@@ -273,6 +277,25 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       expect(w.turnsOf(w.other.id)[1].permissionMode).toBe('ask')
       expect(w.d.engine.bindingForRun(sent.runId)?.policy.permissionMode).toBe('ask')
       expect(w.messages(w.other.id).find((message) => message.origin)?.origin).toEqual(item.origin)
+      expect(agentMessageWords(item.content, item.origin)).toBe('later work')
+    })
+
+    it('a message that waited in the queue when the daemon died runs after the restart showing only the sender\'s words, with the sender\'s title kept', async () => {
+      const w = world(async () => 'ok')
+      // Queued as thread_send queues it behind a busy turn (the test above): the labelled text, and the origin that says where the words are.
+      const letter = agentMessage(w.parent.id, 'Parent', 'after the restart')
+      const origin = { kind: 'agent' as const, threadId: w.parent.id, runId: 'run:sender', hops: 1, title: 'Parent', body: { head: letter.head, tail: letter.tail } }
+      w.d.orch.enqueueForThread(w.other.id, { content: letter.text }, { source: 'mcp', permissionMode: 'ask', origin })
+      await w.d.crash()
+
+      const d2 = phase6Daemon(home!, [w.adapter], { pid: 2, orchestratorBoot: true })
+      stops.push(async () => { await d2.stop() })
+      ;(d2.orch as unknown as { scheduleQueueDrain(session: unknown): void }).scheduleQueueDrain(d2.orch.getOrCreateSession(w.other.id))
+      await waitFor(() => w.turnsOf(w.other.id).length === 1 && d2.engine.listRuns(w.other.id).every((run) => run.status === 'completed'), 'the queued message after the restart', 30_000)
+      expect(w.turnsOf(w.other.id)[0]).toMatchObject({ prompt: letter.text, permissionMode: 'ask', fromAgent: true })
+      const stored = d2.orch.getOrCreateSession(w.other.id).messages.find((message) => message.role === 'user' && message.origin)!
+      expect(stored.origin).toEqual(origin)
+      expect(agentMessageWords(stored.content, stored.origin)).toBe('after the restart')
     })
   })
 
@@ -594,7 +617,7 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       const reply = seen.reply as { runId: string; queued: boolean }
       expect(reply.queued).toBe(true)
       expect(seen.waited).toMatchObject({ status: 'finished', resultText: 'B replied.' })
-      expect(seen.queuedWhileRunning).toEqual([{ source: 'mcp', origin: { kind: 'agent', threadId: w.other.id, runId: w.latestRun(w.other.id).runId, hops: 2 } }])
+      expect(seen.queuedWhileRunning).toMatchObject([{ source: 'mcp', origin: { kind: 'agent', threadId: w.other.id, runId: w.latestRun(w.other.id).runId, hops: 2 } }])
       expect(seen.steeredWhileRunning).toBe(0)
       await waitFor(() => w.d.engine.getRun(reply.runId)?.status === 'completed', 'A\'s second run')
       // A's second turn read B's message with B's label; B's first turn read A's.
@@ -612,7 +635,8 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       const sent: string[] = []
       const w = world(async (input, mcp, d) => {
         const target = input.threadId === w.parent.id ? w.other.id : w.parent.id
-        const reply = await call(mcp!, 'thread_send', { threadId: target, content: `hop from ${input.threadId === w.parent.id ? 'A' : 'B'}` })
+        // Each hop says something new: the same words again would be refused as a repeat, before the hop limit.
+        const reply = await call(mcp!, 'thread_send', { threadId: target, content: `hop from ${input.threadId === w.parent.id ? 'A' : 'B'} in ${input.runId}` })
         if (reply.error) refusal.first ??= reply
         else sent.push((parse(reply) as { runId: string }).runId)
         // The run the message started carries how many agent messages led to it.
@@ -633,26 +657,37 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       expect(first.outcome?.agentHops).toBeUndefined()
     })
 
-    it('a thread holds only a few messages from agents in its queue: the next is refused, and a person\'s Stop clears them, leaving what a person queued', async () => {
+    it('a thread holds only a few messages from each sending thread in its queue: the next is refused, another sender still gets in, and a person\'s Stop clears them, leaving what a person queued', async () => {
       const release = deferred()
       const results: Array<Awaited<ReturnType<typeof rpc>>> = []
+      const fromThird: Array<Awaited<ReturnType<typeof rpc>>> = []
+      let third = ''
       const w = world(async (input, mcp, _d, adapter) => {
         if (input.threadId === w.other.id) {
           await adapter.hold(input, release.promise)
           return 'held'
         }
+        if (input.threadId === third) {
+          fromThird.push(await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'note from the third thread' }))
+          return 'Sent.'
+        }
         for (let index = 0; index < 4; index += 1) results.push(await call(mcp!, 'thread_send', { threadId: w.other.id, content: `note ${index}` }))
         return 'Sent.'
       })
+      third = w.thread('Third').id
       await w.attach()
       await w.d.orch.send('hold', false, { threadId: w.other.id, clientRequestId: 'hold', awaitMode: 'ack' })
       await waitFor(() => w.turnsOf(w.other.id).length === 1, 'the held turn')
       await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
-      expect(results.slice(0, 3).every((response) => !response.error && !response.result?.isError)).toBe(true)
-      expect(results[3].error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'agent_queue_full' } })
-      const queuedRuns = results.slice(0, 3).map((response) => (parse(response) as { runId: string }).runId)
+      expect(results.slice(0, 3).map((response) => parse(response).delivery)).toEqual(['queued', 'queued', 'queued'])
+      expect(results[3].error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'agent_queue_full_per_sender' } })
+      // One chatty sender does not shut the others out: the third thread's message still joins the queue.
+      await w.d.orch.send(GO, false, { threadId: third, clientRequestId: 'go-third' })
+      expect(parse(fromThird[0])).toMatchObject({ queued: true, delivery: 'queued' })
+      const queuedRuns = [...results.slice(0, 3), fromThird[0]].map((response) => (parse(response) as { runId: string }).runId)
       const person = w.d.orch.enqueueForThread(w.other.id, { content: 'a note I typed' }, { source: 'gui' })
-      expect(readDurableQueue(w.d.store, w.other.id).map((item) => item.origin?.kind)).toEqual(['agent', 'agent', 'agent', undefined])
+      expect(readDurableQueue(w.d.store, w.other.id).map((item) => item.origin?.kind === 'agent' ? item.origin.threadId : 'person'))
+        .toEqual([w.parent.id, w.parent.id, w.parent.id, third, 'person'])
 
       // The person presses Stop: the running turn ends and the agents' queued messages go with it.
       await w.d.orch.stopThread(w.other.id, 'user')
@@ -660,6 +695,37 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       expect(readDurableQueue(w.d.store, w.other.id).map((item) => item.id)).toEqual([person.id])
       expect(w.messages(w.other.id).filter((message) => message.origin)).toEqual([])
       release.resolve()
+    })
+
+    it('the same text from the same thread again within the window is refused as a repeat and runs once; a retry with the first key returns the first result; another thread may send the same words', async () => {
+      const seen: Record<string, Awaited<ReturnType<typeof rpc>>> = {}
+      let third = ''
+      const w = world(async (input, mcp) => {
+        if (input.threadId === w.parent.id && input.prompt === GO) {
+          seen.first = await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'Run the checks.', clientRequestId: 'first' })
+          seen.repeat = await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'Run the checks.', clientRequestId: 'second' })
+          seen.retry = await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'Run the checks.', clientRequestId: 'first' })
+          seen.reworded = await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'Run the checks again, please.', clientRequestId: 'third' })
+        }
+        if (input.threadId === third) seen.otherSender = await call(mcp!, 'thread_send', { threadId: w.other.id, content: 'Run the checks.' })
+        return 'ok'
+      })
+      third = w.thread('Third').id
+      await w.attach()
+      await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
+      const first = parse(seen.first) as { runId: string; delivery: string }
+      expect(first.delivery).toBe('started')
+      expect(seen.repeat.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'duplicate_message', retryAfterMs: expect.any(Number) } })
+      expect(seen.repeat.error!.data!.retryAfterMs as number).toBeGreaterThan(0)
+      expect(seen.repeat.error!.data!.retryAfterMs as number).toBeLessThanOrEqual(AGENT_REPEAT_WINDOW_MS)
+      expect(parse(seen.retry)).toMatchObject({ runId: first.runId, replayed: true })
+      expect(seen.reworded.error).toBeUndefined()
+      await w.d.orch.send(GO, false, { threadId: third, clientRequestId: 'go-third' })
+      expect(seen.otherSender.error).toBeUndefined()
+      // The repeated words reached the other thread's model once from the parent: its first message, and the reworded one.
+      await waitFor(() => w.d.engine.listRuns(w.other.id).every((run) => run.status === 'completed') && w.turnsOf(w.other.id).length === 3, 'the other thread\'s turns')
+      const fromParent = w.turnsOf(w.other.id).filter((turn) => String(turn.prompt).includes(`(${w.parent.id})`))
+      expect(fromParent.map((turn) => String(turn.prompt).includes('Run the checks.\n'))).toEqual([true, false])
     })
 
     it('an agent\'s own Stop of a run leaves the messages other agents queued on that thread', async () => {
@@ -763,7 +829,8 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       expect(personTurn.fromAgent).toBeUndefined()
       expect(originOf(w.messages(w.other.id)).map((origin) => origin?.threadId)).toContain(w.parent.id)
       // Every message of the thread that carries the agent's origin is the agent's text, never a person's.
-      for (const message of w.messages(w.other.id).filter((entry) => entry.role === 'user' && entry.origin)) expect(message.content).toContain('also drop the tables')
+      // The turn never read the steer: it ran as a turn of its own, still showing only the agent's words.
+      for (const message of w.messages(w.other.id).filter((entry) => entry.role === 'user' && entry.origin)) expect(agentMessageWords(message.content, message.origin)).toBe('also drop the tables')
       expect(w.messages(w.other.id).filter((entry) => entry.role === 'user' && !entry.origin).every((entry) => !entry.content.includes('drop the tables'))).toBe(true)
     })
 
@@ -771,11 +838,14 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       const w = asks(async () => 'ok')
       await w.attach()
       const orch = w.d.orch as unknown as { enqueueLateSteer(threadId: string, text: string, carried: undefined, notice: undefined, runId: undefined, origin: unknown, mode: string): void }
-      const origin = { kind: 'agent', threadId: w.parent.id, runId: 'run:of-the-sender', hops: 1 }
-      orch.enqueueLateSteer(w.other.id, agentMessageText(w.parent.id, 'Parent', 'late guidance'), undefined, undefined, undefined, origin, 'ask')
+      const letter = agentMessage(w.parent.id, 'Parent', 'late guidance')
+      const origin = { kind: 'agent', threadId: w.parent.id, runId: 'run:of-the-sender', hops: 1, title: 'Parent', body: { head: letter.head, tail: letter.tail } }
+      orch.enqueueLateSteer(w.other.id, letter.text, undefined, undefined, undefined, origin, 'ask')
       await waitFor(() => w.turnsOf(w.other.id).length === 1, 'the late steer to run')
       expect(w.turnsOf(w.other.id)[0]).toMatchObject({ permissionMode: 'ask', fromAgent: true })
-      expect(w.messages(w.other.id).find((message) => message.origin)?.origin).toMatchObject({ kind: 'agent', threadId: w.parent.id })
+      const stored = w.messages(w.other.id).find((message) => message.origin)!
+      expect(stored.origin).toEqual(origin)
+      expect(agentMessageWords(stored.content, stored.origin)).toBe('late guidance')
     })
 
     it('a narrowed turn that queues a message on its own thread queues it narrowed: it runs `ask`, though the thread is `full`', async () => {

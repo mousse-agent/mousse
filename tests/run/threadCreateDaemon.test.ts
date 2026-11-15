@@ -14,7 +14,9 @@ import { readAgentThreadReceipt } from '../../src/mms/orchestrator/agentThreadIn
 import { findUnstartedThread, isThreadStarted } from '../../src/shared/threadTitle'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/harness/drivers/claudeCode/adapter'
 import type { AdapterHost, ProviderAdapter, ProviderCapabilities, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/harness/adapter'
-import { agentMessageText, TURN_TOKEN_KEY, type AgentCreatedThread } from '../../src/mms/run/mcp/appTools'
+import { AGENT_MESSAGE_PREFIX, agentMessageText, TURN_TOKEN_KEY, type AgentCreatedThread } from '../../src/mms/run/mcp/appTools'
+import { agentMessageWords } from '../../src/shared/agentMessageWords'
+import { heuristicTitle } from '../../src/shared/threadTitleText'
 import { THREAD_CREATE_MAX_ACTIVE_PER_THREAD, THREAD_CREATE_MAX_PER_RUN } from '../../src/mms/run/mcp/appTools/thread'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
 import { MCP_ERROR_CODES, MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
@@ -230,6 +232,8 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       expect(w.messages(w.parent.id).filter((message) => message.role === 'system').map((message) => message.content)).toEqual([
         `Created thread «Audit the logs» (${made.id}) in project ${w.project.id}: claude / vendor-model, ask mode, the project folder.`
       ])
+      // Stored with the thread it started, which the transcript draws as a chip that opens it.
+      expect(w.messages(w.parent.id).find((message) => message.role === 'system')?.launchedThread).toEqual({ threadId: made.id, summary: 'claude / vendor-model, ask mode, the project folder' })
       // Nothing ran: no first message was asked for.
       expect(w.d.engine.listRuns(made.id)).toEqual([])
     })
@@ -437,6 +441,25 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       // The marker says a message came with it, and the send has its own audit event.
       expect(w.marker(seen.fromAsk.threadId)[0].payload).toMatchObject({ hasFirstMessage: true })
       expect(w.events(seen.fromAsk.threadId, 'agent.action').map((event) => (event.payload as { action: string }).action)).toEqual(['created_thread', 'sent_message'])
+    })
+
+    it('names the new thread and its branch from the creator\'s words, never from the label Mousse wrote around them', async () => {
+      const seen: Record<string, AgentCreatedThread> = {}
+      const w = world(async (input, mcp) => {
+        if (input.threadId === w.parent.id) seen.made = parse<AgentCreatedThread>(await call(mcp!, 'thread_create', { projectId: w.repo.id, firstMessage: 'Fix the login redirect', clientRequestId: 'named' }))
+        return 'ok'
+      })
+      await w.attach()
+      await w.run(w.parent.id, GO, 'go')
+      const runId = (seen.made.firstMessage as { runId: string }).runId
+      await waitFor(() => w.d.engine.getRun(runId)?.status === 'completed', 'the first run')
+      const stored = w.messages(seen.made.threadId).find((message) => message.role === 'user')!
+      expect(stored.content.startsWith(AGENT_MESSAGE_PREFIX)).toBe(true)
+      expect(agentMessageWords(stored.content, stored.origin)).toBe('Fix the login redirect')
+      // The title Mousse gives a thread from its first message, and the worktree's branch, come from the words alone.
+      expect(w.d.store.getThread(seen.made.threadId)?.name).toBe(heuristicTitle('Fix the login redirect'))
+      const branches = execFileSync('git', ['branch', '--list', 'mousse/*', '--format=%(refname:short)'], { cwd: join(home!, 'repo'), encoding: 'utf8' }).split('\n').filter(Boolean)
+      expect(branches).toEqual([expect.stringMatching(/^mousse\/fix-the-login-redirect/)])
     })
 
     it('an agent message in a row counts: a creation at the hop limit is refused before anything is made, and so is one from a run that carries on that chain', async () => {

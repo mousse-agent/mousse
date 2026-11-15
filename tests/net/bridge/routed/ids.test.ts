@@ -84,6 +84,28 @@ describe('qualified ids', () => {
     expect(away.thread.startedFrom.projectId).toBe(`${third}:p9`)
   })
 
+  it('leaves the sender of a message from an agent on another computer as it was written, on every computer', () => {
+    const sender = newId('node')
+    const origin = { kind: 'agent', from: { node: sender, thread: 'sender-thread', run: 'sender-run', title: 'Planner' }, hops: 1 }
+    const message = { message: { id: 'm', role: 'user', content: 'hi', origin } }
+    // Read on the sender's own computer, the ids are its own plain ids; read on a third computer, `node` says whose.
+    for (const self of [sender, newId('node')]) {
+      const out = qualifyRoutedEvent('thread.message', message, { node: NODE, self }) as typeof message
+      expect(out.message.origin).toEqual(origin)
+    }
+    // Why the sender is never kept in `threadId`: a foreign id there is taken for the owner's and rewritten to a thread
+    // that does not exist.
+    const wrong = qualifyRoutedEvent('thread.message', { message: { origin: { kind: 'agent', threadId: 'sender-thread' } } }, { node: NODE, self: sender }) as { message: { origin: { threadId: string } } }
+    expect(wrong.message.origin.threadId).toBe(`${NODE}:sender-thread`)
+    // A thread an agent there started names that agent's thread by its own id too.
+    const started = qualifyRoutedResult(
+      'threads.get',
+      { thread: { id: 't1', startedFrom: { node: sender, agent: { thread: 'sender-thread', title: 'Planner', mode: 'ask' } } } },
+      { node: NODE, self: sender }
+    ) as { thread: { startedFrom: { agent: { thread: string } } } }
+    expect(started.thread.startedFrom.agent.thread).toBe('sender-thread')
+  })
+
   it('qualifies the thread and project references in a message', () => {
     const data = encodeURIComponent(JSON.stringify([{ id: 'r', kind: 'thread', title: 'T', threadId: 'abc', projectId: 'def' }]))
     const content = `look\n[Mousse references data="${data}"]\n- thread: "T"\n  Thread ID: abc\n  Project ID: def\n[/Mousse references]`

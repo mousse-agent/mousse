@@ -226,6 +226,17 @@ function qualifyStartedFrom(value: Record<string, unknown>, context: QualifyCont
   return { ...value, startedFrom: { ...startedFrom, projectId: qualifyId(origin, startedFrom.projectId) } }
 }
 
+/**
+ * The sender of a message an agent on another computer sent (`AgentOrigin.from { node, thread, run, title }`) names that
+ * computer's thread and run by its own ids. They are never rewritten: unchanged on every computer, so on the computer
+ * named by `node` they are its own plain ids, and anywhere else `node` says whose they are. An agent origin from another
+ * computer never carries `threadId` (a foreign id there would be qualified with the owner and name a thread that does not
+ * exist), so the walk does not enter `from`.
+ */
+function isRemoteAgentFrom(parent: Record<string, unknown>, key: string, inner: unknown): boolean {
+  return key === 'from' && parent.kind === 'agent' && isRecord(inner) && typeof inner.node === 'string'
+}
+
 /** Keys whose objects are threads or projects, so that their `id` is an id of one. */
 const ID_OBJECT_KEYS: Readonly<Record<string, 'thread' | 'project'>> = {
   thread: 'thread',
@@ -261,6 +272,7 @@ function walk(value: unknown, context: QualifyContext, depth: number): unknown {
       continue
     }
     if (key === 'startedFrom') continue
+    if (isRemoteAgentFrom(value, key, inner)) continue
     // A reference to a thread or project is identified `thread:<id>` / `project:<id>`.
     if (key === 'reference' && isRecord(inner) && typeof inner.id === 'string') {
       const found = /^(thread|project):(.+)$/.exec(inner.id)

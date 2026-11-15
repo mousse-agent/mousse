@@ -314,6 +314,18 @@ describe('ThreadMessageQueue domain', () => {
       .toEqual({ kind: 'schedule', jobId: 'job-1', occurrenceKey: 'k' })
   })
 
+  it('keeps an agent origin with where its words are and its sender\'s title through a save and load, and drops malformed lengths', () => {
+    const origin = { kind: 'agent' as const, threadId: 'sender', runId: 'run-s', hops: 2, title: 'Fix flaky test', body: { head: 40, tail: 32 } }
+    const queued = enqueueMessage([], { threadId: 't1', content: 'x'.repeat(100), source: 'mcp', origin }).items
+    expect(normalizeQueuedMessages(JSON.parse(JSON.stringify(queued)), 't1')[0].origin).toEqual(origin)
+
+    const base = { id: 'a', threadId: 't1', content: 'x', enqueuedAt: '2020-01-01T00:00:00.000Z', order: 0, intent: 'normal', state: 'pending' }
+    // Lengths that are not whole numbers of characters are dropped: the message then shows whole, still the agent's.
+    for (const body of [{ head: -1, tail: 2 }, { head: 1.5, tail: 2 }, { head: 1 }, 'head', null])
+      expect(normalizeQueuedMessages([{ ...base, origin: { kind: 'agent', threadId: 'sender', runId: 'run-s', title: 7, body } }], 't1')[0].origin)
+        .toEqual({ kind: 'agent', threadId: 'sender', runId: 'run-s' })
+  })
+
   it('reclaims only abandoned claims; protects live unaccepted owners', () => {
     let items = enqueueMessage([], { threadId: 't1', content: 'dead-owner' }).items
     items = enqueueMessage(items, { threadId: 't1', content: 'live-owner' }).items

@@ -166,6 +166,16 @@ export class RoutedClient {
     return { outdated: false, version }
   }
 
+  /**
+   * The versions `node` advertises, read like a call: a computer that cannot be asked fails with what a person would
+   * see (offline, outdated), never with a bare transport error.
+   */
+  async versionsOrRefusal(node: NodeId): Promise<Record<string, number> | undefined> {
+    const computer = this.deps.computer(node)
+    const session = this.sessionOrOffline(node, computer)
+    return this.guard(node, session, computer, () => this.versions(node, session))
+  }
+
   /** Runs one routed row on `node` and returns its result, or throws what the person should see. */
   async call(
     node: NodeId,

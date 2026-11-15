@@ -14,10 +14,12 @@ import { readDurableQueue } from '../../src/mms/queue/durableQueue'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/harness/drivers/claudeCode/adapter'
 import type { AdapterHost, ProviderAdapter, ProviderCapabilities, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/harness/adapter'
 import { AGENT_MESSAGE_PREFIX, agentMessageText, TURN_TOKEN_KEY } from '../../src/mms/run/mcp/appTools'
+import { AGENT_QUEUE_MAX_PER_SENDER, AGENT_QUEUE_MAX_PER_THREAD } from '../../src/mms/run/mcp/appTools/thread'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
 import { MCP_ERROR_CODES, MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
 import type { ChatMessage, QueuedMessage } from '../../src/shared/types'
+import { agentMessageWords } from '../../src/shared/agentMessageWords'
 import type { PermissionMode } from '../../src/shared/permissionMode'
 import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
 
@@ -410,7 +412,9 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       d2.orch.recoverQueueCommandsOnBoot()
       // Finished by the boot, from the entry alone: the edit is in the file, with who made it and the limit it carries.
       const recovered = readDurableQueue(d2.store, w.other.id).find((item) => item.id === b.id)!
-      expect(recovered).toMatchObject({ content: agentMessageText(w.parent.id, 'Parent', 'b, rewritten'), origin: { kind: 'agent', threadId: w.parent.id }, permissionMode: 'ask' })
+      expect(recovered).toMatchObject({ content: agentMessageText(w.parent.id, 'Parent', 'b, rewritten'), origin: { kind: 'agent', threadId: w.parent.id, title: 'Parent' }, permissionMode: 'ask' })
+      // The edit's origin says where the agent's words are, so the chat shows them without the label.
+      expect(agentMessageWords(recovered.content, recovered.origin)).toBe('b, rewritten')
       expect(d2.engine.store.db.statement("SELECT status FROM queue_commands WHERE command_key = 'queue_edit:caller:2'").get()).toEqual({ status: 'applied' })
 
       // The retries, with other arguments, return what the commands did; neither changes the queue again.
@@ -499,6 +503,7 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       const queued = w.queue(target.id).find((item) => item.id === ids.item)!
       expect(queued).toMatchObject({ source: 'mcp', permissionMode: 'ask', origin: { kind: 'agent', threadId: askCaller.id, hops: 1 } })
       expect(queued.content).toBe(agentMessageText(askCaller.id, 'Ask caller', 'run the migration'))
+      expect(agentMessageWords(queued.content, queued.origin)).toBe('run the migration')
 
       // A person's new words make it the person's message: no agent origin (so no hop, no hold, no clearing by a Stop), but the
       // limit it carried stays.
@@ -514,7 +519,8 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       const rewritten = w.queue(target.id).find((item) => item.id === ids.item)!
       // The words are the full-mode agent's now, said so on the message; the limit is the stricter of the two, and it only tightens.
       expect(rewritten.content).toBe(agentMessageText(fullCaller.id, 'Full caller', 'run the migration, and drop the old tables'))
-      expect(rewritten).toMatchObject({ permissionMode: 'ask', origin: { kind: 'agent', threadId: fullCaller.id, hops: 1 } })
+      expect(rewritten).toMatchObject({ permissionMode: 'ask', origin: { kind: 'agent', threadId: fullCaller.id, hops: 1, title: 'Full caller' } })
+      expect(agentMessageWords(rewritten.content, rewritten.origin)).toBe('run the migration, and drop the old tables')
       // The plan turn is still a plan turn from the ask agent; the reorder changed the order and nothing else.
       expect(w.queue(target.id).map((item) => item.id)).toEqual([ids.plan, ids.item])
       expect(w.queue(target.id)[0]).toMatchObject({ mode: 'plan', permissionMode: 'ask', origin: { kind: 'agent', threadId: askCaller.id } })
@@ -748,7 +754,8 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
         })
         const { w, fullCaller, askTarget } = r
         // A message an agent queued (limit `ask`) and a plain steer a person typed into the same turn.
-        ids.item = w.d.orch.enqueueForThread(askTarget.id, { content: 'written by an agent' }, { source: 'mcp', permissionMode: 'ask', origin: { kind: 'agent', threadId: fullCaller.id, runId: 'run:full', hops: 1 } }).id
+        const sender = { kind: 'agent' as const, threadId: fullCaller.id, runId: 'run:full', hops: 1, title: 'Full caller', body: { head: 0, tail: 0 } }
+        ids.item = w.d.orch.enqueueForThread(askTarget.id, { content: 'written by an agent' }, { source: 'mcp', permissionMode: 'ask', origin: sender }).id
         await w.d.orch.send(GO, false, { threadId: fullCaller.id, clientRequestId: 'go-full' })
         expect(parse(seen.promote)).toMatchObject({ outcome: 'promoted' })
         expect(w.d.orch.steerThread(askTarget.id, 'and a person\'s own steer')).toBe(true)
@@ -760,7 +767,8 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
         expect(followUps.map((turn) => turn.prompt).sort()).toEqual(['and a person\'s own steer', 'written by an agent'].sort())
         const agentTurn = followUps.find((turn) => turn.prompt === 'written by an agent')!
         expect(agentTurn).toMatchObject({ permissionMode: 'ask', fromAgent: true })
-        expect(w.messages(askTarget.id).filter((message) => message.origin && !message.steered).map((message) => message.origin)).toEqual([expect.objectContaining({ threadId: fullCaller.id })])
+        // Its origin is the one it was queued with, where its words are and its sender's title included.
+        expect(w.messages(askTarget.id).filter((message) => message.origin && !message.steered).map((message) => message.origin)).toEqual([sender])
         expect(w.turnsOf(askTarget.id).filter((turn) => turn.prompt === 'written by an agent')).toHaveLength(1)
         await w.d.stop()
         for (const stop of stops.splice(0).reverse()) await stop().catch(() => undefined)
@@ -819,7 +827,7 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       return sent.runId
     }
 
-    it('carries the writing run\'s hop count and mode limit, counts in the cap of three, waits behind a usage pause, and runs as an agent\'s run; an agent at its hop limit cannot start a fresh chain through its own queue', async () => {
+    it('carries the writing run\'s hop count and mode limit, counts in its sender\'s cap of three, waits behind a usage pause, and runs as an agent\'s run; an agent at its hop limit cannot start a fresh chain through its own queue', async () => {
       const w = world(async () => 'ok')
       await w.attach()
       const writer = agentRun(w, 2)
@@ -834,8 +842,8 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       expect(() => enqueue('one hop too many', 'k5', third.runId)).toThrow(expect.objectContaining({ code: 'agent_hops_exceeded' }))
       enqueue('second note', 'k2')
       enqueue('third note', 'k3')
-      // The cap of three queued agent messages counts them, whoever's thread they are on.
-      expect(() => enqueue('fourth note', 'k4')).toThrow(expect.objectContaining({ code: 'agent_queue_full' }))
+      // The cap of three queued messages per sending thread counts them, whoever's thread they are on.
+      expect(() => enqueue('fourth note', 'k4')).toThrow(expect.objectContaining({ code: 'agent_queue_full_per_sender' }))
       expect(w.queue(w.other.id).map((item) => item.content)).toEqual(['note to myself', 'second note', 'third note'])
 
       // Behind a usage pause only a person's message goes on: the notes wait, and the pause stays.
@@ -1195,7 +1203,7 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
   })
 
   describe('limits on what agents put in a thread\'s queue (the caps of thread_send)', () => {
-    it('a thread keeps three queued messages from agents, whether they were sent or queued: the fourth is refused, and so is an edit that would make a person\'s message the fourth; a person\'s Stop clears them', async () => {
+    it('a thread keeps three queued messages from each sending thread, whether they were sent or queued: the fourth is refused, and so is an edit that would make a person\'s message the fourth; a person\'s Stop clears them', async () => {
       const release = deferred()
       const seen: Response[] = []
       const ids: Record<string, string> = {}
@@ -1216,8 +1224,8 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       ids.typed = w.typed(w.other.id, 'a note I typed').id
       await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
       expect(seen.slice(0, 3).map(verdict)).toEqual(['ok', 'ok', 'ok'])
-      expect(seen[3].error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'agent_queue_full' } })
-      expect(seen[4].error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'agent_queue_full' } })
+      expect(seen[3].error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'agent_queue_full_per_sender' } })
+      expect(seen[4].error).toMatchObject({ code: MCP_ERROR_CODES.mousse_conflict, data: { conflict: 'agent_queue_full_per_sender' } })
       expect(w.queue(w.other.id).map((item) => item.origin?.kind)).toEqual([undefined, 'agent', 'agent', 'agent'])
       expect(w.queue(w.other.id)[0].content).toBe('a note I typed')
 
@@ -1225,6 +1233,35 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       await w.d.orch.stopThread(w.other.id, 'user')
       await waitFor(() => w.queue(w.other.id).every((item) => item.origin === undefined), 'the agent messages to be cleared')
       expect(w.queue(w.other.id).map((item) => item.content)).toEqual(['a note I typed'])
+      release.resolve()
+    })
+
+    it(`a thread keeps ${AGENT_QUEUE_MAX_PER_THREAD} queued messages from all agents together: past it every sender is refused, a person is not`, async () => {
+      const release = deferred()
+      const w = world(async (input, _mcp, _d, adapter) => {
+        if (input.prompt === 'hold') await adapter.hold(input, release.promise)
+        return 'ok'
+      })
+      await w.attach()
+      await w.d.orch.send('hold', false, { threadId: w.other.id, clientRequestId: 'hold', awaitMode: 'ack' })
+      await waitFor(() => w.turnsOf(w.other.id).length === 1, 'the held turn')
+      const host = w.d.orch.mcpToolHost()
+      // Enough sending threads to reach the total with none of them past its own cap.
+      const senders = Array.from({ length: Math.ceil(AGENT_QUEUE_MAX_PER_THREAD / AGENT_QUEUE_MAX_PER_SENDER) + 1 }, (_, index) => {
+        const sender = w.thread(`Sender ${index}`)
+        return { kind: 'agent' as const, threadId: sender.id, runId: w.d.engine.store.createRun({ threadId: sender.id, source: 'gui' }).runId, toolCallId: 'mcp:t' }
+      })
+      const enqueue = (actor: (typeof senders)[number], key: string) => () => host.queueCommand!(w.other.id, { op: 'enqueue', content: key, mode: 'agent' }, { clientRequestId: key, actor })
+      let queued = 0
+      for (const [index, actor] of senders.entries())
+        for (let note = 0; note < AGENT_QUEUE_MAX_PER_SENDER && queued < AGENT_QUEUE_MAX_PER_THREAD; note += 1, queued += 1) enqueue(actor, `s${index}-n${note}`)()
+      expect(w.queue(w.other.id)).toHaveLength(AGENT_QUEUE_MAX_PER_THREAD)
+      // The last sender has room under its own cap, yet the thread is full; the first sender is past its own cap first.
+      expect(enqueue(senders.at(-1)!, 'one more')).toThrow(expect.objectContaining({ code: 'agent_queue_full' }))
+      expect(enqueue(senders[0], 'and another')).toThrow(expect.objectContaining({ code: 'agent_queue_full_per_sender' }))
+      // A person's message is never held to the agents' caps.
+      w.typed(w.other.id, 'a note I typed')
+      expect(w.queue(w.other.id)).toHaveLength(AGENT_QUEUE_MAX_PER_THREAD + 1)
       release.resolve()
     })
 

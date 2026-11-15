@@ -1543,7 +1543,9 @@ export function registerGuiIpc(
       if (!turnCurrent && (status.turnState ? turnBehind(held, status.turnState, status.turnHeld) : isTurnStoppable(held) !== serviceActive)) behind.push('turn-differs')
       if (!turnCurrent && !statusCurrent && shownActive && !serviceActive && status.activity !== undefined && !isThreadActivityActive(status.activity as ThreadActivityState)) behind.push('ended')
       if (!behind.length) {
-        if (reasons.includes('quiet')) linkLog.write('check.running', { window: senderId, thread: activeId, reasons, phase: status.turnState?.phase ?? null, newer: turnCurrent || undefined })
+        // The thread's activity tells a turn that is running, or a finished turn whose thread still works (its
+        // subagents, a checkpoint), from a window that shows Working the service does not.
+        if (reasons.includes('quiet')) linkLog.write('check.running', { window: senderId, thread: activeId, reasons, phase: status.turnState?.phase ?? null, activity: status.activity ?? null, shown: activityTrackerFor(binding.profileId).getState(activeId) ?? 'idle', newer: turnCurrent || undefined })
         return
       }
       linkLog.write('check.behind', { window: senderId, thread: activeId, reasons, found: behind, shown: held?.phase ?? null, service: status.turnState?.phase ?? null })

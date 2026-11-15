@@ -12,6 +12,7 @@ import type {
 import { normalizeChatMode } from '../../shared/chatMode'
 import { isPermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import { WORKFLOW_UUID_PATTERN } from '../../shared/workflows'
+import { readSettleNotice, type SettleNoticeItem } from '../../shared/settleNotice'
 
 export interface EnqueueMessageInput {
   /**
@@ -36,6 +37,9 @@ export interface EnqueueMessageInput {
   runId?: string
   inboxIds?: string[]
   subagentNotice?: QueuedMessage['subagentNotice']
+  settleNotice?: SettleNoticeItem[]
+  settleHops?: number
+  heldNotice?: boolean
   stopGeneration?: number
   permissionMode?: PermissionMode
   origin?: QueuedMessage['origin']
@@ -110,7 +114,7 @@ export function queueRevision(items: QueuedMessage[]): string {
       item.state,
       item.mode ?? null,
       item.permissionMode ?? null,
-      item.origin?.kind === 'agent' ? `agent:${item.origin.threadId}` : item.origin?.kind ?? null,
+      item.origin?.kind === 'agent' ? `agent:${item.origin.from ? `${item.origin.from.node}:${item.origin.from.thread}` : item.origin.threadId}` : item.origin?.kind ?? null,
       createHash('sha256').update(item.content).digest('hex')
     ])
   return createHash('sha256').update(JSON.stringify(rows)).digest('hex').slice(0, 16)
@@ -163,8 +167,26 @@ function normalizeOrigin(raw: unknown): QueuedMessage['origin'] {
   const kind = (raw as { kind?: unknown }).kind
   if (kind === 'agent') {
     const agent = raw as Partial<AgentOrigin>
+    const hops = typeof agent.hops === 'number' && Number.isSafeInteger(agent.hops) && agent.hops >= 0 ? { hops: agent.hops } : {}
+    const body = agent.body
+    const validBody = typeof body === 'object' && body !== null && [body.head, body.tail].every((length) => Number.isSafeInteger(length) && length >= 0)
+    const words = validBody ? { body: { head: body.head, tail: body.tail } } : {}
+    // A sender on another computer: its computer, its ids there and its title, kept as they were written.
+    const from = agent.from as Partial<NonNullable<AgentOrigin['from']>> | undefined
+    if (from && typeof from === 'object') {
+      const fields = [from.node, from.thread, from.run] as unknown[]
+      if (!fields.every((value) => typeof value === 'string' && value) || typeof from.title !== 'string') return undefined
+      return { kind: 'agent', from: { node: from.node!, thread: from.thread!, run: from.run!, title: from.title }, ...hops, ...words }
+    }
     if (typeof agent.threadId !== 'string' || !agent.threadId || typeof agent.runId !== 'string' || !agent.runId) return undefined
-    return { kind: 'agent', threadId: agent.threadId, runId: agent.runId, ...(typeof agent.hops === 'number' && Number.isSafeInteger(agent.hops) && agent.hops >= 0 ? { hops: agent.hops } : {}) }
+    return {
+      kind: 'agent',
+      threadId: agent.threadId,
+      runId: agent.runId,
+      ...hops,
+      ...words,
+      ...(typeof agent.title === 'string' && agent.title ? { title: agent.title } : {})
+    }
   }
   const origin = raw as Partial<Extract<NonNullable<QueuedMessage['origin']>, { kind: 'schedule' }>>
   if (origin.kind !== 'schedule') return undefined
@@ -232,6 +254,9 @@ export function normalizeQueuedMessages(raw: unknown, threadId?: string): Queued
       ...(typeof item.continuationOfRunId === 'string' && item.continuationOfRunId ? { continuationOfRunId: item.continuationOfRunId } : {}),
       ...(Array.isArray(item.inboxIds) && item.inboxIds.length && item.inboxIds.every((id) => typeof id === 'string') ? { inboxIds: item.inboxIds } : {}),
       ...(Array.isArray(item.subagentNotice) && item.subagentNotice.length ? { subagentNotice: item.subagentNotice } : {}),
+      ...(readSettleNotice(item.settleNotice) ? { settleNotice: readSettleNotice(item.settleNotice) } : {}),
+      ...(typeof item.settleHops === 'number' && Number.isSafeInteger(item.settleHops) && item.settleHops >= 0 ? { settleHops: item.settleHops } : {}),
+      ...(item.heldNotice === true && state === 'pending' ? { heldNotice: true as const } : {}),
       ...(typeof item.stopGeneration === 'number' && Number.isSafeInteger(item.stopGeneration) && item.stopGeneration >= 0 ? { stopGeneration: item.stopGeneration } : {}),
       ...(item.heldAfterStop === true ? { heldAfterStop: true as const } : {}),
       ...(item.waitsForLease === true && state === 'pending' && intent === 'normal' ? { waitsForLease: true as const } : {}),
@@ -349,6 +374,8 @@ export function enqueueMessage(
     ...(input.continuationOfRunId ? { continuationOfRunId: input.continuationOfRunId } : {}),
     ...(input.inboxIds?.length ? { inboxIds: input.inboxIds } : {}),
     ...(input.subagentNotice?.length ? { subagentNotice: input.subagentNotice } : {}),
+    ...(input.settleNotice?.length ? { settleNotice: input.settleNotice, settleHops: input.settleHops ?? 0 } : {}),
+    ...(input.settleNotice?.length && input.heldNotice ? { heldNotice: true as const } : {}),
     ...(input.stopGeneration !== undefined ? { stopGeneration: input.stopGeneration } : {}),
     ...(input.permissionMode ? { permissionMode: input.permissionMode } : {}),
     ...(input.sentFrom ? { sentFrom: input.sentFrom } : {}),
@@ -541,8 +568,9 @@ export function claimNextNormal(
   owner: ClaimOwnerInput
 ): { items: QueuedMessage[]; claimed: QueuedMessage | null } {
   const pending = listPendingQueue(items)
+  // A held settle notice never starts a turn by itself (`QueuedMessage.heldNotice`).
   const next =
-    pending.find((item) => item.intent === 'normal' && item.state === 'pending') ?? null
+    pending.find((item) => item.intent === 'normal' && item.state === 'pending' && !item.heldNotice) ?? null
   if (!next) return { items: sortQueue(items), claimed: null }
 
   const claim: QueuedMessageClaim = {
@@ -765,6 +793,84 @@ export function releaseStopHold(items: QueuedMessage[]): QueuedMessage[] {
     const { heldAfterStop: _held, ...rest } = item
     return rest
   })
+}
+
+/** A settle notice to deliver through a thread's queue (`mergeSettleNotice`). */
+export interface SettleNoticeInput {
+  threadId: string
+  item: SettleNoticeItem
+  /** What the model reads for this notice. */
+  text: string
+  /** The watched run's count of agent messages in a row. */
+  hops: number
+  mode?: ChatMode
+  /** It must not start a turn by itself (`QueuedMessage.heldNotice`). */
+  held: boolean
+}
+
+/** The key of a notice: one watch writes each event once. */
+function settleKey(item: Pick<SettleNoticeItem, 'watchId' | 'event'>): string {
+  return `${item.watchId}:${item.event}`
+}
+
+/** Whether the queue already carries the notice (a delivery repeated after a restart). */
+export function queueHasSettleNotice(items: readonly QueuedMessage[], item: Pick<SettleNoticeItem, 'watchId' | 'event'>): boolean {
+  const key = settleKey(item)
+  return items.some((entry) => entry.settleNotice?.some((notice) => settleKey(notice) === key))
+}
+
+/**
+ * Puts a settle notice in a thread's queue. Notices that arrive while one waits are delivered as one: a notice joins the
+ * waiting notice item (pending, not yet claimed), whose turn then carries the larger count of agent messages in a row,
+ * and which is held only while every notice in it is. Otherwise the notice is an item of its own at the back of the
+ * queue. A notice the queue already carries changes nothing. `merged` is the item that carries it.
+ */
+export function mergeSettleNotice(items: QueuedMessage[], input: SettleNoticeInput): { items: QueuedMessage[]; item: QueuedMessage; changed: boolean } {
+  const key = settleKey(input.item)
+  const carrying = items.find((entry) => entry.settleNotice?.some((notice) => settleKey(notice) === key))
+  if (carrying) return { items, item: carrying, changed: false }
+  const waiting = items.find((entry) => entry.settleNotice?.length && entry.state === 'pending' && entry.intent === 'normal')
+  if (!waiting) {
+    const made = enqueueMessage(items, {
+      threadId: input.threadId,
+      content: input.text,
+      mode: input.mode,
+      source: SETTLE_NOTICE_SOURCE,
+      settleNotice: [input.item],
+      settleHops: input.hops,
+      heldNotice: input.held
+    })
+    return { ...made, changed: true }
+  }
+  const { heldNotice: _held, ...rest } = waiting
+  const joined: QueuedMessage = {
+    ...rest,
+    content: `${waiting.content}\n\n${input.text}`,
+    settleNotice: [...(waiting.settleNotice ?? []), input.item],
+    settleHops: Math.max(waiting.settleHops ?? 0, input.hops),
+    ...(waiting.heldNotice && input.held ? { heldNotice: true as const } : {})
+  }
+  return { items: items.map((entry) => (entry.id === waiting.id ? joined : entry)), item: joined, changed: true }
+}
+
+/** The source of a queue item, and of the turn it starts, that delivers settle notices. */
+export const SETTLE_NOTICE_SOURCE = 'thread-notice'
+
+/** Held settle notices go on: each runs after the turn that is starting, as a turn of its own. */
+export function releaseHeldNotices(items: QueuedMessage[]): QueuedMessage[] {
+  if (!items.some((item) => item.heldNotice)) return items
+  return items.map((item) => {
+    if (!item.heldNotice) return item
+    const { heldNotice: _held, ...rest } = item
+    return rest
+  })
+}
+
+/** Takes the held settle notices out of the queue: their texts and what is left (`continue_subagent` carries them). */
+export function takeHeldNotices(items: QueuedMessage[]): { items: QueuedMessage[]; taken: QueuedMessage[] } {
+  const taken = items.filter((item) => item.heldNotice && item.state === 'pending')
+  if (taken.length === 0) return { items, taken }
+  return { items: items.filter((item) => !taken.includes(item)), taken }
 }
 
 /** Whether a Stop holds the queue: some waiting item is still marked `heldAfterStop`. */

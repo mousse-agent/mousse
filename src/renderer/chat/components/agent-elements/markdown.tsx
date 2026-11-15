@@ -9,7 +9,8 @@ import { MessageImage } from "./message-image";
 import { codeHighlighter } from "./code-highlighter";
 import { codeBlockPre } from "./code-block";
 import { classifyLink, routeLink, safeMarkdownUrl } from "../../../utils/chatLinks";
-import { LinkLabel } from "./link-label-view";
+import { LinkLabel, threadLinkLabel } from "./link-label-view";
+import { ThreadChip } from "../../../components/ThreadChip";
 import { THREAD_LINK_PREFIX } from "../../../../shared/threadLink";
 import { copyMathAsTex } from "../../../markdown/math/copyMathAsTex";
 import {
@@ -47,8 +48,11 @@ export function restoreMousseHref(href: string): string {
   return href;
 }
 
-/** A thread address: in a link's target, as `<…>`, inside a link's text (`[`), or bare in prose. */
-const THREAD_ADDRESS = /(\]\(\s*<?|<|\[)?mousse:\/\/thread\/([A-Za-z0-9_-]+)\/?(>)?/gi;
+/**
+ * A thread address: in a link's target, as `<…>`, inside a link's text (`[`), or bare in prose. The id may be a thread of
+ * another computer, `<node>:<id>`.
+ */
+const THREAD_ADDRESS = /(\]\(\s*<?|<|\[)?mousse:\/\/thread\/([A-Za-z0-9_-]+(?::[A-Za-z0-9_-]+)?)\/?(>)?/gi;
 
 /**
  * A thread's address (`mousse://thread/<id>`) becomes a link to the thread's marker, which the anchor restores: in a
@@ -432,7 +436,10 @@ const markdownComponents: Components = {
   a: ({ href, children, ...props }) => {
     if (!href) return <span>{children}</span>;
     const routedHref = restoreMousseHref(href);
-    if (classifyLink(routedHref).kind === "reject") return <span>{children}</span>;
+    const route = classifyLink(routedHref);
+    if (route.kind === "reject") return <span>{children}</span>;
+    // A thread link is a chip with the thread's title (or the link's own text) and its live status.
+    if (route.kind === "thread") return <ThreadChip threadId={route.threadId} label={threadLinkLabel(routedHref, children)} />;
     return (
       <a
         {...props}
@@ -531,7 +538,49 @@ function markImageSources(node: Root | Element): void {
 
 /** Runs after raw HTML is parsed and before it is sanitized, so HTML images are marked like Markdown ones. */
 const markImages = () => markImageSources;
-const imageRulePlugins = [defaultRehypePlugins.raw!, markImages, defaultRehypePlugins.sanitize!, defaultRehypePlugins.harden!];
+
+/** The tags the sanitizer keeps; any other tag would be dropped from the text. */
+const KEPT_TAGS = new Set(
+  ((defaultRehypePlugins.sanitize as unknown as [unknown, { tagNames?: string[] }])[1].tagNames ?? []).map((name) => name.toLowerCase()),
+);
+/** One HTML open, close or self-closing tag, as Markdown reads raw HTML. */
+const HTML_TAG = /<\/?([A-Za-z][A-Za-z0-9-]*)(?:\s+[A-Za-z_:][\w.:-]*(?:\s*=\s*(?:[^\s"'=<>`]+|'[^']*'|"[^"]*"))?)*\s*\/?>/g;
+
+type RawNode = { type: "raw"; value: string };
+type TextNode = { type: "text"; value: string };
+
+/** A raw HTML piece with each tag the sanitizer would drop turned into text, so it shows as written. */
+function literalUnknownTags(raw: RawNode): Array<RawNode | TextNode> {
+  const out: Array<RawNode | TextNode> = [];
+  let last = 0;
+  for (const match of raw.value.matchAll(HTML_TAG)) {
+    if (KEPT_TAGS.has(match[1]!.toLowerCase())) continue;
+    if (match.index > last) out.push({ type: "raw", value: raw.value.slice(last, match.index) });
+    out.push({ type: "text", value: match[0] });
+    last = match.index + match[0].length;
+  }
+  if (!out.length) return [raw];
+  if (last < raw.value.length) out.push({ type: "raw", value: raw.value.slice(last) });
+  return out;
+}
+
+function showUnknownTags(node: { children?: unknown[] }): void {
+  if (!node.children) return;
+  node.children = node.children.flatMap((child) => {
+    const item = child as { type: string; children?: unknown[] };
+    if (item.type === "raw") return literalUnknownTags(item as RawNode);
+    showUnknownTags(item);
+    return [child];
+  });
+}
+
+/**
+ * Text in angle brackets that is not HTML the chat draws (`<command>`, `<thinking>`) shows as written: before raw HTML
+ * is parsed, each tag the sanitizer would drop becomes plain text. Code is never raw HTML, so it is untouched.
+ */
+const literalTags = () => showUnknownTags;
+const threadPlugins = [literalTags, defaultRehypePlugins.raw!, defaultRehypePlugins.sanitize!, defaultRehypePlugins.harden!];
+const imageRulePlugins = [literalTags, defaultRehypePlugins.raw!, markImages, defaultRehypePlugins.sanitize!, defaultRehypePlugins.harden!];
 
 function unmarkImageSource(src: unknown): string | undefined {
   if (typeof src !== "string" || !src.startsWith(IMAGE_MARK)) return undefined;
@@ -628,7 +677,7 @@ export const Markdown = memo(function Markdown({ content, className, streaming =
       <MarkdownSetupContext.Provider value={`${ruled ? `${ruled.setup}:` : ""}${math ? "math" : "plain"}`}>
       <Streamdown
         components={ruled ? ruled[math ? "math" : "plain"] : math ? markdownMathComponents : markdownComponents}
-        {...(images ? { rehypePlugins: imageRulePlugins } : {})}
+        rehypePlugins={images ? imageRulePlugins : threadPlugins}
         plugins={math ? markdownMathPlugins : markdownPlugins}
         BlockComponent={CachedBlock}
         parseMarkdownIntoBlocksFn={

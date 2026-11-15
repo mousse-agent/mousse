@@ -1,4 +1,4 @@
-import type { PermissionMode } from '../../../shared/permissionMode'
+import { isPermissionMode, type PermissionMode } from '../../../shared/permissionMode'
 import { int, str, type Row } from '../db/rows'
 import type { RunStore } from '../RunStore'
 
@@ -12,9 +12,6 @@ import type { RunStore } from '../RunStore'
 /** See the migration (version 17) for what each state means. */
 export type RemoteSubagentState = 'starting' | 'running' | 'stopping' | 'done'
 
-/** The modes a remote subagent may run in: never Full access, whatever its parent runs in. */
-export type RemoteSubagentMode = Exclude<PermissionMode, 'full'>
-
 export interface RemoteSubagentRecord {
   delegationId: string
   childThreadId: string
@@ -23,7 +20,11 @@ export interface RemoteSubagentRecord {
   node: string
   /** The task as the far thread receives it. Kept so a start cut off by a restart can be finished. */
   prompt: string
-  permissionMode: RemoteSubagentMode
+  /**
+   * The most the task may run in there: no looser than the run that sent it. That computer narrows it further
+   * to the limit it set for this one (`RemoteSubagents.advanceStart`), so Full access is used only when both allow it.
+   */
+  permissionMode: PermissionMode
   /** `plan` for a read-only task (`workspace: 'shared'`, or a plan ceiling): it plans and reads, never edits. */
   chatMode: 'agent' | 'plan'
   /** The far thread works in a worktree of its own (`workspace: 'isolated'`). */
@@ -45,6 +46,11 @@ export interface RemoteSubagentRecord {
   lastError: string | null
   /** When that computer last answered about this task. */
   lastSeenAt: string | null
+  /**
+   * Whether the task's calls carry the agent mark (`ROUTED_AGENT_KEY`): true where that computer knows it, false for an
+   * older computer, null until the first call. Fixed once set, and the same for every task of one subagent.
+   */
+  marked: boolean | null
   createdAt: string
   updatedAt: string
 }
@@ -62,7 +68,6 @@ export interface RemoteSubagentOverlay {
   lastError?: string
 }
 
-const MODES: ReadonlySet<string> = new Set(['ask', 'accept_edits', 'auto'])
 const STATES: ReadonlySet<string> = new Set(['starting', 'running', 'stopping', 'done'])
 
 function fromRow(row: Row): RemoteSubagentRecord {
@@ -74,7 +79,7 @@ function fromRow(row: Row): RemoteSubagentRecord {
     childRunId: String(row.child_run_id),
     node: String(row.node),
     prompt: String(row.prompt),
-    permissionMode: (MODES.has(mode) ? mode : 'ask') as RemoteSubagentMode,
+    permissionMode: isPermissionMode(mode) ? mode : 'ask',
     chatMode: row.chat_mode === 'agent' ? 'agent' : 'plan',
     worktree: int(row.worktree) === 1,
     projectId: str(row.project_id),
@@ -87,6 +92,7 @@ function fromRow(row: Row): RemoteSubagentRecord {
     waitingInput: int(row.waiting_input) === 1,
     lastError: str(row.last_error),
     lastSeenAt: str(row.last_seen_at),
+    marked: row.marked === null || row.marked === undefined ? null : int(row.marked) === 1,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at)
   }
@@ -94,7 +100,7 @@ function fromRow(row: Row): RemoteSubagentRecord {
 
 /** What a caller may change on a row; `undefined` keeps a field, `null` clears a nullable one. */
 export type RemoteSubagentPatch = Partial<
-  Pick<RemoteSubagentRecord, 'remoteThreadId' | 'remoteRunId' | 'state' | 'waitingInput' | 'lastError' | 'lastSeenAt'>
+  Pick<RemoteSubagentRecord, 'remoteThreadId' | 'remoteRunId' | 'state' | 'waitingInput' | 'lastError' | 'lastSeenAt' | 'marked'>
 >
 
 const COLUMNS: Record<keyof RemoteSubagentPatch, string> = {
@@ -103,14 +109,15 @@ const COLUMNS: Record<keyof RemoteSubagentPatch, string> = {
   state: 'state',
   waitingInput: 'waiting_input',
   lastError: 'last_error',
-  lastSeenAt: 'last_seen_at'
+  lastSeenAt: 'last_seen_at',
+  marked: 'marked'
 }
 
 /** The rows of `remote_subagents`. Synchronous; every write joins the caller's transaction. */
 export class RemoteSubagentRecords {
   constructor(private readonly store: RunStore) {}
 
-  create(input: Omit<RemoteSubagentRecord, 'remoteThreadId' | 'remoteRunId' | 'state' | 'waitingInput' | 'lastError' | 'lastSeenAt' | 'createdAt' | 'updatedAt'> & {
+  create(input: Omit<RemoteSubagentRecord, 'remoteThreadId' | 'remoteRunId' | 'state' | 'waitingInput' | 'lastError' | 'lastSeenAt' | 'marked' | 'createdAt' | 'updatedAt'> & {
     /** A follow-up on a subagent whose far thread already exists. */
     remoteThreadId?: string | null
   }): RemoteSubagentRecord {

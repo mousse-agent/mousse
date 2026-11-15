@@ -8,7 +8,7 @@ import { CommandRejection, fail, reject, RunStoreError } from './db/RunStoreErro
 import { inheritedAgentHops } from './agentHops'
 import { isFencedSource, isFollowUpSource, isPauseHeldSource, isResumeSource } from './delegation/sources'
 import { cancelAcknowledgedWakes, recoverWakesOnBoot } from './delegation/wake'
-import { RemoteSubagentRecords, type RemoteSubagentMode } from './delegation/remoteSubagents'
+import { RemoteSubagentRecords } from './delegation/remoteSubagents'
 import { Delegations } from './Delegations'
 import { EffectOutbox } from './EffectOutbox'
 import { HandoffService } from './handoff/HandoffService'
@@ -95,6 +95,11 @@ export type RunCommand =
       agentOrigin?: { hops: number }
       /** A person's leftover steer queued as a turn of its own (`RunOutcome.sentByPerson`). */
       sentByPerson?: true
+      /**
+       * The run delivers settle notices (SPEC §15.1): it carries the count of agent messages in a row of the runs the
+       * notices are about and adds none of its own. It is not an agent's message.
+       */
+      noticeHops?: number
       /**
        * A person's message that waits behind a usage-limit pause instead of ending it: on a paused thread the run
        * is created `queued`, the pause and its timer stay, and the result says so (`heldByPause`). The sender
@@ -286,7 +291,7 @@ export interface RemoteDelegationTarget {
   node: string
   /** The task as that computer's thread receives it (the subagent's guidance and the prompt). */
   prompt: string
-  permissionMode: RemoteSubagentMode
+  permissionMode: PermissionMode
   chatMode: 'agent' | 'plan'
   worktree: boolean
   projectId: string | null
@@ -1265,7 +1270,8 @@ export class RunEngine extends EventEmitter {
       threadId,
       runId,
       type: 'agent.action',
-      payload: { ...details, action, actorThreadId: actor.threadId, actorRunId: actor.runId, toolCallId: actor.toolCallId }
+      // A sender on another computer: its ids are that computer's, so the event names the computer and its title too.
+      payload: { ...details, action, actorThreadId: actor.threadId, actorRunId: actor.runId, toolCallId: actor.toolCallId, ...(actor.remote ? { actorNode: actor.remote.node, actorTitle: actor.remote.title } : {}) }
     })
   }
 
@@ -1990,7 +1996,11 @@ export class RunEngine extends EventEmitter {
       const continuationOf = command.continuationOfRunId
       // A run that carries on agent work (a provider's continuation, the resume after a pause) keeps the count of agent
       // messages in a row; it is not itself an agent's message.
-      const carriedHops = command.actor || command.agentOrigin ? undefined : inheritedAgentHops(store, command.threadId, command.source, continuationOf)
+      const carriedHops = command.actor || command.agentOrigin
+        ? undefined
+        : command.noticeHops !== undefined
+          ? (command.noticeHops > 0 ? command.noticeHops : undefined)
+          : inheritedAgentHops(store, command.threadId, command.source, continuationOf)
       const outcome: RunOutcome = {
         ...(continuationOf ? { continuationOf, ...(resuming ? { resumedFromPause: command.source === 'resume' ? 'auto' as const : 'user' as const } : {}) } : {}),
         // Remembered with the run, so a message an agent sent is still known as one when it starts later.

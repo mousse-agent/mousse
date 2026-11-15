@@ -19,7 +19,7 @@ import { resolveModelChoice } from "../../../lib/modelChoice";
 import { modelLabel } from "../../../../shared/modelChoice";
 import type { TurnEnd } from "../../../../shared/types";
 
-import { UserMessage } from "./user-message";
+import { agentSenderOf, UserMessage } from "./user-message";
 import { CopyButton } from "./copy-button";
 import { AfterTurnsLayoutProvider, type AfterTurnsLayout } from "./after-turns";
 import { ImageGalleryProvider } from "./image-gallery";
@@ -50,13 +50,15 @@ import {
 } from "./tools/permission-request";
 import { SubagentCardGroup } from "./tools/SubagentCard";
 import { SecretRequestInline, isSecretRequestPart, isWaitingSecretRequest } from "../../../components/secrets/secretRequestPart";
-import { BackgroundNotice, SubagentNotice } from "./tools/SubagentNotice";
+import { BackgroundNotice, SettleNotice, SubagentNotice } from "./tools/SubagentNotice";
 import { SteerGroup } from "./steer-group";
 import { isRunningSubagent } from "../../../../shared/subagents";
 import { useSubagentCards } from "./tools/subagent-cards-context";
 import { readSubagentNotice } from "../../adapters/subagentNotice";
+import { readSettleNoticeMeta } from "../../adapters/settleNotice";
 import { readBackgroundNotice } from "../../adapters/nativeSubagents";
 import { openThread } from "../../../lib/openThread";
+import { ThreadChip } from "../../../components/ThreadChip";
 import { normalizeAssistantToolParts } from "./utils/tool-part-normalizer";
 import { getToolStatus } from "./utils/format-tool";
 import {
@@ -237,6 +239,20 @@ function isThreadNotice(message: UIMessage | undefined): boolean {
 function ThreadNotice({ text }: { text: string }) {
   return <div role="note" className="w-full py-1.5 text-xs leading-5 text-muted-foreground [overflow-wrap:anywhere]">
     {text.split("`").map((part, index) => index % 2 ? <code key={index} className="font-mono text-[11px] text-foreground/80">{part}</code> : part)}
+  </div>;
+}
+
+/** The thread a note says this thread's agent started (`ChatMessage.launchedThread`), else undefined. */
+function readLaunchedThread(message: UIMessage): { threadId: string; summary?: string } | undefined {
+  const launched = (message.metadata as { launchedThread?: { threadId?: unknown; summary?: unknown } } | undefined)?.launchedThread;
+  if (typeof launched?.threadId !== "string") return undefined;
+  return { threadId: launched.threadId, ...(typeof launched.summary === "string" && launched.summary ? { summary: launched.summary } : {}) };
+}
+
+/** Mousse's line for a thread this thread's agent started: "Started", the thread as a chip, then what was chosen for it. */
+function LaunchedThreadNote({ threadId, summary }: { threadId: string; summary?: string }) {
+  return <div role="note" className="launched-thread-note w-full py-1.5 text-xs leading-5 text-muted-foreground [overflow-wrap:anywhere]">
+    Started <ThreadChip threadId={threadId} />{summary ? ` · ${summary}` : null}
   </div>;
 }
 
@@ -788,7 +804,7 @@ function messageTurnId(message: UIMessage | undefined): string | undefined {
 
 /** A message that reports results (a subagent's, or the runtime's own background tasks): not something the user wrote. */
 function isResultNotice(msg: UIMessage | undefined): boolean {
-  return Boolean(readSubagentNotice(msg) || readBackgroundNotice(msg));
+  return Boolean(readSubagentNotice(msg) || readBackgroundNotice(msg) || readSettleNoticeMeta(msg));
 }
 
 /** The empty-parts copy of a subagent-results message that joins a reply, one per message. */
@@ -2205,7 +2221,7 @@ function foldRowOf(msg: UIMessage, toolsOnly: boolean, suppressQuestionTool: boo
   if (toolsOnly) return { kind: "message", toolsOnly: true, keep: (msg.parts ?? []).some(isUnrecoveredFailure) };
   const metadata = (msg.metadata ?? {}) as Record<string, unknown>;
   if (
-    readSubagentNotice(msg) || readBackgroundNotice(msg) || isThreadNotice(msg) || isCompactionRow(msg) ||
+    readSubagentNotice(msg) || readBackgroundNotice(msg) || readSettleNoticeMeta(msg) || isThreadNotice(msg) || isCompactionRow(msg) ||
     metadata.contextHandoff != null || metadata.contextCleared || metadata.scheduledRun != null
   ) {
     return { kind: "message", keep: true };
@@ -2291,6 +2307,15 @@ const TurnRow = memo(function TurnRow({
               </div>
             );
           }
+          // What Mousse told the agent about work it asked to hear about (`notify`).
+          const settled = readSettleNoticeMeta(turn.userMsg);
+          if (settled) {
+            return (
+              <div data-notice-id={turn.userMsg.id}>
+                <SettleNotice items={settled} />
+              </div>
+            );
+          }
           const text = getTextFromParts(
             turn.userMsg!.parts ?? [],
             "",
@@ -2310,7 +2335,9 @@ const TurnRow = memo(function TurnRow({
           const showUserToolbar = true;
           // Edit and versions act on the prompt's turn; a fork's copies of its source name none.
           const promptTurnId = (turn.userMsg as { turnId?: string }).turnId;
-          const editPrompt = turnActionsForEdit?.editPrompt;
+          // An agent's message is not the person's to edit or repeat: it offers Copy of its words.
+          const fromAgent = agentSenderOf(turn.userMsg) !== undefined;
+          const editPrompt = fromAgent ? undefined : turnActionsForEdit?.editPrompt;
           return (
             <div
               className="group/user-message"
@@ -2349,7 +2376,7 @@ const TurnRow = memo(function TurnRow({
                   promptTurnId={promptTurnId}
                   onEdit={promptTurnId && editPrompt ? () => setEditingPromptId(turn.userMsg!.id) : undefined}
                   speechKey={userCopyKey}
-                  repeatText={text}
+                  repeatText={fromAgent ? undefined : text}
                 />
               )}
             </div>
@@ -2521,6 +2548,17 @@ const TurnRow = memo(function TurnRow({
                   node: (
                     <div key={msg.id} data-notice-id={msg.id}>
                       <BackgroundNotice items={background} />
+                    </div>
+                  ),
+                };
+              }
+              const settled = readSettleNoticeMeta(msg);
+              if (settled) {
+                return {
+                  fold,
+                  node: (
+                    <div key={msg.id} data-notice-id={msg.id}>
+                      <SettleNotice items={settled} />
                     </div>
                   ),
                 };
@@ -2928,7 +2966,11 @@ const AssistantParts = memo(function AssistantParts({
     toolRenderers,
   ]);
 
-  if (isThreadNotice(msg)) return <ThreadNotice text={parts.filter(isTextPart).map((part) => part.text).join('')} />;
+  if (isThreadNotice(msg)) {
+    const launched = readLaunchedThread(msg);
+    if (launched) return <LaunchedThreadNote threadId={launched.threadId} summary={launched.summary} />;
+    return <ThreadNotice text={parts.filter(isTextPart).map((part) => part.text).join('')} />;
+  }
   const handoff = (msg.metadata as { contextHandoff?: HandoffMarker } | undefined)?.contextHandoff;
   if (handoff) return <ContextHandoffMarker handoff={handoff} text={parts.filter(isTextPart).map((part) => part.text).join('')} />;
   if ((msg.metadata as { contextCleared?: boolean } | undefined)?.contextCleared)

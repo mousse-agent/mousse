@@ -906,6 +906,12 @@ export interface ChatMessage {
    * (a continuation run): the tasks it reports, so the app shows them as a notice instead of a message the user wrote.
    */
   backgroundNotice?: import('./subagents').BackgroundTaskNoticeItem[]
+  /**
+   * Set on the message that opens a turn Mousse started to tell this thread's agent about work it asked to hear about
+   * (`notify` on `thread_send` or `thread_create`): what settled where. The app shows it as a notice, never as a message
+   * the user wrote or an agent's.
+   */
+  settleNotice?: import('./settleNotice').SettleNoticeItem[]
   /** Set on a user message a scheduled job sent, so the thread can show "Scheduled: <name>" instead of passing it off as typed. */
   scheduled?: { jobId: string; jobName?: string }
   /** Set on a user message another thread's agent sent (`thread_send`), so the thread can say whose it is. */
@@ -921,6 +927,12 @@ export interface ChatMessage {
    * workflow's): that thread and run, which the transcript links to.
    */
   scheduledRun?: { jobId: string; threadId: string; runId?: string }
+  /**
+   * Set on the note Mousse writes on a thread whose agent started another thread (`thread_create`): that thread, which
+   * the transcript draws as a chip with its title and live status, and what was chosen for it (model, mode, where it
+   * runs). Notes written before this field stay plain text.
+   */
+  launchedThread?: { threadId: string; summary?: string }
   /**
    * A user message added to a turn that was already running (a steer), so it does not start a turn.
    * Older transcripts do not carry it.
@@ -1164,6 +1176,16 @@ export interface QueuedMessage {
   inboxIds?: string[]
   /** The subagent results the item's message reports. */
   subagentNotice?: import('./subagents').SubagentNoticeItem[]
+  /** The settle notices the item delivers (`ChatMessage.settleNotice`); notices that arrive while it waits join it. */
+  settleNotice?: import('./settleNotice').SettleNoticeItem[]
+  /** With `settleNotice`: the count of agent messages in a row of the runs the notices are about; the turn carries it. */
+  settleHops?: number
+  /**
+   * A settle notice that must not start a turn by itself (its thread is a subagent, the person stopped it, it is kept in
+   * Plan, or the notice says Mousse stopped watching): it waits until a person sends it (Send now), a notice that may
+   * start a turn joins it, or a person's turn of the thread starts and it runs after that turn.
+   */
+  heldNotice?: true
   /**
    * The thread's stop generation when the item was queued, for work that starts on behalf of a parent
    * (a steer that missed its turn). Once a Stop raised the generation the item is refused when it would
@@ -1230,13 +1252,42 @@ export interface QueueEditResult {
  */
 export interface AgentOrigin {
   kind: 'agent'
-  threadId: string
-  runId: string
+  /** The sending thread and run on this computer; unset for a sender on another computer (`from`). */
+  threadId?: string
+  runId?: string
+  /**
+   * A sender on another of the user's computers: that computer (`node`), the thread and run there by their ids on it,
+   * and the sender's title then. The fields are not named `…Id`, so the routed id rewriting leaves them alone
+   * (`routedIds.ts`, `isRemoteAgentFrom`); on the computer named by `node` they are its own plain ids.
+   */
+  from?: AgentOriginFrom
   /**
    * How many agent messages in a row led to this one without a person in between (the sender's own count
    * plus one). A message that would pass the limit is refused, so a chain of agents cannot run unwatched.
    */
   hops?: number
+  /**
+   * Where the sending agent's own words sit in the stored text: after the header Mousse wrote and before its closing
+   * line (`agentMessageWords`). Lengths, not positions: text another computer reads is re-encoded inside the words,
+   * never in the header or the closing line. Absent on a message stored before it was kept: its whole text is shown.
+   */
+  body?: AgentMessageBody
+  /** The sending thread's title when it sent, shown for a sender that was deleted since. */
+  title?: string
+}
+
+/** The length of the header before an agent's words (`head`) and of the closing line after them (`tail`). */
+export interface AgentMessageBody {
+  head: number
+  tail: number
+}
+
+/** Who sent an agent message from another computer (`AgentOrigin.from`). */
+export interface AgentOriginFrom {
+  node: string
+  thread: string
+  run: string
+  title: string
 }
 
 /** The category for the unsent draft: it is not yet in the context, so it never shows that usage is known. */
@@ -1386,6 +1437,13 @@ export interface SubagentWorkspaceBinding {
 export interface ThreadStartedFrom {
   node: string
   projectId?: string
+  /**
+   * Set when an agent on that device started the thread (a routed `threads.create` marked as an agent's): the sender's
+   * thread there (its id on that device, never rewritten), its title then, and the mode the thread was held to when it
+   * was made. A marked `threads.setPermissionMode` never goes above that mode. `createdByThreadId` stays unset: a foreign
+   * id there would be rewritten to a thread of this computer that does not exist.
+   */
+  agent?: { thread: string; title: string; mode: PermissionMode }
 }
 
 /** The computer a thread's latest routed message came from. */

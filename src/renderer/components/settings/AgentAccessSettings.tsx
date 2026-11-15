@@ -82,11 +82,11 @@ export function AgentAccessSettings({
           description={access.remoteSubagents && !(routed && computers.length > 0) && goneComputers.length === 0
             ? 'No other computers are connected yet. Pair them in Settings → Devices, then turn on the ones agents may use.'
             : <>
-              Runs on the computers you turn on, at no more than Auto-accept edits.
+              Runs on the computers you turn on, within the limit each of them set for this one.
               <MoreDetails>
                 An agent can start a subagent on another of your computers. It runs there under that computer&rsquo;s agents and
-                accounts, in its copy of the repository, at no more than Auto-accept edits and the limit that computer set for this one.
-                Off by default.
+                accounts, in its copy of the repository, no looser than the agent that started it and within the limit that
+                computer set for this one in its Devices settings. Off by default.
               </MoreDetails>
             </>}
           control={

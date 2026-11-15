@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
 /**
- * A link to a thread (`mousse://thread/<id>`) in a thread's reply or a bot's message: it reads as the thread's title
- * when its text is the address, and a click opens that thread in the app, out of the bot's chat. A thread this window
- * does not list gets a short toast. How the link looks is checked in the real app (screenshot on the PR), not here.
+ * A link to a thread (`mousse://thread/<id>`, or `<node>:<id>` for a thread of another computer) in a thread's reply or
+ * a bot's message: a chip that reads as the thread's title when its text is the address, with the thread's live status,
+ * and a click opens that thread in the app, out of the bot's chat. A thread this window cannot open says why in the chip
+ * (deleted, its computer offline or not sharing), and a click says it in a toast. Only links become chips: an id in
+ * prose stays text. How the chip looks is checked in the real app (screenshots on the PR), not here.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -24,6 +26,8 @@ const { Markdown } = await import('../../src/renderer/chat/components/agent-elem
 const { ToastHost, dismissToast } = await import('../../src/renderer/components/ui/Toast')
 const { setBotsClient, useBotsStore } = await import('../../src/renderer/stores/botsStore')
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
+const { useComputersStore, NO_COMPUTERS } = await import('../../src/renderer/lib/computers')
+const { parseThreadLink } = await import('../../src/shared/threadLink')
 
 const NOW = '2026-11-15T10:00:00.000Z'
 const thread = (id: string, name: string): Thread => ({ id, name, createdAt: NOW, updatedAt: NOW, startedAt: NOW, projectId: 'p1' }) as Thread
@@ -34,7 +38,8 @@ let fake: FakeBots
 const select = vi.fn(async () => undefined)
 const appInitial = useAppStore.getInitialState()
 const botsInitial = useBotsStore.getInitialState()
-const links = () => [...host.querySelectorAll<HTMLAnchorElement>('a.an-md-link')]
+const links = () => [...host.querySelectorAll<HTMLAnchorElement>('a.thread-chip')]
+const DESK = 'nod_desk0000000000000000000000'
 const click = async (element: Element) => { await act(async () => { (element as HTMLElement).click() }); await act(async () => {}) }
 
 beforeEach(() => {
@@ -54,6 +59,7 @@ afterEach(() => {
   dismissToast()
   setBotsClient(null)
   useBotsStore.setState(botsInitial)
+  useComputersStore.setState(NO_COMPUTERS)
   useAppStore.setState(appInitial)
 })
 
@@ -68,7 +74,7 @@ describe('a thread link in a bot\'s message', () => {
 
   it('reads as the thread\'s title, and a click opens the thread out of the bot\'s chat', async () => {
     await show('I started mousse://thread/t-fix and [the docs one](mousse://thread/t-docs). Not `mousse://thread/t-fix` in code.')
-    expect(links().map((link) => [link.textContent, link.getAttribute('href')])).toEqual([
+    expect(links().map((link) => [link.querySelector('.thread-chip-title')!.textContent, link.getAttribute('href')])).toEqual([
       ['Fix the login page', 'mousse://thread/t-fix'],
       ['the docs one', 'mousse://thread/t-docs']
     ])
@@ -82,10 +88,11 @@ describe('a thread link in a bot\'s message', () => {
     expect(open).not.toHaveBeenCalled()
   })
 
-  it('a thread that is not here keeps its address, and a click says so without opening anything', async () => {
+  it('a deleted thread says so in its chip, and a click says it again without opening anything', async () => {
     await show('See <mousse://thread/t-gone>.')
     const [link] = links()
-    expect(link!.textContent).toBe('mousse://thread/t-gone')
+    expect(link!.textContent).toBe('A threadDeleted')
+    expect(link!.getAttribute('aria-disabled')).toBe('true')
     await click(link!)
     expect(select).not.toHaveBeenCalled()
     expect(document.body.textContent).toContain('That thread is no longer here.')
@@ -93,11 +100,83 @@ describe('a thread link in a bot\'s message', () => {
 })
 
 describe('a thread link in a thread\'s reply', () => {
-  it('reads as the thread\'s title, and a click opens the thread', async () => {
-    act(() => root.render(createElement(Markdown, { content: 'Done, see mousse://thread/t-docs.' })))
+  const render = (content: string) => act(() => root.render(createElement('div', null, createElement(Markdown, { content }), createElement(ToastHost))))
+
+  it('is a chip with the thread\'s title and live status, and a click opens the thread', async () => {
+    useAppStore.setState({ threadActivity: { 't-docs': 'processing' } })
+    render('Done, see mousse://thread/t-docs.')
     const [link] = links()
-    expect(link!.textContent).toBe('Write the docs')
-    await click(link!)
-    expect(select).toHaveBeenCalledWith('t-docs')
+    expect(link!.textContent).toBe('Write the docsWorking')
+    expect(link!.getAttribute('aria-label')).toBe('Open thread Write the docs, Working')
+    act(() => useAppStore.setState({ threadActivity: { 't-docs': 'paused' } }))
+    expect(link!.textContent).toBe('Write the docsPaused')
+    // An archived thread says so, and still opens.
+    act(() => useAppStore.setState({ threads: [thread('t-docs', 'Write the docs'), { ...thread('t-fix', 'Fix the login page'), settledAt: NOW }] }))
+    render('Archived: mousse://thread/t-fix')
+    expect(links()[0]!.textContent).toBe('Fix the login pageArchived')
+    await click(links()[0]!)
+    expect(select).toHaveBeenCalledWith('t-fix')
+  })
+
+  it('only a link becomes a chip: a thread id written in prose stays text', () => {
+    render('The thread t-docs is done, and so is thread/t-fix. Its link: [docs](mousse://thread/t-docs).')
+    expect(links()).toHaveLength(1)
+    expect(links()[0]!.textContent).toBe('docs')
+    expect(host.textContent).toContain('The thread t-docs is done, and so is thread/t-fix.')
+  })
+
+  describe('to a thread of another computer', () => {
+    const remote = `${DESK}:t-plan`
+    const device = (state: 'open' | 'closed') => ({ node: DESK, name: 'Desk', caps: [], keyEpoch: 1, expiresAt: 0, kind: 'computer', self: false, revoked: false, state })
+    function computers(state: 'open' | 'closed') {
+      const request = vi.fn(async (method: string) => method === 'net.status'
+        ? { enabled: true, self: { node: 'nod_self' }, keystore: 'unlocked', features: { netBridge: true, netBridgeThreads: true } }
+        : { nodes: [device(state)] })
+      installPreload(fake, { threads: { select }, platformRequest: { request } })
+    }
+
+    it('survives in the reply, and opens when the window lists it', async () => {
+      computers('open')
+      useAppStore.setState({ threads: [{ ...thread(remote, 'Plan the trip'), node: DESK }] })
+      render(`On the desk: mousse://thread/${remote}`)
+      await act(async () => {})
+      expect(links()[0]!.getAttribute('href')).toBe(`mousse://thread/${remote}`)
+      expect(links()[0]!.textContent).toBe('Plan the trip')
+      await click(links()[0]!)
+      expect(select).toHaveBeenCalledWith(remote)
+    })
+
+    it('says its computer is offline, or not sharing, from what the window already holds', async () => {
+      computers('closed')
+      // Listed, but its computer is not connected: the row says so.
+      useAppStore.setState({ threads: [{ ...thread(remote, 'Plan the trip'), node: DESK, offline: true }] })
+      render(`mousse://thread/${remote}`)
+      await act(async () => {})
+      expect(links()[0]!.textContent).toBe('Plan the tripDesk is offline')
+      // Not listed: the device list says the computer is not connected; a click says so instead of failing.
+      act(() => useAppStore.setState({ threads: [] }))
+      expect(links()[0]!.textContent).toBe('A thread on another computerDesk is offline')
+      await click(links()[0]!)
+      expect(select).not.toHaveBeenCalled()
+      expect(document.body.textContent).toContain('Desk is not connected, so this thread cannot be opened now.')
+      // Its computer's other rows say it stopped sharing.
+      act(() => useAppStore.setState({ threads: [{ ...thread(`${DESK}:other`, 'Other'), node: DESK, notShared: true }] }))
+      expect(links()[0]!.textContent).toBe('A thread on another computerDesk is not sharing')
+    })
+  })
+})
+
+describe('the thread link scheme', () => {
+  it.each([
+    ['mousse://thread/t-1', 't-1'],
+    ['MOUSSE://thread/t-1/', 't-1'],
+    [`mousse://thread/${DESK}:t-1`, `${DESK}:t-1`],
+    // A colon joins only a real node id and one thread id.
+    ['mousse://thread/desk:t-1', null],
+    [`mousse://thread/${DESK}:t-1:t-2`, null],
+    ['mousse://thread/', null],
+    ['mousse://thread/t 1', null]
+  ])('%s names %s', (href, id) => {
+    expect(parseThreadLink(href)).toBe(id)
   })
 })

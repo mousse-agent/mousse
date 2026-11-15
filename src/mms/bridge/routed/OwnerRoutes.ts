@@ -5,6 +5,7 @@ import { isAbsolute, win32 } from 'node:path'
 import { NetError, isBlobId, isId, type NodeId, type RpcArtifactRef } from '../../../shared/net'
 import type { NodeCapability } from '../../../shared/net'
 import {
+  ROUTED_AGENT_KEY,
   ROUTED_FORBIDDEN_KEYS,
   ROUTED_JOB_METHODS,
   ROUTED_LARGE_READS,
@@ -63,6 +64,7 @@ import { cleanUpBlockedDevice } from './blockCleanup'
 import type { RoutedStaging } from './staging'
 import { RoutedTerminals, type TerminalClaim } from './terminals'
 import { withHiddenBots } from '../remote/botReach'
+import { parseRoutedAgentMark, RemoteAgentCalls, type RemoteAgentCall } from './remoteAgent'
 
 /** Ids are text of this length at most, as in the protocol handlers. */
 const ID_MAX = 256
@@ -85,7 +87,7 @@ export interface OwnerRoutesOptions {
   rpc: RpcDispatcher
   /** What this computer lets each device do here. */
   policy: Pick<SqliteNodePolicy, 'get' | 'list' | 'onChange'>
-  audit: Pick<SqliteBridgeAudit, 'record' | 'countRead' | 'has'>
+  audit: Pick<SqliteBridgeAudit, 'record' | 'countRead' | 'has' | 'countAgentCalls'>
   /** Keeps a call owned by the profile, so it drains when the profile closes. */
   track<T>(work: Promise<T>): Promise<T>
   /**
@@ -203,6 +205,9 @@ export function validateRoutedParams(
   for (const key of row.required ?? [])
     if (value[key] === undefined && !(isPlainObject(staged) && Object.hasOwn(staged, key)))
       throw new NetError('bad_request', `${method} needs ${key}.`)
+  // The agent mark's shape is checked with the call's, before the ledger: a malformed mark is a bad request, never a
+  // call whose outcome is unknown.
+  if (value[ROUTED_AGENT_KEY] !== undefined) parseRoutedAgentMark(value[ROUTED_AGENT_KEY])
   const threadKey = row.threadIds?.[0] ?? 'threadId'
   switch (row.target) {
     case 'thread':
@@ -305,7 +310,16 @@ export class OwnerRoutes {
       sweepMs: options.terminalSweepMs
     })
     options.services.routedTerminals = this.terminals
+    this.remoteAgent = new RemoteAgentCalls({
+      services: options.services,
+      policy: options.policy,
+      audit: options.audit,
+      deviceName: (node) => options.deviceName?.(node) ?? 'another computer',
+      clock: this.clock
+    })
   }
+  /** Calls marked as an agent's (`remoteAgent.ts`). */
+  private readonly remoteAgent: RemoteAgentCalls
 
   register(): void {
     for (const [method, row] of Object.entries(ROUTED_METHODS))
@@ -527,6 +541,7 @@ export class OwnerRoutes {
     let consumed = false
     let entered = false
     let savingLarge = false
+    let marked: RemoteAgentCall | undefined
     // Where the stream of this computer is before the snapshot is read, so no record is marked as already
     // applied that the snapshot does not hold.
     const head =
@@ -577,6 +592,19 @@ export class OwnerRoutes {
         params = unstaged.params
         stagedIds = unstaged.ids
       }
+      // A call marked as an agent's (another computer's daemon sets it, never a window or a phone): the owner handles it as
+      // an agent's, never as a person's (`remoteAgent.ts`). The mark is taken off before anything else reads the call.
+      if (params[ROUTED_AGENT_KEY] !== undefined) {
+        const { [ROUTED_AGENT_KEY]: raw, ...rest } = params
+        marked = {
+          node,
+          mark: parseRoutedAgentMark(raw),
+          asPerson: async (asMethod, asParams) => mmsJson(await dispatchMethod(this.handlerContext(context), asMethod, asParams)),
+          createThread: (createParams, started) =>
+            this.options.services.runOwnedRequest(routedNetMethod('threads.create'), () => this.backend.createThreadForAgent(createParams, { node }, started))
+        }
+        params = rest
+      }
       await this.assertOwned(method, row, params)
       // Terminals: a device types into, resizes and stops only the ones it opened, takes a slot before it starts one,
       // and each numbered input is applied once.
@@ -598,7 +626,7 @@ export class OwnerRoutes {
           } satisfies RoutedReply
         const sent = typeof params.data === 'string' ? Buffer.byteLength(params.data) : 0
         result = await verdict.apply(sent, () => this.dispatch(method, row, params, context, head))
-      } else result = await this.dispatch(method, row, params, context, head, slot)
+      } else result = marked ? await this.remoteAgent.run(method, params, marked) : await this.dispatch(method, row, params, context, head, slot)
       // A thread a bot started names that bot only to a computer that reaches it ("Started by a bot" otherwise).
       if (!row.sequenced) result = withHiddenBots(result, this.options.services.botReach?.hiddenFor(node))
       if (method === 'projects.open')
@@ -628,7 +656,7 @@ export class OwnerRoutes {
       // opening, its end and the bytes it carried are.
       if (row.sequenced) return reply
       if (row.durable)
-        audit.record({ node, method, thread, project, outcome: 'ok', kind: 'change' })
+        audit.record({ node, method, thread, project, outcome: 'ok', kind: 'change', ...(marked ? { actor: 'agent' as const } : {}) })
       else audit.countRead(node, bytes)
       if (firstUse) {
         this.toldFirstUse.add(node)
@@ -700,12 +728,12 @@ export class OwnerRoutes {
             errorDiagnostic(normalizeAppError(error, 'handler_error'), method)
           )
         if (row.durable)
-          audit.record({ node, method, thread, project, outcome: 'uncertain', kind: 'change' })
+          audit.record({ node, method, thread, project, outcome: 'uncertain', kind: 'change', ...(marked ? { actor: 'agent' as const } : {}) })
         throw error
       }
       // A refused read is only counted: a device cannot fill the audit with reads it knows will fail.
       if (row.durable)
-        audit.record({ node, method, thread, project, outcome: refusal.code, kind: 'refused' })
+        audit.record({ node, method, thread, project, outcome: refusal.code, kind: 'refused', ...(marked ? { actor: 'agent' as const } : {}) })
       else if (!row.sequenced) audit.countRead(node, 0)
       return { ok: false, error: refusal }
     } finally {

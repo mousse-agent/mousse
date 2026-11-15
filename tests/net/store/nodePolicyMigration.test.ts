@@ -242,3 +242,33 @@ describe('the bots switch in net_node_policy', () => {
     expect(() => policy.set(node, { bots: 'no' as never })).toThrow()
   })
 })
+
+describe('agent reach in net_node_policy (issue #1160)', () => {
+  it('adds the column with every device at "launched" and leaves the schema version', () => {
+    const dir = profile()
+    const node = newId('node')
+    writeOldDatabase(dir, [[node, 0, 'full', 1]])
+    const db = new NetDatabase({ profileDir: dir })
+    cleanups.push(() => db.close())
+    expect(columns(db).find((column) => column.name === 'agent_reach')).toMatchObject({ notnull: 1, dflt_value: "'launched'" })
+    expect(userVersion(db)).toBe(1)
+    const policy = new SqliteNodePolicy(db, systemClock)
+    expect(policy.get(node)).toMatchObject({ agentReach: 'launched', maxPermissionMode: 'full', terminal: true })
+    expect(policy.get(newId('node')).agentReach).toBe('launched')
+  })
+
+  it('keeps what is set across a restart, refuses a value it does not know, and reads an unknown stored one as none', () => {
+    const dir = profile()
+    const node = newId('node')
+    let db = new NetDatabase({ profileDir: dir })
+    new SqliteNodePolicy(db, systemClock).set(node, { agentReach: 'all' })
+    db.close()
+    db = new NetDatabase({ profileDir: dir })
+    cleanups.push(() => db.close())
+    const policy = new SqliteNodePolicy(db, systemClock)
+    expect(policy.get(node).agentReach).toBe('all')
+    expect(() => policy.set(node, { agentReach: 'everything' as never })).toThrow()
+    db.database.prepare("UPDATE net_node_policy SET agent_reach='later' WHERE node=?").run(node)
+    expect(policy.get(node).agentReach).toBe('none')
+  })
+})
