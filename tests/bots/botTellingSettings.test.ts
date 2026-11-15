@@ -19,9 +19,9 @@ it.each(['needs_you', 'look', 'fyi', 'every'] as const)('keeps failures audible 
   expect(tellingClass({ message, ownerTurn: false, reminder: false, quiet: false, tellMe })).toBe('soon')
   expect(tellingClass({ message: { ...message, kind: 'text', error: undefined }, ownerTurn: true, reminder: false, quiet: false, tellMe })).toBe('now')
 })
-it('omits an unset line and uses the owner’s clock format', () => {
+it('omits an unset line and keeps service times in HH:MM', () => {
   expect(tellingLine({})).toBeUndefined()
-  expect(tellingLine({ tellMe: 'needs_you' }, { from: '22:00', to: '08:00' }, 'en-GB')).toBe('Tells you when it needs you · Quiet 22:00 to 08:00')
+  expect(tellingLine({ tellMe: 'needs_you' }, { from: '22:00', to: '08:00' })).toBe('Tells you when it needs you · Quiet 22:00 to 08:00')
 })
 
 // Owner message, tapped answer; work, reminder work, wake, question default,
