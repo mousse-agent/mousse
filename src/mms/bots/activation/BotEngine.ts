@@ -4812,6 +4812,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const maxTurns = counters.limits.maxTurns
     if (maxTurns !== undefined && counters.requests >= maxTurns) {
       this.raiseWall(row.id, { dispatchN: main.n, kind: 'budget', permission: { budget: { key: 'maxTurns', amount: maxTurns } }, reason: `This bot reached its limit of ${maxTurns} model requests.` })
+      // Removing a schedule turns this wall into an end immediately. Reuse its normal end path
+      // now: this dispatch was already settled, so no later run event will post its report.
+      const ended = this.store.activation(row.id)
+      if (ended?.status === 'done' && ended.endReason === 'schedule_removed')
+        await this.advance(row.id, text ?? this.carried.get(row.id)?.text, { expectText: true })
       return
     }
     const allowed = this.allowedSinceRefused(row)
