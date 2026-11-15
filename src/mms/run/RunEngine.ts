@@ -8,7 +8,7 @@ import { CommandRejection, fail, reject, RunStoreError } from './db/RunStoreErro
 import { inheritedAgentHops } from './agentHops'
 import { isFencedSource, isFollowUpSource, isPauseHeldSource, isResumeSource } from './delegation/sources'
 import { cancelAcknowledgedWakes, recoverWakesOnBoot } from './delegation/wake'
-import { RemoteSubagentRecords, type RemoteSubagentMode } from './delegation/remoteSubagents'
+import { RemoteSubagentRecords } from './delegation/remoteSubagents'
 import { Delegations } from './Delegations'
 import { EffectOutbox } from './EffectOutbox'
 import { HandoffService } from './handoff/HandoffService'
@@ -284,7 +284,7 @@ export interface RemoteDelegationTarget {
   node: string
   /** The task as that computer's thread receives it (the subagent's guidance and the prompt). */
   prompt: string
-  permissionMode: RemoteSubagentMode
+  permissionMode: PermissionMode
   chatMode: 'agent' | 'plan'
   worktree: boolean
   projectId: string | null

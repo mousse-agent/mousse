@@ -6650,8 +6650,9 @@ export class OrchestratorService extends EventEmitter {
           : `${computer.name} has no project for this repository. Open (or clone) it there first.`)
       farProjectId = match.projectId
     }
-    // Never looser than the run that asks, never Full access; the other computer narrows it to its own limit for this one.
-    const permissionMode = narrowPermissionMode(this.requestedPermissionMode(parentThreadId), this.runPermissionMode(parentRunId), 'accept_edits') as Exclude<PermissionMode, 'full'>
+    // Never looser than the thread's mode or the run that asks. No fixed cap: the other computer narrows it to the
+    // limit it set for this one (`RemoteSubagents.advanceStart`), so Full access is used only when both allow it.
+    const permissionMode = narrowPermissionMode(this.requestedPermissionMode(parentThreadId), this.runPermissionMode(parentRunId))
     // That computer's `threads.setModel` reads a level packed with the model, as every computer does.
     const remoteModel = input.model?.trim() ? agentModelId(input.model.trim(), input.effort) : undefined
     const minutes = input.maxMinutes ?? DEFAULT_REMOTE_MINUTES
@@ -7030,7 +7031,7 @@ export class OrchestratorService extends EventEmitter {
           node: base?.node ?? '',
           prompt: target.prompt,
           // Never looser than the run that asks now, nor than the subagent started with.
-          permissionMode: narrowPermissionMode(this.runPermissionMode(parentRunId), base?.permissionMode) as Exclude<PermissionMode, 'full'>,
+          permissionMode: narrowPermissionMode(this.runPermissionMode(parentRunId), base?.permissionMode),
           chatMode: base?.chatMode === 'plan' || modeCeiling === 'plan' ? 'plan' : 'agent',
           worktree: base?.worktree ?? false,
           projectId: base?.projectId ?? null,

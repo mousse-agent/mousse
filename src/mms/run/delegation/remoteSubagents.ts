@@ -1,4 +1,4 @@
-import type { PermissionMode } from '../../../shared/permissionMode'
+import { isPermissionMode, type PermissionMode } from '../../../shared/permissionMode'
 import { int, str, type Row } from '../db/rows'
 import type { RunStore } from '../RunStore'
 
@@ -12,9 +12,6 @@ import type { RunStore } from '../RunStore'
 /** See the migration (version 17) for what each state means. */
 export type RemoteSubagentState = 'starting' | 'running' | 'stopping' | 'done'
 
-/** The modes a remote subagent may run in: never Full access, whatever its parent runs in. */
-export type RemoteSubagentMode = Exclude<PermissionMode, 'full'>
-
 export interface RemoteSubagentRecord {
   delegationId: string
   childThreadId: string
@@ -23,7 +20,11 @@ export interface RemoteSubagentRecord {
   node: string
   /** The task as the far thread receives it. Kept so a start cut off by a restart can be finished. */
   prompt: string
-  permissionMode: RemoteSubagentMode
+  /**
+   * The most the task may run in there: no looser than the run that sent it. That computer narrows it further
+   * to the limit it set for this one (`RemoteSubagents.advanceStart`), so Full access is used only when both allow it.
+   */
+  permissionMode: PermissionMode
   /** `plan` for a read-only task (`workspace: 'shared'`, or a plan ceiling): it plans and reads, never edits. */
   chatMode: 'agent' | 'plan'
   /** The far thread works in a worktree of its own (`workspace: 'isolated'`). */
@@ -62,7 +63,6 @@ export interface RemoteSubagentOverlay {
   lastError?: string
 }
 
-const MODES: ReadonlySet<string> = new Set(['ask', 'accept_edits', 'auto'])
 const STATES: ReadonlySet<string> = new Set(['starting', 'running', 'stopping', 'done'])
 
 function fromRow(row: Row): RemoteSubagentRecord {
@@ -74,7 +74,7 @@ function fromRow(row: Row): RemoteSubagentRecord {
     childRunId: String(row.child_run_id),
     node: String(row.node),
     prompt: String(row.prompt),
-    permissionMode: (MODES.has(mode) ? mode : 'ask') as RemoteSubagentMode,
+    permissionMode: isPermissionMode(mode) ? mode : 'ask',
     chatMode: row.chat_mode === 'agent' ? 'agent' : 'plan',
     worktree: int(row.worktree) === 1,
     projectId: str(row.project_id),
