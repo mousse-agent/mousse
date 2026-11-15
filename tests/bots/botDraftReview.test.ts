@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { BotEngine } from '../../src/mms/bots/activation/BotEngine'
 import { keepReplyCard } from '../../src/mms/bots/chat/replyCards'
 import { keepToolImages } from '../../src/mms/bots/chat/toolImages'
-import { botFixture, chatOf, createBot, finish, flush, start, type BotFixture } from './botFixture'
+import { botFixture, chatOf, createBot, finish, flush, start, T0, type BotFixture } from './botFixture'
 let f: BotFixture
 let botId: string
 beforeEach(async () => { f = botFixture(); ({ botId } = await createBot(f, { reply: 'Hi.' })) })
@@ -79,4 +79,51 @@ it('a code example naming a picture remains an unsent draft', async () => {
   await finish(f, one.payload, 'completed', { text: 'Example:\n```text\n![Flat](file:///tmp/flat.png)\n```' })
   expect(texts(one.id)).toHaveLength(0)
   expect(f.store.dispatch(one.id, 2)?.prompt.text).toContain('Your draft, not sent')
+})
+
+// A removed schedule ends in the run lane; its wall or request cap must leave the
+// independently held chat draft intact, and the chat's later end must consume it.
+it.each([
+  ['removed schedule wall', 'reply'], ['removed schedule wall', 'stop'],
+  ['removed schedule turn cap', 'reply'], ['removed schedule turn cap', 'stop'],
+  ['chat turn cap', 'reply'], ['chat turn cap', 'stop']
+] as const)('%s composes with a held chat draft ending by %s', async (path, end) => {
+  await f.bots.reconcileOnStartup()
+  const one = await joined()
+  await finish(f, one.payload, 'completed', { text: 'Hi! What can I do?' })
+  const draft = () => f.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, `draft:${one.id}`)
+  expect(draft()).toBeDefined()
+  let chatN = 2
+  if (path === 'chat turn cap') {
+    await finish(f, (await start(f, one.id, 2)).payload, 'failed', { text: 'Still checking.', outcome: { error: '[provider_turn_cap] Claude Code reached the most steps one turn may take.' } })
+    chatN = f.store.lastMainDispatch(one.id)!.n
+    expect(chatN).toBeGreaterThan(2)
+  } else {
+    const schedule = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Check price' }, 'owner')
+    await f.tickSchedules(new Date(T0 + 5 * 60_000))
+    const row = f.store.listActivations(botId).find(a => a.trigger.kind === 'schedule')!
+    const run = await start(f, row.id)
+    f.bots.removeSchedule(botId, schedule.scheduleId)
+    if (path === 'removed schedule wall') {
+      f.bots.raiseWall(row.id, { dispatchN: 1, kind: 'gate', permission: { tool: 'write' }, reason: 'Need write.' })
+      await finish(f, run.payload, 'interrupted', { text: 'Checked the price.', outcome: { interruptedBy: 'bot_wall' } })
+    } else {
+      f.store.setLimits(row.id, { ...f.store.counters(row.id).limits, maxTurns: f.store.counters(row.id).requests })
+      await finish(f, run.payload, 'failed', { text: 'Checked the price.', outcome: { error: '[provider_turn_cap] Claude Code reached the most steps one turn may take.' } })
+    }
+    expect(f.store.activation(row.id)?.status).toBe('done')
+    const reports = chatOf(f, botId).filter(m => m.activationId === row.id)
+    expect(reports.some(m => m.kind === 'run_report' && m.text.includes('Checked the price.'))).toBe(true)
+    expect(reports.some(m => m.ask)).toBe(false)
+    expect(f.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, `draft:${row.id}`)).toBeUndefined()
+  }
+  expect(draft()).toBeDefined()
+  expect(texts(one.id)).toHaveLength(0)
+  const continuation = await start(f, one.id, chatN)
+  if (end === 'stop') {
+    await f.bots.service.chatStop(botId)
+    await finish(f, continuation.payload, 'interrupted', { outcome: { interruptedBy: 'user' } })
+  } else await finish(f, continuation.payload, 'completed', { text: 'Hi — the flat is free.' })
+  expect(texts(one.id).map(m => m.text)).toEqual([end === 'stop' ? 'Hi! What can I do?' : 'Hi — the flat is free.'])
+  expect(draft()).toBeUndefined()
 })
