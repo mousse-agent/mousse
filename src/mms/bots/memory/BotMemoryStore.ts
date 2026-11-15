@@ -830,7 +830,7 @@ export class BotMemoryStore {
         || forgottenTexts.some((forgotten) => forgotten.trim().length >= MIN_COPY_CHARS && text.includes(forgotten.trim().replace(/\s+/g, ' ')))
       // All versions matter: the latest value may no longer cite what an older note still holds.
       for (const row of progressRows) if (matches(row.text) || redactedSeqs.has(row.seq)) redact(row)
-      for (const row of this.all("SELECT key, value FROM bot_memory_state WHERE bot_id = ? AND key LIKE 'progress:%'", botId)) {
+      for (const row of this.all("SELECT key, value FROM bot_memory_state WHERE bot_id = ? AND (key LIKE 'progress:%' OR key LIKE 'progress_pending:%')", botId)) {
         const progress = parseJson(row.value) as { text?: string; seq?: number } | undefined
         if (!progress?.text) continue
         if (matches(progress.text) || (progress.seq !== undefined && redactedSeqs.has(progress.seq))) {
@@ -921,6 +921,19 @@ export class BotMemoryStore {
     this.run("DELETE FROM bot_memory_state WHERE bot_id = ? AND substr(key, 1, 5) = 'pack:'", botId)
   }
 
+  stageProgress(botId: string, scheduleId: string, activationId: string, text: string): void {
+    this.write(() => this.setState(botId, `progress_pending:${activationId}`, { scheduleId, text: text.trim().replace(/\s+/g, ' ') }))
+  }
+
+  finishProgress(botId: string, activationId: string, done: boolean): void {
+    this.write(() => {
+      const key = `progress_pending:${activationId}`
+      const pending = this.getState<{ scheduleId: string; text: string }>(botId, key)
+      if (pending && done) this.saveProgress(botId, pending.scheduleId, activationId, pending.text)
+      this.run('DELETE FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, key)
+    })
+  }
+
   /** A schedule's own cursor. Kept outside AutomationRuns so Forget reaches every copy. */
   saveProgress(botId: string, scheduleId: string, activationId: string, text: string): void {
     text = text.trim().replace(/\s+/g, ' ')
@@ -942,7 +955,7 @@ export class BotMemoryStore {
   /** Shared scheduler deletion covers the bot, the owner and removing all of a bot's schedules. */
   removeProgressForJob(jobId: string): void {
     this.write(() => {
-      const rows = this.all("SELECT bot_id, key FROM bot_memory_state WHERE key LIKE 'progress:%' AND bot_id || '--' || substr(key, 10) = ?", jobId)
+      const rows = this.all("SELECT bot_id, key FROM bot_memory_state WHERE (key LIKE 'progress:%' AND bot_id || '--' || substr(key, 10) = ?) OR (key LIKE 'progress_pending:%' AND bot_id || '--' || json_extract(value, '$.scheduleId') = ?)", jobId, jobId)
       for (const row of rows) {
         this.run('DELETE FROM bot_memory_state WHERE bot_id = ? AND key = ?', row.bot_id as string, row.key as string)
         this.dropPacks(row.bot_id as string)

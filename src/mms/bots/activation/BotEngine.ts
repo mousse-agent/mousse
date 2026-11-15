@@ -193,7 +193,7 @@ export interface BotEngineHost {
    */
   schedules?: Pick<BotScheduleBook, 'list' | 'get' | 'add' | 'remove' | 'removeAll' | 'labelOf'> & Partial<Pick<BotScheduleBook, 'skipped'>>
   /** The level a scheduled run's activation reported with `run_report` (`AutomationRuns`). Absent: none is known. */
-  progress?: Pick<BotMemoryStore, 'saveProgress' | 'progress'>
+  progress?: Pick<BotMemoryStore, 'stageProgress' | 'finishProgress' | 'progress'>
   runLevel?(activationId: string): RunLevel | undefined
   /** Wall-clock milliseconds, for the times `bots.db` records (default: `Date.now`). */
   clock?(): number
@@ -2154,6 +2154,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /** What follows any end of an activation: its scratch and pack go, the lane moves on. */
   private afterEnd(row: BotActivationRow): void {
+    this.host.progress?.finishProgress(row.botId, row.id, false)
     this.clearInternetCheck(row.id)
     this.cleanup(row)
     this.packs.delete(row.id)
@@ -2163,6 +2164,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   private journalEnd(row: BotActivationRow, reason: string | null): void {
+    if (row.trigger.kind === 'schedule') this.host.progress?.finishProgress(row.botId, row.id,
+      reason === null && this.store.activation(row.id)?.status === 'done' && Boolean(this.host.schedules?.get(row.botId, row.trigger.scheduleId)))
     // A chat turn that ended without its reply leaves one line in the recent chat, so the next turn can tell the owner.
     if (row.lane === 'chat') {
       if (reason !== null) this.journalInTx(chatTurnEndRow(row, reason))
@@ -8196,10 +8199,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /** Only the activation's own existing schedule may keep a cursor; never work or a run by hand. */
-  saveLeftOff(activationId: string, text: string): void {
+  saveLeftOff(activationId: string, text: string): string {
     const row = this.host.store.activation(activationId)
-    if (!row || row.trigger.kind !== 'schedule' || !this.host.schedules?.get(row.botId, row.trigger.scheduleId)) return
-    this.host.progress?.saveProgress(row.botId, row.trigger.scheduleId, row.id, text)
+    if (!row || row.trigger.kind !== 'schedule') return 'not kept: only a bot scheduled run keeps leftOff'
+    if (!this.host.schedules?.get(row.botId, row.trigger.scheduleId)) return 'not kept: the schedule was removed'
+    if (!this.host.progress) return 'not kept: bot memory is unavailable'
+    this.host.progress.stageProgress(row.botId, row.trigger.scheduleId, row.id, text)
+    return 'pending: kept only when this run ends done'
   }
 
   removeSchedule(botId: string, scheduleId: string): boolean {
