@@ -1,3 +1,4 @@
+import { BOT_TELLING_CAPABILITY } from '../../shared/bots/personal/telling'
 import { ERROR_INFO_CAPABILITY } from '../../shared/errors'
 import { connectGuiClient } from './guiDaemonCompatibility'
 /**
@@ -197,7 +198,8 @@ const GUI_PLATFORM_CAPABILITIES = [
   NET_LOCAL_CAPABILITY,
   BROWSER_VIEWER_CAPABILITY,
   BROWSER_SETUP_CAPABILITY,
-  FIRST_SEND_BINDING_CAPABILITY
+  FIRST_SEND_BINDING_CAPABILITY,
+  BOT_TELLING_CAPABILITY
 ] as const
 
 export class GuiMmsController extends EventEmitter {
@@ -577,6 +579,10 @@ export class GuiMmsController extends EventEmitter {
   }
 
   /** The service a window's connection talks to: answers and updates are numbered per service instance. */
+  tellsForSender(senderId: number): boolean {
+    return this.windowSessions.get(senderId)?.client.hello?.capabilities.includes(BOT_TELLING_CAPABILITY) ?? false
+  }
+
   instanceForSender(senderId: number): string | undefined {
     return this.windowSessions.get(senderId)?.client.hello?.instanceId
   }

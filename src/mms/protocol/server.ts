@@ -1,3 +1,4 @@
+import { BOT_TELLING_CAPABILITY } from '../../shared/bots/personal/telling'
 import { AgentDefinitionError } from '../../shared/agents/errors'
 import { ERROR_INFO_CAPABILITY, errorDiagnostic, knownAppError, normalizeAppError, serializeAppError } from '../../shared/errors'
 /**
@@ -883,6 +884,9 @@ export class MmsProtocolServer {
     if (services.personalBots) onEmitter(services.personalBots.events, 'message', (event: unknown) => {
       emitToSubscribers(this.ring.push('bots.message', event, undefined))
     })
+    if (services.personalBots) onEmitter(services.personalBots.events, 'tell', (event: unknown) => {
+      emitToSubscribers(this.ring.push('bots.tell', event, undefined))
+    })
     if (services.personalBots) onEmitter(services.personalBots.events, 'activity', (event: unknown) => {
       emitToSubscribers(this.ring.push('bots.activity', event, undefined))
     })
@@ -997,10 +1001,12 @@ export class MmsProtocolServer {
             capability !== MMS_PROTOCOL_CHUNK_CAPABILITY &&
             capability !== PROFILES_V1_CAPABILITY &&
             capability !== ERROR_INFO_CAPABILITY &&
+            capability !== BOT_TELLING_CAPABILITY &&
             capability !== BROWSER_ATTACHED_V1_CAPABILITY
         )
       )
       if (requested.has(MMS_PROTOCOL_CHUNK_CAPABILITY) && advertised.includes(MMS_PROTOCOL_CHUNK_CAPABILITY)) session.capabilities.add(MMS_PROTOCOL_CHUNK_CAPABILITY)
+      if (v.hello.clientType === 'gui' && requested.has(BOT_TELLING_CAPABILITY)) session.capabilities.add(BOT_TELLING_CAPABILITY)
       if (requested.has(ERROR_INFO_CAPABILITY)) session.capabilities.add(ERROR_INFO_CAPABILITY)
       // A window says it binds a chat's first message; nothing else may claim it.
       if (v.hello.clientType === 'gui' && requested.has(FIRST_SEND_BINDING_CAPABILITY)) session.capabilities.add(FIRST_SEND_BINDING_CAPABILITY)
@@ -1333,6 +1339,7 @@ export class MmsProtocolServer {
     for (const stored of replay.events) {
       if (session.clientType !== 'gui' && isQualifiedId(stored.threadId)) continue
       // Project for this client first, so the budget counts what is actually sent.
+      if (stored.type === 'bots.tell') continue // A telling is shown live once; durable rows supply catch-up.
       const event = projectEventFor(session.clientType, stored, this.remoteListsFor(session))
       replayBytes += Buffer.byteLength(JSON.stringify(event), 'utf8') + (result.replay.length ? 1 : 0)
       if (replayBytes > replayBudget) {
@@ -1346,6 +1353,7 @@ export class MmsProtocolServer {
 
     session.subscribeState = 'active'
     session.lastSeq = currentSeq
+    this.refreshTellingWindows()
 
     // Flush events that landed during buffering with sequence after the boundary.
     const buffered = session.eventBuffer
@@ -1453,6 +1461,7 @@ export class MmsProtocolServer {
   }
 
   private deliverEventToClient(session: ClientSession, event: ProtocolEvent): void {
+    if (event.type === 'bots.tell' && !session.capabilities.has(BOT_TELLING_CAPABILITY)) return
     if (!this.sendRaw(session, event)) return
     session.lastSeq = event.sequence
   }
@@ -1590,6 +1599,14 @@ export class MmsProtocolServer {
     })
   }
 
+  private refreshTellingWindows(): void {
+    for (const [profileId, services] of this.servicesByProfile) {
+      const count = [...this.clients.values()].filter(c => !c.closed && c.authenticated && c.clientType === 'gui' &&
+        c.subscribeState === 'active' && (c.binding?.profileId ?? this.opts.mms.profileId) === profileId).length
+      services.personalBots?.setTellingWindows(count)
+    }
+  }
+
   private closeClient(session: ClientSession): void {
     if (session.closed) return
     session.closed = true
@@ -1603,6 +1620,7 @@ export class MmsProtocolServer {
     session.completedResponseBytes = 0
     session.completedIds.clear()
     this.clients.delete(session.id)
+    this.refreshTellingWindows()
     this.opts.commandRouter?.revoke(session.id, 'close')
     this.opts.mms.domains?.notifyConnectionClosed(session.id)
     try {
