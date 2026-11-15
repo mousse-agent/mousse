@@ -113,7 +113,7 @@ export function createAppToolRegistry(input: {
   add('applets', appletTools())
   add('bots', [...botTools(input.bots), ...(input.botMemory ? botMemoryTools(input.botMemory) : [])])
   add('projectGit', projectGitTools(host))
-  add('profiler', profilerTools(host))
+  add('profiler', profilerTools(host, engine))
   add('appearance', appearanceTools(host))
   return { registry, families }
 }

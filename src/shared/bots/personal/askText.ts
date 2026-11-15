@@ -37,7 +37,12 @@ const TOOL_TEXT: Record<string, AskText> = {
   web_search: { title: 'search the web', note: 'It sees search results, not your files.' },
   web_fetch: { title: 'read web pages', note: 'It sees the pages, not your files.' },
   browser: { title: 'use the browser', note: 'Its own browser, apart from your tabs. It can open pages, click and type. Sites you sign in to there stay signed in for it.' },
-  threads: THREADS_TEXT
+  threads: THREADS_TEXT,
+  profiler: {
+    title: 'use the profiler',
+    note: "Mousse's memory and CPU numbers, while Labs lets agents read the profiler.",
+    tip: "It can read Mousse's profiler: memory and CPU of each process, the service's counts and caches, windows and the GPU, and take samples. Numbers only, never your chats or files; threads it can't see count only in totals. Never a heap snapshot. Settings → Labs → Profiler can still turn it off."
+  }
 }
 
 /**

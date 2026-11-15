@@ -28,7 +28,7 @@ import {
   grantRequestOf
 } from '../../../shared/bots/personal/escalation'
 import { findServer, installationOf, mcpAskFor, type BotMcpHost, type BotMcpServer } from '../mcp/BotMcp'
-import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, MAX_BOT_SUBAGENTS_AT_ONCE, MAX_BOT_SUBAGENTS_PER_DAY, MAX_BOT_SUBAGENTS_PER_WORK, botGrantTool, isAbsolutePath, manifestProblem } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_PROFILER_PERMISSION, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, MAX_BOT_SUBAGENTS_AT_ONCE, MAX_BOT_SUBAGENTS_PER_DAY, MAX_BOT_SUBAGENTS_PER_WORK, botGrantTool, isAbsolutePath, manifestProblem } from '../../../shared/bots/personal/manifest'
 import { checkMessage, wallMessage } from '../../../shared/bots/personal/walls'
 import type { ChargeResult, CountKind, CounterScope } from '../../../shared/harness/counters'
 import type { ReserveResult, SpendLimits, SpendRequest, SpendScope } from '../../../shared/harness/spend'
@@ -2199,8 +2199,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       filesFolder: this.filesFolder(row.botId),
       // A chat turn is the bot's front desk: it hands what takes long to work (docs/plans/bot-always-free.md).
       // The owner's threads: reading in every lane; starting, messaging and stopping only in a chat turn the owner's own
-      // message started (`chat:`), never in work, a reminder's work, a schedule or the bot's first message.
-      botTools: { escalate: true, consult: definition.context.length > 0, memory: true, frontDesk: row.lane === 'chat', threads: ownerChatTurn(row) ? 'all' : 'read', images: this.imagePick(row.botId) !== null, applets: true, subagents: row.lane === 'run', questions: asksOwner(row), cards: true },
+      // message started (`chat:`), never in work, a reminder's work, a schedule or the bot's first message. The profiler:
+      // in both lanes (the chat without its minutes-long watch).
+      botTools: { escalate: true, consult: definition.context.length > 0, memory: true, frontDesk: row.lane === 'chat', threads: ownerChatTurn(row) ? 'all' : 'read', profiler: true, images: this.imagePick(row.botId) !== null, applets: true, subagents: row.lane === 'run', questions: asksOwner(row), cards: true },
       limit
     })
     if (!compiled.ok) return this.block(row, 'policy_unenforceable', compiled.error.reason ?? compiled.error.message)
@@ -7992,8 +7993,10 @@ function heldAlready(authority: Pick<BotAuthority, 'tools' | 'appTools' | 'skill
   if ('tool' in asked) {
     // The web tools are neutral tools that a grant keeps with the app tools (the starter grant does): either holds them.
     if (isNeutralTool(asked.tool)) return authority.tools.has(asked.tool) || authority.appTools.has(asked.tool)
-    // The browser is held as its tools, and the owner's threads as theirs (reading them, in every lane that has them).
+    // The browser is held as its tools, the owner's threads as theirs (reading them, in every lane that has them), and the
+    // profiler as its overview (in both lanes).
     if (asked.tool === BOT_BROWSER_PERMISSION) return authority.appTools.has('browser_open')
+    if (asked.tool === BOT_PROFILER_PERMISSION) return authority.appTools.has('profiler_overview')
     return asked.tool === BOT_THREADS_PERMISSION ? authority.appTools.has('thread_list') : authority.appTools.has(asked.tool)
   }
   if ('skill' in asked) return authority.skills.has(asked.skill)

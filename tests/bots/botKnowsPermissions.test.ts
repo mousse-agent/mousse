@@ -16,7 +16,7 @@ import { compileBotThread, botManifestDigest } from '../../src/mms/bots/grants/c
 import { askFingerprintOf } from '../../src/mms/bots/chat/projection'
 import { ToolRegistry } from '../../src/mms/run/mcp/appTools/registry'
 import type { MousseTool } from '../../src/mms/run/mcp/appTools/types'
-import { BOT_APP_TOOLS, BOT_AUTOMATION_APP_TOOLS, BOT_BROWSER_TOOLS, BOT_THREAD_TOOLS, BOT_WORK_TOOLS, botMayBeOffered, botStarterManifest } from '../../src/shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_AUTOMATION_APP_TOOLS, BOT_BROWSER_TOOLS, BOT_PROFILER_TOOLS, BOT_THREAD_TOOLS, BOT_WORK_TOOLS, botMayBeOffered, botStarterManifest } from '../../src/shared/bots/personal/manifest'
 import { withPermission } from '../../src/shared/bots/personal/escalation'
 import type { BotManifest } from '../../src/shared/bots/personal/definition'
 import { botFixture, createBot, finish, start, type BotFixture } from './botFixture'
@@ -152,20 +152,21 @@ describe('the stated permissions match the tools a run is given', () => {
     })
 
   it('the text says yes or no for each permission, in plain words', () => {
-    const text = botAllowedText({ shell: true, browser: true, threads: false, web: true, skills: [], automation: [] }, 'run', true)
+    const text = botAllowedText({ shell: true, browser: true, threads: false, profiler: false, web: true, skills: [], automation: [] }, 'run', true)
     expect(text.split('\n')).toEqual([
       'What your owner allows now (current; it replaces anything said earlier in this chat)',
       '- Search the web and read pages: yes',
       '- Run commands: yes',
       "- Use the browser (your own): yes, but it can't open on this run",
       "- Use your owner's threads: no",
+      "- Read Mousse's profiler: no",
       '- Skills: none',
       '- Automation tools: none',
       "- Your owner's MCP servers: none yet (mcp_servers lists the ones you can ask for)",
       'Use what is allowed without asking. Ask with escalate only for something marked no.'
     ])
     // The servers it holds tools of, by name; the chat is told they are its work's.
-    const chat = botAllowedText({ shell: false, browser: false, threads: false, web: true, skills: [], automation: [], mcp: ['GitHub', 'Notes'] }, 'chat')
+    const chat = botAllowedText({ shell: false, browser: false, threads: false, profiler: false, web: true, skills: [], automation: [], mcp: ['GitHub', 'Notes'] }, 'chat')
     expect(chat).toContain("- Your owner's MCP servers: GitHub, Notes")
     expect(chat).toContain('In the chat, the web, the browser, commands and MCP tools are for your work: hand jobs that need them to work_start.')
   })
@@ -241,10 +242,10 @@ describe("a bot's thread lists only tools a bot can hold", () => {
     }
   })
 
-  it('a bot can hold every grantable tool, the browser tools and the work tools', () => {
-    for (const name of [...BOT_APP_TOOLS].filter((name) => name !== 'browser' && name !== 'threads')) expect(botMayBeOffered(name), name).toBe(true)
-    for (const name of [...BOT_BROWSER_TOOLS, ...BOT_THREAD_TOOLS, ...BOT_WORK_TOOLS, 'consult', 'list_skills', 'load_skill']) expect(botMayBeOffered(name), name).toBe(true)
-    // A permission's name is no tool, and nothing a bot could steer, queue or answer with is offered.
-    for (const name of ['delegate_task', 'thread_steer', 'approval_respond', 'queue_enqueue', 'thread_fork', 'browser_request_human', 'browser', 'threads']) expect(botMayBeOffered(name), name).toBe(false)
+  it('a bot can hold every grantable tool, the browser, thread and profiler tools and the work tools', () => {
+    for (const name of [...BOT_APP_TOOLS].filter((name) => name !== 'browser' && name !== 'threads' && name !== 'profiler')) expect(botMayBeOffered(name), name).toBe(true)
+    for (const name of [...BOT_BROWSER_TOOLS, ...BOT_THREAD_TOOLS, ...BOT_PROFILER_TOOLS, ...BOT_WORK_TOOLS, 'consult', 'list_skills', 'load_skill']) expect(botMayBeOffered(name), name).toBe(true)
+    // A permission's name is no tool, and nothing a bot could steer, queue or answer with is offered, nor the heap summary, which pauses the service.
+    for (const name of ['delegate_task', 'thread_steer', 'approval_respond', 'queue_enqueue', 'thread_fork', 'browser_request_human', 'browser', 'threads', 'profiler', 'profiler_heap_summary']) expect(botMayBeOffered(name), name).toBe(false)
   })
 })
