@@ -2,8 +2,8 @@
  * Path step 3, "One scheduler": a bot's schedules are automations whose Who is the bot, in the shared scheduled-job
  * store, and the one `ScheduledJobService` claims their occurrences. Each due occurrence is one run activation keyed
  * `sched:<botId>:<scheduleId>:<occurrenceAt>`, so a repeated hand-over (after a crash) inserts nothing. The bot keeps
- * its own rules: skipped while it is paused or its last run of the schedule still waits, at most 8, at most every
- * 5 minutes, missed occurrences collapse into one, and nothing runs before the bot startup pass.
+ * its own rules: skipped while it is paused or its last run of the schedule still waits, at most 8, at most once
+ * a minute, missed occurrences collapse into one, and nothing runs before the bot startup pass.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { BOT_RUN_REPORT_LINE } from '../../src/mms/bots/memory/contextPack'
@@ -102,6 +102,26 @@ describe('bot schedules in the shared scheduler', () => {
     expect(f.book.list(botId).map((schedule) => [schedule.scheduleId, schedule.skip?.reason])).toEqual(expect.arrayContaining([[tidy, 'previous_run_still_queued'], [other, 'previous_run_still_queued']]))
   })
 
+  it('a schedule every minute runs on each scheduler tick, and skips a tick while its last run still goes', async () => {
+    await scheduled('Check the threads.', 1)
+    expect(entry().nextAt).toBe(iso(T0 + MIN))
+    // The scheduler ticks once a minute, here 20 seconds after each occurrence is due.
+    const tick = async (minute: number) => (await f.tickSchedules(new Date(T0 + minute * MIN + 20_000))).inserted
+    for (const minute of [1, 2, 3]) {
+      const inserted = await tick(minute)
+      expect(inserted, `minute ${minute}`).toHaveLength(1)
+      expect(f.store.activation(inserted[0]!)!.trigger).toMatchObject({ occurrenceAt: iso(T0 + minute * MIN) })
+      await runDispatch(f, inserted[0]!, 1, { text: 'Checked.' })
+    }
+    // A run longer than a minute: the next occurrence is skipped, not stacked, and the one after it runs.
+    const [long] = await tick(4)
+    expect(await tick(5)).toEqual([])
+    expect(entry().skip?.reason).toBe('previous_run_still_running')
+    await runDispatch(f, long!, 1, { text: 'Checked.' })
+    expect(await tick(6)).toHaveLength(1)
+    expect(scheduledRuns()).toHaveLength(5)
+  })
+
   it('a hand-over repeated after a crash inserts nothing and dispatches nothing twice', async () => {
     const scheduleId = await scheduled()
     await f.tickSchedules(new Date(T0 + 5 * MIN))
@@ -159,7 +179,7 @@ describe('bot schedules in the shared scheduler', () => {
     expect(() => f.book.update(job, { permissionMode: 'full' })).toThrow(/stay the bot's/)
     expect(() => f.book.update(job, { prompt: '/release-notes' })).toThrow(/workflow/)
     expect(() => f.book.update(job, { schedule: { kind: 'once', runAt: iso(T0 + MIN) } })).toThrow(/A bot repeats/)
-    expect(() => f.book.update(job, { schedule: { kind: 'interval', minutes: 2 } })).toThrow(/every 5 minutes/)
+    expect(() => f.book.update(job, { schedule: { kind: 'interval', minutes: 0 } })).toThrow(/at least 1/)
     f.book.update(job, { name: 'Tidy up', prompt: 'Tidy the blog.', tellMe: 'problems' })
     expect(entry()).toMatchObject({ name: 'Tidy up', prompt: 'Tidy the blog.', tellMe: 'needs_you' })
     // The bot's own list shows the same record.
@@ -180,11 +200,13 @@ describe('bot schedules in the shared scheduler', () => {
     expect(() => f.bots.addSchedule(botId, { when: { kind: 'cron', expr: '0 9 * * 1' }, prompt: '' }, 'bot')).toThrow(/something to do/)
   })
 
-  it('a bot\'s own schedules: at most 8, at least 5 minutes apart, each with a label and no approval', () => {
+  it('a bot\'s own schedules: at most 8, at least a minute apart, each with a label and no approval', () => {
     const revision = f.store.registry(botId)!.revision
-    expect(() => f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 4 }, prompt: 'p' }, 'bot')).toThrow(/every 5 minutes/)
-    expect(() => f.bots.addSchedule(botId, { when: { kind: 'cron', expr: '* * * * *' }, prompt: 'p' }, 'bot')).toThrow(/every 5 minutes/)
-    expect(botScheduleProblem({ kind: 'cron', expr: '*/5 * * * *' }, 'p')).toBeUndefined()
+    // Every minute is the shortest: an interval of whole minutes, at least 1, or any cron expression.
+    for (const when of [{ kind: 'interval', minutes: 1 }, { kind: 'interval', minutes: 2 }, { kind: 'cron', expr: '* * * * *' }, { kind: 'cron', expr: '*/2 * * * *' }])
+      expect(botScheduleProblem(when, 'p'), JSON.stringify(when)).toBeUndefined()
+    for (const minutes of [0, 0.5, -1]) expect(botScheduleProblem({ kind: 'interval', minutes }, 'p'), String(minutes)).toMatch(/at least 1/)
+    expect(() => f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 0 }, prompt: 'p' }, 'bot')).toThrow(/at least 1/)
     const added = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 30 }, prompt: 'Check links.' }, 'bot')
     expect(added).toMatchObject({ scheduleId: expect.stringMatching(/^s-[0-9a-f]{8}$/), label: 'every 30 minutes', createdBy: 'bot', prompt: 'Check links.' })
     for (let i = 1; i < 8; i += 1) f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 60 }, prompt: `p${i}` }, 'bot')

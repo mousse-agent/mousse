@@ -53,7 +53,7 @@ const PERMISSION = Type.Union([
 ])
 
 const WHEN = Type.Union([
-  Type.Object({ kind: Type.Literal('interval'), minutes: Type.Integer({ description: 'Every this many minutes; at least 5.' }) }),
+  Type.Object({ kind: Type.Literal('interval'), minutes: Type.Integer({ description: 'Every this many minutes; at least 1.' }) }),
   Type.Object({ kind: Type.Literal('cron'), expr: Type.String({ description: 'Five-field cron in this computer\'s local time, for example "0 9 * * 1-5" for weekdays at 9:00.' }) })
 ])
 
@@ -115,7 +115,7 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'bot_schedule_add',
-    description: `Run yourself on a schedule: each time, you get the prompt as your task. At most ${MAX_BOT_SCHEDULES} schedules, at most every 5 minutes. Returns the schedule's id and its label; confirm it to the owner in words.`,
+    description: `Run yourself on a schedule: each time, you get the prompt as your task. At most ${MAX_BOT_SCHEDULES} schedules, at most once a minute. Returns the schedule's id and its label; confirm it to the owner in words.`,
     parameters: Type.Object({
       when: WHEN,
       prompt: Type.String({ description: 'What to do on each run, in your own words.' })

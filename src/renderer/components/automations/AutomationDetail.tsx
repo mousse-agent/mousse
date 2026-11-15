@@ -52,14 +52,9 @@ const BUILDER_KINDS: Array<{ value: BuilderKind; label: string }> = [
 /** A bot repeats: Once and On demand are something you ask it in its chat. */
 const BOT_BUILDER_KINDS = BUILDER_KINDS.filter((option) => option.value !== 'once' && option.value !== 'manual')
 
-/** Why a bot can't keep this When, by field; empty when it can. A bot runs at most every 5 minutes. */
+/** Why a bot can't keep this When, by field; empty when it can. Its interval follows every job's (at least a minute). */
 export function botScheduleErrors(draft: JobDraft): Partial<Record<DraftField, string>> {
   if (draft.scheduleKind === 'once' || draft.scheduleKind === 'manual') return { schedule: 'A bot repeats. For one run, ask it in its chat.' }
-  if (draft.scheduleKind === 'interval' && Number(draft.minutes) < 5) return { minutes: 'A bot runs at most every 5 minutes.' }
-  if (draft.scheduleKind === 'cron') {
-    const cron = parseSimpleCron(draft.expr)
-    if (cron?.kind === 'minutes' && cron.every < 5) return { expr: 'A bot runs at most every 5 minutes.' }
-  }
   return {}
 }
 

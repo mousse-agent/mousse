@@ -156,7 +156,7 @@ describe('automation drafts', () => {
     expect(pip.problems).toEqual([])
     expect(drafts.list().find((entry) => entry.id === pip.draftId)!.agent).toEqual({ kind: 'bot', botId: 'bot_1' })
     // A bot repeats: a CLI trigger is a problem until When repeats.
-    expect(drafts.save({ draftId: pip.draftId, trigger: { kind: 'cli' } }, { managerThreadId: 'manager' }).problems).toEqual(['A bot repeats: give it a time that repeats, at most every 5 minutes.'])
+    expect(drafts.save({ draftId: pip.draftId, trigger: { kind: 'cli' } }, { managerThreadId: 'manager' }).problems).toEqual(['A bot repeats: give it a time that repeats, at most once a minute.'])
     drafts.save({ draftId: pip.draftId, trigger: PR_CHECK.trigger }, { managerThreadId: 'manager' })
     const on = drafts.turnOn(pip.draftId)
     expect(botSchedules).toEqual([expect.objectContaining({ botId: 'bot_1', name: 'PR check', prompt: PR_CHECK.prompt })])

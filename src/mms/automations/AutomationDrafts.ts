@@ -355,7 +355,7 @@ export class AutomationDrafts {
     if (bot) {
       if (this.deps.botExists && !this.deps.botExists(bot)) problems.push('That bot is gone. Pick another Who.')
       const when = trigger.kind === 'time' ? botWhenOf(trigger.schedule) : undefined
-      const problem = when ? botScheduleProblem(when, prompt || 'x') : 'A bot repeats: give it a time that repeats, at most every 5 minutes.'
+      const problem = when ? botScheduleProblem(when, prompt || 'x') : 'A bot repeats: give it a time that repeats, at most once a minute.'
       if (problem) problems.push(problem)
     }
     if (!prompt.trim()) problems.push('Say what it should do.')
