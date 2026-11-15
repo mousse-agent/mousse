@@ -40,10 +40,10 @@ function fixture() {
     episode: new WriterEpisode(), ledgerRows: new Map(), fileCalls: new Map(), openTools: new Map(), announced: new Set(), sink: { tool: vi.fn(), lineEdits: vi.fn() }
   })
   let n = 0
-  async function call(t: ReturnType<typeof turn>, toolName: string, target = path, content = 'mine\n', fail = false) {
+  async function call(t: ReturnType<typeof turn>, toolName: string, target = path, content = 'mine\n', fail = false, read: { args?: Record<string, unknown>; result?: unknown } = {}) {
     const thread = { turn: t, cwd: files }
     const toolCallId = String(++n)
-    const input = { path: target, content, oldText: 'one', newText: 'mine' }
+    const input = { path: target, content, oldText: 'one', newText: 'mine', ...read.args }
     const answer = await rpc.gate(thread, { attemptToken: 't', toolCallId, toolName, input })
     if (answer.allow) {
       if (!fail) {
@@ -51,7 +51,7 @@ function fixture() {
         if (toolName === 'edit') writeFileSync(target, readFileSync(target, 'utf8').replace('one', 'mine'))
         if (toolName === 'read') accessSync(target)
       }
-      rpc.turnEvent(thread, t, { type: 'tool_execution_end', toolCallId, toolName, args: input, isError: fail, result: {} })
+      rpc.turnEvent(thread, t, { type: 'tool_execution_end', toolCallId, toolName, args: input, isError: fail, result: read.result ?? {} })
     }
     return answer
   }
@@ -152,3 +152,22 @@ it('detects a file growing past the hash cap and accepts it after a fresh read',
   expect((await f.call(t, 'write')).allow).toBe(true)
   expect(reads.mock.calls.filter(([path]) => path === f.path)).toHaveLength(0)
 })
+
+for (const [name, read] of [
+  ['offset', { args: { offset: 1 } }],
+  ['limit', { args: { limit: 1 } }],
+  ['Pi truncation', { result: { details: { truncation: { truncated: true } } } }],
+  ['oversized first line', { result: { details: { truncation: { firstLineExceedsLimit: true } } } }]
+] as const) {
+  it(`a partial read (${name}) allows version-checked edits but requires a whole read before overwrite`, async () => {
+    const f = fixture(), t = f.turn()
+    await f.call(t, 'read')
+    await f.call(t, 'read', f.path, '', false, read)
+    expect((await f.call(t, 'write')).allow).toBe(false)
+    expect(readFileSync(f.path, 'utf8')).toBe('one\n')
+    expect((await f.call(t, 'edit')).allow).toBe(true)
+    expect((await f.call(t, 'write')).allow).toBe(false)
+    await f.call(t, 'read')
+    expect((await f.call(t, 'write')).allow).toBe(true)
+  })
+}
