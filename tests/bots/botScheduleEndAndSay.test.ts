@@ -135,7 +135,7 @@ it.each(['removeAll', 'reset', 'purge'] as const)('finished schedules leave Auto
   expect(f.scheduler.getJob(entry.jobId)?.state).toBe('completed')
   if (action === 'removeAll') f.book.removeAll(botId)
   else if (action === 'reset') await f.bots.resetBot(botId)
-  else { await f.bots.remove(botId); await f.bots.purge(botId) }
+  else { await f.bots.remove(botId); await f.bots.sweepDeleted(new Date(2031, 0, 1).getTime()) }
   expect(f.scheduler.listJobs().filter((job) => job.bot?.botId === botId)).toEqual([])
 })
 
