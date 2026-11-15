@@ -472,6 +472,14 @@ describe('owner attention in the shared summary', () => {
     expect(summary().state).not.toBe('needs_you')
   })
 
+  it('clears when the owner answers the only question from work', async () => {
+    const { questionId } = await workAsks(FLATS)
+    expect(summary().needsOwner).toBe(true)
+    await tap(questionId, 'Flat A')
+    expect(summary().needsOwner).toBeUndefined()
+    expect(summary().state).not.toBe('needs_you')
+  })
+
   it('counts work waiting on its question, once even with three questions', async () => {
     const one = await workAsks(FLATS)
     await workAsks({ question: 'Which movers?', choices: ['A', 'B'] }, 'Movers', 'w2')
@@ -490,6 +498,14 @@ describe('owner attention in the shared summary', () => {
     expect(f.store.question(questionId)?.status).toBe(status)
     expect(summary().needsOwner).toBeUndefined()
     expect(summary().state).not.toBe('needs_you')
+  })
+
+  it('counts an open question even when an error takes priority in the state', async () => {
+    f.store.setError(botId, { code: 'test', error: { text: 'Sign in', action: { kind: 'sign_in', label: 'Sign in', instanceId: 'test' } } })
+    expect(summary().needsOwner).toBeUndefined()
+    await chatAsks(FLATS)
+    f.store.setError(botId, { code: 'test', error: { text: 'Sign in', action: { kind: 'sign_in', label: 'Sign in', instanceId: 'test' } } })
+    expect(summary()).toMatchObject({ state: 'stuck', needsOwner: true })
   })
 
   it('does not count a paused bot with an open question', async () => {

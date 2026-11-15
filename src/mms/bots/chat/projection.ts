@@ -505,8 +505,9 @@ export class BotChatProjection {
         ...(row.trigger.kind === 'work' && row.trigger.model?.name ? { model: { name: row.trigger.model.name, detail: workModelDetail(row.trigger.model) } } : {}),
         ...this.runningSubagents(row.id)
       }))
-    // Questions the bot's work waits on need the owner too ("Asked: Which flat…?"); a permission ask's words come first.
-    const waitingOn = this.store.waitingQuestions(definition.id)
+    // Posted chat questions and questions the bot's work waits on need the owner too ("Asked: Which flat…?"); a permission ask's words come first.
+    const waitingOn = [...this.store.waitingQuestions(definition.id), ...this.store.openChatQuestions(definition.id)]
+    const needsOwner = !paused && asks.length + waitingOn.length > 0
     // Threads it started that still work keep it busy: it manages them. Those that ended are listed, never counted.
     const threads = this.launchedOf(definition.id)
     const watchers = this.options.watchers?.(definition.id) ?? []
@@ -532,6 +533,7 @@ export class BotChatProjection {
       ...(definition.promptDefault ? { promptEdited: true as const } : {}),
       look: normalizeBotLook(definition.look),
       state,
+      ...(needsOwner ? { needsOwner: true as const } : {}),
       stateText,
       ...(offline ? { waiting: 'internet' as const } : {}),
       ...(error ? { error } : {}),

@@ -86,8 +86,10 @@ describe('asks in a run', () => {
     first.prepared.authority.check(command('ls'))
     await finish(f, first.payload, 'completed', { text: 'Skipped.' })
     const askId = f.store.openAsks(botId)[0]!.id
+    expect(f.bots.service.get(botId).summary.needsOwner).toBe(true)
     const { message } = await f.bots.service.answer(botId, askId, 'not_now')
     expect(message.ask).toMatchObject({ askId, status: 'not_now' })
+    expect(f.bots.service.get(botId).summary.needsOwner).toBeUndefined()
     f.clock.now += DAY - 60_000
     const second = await run('r2')
     // No card: the bot is told the owner said not now, never that it asked.
