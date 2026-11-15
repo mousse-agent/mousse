@@ -32,6 +32,7 @@ import { ChatComposer, type AttachedFile, type VoiceMessage } from '../ChatCompo
 import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from '../ComposerNotice'
 import { botGroupTime, placeMessages } from './messageGroups'
 import { chatRows, withNotes, type BotChatRow, type OwnerMarks } from './botChatShape'
+import { BOT_CHAT_WINDOW_STEP, rowIndex, rowKey, windowStart } from './botChatWindow'
 import { botCommandSuggestions } from './botCommands'
 import { slotModels, submitBotChat } from './runBotCommand'
 import type { BotLocalNote } from '../../stores/botsStore'
@@ -81,16 +82,23 @@ const messageElement = (id: string) => {
 }
 const nextFrame = () => new Promise<void>((resolve) => { requestAnimationFrame(() => resolve()) })
 
+/** The open chat's way to draw a loaded message above its window (botChatWindow.ts), by bot. */
+const revealers = new Map<string, (id: string) => void>()
+
 /**
  * Scrolls to a message of the open chat and lights it briefly. A message not loaded yet is loaded first, page by
- * page of older history; one the chat no longer has does nothing.
+ * page of older history; one loaded above the rows drawn is drawn; one the chat no longer has does nothing.
  */
 async function showMessage(botId: string, id: string): Promise<void> {
   let element = messageElement(id)
   if (!element) {
     if (!(await useBotsStore.getState().findMessage(botId, id))) return
-    // The loaded page renders on its own schedule: wait a few frames for the message to be drawn.
-    for (let frame = 0; frame < 10 && !(element = messageElement(id)); frame += 1) await nextFrame()
+    // The loaded page renders on its own schedule: wait a few frames for the message to be drawn, asking the chat to
+    // draw it until it is (it may not have rendered the page yet when first asked).
+    for (let frame = 0; frame < 10 && !(element = messageElement(id)); frame += 1) {
+      revealers.get(botId)?.(id)
+      await nextFrame()
+    }
     if (!element) return
   }
   element.scrollIntoView({ block: 'center', behavior: 'smooth' })
@@ -516,6 +524,30 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   // The sent rows and the messages on their way, in one run of groups (a quiet line ends a group), with the day lines.
   const shown = useMemo<BotChatRow[]>(() => (pending.length ? [...rows, ...pending.map((message) => ({ kind: 'message' as const, message }))] : rows), [rows, pending])
   const places = useMemo(() => placeMessages(shown.map((row) => (row.kind === 'message' ? row.message : { author: 'system', at: row.at }))), [shown])
+  // Only the newest rows are drawn (botChatWindow.ts). `from`: the first row drawn while the reader is away from the
+  // end; without it, the newest rows. `revealOlder`: a page asked for at the window's top shows once it arrives.
+  const [from, setFrom] = useState<string | undefined>(undefined)
+  const start = windowStart(shown, from)
+  const firstShown = shown[start] ? rowKey(shown[start]!) : undefined
+  const revealOlder = useRef(false)
+  const shownRef = useRef(shown)
+  shownRef.current = shown
+  const fromRef = useRef(from)
+  fromRef.current = from
+  useLayoutEffect(() => {
+    if (!revealOlder.current || !firstId) return
+    revealOlder.current = false
+    if (shown[0]) setFrom(rowKey(shown[0]))
+  }, [firstId, shown])
+  // A quote's message above the window is drawn, with every row after it.
+  useEffect(() => {
+    revealers.set(bot.id, (id) => {
+      const rows = shownRef.current
+      const index = rowIndex(rows, id)
+      if (index >= 0 && index < windowStart(rows, fromRef.current)) setFrom(rowKey(rows[index]!))
+    })
+    return () => { revealers.delete(bot.id) }
+  }, [bot.id])
   // The message each reply answers, for how long its work took.
   const byId = useMemo(() => new Map(messages.map((message) => [message.id, message])), [messages])
   // A file a chip opened, in the Files pane beside the chat. Opening one closes About and the browser's split view.
@@ -568,11 +600,11 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
       setAway(false)
       setUnseen(false)
     }
-    if (held.firstId && firstId !== held.firstId && !held.atEnd) element.scrollTop += element.scrollHeight - held.height
+    if (held.firstId && firstShown !== held.firstId && !held.atEnd) element.scrollTop += element.scrollHeight - held.height
     else if (held.atEnd) element.scrollTop = element.scrollHeight
     if (!held.atEnd && held.lastSeq !== undefined && lastSeq !== undefined && lastSeq > held.lastSeq && messages.at(-1)?.author === 'bot') setUnseen(true)
-    anchor.current = { firstId, lastSeq, height: element.scrollHeight, atEnd: held.atEnd, sent: pending.length, heading: held.heading, top: held.top }
-  }, [firstId, lastSeq, messages, pending.length, working, offline, replying?.id])
+    anchor.current = { firstId: firstShown, lastSeq, height: element.scrollHeight, atEnd: held.atEnd, sent: pending.length, heading: held.heading, top: held.top }
+  }, [firstShown, lastSeq, messages, pending.length, working, offline, replying?.id])
   useEffect(() => {
     anchor.current = { lastSeq: anchor.current.lastSeq, height: 0, atEnd: true, sent: anchor.current.sent }
     setUnseen(false)
@@ -664,7 +696,17 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
         if (anchor.current.atEnd) setUnseen(false)
         if (!anchor.current.heading) setAway(!anchor.current.atEnd)
         measure()
-        if (element.scrollTop < 60 && chat?.hasMore) void store().loadOlder(bot.id)
+        // Back at the end, only the newest rows are drawn again; away from it, the rows drawn hold still.
+        if (anchor.current.atEnd) setFrom(undefined)
+        else if (from === undefined && firstShown !== undefined) setFrom(firstShown)
+        // At the top of the rows drawn: the next loaded rows above join them, else the next page is asked for.
+        if (element.scrollTop < 60) {
+          if (start > 0) setFrom(rowKey(shown[Math.max(0, start - BOT_CHAT_WINDOW_STEP)]!))
+          else if (chat?.hasMore) {
+            revealOlder.current = true
+            void store().loadOlder(bot.id)
+          }
+        }
       }}>
         {!chat && load === 'loading' && <div className="bot-load-state" role="status"><Loader2 size={14} className="chat-spin" aria-hidden />Loading messages…</div>}
         {!chat && load === 'failed' && <div className="bot-load-state is-failed" role="status">
@@ -672,7 +714,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
           <button type="button" onClick={() => void store().loadChat(bot.id)}>Retry</button>
         </div>}
         {chat?.loadingOlder && <p className="chat-empty-hint bot-loading-older">Loading earlier messages…</p>}
-        {shown.map((row, index) => {
+        {shown.slice(start).map((row, drawn) => {
+          const index = start + drawn
           const place = places[index]!
           const day = place.day && <div className="bot-day" role="separator" aria-label={place.day}><span>{place.day}</span></div>
           if (row.kind === 'system') return <Fragment key={row.id}>{day}<SystemLine row={row} /></Fragment>
