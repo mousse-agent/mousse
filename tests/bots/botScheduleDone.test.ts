@@ -173,6 +173,9 @@ it('posts the report followed by one stopped line even when removal keeps failin
   const line = rows.findIndex(row => row.systemLine)
   expect(report).toBeGreaterThan(-1)
   expect(line).toBeGreaterThan(report)
+  vi.restoreAllMocks()
+  await f.bots.maintain()
+  expect(f.book.get(botId, s.own.scheduleId)).toBeUndefined()
 })
 
 it.each(['failed', 'stopped'] as const)('posts one completion line when the run ends %s', async path => {
