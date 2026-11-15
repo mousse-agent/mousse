@@ -1883,3 +1883,23 @@ describe('memory', () => {
     expect(dialog()?.querySelector('.is-focused .bot-memory-text')?.textContent).toBe('The owner reads mail at 8.')
   })
 })
+
+
+it('a reminder offers snooze replies and a tap leaves a quiet confirmation', async () => {
+  fake.chats.inbox = [message(1, { text: 'Tea', reminder: {} })]
+  fake.client.snoozeReminder = vi.fn(async () => ({ ...fake.chats.inbox![0]!, reminder: { snoozedUntil: '2026-11-07T09:10:00.000Z' } }))
+  await open()
+  expect(button('In 10 min')).toBeDefined()
+  expect(button('In 1 hour')).toBeDefined()
+  expect(button('Tomorrow 9:00')).toBeDefined()
+  await click(button('In 10 min'))
+  expect(fake.client.snoozeReminder).toHaveBeenCalledWith('inbox', 'm1', '10m')
+  expect(button('In 10 min')).toBeUndefined()
+  expect(host.textContent).toContain('Snoozed until')
+})
+
+it('a service without snooze support offers no snooze replies', async () => {
+  fake.chats.inbox = [message(1, { text: 'Tea' })]
+  await open()
+  expect(button('In 10 min')).toBeUndefined()
+})
