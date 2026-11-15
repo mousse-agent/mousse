@@ -23,7 +23,6 @@ beforeEach(() => {
   Object.assign(window.mousse, { app: { setAttentionCount: badge } })
   setBotsClient(fake.client)
   useBotsStore.setState({ profileId: null })
-  useBotsStore.getState().activate('p1')
   useAppStore.setState({ threadsSidebarOpen: false, threadsSidebarView: 'threads', threads: [], threadActivity: {} })
   useChatsStore.setState({ snapshot: { agents: [], chats: [], devices: [] } })
   host = document.createElement('div')
@@ -35,7 +34,10 @@ afterEach(() => {
   host.remove()
   setBotsClient(null)
 })
-const show = async () => { await act(async () => root.render(createElement(TitleBar))) }
+const show = async () => { await act(async () => {
+  useBotsStore.getState().activate('p1')
+  root.render(createElement(TitleBar))
+}) }
 const change = async () => { await act(async () => { fake.emit.changed('a') }) }
 
 it('sends zero with no bots and counts a waiting bot once alongside threads, before Chats opens', async () => {
@@ -52,8 +54,10 @@ it('sends zero with no bots and counts a waiting bot once alongside threads, bef
   expect(host.querySelector('button[aria-label="Show sidebar · 1 thread and 1 bot need you"]')).not.toBeNull()
 })
 
-it('loads waiting bots on mount without a change event or opening Chats', async () => {
+it('loads waiting bots at activation before mounting the title bar or opening Chats', async () => {
   fake.bots = [summary('a', { state: 'needs_you' })]
+  await act(async () => useBotsStore.getState().activate('p1'))
+  expect(useBotsStore.getState().bots.map((bot) => bot.id)).toEqual(['a'])
   await show()
   expect(badge).toHaveBeenLastCalledWith(1)
 })
