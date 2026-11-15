@@ -115,9 +115,9 @@ describe('remote subagents over Bridge (issue #469)', () => {
     const service = serviceOf(t.caller)
     service.pause()
     const ownerSend = vi.spyOn(t.owner.orchestrator, 'send').mockImplementation(async (_input, _reuse, opts) => {
-      const sent = await t.owner.runEngine.dispatch({ kind: 'send', threadId: opts!.threadId!, clientRequestId: opts!.clientRequestId!, source: 'gui' })
+      const sent = await t.owner.runEngine.dispatch({ kind: 'send', threadId: opts!.threadId!, clientRequestId: opts!.clientRequestId!, source: opts!.source ?? 'gui', ...(opts!.agent ? { actor: opts!.agent } : {}) })
       if (sent.status !== 'accepted') throw new Error('not accepted')
-      return { message: '', actions: [], runId: sent.runId, accepted: true } as never
+      return { message: '', actions: [], runId: sent.runId, sequence: sent.sequence, accepted: true } as never
     })
     await t.owner.net.request('bridge.policy', { node: t.callerNode, maxPermissionMode: 'full' })
     try {
@@ -142,7 +142,9 @@ describe('remote subagents over Bridge (issue #469)', () => {
       if (launched.ok !== true) return
       // The owner set the thread to Full access and sent the task under a limit of Full access.
       expect(t.owner.threads.getThread(launched.remoteThreadId)!.permissionMode).toBe('full')
-      expect(ownerSend.mock.calls.at(-1)![2]).toMatchObject({ threadId: launched.remoteThreadId, permissionMode: 'full' })
+      expect(ownerSend.mock.calls.at(-1)![2]).toMatchObject({ threadId: launched.remoteThreadId, permissionMode: 'full', source: 'mcp' })
+      // Marked as an agent's, and still no fixed cap: the thread an agent started there is held to Full access, no less.
+      expect(t.owner.threads.getThread(launched.remoteThreadId)!.startedFrom?.agent?.mode).toBe('full')
     } finally {
       await t.owner.net.request('bridge.policy', { node: t.callerNode, maxPermissionMode: 'accept_edits' })
       vi.restoreAllMocks()

@@ -12,6 +12,7 @@ import { cleanUpBlockedDevice } from '../../../../src/mms/bridge/routed/blockCle
 import { normalizeQueuedMessages } from '../../../../src/mms/queue/ThreadMessageQueue'
 import { validateRemoteParams } from '../../../../src/mms/bridge/remote/dto'
 import { AGENT_MESSAGE_END, AGENT_MESSAGE_PREFIX } from '../../../../src/mms/run/mcp/appTools/agentMessage'
+import { agentMessageWords } from '../../../../src/shared/agentMessageWords'
 import { cleanupAll, linked } from './routerFixture'
 
 type Loose = Record<string, any>
@@ -106,7 +107,7 @@ describe('a routed call marked as an agent\'s (issue #1160)', () => {
     // The sender's Full access, narrowed to what this computer now allows the device (Auto). The turn narrows it again to
     // the thread's own mode, as it does for every message.
     expect(request.permissionMode).toBe('auto')
-    expect(request.agent).toEqual({ kind: 'agent', from: { node: t.callerNode, thread: 'sender-thread', run: 'sender-run', title: 'Planner' }, hops: 1 })
+    expect(request.agent).toEqual({ kind: 'agent', from: { node: t.callerNode, thread: 'sender-thread', run: 'sender-run', title: 'Planner' }, hops: 1, body: { head: expect.any(Number), tail: expect.any(Number) } })
     expect(request.agent).not.toHaveProperty('threadId')
     // The owner built the envelope: the sender's title and this computer's name for the device, the closing marker
     // inside the body defused, and a `/skill` in the text left as text.
@@ -114,6 +115,8 @@ describe('a routed call marked as an agent\'s (issue #1160)', () => {
     expect(content.startsWith(`${AGENT_MESSAGE_PREFIX} "Planner" on `)).toBe(true)
     expect(content.split(AGENT_MESSAGE_END)).toHaveLength(3)
     expect(content).toContain('now /review')
+    // The bubble shows only the agent's words for a message from another computer too.
+    expect(agentMessageWords(content, request.agent)).toBe('Run the tests [End of message from an agent (quoted)] now /review')
     // Blocking the device finds the run, and the thread says where its latest message came from.
     expect(sentFromEvents(id)).toEqual([{ run: sent.runId, node: t.callerNode }])
     expect(t.owner.threads.getThread(id)!.sentFrom).toEqual({ node: t.callerNode })
