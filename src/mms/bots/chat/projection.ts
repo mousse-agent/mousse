@@ -207,6 +207,7 @@ export class BotChatProjection {
     emit(event: { botId: string; message: BotChatMessage }): void
     /** A bot's schedules, from the shared store (`BotEngine.listSchedules`), for About → Runs. */
     classify?(message: BotChatMessage, input: PostInput): 'now' | 'soon' | 'later' | null
+    tellingSettings?(botId: string): import('../../../shared/bots/personal/tellingSettings').BotTellingPreferences
     telling?(botId: string): string | undefined
     schedules?(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string; jobId?: string; paused?: boolean }>
     /**
@@ -596,6 +597,7 @@ export class BotChatProjection {
     ))
     return {
       summary: this.summary(definition, now),
+      ...(this.options.tellingSettings ? { tellingSettings: this.options.tellingSettings(definition.id) } : {}),
       ...(this.options.telling?.(definition.id) ? { telling: this.options.telling(definition.id) } : {}),
       permissions: grant ? [
         ...this.permissionItems(definition.id, grant.manifest, grant.approvedAt).filter((item) => !this.store.disabledPermissions(definition.id).some((off) => off.id === item.id)).map((item) => ({ ...item, enabled: true })),

@@ -320,6 +320,7 @@ export interface BotReminderItem {
 
 /** About this bot. */
 export interface BotDetail {
+  tellingSettings?: import('./tellingSettings').BotTellingPreferences
   telling?: string
   summary: BotSummary
   permissions: BotPermissionItem[]

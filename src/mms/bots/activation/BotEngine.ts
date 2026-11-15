@@ -695,6 +695,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         return tellingClass({ tellMe, level: activation ? this.host.runLevel?.(activation.id) : undefined, message, scheduleLine: input.scheduleLine, ownerTurn: !!activation && memoryLaneOf(activation) === 'chat',
           reminder: !!reminder, reminderOwner: reminder?.ownerSet, quiet: this.quietReport(this.store.message(message.id)!.botId, message) })
       },
+      tellingSettings: (botId) => this.tellingSettings(botId),
       telling: (botId) => this.tellingLine(botId),
       schedules: (botId) => this.schedulesOf(botId).map((schedule) => ({ scheduleId: schedule.scheduleId, label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}), jobId: schedule.jobId, paused: schedule.paused })),
       // The threads it started that still work: it is busy while it manages them.
@@ -7741,8 +7742,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.changed({ botId })
   }
 
+  tellingSettings(botId: string): import('../../../shared/bots/personal/tellingSettings').BotTellingPreferences {
+    const quietHours = this.host.settings?.get().notifications.quietHours
+    return { ...readBotTelling(this.store.registry(botId)?.tellJson), ...(quietHours ? { quietHours } : {}) }
+  }
+
   tellingLine(botId: string): string | undefined {
-    return tellingLine(readBotTelling(this.store.registry(botId)?.tellJson), this.host.settings?.get().notifications.quietHours)
+    const settings = this.tellingSettings(botId)
+    return tellingLine(settings, settings.quietHours)
   }
 
   setTelling(botId: string, activationId: string, change: TellingChange): string {

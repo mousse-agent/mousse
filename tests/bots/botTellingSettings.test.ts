@@ -58,7 +58,8 @@ it('writes profile quiet hours, clears them, and refuses bad values before chang
   f.host.settings = new SettingsStore(config)
   const { botId } = await createBot(f)
   const turn = await f.bots.enqueueChat(botId, 'chat:settings', 'No pings at night')
-  f.bots.setTelling(botId, turn.id, { quietHours: { from: '22:00', to: '07:00' } })
+  expect(f.bots.setTelling(botId, turn.id, { quietHours: { from: '22:00', to: '07:00' } })).toBe('Quiet 22:00 to 07:00')
+  expect(f.bots.chat.detail(f.bots.get(botId).published!, f.clock.now).tellingSettings).toMatchObject({ quietHours: { from: '22:00', to: '07:00' } })
   expect(new SettingsStore(MousseConfigStore.load(join(f.base, 'settings-home'))).get().notifications.quietHours).toEqual({ from: '22:00', to: '07:00' })
   for (const quietHours of [{ from: '24:00', to: '07:00' }, { from: '10:2', to: '07:00' }, { from: '22:00', to: '22:00' }]) {
     expect(() => f.bots.setTelling(botId, turn.id, { quietHours })).toThrow(/HH:MM/)

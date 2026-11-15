@@ -11,6 +11,8 @@ import { BotComputerSelect, BotModelRows, BotModelSelect } from './BotRunsOn'
 import { BotFace } from './face/BotFace'
 import { BotDevicesRow } from './BotDevices'
 import { memorySplitText } from './BotMemoryDialog'
+import { tellingLine } from '../../../shared/bots/personal/tellingSettings'
+import { botGroupTime } from './messageGroups'
 import { BotPrompt } from './BotPrompt'
 
 /** About's Runs on section, which a bot's Pick a model scrolls to. */
@@ -167,6 +169,10 @@ function Memory({ botId, detail }: { botId: string; detail: unknown }) {
  */
 export function BotAboutPanel({ bot }: { bot: BotSummary }) {
   const detail = useBotsStore((s) => s.details[bot.id])
+  const telling = detail?.tellingSettings ? tellingLine(detail.tellingSettings, detail.tellingSettings.quietHours, time => {
+    const [hour, minute] = time.split(':').map(Number)
+    return botGroupTime(new Date(2000, 0, 1, hour, minute).toISOString())
+  }) : detail?.telling
   const happy = useBotsStore((s) => s.happy[bot.id])
   useEffect(() => { void useBotsStore.getState().loadDetail(bot.id) }, [bot.id])
   const store = useBotsStore.getState
@@ -179,7 +185,7 @@ export function BotAboutPanel({ bot }: { bot: BotSummary }) {
       <h2>{bot.name}</h2>
     </div>
     <BotPrompt bot={bot} />
-    {detail?.telling && <p className="bot-about-row"><Bell size={14} aria-hidden /><span>{detail.telling}</span></p>}
+    {telling && <p className="bot-about-row"><Bell size={14} aria-hidden /><span>{telling}</span></p>}
     <h3>CAN USE</h3>
     {detail?.permissions.length
       ? detail.permissions.map((item) => <div className="bot-about-row bot-about-permission" key={item.id}>
