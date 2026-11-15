@@ -1,3 +1,5 @@
+import { hasToolImages } from '../chat/toolImages'
+import { extractAppletParts } from '../../../shared/applets'
 import type { BotMemoryStore } from '../memory/BotMemoryStore'
 import type { ScheduledMissedRuns } from '../../../shared/types'
 import { requestJournalRows } from '../memory/requestFrames'
@@ -2174,7 +2176,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.store.run('DELETE FROM bot_memory_state WHERE bot_id = ? AND key = ?', row.botId, `draft:${row.id}`)
   }
 
-  private canHoldChatDraft(row: BotActivationRow, main: BotDispatchRow): boolean {
+  private canHoldChatDraft(row: BotActivationRow, main: BotDispatchRow, text?: string): boolean {
+    if (hasReplyCards(row.id) || hasToolImages(row.id) || (text && extractAppletParts(text, true).some(part => part.type !== 'text'))) return false;
     if (row.lane !== 'chat' || this.chatDraft(row) || !this.store.pendingWorkNotes(row.id).length) return false
     if (this.store.get("SELECT 1 FROM bot_messages WHERE activation_id = ? AND author = 'bot' AND kind = 'text'", row.id)) return false
     const runs = this.host.runs()
@@ -4472,7 +4475,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // left for them; without the time it reports what it has, and the notes stay unread (work_list shows it ended).
       // The same holds, in either lane, for a permission the owner allowed after the turn was refused it (issue #983).
       const allowed = !reload && run.status === 'completed' ? this.allowedSinceRefused(row) : []
-      const hold = this.canHoldChatDraft(row, main)
+      const hold = this.canHoldChatDraft(row, main, text)
       // The executor can deliver its final words after the terminal event. Wait before making the
       // continuation, so its request and the durable draft contain those words too.
       if (hold && text === undefined && options.expectText) {
