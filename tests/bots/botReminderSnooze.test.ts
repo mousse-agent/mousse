@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, it } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
 import { botFixture, chatOf, createBot, type BotFixture } from './botFixture'
 
@@ -9,13 +9,13 @@ beforeEach(async () => {
   await f.bots.reconcileOnStartup()
   botId = (await createBot(f, { reply: 'Hello.' })).botId
 })
-afterEach(() => f.close())
+afterEach(() => { f.close(); vi.restoreAllMocks(); vi.unstubAllEnvs() })
 
 // Owner message, coalesced message, tap, first message, wake, default, other bot, unknown.
 it.each([
   ['chat:m1', true], ['chat:after:m1', true], ['answer:q1', true],
   ['create:b1', false], ['wake:r1', false], ['question:q1:default', false],
-  ['bot-message:b2', false], ['future:start', false]
+  ['botmsg:b2', false], ['future:start', false]
 ])('stores who set text and work reminders in %s', async (key, ownerSet) => {
   await f.bots.service.chatSend({ botId, text: 'Remind me', clientRequestId: 'm1' })
   const turn = f.store.laneActivations(botId, 'chat', ['running'])[0]!
@@ -102,4 +102,58 @@ it('a snoozed reminder can be cancelled through the usual list', async () => {
   const reminder = f.bots.service.get(botId).reminders![0]!
   expect(f.bots.service.reminderCancel(botId, reminder.id).reminders).toEqual([])
   expect(f.store.reminder(reminder.id)?.status).toBe('cancelled')
+})
+
+
+it('reads reminder state only for said reminder rows and scopes copies to their bot', async () => {
+  const { bubble, r } = await said()
+  const lookup = vi.spyOn(f.store, 'reminderForMessage')
+  const copies = vi.spyOn(f.store, 'snoozedCopy')
+  const ordinary = f.store.messages(botId, { limit: 50 }).filter(m => !m.id.startsWith('bm_rem_'))
+  for (const row of ordinary) f.bots.chat.toMessage(row)
+  expect(lookup).not.toHaveBeenCalled()
+  expect(copies).not.toHaveBeenCalled()
+  f.store.insertReminder({ id: 'another-bots-copy', botId: 'another', dueAt: f.store.now(), text: 'Other', work: null, replyTo: null, createdAt: f.store.now(), snoozedFrom: r.reminderId })
+  expect(f.bots.chat.toMessage(f.store.message(bubble.id)!).reminder).not.toHaveProperty('snoozedUntil')
+})
+
+it('cancelling a snoozed copy returns replies and allows another snooze', async () => {
+  const { bubble } = await said()
+  f.bots.service.reminderSnooze(botId, bubble.id, '10m')
+  const copy = f.store.waitingReminders(botId)[0]!
+  const messages: unknown[] = []
+  f.bots.events.on('message', e => messages.push(e))
+  f.bots.service.reminderCancel(botId, copy.id)
+  expect(chatOf(f, botId).find(m => m.id === bubble.id)?.reminder).not.toHaveProperty('snoozedUntil')
+  expect(messages).toContainEqual(expect.objectContaining({ message: expect.objectContaining({ id: bubble.id, reminder: expect.not.objectContaining({ snoozedUntil: expect.anything() }) }) }))
+  f.bots.service.reminderSnooze(botId, bubble.id, '1h')
+  expect(f.store.waitingReminders(botId)).toHaveLength(1)
+})
+
+it('offers snooze for 24 hours from delivery and refuses an expired stale tap', async () => {
+  const { bubble } = await said()
+  f.clock.now += 24 * 60 * 60_000 - 1
+  expect(chatOf(f, botId).find(m => m.id === bubble.id)?.reminder).toBeDefined()
+  f.clock.now += 1
+  expect(chatOf(f, botId).find(m => m.id === bubble.id)?.reminder).toBeUndefined()
+  expect(() => f.bots.service.reminderSnooze(botId, bubble.id, '10m')).toThrow('This reminder is too old to snooze.')
+  expect(f.store.waitingReminders(botId)).toEqual([])
+})
+
+// America/New_York: midnight boundaries, spring clock change, autumn repeated hour.
+it.each([
+  ['2026-11-07T23:55:00-05:00', '2026-11-08T05:05:00.000Z', '2026-11-08T05:55:00.000Z', '2026-11-08T14:00:00.000Z'],
+  ['2026-11-07T00:05:00-05:00', '2026-11-07T05:15:00.000Z', '2026-11-07T06:05:00.000Z', '2026-11-08T14:00:00.000Z'],
+  ['2026-03-08T01:55:00-05:00', '2026-03-08T07:05:00.000Z', '2026-03-08T07:55:00.000Z', '2026-03-09T13:00:00.000Z'],
+  ['2026-11-01T01:55:00-04:00', '2026-11-01T06:05:00.000Z', '2026-11-01T06:55:00.000Z', '2026-11-02T14:00:00.000Z']
+])('uses local calendar time and real durations at %s', async (now, ten, hour, tomorrow) => {
+  vi.stubEnv('TZ', 'America/New_York')
+  f.clock.now = Date.parse(now)
+  const { bubble } = await said()
+  for (const [choice, expected] of [['10m', ten], ['1h', hour], ['tomorrow', tomorrow]] as const) {
+    const updated = f.bots.service.reminderSnooze(botId, bubble.id, choice)
+    expect(updated.reminder?.snoozedUntil).toBe(expected)
+    const copy = f.store.waitingReminders(botId)[0]!
+    f.bots.service.reminderCancel(botId, copy.id)
+  }
 })
