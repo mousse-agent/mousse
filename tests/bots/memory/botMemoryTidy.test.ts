@@ -23,7 +23,7 @@ it('puts away cross-kind copies without changing the kept entry, and Forget take
     expect(store.forget('ada', { id, by: 'owner_ui' })).toMatchObject({ error: expect.stringContaining('m1') })
     for (const key of ['replaces', 'merges'] as const) {
       expect(store.save('ada', { lane: 'chat', kind: 'note', text: 'A replacement.', [key]: key === 'merges' ? [id] : id }))
-        .toMatchObject({ error: 'stale', current: { absorbedBy: 'm1' } })
+        .toMatchObject({ error: 'refused', reason: `${id} was put away as a copy of m1. To change these words, replace m1.` })
     }
   }
   expect(store.journal('ada').at(-1)).toMatchObject({ who: 'mousse', kind: 'memory_op' })

@@ -591,7 +591,7 @@ export class BotMemoryStore {
    * (`m12`), or one activation's rows page by page. A page holds about 8k tokens at most; a
    * redacted row shows its tombstone.
    */
-  read(botId: string, input: { ref: string; before?: number; after?: number } | { activationId: string; cursor?: string }): { rows: BotMemoryRow[]; cursor?: string } | { error: string } {
+  read(botId: string, input: { ref: string; before?: number; after?: number } | { activationId: string; cursor?: string }): { rows: BotMemoryRow[]; cursor?: string; guidance?: string } | { error: string } {
     const budget = BOT_MEMORY_READ_PAGE_TOKENS * 4
     const rowOf = (row: BotJournalRow, max: number): BotMemoryRow => {
       const text = maskMemoryCredentials(row.text)
@@ -622,7 +622,9 @@ export class BotMemoryStore {
     if (memory) {
       const versions = this.versions(botId, memory.id)
       if (!versions.length) return { error: `There is no memory entry ${input.ref}.` }
+      const guidance = this.copyAdvice(botId, versions.at(-1)!)
       return {
+        ...(guidance ? { guidance } : {}),
         rows: versions.map((version) => ({
           ref: memoryRef(version.id, version.version),
           at: version.learnedAt,
@@ -655,6 +657,19 @@ export class BotMemoryStore {
       VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'superseded', ?)`,
     entry.id, entry.version + 1, botId, entry.kind, entry.text, entry.textHash, entry.learnedAt,
     entry.validFrom, entry.expiresAt, entry.writtenIn, entry.sourceSeq, `merged into ${absorbedBy}`)
+  }
+
+  /** A copy points to the version that absorbed it; later corrections keep that identity. */
+  private copyAdvice(botId: string, entry: BotMemoryVersion): string | undefined {
+    if (entry.status !== 'superseded' || !entry.reason?.startsWith('merged into ')) return undefined
+    const ref = parseMemoryRef(entry.reason.slice(12))
+    if (!ref) return undefined
+    const absorbedInto = this.get('SELECT text_hash FROM bot_memories WHERE bot_id = ? AND id = ? AND version = ?', botId, ref.id, ref.version ?? 1)
+    if (absorbedInto?.text_hash !== entry.textHash) return undefined
+    const kept = this.current(botId, ref.id)
+    if (!kept || (kept.status !== 'active' && kept.status !== 'expired')) return undefined
+    const target = memoryRef(kept.id, kept.version)
+    return `${entry.id} was put away as a copy of ${target}. To change these words, replace ${target}.`
   }
 
   /** Exact hashes only. Both chat and run packs load all three kinds in full. */
@@ -774,6 +789,8 @@ export class BotMemoryStore {
         const ref = parseMemoryRef(input.replaces)
         replaced = ref ? this.current(botId, ref.id) : undefined
         if (!ref || !replaced) return { error: 'refused', reason: `There is no memory entry ${input.replaces}.` }
+        const advice = this.copyAdvice(botId, replaced)
+        if (advice) return { error: 'refused', reason: advice }
         if (replaced.status === 'forgotten') return { error: 'refused', reason: `${ref.id} was forgotten: save a new entry instead.` }
         if (input.lane === 'run' && replaced.kind !== 'run_note') return { error: 'refused', reason: 'A run or a turn you started yourself can only replace run notes. Ask the owner in the chat.' }
         if ((ref.version ?? 1) !== replaced.version)
@@ -784,6 +801,8 @@ export class BotMemoryStore {
         const ref = parseMemoryRef(value)
         const entry = ref ? this.current(botId, ref.id) : undefined
         if (!ref || !entry) return { error: 'refused', reason: `There is no memory entry ${value}.` }
+        const advice = this.copyAdvice(botId, entry)
+        if (advice) return { error: 'refused', reason: advice }
         if ((ref.version ?? 1) !== entry.version)
           return { error: 'stale', current: { id: entry.id, version: entry.version, ref: memoryRef(entry.id, entry.version), text: entry.text ?? '', ...(entry.reason?.startsWith('merged into ') ? { absorbedBy: entry.reason.slice(12) } : {}) } }
         if (entry.status !== 'active') return { error: 'refused', reason: entry.reason?.startsWith('merged into ') ? `${value} was ${entry.reason}. Read that entry instead.` : `${value} is not an active memory entry.` }
@@ -920,7 +939,9 @@ export class BotMemoryStore {
         .sort((a, b) => Number(a.id.slice(1)) - Number(b.id.slice(1)))
       if (holders.some((value) => !ids.has(value.id))) {
         const refs = holders.map((value) => memoryRef(value.id, value.version)).join(', ')
-        return { error: `This memory is held by ${refs}, including earlier versions. Name all these entries together in one Forget in the chat, then save again what should stay.`, holders: holders.map(entryOf) }
+        const advice = [...ids].map((id) => entry(id)).filter((value): value is BotMemoryVersion => !!value)
+          .map((value) => this.copyAdvice(botId, value)).filter(Boolean).join(' ')
+        return { error: `${advice ? `${advice} ` : ''}This memory is held by ${refs}, including earlier versions. Name all these entries together in one Forget in the chat, then save again what should stay.`, holders: holders.map(entryOf) }
       }
       for (const id of ids)
         for (const absorbed of downward.get(id) ?? []) ids.add(absorbed)
