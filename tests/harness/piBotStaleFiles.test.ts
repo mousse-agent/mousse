@@ -129,7 +129,7 @@ for (const size of [50 * 1024 * 1024, 3 * 1024 * 1024 * 1024]) {
     const fd = fs.openSync(f.path, 'r+')
     fs.ftruncateSync(fd, size); fs.closeSync(fd)
     // Fail safely on the old implementation, rather than allocate a giant buffer in the test.
-    const original = fs.readFileSync
+    const original = (await vi.importActual<typeof import('node:fs')>('node:fs')).readFileSync
     const reads = vi.spyOn(fs, 'readFileSync').mockImplementation(((path: fs.PathOrFileDescriptor, ...args: unknown[]) => {
       if (path === f.path) throw new Error('whole-file read is forbidden in this fixture')
       return original(path, ...args as [])

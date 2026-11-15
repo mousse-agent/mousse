@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { readFileSync, realpathSync } from 'node:fs'
+import { closeSync, fstatSync, openSync, readSync, realpathSync, type Stats } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import type { ActiveTimeScope, BotAllowedObserver, BotAuthority, BotCheck, BotThreadRole, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
@@ -278,11 +278,36 @@ function insideAny(roots: readonly string[], raw: string, scratch: string): bool
   }
 }
 
-/** Hash bytes rather than timestamps: equal-size edits and coarse/restored mtimes still differ. */
+/** Lists get exact content checks; attachments and logs never allocate unbounded buffers. */
+export const BOT_FILE_HASH_MAX_BYTES = 2 * 1024 * 1024
+
+function metadataVersion(stat: Stats): string {
+  return `stat:${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}`
+}
+
 function fileHash(path: string): string | undefined | null {
-  try { return createHash('sha256').update(readFileSync(path)).digest('hex') } catch (error) {
+  let fd: number | undefined
+  try {
+    fd = openSync(path, 'r')
+    const stat = fstatSync(fd)
+    if (stat.size > BOT_FILE_HASH_MAX_BYTES) return metadataVersion(stat)
+    // Read a bounded descriptor, not readFileSync(path): the file can grow after fstat.
+    const bytes = Buffer.allocUnsafe(stat.size)
+    let length = 0
+    while (length < bytes.length) {
+      const n = readSync(fd, bytes, length, bytes.length - length, length)
+      if (!n) break
+      length += n
+    }
+    const after = fstatSync(fd)
+    if (after.size > BOT_FILE_HASH_MAX_BYTES) return metadataVersion(after)
+    // A changing small file has no stable observation. Ask for a fresh read.
+    if (length !== stat.size || metadataVersion(stat) !== metadataVersion(after)) return null
+    return `sha256:${createHash('sha256').update(bytes.subarray(0, length)).digest('hex')}`
+  } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
-    // A file that cannot be read must not be overwritten on the strength of an old observation.
     return null
+  } finally {
+    if (fd !== undefined) closeSync(fd)
   }
 }
