@@ -20,7 +20,7 @@ import type { LlmModelOption, LlmProviderOption } from '../../../../shared/setti
 import { promptCacheHourOn, type CredentialKind, type PromptCacheHour } from '../../../../shared/harness/status'
 import type { ChatImageAttachment } from '../../../../shared/types'
 import { normalizePermissionMode, permissionModeAllows, type PermissionLimits, type PermissionMode as ThreadPermissionMode } from '../../../../shared/permissionMode'
-import { parseThinkingSuffixFromModelId, supportedEffortOf } from '../../../../shared/modelVariants'
+import { applyEffortToModelId, parseThinkingSuffixFromModelId, supportedEffortOf } from '../../../../shared/modelVariants'
 import { AppError } from '../../../../shared/errors'
 import { PROVIDER_TURN_CAP } from '../../../../shared/harness/types'
 import type { ProviderToolEvent } from '../../../../shared/agentActivity'
@@ -135,13 +135,13 @@ interface LaunchContext {
 }
 /**
  * The model and effort a live process runs a turn on. Ultracode is a level here: it runs at the model's default effort
- * with Claude Code's `ultracode` setting on.
+ * with Claude Code's `ultracode` setting on. Fast is Claude Code's `fastMode` setting.
  */
-type LiveFlags = { model: string; effort: string | null; ultracode: boolean }
+type LiveFlags = { model: string; effort: string | null; ultracode: boolean; fast: boolean }
 /** How long Claude Code may take to switch a live process's model or effort before the turn starts a new process. */
 const LIVE_FLAGS_SWITCH_MS = 15_000
 const sameFlags = (a: LiveFlags | undefined, b: LiveFlags): boolean =>
-  a !== undefined && a.model === b.model && a.effort === b.effort && a.ultracode === b.ultracode
+  a !== undefined && a.model === b.model && a.effort === b.effort && a.ultracode === b.ultracode && a.fast === b.fast
 type SavedSession = {
   sessionId: string
   cwd: string
@@ -199,7 +199,7 @@ export type OlderModelsState = {
 }
 /** `runs`: Claude Code reports the model itself as applied. `refused` and `remapped` are not offered. */
 export type OlderModelOutcome =
-  | { outcome: 'runs'; defaultEffort?: string }
+  | { outcome: 'runs'; defaultEffort?: string; ultracode?: true }
   | { outcome: 'refused' }
   | { outcome: 'remapped'; to: string }
 export type ClaudeSubscriptionChatInput = {
@@ -516,13 +516,31 @@ export interface ClaudeModelExtras {
 
 /** The efforts Claude Code takes as `effort` (its `EffortLevel`). */
 const CLAUDE_EFFORTS: ReadonlySet<string> = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
+const ULTRACODE_DESCRIPTION = 'Runs multi-agent workflows on each task, at the default effort.'
+
+/** A model's levels with Ultracode added when Claude Code says the model can run it. */
+function withUltracode(efforts: string[] | undefined, ultracode: boolean | undefined): Pick<LlmModelOption, 'efforts' | 'effortDescriptions'> {
+  if (!ultracode) return efforts ? { efforts } : {}
+  return { efforts: [...(efforts ?? []), 'ultracode'], effortDescriptions: { ultracode: ULTRACODE_DESCRIPTION } }
+}
+
+/**
+ * A selected Claude model id without its Fast suffix (`opus:fast:high` is `opus:high` with Fast on).
+ * Fast is Claude Code's `fastMode` setting, offered for the models its listing marks `supportsFastMode`.
+ */
+export function claudeSpeedOf(modelId: string): { model: string; fast: boolean } {
+  const { baseId, effort } = parseThinkingSuffixFromModelId(modelId)
+  if (!baseId.endsWith(':fast')) return { model: modelId, fast: false }
+  return { model: applyEffortToModelId(baseId.slice(0, -':fast'.length), effort), fast: true }
+}
 
 /**
  * Claude Code names models by family ("Sonnet") and puts the version in the description
  * ("Sonnet 5.5 · …"). Its "default" alias repeats another listed model, so it is dropped;
  * when it points elsewhere it is named after that model instead. The levels are the ones Claude
- * Code reports for the model, plus Ultracode where `get_settings` says the model can run it. Mousse
- * never turns Claude's thinking off, so no model offers "Off".
+ * Code reports for the model, plus Ultracode where `get_settings` says the model can run it. A model
+ * Claude Code marks `supportsFastMode` offers the Fast speed. Mousse never turns Claude's thinking off,
+ * so no model offers "Off".
  */
 export function claudeModelOptions(models: ModelInfo[], extras: Record<string, ClaudeModelExtras> = {}): LlmModelOption[] {
   const listed = new Set(models.filter((model) => model.value !== 'default').map((model) => model.resolvedModel))
@@ -534,16 +552,15 @@ export function claudeModelOptions(models: ModelInfo[], extras: Record<string, C
           ? /\(currently ([^)]+)\)/.exec(model.description)?.[1]
           : /^([A-Za-z]+ \d+(?:\.\d+)*)\s*(?:·|$)/.exec(model.description)?.[1]
       const extra = extras[model.value] ?? {}
-      const efforts = model.supportedEffortLevels?.length || extra.ultracode
-        ? [...(model.supportedEffortLevels ?? []), ...(extra.ultracode ? ['ultracode'] : [])]
-        : model.supportedEffortLevels
+      const levels = withUltracode(model.supportedEffortLevels?.length ? [...model.supportedEffortLevels] : undefined, extra.ultracode)
+      const efforts = levels.efforts
       return {
         id: model.value,
         label: version?.trim() || model.displayName,
-        efforts,
+        ...levels,
         ...(efforts?.length ? { thinkingOff: false as const } : {}),
         ...(extra.defaultEffort && efforts?.includes(extra.defaultEffort) ? { defaultEffort: extra.defaultEffort } : {}),
-        ...(extra.ultracode ? { effortDescriptions: { ultracode: 'Runs multi-agent workflows on each task, at the default effort.' } } : {})
+        ...(model.supportsFastMode ? { speeds: ['fast' as const] } : {})
       }
     })
 }
@@ -619,10 +636,13 @@ export function claudeLiveModelsForThisMousse(models: readonly ModelInfo[], read
   return models.filter((model) => !held.has(bareModelId(model.value)) && !(model.resolvedModel && held.has(bareModelId(model.resolvedModel))))
 }
 
-/** The cache key of a check: the Claude Code program file, the account and the candidate route ids. */
+/** What a check records for each model; a change checks every model again (2: Ultracode). */
+const OLDER_CHECK_RECORDS = 2
+
+/** The cache key of a check: what it records, the Claude Code program file, the account and the candidate route ids. */
 export function claudeOlderCheckKey(fingerprint: string | undefined, subject: string | undefined, candidates: readonly ClaudeOlderCandidate[]): string {
   const routes = candidates.map((entry) => entry.route.id).sort()
-  return createHash('sha256').update(JSON.stringify([fingerprint ?? '', subject ?? '', routes])).digest('hex')
+  return createHash('sha256').update(JSON.stringify([OLDER_CHECK_RECORDS, fingerprint ?? '', subject ?? '', routes])).digest('hex')
 }
 
 /** `setModel`'s words when Claude Code refuses a model for this account (`400 unknown provider for model … · model not changed`). */
@@ -676,13 +696,18 @@ export async function claudeOlderModelCheck(
       onResult(routeId, { outcome: 'remapped', to: applied.model })
       continue
     }
-    onResult(routeId, { outcome: 'runs', ...(typeof applied.effort === 'string' ? { defaultEffort: applied.effort } : {}) })
+    onResult(routeId, {
+      outcome: 'runs',
+      ...(typeof applied.effort === 'string' ? { defaultEffort: applied.effort } : {}),
+      ...(applied.ultracodeAvailable === true ? { ultracode: true as const } : {})
+    })
   }
 }
 
 /**
  * The catalog models the check found running, newest first: named by the catalog's short name, with
- * the catalog's levels that Claude Code takes and the default effort it reported. Only the ones the
+ * the catalog's levels that Claude Code takes, Ultracode where Claude Code said the model can run it, and
+ * the default effort it reported. Only the ones the
  * catalog marks older carry `older`; a current one (a newer model Claude Code does not list yet) does not.
  */
 export function claudeOlderModelOptions(candidates: readonly ClaudeOlderCandidate[], results: Readonly<Record<string, OlderModelOutcome>>): LlmModelOption[] {
@@ -690,11 +715,13 @@ export function claudeOlderModelOptions(candidates: readonly ClaudeOlderCandidat
   for (const candidate of candidates) {
     const result = results[candidate.route.id]
     if (result?.outcome !== 'runs') continue
-    const efforts = candidate.efforts?.filter((level) => CLAUDE_EFFORTS.has(level))
+    const listed = candidate.efforts?.filter((level) => CLAUDE_EFFORTS.has(level))
+    const levels = withUltracode(listed?.length ? listed : undefined, result.ultracode)
+    const efforts = levels.efforts
     options.push({
       id: candidate.route.id,
       label: candidate.short,
-      ...(efforts?.length ? { efforts, thinkingOff: false as const } : {}),
+      ...(efforts?.length ? { ...levels, thinkingOff: false as const } : {}),
       ...(result.defaultEffort && efforts?.includes(result.defaultEffort) ? { defaultEffort: result.defaultEffort } : {}),
       ...(candidate.older ? { older: true as const } : {})
     })
@@ -1224,9 +1251,11 @@ export class ClaudeSubscriptionProviderService {
     signal.addEventListener('abort', abort, { once: true })
     let query: Query | undefined
     try {
-      const { baseId } = parseThinkingSuffixFromModelId(spec.model)
+      // A one-shot runs at the standard speed.
+      const model = claudeSpeedOf(spec.model).model
+      const { baseId } = parseThinkingSuffixFromModelId(model)
       // A level the model does not offer runs at the model's default; Ultracode is a turn setting, not a level.
-      const level = spec.effort ?? supportedEffortOf(spec.model, this.listedByClaude() ? this.models() : [], CLAUDE_EFFORTS)
+      const level = spec.effort ?? supportedEffortOf(model, this.listedByClaude() ? this.models() : [], CLAUDE_EFFORTS)
       const effort = level && CLAUDE_EFFORTS.has(level) ? level as Options['effort'] : undefined
       query = await this.createQuery(spec.prompt, {
         ...this.oneShotOptions(controller),
@@ -2437,7 +2466,7 @@ export class ClaudeSubscriptionProviderService {
    * Switches a live process to `flags` before a turn is pushed: false when Claude Code refused, did not answer in time,
    * or the process ended meanwhile; after a failure the process's flags count as unknown. The model is always named: a `null` one would reset it to Claude Code's default,
    * not the thread's. A `null` effort is the model's default; Ultracode runs at it with `ultracode` on, and leaving
-   * Ultracode turns it off, since only a change of level does that by itself.
+   * Ultracode turns it off, since only a change of level does that by itself. Fast is turned on and off the same way.
    */
   private async switchLiveFlags(live: LiveSession<TurnContext>, flags: LiveFlags): Promise<boolean> {
     const previous = live.meta.flags as LiveFlags | undefined
@@ -2445,7 +2474,8 @@ export class ClaudeSubscriptionProviderService {
       model: flags.model,
       effortLevel: flags.effort as EffortLevel | null,
       // Off is said when it was on, or when what the process runs is unknown (an earlier switch failed).
-      ...(flags.ultracode ? { ultracode: true } : !previous || previous.ultracode ? { ultracode: false } : {})
+      ...(flags.ultracode ? { ultracode: true } : !previous || previous.ultracode ? { ultracode: false } : {}),
+      ...(flags.fast ? { fastMode: true } : !previous || previous.fast ? { fastMode: false } : {})
     }
     let timer: ReturnType<typeof setTimeout> | undefined
     try {
@@ -3139,16 +3169,20 @@ export class ClaudeSubscriptionProviderService {
       controller.signal.throwIfAborted()
       input.signal?.throwIfAborted()
       controller.signal.throwIfAborted()
-      const selected = parseThinkingSuffixFromModelId(input.model)
+      const chosen = claudeSpeedOf(input.model)
+      const selected = parseThinkingSuffixFromModelId(chosen.model)
       // A level the model does not offer (saved for another model) runs at the model's default.
-      const level = supportedEffortOf(input.model, this.listedByClaude() ? this.models() : [], new Set([...CLAUDE_EFFORTS, 'ultracode']))
+      const level = supportedEffortOf(chosen.model, this.listedByClaude() ? this.models() : [], new Set([...CLAUDE_EFFORTS, 'ultracode']))
       // Ultracode runs at the model's default effort, with Claude Code's `ultracode` setting on.
       const ultracode = level === 'ultracode'
       const effort = level && CLAUDE_EFFORTS.has(level) ? level as Options['effort'] : undefined
-      // What a live process is keyed on besides `hard`: the settings without Ultracode, which switches in place.
+      // What a live process is keyed on besides `hard`: the settings without Ultracode and Fast, which switch in place.
       const launchSettings = turnSettings
       if (ultracode && !locked) turnSettings = { ...turnSettings, ultracode: true }
-      const flags: LiveFlags = { model: selected.baseId, effort: effort ?? null, ultracode: ultracode && !locked }
+      // Fast is Claude Code's `fastMode` setting; it switches in place like Ultracode. Bot turns run at the standard speed.
+      const fast = chosen.fast && !locked
+      if (fast) turnSettings = { ...turnSettings, fastMode: true }
+      const flags: LiveFlags = { model: selected.baseId, effort: effort ?? null, ultracode: ultracode && !locked, fast }
       // The thread's permission mode, in Claude Code's own terms: Ask asks about everything it would
       // not allow itself, Auto-accept edits lets edits through, Auto hands the decision to Claude Code's
       // auto mode (its classifier runs what it judges safe and asks through canUseTool about the rest),
@@ -3650,7 +3684,7 @@ export class ClaudeSubscriptionProviderService {
               sessionId: savedSessionId,
               cwd: resolve(input.cwd),
               // The model the turn ran on, which a compaction resumes the session with.
-              model: parseThinkingSuffixFromModelId(input.model).baseId,
+              model: parseThinkingSuffixFromModelId(claudeSpeedOf(input.model).model).baseId,
               ...(baseline ? { usageBaseline: baseline } : {}),
               instanceId,
               ...ranEntrypoint(_ranWith)

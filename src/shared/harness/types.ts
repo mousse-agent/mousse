@@ -397,6 +397,8 @@ export interface ModelCapabilities {
   effortDescriptions?: Record<string, string>
   /** `false`: the model cannot turn thinking off. */
   thinkingOff?: false
+  /** Speeds besides the standard one, chosen by a suffix on the model id (`opus:fast`). */
+  speeds?: Array<'fast' | 'slow'>
   images: boolean
   /** Context window in tokens, when known. */
   contextWindow?: number

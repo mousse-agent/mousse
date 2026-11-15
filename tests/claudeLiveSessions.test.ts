@@ -1136,6 +1136,19 @@ describe('a model or effort change (issue #359)', () => {
     expect(process.flagSettings).toEqual([{ model: 'sonnet', effortLevel: 'low' }, { model: 'sonnet', effortLevel: null }])
   })
 
+  it('Fast turns on and off in place, keeping the process', async () => {
+    const f = fixture()
+    await f.turn({ model: 'opus:high', history: 'h' }, 'h')
+    const process = f.cli.last
+    await f.turn({ model: 'opus:fast:high', history: 'h' }, 'h')
+    await f.turn({ model: 'opus:high', history: 'h' }, 'h')
+    expect(f.cli.processes).toHaveLength(1)
+    expect(process.flagSettings).toEqual([
+      { model: 'opus', effortLevel: 'high', fastMode: true },
+      { model: 'opus', effortLevel: 'high', fastMode: false }
+    ])
+  })
+
   it('a model and effort change while background work runs is applied, and the work keeps running', async () => {
     const f = fixture()
     await withShell(f)
@@ -1201,7 +1214,7 @@ describe('a model or effort change (issue #359)', () => {
     expect(f.cli.processes).toHaveLength(1)
     expect(process.flagSettings).toEqual([
       { model: 'opus', effortLevel: null },
-      { model: 'sonnet', effortLevel: null, ultracode: false }
+      { model: 'sonnet', effortLevel: null, ultracode: false, fastMode: false }
     ])
   })
 
