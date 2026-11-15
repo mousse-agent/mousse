@@ -93,6 +93,14 @@ export type AgentRunCommandResult =
   /** A steer joins a run that is already running under a looser permission mode than the caller's own. */
   | { status: 'ceiling_exceeded'; callerMode: PermissionMode; targetMode: PermissionMode }
 
+/**
+ * What archiving or unarchiving a thread for a personal bot did (`thread_archive`): `changed` is false when the thread
+ * already was so. Refused (`thread_running`) while the thread or a subagent below it has a run working or paused.
+ */
+export type AgentArchiveResult =
+  | { status: 'accepted'; archived: boolean; changed: boolean }
+  | { status: 'rejected'; reason: 'thread_running' }
+
 /** A thread's queue as a reader sees it: what is waiting, what a turn has claimed, and the revision a change must name. */
 export interface QueueSnapshot {
   /** Pending and steering items, in order; internal items are left out. */
@@ -322,6 +330,8 @@ export interface AppToolHost extends DelegationToolsHost {
   queueCommand?(threadId: string, command: AgentQueueCommand, options: { clientRequestId: string; actor: AgentActor; level: AgentAccessLevel }): AgentQueueResult
   /** Stops run `runId` of another thread and what is below it, as `actor`'s Stop (`thread_interrupt`). */
   stopRun?(threadId: string, runId: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult>
+  /** Archives (`archived`) or unarchives another thread through the app's own Archive, as a personal bot's call (`thread_archive`). */
+  setThreadArchived?(threadId: string, archived: boolean, options: { actor: AgentActor }): Promise<AgentArchiveResult>
   /** Steers run `runId` of another thread with `text` as `actor`'s message (`thread_steer`). */
   steerRun?(threadId: string, runId: string, text: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult>
   /** The profile's scheduled jobs (`schedule_*`); absent: the host registers no schedule tools. */
