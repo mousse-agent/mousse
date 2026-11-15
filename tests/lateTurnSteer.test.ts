@@ -63,14 +63,14 @@ describe('late-turn steer/send during finalizing', () => {
         }
       })], profileHome: home }))
 
-      // The first turn is past the provider and finalizing: the steer and the send land in that exact
-      // window, before the final response is written and the turn settles.
+      // The first turn is past the provider and shows finished while it records its checkpoint: the steer and the send
+      // land in that exact window, before the final response is written and the turn settles.
       let steered: boolean | undefined
       let late: ReturnType<OrchestratorService['send']> | undefined
       const realSetTurnPhase = (orch as any).setTurnPhase.bind(orch)
       ;(orch as any).setTurnPhase = (threadId: string, phase: string, ...rest: unknown[]) => {
         realSetTurnPhase(threadId, phase, ...rest)
-        if (phase === 'finalizing' && !late) {
+        if (phase === 'completed' && !late) {
           steered = orch.steerActiveTurn('late steer', thread.id)
           late = orch.send('second', false, { threadId: thread.id })
         }

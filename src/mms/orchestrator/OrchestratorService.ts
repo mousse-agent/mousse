@@ -13050,15 +13050,15 @@ export class OrchestratorService extends EventEmitter {
       this.setTurnPhase(session.threadId, 'failed', { error: 'LLM error' })
       markRunTerminal('failed', { error: 'LLM error' }, displayText)
     } else {
-      this.setTurnPhase(session.threadId, 'finalizing')
+      // The answer is complete: windows show the turn finished now. Its checkpoint may wait minutes for the repository's
+      // lease behind another thread's. The run stays `finalizing` until the checkpoint is recorded: the thread's next
+      // turn waits for it (its end snapshot is this turn's alone), and a parent's delegation publishes only with it.
+      this.setTurnPhase(session.threadId, 'completed')
       this.markRun(engineRunId, (engine, id) => engine.markFinalizing(id))
     }
     await checkpointTurn(executionFailed ? 'failed' : 'completed')
     this.persist(true)
-    if (!executionFailed) {
-      this.setTurnPhase(session.threadId, 'completed')
-      markRunTerminal('completed', undefined, displayText || 'Done.')
-    }
+    if (!executionFailed) markRunTerminal('completed', undefined, displayText || 'Done.')
     this.emit('response', response)
     this.emitThreadMessages(session.threadId, session.messages)
     settleOnce(aborted, executionFailed)
