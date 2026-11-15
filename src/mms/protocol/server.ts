@@ -1464,6 +1464,10 @@ export class MmsProtocolServer {
   private deliverEventToClient(session: ClientSession, event: ProtocolEvent): void {
     if (event.type === 'bots.tell' && !session.capabilities.has(BOT_TELLING_CAPABILITY)) return
     if (!this.sendRaw(session, event)) return
+    if (event.type === 'bots.message' && session.clientType === 'gui' && !session.capabilities.has(BOT_TELLING_CAPABILITY)) {
+      const services = this.servicesByProfile.get(session.binding?.profileId ?? this.opts.mms.profileId)
+      try { services?.personalBots?.noteLegacyTelling(event.data) } catch { /* A best-effort receipt cannot undo a sent frame. */ }
+    }
     session.lastSeq = event.sequence
   }
 
@@ -1603,7 +1607,7 @@ export class MmsProtocolServer {
   private refreshTellingWindows(): void {
     for (const [profileId, services] of this.servicesByProfile) {
       const count = [...this.clients.values()].filter(c => !c.closed && c.authenticated && c.clientType === 'gui' &&
-        c.subscribeState === 'active' && (c.binding?.profileId ?? this.opts.mms.profileId) === profileId).length
+        c.subscribeState === 'active' && c.capabilities.has(BOT_TELLING_CAPABILITY) && (c.binding?.profileId ?? this.opts.mms.profileId) === profileId).length
       services.personalBots?.setTellingWindows(count)
     }
   }

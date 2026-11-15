@@ -7874,6 +7874,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /** The soonest due time for one bot, or the profile when omitted. Schedules remain the scheduler's to claim. */
+  noteLegacyTelling(data: unknown): void {
+    const event = data as { botId?: unknown; message?: BotChatMessage; quiet?: unknown } | null
+    if (typeof event?.botId !== 'string' || typeof event.message?.id !== 'string') return
+    this.tellings.noteLegacy(event.botId, event.message, event.quiet === true)
+  }
+
   setTellingWindows(count: number): void { this.tellings.attach(count); this.armDue() }
 
   nextDueAt(botId?: string): string | undefined {

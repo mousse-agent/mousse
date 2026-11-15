@@ -1,4 +1,5 @@
-import { botNotificationContent } from '../../../shared/bots/personal/notification'
+import type { BotChatMessage } from '../../../shared/bots/personal/chat'
+import { botNotificationContent, botNotificationKind } from '../../../shared/bots/personal/notification'
 import { randomUUID } from 'node:crypto'
 import type { BotTelling } from '../../../shared/bots/personal/telling'
 import type { BotStore, BotMessageRow } from '../store/BotStore'
@@ -21,6 +22,14 @@ export class BotTellings {
     if (windows && !this.windows) this.closedThrough = Number(this.store.get(`SELECT MAX(seq) AS seq FROM bot_messages
       WHERE tell IS NOT NULL AND tell != 'later' AND told_at IS NULL`)?.seq ?? 0)
     this.windows = windows
+  }
+  /** A successful legacy message push with no capable audience is a durable handoff receipt, not a release. */
+  noteLegacy(botId: string, message: BotChatMessage, quiet: boolean): void {
+    if (this.windows || quiet || !botNotificationKind(message, Date.parse(this.store.now()))) return
+    const row = this.store.message(message.id)
+    if (!row || row.botId !== botId || !row.tell || row.toldAt) return
+    this.store.run(`INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, 'true') ON CONFLICT DO NOTHING`,
+      botId, `cursor:telling-legacy:${message.id}`)
   }
   read(): void {
     for (const [id, rows] of this.banners) {
@@ -54,6 +63,7 @@ export class BotTellings {
   private unread(row: BotMessageRow): boolean {
     const bot = this.store.registry(row.botId)
     if (!bot || bot.deletedAt || row.seq <= bot.readSeq) return false
+    if (this.store.get('SELECT 1 FROM bot_memory_state WHERE bot_id = ? AND key = ?', row.botId, `cursor:telling-legacy:${row.id}`)) return false
     const live = this.store.message(row.id)
     if (!live) return false
     const message = this.chat.toMessage(live)
@@ -118,7 +128,10 @@ export class BotTellings {
   }
 
   private told(row: BotMessageRow, now: number): void {
-    this.store.run('UPDATE bot_messages SET told_at = ? WHERE id = ? AND told_at IS NULL', new Date(now).toISOString(), row.id)
+    this.store.db.transaction(() => {
+      this.store.run('UPDATE bot_messages SET told_at = ? WHERE id = ? AND told_at IS NULL', new Date(now).toISOString(), row.id)
+      this.store.run('DELETE FROM bot_memory_state WHERE bot_id = ? AND key = ?', row.botId, `cursor:telling-legacy:${row.id}`)
+    })
   }
   private announce(rows: BotMessageRow[], sound: boolean, id = `bt_${randomUUID()}`, closed: false | string = false): void {
     rows = rows.map(r => this.store.message(r.id)!).filter(Boolean)
