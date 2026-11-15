@@ -1391,6 +1391,8 @@ export class MmsProfileServices {
       runInProgress: (threadId) => this.lifecycleOwnedTasks(threadId).some((task) => this.orchestrator.isTurnActive(task.taskId) || this.runEngine.getActiveRun(task.taskId) !== null),
       stop: async (threadId) => { await this.orchestrator.stopThread(threadId, 'expired', { clearQueue: true }) },
       quiesce: (threadId) => {
+        // What the expired threads launched on other computers is stopped there; nothing there is deleted.
+        this.orchestrator.stopRemoteLaunches(this.lifecycleOwnedTasks(threadId).map((task) => task.taskId), 'expired')
         // A question waiting for an answer and an open terminal are not a run: they end at expiry.
         for (const task of this.lifecycleOwnedTasks(threadId)) {
           this.questions.dismissAllForThread(task.taskId, 'thread_deleted')
@@ -1817,6 +1819,9 @@ export class MmsProfileServices {
   }
 
   private async stopRunsForDelete(threadIds: readonly string[]): Promise<void> {
+    // What the deleted threads launched on other computers is stopped there, whether or not they run now; nothing there
+    // is deleted.
+    this.orchestrator.stopRemoteLaunches(threadIds, 'deleted')
     const running = (): string[] => this.runningForDelete(threadIds)
     const stopping = running()
     if (!stopping.length) return
@@ -1933,15 +1938,17 @@ export class MmsProfileServices {
   /** Brings the inbox's bot runs up to date with their activations. */
   syncBotRuns(): void {
     const runs = this.automationRuns
-    const bots = this.personalBots
-    if (!runs || !bots) return
-    for (const job of this.scheduled.listJobs()) {
-      if (!job.bot) continue
+    const store = this.botStore
+    if (!runs || !store) return
+    for (const open of runs.openBotRuns()) {
       try {
-        const facts = bots.service.automationFacts(job.bot.botId, job.bot.scheduleId)
-        if (facts) runs.syncBotRuns(job.id, facts.runs)
+        const row = store.activation(open.activationId)
+        if (!row || row.botId !== open.botId || row.trigger.kind !== 'schedule') continue
+        runs.syncBotRuns(open.jobId, [{ id: row.id, status: row.status, at: row.createdAt,
+          ...(row.endedAt ? { endedAt: row.endedAt } : {}), ...(row.endReason ? { endReason: row.endReason } : {}),
+          ...(row.threadId ? { threadId: row.threadId } : {}) }])
       } catch {
-        // That bot's runs follow at the next read.
+        // That run follows at the next read, including when its job no longer exists.
       }
     }
   }

@@ -674,5 +674,23 @@ CREATE INDEX remote_launches_launcher ON remote_launches(launcher_thread_id);
 CREATE INDEX remote_launches_remote ON remote_launches(node, remote_thread_id);
 CREATE INDEX remote_launches_open ON remote_launches(state, first_message_state);
 `
+  },
+  {
+    version: 22,
+    sql: `
+-- A person's Stop of a launcher, its deletion or its expiry reaches the threads it launched on other computers
+-- (issue #1160): a marked orchestrator.abort there, which stops only runs this computer's agents started. A Stop that
+-- could not be delivered is kept here, survives a restart and is sent when that computer answers, until stop_deadline.
+--   pending: not delivered yet (stop_key is the idempotency key every attempt uses, so it acts once there);
+--   sent:    that computer answered (stop_result says what it stopped, or why it left the run);
+--   expired: stop_deadline passed first.
+-- stop_reason: stopped (a person's Stop), deleted or expired (the launcher's).
+ALTER TABLE remote_launches ADD COLUMN stop_state TEXT CHECK(stop_state IS NULL OR stop_state IN ('pending','sent','expired'));
+ALTER TABLE remote_launches ADD COLUMN stop_key TEXT;
+ALTER TABLE remote_launches ADD COLUMN stop_reason TEXT CHECK(stop_reason IS NULL OR stop_reason IN ('stopped','deleted','expired'));
+ALTER TABLE remote_launches ADD COLUMN stop_deadline TEXT;
+ALTER TABLE remote_launches ADD COLUMN stop_result TEXT;
+CREATE INDEX remote_launches_stops ON remote_launches(stop_state);
+`
   }
 ]
