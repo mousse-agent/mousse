@@ -3,7 +3,10 @@
  * Edges: no due time, overdue, window boundary, another bot, settled/cancelled/deleted rows, paused schedules.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { botFixture, createBot, type BotFixture } from './botFixture'
+import { EventEmitter } from 'node:events'
+import type { ChildProcess } from 'node:child_process'
+import type { BotLaunchedThread } from '../../src/shared/bots/personal/chat'
+import { botFixture, createBot, finish, start, type BotFixture } from './botFixture'
 
 const MIN = 60_000
 let f: BotFixture
@@ -12,7 +15,7 @@ let first: string
 const at = (minutes: number) => new Date(f.clock.now + minutes * MIN).toISOString()
 
 beforeEach(async () => {
-  f = botFixture()
+  f = botFixture({ spawnWatcher: () => new EventEmitter() as ChildProcess })
   await f.bots.reconcileOnStartup()
   const created = await createBot(f, { reply: 'Hello.' })
   botId = created.botId
@@ -127,6 +130,36 @@ describe('idleness (no caller outside tests yet)', () => {
   ])('is idle after a stopped %s row (%s)', (status, reason) => {
     f.store.run("UPDATE bot_activations SET lane = 'run', status = ?, trigger_json = ?, end_reason = ? WHERE id = ?",
       status, JSON.stringify({ kind: 'work', title: 'Check.', input: 'Check.' }), reason, first)
+    expect(f.bots.isIdle(botId)).toBe(true)
+  })
+
+  it.each([
+    ['running', false], ['queued', false], ['paused', false], ['subagents', false], ['needs_input', false],
+    ['idle', true], ['done', true], ['failed', true], ['stopped', true]
+  ] as const)('agrees with the summary for a launched thread that is %s', (status, idle) => {
+    const thread: BotLaunchedThread = { threadId: 'launched', title: 'Check.', status, startedAt: at(0), updatedAt: at(0) }
+    const home = f.store.registry(botId)!.homeThreadId!
+    f.launched = (creators) => creators.has(home) ? [thread] : []
+    expect(f.bots.service.list().bots.find((bot) => bot.id === botId)?.state).toBe(idle ? 'idle' : 'working')
+    expect(f.bots.isIdle(botId)).toBe(idle)
+  })
+
+  it('is busy while a background command runs beyond the idle window, and idle after Stop', async () => {
+    const activation = await f.bots.activate({ botId, input: 'Run', clientRequestId: 'grant' })
+    const turn = await start(f, activation.id)
+    turn.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'Watch the build.' })
+    await finish(f, turn.payload, 'completed', { text: 'Asked.' })
+    for (const ask of f.store.openAsks(botId)) await f.bots.service.answer(botId, ask.id, 'allow')
+    await f.bots.service.chatSend({ botId, text: 'Watch the build.', clientRequestId: 'watch' })
+    const chat = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    const running = await start(f, chat.id)
+    // Hand-authored process stub: the watcher really registers, but starts no shell or process.
+    const watcher = f.bots.tools.watchers!.start(botId, chat.id, { command: 'build', brief: 'Check the build.', minutes: 60 })
+    await finish(f, running.payload, 'completed', { text: 'Watching.' })
+    expect(Date.parse(f.bots.nextDueAt(botId)!) - f.clock.now).toBeGreaterThan(30 * MIN)
+    expect(f.bots.service.list().bots.find((bot) => bot.id === botId)?.watchers?.[0]?.id).toBe(watcher.watcherId)
+    expect(f.bots.isIdle(botId)).toBe(false)
+    f.bots.tools.watchers!.stop(botId, watcher.watcherId)
     expect(f.bots.isIdle(botId)).toBe(true)
   })
 
