@@ -565,6 +565,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private delivering: Promise<void> | undefined
   private resumeTimer: { clear(): void } | undefined
   private maintaining: Promise<void> | undefined
+  /** Latest tick received while upkeep runs; later calls replace this one queued pass. */
+  private maintainAgainAt: Date | undefined
   /** Until when a reminder that failed to be said is not tried again (`REMINDER_RETRY_MS`), so a failure never spins. */
   private readonly reminderRetryAt = new Map<string, number>()
   /** The same for a question's follow-up (a nudge or a default) that failed. */
@@ -1476,9 +1478,22 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   async maintain(now: Date = new Date(this.now())): Promise<void> {
     if (!this.startupPassed || this.closed) return
-    if (this.maintaining) return this.maintaining
-    // Hold the pass before any asynchronous work starts: scheduler and resume checks share it.
-    this.maintaining = Promise.resolve().then(() => this.maintainPass(now)).finally(() => {
+    if (this.maintaining) {
+      this.maintainAgainAt = now
+      // A slow network read must not hold back the later tick's reminder backstop.
+      await this.deliverDueReminders(now).catch(() => {})
+      return this.maintaining
+    }
+    // Hold upkeep before it starts. Calls during a pass request one more, at the latest tick's time.
+    this.maintainAgainAt = undefined
+    this.maintaining = Promise.resolve().then(async () => {
+      let at: Date | undefined = now
+      while (at && !this.closed) {
+        await this.maintainPass(at)
+        at = this.maintainAgainAt
+        this.maintainAgainAt = undefined
+      }
+    }).finally(() => {
       this.maintaining = undefined
     })
     return this.maintaining
