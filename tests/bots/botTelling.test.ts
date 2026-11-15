@@ -399,7 +399,7 @@ it.each(['active', 'wake', 'now'] as const)('does not hold a night row with the 
     id = `bm_${reminder.reminderId}`
   } else id = f.bots.chat.post({ botId, author: 'bot', kind: 'error', text: 'Repair needed', error: { text: 'Failed' } }).id
   await f.bots.deliverDueReminders()
-  expect(f.store.message(id)).toMatchObject({ tell: 'now', tellAt: f.store.now(), toldAt: f.store.now() })
+  expect(f.store.message(id)).toMatchObject({ tell: exception === 'now' ? 'now' : 'soon', tellAt: f.store.now(), toldAt: f.store.now() })
   expect(events.at(-1)?.sound).toBe(true)
 })
 
@@ -408,4 +408,28 @@ it('keeps the same class and due time with no quiet-hours wish even when active 
   f.store.run('UPDATE bot_registry SET tell_json = ? WHERE bot_id = ?', JSON.stringify({ canWakeMe: true }), botId)
   const report = f.bots.chat.post({ botId, author: 'bot', kind: 'run_report', text: 'Normal report' })
   expect(f.store.message(report.id)).toMatchObject({ tell: 'soon', tellAt: f.store.now() })
+})
+
+// Same reports by day, during quiet hours with owner activity, and from a can-wake bot.
+it.each(['day', 'active at night', 'can wake at night'] as const)('folds five soon reports into one banner and one sound: %s', async scenario => {
+  Object.assign(f.host, {
+    quietHoursFor: () => scenario === 'day' ? undefined : { end: f.clock.now + 3600_000 },
+    ownerActive: () => scenario === 'active at night'
+  })
+  if (scenario === 'can wake at night') f.store.run('UPDATE bot_registry SET tell_json = ? WHERE bot_id = ?', JSON.stringify({ canWakeMe: true }), botId)
+  f.bots.setTellingWindows(1)
+  const events: import('../../src/shared/bots/personal/telling').BotTelling[] = []
+  f.bots.events.on('tell', event => events.push(event))
+  const classes: unknown[] = []
+  for (let n = 0; n < 5; n++) {
+    const message = f.bots.chat.post({ botId, author: 'bot', kind: 'run_report', text: `Report ${n}` })
+    classes.push(f.store.message(message.id)?.tell)
+    expect(f.store.message(message.id)?.tellAt).toBe(f.store.now())
+    await f.bots.deliverDueReminders()
+    f.clock.now += 1000
+  }
+  expect(new Set(events.map(event => event.id)).size).toBe(1)
+  expect(events.filter(event => event.sound)).toHaveLength(1)
+  expect(events.at(-1)?.rows).toHaveLength(5)
+  expect(classes).toEqual(['soon', 'soon', 'soon', 'soon', 'soon'])
 })
