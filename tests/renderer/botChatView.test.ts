@@ -95,6 +95,8 @@ it('shows a permission switch notice as one quiet line', async () => {
 })
 
 beforeEach(() => {
+  vi.spyOn(document, 'hasFocus').mockReturnValue(true)
+  vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
   fake = fakeBots()
   setViewedBot = vi.fn(async () => undefined)
   installPreload(fake, { app: { setViewedBot } })
@@ -110,6 +112,7 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount())
   host.remove()
+  vi.restoreAllMocks()
   setBotsClient(null)
   useChatsStore.setState(chatsInitial)
   useBotsStore.setState(botsInitial)
@@ -1882,4 +1885,20 @@ describe('memory', () => {
     await settle()
     expect(dialog()?.querySelector('.is-focused .bot-memory-text')?.textContent).toBe('The owner reads mail at 8.')
   })
+})
+
+it.each(['unfocused', 'hidden'] as const)('keeps a mounted %s chat unread until visible and focused', async state => {
+  let focused = state !== 'unfocused'
+  let visible = state !== 'hidden'
+  vi.mocked(document.hasFocus).mockImplementation(() => focused)
+  vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => visible ? 'visible' : 'hidden')
+  fake.chats.inbox = [message(1)]
+  await open({ ...inbox, unread: 1 })
+  await act(async () => fake.emit.message('inbox', message(2)))
+  expect(fake.calls.filter(call => call[0] === 'markRead')).toEqual([])
+  expect(useBotsStore.getState().bots[0]?.unread).toBeGreaterThan(0)
+  focused = true; visible = true
+  await act(async () => { window.dispatchEvent(new Event('focus')); document.dispatchEvent(new Event('visibilitychange')) })
+  expect(fake.calls).toContainEqual(['markRead', 'inbox', 2])
+  expect(useBotsStore.getState().bots[0]?.unread).toBe(0)
 })
