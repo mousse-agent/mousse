@@ -83,3 +83,13 @@ it('startup drops work left queued when only the shared-store removal committed'
   expect(f.store.activation(row.id)).toMatchObject({ status: 'cancelled', endReason: 'schedule_removed' })
   expect(f.store.dispatches(row.id)).toHaveLength(0)
 })
+
+it('deleting the bot also cancels its queued schedule work', async () => {
+  for (let i = 0; i < 3; i++) await f.bots.activate({ botId, input: 'Busy', clientRequestId: `busy-${i}` })
+  f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'A' }, 'owner')
+  await f.tickSchedules(new Date(T0 + 5 * 60_000))
+  const row = f.store.listActivations(botId).find(row => row.trigger.kind === 'schedule')!
+  await f.bots.remove(botId)
+  expect(f.store.activation(row.id)).toMatchObject({ status: 'cancelled', endReason: 'bot_deleted' })
+  expect(f.store.dispatches(row.id)).toHaveLength(0)
+})

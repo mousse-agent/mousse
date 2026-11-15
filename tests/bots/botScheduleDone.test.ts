@@ -31,6 +31,7 @@ async function scheduled() {
 it.each(['Price is low.', '[SILENT]'])('ends only its own schedule and posts one quiet service line at report time (%s)', async text => {
   const s = await scheduled()
   expect(s.prepared.authority.appTools.has('schedule_done')).toBe(true)
+  expect(s.prepared.authority.check({ kind: 'app', tool: 'schedule_done', args: { why: 'Finished.' } })).toMatchObject({ ok: true })
   expect(s.tool).toBeDefined()
   expect(await s.tool.handler({ why: 'The price dropped.', scheduleId: s.other.scheduleId }, s.ctx)).not.toMatchObject({ isError: true })
   expect(await s.tool.handler({ why: 'Again.' }, s.ctx)).not.toMatchObject({ isError: true })
@@ -114,4 +115,12 @@ it('keeps Tell me on the final report when completion removes the schedule', asy
   await s.tool.handler({ why: 'Finished.' }, s.ctx)
   await finish(f, s.payload, 'completed', { text: 'Done.' })
   expect(events.find(event => event.message.kind === 'run_report')).toMatchObject({ quiet: true })
+})
+
+it('refuses ordinary threads even when they call the handler directly', async () => {
+  const s = await scheduled()
+  const ctx = { ...s.ctx, turn: { ...s.ctx.turn, bot: undefined } }
+  expect(s.tool.offered?.(ctx.turn)).toBe(false)
+  expect(await s.tool.handler({ why: 'Finished.' }, ctx)).toMatchObject({ isError: true })
+  expect(f.book.list(botId)).toHaveLength(2)
 })
