@@ -28,7 +28,7 @@ describe('wake briefs keep their whole meaning', () => {
       ? (await fx.bots.tools.wakes!.add(botId, activation.id, { brief, dueAt: new Date(fx.clock.now + 60_000).toISOString() })).wakeId
       : fx.bots.tools.watchers!.start(botId, activation.id, { command: 'build', brief }).watcherId
     const brief = 'Follow up. '.repeat(200).slice(0, 1_999) + '.'
-    await expect(set(brief + '!')).rejects.toThrow('Keep the brief under 2,000 characters')
+    await expect(set(brief + '!')).rejects.toThrow('Keep the brief to 2,000 characters')
     expect(fx.store.waitingReminders(botId)).toHaveLength(0)
     expect(launch).not.toHaveBeenCalled()
     const id = await set(brief)
