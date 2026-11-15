@@ -42,6 +42,7 @@ export function createBotMemoryAdmin(options: BotMemoryAdminOptions): BotMemoryA
     try { return options.name?.(botId)?.trim() || 'your bot' } catch { return 'your bot' }
   }
   return {
+    tidyDuplicates: (botId) => store.tidyDuplicates(botId),
     list: (botId, history) => store.list(botId, history),
     forget: (botId, id) => {
       const result = store.forget(botId, { id, by: 'owner_ui' })

@@ -1568,6 +1568,19 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         console.warn('a bot\'s models could not be checked', { botId, error: error instanceof Error ? error.message : String(error) })
       }
     }
+    for (const botId of this.host.definitions.ids()) {
+      try {
+        const registry = this.store.registry(botId)
+        if (!registry || registry.deletedAt || registry.pausedReason || !this.isIdle(botId)) continue
+        // The same posted asks and questions as projection.summary's needsOwner, without
+        // building a whole summary (threads, watchers, model slots and work) every tick.
+        if (this.store.openAsks(botId).some((ask) => ask.messageId !== null)
+          || this.store.waitingQuestions(botId).length || this.store.openChatQuestions(botId).length) continue
+        this.host.memory?.tidyDuplicates?.(botId)
+      } catch (error) {
+        console.warn("a bot's duplicate memory could not be put away", { botId, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
     // Waiting work that nothing would wake or end (its ask's answer lost, its question forgotten) ends now, with a line.
     this.settleStrandedWork()
     for (const botId of this.waitingBots()) {

@@ -294,6 +294,8 @@ export interface BotJournal {
 
 /** Owner-side memory operations. WP6 implements; the `bots.memory.*` handlers and the engine's purge call it. */
 export interface BotMemoryAdmin {
+  /** Quiet upkeep; only called when idle with no owner question or ask open. */
+  tidyDuplicates?(botId: string): number
   list(botId: string, history?: boolean): BotMemoryListing
   forget(botId: string, id: string): BotMemoryForgetResult
   /** The owner's new words for an entry (`bots.memory.edit`): its next version. */
