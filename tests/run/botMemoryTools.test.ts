@@ -196,6 +196,42 @@ describe('memory tools', () => {
       .toEqual([{ icon: 'memory', text: 'remembered something' }])
   })
 
+  it.each(['bot', 'dialog'])('%s refuses Forget of an absorbed entry and names the top current ref', async (via) => {
+    const fx = memoryFixture()
+    const { call } = setup(fx)
+    const save = async (text: string, merges?: string[], replaces?: string) => {
+      const result = await call('memory_save', 'ada-home', { text, kind: 'owner', merges, replaces })
+      expect(result.isError).toBeUndefined()
+      return result.value.ref as string
+    }
+    const door = await save('The door code is 4471.')
+    const home = await save('The owner lives at 12 Elm Street.')
+    const first = await save('Home: 12 Elm Street; door 4471.', [door, home])
+    const final = await save('Home at Elm Street, door 4471.', [first])
+    const top = await save('Elm Street home; door 4471.', undefined, final)
+    const admin = createBotMemoryAdmin({ store: fx.store })
+    const methods = botMemoryMethods(admin)
+    const before = { entries: fx.store.allVersions('ada'), journal: fx.store.journal('ada') }
+    if (via === 'bot') {
+      const result = await call('memory_forget', 'ada-home', { id: door, reason: 'Forget my door code.' })
+      expect(result.isError).toBe(true)
+      expect(result.value.error).toContain(top)
+      expect(result.value.error).toContain('then save again what should stay')
+    } else {
+      await expect(methods['bots.memory.forget']({ profileId: 'p', botId: 'ada', id: door })).rejects.toThrow(top)
+    }
+    expect({ entries: fx.store.allVersions('ada'), journal: fx.store.journal('ada') }).toEqual(before)
+    if (via === 'bot') expect((await call('memory_forget', 'ada-home', { id: top, reason: 'Forget those details.' })).isError).toBeUndefined()
+    else await methods['bots.memory.forget']({ profileId: 'p', botId: 'ada', id: top })
+    expect(fx.store.allVersions('ada').every(entry => entry.text === null && entry.status === 'forgotten')).toBe(true)
+    for (const file of (await admin.export('ada', fx.home)).files) {
+      const content = readFileSync(file, 'utf8')
+      expect(content).not.toContain('4471')
+      expect(content).not.toContain('Elm Street')
+    }
+    expect((await call('memory_save', 'ada-home', { kind: 'owner', text: 'The door code is 4471.' })).value.error).toBe('refused')
+  })
+
   // Forget through either public handler; direct and chained absorption; old target versions;
   // journal/message copies, export, re-learning, restoration, and another bot as a control.
   it.each([
