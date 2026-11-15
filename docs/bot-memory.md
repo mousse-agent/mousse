@@ -48,7 +48,7 @@ Both FTS5 indexes use `porter unicode61 remove_diacritics 2`. `bot_journal_fts` 
 
 - `memory_search`: memory hits first, then journal rows, by bm25 with recency breaking ties, filtered to the bot before the limit. Every word must match first; when that finds too few, any word may. Query text is reduced to quoted words, so no FTS syntax passes through. `model_change`, `memory_op` and `redaction` rows are never returned.
 - `memory_read`: rows around a hit, an entry's versions, or one activation page by page (about 8k tokens a page). Credential pieces are masked in every row, including the owner's words and rows held back from a pack for hidden characters or instruction-shaped text. The rest of those rows can still be read.
-- Search snippets also mask credentials, before cutting or highlighting can split a secret. A hit whose text contains a credential shows the start of its masked text instead of the highlighted excerpt.
+- Search snippets also mask credentials, before cutting or highlighting can split a secret. A hit whose text contains a credential shows the start of its masked text instead of the highlighted excerpt. Such a hit is kept only when its query words still occur in the full masked text: every word in the all-words pass, any word in the fallback. A word found only inside a held-back secret returns no hit, so search cannot confirm password guesses.
 - Zero-hit searches and turns with three searches and no read are counted in `search_stats`, locally.
 - At open, a failed integrity check rebuilds an index; `BotMemoryAdmin.reindex` rebuilds both.
 
