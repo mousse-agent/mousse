@@ -70,7 +70,7 @@ it('omits empty indexes, freezes them per activation and preserves every earlier
 })
 it('states searchable message count and earliest date without counting tools or another bot', async () => {
   const fx = fixture()
-  fx.store.append({ botId: 'ada', kind: 'tool_call', who: 'tool', sourceKey: 'tool:1', text: 'result', at: '2026-09-01T12:00:00Z' })
+  fx.store.append({ botId: 'ada', kind: 'tool_call', who: 'tool', sourceKey: 'tool:1', text: 'result' }, '2026-09-01T12:00:00Z')
   for (let n = 0; n < 1240; n++) fx.message({ botId: 'ada', id: `m${n}`, author: n % 2 ? 'bot' : 'owner', text: 'Hello', at: '2026-10-03T12:00:00Z' })
   fx.message({ botId: 'other', id: 'other', author: 'owner', text: 'Other' })
   for (const pack of [await fx.packs.chatPreamble({ botId: 'ada', activationId: 'c' }), await fx.packs.runPreamble({ botId: 'ada', activationId: 'r', input: 'Go' })]) {
