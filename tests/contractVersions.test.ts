@@ -11,7 +11,7 @@ describe('contract versions', () => {
       netProtocol: '1.0',
       netEnvelope: 1,
       runDatabase: 21,
-      botsDb: 9,
+      botsDb: 10,
       mousseConf: 1,
       installation: 2,
       profile: '1.0.0',

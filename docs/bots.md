@@ -632,6 +632,16 @@ The owner's slash commands in the bot's chat, on the computer only (not in `REMO
 - **After 30 days:** a daily sweep (`BotEngine.sweepDeleted`) deletes the definition, the threads for good, the chat, the schedules, the files folder and the memory rows (`BotMemoryAdmin.purge`). Run history in the Run Engine database and runtimes' session files are not purged; the log says so.
 - There is no restore in Phase 1.
 
+## Database versions
+
+`bots.db` is at v10. This version reserves unused columns for the later items of always-on bots phase 1:
+
+- `bot_reminders.snoozed_from` (nullable text) and `owner_set` (0, 1, or NULL; no default).
+- `bot_messages.tell` (`now`, `soon`, `later`, or NULL for never told), `tell_at` and `told_at` (nullable text). `tell` requires a non-NULL `tell_at`. A partial index on `(bot_id, tell_at)` covers rows with `tell IS NOT NULL AND told_at IS NULL`.
+- `bot_registry.tell_json` (nullable text), beside `model_json`, for the bot's telling wishes.
+
+NULL `owner_set` means set before v10 (or by an older writer) and preserves today's behavior: text reminders ring at their time, while wakes follow the existing wake rules. Later writers will store 0 or 1 for known ownership. Existing writers leave these fields at their defaults. No bot behavior changes yet. Existing rows are kept intact. Before upgrading an older database, the store writes `bots.db.pre-v10` and keeps the newest two migration copies. Older builds refuse a newer database; returning to one needs its pre-migration copy. Earlier versions added replies and reminders (v6), reactions (v7), questions and cards (v8), and wakes (v9).
+
 ## Where the code lives
 
 | Area | Path |
