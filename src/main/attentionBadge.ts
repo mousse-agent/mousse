@@ -1,10 +1,10 @@
 import { app, BrowserWindow, nativeImage, type NativeImage } from 'electron'
 
-import { needsMeLabel } from '../shared/threadAttention'
+import { attentionCountLabel } from '../shared/threadAttention'
 
 /**
- * How many threads need the person, from the counts each window reports. A profile open in two
- * windows reports the same threads twice, so it counts once; different profiles add up.
+ * How many threads and bots need the person, from the counts each window reports. A profile open in two
+ * windows reports the same items twice, so it counts once; different profiles add up.
  */
 export class AttentionCounts {
   private readonly byWindow = new Map<number, { profile: string; count: number }>()
@@ -66,7 +66,7 @@ export function showAttentionCount(total: number): void {
   if (process.platform === 'win32') {
     overlayDot ??= nativeImage.createFromBitmap(attentionDotBitmap(), { width: 16, height: 16 })
     for (const win of BrowserWindow.getAllWindows()) {
-      if (!win.isDestroyed()) win.setOverlayIcon(total > 0 ? overlayDot : null, total > 0 ? needsMeLabel(total) : '')
+      if (!win.isDestroyed()) win.setOverlayIcon(total > 0 ? overlayDot : null, total > 0 ? attentionCountLabel(total) : '')
     }
     return
   }
