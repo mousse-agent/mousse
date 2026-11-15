@@ -179,7 +179,11 @@ export interface BotsPersonalV2Api {
    */
   'bots.create': { params: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots; image?: BotModelPick }; result: { bot: BotSummary } }
   'bots.get': { params: { botId: string }; result: BotDetail }
-  'bots.update': { params: { botId: string; name?: string; look?: BotLook }; result: { bot: BotSummary } }
+  /**
+   * Renames the bot, changes its look, or (`description`) edits its prompt in About: the description it works under from
+   * its next turn. `description: null` resets the prompt to what it was before the first edit. An older service refuses it.
+   */
+  'bots.update': { params: { botId: string; name?: string; look?: BotLook; description?: string | null }; result: { bot: BotSummary } }
   'bots.personal.pause': { params: { botId: string }; result: { bot: BotSummary } }
   'bots.personal.resume': { params: { botId: string }; result: { bot: BotSummary } }
   /** Archives now; everything is purged at `purgeAt` (30 days). */

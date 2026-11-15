@@ -388,7 +388,6 @@ button.bot-image:focus-visible > img { opacity: 0.82; }
 .bot-close { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 7px; color: var(--text-secondary); margin: -8px -6px 0 auto; }
 .bot-about-head { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 10px; padding-bottom: 18px; border-bottom: 1px solid rgba(var(--accent-pale-rgb), .1); }
 .bot-about-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
-.bot-about-head p { margin: 0; font-size: 12px; line-height: 1.5; color: var(--text-secondary); }
 .bot-about h3 { margin: 18px 0 8px; font-size: 11px; font-weight: 500; letter-spacing: .075em; color: var(--text-secondary); }
 .bot-about-row { display: flex; align-items: center; gap: 9px; padding: 7px 0; font-size: 12px; }
 .bot-about-row > svg { color: var(--text-secondary); flex-shrink: 0; }
@@ -398,6 +397,32 @@ button.bot-image:focus-visible > img { opacity: 0.82; }
 .bot-about-row button { font-size: 11px; color: var(--text-secondary); }
 .bot-about-row button:hover { color: var(--text-primary); }
 .bot-about-empty { font-size: 11px; color: var(--text-secondary); margin: 0; line-height: 1.5; }
+/* About's prompt: the owner's words as a profile section, in the app's own type on the Settings group surface
+   (.settings-scope gives its fill and edge per theme). Edit opens the words in the same card; selection is a fill. */
+.bot-prompt-head { display: flex; align-items: center; gap: 6px; min-height: 24px; margin: 18px 0 8px; }
+.bot-about .bot-prompt-head h3 { margin: 0; }
+.bot-prompt-mark { font-size: 11px; color: var(--text-secondary); }
+.bot-prompt-mark::before { content: '·'; margin-right: 6px; }
+.bot-prompt-edit { display: inline-flex; align-items: center; gap: 5px; margin: 0 -6px 0 auto; padding: 4px 8px; border-radius: 7px; font-size: 11.5px; font-weight: 500; color: var(--text-secondary); }
+.bot-prompt-edit:hover { color: var(--text-primary); background: var(--ui-hover); }
+.bot-prompt-card { padding: 12px 14px; border-radius: var(--ui-card-radius, 12px); background: var(--settings-surface); box-shadow: var(--settings-surface-edge); transition: background-color .15s; }
+.bot-prompt-card.is-editing { background: color-mix(in srgb, var(--text-primary) 7%, transparent); }
+.bot-prompt-card.is-editing:focus-within { background: color-mix(in srgb, var(--text-primary) 9%, transparent); }
+.bot-prompt-body { margin: 0; font-size: 13px; line-height: 1.6; color: var(--text-primary); white-space: pre-wrap; overflow-wrap: anywhere; }
+.bot-prompt-body.is-folded { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 7; overflow: hidden; }
+.bot-prompt-body.is-cut { mask-image: linear-gradient(to bottom, #000 calc(100% - 1.6em), transparent); }
+.bot-prompt-more { margin-top: 6px; font-size: 12px; font-weight: 500; color: var(--accent); }
+.bot-prompt-more:hover { color: var(--text-primary); }
+.bot-prompt-field { display: block; width: 100%; min-height: 4.8em; max-height: 320px; padding: 0; border: 0; outline: none; resize: none; background: transparent; color: var(--text-primary); font: inherit; font-size: 13px; line-height: 1.6; overflow-y: auto; }
+.bot-prompt-count { margin-top: 8px; text-align: right; font-size: 11px; font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+.bot-prompt-count.is-over, .bot-prompt-error { color: var(--danger, #e79090); }
+.bot-prompt-actions { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.bot-prompt-spacer { flex: 1; }
+.bot-prompt-reset { display: inline-flex; align-items: center; gap: 5px; padding: 6px 0; font-size: 11.5px; color: var(--text-secondary); }
+.bot-prompt-reset:hover:not(:disabled) { color: var(--text-primary); }
+.bot-prompt-reset:disabled { opacity: .45; }
+.bot-prompt-actions :is(.bot-ghost-button, .chat-primary-button) { display: inline-flex; align-items: center; gap: 5px; padding: 6px 12px; font-size: 12px; }
+.bot-prompt-error { margin-top: 8px; }
 /* About's one Memory row: the count and its split; it opens the Memory dialog. */
 /* No heading of its own (the row names it): it keeps a section's space above it. */
 .bot-about-row.bot-about-memory { margin: 12px -8px 0; width: calc(100% + 16px); padding: 7px 8px; border-radius: 8px; text-align: left; color: var(--text-primary); font-size: 12px; }

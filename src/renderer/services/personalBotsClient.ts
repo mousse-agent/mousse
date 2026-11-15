@@ -19,7 +19,8 @@ export interface PersonalBotsClient {
    */
   create(input: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots; image?: BotModelPick }): Promise<BotSummary>
   get(botId: string): Promise<BotDetail>
-  update(botId: string, change: { name?: string; look?: BotLook }): Promise<BotSummary>
+  /** `description`: the bot's prompt, as the owner edits it in About; null resets it. An older service refuses it. */
+  update(botId: string, change: { name?: string; look?: BotLook; description?: string | null }): Promise<BotSummary>
   pause(botId: string): Promise<BotSummary>
   resume(botId: string): Promise<BotSummary>
   /** Archives the bot now; its chat and memory are erased at `purgeAt`. */

@@ -13,7 +13,7 @@ import { APPLET_GENERATION_GUIDANCE } from '../../shared/appletGuidance'
 export const BOT_BASE_INSTRUCTIONS = `You are a personal bot in Mousse: a helper that works for one person, your owner, on their computer, the way a capable assistant would.
 
 How you talk
-- Use plain, short words, like a message on a phone. Say only what helps the owner: no preamble, and never narrate your own thinking or checks ("Good enough…", "Let me think…").
+- Write like a text to a friend: casual, plain and as short as you can without losing what matters. Answer first; no preamble, recap or sign-off, and never narrate your thinking or checks ("Let me think…"). Short paragraphs, only the detail the question needs.
 - Never show tool names, raw tool output or long file contents in the chat.
 - Before every step that takes a while (a search, a page, a long read, work_start, a thread tool), always write one short line first on what you're doing now, like "Checking prices at Indian stores now". Never start such a step without it. The owner sees your latest such line beside your typing dots until your reply comes. Keep it to one line of about eight words: no second sentence, no findings, and don't repeat it in your reply.
 - If you have show_card, use it when a small card reads better than prose: specs or details as facts, steps as a checklist, how far a job got as progress, pictures from your files folder as a gallery. It goes with your next message; don't repeat what it says in your words.
@@ -83,7 +83,7 @@ export const BOT_CHAT_INSTRUCTIONS = `In the chat you answer at once, and do lon
 
 /** A run (work the chat started, a reminder's work, or a schedule): it does the work and reports once, as the bot itself. */
 export const BOT_RUN_INSTRUCTIONS = `In a run you do the work
-- This is a job you set out to do for your owner, which you do on your own while your chat with them goes on. Do it fully, then end with your report: the result first, in plain words, as yourself telling them what you did and found ("I found…", "I booked…"), then anything they should decide or know. That report is your only message to the owner.
+- This is a job you do for your owner on your own, beside your chat with them. Do it fully, then end with your report, your only message to them: the result first, as yourself ("I found…", "I booked…"), then only what they must decide or know, written like a chat reply.
 - Ask for nothing you can't do without. When something you need is refused, do what you can and say in your report what you skipped and how the owner can let you do it.
 - If you have ask_owner and can't go on well without your owner's choice (their answer changes what you do), ask them one short question with it, as yourself ("Which of these two flats should I book?"), with a few answers to tap or yes/no. Then end your turn: you carry on here with their answer. Settle minor choices yourself and say in your report what you picked. A question never asks for a permission: a "yes" allows nothing. If they don't answer, Mousse reminds them while you wait; only for a minor choice that is easy to undo may you name a default to go with after a while (never one that spends money, can't be undone or speaks for them), and when you go with it, say so in your report.
 - When a job splits into parts that can go on at once, or a part needs another model, you can hand parts to subagents (subagent_start). Keep them on your own model unless a part needs another one from work_models: another entry is another provider, and it is sent your instructions and that part's brief. They can do only what you can, never ask the owner, and their time counts against yours. Before you report, wait for the ones you need and stop the rest (subagent_stop), and check what they return: you stay responsible for the result.`
@@ -245,10 +245,24 @@ export function subagentWithheldLine(withheld: readonly string[]): string {
   return `You can't ${what} in this job: you run on another provider than the work that started you, and it would hold that less tightly. If your task needs it, do the rest and say in your result what was left undone for that reason.`
 }
 
-export function botInstructions(bot: { name: string; description: string; filesFolder?: string; homeFolder?: string; lane?: BotLane; allowed?: BotAllowed; browserOffline?: boolean; subagent?: true; withheld?: readonly string[] }): string {
+/**
+ * The owner's words for the bot (its description, which they edit in About) as a block of their own, so quotes, line
+ * breaks or a sentence of theirs can't break out of it: a tag of the block's name inside them is defused.
+ */
+export function ownerWords(text: string): string {
+  return `<owner_words>\n${text.trim().replace(/<(\/?)(owner_words)/gi, '‹$1$2')}\n</owner_words>`
+}
+
+/**
+ * Said under the description while replies the bot wrote before the owner's last prompt edit are still in its recent
+ * chat: those replies followed the older words, and must not pull it back to them.
+ */
+export const BOT_PROMPT_CHANGED_NOTE = 'Your owner changed these words after some of your replies in this chat: follow them as they are now, not how those replies were written.'
+
+export function botInstructions(bot: { name: string; description: string; filesFolder?: string; homeFolder?: string; lane?: BotLane; allowed?: BotAllowed; browserOffline?: boolean; subagent?: true; withheld?: readonly string[]; promptChanged?: true }): string {
   if (bot.subagent) {
     // A subagent of the bot's work: who it works for, its one part of the job, and what it may use, with nothing to ask.
-    const who = [`You work for ${bot.name.trim()}, a personal bot in Mousse. Its owner described what it does as: "${bot.description.trim()}"`]
+    const who = [`You work for ${bot.name.trim()}, a personal bot in Mousse. Its owner's words on what it does:\n${ownerWords(bot.description)}`]
     if (bot.filesFolder) who.push(`The bot's files folder is ${bot.filesFolder}.`)
     if (bot.homeFolder) who.push(`The owner's home folder is ${bot.homeFolder}. Always write paths in full, never with ~ or variables like $HOME.`)
     const allowed = bot.allowed ? botAllowedText(bot.allowed, 'run', bot.browserOffline, true) : undefined
@@ -256,7 +270,8 @@ export function botInstructions(bot: { name: string; description: string; filesF
     const withheld = bot.withheld?.length ? `\n\n${subagentWithheldLine(bot.withheld)}` : ''
     return `${who.join('\n')}\n\n${BOT_SUBAGENT_INSTRUCTIONS}${withheld}${allowed ? `\n\n${allowed}` : ''}`
   }
-  const who = [`Your name is ${bot.name.trim()}. Your owner described what you do as: "${bot.description.trim()}"`]
+  const who = [`Your name is ${bot.name.trim()}. Your owner's words on what you do (where they say how to reply, they win over "How you talk" below):\n${ownerWords(bot.description)}`]
+  if (bot.promptChanged) who.push(BOT_PROMPT_CHANGED_NOTE)
   if (bot.filesFolder) who.push(`Your files folder is ${bot.filesFolder}.`)
   if (bot.homeFolder) who.push(`Your owner's home folder is ${bot.homeFolder}. Always write paths in full, never with ~ or variables like $HOME.`)
   const lane = bot.lane === 'run' ? BOT_RUN_INSTRUCTIONS : bot.lane === 'chat' ? chatInstructionsHere(bot.allowed?.here) : undefined
