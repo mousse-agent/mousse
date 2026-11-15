@@ -21,13 +21,15 @@ const NO_MICROPHONE: Plugin = { name: 'no-microphone', setup(builder) {
 } }
 
 type Measured = { width: number; scrollWidth: number; clientWidth: number; open?: boolean; over?: number }
+type AppletWidth = { reply: number; applet: number; bubble: number }
 type Evidence = {
   hidden: Measured; hover: Record<string, Measured>; afterHover: Measured
   keyboard: Record<string, { focused: boolean; reached: string[]; measured: Record<string, Measured> }>
   roomy: Measured; narrowed: Measured; pageErrors: string[]; rendererErrors: string[]
+  appletNarrow: AppletWidth; appletRoomy: AppletWidth
 }
 
-it('keeps a narrow bot chat free of sideways scroll: tools hidden, shown by pointer or keyboard, and open while it narrows', async () => {
+it('keeps a narrow bot chat free of sideways scroll (tools hidden, shown by pointer or keyboard, open while it narrows), with applets across the whole reply', async () => {
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-bot-chat-width-'))
   let child: ChildProcess | undefined
   let exited: Promise<number | null> | undefined
@@ -76,6 +78,13 @@ it('keeps a narrow bot chat free of sideways scroll: tools hidden, shown by poin
     expect(evidence.narrowed.open, all).toBe(true)
     expect(evidence.narrowed.over, all).toBeLessThanOrEqual(0)
     noSidewaysScroll(evidence.narrowed, 'open while it narrowed')
+
+    // An applet takes the whole reply width, narrow or roomy; a bubble that fills its width keeps the gutter on its right.
+    for (const [where, widths] of [['narrow', evidence.appletNarrow], ['roomy', evidence.appletRoomy]] as const) {
+      expect(widths.applet, `applet, ${where}: ${all}`).toBeGreaterThanOrEqual(widths.reply - 1)
+      expect(widths.bubble, `bubble, ${where}: ${all}`).toBeLessThanOrEqual(widths.reply * 0.86 + 1)
+    }
+    expect(evidence.appletRoomy.applet, all).toBeGreaterThan(evidence.appletNarrow.applet)
   } finally {
     if (child?.pid && child.exitCode === null && child.signalCode === null) {
       child.kill('SIGTERM')
