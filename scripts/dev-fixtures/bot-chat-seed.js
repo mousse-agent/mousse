@@ -15,6 +15,8 @@
  *   await botSeed.show('paused')
  *   await botSeed.show('limitPaused')               // two usage-limit lines while the limit holds
  *   await botSeed.show('limitOver')                 // the same lines after the bot runs again
+ *   await botSeed.show('twoAsks')                   // one turn's two asks: on its reply, and one on its own
+ *   await botSeed.show('twoAsksAllowed')            // the same, both allowed
  *   botSeed.scrollTo('report')                      // brings a message to the top: see botSeed.ids
  *
  * The bot's memory (About's Memory row, the Memory dialog) answers from `memory` below; Forget and Edit change it until
@@ -41,7 +43,8 @@
     morning: 'seed-morning-1', drawAsk: 'seed-draw-ask', screenshot: 'seed-screenshot', compareAsk: 'seed-compare-ask',
     markdown: 'seed-markdown', commandAsk: 'seed-command-ask', handoff: 'seed-handoff', note: 'seed-note',
     noteReply: 'seed-note-reply', report: 'seed-report', browserAsk: 'seed-browser-ask', again: 'seed-again',
-    pictureAsk: 'seed-picture-ask', picture: 'seed-picture', pictures: 'seed-pictures', limit: 'seed-limit-2'
+    pictureAsk: 'seed-picture-ask', picture: 'seed-picture', pictures: 'seed-pictures', limit: 'seed-limit-2',
+    repos: 'seed-repos', filesAsk: 'seed-files-ask', shellAsk: 'seed-shell-ask'
   }
 
   function conversation(scenario) {
@@ -131,6 +134,16 @@
         ask: { askId: 'seed-ask-browser', title: 'use the browser', note: 'Its own browser, apart from your tabs. Sites you sign in to for it stay signed in for it only.', status: scenario === 'allowed' ? 'allowed' : 'open' }
       })
     ]
+    // One turn that asked for two things: the first ask on its reply, the second posted on its own ("alpha wants to run
+    // commands."), both open, or both allowed.
+    if (scenario === 'twoAsks' || scenario === 'twoAsksAllowed') {
+      const status = scenario === 'twoAsks' ? 'open' : 'allowed'
+      rows.push(
+        owner(ids.repos, today(22, 4), 'list my repos'),
+        bot(ids.filesAsk, today(22, 4), "I'll need to look through your folders and run git to find them.", [], { replyTo: quote(ids.repos, 'list my repos'), ask: { askId: 'seed-ask-files', title: 'use files on this computer', note: "Read and change any file or folder, except Mousse's own data.", status } }),
+        bot(ids.shellAsk, today(22, 4), 'alpha wants to run commands.', [], { kind: 'notice', ask: { askId: 'seed-ask-shell', title: 'run commands', note: 'Any command, in its work.', status } })
+      )
+    }
     if (scenario === 'typing') rows.push(owner(ids.again, ago(0.2), 'again'))
     // A usage limit ended two chat turns; in `limitOver` the bot has since answered again.
     if (scenario === 'limitPaused' || scenario === 'limitOver') {

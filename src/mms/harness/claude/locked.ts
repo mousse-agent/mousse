@@ -1,15 +1,15 @@
 import { execFile, spawn as nodeSpawn } from 'node:child_process'
-import { createHash } from 'node:crypto'
-import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
+import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
-import type { Options, SandboxSettings, SpawnedProcess, SpawnOptions } from '@anthropic-ai/claude-agent-sdk'
+import type { Options, SandboxSettings, Settings, SpawnedProcess, SpawnOptions } from '@anthropic-ai/claude-agent-sdk'
 import type { ToolCall } from '@earendil-works/pi-ai'
 import type { BotAuthority, BotMcpTool } from '../../../shared/bots/personal/authority'
 import { botAppToolRefusal, checkBuiltinCall, checkMessage, wallMessage } from '../../../shared/bots/personal/walls'
 import { runtimeExpandedPath } from '../../bots/authority/botAuthority'
 import { entriesBeside } from '../../bots/grants/compile'
-import { CLAUDE_COMMAND_WRITE_LIMIT_TEXT, closedBeside, linuxCommandLayout, mousseTempEntries } from '../../data/closedPlaces'
+import { CLAUDE_COMMAND_WRITE_LIMIT_TEXT, closedBeside, isMousseTempEntry, linuxCommandLayout, mousseTempEntries } from '../../data/closedPlaces'
 import { neutralToolIdempotent, neutralToolsOf, type NativeToolTable, type NeutralTool } from '../../../shared/harness/tools'
 import type { HarnessCaps } from '../../../shared/harness/types'
 import { withoutTransportFields } from '../../agentDefinitions/definitionGate'
@@ -530,8 +530,11 @@ export function claudeLockedSandbox(input: { workspace: NonNullable<BotAuthority
  * as everything under it. Claude Code turns them into exclusions of its own Grep and Glob, which skip those places in a
  * search over a folder above them, and refuses a Read of one. Paths in the form its rules take: `//` and the absolute
  * path with `/`, a Windows drive as `/c/…`, and the characters its patterns read as special escaped.
+ *
+ * Mousse's own entries in a temporary folder of `temps` (`mousseTempEntries`; tens of thousands where tests or crashes
+ * left them) are closed by one pattern per folder, `mousse-*`, which also closes the ones made after the turn starts.
  */
-export function claudeReadDenyRules(workspace: BotAuthority['workspace']): string[] {
+export function claudeReadDenyRules(workspace: BotAuthority['workspace'], temps: readonly string[] = []): string[] {
   const computer = workspace?.computer
   if (!workspace || !computer) return []
   const mine = [...(workspace.files !== undefined ? [workspace.files] : []), workspace.scratch]
@@ -545,7 +548,31 @@ export function claudeReadDenyRules(workspace: BotAuthority['workspace']): strin
     const escaped = posix.replace(/[*?[\]{}!#]/g, (char) => `\\${char}`)
     return `/${escaped.startsWith('/') ? escaped : `/${escaped}`}`
   }
-  return [...new Set(places.flatMap((place) => [`Read(${rule(place)})`, `Read(${rule(place)}/**)`]))]
+  // Whether a folder is one of `temps`, looked up once per folder.
+  const tempFolders = new Map<string, boolean>()
+  const inTemp = (place: string): boolean => {
+    if (!basename(place).startsWith(MOUSSE_TEMP_PREFIX)) return false
+    const folder = dirname(place)
+    let found = tempFolders.get(folder)
+    if (found === undefined) tempFolders.set(folder, (found = isMousseTempEntry(place, temps)))
+    return found
+  }
+  const paths = places.flatMap((place) => (inTemp(place) ? [] : [rule(place)]))
+  const patterns = [...tempFolders].flatMap(([folder, found]) => (found ? [`${rule(folder)}/${MOUSSE_TEMP_PREFIX}*`] : []))
+  return [...new Set([...paths, ...patterns].flatMap((path) => [`Read(${path})`, `Read(${path}/**)`]))]
+}
+
+const MOUSSE_TEMP_PREFIX = 'mousse-'
+
+/**
+ * Where a locked turn's settings go (`claudeLockedOptions`'s `settings`): a file in `folder`, named on Claude Code's
+ * command line by its path. Inline, its deny rules and sandbox could pass the length Windows allows a command line
+ * (32,767 characters) or Linux one argument (128 KiB), and the turn would not start (`spawn ENAMETOOLONG`).
+ */
+export function claudeLockedSettingsFile(settings: Settings, folder: string): string {
+  const path = join(folder, `settings-${randomUUID()}.json`)
+  writeFileSync(path, JSON.stringify(settings), { mode: 0o600 })
+  return path
 }
 
 /**
@@ -576,15 +603,19 @@ export function claudeLockedOptions(turn: ClaudeLockedTurn, input: {
     // Code's input once it starts (`registerClaudeMcpServers`, #358).
     mcpServers: {},
     tools,
-    // The places closed to a bot with file access: its own Grep and Glob skip them (`claudeReadDenyRules`).
-    disallowedTools: [...disallowedTools, ...claudeReadDenyRules(turn.authority.workspace)],
+    disallowedTools,
+    // Off the command line, in a file (`claudeLockedSettingsFile`): the places closed to a bot with file access, which
+    // its own Grep and Glob skip (`claudeReadDenyRules`), and the sandbox of its commands. Both grow with the places.
+    settings: {
+      permissions: { deny: claudeReadDenyRules(turn.authority.workspace, turn.temps) },
+      ...(shell ? { sandbox: claudeLockedSandbox({ workspace: turn.authority.workspace!, temps: turn.temps, ...(input.home ? { home: input.home } : {}), ...(turn.own ? { own: turn.own.folders } : {}), ...(turn.sharedTemp ? { sharedTemp: turn.sharedTemp } : {}) }) } : {})
+    },
     permissionMode: 'default',
     // The bot's own system text, rendered as given on every request of the session (never kept from its first one): a
     // turn after an Allow resumes the session with the wider permissions in it. It is the same text on every turn of an
     // activation, so the prompt cache holds.
     systemPrompt: { type: 'custom', prompt: shell && turn.authority.workspace?.computer && process.platform === 'linux' ? `${turn.systemPrompt}\n\n${CLAUDE_COMMAND_WRITE_LIMIT_TEXT}` : turn.systemPrompt, snapshot: false },
     maxTurns: CLAUDE_LOCKED_MAX_TURNS,
-    ...(shell ? { sandbox: claudeLockedSandbox({ workspace: turn.authority.workspace!, temps: turn.temps, ...(input.home ? { home: input.home } : {}), ...(turn.own ? { own: turn.own.folders } : {}), ...(turn.sharedTemp ? { sharedTemp: turn.sharedTemp } : {}) }) } : {}),
     ...(input.spawn ? { spawnClaudeCodeProcess: input.spawn } : {})
   }
 }

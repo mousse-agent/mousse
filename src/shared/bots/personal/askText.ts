@@ -109,3 +109,12 @@ export function askText(request: BotAskRequest, options: { budget?: BotBudget } 
   }
   return budgetText(request.budget.key, request.budget.amount, options.budget)
 }
+
+/**
+ * The words of a notice that carries only an ask ("Plusy wants to run commands."): an ask the turn's reply had no room
+ * for, or one a run posted. The chat shows such a notice as the ask alone, as on a reply, and once answered only the
+ * quiet line the answer leaves (`askOnlyNotice`).
+ */
+export function askNoticeText(botName: string, title: string): string {
+  return `${botName} wants to ${title}.`
+}

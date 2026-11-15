@@ -1,4 +1,5 @@
 import { compareLaunched, launchedActive, type BotAskCard, type BotChatMessage, type BotChip, type BotLaunchedThread, type BotSummary, type BotWorkItem } from '../../../shared/bots/personal/chat'
+import { askNoticeText } from '../../../shared/bots/personal/askText'
 
 /**
  * How a bot's chat reads as a messenger: what the renderer infers from the chat's rows alone (`bot_messages`), with
@@ -66,6 +67,15 @@ function startedLine(botName: string, titles: readonly string[], queued: boolean
   return `${botName} ${queued ? 'will start' : 'started'} ${named}`
 }
 
+/**
+ * A bot's message that says nothing but its ask ("Plusy wants to run commands.", `askNoticeText`): a second ask of a
+ * turn, or a run's. A message with more, or one renamed since, shows as written.
+ */
+export function askOnlyNotice(message: BotChatMessage, botName: string): boolean {
+  return message.author === 'bot' && !!message.ask && message.text === askNoticeText(botName, message.ask.title) &&
+    !message.error && !message.question && !message.attachments?.length && !message.cards?.length && !message.applets?.length
+}
+
 /** The quiet line an answered ask leaves: "You let alpha use the browser". */
 export function askAnsweredLine(botName: string, ask: Pick<BotAskCard, 'title' | 'status'>): string | undefined {
   if (ask.status === 'allowed') return `You let ${botName} ${ask.title}`
@@ -112,6 +122,19 @@ export function chatRows(messages: readonly BotChatMessage[], botName: string, a
       }
       if (signals.titles.length) rows.push({ kind: 'system', id: `${message.id}:started`, at: message.at, text: startedLine(botName, signals.titles, signals.queued), ...(tip ? { title: tip } : {}) })
       if (signals.only) continue
+    }
+    // A message that is only an ask shows the ask alone, as on a reply; once answered, only the line the answer leaves.
+    if (askOnlyNotice(message, botName)) {
+      if (message.ask!.status === 'open') {
+        rows.push({ kind: 'message', message: { ...message, text: '' } })
+        continue
+      }
+      const answered = askAnsweredLine(botName, message.ask!)
+      if (answered) {
+        const tip = answerTip?.(message)
+        rows.push({ kind: 'system', id: `${message.id}:answered`, at: message.at, text: answered, of: message.id, ...(tip ? { title: tip } : {}) })
+        continue
+      }
     }
     rows.push({ kind: 'message', message })
     const answered = message.ask ? askAnsweredLine(botName, message.ask) : undefined
