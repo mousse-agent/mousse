@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs'
+import { createBotMemoryAdmin } from '../../src/mms/bots/memory/admin'
+import { botMemoryMethods } from '../../src/mms/bots/memory/methods'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { botMemoryTools, type BotMemoryToolHost } from '../../src/mms/run/mcp/appTools/botMemory'
 import { ToolRegistry } from '../../src/mms/run/mcp/appTools/registry'
@@ -155,6 +158,53 @@ describe('memory tools', () => {
     }
     expect(fx.store.active('ada')).toHaveLength(3)
     expect((await call('memory_save', 'ada-home', { kind: 'note', text: 'Combined.', merges: ['m3'] })).isError).toBeUndefined()
+  })
+
+  // Forget through either public handler; direct and chained absorption; old target versions;
+  // journal/message copies, export, re-learning, restoration, and another bot as a control.
+  it.each([
+    ['bot', false], ['dialog', false], ['bot', true], ['dialog', true]
+  ] as const)('%s Forget removes absorbed facts and copies (chain: %s)', async (via, chain) => {
+    const fx = memoryFixture()
+    const { call } = setup(fx)
+    const texts = ['The owner lives at 12 Elm Street, flat 4B.', 'The door code is 4471.']
+    const save = async (text: string, args = {}) => {
+      const result = await call('memory_save', 'ada-home', { text, kind: 'owner', ...args })
+      expect(result.isError).toBeUndefined()
+      return result.value.ref as string
+    }
+    for (const [n, text] of texts.entries()) {
+      fx.message({ botId: 'ada', id: `fact-${n}`, author: 'owner', text })
+      await save(text)
+      fx.store.append({ botId: 'ada', kind: 'tool_result', sourceKey: `copy-${n}`, who: 'tool', text: `Copy: ${text}` })
+    }
+    let target = await save('Home: flat 4B, 12 Elm Street; door code 4471.', { merges: ['m1', 'm2'] })
+    // Forget must follow an absorption into any version, not just the target's newest.
+    target = await save('Home details are saved together.', { replaces: target })
+    if (chain) {
+      const extra = await save('The caretaker visits on 19 Nov 2026.')
+      target = await save('Home and caretaker details.', { merges: [target, extra] })
+    }
+    await call('memory_save', 'bob-home', { kind: 'owner', text: texts[0] })
+    const admin = createBotMemoryAdmin({ store: fx.store })
+    if (via === 'dialog') await botMemoryMethods(admin)['bots.memory.forget']({ profileId: 'p', botId: 'ada', id: target })
+    else expect((await call('memory_forget', 'ada-home', { id: target, reason: 'Remove home details.' })).isError).toBeUndefined()
+    expect(fx.store.allVersions('ada').every(e => e.status === 'forgotten' && e.text === null)).toBe(true)
+    const history = await call('memory_list', 'ada-home', { history: true })
+    expect(JSON.stringify(history.value)).not.toContain(texts[1])
+    const exported = await admin.export('ada', fx.home)
+    for (const file of exported.files) {
+      const content = readFileSync(file, 'utf8')
+      for (const text of texts) expect(content).not.toContain(text)
+    }
+    for (const [n, text] of texts.entries()) {
+      expect((await call('memory_save', 'ada-home', { kind: 'owner', text })).value.error).toBe('refused')
+      expect((await call('memory_save', 'ada-home', { kind: 'owner', text, replaces: `m${n + 1}v2` })).value.error).toBe('refused')
+      const message = fx.db.statement('SELECT text FROM bot_messages WHERE id = ?').get(`fact-${n}`)
+      expect(message?.text).not.toBe(text)
+      expect(fx.store.journal('ada').find(row => row.sourceKey === `copy-${n}`)?.redactedAt).toBeTruthy()
+    }
+    expect(fx.store.active('bob')[0]?.text).toBe(texts[0])
   })
 
   it('over the cap: fails with the current list', async () => {
