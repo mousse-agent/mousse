@@ -9,6 +9,7 @@ import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BotEngine } from '../../src/mms/bots/activation/BotEngine'
+import type { ChatMessage } from '../../src/shared/types'
 import { botFixture, chatOf, createBot, finish, flush, payloadOf, runDispatch, start, type BotFixture } from './botFixture'
 
 let f: BotFixture
@@ -266,6 +267,30 @@ describe('bots.chat.list, chips and read markers', () => {
     expect(page.map((message) => message.seq)).toEqual(all.slice(-2).map((message) => message.seq))
     const before = f.bots.service.chatList(botId, { beforeSeq: page[0]!.seq, limit: 100 }).messages
     expect(before.map((message) => message.seq)).toEqual(all.slice(0, -2).map((message) => message.seq))
+  })
+
+  it("a step's status is the bot's words just before it, sent with the live chip and in chat.list, never its reply; the dispatch's end clears it", async () => {
+    await send('one', 'm1')
+    const activation = chatActivation()
+    const { payload } = await start(f, activation.id)
+    const events: unknown[] = []
+    f.bots.events.on('activity', (event) => events.push(event))
+    const at = (id: string, role: ChatMessage['role'], content: string, kind?: ChatMessage['kind']): ChatMessage => ({ id, role, content, timestamp: '2026-11-14T10:00:00.000Z', turnId: 't1', ...(kind ? { kind } : {}) })
+    const said = [at('u1', 'user', 'one'), at('a1', 'assistant', 'Checking  your\ninbox now'), at('c1', 'assistant', '', 'tool_call')]
+    f.bots.stepStarted(home(), () => said)
+    expect(events).toEqual([{ botId, activationId: activation.id, chip: null, status: 'Checking your inbox now' }])
+    expect(f.bots.service.chatList(botId).live).toEqual({ activationId: activation.id, status: 'Checking your inbox now' })
+    // The same words before the next step send nothing again; a live chip keeps them.
+    f.bots.stepStarted(home(), () => [...said, at('c2', 'assistant', '', 'tool_call')])
+    expect(events).toHaveLength(1)
+    f.bots.publishActivity({ botId, activationId: activation.id, chip: { icon: 'search', text: 'searching the web', live: true } })
+    expect(events.at(-1)).toMatchObject({ chip: { text: 'searching the web' }, status: 'Checking your inbox now' })
+    // A thread that is not the bot's: nothing.
+    f.bots.stepStarted('thread:someone-else', () => said)
+    expect(events).toHaveLength(2)
+    await finish(f, payload, 'completed', { text: 'Two need a reply.' })
+    expect(events.at(-1)).toEqual({ botId, activationId: activation.id, chip: null })
+    expect(f.bots.service.chatList(botId).live).toBeUndefined()
   })
 
   it('markRead lowers the unread count', async () => {

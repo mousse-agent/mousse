@@ -94,6 +94,8 @@ interface BotsState {
   live: Record<string, { activationId: string; chip?: BotChip }>
   /** The live chip of each running activation (the chat's turn and each piece of work), by activation id. */
   activity: Record<string, BotChip>
+  /** What each running activation said it is doing now, its latest line before a step, by activation id. */
+  statuses: Record<string, string>
   /** Owner messages sent and not yet confirmed, shown as sent. */
   pending: Record<string, BotChatMessage[]>
   details: Record<string, BotDetail>
@@ -299,14 +301,16 @@ export const useBotsStore = create<BotsState>((set, get) => {
         if (!event?.botId) return
         set((state) => ({
           live: { ...state.live, [event.botId]: { activationId: event.activationId, ...(event.chip ? { chip: event.chip } : {}) } },
-          activity: event.chip ? { ...state.activity, [event.activationId]: event.chip } : withoutKey(state.activity, event.activationId)
+          activity: event.chip ? { ...state.activity, [event.activationId]: event.chip } : withoutKey(state.activity, event.activationId),
+          // Each event carries the status as it is now: one without it clears it.
+          statuses: event.status ? (state.statuses[event.activationId] === event.status ? state.statuses : { ...state.statuses, [event.activationId]: event.status }) : withoutKey(state.statuses, event.activationId)
         }))
       })
     ].filter((stop): stop is () => void => typeof stop === 'function')
   }
 
   return {
-    profileId: null, bots: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, replyingTo: {},
+    profileId: null, bots: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, statuses: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, replyingTo: {},
     reactionsMissing: false, questionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null,
     memory: {}, memoryError: {}, memoryOpen: null, memoryEditMissing: false,
 
@@ -322,7 +326,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
       readSeq.clear()
       removed.clear()
       reactions.clear()
-      set({ profileId, bots: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, replyingTo: {},
+      set({ profileId, bots: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, statuses: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, replyingTo: {},
         reactionsMissing: false, questionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null,
     memory: {}, memoryError: {}, memoryOpen: null, memoryEditMissing: false })
       subscribe()
@@ -345,7 +349,9 @@ export const useBotsStore = create<BotsState>((set, get) => {
             const running = new Set(list.flatMap((bot) => [...(bot.chat ? [bot.chat.activationId] : []), ...(bot.work ?? []).map((item) => item.id)]))
             const kept = Object.entries(state.activity).filter(([id]) => running.has(id))
             const activity = kept.length === Object.keys(state.activity).length ? state.activity : Object.fromEntries(kept)
-            return { bots, loaded: true, live, activity, ...celebrate(state.bots, bots) }
+            const said = Object.entries(state.statuses).filter(([id]) => running.has(id))
+            const statuses = said.length === Object.keys(state.statuses).length ? state.statuses : Object.fromEntries(said)
+            return { bots, loaded: true, live, activity, statuses, ...celebrate(state.bots, bots) }
           })
         } catch {
           // A missed list is listed again by the next event or poll; the open chat keeps what it has.
@@ -375,6 +381,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
           return {
             chats: { ...state.chats, [botId]: { messages: upsert(held, page.messages), hasMore: page.messages.length >= BOT_CHAT_PAGE, loadingOlder: false } },
             live: page.live ? { ...live, [botId]: page.live } : live,
+            ...(page.live?.status ? { statuses: { ...state.statuses, [page.live.activationId]: page.live.status } } : {}),
             chatLoad
           }
         })

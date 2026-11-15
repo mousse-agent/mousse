@@ -674,6 +674,18 @@ describe('while it works', () => {
       expect(running()).toEqual([])
       act(() => setAnimationSpeed('normal'))
       expect(running()).toHaveLength(3)
+      // A status shimmers on the dots' cycle, its band reaching the words one dot step after the last dot peaks
+      // (300 + 360 + 150 ms), and is still with them; the dots keep moving as it comes.
+      const dotsBefore = running()
+      await act(async () => fake.emit.activity('inbox', null, 'act1', 'Checking prices at Indian stores now'))
+      const words = transcript().querySelector('.bot-typing-status')!
+      const shimmer = running().filter((record) => words.contains(record.element))
+      expect(shimmer.map((record) => [record.options.duration, record.options.iterations, (record.options.delay as number) + 0.25 * 1200]))
+        .toEqual([[1200, Infinity, 300 + 360 + 150], [1200, Infinity, 300 + 360 + 150]])
+      expect(dotsBefore.every((record) => !record.cancelled)).toBe(true)
+      act(() => setAnimationSpeed('off'))
+      expect(running()).toEqual([])
+      expect(transcript().querySelector('.bot-typing-status')?.textContent).toBe('Checking prices at Indian stores now')
     } finally {
       delete (HTMLElement.prototype as { animate?: unknown }).animate
       setAnimationSpeed('normal')
@@ -1090,6 +1102,37 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
     expect(line.querySelector('.bot-work-subagents')!.getAttribute('title')).toBe("Prices · Some Model on OpenRouter\nReviews · Haiku 5.5 on Claude Code, low reasoning · can't run commands there")
     await click(button('Stop Vacuum comparison'))
     expect(fake.calls).toContainEqual(['stopWork', 'inbox', 'act_w1'])
+  })
+
+  it("says beside the chat turn's dots what the bot is doing now, in full, and only the chat turn's words", async () => {
+    // A chat opened mid-turn shows what the bot already said.
+    fake.live.inbox = { activationId: 'act_c1', status: 'Looking at your files' }
+    await open({ ...working, chat: { activationId: 'act_c1' } })
+    const typing = () => transcript().querySelector('.bot-typing')!
+    // The words as shown and read: the shimmer's bright copy of them is hidden from assistive technology.
+    const words = () => {
+      const status = typing().querySelector('.bot-typing-status')
+      if (!status) return null
+      const read = status.cloneNode(true) as Element
+      read.querySelectorAll('[aria-hidden]').forEach((copy) => copy.remove())
+      return read
+    }
+    expect(words()?.textContent).toBe('Looking at your files')
+    // Its work's words are not the chat's.
+    await act(async () => fake.emit.activity('inbox', null, 'act_w1', 'Comparing vacuum prices'))
+    expect(words()?.textContent).toBe('Looking at your files')
+    await act(async () => fake.emit.activity('inbox', null, 'act_c1', 'Checking your shopping list now'))
+    expect(words()?.textContent).toBe('Checking your shopping list now')
+    expect(typing().querySelectorAll('.bot-typing-bubble i')).toHaveLength(3)
+    expect(typing().getAttribute('aria-label')).toBe('Inbox helper: Checking your shopping list now')
+    // A newer line replaces it, and a long one shows whole.
+    const long = 'Reading the three store pages you sent and checking which of them still have the 2 TB drive in stock, with delivery to Pune before Friday'
+    await act(async () => fake.emit.activity('inbox', { icon: 'web', text: 'reading a page' }, 'act_c1', long))
+    expect(words()?.textContent).toBe(long)
+    // An event without one: the dots alone again.
+    await act(async () => fake.emit.activity('inbox', null, 'act_c1'))
+    expect(words()).toBeNull()
+    expect(typing().getAttribute('aria-label')).toBe('Inbox helper is typing')
   })
 
   it("the chat's own turn types and has Stop; the header still opens the work", async () => {

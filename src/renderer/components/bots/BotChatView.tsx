@@ -370,19 +370,24 @@ function SystemLine({ row }: { row: Extract<BotChatRow, { kind: 'system' }> }) {
 
 /**
  * While the chat's turn runs: the bot's next message, typing, as a messaging app shows it: three dots in a small bubble
- * in the bot's column, the only thing in the chat that moves. Waiting for the internet, it says so instead, still.
+ * in the bot's column, the only thing in the chat that moves, and beside them what the bot said it is doing now (its
+ * latest line before a step), in full. Waiting for the internet, it says so instead, still.
  */
-function BotTyping({ bot, starts, offline }: { bot: BotSummary; starts: boolean; offline: boolean }) {
-  return <article className={`chat-participant-message from-agent bot-message bot-typing${starts ? ' is-group-start' : ''}`} role="status" aria-label={offline ? OFFLINE_TEXT : `${bot.name} is typing`}>
+function BotTyping({ bot, starts, offline, status }: { bot: BotSummary; starts: boolean; offline: boolean; status?: string }) {
+  return <article className={`chat-participant-message from-agent bot-message bot-typing${starts ? ' is-group-start' : ''}`} role="status" aria-label={offline ? OFFLINE_TEXT : status ? `${bot.name}: ${status}` : `${bot.name} is typing`}>
     <div className="bot-message-line">
       {offline
         ? <p className="bot-bubble bot-status-line">{OFFLINE_TEXT}</p>
-        : <TypingDots />}
+        : <TypingDots status={status} />}
     </div>
   </article>
 }
 
-/** One dot's rise and fade; each dot starts 150 ms after the one before it. */
+/** One rise and fall of the dots, and of the status's shimmer. */
+const TYPING_CYCLE_MS = 1200
+/** Each dot starts this long after the one before it. */
+const TYPING_DOT_STEP_MS = 150
+/** One dot's rise and fade; it peaks 30% into its cycle. */
 const TYPING_DOT: Keyframe[] = [
   { offset: 0, opacity: 0.35, transform: 'none', easing: 'ease-in-out' },
   { offset: 0.3, opacity: 0.9, transform: 'translateY(-2px)', easing: 'ease-in-out' },
@@ -391,23 +396,64 @@ const TYPING_DOT: Keyframe[] = [
 ]
 
 /**
+ * The status's shimmer: a bright copy of the words, seen through a soft band (`.bot-typing-glint`, as wide as the words,
+ * its mask bright in its middle), crosses them once a cycle: the band moves from one width left of them to one width
+ * right, and the copy inside it the other way, so its letters stay on the words'. Its middle reaches the words' first
+ * letter a quarter into its cycle and their end three quarters in. Both are transforms, run by the compositor.
+ */
+const TYPING_GLINT: Keyframe[] = [
+  { offset: 0, transform: 'translateX(-100%)', easing: 'linear' },
+  { offset: 1, transform: 'translateX(100%)' }
+]
+const TYPING_GLINT_COPY: Keyframe[] = [
+  { offset: 0, transform: 'translateX(100%)', easing: 'linear' },
+  { offset: 1, transform: 'translateX(-100%)' }
+]
+/**
+ * When the shimmer starts, so the band reaches the words as the wave would: the last dot peaks 30% into its cycle, and
+ * the words begin about one dot step after it (the gap after the dots). The band's middle reaches them a quarter into
+ * its own cycle.
+ */
+const TYPING_SHIMMER_DELAY_MS = 2 * TYPING_DOT_STEP_MS + 0.3 * TYPING_CYCLE_MS + TYPING_DOT_STEP_MS - 0.25 * TYPING_CYCLE_MS
+
+/**
  * The typing dots move smoothly, every frame, on the compositor (opacity and transform only). They are Web Animations
  * rather than a CSS loop for the reason Turning gives (lib/turning.tsx): a repeating CSS animation wakes the main thread
- * at every iteration because React listens for `animationiteration`. With Animation speed Off or reduced motion they
- * stay still.
+ * at every iteration because React listens for `animationiteration`. The status's shimmer is transforms too. With
+ * Animation speed Off or reduced motion all of it stays still, and the words are plain.
  */
-function TypingDots() {
-  const bubble = useRef<HTMLSpanElement>(null)
+function TypingDots({ status }: { status?: string }) {
+  const dotsRef = useRef<HTMLSpanElement>(null)
+  const glintRef = useRef<HTMLSpanElement>(null)
   const still = useMotionScale() === 0
+  const said = Boolean(status)
   useLayoutEffect(() => {
-    const dots = Array.from(bubble.current?.children ?? [])
     if (still) return
+    const dots = Array.from(dotsRef.current?.children ?? [])
     const animations = dots.flatMap((dot, at) => typeof dot.animate === 'function'
-      ? [dot.animate(TYPING_DOT, { duration: 1200, delay: at * 150, iterations: Infinity })]
+      ? [dot.animate(TYPING_DOT, { duration: TYPING_CYCLE_MS, delay: at * TYPING_DOT_STEP_MS, iterations: Infinity })]
       : [])
     return () => animations.forEach((animation) => animation.cancel())
   }, [still])
-  return <span ref={bubble} className={`bot-bubble bot-typing-bubble${still ? ' is-still' : ''}`} aria-hidden><i /><i /><i /></span>
+  useLayoutEffect(() => {
+    const glint = glintRef.current
+    const copy = glint?.firstElementChild
+    if (still || !glint || !copy || typeof glint.animate !== 'function') return
+    const timing: KeyframeAnimationOptions = { duration: TYPING_CYCLE_MS, delay: TYPING_SHIMMER_DELAY_MS, iterations: Infinity, fill: 'backwards' }
+    const shimmer = [glint.animate(TYPING_GLINT, timing), copy.animate(TYPING_GLINT_COPY, timing)]
+    // On the dots' clock, so the wave that crosses them runs on into the words. Dots started in this same frame have no
+    // start time yet: all of them then start together.
+    const lead = dotsRef.current?.firstElementChild?.getAnimations?.()[0]
+    if (lead?.startTime !== null && lead?.startTime !== undefined) for (const animation of shimmer) animation.startTime = lead.startTime
+    return () => shimmer.forEach((animation) => animation.cancel())
+  }, [still, said])
+  return <span className={`bot-bubble bot-typing-bubble${still ? ' is-still' : ''}${said ? ' has-status' : ''}`}>
+    <span ref={dotsRef} className="bot-typing-dots" aria-hidden><i /><i /><i /></span>
+    {said && <span className="bot-typing-status">
+      {status}
+      {!still && <span ref={glintRef} className="bot-typing-glint" aria-hidden><span>{status}</span></span>}
+    </span>}
+  </span>
 }
 
 /**
@@ -441,6 +487,11 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   // The chat's turn waits for the internet: no dots, and it says so.
   const offline = bot.chat ? Boolean(bot.chat.offline) : working && bot.waiting === 'internet'
   const typing = working && !offline
+  // What the chat's turn said it is doing now; a service from before work: what the bot's working activation said.
+  const status = useBotsStore((s) => {
+    const activationId = bot.chat?.activationId ?? (legacy ? s.live[bot.id]?.activationId : undefined)
+    return activationId ? s.statuses[activationId] : undefined
+  })
   const lastSeq = messages.at(-1)?.seq
   const firstId = messages[0]?.id
   const files = attachments ?? NO_FILES
@@ -611,7 +662,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
                 asked={message.replyTo ? byId.get(message.replyTo.id) : undefined} />}
           </Fragment>
         })}
-        {(working || offline) && <BotTyping bot={bot} starts={typingStarts} offline={offline} />}
+        {(working || offline) && <BotTyping bot={bot} starts={typingStarts} offline={offline} status={status} />}
         {/* A run still working before its reply: the preview follows it here. */}
         {preview && !previewOn && <div className="bot-browser-live">{preview}</div>}
         {bot.state === 'paused' && <p className="bot-paused-line" role="status">{bot.stateText.startsWith('Paused') ? bot.stateText : 'Paused'}. <button type="button" onClick={() => void store().resume(bot.id)}>Resume</button></p>}

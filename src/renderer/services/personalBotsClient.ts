@@ -115,7 +115,7 @@ export interface PersonalBotsEvents {
   /** `reread`: the window's service connection was opened again; chats it holds may have missed rows. */
   onChanged?(cb: (event: { botId?: string; reread?: boolean }) => void): () => void
   onMessage?(cb: (event: BotsPersonalV2EventData['bots.message']) => void): () => void
-  onActivity?(cb: (event: { botId: string; activationId: string; chip: BotChip | null }) => void): () => void
+  onActivity?(cb: (event: { botId: string; activationId: string; chip: BotChip | null; status?: string }) => void): () => void
   /** A composer file's path on this computer (see `attachmentPath`). */
   attachmentPath?(file: File): Promise<string>
 }

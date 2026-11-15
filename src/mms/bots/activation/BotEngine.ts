@@ -92,6 +92,8 @@ import { isConnectionFailure, type BotConnectivity } from './connectivity'
 import { BotScheduleError, type BotScheduleBook, type BotScheduleEntry } from '../../scheduled/botJobs'
 import { isSilentOutput } from '../../scheduled/computeNextRun'
 import { tellMeNotifies } from '../../../shared/automations'
+import { statusLineOf } from '../activity/statusLine'
+import type { ChatMessage } from '../../../shared/types'
 import { BOT_COMPACTION_HOLD_MS, BotReloadAbort, BotRoomAbort, BotWallAbort, type BotBrowserHost, type BotTurnDispatcher, type BotTurnSteer, type PreparedBotTurn } from './dispatcher'
 
 /**
@@ -528,6 +530,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private readonly pendingReplies = new Map<string, { post(text?: string): void; timer: { clear(): void } }>()
   /** The live chip of each working activation (`bots.chat.list`'s `live`). */
   private readonly liveChips = new Map<string, { botId: string; chip: BotChip | null }>()
+  /** What each working activation said it is doing now (`stepStarted`), sent with its live chip. */
+  private readonly liveStatuses = new Map<string, string>()
   /** The one timer for the soonest reminder or question follow-up of any bot (`armDue`). */
   private reminderTimer: { clear(): void } | undefined
   private delivering: Promise<void> | undefined
@@ -5928,20 +5932,38 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   publishActivity(event: { botId: string; activationId: string; chip: BotChip | null }): void {
     if (event.chip) this.liveChips.set(event.activationId, { botId: event.botId, chip: event.chip })
     else this.liveChips.delete(event.activationId)
-    try { this.events.emit('activity', event) } catch { /* a listener never stops a call */ }
+    // Every event carries the activation's status as it is now: an event without one clears it.
+    const status = this.liveStatuses.get(event.activationId)
+    try { this.events.emit('activity', { ...event, ...(status ? { status } : {}) }) } catch { /* a listener never stops a call */ }
   }
 
   private clearLiveChip(row: BotActivationRow): void {
-    if (!this.liveChips.has(row.id)) return
+    const status = this.liveStatuses.delete(row.id)
+    if (!this.liveChips.has(row.id) && !status) return
     this.publishActivity({ botId: row.botId, activationId: row.id, chip: null })
   }
 
-  /** The bot's working activation and its live chip, chat lane first (each piece of work's chip comes as `activity`). */
-  liveActivity(botId: string): { activationId: string; chip?: BotChip } | undefined {
+  /**
+   * A step of a bot's turn began (a tool call landed in its thread): the bot's latest words before it in that turn are
+   * what it is doing now ("Checking prices at Indian stores now"), its status beside its typing dots. Its reply comes
+   * after its last step, so it never shows there. A subagent's or a consult's words are not the bot's own.
+   */
+  stepStarted(threadId: string, messages: () => readonly ChatMessage[]): void {
+    const at = this.activationOf(threadId)
+    if (!at || (at.role !== 'home' && at.role !== 'activation') || !this.live.has(at.activationId)) return
+    const status = statusLineOf(messages())
+    if (!status || this.liveStatuses.get(at.activationId) === status) return
+    this.liveStatuses.set(at.activationId, status)
+    this.publishActivity({ botId: at.botId, activationId: at.activationId, chip: this.liveChips.get(at.activationId)?.chip ?? null })
+  }
+
+  /** The bot's working activation, its live chip and its status, chat lane first (each piece of work's come as `activity`). */
+  liveActivity(botId: string): { activationId: string; chip?: BotChip; status?: string } | undefined {
     const working = [...this.store.laneActivations(botId, 'chat', ['running']), ...this.store.laneActivations(botId, 'run', ['running'])][0]
     if (!working) return undefined
     const chip = this.liveChips.get(working.id)?.chip
-    return { activationId: working.id, ...(chip ? { chip } : {}) }
+    const status = this.liveStatuses.get(working.id)
+    return { activationId: working.id, ...(chip ? { chip } : {}), ...(status ? { status } : {}) }
   }
 
   private settleConsult(row: BotActivationRow, dispatch: BotDispatchRow, run: RunRecord, outcome: { text?: string }, fromExecutor: boolean): void {
