@@ -5,7 +5,7 @@
  *
  * What each case covers:
  * - a nudge: a fixed line from Mousse with no model call, the question's buttons again, at most two, at its time
- * - limits: the bot's nudges an hour apart across its questions; nothing in the owner's quiet hours (a default too)
+ * - limits: the bot's nudges an hour apart across its questions; nothing is held for the night (a default too)
  * - a default: work carries on with "…so go with "A"…" (no owner row, same grant); a chat question queues a turn that is
  *   not the owner's (threads read-only, no owner's words)
  * - races: the owner writes in the chat first (no chat follow-up after it); a default that falls due while a chat turn
@@ -43,8 +43,6 @@ let botId: string
 
 beforeEach(async () => {
   f = botFixture()
-  // The owner's time zone: the quiet hours are 22:00 to 08:00 UTC here, whatever this computer's zone is.
-  f.host.timeZone = () => 'UTC'
   await f.bots.reconcileOnStartup()
   domains = new DomainHandlerRegistry()
   registerPersonalBotMethods(domains, () => f.bots.service)
@@ -159,7 +157,7 @@ describe('a nudge', () => {
     expect(bubbleNow(nudge!.id).question?.status).toBe('answered')
   })
 
-  it('a bot’s nudges are an hour apart across its questions, and none comes in the quiet hours', async () => {
+  it('a bot’s nudges are an hour apart across its questions, and are not held for the night', async () => {
     const one = await workAsks(FLATS, 'Flat hunt', 'w1')
     const two = await workAsks({ question: 'Shall I book the cheaper movers?', yesNo: true }, 'Movers', 'w2')
     const due = Date.parse(two.bubble.at) + HOUR
@@ -169,13 +167,12 @@ describe('a nudge', () => {
     expect(f.store.question(two.questionId)?.nextAt).toBe(new Date(Date.parse(nudgesOf(one.questionId)[0]!.at) + HOUR).toISOString())
     await reach(Date.parse(nudgesOf(one.questionId)[0]!.at) + HOUR)
     expect(nudgesOf(two.questionId)).toHaveLength(1)
-    // A question asked at 21:30 would nudge at 22:30: it waits for 08:00.
-    f.clock.now = Date.parse('2026-11-07T21:30:00Z')
+    // A question asked at 21:30 (this computer's time) nudges at 22:30.
+    f.clock.now = new Date(2026, 10, 7, 21, 30).getTime()
     const late = await workAsks({ question: 'Shall I order the boxes?', yesNo: true }, 'Boxes', 'w3')
-    expect(f.store.question(late.questionId)?.nextAt).toBe('2026-11-08T08:00:00.000Z')
-    await reach(Date.parse('2026-11-07T22:30:00Z'))
-    expect(nudgesOf(late.questionId)).toEqual([])
-    await reach(Date.parse('2026-11-08T08:00:00Z'))
+    const nudgeAt = Date.parse(late.bubble.at) + HOUR
+    expect(f.store.question(late.questionId)?.nextAt).toBe(new Date(nudgeAt).toISOString())
+    await reach(nudgeAt)
     expect(nudgesOf(late.questionId)).toHaveLength(1)
   })
 })
@@ -217,13 +214,12 @@ describe('a default', () => {
     expect(bubbleNow(bubble.id).question).toMatchObject({ status: 'defaulted', answer: 'Flat A' })
   })
 
-  it('in the quiet hours, goes ahead at 08:00', async () => {
-    f.clock.now = Date.parse('2026-11-07T21:45:00Z')
+  it('is not held for the night: one due at 22:15 (this computer\'s time) goes ahead at 22:15', async () => {
+    f.clock.now = new Date(2026, 10, 7, 21, 45).getTime()
     const { workId, questionId, bubble } = await workAsks(DEFAULT_A)
-    expect(bubble.question?.defaultAt).toBe('2026-11-08T08:00:00.000Z')
-    await reach(Date.parse('2026-11-07T22:15:00Z'))
-    expect(f.store.question(questionId)?.status).toBe('open')
-    await reach(Date.parse('2026-11-08T08:00:00Z'))
+    const at = Date.parse(bubble.at) + 30 * MIN
+    expect(bubble.question?.defaultAt).toBe(new Date(at).toISOString())
+    await reach(at)
     expect(f.store.question(questionId)?.status).toBe('defaulted')
     expect(mainDispatches(workId).at(-1)!.prompt.text).toContain('so go with "Flat A"')
   })
