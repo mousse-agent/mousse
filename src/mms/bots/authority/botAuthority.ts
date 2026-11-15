@@ -90,15 +90,20 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
       let path = absolute
       try { path = realpathSync(absolute) } catch { /* A new file has no real path yet. */ }
       const before = fileHash(path)
-      if (tool !== 'read' && (before === null || (before !== undefined && fileReads.get(path) !== before))) {
+      const previous = fileReads.get(path)
+      if (tool !== 'read' && (before === null || (before !== undefined && previous !== before && previous !== `partial:${before}`))) {
         return { refused: 'This file changed since you read it. Read it again, then make your change.' }
       }
+      if (tool === 'write' && before !== undefined && previous?.startsWith('partial:')) {
+        return { refused: 'Read the whole file before replacing it.' }
+      }
       return {
-        completed(success) {
+        completed(success, truncated = false) {
           if (!success) return
           // A read remembers the bytes at admission, not a newer writer's bytes at completion.
           const hash = tool === 'read' ? before : fileHash(path)
-          if (typeof hash === 'string') fileReads.set(path, hash)
+          const partial = tool === 'read' ? args.offset !== undefined || args.limit !== undefined || truncated : tool === 'edit' && previous?.startsWith('partial:')
+          if (typeof hash === 'string') fileReads.set(path, partial ? `partial:${hash}` : hash)
           else fileReads.delete(path)
         }
       }
