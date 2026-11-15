@@ -10,6 +10,7 @@ import { cardOf, MAX_CARD_TITLE_CHARS, MAX_CARDS_PER_MESSAGE, MAX_CHECKLIST_ITEM
 import { shortModelName } from '../../../../shared/modelNames'
 import { botScheduleLabel } from '../../../../shared/scheduleLabel'
 import { botScheduleProblem } from '../../../scheduled/botJobs'
+import { DEFAULT_EVENT_WAKE_HOURS, MAX_EVENT_WAKE_HOURS, MAX_WAKE_CHAIN, MAX_WAKES_PER_DAY, pullRequestOf } from '../../../../shared/bots/personal/wakes'
 import type { BotActivityContext, BotActivitySink, BotToolHost, BotWorkModel } from '../../../bots/seams'
 import type { BotImageMaker } from '../../../bots/images/BotImageMaker'
 import { json, plainSchema, truncateForModel, type MousseTool, type ToolCallContext, type ToolOutcome } from './types'
@@ -244,13 +245,25 @@ export const BOT_TOOLS: Tool[] = [
     })
   },
   {
+    name: 'wake',
+    description: `Wake yourself up later to carry on, here in this chat, without your owner writing: at a time (inMinutes or at), when a thread finishes its turn (thread: its id), or when a pull request merges (pr). Use it whenever you are waiting on something (a pull request, a nightly build, a thread you started) instead of checking on a schedule or promising to look later. brief is what you will do then, standing on its own: you see it with what happened. A wake on a thread or pull request gives up after hours (default ${DEFAULT_EVENT_WAKE_HOURS}, at most ${MAX_EVENT_WAKE_HOURS}) or when the pull request is closed or the thread archived or deleted, and you still wake once and are told why. Waking turns wait out your owner's night (22:00 to 08:00); for something they want at an exact time, use remind. At most ${MAX_WAKE_CHAIN} wake-ups in a row without your owner writing, and ${MAX_WAKES_PER_DAY} a day. Your wake-ups are listed and cancelled with reminder_list and reminder_cancel. Tell your owner in a few words what you'll follow up on.`,
+    parameters: Type.Object({
+      brief: Type.String({ description: 'What you will do then, standing on its own, as a note to yourself.' }),
+      inMinutes: Type.Optional(Type.Number({ description: 'Minutes from now.' })),
+      at: Type.Optional(Type.String({ description: 'Local date and time, like 2026-11-14T09:00.' })),
+      thread: Type.Optional(Type.String({ description: 'Wake when this thread finishes its turn: its id, from thread_list. Needs "use your threads".' })),
+      pr: Type.Optional(Type.String({ description: "Wake when this pull request merges: \"owner/repo#12\" or its link. Its repository must be one of your owner's projects in Mousse." })),
+      hours: Type.Optional(Type.Number({ description: `With thread or pr: how many hours to wait for it before you wake anyway (default ${DEFAULT_EVENT_WAKE_HOURS}, at most ${MAX_EVENT_WAKE_HOURS}).` }))
+    })
+  },
+  {
     name: 'reminder_list',
-    description: 'Your reminders still to come: id, time and text.',
+    description: 'Your reminders and wake-ups still to come: id, time and text. A wake-up says what it waits for (its time is then when it gives up).',
     parameters: Type.Object({})
   },
   {
     name: 'reminder_cancel',
-    description: 'Cancel one of your reminders by its id (see reminder_list).',
+    description: 'Cancel one of your reminders or wake-ups by its id (see reminder_list).',
     parameters: Type.Object({ reminderId: Type.String() })
   },
   {
@@ -443,7 +456,7 @@ export function ownerModelChoice(owner: string, options: readonly BotModelOption
 const NOT_A_BOT = 'Only a bot can use this.'
 const NO_PICTURES_HERE = "Pictures can't be made here. Nothing was made."
 const NO_IMAGE_MODEL_LINE = "Your owner hasn't picked an image model for you. Tell them they can pick one in About → Runs on, in the Images row."
-const CHAT_ONLY = 'Only your chat hands out work and sets reminders. In a run, do the work yourself and say in your report what should happen next.'
+const CHAT_ONLY = 'Only your chat hands out work and sets reminders and wake-ups. In a run, do the work yourself and say in your report what should happen next.'
 /** `question_answer` outside the chat: only the chat hears the owner's words to pass on. */
 const ANSWER_CHAT_ONLY = 'Only your chat passes on your owner\'s answers to your work.'
 /** `show_card` where it is never offered (a consult, a subagent): what it would show goes in words. */
@@ -844,6 +857,47 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         }
       }
     }),
+    ownTool(byName.get('wake')!, deps, {
+      class: 'mutation',
+      describe: () => 'Set a wake-up',
+      handler: async (args, ctx) => {
+        const call = botCall(deps, ctx)
+        if (isOutcome(call)) return call
+        if (call.lane !== 'chat') return error(CHAT_ONLY)
+        const wakes = call.deps.host.wakes
+        if (!wakes) return error("Wake-ups can't be set here.")
+        const brief = typeof args.brief === 'string' ? args.brief.trim() : ''
+        if (!brief) return error('wake needs a brief: what you will do then.')
+        const timed = args.inMinutes !== undefined || args.at !== undefined
+        if ([timed, args.thread !== undefined, args.pr !== undefined].filter(Boolean).length !== 1)
+          return error('Give one of: inMinutes or at (a time), thread (a thread id) or pr (a pull request).')
+        const hours = typeof args.hours === 'number' ? { hours: args.hours } : {}
+        let input: Parameters<NonNullable<BotToolHost['wakes']>['add']>[2]
+        if (timed) {
+          const due = reminderTime(args.inMinutes, args.at)
+          if (typeof due === 'string') return error(due)
+          input = { brief, dueAt: due.toISOString() }
+        } else if (args.thread !== undefined) {
+          if (typeof args.thread !== 'string' || !args.thread.trim()) return error("thread is a thread's id, from thread_list.")
+          // The owner's threads are theirs to share: a bot waits on one only while it may read them.
+          if (!ctx.turn.bot?.appTools.has('thread_wait')) return error('Waiting for a thread needs "use your threads": ask for it with escalate (the tool threads).')
+          input = { brief, event: { kind: 'thread', threadId: args.thread.trim() }, ...hours }
+        } else {
+          const pr = pullRequestOf(args.pr)
+          if (!pr) return error('pr is a pull request as "owner/repo#12", or its link.')
+          input = { brief, event: { kind: 'pr', ...pr }, ...hours }
+        }
+        try {
+          const added = await wakes.add(call.botId, call.activationId, input)
+          const when = reminderLabel(new Date(added.dueAt))
+          const result = { wakeId: added.wakeId, ...(added.label ? { waitsFor: added.label, givesUpAt: when } : { when }) }
+          call.deps.activity?.onAppResult(call.activity, 'wake', result)
+          return json(result)
+        } catch (failure) {
+          return error(failure instanceof Error ? failure.message : String(failure))
+        }
+      }
+    }),
     ownTool(byName.get('reminder_list')!, deps, {
       class: 'read',
       describe: () => 'List reminders',
@@ -860,7 +914,7 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         const call = botCall(deps, ctx)
         if (isOutcome(call)) return call
         if (call.lane !== 'chat') return error(CHAT_ONLY)
-        if (typeof args.reminderId !== 'string' || !call.deps.host.reminders.cancel(call.botId, args.reminderId)) return error('You have no waiting reminder with that id. See reminder_list.')
+        if (typeof args.reminderId !== 'string' || !call.deps.host.reminders.cancel(call.botId, args.reminderId)) return error('You have no waiting reminder or wake-up with that id. See reminder_list.')
         const result = { cancelled: true as const }
         call.deps.activity?.onAppResult(call.activity, 'reminder_cancel', result)
         return json(result)

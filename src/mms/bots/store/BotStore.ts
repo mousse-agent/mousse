@@ -11,6 +11,7 @@ import type { ProviderSelection } from '../../../shared/harness/types'
 import type { BotStuckRows } from '../../../shared/bots/personal/modelSlots'
 import type { BotQuestionAnswer, BotQuestionFollow, BotQuestionLateAnswer, BotQuestionSpec, BotQuestionStatus } from '../../../shared/bots/personal/questions'
 import { cardOf, type BotCard } from '../../../shared/bots/personal/cards'
+import type { BotWakeEvent, BotWakeFired } from '../../../shared/bots/personal/wakes'
 import { BOT_MEMORY_SCHEMA_SQL } from '../memory/schema'
 import { narrowPermissionMode, type PermissionMode } from '../../../shared/permissionMode'
 
@@ -356,6 +357,19 @@ ALTER TABLE bot_messages ADD COLUMN question_id TEXT;
 ALTER TABLE bot_messages ADD COLUMN cards_json TEXT;
 CREATE INDEX bot_messages_question ON bot_messages(question_id);
 `
+  },
+  {
+    // Wakes (a bot's follow-ups to itself): a reminder that starts a chat turn of the bot's own (`wake`), maybe once an
+    // event happens (`event_json`, with `due_at` as the time it gives up), what happened (`fired_json`) and how many wakes
+    // in a row led to it (`chain`). An older build refuses this bots.db (downgrade_unsupported).
+    version: 9,
+    sql: `
+ALTER TABLE bot_reminders ADD COLUMN wake INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE bot_reminders ADD COLUMN event_json TEXT;
+ALTER TABLE bot_reminders ADD COLUMN fired_json TEXT;
+ALTER TABLE bot_reminders ADD COLUMN chain INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX bot_reminders_wakes ON bot_reminders(bot_id, wake, created_at);
+`
   }
 ]
 
@@ -554,6 +568,26 @@ export interface BotReminderRow {
   deliveredAt: string | null
   messageId: string | null
   activationId: string | null
+  /**
+   * A wake (v9): at its time the bot carries on in its own chat, a turn no person started; `text` is the brief it wrote
+   * for itself. False for a reminder.
+   */
+  wake: boolean
+  /** What a wake waits for; `dueAt` is then the time it gives up. Null: a time alone. */
+  event: BotWakeEvent | null
+  /** What happened to a wake on an event (its event, or why it ended), kept until it is said. */
+  fired: BotWakeFired | null
+  /** How many wakes in a row, with no owner's message between them, this one ends (1 for one the owner's turn set). */
+  chain: number
+}
+
+function jsonOf<T>(value: unknown): T | null {
+  if (typeof value !== 'string' || !value) return null
+  try {
+    return JSON.parse(value) as T
+  } catch {
+    return null
+  }
 }
 
 function reminderOf(row: Row): BotReminderRow {
@@ -570,7 +604,11 @@ function reminderOf(row: Row): BotReminderRow {
     status: row.status as BotReminderRow['status'],
     deliveredAt: str(row.delivered_at),
     messageId: str(row.message_id),
-    activationId: str(row.activation_id)
+    activationId: str(row.activation_id),
+    wake: num(row.wake) === 1,
+    event: jsonOf<BotWakeEvent>(row.event_json),
+    fired: jsonOf<BotWakeFired>(row.fired_json),
+    chain: num(row.chain) ?? 0
   }
 }
 
@@ -1837,11 +1875,35 @@ export class BotStore {
 
   // -- Reminders (bot_reminders, v6): a bot's one-off times; repeating ones are schedules in the shared store --------
 
-  insertReminder(row: Omit<BotReminderRow, 'status' | 'deliveredAt' | 'messageId' | 'activationId'>): void {
+  insertReminder(row: Omit<BotReminderRow, 'status' | 'deliveredAt' | 'messageId' | 'activationId' | 'wake' | 'event' | 'fired' | 'chain'> & Partial<Pick<BotReminderRow, 'wake' | 'event' | 'chain'>>): void {
     this.run(
-      "INSERT INTO bot_reminders(id, bot_id, due_at, text, work_title, work_brief, reply_to, created_at, status) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'waiting')",
-      row.id, row.botId, row.dueAt, row.text, row.work?.title ?? null, row.work?.brief ?? null, row.replyTo, row.createdAt
+      "INSERT INTO bot_reminders(id, bot_id, due_at, text, work_title, work_brief, reply_to, created_at, status, wake, event_json, chain) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'waiting', ?, ?, ?)",
+      row.id, row.botId, row.dueAt, row.text, row.work?.title ?? null, row.work?.brief ?? null, row.replyTo, row.createdAt,
+      row.wake ? 1 : 0, row.event ? JSON.stringify(row.event) : null, row.chain ?? 0
     )
+  }
+
+  /** How many wakes a bot set since `since`, cancelled ones too (the daily budget). */
+  wakesSince(botId: string, since: string): number {
+    return num(this.get('SELECT COUNT(*) AS n FROM bot_reminders WHERE bot_id = ? AND wake = 1 AND created_at > ?', botId, since)?.n) ?? 0
+  }
+
+  /** Every bot's waiting wakes on an event that has not happened yet, oldest first. */
+  waitingEventWakes(): BotReminderRow[] {
+    return this.all("SELECT * FROM bot_reminders WHERE status = 'waiting' AND wake = 1 AND event_json IS NOT NULL AND fired_json IS NULL ORDER BY created_at, id").map(reminderOf)
+  }
+
+  /**
+   * A waiting wake's event happened (or it ended without it): kept with the wake, which is now due at `dueAt`. False when
+   * it was no longer waiting, or had fired already.
+   */
+  fireWake(id: string, fired: BotWakeFired, dueAt: string): boolean {
+    return this.run("UPDATE bot_reminders SET fired_json = ?, due_at = ? WHERE id = ? AND status = 'waiting' AND wake = 1 AND fired_json IS NULL", JSON.stringify(fired), dueAt, id) > 0
+  }
+
+  /** A waiting reminder is said later (a wake held through the quiet hours). */
+  moveReminder(id: string, dueAt: string): boolean {
+    return this.run("UPDATE bot_reminders SET due_at = ? WHERE id = ? AND status = 'waiting'", dueAt, id) > 0
   }
 
   reminder(id: string): BotReminderRow | undefined {

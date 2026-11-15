@@ -27,10 +27,10 @@ export const BOT_OWN_APP_TOOLS: readonly string[] = [
 
 /**
  * The bot's front-desk tools (docs/plans/bot-always-free.md): a chat turn hands longer work to a run of its own and
- * keeps one-off reminders. Like memory they are always on and never grantable, so bots made before them have them too;
+ * keeps one-off reminders and wakes (its own follow-ups). Like memory they are always on and never grantable, so bots made before them have them too;
  * only a chat turn gets them, so work never starts work.
  */
-export const BOT_WORK_TOOLS: readonly string[] = ['work_start', 'work_models', 'work_list', 'work_stop', 'work_note', 'remind', 'reminder_list', 'reminder_cancel']
+export const BOT_WORK_TOOLS: readonly string[] = ['work_start', 'work_models', 'work_list', 'work_stop', 'work_note', 'remind', 'reminder_list', 'reminder_cancel', 'wake']
 
 /**
  * The tools a bot's work splits a job among subagents with: start one on a title and a brief (on the work's model, or one

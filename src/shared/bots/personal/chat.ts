@@ -283,6 +283,11 @@ export interface BotReminderItem {
   text: string
   /** It starts work at its time rather than only saying `text`. */
   work?: true
+  /**
+   * A wake: the bot carries on by itself at its time, or once what this says happens ("when acme/app#12 merges"; empty
+   * for a time alone), and `dueAt` is then when it gives up. Absent from older services.
+   */
+  wake?: string
 }
 
 /** About this bot. */

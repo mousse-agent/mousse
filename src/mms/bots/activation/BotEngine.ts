@@ -69,7 +69,8 @@ import type { BotModelOption } from '../../../shared/bots/personal/methods'
 import { defaultChatInput, defaultWorkLine, lateWorkNote, MAX_NEW_QUESTIONS_PER_DAY, MAX_NUDGES_PER_QUESTION, MAX_OPEN_QUESTIONS_PER_BOT, MAX_OPEN_QUESTIONS_PER_WORK, MAX_QUESTIONS_PER_CHAT_TURN, NUDGE_AGAIN_MS, NUDGE_TEXT, plainChoices, QUESTION_AFTER_ASK_TEXT, QUESTION_ASKED_TEXT, QUESTION_END_TURN_TEXT, QUESTION_ANSWER_FORGOTTEN_TEXT, QUESTION_NOT_OFFERED_TEXT, QUESTION_WORK_ASKED_TEXT, QUESTION_WORK_WAITING_TEXT, questionGoneText, QUESTIONS_ENOUGH_TEXT, waitingQuestionLine, workAnswerLine, type BotQuestionAnswer, type BotQuestionFollow, type BotQuestionSpec } from '../../../shared/bots/personal/questions'
 import { CARD_SHOWN_TEXT, type BotCard } from '../../../shared/bots/personal/cards'
 import { checkedCard, hasReplyCards, keepReplyCard } from '../chat/replyCards'
-import { afterQuietHours, nudgeSlot } from './questionFollowUps'
+import { afterQuietHours, inQuietHours, nudgeSlot } from './questionFollowUps'
+import { DEFAULT_EVENT_WAKE_HOURS, MAX_EVENT_WAKE_HOURS, MAX_WAKE_BRIEF_CHARS, MAX_WAKE_CHAIN, MAX_WAKES_PER_DAY, WAKE_LINE_PREFIX, wakeEventLabel, wakeFiredLabel, wakeInput, type BotWakeEvent, type BotWakeFired } from '../../../shared/bots/personal/wakes'
 import type { LlmProviderOption } from '../../../shared/settings'
 import { botAllowedOf, type BotAllowed } from '../instructions'
 import { isProviderTurnCap, type Enforceability, type HarnessError, type ProviderSelection, type RunPolicy } from '../../../shared/harness/types'
@@ -134,6 +135,17 @@ export interface BotEngineHost {
   quiesceTimeoutMs?: number
   /** The profile's run engine (null while it is not running). */
   runs(): RunEngine | null
+  /**
+   * A thread a bot's wake waits on, as it stands now, seen from the bot's home thread `from`: `unreachable` when the bot
+   * may not see it (a bot's or a private thread, a subagent); `running` while a run of it works, waits or is paused by a
+   * usage limit; its last run when idle. Absent: no wakes on threads here.
+   */
+  wakeThread?(from: string, threadId: string): { state: 'running' | 'idle' | 'archived' | 'deleted' | 'unreachable'; title?: string; lastRun?: { status: string; endedAt?: string } }
+  /**
+   * A pull request's state, read through a project of the owner's whose repository is `repo` ("owner/name"). `none` when
+   * no project is; `problem` when it could not be read. Absent: no wakes on pull requests here.
+   */
+  pullRequestState?(repo: string, number: number): Promise<{ state: 'open' | 'closed' | 'merged'; title?: string } | { none: true } | { problem: string }>
   harness: {
     checkPolicy(instanceId: string, policy: RunPolicy, model?: string): Enforceability
     /** Reads the instance's policy facts again (`HarnessGateway.refreshPolicyFacts`). */
@@ -328,6 +340,9 @@ const REMINDER_RETRY_MS = 60_000
 const DEFAULT_OWNER_TURN_WAIT_MS = 60_000
 /** A reminder said later than this (Mousse was off) says what time it was for. */
 const REMINDER_LATE_MS = 2 * 60_000
+/** How often a wake on a pull request reads it. */
+const PR_WAKE_READ_MS = 2 * 60_000
+const HOUR_MS = 60 * 60_000
 /** How long a dispatch's reply waits for the executor's final message before it is posted without it. */
 const REPLY_WAIT_MS = 5_000
 /** Retries on another model after usage limits, per activation. */
@@ -539,6 +554,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private readonly reminderRetryAt = new Map<string, number>()
   /** The same for a question's follow-up (a nudge or a default) that failed. */
   private readonly questionRetryAt = new Map<string, number>()
+  /** When each waiting wake on a pull request last read it (`PR_WAKE_READ_MS`). */
+  private readonly wakeReadAt = new Map<string, number>()
   private closed = false
   /** Final messages the executor delivered while the dispatch's end was still being recorded, by `<activationId>:<n>`. */
   private readonly lateTexts = new Map<string, string>()
@@ -1438,6 +1455,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       }
     }
     for (const ref of [...this.needsSync.values()]) this.resync(ref)
+    // Wakes on an event look at it each tick (a pull request is read every few minutes); one that fired is due now.
+    await this.checkWakeEvents(now).catch(() => {})
     // The reminder timer is the way they fire; each tick is a backstop for a timer a sleep or clock change missed.
     await this.deliverDueReminders(now).catch(() => {})
     if (now.getTime() - this.lastSweep >= SWEEP_EVERY_MS) await this.sweepDeleted(now.getTime()).catch(() => [])
@@ -6797,9 +6816,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     cards: {
       show: (botId, activationId, card) => this.showCard(botId, activationId, card)
     },
+    wakes: {
+      add: (botId, from, input) => this.addWake(botId, from, input)
+    },
     reminders: {
       add: (botId, from, input) => this.addReminder(botId, from, input),
-      list: (botId) => this.store.waitingReminders(botId).map((reminder) => ({ reminderId: reminder.id, dueAt: reminder.dueAt, text: reminder.text, ...(reminder.work ? { work: reminder.work.title } : {}) })),
+      // Wakes are listed with them: a wake on an event shows what it waits for, and its time is when it gives up.
+      list: (botId) => this.store.waitingReminders(botId).map((reminder) => ({
+        reminderId: reminder.id, dueAt: reminder.dueAt, text: reminder.text,
+        ...(reminder.work ? { work: reminder.work.title } : {}),
+        ...(reminder.wake ? { wake: reminder.event ? (reminder.fired ? 'happened; you wake soon' : wakeEventLabel(reminder.event)) : 'at its time' } : {})
+      })),
       cancel: (botId, reminderId) => {
         const reminder = this.store.reminder(reminderId)
         if (!reminder || reminder.botId !== botId) return false
@@ -7222,6 +7249,129 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
+   * `wake`: the bot carries on by itself in its own chat, at a time or once something happens (a thread's run finishing,
+   * a pull request merging), as a chat turn no person started (`wake:<id>`). Set from a chat turn only; one set in a
+   * wake's own turn is the next in its chain, at most `MAX_WAKE_CHAIN` in a row with no owner's message between them,
+   * and a bot sets at most `MAX_WAKES_PER_DAY` in any 24 hours. A wake on an event gives up after `hours` (default a day,
+   * at most a week) and then wakes once anyway, saying why. Its turn waits out the owner's quiet hours.
+   */
+  async addWake(botId: string, from: string, input: { brief: string; dueAt?: string; event?: BotWakeEvent; hours?: number }): Promise<{ wakeId: string; dueAt: string; label: string }> {
+    this.entry(botId)
+    const brief = input.brief.trim().slice(0, MAX_WAKE_BRIEF_CHARS)
+    if (!brief) throw new BotEngineError('invalid_params', 'A wake-up needs a brief: what you will do then.')
+    const setting = this.store.activation(from)
+    if (!setting || setting.botId !== botId || setting.lane !== 'chat') throw new BotEngineError('invalid_params', 'Only your chat sets wake-ups.')
+    const chain = this.wakeChainOf(setting) + 1
+    if (chain > MAX_WAKE_CHAIN)
+      throw new BotEngineError('wake_chain', `You have already followed up ${MAX_WAKE_CHAIN} times in a row without your owner. Don't set another: tell your owner where things stand, and carry on when they write.`)
+    if (this.store.wakesSince(botId, new Date(this.now() - 24 * HOUR_MS).toISOString()) >= MAX_WAKES_PER_DAY)
+      throw new BotEngineError('wake_limit', `You have set ${MAX_WAKES_PER_DAY} wake-ups in the last 24 hours, the most a bot may. Tell your owner what you would have followed up on instead.`)
+    if (this.store.waitingReminders(botId).length >= MAX_WAITING_REMINDERS) throw new BotEngineError('reminder_limit', `You already have ${MAX_WAITING_REMINDERS} reminders and wake-ups waiting. Cancel one first.`)
+    let dueAt: string
+    let event: BotWakeEvent | null = null
+    if (input.event) {
+      event = await this.checkedWakeEvent(botId, input.event)
+      const hours = input.hours === undefined ? DEFAULT_EVENT_WAKE_HOURS : input.hours
+      if (!Number.isFinite(hours) || hours <= 0 || hours > MAX_EVENT_WAKE_HOURS) throw new BotEngineError('invalid_params', `hours is how long to wait for it: more than 0, at most ${MAX_EVENT_WAKE_HOURS}.`)
+      dueAt = new Date(this.now() + hours * HOUR_MS).toISOString()
+    } else {
+      const due = Date.parse(input.dueAt ?? '')
+      if (!Number.isFinite(due)) throw new BotEngineError('invalid_params', 'A wake-up needs a time or something to wait for.')
+      if (due < this.now() - 60_000) throw new BotEngineError('invalid_params', 'That time has passed. Pick a time from now on.')
+      if (due > this.now() + MAX_EVENT_WAKE_HOURS * HOUR_MS) throw new BotEngineError('invalid_params', `A wake-up is at most ${MAX_EVENT_WAKE_HOURS / 24} days ahead. For later, use remind or a schedule.`)
+      dueAt = new Date(Math.max(due, this.now())).toISOString()
+    }
+    const wakeId = `rem_${randomUUID()}`
+    this.store.insertReminder({ id: wakeId, botId, dueAt, text: brief, work: null, replyTo: this.ownerMessageOf(from) ?? null, createdAt: this.store.now(), wake: true, event, chain })
+    this.armDue()
+    this.changed({ botId })
+    return { wakeId, dueAt, label: event ? wakeEventLabel(event) : '' }
+  }
+
+  /** How many wakes in a row led to the chat turn `row`: 0 for one the owner (or anything but a wake) started. */
+  private wakeChainOf(row: Pick<BotActivationRow, 'idempotencyKey'>): number {
+    if (!row.idempotencyKey.startsWith('wake:')) return 0
+    return this.store.reminder(row.idempotencyKey.slice('wake:'.length))?.chain ?? MAX_WAKE_CHAIN
+  }
+
+  /**
+   * A wake's event as it is kept, once it is one the bot may wait on and still to come: a thread the bot can see that is
+   * working now (with its title), or an open pull request of a repository the owner has as a project.
+   */
+  private async checkedWakeEvent(botId: string, event: BotWakeEvent): Promise<BotWakeEvent> {
+    if (event.kind === 'thread') {
+      const home = this.store.registry(botId)?.homeThreadId
+      const seen = home ? this.host.wakeThread?.(home, event.threadId) : undefined
+      if (!seen) throw new BotEngineError('invalid_params', 'Wake-ups on threads can\'t be set here.')
+      if (seen.state === 'unreachable') throw new BotEngineError('invalid_params', `Thread ${event.threadId} is not available to you.`)
+      if (seen.state === 'archived' || seen.state === 'deleted') throw new BotEngineError('invalid_params', `Thread ${event.threadId} is ${seen.state}.`)
+      if (seen.state === 'idle') throw new BotEngineError('invalid_params', `Thread ${event.threadId} isn't working now${seen.lastRun ? `: its last turn ended ${seen.lastRun.status}${seen.lastRun.endedAt ? ` at ${clockTime(seen.lastRun.endedAt)}` : ''}` : ''}. Read it instead of waiting for it.`)
+      return { kind: 'thread', threadId: event.threadId, ...(seen.title ? { title: seen.title.slice(0, 120) } : {}) }
+    }
+    if (!this.host.pullRequestState) throw new BotEngineError('invalid_params', 'Wake-ups on pull requests can\'t be set here.')
+    const read = await this.host.pullRequestState(event.repo, event.number)
+    if ('none' in read) throw new BotEngineError('invalid_params', `${event.repo} is not one of your owner's projects in Mousse, so its pull requests can't be watched.`)
+    if ('problem' in read) throw new BotEngineError('invalid_params', `${event.repo}#${event.number} couldn't be read: ${read.problem}`)
+    if (read.state === 'merged') throw new BotEngineError('invalid_params', `${event.repo}#${event.number} is merged already.`)
+    if (read.state === 'closed') throw new BotEngineError('invalid_params', `${event.repo}#${event.number} is closed without merging.`)
+    return { kind: 'pr', repo: event.repo, number: event.number }
+  }
+
+  /**
+   * Looks at what each waiting wake on an event waits for, and fires the ones whose event happened, or that can no
+   * longer happen: the thread finished, was archived, deleted or went out of the bot's sight; the pull request merged or
+   * was closed. A fired wake is due now (its turn may still wait out the quiet hours). `threadId`: only the wakes on that
+   * thread (its run just ended). Every scheduler tick looks at all of them, so one missed while Mousse was off fires.
+   */
+  async checkWakeEvents(now: Date = new Date(this.now()), only?: { threadId: string }): Promise<void> {
+    if (!this.startupPassed || this.closed) return
+    const waiting = this.store.waitingEventWakes()
+    for (const id of this.wakeReadAt.keys()) if (!waiting.some((wake) => wake.id === id)) this.wakeReadAt.delete(id)
+    let fired = false
+    for (const wake of waiting) {
+      const event = wake.event
+      if (!event || (only && (event.kind !== 'thread' || event.threadId !== only.threadId))) continue
+      try {
+        const happened = await this.wakeEventNow(wake, event, now)
+        if (happened && this.store.fireWake(wake.id, happened, now.toISOString())) {
+          fired = true
+          this.changed({ botId: wake.botId })
+        }
+      } catch (error) {
+        console.warn('a bot wake could not check its event; the next tick tries again', { wakeId: wake.id, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    if (fired) this.armDue()
+  }
+
+  /** What happened to a wake's event by now, or undefined while it is still to come. */
+  private async wakeEventNow(wake: BotReminderRow, event: BotWakeEvent, now: Date): Promise<BotWakeFired | undefined> {
+    if (event.kind === 'thread') {
+      const home = this.store.registry(wake.botId)?.homeThreadId
+      const seen = home ? this.host.wakeThread?.(home, event.threadId) : undefined
+      if (!seen || seen.state === 'running') return undefined
+      if (seen.state === 'unreachable') return { kind: 'ended', reason: 'unreachable' }
+      if (seen.state === 'archived') return { kind: 'ended', reason: 'thread_archived' }
+      if (seen.state === 'deleted') return { kind: 'ended', reason: 'thread_deleted' }
+      const title = seen.title ?? event.title
+      return { kind: 'thread', threadId: event.threadId, status: seen.lastRun?.status ?? 'completed', ...(title ? { title: title.slice(0, 120) } : {}) }
+    }
+    if (now.getTime() - (this.wakeReadAt.get(wake.id) ?? 0) < PR_WAKE_READ_MS) return undefined
+    this.wakeReadAt.set(wake.id, now.getTime())
+    const read = await this.host.pullRequestState?.(event.repo, event.number)
+    // Not read now (offline, the host failed, the project went): tried again later, until the wake gives up.
+    if (!read || 'none' in read || 'problem' in read) return undefined
+    if (read.state === 'merged') return { kind: 'pr', repo: event.repo, number: event.number, state: 'merged', ...(read.title ? { title: read.title.slice(0, 120) } : {}) }
+    if (read.state === 'closed') return { kind: 'ended', reason: 'pr_closed' }
+    return undefined
+  }
+
+  /** A thread's run ended: the wakes waiting on that thread look now, not at the next tick. */
+  threadRunEnded(threadId: string): void {
+    void this.checkWakeEvents(new Date(this.now()), { threadId }).catch(() => {})
+  }
+
+  /**
    * Arms the one timer for the soonest waiting reminder or question follow-up of any bot (long waits re-arm, so a far
    * timer never overflows).
    */
@@ -7305,6 +7455,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // The pass works from a list read before it began: one cancelled or forgotten since is not said or started.
     // Nothing awaits between this read and the work's insert below, so a cancel can't slip in between.
     if (this.store.reminder(reminder.id)?.status !== 'waiting') return
+    if (reminder.wake) return this.deliverWake(this.store.reminder(reminder.id)!, now, late)
     if (reminder.work) {
       try {
         const summary = await this.enqueue(reminder.botId, `reminder:${reminder.id}`, { kind: 'work', input: late ? `${reminder.work.brief}\n\n(This was due at ${clockTime(reminder.dueAt)}; Mousse was off then.)` : reminder.work.brief, title: reminder.work.title, ...(reminder.replyTo ? { replyTo: reminder.replyTo } : {}), from: reminder.id }, 'run')
@@ -7332,6 +7483,44 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return true
     })
     if (posted) this.changed({ botId: reminder.botId })
+  }
+
+  /**
+   * A wake that is due: in the owner's quiet hours it waits for the morning; otherwise a chat turn of the bot's own
+   * (`wake:<id>`, not the owner's: it can't act on their threads) starts with what the bot wrote for itself and what
+   * happened, after a quiet line in the chat saying why the bot speaks. A wake on an event whose time came first ended
+   * without it, and says so. A bot that is paused, or can't run now, has the wake said as a line instead, so it is never
+   * lost and never retried forever. Marked delivered in the transaction that queues the turn: it wakes once.
+   */
+  private async deliverWake(wake: BotReminderRow, now: Date, late: boolean): Promise<void> {
+    const zone = this.zone()
+    if (inQuietHours(now.getTime(), zone)) {
+      if (this.store.moveReminder(wake.id, new Date(afterQuietHours(now.getTime(), zone)).toISOString())) this.changed({ botId: wake.botId })
+      return
+    }
+    const fired: BotWakeFired | null = wake.fired ?? (wake.event ? { kind: 'ended', reason: 'expired' } : null)
+    const input = wakeInput({ brief: wake.text, setAt: wake.createdAt, event: wake.event, fired, chain: Math.max(1, wake.chain), clock: clockTime, ...(late && !wake.event ? { late: clockTime(wake.dueAt) } : {}) })
+    const paused = Boolean(this.store.registry(wake.botId)?.pausedReason)
+    const activationId = newActivationId()
+    let refused: BotEngineError | undefined
+    const started = this.store.db.transaction(() => {
+      // Cancelled or forgotten since the pass read it: nothing happens.
+      if (this.store.reminder(wake.id)?.status !== 'waiting') return undefined
+      if (!paused) refused = this.queueChatInTx(wake.botId, `wake:${wake.id}`, input, activationId)
+      if (!paused && !refused) {
+        this.store.settleReminder(wake.id, 'delivered', { activationId })
+        // A quiet line says why the bot speaks unasked.
+        this.chat.post({ id: `${WAKE_LINE_PREFIX}${wake.id}`, botId: wake.botId, author: 'bot', kind: 'notice', text: wakeFiredLabel(fired), lane: 'chat' })
+        return true
+      }
+      const id = `bm_${wake.id}`
+      this.store.settleReminder(wake.id, 'delivered', { messageId: id })
+      this.chat.post({ id, botId: wake.botId, author: 'bot', kind: 'run_report', text: `${wakeFiredLabel(fired)}. I didn't follow up on this: ${paused ? 'I\'m paused.' : refused!.message}\n\n${wake.text}`, lane: 'chat' })
+      return false
+    })
+    if (started === undefined) return
+    this.changed({ botId: wake.botId })
+    if (started) await this.startQueuedChat(wake.botId, activationId)
   }
 
   // -- Follow-ups when the owner doesn't answer a question (issue #1123) -------------------------------------------

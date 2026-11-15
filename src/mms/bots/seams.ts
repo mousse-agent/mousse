@@ -3,6 +3,7 @@ import type { BotDepth, BotLane, BotModelPick, BotModelSlotKey, BotModelSlots, B
 import type { BotModelRows, BotPickMiss } from '../../shared/bots/personal/modelSlots'
 import type { BotQuestionFollow, BotQuestionSpec } from '../../shared/bots/personal/questions'
 import type { BotCard } from '../../shared/bots/personal/cards'
+import type { BotWakeEvent } from '../../shared/bots/personal/wakes'
 import type { BotJournalKind, BotJournalWho, BotMemoryEntry, BotMemoryForgetResult, BotMemoryListing } from '../../shared/bots/personal/memory'
 import type { Enforceability, ProviderSelection, RunPolicy } from '../../shared/harness/types'
 import type { BotStoreTx } from './store/BotStore'
@@ -132,11 +133,20 @@ export interface BotToolHost {
   cards?: {
     show(botId: string, activationId: string, card: BotCard): { shown: boolean; text: string }
   }
-  /** One-off reminders: said at a time, or work started then. */
+  /** One-off reminders: said at a time, or work started then. Wakes are listed and cancelled with them. */
   reminders: {
     add(botId: string, from: string, input: { dueAt: string; text: string; work?: { title: string; brief: string } }): { reminderId: string; dueAt: string }
-    list(botId: string): Array<{ reminderId: string; dueAt: string; text: string; work?: string }>
+    /** `wake`: it is a wake, and what it waits for ("when acme/app#12 merges", "at its time"). */
+    list(botId: string): Array<{ reminderId: string; dueAt: string; text: string; work?: string; wake?: string }>
     cancel(botId: string, reminderId: string): boolean
+  }
+  /**
+   * `wake`: the bot carries on by itself in its own chat, at a time (`dueAt`) or once `event` happens, giving up after
+   * `hours`. `from` is the chat turn that sets it. Throws, with why in words for the bot, when it can't be set. Absent: no
+   * wakes here.
+   */
+  wakes?: {
+    add(botId: string, from: string, input: { brief: string; dueAt?: string; event?: BotWakeEvent; hours?: number }): Promise<{ wakeId: string; dueAt: string; label: string }>
   }
 }
 

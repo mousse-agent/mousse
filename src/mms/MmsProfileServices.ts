@@ -51,6 +51,9 @@ import { launchedThreadsOf, watchLaunchedThreads } from './bots/launchedThreads'
 import { Reconciler } from './run/Reconciler'
 import { RunEngine } from './run/RunEngine'
 import type { BotEngine } from './bots/activation/BotEngine'
+import { pullRequestStateOf, wakeThreadState } from './bots/wakeSources'
+import { wakeEventLabel } from '../shared/bots/personal/wakes'
+import { botThreadReach } from './run/mcp/appTools/thread'
 import { openPersonalBots } from './bots/activation/open'
 import { botApiHost, createBotConnectivity } from './bots/activation/connectivity'
 import { createBotActivitySink } from './bots/activity/BotActivitySink'
@@ -748,6 +751,25 @@ export class MmsProfileServices {
         }
       },
       runs: () => this.runEngine,
+      // What a bot's wakes wait on: one of the owner's threads it may see, and a pull request of one of their projects.
+      wakeThread: (from, threadId) => wakeThreadState({
+        thread: (id) => this.threads.getThread(id),
+        trashed: (id) => {
+          const record = this.threads.lifecycleStore.get(id)
+          return Boolean(record && record.state !== 'active')
+        },
+        reachable: (caller, id) => !('refused' in botThreadReach(this.orchestrator.mcpToolHost(), this.runEngine, caller, id)),
+        working: (id) => this.orchestrator.isTurnActive(id) || this.runEngine.getActiveRun(id) !== null || this.runEngine.store.getPausedRun(id) !== null,
+        lastRun: (id) => {
+          const run = this.runEngine.listRuns(id, { limit: 1 })[0]
+          return run ? { status: run.status, endedAt: run.completedAt } : undefined
+        }
+      }, from, threadId),
+      pullRequestState: (repo, number) => pullRequestStateOf({
+        folders: () => this.projects.listProjects().map((project) => project.path),
+        repository: async (folder) => (await this.gitService.codeHost.repositoryIdentity(folder)).nameWithOwner,
+        pullRequest: (folder, n) => this.gitService.codeHost.getPullRequestDetail(folder, n, { lineComments: false })
+      }, repo, number),
       // The threads a bot started, hidden ones too, and how each stands: the bot is busy while any of them works.
       launchedThreads: (creators) => launchedThreadsOf({
         creators,
@@ -1382,6 +1404,11 @@ export class MmsProfileServices {
         return () => { this.orchestrator.off('run-event', handler) }
       }
     })
+    // A bot's wakes on a thread look when its run ends or it is archived, not only at the next tick.
+    this.orchestrator.on('run-event', (event: ThreadEvent) => {
+      if (event.type === 'run.status' && TERMINAL_RUN_STATUSES.has((event.payload as RunRecord).status)) this.personalBots?.threadRunEnded(event.threadId)
+    })
+    this.orchestrator.on('thread-settled', (payload: { threadId: string }) => this.personalBots?.threadRunEnded(payload.threadId))
     // Any Stop that reaches a thread, and every subagent below it, ends its watch at once.
     this.orchestrator.on('threads-stopped', (payload: { threadIds: string[] }) => this.pullRequestWatch.onStopped(payload.threadIds))
     // An archived thread's watch ends as archived, not as stopped (`OrchestratorService.settleThread`).
@@ -2143,7 +2170,8 @@ export class MmsProfileServices {
     const schedules = engine.listSchedules(botId).map((schedule) => ({ label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}) }))
     // What its work is doing and what it will say later, so a chat turn answers "how's it going?" without a tool.
     const work = engine.listWork(botId).now
-    const reminders = store.waitingReminders(botId).map((reminder) => ({ dueAt: reminder.dueAt, text: reminder.text }))
+    // A wake reads as the bot's own follow-up, with what it waits for: its time is then when it gives up.
+    const reminders = store.waitingReminders(botId).map((reminder) => ({ dueAt: reminder.dueAt, text: reminder.wake ? `your wake-up${reminder.event ? ` ${wakeEventLabel(reminder.event)}` : ''}: ${reminder.text}` : reminder.text }))
     // Work rows whose model can't run (#673): the chat can tell the owner why such work does not start.
     const blocked = engine.situationLines(botId)
     // Questions its work waits on (#1123): the chat can talk about them and pass on an answer the owner gives there.
