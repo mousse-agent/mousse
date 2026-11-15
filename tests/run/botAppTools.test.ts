@@ -392,6 +392,19 @@ describe('registration', () => {
 })
 
 describe('wake', () => {
+  it.each(['checks', 'review'] as const)('passes the PR %s condition to the engine', async (on) => {
+    const bots = fakeBots()
+    await bots.call('wake', { brief: 'Report.', pr: 'acme/app#12', on })
+    expect(bots.wakes[0]?.input.event).toMatchObject({ kind: 'pr', on })
+  })
+  it('rejects an invalid condition or one without a pull request', async () => {
+    const bots = fakeBots()
+    for (const args of [{ pr: 'acme/app#12', on: 'other' }, { inMinutes: 2, on: 'review' }]) {
+      expect(await bots.call('wake', { brief: 'Report.', ...args })).toMatchObject({ isError: true })
+    }
+    expect(bots.wakes).toHaveLength(0)
+  })
+
   it('sets a wake at a time, on a pull request, or on a thread (with "use your threads"), from the chat turn, with a chip', async () => {
     const bots = fakeBots()
     bots.activity.onAllowed({ botId: 'b1', activationId: 'a1', dispatchId: 'd1' }, { tool: 'wake', input: {} })

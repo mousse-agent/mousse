@@ -77,6 +77,12 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
     id: 11,
     date: '2026-11-16',
     text: "Only a chat turn your owner's message or tapped answer started can save facts about them and standing notes, replace them, or forget memory. In a run or a turn you started yourself (your first message, a wake-up, a question's default or another bot's message), saves are run notes and can replace only run notes; ask your owner in the chat to forget something."
+  },
+  {
+    id: 12,
+    date: '2026-11-16',
+    text: 'For a pull request, use wake with pr and on: checks or review to wait for its current-head checks to finish or a new review. Do not start a background command to watch pull request checks or reviews; these wakes survive a restart and need only a project for that repository.',
+    gone: [/gh pr checks.*--watch/i]
   }
 ]
 
