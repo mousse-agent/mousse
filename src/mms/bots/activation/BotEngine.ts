@@ -7064,7 +7064,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   chatTurnToJoinInTx(botId: string, owner: BotOwnerTurn): string | undefined {
     const turns = this.store.laneActivations(botId, 'chat', ['running', 'queued'])
-      .filter((row) => ownerChatTurn(row) && row.trigger.kind === 'manual' && (row.trigger.owner?.limit ?? null) === (owner.limit ?? null))
+      .filter((row) => ownerChatTurn(row) && row.trigger.kind === 'manual' && (row.trigger.owner?.node ?? null) === (owner.node ?? null) && (row.trigger.owner?.limit ?? null) === (owner.limit ?? null))
     return turns.find((row) => row.status === 'running')?.id ?? turns.filter((row) => row.status === 'queued').at(-1)?.id
   }
 
