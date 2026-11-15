@@ -319,6 +319,27 @@ describe('pull request checks and reviews', () => {
     await tick()
     expect(f.store.reminder(set.wakeId)?.fired).toMatchObject({ state: 'review', reviewer: 'review-bot' })
   })
+  it('bounds stored failed and waiting names while keeping full counts and the observed head', async () => {
+    const turn = await chat('Watch checks', 'many-checks')
+    const set = await wake(turn.activation.id, { brief: 'Report.', event: { kind: 'pr', repo: 'acme/app', number: 12, on: 'checks' } })
+    await finish(f, turn.payload, 'completed', { text: 'Watching.' })
+    pr = { state: 'open', headSha: 'abcdef0123456789', checkRuns: [
+      ...Array.from({ length: 23 }, (_, i) => ({ name: `${i} failed ` + 'x'.repeat(200), state: 'failing' as const })),
+      ...Array.from({ length: 21 }, (_, i) => ({ name: `${i} waiting ` + 'y'.repeat(200), state: 'waiting' as const }))
+    ] }
+    await tick()
+    const fired = f.store.reminder(set.wakeId)?.fired
+    expect(fired).toMatchObject({ state: 'checks', failed: 23, waiting: 21 })
+    if (fired?.kind !== 'pr' || fired.state !== 'checks') throw new Error('No checks event')
+    expect(fired.failedNames).toHaveLength(20)
+    expect(fired.waitingNames).toHaveLength(20)
+    expect([...fired.failedNames, ...fired.waitingNames!].every((name) => name.length <= 120)).toBe(true)
+    const { prepared } = await start(f, wakeTurn(set.wakeId)!.id)
+    expect(prepared.prompt).toContain('[data from head commit]\nabcdef0\n[end of data]')
+    expect(prepared.prompt).toContain('Failed check names: and 3 more.')
+    expect(prepared.prompt).toContain('Checks waiting for approval: and 1 more.')
+    expect(prepared.prompt).not.toContain('x'.repeat(121))
+  })
   it('says checks passed with no failed checks', async () => {
     const turn = await chat('Watch checks', 'pass')
     const set = await wake(turn.activation.id, { brief: 'Report.', event: { kind: 'pr', repo: 'acme/app', number: 12, on: 'checks' } })
