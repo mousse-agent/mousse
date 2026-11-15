@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import { Type, type Tool } from '@earendil-works/pi-ai'
 import { BOT_DEPTHS, BOT_WORK_LEVELS, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, MAX_BOT_SCHEDULES, type BotDepth, type BotLane, type BotModelPick, type BotModelSlotKey, type BotModelSlots, type BotSchedule, type BotWorkLevel } from '../../../../shared/bots/personal/definition'
 import { entriesOf, modelsNamedBy, namedOn, ownerNamesModel, pickReasonText, pickSourceOf, plainLabel, workLevelOf, type BotModelRows, type NamedModel } from '../../../../shared/bots/personal/modelSlots'
@@ -798,10 +798,24 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         // A custom slot needs no words of the owner's: the owner set it up for jobs like this. The engine checks it is one.
         if (args.slot !== undefined && args.slot !== null && typeof args.slot !== 'string') return error('slot is the name of one of the owner\'s custom slots.')
         const slot = typeof args.slot === 'string' ? args.slot : undefined
+        // MCP assigns fresh call ids, and a restarted chat gets a new dispatch. Request identity belongs to the
+        // whole chat activation instead; include every choice that can change which work the owner asked for.
+        const requestKey = createHash('sha256').update(JSON.stringify([
+          title, brief, level ?? null,
+          model ? [model.pick.instanceId, model.pick.model, model.pick.effort ?? null] : null,
+          slot ?? null
+        ])).digest('hex')
         try {
-          const started = await call.deps.host.work.start(call.botId, call.activationId, { title, brief, key: `${call.activationId}:${ctx.toolCallId ?? randomUUID()}`, ...(level ? { level } : {}), ...(model ? { model } : {}), ...(slot !== undefined ? { slot } : {}) })
+          const started = await call.deps.host.work.start(call.botId, call.activationId, { title, brief, key: `${call.activationId}:${requestKey}`, ...(level ? { level } : {}), ...(model ? { model } : {}), ...(slot !== undefined ? { slot } : {}) })
           const where = model ? ` It runs on ${model.name.name} on ${model.name.entry}${model.name.effort ? `, ${model.name.effort} reasoning` : ''}, for this work only.` : ''
-          const result = { ...started, note: (started.status === 'queued' ? `You start on it when there is room, after: ${started.ahead.join('; ')}. Tell the owner you'll get to it after that.` : started.status === 'ended' ? 'You already did this and finished; work_list has the start of your report.' : 'You are on it now, beside anything else you are working on. Tell the owner in one short line that you are on it; when you finish, your report reaches them by itself.') + where }
+          const note = started.status === 'ended'
+            ? 'This work already ended; nothing new was started. work_list has its result.'
+            : started.status === 'queued'
+              ? `${started.replayed ? 'This work is already queued; nothing new was started. ' : ''}You start on it when there is room, after: ${started.ahead.join('; ')}. Tell the owner you'll get to it after that.`
+              : started.replayed
+                ? 'This work is already in progress; nothing new was started. Tell the owner you are already on it; its report reaches them by itself.'
+                : 'You are on it now, beside anything else you are working on. Tell the owner in one short line that you are on it; when you finish, your report reaches them by itself.'
+          const result = { ...started, note: note + where }
           call.deps.activity?.onAppResult(call.activity, 'work_start', started)
           return json(result)
         } catch (failure) {

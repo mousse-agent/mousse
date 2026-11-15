@@ -1,8 +1,6 @@
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { ActiveTimeScope, BotAllowedObserver, BotAuthority, BotCheck, BotThreadRole, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
-import { BOT_COMPUTER_OPEN, type BotComputerLimit } from '../../../shared/bots/personal/computerLimit'
-import { BOT_BROWSER_PERMISSION, BOT_THREADS_PERMISSION, botGrantTool } from '../../../shared/bots/personal/manifest'
 import type { CounterScope } from '../../../shared/harness/counters'
 import type { SpendScope } from '../../../shared/harness/spend'
 import type { NeutralTool } from '../../../shared/harness/tools'
@@ -16,8 +14,8 @@ import type { BotPermissions } from '../grants/compile'
  * Pi's `/pi/gate` for built-ins, the Mousse MCP registry for app and proxied MCP tools, Claude Code's
  * grant gate (its hooks and `canUseTool`), and Codex's approval requests. It asks nobody: a call outside the grant stops at a wall. The bot's
  * files folder (Bot Phase 1 §5.10) counts as a granted writable root, and every allowed call is
- * reported to `onAllowed`, the source of activity chips (§5.8). What this computer lets bots do (`limit`, read on
- * every call) comes before the grant: a call it has switched off is refused (a `computer` wall), never asked about.
+ * reported to `onAllowed`, the source of activity chips (§5.8). A permission the owner switched off for the bot
+ * (`disabled`, read on every call) is refused before anything else, never asked about.
  */
 
 /** The arguments that name a path, on every runtime (Pi's and Claude's built-ins). */
@@ -45,11 +43,10 @@ export interface BotAuthorityInput {
   /** Told of every call the check allows, whatever the runtime (`BotActivitySink.observer`). Never fails a call. */
   onAllowed?: BotAllowedObserver
   /**
-   * What this computer lets bots do now (Settings → What bots may do here), read on every call, so a switch turned off
-   * refuses the next call of a turn already running. Absent: everything. Must not throw.
+   * Why the owner's switch refuses `call` now (a permission switched off for this bot in About), read on every call, so a
+   * switch turned off refuses the next call of a turn already running. Undefined: not switched off. Must not throw.
    */
   disabled?(call: NormalisedCall): string | undefined
-  limit?(): BotComputerLimit
 }
 
 export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
@@ -97,7 +94,6 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
     const ended = input.live?.() ?? (input.time.signal.aborted ? { kind: 'ended' as const } : undefined)
     if (ended) return { ok: false, wall: ended }
     if (input.waiting()) return { ok: false, wall: { kind: 'waiting' } }
-    const limit = input.limit?.() ?? BOT_COMPUTER_OPEN
     switch (call.kind) {
       case 'skill':
         return skills.has(call.skill) ? { ok: true } : { ok: false, wall: { kind: 'skill', skill: call.skill } }
@@ -107,19 +103,13 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
           ? { ok: true }
           : { ok: false, wall: { kind: 'mcp', server: call.server, tool: call.tool, ...(call.serverName ? { serverName: call.serverName } : {}) } }
       case 'app':
-        // The browser switched off on this computer: none of its tools runs, whatever the grant holds.
-        if (!limit.browser && botGrantTool(call.tool) === BOT_BROWSER_PERMISSION) return { ok: false, wall: { kind: 'computer', tool: call.tool, off: 'browser' } }
-        // The owner's threads switched off on this computer: no thread tool runs, whatever the grant or this turn holds.
-        if (!limit.threads && botGrantTool(call.tool) === BOT_THREADS_PERMISSION) return { ok: false, wall: { kind: 'computer', tool: call.tool, off: 'threads' } }
         return appTools.has(call.tool) ? { ok: true } : { ok: false, wall: { kind: 'tool', tool: call.tool } }
       case 'builtin':
-        return checkBuiltin(call.tool, call.nativeName, call.args, limit, call.own)
+        return checkBuiltin(call.tool, call.nativeName, call.args, call.own)
     }
   }
 
-  function checkBuiltin(tool: NeutralTool, nativeName: string, args: Record<string, unknown>, limit: BotComputerLimit, own?: true): { ok: true } | { ok: false; wall: WallReason } {
-    // This computer's switches come before the grant: what is off here is refused, and never asked for.
-    if (tool === 'shell' && !limit.shell) return { ok: false, wall: { kind: 'computer', tool: nativeName, off: 'shell' } }
+  function checkBuiltin(tool: NeutralTool, nativeName: string, args: Record<string, unknown>, own?: true): { ok: true } | { ok: false; wall: WallReason } {
     if (!tools.has(tool)) return { ok: false, wall: { kind: 'tool', tool: nativeName } }
     // "Run commands" is granted as a whole: any command, wherever it says it runs. What a command
     // can reach is the runtime's sandbox, where it has one, not a path check here.

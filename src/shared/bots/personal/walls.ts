@@ -1,7 +1,6 @@
 import type { BotAuthority, BotCheck, BotCheckDenied, NormalisedCall, WallReason } from './authority'
 import { neutralToolsOf, type NativeToolTable, type NeutralTool } from '../../harness/tools'
 import { BROWSER_AUTOMATION_TOOLS } from '../../browser/automation'
-import { notOnThisComputerText } from './computerLimit'
 import { BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS } from './manifest'
 
 /** Walls in plain words, and the built-in check a runtime's gate makes (PR 6 §4). Browser-safe. */
@@ -15,7 +14,6 @@ export function wallMessage(wall: WallReason): string {
     case 'path': return wall.access === 'write'
       ? `This bot is not allowed to change ${wall.path}.`
       : `This bot is not allowed to read ${wall.path}.`
-    case 'computer': return notOnThisComputerText(wall.off)
     case 'network_path': return `Give ${wall.path} by its path on this computer, not as a network path to it.`
     case 'path_form': return wall.full
       ? `Give ${wall.path} as a full path, without ~ or variables: ${wall.full}`

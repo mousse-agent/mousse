@@ -1,3 +1,4 @@
+import { requestJournalRows } from './requestFrames'
 import { createHash } from 'node:crypto'
 import type { ProfileDatabase } from '../../run/db/ProfileDatabase'
 import type { BotLane } from '../../../shared/bots/personal/definition'
@@ -255,6 +256,14 @@ export class BotMemoryStore {
     this.timeZone = options.timeZone ?? (() => undefined)
     this.log = options.log ?? (() => {})
     this.redactMessage = options.redactMessage ?? defaultRedactMessage
+    // Profile-wide repair, deliberately separate from the bots.db schema version.
+    this.write(() => {
+      const key = 'request_frames_external_v1'
+      if (this.getState('', key)) return
+      this.run(`UPDATE bot_journal SET external = 1 WHERE kind IN ('notice', 'run_start')
+        AND (instr(text, '[output]') > 0 OR instr(text, '[data from ') > 0 OR instr(text, '[Message from the bot "') > 0)`)
+      this.setState('', key, true)
+    })
     if (options.checkIndexes !== false) this.checkIndexes()
   }
 
@@ -337,7 +346,8 @@ export class BotMemoryStore {
     const existing = this.get('SELECT seq, json, redacted_at FROM bot_journal WHERE bot_id = ? AND source_key = ?', row.botId, row.sourceKey)
     const json = { ...((row.json as Record<string, unknown> | undefined) ?? {}), sha256: sha256(row.text), ...(partial ? { partial: true } : {}) }
     if (!existing) {
-      this.appendInTx(this.db, { ...row, json }, row.at)
+      for (const part of row.kind === 'notice' ? requestJournalRows({ ...row, json }) : [{ ...row, json }])
+        this.appendInTx(this.db, part, row.at)
       return
     }
     const stored = parseJson(existing.json)
@@ -353,6 +363,12 @@ export class BotMemoryStore {
 
   journalRow(botId: string, seq: number): BotJournalRow | undefined {
     const row = this.get('SELECT * FROM bot_journal WHERE bot_id = ? AND seq = ?', botId, seq)
+    return row ? journalRowOf(row) : undefined
+  }
+
+  /** The journal provenance of a chat message, including service lines shown with a bot author. */
+  journalMessage(botId: string, messageId: string): BotJournalRow | undefined {
+    const row = this.get('SELECT * FROM bot_journal WHERE bot_id = ? AND source_key = ?', botId, `bm:${messageId}`)
     return row ? journalRowOf(row) : undefined
   }
 

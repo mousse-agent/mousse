@@ -29,7 +29,7 @@ export const SETTINGS_CLASSIFICATION: readonly SettingsClassificationEntry[] = [
   {
     path: 'bots',
     scope: 'installation',
-    notes: 'What bots may do on this computer caps every bot of every profile here; it is set here and never sent to or set from another computer.'
+    notes: 'Leftover of the removed "What bots may do here" switches; it stays with the installation and nothing reads it.'
   },
   {
     path: 'settings.profile.username',

@@ -1,15 +1,23 @@
 import { createErrorProvider } from '../../shared/errors'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import type { ChatMode } from '../../shared/types'
-import type { WorkspaceExecutionContext } from '../../shared/workspace'
+import type { WorkspaceExecutionContext, WorkspaceLifecycle } from '../../shared/workspace'
 import { inspectPendingChangesAsync } from '../actions/git'
 import { PROJECT_FOLDER_REASON, type ThreadPlacement } from './threadPlacement'
-import { ThreadWorkspaceManager } from './ThreadWorkspaceManager'
+import { isProjectFolderWorkspace, ThreadWorkspaceManager } from './ThreadWorkspaceManager'
 import { startedInSnapshotStore } from './SnapshotWorkspace'
 import { assertWorktreeFolderConnected } from '../worktree/worktreeLayout'
 
 /** A thread that records its turns in its folder's hidden store, whatever the folder has become since (`unavailableReason`). */
 export const SNAPSHOT_STORE_REASON = 'snapshot-store'
+
+/** A thread whose worktree someone removed or emptied: its turns run in the project folder, unrecorded (`unavailableReason`). */
+export const WORKTREE_GONE_REASON = 'This thread\'s worktree is gone or no longer a Git repository, so it works in the project folder.'
+
+/** What the agent is told, once, when its turns move to the project folder because its worktree is gone or emptied. */
+export function worktreeGoneNote(worktreePath: string, lifecycle: WorkspaceLifecycle, projectPath: string): string {
+  return `Your worktree folder ${worktreePath} ${lifecycle === 'missing' ? 'is gone' : 'is no longer a Git repository'}. You are working from the project folder ${projectPath} now.`
+}
 
 /** Resolves one authoritative path at the turn boundary; no selected-project globals. */
 const workspaceErrors = createErrorProvider({
@@ -94,7 +102,15 @@ export class WorkspaceResolver {
       if (verified.lifecycle === 'missing' && manager.hasReconstructionManifest(existing)) {
         return manager.executionContext(this.projectPath, await manager.restore(this.projectPath, signal, heldThreadLease, this.notify))
       }
-      if (verified.lifecycle !== 'ready') throw workspaceErrors.create('workspace_recovery_required', undefined, { state: verified.lifecycle })
+      if (verified.lifecycle !== 'ready') {
+        // An operation of Mousse's own on the worktree that did not finish pauses the thread until it is recovered.
+        if (await manager.ownOperationUnfinished(verified)) throw workspaceErrors.create('workspace_recovery_required', undefined, { state: verified.lifecycle })
+        // Removed or emptied by someone else (the agent, the person): the turn runs in the project folder, unrecorded, and
+        // the worktree's path is left alone. A thread recorded in the project folder itself has nowhere else to go.
+        const repository = await manager.resolveRepositoryAsync(this.projectPath)
+        const context = unprovisionedContext(this.threadId, this.projectPath, repository.capability.gitBacked, WORKTREE_GONE_REASON)
+        return isProjectFolderWorkspace(existing) ? context : { ...context, workspaceNote: worktreeGoneNote(existing.worktreePath, verified.lifecycle, this.projectPath) }
+      }
       return manager.executionContext(this.projectPath, verified)
     }
     if (!mutating) {

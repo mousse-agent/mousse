@@ -15,7 +15,6 @@ import { botInstructions } from '../../src/mms/bots/instructions'
 import { PI_NATIVE_TOOLS } from '../../src/mms/harness/pi/nativeTools'
 import { botTools } from '../../src/mms/run/mcp/appTools/bots'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
-import { BOT_COMPUTER_OPEN, type BotComputerLimit } from '../../src/shared/bots/personal/computerLimit'
 import type { BotManifest } from '../../src/shared/bots/personal/definition'
 import { BOT_AUTOMATION_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_OWN_APP_TOOLS, BOT_SUBAGENT_TOOLS, BOT_THREAD_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_TOOLS, MAX_BOT_SUBAGENTS_AT_ONCE, MAX_BOT_SUBAGENTS_PER_WORK, botStarterManifest } from '../../src/shared/bots/personal/manifest'
 import { BOT_MEMORY_TOOLS } from '../../src/shared/bots/personal/memory'
@@ -54,10 +53,10 @@ describe('a subagent is compiled from its work\'s grant, and holds no more', () 
     pi: (tools) => tools.flatMap((tool) => [...(PI_NATIVE_TOOLS[tool as keyof typeof PI_NATIVE_TOOLS] ?? [])]),
     claude: (tools) => tools.map((tool) => (tool === 'shell' ? 'Bash' : tool[0]!.toUpperCase() + tool.slice(1)))
   }
-  const compile = (grant: BotManifest, runtime: string, botTools: Parameters<typeof compileBotThread>[0]['botTools'], limit: BotComputerLimit = BOT_COMPUTER_OPEN) => {
+  const compile = (grant: BotManifest, runtime: string, botTools: Parameters<typeof compileBotThread>[0]['botTools']) => {
     const compiled = compileBotThread({
       grant, digest: botManifestDigest(grant), thread: {}, scratch: join(profile, 'bots', 'scratch', 'a1'), profileHome: profile,
-      filesFolder: join(profile, 'bots', 'files', 'b1'), limit, remaining: { deadlineMs: 600_000 }, botTools,
+      filesFolder: join(profile, 'bots', 'files', 'b1'), remaining: { deadlineMs: 600_000 }, botTools,
       nativeNames: (tools) => ({ ok: true, names: runtimes[runtime]!(tools) })
     })
     if (!compiled.ok) throw new Error(compiled.error.message)
@@ -66,17 +65,16 @@ describe('a subagent is compiled from its work\'s grant, and holds no more', () 
   const work = { escalate: true, consult: true, memory: true, threads: 'read' as const, images: true, subagents: true }
 
   it.each([
-    ['the starter grant', starter, BOT_COMPUTER_OPEN],
-    ['every permission', everything, BOT_COMPUTER_OPEN],
-    ['every permission, with commands, files, the browser and threads off here', everything, { shell: false, files: false, browser: false, threads: false }]
-  ] as const)('%s: what the work holds of the built-ins, files, MCP tools and skills; of the app tools only the web and the browser', (_name, grant, limit) => {
+    ['the starter grant', starter],
+    ['every permission', everything]
+  ] as const)('%s: what the work holds of the built-ins, files, MCP tools and skills; of the app tools only the web and the browser', (_name, grant) => {
     for (const runtime of Object.keys(runtimes)) {
-      const parent = compile(grant, 'pi', work, limit).permissions
+      const parent = compile(grant, 'pi', work).permissions
       // Each compile snapshots temporary entries independently. A new one must be closed to the child without changing its grant.
       const transient = parent.workspace?.computer ? mkdtempSync(join(tmpdir(), 'mousse-between-turns-')) : undefined
       let child: ReturnType<typeof compile>
       try {
-        child = compile(grant, runtime, { ...work, subagent: true }, limit)
+        child = compile(grant, runtime, { ...work, subagent: true })
         if (transient) {
           expect(parent.workspace!.computer!.outside).not.toContain(transient)
           expect(child.permissions.workspace!.computer!.outside).toContain(transient)
@@ -113,7 +111,6 @@ describe('a subagent is compiled from its work\'s grant, and holds no more', () 
 describe('a bot\'s work and its subagents', () => {
   let f: BotFixture
   let botId: string
-  let limit: BotComputerLimit
   const CHEAP = { instanceId: 'pi:cheap', model: 'cheap/model' }
   const choices: BotModelOption[] = [
     { instanceId: PI.instanceId, entry: 'OpenRouter', model: PI.model, label: 'Some Model', efforts: [] },
@@ -123,8 +120,6 @@ describe('a bot\'s work and its subagents', () => {
 
   beforeEach(async () => {
     f = botFixture()
-    limit = { ...BOT_COMPUTER_OPEN }
-    f.host.computerLimit = () => limit
     f.host.instructions = (bot) => botInstructions(bot)
     f.host.modelOptions = async () => choices
     // Each entry names its built-ins its own way, so a subagent's turn shows which runtime it was compiled for.
@@ -263,24 +258,17 @@ describe('a bot\'s work and its subagents', () => {
     expect(f.bots.service.get(botId).summary.work).toBeUndefined()
   })
 
-  it.each(['computer', 'bot'] as const)('commands switched off on this computer stop the work and its subagents at once', async (source) => {
-    if (source === 'bot') {
-      const initial = await work('permission')
-      initial.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'Run commands.' })
-      await finish(f, initial.payload, 'completed', { text: 'Asked.' })
-      for (const ask of f.store.openAsks(botId)) await f.bots.service.answer(botId, ask.id, 'allow')
-    }
+  it('commands switched off for the bot stop the work and its subagents at once', async () => {
+    const initial = await work('permission')
+    initial.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'Run commands.' })
+    await finish(f, initial.payload, 'completed', { text: 'Asked.' })
+    for (const ask of f.store.openAsks(botId)) await f.bots.service.answer(botId, ask.id, 'allow')
     const job = await work('w1', { shell: true })
     await job.prepared.authority.subagents!.start({ title: 'Builder', brief: 'Run the build.' })
     const builder = await start(f, job.id, subagentNs(job.id)[0])
     expect(builder.prepared.authority.check(command)).toEqual({ ok: true })
-    if (source === 'computer') {
-      limit = { ...limit, shell: false }
-      f.bots.computerLimitChanged()
-    } else {
-      const id = f.bots.service.get(botId).permissions.find((item) => item.title === 'run commands')!.id
-      f.bots.service.setPermission(botId, id, false)
-    }
+    const id = f.bots.service.get(botId).permissions.find((item) => item.title === 'run commands')!.id
+    f.bots.service.setPermission(botId, id, false)
     expect(job.prepared.authority.time.signal.aborted).toBe(true)
     expect(builder.prepared.authority.time.signal.aborted).toBe(true)
     expect(builder.prepared.authority.check(command)).toMatchObject({ ok: false })
