@@ -92,16 +92,18 @@ export class BotTellings {
         if ((this.retryAt.get(row.botId) ?? 0) <= now) due.push(row)
       }
     }
-    const closed = due.filter(r => r.seq <= this.closedThrough)
-    if (closed.some(r => r.tell !== 'later')) {
+    const closed = due.filter(r => r.seq <= this.closedThrough && r.tell !== 'later')
+    if (closed.length) {
+      closed.push(...due.filter(r => r.seq <= this.closedThrough && r.tell === 'later'))
       if (!this.attempt(closed, now, () => this.releaseBacklog(closed, now))) {
         for (const bot of new Set(closed.map(r => r.botId))) {
           const rows = closed.filter(r => r.botId === bot)
-          this.attempt(rows, now, () => this.releaseBacklog(rows, now))
+          if (rows.some(r => r.tell !== 'later')) this.attempt(rows, now, () => this.releaseBacklog(rows, now))
         }
       }
     }
-    const live = due.filter(r => r.seq > this.closedThrough)
+    const closedIds = new Set(closed.map(r => r.id))
+    const live = due.filter(r => !closedIds.has(r.id))
     for (const row of live.filter(r => r.tell === 'now')) {
       this.attempt([row], now, () => { this.announce([row], true); this.told(row, now) })
     }
@@ -112,7 +114,7 @@ export class BotTellings {
       const previous = this.fold
       if (!this.attempt(rows, now, () => {
         const base = previous && previous.until >= now ? previous : { id: `bt_${randomUUID()}`, until: now + 120_000, rows: [] }
-        this.fold = { ...base, rows: [...base.rows.filter(r => this.unread(r)), ...rows] }
+        this.fold = { ...base, rows: [...base.rows.filter(r => this.unread(r) && (this.retryAt.get(r.botId) ?? 0) <= now), ...rows] }
         this.profileSounds = this.profileSounds.filter(at => now - at < 3600_000)
         const sound = now - (this.botSounds.get(bot) ?? -Infinity) >= 600_000 && this.profileSounds.length < 6
         if (sound) { this.profileSounds.push(now); this.botSounds.set(bot, now) }
