@@ -9,7 +9,7 @@ import type { InboxRunState, RunLevel } from '../../shared/automationInbox'
 import { missingKeyText } from '../../shared/automationKeys'
 import { join } from 'node:path'
 import { TERMINAL_RUN_STATUSES } from '../run/types'
-import { computeNextRun, isSilentOutput } from './computeNextRun'
+import { computeNextRun, CRON_SEARCH_YEARS, isSilentOutput } from './computeNextRun'
 import { FileLockBusyError, tryAcquireTickLock } from './fileLock'
 import { OwnedWorkBarrier, type OwnedWorkEntry } from '../execution/OwnedWorkBarrier'
 import {
@@ -870,7 +870,27 @@ export class ScheduledJobService extends EventEmitter {
         const gap = (job.schedule.minutes ?? 1) * 60_000
         occurrenceAt = new Date(Date.parse(occurrenceAt) + Math.floor((now.getTime() - Date.parse(occurrenceAt)) / gap) * gap).toISOString()
         next = computeNextRun(job.schedule, occurrenceAt, now)
-      } else {
+      } else if (claim.missed) {
+        const hour = 60 * 60_000
+        // Jump near now before walking: a year of minute ticks costs the same as a day.
+        // The final window covers even the longest supported leap-day gap.
+        for (const hours of [1, 24, 32 * 24, 366 * 24, CRON_SEARCH_YEARS * 366 * 24]) {
+          const candidate = computeNextRun(job.schedule, new Date(now.getTime() - hours * hour).toISOString(), now)
+          if (candidate && Date.parse(candidate) <= now.getTime() && Date.parse(candidate) >= Date.parse(occurrenceAt)) {
+            occurrenceAt = candidate
+            break
+          }
+        }
+        // A sparse schedule can have a dense burst far back in that window. Narrow it
+        // before walking too, so the walk never traverses more than an hour of minutes.
+        let end = now.getTime()
+        while (end - Date.parse(occurrenceAt) > hour) {
+          const middle = Math.floor((Date.parse(occurrenceAt) + end) / 2)
+          const candidate = computeNextRun(job.schedule, new Date(middle).toISOString(), now)
+          if (candidate && Date.parse(candidate) <= now.getTime() && Date.parse(candidate) > Date.parse(occurrenceAt)) occurrenceAt = candidate
+          else end = middle
+        }
+        next = computeNextRun(job.schedule, occurrenceAt, now)
         while (next && Date.parse(next) <= now.getTime() && Date.parse(next) > Date.parse(occurrenceAt)) {
           occurrenceAt = next
           next = computeNextRun(job.schedule, occurrenceAt, now)
