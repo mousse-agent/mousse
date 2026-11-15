@@ -316,6 +316,15 @@ describe('GitService commit', () => {
     expect(porcelain(cwd)).toEqual(['?? .mousse/state.json'])
   })
 
+  it('with all, commits in a project whose .gitignore lists .mousse/ while that folder exists', async () => {
+    const cwd = repo()
+    write(cwd, '.gitignore', '.mousse/\n'); git(cwd, 'add', '.gitignore'); git(cwd, 'commit', '-m', 'ignore .mousse')
+    write(cwd, 'a.txt'); write(cwd, '.mousse/state.json')
+    await new GitService().commit(cwd, USER, 'a', { all: true })
+    expect(git(cwd, 'show', '--name-only', '--format=', 'HEAD')).toBe('a.txt')
+    expect(porcelain(cwd)).toEqual([])
+  })
+
   it('leaves HEAD, index and tree as they were when a hook rejects an empty-index commit', async () => {
     const cwd = repo(); withHook(cwd, rejectingHook)
     write(cwd, 'a.txt'); write(cwd, 'base.txt', 'changed\n')
