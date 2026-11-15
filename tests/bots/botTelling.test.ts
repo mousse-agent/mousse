@@ -138,3 +138,69 @@ it('keeps later notices behind reports in a fold', async () => {
   expect(events[0].body).toBe('New report')
   expect(events[0].rows.at(-1).tell).toBe('later')
 })
+
+it.each(['emit', 'write'] as const)('backs off a failed telling %s while other bots and reminders continue', async failure => {
+  const { vi } = await import('vitest')
+  const other = (await createBot(f)).botId
+  f.bots.setTellingWindows(1)
+  const bad = f.bots.chat.post({ botId, author: 'bot', kind: 'text', text: 'Bad' })
+  const good = f.bots.chat.post({ botId: other, author: 'bot', kind: 'text', text: 'Good' })
+  const reminder = f.bots.addReminder(other, 'test', { dueAt: f.store.now(), text: 'Reminder' })
+  const original = f.store.run.bind(f.store)
+  const write = vi.spyOn(f.store, 'run').mockImplementation((sql, ...args) => {
+    if (failure === 'write' && sql.startsWith('UPDATE bot_messages SET told_at') && args.includes(bad.id)) throw new Error('Disk full')
+    return original(sql, ...args)
+  })
+  const listener = (event: any) => { if (failure === 'emit' && event.rows.some((r: any) => r.botId === botId)) throw new Error('Window failed') }
+  f.bots.events.on('tell', listener)
+  try {
+    await expect(f.bots.deliverDueReminders()).resolves.toBeUndefined()
+    expect(f.store.message(bad.id)?.toldAt).toBeNull()
+    expect(f.store.message(good.id)?.toldAt).toBe(f.store.now())
+    expect(f.store.reminder(reminder.reminderId)?.status).toBe('delivered')
+    expect(f.bots.nextDueAt(botId)).toBe(new Date(f.clock.now + 60_000).toISOString())
+    expect(f.timers.at(-1)?.ms).toBe(60_000)
+    await f.bots.deliverDueReminders()
+    expect(f.store.message(bad.id)?.toldAt).toBeNull()
+  } finally { write.mockRestore(); f.bots.events.off('tell', listener) }
+  f.clock.now += 60_000
+  await f.bots.deliverDueReminders()
+  expect(f.store.message(bad.id)?.toldAt).toBe(f.store.now())
+})
+it('leaves a partly read fold shown until every row is read', async () => {
+  const other = (await createBot(f)).botId
+  f.bots.setTellingWindows(1)
+  const events: any[] = []; f.bots.events.on('tell', e => events.push(e))
+  const a = f.bots.chat.post({ botId, author: 'bot', kind: 'run_report', text: 'A' })
+  const b = f.bots.chat.post({ botId: other, author: 'bot', kind: 'run_report', text: 'B' })
+  await f.bots.deliverDueReminders()
+  const before = events.length
+  f.bots.markRead(botId, a.seq)
+  expect(events).toHaveLength(before)
+  f.bots.markRead(other, b.seq)
+  expect(events.at(-1)).toMatchObject({ rows: [], sound: false })
+})
+it('expires later rows with one indexed read and no per-message projection when only later rows wait', async () => {
+  const { vi } = await import('vitest')
+  f.bots.setTellingWindows(1)
+  const later = f.bots.chat.post({ id: 'bm_test_offline', botId, author: 'bot', kind: 'notice', text: 'Offline' })
+  f.clock.now += 86_400_001
+  const projected = vi.spyOn(f.bots.chat, 'toMessage')
+  const all = vi.spyOn(f.store, 'all')
+  try {
+    f.bots.tellings.release(f.clock.now)
+    expect(f.store.message(later.id)?.toldAt).toBe(f.store.now())
+    expect(projected).not.toHaveBeenCalled()
+    expect(all).toHaveBeenCalledTimes(1)
+    expect(all.mock.calls[0]![0]).toContain('bot_messages_tell_due')
+  } finally { projected.mockRestore(); all.mockRestore() }
+})
+it('does not label a live reply as closed-window catch-up because later rows wait', async () => {
+  f.bots.chat.post({ id: 'bm_later_offline', botId, author: 'bot', kind: 'notice', text: 'Offline' })
+  f.bots.setTellingWindows(1)
+  const events: any[] = []; f.bots.events.on('tell', e => events.push(e))
+  f.bots.chat.post({ botId, author: 'bot', kind: 'text', text: 'Live' })
+  await f.bots.deliverDueReminders()
+  expect(events[0].title).not.toContain('While Mousse was closed')
+  expect(events[0].sound).toBe(true)
+})
