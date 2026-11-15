@@ -94,7 +94,6 @@ import { botMessageText } from '../run/mcp/appTools/agentMessage'
  * acts in, and the limit of the other device whose message started or continued that turn (absent: this computer).
  */
 type BotSender = { botId: string; name: string; activationId: string; limit?: PermissionMode }
-import { notOnThisComputerText } from '../../shared/bots/personal/computerLimit'
 import { createHash, randomUUID } from 'node:crypto'
 import { QueueCommands, type QueueIntent } from '../run/QueueCommands'
 import type { PlannedQueueCommand, QueueEffects } from '../queue/queueJournal'
@@ -5147,8 +5146,7 @@ export class OrchestratorService extends EventEmitter {
   /**
    * The owner's bot behind a call from one of its threads ("use your threads"), when the call may go ahead: the bot's
    * main thread made it, in a turn registered with the bot's authority that holds `tool` now (starting, messaging and
-   * stopping only in a chat turn the owner's own message started), and this computer has "use your threads" on. Undefined
-   * for a thread that is no bot's. A bot's thread that may not make the call is refused here, whatever let it this far.
+   * stopping only in a chat turn the owner's own message started). Undefined for a thread that is no bot's. A bot's thread that may not make the call is refused here, whatever let it this far.
    */
   private botSenderOf(actor: AgentActor, tool: 'thread_create' | 'thread_send' | 'thread_interrupt' | 'thread_archive' | 'thread_hide'): BotSender | undefined {
     let role: string | undefined
@@ -5170,13 +5168,6 @@ export class OrchestratorService extends EventEmitter {
       owned = undefined
     }
     if (!owned) throw refused
-    let here = false
-    try {
-      here = this.settingsStore.get().bots.here.threads === true
-    } catch {
-      here = false
-    }
-    if (!here) throw new McpToolError('mousse_scope_denied', notOnThisComputerText('threads'))
     const bot = this.botThreads?.botOf?.(actor.threadId)
     if (!bot) throw refused
     return { ...bot, activationId: turn.bot.activationId, ...(owned.limit ? { limit: owned.limit } : {}) }
@@ -5193,7 +5184,7 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * "Use your threads" no longer holds for a bot (Remove, or this computer's switch went off): the messages it sent that
+   * "Use your threads" no longer holds for a bot (Remove, or its switch went off in About): the messages it sent that
    * wait in its owner's threads and have not started are taken out of their queues, and each thread says so in one line.
    * A message already running is left to finish; its owner can stop it. Returns how many were withdrawn.
    */

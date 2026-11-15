@@ -17,7 +17,6 @@ import { botInstructions } from '../../src/mms/bots/instructions'
 import { toolArgsDigest } from '../../src/mms/run/tools/argsDigest'
 import { PI_NATIVE_TOOLS } from '../../src/mms/harness/pi/nativeTools'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
-import { BOT_COMPUTER_OPEN, type BotComputerLimit } from '../../src/shared/bots/personal/computerLimit'
 import { MAX_BOT_SUBAGENTS_PER_DAY } from '../../src/shared/bots/personal/manifest'
 import type { BotModelOption } from '../../src/shared/bots/personal/methods'
 import type { BotRuntimeHold } from '../../src/shared/bots/personal/subagentHold'
@@ -31,7 +30,6 @@ const write = (path: string): NormalisedCall => ({ kind: 'builtin', tool: 'write
 describe('a subagent on another entry is never held less tightly than its work', () => {
   let f: BotFixture
   let botId: string
-  let limit: BotComputerLimit
   /** The work's own entry runs Claude Code in its sandbox here (Linux); "Second Claude" too; "Cheap Router" is Pi. */
   const PIONLY = { instanceId: 'pi:cheap', model: 'cheap/model' }
   const SECOND = { instanceId: 'claude:second', model: 'second/model' }
@@ -46,9 +44,7 @@ describe('a subagent on another entry is never held less tightly than its work',
 
   beforeEach(async () => {
     f = botFixture()
-    limit = { ...BOT_COMPUTER_OPEN }
     holds = { [PI.instanceId]: { runtime: 'claude', sandbox: 'available' }, [SECOND.instanceId]: { runtime: 'claude', sandbox: 'available' }, [PIONLY.instanceId]: { runtime: 'pi' } }
-    f.host.computerLimit = () => limit
     f.host.platform = 'linux'
     f.host.instructions = (bot) => botInstructions(bot)
     f.host.modelOptions = async () => choices
@@ -118,7 +114,7 @@ describe('a subagent on another entry is never held less tightly than its work',
     expect(await subagents.start({ title: 'Reviews', brief: 'Find reviews.', model: cheap })).toHaveProperty('started')
   })
 
-  it('it holds what the work\'s turn holds: an Allow given while the turn runs is not its, and Run commands switched off stops neither', async () => {
+  it('it holds what the work\'s turn holds: an Allow given while the turn runs is not its', async () => {
     const job = await work('w1')
     // Allowed for this work while its first turn runs: the turn gets it at its next turn, and so does a subagent.
     f.store.putOverlay(job.id, 'later', { tool: 'shell' })
@@ -126,27 +122,26 @@ describe('a subagent on another entry is never held less tightly than its work',
     const child = await start(f, job.id, subagentNs(job.id)[0])
     expect(child.prepared.policy.tools!.allow).not.toContain('bash')
     expect(child.prepared.authority.check(command)).toMatchObject({ ok: false })
-    // What it holds is recorded like its work's: neither holds commands, so the switch stops neither.
-    limit = { ...limit, shell: false }
-    f.bots.computerLimitChanged()
-    expect(job.prepared.authority.time.signal.aborted).toBe(false)
-    expect(child.prepared.authority.time.signal.aborted).toBe(false)
   })
 
-  // Run commands switched off stops the work and its subagent on another entry; the call the subagent had in flight is
-  // matched by that entry's names, and only what the switch took away is cleared.
+  // Run commands switched off for the bot stops the work and its subagent on another entry; the call the subagent had in
+  // flight is matched by that entry's names, and only what the switch took away is cleared.
   it.each([
-    ['a command, Run commands off', 'shell', 'second_bash', false],
-    ['a file change, Run commands off (another power: it holds)', 'shell', 'second_write', true]
-  ] as const)('a switch turned off: %s', async (_name, which, tool, holdsWork) => {
-    const job = await work('w1', { shell: true })
+    ['a command', 'second_bash', false],
+    ['a file change (another power: it holds)', 'second_write', true]
+  ] as const)('Run commands switched off: %s', async (_name, tool, holdsWork) => {
+    // The owner allows commands from a card, so About has their switch.
+    const asking = await work('permission')
+    asking.prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'Run commands.' })
+    await finish(f, asking.payload, 'completed', { text: 'Asked.' })
+    for (const ask of f.store.openAsks(botId)) await f.bots.service.answer(botId, ask.id, 'allow')
+    const job = await work('w1')
     await job.prepared.authority.subagents!.start({ title: 'Builder', brief: 'Build it.', model: second })
     const builder = await start(f, job.id, subagentNs(job.id)[0])
     const own = join(builder.prepared.authority.workspace!.files!, 'notes.md')
     expect(builder.prepared.authority.check(write(own))).toEqual({ ok: true })
     f.runs.tools.start({ invocationId: 'inv-sub', runId: builder.payload.runId, attemptId: attemptOf(builder.payload.runId), tool, argsDigest: toolArgsDigest(tool === 'second_bash' ? { command: 'make' } : { path: own }), now: 'n', idempotent: false })
-    limit = { ...limit, [which]: false }
-    f.bots.computerLimitChanged()
+    f.bots.service.setPermission(botId, f.bots.service.get(botId).permissions.find((item) => item.title === 'run commands')!.id, false)
     expect(job.prepared.authority.time.signal.aborted).toBe(true)
     expect(builder.prepared.authority.time.signal.aborted).toBe(true)
     await finish(f, builder.payload, 'interrupted', { outcome: { interruptedBy: 'bot_wall' } })

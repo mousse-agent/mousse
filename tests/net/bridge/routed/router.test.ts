@@ -81,20 +81,21 @@ describe('what a window sends', () => {
     ).toMatchObject({ code: 'invalid_params' })
   }, 60_000)
 
-  it('never routes What bots may do here: another computer\'s setting can be neither read nor set from this one', async () => {
+  it('never routes settings: another computer\'s settings can be neither read nor set from this one', async () => {
     const thread = t.thread()
-    const before = t.owner.settings.get().bots
-    const shut = { here: { shell: false, browser: false, threads: false } }
+    const before = t.owner.settings.get().appearance.theme
+    const theme = before === 'dark' ? 'light' : 'dark'
     for (const method of ['settings.set', 'settings.get'])
-      expect(await t.refused(t.dispatch(method, { threadId: t.qualified(thread.id), partial: { bots: shut } })), method).toMatchObject({
+      expect(await t.refused(t.dispatch(method, { threadId: t.qualified(thread.id), partial: { appearance: { theme } } })), method).toMatchObject({
         code: 'not_available_remotely'
       })
-    expect(t.owner.settings.get().bots).toEqual(before)
+    expect(t.owner.settings.get().appearance.theme).toBe(before)
     // Without a thread of the other computer, the call is this computer's own: the owner's setting stays as it was.
-    await t.dispatch('settings.set', { partial: { bots: shut } })
-    expect(t.caller.settings.get().bots).toEqual(shut)
-    expect(t.owner.settings.get().bots).toEqual(before)
-    await t.dispatch('settings.set', { partial: { bots: { here: { shell: true, browser: true, threads: true } } } })
+    const callerBefore = t.caller.settings.get().appearance.theme
+    await t.dispatch('settings.set', { partial: { appearance: { theme } } })
+    expect(t.caller.settings.get().appearance.theme).toBe(theme)
+    expect(t.owner.settings.get().appearance.theme).toBe(before)
+    await t.dispatch('settings.set', { partial: { appearance: { theme: callerBefore } } })
   }, 60_000)
 
   it('does not route with the flag off, and nothing about a plain id changes', async () => {

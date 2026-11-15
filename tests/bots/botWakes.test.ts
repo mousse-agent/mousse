@@ -119,7 +119,7 @@ describe('a wake on an event', () => {
     const row = wakeTurn(set.wakeId)!
     expect(lineOf(set.wakeId)?.text).toBe('Following up · "Fix login" finished')
     const { prepared } = await start(f, row.id)
-    expect(prepared.prompt).toContain('thread t1 ("Fix login") finished its turn (status: completed)')
+    expect(prepared.prompt).toContain('thread t1 ("[data from thread title]\nFix login\n[end of data]") finished its turn (status: completed)')
     expect(prepared.prompt).toContain('Read what it changed and sum it up.')
   })
 
@@ -138,7 +138,7 @@ describe('a wake on an event', () => {
     const row = wakeTurn(set.wakeId)!
     expect(lineOf(set.wakeId)?.text).toBe('Following up · acme/app#12 merged')
     const { prepared } = await start(f, row.id)
-    expect(prepared.prompt).toContain('pull request acme/app#12 ("Fix login") merged')
+    expect(prepared.prompt).toContain('pull request acme/app#12 ("[data from pull request title]\nFix login\n[end of data]") merged')
   })
 
   // Every way a wake on an event ends without it: it still wakes, once, saying why.

@@ -157,14 +157,8 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     expect(w.pi.turns).toHaveLength(0)
   })
 
-  it('this computer\'s switch off refuses even a turn that holds every thread tool, and a turn that is not the bot\'s registered one', async () => {
+  it('a turn that is not the bot\'s registered one starts nothing', async () => {
     const w = world()
-    w.d.settings.bots = { here: { ...w.d.settings.bots.here, threads: false } }
-    await expect(w.create('off-1')).rejects.toMatchObject({ code: 'mousse_scope_denied', message: expect.stringMatching(/Not on this computer: "use your threads" is switched off here/) })
-    const kept = w.d.store.createThread('Kept', w.project.id)
-    await expect(w.archive(kept.id)).rejects.toMatchObject({ code: 'mousse_scope_denied', message: expect.stringMatching(/Not on this computer/) })
-    expect(w.d.store.getThread(kept.id)!.settledAt).toBeUndefined()
-    w.d.settings.bots = { here: { ...w.d.settings.bots.here, threads: true } }
     const stranger = { ...w.actor, runId: 'run:not-registered' }
     await expect(w.orch.createThreadAsAgent({ projectId: w.project.id, title: 'X', workspace: 'project' }, { clientRequestId: 'x1', actor: stranger, accessLevel: 'manage' })).rejects.toBeInstanceOf(McpToolError)
     expect(w.d.store.listAllThreads().filter((thread) => thread.createdByThreadId === w.chat.id)).toEqual([])

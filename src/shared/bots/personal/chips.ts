@@ -277,7 +277,9 @@ function outcomeChip(kind: ChipKind, call: BotChipCall): BotChip | null {
       const effort = str(model.effort)
       return {
         icon: 'think',
-        text: result.status === 'queued' ? 'will start' : 'started',
+        text: result.replayed
+          ? (result.status === 'ended' ? 'already ended' : result.status === 'queued' ? 'already queued' : 'already on it')
+          : result.status === 'queued' ? 'will start' : 'started',
         ...(highlight ? { highlight } : {}),
         ...(name ? { title: workModelDetail({ name, entry: str(model.entry) ?? '', ...(effort ? { effort } : {}) }) } : {})
       }

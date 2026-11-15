@@ -1,6 +1,6 @@
 /**
  * "Use your threads" through the app tools, as a bot's turn reaches them: the grant compiled for the turn's lane, the
- * bot's authority with what this computer allows at each call, the registry's listing and its per-call check, and the
+ * bot's authority with the owner's switch read at each call, the registry's listing and its per-call check, and the
  * thread tools' own handlers. The service side (Full access, who started a thread, the bot's label) is in
  * botThreadsDaemon.test.ts.
  */
@@ -12,17 +12,16 @@ import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
 import { botManifestDigest, compileBotThread } from '../../src/mms/bots/grants/compile'
 import { agentMessageText, botMessageText, isPersonMessage, type BotAppToolDeps } from '../../src/mms/run/mcp/appTools'
 import { THREAD_CREATE_MAX_PER_RUN, THREAD_SEND_MAX_PER_RUN } from '../../src/mms/run/mcp/appTools/thread'
-import { BOT_COMPUTER_OPEN, type BotComputerLimit } from '../../src/shared/bots/personal/computerLimit'
 import { BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, botStarterManifest } from '../../src/shared/bots/personal/manifest'
 import { BOT_THREADS_CHAT_ONLY_TEXT } from '../../src/shared/bots/personal/walls'
-import type { BotAuthority } from '../../src/shared/bots/personal/authority'
+import type { BotAuthority, NormalisedCall } from '../../src/shared/bots/personal/authority'
 import type { ChatMessage, Thread } from '../../src/shared/types'
 import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
 const NOW = '2026-11-13T10:00:00.000Z'
 const thread = (id: string, patch: Partial<Thread> = {}): Thread => ({ id, name: `Thread ${id}`, createdAt: NOW, updatedAt: NOW, startedAt: NOW, projectId: 'p1', ...patch }) as Thread
-const NOT_HERE = /^Not on this computer: "use your threads" is switched off here/
+const SWITCHED_OFF_TEXT = 'Your owner has switched that off for now. Do not ask for it. Carry on without it and say what you skipped.'
 
 describe('a message a person sent (what answers a plan review, and what the Automation manager takes as the request)', () => {
   const user = (patch: Partial<ChatMessage>): ChatMessage => ({ id: 'm', role: 'user', content: 'Change step 1.', timestamp: NOW, ...patch }) as ChatMessage
@@ -52,10 +51,10 @@ describe('a bot\'s thread tools ("use your threads")', () => {
 
   /**
    * A bot whose chat thread is `home`, holding a live run. `threads` is the turn's lane: `all` (a chat turn its owner's
-   * message started), `read` (work, a schedule, a reminder), or none (a consult). `limit` is what the computer allows at
-   * each call; the turn is compiled under `compiledWith`.
+   * message started), `read` (work, a schedule, a reminder), or none (a consult). `disabled` is the owner's switch as the
+   * engine reads it at each call (`BotEngine.permissionOff`).
    */
-  const world = async (options: { granted?: boolean; threads?: 'read' | 'all'; compiledWith?: BotComputerLimit; limit?: () => BotComputerLimit; messages?: ChatMessage[]; role?: 'activation' | 'context'; stillHolds?: () => string | undefined } = {}) => {
+  const world = async (options: { granted?: boolean; threads?: 'read' | 'all'; disabled?: (call: NormalisedCall) => string | undefined; messages?: ChatMessage[]; role?: 'activation' | 'context'; stillHolds?: () => string | undefined } = {}) => {
     fx = delegationFixture()
     base = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-bot-threads-')))
     const profile = join(base, 'profile')
@@ -64,13 +63,13 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     const starter = botStarterManifest()
     const grant = options.granted === false ? starter : { ...starter, appTools: [...starter.appTools, BOT_THREADS_PERMISSION] }
     const compiled = compileBotThread({
-      grant, digest: botManifestDigest(grant), thread: {}, scratch, profileHome: profile, limit: options.compiledWith ?? BOT_COMPUTER_OPEN,
+      grant, digest: botManifestDigest(grant), thread: {}, scratch, profileHome: profile,
       nativeNames: (tools) => ({ ok: true, names: [...tools] }), remaining: { deadlineMs: 600_000 },
       botTools: { escalate: true, consult: false, memory: true, ...(options.threads ? { threads: options.threads } : {}) }
     })
     if (!compiled.ok) throw new Error(compiled.error.message)
     const created = createBotAuthority({
-      activationId: 'act-1', role: 'activation', permissions: compiled.permissions, waiting: () => false, limit: options.limit ?? (() => BOT_COMPUTER_OPEN),
+      activationId: 'act-1', role: 'activation', permissions: compiled.permissions, waiting: () => false, ...(options.disabled ? { disabled: options.disabled } : {}),
       counters: { charge: () => ({ ok: true, count: 1 }) }, time: { deadline: () => 0, signal: new AbortController().signal }, spend: null
     })
     // The engine's re-check after a wait (`BotEngine.authorityFor`), as the test says it answers.
@@ -138,7 +137,6 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(await allowed({ threads: 'read' })).toEqual([...BOT_THREAD_READ_TOOLS].sort())
     expect(await allowed({})).toEqual([])
     expect(await allowed({ granted: false, threads: 'all' })).toEqual([])
-    expect(await allowed({ threads: 'all', compiledWith: { ...BOT_COMPUTER_OPEN, threads: false } })).toEqual([])
   })
 
   // What a bot's thread is shown for the run its credential acts for: only the thread tools that turn can call. The Mousse MCP server and Pi's per-turn list both list for the run (`listForThread`'s `runId`).
@@ -146,7 +144,6 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     ['a chat turn its owner started', { threads: 'all' }, [...BOT_THREAD_READ_TOOLS, ...BOT_THREAD_ACT_TOOLS]],
     ['work, a schedule or a reminder', { threads: 'read' }, BOT_THREAD_READ_TOOLS],
     ['a bot without the permission', { granted: false, threads: 'all' }, []],
-    ['a computer with the switch off', { threads: 'all', compiledWith: { ...BOT_COMPUTER_OPEN, threads: false } }, []],
     ['a consult', { threads: 'all', role: 'context' }, []]
   ]
   it.each(listings)('the thread tools listed to %s', async (_name, options, shown) => {
@@ -277,9 +274,9 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     held = undefined
     const lateWait = text('thread_wait', { threadId: 'mine', runId: late.runId, timeoutMs: 60_000 })
     await new Promise((resolve) => setTimeout(resolve, 50))
-    held = 'Not on this computer.'
+    held = SWITCHED_OFF_TEXT
     fx!.finish(late.runId, 'Secret result text.')
-    expect(await lateWait).toEqual({ error: true, text: 'Not on this computer.' })
+    expect(await lateWait).toEqual({ error: true, text: SWITCHED_OFF_TEXT })
     // Held: the same wait returns the answer, framed as data.
     held = undefined
     const again = await fx!.runningRun('mine')
@@ -377,15 +374,15 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(host.createThread).toHaveBeenLastCalledWith(expect.objectContaining({ projectId: 'p2' }), expect.anything())
   })
 
-  it('the switch turned off on this computer refuses the next call of a turn that started with it, and the thread_list models only show to a turn that may start one', async () => {
-    let limit: BotComputerLimit = BOT_COMPUTER_OPEN
-    const { text, host } = await world({ threads: 'all', limit: () => limit })
+  it('the owner\'s switch turned off refuses the next call of a turn that started with it, and the thread_list models only show to a turn that may start one', async () => {
+    let off = false
+    const { text, host } = await world({ threads: 'all', disabled: (call) => (off && call.kind === 'app' && call.tool.startsWith('thread_') ? SWITCHED_OFF_TEXT : undefined) })
     expect(JSON.parse((await text('thread_list', {})).text.split('\n').slice(1, -1).join('\n'))).toMatchObject({ models: [{ instanceId: 'claude', model: 'opus' }] })
-    limit = { ...BOT_COMPUTER_OPEN, threads: false }
+    off = true
     for (const [name, args] of [['thread_list', {}], ['thread_read', { threadId: 'mine' }], ['thread_create', { projectId: 'p1', title: 'X', firstMessage: 'Y' }], ['thread_send', { threadId: 'mine', content: 'Hi' }]] as const) {
       const refused = await text(name, args)
       expect(refused.error, name).toBe(true)
-      expect(refused.text, name).toMatch(NOT_HERE)
+      expect(refused.text, name).toBe(SWITCHED_OFF_TEXT)
     }
     expect(host.createThread).not.toHaveBeenCalled()
     expect(host.sendToThread).not.toHaveBeenCalled()

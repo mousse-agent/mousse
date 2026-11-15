@@ -1,6 +1,6 @@
 import type { ContextSettings, MousseSettings, MousseSettingsUpdate } from '../../shared/settings'
 import { THEME_CSS_MAX_LENGTH, themeCssTooLong } from '../../shared/themes/cssSafety'
-import { BOTS_HERE_SHAPE, botSettingsWrite, CONTEXT_COMPACTION_DEFAULT_MARKER, DEFAULT_CONTEXT_COMPACTION_TOKENS, REMOVED_THEME_IDS, getDefaultSettings, normalizeAgentAccessSettings, normalizeAppearance, normalizeBotSettings, normalizeContextSettings, normalizeExperimentalSettings, normalizePermissionSettings, normalizeRunSettings, normalizeStorageSettings } from '../../shared/settings'
+import { CONTEXT_COMPACTION_DEFAULT_MARKER, DEFAULT_CONTEXT_COMPACTION_TOKENS, REMOVED_THEME_IDS, getDefaultSettings, normalizeAgentAccessSettings, normalizeAppearance, normalizeContextSettings, normalizeExperimentalSettings, normalizePermissionSettings, normalizeRunSettings, normalizeStorageSettings } from '../../shared/settings'
 import { MOUSSE_BUILTIN_TOOL_IDS } from '../../shared/integrations'
 import { generateRandomUsername } from '../../shared/randomUsername'
 import { normalizeShortcuts } from '../../shared/commands'
@@ -96,8 +96,6 @@ function normalizeSettings(settings: MousseSettings): MousseSettings {
     runs: normalizeRunSettings(settings.runs),
     experimental: normalizeExperimentalSettings(settings.experimental),
     storage: normalizeStorageSettings(settings.storage),
-    // What bots may do on this computer, as the installation holds it (already read through `normalizeBotSettings`).
-    bots: normalizeBotSettings(settings.bots),
     ...(typeof settings.provider?.model === 'string' ? { provider: upgradeSelection(settings.provider) } : {}),
     ...(settings.title ? { title: withInstance(settings.title) } : {}),
     // The bot's depth sets the level, so a bot model keeps none.
@@ -176,11 +174,8 @@ export class SettingsStore {
   }
 
   set(update: MousseSettingsUpdate): MousseSettings {
-    // What bots may do on this computer is the installation's: the switches the update names, checked before anything
-    // is written (anything else is refused and nothing in the update is saved), and put over the switches held now.
-    const { bots, ...partial } = update as MousseSettingsUpdate & { bots?: unknown }
-    const botsHere = Object.hasOwn(update, 'bots') ? botSettingsWrite(bots) : undefined
-    if (Object.hasOwn(update, 'bots') && !botsHere) throw new Error(BOTS_HERE_SHAPE)
+    // `bots` (the removed "What bots may do here" switches) is ignored when an older window or script still sends it.
+    const { bots: _retired, ...partial } = update as MousseSettingsUpdate & { bots?: unknown }
     // A theme's CSS over the limit is refused, never cut, and nothing in the update is saved.
     const themes = (partial.appearance as { userThemes?: unknown } | undefined)?.userThemes
     if (Array.isArray(themes)) {
@@ -221,11 +216,7 @@ export class SettingsStore {
       for (const [skillId, update] of skillModels) if (model[skillId] && update) model[skillId] = cleared(model[skillId]!, update)
       normalized.integrations = { ...normalized.integrations, skills: { ...normalized.integrations.skills, model } }
     }
-    // Saved whole or not at all: the switches go last, and a failure anywhere puts back what was already written.
-    this.config.atomically(() => {
-      if (!botsHere || Object.keys(partial).length) this.config.applySettingsPatch(normalized)
-      if (botsHere) this.config.setBotsHere(botsHere)
-    })
+    this.config.applySettingsPatch(normalized)
     for (const listener of savedListeners) {
       try { listener() } catch (error) { console.warn('[SettingsStore] a settings listener failed', error) }
     }
