@@ -15,6 +15,9 @@
  *   await botSeed.show('paused')
  *   botSeed.scrollTo('report')                      // brings a message to the top: see botSeed.ids
  *
+ * The bot's memory (About's Memory row, the Memory dialog) answers from `memory` below; Forget and Edit change it until
+ * the page reloads.
+ *
  * Options, kept between calls: `await botSeed.show('free', { localFile, localImage, localImages })` names a real text
  * file, a real PNG and up to four real pictures (PNG, JPEG, GIF or WebP) on this computer, so the Files pane and the
  * pictures have something to read: the markdown reply links `localFile` and `localImage`, the picture reply
@@ -107,7 +110,7 @@
       owner(ids.commandAsk, today(21, 50), 'run some command pls'),
       bot(ids.handoff, today(21, 50), "On it, I'll text you when it's done.", [{ icon: 'think', text: 'started', highlight: 'System check' }], { replyTo: quote(ids.commandAsk, 'run some command pls') }),
       owner(ids.note, today(21, 51), 'Use PC Part Picker for the prices too'),
-      bot(ids.noteReply, today(21, 51), "I'll use PC Part Picker for the prices from here on.", [{ icon: 'think', text: 'noted', title: 'For SSD search' }], { replyTo: quote(ids.note, 'Use PC Part Picker for the prices too') }),
+      bot(ids.noteReply, today(21, 51), "I'll use PC Part Picker for the prices from here on.", [{ icon: 'think', text: 'noted', title: 'For SSD search' }, { icon: 'memory', text: 'remembered', highlight: 'Use PC Part Picker for prices.' }], { replyTo: quote(ids.note, 'Use PC Part Picker for the prices too') }),
       // The run report: it quotes the request; its facts are a list of keys and values.
       bot(ids.report, today(21, 53), [
         'Done. I ran a few commands that only read info, and nothing was changed.',
@@ -146,6 +149,21 @@
   /** What each piece of running work is doing, as its live chip. */
   const ACTIVITY = { 'seed-act-work-1': { icon: 'web', text: 'using the browser', highlight: 'pcpartpicker.com', live: true } }
 
+  /** The bot's memory entries (`bots.memory.list`): the owner's wishes and its own notes. */
+  const entry = (id, kind, text, daysAgo) => {
+    const at = new Date(Date.now() - daysAgo * 24 * 60 * 60_000).toISOString()
+    return { id, version: 1, ref: id, kind, text, since: at, learnedAt: at, by: kind === 'run_note' ? 'a run' : 'you said', status: 'active' }
+  }
+  let memory = [
+    entry('m1', 'owner', 'Call me Sam.', 9),
+    entry('m2', 'owner', 'No em dashes in your messages.', 6),
+    entry('m3', 'note', 'Sam builds PCs and likes AMD parts.', 5),
+    entry('m4', 'run_note', 'The weekly summary goes out on Mondays at 09:00.', 4),
+    entry('m5', 'note', 'Budget for the new SSD is under £150.', 2),
+    entry('m6', 'owner', 'Use PC Part Picker for prices.', 0),
+    entry('m7', 'note', 'Desktop is DESKTOP-01, Windows 11 Pro.', 0)
+  ]
+
   let scenario = 'free'
   /** The owner's reactions on the bot's messages, by message id: kept across states, as `bots.db` keeps them. */
   const reactions = new Map()
@@ -169,6 +187,17 @@
       return withReaction(row)
     },
     markRead: async () => undefined,
+    memory: async () => ({ entries: memory.map((item) => ({ ...item })), gauge: 'core 210/2,000 · run notes 12/500' }),
+    forgetMemory: async (botId, id) => { memory = memory.filter((item) => item.id !== id) },
+    editMemory: async (botId, ref, text) => {
+      const old = memory.find((item) => item.ref === ref)
+      if (!old) throw new Error('This memory changed since you opened it.')
+      const next = { ...old, version: old.version + 1, ref: `${old.id}v${old.version + 1}`, text, by: 'you said' }
+      memory = memory.map((item) => (item.id === old.id ? next : item))
+      return { ...next }
+    },
+    devices: async () => { throw Object.assign(new Error('not in the seed'), { code: 'method_not_found' }) },
+    model: async () => ({ model: null, models: [], computers: [] }),
     get: async () => ({ summary: summary(scenario), permissions: [], runs: [] }),
     answer: async (botId, askId, answer) => conversation(scenario).find((row) => row.ask?.askId === askId) ?? null,
     stop: async () => undefined,
@@ -188,7 +217,7 @@
     const { bots, chats } = await modules()
     bots.setBotsClient(stub)
     // Start the chat over, so the new state's rows are the only ones held.
-    bots.useBotsStore.setState({ chats: {}, chatLoad: {}, pending: {}, activity: {}, live: {}, aboutOpen: false })
+    bots.useBotsStore.setState({ chats: {}, chatLoad: {}, pending: {}, activity: {}, live: {}, aboutOpen: false, memoryOpen: null })
     await bots.useBotsStore.getState().refresh()
     await chats.useChatsStore.getState().openBot(BOT)
     const running = (summary(scenario).work ?? []).filter((item) => item.status === 'running').map((item) => item.id)
