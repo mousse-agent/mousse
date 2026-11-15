@@ -392,7 +392,7 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settl
         </span>
       </span>
     </div>
-    {saved && <button type="button" className="bot-memory-tag" title="Open it in Memory" onClick={() => store().openMemory(bot.id, saved.highlight)}>
+    {saved && <button type="button" className="bot-memory-tag" title="Open it in Memory" onClick={() => store().openMemory(bot.id, saved.title?.startsWith('Put away:\n') ? saved.highlight?.replace(/ · put away \d+$/, '') : saved.highlight)}>
       <Brain size={12} aria-hidden />Saved to memory
     </button>}
     {!!message.applets?.length && <BotMessageApplets botId={bot.id} applets={message.applets} onOpen={onApplet} message={message} onReply={onReply} />}
