@@ -125,7 +125,7 @@ it('starting unrelated work does not read the shared scheduler under the bot tra
   expect(f.book.list(botId).some(entry => entry.scheduleId === a.scheduleId)).toBe(true)
 })
 
-it('an executing run whose schedule was removed reports what it had at its next wall without a card', async () => {
+it.each(['completed', 'interrupted'] as const)('a removed executing schedule reports at its wall without a card (%s)', async status => {
   const a = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'A' }, 'owner')
   await f.tickSchedules(new Date(T0 + 5 * 60_000))
   const row = f.store.listActivations(botId).find(row => row.trigger.kind === 'schedule')!
@@ -133,7 +133,7 @@ it('an executing run whose schedule was removed reports what it had at its next 
   f.bots.removeSchedule(botId, a.scheduleId)
   f.bots.raiseWall(row.id, { dispatchN: 1, kind: 'gate', permission: { tool: 'write' }, reason: 'Need write.' })
   expect(f.store.escalations({ activationId: row.id, status: 'open' })).toHaveLength(0)
-  await finish(f, turn.payload, 'completed', { text: 'Checked the price; recording it needs permission.' })
+  await finish(f, turn.payload, status, { text: 'Checked the price; recording it needs permission.', ...(status === 'interrupted' ? { outcome: { interruptedBy: 'bot_wall' as const } } : {}) })
   expect(f.store.activation(row.id)).toMatchObject({ status: 'done' })
   const rows = chatOf(f, botId).filter(message => message.activationId === row.id)
   expect(rows.some(message => message.kind === 'run_report' && message.text.includes('Checked the price'))).toBe(true)
