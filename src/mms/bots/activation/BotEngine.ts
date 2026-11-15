@@ -4632,7 +4632,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const lateReport = report && row.trigger.kind === 'schedule' && row.trigger.missed && this.now() - Date.parse(row.trigger.occurrenceAt) > 15 * 60_000
       ? `(Due ${scheduledDueTime(row.trigger.occurrenceAt, this.now())}, this computer was off or asleep) ` : ''
     const body = silent ? '' : lateReport ? `${lateReport}${written || 'Done.'}` : written
-    if (!body && !chips.length && !asks.length && !report && !waiting && !questions.length && !cards) return
+    if (!body && !chips.length && !asks.length && !report && !waiting && !questions.length && !cards) {
+      if (ENDED_ACTIVATION_STATUSES.has(row.status)) this.postChatDraft(row)
+      return
+    }
     // A turn that asked and said nothing else shows its question alone.
     const reply = Boolean(body || chips.length || asks.length || report || waiting || cards)
     const kind = row.lane === 'chat' ? 'text' : report ? 'run_report' : 'notice'
