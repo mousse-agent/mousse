@@ -199,3 +199,29 @@ it('keeps a late final reply ahead of its completion line', async () => {
   expect(report).toBeGreaterThan(-1)
   expect(rows.findIndex(row => row.systemLine)).toBeGreaterThan(report)
 })
+
+it('startup still repairs running activations and delivers reminders when scheduler reads are locked', async () => {
+  const s = await scheduled()
+  await f.bots.service.chatSend({ botId, text: 'Remind me', clientRequestId: 'reminder-owner' })
+  const chat = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+  f.bots.tools.reminders.add(botId, chat.id, { dueAt: new Date(f.clock.now + 60_000).toISOString(), text: 'Drink water.' })
+  f.clock.now += 120_000
+  f.runs.markTerminal(s.payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+  const list = vi.spyOn(f.book, 'list').mockImplementation(() => { throw new Error('jobs locked') })
+  await expect(f.bots.reconcileOnStartup()).resolves.toBeUndefined()
+  expect(f.store.dispatch(s.row.id, 2)).toBeDefined()
+  expect(chatOf(f, botId).some(row => row.text.includes('Drink water.'))).toBe(true)
+  list.mockRestore()
+  await f.bots.maintain()
+})
+
+it('upkeep retries pending removals without rescanning all activations or repeating the warning', async () => {
+  const s = await scheduled()
+  vi.spyOn(f.book, 'remove').mockImplementation(() => { throw new Error('read only') })
+  await s.tool.handler({ why: 'Done.' }, s.ctx)
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  const all = vi.spyOn(f.store, 'all')
+  for (let i = 0; i < 3; i++) await f.bots.maintain()
+  expect(all.mock.calls.filter(([sql]) => sql.includes("'$.completed'") && sql.includes('SELECT id'))).toHaveLength(0)
+  expect(warn.mock.calls.filter(([message]) => message === 'a completed bot schedule could not be removed')).toHaveLength(1)
+})
