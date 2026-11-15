@@ -44,7 +44,7 @@ export function isV5ToolPart(part: unknown): part is ToolPartBase {
  * Rows that need their own surface and never join an activity group or fold behind a finished turn's
  * "Worked for" line: questions and what the user answered, an approval card, a plan to approve.
  */
-const STANDALONE_TOOL_TYPES = new Set(["tool-Question", "tool-QuestionAnswers", "tool-QuickAction", "tool-ExitPlanMode", "tool-PlanWrite"]);
+const STANDALONE_TOOL_TYPES = new Set(["tool-Question", "tool-QuestionAnswers", "tool-QuickAction", "tool-PlanWrite"]);
 
 /** A call drawn on its own surface, never inside a group (see `STANDALONE_TOOL_TYPES`). */
 export function isStandaloneToolType(type: string): boolean {

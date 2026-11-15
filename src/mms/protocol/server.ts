@@ -709,9 +709,6 @@ export class MmsProtocolServer {
     })
 
     // UI capability intents (Electron decides focus/open/notify)
-    onOrch('document-opened', (payload: unknown) => {
-      emitToSubscribers(this.ring.push('ui.document-open', payload, undefined))
-    })
     onOrch('quick-action-created', (payload: unknown) => {
       emitToSubscribers(this.ring.push('ui.quick-action-created', payload, undefined))
     })

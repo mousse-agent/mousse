@@ -199,7 +199,7 @@ function activityPart(msg: ChatMessage, activity: AgentActivityItem): PartShape 
  */
 const RICH_TOOL_TYPES = new Set([
   'Read', 'Edit', 'MultiEdit', 'Write', 'Bash', 'Grep', 'Glob',
-  'TodoWrite', 'PlanWrite', 'ExitPlanMode',
+  'TodoWrite', 'PlanWrite',
   'WebSearch', 'WebFetch', 'Skill', 'Task', 'Agent',
   'Question', 'Thinking', 'cloning', 'QuickAction', 'ToolSearch',
 ])
@@ -471,33 +471,6 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
         output: msg.thinking.status === 'complete' ? msg.thinking.content : undefined,
         ...(msg.timestamp ? { createdAt: msg.timestamp } : {}),
       } as unknown as UIMessage['parts'][number]]
-      out.push(base)
-      lastAssistantText = null
-      continue
-    }
-
-    if (msg.kind === 'plan_card' && msg.planCard) {
-      // Inline approval card: reuse the agent-elements PlanTool
-      // (tool-PlanWrite) so plans render with the same chrome as other tool
-      // cards. Preview and implement actions live on the card itself — the
-      // sidebar document preview no longer auto-opens.
-      const planMarkdown = msg.presentationParts ? msg.presentationParts.filter(part => part.type === 'text').map(part => part.text).join('\n').trim() || 'Interactive plan' : msg.planCard.planMarkdown?.trim() || msg.content?.trim() || 'No plan generated.'
-      const request = msg.planCard.originalRequest?.trim() || 'Implementation plan'
-      const title = request.length > 90 ? `${request.slice(0, 87)}…` : request
-      base.role = 'assistant'
-      base.parts = [{
-        type: 'tool-PlanWrite',
-        toolCallId: msg.id,
-        state: 'output-available',
-        input: {
-          action: 'create',
-          plan: { id: msg.id.slice(0, 8), title, summary: planMarkdown },
-        },
-        output: planMarkdown,
-      } as unknown as UIMessage['parts'][number]]
-      if (!msg.streaming && !msg.incomplete) for (const part of msg.presentationParts ?? []) {
-        if (part.type === 'applet') base.parts.push({type:'data-applet',data:part.reference} as unknown as UIMessage['parts'][number])
-      }
       out.push(base)
       lastAssistantText = null
       continue

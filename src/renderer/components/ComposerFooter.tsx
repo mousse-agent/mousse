@@ -124,9 +124,6 @@ export interface ComposerFooterProps {
   recordingDuration?: number
   /** Loudness of the recording, for its wave. */
   recordingLevels?: AudioLevels | null
-  primaryAction?: 'send' | 'implement-plan'
-  onImplementPlan?: () => void
-  implementPlanDisabled?: boolean
   /** When true, file attach stays enabled during an active turn (queued sends). */
   allowAttachWhileLoading?: boolean
   /** The thread's permission mode and how to change it; without it (or `run`) the footer has no such control. */
@@ -393,9 +390,6 @@ export function ComposerFooter({
   onCancelRecording,
   recordingDuration = 0,
   recordingLevels = null,
-  primaryAction = 'send',
-  onImplementPlan,
-  implementPlanDisabled = false,
   allowAttachWhileLoading = false,
   permission,
   sendLabel,
@@ -420,10 +414,6 @@ export function ComposerFooter({
   ].join(' · ')
 
   const handleActionClick = () => {
-    if (primaryAction === 'implement-plan') {
-      onImplementPlan?.()
-      return
-    }
     if (canSend) onSend?.()
   }
   // The send slot is Send, Queue, Stop or Stop recording. While a run goes and the box has text, Stop
@@ -503,7 +493,7 @@ export function ComposerFooter({
           <Paperclip size={16} strokeWidth={2} />
         </button>
 
-        {primaryAction !== 'implement-plan' && (!stoppable || dictateWhileStoppable) && onStartRecording ? (
+        {(!stoppable || dictateWhileStoppable) && onStartRecording ? (
           <button
             type="button"
             className="composer-icon-btn composer-dictate-btn"
@@ -519,9 +509,9 @@ export function ComposerFooter({
           </button>
         ) : null}
 
-        {primaryAction !== 'implement-plan' && stoppable && canSend ? stopButton('composer-icon-btn composer-stop-btn') : null}
+        {stoppable && canSend ? stopButton('composer-icon-btn composer-stop-btn') : null}
 
-        {sendMode && primaryAction !== 'implement-plan' ? (
+        {sendMode ? (
           <button
             type="button"
             className={`composer-icon-btn composer-send-mode-btn${steers ? ' is-steer' : ''}`}
@@ -536,16 +526,7 @@ export function ComposerFooter({
           </button>
         ) : null}
 
-        {primaryAction === 'implement-plan' ? (
-          <button
-            type="button"
-            className="composer-implement-btn"
-            onClick={handleActionClick}
-            disabled={implementPlanDisabled || loading}
-          >
-            Implement plan
-          </button>
-        ) : stopInSlot ? (
+        {stopInSlot ? (
           stopButton('composer-action-btn composer-action-btn-stop')
         ) : (
           <button

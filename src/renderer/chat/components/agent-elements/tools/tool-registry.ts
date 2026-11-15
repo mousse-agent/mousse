@@ -11,7 +11,6 @@ import {
   RowWeb,
   ThinkingIcon,
   IconSparkles as Sparkles,
-  IconLogout as LogOut,
   Wrench,
 } from "../../../../lib/icons";
 import {
@@ -346,25 +345,8 @@ export const toolRegistry: Record<string, ToolMeta> = {
       const isPending =
         part.state !== "output-available" && part.state !== "output-error";
       const action = part.input?.action || "create";
-      if (isPending) {
-        if (action === "create") return "Creating plan";
-        if (action === "approve") return "Approving plan";
-        return "Updating plan";
-      }
-      const status = part.input?.plan?.status;
-      if (status === "awaiting_approval") return "Plan ready for review";
-      if (status === "approved") return "Plan approved";
-      if (status === "completed") return "Plan completed";
+      if (isPending) return action === "create" ? "Creating plan" : "Updating plan";
       return action === "create" ? "Created plan" : "Updated plan";
-    },
-    variant: "simple",
-  },
-  "tool-ExitPlanMode": {
-    icon: LogOut,
-    title: (part) => {
-      const isPending =
-        part.state !== "output-available" && part.state !== "output-error";
-      return isPending ? "Finishing plan" : "Plan complete";
     },
     variant: "simple",
   },

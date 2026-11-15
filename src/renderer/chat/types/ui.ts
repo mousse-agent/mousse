@@ -62,9 +62,6 @@ export function toUIMessage(msg: ChatMessage): MousseUIMessage {
       output: msg.toolCall.response,
       title: msg.toolCall.title,
     })
-  } else if (msg.kind === 'plan_card' && msg.planCard) {
-    parts.push({ type: 'data-plan-card', data: msg.planCard } as DataPart)
-    if (msg.content.trim()) parts.push({ type: 'text', text: msg.content })
   } else if (msg.kind === 'progress' || msg.kind === 'warning' || msg.kind === 'context_compaction' || msg.kind === 'context_cleared') {
     parts.push({ type: `data-${msg.kind}` as string, data: msg.content } as DataPart)
   } else if (msg.role === 'assistant' && msg.streaming) {

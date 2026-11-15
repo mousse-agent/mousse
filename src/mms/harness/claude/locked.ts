@@ -61,6 +61,9 @@ export const CLAUDE_BUILTIN_TOOLS: readonly string[] = Object.freeze([
   'WebSearch', 'Workflow', 'Write'
 ])
 
+/** Claude Code's own plan-mode tools, turned off on every turn: Mousse's Plan mode is a read-only turn that replies with the plan. */
+export const CLAUDE_PLAN_TOOLS: readonly string[] = Object.freeze(['EnterPlanMode', 'ExitPlanMode'])
+
 /** Variables that hold Claude Code's credential: never visible to a sandboxed command. */
 export const CLAUDE_KEY_VARIABLES: readonly string[] = Object.freeze(['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN'])
 

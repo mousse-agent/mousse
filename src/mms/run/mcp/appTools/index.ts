@@ -1,13 +1,13 @@
 import type { RunEngine } from '../../RunEngine'
 import { appearanceTools } from './appearance'
 import { appletTools } from './applets'
+import { askUserTools } from './askUser'
 import { botMemoryTools, type BotMemoryToolHost } from './botMemory'
 import { botTools, type BotAppToolDeps } from './bots'
 import { browserTools } from './browser'
 import { delegationTools } from './delegation'
 import { devGuiTools } from './devGui'
 import type { AppToolHost } from './host'
-import { planTools } from './plans'
 import { profilerTools } from './profiler'
 import { projectGitTools } from './projectGit'
 import { quickActionTools } from './quickActions'
@@ -45,7 +45,7 @@ export {
 } from './delegation'
 
 /** The tool families in the order runtimes are sent them, after the delegation tools. */
-export const APP_TOOL_FAMILIES = ['skills', 'plans', 'tasks', 'quickActions', 'devGui', 'web', 'browser', 'applets', 'delegation', 'thread', 'schedules', 'bots', 'projectGit', 'profiler', 'appearance'] as const
+export const APP_TOOL_FAMILIES = ['skills', 'questions', 'tasks', 'quickActions', 'devGui', 'web', 'browser', 'applets', 'delegation', 'thread', 'schedules', 'bots', 'projectGit', 'profiler', 'appearance'] as const
 export type AppToolFamily = (typeof APP_TOOL_FAMILIES)[number]
 
 /**
@@ -108,12 +108,12 @@ export function createAppToolRegistry(input: {
     ...input.options
   })
   const families = {} as Record<AppToolFamily, string[]>
-  const add = (family: AppToolFamily, tools: ReturnType<typeof planTools>): void => {
+  const add = (family: AppToolFamily, tools: ReturnType<typeof askUserTools>): void => {
     families[family] = tools.map((tool) => tool.name)
     for (const tool of tools) registry.register(tool)
   }
   add('delegation', delegationTools(host))
-  add('plans', planTools(host))
+  add('questions', askUserTools(host))
   add('tasks', taskTools(host))
   add('thread', engine ? threadTools(host, engine, input.bots) : [])
   add('schedules', [...(engine ? scheduleTools(host, engine) : []), ...automationTools(host)])

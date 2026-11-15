@@ -35,7 +35,6 @@ export function fakeAppToolHost(overrides: Partial<AppToolHost> = {}) {
   const host: AppToolHost = {
     delegation: vi.fn(() => delegation),
     askUser: vi.fn(async () => ({ q1: 'a' })),
-    presentPlan: vi.fn(),
     tasks: () => tasks,
     queueSnapshot: () => ({ items: [], claimed: [], revision: 'rev-0', open: true }),
     queueCommand: (threadId, command, options) => {

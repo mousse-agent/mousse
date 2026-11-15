@@ -55,7 +55,6 @@ export const NON_IDEMPOTENT_TOOLS: ReadonlySet<string> = new Set([
   'answer_subagent',
   'task_status',
   'task_cancel',
-  'present_plan',
   'ask_user',
   'queue_enqueue'
 ])

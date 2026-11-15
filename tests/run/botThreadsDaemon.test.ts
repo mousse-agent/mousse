@@ -132,18 +132,6 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     void w.orch.questions.requestAnswers([{ id: 'q', prompt: 'Which?', options: [{ id: 'a', label: 'A' }] }], waiting.id, {})
     await expect(w.send(waiting.id, 's3')).rejects.toMatchObject({ code: 'questions_pending' })
     expect(w.orch.questions.listPendingForThread(waiting.id)).toHaveLength(1)
-    // So is a plan shown for review: the owner's next message there answers it, never the bot's. Once they reply, it goes.
-    const planned = w.d.store.createThread('Planned', w.project.id)
-    const internals = w.d.orch as unknown as { sessionAls: { run(session: unknown, fn: () => void): void }; getOrCreateSession(id: string): unknown; presentPlanCard(payload: { title: string; markdown: string }, threadId: string): void }
-    internals.sessionAls.run(internals.getOrCreateSession(planned.id), () => internals.presentPlanCard({ title: 'Plan', markdown: '1. Do it.' }, planned.id))
-    await expect(w.send(planned.id, 's4')).rejects.toMatchObject({ code: 'plan_review_pending' })
-    // Another agent's message there is no reply from the owner: the plan still waits for them.
-    const agentSent = await w.d.orch.send('An agent says: go ahead.', false, { threadId: planned.id, clientRequestId: 'agent-1', agent: { kind: 'agent', threadId: 'other-thread', runId: 'other-run', toolCallId: 'x', hops: 1 } } as never)
-    await w.settled(agentSent.runId!)
-    await expect(w.send(planned.id, 's4b')).rejects.toMatchObject({ code: 'plan_review_pending' })
-    const replied = await w.d.orch.send('Not yet, change step 1.', false, { threadId: planned.id, clientRequestId: 'owner-1' })
-    await w.settled(replied.runId!)
-    await expect(w.send(planned.id, 's5')).resolves.toMatchObject({ runId: expect.any(String) })
   })
 
   // A bot's thread that may not start, message, stop or archive threads, whatever let the call get this far.
@@ -239,11 +227,6 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     void w.orch.questions.requestAnswers([{ id: 'q', prompt: 'Which?', options: [{ id: 'a', label: 'A' }] }], waiting.id, {})
     expect(await w.stop(waiting.id, 'run-x', 'x1')).toEqual({ status: 'rejected', reason: 'questions_pending' })
     expect(w.orch.questions.listPendingForThread(waiting.id)).toHaveLength(1)
-    // A plan waiting for review: refused.
-    const planned = w.d.store.createThread('Planned', w.project.id)
-    const internals = w.d.orch as unknown as { sessionAls: { run(session: unknown, fn: () => void): void }; getOrCreateSession(id: string): unknown; presentPlanCard(payload: { title: string; markdown: string }, threadId: string): void }
-    internals.sessionAls.run(internals.getOrCreateSession(planned.id), () => internals.presentPlanCard({ title: 'Plan', markdown: '1. Do it.' }, planned.id))
-    expect(await w.stop(planned.id, 'run-y', 'x2')).toEqual({ status: 'rejected', reason: 'plan_review_pending' })
     // A subagent of the thread waiting on an approval: refused, and the approval still waits (a Stop would cancel it).
     const parent = w.d.store.createThread('Parent', w.project.id)
     const child = w.d.store.createThread('Child', w.project.id, undefined, { lineage: { parentThreadId: parent.id, rootThreadId: parent.id, relationship: 'subagent' } })

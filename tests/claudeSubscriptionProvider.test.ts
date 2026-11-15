@@ -589,7 +589,9 @@ describe('Claude Subscription native provider', () => {
     await service.chat({ ...chatInput(home), mode: 'plan' })
     expect(decision).toMatchObject({ behavior: 'allow' })
     expect(asked).toHaveBeenCalledOnce()
-    expect(inputs[2].permissionMode).toBe('plan')
+    // Read-only by Mousse's own checks, not Claude Code's plan mode, whose tools never reach the model.
+    expect(inputs[2].permissionMode).toBe('default')
+    expect(inputs[2].disallowedTools).toEqual(expect.arrayContaining(['EnterPlanMode', 'ExitPlanMode']))
     expect(inputs[2].allowDangerouslySkipPermissions).toBeUndefined()
   })
   describe('permission modes', () => {

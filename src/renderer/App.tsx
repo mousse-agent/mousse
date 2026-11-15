@@ -154,7 +154,6 @@ export default function App() {
   const setAppInfo = useAppStore((s) => s.setAppInfo)
 
   const setMainView = useAppStore((s) => s.setMainView)
-  const openDocument = useAppStore((s) => s.openDocument)
 
   const mainView = useAppStore((s) => s.mainView)
 
@@ -394,9 +393,6 @@ export default function App() {
         setMainView(view)
         setMainAreaOpen(true)
       }),
-      window.mousse.documents.onOpened(({ title, markdown }) => {
-        openDocument(title, markdown)
-      }),
       // A thread's notification was clicked: open that thread.
       window.mousse.app.onOpenThread(applyIfCurrent((threadId: string) => void selectThread(threadId))),
       // A thread the person is not looking at finished, needs them, or stopped.
@@ -444,7 +440,6 @@ export default function App() {
     setTurnState,
     setTurnSnapshot,
     setMainView,
-    openDocument,
     setMainAreaOpen,
     profileId,
     profileReady,

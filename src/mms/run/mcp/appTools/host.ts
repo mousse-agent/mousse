@@ -4,7 +4,7 @@ import type { PermissionMode } from '../../../../shared/permissionMode'
 import type { ModelOverride } from '../../../../shared/providerInstances'
 import type { AgentAccessLevel, AgentAccessSettings } from '../../../../shared/settings'
 import type { ApprovalTag } from '../../../orchestrator/UserQuestionService'
-import type { ChatMessage, CreateScheduledJobInput, DocumentOpenPayload, PendingUserQuestions, QueuedMessage, ScheduledJob, Thread, UserQuestion, UserQuestionAnswers } from '../../../../shared/types'
+import type { ChatMessage, CreateScheduledJobInput, PendingUserQuestions, QueuedMessage, ScheduledJob, Thread, UserQuestion, UserQuestionAnswers } from '../../../../shared/types'
 import type { ScheduledJobOptionsInput } from '../../../scheduled/validateJobOptions'
 import type { DevGuiTools } from '../../../devgui/DevGuiTools'
 import type { SkillsRegistry } from '../../../integrations/skills/SkillsRegistry'
@@ -224,9 +224,6 @@ export interface AppToolHost extends DelegationToolsHost {
   ): Promise<UserQuestionAnswers>
   /** Dismisses the thread's open questions (an in-process `ask_user` whose turn stopped). */
   dismissQuestions?(threadId: string): void
-  presentPlan(threadId: string | undefined, payload: { title: string; markdown: string }): void
-  /** The deprecated `show_document`, in process only. */
-  openDocument?(payload: DocumentOpenPayload): void
   /** The thread's task queue; null when the owner keeps none (no task tools). */
   tasks(threadId: string | undefined): TaskQueue | null
   /** The run engine of the thread tools (`thread_read`, the queue, fork and merge-back); MCP only. */

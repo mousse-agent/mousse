@@ -452,9 +452,7 @@ export function knownToolName(rawName: string | undefined): string | undefined {
       return 'TodoWrite'
     case 'plan':
     case 'planwrite':
-    case 'presentplan':
-    case 'exitplanmode':
-      return rawName === 'ExitPlanMode' ? 'ExitPlanMode' : 'PlanWrite'
+      return 'PlanWrite'
     case 'websearch':
       return 'WebSearch'
     case 'webfetch':
@@ -635,8 +633,7 @@ function typedDraft(
       const items = todosOf(input.todos)
       return items ? { ...base, kind: 'todo', items } : undefined
     }
-    case 'PlanWrite':
-    case 'ExitPlanMode': {
+    case 'PlanWrite': {
       const text = str(input.markdown) ?? str(input.plan) ?? str(input.text)
       return text ? { ...base, kind: 'plan', text: capHead(text, ACTIVITY_GENERIC_CAP_BYTES).text } : undefined
     }

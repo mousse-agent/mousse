@@ -24,7 +24,6 @@ import type {
   OrchestratorContextUsageInput,
   OrchestratorSendInput,
   ContextUsageSnapshot,
-  DocumentOpenPayload,
   FileAsset,
   EditorInfo,
   FileEntry,
@@ -405,13 +404,6 @@ const api = {
       ) => cb(payload)
       ipcRenderer.on('queue:updated', handler)
       return () => ipcRenderer.removeListener('queue:updated', handler)
-    }
-  },
-  documents: {
-    onOpened: (cb: (payload: DocumentOpenPayload) => void): (() => void) => {
-      const handler = (_: Electron.IpcRendererEvent, payload: DocumentOpenPayload) => cb(payload)
-      ipcRenderer.on('document:opened', handler)
-      return () => ipcRenderer.removeListener('document:opened', handler)
     }
   },
   quickActions: {

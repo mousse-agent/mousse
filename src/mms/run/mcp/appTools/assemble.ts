@@ -179,6 +179,12 @@ export function instructionsHash(text: string): string {
 }
 
 /**
+ * What a person's Plan-mode turn is told. The turn is read-only in every runtime (its tools and permissions say so);
+ * the plan is the reply itself, with no tool to submit it.
+ */
+export const PLAN_TURN_NOTE = 'Plan mode: this turn is read-only. Inspect what you need with read-only tools; do not edit files or run commands that change anything. Reply with the plan itself as your message, in markdown: steps, file paths and how to check the result. Use ask_user first when the request is ambiguous.'
+
+/**
  * What a runtime with its own loop is told at the start of each prompt (PR 2 §2 "Instructions"):
  * skills loaded for the turn (an explicit `/skill` included), the mode's own instructions, the
  * conversation's applet catalogue, and which Mousse tools are usable now. Empty when there is none.

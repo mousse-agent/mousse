@@ -9,7 +9,6 @@ import {
 describe('assistant response actions', () => {
   it('only renders for completed ordinary assistant replies', () => {
     expect(canShowAssistantMessageActions({ role: 'assistant' })).toBe(true)
-    expect(canShowAssistantMessageActions({ role: 'assistant', kind: 'plan_card' })).toBe(true)
     expect(canShowAssistantMessageActions({ role: 'assistant', streaming: true })).toBe(false)
     expect(canShowAssistantMessageActions({ role: 'assistant', incomplete: true })).toBe(false)
     expect(canShowAssistantMessageActions({ role: 'assistant', kind: 'thinking' })).toBe(false)

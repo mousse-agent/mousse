@@ -59,7 +59,6 @@ const DECISIONS: Record<string, string> = {
   'a thread\'s permission request': 'src/renderer/chat/components/agent-elements/tools/permission-request.tsx',
   'a tool\'s approval footer': 'src/renderer/chat/components/agent-elements/tools/tool-approval-footer.tsx',
   'an agent-made quick action': 'src/renderer/chat/components/agent-elements/tools/quick-action-tool.tsx',
-  'a plan to approve': 'src/renderer/chat/components/agent-elements/tools/plan-tool.tsx',
   'an approval in the composer\'s dock': 'src/renderer/components/ComposerNotice.tsx',
   'a question or approval in the composer': 'src/renderer/components/ComposerQuestionModal.tsx',
   'Needs you asks (bots, workflows, first-creation)': 'src/renderer/components/asks/AskCard.tsx',

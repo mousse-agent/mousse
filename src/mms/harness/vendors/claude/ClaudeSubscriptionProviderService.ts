@@ -37,7 +37,7 @@ import { TURN_TOKEN_KEY } from '../../../run/mcp/appTools/registry'
 import type { LoginSession } from '../../../providers/LoginSession'
 import { settingsMirror, type MirrorField, type VendorMirror } from '../../vendorMirror'
 import { withEnforced } from '../../env'
-import { CLAUDE_BOT_FILE_DATA_NOTE, CLAUDE_FILE_TEXT_TOOLS, CLAUDE_LOCKED_REMOVED_OPTIONS, claudeBotTemp, claudeCommandsRefusal, holdClaudeBotTemp, ClaudeLockedGate, claudeLockedOptions, claudeLockedSettingsFile, claudeOwnStorage, claudeLockedSpawn, type ClaudeLockedTurn } from '../../claude/locked'
+import { CLAUDE_BOT_FILE_DATA_NOTE, CLAUDE_FILE_TEXT_TOOLS, CLAUDE_LOCKED_REMOVED_OPTIONS, CLAUDE_PLAN_TOOLS, claudeBotTemp, claudeCommandsRefusal, holdClaudeBotTemp, ClaudeLockedGate, claudeLockedOptions, claudeLockedSettingsFile, claudeOwnStorage, claudeLockedSpawn, type ClaudeLockedTurn } from '../../claude/locked'
 import {
   claudeExtraArgs,
   cliFingerprint,
@@ -1490,8 +1490,8 @@ export class ClaudeSubscriptionProviderService {
    *   only after a sign-in check that answered, so the account is known here);
    * - never for a process that runs in Auto (`runsAuto`): under an unknown client name Claude Code's auto mode
    *   checks each tool call with a billed request of its own instead of Anthropic's server-side check. A process
-   *   with Mousse's name never runs in Auto (`liveModeFor`), and its plan mode never takes auto semantics
-   *   (`useAutoModeDuringPlan` off in its flag settings).
+   *   with Mousse's name never runs in Auto (`liveModeFor`), and never enters Claude Code's plan mode (its plan tools
+   *   are turned off).
    */
   private entrypointEnv(env: NodeJS.ProcessEnv, runsAuto: boolean, cwd?: string): Record<string, string> {
     const options = cwd ? { cwd } : {}
@@ -3164,8 +3164,8 @@ export class ClaudeSubscriptionProviderService {
     const planTurn = input.mode === 'plan'
     const readOnlyChild = input.child?.readOnly === true
     // Plan turns and read-only children route every call through the hook and canUseTool's
-    // read-only allowlist. A read-only child keeps the default permission mode: plan mode would
-    // inject its planning and ExitPlanMode flow into a research or review task.
+    // read-only allowlist, in Claude Code's default permission mode: its own plan mode would
+    // inject its planning and ExitPlanMode flow, and a plan turn replies with its plan as a message.
     const restricted = planTurn || readOnlyChild
     // Full access needs Claude Code to allow bypassing permissions. The gateway already lowers the
     // mode when the user's settings forbid it; reading them again here keeps a settings edit made
@@ -3198,19 +3198,12 @@ export class ClaudeSubscriptionProviderService {
       // What a live process is keyed on besides `hard`: the settings without Ultracode, which switches in place.
       const launchSettings = turnSettings
       if (ultracode && !locked) turnSettings = { ...turnSettings, ultracode: true }
-      // Plan mode takes auto mode's semantics by default when auto mode is available: under Mousse's client name that
-      // would check tool calls with billed requests of their own (`entrypointEnv`), so a process with it never does.
-      if (env.CLAUDE_CODE_ENTRYPOINT === MOUSSE_CLAUDE_ENTRYPOINT) turnSettings = { ...turnSettings, useAutoModeDuringPlan: false } as SdkSettings
       const flags: LiveFlags = { model: selected.baseId, effort: effort ?? null, ultracode: ultracode && !locked }
       // The thread's permission mode, in Claude Code's own terms: Ask asks about everything it would
       // not allow itself, Auto-accept edits lets edits through, Auto hands the decision to Claude Code's
       // auto mode (its classifier runs what it judges safe and asks through canUseTool about the rest),
       // Full access bypasses its checks.
-      const permissionMode: PermissionMode = planTurn
-        ? 'plan'
-        : readOnlyChild
-          ? 'default'
-          : CLAUDE_PERMISSION_MODES[threadMode]
+      const permissionMode: PermissionMode = restricted ? 'default' : CLAUDE_PERMISSION_MODES[threadMode]
       const launchAppend = locked ? [] : claudeLaunchAppendSystemPrompt(claudeExtraArgs(storedCliArgs(this.launchSettings())), input.cwd)
       const appendTexts = [input.systemPromptAppend ?? '', ...launchAppend]
       // What a live process is started for (`HARD_PARTS`); a process the turn can reuse already holds the conversation.
@@ -3322,7 +3315,9 @@ export class ClaudeSubscriptionProviderService {
           // Claude Code copies the session up to the cut into a new one and leaves the source as it was.
           ...(branch ? { resumeSessionAt: branch.at, forkSession: true, sessionId: branch.id } : {}),
           permissionMode,
-          // A live query can switch to bypass on a later turn even when it starts in plan or ask mode,
+          // Claude Code's own plan tools never reach the model: Mousse's Plan mode is a read-only turn whose reply is the plan.
+          disallowedTools: [...CLAUDE_PLAN_TOOLS],
+          // A live query can switch to bypass on a later turn even when it starts in ask mode,
           // unless Claude Code's settings forbid bypassing permissions at all.
           ...(permissionMode === 'bypassPermissions' || (isLive && !readOnlyChild && !bypassDisabled) ? { allowDangerouslySkipPermissions: true } : {}),
           // The skills enabled in Mousse reach Claude as a local plugin, next to the user's own.

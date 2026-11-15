@@ -141,15 +141,15 @@ describe('the client name of a turn', () => {
     expect(started.at(-1)!.options.env!.CLAUDE_CODE_ENTRYPOINT).toBe(MOUSSE_CLAUDE_ENTRYPOINT)
   })
 
-  it("a plan turn keeps its thread's name, and a named process never takes auto semantics in plan mode", async () => {
+  it("a plan turn keeps its thread's name and never enters Claude Code's plan mode", async () => {
     const fixture = service()
-    const settingsOf = () => (fixture.started.at(-1)!.options.settings ?? {}) as Record<string, unknown>
-    // In an Ask thread: the name, with plan mode's auto semantics off.
+    const optionsOf = () => fixture.started.at(-1)!.options
+    // In an Ask thread: the name; the turn runs read-only in the default mode, with Claude Code's plan tools off.
     expect((await fixture.turn('ask', 'ask-thread', { mode: 'plan' })).CLAUDE_CODE_ENTRYPOINT).toBe(MOUSSE_CLAUDE_ENTRYPOINT)
-    expect(settingsOf().useAutoModeDuringPlan).toBe(false)
+    expect(optionsOf().permissionMode).toBe('default')
+    expect(optionsOf().disallowedTools).toEqual(expect.arrayContaining(['EnterPlanMode', 'ExitPlanMode']))
     // In an Auto thread: the default, like the thread's other turns, so its process is not restarted for it.
     expect((await fixture.turn('auto', 'auto-thread', { mode: 'plan' })).CLAUDE_CODE_ENTRYPOINT).toBeUndefined()
-    expect(settingsOf()).not.toHaveProperty('useAutoModeDuringPlan')
   })
 
   it('a read-only child of an Auto thread runs in the default mode, so it takes the name', async () => {
@@ -192,7 +192,6 @@ describe('an explicitly configured native subscription proxy', () => {
     await fixture.service.compactConversation('thread', 'history', undefined, undefined, new AbortController().signal)
     expect(fixture.started.at(-1)!.options.env!.CLAUDE_CODE_ENTRYPOINT).toBeUndefined()
     expect((await fixture.turn('full', 'new-thread', { mode: 'plan' })).CLAUDE_CODE_ENTRYPOINT).toBe('mousse')
-    expect((fixture.started.at(-1)!.options.settings as Record<string, unknown>).useAutoModeDuringPlan).toBe(false)
     fixture.service.commitConversation('new-thread', 'new-history')
     await fixture.service.compactConversation('new-thread', 'new-history', undefined, undefined, new AbortController().signal)
     expect(fixture.started.at(-1)!.options.env!.CLAUDE_CODE_ENTRYPOINT).toBe('mousse')

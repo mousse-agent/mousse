@@ -93,7 +93,6 @@ describe('claudeActivityStart and claudeActivityComplete', () => {
     expect(claudeActivityStart('Bash', { cmd: 'ls' }, true)).toMatchObject({ kind: 'generic' })
     expect(claudeActivityStart('Glob', { pattern: '*.ts' }, true)).toEqual({ kind: 'search', scope: 'files', query: '*.ts' })
     expect(claudeActivityStart('WebFetch', { url: 'https://a.test' }, true)).toEqual({ kind: 'web_search', query: 'https://a.test' })
-    expect(claudeActivityStart('ExitPlanMode', { plan: '# Plan' }, true)).toEqual({ kind: 'plan', text: '# Plan' })
     expect(claudeActivityStart('mcp__srv__tool', { a: 1 }, true)).toEqual({ kind: 'generic', server: 'srv', input: { a: 1 } })
     // Nothing is typed before the arguments are in, except a subagent call.
     expect(claudeActivityStart('Bash', undefined, true)).toBeUndefined()
@@ -276,12 +275,10 @@ describe('background agents, plans and stopped turns', () => {
     expect(saved(reader).byCall('bg')).toMatchObject({ kind: 'subagent', status: 'done', background: true, summary: 'Running in the background' })
   })
 
-  it('stopping the turn interrupts a backgrounded agent and an open plan, and a running child with its parent', () => {
+  it('stopping the turn interrupts a backgrounded agent, and a running child with its parent', () => {
     const events = readFrames(
       [
         ...launch,
-        stream('plan', 'ExitPlanMode'),
-        assistant('plan', 'ExitPlanMode', { plan: '# The plan' }),
         stream('parent', 'Agent'),
         assistant('parent', 'Agent', { description: 'Parent', prompt: 'p' }),
         stream('child', 'Bash', 'parent'),
@@ -290,15 +287,10 @@ describe('background agents, plans and stopped turns', () => {
       'stop'
     )
     const { byCall } = saved(events)
-    for (const callId of ['bg', 'plan', 'parent', 'child']) {
+    for (const callId of ['bg', 'parent', 'child']) {
       expect(byCall(callId)).toMatchObject({ status: 'interrupted', interruptedBy: 'stop', summary: 'Stopped' })
     }
     expect(byCall('child').parentId).toBe(byCall('parent').id)
-  })
-
-  it('an open plan on a settled turn is done', () => {
-    const events = readFrames([stream('plan', 'ExitPlanMode'), assistant('plan', 'ExitPlanMode', { plan: '# The plan' })], 'no_result')
-    expect(saved(events).byCall('plan')).toMatchObject({ kind: 'plan', status: 'done' })
   })
 })
 
@@ -544,12 +536,10 @@ describe('what the frame reader keeps of a call', () => {
     expect(JSON.stringify(failed)).not.toContain('"diff"')
   })
 
-  it('a long command and a long plan keep their kind through completion, and a Mousse delegation keeps its record', () => {
+  it('a long command keeps its kind through completion, and a Mousse delegation keeps its record', () => {
     const command = `cat > f <<'EOF'\n${big}EOF`
     const bash = saved(readFrames([stream('c', 'Bash'), assistant('c', 'Bash', { command }), answer('c', 'ok', { stdout: 'ok', stderr: '', interrupted: false })]))
     expect(bash.byCall('c')).toMatchObject({ kind: 'command', status: 'done', output: 'ok' })
-    const plan = saved(readFrames([stream('p', 'ExitPlanMode'), assistant('p', 'ExitPlanMode', { plan: big }), answer('p', 'approved')]))
-    expect(plan.byCall('p')).toMatchObject({ kind: 'plan', status: 'done' })
     const events = readFrames([
       stream('d', 'mcp__mousse__delegate_task'),
       assistant('d', 'mcp__mousse__delegate_task', { title: 'Reviewer', prompt: big + big }),
