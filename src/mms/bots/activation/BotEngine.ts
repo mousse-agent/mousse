@@ -7488,7 +7488,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.entry(botId)
     this.store.db.transaction(() => {
       const reminder = this.store.reminderForMessage(botId, messageId)
-      if (!reminder || reminder.work || reminder.wake || reminder.status !== 'delivered' || this.store.messageForgotten(botId, messageId))
+      if (!this.store.message(messageId) || !reminder || reminder.work || reminder.wake || reminder.status !== 'delivered' || this.store.messageForgotten(botId, messageId))
         throw new BotEngineError('reminder_not_found', 'This message has no reminder to snooze.')
       if (this.store.snoozedCopy(reminder.id)) throw new BotEngineError('reminder_snoozed', 'This reminder is already snoozed.')
       if (this.store.waitingReminders(botId).length >= MAX_WAITING_REMINDERS)
