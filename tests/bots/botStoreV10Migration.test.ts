@@ -45,10 +45,10 @@ describe('bots.db v9 → v10', () => {
       expect(rows).toHaveLength(1)
       expect(rows).toMatchObject(before[table])
     }
-    expect(store.get('SELECT snoozed_from, owner_set FROM bot_reminders')).toEqual({ snoozed_from: null, owner_set: 0 })
+    expect(store.get('SELECT snoozed_from, owner_set FROM bot_reminders')).toEqual({ snoozed_from: null, owner_set: null })
     expect(store.get('SELECT tell, tell_at, told_at FROM bot_messages')).toEqual({ tell: null, tell_at: null, told_at: null })
     expect(store.get('SELECT tell_json FROM bot_registry')).toEqual({ tell_json: null })
-    expect(store.reminder('r')).toMatchObject({ snoozedFrom: null, ownerSet: false, wake: true, chain: 2 })
+    expect(store.reminder('r')).toMatchObject({ snoozedFrom: null, ownerSet: null, wake: true, chain: 2 })
     expect(store.message('m')).toMatchObject({ tell: null, tellAt: null, toldAt: null, ownerReaction: { emoji: '❤️', at: T } })
     expect(store.registry('b')).toMatchObject({ tellJson: null })
     const rows = tables.map((table) => store!.all(`SELECT * FROM ${table}`))
@@ -98,14 +98,18 @@ describe('bots.db v9 → v10', () => {
     store.insertMessage({ ...store.message('m')!, id: 'm2' })
     store.insertReminder({ ...store.reminder('r')!, id: 'r2' })
     expect(store.message('m2')).toMatchObject({ tell: null, tellAt: null, toldAt: null })
-    expect(store.reminder('r2')).toMatchObject({ snoozedFrom: null, ownerSet: false })
+    expect(store.reminder('r2')).toMatchObject({ snoozedFrom: null, ownerSet: null })
   })
 
   it('enforces the reserved value domains on STRICT tables', () => {
     buildV9()
     store = new BotStore({ profileHome: profile })
-    for (const ownerSet of [-1, 2, null, 'invalid'])
+    for (const ownerSet of [-1, 2, 'invalid'])
       expect(() => store!.run('UPDATE bot_reminders SET owner_set = ?', ownerSet)).toThrow()
+    for (const [value, ownerSet] of [[null, null], [0, false], [1, true]] as const) {
+      store.run('UPDATE bot_reminders SET owner_set = ?', value)
+      expect(store.reminder('r')?.ownerSet).toBe(ownerSet)
+    }
     for (const tell of ['never', '', 1])
       expect(() => store!.run('UPDATE bot_messages SET tell = ?', tell)).toThrow()
     for (const tell of ['now', 'soon', 'later', null])

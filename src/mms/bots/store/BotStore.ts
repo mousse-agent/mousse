@@ -376,7 +376,7 @@ CREATE INDEX bot_reminders_wakes ON bot_reminders(bot_id, wake, created_at);
     version: 10,
     sql: `
 ALTER TABLE bot_reminders ADD COLUMN snoozed_from TEXT;
-ALTER TABLE bot_reminders ADD COLUMN owner_set INTEGER NOT NULL DEFAULT 0 CHECK(owner_set IN (0, 1));
+ALTER TABLE bot_reminders ADD COLUMN owner_set INTEGER CHECK(owner_set IN (0, 1));
 ALTER TABLE bot_messages ADD COLUMN tell TEXT CHECK(tell IN ('now', 'soon', 'later'));
 ALTER TABLE bot_messages ADD COLUMN tell_at TEXT;
 ALTER TABLE bot_messages ADD COLUMN told_at TEXT;
@@ -601,8 +601,8 @@ export interface BotReminderRow {
   chain: number
   /** The reminder this one was snoozed from (v10); null for none. */
   snoozedFrom?: string | null
-  /** Whether the owner's message or tap started the turn that set it (v10); false for older rows. */
-  ownerSet?: boolean
+  /** Whether the owner's message or tap started the turn that set it (v10); null preserves pre-v10 behavior. */
+  ownerSet?: boolean | null
 }
 
 function jsonOf<T>(value: unknown): T | null {
@@ -634,7 +634,7 @@ function reminderOf(row: Row): BotReminderRow {
     fired: jsonOf<BotWakeFired>(row.fired_json),
     chain: num(row.chain) ?? 0,
     snoozedFrom: str(row.snoozed_from),
-    ownerSet: num(row.owner_set) === 1
+    ownerSet: num(row.owner_set) === null ? null : num(row.owner_set) === 1
   }
 }
 
