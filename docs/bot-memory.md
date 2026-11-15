@@ -20,6 +20,7 @@ Every bot has an append-only **journal** in `bots.db` (`bot_journal`). It holds 
 - **Caps** (estimated tokens): owner 600, notes 1,400, run notes 500. A save over its kind's cap fails with that kind's entries. Superseded and expired entries do not count.
 - **Refused saves:** over 400 characters, unresolved relative dates ("tomorrow"; the refusal gives the absolute date), and anything the guard rejects.
 - **Lists and longer documents** are files in the bot's files folder, which the chat and its work can both change; memory keeps one short note per list with its path (`instructions.ts`).
+- **Pack order:** entries keep the place where they were first learned when the bot replaces them or the owner edits them. Each version still has its own date.
 - **Dates:** `learned_at`, plus optional `valid_from` and `expires_at`. An entry past `expires_at` becomes `expired`: out of the pack, still listed and searchable.
 - **Forget** (chat lane, or the owner through `bots.memory.forget`): the entry's text is removed and its hash kept, so it is refused if saved again. Cited journal rows (`refs`), their exact copies, and the entry's save records are redacted to `[removed at your request · <date>]`, with their index rows. Entries citing a redacted row are forgotten too, and a redacted `bm:` row's `bot_messages` text is blanked. Thread transcripts and runtime session files are caches outside this.
 
@@ -39,6 +40,7 @@ Every bot has an append-only **journal** in `bots.db` (`bot_journal`). It holds 
 
 - **The window moves in chunks.** When it passes 8k tokens, its oldest rows drop until it is under 4k and fold into the chat summary, newest first: owner messages cut at 300 characters, the first line of a run report, the first sentence of a reply. No model call. Between jumps each pack's prefix extends the last one, so prompt caches hold.
 - A run's request (its prompt, after the pack) ends with "Your last message is your report to the owner …" (`BOT_RUN_REPORT_LINE`), which the engine appends.
+- **Missed standing wishes.** After a settled chat turn, the fallback saves a standing wish the turn did not save. If the owner entries are full, the refusal is counted in `bot_memory_state`. The next chat situation gives the count and asks the bot to tell the owner in its own words that its notes about them are full and ask which to drop. Only a settled turn that carried the count acknowledges it; failures and consults leave it pending, and a run is not told.
 - The rows of the current activation (the owner's new message) are left out: they arrive as the request.
 - The **guard** checks every row entering a pack. A piece that looks like a credential is replaced in place by "[held back: looks like a secret · memory_read j12 shows it]", and the rest of the row stays (after "password:" the rest of the line goes with it, since a password may have spaces). A row with hidden characters or instruction-shaped text is held back whole: "(held back: … memory_read j12 shows it.)". The owner's own words skip only the instruction check.
 

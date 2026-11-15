@@ -239,6 +239,7 @@ A wake is the bot's own follow-up: `wake({ brief, inMinutes | at | thread | pr, 
 - **When it comes,** the bot carries on in its own chat: a chat turn keyed `wake:<id>`, which no person started (`ownerChatTurn` is false, so it reads the owner's threads but never starts, messages or stops one), queued in the transaction that marks the wake delivered, so it wakes once. Its input is a `[Mousse]` line with what happened (the thread's id and status, or the pull request and that it merged) and the brief the bot wrote (`wakeInput`). A quiet line (`bm_wake_<id>`, a service line) says why the bot speaks unasked. A paused bot, or one that can't run then, has the wake said as a line instead.
 - **Events.** `thread`: one of the owner's threads the bot may see (it needs "use your threads"; `botThreadReach`), working when the wake is set; it fires when the thread is idle again (`wakeThread`, checked when any run ends or a thread is archived, and each scheduler tick). `pr`: `owner/repo#N` or its link, read through the owner's project of that repository (`pullRequestState`, every 2 minutes), open when set; it fires when it merges.
 - **Expiry.** A wake on an event gives up after `hours` (default 24, at most a week; `due_at` holds that time). A closed pull request, an archived or deleted thread, a thread out of the bot's sight, or the time passing first wakes it once anyway, saying why (`fired_json`: `{ kind: 'ended', reason }`).
+- **Brief.** Wakes and background commands refuse a brief over 2,000 characters after trimming, with a request to shorten it. A brief of exactly 2,000 characters is kept whole.
 - **Limits.** At most 5 in a row with no owner's message between them (`chain`: a wake set in a wake's own turn is the next), 30 set per bot in any 24 hours (cancelled ones count), and the 50 waiting reminders. A wake starts when it is due, at any hour.
 - The bot is told to use wakes when it waits on something (a pull request, a build, a thread it started) instead of checking on a schedule or promising to look later.
 
@@ -608,6 +609,8 @@ Claude Code and Codex on the owner's entries report no process: Codex's app-serv
 ## Memory
 
 Mousse keeps an append-only **bot journal** in `bots.db` of everything it sees a bot do and be told. Capped, dated **bot memory** entries, the **chat summary** and FTS5 search sit on top of it. Every activation's first dispatch gets a context pack built from it: the chat pack in the chat lane, the run brief in the run lane. The bot has five tools that are always on and never grantable: `memory_search`, `memory_read`, `memory_list`, `memory_save` and `memory_forget`; runs may only save run notes and never forget. Details: [`bot-memory.md`](bot-memory.md).
+
+Corrections and edits keep a memory entry in its original pack position. When the standing-wish fallback cannot save because the owner entries are full, the next chat situation tells the bot how many wishes did not fit and asks it to explain and ask which notes to drop. The notice clears only after a chat turn carrying it settles.
 
 ### What's new for bots
 
