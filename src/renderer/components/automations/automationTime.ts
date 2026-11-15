@@ -125,8 +125,8 @@ export interface SkippedDate {
 
 /**
  * The days in the coming year on which a cron schedule says it runs but cannot, on this computer's clock: a time the
- * clock skips when it moves forward (daylight saving), or a day of the month that a month does not have (the 31st,
- * Feb 29). Repeats of an interval and one-time runs skip nothing. Read on this computer's clock, as the scheduler reads it.
+ * clock skips for an hourly schedule, or a day of the month that a month does not have (the 31st, Feb 29).
+ * Fixed-hour times in a clock gap run at its first valid minute instead. Repeats of an interval and one-time runs skip nothing. Read on this computer's clock, as the scheduler reads it.
  */
 export function skippedDates(schedule: JobSchedule, from: Date = new Date(), days = 366, limit = 6): SkippedDate[] {
   if (schedule.kind !== 'cron' || !schedule.expr) return []
@@ -154,6 +154,8 @@ export function skippedDates(schedule: JobSchedule, from: Date = new Date(), day
       }
     }
   }
+  // Fixed-hour jobs catch up at the first valid minute; hourly jobs keep their minute cadence.
+  if (hours.size !== 24) return out
   // A time the clock jumps over.
   const start = new Date(from.getFullYear(), from.getMonth(), from.getDate())
   for (let offset = 0; offset < days && out.length < limit; offset += 1) {

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
+import { skippedDates } from '../src/renderer/components/automations/automationTime'
 import { computeNextRun, nextOccurrenceAfter, occurrencesSince } from '../src/mms/scheduled/computeNextRun'
 
 const originalZone = process.env.TZ
@@ -39,6 +40,24 @@ describe.each(zones)('cron clock changes in $zone', (row) => {
     tomorrow.setDate(tomorrow.getDate() + 1)
     expect(computeNextRun(schedule, first)).toBe(tomorrow.toISOString())
     expect(computeNextRun(schedule, null, at(row.fall, `${row.repeatedHour}:10`, row.springOffset))).toBe(tomorrow.toISOString())
+  })
+
+  it('catches up once from before the gap and respects calendar fields', () => {
+    process.env.TZ = row.zone
+    const before = at(row.spring, '00:00', row.springOffset)
+    const due = at(row.spring, '03:00', row.summerOffset).toISOString()
+    const day = before.getDate()
+    const month = before.getMonth() + 1
+    const schedule = { kind: 'cron', expr: `15,30,45 2 ${day} ${month} 0` } as const
+    expect(computeNextRun(schedule, null, before)).toBe(due)
+    expect(occurrencesSince(schedule, due, at(row.spring, '04:00', row.summerOffset))).toBe(1)
+    expect(computeNextRun({ kind: 'cron', expr: '30 2 * * 1' }, null, before)).not.toBe(due)
+    expect(computeNextRun({ kind: 'cron', expr: '30 3 * * *' }, null, before)).toBe(at(row.spring, '03:30', row.summerOffset).toISOString())
+  })
+
+  it('does not describe a fixed-hour spring run as a skipped date', () => {
+    process.env.TZ = row.zone
+    expect(skippedDates({ kind: 'cron', expr: '30 2 * * *' }, at(row.spring, '00:00', row.springOffset), 2)).toEqual([])
   })
 
   it('keeps elapsed intervals and hourly cron cadence across both changes', () => {
