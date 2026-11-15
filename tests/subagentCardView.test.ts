@@ -386,12 +386,12 @@ describe('a subagent tool row', () => {
     expect(html).toContain('rows')
   })
 
-  it('starts a group folded once every task has finished', () => {
+  it('keeps listing its subagents once every task has finished', () => {
     const done = [card({ toolCallId: 'a', state: 'done', completedAt: NOW }), card({ toolCallId: 'b', state: 'failed', completedAt: NOW })]
     const html = withCards(done, createElement(SubagentCardGroup, { toolCallIds: ['a', 'b'] }, createElement('span', null, 'rows')))
-    expect(html).toContain('aria-expanded="false"')
+    expect(html).toContain('aria-expanded="true"')
     expect(html).toContain('1 failed')
-    expect(html).not.toContain('rows')
+    expect(html).toContain('rows')
   })
 
   it('leaves a single card alone, with no group header', () => {

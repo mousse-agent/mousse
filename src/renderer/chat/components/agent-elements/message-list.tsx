@@ -72,6 +72,7 @@ import {
   isTextPart,
   isV5ToolPart,
   partitionTurnSegments,
+  SUBAGENT_BURST_GAP_MS,
   isCompactionRow,
   settleFinishedTurn,
   turnAnswerText,
@@ -2455,6 +2456,19 @@ const TurnRow = memo(function TurnRow({
             isTurnStreaming
               ? (run) => run.some((msgIndex) => analyses[msgIndex]!.toolItems.some((item) => isRunningCall(item.part)))
               : undefined,
+            // Subagents started in quick succession share one card: only thinking between them, and each started
+            // within a short gap of the one before.
+            {
+              quiet: (msgIndex) => {
+                const items = analyses[msgIndex]!.toolItems;
+                return items.length > 0 && items.every((item) => item.part.type === "tool-Thinking");
+              },
+              join: (last, next) => {
+                const before = readCreatedAt(answerMsgs[last]);
+                const after = readCreatedAt(answerMsgs[next]);
+                return before == null || after == null || Math.abs(after - before) <= SUBAGENT_BURST_GAP_MS;
+              },
+            },
           );
           const chatStreamingStatus = isLastTurn && isStreaming ? "streaming" : undefined;
           const renderTool = (part: ToolPartBase, nestedTools: ToolPartBase[] | undefined, key: string) => (

@@ -269,4 +269,62 @@ describe('a thread whose turns start several subagents', () => {
     expect(text).not.toContain('Two separate changes')
     expect(text).toContain('Schedule builder and Link builder are on it.')
   })
+
+  /** A command the agent ran: tool work, which separates two starts. */
+  const command = (id: string, seconds: number): UIMessage =>
+    ({ id, role: 'assistant', createdAt: at(seconds), parts: [{ type: 'tool-Bash', toolCallId: id, state: 'output-available', input: { command: 'gh pr list' }, output: '' }] }) as unknown as UIMessage
+
+  /** A finished turn that started `titles` with `between` rows after each start; each card list as the chat shows it. */
+  async function showStarts(rows: UIMessage[], titles: string[]) {
+    const subagents = titles.map((title, index) => subagent(title, [[`d-${index}`, 0]], 'done'))
+    const cards = joinSubagentCards(collectSubagentCalls(rows), subagents, { loaded: true, turnActive: false })
+    await act(async () => {
+      vi.advanceTimersByTime(Math.max(0, T0 + 600_000 - Date.now()))
+    })
+    await act(async () => {
+      root.render(createElement(SubagentCardsContext.Provider, { value: cards },
+        createElement(MessageList, { messages: rows, status: chatStatusFromTurn({ phase: 'completed', turnId: 'run:9' }) })))
+    })
+    return [...host.querySelectorAll('.subagent-cards')].map((list) => ({
+      head: list.querySelector('.subagent-group-title')?.textContent ?? null,
+      // Each row opens its subagent's thread.
+      rows: [...list.querySelectorAll<HTMLButtonElement>('button.subagent-card')].filter((row) => !row.disabled).map((row) => row.textContent?.match(/^[A-Z][a-z]+ builder/)?.[0])
+    }))
+  }
+
+  it('shows a quick burst of starts as one card that lists them', async () => {
+    const titles = ['Archive builder', 'Schedule builder', 'Link builder']
+    const rows = [
+      user('u9', 0, 'Three changes, in parallel'),
+      thought('b0', 1, 'One subagent per change.'),
+      start('b1', 2, 'delegate_task', titles[0]!, 'd-0'),
+      thought('b2', 13, 'Next, the schedule.'),
+      start('b3', 14, 'delegate_task', titles[1]!, 'd-1'),
+      start('b4', 25, 'delegate_task', titles[2]!, 'd-2'),
+      reply('b5', 36, 'All three are on it.')
+    ]
+    expect(await showStarts(rows, titles)).toEqual([{ head: '3 subagents', rows: titles }])
+  })
+
+  it('gives starts far apart cards of their own', async () => {
+    const titles = ['Archive builder', 'Schedule builder']
+    // Tool work between the starts.
+    const worked = [
+      user('u9', 0, 'Two changes'),
+      start('w1', 2, 'delegate_task', titles[0]!, 'd-0'),
+      command('w2', 4),
+      start('w3', 6, 'delegate_task', titles[1]!, 'd-1'),
+      reply('w4', 20, 'Both are on it.')
+    ]
+    expect(await showStarts(worked, titles)).toEqual([{ head: null, rows: [titles[0]] }, { head: null, rows: [titles[1]] }])
+    // Only thinking between them, but minutes apart.
+    const later = [
+      user('u9', 0, 'Two changes'),
+      start('l1', 2, 'delegate_task', titles[0]!, 'd-0'),
+      thought('l2', 100, 'Now the schedule, after reading the code.'),
+      start('l3', 200, 'delegate_task', titles[1]!, 'd-1'),
+      reply('l4', 210, 'Both are on it.')
+    ]
+    expect(await showStarts(later, titles)).toEqual([{ head: null, rows: [titles[0]] }, { head: null, rows: [titles[1]] }])
+  })
 })

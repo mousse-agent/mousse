@@ -278,6 +278,37 @@ describe('foldTurnWork', () => {
 })
 
 describe('partitionTurnSegments', () => {
+  // Messages: c = subagent start, t = thought, x = tool call, r = reply. `near` says which starts are close in time.
+  const shape = (kinds: string, near = (_a: number, _b: number) => true) =>
+    partitionTurnSegments(
+      [...kinds].map((k) => k === 't' || k === 'x'),
+      [...kinds].map((k) => k === 'c'),
+      [...kinds].map(() => 1),
+      undefined,
+      { quiet: (i) => kinds[i] === 't', join: near },
+    )
+
+  it('joins starts in quick succession into one card list, the thoughts between them above it', () => {
+    expect(shape('ctcc')).toEqual([{ kind: 'message', msgIndex: 1 }, { kind: 'cards', msgIndices: [0, 2, 3] }])
+    expect(shape('tctcr')).toEqual([
+      { kind: 'message', msgIndex: 0 },
+      { kind: 'message', msgIndex: 2 },
+      { kind: 'cards', msgIndices: [1, 3] },
+      { kind: 'message', msgIndex: 4 },
+    ])
+  })
+
+  it('keeps a thought after the last start where it was', () => {
+    expect(shape('cctr')).toEqual([{ kind: 'cards', msgIndices: [0, 1] }, { kind: 'message', msgIndex: 2 }, { kind: 'message', msgIndex: 3 }])
+  })
+
+  it('starts a new card list after tool work, narration, or a long gap', () => {
+    expect(shape('cxc')).toEqual([{ kind: 'cards', msgIndices: [0] }, { kind: 'message', msgIndex: 1 }, { kind: 'cards', msgIndices: [2] }])
+    expect(shape('crc')).toEqual([{ kind: 'cards', msgIndices: [0] }, { kind: 'message', msgIndex: 1 }, { kind: 'cards', msgIndices: [2] }])
+    expect(shape('ctc', () => false)).toEqual([{ kind: 'cards', msgIndices: [0] }, { kind: 'message', msgIndex: 1 }, { kind: 'cards', msgIndices: [2] }])
+    expect(shape('cc', () => false)).toEqual([{ kind: 'cards', msgIndices: [0] }, { kind: 'cards', msgIndices: [1] }])
+  })
+
   it('groups runs of 2+ consecutive tools-only messages', () => {
     expect(partitionTurnSegments([true, true, false, true])).toEqual([
       { kind: 'tools', msgIndices: [0, 1] },
