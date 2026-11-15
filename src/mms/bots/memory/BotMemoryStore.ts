@@ -514,7 +514,7 @@ export class BotMemoryStore {
         const matches = new Map(this.all(`SELECT rowid AS hit_id,
           snippet(${index}, 0, '«', '»', '…', 16) AS snip, bm25(${index}) AS score
           FROM ${index} WHERE ${index} MATCH ? AND rowid IN (${page.map(() => '?').join(',')})`,
-        match, ...page.map((row) => row[id])).map((row) => [num(row.hit_id)!, row]))
+        match, ...page.map((row) => num(row[id])!)).map((row) => [num(row.hit_id)!, row]))
         for (const row of page) {
           const text = row.text as string
           // Do not let the replacement marker itself count as the owner's visible words.
