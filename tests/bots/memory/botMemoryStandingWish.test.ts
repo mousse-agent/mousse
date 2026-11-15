@@ -42,6 +42,41 @@ describe('the missed-wish fallback', () => {
     expect(await createBotContextProvider({ store: fx.store, journal }).chatPreamble({ botId: 'ada', activationId: 'act-next' })).toContain(EM)
   })
 
+  it('tells the next chat about wishes refused at the cap, until a carrying turn settles', async () => {
+    const fx = memoryFixture()
+    for (let n = 0; n < 6; n++) {
+      expect(fx.store.save('ada', { lane: 'chat', kind: 'owner', text: `Fact ${n}: ${'ordinary words '.repeat(30)}`.slice(0, 400) })).not.toHaveProperty('error')
+    }
+    const { turn } = chat(fx)
+    await turn(EM)
+    await turn('Always keep your replies short.')
+    expect(fx.store.active('ada')).toHaveLength(6)
+    // Reopen to prove that the notice survives a service restart.
+    const store = fx.reopen()
+    const journal = createBotJournal({ store, readThread: () => ({ messages: [] }), listThreads: () => [] })
+    const packs = createBotContextProvider({ store, journal })
+    const next = await packs.chatPreamble({ botId: 'ada', activationId: 'next' })
+    const situation = next.slice(next.indexOf('Situation:'))
+    expect(situation).toContain('2 standing wishes')
+    expect(situation).toContain('full')
+    expect(situation).toContain('which')
+    expect(await packs.runPreamble({ botId: 'ada', activationId: 'run' })).not.toContain('2 standing wishes')
+    const end = { botId: 'ada', activationId: 'next', dispatchId: 'd-next', lane: 'chat' as const, threadId: 'home' }
+    await packs.afterDispatch({ ...end, endedBy: 'failed' })
+    expect(await packs.chatPreamble({ botId: 'ada', activationId: 'retry' })).toContain('2 standing wishes')
+    await packs.afterDispatch({ ...end, endedBy: 'settled', consult: true })
+    expect(await packs.chatPreamble({ botId: 'ada', activationId: 'after-consult' })).toContain('2 standing wishes')
+    // A third wish fails during the turn carrying the first two; only those two are acknowledged.
+    fx.message({ botId: 'ada', id: 'new-wish', author: 'owner', text: 'Never use emoji.', activationId: 'next' })
+    await packs.afterDispatch({ ...end, endedBy: 'settled' })
+    await packs.afterDispatch({ ...end, endedBy: 'settled' })
+    const last = await packs.chatPreamble({ botId: 'ada', activationId: 'last' })
+    expect(last).toContain('1 standing wish')
+    await packs.afterDispatch({ ...end, activationId: 'last', endedBy: 'settled' })
+    const done = await packs.chatPreamble({ botId: 'ada', activationId: 'done' })
+    expect(done.slice(done.indexOf('Situation:'))).not.toContain('standing wish')
+  })
+
   it('does not save a one-off request', async () => {
     const fx = memoryFixture()
     const { turn, entries } = chat(fx)
