@@ -14,7 +14,7 @@ import { dataFrame } from './dataFrames'
  */
 export type BotWakeEvent =
   | { kind: 'thread'; threadId: string; title?: string }
-  | { kind: 'pr'; repo: string; number: number; on?: 'merged' | 'checks' | 'review' }
+  | { kind: 'pr'; repo: string; number: number; on?: 'merged' | 'checks' | 'review'; reviewAfter?: { at: string | null; ids: string[] } }
   | { kind: 'watcher'; title: string; command: string; match?: string; minutes: number }
 
 /** What happened: the event, with its fixed fields, or why it ended without it. */

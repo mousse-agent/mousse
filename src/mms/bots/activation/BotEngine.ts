@@ -7774,7 +7774,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if ('problem' in read) throw new BotEngineError('invalid_params', `${event.repo}#${event.number} couldn't be read: ${read.problem}`)
     if (read.state === 'merged') throw new BotEngineError('invalid_params', `${event.repo}#${event.number} is merged already.`)
     if (read.state === 'closed') throw new BotEngineError('invalid_params', `${event.repo}#${event.number} is closed without merging.`)
-    return { kind: 'pr', repo: event.repo, number: event.number, ...(event.on ? { on: event.on } : {}) }
+    // A cursor from GitHub's own read avoids comparing its clock with this computer's clock.
+    const submitted = (read.reviews ?? []).filter((review) => review.submittedAt && Number.isFinite(Date.parse(review.submittedAt)))
+    const newest = submitted.reduce<string | null>((at, review) => !at || Date.parse(review.submittedAt!) > Date.parse(at) ? review.submittedAt! : at, null)
+    const reviewAfter = { at: newest, ids: submitted.filter((review) => newest && Date.parse(review.submittedAt!) === Date.parse(newest)).map((review) => review.id) }
+    return { kind: 'pr', repo: event.repo, number: event.number, ...(event.on ? { on: event.on } : {}), ...(event.on === 'review' ? { reviewAfter } : {}) }
   }
 
   /**
@@ -7836,7 +7840,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return { ...pr, state: 'checks', waiting: waitingNames.length, waitingNames, passed: checks.filter((check) => check.state === 'passing').length, failed: failedNames.length, failedNames }
     }
     if (event.on === 'review') {
-      const review = read.reviews?.filter((review) => review.submittedAt && Date.parse(review.submittedAt) > Date.parse(wake.createdAt))
+      const review = read.reviews?.filter((review) => {
+        if (!review.submittedAt || !Number.isFinite(Date.parse(review.submittedAt))) return false
+        // Older stored wakes have no GitHub cursor; retain their original cutoff until they end.
+        if (!event.reviewAfter) return Date.parse(review.submittedAt) > Date.parse(wake.createdAt)
+        if (!event.reviewAfter.at) return true
+        const time = Date.parse(review.submittedAt), cutoff = Date.parse(event.reviewAfter.at)
+        return time > cutoff || (time === cutoff && !event.reviewAfter.ids.includes(review.id))
+      })
         .sort((a, b) => Date.parse(a.submittedAt!) - Date.parse(b.submittedAt!))
         .find((review) => ['approved', 'changes_requested', 'commented'].includes(review.state))
       if (review && (review.state === 'approved' || review.state === 'changes_requested' || review.state === 'commented'))

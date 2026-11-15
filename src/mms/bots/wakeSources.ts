@@ -39,7 +39,7 @@ export interface WakePullRequestState {
   title?: string
   headSha?: string
   checkRuns?: Array<Pick<PullRequestCheck, 'name' | 'state'>>
-  reviews?: Array<Pick<PullRequestReview, 'state' | 'author' | 'submittedAt'>>
+  reviews?: Array<Pick<PullRequestReview, 'id' | 'state' | 'author' | 'submittedAt'>>
 }
 
 export interface PullRequestStateDeps {
