@@ -26,8 +26,28 @@ const THREAD_READ_DEFAULT_LIMIT = 200
 const THREAD_READ_MAX_LIMIT = 500
 const THREAD_MESSAGES_DEFAULT_LIMIT = 50
 const THREAD_MESSAGES_MAX_LIMIT = 200
-/** Each message of `thread_read` view `messages` is cut to this many characters. */
-const THREAD_MESSAGE_MAX_CHARS = 4096
+/** Each message of `thread_read` view `messages` is cut to this many characters; `textOffset` reads on in it. */
+export const THREAD_MESSAGE_MAX_CHARS = 4096
+/**
+ * One `thread_read` response holds at most this many bytes (UTF-8 JSON), in either view: a page that would pass it holds
+ * fewer items and says where to continue. An event too big for a response on its own comes with a preview of its payload.
+ */
+export const THREAD_READ_MAX_BYTES = 64 * 1024
+/** The preview of an event too big for a response of its own: this many characters of its payload's JSON. */
+const THREAD_EVENT_PREVIEW_CHARS = 4096
+/** Another thread's final run text, as a tool returns it (`thread_wait`'s `resultText`, a `run.result` event), is cut to this many characters. */
+export const THREAD_RESULT_MAX_CHARS = 4_000
+/** Messages one sending thread's agent may have waiting in another thread's queue (and in its own); the next is refused. */
+export const AGENT_QUEUE_MAX_PER_SENDER = 3
+/** Messages from all agents together a thread may have waiting in its queue; the next is refused. */
+export const AGENT_QUEUE_MAX_PER_THREAD = 10
+/**
+ * The same text from the same sending thread to the same thread within this window is refused as a repeat
+ * (`duplicate_message`). Two minutes is longer than an MCP client waits on a call (about a minute) plus the retry an agent
+ * makes when a send seemed to fail, which is the repeat this catches; it is short enough that sending the same words again
+ * after the other thread has answered ("continue") still goes through.
+ */
+export const AGENT_REPEAT_WINDOW_MS = 120_000
 /** A removed message's text is cut to this many characters in the transcript row (the event keeps more). */
 const REMOVED_TEXT_ROW_CHARS = 600
 const THREAD_LIST_DEFAULT_LIMIT = 100
@@ -276,6 +296,57 @@ function boundedInt(value: unknown, name: string, min: number, max: number, fall
   return value
 }
 
+/** Where a cut of `text` at `end` falls, moved back one so it never splits a surrogate pair. */
+function cutEnd(text: string, end: number): number {
+  if (end >= text.length) return text.length
+  const code = text.charCodeAt(end - 1)
+  return end > 0 && code >= 0xd800 && code <= 0xdbff ? end - 1 : end
+}
+
+const jsonBytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), 'utf8')
+
+/**
+ * The rows of a `thread_read` page that fit in `THREAD_READ_MAX_BYTES` together with `envelope` (the rest of the
+ * response): whole rows in order, always the first, until the next would pass the cap. `capped` says rows were left out.
+ */
+function fitPage<T>(rows: Iterable<T>, envelope: Record<string, unknown>): { taken: T[]; capped: boolean } {
+  // The envelope as the response will carry it, with room for the numbers and hints the page adds.
+  let used = jsonBytes(envelope) + 512
+  const taken: T[] = []
+  for (const row of rows) {
+    const size = jsonBytes(row) + 1
+    if (taken.length > 0 && used + size > THREAD_READ_MAX_BYTES) return { taken, capped: true }
+    taken.push(row)
+    used += size
+  }
+  return { taken, capped: false }
+}
+
+const RESULT_READ_ON = 'The full text is the run\'s last answer in the thread\'s transcript: read it with thread_read view "messages", and read on in a long message with textOffset.'
+
+/** Another thread's final run text, cut to `THREAD_RESULT_MAX_CHARS` with a marker; `totalChars` is set when it was cut. */
+function cutResultText(text: string): { text: string; totalChars?: number } {
+  if (text.length <= THREAD_RESULT_MAX_CHARS) return { text }
+  return { text: `${text.slice(0, cutEnd(text, THREAD_RESULT_MAX_CHARS))}…`, totalChars: text.length }
+}
+
+/**
+ * An event as `thread_read` returns it: a run's final text cut like `thread_wait`'s, and an event too big for a response
+ * on its own with a preview of its payload in place of the payload.
+ */
+function boundedEvent(event: ThreadEvent): ThreadEvent {
+  let out = event
+  const payload = event.payload as { text?: unknown } | null
+  if (event.type === 'run.result' && payload && typeof payload.text === 'string') {
+    const cut = cutResultText(payload.text)
+    if (cut.totalChars !== undefined) out = { ...event, payload: { ...payload, text: cut.text, truncated: true, totalChars: cut.totalChars, hint: RESULT_READ_ON } }
+  }
+  // Room for the response around it, so an event that comes whole still fits a response on its own.
+  if (jsonBytes(out) + 2048 <= THREAD_READ_MAX_BYTES) return out
+  const raw = JSON.stringify(out.payload) ?? ''
+  return { ...out, payload: { truncated: true, bytes: Buffer.byteLength(raw, 'utf8'), preview: raw.slice(0, cutEnd(raw, THREAD_EVENT_PREVIEW_CHARS)) } }
+}
+
 /** The caller's `clientRequestId` when given (a retry), else this call's id. */
 function toolRequestId(args: Record<string, unknown>, ctx: ToolCallContext): string {
   if (args.clientRequestId === undefined) return ctx.toolCallId
@@ -359,17 +430,29 @@ const SEND_CONFLICTS: Readonly<Record<string, string>> = {
     'The thread is waiting for the user to answer a question or an approval; a message from an agent never answers or skips it. Try again after the user has answered.',
   agent_hops_exceeded:
     'Too many agent messages in a row without a person in between: this message would be past the limit. Stop here and let a person reply before agents go on.',
+  agent_queue_full_per_sender:
+    `The thread already has ${AGENT_QUEUE_MAX_PER_SENDER} messages from your thread waiting in its queue, the most one thread may have there; nothing was queued. Wait for them to run (thread_wait), or change one of them (queue_list, queue_edit) instead of adding another.`,
   agent_queue_full:
-    'The thread already has several messages from agents waiting in its queue. Wait for them to run (thread_wait), or try again later.',
+    `The thread already has ${AGENT_QUEUE_MAX_PER_THREAD} messages from agents waiting in its queue, the most it holds from all agents together; nothing was queued. Wait for them to run (thread_wait), or try again later.`,
+  duplicate_message:
+    `You sent the same text to this thread less than ${AGENT_REPEAT_WINDOW_MS / 60_000} minutes ago, so it was not sent again. If your earlier call failed or timed out, call again with the same clientRequestId to get its result. To send it again on purpose, wait until retryAfterMs has passed, or write a new message.`,
+  sends_per_run_exceeded:
+    `thread_send is limited to ${THREAD_SEND_MAX_PER_RUN} messages per run; nothing was sent. End your turn and let the other threads work.`,
   device_limit:
     "Your owner wrote to you from a device this computer holds below that thread's access, so you can't send to it in this turn. Ask your owner to send it from the computer, or to message the thread themselves."
+}
+
+/** When the refused message may be sent again (`duplicate_message`), as the engine's refusal gives it. */
+function retryAfterOf(error: unknown): { retryAfterMs?: number } {
+  const value = ((error as { details?: unknown } | null)?.details as { retryAfterMs?: unknown } | undefined)?.retryAfterMs
+  return typeof value === 'number' ? { retryAfterMs: value } : {}
 }
 
 /** An engine refusal that means the thread is not in a state to take the message now, as a `mousse_conflict`. */
 function sendConflict(error: unknown): McpToolError | undefined {
   const code = (error as { code?: unknown } | null)?.code
   if (typeof code !== 'string') return undefined
-  if (SEND_CONFLICTS[code]) return new McpToolError('mousse_conflict', SEND_CONFLICTS[code], { conflict: code })
+  if (SEND_CONFLICTS[code]) return new McpToolError('mousse_conflict', SEND_CONFLICTS[code], { conflict: code, ...retryAfterOf(error) })
   if (code === 'merge_back_pending') return new McpToolError('mousse_conflict', error instanceof Error ? error.message : 'A merge-back waits for the thread.', { conflict: code })
   return undefined
 }
@@ -497,6 +580,11 @@ function chosenStandingRule(request: ApprovalRequestInfo, answers: UserQuestionA
   })
 }
 
+/** What became of an agent's message: a turn started with it, or it waits in the thread's queue behind the running turn. */
+function deliveryOf(sent: { queued: boolean }): 'started' | 'queued' {
+  return sent.queued ? 'queued' : 'started'
+}
+
 /** The transcript row of a change the call made; the `agent.action` event is the record, so a row that fails to write is not an error. */
 function showAction(host: AppToolHost, threadId: string, actor: AgentActor, summary: string, options?: { notice?: boolean }): void {
   try {
@@ -526,7 +614,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
   const reserveSend = (runId: string): void => {
     const used = sends.get(runId) ?? 0
     if (used >= THREAD_SEND_MAX_PER_RUN)
-      throw new Error(`thread_send is limited to ${THREAD_SEND_MAX_PER_RUN} messages per run; end your turn and let the other threads work.`)
+      throw new McpToolError('mousse_conflict', SEND_CONFLICTS.sends_per_run_exceeded, { conflict: 'sends_per_run_exceeded', limit: THREAD_SEND_MAX_PER_RUN })
     sends.delete(runId)
     sends.set(runId, used + 1)
     // The oldest runs fall out first, so the map stays small on a long-lived daemon.
@@ -621,7 +709,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
   return [
     {
       name: 'thread_read',
-      description: 'Read a thread. view "events" (default): run events (runs, attempts, delegations, tool calls) of any thread. Page with afterSeq. view "messages": the transcript of any thread; page with afterIndex. A personal bot reads its owner\'s threads with view "summary" (default: one line on the thread and its last reply) or "messages" (the newest ones, or from afterIndex, capped).',
+      description: `Read a thread. view "events" (default): run events (runs, attempts, delegations, tool calls) of any thread. Page with afterSeq. view "messages": the transcript of any thread; page with afterIndex. Each message holds at most ${THREAD_MESSAGE_MAX_CHARS} characters: one marked truncated continues when you pass its index as afterIndex and its nextTextOffset as textOffset. A response holds at most ${THREAD_READ_MAX_BYTES / 1024} KB: a page that reaches it has fewer items and capped: true, and nextAfterSeq or nextAfterIndex continues it. A run's final text is cut to ${THREAD_RESULT_MAX_CHARS} characters; read it in full in the messages. A personal bot reads its owner\'s threads with view "summary" (default: one line on the thread and its last reply) or "messages" (the newest ones, or from afterIndex, capped).`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -629,6 +717,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           view: { type: 'string', enum: ['events', 'messages', 'summary'], description: 'Defaults to events (summary for a personal bot, which has no events view).' },
           afterSeq: { type: 'integer', minimum: 0, description: 'events: return events after this sequence number.' },
           afterIndex: { type: 'integer', minimum: 0, description: 'messages: return the messages after this many (nextAfterIndex of the previous page).' },
+          textOffset: { type: 'integer', minimum: 0, description: 'messages: start the first message returned (the one at afterIndex) at this character, to read on in a message marked truncated (its nextTextOffset).' },
           limit: { type: 'integer', minimum: 1, maximum: THREAD_READ_MAX_LIMIT, description: `events: up to ${THREAD_READ_MAX_LIMIT} (default ${THREAD_READ_DEFAULT_LIMIT}); messages: up to ${THREAD_MESSAGES_MAX_LIMIT} (default ${THREAD_MESSAGES_DEFAULT_LIMIT}).` }
         }
       },
@@ -653,27 +742,62 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           if (!host.threadMessages) return notAvailable('thread_read messages')
           const afterIndex = boundedInt(args.afterIndex, 'afterIndex', 0, Number.MAX_SAFE_INTEGER, 0)
           const limit = boundedInt(args.limit, 'limit', 1, THREAD_MESSAGES_MAX_LIMIT, THREAD_MESSAGES_DEFAULT_LIMIT)
+          const textOffset = boundedInt(args.textOffset, 'textOffset', 0, Number.MAX_SAFE_INTEGER, 0)
           const all = host.threadMessages(threadId)
-          const messages = all.slice(afterIndex, afterIndex + limit).map((message, offset) => {
-            const text = typeof message.content === 'string' ? message.content : ''
-            const truncated = text.length > THREAD_MESSAGE_MAX_CHARS
-            return {
-              index: afterIndex + offset,
-              id: message.id,
-              role: message.role,
-              timestamp: message.timestamp,
-              text: truncated ? text.slice(0, THREAD_MESSAGE_MAX_CHARS) : text,
-              ...(truncated ? { truncated: true } : {})
+          const firstText = all[afterIndex] && typeof all[afterIndex].content === 'string' ? all[afterIndex].content : ''
+          if (textOffset > 0 && afterIndex < all.length && textOffset >= firstText.length)
+            throw new Error(`textOffset ${textOffset} is past the end of message ${afterIndex}, which has ${firstText.length} characters`)
+          // Built one at a time, so a page that reaches the byte cap stops reading the transcript there.
+          function* rows() {
+            for (let index = afterIndex; index < Math.min(all.length, afterIndex + limit); index += 1) {
+              const message = all[index]
+              const text = typeof message.content === 'string' ? message.content : ''
+              const from = index === afterIndex ? textOffset : 0
+              const end = cutEnd(text, from + THREAD_MESSAGE_MAX_CHARS)
+              yield {
+                index,
+                id: message.id,
+                role: message.role,
+                timestamp: message.timestamp,
+                text: text.slice(from, end),
+                ...(from > 0 ? { textOffset: from } : {}),
+                ...(end < text.length ? { truncated: true, totalChars: text.length, nextTextOffset: end } : {})
+              }
             }
+          }
+          const envelope = { threadId, link: threadLink(threadId), view, scope, total: all.length }
+          const { taken: messages, capped } = fitPage(rows(), envelope)
+          const truncated = messages.some((message) => 'truncated' in message)
+          return json({
+            ...envelope,
+            messages,
+            nextAfterIndex: afterIndex + messages.length,
+            ...(capped ? { capped: true } : {}),
+            ...(capped || truncated
+              ? {
+                  hint: [
+                    capped ? `This page stopped at ${THREAD_READ_MAX_BYTES / 1024} KB; continue with afterIndex ${afterIndex + messages.length}.` : '',
+                    truncated ? 'A message marked truncated continues: pass its index as afterIndex and its nextTextOffset as textOffset.' : ''
+                  ].filter(Boolean).join(' ')
+                }
+              : {})
           })
-          return json({ threadId, link: threadLink(threadId), view, scope, messages, total: all.length, nextAfterIndex: afterIndex + messages.length })
         }
         const afterSeq = boundedInt(args.afterSeq, 'afterSeq', 0, Number.MAX_SAFE_INTEGER, 0)
         const limit = boundedInt(args.limit, 'limit', 1, THREAD_READ_MAX_LIMIT, THREAD_READ_DEFAULT_LIMIT)
         const page = engine.listEvents(threadId, { afterSeq, limit })
-        const events = full ? page : lineageView(page, ctx.caller.threadId, scope)
-        // `nextAfterSeq` pages on even when a lineage view filtered events out of this page.
-        return json({ threadId, link: threadLink(threadId), view, scope, events, maxSeq: engine.maxSeq(threadId), nextAfterSeq: page.at(-1)?.seq ?? afterSeq })
+        const visible = full ? page : lineageView(page, ctx.caller.threadId, scope)
+        const envelope = { threadId, link: threadLink(threadId), view, scope, maxSeq: engine.maxSeq(threadId) }
+        const { taken: events, capped } = fitPage(visible.map(boundedEvent), envelope)
+        // `nextAfterSeq` pages on even when a lineage view filtered events out of this page; a page cut at the byte cap
+        // continues after the last event it holds.
+        const nextAfterSeq = capped ? events.at(-1)!.seq : page.at(-1)?.seq ?? afterSeq
+        return json({
+          ...envelope,
+          events,
+          nextAfterSeq,
+          ...(capped ? { capped: true, hint: `This page stopped at ${THREAD_READ_MAX_BYTES / 1024} KB; continue with afterSeq ${nextAfterSeq}.` } : {})
+        })
       }
     },
     {
@@ -832,7 +956,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_send',
-      description: `Send a message to another thread. The thread's model receives it labelled as a message from an agent in your thread, not from the user, and runs it under your permission mode when that is stricter than the thread's own; it never gets more than the thread itself allows. It starts a turn when the thread is idle and queues behind the running turn otherwise (it never steers the running turn). A thread kept in Plan takes it as a plan turn. Refused while the thread waits for the user to answer a question or approval, is paused by a usage limit, or is archived, when it already has several messages from agents waiting, and when it would be more than a few agent messages in a row without a person in between. You may send ${THREAD_SEND_MAX_PER_RUN} messages per run (a personal bot has no such count). Returns the run it created: use thread_wait with it to wait for the answer, only when you need it this turn. Subagents are reached with continue_subagent.`,
+      description: `Send a message to another thread. The thread's model receives it labelled as a message from an agent in your thread, not from the user, and runs it under your permission mode when that is stricter than the thread's own; it never gets more than the thread itself allows. It starts a turn when the thread is idle and queues behind the running turn otherwise (it never steers the running turn). A thread kept in Plan takes it as a plan turn. Refused while the thread waits for the user to answer a question or approval, is paused by a usage limit, or is archived, when it already has ${AGENT_QUEUE_MAX_PER_SENDER} messages from your thread or ${AGENT_QUEUE_MAX_PER_THREAD} from agents in all waiting, when you sent it the same text in the last ${AGENT_REPEAT_WINDOW_MS / 60_000} minutes, and when it would be more than a few agent messages in a row without a person in between; each refusal names its limit (data.conflict). You may send ${THREAD_SEND_MAX_PER_RUN} messages per run (a personal bot has no such count). Returns the run it created and delivery: started (a turn began with it) or queued (it waits behind the running turn): use thread_wait with it to wait for the answer, only when you need it this turn. Subagents are reached with continue_subagent.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -873,7 +997,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         } catch (limit) {
           // A retry of a send this run already made is answered with its first result, however many it has made.
           const earlier = host.earlierSend?.(threadId, requestKey)
-          if (earlier) return json({ threadId, ...earlier })
+          if (earlier) return json({ threadId, ...earlier, delivery: deliveryOf(earlier) })
           throw limit
         }
         let sent
@@ -891,14 +1015,14 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         if (bot) {
           const title = titleOf(threadId)
           if (!sent.replayed) botChip(bot, 'thread_send', threadId, title, args.content)
-          return json({ threadId, title: title ?? null, ...sent, note: 'It runs in that thread\'s own mode. Approvals and questions there wait for your owner, never for you.' })
+          return json({ threadId, title: title ?? null, ...sent, delivery: deliveryOf(sent), note: 'It runs in that thread\'s own mode. Approvals and questions there wait for your owner, never for you.' })
         }
-        return json({ threadId, ...sent })
+        return json({ threadId, ...sent, delivery: deliveryOf(sent) })
       }
     },
     {
       name: 'thread_wait',
-      description: `Wait for a run of another thread to finish, for at most timeoutMs (default ${THREAD_WAIT_DEFAULT_MS}, up to ${THREAD_WAIT_MAX_MS}). Pass the runId thread_send returned; without one, the run that is active now. Returns status finished (with the run's outcome, and its final text where you may read it), timeout (the run is still going: call again; the wait never interrupts it), paused (a usage limit paused the run and it was still paused when the wait ran out: it resumes by itself, and the result says when to ask again; a wait that is running when it resumes follows it into the run that continues it), idle (no run to wait for) or caller_ended (your own run ended). Wait only when you need the answer this turn; otherwise end your turn and read the thread later.`,
+      description: `Wait for a run of another thread to finish, for at most timeoutMs (default ${THREAD_WAIT_DEFAULT_MS}, up to ${THREAD_WAIT_MAX_MS}). Pass the runId thread_send returned; without one, the run that is active now. Returns status finished (with the run's outcome, and its final text where you may read it, cut to ${THREAD_RESULT_MAX_CHARS} characters with resultTruncated when longer), timeout (the run is still going: call again; the wait never interrupts it), paused (a usage limit paused the run and it was still paused when the wait ran out: it resumes by itself, and the result says when to ask again; a wait that is running when it resumes follows it into the run that continues it), idle (no run to wait for) or caller_ended (your own run ended). Wait only when you need the answer this turn; otherwise end your turn and read the thread later.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -1015,7 +1139,15 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
             const cut = resultText !== undefined && resultText.length > BOT_RESULT_CHARS
             return botData(`What thread «${title}» answered`, { status: 'finished', threadId, title, run: reported, ...(resultText !== undefined ? { resultText: cut ? `${resultText.slice(0, BOT_RESULT_CHARS)}…` : resultText, ...(cut ? { cut: true } : {}) } : {}) })
           }
-          return json({ status: 'finished', threadId, run: reported, ...(resultText !== undefined ? { resultText } : {}) })
+          // Cut like every other thread's result a tool returns; the delegation notice reads the stored text, not this.
+          const cut = resultText === undefined ? undefined : cutResultText(resultText)
+          return json({
+            status: 'finished',
+            threadId,
+            run: reported,
+            ...(cut ? { resultText: cut.text } : {}),
+            ...(cut?.totalChars !== undefined ? { resultTruncated: true, resultChars: cut.totalChars, hint: RESULT_READ_ON } : {})
+          })
         } finally {
           clearTimeout(timer)
           if (held) clearInterval(held)

@@ -11,6 +11,8 @@ import {
 } from '../../src/mms/run/mcp/appTools'
 import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
+import { THREAD_MESSAGE_MAX_CHARS, THREAD_READ_MAX_BYTES, THREAD_RESULT_MAX_CHARS } from '../../src/mms/run/mcp/appTools/thread'
+import { AGENT_MESSAGE_END, AGENT_MESSAGE_PREFIX, agentMessage } from '../../src/mms/run/mcp/appTools/agentMessage'
 
 /** The tools a credential lists before the app tools joined (still listed, still these classes). */
 const PHASE5_TOOLS: Record<string, string> = {
@@ -578,6 +580,115 @@ describe('reading and managing other threads (SPEC §15.1)', () => {
     expect((await read('parent', { view: 'messages' })).messages[0].text).toBe('mine')
     expect((await call('parent', 'thread_read', { threadId: 'stranger', view: 'transcript' })).isError).toBe(true)
     expect((await call('parent', 'thread_read', { threadId: 'stranger', view: 'messages', limit: 201 })).isError).toBe(true)
+  })
+
+  it('thread_read messages: a message marked truncated is read on with textOffset to its end, never splitting a character', async () => {
+    const { call, read, messages } = await world()
+    // A character outside the BMP sits on the cut: the first part stops before it rather than halving it.
+    const long = `${'a'.repeat(THREAD_MESSAGE_MAX_CHARS - 1)}😀${Array.from({ length: 6000 }, (_, at) => String.fromCharCode(98 + (at % 24))).join('')}`
+    messages.set('stranger', [message(0, 'before'), message(1, long, 'assistant'), message(2, 'after')])
+    const first = await read('parent', { threadId: 'stranger', view: 'messages', afterIndex: 1, limit: 1 })
+    expect(first.messages[0]).toMatchObject({ index: 1, truncated: true, totalChars: long.length, nextTextOffset: THREAD_MESSAGE_MAX_CHARS - 1 })
+    expect(first.hint).toContain('textOffset')
+    let text = first.messages[0].text as string
+    let next: number | undefined = first.messages[0].nextTextOffset
+    const offsets: number[] = []
+    while (next !== undefined) {
+      offsets.push(next)
+      const page = await read('parent', { threadId: 'stranger', view: 'messages', afterIndex: 1, textOffset: next, limit: 2 })
+      expect(page.messages[0]).toMatchObject({ index: 1, textOffset: next })
+      // The offset applies to the message at afterIndex only; the next one starts at its beginning.
+      expect(page.messages[1]).toMatchObject({ index: 2, text: 'after' })
+      text += page.messages[0].text
+      next = page.messages[0].nextTextOffset
+    }
+    expect(text).toBe(long)
+    expect(offsets).toHaveLength(Math.ceil((long.length - (THREAD_MESSAGE_MAX_CHARS - 1)) / THREAD_MESSAGE_MAX_CHARS))
+    expect((await call('parent', 'thread_read', { threadId: 'stranger', view: 'messages', afterIndex: 1, textOffset: long.length })).isError).toBe(true)
+  })
+
+  it('thread_read messages: an agent\'s long message reads on over its stored text, label and closing line included', async () => {
+    const { read, messages } = await world()
+    const words = Array.from({ length: 9000 }, (_, at) => String.fromCharCode(65 + (at % 26))).join('')
+    const envelope = agentMessage('sender-thread', 'Sender', words)
+    messages.set('stranger', [{ ...message(0, envelope.text), origin: { kind: 'agent', threadId: 'sender-thread', runId: 'r', body: { head: envelope.head, tail: envelope.tail } } } as ChatMessage])
+    let page = (await read('parent', { threadId: 'stranger', view: 'messages' })).messages[0]
+    // The offsets count the stored text: the first part starts with the label, and the agent's words start after it.
+    expect(page.text.startsWith(AGENT_MESSAGE_PREFIX)).toBe(true)
+    expect(page.totalChars).toBe(envelope.text.length)
+    let text = page.text as string
+    while (page.nextTextOffset !== undefined) {
+      page = (await read('parent', { threadId: 'stranger', view: 'messages', textOffset: page.nextTextOffset })).messages[0]
+      text += page.text
+    }
+    expect(text).toBe(envelope.text)
+    expect(text.endsWith(AGENT_MESSAGE_END)).toBe(true)
+    expect(text.slice(envelope.head, text.length - envelope.tail)).toBe(words)
+  })
+
+  /** Every page a reader gets by following the continuation, until it says there is no more. */
+  const allPages = async (read: (args: Record<string, unknown>) => Promise<Record<string, any>>, args: Record<string, unknown>, cursor: 'afterIndex' | 'afterSeq') => {
+    const pages: Array<Record<string, any>> = []
+    let at = 0
+    for (;;) {
+      const page = await read({ ...args, [cursor]: at })
+      pages.push(page)
+      const next = cursor === 'afterIndex' ? page.nextAfterIndex : page.nextAfterSeq
+      if (!page.capped || next === at) return pages
+      at = next
+    }
+  }
+
+  it(`thread_read holds a response to ${THREAD_READ_MAX_BYTES / 1024} KB in the messages view, counted in bytes, and continues where it stopped`, async () => {
+    const { call, messages } = await world()
+    // Two bytes a character: a cap counted in characters would let twice as much through.
+    const all = Array.from({ length: 50 }, (_, index) => message(index, `${index}:${'é'.repeat(3_000)}`))
+    messages.set('stranger', all)
+    const raw = async (args: Record<string, unknown>) => (await call('parent', 'thread_read', { threadId: 'stranger', view: 'messages', ...args })).text
+    const pages = await allPages(async (args) => {
+      const text = await raw(args)
+      expect(Buffer.byteLength(text, 'utf8')).toBeLessThanOrEqual(THREAD_READ_MAX_BYTES)
+      return JSON.parse(text)
+    }, { limit: 50 }, 'afterIndex')
+    expect(pages.length).toBeGreaterThan(1)
+    expect(pages[0]).toMatchObject({ capped: true, hint: expect.stringContaining(`afterIndex ${pages[0].messages.length}`) })
+    // Every message once, in order, none cut: the pages fit whole messages and the next page starts at the first left out.
+    expect(pages.flatMap((page) => page.messages.map((entry: { id: string }) => entry.id))).toEqual(all.map((entry) => entry.id))
+    expect(pages.flatMap((page) => page.messages).some((entry: { truncated?: boolean }) => entry.truncated)).toBe(false)
+    expect(pages.at(-1)!.capped).toBeUndefined()
+  })
+
+  it(`thread_read holds a response to ${THREAD_READ_MAX_BYTES / 1024} KB in the events view, continues after the last event it holds, and previews an event too big for a response`, async () => {
+    const { call, fx, strangerRun } = await world()
+    const from = fx.engine.maxSeq('stranger')
+    for (let index = 0; index < 120; index += 1)
+      fx.engine.store.appendEvent({ threadId: 'stranger', runId: strangerRun.runId, type: 'tool.call', payload: { index, text: 'é'.repeat(1_000) } })
+    fx.engine.store.appendEvent({ threadId: 'stranger', runId: strangerRun.runId, type: 'tool.call', payload: { index: 'huge', text: 'z'.repeat(THREAD_READ_MAX_BYTES * 2) } })
+    fx.engine.store.appendEvent({ threadId: 'stranger', runId: strangerRun.runId, type: 'tool.call', payload: { index: 'last', text: 'end' } })
+    const pages = await allPages(async (args) => {
+      const text = (await call('parent', 'thread_read', { threadId: 'stranger', limit: 500, ...args })).text
+      expect(Buffer.byteLength(text, 'utf8')).toBeLessThanOrEqual(THREAD_READ_MAX_BYTES)
+      return JSON.parse(text)
+    }, {}, 'afterSeq')
+    expect(pages.length).toBeGreaterThan(1)
+    expect(pages[0]).toMatchObject({ capped: true, nextAfterSeq: pages[0].events.at(-1).seq })
+    const seqs = pages.flatMap((page) => page.events.map((event: { seq: number }) => event.seq))
+    expect(seqs).toEqual(fx.engine.listEvents('stranger', { limit: 1000 }).map((event) => event.seq))
+    const ours = pages.flatMap((page) => page.events).filter((event: { seq: number }) => event.seq > from)
+    expect(ours.slice(0, 120).map((event: { payload: { index: number } }) => event.payload.index)).toEqual(Array.from({ length: 120 }, (_, index) => index))
+    expect(ours[120].payload).toMatchObject({ truncated: true, bytes: expect.any(Number), preview: expect.stringContaining('"index":"huge"') })
+    expect(ours[120].payload.bytes).toBeGreaterThan(THREAD_READ_MAX_BYTES)
+    expect(ours[121].payload).toEqual({ index: 'last', text: 'end' })
+  })
+
+  it(`thread_read cuts a run\'s final text in the events to ${THREAD_RESULT_MAX_CHARS} characters with a pointer to the messages`, async () => {
+    const { read, fx, threads, strangerRun } = await world()
+    const long = `${'w'.repeat(THREAD_RESULT_MAX_CHARS)}-the rest`
+    const child = await fx.delegate(strangerRun.runId, 'call-long')
+    threads.set(child.childThreadId, thread(child.childThreadId))
+    fx.finish(child.childRunId, long)
+    const result = (await read('parent', { threadId: child.childThreadId })).events.find((event: { type: string }) => event.type === 'run.result')
+    expect(result.payload).toMatchObject({ runId: child.childRunId, text: `${'w'.repeat(THREAD_RESULT_MAX_CHARS)}…`, truncated: true, totalChars: long.length, hint: expect.stringContaining('view "messages"') })
   })
 
   it('thread_list: every project, started and unsettled by default, filters and limits, with the pending questions', async () => {

@@ -86,7 +86,7 @@ import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type Effe
 import { steerReleaseWindow, stopStrategy, type SteerDelivery } from '../run/CommandPolicy'
 import { agentMessage, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentArchiveResult, type AgentCreatedThread, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
-import { botRequestPrefix, THREAD_CREATE_MAX_ACTIVE_PER_THREAD } from '../run/mcp/appTools/thread'
+import { AGENT_QUEUE_MAX_PER_SENDER, AGENT_QUEUE_MAX_PER_THREAD, AGENT_REPEAT_WINDOW_MS, botRequestPrefix, THREAD_CREATE_MAX_ACTIVE_PER_THREAD } from '../run/mcp/appTools/thread'
 import { botMessageText } from '../run/mcp/appTools/agentMessage'
 
 /**
@@ -654,6 +654,11 @@ export interface OrchestratorSendOptions {
    * thread's lock, right before the run is committed; it throws `thread_settings_changed` when anything changed.
    */
   bindCheck?: () => void
+  /**
+   * Daemon-only: runs last in the engine's admission of a new message, under the thread's lock, after every other check
+   * passed; a throw refuses the send before its run exists. A replay never runs it. `thread_send`'s repeat check.
+   */
+  onAdmit?: () => void
 }
 
 /** Options of `runRemoteTurn`. */
@@ -755,8 +760,25 @@ const ADMITTED_TURN_FAILURES = new WeakMap<object, { workflowRun?: WorkflowChatR
 
 /** Agent messages in a row, without a person in between, that a message may be the end of; the next one is refused. */
 export const AGENT_MESSAGE_MAX_HOPS = 3
-/** Messages from other threads' agents a thread may have waiting in its queue; the next one is refused. */
-export const AGENT_QUEUE_MAX_PER_THREAD = 3
+/**
+ * Why one more agent message from `senderThreadId` does not fit in the queue `items` (SPEC §15.1): its sender already has
+ * `AGENT_QUEUE_MAX_PER_SENDER` waiting there, or all agents together `AGENT_QUEUE_MAX_PER_THREAD`. `replacing` is an item
+ * the message takes the place of (an edit that makes it this sender's). Undefined when it fits.
+ */
+function agentQueueRefusal(threadId: string, items: QueuedMessage[], senderThreadId: string, replacing?: QueuedMessage): DomainRpcError | undefined {
+  const waiting = listPendingQueue(items).filter((item) => item.origin?.kind === 'agent' && item.id !== replacing?.id)
+  const fromSender = waiting.filter((item) => item.origin?.kind === 'agent' && item.origin.threadId === senderThreadId).length
+  if (fromSender >= AGENT_QUEUE_MAX_PER_SENDER)
+    return new DomainRpcError('agent_queue_full_per_sender', `Thread ${threadId} already has ${AGENT_QUEUE_MAX_PER_SENDER} messages from thread ${senderThreadId} waiting, the most one sender may have there; try again after they run.`)
+  if (waiting.length >= AGENT_QUEUE_MAX_PER_THREAD)
+    return new DomainRpcError('agent_queue_full', `Thread ${threadId} already has ${AGENT_QUEUE_MAX_PER_THREAD} messages from agents waiting; try again later.`)
+  return undefined
+}
+
+/** The key of the repeat check: the same text from the same sending thread to the same thread. */
+function agentRepeatKey(threadId: string, senderThreadId: string, content: string): string {
+  return createHash('sha256').update(JSON.stringify([threadId, senderThreadId, content])).digest('hex')
+}
 
 /**
  * The agent behind a message, with where its words sit in the text the thread stores and its title then
@@ -1681,6 +1703,8 @@ export class OrchestratorService extends EventEmitter {
   private botThreads: BotThreads | null = null
   /** `thread_create` calls in flight by key, so two calls with one key make one thread. */
   private readonly agentCreations = new Map<string, { fingerprint: string; task: Promise<AgentCreatedThread> }>()
+  /** Agents' messages of the last `AGENT_REPEAT_WINDOW_MS`, by `agentRepeatKey`, oldest first: the repeat check of `thread_send`. */
+  private readonly recentAgentMessages = new Map<string, { at: number }>()
 
   /** The profile's bot threads, for the origin of their turns; null: none. */
   setBotThreads(threads: BotThreads | null): void {
@@ -4118,7 +4142,11 @@ export class OrchestratorService extends EventEmitter {
     if (turnBot) this.assertBotRequestKey('thread_send', options.clientRequestId, options.actor, turnBot)
     // A thread a person keeps in Plan takes the message as a plan turn, whatever mode the sender asked for.
     const mode: 'agent' | 'plan' = this.lastChatModeOf(threadId) === 'plan' ? 'plan' : input.mode
-    const response = await this.send(
+    // The same text from the same thread again within the window is refused as a repeat, decided at admission (under the
+    // thread's lock, so two at once cannot both pass) and only for a new request: a retry with the same key replays.
+    const repeatKey = agentRepeatKey(threadId, options.actor.threadId, input.content)
+    const claim = { at: 0 }
+    const response = await this.sendGuardedAgainstRepeat(repeatKey, claim, () => this.send(
       { content: letter ? letter.content : botMessageText(bot!.name, input.content), mode },
       false,
       {
@@ -4133,9 +4161,10 @@ export class OrchestratorService extends EventEmitter {
         ...(bot ? {} : { permissionMode: this.runPermissionMode(sender.runId) }),
         // Neither ever answers or skips a question or an approval waiting in the thread.
         preemptQuestions: false,
-        refuseWhileAsking: true
+        refuseWhileAsking: true,
+        onAdmit: () => this.claimAgentMessage(repeatKey, claim)
       }
-    )
+    ))
     if (!response.runId || response.sequence === undefined) throw new Error('The message was not recorded as a run.')
     const replayed = response.replayed === true
     return {
@@ -4144,6 +4173,37 @@ export class OrchestratorService extends EventEmitter {
       queued: response.queued === true || (replayed && engine.getRun(response.runId)?.status === 'queued'),
       replayed,
       mode
+    }
+  }
+
+  /**
+   * Refuses an agent's message when the same sender sent the same text to the same thread within
+   * `AGENT_REPEAT_WINDOW_MS` (`duplicate_message`, with when it may be sent again), else records it. In memory: a restart
+   * forgets what was sent, as it forgets each run's count of sends.
+   */
+  private claimAgentMessage(key: string, claim: { at: number }): void {
+    const now = Date.now()
+    // Entries are added in time order and never changed, so the expired ones are at the front.
+    for (const [old, entry] of this.recentAgentMessages) {
+      if (now - entry.at < AGENT_REPEAT_WINDOW_MS) break
+      this.recentAgentMessages.delete(old)
+    }
+    const earlier = this.recentAgentMessages.get(key)
+    if (earlier) {
+      const retryAfterMs = AGENT_REPEAT_WINDOW_MS - (now - earlier.at)
+      throw new DomainRpcError('duplicate_message', `The same message was sent to this thread by the same thread ${Math.ceil((now - earlier.at) / 1000)} s ago; it was not sent again.`, { retryAfterMs })
+    }
+    claim.at = now
+    this.recentAgentMessages.set(key, claim)
+  }
+
+  /** Runs an agent's send; when it fails after its message was recorded for the repeat check, the record goes, so a fresh try is no repeat. */
+  private async sendGuardedAgainstRepeat<T>(key: string, claim: { at: number }, send: () => Promise<T>): Promise<T> {
+    try {
+      return await send()
+    } catch (error) {
+      if (this.recentAgentMessages.get(key) === claim) this.recentAgentMessages.delete(key)
+      throw error
     }
   }
 
@@ -9254,9 +9314,10 @@ export class OrchestratorService extends EventEmitter {
     // Who wrote the item: this agent (its origin names its thread: an own note or a message it sent) or someone else. A
     // label such as the item's source never decides it: only the origin the daemon stamped on the message does.
     const authoredBy = (item: QueuedMessage): boolean => item.origin?.kind === 'agent' && item.origin.threadId === actor.threadId
-    const agentItems = (items: QueuedMessage[]): number => listPendingQueue(items).filter((item) => item.origin?.kind === 'agent').length
-    const full = (): never => {
-      throw new DomainRpcError('agent_queue_full', `Thread ${threadId} already has ${AGENT_QUEUE_MAX_PER_THREAD} messages from agents waiting; try again later.`)
+    // One more message of this agent in the queue: refused past its sender's cap or the cap of all agents together.
+    const assertRoom = (items: QueuedMessage[], replacing?: QueuedMessage): void => {
+      const full = agentQueueRefusal(threadId, items, actor.threadId, replacing)
+      if (full) throw full
     }
     const found = (items: QueuedMessage[], itemId: string): QueuedMessage => {
       const item = items.find((entry) => entry.id === itemId)
@@ -9280,10 +9341,10 @@ export class OrchestratorService extends EventEmitter {
       switch (command.op) {
         case 'enqueue': {
           // Every message an agent queues is the agent's, on its own thread too: it carries the writing run's hop count and
-          // mode limit, counts in the cap of three, is held behind a pause and a waiting question, is cleared by a person's
-          // Stop and runs as an agent's run (so an agent at its hop limit cannot start a fresh chain through its own queue).
+          // mode limit, counts in the caps (per sender and in all), is held behind a pause and a waiting question, is cleared by a
+          // person's Stop and runs as an agent's run (so an agent at its hop limit cannot start a fresh chain through its own queue).
           // On another thread the text is labelled too; on its own an agent reads its own note as written.
-          if (agentItems(items) >= AGENT_QUEUE_MAX_PER_THREAD) full()
+          assertRoom(items)
           const letter = this.agentLetter(this.withAgentHops(actor), command.content, cross)
           const content = letter.content
           const origin = agentOriginOf(letter.sender)
@@ -9314,7 +9375,7 @@ export class OrchestratorService extends EventEmitter {
           if (command.content !== undefined) {
             // The words are the agent's from here on, with this run's hop count: stored as its own, run under the stricter mode.
             // Another writer's message, or any message on another thread, is labelled; an agent's own note on its own thread is not.
-            if (item.origin?.kind !== 'agent' && agentItems(items) >= AGENT_QUEUE_MAX_PER_THREAD) full()
+            if (!authored) assertRoom(items, item)
             const letter = this.agentLetter(this.withAgentHops(actor), command.content, cross || !authored)
             patch.content = letter.content
             patch.origin = agentOriginOf(letter.sender)
@@ -10881,13 +10942,12 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
-  /** How many messages other threads' agents sent that wait in the thread's queue (from disk, so a restart counts them). */
-  private queuedAgentMessages(threadId: string): number {
+  /** The thread's queue as the agent queue caps count it (from disk, so a restart counts what waits). */
+  private queueForAgentCaps(threadId: string): QueuedMessage[] {
     try {
-      const items = this.threadStore ? this.threadStore.loadMessageQueue(threadId) : this.sessions.get(threadId)?.queue ?? []
-      return listPendingQueue(items).filter((item) => item.origin?.kind === 'agent').length
+      return this.threadStore ? this.threadStore.loadMessageQueue(threadId) : this.sessions.get(threadId)?.queue ?? []
     } catch {
-      return 0
+      return []
     }
   }
 
@@ -11022,10 +11082,14 @@ export class OrchestratorService extends EventEmitter {
           // refuses a message an agent sent (it never answers one for the user, and never piles up behind it).
           if (opts?.refuseWhileAsking && this.questions.listPendingForThread(threadId).length > 0)
             throw new DomainRpcError('questions_pending', `Thread ${threadId} is waiting for the user to answer a question or approval.`)
-          // A thread holds only a few messages from other agents at a time: a fan-out cannot pile up behind it.
-          if (opts?.agent && this.queuedAgentMessages(threadId) >= AGENT_QUEUE_MAX_PER_THREAD)
-            throw new DomainRpcError('agent_queue_full', `Thread ${threadId} already has ${AGENT_QUEUE_MAX_PER_THREAD} messages from agents waiting; try again later.`)
+          // A thread holds only a few messages from agents at a time, and a few from each sender: a fan-out cannot pile up
+          // behind it, and one chatty sender cannot shut the others out.
+          if (opts?.agent) {
+            const full = agentQueueRefusal(threadId, this.queueForAgentCaps(threadId), opts.agent.threadId)
+            if (full) throw full
+          }
           this.assertSendableSelection(session, input, opts?.modelOverride, opts?.origin === 'schedule')
+          opts?.onAdmit?.()
         }
       : undefined
 
