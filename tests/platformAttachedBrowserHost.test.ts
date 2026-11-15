@@ -124,4 +124,39 @@ describe('AttachedBrowserHost production ownership', () => {
     })
     await host.shutdown()
   })
+
+  it('registers a tab that loads again while its unloaded page is still being released', async () => {
+    const artifactRoot = await mkdtemp(join(tmpdir(), 'mousse-attached-host-'))
+    roots.push(artifactRoot)
+    const binding = { profileId: 'prof_host', epoch: 7 }
+    let releaseUnregister!: () => void
+    const unregisterHeld = new Promise<void>((resolve) => { releaseUnregister = resolve })
+    const methods: string[] = []
+    const host = new AttachedBrowserHost({
+      binding: () => binding,
+      request: async (_sender, method, raw) => {
+        methods.push(method)
+        if (method === 'browser.attachments.unregister') await unregisterHeld
+        if (method === 'browser.attachments.register') return { ...(raw as object), profileId: binding.profileId, profileEpoch: binding.epoch, artifactRoot }
+        return { ok: true }
+      }
+    })
+    const page = (loaderId: string) => ({ url: 'http://127.0.0.1/page', title: 'Fixture', nameValue: '', result: '', posts: 0, cookie: '', destroyed: false, loaderId, frameId: loaderId })
+    const owner = new Contents(20, null, page('owner'))
+    const first = new Contents(21, owner, page('first'))
+    host.observeGuest(owner as never, first as never)
+    const before = await host.registerTab(owner as never, { localTabId: 'local_tab', webContentsId: first.id, threadId: 'thread_host' })
+
+    // The window unloads the tab, then shows it again before the old page's registration has ended.
+    first.destroy()
+    const second = new Contents(22, owner, page('second'))
+    host.observeGuest(owner as never, second as never)
+    const again = host.registerTab(owner as never, { localTabId: 'local_tab', webContentsId: second.id, threadId: 'thread_host' })
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    releaseUnregister()
+    const after = await again
+    expect(after.uiTabId).not.toBe(before.uiTabId)
+    expect(methods).toEqual(['browser.attachments.register', 'browser.attachments.unregister', 'browser.attachments.register'])
+    await host.shutdown()
+  })
 })
