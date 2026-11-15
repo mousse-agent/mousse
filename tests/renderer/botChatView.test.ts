@@ -1914,3 +1914,38 @@ it('removes snooze replies in an open chat when their day expires', async () => 
     expect(button('In 10 min')).toBeUndefined()
   } finally { vi.useRealTimers() }
 })
+
+
+it.each([
+  ['en-US', '4:05 AM', '9:00 AM'],
+  ['en-GB', '4:05', '9:00']
+])('snooze replies use the bubble clock format in %s', async (locale, dueTime, morning) => {
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(new Date(2026, 10, 16, 3, 55))
+  const nativeTime = Date.prototype.toLocaleTimeString
+  const format = vi.spyOn(Date.prototype, 'toLocaleTimeString').mockImplementation(function (locales, options) {
+    return nativeTime.call(this, locale, options)
+  })
+  try {
+    const due = new Date(2026, 10, 16, 4, 5).toISOString()
+    fake.chats.inbox = [message(1, { at: due, text: 'Tea', reminder: {} })]
+    fake.client.snoozeReminder = vi.fn(async () => ({ ...fake.chats.inbox![0]!, reminder: { snoozedUntil: due } }))
+    await open()
+    expect(button(`Tomorrow ${morning}`)).toBeDefined()
+    expect(host.querySelector('.bot-bubble-time')?.textContent).toBe(dueTime)
+    await click(button('In 10 min'))
+    expect(host.querySelector('.bot-question-settled')?.textContent).toBe(`Snoozed until ${dueTime}`)
+  } finally { format.mockRestore(); vi.useRealTimers() }
+})
+
+it('a snooze on another day shows the chat date and time', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(new Date(2026, 10, 16, 23, 55))
+  try {
+    const due = new Date(2026, 10, 17, 9).toISOString()
+    const { botDayLabel, botGroupTime } = await import('../../src/renderer/components/bots/messageGroups')
+    fake.chats.inbox = [message(1, { at: due, text: 'Tea', reminder: { snoozedUntil: due } })]
+    await open()
+    expect(host.querySelector('.bot-question-settled')?.textContent).toBe(`Snoozed until ${botDayLabel(due)} ${botGroupTime(due)}`)
+  } finally { vi.useRealTimers() }
+})
