@@ -1237,6 +1237,20 @@ export interface AgentOrigin {
    * plus one). A message that would pass the limit is refused, so a chain of agents cannot run unwatched.
    */
   hops?: number
+  /**
+   * Where the sending agent's own words sit in the stored text: after the header Mousse wrote and before its closing
+   * line (`agentMessageWords`). Lengths, not positions: text another computer reads is re-encoded inside the words,
+   * never in the header or the closing line. Absent on a message stored before it was kept: its whole text is shown.
+   */
+  body?: AgentMessageBody
+  /** The sending thread's title when it sent, shown for a sender that was deleted since. */
+  title?: string
+}
+
+/** The length of the header before an agent's words (`head`) and of the closing line after them (`tail`). */
+export interface AgentMessageBody {
+  head: number
+  tail: number
 }
 
 /** The category for the unsent draft: it is not yet in the context, so it never shows that usage is known. */

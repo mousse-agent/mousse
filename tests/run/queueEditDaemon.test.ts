@@ -18,6 +18,7 @@ import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
 import { MCP_ERROR_CODES, MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
 import type { ChatMessage, QueuedMessage } from '../../src/shared/types'
+import { agentMessageWords } from '../../src/shared/agentMessageWords'
 import type { PermissionMode } from '../../src/shared/permissionMode'
 import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
 
@@ -410,7 +411,9 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       d2.orch.recoverQueueCommandsOnBoot()
       // Finished by the boot, from the entry alone: the edit is in the file, with who made it and the limit it carries.
       const recovered = readDurableQueue(d2.store, w.other.id).find((item) => item.id === b.id)!
-      expect(recovered).toMatchObject({ content: agentMessageText(w.parent.id, 'Parent', 'b, rewritten'), origin: { kind: 'agent', threadId: w.parent.id }, permissionMode: 'ask' })
+      expect(recovered).toMatchObject({ content: agentMessageText(w.parent.id, 'Parent', 'b, rewritten'), origin: { kind: 'agent', threadId: w.parent.id, title: 'Parent' }, permissionMode: 'ask' })
+      // The edit's origin says where the agent's words are, so the chat shows them without the label.
+      expect(agentMessageWords(recovered.content, recovered.origin)).toBe('b, rewritten')
       expect(d2.engine.store.db.statement("SELECT status FROM queue_commands WHERE command_key = 'queue_edit:caller:2'").get()).toEqual({ status: 'applied' })
 
       // The retries, with other arguments, return what the commands did; neither changes the queue again.
@@ -499,6 +502,7 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       const queued = w.queue(target.id).find((item) => item.id === ids.item)!
       expect(queued).toMatchObject({ source: 'mcp', permissionMode: 'ask', origin: { kind: 'agent', threadId: askCaller.id, hops: 1 } })
       expect(queued.content).toBe(agentMessageText(askCaller.id, 'Ask caller', 'run the migration'))
+      expect(agentMessageWords(queued.content, queued.origin)).toBe('run the migration')
 
       // A person's new words make it the person's message: no agent origin (so no hop, no hold, no clearing by a Stop), but the
       // limit it carried stays.
@@ -514,7 +518,8 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
       const rewritten = w.queue(target.id).find((item) => item.id === ids.item)!
       // The words are the full-mode agent's now, said so on the message; the limit is the stricter of the two, and it only tightens.
       expect(rewritten.content).toBe(agentMessageText(fullCaller.id, 'Full caller', 'run the migration, and drop the old tables'))
-      expect(rewritten).toMatchObject({ permissionMode: 'ask', origin: { kind: 'agent', threadId: fullCaller.id, hops: 1 } })
+      expect(rewritten).toMatchObject({ permissionMode: 'ask', origin: { kind: 'agent', threadId: fullCaller.id, hops: 1, title: 'Full caller' } })
+      expect(agentMessageWords(rewritten.content, rewritten.origin)).toBe('run the migration, and drop the old tables')
       // The plan turn is still a plan turn from the ask agent; the reorder changed the order and nothing else.
       expect(w.queue(target.id).map((item) => item.id)).toEqual([ids.plan, ids.item])
       expect(w.queue(target.id)[0]).toMatchObject({ mode: 'plan', permissionMode: 'ask', origin: { kind: 'agent', threadId: askCaller.id } })
@@ -748,7 +753,8 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
         })
         const { w, fullCaller, askTarget } = r
         // A message an agent queued (limit `ask`) and a plain steer a person typed into the same turn.
-        ids.item = w.d.orch.enqueueForThread(askTarget.id, { content: 'written by an agent' }, { source: 'mcp', permissionMode: 'ask', origin: { kind: 'agent', threadId: fullCaller.id, runId: 'run:full', hops: 1 } }).id
+        const sender = { kind: 'agent' as const, threadId: fullCaller.id, runId: 'run:full', hops: 1, title: 'Full caller', body: { head: 0, tail: 0 } }
+        ids.item = w.d.orch.enqueueForThread(askTarget.id, { content: 'written by an agent' }, { source: 'mcp', permissionMode: 'ask', origin: sender }).id
         await w.d.orch.send(GO, false, { threadId: fullCaller.id, clientRequestId: 'go-full' })
         expect(parse(seen.promote)).toMatchObject({ outcome: 'promoted' })
         expect(w.d.orch.steerThread(askTarget.id, 'and a person\'s own steer')).toBe(true)
@@ -760,7 +766,8 @@ describe('queue tools that change other threads\' queues and the caller\'s own (
         expect(followUps.map((turn) => turn.prompt).sort()).toEqual(['and a person\'s own steer', 'written by an agent'].sort())
         const agentTurn = followUps.find((turn) => turn.prompt === 'written by an agent')!
         expect(agentTurn).toMatchObject({ permissionMode: 'ask', fromAgent: true })
-        expect(w.messages(askTarget.id).filter((message) => message.origin && !message.steered).map((message) => message.origin)).toEqual([expect.objectContaining({ threadId: fullCaller.id })])
+        // Its origin is the one it was queued with, where its words are and its sender's title included.
+        expect(w.messages(askTarget.id).filter((message) => message.origin && !message.steered).map((message) => message.origin)).toEqual([sender])
         expect(w.turnsOf(askTarget.id).filter((turn) => turn.prompt === 'written by an agent')).toHaveLength(1)
         await w.d.stop()
         for (const stop of stops.splice(0).reverse()) await stop().catch(() => undefined)

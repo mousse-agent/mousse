@@ -17,6 +17,7 @@ import {
   titleContextOf,
   titleLength
 } from '../../src/shared/threadTitleText'
+import { agentMessage } from '../../src/mms/run/mcp/appTools/agentMessage'
 
 const stackTrace = [
   'TypeError: Cannot read properties of undefined (reading \'id\')',
@@ -189,5 +190,15 @@ describe('what a title is made from', () => {
 
   it('is null before the person has written anything', () => {
     expect(titleContextOf([{ role: 'assistant', content: 'hi' }])).toBeNull()
+  })
+
+  it('reads an agent\'s message for its words, never for the label Mousse wrote around them', () => {
+    const first = agentMessage('sender', 'Planner', 'fix the login redirect')
+    const later = agentMessage('sender', 'Planner', 'also keep the return path')
+    const origin = (envelope: typeof first) => ({ kind: 'agent' as const, threadId: 'sender', runId: 'r', body: { head: envelope.head, tail: envelope.tail } })
+    expect(titleContextOf([
+      { role: 'user', content: first.text, origin: origin(first) },
+      { role: 'user', content: later.text, origin: origin(later) }
+    ])).toMatchObject({ request: 'fix the login redirect', later: ['also keep the return path'] })
   })
 })
