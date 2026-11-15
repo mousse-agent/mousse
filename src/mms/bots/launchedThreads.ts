@@ -84,7 +84,7 @@ export function launchedThreadsOf(input: {
 }
 
 /**
- * Calls `changed` with the thread that started a thread whenever that thread's run, or a run of a subagent below it, changes status, a question or
+ * Calls `changed` with the thread that started a thread when it is made, whenever its run, or a run of a subagent below it, changes status, a question or
  * approval in it opens or closes, or its place in the lists changes (hidden or shown, archived): a bot that started it
  * reads its summary again, so its header goes busy or back to free and its list shows the thread as it is. Threads no
  * thread started are ignored. Returns the unsubscribe. Never throws into the emitters.
@@ -93,7 +93,7 @@ export function watchLaunchedThreads(input: {
   /** The run engine (`event`) and the questions service (`pending`, `cleared`). */
   runs: Pick<EventEmitter, 'on' | 'off'>
   questions: Pick<EventEmitter, 'on' | 'off'>
-  /** The thread store (`list-changed`, with the thread's id). */
+  /** The thread store (`created`, with the thread; `list-changed`, with the thread's id). */
   threads?: Pick<EventEmitter, 'on' | 'off'>
   thread(threadId: string): LaunchedThreadMeta | undefined
   changed(creatorThreadId: string): void
@@ -115,11 +115,14 @@ export function watchLaunchedThreads(input: {
   input.runs.on('event', onRun)
   input.questions.on('pending', onAsk)
   input.questions.on('cleared', onAsk)
+  // A thread it just started is listed at once, before its first message runs (or when it has none).
+  input.threads?.on('created', onListed)
   input.threads?.on('list-changed', onListed)
   return () => {
     input.runs.off('event', onRun)
     input.questions.off('pending', onAsk)
     input.questions.off('cleared', onAsk)
+    input.threads?.off('created', onListed)
     input.threads?.off('list-changed', onListed)
   }
 }

@@ -199,6 +199,8 @@ export function botsClient(): PersonalBotsClient {
 
 let epoch = 0
 let refreshOperation: Promise<void> | undefined
+/** A refresh was asked for while a list was on its way: that list may predate the change, so one more follows it. */
+let refreshAgain = false
 let unsubscribe: Array<() => void> = []
 /** Each bot's last send whose words came back after a failure: sending the same words again reuses its request id. */
 const failedSends = new Map<string, { text: string; clientRequestId: string }>()
@@ -333,6 +335,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
       if (get().profileId === profileId) return
       epoch += 1
       refreshOperation = undefined
+      refreshAgain = false
       failedSends.clear()
       olderLoads.clear()
       pendingCreate = undefined
@@ -348,30 +351,38 @@ export const useBotsStore = create<BotsState>((set, get) => {
     },
 
     async refresh() {
-      if (refreshOperation) return refreshOperation
+      // A change pushed while a list is on its way (a thread the bot just started, its status) may be missing from that
+      // list, which the service read before the change: the list is read once more after it, never dropped.
+      if (refreshOperation) {
+        refreshAgain = true
+        return refreshOperation
+      }
       const owner = epoch
       const operation = (async () => {
-        try {
-          const list = withCreated((await bots().list()).filter((bot) => !removed.has(bot.id)))
-          if (owner !== epoch) return
-          set((state) => {
-            // A list that brought nothing new keeps the bots held, so the open chat does not render again.
-            const bots = keepEqualById(state.bots, list)
-            // A live chip lasts while its bot works.
-            const working = Object.entries(state.live).filter(([id]) => list.some((bot) => bot.id === id && bot.state === 'working'))
-            const live = working.length === Object.keys(state.live).length ? state.live : Object.fromEntries(working)
-            // A chip lasts while its activation (a chat turn or a piece of work) runs.
-            const running = new Set(list.flatMap((bot) => [...(bot.chat ? [bot.chat.activationId] : []), ...(bot.work ?? []).map((item) => item.id)]))
-            const kept = Object.entries(state.activity).filter(([id]) => running.has(id))
-            const activity = kept.length === Object.keys(state.activity).length ? state.activity : Object.fromEntries(kept)
-            const said = Object.entries(state.statuses).filter(([id]) => running.has(id))
-            const statuses = said.length === Object.keys(state.statuses).length ? state.statuses : Object.fromEntries(said)
-            return { bots, loaded: true, live, activity, statuses, ...celebrate(state.bots, bots) }
-          })
-        } catch {
-          // A missed list is listed again by the next event or poll; the open chat keeps what it has.
-          if (owner === epoch) set({ loaded: true })
-        }
+        do {
+          refreshAgain = false
+          try {
+            const list = withCreated((await bots().list()).filter((bot) => !removed.has(bot.id)))
+            if (owner !== epoch) return
+            set((state) => {
+              // A list that brought nothing new keeps the bots held, so the open chat does not render again.
+              const bots = keepEqualById(state.bots, list)
+              // A live chip lasts while its bot works.
+              const working = Object.entries(state.live).filter(([id]) => list.some((bot) => bot.id === id && bot.state === 'working'))
+              const live = working.length === Object.keys(state.live).length ? state.live : Object.fromEntries(working)
+              // A chip lasts while its activation (a chat turn or a piece of work) runs.
+              const running = new Set(list.flatMap((bot) => [...(bot.chat ? [bot.chat.activationId] : []), ...(bot.work ?? []).map((item) => item.id)]))
+              const kept = Object.entries(state.activity).filter(([id]) => running.has(id))
+              const activity = kept.length === Object.keys(state.activity).length ? state.activity : Object.fromEntries(kept)
+              const said = Object.entries(state.statuses).filter(([id]) => running.has(id))
+              const statuses = said.length === Object.keys(state.statuses).length ? state.statuses : Object.fromEntries(said)
+              return { bots, loaded: true, live, activity, statuses, ...celebrate(state.bots, bots) }
+            })
+          } catch {
+            // A missed list is listed again by the next event or poll; the open chat keeps what it has.
+            if (owner === epoch) set({ loaded: true })
+          }
+        } while (refreshAgain && owner === epoch)
       })()
       refreshOperation = operation
       try { await operation } finally { if (refreshOperation === operation) refreshOperation = undefined }
