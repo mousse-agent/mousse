@@ -503,26 +503,27 @@ export class BotMemoryStore {
           push(journalHit(row), row.text)
       return hits
     }
-    // Page the full index. Only ordinary rows can fill the result while paging;
-    // credential-bearing survivors wait until all ordinary matches have had their turn.
-    const batchSize = 128
-    const maxPages = 4096
+    // Sort each full-index match once, and stop pulling rows as soon as clean hits fill
+    // the result. Guarded survivors stay deferred until ordinary matches are exhausted.
+    const maxCandidates = 4096
     const candidates = (memory: boolean, allWords: boolean): { ordinary: Row[]; guarded: Row[]; truncated: boolean } => {
       const match = terms.join(allWords ? ' AND ' : ' OR ')
       const ordinary: Row[] = []
       const guarded: Row[] = []
       const unique = new Set<string>()
-      for (let pageNumber = 0; pageNumber < maxPages; pageNumber++) {
-        const page = memory
-          ? this.all(`SELECT m.*, snippet(bot_memories_fts, 0, '«', '»', '…', 16) AS snip, bm25(bot_memories_fts) AS score
-            FROM bot_memories_fts JOIN bot_memories m ON m.row_id = bot_memories_fts.rowid
-            WHERE bot_memories_fts MATCH ? AND m.bot_id = ? AND m.status IN ('active','expired') AND m.learned_at >= ? AND m.learned_at <= ?
-            ORDER BY score, m.learned_at DESC LIMIT ? OFFSET ?`, match, botId, since, until, batchSize, pageNumber * batchSize)
-          : this.all(`SELECT j.*, snippet(bot_journal_fts, 0, '«', '»', '…', 16) AS snip, bm25(bot_journal_fts) AS score
-            FROM bot_journal_fts JOIN bot_journal j ON j.seq = bot_journal_fts.rowid
-            WHERE bot_journal_fts MATCH ? AND ${journalWhere} ORDER BY score, j.seq DESC LIMIT ? OFFSET ?`,
-          match, botId, since, until, batchSize, pageNumber * batchSize)
-        for (const row of page) {
+      const rows = memory
+        ? this.db.statement(`SELECT m.*, snippet(bot_memories_fts, 0, '«', '»', '…', 16) AS snip, bm25(bot_memories_fts) AS score
+          FROM bot_memories_fts JOIN bot_memories m ON m.row_id = bot_memories_fts.rowid
+          WHERE bot_memories_fts MATCH ? AND m.bot_id = ? AND m.status IN ('active','expired') AND m.learned_at >= ? AND m.learned_at <= ?
+          ORDER BY score, m.learned_at DESC`).iterate(match, botId, since, until)
+        : this.db.statement(`SELECT j.*, snippet(bot_journal_fts, 0, '«', '»', '…', 16) AS snip, bm25(bot_journal_fts) AS score
+          FROM bot_journal_fts JOIN bot_journal j ON j.seq = bot_journal_fts.rowid
+          WHERE bot_journal_fts MATCH ? AND ${journalWhere} ORDER BY score, j.seq DESC`).iterate(match, botId, since, until)
+      try {
+        for (let examined = 0; examined < maxCandidates; examined++) {
+          const next = rows.next()
+          if (next.done) return { ordinary, guarded, truncated: false }
+          const row = next.value as Row
           const text = row.text as string
           // The marker is not one of the owner's visible words.
           const visibleText = maskMemoryCredentials(text, '')
@@ -547,14 +548,13 @@ export class BotMemoryStore {
           } else if (!unique.has(key)) {
             unique.add(key)
             ordinary.push(row)
+            if (ordinary.length >= limit - hits.length) return { ordinary, guarded, truncated: false }
           }
         }
-        if (ordinary.length >= limit - hits.length || page.length < batchSize)
-          return { ordinary, guarded, truncated: false }
+        return { ordinary, guarded: [], truncated: true }
+      } finally {
+        rows.return?.()
       }
-      // With more than 524,288 candidates in one source/pass, return only the ordinary
-      // survivors examined so far. Deferred rows cannot displace unseen ordinary matches.
-      return { ordinary, guarded: [], truncated: true }
     }
     for (const allWords of terms.length > 1 ? [true, false] : [true]) {
       if (hits.length >= limit) break
