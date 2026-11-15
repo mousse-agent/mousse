@@ -446,7 +446,17 @@ export class BotMemoryStore {
     const hits: BotMemoryHit[] = []
     const seen = new Set<string>()
     // The same text twice (a reply as the chat row and as the copied thread row) is one hit.
-    const push = (hit: BotMemoryHit, text: unknown) => {
+    const push = (hit: BotMemoryHit, text: unknown, allWords = true) => {
+      if (terms.length && typeof text === 'string') {
+        const masked = maskMemoryCredentials(text)
+        if (masked !== text) {
+          // Raw FTS matches are only candidates: neither a hit nor its count may confirm
+          // words inside a held-back credential. Check the full masked text, not its snippet.
+          const words = new Set(masked.normalize('NFKC').toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? [])
+          const matches = terms.map((term) => words.has(term.slice(1, -1)))
+          if (!(allWords ? matches.every(Boolean) : matches.some(Boolean))) return
+        }
+      }
       const key = `t:${sha256(typeof text === 'string' ? text.trim() : '')}`
       if (hits.length >= limit || seen.has(key) || seen.has(hit.ref)) return
       seen.add(key)
@@ -486,18 +496,19 @@ export class BotMemoryStore {
           push(journalHit(row), row.text)
       return hits
     }
-    for (const match of terms.length > 1 ? [terms.join(' AND '), terms.join(' OR ')] : [terms[0]!]) {
+    for (const allWords of terms.length > 1 ? [true, false] : [true]) {
+      const match = terms.join(allWords ? ' AND ' : ' OR ')
       if (hits.length >= limit) break
       if (kinds.has('memory'))
         for (const row of this.all(`SELECT m.*, snippet(bot_memories_fts, 0, '«', '»', '…', 16) AS snip, bm25(bot_memories_fts) AS score
           FROM bot_memories_fts JOIN bot_memories m ON m.row_id = bot_memories_fts.rowid
           WHERE bot_memories_fts MATCH ? AND m.bot_id = ? AND m.status IN ('active','expired') AND m.learned_at >= ? AND m.learned_at <= ?
-          ORDER BY score, m.learned_at DESC LIMIT ?`, match, botId, since, until, limit)) push(memoryHit(row), row.text)
+          ORDER BY score, m.learned_at DESC LIMIT ?`, match, botId, since, until, limit)) push(memoryHit(row), row.text, allWords)
       if (journalKinds.length)
         for (const row of this.all(`SELECT j.*, snippet(bot_journal_fts, 0, '«', '»', '…', 16) AS snip, bm25(bot_journal_fts) AS score
           FROM bot_journal_fts JOIN bot_journal j ON j.seq = bot_journal_fts.rowid
           WHERE bot_journal_fts MATCH ? AND ${journalWhere} ORDER BY score, j.seq DESC LIMIT ?`, match, botId, since, until, limit * 2))
-          push(journalHit(row), row.text)
+          push(journalHit(row), row.text, allWords)
     }
     return hits
   }
