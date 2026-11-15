@@ -49,6 +49,7 @@ const { ChatsSidebar } = await import('../../src/renderer/components/chats/Chats
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
 const { setBotsClient, useBotsStore } = await import('../../src/renderer/stores/botsStore')
 const { SelectionReplyButton } = await import('../../src/renderer/components/SelectionReplyButton')
+const { botMessageScroller } = await import('../../src/renderer/components/bots/BotChatView')
 
 let root: Root
 let host: HTMLElement
@@ -750,6 +751,26 @@ describe('a long chat', () => {
     } finally {
       delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView
     }
+  })
+
+  it('lands on a message as find does: loaded and drawn when it is older than the rows drawn; a landing a newer one replaced does nothing', async () => {
+    fake.chats.inbox = Array.from({ length: 200 }, (_, index) => message(index + 1))
+    await open()
+    expect(drawn()[0]).toBe('m151')
+    const land = botMessageScroller('inbox')
+    let current = 1
+    const landing = (token: number) => ({ isCurrent: () => current === token, end: () => undefined })
+    // Replaced before it was drawn: false, and the message is not drawn.
+    const stale = land('m120', landing(1))
+    current = 2
+    expect(await stale).toBe(false)
+    expect(drawn()).not.toContain('m120')
+    // Not loaded yet: older pages load until it is held, then it is drawn with every row after it.
+    let result: boolean | undefined
+    void land('m3', landing(2)).then((value) => { result = value })
+    for (let turn = 0; turn < 60 && result === undefined; turn += 1) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)) })
+    expect(result).toBe(true)
+    expect(drawn()[0]).toBe('m3')
   })
 })
 

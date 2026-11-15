@@ -42,6 +42,7 @@ import { ImageGalleryProvider } from '../../chat/components/agent-elements/image
 import type { LightboxImage } from '../../chat/components/agent-elements/image-lightbox'
 import { BotImageFiles, BotOtherFiles, botFileImageUrl, useFailedFileImages } from './BotImages'
 import { botChatImages } from './imageSources'
+import type { RevealNavigation } from '../../chat/components/agent-elements/find/reveal'
 
 const EMPTY: BotChatMessage[] = []
 const NO_FILES: AttachedFile[] = []
@@ -85,22 +86,52 @@ const nextFrame = () => new Promise<void>((resolve) => { requestAnimationFrame((
 /** The open chat's way to draw a loaded message above its window (botChatWindow.ts), by bot. */
 const revealers = new Map<string, (id: string) => void>()
 
+/** One landing on a message; a newer one (the find bar's next match) makes it stale. As find/reveal.ts passes it. */
+type Landing = Pick<RevealNavigation, 'isCurrent'>
+const ONLY_LANDING: Landing = { isCurrent: () => true }
+/** Frames a message may take to be drawn after it was loaded or the window widened to it. */
+const DRAW_FRAMES = 30
+/** Space kept above a message scrolled to by `botMessageScroller`. */
+const LANDING_MARGIN = 16
+
 /**
- * Scrolls to a message of the open chat and lights it briefly. A message not loaded yet is loaded first, page by
- * page of older history; one loaded above the rows drawn is drawn; one the chat no longer has does nothing.
+ * Draws a message of a bot's open chat and returns its row. A message not loaded yet is loaded first, page by page of
+ * older history; one loaded above the rows drawn widens the window to it. Null when the chat no longer has it, or a
+ * newer landing took over.
  */
-async function showMessage(botId: string, id: string): Promise<void> {
+async function drawMessage(botId: string, id: string, landing: Landing = ONLY_LANDING): Promise<HTMLElement | null> {
   let element = messageElement(id)
-  if (!element) {
-    if (!(await useBotsStore.getState().findMessage(botId, id))) return
-    // The loaded page renders on its own schedule: wait a few frames for the message to be drawn, asking the chat to
-    // draw it until it is (it may not have rendered the page yet when first asked).
-    for (let frame = 0; frame < 10 && !(element = messageElement(id)); frame += 1) {
-      revealers.get(botId)?.(id)
-      await nextFrame()
-    }
-    if (!element) return
+  if (element) return element
+  if (!(await useBotsStore.getState().findMessage(botId, id))) return null
+  // The loaded page renders on its own schedule: ask the chat to draw the message until it is drawn (it may not have
+  // rendered the page yet when first asked).
+  for (let frame = 0; frame < DRAW_FRAMES && !(element = messageElement(id)); frame += 1) {
+    if (!landing.isCurrent()) return null
+    revealers.get(botId)?.(id)
+    await nextFrame()
   }
+  return landing.isCurrent() ? element : null
+}
+
+/**
+ * Brings a message of `botId`'s open chat into view near the transcript's top, drawn first by `drawMessage`; resolves
+ * false when it can't. Its shape is find's `scrollToMessage` (`useBotChatFind({ scrollToMessage })`): a chat that
+ * draws only its newest rows lands the find bar's matches through it.
+ */
+export function botMessageScroller(botId: string): (id: string, landing: Landing) => Promise<boolean> {
+  return async (id, landing) => {
+    const element = await drawMessage(botId, id, landing)
+    const lane = element?.closest<HTMLElement>('.chat-transcript')
+    if (!element || !lane || !landing.isCurrent()) return false
+    lane.scrollTop += element.getBoundingClientRect().top - lane.getBoundingClientRect().top - LANDING_MARGIN
+    return true
+  }
+}
+
+/** Scrolls to a message of the open chat and lights it briefly, drawn first by `drawMessage`; a gone one does nothing. */
+async function showMessage(botId: string, id: string): Promise<void> {
+  const element = await drawMessage(botId, id)
+  if (!element) return
   element.scrollIntoView({ block: 'center', behavior: 'smooth' })
   element.classList.remove('is-shown')
   void element.offsetWidth
@@ -688,6 +719,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
       </header>
       <div className="chat-transcript" data-applet-scroller data-quote-source ref={transcript} role="log" aria-label={`${bot.name} messages`} onScroll={(event) => {
         const element = event.currentTarget
+        const down = element.scrollTop >= (anchor.current.top ?? 0)
         anchor.current.atEnd = element.scrollHeight - element.scrollTop - element.clientHeight < 40
         anchor.current.height = element.scrollHeight
         // Reaching the end, or any scroll back up (the reader took over), ends the way to the end.
@@ -696,8 +728,9 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
         if (anchor.current.atEnd) setUnseen(false)
         if (!anchor.current.heading) setAway(!anchor.current.atEnd)
         measure()
-        // Back at the end, only the newest rows are drawn again; away from it, the rows drawn hold still.
-        if (anchor.current.atEnd) setFrom(undefined)
+        // Back at the end, only the newest rows are drawn again; away from it, the rows drawn hold still. A scroll up
+        // that starts at the end (to a quote or a find match above) keeps the rows it is heading for.
+        if (anchor.current.atEnd && down) setFrom(undefined)
         else if (from === undefined && firstShown !== undefined) setFrom(firstShown)
         // At the top of the rows drawn: the next loaded rows above join them, else the next page is asked for.
         if (element.scrollTop < 60) {
