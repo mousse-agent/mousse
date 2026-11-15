@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import type { ProfileDatabase } from '../../run/db/ProfileDatabase'
 import type { BotLane } from '../../../shared/bots/personal/definition'
 import {
+  BOT_CHAT_TURN_END_KEY,
   BOT_JOURNAL_KINDS,
   BOT_MEMORY_CAPS,
   BOT_MEMORY_READ_PAGE_TOKENS,
@@ -360,10 +361,15 @@ export class BotMemoryStore {
     return this.all('SELECT * FROM bot_journal WHERE bot_id = ? ORDER BY seq', botId).map(journalRowOf)
   }
 
-  /** The chat rows the verbatim window carries (owner messages, bot replies, run reports), from `fromSeq`. */
+  /**
+   * The chat rows the verbatim window carries (owner messages, bot replies, run reports, and the line a chat turn left
+   * when it failed, was interrupted or was stopped), from `fromSeq`.
+   */
   windowRows(botId: string, fromSeq: number): BotJournalRow[] {
-    return this.all(`SELECT * FROM bot_journal WHERE bot_id = ? AND seq >= ? AND kind IN ('owner_msg','bot_msg','run_report')
-      AND source_key LIKE 'bm:%' ORDER BY seq`, botId, fromSeq).map(journalRowOf)
+    return this.all(`SELECT * FROM bot_journal WHERE bot_id = ? AND seq >= ? AND (
+        (kind IN ('owner_msg','bot_msg','run_report') AND source_key LIKE 'bm:%')
+        OR (kind = 'notice' AND substr(source_key, 1, ?) = ?)
+      ) ORDER BY seq`, botId, fromSeq, BOT_CHAT_TURN_END_KEY.length, BOT_CHAT_TURN_END_KEY).map(journalRowOf)
   }
 
   /** Run reports, newest first: of the runs of `scheduleId`, or of any run when it is absent. */

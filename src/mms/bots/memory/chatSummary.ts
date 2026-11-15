@@ -21,10 +21,11 @@ export interface ChatSummaryState {
 
 export const SUMMARY_HEADER = 'Chat summary (older chat, newest first; memory_search finds the full rows):'
 
-type Who = 'Owner' | 'Me' | 'My run report'
+type Who = 'Owner' | 'Me' | 'My run report' | 'Mousse'
 
 export function speaker(row: BotJournalRow): Who {
-  return row.kind === 'owner_msg' ? 'Owner' : row.kind === 'run_report' ? 'My run report' : 'Me'
+  // A notice is Mousse's line on how a chat turn ended (failed, interrupted, stopped), never the bot's own words.
+  return row.kind === 'owner_msg' ? 'Owner' : row.kind === 'run_report' ? 'My run report' : row.kind === 'notice' ? 'Mousse' : 'Me'
 }
 
 /**
