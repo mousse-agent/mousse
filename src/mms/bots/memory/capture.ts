@@ -108,7 +108,12 @@ function botRows(message: ChatMessage, ref: BotThreadRef): CapturedRow[] {
   if (CALL_KINDS.has(kind)) {
     const activity = message.activity
     const tool = message.toolCall?.toolName ?? activity?.toolName ?? message.toolCall?.title ?? 'tool'
-    const input = message.toolCall?.input ?? (activity && 'input' in activity ? activity.input : undefined)
+    let input = message.toolCall?.input ?? (activity && 'input' in activity ? activity.input : undefined)
+    // The progress journal owns this text. A captured JSON copy would outlive Forget.
+    if (/(?:^|__)run_report$/.test(tool) && input && typeof input === 'object') {
+      const { leftOff: _leftOff, ...report } = input as Record<string, unknown>
+      input = report
+    }
     const memory = memoryToolOf(tool)
     if (memory) {
       // A memory call is kept by its refs alone: its text, query or reason restates what a forget
