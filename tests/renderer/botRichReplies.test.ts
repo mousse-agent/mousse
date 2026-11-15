@@ -65,7 +65,7 @@ beforeEach(() => {
     export: vi.fn(async () => {})
   }
   installPreload(fake, { applets, fs: { readAsset: vi.fn(async () => { throw new Error('no file') }) } })
-  vi.stubGlobal('IntersectionObserver', class { observe() {} disconnect() {} })
+  vi.stubGlobal('IntersectionObserver', class { observe() {} unobserve() {} disconnect() {} })
   window.matchMedia ??= ((query: string) => ({ matches: false, media: query, addEventListener: () => {}, removeEventListener: () => {} })) as unknown as typeof window.matchMedia
   setBotsClient(fake.client)
   host = document.createElement('div')
