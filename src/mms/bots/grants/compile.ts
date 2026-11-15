@@ -87,6 +87,8 @@ export interface CompileInput {
     consult: boolean
     memory?: boolean
     frontDesk?: boolean
+    /** Only a chat turn the owner's own message started may start an unsandboxed background command. */
+    watcherStart?: boolean
     /**
      * What "use your threads" gives this turn, when the grant holds it: `read` (list, search, read, wait: work, a
      * reminder's work, a schedule, a chat turn the owner's message did not start), or `all`, which adds starting,
@@ -208,7 +210,7 @@ export function compileBotThread(input: CompileInput): CompileResult {
     ...(own?.consult ? ['consult'] : []),
     // Always on, like memory: the listing of the owner's MCP servers, so the bot can ask for the right one.
     ...(own?.memory ? [...BOT_MEMORY_TOOLS, BOT_MCP_LIST_TOOL] : []),
-    ...(own?.frontDesk ? BOT_WORK_TOOLS : []),
+    ...(own?.frontDesk ? BOT_WORK_TOOLS.filter((tool) => tool !== 'watch_start' || own.watcherStart === true) : []),
     ...(own?.images ? [BOT_IMAGE_TOOL] : []),
     ...(own?.applets ? [BOT_APPLET_TOOL] : []),
     ...(own?.questions ? [BOT_QUESTION_TOOL, ...(own.frontDesk ? [BOT_QUESTION_ANSWER_TOOL] : [])] : []),

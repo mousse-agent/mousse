@@ -78,6 +78,16 @@ describe('the bot changelog in the pack', () => {
     expect(pack).not.toContain(BOT_CHANGELOG[0]!.text)
   })
 
+  it('tells a bot that saw the old watcher advice which turns can still start commands', async () => {
+    existingBot()
+    memory.write(() => memory.setState('ada', 'changelog_seen', 9))
+    const pack = await packs().chatPreamble({ botId: 'ada', activationId: 'act-watch-rule' })
+    expect(pack).toContain('watch_start')
+    expect(pack).toMatch(/only.*chat turn.*owner.*own message/i)
+    expect(pack).toMatch(/wake-up.*work.*sandbox/i)
+    expect(pack).toMatch(/tell your owner what to start/i)
+  })
+
   it('tells a new bot nothing: it has no history to correct', async () => {
     const provider = packs()
     chat.post({ botId: 'ada', author: 'owner', kind: 'text', text: 'Hello', activationId: 'act-1' })
