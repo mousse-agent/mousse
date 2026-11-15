@@ -267,6 +267,7 @@ import {
   type CommitInput
 } from '../git/commitSuggestion'
 import { readPullRequestTemplate } from '../git/pullRequestTemplate'
+import { RepositoryIdentityError } from '../git/RepositoryIdentity'
 import type { LineEditStatsStore } from '../stats/LineEditStatsStore'
 import type { ProjectManager } from '../data/ProjectManager'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
@@ -12489,11 +12490,19 @@ export class OrchestratorService extends EventEmitter {
           snapshotFolder = undefined
         }
       } else if (directory) {
-        turnStartSha = (await new ThreadActionService(directory).recordOutsideChanges({
-          threadId: session.threadId, conversationBranchId, workspacePath: checkpointCwd,
-          heldThreadLease: session.executionLease ?? undefined, signal: setupSignal,
-          presentationMessageStart: turnPresentationStart, nativeContextBoundary: turnNativeStartBoundary
-        })).startSha
+        try {
+          turnStartSha = (await new ThreadActionService(directory).recordOutsideChanges({
+            threadId: session.threadId, conversationBranchId, workspacePath: checkpointCwd,
+            heldThreadLease: session.executionLease ?? undefined, signal: setupSignal,
+            presentationMessageStart: turnPresentationStart, nativeContextBoundary: turnNativeStartBoundary
+          })).startSha
+        } catch (error) {
+          // A worktree folder given a new repository (Initialize Git) has no commit to snapshot yet: the turn runs with
+          // its conversation recorded alone, and Undo says why. Anything else still fails the turn.
+          if (!(error instanceof RepositoryIdentityError && error.capability.reason === 'unborn-head')) throw error
+          snapshotsOff = 'Undo is off for this turn: the worktree\'s repository has no commit yet.'
+          checkpointEnabled = false
+        }
       } else {
         await requireCleanWorkspaceAsync(checkpointCwd, 'Thread workspace')
         turnStartSha = await actionGitAsync(checkpointCwd, ['rev-parse', 'HEAD'])
@@ -12869,7 +12878,11 @@ export class OrchestratorService extends EventEmitter {
       const goal = this.threadStore?.getThread(session.threadId)?.goal
       const turnEpoch = this.goalTurnEpochs.get(session.threadId)?.epoch
       const goalText = goal?.state === 'working' && turnEpoch && goal.epoch === turnEpoch ? goalNote(goal) : undefined
-      const prompted = [modelNote, goalText, userContent].filter(Boolean).join('\n\n')
+      // The first turn that runs in the project folder because the worktree is gone or emptied: the agent is told, once.
+      const folderNote = opts?.bot ? undefined : session.workspace?.workspaceNote
+      const workspaceNote = folderNote && folderNote !== session.workspaceNoteGiven ? folderNote : undefined
+      session.workspaceNoteGiven = folderNote ?? null
+      const prompted = [modelNote, goalText, workspaceNote, userContent].filter(Boolean).join('\n\n')
       const activeMessages = getActiveMessages(this.nativeContext)
       const turnInput: TurnInput = {
         runId: engineRunId ?? turnId,
