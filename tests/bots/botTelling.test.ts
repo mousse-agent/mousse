@@ -117,3 +117,10 @@ it('withdraws a banner when any window reads and keeps the next update free of r
   await f.bots.deliverDueReminders()
   expect(events.at(-1).rows).toHaveLength(1)
 })
+it('includes tellings in the shared due sources without spinning a closed-window timer', () => {
+  const m = f.bots.chat.post({ botId, author: 'bot', kind: 'text', text: 'Ready' })
+  expect(f.bots.nextDueAt()).toBeUndefined()
+  f.bots.setTellingWindows(1)
+  expect(f.bots.nextDueAt(botId)).toBe(f.store.message(m.id)?.tellAt)
+  expect(f.timers.at(-1)?.ms).toBe(0)
+})

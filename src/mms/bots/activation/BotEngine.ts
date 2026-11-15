@@ -646,6 +646,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // report its schedule's Tell me keeps quiet says so (`quiet`): it is in the chat, without a notification.
       emit: (event) => {
         this.events.emit('message', { ...event, ...this.nameFor(event.botId), ...(this.quietReport(event.botId, event.message) ? { quiet: true } : {}) })
+        this.tellings.read()
         this.armDue()
       },
       classify: (message) => {
@@ -7909,7 +7910,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   private dueAt(botId?: string, forTimer = false): number | undefined {
     const sources: Array<() => number | undefined> = [
-      () => this.tellings.next(botId, forTimer),
+      () => this.tellings.next(botId),
       () => {
         const row = this.store.nextReminder(botId)
         return row ? Math.max(Date.parse(row.dueAt), forTimer ? this.reminderRetryAt.get(row.id) ?? 0 : 0) : undefined

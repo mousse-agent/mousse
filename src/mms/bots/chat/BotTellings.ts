@@ -26,9 +26,9 @@ export class BotTellings {
       else { this.emit({ id, rows: [], title: '', body: '', kind: 'completed', sound: false }); this.banners.delete(id) }
     }
   }
-  next(botId?: string, forTimer = false): number | undefined {
-    if (!this.windows && forTimer) return undefined
-    const row = this.store.get(`SELECT MIN(tell_at) AS at FROM bot_messages WHERE tell IS NOT NULL ${forTimer ? "AND tell != 'later'" : ''} AND told_at IS NULL${botId ? ' AND bot_id = ?' : ''}`, ...(botId ? [botId] : []))
+  next(botId?: string): number | undefined {
+    if (!this.windows) return undefined
+    const row = this.store.get(`SELECT MIN(tell_at) AS at FROM bot_messages WHERE tell IS NOT NULL AND tell != 'later' AND told_at IS NULL${botId ? ' AND bot_id = ?' : ''}`, ...(botId ? [botId] : []))
     return typeof row?.at === 'string' ? Date.parse(row.at) : undefined
   }
   private unread(row: BotMessageRow): boolean {

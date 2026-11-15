@@ -313,3 +313,16 @@ describe('forgetting, deleting and exporting', () => {
     }
   })
 })
+
+it('an answered question awaiting release is marked told silently', async () => {
+  const { bubble } = await asked()
+  await tap(bubble.question!.questionId, 'Flat B')
+  f.store.run('UPDATE bot_messages SET told_at = ?', f.store.now())
+  f.store.run('UPDATE bot_messages SET told_at = NULL WHERE id = ?', bubble.id)
+  const tellings: unknown[] = []
+  f.bots.events.on('tell', event => tellings.push(event))
+  f.bots.setTellingWindows(1)
+  await f.bots.deliverDueReminders()
+  expect(tellings).toHaveLength(0)
+  expect(f.store.message(bubble.id)?.toldAt).toBe(f.store.now())
+})

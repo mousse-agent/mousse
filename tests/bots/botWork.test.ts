@@ -998,6 +998,7 @@ describe('long work', () => {
       expect(f.store.activation(activation.id)).toMatchObject({ status: 'failed', endReason: 'budget_exhausted' })
       expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'notice', text: 'I ran out of room for this. Pip wants to work for up to 2 hours per run.' })
       expect(chatOf(f, botId).at(-1)!.ask!.carriesOn).toBeUndefined()
+      expect(f.store.message(chatOf(f, botId).at(-1)!.id)?.tell).toBe('soon')
     })
   })
 })
