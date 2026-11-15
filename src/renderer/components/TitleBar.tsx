@@ -3,7 +3,6 @@ import { Edit, Info, PanelLeft, PanelRightClose, PanelRightOpen } from '../lib/i
 import { useShortcutTitle } from '../commands/commandRegistry'
 import { createAndSelectThread } from '../lib/threadActions'
 import { useChatsStore } from '../stores/chatsStore'
-import { useBotsPolling } from '../stores/botsStore'
 import { WindowCaptionButtons } from './WindowCaptionButtons'
 import { TitleBarNav } from './TitleBarNav'
 import { IconButton } from './IconButton'
@@ -29,7 +28,6 @@ const BUILD_VERSION = typeof __MOUSSE_VERSION__ === 'string' ? __MOUSSE_VERSION_
 const logoIcon = channelForVersion(BUILD_VERSION) === 'nightly' ? nightlyLogoIcon : stableLogoIcon
 
 export function TitleBar() {
-  useBotsPolling()
   const threadsSidebarOpen = useAppStore((s) => s.threadsSidebarOpen)
   const setThreadsSidebarOpen = useAppStore((s) => s.setThreadsSidebarOpen)
   const mainAreaOpen = useAppStore((s) => s.mainAreaOpen)
