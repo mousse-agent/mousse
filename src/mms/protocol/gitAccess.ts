@@ -20,6 +20,7 @@ export const GIT_ACCESS = {
   'applets.state.get': 'none',
   'applets.state.save': 'none',
   'applets.export': 'none',
+  'app.presence': 'none',
   'health': 'none',
   'capabilities': 'none',
   'projects.list': 'read',
