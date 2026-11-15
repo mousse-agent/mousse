@@ -21,7 +21,7 @@ import { trackChildProcess } from '../../diagnostics/liveCounts'
 /**
  * How a bot's turn runs on Claude Code (PR 6 §3), on either kind of entry:
  * - the owner's own entry (the one their chats use, with their sign-in): the turn runs in that
- *   entry's environment, as one query that is never kept warm, and its process is the turn's own:
+ *   locked environment plus its sign-in, as one query that is never kept warm, and its process is the turn's own:
  *   the deadline ends it through the turn's signal, never the bot supervisor (`ownerEntry`);
  * - a `locked` entry (`config.profile: 'locked'`), which runs in a home of its own and only bot
  *   turns, in the locked environment, with its process group under the bot supervisor.
@@ -136,7 +136,7 @@ export const CLAUDE_NATIVE_TOOLS: NativeToolTable = Object.freeze({
 export interface ClaudeLockedTurn {
   authority: BotAuthority
   /**
-   * The turn runs on the owner's own entry, not a locked one: their environment and sign-in, the
+   * The turn runs on the owner's own entry, not a locked one: only their sign-in over the locked environment, the
    * SDK's own process handling, and no organisation-policy reading. Every call still goes through
    * the grant gate, and Claude Code runs in its asking mode with none of the user's settings files.
    */
