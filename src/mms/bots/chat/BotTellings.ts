@@ -70,10 +70,18 @@ export class BotTellings {
     return (!message.ask || message.ask.status === 'open') && (!message.question || message.question.status === 'open')
   }
   release(now: number): void {
-    // Expiration is one bulk write over the waiting-row index, including with no window.
-    try { this.store.run(`UPDATE bot_messages INDEXED BY bot_messages_tell_due SET told_at = ?
-      WHERE tell IS NOT NULL AND told_at IS NULL AND tell = 'later' AND at <= ?`,
-      new Date(now).toISOString(), new Date(now - 86_400_000).toISOString()) } catch { /* The next upkeep pass retries expiration; it never arms the due timer. */ }
+    // One bulk maintenance transaction, including on legacy-only profiles. A receipt's message
+    // age is sufficient: messages outside the same day are never caught up, and missing rows keep no receipt.
+    try {
+      this.store.db.transaction(() => {
+        const cutoff = new Date(now - 86_400_000).toISOString()
+        this.store.run(`UPDATE bot_messages INDEXED BY bot_messages_tell_due SET told_at = ?
+          WHERE tell IS NOT NULL AND told_at IS NULL AND tell = 'later' AND at <= ?`, new Date(now).toISOString(), cutoff)
+        this.store.run(`DELETE FROM bot_memory_state AS s WHERE s.key GLOB 'cursor:telling-legacy:*'
+          AND NOT EXISTS (SELECT 1 FROM bot_messages m WHERE m.bot_id = s.bot_id
+            AND s.key = 'cursor:telling-legacy:' || m.id AND m.at > ?)`, cutoff)
+      })
+    } catch { /* The next upkeep pass retries expiration; it never arms the due timer. */ }
     if (!this.windows) return
     for (const [id, rows] of this.banners) if (rows.every(r => now - Date.parse(r.at) > 86_400_000)) this.banners.delete(id)
     const ids = this.store.all(`SELECT id FROM bot_messages INDEXED BY bot_messages_tell_due WHERE tell IS NOT NULL AND tell != 'later' AND told_at IS NULL AND tell_at <= ? ORDER BY seq`, new Date(now).toISOString())

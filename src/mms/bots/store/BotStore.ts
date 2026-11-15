@@ -2033,7 +2033,10 @@ export class BotStore {
   }
 
   deleteMessages(botId: string): void {
-    this.run('DELETE FROM bot_messages WHERE bot_id = ?', botId)
+    this.db.transaction(() => {
+      this.run("DELETE FROM bot_memory_state WHERE bot_id = ? AND key GLOB 'cursor:telling-legacy:*'", botId)
+      this.run('DELETE FROM bot_messages WHERE bot_id = ?', botId)
+    })
   }
 
   // -- Schedules (bot_schedules: where earlier builds kept them; the shared store holds them now) -------
