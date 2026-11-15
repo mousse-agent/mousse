@@ -215,8 +215,8 @@ describe('memory tools', () => {
     if (via === 'bot') {
       const result = await call('memory_forget', 'ada-home', { id: door, reason: 'Forget my door code.' })
       expect(result.isError).toBe(true)
-      expect(result.value.error).toContain(top)
-      expect(result.value.error).toContain('then save again what should stay')
+      expect(result.text).toContain(top)
+      expect(result.text).toContain('then save again what should stay')
     } else {
       await expect(methods['bots.memory.forget']({ profileId: 'p', botId: 'ada', id: door })).rejects.toThrow(top)
     }
