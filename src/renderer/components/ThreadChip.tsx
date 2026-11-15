@@ -61,7 +61,7 @@ export function threadChipState(
   return { kind: 'missing' }
 }
 
-/** What the chip's state says, after its title: shown beside it and read as part of its name. */
+/** What the link's state says: its tooltip, and read as part of its name. */
 function stateWords(state: ThreadChipState): string | null {
   switch (state.kind) {
     case 'listed':
@@ -83,7 +83,8 @@ function unreachableText(state: ThreadChipState): string {
 }
 
 /**
- * A link to a Mousse thread, drawn as a chip: the thread's title (or the link's own text) and its live status. A click
+ * A link to a Mousse thread, drawn as text: a small icon tinted by the thread's live status, then its title (or the
+ * link's own text); the tooltip names the status. A click
  * switches the main view to the thread in this window, and Back returns (the thread history records the switch). A
  * thread that is not listed here says why instead: deleted, or on a computer that is not connected or not sharing.
  */
@@ -113,17 +114,11 @@ export function ThreadChip({ threadId, label }: { threadId: string; label?: Reac
       {...(state.kind === 'listed' ? { 'data-status': state.status } : {})}
       aria-label={openable ? `Open thread ${name}` : name}
       {...(openable ? {} : { 'aria-disabled': true })}
-      title={openable ? `Open ${title ?? 'thread'}` : unreachableText(state)}
+      title={openable ? [words, `Open ${title ?? 'thread'}`].filter(Boolean).join(' · ') : unreachableText(state)}
       onClick={onClick}
     >
       <MessageSquare size={12} strokeWidth={2} aria-hidden="true" className="thread-chip-icon" />
       <span className="thread-chip-title">{shown}</span>
-      {words && (
-        <span className="thread-chip-status">
-          <span className="thread-chip-dot" aria-hidden="true" />
-          {words}
-        </span>
-      )}
     </a>
   )
 }
