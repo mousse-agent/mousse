@@ -336,8 +336,8 @@ export class BotChatProjection {
   }
 
   toMessage(row: BotMessageRow): BotChatMessage {
-    const reminder = this.store.reminderForMessage(row.botId, row.id)
-    const snoozed = reminder && this.store.snoozedCopy(reminder.id)
+    const reminder = row.id.startsWith('bm_rem_') ? this.store.reminderForMessage(row.botId, row.id) : undefined
+    const snoozed = reminder && this.store.snoozedCopy(row.botId, reminder.id)
     const tomorrow = new Date(this.store.now())
     tomorrow.setDate(tomorrow.getDate() + 1)
     const snoozedLabel = snoozed ? `Snoozed until ${new Date(snoozed.dueAt).toDateString() === tomorrow.toDateString() ? 'tomorrow ' : ''}${clockTime(snoozed.dueAt)}` : undefined

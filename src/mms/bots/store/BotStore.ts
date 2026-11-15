@@ -1967,8 +1967,8 @@ export class BotStore {
     return row ? reminderOf(row) : undefined
   }
 
-  snoozedCopy(reminderId: string): BotReminderRow | undefined {
-    const row = this.get('SELECT * FROM bot_reminders WHERE snoozed_from = ? LIMIT 1', reminderId)
+  snoozedCopy(botId: string, reminderId: string): BotReminderRow | undefined {
+    const row = this.get("SELECT * FROM bot_reminders WHERE bot_id = ? AND snoozed_from = ? AND status != 'cancelled' LIMIT 1", botId, reminderId)
     return row ? reminderOf(row) : undefined
   }
 

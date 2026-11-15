@@ -7061,6 +7061,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         if (!reminder || reminder.botId !== botId) return false
         const cancelled = this.store.settleReminder(reminderId, 'cancelled')
         if (cancelled) {
+          if (reminder.snoozedFrom) {
+            const original = this.store.reminder(reminder.snoozedFrom)
+            if (original?.messageId) this.chat.republish(original.messageId)
+          }
           this.armDue()
           this.changed({ botId })
         }
@@ -7490,7 +7494,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const reminder = this.store.reminderForMessage(botId, messageId)
       if (!this.store.message(messageId) || !reminder || reminder.work || reminder.wake || reminder.status !== 'delivered' || this.store.messageForgotten(botId, messageId))
         throw new BotEngineError('reminder_not_found', 'This message has no reminder to snooze.')
-      if (this.store.snoozedCopy(reminder.id)) throw new BotEngineError('reminder_snoozed', 'This reminder is already snoozed.')
+      if (this.store.snoozedCopy(botId, reminder.id)) throw new BotEngineError('reminder_snoozed', 'This reminder is already snoozed.')
       if (this.store.waitingReminders(botId).length >= MAX_WAITING_REMINDERS)
         throw new BotEngineError('reminder_limit', 'You already have 50 reminders waiting. Cancel one first.')
       const due = new Date(this.now())
