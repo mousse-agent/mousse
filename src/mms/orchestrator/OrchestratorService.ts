@@ -84,9 +84,9 @@ import { delegationRequestKey, followUpRequestKey, narrowCeiling } from '../run/
 import { CommandRejection, RunStoreError } from '../run/db/RunStoreError'
 import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
 import { steerReleaseWindow, stopStrategy, type SteerDelivery } from '../run/CommandPolicy'
-import { agentMessage, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentArchiveResult, type AgentCreatedThread, type AgentRemoteThreadRequest, type AgentRemoteThreadResult, type RemoteProjectCandidate, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
+import { agentMessage, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentArchiveResult, type AgentCreatedThread, type AgentRemoteThreadRequest, type AgentRemoteThreadResult, type RemoteProjectCandidate, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type RemoteThreadsHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
-import { AGENT_QUEUE_MAX_PER_SENDER, AGENT_QUEUE_MAX_PER_THREAD, AGENT_REPEAT_WINDOW_MS, botRequestPrefix, THREAD_CREATE_MAX_ACTIVE_PER_THREAD } from '../run/mcp/appTools/thread'
+import { AGENT_QUEUE_MAX_PER_SENDER, AGENT_QUEUE_MAX_PER_THREAD, AGENT_REPEAT_WINDOW_MS, botRequestPrefix, lineageRelation, THREAD_CREATE_MAX_ACTIVE_PER_THREAD } from '../run/mcp/appTools/thread'
 import { botMessageText } from '../run/mcp/appTools/agentMessage'
 
 /**
@@ -133,6 +133,8 @@ import { taskCheckpoint } from '../run/delegation/checkpoint'
 import { remoteSubagentPreamble, subagentPreamble, withoutSubagentPreamble } from '../run/delegation/guidance'
 import { qualifyId } from '../../shared/threadRef'
 import { RemoteThreadLaunches, type RemoteLaunchOutcome } from './RemoteThreadLaunches'
+import { RemoteLaunchedThreads, RemoteThreadRefusal } from './RemoteLaunchedThreads'
+import type { RoutedAgentMark } from '../../shared/bridge/routed'
 import { REMOTE_THREAD_COMMAND, remoteThreadFingerprint, remoteThreadRefusal } from './remoteThreadRequest'
 import type { RemoteLaunchRecord } from '../run/delegation/remoteLaunches'
 import { RemoteSubagents } from './RemoteSubagents'
@@ -1191,6 +1193,7 @@ export class OrchestratorService extends EventEmitter {
     this.beginShutdown()
     this.remoteSubagents?.close()
     this.remoteLaunches?.close()
+    this.remoteThreads?.close()
     await this.lifecycle.waitForIdle(timeoutMs)
     for (const timer of this.persistTimers.values()) clearTimeout(timer)
     this.persistTimers.clear()
@@ -1268,6 +1271,8 @@ export class OrchestratorService extends EventEmitter {
   private remoteSubagents?: RemoteSubagents
   /** Threads agents here launched on other computers (`thread_create` with `computer`, issue #1160); likewise. */
   private remoteLaunches?: RemoteThreadLaunches
+  /** The thread tools and Stops on those threads (issue #1160); likewise. */
+  private remoteThreads?: RemoteLaunchedThreads
 
   /**
    * The user's other computers, for remote subagents (issue #469). Composed with Bridge, which sets it
@@ -1278,6 +1283,8 @@ export class OrchestratorService extends EventEmitter {
     if (port) {
       this.remoteSubagents?.start()
       this.remoteLaunches?.start()
+      // Stops kept while Bridge was off are sent now.
+      this.remoteThreads?.start()
     }
   }
 
@@ -2388,6 +2395,8 @@ export class OrchestratorService extends EventEmitter {
     this.remoteSubagents = undefined
     this.remoteLaunches?.close()
     this.remoteLaunches = undefined
+    this.remoteThreads?.close()
+    this.remoteThreads = undefined
     this.runEngine = engine
     this.installQueueJournal()
     if (!engine) return
@@ -2411,6 +2420,20 @@ export class OrchestratorService extends EventEmitter {
     })
     // Launches a restart cut off are finished (or archived there) once that computer can be reached.
     this.remoteLaunches.start()
+    this.remoteThreads = new RemoteLaunchedThreads({
+      records: engine.remoteLaunches,
+      port: () => this.remoteComputers,
+      denial: (node, name) => this.remoteThreadDenial(node, name),
+      related: (callerThreadId, launcherThreadId) => callerThreadId === launcherThreadId || lineageRelation(engine, callerThreadId, launcherThreadId) !== null,
+      localOnly: (threadId) => this.isLocalOnly(threadId),
+      note: (launcherThreadId, text) => {
+        // A launcher that is gone (deleted, expired) gets no note: nothing would show it.
+        if (!this.threadStore?.getThread(launcherThreadId) || this.isExpired(launcherThreadId)) return
+        this.noteAgentLaunch(launcherThreadId, text)
+      }
+    })
+    // Stops a restart left undelivered are sent once that computer answers.
+    this.remoteThreads.start()
     this.installTitleGuard()
     this.attachInFlightCanceller()
     // Input (4) of the hold predicate: synchronous, in memory, never throws (it is read inside transactions).
@@ -3543,7 +3566,11 @@ export class OrchestratorService extends EventEmitter {
     // A person's Stop reaches the threads the stopped ones launched while they run work an agent started: a creator
     // that is stopped leaves no fan-out running behind it (an agent's own Stop of a thread does not cascade).
     // The cascade keeps the cause of the Stop that started it: an agent's `task_cancel` stays the agent's below.
-    if (!result.replayed && !opts.actor) await this.stopLaunchedThreads(result.threads, opts.byAgent === true)
+    if (!result.replayed && !opts.actor) {
+      await this.stopLaunchedThreads(result.threads, opts.byAgent === true)
+      // And the threads they launched on other computers, there (kept until it is delivered).
+      this.stopRemoteLaunches(result.threads, reason === 'deleted' || reason === 'expired' ? reason : 'stopped')
+    }
     const stoppedAnything = aborted || compactionStopped || worked.some(Boolean) || result.activeRuns.length + result.cancelledRuns.length + result.delegations.length > 0
     return { ok: stoppedAnything, ...result }
   }
@@ -4137,6 +4164,7 @@ export class OrchestratorService extends EventEmitter {
       createThread: (input, options) => this.createThreadAsAgent(input, options),
       creationStarted: (clientRequestId) => this.agentCreationStarted(clientRequestId),
       createRemoteThread: (input, options) => this.createRemoteThreadAsAgent(input, options),
+      ...(this.remoteThreads ? { remoteThreads: this.remoteThreadsHost(this.remoteThreads) } : {}),
       noteOnThread: (threadId, text, launched) => this.noteAgentLaunch(threadId, text, launched),
       stopRun: (threadId, runId, options) => this.stopRunAsAgent(threadId, runId, options),
       setThreadArchived: (threadId, archived, options) => this.setThreadArchivedAsAgent(threadId, archived, options),
@@ -4758,7 +4786,7 @@ export class OrchestratorService extends EventEmitter {
       return refuse(failed.code, failed.message, at)
     }
     // However many runs this thread has made, only so many of the threads it launched may be working at once.
-    const working = this.launchedThreadsWorking(callerThreadId)
+    const working = await this.launchedThreadsWorking(callerThreadId)
     if (working >= THREAD_CREATE_MAX_ACTIVE_PER_THREAD)
       return refuse('creation_limit', `${working} of the threads this thread launched are still working (the limit is ${THREAD_CREATE_MAX_ACTIVE_PER_THREAD}); wait for some to finish before launching more.`, at)
     // The first message counts as the next agent message in a row: a launch cannot start a chain the limit would stop.
@@ -4823,14 +4851,69 @@ export class OrchestratorService extends EventEmitter {
     return undefined
   }
 
-  /** The threads `launcherThreadId` launched that are working: here, with a run going, and on other computers, while their launch is open. */
-  private launchedThreadsWorking(launcherThreadId: string): number {
+  /**
+   * The threads `launcherThreadId` launched that are working: here, with a run going, and on other computers, as each
+   * computer says (a launch still open, or one that computer cannot be asked about, counts as working).
+   */
+  private async launchedThreadsWorking(launcherThreadId: string): Promise<number> {
     const engine = this.requireRunEngine()
     const busy = new Set(engine.store.listNonTerminalRuns().map((run) => run.threadId))
     const here = this.threadStore?.listAllThreads().filter((thread) => thread.createdByThreadId === launcherThreadId && busy.has(thread.id)).length ?? 0
-    const there = engine.remoteLaunches.listForLauncher(launcherThreadId).filter((launch) =>
-      launch.state === 'starting' || launch.state === 'created' || launch.firstMessageState === 'pending' || launch.firstMessageState === 'uncertain').length
+    const there = this.remoteThreads ? await this.remoteThreads.working(launcherThreadId) : 0
     return here + there
+  }
+
+  /**
+   * A person's Stop, the deletion or the expiry of these threads reaches the threads they launched on other computers: a
+   * marked Stop there, which stops only runs this computer's agents started. Kept until it is delivered (or a day passed).
+   */
+  stopRemoteLaunches(launcherThreadIds: readonly string[], reason: 'stopped' | 'deleted' | 'expired'): void {
+    try {
+      this.remoteThreads?.stopLaunchedBy(launcherThreadIds, reason)
+    } catch (error) {
+      console.warn('threads launched on other computers could not be stopped', { error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /**
+   * The mark of an agent's call to a thread on another computer: the caller's thread, run, title, mode (its own, never
+   * looser than its run) and, for a message or a steer, the count of agent messages in a row it would be (refused past
+   * the limit, as on one computer).
+   */
+  private remoteAgentMark(actor: AgentActor, counts: boolean): RoutedAgentMark {
+    let hops = 1
+    if (counts) hops = this.withAgentHops(actor).hops ?? 1
+    else {
+      try {
+        hops = this.withAgentHops(actor).hops ?? 1
+      } catch {
+        hops = AGENT_MESSAGE_MAX_HOPS
+      }
+    }
+    return {
+      thread: actor.threadId,
+      run: actor.runId,
+      title: this.titleOf(actor.threadId) ?? '',
+      hops,
+      mode: narrowPermissionMode(this.requestedPermissionMode(actor.threadId), this.runPermissionMode(actor.runId))
+    }
+  }
+
+  /** What the thread tools call for a thread launched on another computer: the service, with the mark built here. */
+  private remoteThreadsHost(service: RemoteLaunchedThreads): RemoteThreadsHost {
+    return {
+      reach: (callerThreadId, threadId) => service.reach(callerThreadId, threadId),
+      events: (target, page) => service.events(target, page),
+      messages: (target, page) => service.messages(target, page),
+      wait: (target, request) => {
+        const denied = this.remoteThreadDenial(target.node, target.computer)
+        if (denied) return Promise.reject(new RemoteThreadRefusal(denied.code, denied.message, target.computer))
+        return service.follow(target, request)
+      },
+      send: (target, input, options) => service.send(target, input, { clientRequestId: options.clientRequestId, mark: this.remoteAgentMark(options.actor, true) }),
+      steer: (target, runId, text, options) => service.steer(target, runId, text, { clientRequestId: options.clientRequestId, mark: this.remoteAgentMark(options.actor, true) }),
+      interrupt: (target, runId, options) => service.interrupt(target, runId, { clientRequestId: options.clientRequestId, mark: this.remoteAgentMark(options.actor, false) })
+    }
   }
 
   /**
