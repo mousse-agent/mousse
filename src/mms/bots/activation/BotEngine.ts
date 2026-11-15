@@ -2284,7 +2284,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // The owner's threads: reading in every lane; starting, messaging and stopping only in a chat turn the owner's own
       // message started (`chat:`), never in work, a reminder's work, a schedule or the bot's first message. The profiler:
       // in both lanes (the chat without its minutes-long watch).
-      botTools: { escalate: true, consult: definition.context.length > 0, memory: true, frontDesk: row.lane === 'chat', watcherStart: ownerChatTurn(row), threads: ownerChatTurn(row) ? 'all' : 'read', profiler: true, images: this.imagePick(row.botId) !== null, applets: true, subagents: row.lane === 'run', questions: asksOwner(row), cards: true, bots: asksOwner(row) }
+      botTools: { escalate: true, consult: definition.context.length > 0, memory: true, scheduled: row.lane === 'run' && row.trigger.kind === 'schedule', frontDesk: row.lane === 'chat', watcherStart: ownerChatTurn(row), threads: ownerChatTurn(row) ? 'all' : 'read', profiler: true, images: this.imagePick(row.botId) !== null, applets: true, subagents: row.lane === 'run', questions: asksOwner(row), cards: true, bots: asksOwner(row) }
     })
     if (!compiled.ok) return this.block(row, 'policy_unenforceable', compiled.error.reason ?? compiled.error.message)
     const checked = this.host.harness.checkPolicy(selection.instanceId, { mode: 'default', origin: 'bot', ...compiled.policy }, selection.model)
@@ -4561,6 +4561,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // its report is not posted, so the chat shows nothing; the run and its line stay in Automations. Open asks and
     // cards it made still show, without the marker. Work the owner asked for and chat replies are posted as written.
     const silent = report && row.trigger.kind === 'schedule' && (isSilentOutput(written) || this.quietLevel(row.id))
+    if (report) this.postScheduleCompleted(row)
     if (silent && !asks.length && !waiting && !cards) return
     const lateReport = report && row.trigger.kind === 'schedule' && row.trigger.missed && this.now() - Date.parse(row.trigger.occurrenceAt) > 15 * 60_000
       ? `(Due ${scheduledDueTime(row.trigger.occurrenceAt, this.now())}, this computer was off or asleep) ` : ''
@@ -7010,6 +7011,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         return { scheduleId: added.scheduleId, label: added.label, ...(from ? { card: true as const } : {}) }
       },
       remove: (botId, scheduleId) => this.removeSchedule(botId, scheduleId),
+      done: (threadId, why) => this.completeSchedule(threadId, why),
       list: (botId) => this.listSchedules(botId)
     },
     setProfile: (botId, profile) => this.setProfile(botId, profile),
@@ -8214,6 +8216,29 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // These hold no executing turn: cancel their queued work and withdraw their asks atomically in bots.db.
     const rows = this.store.activationsWith(['queued', 'waiting_grant', 'paused', 'blocked'])
     for (const row of rows) if (botId === undefined || row.botId === botId) this.cancelRemovedScheduleRun(row)
+  }
+
+  /** The activation chooses the schedule, never an argument supplied by the model. */
+  private completeSchedule(threadId: string, why: string): void {
+    const at = this.activationOf(threadId)
+    const row = at && this.store.activation(at.activationId)
+    if (at?.role !== 'activation' || row?.lane !== 'run' || row.trigger.kind !== 'schedule')
+      throw new BotEngineError('invalid_params', 'Only a scheduled run can end its own schedule.')
+    if (!why.trim() || why.length > 200) throw new BotEngineError('invalid_params', 'why needs 1 to 200 characters.')
+    const trigger = row.trigger
+    if (trigger.completed) return
+    const schedule = this.host.schedules?.get(row.botId, trigger.scheduleId)
+    if (!schedule) return
+    // Persist the intent before removing the shared job: retry after a crash can finish its removal.
+    this.store.run('UPDATE bot_activations SET trigger_json = ? WHERE id = ?', JSON.stringify({ ...trigger, completed: { why, name: schedule.name } }), row.id)
+    this.removeSchedule(row.botId, trigger.scheduleId)
+  }
+
+  private postScheduleCompleted(row: BotActivationRow): void {
+    if (row.trigger.kind !== 'schedule' || !row.trigger.completed) return
+    this.removeSchedule(row.botId, row.trigger.scheduleId)
+    const id = `bm_schedule_done_${row.id}`
+    if (!this.store.message(id)) this.chat.post({ id, botId: row.botId, author: 'bot', kind: 'notice', text: `Stopped ‘${row.trigger.completed.name}’.`, activationId: row.id, lane: 'run' })
   }
 
   removeSchedule(botId: string, scheduleId: string): boolean {
