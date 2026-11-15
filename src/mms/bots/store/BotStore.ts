@@ -10,7 +10,7 @@ import type { BotChatApplet, BotChip, BotError, BotMessageKind } from '../../../
 import type { ProviderSelection } from '../../../shared/harness/types'
 import type { BotStuckRows } from '../../../shared/bots/personal/modelSlots'
 import type { BotQuestionAnswer, BotQuestionFollow, BotQuestionLateAnswer, BotQuestionSpec, BotQuestionStatus } from '../../../shared/bots/personal/questions'
-import { cardOf, type BotCard } from '../../../shared/bots/personal/cards'
+import { keptCardOf, type BotCard } from '../../../shared/bots/personal/cards'
 import type { BotWakeEvent, BotWakeFired } from '../../../shared/bots/personal/wakes'
 import { BOT_MEMORY_SCHEMA_SQL } from '../memory/schema'
 import { narrowPermissionMode, type PermissionMode } from '../../../shared/permissionMode'
@@ -638,7 +638,7 @@ function messageOf(row: Row): BotMessageRow {
 function cardsOf(value: unknown): BotCard[] | undefined {
   const kept = json<unknown[]>(value)
   if (!Array.isArray(kept)) return undefined
-  const cards = kept.map(cardOf).filter((card): card is BotCard => !('problem' in card))
+  const cards = kept.map(keptCardOf).filter((card): card is BotCard => card !== undefined)
   return cards.length ? cards : undefined
 }
 

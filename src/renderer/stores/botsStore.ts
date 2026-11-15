@@ -251,6 +251,20 @@ export function botFaceState(bot: BotSummary, happyUntil: number | undefined, no
   return bot.state === 'idle' && happyUntil !== undefined && happyUntil > now ? 'happy' : bot.state
 }
 
+/** Bots whose detail a chat card shows (an automation's state): read again on each change, as About's is. */
+const detailWatchers = new Map<string, number>()
+
+/** Keeps `botId`'s detail fresh while a card shows it; loads it when it isn't yet. Returns the stop. */
+export function watchBotDetail(botId: string): () => void {
+  detailWatchers.set(botId, (detailWatchers.get(botId) ?? 0) + 1)
+  if (!useBotsStore.getState().details[botId]) void useBotsStore.getState().loadDetail(botId)
+  return () => {
+    const left = (detailWatchers.get(botId) ?? 1) - 1
+    if (left > 0) detailWatchers.set(botId, left)
+    else detailWatchers.delete(botId)
+  }
+}
+
 export const useBotsStore = create<BotsState>((set, get) => {
   const fail = (owner: number, cause: unknown, botId: string | null = null) => { if (owner === epoch) set({ error: errorText(cause), errorBotId: botId, busy: false }) }
   const cacheOf = (botId: string): BotChatCache => get().chats[botId] ?? { messages: [], hasMore: false, loadingOlder: false }
@@ -291,7 +305,8 @@ export const useBotsStore = create<BotsState>((set, get) => {
     unsubscribe = [
       events.onChanged?.((event) => {
         void get().refresh()
-        if (event?.botId && get().aboutOpen && get().details[event.botId]) void get().loadDetail(event.botId)
+        // About, and a chat card that shows one of the bot's automations (`watchBotDetail`), read its runs again.
+        if (event?.botId && (get().aboutOpen || detailWatchers.has(event.botId)) && get().details[event.botId]) void get().loadDetail(event.botId)
         // The window's service connection was opened again: a chat it holds reads its newest rows, which also fills
         // any it missed (#1042).
         if (event?.reread) for (const botId of Object.keys(get().chats)) void get().loadChat(botId)

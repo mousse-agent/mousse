@@ -267,17 +267,25 @@ describe('About this bot', () => {
     const at = new Date(Date.now() + 2 * 60 * 60_000).toISOString()
     fake.details.b1 = { summary: bot, permissions: [], runs: [], reminders: [
       { id: 'rem_1', dueAt: at, text: 'Call mum.' },
-      { id: 'rem_2', dueAt: at, text: 'Check the weather.', work: true }
+      { id: 'rem_2', dueAt: at, text: 'Check the weather.', work: true },
+      // Wakes, the bot's own follow-ups: at a time, and on an event (its time is then when it gives up, on hover).
+      { id: 'rem_3', dueAt: at, text: 'Look at the logs again.', wake: '' },
+      { id: 'rem_4', dueAt: at, text: 'Tell them it shipped.', wake: 'when acme/app#12 merges' }
     ] }
     await show()
     const reminders = [...host.querySelectorAll('[data-testid="bot-about-reminder"]')]
-    expect(reminders.map((row) => row.querySelector('.bot-about-clamp')!.textContent)).toEqual(['Call mum.', 'Check the weather.'])
-    expect(reminders[0]!.querySelector('.bot-about-next')!.textContent).toBe(`Reminds: ${reminderWhenText(at)}`)
-    expect(reminders[1]!.querySelector('.bot-about-next')!.textContent).toBe(`Starts: ${reminderWhenText(at)}`)
+    expect(reminders.map((row) => row.querySelector('.bot-about-clamp')!.textContent)).toEqual(['Call mum.', 'Check the weather.', 'Look at the logs again.', 'Tell them it shipped.'])
+    expect(reminders.map((row) => row.querySelector('.bot-about-next')!.textContent)).toEqual([
+      `Reminds: ${reminderWhenText(at)}`,
+      `Starts: ${reminderWhenText(at)}`,
+      `Follows up: ${reminderWhenText(at)}`,
+      'Follows up when acme/app#12 merges'
+    ])
+    expect(reminders[3]!.querySelector('.bot-about-next')!.getAttribute('title')).toBe(`Gives up: ${reminderWhenText(at)}`)
     expect(host.textContent).not.toContain('Only when you message it.')
     await click(button('Cancel reminder: Call mum.'))
     expect(fake.calls).toContainEqual(['cancelReminder', 'b1', 'rem_1'])
-    expect([...host.querySelectorAll('[data-testid="bot-about-reminder"] .bot-about-clamp')].map((row) => row.textContent)).toEqual(['Check the weather.'])
+    expect([...host.querySelectorAll('[data-testid="bot-about-reminder"] .bot-about-clamp')].map((row) => row.textContent)).toEqual(['Check the weather.', 'Look at the logs again.', 'Tell them it shipped.'])
   })
 
   it('writes a reminder further than a week ahead with its date', () => {

@@ -17,6 +17,8 @@
  *   await botSeed.show('limitOver')                 // the same lines after the bot runs again
  *   await botSeed.show('twoAsks')                   // one turn's two asks: on its reply, and one on its own
  *   await botSeed.show('twoAsksAllowed')            // the same, both allowed
+ *   await botSeed.show('wakes')                     // an automation card on a reply, then a wake's line and reply
+ *   await botSeed.show('wakesPaused')               // the same automation, paused
  *   botSeed.scrollTo('report')                      // brings a message to the top: see botSeed.ids
  *
  * The bot's memory (About's Memory row, the Memory dialog) answers from `memory` below; Forget and Edit change it until
@@ -44,8 +46,10 @@
     markdown: 'seed-markdown', commandAsk: 'seed-command-ask', handoff: 'seed-handoff', note: 'seed-note',
     noteReply: 'seed-note-reply', report: 'seed-report', browserAsk: 'seed-browser-ask', again: 'seed-again',
     pictureAsk: 'seed-picture-ask', picture: 'seed-picture', pictures: 'seed-pictures', limit: 'seed-limit-2',
-    repos: 'seed-repos', filesAsk: 'seed-files-ask', shellAsk: 'seed-shell-ask'
+    repos: 'seed-repos', filesAsk: 'seed-files-ask', shellAsk: 'seed-shell-ask',
+    watch: 'seed-watch', automation: 'seed-automation', wake: 'bm_wake_seed', wakeReply: 'seed-wake-reply'
   }
+  const AUTOMATION = { type: 'automation', jobId: `${BOT}--inbox`, name: 'Go through my inbox', label: 'every hour' }
 
   function conversation(scenario) {
     let seq = 0
@@ -144,6 +148,15 @@
         bot(ids.shellAsk, today(22, 4), 'alpha wants to run commands.', [], { kind: 'notice', ask: { askId: 'seed-ask-shell', title: 'run commands', note: 'Any command, in its work.', status } })
       )
     }
+    // Wakes and an automation it made: the reply's automation card (Pause, Open), then a wake's quiet line and its reply.
+    if (scenario === 'wakes' || scenario === 'wakesPaused') {
+      rows.push(
+        owner(ids.watch, today(21, 10), 'check my inbox every hour, and tell me when #12 merges'),
+        bot(ids.automation, today(21, 10), "Done: I'll go through your inbox every hour, and I'll pick #12 up when it merges.", [{ icon: 'schedule', text: 'wake-up', highlight: 'when acme/app#12 merges' }], { replyTo: quote(ids.watch, 'check my inbox every hour, and tell me when #12 merges'), cards: [AUTOMATION] }),
+        bot(ids.wake, today(21, 42), 'Following up · acme/app#12 merged', [], { kind: 'notice', systemLine: true }),
+        bot(ids.wakeReply, today(21, 42), '#12 is in: **Fix login** merged at 21:41. The nightly picks it up tonight.')
+      )
+    }
     if (scenario === 'typing') rows.push(owner(ids.again, ago(0.2), 'again'))
     // A usage limit ended two chat turns; in `limitOver` the bot has since answered again.
     if (scenario === 'limitPaused' || scenario === 'limitOver') {
@@ -221,7 +234,7 @@
     },
     devices: async () => { throw Object.assign(new Error('not in the seed'), { code: 'method_not_found' }) },
     model: async () => ({ model: null, models: [], computers: [] }),
-    get: async () => ({ summary: summary(scenario), permissions: [], runs: [] }),
+    get: async () => ({ summary: summary(scenario), permissions: [], runs: scenario.startsWith('wakes') ? [{ id: 'inbox', label: 'every hour', kind: 'schedule', jobId: AUTOMATION.jobId, ...(scenario === 'wakesPaused' ? { paused: true } : {}) }] : [], reminders: scenario === 'wakes' ? [{ id: 'rem_seed', dueAt: today(23, 0), text: 'Tell them the nightly is out.', wake: 'when acme/app#13 merges' }] : [] }),
     answer: async (botId, askId, answer) => conversation(scenario).find((row) => row.ask?.askId === askId) ?? null,
     stop: async () => undefined,
     stopWork: async () => undefined,

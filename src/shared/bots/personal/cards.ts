@@ -34,8 +34,22 @@ export interface BotGalleryCard {
   files: Array<{ path: string; caption?: string }>
 }
 
-/** A card as the bot made it and `bots.db` keeps it (`bot_messages.cards_json`). */
-export type BotCard = BotFactsCard | BotChecklistCard | BotProgressCard | BotGalleryCard
+/**
+ * An automation the bot created (`bot_schedule_add`), on the message of the turn that created it. Mousse makes it, never
+ * the bot (`show_card` refuses the type); the app draws it with Pause and Open, and reads whether it is paused, or gone,
+ * from the bot's runs.
+ */
+export interface BotAutomationCard {
+  type: 'automation'
+  /** The automation's job in the shared store. */
+  jobId: string
+  name: string
+  /** "every weekday · 09:00". */
+  label: string
+}
+
+/** A card as the bot made it, or Mousse for it, and `bots.db` keeps it (`bot_messages.cards_json`). */
+export type BotCard = BotFactsCard | BotChecklistCard | BotProgressCard | BotGalleryCard | BotAutomationCard
 
 /** A gallery as the app gets it: each picture with its file's name too. */
 export interface BotChatGalleryCard extends Omit<BotGalleryCard, 'files'> {
@@ -43,7 +57,11 @@ export interface BotChatGalleryCard extends Omit<BotGalleryCard, 'files'> {
 }
 
 /** A card on a chat message, as the app draws it. */
-export type BotChatCard = BotFactsCard | BotChecklistCard | BotProgressCard | BotChatGalleryCard
+export type BotChatCard = BotFactsCard | BotChecklistCard | BotProgressCard | BotChatGalleryCard | BotAutomationCard
+
+/** The card types Mousse makes for a bot's message; the bot can't (`cardOf`), and they don't count toward its limit. */
+export const MOUSSE_CARD_TYPES = ['automation'] as const
+const isMousseCard = (card: { type: string }): boolean => (MOUSSE_CARD_TYPES as readonly string[]).includes(card.type)
 
 export const BOT_CARD_TYPES = ['facts', 'checklist', 'progress', 'gallery'] as const
 export const BOT_CHECKLIST_STATES: readonly BotChecklistState[] = ['done', 'doing', 'todo', 'skipped']
@@ -69,7 +87,7 @@ export const CARD_SHOWN_TEXT = 'Shown with your next message. Don\'t repeat what
 /** Over `MAX_CARDS_PER_MESSAGE` or `MAX_CARDS_JSON_BYTES` for one message. */
 export const CARDS_FULL_TEXT = `Your next message already has as many cards as it can hold (${MAX_CARDS_PER_MESSAGE}, ${MAX_CARDS_JSON_BYTES / 1024} KB). Say the rest in words.`
 
-const FIELDS: Record<BotCard['type'], readonly string[]> = {
+const FIELDS: Record<Exclude<BotCard['type'], 'automation'>, readonly string[]> = {
   facts: ['type', 'title', 'rows'],
   checklist: ['type', 'title', 'items'],
   progress: ['type', 'label', 'done', 'total', 'note'],
@@ -109,8 +127,8 @@ export function cardOf(value: unknown): BotCard | { problem: string } {
   if (!given) return { problem: 'A card is an object with a type: facts, checklist, progress or gallery.' }
   const type = given.type
   if (typeof type !== 'string' || !(BOT_CARD_TYPES as readonly string[]).includes(type)) return { problem: 'A card\'s type is facts, checklist, progress or gallery.' }
-  const extra = unknownKeys(given, FIELDS[type as BotCard['type']])
-  if (extra.length) return { problem: `A ${type} card has no ${extra.map((key) => `"${key}"`).join(', ')}. It takes ${FIELDS[type as BotCard['type']].join(', ')}.` }
+  const extra = unknownKeys(given, FIELDS[type as keyof typeof FIELDS])
+  if (extra.length) return { problem: `A ${type} card has no ${extra.map((key) => `"${key}"`).join(', ')}. It takes ${FIELDS[type as keyof typeof FIELDS].join(', ')}.` }
   const title = type === 'progress' ? undefined : line(given.title, 'the title', MAX_CARD_TITLE_CHARS, true)
   if (isProblem(title)) return title
   const titled = title ? { title } : {}
@@ -166,9 +184,24 @@ export function cardOf(value: unknown): BotCard | { problem: string } {
   return { type: 'gallery', ...titled, files }
 }
 
-/** Why `cards` can't go on one message (too many, or too large), or undefined when they can. */
+/**
+ * A card as `bots.db` kept it: one the bot made (`cardOf`), or one Mousse made (an automation's), each field checked for
+ * shape. Undefined for anything else.
+ */
+export function keptCardOf(value: unknown): BotCard | undefined {
+  const given = record(value)
+  if (given?.type === 'automation') {
+    const { jobId, name, label } = given
+    if (typeof jobId !== 'string' || !jobId || typeof name !== 'string' || typeof label !== 'string') return undefined
+    return { type: 'automation', jobId, name: oneLine(name).slice(0, 120), label: oneLine(label).slice(0, 120) }
+  }
+  const card = cardOf(value)
+  return 'problem' in card ? undefined : card
+}
+
+/** Why `cards` can't go on one message (too many of the bot's own, or too large), or undefined when they can. */
 export function cardsProblem(cards: readonly BotCard[]): string | undefined {
-  if (cards.length > MAX_CARDS_PER_MESSAGE) return CARDS_FULL_TEXT
+  if (cards.filter((card) => !isMousseCard(card)).length > MAX_CARDS_PER_MESSAGE) return CARDS_FULL_TEXT
   if (new TextEncoder().encode(JSON.stringify(cards)).length > MAX_CARDS_JSON_BYTES) return CARDS_FULL_TEXT
   return undefined
 }
@@ -185,6 +218,7 @@ const CHECK_MARKS: Record<BotChecklistState, string> = { done: '[x]', doing: '[~
  * gallery as its files' names. Each under its title when it has one.
  */
 export function plainCard(card: BotCard | BotChatCard): string {
+  if (card.type === 'automation') return `Automation: ${card.name} · ${card.label}`
   const head = 'title' in card && card.title ? [card.title] : []
   if (card.type === 'facts') return [...head, ...card.rows.map((row) => `${row.label}: ${row.value}`)].join('\n')
   if (card.type === 'checklist') return [...head, ...card.items.map((item) => `${CHECK_MARKS[item.state]} ${item.text}`)].join('\n')

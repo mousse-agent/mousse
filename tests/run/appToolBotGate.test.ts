@@ -69,6 +69,7 @@ describe('the bot\'s own tools under its authority (Bot Phase 1 §5.10)', () => 
     expect(host.schedules.add).not.toHaveBeenCalled()
     turns.register(appTurn({ threadId: 'thread-a', runId: run.runId, bot: bot([...BOT_DEFAULT_APP_TOOLS]) }))
     expect(await registry.call('bot_schedule_add', { when: { kind: 'interval', minutes: 30 }, prompt: 'x' }, ctx())).toEqual({ text: JSON.stringify({ scheduleId: 's1', label: 'every 30 minutes' }) })
-    expect(host.schedules.add).toHaveBeenCalledWith('b1', { when: { kind: 'interval', minutes: 30 }, prompt: 'x' })
+    // The turn that adds it goes with it: its reply shows the automation as a card.
+    expect(host.schedules.add).toHaveBeenCalledWith('b1', { when: { kind: 'interval', minutes: 30 }, prompt: 'x' }, 'act-1')
   })
 })

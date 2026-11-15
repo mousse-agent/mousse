@@ -99,6 +99,7 @@ describe('what a card may be', () => {
     ['a gallery of 9 pictures', { type: 'gallery', files: Array.from({ length: 9 }, (_, i) => ({ path: `p${i}.png` })) }, /1 to 8/],
     ['a gallery picture from the web', { type: 'gallery', files: [{ path: 'https://example.com/a.png' }] }, /never web addresses/],
     ['an unknown type', { type: 'html', html: '<script>alert(1)</script>' }, /facts, checklist, progress or gallery/],
+    ['an automation card (only Mousse makes one)', { type: 'automation', jobId: 'job-1', name: 'Inbox', label: 'every hour' }, /facts, checklist, progress or gallery/],
     ['a style field', { ...SPECS, style: 'color:red' }, /no "style"/]
   ]
   it.each(ROWS)('%s', (_name, value, expected) => {
@@ -191,6 +192,24 @@ describe('a card on a message', () => {
     if ('refused' in consult) throw new Error(consult.refused)
     expect(consult.authority.appTools.has('show_card')).toBe(false)
     void asked.catch(() => undefined)
+  })
+})
+
+describe('an automation the bot creates', () => {
+  it("is on at once, and the turn's reply shows it as a card, beside the bot's own three, read as text elsewhere", async () => {
+    const turn = await chatTurn('Check my inbox every hour.', 'm1')
+    for (let n = 0; n < 3; n += 1) expect((await tool('show_card', turn.prepared, turn.payload.threadId, { card: SPECS })).isError).toBeFalsy()
+    const added = await tool('bot_schedule_add', turn.prepared, turn.payload.threadId, { when: { kind: 'interval', minutes: 60 }, prompt: 'Go through my inbox and tell me what matters.' })
+    expect(added.isError, added.text).toBeFalsy()
+    await finish(f, turn.payload, 'completed', { text: 'Done: every hour.' })
+    const [entry] = f.book.list(botId)
+    expect(entry).toMatchObject({ paused: false, createdBy: 'bot' })
+    const reply = chatOf(f, botId).filter((message) => message.activationId === turn.activation.id && message.author === 'bot').at(-1)!
+    expect(reply.cards).toHaveLength(4)
+    expect(reply.cards!.at(-1)).toEqual({ type: 'automation', jobId: entry!.jobId, name: entry!.name, label: 'every 60 minutes' })
+    expect(reply.text.slice(reply.plainFrom)).toContain(`Automation: ${entry!.name} · every 60 minutes`)
+    // Its runs in About name the job, so the card finds whether it is paused.
+    expect(f.bots.service.get(botId).runs).toEqual([expect.objectContaining({ id: entry!.scheduleId, jobId: entry!.jobId })])
   })
 })
 

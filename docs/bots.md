@@ -211,6 +211,16 @@ A bot's main turns, chat and work (scheduled runs too), can attach a small card 
 
 A deleted bot's reminders are cancelled at once and purged with it. Forgetting the owner's message that asked for a reminder or work (`memory_forget`, Forget in About) cancels the reminder and removes its words, and the work's brief and notes. Repeating reminders are schedules.
 
+## Wakes
+
+A wake is the bot's own follow-up: `wake({ brief, inMinutes | at | thread | pr, hours? })` from a chat turn. It is the third kind of reminder, in the same `bot_reminders` table (v9 adds `wake`, `event_json`, `fired_json`, `chain`), on the same timer, listed and cancelled with `reminder_list` and `reminder_cancel` and in About → Runs ("Follows up when acme/app#12 merges", with when it gives up on hover). It is never an automation and never on the Automations page.
+
+- **When it comes,** the bot carries on in its own chat: a chat turn keyed `wake:<id>`, which no person started (`ownerChatTurn` is false, so it reads the owner's threads but never starts, messages or stops one), queued in the transaction that marks the wake delivered, so it wakes once. Its input is a `[Mousse]` line with what happened (the thread's id and status, or the pull request and that it merged) and the brief the bot wrote (`wakeInput`). A quiet line (`bm_wake_<id>`, a service line) says why the bot speaks unasked. A paused bot, or one that can't run then, has the wake said as a line instead.
+- **Events.** `thread`: one of the owner's threads the bot may see (it needs "use your threads"; `botThreadReach`), working when the wake is set; it fires when the thread is idle again (`wakeThread`, checked when any run ends or a thread is archived, and each scheduler tick). `pr`: `owner/repo#N` or its link, read through the owner's project of that repository (`pullRequestState`, every 2 minutes), open when set; it fires when it merges.
+- **Expiry.** A wake on an event gives up after `hours` (default 24, at most a week; `due_at` holds that time). A closed pull request, an archived or deleted thread, a thread out of the bot's sight, or the time passing first wakes it once anyway, saying why (`fired_json`: `{ kind: 'ended', reason }`).
+- **Limits.** At most 5 in a row with no owner's message between them (`chain`: a wake set in a wake's own turn is the next), 30 set per bot in any 24 hours (cancelled ones count), and the 50 waiting reminders. A wake that falls due in the owner's quiet hours (22:00 to 08:00 in their zone, as question nudges) waits for 08:00.
+- The bot is told to use wakes when it waits on something (a pull request, a build, a thread it started) instead of checking on a schedule or promising to look later.
+
 ## Asks
 
 An ask is a request for one permission, shown as a card with Allow and Not now (`bot_escalations`, `mode` `wall` or `ask`).
@@ -409,6 +419,7 @@ A bot's schedule is an **automation whose Who is the bot**: an ordinary job in t
 - After each tick, `BotEngine.maintain` ends usage-limit pauses past their reset, starts what waits in a free lane, and runs the daily purge of deleted bots.
 - **Tell me** applies to run reports. A run reports its level with `run_report`, as any automation run does; a done run whose level is below the automation's Tell me posts its report without a notification (`bots.message` carries `quiet`). Failures still notify.
 - **Nothing new.** A scheduled run whose last message is `[SILENT]` (what every automation run is told to say when it finds nothing new, `isSilentOutput`) posts no report: the chat shows nothing and nothing notifies (`postReply`). An open ask or a card it made still shows, without the marker. Work the owner asked for and chat replies are posted as written.
+- **No step for the owner.** A schedule the bot adds is on at once. The chat turn that added it shows it as an automation card on its reply (`BotAutomationCard`, made by Mousse, never by `show_card`, and not counted among the bot's three cards): its name and schedule, a click opens it in Automations, and Pause (Resume once paused) acts on its job. The card reads whether it is paused, or removed, from the bot's runs (`BotRunItem.jobId`, `paused`). Its plain copy is "Automation: <name> · <schedule>"; no chip repeats it.
 - Turning one off in Manage pauses that schedule only; the bot's own Pause stops all its schedules.
 - In a profile where bots could not be opened, a bot's schedule is paused once with that reason ("Bots could not be opened in this profile…"; a deleted bot's with "Its bot was deleted."). The next start that opens bots resumes the schedules paused for that reason only.
 - Schedules saved by earlier builds in `bots.db` (`bot_schedules`) are moved once into the shared store at profile open (`migrateBotSchedules`); see "Moving schedules".

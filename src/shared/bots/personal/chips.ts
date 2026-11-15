@@ -250,6 +250,8 @@ function outcomeChip(kind: ChipKind, call: BotChipCall): BotChip | null {
   const result = record(call.result)
   switch (kind) {
     case 'schedule': {
+      // Shown as an automation card on the message instead.
+      if (result.card === true) return null
       const label = str(result.label)
       return label ? { icon: 'schedule', text: label } : { icon: 'schedule', text: 'set a schedule' }
     }

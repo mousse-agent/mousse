@@ -68,7 +68,7 @@ import { allPinned, copyPick, imagePickOf, isPinned, limitFamilyOf, limitOnPick,
 import type { BotModelOption } from '../../../shared/bots/personal/methods'
 import { defaultChatInput, defaultWorkLine, lateWorkNote, MAX_NEW_QUESTIONS_PER_DAY, MAX_NUDGES_PER_QUESTION, MAX_OPEN_QUESTIONS_PER_BOT, MAX_OPEN_QUESTIONS_PER_WORK, MAX_QUESTIONS_PER_CHAT_TURN, NUDGE_AGAIN_MS, NUDGE_TEXT, plainChoices, QUESTION_AFTER_ASK_TEXT, QUESTION_ASKED_TEXT, QUESTION_END_TURN_TEXT, QUESTION_ANSWER_FORGOTTEN_TEXT, QUESTION_NOT_OFFERED_TEXT, QUESTION_WORK_ASKED_TEXT, QUESTION_WORK_WAITING_TEXT, questionGoneText, QUESTIONS_ENOUGH_TEXT, waitingQuestionLine, workAnswerLine, type BotQuestionAnswer, type BotQuestionFollow, type BotQuestionSpec } from '../../../shared/bots/personal/questions'
 import { CARD_SHOWN_TEXT, type BotCard } from '../../../shared/bots/personal/cards'
-import { checkedCard, hasReplyCards, keepReplyCard } from '../chat/replyCards'
+import { checkedCard, hasReplyCards, keepMousseCard, keepReplyCard } from '../chat/replyCards'
 import { afterQuietHours, inQuietHours, nudgeSlot } from './questionFollowUps'
 import { DEFAULT_EVENT_WAKE_HOURS, MAX_EVENT_WAKE_HOURS, MAX_WAKE_BRIEF_CHARS, MAX_WAKE_CHAIN, MAX_WAKES_PER_DAY, WAKE_LINE_PREFIX, wakeEventLabel, wakeFiredLabel, wakeInput, type BotWakeEvent, type BotWakeFired } from '../../../shared/bots/personal/wakes'
 import type { LlmProviderOption } from '../../../shared/settings'
@@ -615,7 +615,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // The bot's name rides along: a notification for a new bot's first row comes before any list names it. A run
       // report its schedule's Tell me keeps quiet says so (`quiet`): it is in the chat, without a notification.
       emit: (event) => this.events.emit('message', { ...event, ...this.nameFor(event.botId), ...(this.quietReport(event.botId, event.message) ? { quiet: true } : {}) }),
-      schedules: (botId) => this.listSchedules(botId),
+      schedules: (botId) => this.schedulesOf(botId).map((schedule) => ({ scheduleId: schedule.scheduleId, label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}), jobId: schedule.jobId, paused: schedule.paused })),
       // The threads it started that still work: it is busy while it manages them.
       launched: (botId) => this.launchedThreads(botId),
       // About marks a permission this computer has switched off.
@@ -6790,9 +6790,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   readonly tools: BotToolHost & { activationOf(threadId: string): ({ botId: string; activationId: string; lane: BotLane; role: 'home' | BotThreadRole; dispatchId?: string }) | undefined } = {
     activationOf: (threadId) => this.activationOf(threadId),
     schedules: {
-      add: (botId, schedule) => {
+      // An automation the bot creates is on at once, with no step for the owner; the turn's message shows it as a card
+      // with Pause and Open, so the owner sees each one and can stop it there.
+      add: (botId, schedule, from) => {
         const added = this.addSchedule(botId, schedule, 'bot')
-        return { scheduleId: added.scheduleId, label: added.label }
+        if (from) keepMousseCard(from, { type: 'automation', jobId: added.jobId, name: added.name, label: added.label })
+        return { scheduleId: added.scheduleId, label: added.label, ...(from ? { card: true as const } : {}) }
       },
       remove: (botId, scheduleId) => this.removeSchedule(botId, scheduleId),
       list: (botId) => this.listSchedules(botId)

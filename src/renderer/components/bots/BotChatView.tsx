@@ -323,7 +323,7 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settl
         {quoted && <BotReplyQuote botId={bot.id} quote={message.replyTo!} botName={bot.name} />}
         <BotReplyMedia images={shownImages} onMenuOpen={setMenuOpen} />
         {media.text && <BotMarkdown text={media.text} className="bot-markdown" />}
-        {cards && <BotCards cards={cards} />}
+        {cards && <BotCards cards={cards} botId={bot.id} />}
         {lostChips.length > 0 && <p className="bot-picture-chips">{lostChips.map((image) => <BotPathChip key={image.key} path={image.path!} />)}</p>}
         {openAsk && <p className="bot-bubble-ask"><Shield size={14} aria-hidden /><span>Wants to <strong>{openAsk.title}</strong></span></p>}
         {!!message.attachments?.length && <BotOtherFiles files={message.attachments} />}

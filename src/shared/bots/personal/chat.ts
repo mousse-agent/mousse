@@ -274,6 +274,10 @@ export interface BotRunItem {
   label: string
   nextAt?: string
   kind: 'schedule'
+  /** Its automation's job (an automation card finds it by this). Absent from older services. */
+  jobId?: string
+  /** Paused (from Automations, or a card's Pause). */
+  paused?: true
 }
 
 /** One of a bot's waiting reminders (one-off, not yet said), in About → Runs. */

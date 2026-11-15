@@ -633,9 +633,10 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
           return error(`You already have ${MAX_BOT_SCHEDULES} schedules, the most a bot can have. Remove one first.`)
         const when = args.when as BotSchedule['when']
         try {
-          const added = call.deps.host.schedules.add(call.botId, { when: when.kind === 'interval' ? { kind: 'interval', minutes: when.minutes } : { kind: 'cron', expr: when.expr.trim() }, prompt })
+          const added = call.deps.host.schedules.add(call.botId, { when: when.kind === 'interval' ? { kind: 'interval', minutes: when.minutes } : { kind: 'cron', expr: when.expr.trim() }, prompt }, call.activationId)
           const result = { scheduleId: added.scheduleId, label: added.label || botScheduleLabel(when) }
-          call.deps.activity?.onAppResult(call.activity, 'bot_schedule_add', result)
+          // A card on the message shows it (`card`), so no chip repeats it.
+          call.deps.activity?.onAppResult(call.activity, 'bot_schedule_add', { ...result, ...(added.card ? { card: true } : {}) })
           return json(result)
         } catch (failure) {
           return error(failure instanceof Error ? failure.message : String(failure))
@@ -880,7 +881,7 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         } else if (args.thread !== undefined) {
           if (typeof args.thread !== 'string' || !args.thread.trim()) return error("thread is a thread's id, from thread_list.")
           // The owner's threads are theirs to share: a bot waits on one only while it may read them.
-          if (!ctx.turn.bot?.appTools.has('thread_wait')) return error('Waiting for a thread needs "use your threads": ask for it with escalate (the tool threads).')
+          if (!ctx.turn.bot?.appTools?.has('thread_wait')) return error('Waiting for a thread needs "use your threads": ask for it with escalate (the tool threads).')
           input = { brief, event: { kind: 'thread', threadId: args.thread.trim() }, ...hours }
         } else {
           const pr = pullRequestOf(args.pr)
