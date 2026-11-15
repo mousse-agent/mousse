@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BotEngine } from '../../src/mms/bots/activation/BotEngine'
+import { MAX_QUEUED_ACTIVATIONS } from '../../src/shared/bots/personal/definition'
 import { rollUpChips } from '../../src/shared/bots/personal/chips'
 import { appToolRegistry, appTurn, fakeAppToolHost } from '../run/appToolsFixture'
 import { botFixture, chatOf, createBot, finish, flush, runDispatch, start, type BotFixture } from './botFixture'
@@ -101,6 +102,45 @@ describe('work_start through the production registry', () => {
     expect(f.store.listActivations(botId).filter((row) => row.trigger.kind === 'work')).toHaveLength(1)
     await finish(f, next.payload, 'completed', { text: 'Already on it.' })
     expect((await caller(await chat())()).workId).not.toBe(first.workId)
+  })
+
+  // An unfinished attempt is retryable; replaying its replacement is still one attempt, even after boot recovery.
+  it.each(['failed', 'stopped'] as const)('retries %s work and reuses the retry across a restart', async (ending) => {
+    const turn = await chat()
+    const call = caller(turn)
+    const first = await call()
+    if (ending === 'failed') await runDispatch(f, first.workId, 1, { status: 'failed' })
+    else await f.bots.service.workStop(botId, first.workId)
+    const retry = await call()
+    expect(retry.workId).not.toBe(first.workId)
+    expect(retry.replayed).toBeUndefined()
+    expect((await call()).workId).toBe(retry.workId)
+
+    f.runs.markTerminal(turn.payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+    f.bots.close()
+    f.bots = new BotEngine(f.host)
+    await f.bots.reconcileOnStartup()
+    await flush()
+    const dispatch = f.store.lastMainDispatch(turn.message.activationId!)!
+    expect(dispatch.n).toBeGreaterThan(turn.payload.dispatchN)
+    const next = await start(f, turn.message.activationId!, dispatch.n)
+    expect((await caller(next)()).workId).toBe(retry.workId)
+    expect(f.store.listActivations(botId).filter((row) => row.trigger.kind === 'work')).toHaveLength(2)
+  })
+
+  it('retries work dropped from the full queue', async () => {
+    const call = caller(await chat())
+    for (const title of ['First', 'Second', 'Third']) await call({ ...request, title })
+    const first = await call()
+    for (let n = 0; n < MAX_QUEUED_ACTIVATIONS - 3; n += 1) {
+      f.clock.now += 1
+      await call({ ...request, title: `Other job ${n}` })
+    }
+    expect(f.store.activation(first.workId)).toMatchObject({ status: 'cancelled', endReason: 'queue_full' })
+    const retry = await call()
+    expect(retry.workId).not.toBe(first.workId)
+    expect(retry.status).toBe('queued')
+    expect((await call()).workId).toBe(retry.workId)
   })
 
   it('repeats describe existing and ended work truthfully, and the report still replies to the owner message', async () => {
