@@ -615,8 +615,11 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
     // The same for the message a turn the provider started itself opens with: the background tasks it reports.
     const backgroundNotice = msg.role === 'user' && msg.backgroundNotice?.length ? msg.backgroundNotice : undefined
     if (backgroundNotice) base.metadata = { ...(base.metadata as object | undefined), backgroundNotice }
+    // And for what Mousse told the agent about work it asked to hear about (`notify`).
+    const settleNotice = msg.role === 'user' && msg.settleNotice?.length ? msg.settleNotice : undefined
+    if (settleNotice) base.metadata = { ...(base.metadata as object | undefined), settleNotice }
     if (msg.role === 'assistant' && msg.scheduledRun) base.metadata = { ...(base.metadata as object | undefined), scheduledRun: msg.scheduledRun }
-    if (!displayText.trim() && !msg.images?.length && extraFiles.length === 0 && references.length === 0 && !subagentNotice && !backgroundNotice) {
+    if (!displayText.trim() && !msg.images?.length && extraFiles.length === 0 && references.length === 0 && !subagentNotice && !backgroundNotice && !settleNotice) {
       continue
     }
     // Fold exact-duplicate consecutive assistant text (provider double-adds,

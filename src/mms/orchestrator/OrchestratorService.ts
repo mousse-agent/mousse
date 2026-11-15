@@ -72,8 +72,9 @@ import { EventEmitter } from 'events'
 import { nativeAgentAssistantMessage, nativeAgentHistory } from '../providers/nativeAgentHistory'
 import { v4 as uuidv4 } from 'uuid'
 import { TitleTakenRejection, type CommandResult, type RunEngine, type SendDelegation, type StopResult } from '../run/RunEngine'
-import { isFencedSource, isPauseHeldSource, isPriorityTurnRun, isResumeSource } from '../run/delegation/sources'
-import { deleteRunResults } from '../run/delegation/hold'
+import { isFencedSource, isFollowUpSource, isPauseHeldSource, isPriorityTurnRun, isResumeSource } from '../run/delegation/sources'
+import { deleteRunResults, readRunResultText } from '../run/delegation/hold'
+import { SettleNotices, type PlannedSettleNotice } from './settleNotices'
 import { decideUsageLimit, usageLimitOf, type UsageLimitDecision } from '../run/pausePolicy'
 import { boundedResetIso, estimatedReset } from './providerErrors'
 import { CONTINUE_TEXT, MANUAL_CONTINUE_TEXT, pausedLine } from '../run/pauseText'
@@ -136,6 +137,7 @@ import { RemoteSubagents } from './RemoteSubagents'
 import type { RemoteComputersPort } from '../protocol/remoteComputersPort'
 import { MAX_REMOTE_MINUTES } from '../run/mcp/appTools/delegation'
 import { isRunningSubagent, type BackgroundTaskNoticeItem, type SubagentNoticeItem, type SubagentSummary } from '../../shared/subagents'
+import type { SettleNoticeItem } from '../../shared/settleNotice'
 import type { DelegationRequest, ForkPointSeed, ThreadCreation } from '../run/RunEngine'
 import type { HandoffItem } from '../run/handoff/budget'
 import { committedTransfers, TurnHandoffs, type PlannedHandoff } from './turnHandoffs'
@@ -312,6 +314,10 @@ import {
   reclaimAbandonedClaims,
   releaseClaim,
   releaseStopHold,
+  releaseHeldNotices,
+  mergeSettleNotice,
+  queueHasSettleNotice,
+  takeHeldNotices,
   removeQueuedMessage,
   reorderQueuedMessages,
   withoutSteerNow,
@@ -879,6 +885,8 @@ interface TurnStartRequest {
   inboxIds?: string[]
   /** The subagent results the turn's message delivers. */
   subagentNotice?: SubagentNoticeItem[]
+  /** The settle notices the turn's message delivers (`ChatMessage.settleNotice`). */
+  settleNotice?: SettleNoticeItem[]
   /** A mode the turn must not exceed (`OrchestratorSendOptions.permissionMode`). */
   permissionMode?: PermissionMode
   /** A bound send (`OrchestratorSendOptions.refuseQueue`): a turn that cannot start now is refused, never queued. */
@@ -1922,6 +1930,8 @@ export class OrchestratorService extends EventEmitter {
   private readonly pendingContinuations = new Map<string, { threadId: string; reserved: boolean; done: Promise<{ runId: string | null }>; settle: (runId: string | null) => void }>()
   /** Removes the listeners that route a subagent's questions to its parent (`routeSubagentQuestions`). */
   private questionRouterOff: (() => void) | null = null
+  /** The settle notice (`notify`): the watches of messages agents sent, followed on this computer (SPEC §15.1). */
+  private settleNotices: SettleNotices | undefined
   /** Pending retries of a queue item's row release (`releaseQueuedRows`); a shutdown clears them. */
   private readonly releaseRetries = new Set<ReturnType<typeof setTimeout>>()
   /** Background repairs of unfinished agent queue commands tried so far, per thread. */
@@ -2351,6 +2361,8 @@ export class OrchestratorService extends EventEmitter {
     this.runEngine?.store.setUnreadSteers(null)
     this.questionRouterOff?.()
     this.questionRouterOff = null
+    this.settleNotices?.stop()
+    this.settleNotices = undefined
     this.runEngine?.handoffs.setTranscriptSource(null)
     this.unbindApprovals()
     this.remoteSubagents?.close()
@@ -2377,6 +2389,7 @@ export class OrchestratorService extends EventEmitter {
     // Input (5): steers a live turn has not read yet become a follow-up turn only after its terminal write.
     engine.store.setUnreadSteers((threadId) => this.hasUnreadSteers(threadId))
     this.questionRouterOff = this.routeSubagentQuestions(engine)
+    this.settleNotices = this.startSettleNotices(engine)
     engine.handoffs.setTranscriptSource((threadId) => this.handoffTranscript(threadId))
     engine.setDelegationHost({
       createThread: (creation) =>
@@ -2799,6 +2812,97 @@ export class OrchestratorService extends EventEmitter {
         session.admissionRunId = passedOwner
       }
       this.effectWorker?.notify()
+    }
+  }
+
+  /**
+   * The settle notice on this computer (SPEC §15.1): watches follow the target's runs and queue, and a notice goes into
+   * the sender's queue (`queueSettleNotice`). A question or an approval that starts waiting reads the watches of its
+   * thread again. Returns the started service.
+   */
+  private startSettleNotices(engine: RunEngine): SettleNotices {
+    const queueOf = (threadId: string): QueuedMessage[] => {
+      try {
+        return this.threadStore?.loadMessageQueue(threadId) ?? this.getOrCreateSession(threadId).queue
+      } catch {
+        return []
+      }
+    }
+    const service = new SettleNotices({
+      engine,
+      target: {
+        getRun: (runId) => engine.getRun(runId),
+        continuationOf: (threadId, runId) => engine.listRuns(threadId, { limit: 50 }).find((run) => run.outcome?.continuationOf === runId),
+        queueRun: (threadId, itemId) => {
+          const row = engine.store.db.statement('SELECT run_id FROM runs WHERE thread_id = ? AND client_request_id = ? ORDER BY ordinal DESC LIMIT 1').get(threadId, `queue:${itemId}`)
+          return row ? engine.getRun(String(row.run_id)) ?? undefined : undefined
+        },
+        queueItemForRun: (threadId, runId) => queueOf(threadId).find((item) => item.runId === runId && item.state !== 'claimed')?.id,
+        queueItem: (threadId, itemId) => queueOf(threadId).find((item) => item.id === itemId),
+        activeRun: (threadId) => engine.getActiveRun(threadId)
+      },
+      titleOf: (threadId) => this.titleOf(threadId),
+      threadLive: (threadId) => this.titleOf(threadId) !== undefined,
+      waitingForPerson: (threadId) => this.questions.listPendingForThread(threadId).length > 0 || engine.approvals.listPending(threadId).length > 0,
+      resultText: (threadId, runId) => readRunResultText(engine.store, threadId, runId),
+      stopGeneration: (threadId) => currentStopGeneration(engine.store, threadId),
+      isSubagent: (threadId) => engine.delegations.getLineage(threadId)?.relationship === 'subagent',
+      inPlan: (threadId) => this.lastChatModeOf(threadId) === 'plan',
+      deliver: (threadId, notice, held) => this.queueSettleNotice(threadId, notice, held),
+      delivered: (threadId, item) => {
+        if (queueHasSettleNotice(queueOf(threadId), item)) return true
+        try {
+          return this.visibleMessagesWithoutLoading(threadId).some((message) => message.settleNotice?.some((notice) => notice.watchId === item.watchId && notice.event === item.event))
+        } catch {
+          return false
+        }
+      }
+    })
+    const onPending = (event: { threadId: string }): void => service.touch(event.threadId)
+    this.questions.on('pending', onPending)
+    service.start()
+    const stop = service.stop.bind(service)
+    service.stop = () => {
+      this.questions.off('pending', onPending)
+      stop()
+    }
+    return service
+  }
+
+  /**
+   * Puts a settle notice in the sender's queue, joining one that waits there. It starts a turn when the sender is idle and
+   * runs after the running turn otherwise; a `held` notice (`QueuedMessage.heldNotice`) starts none by itself.
+   */
+  private queueSettleNotice(threadId: string, notice: PlannedSettleNotice, held: boolean): void {
+    const session = this.getOrCreateSession(threadId)
+    if (session.deleted) return
+    const mode = getLastUserChatMode(session.messages) ?? 'agent'
+    let item: QueuedMessage | undefined
+    const merge = (items: QueuedMessage[]): QueuedMessage[] => {
+      const result = mergeSettleNotice(items, { threadId, item: notice.item, text: notice.text, hops: notice.hops, mode, held })
+      item = result.item
+      return result.items
+    }
+    session.queue = this.threadStore ? mutateDurableQueue(this.threadStore, threadId, merge) : merge(session.queue)
+    this.emitQueueUpdated(threadId, session.queue)
+    if (!item || item.heldNotice) return
+    if (session.isTurnRunning() || session.turnAdmitted) session.drainAfterSettle = true
+    else this.scheduleQueueDrain(session)
+  }
+
+  /**
+   * The held settle notices of a subagent's thread, for the follow-up its parent sends now: their text joins the
+   * follow-up's (a subagent never starts a turn of its own for a notice: its result is its parent's), and `drop` takes
+   * them out of the queue once the follow-up was accepted.
+   */
+  private heldNoticesOf(threadId: string): { text: string; drop: () => void } | undefined {
+    const queue = this.threadStore?.loadMessageQueue(threadId) ?? this.getOrCreateSession(threadId).queue
+    const { taken } = takeHeldNotices(queue)
+    if (taken.length === 0) return undefined
+    const ids = new Set(taken.map((item) => item.id))
+    return {
+      text: taken.map((item) => item.content).join('\n\n'),
+      drop: () => this.mutateQueue(threadId, (items) => items.filter((item) => !ids.has(item.id) || item.state !== 'pending'))
     }
   }
 
@@ -3997,6 +4101,10 @@ export class OrchestratorService extends EventEmitter {
       showAgentAction: (target, actor, summary, options) => this.showAgentAction(target.threadId, actor, summary, options),
       sendToThread: (threadId, input, options) => this.sendToThreadAsAgent(threadId, input, options),
       earlierSend: (threadId, clientRequestId) => this.earlierAgentSend(threadId, clientRequestId),
+      watchSettle: (input) => {
+        if (!this.settleNotices) throw new Error('Mousse cannot watch threads without the run engine.')
+        return { watchId: this.settleNotices.watch(input).watchId }
+      },
       createThread: (input, options) => this.createThreadAsAgent(input, options),
       creationStarted: (clientRequestId) => this.agentCreationStarted(clientRequestId),
       noteOnThread: (threadId, text, launched) => this.noteAgentLaunch(threadId, text, launched),
@@ -4956,6 +5064,7 @@ export class OrchestratorService extends EventEmitter {
         runId: payload.runId,
         admissionHeld,
         subagentNotice: payload.subagentNotice,
+        ...(payload.settleNotice?.length ? { settleNotice: payload.settleNotice } : {}),
         ...(payload.permissionMode ? { permissionMode: payload.permissionMode } : {}),
         ...(payload.refuseQueue ? { refuseQueue: true } : {}),
         modelOverride: payload.modelOverride,
@@ -5159,6 +5268,7 @@ export class OrchestratorService extends EventEmitter {
           admissionHeld: payload.admissionHeld,
           externalSignal: signal,
           subagentNotice: payload.subagentNotice,
+          ...(payload.settleNotice?.length ? { settleNotice: payload.settleNotice } : {}),
           ...(payload.permissionMode ? { permissionMode: payload.permissionMode } : {}),
           ...(payload.refuseQueue ? { refuseQueue: true } : {}),
           modelOverride: payload.modelOverride,
@@ -7212,8 +7322,10 @@ export class OrchestratorService extends EventEmitter {
     const modeCeiling = narrowCeiling(callerCeiling, first?.modeCeiling)
     const accessLevel: AgentAccessLevel = 'manage'
     let response: OrchestratorResponse
+    // Settle notices that waited for this follow-up reach the subagent with it.
+    const notices = this.heldNoticesOf(childThreadId)
     try {
-      response = await this.send({ content: input.prompt, mode: modeCeiling === 'plan' ? 'plan' : 'agent' }, false, {
+      response = await this.send({ content: notices ? `${input.prompt}\n\n${notices.text}` : input.prompt, mode: modeCeiling === 'plan' ? 'plan' : 'agent' }, false, {
         threadId: childThreadId,
         source: 'delegation',
         clientRequestId: requestId,
@@ -7239,6 +7351,7 @@ export class OrchestratorService extends EventEmitter {
         return { started: false as const, code: 'parent_stopping' as const, message: error.message }
       throw error
     }
+    if (response.runId) notices?.drop()
     const task = response.runId ? engine.delegations.getByChildRun(response.runId) : null
     if (!task) throw new Error('The follow-up was not recorded as a task')
     return this.followUpValue(task, target.title, response.queued ? { queued: true } : {})
@@ -7847,7 +7960,9 @@ export class OrchestratorService extends EventEmitter {
         // behind a pause, wherever it was written (the send, or an edit that made it the agent's).
         ...(item.origin?.kind === 'agent' ? { agentOrigin: { hops: item.origin.hops ?? 1 } } : {}),
         // A person's unread steer queued again from its entry (`settleUnreadItems`); one carrying subagent results is not.
-        ...(isPersonFollowUp(item) ? { sentByPerson: true as const } : {})
+        ...(isPersonFollowUp(item) ? { sentByPerson: true as const } : {}),
+        // A settle notice's turn carries the count of the work it reports on and adds none (SPEC §15.1).
+        ...(item.settleNotice?.length ? { noticeHops: item.settleHops ?? 0 } : {})
       })
       return result.status === 'accepted' ? result.runId : undefined
     } catch (error) {
@@ -8661,6 +8776,8 @@ export class OrchestratorService extends EventEmitter {
   }
 
   private emitQueueUpdated(threadId: string, items: QueuedMessage[]): void {
+    // A message an agent watches may have moved in its queue (an edit, a steer, a hand-back, a removal).
+    this.settleNotices?.touch(threadId)
     const pending = listPendingQueue(items).filter((item) => !item.internal)
     this.emit('queue-updated', { threadId, items: pending })
   }
@@ -9120,8 +9237,9 @@ export class OrchestratorService extends EventEmitter {
       // Already sent now into a turn that ended (a Stop) before it read it: the drain puts it first as it demotes it.
       if (item?.state === 'steering') return items
       if (!item || item.state !== 'pending') throw new QueueConflictError('queue_item_not_found', 'That message is not in the queue.')
-      if (pending[0]?.id === itemId) return items
-      return reorderQueuedMessages(items, [itemId, ...pending.map((entry) => entry.id).filter((id) => id !== itemId)])
+      const placed = pending[0]?.id === itemId ? items : reorderQueuedMessages(items, [itemId, ...pending.map((entry) => entry.id).filter((id) => id !== itemId)])
+      // A held settle notice the person sends now is theirs to start.
+      return item.heldNotice ? placed.map((entry) => (entry.id === itemId ? releaseHeldNotices([entry])[0]! : entry)) : placed
     }
     const toFront = (items: QueuedMessage[]): QueuedMessage[] => (opts?.releaseStopHold ? releaseStopHold(move(items)) : move(items))
     session.queue = this.threadStore ? mutateDurableQueue(this.threadStore, session.threadId, toFront) : toFront(session.queue)
@@ -10195,7 +10313,8 @@ export class OrchestratorService extends EventEmitter {
     agent?: AgentOrigin,
     backgroundNotice?: BackgroundTaskNoticeItem[],
     /** The run this message opens: its `turnId` from the start, so a run started again after a restart finds it. */
-    runId?: string
+    runId?: string,
+    settleNotice?: SettleNoticeItem[]
   ): { claimAccepted: boolean } {
     const messagesBefore = this.messages.length
     const nativeBefore = structuredClone(this.nativeContext)
@@ -10255,6 +10374,7 @@ export class OrchestratorService extends EventEmitter {
       workflowInvocationId: workflowRun?.invocationId,
       ...(subagentNotice?.length ? { subagentNotice } : {}),
       ...(backgroundNotice?.length ? { backgroundNotice } : {}),
+      ...(settleNotice?.length ? { settleNotice } : {}),
       // A job's prompt is not something the person typed; the thread can say whose it is.
       ...(scheduled ? { scheduled: { jobId: scheduled.jobId, ...(scheduled.jobName ? { jobName: scheduled.jobName } : {}) } } : {}),
       // A message another thread's agent wrote is stored as that agent's, never as something a person typed.
@@ -10551,6 +10671,23 @@ export class OrchestratorService extends EventEmitter {
       session.queue = this.threadStore ? mutateDurableQueue(this.threadStore, session.threadId, releaseStopHold) : releaseStopHold(session.queue)
     } catch (error) {
       console.warn('the hold a Stop saved on the queue could not be lifted', { threadId: session.threadId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /**
+   * A person's turn starts: the settle notices held in the queue (`QueuedMessage.heldNotice`) run after it, as their
+   * own turn. Not in a subagent's thread, whose turns' results are its parent's, and not while the person works in Plan:
+   * there they wait for Send now.
+   */
+  private releaseHeldNotices(session: ThreadSession, mode: ChatMode | undefined): void {
+    if (!session.queue.some((item) => item.heldNotice)) return
+    if ((mode ?? getLastUserChatMode(session.messages)) === 'plan') return
+    if (this.runEngine?.delegations.getLineage(session.threadId)?.relationship === 'subagent') return
+    try {
+      session.queue = this.threadStore ? mutateDurableQueue(this.threadStore, session.threadId, releaseHeldNotices) : releaseHeldNotices(session.queue)
+      this.emitQueueUpdated(session.threadId, session.queue)
+    } catch (error) {
+      console.warn('the settle notices held in the queue could not be released', { threadId: session.threadId, error: error instanceof Error ? error.message : String(error) })
     }
   }
 
@@ -11543,6 +11680,8 @@ export class OrchestratorService extends EventEmitter {
       runId?: string
       /** The subagent results this turn's message delivers (a wake, a queued steer). */
       subagentNotice?: SubagentNoticeItem[]
+      /** The settle notices this turn's message delivers. */
+      settleNotice?: SettleNoticeItem[]
       /** The provider background tasks a continuation's message reports. */
       backgroundNotice?: BackgroundTaskNoticeItem[]
       /** The turn the provider started that this run is for (`provider-continuation`). */
@@ -11837,6 +11976,7 @@ export class OrchestratorService extends EventEmitter {
       onUserInputAccepted?: () => void
       runId?: string
       subagentNotice?: SubagentNoticeItem[]
+      settleNotice?: SettleNoticeItem[]
       backgroundNotice?: BackgroundTaskNoticeItem[]
       continuationId?: string
       permissionMode?: PermissionMode
@@ -12150,7 +12290,8 @@ export class OrchestratorService extends EventEmitter {
             approvalNote,
             opts?.agent,
             opts?.backgroundNotice,
-            this.runEngine ? opts?.runId : undefined
+            this.runEngine ? opts?.runId : undefined,
+            opts?.settleNotice
           )
           claimAccepted = true
           this.notifyUserInputAccepted(session.threadId, opts?.onUserInputAccepted)
@@ -12297,6 +12438,8 @@ export class OrchestratorService extends EventEmitter {
     this.applyRequestedAbort(session, turn)
     // The thread runs again: what a Stop held in its queue goes on after this turn, as after any turn that ends.
     if (!turn.abort.signal.aborted) this.releaseStopHold(session)
+    // A person's turn lets the settle notices held for them go on after it too.
+    if (!turn.abort.signal.aborted && isFollowUpSource(opts?.source ?? 'gui')) this.releaseHeldNotices(session, request.mode)
     // Authoritative turn lifecycle boundary (includes queue/background turns).
     this.emit('turn-started', { threadId: session.threadId })
     if (session.steerOnStart.length) this.deliverSteersOnStart(session)
@@ -13751,6 +13894,7 @@ export class OrchestratorService extends EventEmitter {
       admissionHeld,
       ...(queued.permissionMode ? { permissionMode: queued.permissionMode } : {}),
             ...(queued.inboxIds?.length ? { inboxIds: queued.inboxIds, subagentNotice: queued.subagentNotice } : {}),
+      ...(queued.settleNotice?.length ? { settleNotice: queued.settleNotice } : {}),
       // The item is consumed when the turn accepts its input, so what the run needs travels on the request.
       ...(queued.origin?.kind === 'schedule'
         ? {

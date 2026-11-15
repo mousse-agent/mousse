@@ -1,5 +1,6 @@
 import type { UIMessage } from "ai";
 import { readSubagentNotice } from "../../../adapters/subagentNotice";
+import { readSettleNoticeMeta } from "../../../adapters/settleNotice";
 import { isTextPart } from "../utils/assistant-blocks";
 import { markdownToSearchBlocks, plainTextToSearchBlocks } from "./search-text";
 import { promptDisplayText } from "../prompt-links";
@@ -101,7 +102,7 @@ function sourceOf(message: UIMessage): unknown[] {
   const source: unknown[] = [
     message.role,
     Boolean(metadata?.contextHandoff || metadata?.compaction || metadata?.contextCleared),
-    message.role === "user" && readSubagentNotice(message) !== null,
+    message.role === "user" && (readSubagentNotice(message) !== null || readSettleNoticeMeta(message) !== null),
   ];
   for (const part of message.parts ?? []) source.push(isTextPart(part) ? replyText(message, part.text) : null);
   return source;
@@ -279,7 +280,7 @@ export function searchableParts(message: UIMessage, math = false): SearchablePar
 function readParts(message: UIMessage, math: boolean): SearchablePart[] {
   const parts = message.parts ?? [];
   if (message.role === "user") {
-    if (readSubagentNotice(message)) return [];
+    if (readSubagentNotice(message) || readSettleNoticeMeta(message)) return [];
     const text = parts
       .filter(isTextPart)
       .map((part) => part.text)

@@ -77,6 +77,7 @@ export function canEditQueued(item: QueuedMessage): boolean {
     item.state === 'pending' &&
     item.intent !== 'steer' &&
     !item.subagentNotice?.length &&
+    !item.settleNotice?.length &&
     !item.inboxIds?.length &&
     !item.workflowInvocationId
 }
