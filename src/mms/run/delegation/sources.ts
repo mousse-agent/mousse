@@ -77,3 +77,8 @@ export function isResumeSource(source: string | null | undefined): boolean {
  * limit paused, which after a restart is often many background runs resumed together.
  */
 export const PRIORITY_TURN_SOURCES: readonly string[] = ['gui', 'cli', 'remote', 'internal', 'cli-steer', 'protocol-steer']
+
+/** Whether a run is one a person is waiting for, as the turn-slot claim ranks it (`EffectOutbox`). */
+export function isPriorityTurnRun(run: { source: string; outcome?: { sentByPerson?: true } | null }): boolean {
+  return PRIORITY_TURN_SOURCES.includes(run.source) || (run.source === 'steer-followup' && run.outcome?.sentByPerson === true)
+}

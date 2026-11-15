@@ -344,4 +344,32 @@ describe('a turn that waits for a free turn slot', () => {
     expect(engine.listRuns(b.id).map((run) => [run.status, run.outcome?.interruptedBy])).toEqual([['interrupted', 'user']])
     expect(orch.getTurnState(b.id).phase).toBe('stopped')
   })
+
+  it('a background turn shows the wait while the slots kept for people are free, and a person\'s message still starts', async () => {
+    // Three slots, two kept for people: background turns share one.
+    await worker.stop()
+    worker = new EffectWorker({ outbox: engine.outbox, executors: orch.effectExecutors(), owner: engine.leaseOwner, fibres: { turn: 3 } })
+    worker.start()
+    orch.attachEffectWorker(worker)
+    const a = store.createThread('a')
+    const b = store.createThread('b')
+    const c = store.createThread('c')
+    const first = orch.send('first', false, { threadId: a.id, clientRequestId: 'bg-a', source: 'mcp' })
+    await until(() => adapter.started.includes(a.id), 'the first background turn')
+    const second = orch.send('second', false, { threadId: b.id, clientRequestId: 'bg-b', source: 'mcp' })
+    await until(() => orch.getTurnState(b.id).step?.kind === 'waiting_slot', 'the background wait')
+    // One turn runs of three: the two free slots are kept for people, so it waits, and says why.
+    expect(orch.getTurnState(b.id)).toMatchObject({ phase: 'queued', step: { kind: 'waiting_slot', running: 1, limit: 3, keptForPeople: 2 } })
+    expect(adapter.started).not.toContain(b.id)
+
+    const person = orch.send('mine', false, { threadId: c.id, clientRequestId: 'gui-c', source: 'gui' })
+    await until(() => adapter.started.includes(c.id), 'the person\'s turn')
+    expect(orch.getTurnState(c.id).step?.kind).not.toBe('waiting_slot')
+
+    for (const threadId of [a.id, c.id]) adapter.release(threadId)
+    await Promise.all([first, person])
+    await until(() => adapter.started.includes(b.id), 'the background turn')
+    adapter.release(b.id)
+    await second
+  })
 })

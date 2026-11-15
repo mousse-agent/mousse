@@ -72,7 +72,7 @@ import { EventEmitter } from 'events'
 import { nativeAgentAssistantMessage, nativeAgentHistory } from '../providers/nativeAgentHistory'
 import { v4 as uuidv4 } from 'uuid'
 import { TitleTakenRejection, type CommandResult, type RunEngine, type SendDelegation, type StopResult } from '../run/RunEngine'
-import { isFencedSource, isPauseHeldSource, isResumeSource } from '../run/delegation/sources'
+import { isFencedSource, isPauseHeldSource, isPriorityTurnRun, isResumeSource } from '../run/delegation/sources'
 import { deleteRunResults } from '../run/delegation/hold'
 import { decideUsageLimit, usageLimitOf, type UsageLimitDecision } from '../run/pausePolicy'
 import { boundedResetIso, estimatedReset } from './providerErrors'
@@ -4886,12 +4886,17 @@ export class OrchestratorService extends EventEmitter {
     setImmediate(() => {
       const entry = this.turnResults.get(runId)
       const slots = this.effectWorker?.turnSlots()
-      if (!entry || entry.started || entry.abandoned || !slots || slots.running < slots.limit) return
-      if (this.runEngine?.getRun(runId)?.status !== 'queued' || this.isStopping(threadId)) return
+      if (!entry || entry.started || entry.abandoned || !slots) return
+      const run = this.runEngine?.getRun(runId)
+      if (run?.status !== 'queued' || this.isStopping(threadId)) return
+      // A person's turn waits only while every slot runs a turn; a background one already while the slots it may use
+      // (all but those kept for people) do.
+      const person = isPriorityTurnRun(run)
+      if (person ? slots.running < slots.limit : slots.sharedRunning < slots.limit - slots.keptForPeople) return
       // Another turn of the thread is live (a queue drain raced it): its state is the thread's.
       if (this.loadedSession(threadId)?.activeTurn) return
       this.slotWaits.set(threadId, runId)
-      this.setTurnPhase(threadId, 'queued', { turnId: null, step: { kind: 'waiting_slot', running: slots.running } })
+      this.setTurnPhase(threadId, 'queued', { turnId: null, step: { kind: 'waiting_slot', running: slots.running, limit: slots.limit, ...(person ? {} : { keptForPeople: slots.keptForPeople }) } })
     })
   }
 
