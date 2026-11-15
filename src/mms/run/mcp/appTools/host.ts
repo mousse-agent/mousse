@@ -373,9 +373,10 @@ export interface AppToolHost extends DelegationToolsHost {
   /**
    * Watches the message `messageKey` sent to `targetThreadId` (`notify` on `thread_send` and `thread_create`): Mousse
    * tells the sending thread when the work it started waits on a person (once) and when it ends (SPEC §15.1). Once per
-   * message: a retry keeps its watch.
+   * message: a retry keeps its watch. With `targetNode`, `targetThreadId` is a thread this caller launched on that
+   * computer (its id there), followed there through routed reads.
    */
-  watchSettle?(input: { messageKey: string; watcherThreadId: string; watcherRunId: string; targetThreadId: string; runId: string }): { watchId: string }
+  watchSettle?(input: { messageKey: string; watcherThreadId: string; watcherRunId: string; targetThreadId: string; runId: string; targetNode?: string }): { watchId: string }
   /**
    * Creates a thread for `actor` (`thread_create`): in the project's folder or its own worktree, on the model
    * asked for or the caller's, with a permission mode no wider than the caller's, recorded as launched by the

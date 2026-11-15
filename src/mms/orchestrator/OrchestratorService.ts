@@ -1285,6 +1285,8 @@ export class OrchestratorService extends EventEmitter {
       this.remoteLaunches?.start()
       // Stops kept while Bridge was off are sent now.
       this.remoteThreads?.start()
+      // Settle watches on threads there that waited to try again try now.
+      this.settleNotices?.remoteReachable()
     }
   }
 
@@ -1958,6 +1960,8 @@ export class OrchestratorService extends EventEmitter {
   private questionRouterOff: (() => void) | null = null
   /** The settle notice (`notify`): the watches of messages agents sent, followed on this computer (SPEC §15.1). */
   private settleNotices: SettleNotices | undefined
+  /** The first wait of a settle watch on another computer after a round that did not reach it (tests shorten it). */
+  private remoteWatchRetryMs: number | undefined
   /** Pending retries of a queue item's row release (`releaseQueuedRows`); a shutdown clears them. */
   private readonly releaseRetries = new Set<ReturnType<typeof setTimeout>>()
   /** Background repairs of unfinished agent queue commands tried so far, per thread. */
@@ -2901,6 +2905,18 @@ export class OrchestratorService extends EventEmitter {
       isSubagent: (threadId) => engine.delegations.getLineage(threadId)?.relationship === 'subagent',
       inPlan: (threadId) => this.lastChatModeOf(threadId) === 'plan',
       deliver: (threadId, notice, held) => this.queueSettleNotice(threadId, notice, held),
+      // A thread this computer's agent launched on another computer is followed there through routed reads (issue #1160).
+      remote: {
+        reads: () => this.remoteThreads,
+        launched: (node, remoteThreadId) => {
+          const record = engine.remoteLaunches.getByRemoteThread(node, remoteThreadId)
+          return record ? { computer: record.computerName, title: record.title } : undefined
+        },
+        denial: (node, computer) => this.remoteThreadDenial(node, computer),
+        // What `remoteAgentMark` carried for a message of that run: its own count plus one.
+        sentHops: (runId) => (engine.getRun(runId)?.outcome?.agentHops ?? 0) + 1,
+        ...(this.remoteWatchRetryMs !== undefined ? { retryMs: this.remoteWatchRetryMs, needsInputRecheckMs: this.remoteWatchRetryMs } : {})
+      },
       delivered: (threadId, item) => {
         if (queueHasSettleNotice(queueOf(threadId), item)) return true
         try {
