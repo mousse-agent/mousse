@@ -45,6 +45,7 @@ it.each(['Price is low.', '[SILENT]'])('ends only its own schedule and posts one
   const lines = chatOf(f, botId).filter(row => row.systemLine)
   expect(lines).toHaveLength(1)
   expect(lines[0]!.text).toMatch(/^Stopped /)
+  expect(f.store.message(lines[0]!.id)?.tell).toBeNull()
   expect(lines[0]!.text).not.toContain('The price dropped.')
   if (text !== '[SILENT]') expect(chatOf(f, botId).some(row => row.kind === 'run_report' && row.text === text)).toBe(true)
   expect((await f.tickSchedules(new Date(T0 + 10 * 60_000))).inserted).toEqual([])

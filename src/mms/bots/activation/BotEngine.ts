@@ -1,3 +1,5 @@
+import { BotTellings } from '../chat/BotTellings'
+import { tellingClass } from '../chat/telling'
 import { hasToolImages } from '../chat/toolImages'
 import { extractAppletParts } from '../../../shared/applets'
 import type { WakePullRequestState } from '../wakeSources'
@@ -575,6 +577,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** The startup pass has run: only then may a schedule's occurrence insert an activation (PR 6 §6). */
   private startupPassed = false
   /** The chat rows and the Bot UI's summaries (Bot Phase 1 §5.1.1). */
+  readonly tellings: BotTellings
   readonly chat: BotChatProjection
   /** The Bot UI's methods (`bots.*` v2). */
   readonly service: BotChatService
@@ -674,7 +677,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       ...(host.journal ? { journal: host.journal } : {}),
       // The bot's name rides along: a notification for a new bot's first row comes before any list names it. A run
       // report its schedule's Tell me keeps quiet says so (`quiet`): it is in the chat, without a notification.
-      emit: (event) => this.events.emit('message', { ...event, ...this.nameFor(event.botId), ...(this.quietReport(event.botId, event.message) ? { quiet: true } : {}) }),
+      emit: (event) => {
+        this.events.emit('message', { ...event, ...this.nameFor(event.botId), ...(this.quietReport(event.botId, event.message) ? { quiet: true } : {}) })
+        this.tellings.read()
+        this.armDue()
+      },
+      classify: (message, input) => {
+        const activation = message.activationId ? this.store.activation(message.activationId) : undefined
+        const reminder = message.id.startsWith('bm_rem_') ? this.store.reminder(message.id.slice(3)) : undefined
+        return tellingClass({ message, scheduleLine: input.scheduleLine, ownerTurn: !!activation && memoryLaneOf(activation) === 'chat',
+          reminder: !!reminder, reminderOwner: reminder?.ownerSet, quiet: this.quietReport(this.store.message(message.id)!.botId, message) })
+      },
       schedules: (botId) => this.schedulesOf(botId).map((schedule) => ({ scheduleId: schedule.scheduleId, label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}), jobId: schedule.jobId, paused: schedule.paused })),
       // The threads it started that still work: it is busy while it manages them.
       launched: (botId) => this.launchedThreads(botId),
@@ -695,6 +708,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // A question's follow-up counts from when its bubble is shown.
       followUpAt: (question, shownAt) => this.firstFollowUpAt(question, shownAt)
     })
+    this.tellings = new BotTellings(this.store, this.chat, id => this.nameFor(id).botName ?? 'Your bot', event => this.events.emit('tell', event), REMINDER_RETRY_MS)
     this.service = new BotChatService(this, {
       store: host.store,
       ...(host.memory ? { memory: host.memory } : {}),
@@ -1405,7 +1419,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const late = (input.now?.getTime() ?? this.now()) - Date.parse(occurrenceAt) > REMINDER_LATE_MS
       this.store.db.transaction(() => {
         this.store.run('INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?) ON CONFLICT(bot_id, key) DO UPDATE SET value = excluded.value', botId, `schedule-said:${scheduleId}`, JSON.stringify({ occurrenceKey, messageId, occurrenceAt }))
-        this.chat.post({ id: messageId, botId, author: 'bot', kind: 'run_report', text: `${late ? `(For ${clockTime(occurrenceAt)}) ` : ''}${input.say}`, lane: 'run' })
+        this.chat.post({ id: messageId, botId, author: 'bot', kind: 'run_report', text: `${late ? `(For ${clockTime(occurrenceAt)}) ` : ''}${input.say}`, lane: 'run', scheduleLine: { say: input.say!, ownerAsked: input.ownerAsked } })
       })
       this.changed({ botId })
       return { kind: 'said', messageId }
@@ -7203,6 +7217,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   markRead(botId: string, seq: number): void {
     this.entry(botId)
     this.store.setReadSeq(botId, seq)
+    this.tellings.read()
     this.changed({ botId })
   }
 
@@ -8126,6 +8141,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /** The soonest due time for one bot, or the profile when omitted. Schedules remain the scheduler's to claim. */
+  noteLegacyTelling(data: unknown): void {
+    const event = data as { botId?: unknown; message?: BotChatMessage; quiet?: unknown } | null
+    if (typeof event?.botId !== 'string' || typeof event.message?.id !== 'string') return
+    this.tellings.noteLegacy(event.botId, event.message, event.quiet === true)
+  }
+
+  setTellingWindows(count: number): void { this.tellings.attach(count); this.armDue() }
+
   nextDueAt(botId?: string): string | undefined {
     const due = this.dueAt(botId)
     return due === undefined ? undefined : new Date(due).toISOString()
@@ -8160,6 +8183,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   private dueAt(botId?: string, forTimer = false): number | undefined {
     const sources: Array<() => number | undefined> = [
+      () => this.tellings.next(botId),
       () => {
         const row = this.store.nextReminder(botId)
         return row ? Math.max(Date.parse(row.dueAt), forTimer ? this.reminderRetryAt.get(row.id) ?? 0 : 0) : undefined
@@ -8248,6 +8272,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
             console.warn('a bot question could not be followed up; trying again in a minute', { questionId: question.id, error: error instanceof Error ? error.message : String(error) })
           }
         }
+        this.tellings.release(now.getTime())
       } finally {
         if (this.delivering === pass) this.delivering = undefined
         this.armDue()

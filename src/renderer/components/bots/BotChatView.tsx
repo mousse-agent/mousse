@@ -615,7 +615,18 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
     void window.mousse.app.setViewedBot?.(bot.id)?.catch(() => undefined)
     return () => { void window.mousse.app.setViewedBot?.(null)?.catch(() => undefined) }
   }, [bot.id])
-  useEffect(() => { if (lastSeq !== undefined) store().markRead(bot.id) }, [bot.id, lastSeq, store])
+  useEffect(() => {
+    const readVisible = (): void => {
+      if (lastSeq !== undefined && document.visibilityState === 'visible' && document.hasFocus()) store().markRead(bot.id)
+    }
+    readVisible()
+    window.addEventListener('focus', readVisible)
+    document.addEventListener('visibilitychange', readVisible)
+    return () => {
+      window.removeEventListener('focus', readVisible)
+      document.removeEventListener('visibilitychange', readVisible)
+    }
+  }, [bot.id, lastSeq, store])
 
   // New messages keep the end in view; a page loaded above keeps the reader where they were. A message the owner sends
   // from here always goes to the end, as in a messenger.

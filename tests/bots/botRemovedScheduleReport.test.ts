@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, it } from 'vitest'
 import { BotEngine } from '../../src/mms/bots/activation/BotEngine'
 import { MmsProfileServices } from '../../src/mms/MmsProfileServices'
-import { botFixture, chatOf, createBot, finish, flush, start, T0, type BotFixture } from './botFixture'
+import { botFixture, chatOf, createBot, finish, flush, runDispatch, start, T0, type BotFixture } from './botFixture'
 
 let f: BotFixture
 let botId: string
@@ -31,6 +31,15 @@ function rebuildEngine() {
 // Words arrive with settlement or late; replayed settlement, startup and inbox reads must stay idempotent.
 it.each(['request limit', 'time limit', 'restart'] as const)('%s posts the removed schedule report once, also after late settlement and startup', async end => {
   const s = await scheduled()
+  const ordinary = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 60 }, prompt: 'Check price.' }, 'owner')
+  const started = f.bots.runScheduledOccurrence({ botId, scheduleId: ordinary.scheduleId, prompt: 'Check price.', occurrenceAt: f.store.now() })
+  expect(started.kind).toBe('started')
+  if (started.kind !== 'started') throw new Error('Expected ordinary report control')
+  await flush()
+  await runDispatch(f, started.activationId, 1, { text: 'Checked the price.' })
+  const control = chatOf(f, botId).find(message => message.activationId === started.activationId && message.kind === 'run_report')!
+  const ordinaryClass = f.store.message(control.id)!.tell
+  expect(ordinaryClass).toBe('soon')
   f.bots.removeSchedule(botId, s.schedule.scheduleId)
   if (end === 'request limit') {
     const counters = f.store.counters(s.row.id)
@@ -52,6 +61,7 @@ it.each(['request limit', 'time limit', 'restart'] as const)('%s posts the remov
   const reports = () => chatOf(f, botId).filter(message => message.activationId === s.row.id && message.kind === 'run_report')
   expect(f.store.activation(s.row.id)).toMatchObject({ status: 'done', endReason: 'schedule_removed' })
   expect(reports().map(message => message.text)).toEqual(['Checked the price.'])
+  expect(f.store.message(reports()[0]!.id)?.tell).toBe(ordinaryClass)
   expect(f.store.dispatches(s.row.id)).toHaveLength(1)
   expect(f.store.escalations({ activationId: s.row.id, status: 'open' })).toHaveLength(0)
   expect(chatOf(f, botId).some(message => message.activationId === s.row.id && (message.ask || message.systemLine))).toBe(false)
@@ -67,6 +77,7 @@ it.each(['request limit', 'time limit', 'restart'] as const)('%s posts the remov
   await flush()
   syncInbox()
   expect(reports().map(message => message.text)).toEqual(['Checked the price.'])
+  expect(f.store.message(reports()[0]!.id)?.tell).toBe(ordinaryClass)
   expect(inbox().endedAt).toBe(endedAt)
 })
 
