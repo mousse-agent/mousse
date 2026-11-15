@@ -37,13 +37,24 @@ export const APP_PROCESS_ROLES = [
 export type AppProcessRole = (typeof APP_PROCESS_ROLES)[number]
 
 /**
- * A process of the desktop app, as its main process reports it. `private` is the OS's private bytes where Chromium
- * reports them; `rss` is the working set.
+ * A process of the desktop app, as its main process reports it. `private` is the process's own memory: its footprint
+ * on macOS (Activity Monitor's Memory column, which counts the GPU and IOSurface memory it holds), private bytes on
+ * Windows, and on Linux what Chromium or the window reports. `rss` is the working set.
  */
 export interface AppProcessMemory extends ProcessMemory {
   kind: AppProcessKind
   role?: AppProcessRole
+  /** A window's Blink memory (DOM, layout, styles), allocated and reserved, MB. */
+  blinkUsed?: number
+  blinkTotal?: number
+  /** A window's resource cache (decoded images, scripts, style sheets, fonts), MB. */
+  resourcesMb?: number
 }
+
+/** The app process fields a service from before them refuses as unknown. */
+export const NEWER_APP_PROCESS_FIELDS = ['blinkUsed', 'blinkTotal', 'resourcesMb'] as const
+/** The hint fields a service from before them refuses as unknown. */
+export const NEWER_APP_HINT_FIELDS = ['footprintMs'] as const
 
 /** Cheap hints at what the GPU process holds. Reading them does no GPU work. */
 export interface AppHints {
@@ -59,6 +70,8 @@ export interface AppHints {
   canvases: number
   /** Decoded images the windows hold (Blink's image cache), MB. */
   imagesMb?: number
+  /** How long reading the processes' footprints took (macOS), ms. */
+  footprintMs?: number
 }
 
 /** Counts read in the service. `null` when a count could not be read this time. */
@@ -85,10 +98,14 @@ export interface ServiceCounts {
 
 export type CountName = Exclude<keyof ServiceCounts, 'threadCacheMb' | 'profiles' | 'activeTurns' | 'workerCrashes'>
 
-/** A provider or tool process the service started, by kind (`claude`, `codex`, `mcp`...), and its memory in MB. */
+/**
+ * A provider or tool process the service started, by kind (`claude`, `codex`, `mcp`...), and its memory in MB: its
+ * footprint on macOS (`footprint`), its resident or working set elsewhere.
+ */
 export interface ChildMemory {
   kind: string
   mb: number | null
+  footprint?: boolean
 }
 
 export interface MemorySample {
@@ -102,7 +119,7 @@ export interface MemorySample {
   counts: ServiceCounts
   /** Heap used by each worker thread of the service, MB. */
   workers?: number[]
-  /** Measured every few samples, and on a breach. */
+  /** The processes the service started (agent CLIs and tools), measured with each sample. */
   children?: ChildMemory[]
   /** The desktop app's processes, when the app reported in the last few minutes. */
   app?: AppProcessMemory[]
@@ -297,10 +314,19 @@ export function serviceMb(sample: MemorySample): number {
   return sample.service.private ?? sample.service.rss
 }
 
-/** The app's processes together, or null when the app has not reported. */
+/** The agent CLIs and tools the service started, together, MB; null when none ran or none could be read. */
+export function childrenMb(sample: MemorySample): number | null {
+  const sizes = (sample.children ?? []).map((child) => child.mb).filter((mb): mb is number => mb !== null)
+  return sizes.length ? round1(sizes.reduce((sum, mb) => sum + mb, 0)) : null
+}
+
+/**
+ * The app's processes together, with the agent CLIs and tools the service started for it, or null when the app has
+ * not reported.
+ */
 export function appMb(sample: MemorySample): number | null {
   if (!sample.app?.length) return null
-  return round1(sample.app.reduce((sum, process) => sum + (process.private ?? process.rss), 0))
+  return round1(sample.app.reduce((sum, process) => sum + (process.private ?? process.rss), 0) + (childrenMb(sample) ?? 0))
 }
 
 /** The largest process of `kind`, or null when the app has not reported one. */
@@ -541,20 +567,53 @@ export interface MemoryTableRow {
   cpu?: number
   heapUsed?: number
   heapTotal?: number
+  /** One line of what the number is made of, for a tooltip: a window's heaps, each agent CLI. */
+  detail?: string
 }
 
-/** Every process with its role, like Task Manager: the service, its workers and providers, then the app's processes. */
+/** A window's memory split into what is measured: the JS heap, Blink and the resource cache. */
+function windowDetail(p: AppProcessMemory): string | undefined {
+  const parts: string[] = []
+  if (p.heapUsed !== undefined) parts.push(`JS heap ${Math.round(p.heapUsed)} of ${Math.round(p.heapTotal ?? p.heapUsed)} MB`)
+  if (p.blinkUsed !== undefined) parts.push(`Blink ${Math.round(p.blinkUsed)} of ${Math.round(p.blinkTotal ?? p.blinkUsed)} MB`)
+  if (p.resourcesMb !== undefined) parts.push(`resource cache ${Math.round(p.resourcesMb)} MB`)
+  if (!parts.length) return undefined
+  // The rest of the process: code, the compositor, freed pages not given back. The resource cache may sit in either.
+  const heaps = (p.heapTotal ?? 0) + (p.blinkTotal ?? 0)
+  const own = p.private ?? p.rss
+  if (p.blinkTotal !== undefined && own > heaps) parts.push(`rest ${Math.round(own - heaps)} MB`)
+  return parts.join(', ')
+}
+
+/** Each agent CLI or tool the service started, by kind: `claude 143, claude 140, mcp 30 MB`. */
+function childrenDetail(children: readonly ChildMemory[]): string {
+  return `${children.map((child) => `${kindName(child.kind)} ${child.mb === null ? '-' : Math.round(child.mb)}`).join(', ')} MB`
+}
+
+/**
+ * Every process with its role, like Task Manager: the service and its workers, then the app's processes and the agent
+ * CLIs and tools the service started, which count in the app's total.
+ */
 export function memoryTable(sample: MemorySample): MemoryTableRow[] {
   const rows: MemoryTableRow[] = [{ label: 'Service', group: 'service', ...pick(sample.service), ...(sample.service.cpu !== undefined ? { cpu: sample.service.cpu } : {}) }]
   if (sample.workers?.length) {
     rows.push({ label: `Service workers (${sample.workers.length})`, group: 'service', heapUsed: round1(sample.workers.reduce((sum, heap) => sum + heap, 0)) })
   }
-  for (const child of sample.children ?? []) rows.push({ label: `Provider: ${kindName(child.kind)}`, group: 'service', ...(child.mb !== null ? { rss: child.mb } : {}) })
   const app = sample.app ?? []
   const labels = appProcessLabels(app)
-  app.forEach((process, i) => rows.push({ label: labels[i], group: 'app', ...pick(process), ...(process.cpu !== undefined ? { cpu: process.cpu } : {}) }))
+  app.forEach((process, i) => {
+    const detail = process.role === 'window' || process.blinkUsed !== undefined ? windowDetail(process) : undefined
+    rows.push({ label: labels[i], group: 'app', ...pick(process), ...(process.cpu !== undefined ? { cpu: process.cpu } : {}), ...(detail ? { detail } : {}) })
+  })
+  const children = sample.children ?? []
+  const childTotal = childrenMb(sample)
+  if (children.length) {
+    // On macOS each is its footprint, like the app's processes; elsewhere its resident or working set.
+    const column = children.every((child) => child.footprint) ? 'private' : 'rss'
+    rows.push({ label: `Agents and tools (${children.length})`, group: 'app', ...(childTotal !== null ? { [column]: childTotal } : {}), detail: childrenDetail(children) })
+  }
   const total = appMb(sample)
-  if (total !== null) rows.push({ label: 'App total', group: 'total', private: total })
+  if (total !== null) rows.push({ label: 'App total', group: 'total', private: total, ...(childTotal !== null ? { detail: `With agents and tools (${Math.round(childTotal)} MB)` } : {}) })
   return rows
 }
 
@@ -573,7 +632,15 @@ export function appHintsLine(hints: AppHints): string {
   const sizes = hints.windows.map((w) => `${Math.round(w.w)}x${Math.round(w.h)} at ${round1(w.scale)}x${w.visible ? '' : ' hidden'}`).join(', ')
   const plural = hints.windows.length === 1 ? '' : 's'
   const images = hints.imagesMb !== undefined ? `, decoded images ${mb(hints.imagesMb)} MB` : ''
-  return `${hints.windows.length} window${plural} (${sizes || 'none'}; ${shown} shown, ${mb(hints.surfaceMb)} MB of pixels), acrylic ${hints.acrylic ? 'on' : 'off'}, WebGL contexts ${hints.webglContexts}, canvases ${hints.canvases}, applet views ${hints.views.applet}, in-app browser ${hints.views.browser}, DevTools ${hints.views.devtools}${images}`
+  const footprints = hints.footprintMs !== undefined ? `, footprints read in ${Math.round(hints.footprintMs)} ms` : ''
+  return `${hints.windows.length} window${plural} (${sizes || 'none'}; ${shown} shown, ${mb(hints.surfaceMb)} MB of pixels), acrylic ${hints.acrylic ? 'on' : 'off'}, WebGL contexts ${hints.webglContexts}, canvases ${hints.canvases}, applet views ${hints.views.applet}, in-app browser ${hints.views.browser}, DevTools ${hints.views.devtools}${images}${footprints}`
+}
+
+/** Where the Memory column's numbers come from on `platform` (`process.platform`). */
+export function memorySource(platform: string): string {
+  if (platform === 'darwin') return "each process's footprint, as Activity Monitor's Memory column, which counts the GPU and IOSurface memory it holds"
+  if (platform === 'win32') return 'private bytes'
+  return 'private memory where it is known, else the working set'
 }
 
 /** The issue's title and body: numbers, fixed names, the version and the OS. Nothing a person typed or named. */
@@ -589,8 +656,11 @@ export function memoryIssueText(input: MemoryReportInput): { title: string; body
     lines.push('', '**Out of bounds:**')
     for (const breach of breaches) lines.push(`- ${breach.kind}${breach.severe ? ' (severe)' : ''}: ${breach.summary}`)
   }
-  lines.push('', '| Process | Private MB | Working set MB | CPU % | Heap used MB | Heap total MB |', '|---|---|---|---|---|---|')
-  for (const r of memoryTable(sample)) lines.push(`| ${r.label} | ${mb(r.private)} | ${mb(r.rss)} | ${mb(r.cpu)} | ${mb(r.heapUsed)} | ${mb(r.heapTotal)} |`)
+  const table = memoryTable(sample)
+  lines.push('', '| Process | Memory MB | Working set MB | CPU % | Heap used MB | Heap total MB |', '|---|---|---|---|---|---|')
+  for (const r of table) lines.push(`| ${r.label} | ${mb(r.private)} | ${mb(r.rss)} | ${mb(r.cpu)} | ${mb(r.heapUsed)} | ${mb(r.heapTotal)} |`)
+  lines.push('', `Memory is ${memorySource(input.os.platform)}.`)
+  for (const r of table) if (r.detail && r.group === 'app') lines.push(`- ${r.label}: ${r.detail}`)
   if (sample.hints) lines.push('', `**What the windows draw:** ${appHintsLine(sample.hints)}`)
 
   const c = sample.counts

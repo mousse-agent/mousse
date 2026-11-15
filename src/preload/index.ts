@@ -1483,7 +1483,8 @@ const api = {
 contextBridge.exposeInMainWorld('mousse', api)
 
 // This window's renderer memory, for the profiler, read only when main asks (the profiler is on, or a profiler tool
-// asked): JS heap, private memory, decoded images and canvases, and with `detail` the window's DOM and counters. No
+// asked): JS heap, Blink memory, private memory, the resource cache, decoded images and canvases, and with `detail`
+// the window's DOM and counters. No
 // timer runs here, nothing is read per frame, and no GPU work is done.
 {
   const mb = (bytes: number): number => Math.round((bytes / 1048576) * 10) / 10
@@ -1506,7 +1507,6 @@ contextBridge.exposeInMainWorld('mousse', api)
       canvases: canvases.length,
       canvasMbEstimated: mb(canvasBytes),
       webglContexts: webgl,
-      browserTabs: document.querySelectorAll('webview').length,
       jsHeapUsedMb: Math.round((heap.usedHeapSize / 1024) * 10) / 10,
       jsHeapTotalMb: Math.round((heap.totalHeapSize / 1024) * 10) / 10,
       caches: own.caches ?? {}
@@ -1519,7 +1519,15 @@ contextBridge.exposeInMainWorld('mousse', api)
         let privateKb: number | undefined
         try { privateKb = (await process.getProcessMemoryInfo()).private } catch { /* not offered */ }
         let imagesKb: number | undefined
-        try { imagesKb = Math.round(webFrame.getResourceUsage().images.size / 1024) } catch { /* not offered */ }
+        let resourcesKb: number | undefined
+        try {
+          const usage = webFrame.getResourceUsage()
+          imagesKb = Math.round(usage.images.size / 1024)
+          resourcesKb = Math.round((usage.images.size + usage.scripts.size + usage.cssStyleSheets.size + usage.xslStyleSheets.size + usage.fonts.size + usage.other.size) / 1024)
+        } catch { /* not offered */ }
+        // Blink's own memory (DOM, layout, styles): what it allocated, and what it holds from the OS.
+        let blink: { allocated: number; total: number } | undefined
+        try { blink = process.getBlinkMemoryInfo() } catch { /* not offered */ }
         const webglRaw = Number(document.documentElement?.dataset.mousseWebglContexts ?? 0)
         const webgl = Number.isFinite(webglRaw) ? webglRaw : 0
         ipcRenderer.send('diagnostics:windowMemory', {
@@ -1528,6 +1536,8 @@ contextBridge.exposeInMainWorld('mousse', api)
           totalHeapKb: heap.totalHeapSize,
           privateKb,
           imagesKb,
+          resourcesKb,
+          ...(blink ? { blinkUsedKb: blink.allocated, blinkTotalKb: blink.total } : {}),
           canvases: document.querySelectorAll('canvas').length,
           webglContexts: webgl,
           ...(request?.detail === true ? { counters: detailCounters(heap, imagesKb, webgl) } : {})

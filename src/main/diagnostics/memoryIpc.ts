@@ -2,8 +2,9 @@
  * The desktop app's part of the profiler's memory monitor, which runs only while the profiler is on (Settings → Labs).
  * Then, about once a minute and when a profiler tool asks, main reads every Chromium process
  * (`app.getAppMetrics`: main, each window's renderer, applet views, the in-app browser, GPU, network and other
- * utility processes) with its role, private memory, working set and CPU, adds its own Node heap and each window's JS
- * heap and image cache (which each window's preload sends when asked), and a few hints at what the GPU process holds: window
+ * utility processes) with its role, private memory (on macOS its footprint, read with `top`), working set and CPU,
+ * adds its own Node heap and each window's JS heap, Blink memory, resource cache and image cache (which each window's
+ * preload sends when asked), and a few hints at what the GPU process holds: window
  * sizes and scale, acrylic, WebGL contexts and canvases. It reports the numbers to the service, which logs them and
  * checks the limits. No GPU work is done to read any of it. The window asks main for the status and the prefilled
  * issue; main opens the issue in the browser.
@@ -12,7 +13,8 @@ import { randomUUID } from 'node:crypto'
 import { app, BrowserWindow, clipboard, ipcMain, screen, shell, webContents } from 'electron'
 import { toMb, type AppHints, type AppProcessMemory, type BreachKind, type MemoryIssue } from '../../shared/diagnostics/memory'
 import type { WindowCounters } from '../../shared/diagnostics/profiler'
-import { appHints, appProcessRows, sendAppReport, windowCacheSizeOf, type ContentsLike, type WindowGeometry, type WindowReport } from './appProcesses'
+import { readFootprintsMb } from '../../mms/diagnostics/processMemory'
+import { appHints, appProcessRows, browserProcessesByHost, sendAppReport, windowCacheSizeOf, type ContentsLike, type WindowGeometry, type WindowReport } from './appProcesses'
 import { openMemoryIssue } from './memoryReport'
 import { markedViews, webContentsRole } from './webContentsRoles'
 
@@ -47,9 +49,19 @@ function liveContents(): ContentsLike[] {
     const type = contents.getType()
     const role: ContentsLike['role'] = devtools.has(contents.id) ? 'devtools'
       : marked ?? (type === 'window' ? 'window' : type === 'webview' ? 'browser' : 'renderer')
-    out.push({ pid, role })
+    out.push({ pid, role, ...(role === 'browser' ? hostOf(contents) : {}) })
   }
   return out
+}
+
+/** The window an in-app browser tab shows in: a webview's host, or the window a browser view is attached to. */
+function hostOf(contents: Electron.WebContents): { hostId?: number } {
+  try {
+    const host = contents.hostWebContents ?? BrowserWindow.fromWebContents(contents)?.webContents
+    return host && !host.isDestroyed() ? { hostId: host.id } : {}
+  } catch {
+    return {}
+  }
 }
 
 function windowGeometry(): WindowGeometry[] {
@@ -63,7 +75,29 @@ function windowGeometry(): WindowGeometry[] {
 
 type ElectronProcess = NodeJS.Process & { getProcessMemoryInfo?: () => Promise<{ private: number }> }
 
-/** Every app process's memory and the GPU hints now. Cheap: one Chromium call, Node's own counters, window bounds. */
+/** Footprints are read at most this often; a profiler tool asking in between gets the last ones. */
+const FOOTPRINT_EVERY_MS = REPORT_EVERY_MS - 5_000
+let lastFootprints: { at: number; mb: Map<number, number>; ms: number } | null = null
+
+/**
+ * The processes' footprints on macOS, where resident size misses the GPU and IOSurface memory a process holds and
+ * still counts pages it freed: read about once a minute, sooner only when a process is new. Null elsewhere.
+ */
+async function appFootprints(pids: number[], now: number): Promise<{ footprints: Map<number, number> | null; footprintMs?: number }> {
+  if (process.platform !== 'darwin') return { footprints: null }
+  const last = lastFootprints
+  if (last && now - last.at >= 0 && now - last.at < FOOTPRINT_EVERY_MS && pids.every((pid) => last.mb.has(pid))) return { footprints: last.mb, footprintMs: last.ms }
+  const started = performance.now()
+  const mb = await readFootprintsMb(pids)
+  if (!mb) return { footprints: null }
+  lastFootprints = { at: now, mb, ms: performance.now() - started }
+  return { footprints: mb, footprintMs: lastFootprints.ms }
+}
+
+/**
+ * Every app process's memory and the GPU hints now. Cheap: one Chromium call, Node's own counters, window bounds, and
+ * on macOS one `top` sample for the processes' footprints (about 0.15 s of CPU, once a minute while the profiler is on).
+ */
 export async function readAppMemory(acrylic: boolean, now = Date.now()): Promise<{ processes: AppProcessMemory[]; hints: AppHints }> {
   const usage = process.memoryUsage()
   let privateMb: number | undefined
@@ -73,15 +107,18 @@ export async function readAppMemory(acrylic: boolean, now = Date.now()): Promise
   }
   for (const [pid, report] of windowReports) if (now - report.at > FRESH_MS * 2) windowReports.delete(pid)
   const contents = liveContents()
+  const metrics = app.getAppMetrics()
+  const { footprints, footprintMs } = await appFootprints(metrics.map((metric) => metric.pid), now)
   const processes = appProcessRows(
-    app.getAppMetrics(),
+    metrics,
     contents,
     windowReports,
     { heapUsed: toMb(usage.heapUsed), heapTotal: toMb(usage.heapTotal), external: toMb(usage.external), arrayBuffers: toMb(usage.arrayBuffers), ...(privateMb ? { privateMb } : {}) },
     now,
-    FRESH_MS
+    FRESH_MS,
+    footprints
   )
-  const hints = appHints({ windows: windowGeometry(), acrylic, contents, reports: windowReports.values(), now, freshMs: FRESH_MS })
+  const hints = appHints({ windows: windowGeometry(), acrylic, contents, reports: windowReports.values(), now, freshMs: FRESH_MS, ...(footprintMs !== undefined ? { footprintMs } : {}) })
   return { processes, hints }
 }
 
@@ -117,7 +154,8 @@ function windowCountersOf(raw: unknown): Omit<WindowCounters, 'w' | 'h' | 'scale
     canvases: Math.round(n('canvases')),
     canvasMbEstimated: n('canvasMbEstimated'),
     webglContexts: Math.round(n('webglContexts')),
-    browserTabs: Math.round(n('browserTabs')),
+    // Counted from the browser processes when the window's detail is collected.
+    browserTabs: 0,
     jsHeapUsedMb: n('jsHeapUsedMb'),
     jsHeapTotalMb: n('jsHeapTotalMb'),
     caches
@@ -140,6 +178,9 @@ function onWindowMemory(event: Electron.IpcMainEvent, raw: unknown): void {
     totalHeapKb,
     privateKb: finite(value?.privateKb),
     imagesKb: finite(value?.imagesKb),
+    blinkUsedKb: finite(value?.blinkUsedKb),
+    blinkTotalKb: finite(value?.blinkTotalKb),
+    resourcesKb: finite(value?.resourcesKb),
     canvases: finite(value?.canvases),
     webglContexts: finite(value?.webglContexts),
     at: Date.now()
@@ -180,6 +221,8 @@ async function collectWindows(detail: boolean): Promise<WindowCounters[]> {
   })
   if (!detail) return []
   const out: WindowCounters[] = []
+  // Browser tabs are the processes that hold their pages, not the elements a window mounts for them.
+  const browsers = browserProcessesByHost(liveContents())
   for (const win of windows) {
     if (win.isDestroyed()) continue
     const answer = windowCounters.get(win.webContents.id)
@@ -187,7 +230,7 @@ async function collectWindows(detail: boolean): Promise<WindowCounters[]> {
     const bounds = win.getContentBounds()
     let scale = 1
     try { scale = screen.getDisplayMatching(bounds).scaleFactor } catch { /* no display yet */ }
-    out.push({ w: bounds.width, h: bounds.height, scale, visible: win.isVisible() && !win.isMinimized(), ...answer.counters })
+    out.push({ w: bounds.width, h: bounds.height, scale, visible: win.isVisible() && !win.isMinimized(), ...answer.counters, browserTabs: browsers.get(win.webContents.id) ?? 0 })
   }
   return out
 }

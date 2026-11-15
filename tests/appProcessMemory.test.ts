@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { appHints, appProcessRows, sendAppReport, utilityRole, type MetricLike, type WindowReport } from '../src/main/diagnostics/appProcesses'
+import { appHints, appProcessRows, browserProcessesByHost, sendAppReport, utilityRole, type MetricLike, type WindowReport } from '../src/main/diagnostics/appProcesses'
+import { parseTopMemory } from '../src/mms/diagnostics/processMemory'
 import type { WindowCounters } from '../src/shared/diagnostics/profiler'
 import { appProcessLabels, memoryTable, type MemorySample } from '../src/shared/diagnostics/memory'
 import { liveWebGlContexts, noteWebGlContext } from '../src/renderer/lib/webglCount'
@@ -104,13 +105,73 @@ describe('per-process table', () => {
     expect(memoryTable(sample).map((row) => [row.label, row.private ?? null, row.rss ?? null, row.group])).toEqual([
       ['Service', 306, 380, 'service'],
       ['Service workers (2)', null, null, 'service'],
-      ['Provider: codex', null, 80, 'service'],
       ['Main', 149, 210, 'app'],
       ['Window', 221, 300, 'app'],
       ['GPU', 334, 420, 'app'],
       ['Network', 13, 30, 'app'],
-      ['App total', 717, null, 'total']
+      // Resident size off macOS: in the working set column, and in the app's total.
+      ['Agents and tools (1)', null, 80, 'app'],
+      ['App total', 797, null, 'total']
     ])
+  })
+
+  it("on macOS shows each process's footprint, a window split into its heaps, and the agents' footprints", () => {
+    const metrics: MetricLike[] = [
+      { pid: 10, type: 'Browser', memory: { workingSetSize: 180 * KB } },
+      { pid: 11, type: 'GPU', memory: { workingSetSize: 110 * KB } },
+      { pid: 12, type: 'Tab', memory: { workingSetSize: 900 * KB } }
+    ]
+    const report: WindowReport = { usedHeapKb: 140 * KB, totalHeapKb: 180 * KB, privateKb: 2_000 * KB, blinkUsedKb: 45 * KB, blinkTotalKb: 1_584 * KB, resourcesKb: 30 * KB, at: NOW }
+    // The GPU process's footprint counts the GPU and IOSurface memory its working set misses.
+    const footprints = new Map([[10, 120], [11, 340], [12, 2_155]])
+    const app = appProcessRows(metrics, [{ pid: 12, role: 'window' }], new Map([[12, report]]), { ...MAIN, privateMb: 100 }, NOW, 180_000, footprints)
+    expect(app.map((row) => [row.role, row.private, row.rss])).toEqual([['main', 120, 180], ['window', 2_155, 900], ['gpu', 340, 110]])
+    expect(app[1]).toMatchObject({ heapUsed: 140, heapTotal: 180, blinkUsed: 45, blinkTotal: 1_584, resourcesMb: 30 })
+
+    const sample: MemorySample = {
+      t: NOW, up: 60,
+      service: { rss: 200 },
+      counts: { sqliteConnections: 0, workerThreads: 0, loadedThreads: 0, threadRuntimes: 0, threadCacheThreads: 0, threadCacheMb: 0, replayEvents: 0, ptys: 0, fileWatchers: 0, providerProcesses: 2, profiles: 1, activeTurns: 0 },
+      children: [{ kind: 'claude', mb: 143, footprint: true }, { kind: 'mcp', mb: null, footprint: true }],
+      app
+    }
+    const rows = memoryTable(sample)
+    expect(rows.find((row) => row.label === 'Window')?.detail).toBe('JS heap 140 of 180 MB, Blink 45 of 1584 MB, resource cache 30 MB, rest 391 MB')
+    expect(rows.find((row) => row.label === 'Agents and tools (2)')).toMatchObject({ private: 143, detail: 'claude 143, mcp - MB' })
+    expect(rows.find((row) => row.group === 'total')?.private).toBe(120 + 2_155 + 340 + 143)
+  })
+})
+
+describe('in-app browser processes by window', () => {
+  it('counts the processes, not the tabs: tabs sharing one count once, each window its own', () => {
+    expect(browserProcessesByHost([
+      { pid: 50, role: 'browser', hostId: 7 },
+      { pid: 50, role: 'browser', hostId: 7 },
+      { pid: 51, role: 'browser', hostId: 7 },
+      { pid: 52, role: 'browser', hostId: 9 },
+      // A tab not shown in any window, and the window itself, are not counted.
+      { pid: 53, role: 'browser' },
+      { pid: 12, role: 'window' }
+    ])).toEqual(new Map([[7, 2], [9, 1]]))
+  })
+})
+
+describe("reading macOS footprints from top", () => {
+  it('reads MEM in each unit and skips the header', () => {
+    // Recorded from `top -l 1 -stats pid,mem -pid ...` on macOS 26.6.2; the last two rows (B, and the +/- that older
+    // releases append) are hand-authored.
+    const text = [
+      'Processes: 453 total, 5 running, 448 sleeping, 2687 threads ',
+      'PhysMem: 15G used (3214M wired, 7221M compressor), 111M unused.',
+      '',
+      'PID    MEM  ',
+      '97874  2402M',
+      '17884  7201K',
+      '74120  947M ',
+      '301    512B',
+      '302    12M+'
+    ].join('\n')
+    expect(parseTopMemory(text)).toEqual(new Map([[97874, 2402], [17884, 7], [74120, 947], [301, 0], [302, 12]]))
   })
 })
 
@@ -127,6 +188,19 @@ describe('sending the report to a service from before the window caches had size
     }, { processes: [], windows: [sized] })
     expect(sent).toHaveLength(2)
     expect((sent[1] as { windows: WindowCounters[] }).windows).toEqual([{ ...counters, caches: { codeHighlight: { entries: 3 }, other: { entries: 2, limit: 10 } } }])
+  })
+
+  it("sends again without a window's Blink numbers and the footprint's read time when the service does not know them", async () => {
+    const sent: Array<Record<string, unknown>> = []
+    const window = { kind: 'renderer' as const, role: 'window' as const, rss: 900, private: 2_155, heapUsed: 140, blinkUsed: 45, blinkTotal: 1_584, resourcesMb: 30 }
+    const hints = { windows: [], surfaceMb: 0, acrylic: false, views: { applet: 0, browser: 0, devtools: 0 }, webglContexts: 0, canvases: 0, footprintMs: 180 }
+    await sendAppReport(async (report) => {
+      sent.push(report)
+      if (sent.length === 1) throw refusal('unknown_field')
+    }, { processes: [window], hints })
+    expect(sent).toHaveLength(2)
+    expect(sent[1]).toEqual({ processes: [{ kind: 'renderer', role: 'window', rss: 900, private: 2_155, heapUsed: 140 }], hints: { ...hints, footprintMs: undefined } })
+    expect('footprintMs' in (sent[1].hints as object)).toBe(false)
   })
 
   it('sends once when the service takes it, and passes any other refusal on', async () => {

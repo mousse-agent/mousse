@@ -101,7 +101,7 @@ export interface WindowCounters {
   /** The canvases' backing stores, estimated at 4 bytes a pixel. */
   canvasMbEstimated: number
   webglContexts: number
-  /** In-app browser tabs (`<webview>`) mounted in this window. */
+  /** In-app browser processes this window shows (tabs that share a process count once). */
   browserTabs: number
   jsHeapUsedMb: number
   jsHeapTotalMb: number

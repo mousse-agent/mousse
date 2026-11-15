@@ -1,7 +1,7 @@
 /**
  * Reads one process's memory cheaply: Node's counters, V8's heap statistics, and the OS's private bytes where the
  * runtime offers them (Electron's `process.getProcessMemoryInfo`, or `/proc/self/status` on Linux). Also reads the
- * memory of processes the service started, which needs one OS listing, so it runs only every few samples.
+ * memory of processes the service started (one OS listing a sample), and on macOS any processes' footprints.
  */
 import { execFile } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
@@ -73,10 +73,48 @@ function run(command: string, args: string[]): Promise<string | null> {
   })
 }
 
-/** Resident memory in MB of each pid: `/proc` on Linux, `ps` on macOS, `tasklist` (working set) on Windows. */
-export async function readProcessesMb(pids: number[]): Promise<Map<number, number>> {
+const UNIT_MB: Record<string, number> = { B: 1 / 1048576, K: 1 / 1024, M: 1, G: 1024, T: 1048576 }
+
+/**
+ * `top -l 1 -stats pid,mem` output as MB by pid. MEM is the process's phys_footprint (Activity Monitor's Memory), in
+ * B, K, M or G, sometimes followed by `+` or `-` (it grew or shrank).
+ */
+export function parseTopMemory(text: string): Map<number, number> {
   const out = new Map<number, number>()
+  for (const line of text.split('\n')) {
+    const match = /^\s*(\d+)\s+(\d+(?:\.\d+)?)([BKMGT])[+-]?\s*$/.exec(line)
+    if (!match) continue
+    out.set(Number(match[1]), Math.round(Number(match[2]) * UNIT_MB[match[3]] * 10) / 10)
+  }
+  return out
+}
+
+/**
+ * Each pid's footprint in MB on macOS: the memory Activity Monitor shows, with the GPU and IOSurface memory the process
+ * holds, which resident size misses (and which counts freed pages resident size still shows). One `top` sample for
+ * all of them, about 0.15 s of CPU. Gone pids are left out; null where `top` could not run or this is not macOS.
+ */
+export async function readFootprintsMb(pids: number[]): Promise<Map<number, number> | null> {
+  if (process.platform !== 'darwin' || !pids.length) return null
+  const text = await run('top', ['-l', '1', '-stats', 'pid,mem', ...pids.flatMap((pid) => ['-pid', String(pid)])])
+  return text === null ? null : parseTopMemory(text)
+}
+
+/**
+ * Memory in MB of each pid: the footprint on macOS (`ps`'s resident size if `top` fails), `/proc` resident on Linux,
+ * `tasklist` working set on Windows. `footprint` says which macOS gave.
+ */
+export async function readProcessesMb(pids: number[]): Promise<Map<number, number> & { footprint?: boolean }> {
+  const out: Map<number, number> & { footprint?: boolean } = new Map<number, number>()
   if (!pids.length) return out
+  if (process.platform === 'darwin') {
+    const footprints = await readFootprintsMb(pids)
+    if (footprints) {
+      for (const [pid, mb] of footprints) out.set(pid, mb)
+      out.footprint = true
+      return out
+    }
+  }
   if (process.platform === 'linux') {
     await Promise.all(pids.map(async (pid) => {
       try {
@@ -115,5 +153,5 @@ export async function readProcessesMb(pids: number[]): Promise<Map<number, numbe
 /** Each tracked child's kind and memory. */
 export async function readChildMemory(children: Array<{ pid: number; kind: string }>): Promise<ChildMemory[]> {
   const sizes = await readProcessesMb(children.map((child) => child.pid))
-  return children.map((child) => ({ kind: child.kind, mb: sizes.get(child.pid) ?? null }))
+  return children.map((child) => ({ kind: child.kind, mb: sizes.get(child.pid) ?? null, ...(sizes.footprint ? { footprint: true } : {}) }))
 }
