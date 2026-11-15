@@ -39,6 +39,8 @@ const select = vi.fn(async () => undefined)
 const appInitial = useAppStore.getInitialState()
 const botsInitial = useBotsStore.getInitialState()
 const links = () => [...host.querySelectorAll<HTMLAnchorElement>('a.thread-chip')]
+/** A link's text, then its tooltip: the status shows in the tooltip, not beside the title. */
+const said = (link: HTMLAnchorElement) => [link.textContent, link.getAttribute('title')]
 const DESK = 'nod_desk0000000000000000000000'
 const click = async (element: Element) => { await act(async () => { (element as HTMLElement).click() }); await act(async () => {}) }
 
@@ -88,10 +90,11 @@ describe('a thread link in a bot\'s message', () => {
     expect(open).not.toHaveBeenCalled()
   })
 
-  it('a deleted thread says so in its chip, and a click says it again without opening anything', async () => {
+  it('a deleted thread says so in its link, and a click says it again without opening anything', async () => {
     await show('See <mousse://thread/t-gone>.')
     const [link] = links()
-    expect(link!.textContent).toBe('A threadDeleted')
+    expect(said(link!)).toEqual(['A thread', 'That thread is no longer here.'])
+    expect(link!.getAttribute('aria-label')).toBe('Thread, Deleted')
     expect(link!.getAttribute('aria-disabled')).toBe('true')
     await click(link!)
     expect(select).not.toHaveBeenCalled()
@@ -102,23 +105,23 @@ describe('a thread link in a bot\'s message', () => {
 describe('a thread link in a thread\'s reply', () => {
   const render = (content: string) => act(() => root.render(createElement('div', null, createElement(Markdown, { content }), createElement(ToastHost))))
 
-  it('is a chip with the thread\'s title and live status, and a click opens the thread', async () => {
+  it('is a link with the thread\'s title and live status, and a click opens the thread', async () => {
     useAppStore.setState({ threadActivity: { 't-docs': 'processing' } })
     render('Done, see mousse://thread/t-docs.')
     const [link] = links()
-    expect(link!.textContent).toBe('Write the docsWorking')
+    expect(said(link!)).toEqual(['Write the docs', 'Working · Open Write the docs'])
     expect(link!.getAttribute('aria-label')).toBe('Open thread Write the docs, Working')
     act(() => useAppStore.setState({ threadActivity: { 't-docs': 'paused' } }))
-    expect(link!.textContent).toBe('Write the docsPaused')
+    expect(said(link!)).toEqual(['Write the docs', 'Paused · Open Write the docs'])
     // An archived thread says so, and still opens.
     act(() => useAppStore.setState({ threads: [thread('t-docs', 'Write the docs'), { ...thread('t-fix', 'Fix the login page'), settledAt: NOW }] }))
     render('Archived: mousse://thread/t-fix')
-    expect(links()[0]!.textContent).toBe('Fix the login pageArchived')
+    expect(said(links()[0]!)).toEqual(['Fix the login page', 'Archived · Open Fix the login page'])
     await click(links()[0]!)
     expect(select).toHaveBeenCalledWith('t-fix')
   })
 
-  it('only a link becomes a chip: a thread id written in prose stays text', () => {
+  it('only a link becomes a thread link: a thread id written in prose stays text', () => {
     render('The thread t-docs is done, and so is thread/t-fix. Its link: [docs](mousse://thread/t-docs).')
     expect(links()).toHaveLength(1)
     expect(links()[0]!.textContent).toBe('docs')
@@ -152,16 +155,18 @@ describe('a thread link in a thread\'s reply', () => {
       useAppStore.setState({ threads: [{ ...thread(remote, 'Plan the trip'), node: DESK, offline: true }] })
       render(`mousse://thread/${remote}`)
       await act(async () => {})
-      expect(links()[0]!.textContent).toBe('Plan the tripDesk is offline')
+      expect(said(links()[0]!)).toEqual(['Plan the trip', 'Desk is offline · Open Plan the trip'])
       // Not listed: the device list says the computer is not connected; a click says so instead of failing.
       act(() => useAppStore.setState({ threads: [] }))
-      expect(links()[0]!.textContent).toBe('A thread on another computerDesk is offline')
+      expect(said(links()[0]!)).toEqual(['A thread on another computer', 'Desk is not connected, so this thread cannot be opened now.'])
+    expect(links()[0]!.getAttribute('aria-label')).toBe('Thread on another computer, Desk is offline')
       await click(links()[0]!)
       expect(select).not.toHaveBeenCalled()
       expect(document.body.textContent).toContain('Desk is not connected, so this thread cannot be opened now.')
       // Its computer's other rows say it stopped sharing.
       act(() => useAppStore.setState({ threads: [{ ...thread(`${DESK}:other`, 'Other'), node: DESK, notShared: true }] }))
-      expect(links()[0]!.textContent).toBe('A thread on another computerDesk is not sharing')
+      expect(said(links()[0]!)).toEqual(['A thread on another computer', 'Desk no longer shares its threads with this computer.'])
+    expect(links()[0]!.getAttribute('aria-label')).toBe('Thread on another computer, Desk is not sharing')
     })
   })
 })
