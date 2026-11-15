@@ -87,6 +87,7 @@ describe('messages sent one after another', () => {
       f.runs.tools.start({ invocationId: 'call', runId: payload.runId, attemptId: f.runs.store.getRun(payload.runId)!.activeAttemptId!, tool, argsDigest: 'test', now })
       f.runs.tools.commit('call', now)
     }
+    if (tool === 'thread_read') f.chips.set(`${turn}:d1`, [{ icon: 'read', text: 'read your threads' }])
     const second = await f.bots.service.chatSend({ botId, text: 'check the flat', clientRequestId: 'm2' })
     f.bots.service.markRead(botId, second.message.seq)
     await finish(f, payload, 'completed', { text: 'Hi! What can I do?' })
@@ -101,6 +102,7 @@ describe('messages sent one after another', () => {
     expect(prepared.prompt).toContain('check the flat')
     await finish(f, next, 'completed', { text: 'Hi — checking the flat.' })
     expect(replies()).toHaveLength(held ? 1 : 2)
+    if (tool === 'thread_read') expect(replies().at(-1)?.chips).toContainEqual({ icon: 'read', text: 'read your threads' })
     expect(replies().at(-1)).toMatchObject({ text: 'Hi — checking the flat.', replyTo: { id: second.message.id } })
     if (!held) expect(replies()[0]).toMatchObject({ replyTo: { id: first.message.id } })
     expect(replies().at(-1)!.seq).toBeGreaterThan(second.message.seq)
