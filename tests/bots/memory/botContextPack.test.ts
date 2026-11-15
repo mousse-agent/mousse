@@ -5,6 +5,7 @@ import { createBotJournal } from '../../../src/mms/bots/memory/capture'
 import { BOT_MEMORY_PROTOCOL, BOT_MEMORY_WRAPPER_CLOSE, BOT_MEMORY_WRAPPER_OPEN, BOT_RUN_REPORT_LINE, createBotContextProvider, type BotContextPackOptions } from '../../../src/mms/bots/memory/contextPack'
 import type { ChatMessage } from '../../../src/shared/types'
 import { DAY, HOUR, disposeFixtures, later, memoryFixture, type MemoryFixture } from './memoryFixture'
+import { createProfileBotMemory } from '../../../src/mms/bots/memory/profileMemory'
 import { botTools } from '../../../src/mms/run/mcp/appTools/bots'
 import type { BotToolHost } from '../../../src/mms/bots/seams'
 import type { ToolCallContext } from '../../../src/mms/run/mcp/appTools/types'
@@ -37,8 +38,12 @@ function chat(fx: MemoryFixture, n: number, tokens = 100, activationId = `act-${
 
 describe('the chat pack', () => {
   it('reads a reminder at 9 in the zone named by Now, with the service defaults', async () => {
-    // MmsProfileServices supplies neither the memory store nor the pack a zone override.
-    const fx = memoryFixture({ timeZone: () => undefined })
+    // The same store and pack construction as MmsProfileServices, over a temporary database.
+    const fx = memoryFixture()
+    const { pack: packs } = createProfileBotMemory({
+      memory: { db: fx.db, clock: () => fx.clock.now },
+      journal: { readThread: () => undefined, listThreads: () => [] }
+    })
     let dueAt = ''
     const host = {
       activationOf: () => ({ botId: 'ada', activationId: 'at-nine', lane: 'chat' }),
@@ -52,7 +57,6 @@ describe('the chat pack', () => {
       } }
     } as unknown as BotToolHost
     const ctx = { caller: { threadId: 'home' }, turn: { bot: { activationId: 'at-nine' } } } as ToolCallContext
-    const { packs } = provider(fx)
     for (const name of ['remind', 'wake']) {
       const tool = botTools(() => ({ host })).find((entry) => entry.name === name)!
       const result = await tool.handler({ text: 'At nine.', brief: 'Check back.', at: '2026-11-14T09:00' }, ctx)
