@@ -191,8 +191,8 @@ describe('a bot on the owner\'s own Claude Code entry', () => {
 
   const cloudSignIns = {
     aws: { AWS_PROFILE: 'work', AWS_REGION: 'eu-west-1', AWS_ACCESS_KEY_ID: 'aws-id', AWS_SECRET_ACCESS_KEY: 'aws-secret', AWS_SESSION_TOKEN: 'aws-session', AWS_BEARER_TOKEN_BEDROCK: 'aws-bearer' },
-    google: { GOOGLE_APPLICATION_CREDENTIALS: '/signin/google.json', CLOUDSDK_CONFIG: '/signin/gcloud', GCLOUD_PROJECT: 'project', CLOUD_ML_REGION: 'us-east5' },
-    azure: { AZURE_CLIENT_ID: 'client', AZURE_TENANT_ID: 'tenant', AZURE_CLIENT_SECRET: 'azure-secret', AZURE_PASSWORD: 'azure-password' }
+    google: { GOOGLE_APPLICATION_CREDENTIALS: '/signin/google.json', CLOUDSDK_CONFIG: '/signin/gcloud', GCLOUD_PROJECT: 'project', GOOGLE_CLOUD_PROJECT: 'cloud-project', GOOGLE_CLOUD_LOCATION: 'global', GOOGLE_CLOUD_QUOTA_PROJECT: 'quota-project', CLOUD_ML_REGION: 'us-east5' },
+    azure: { AZURE_CLIENT_ID: 'client', AZURE_TENANT_ID: 'tenant', AZURE_CLIENT_SECRET: 'azure-secret', AZURE_PASSWORD: 'azure-password', AZURE_AUTHORITY_HOST: 'https://login.microsoftonline.com', AZURE_FEDERATED_TOKEN_FILE: '/signin/token', AZURE_CLIENT_CERTIFICATE_PATH: '/signin/client.pem', AZURE_CLIENT_CERTIFICATE_PASSWORD: 'certificate-password', AZURE_CLIENT_SEND_CERTIFICATE_CHAIN: 'true', AZURE_ADDITIONALLY_ALLOWED_TENANTS: 'other-tenant', AZURE_USERNAME: 'test-user', AZURE_CONFIG_DIR: '/signin/azure', AZURE_TOKEN_CREDENTIALS: 'prod' }
   }
   it.each([
     { route: '', cloud: {} },
@@ -205,7 +205,11 @@ describe('a bot on the owner\'s own Claude Code entry', () => {
   ].flatMap((row) => ['environment', 'settings'].map((source) => ({ ...row, source }))))('keeps $route sign-in from $source only for the active cloud', async ({ route, cloud, source }) => {
     const root = temp('claude-cloud-root-')
     const scratch = temp('claude-cloud-scratch-')
-    const unrelated = { ...cloudSignIns.aws, ...cloudSignIns.google, ...cloudSignIns.azure, GITHUB_TOKEN: 'github', OPENAI_API_KEY: 'openai', MY_SECRET: 'arbitrary', NODE_OPTIONS: '--require /untrusted.js' }
+    const unrelated = { ...cloudSignIns.aws, ...cloudSignIns.google, ...cloudSignIns.azure,
+      GOOGLE_API_KEY: 'unrelated-google-key', GOOGLE_CLIENT_SECRET: 'unrelated-google-secret',
+      AZURE_OPENAI_API_KEY: 'unrelated-azure-key', AZURE_STORAGE_CONNECTION_STRING: 'unrelated-azure-storage',
+      GOOGLE_GENERATIVE_AI_API_KEY: 'unrelated-generative-key', AZURE_STORAGE_KEY: 'unrelated-storage-key',
+      GITHUB_TOKEN: 'github', OPENAI_API_KEY: 'openai', MY_SECRET: 'arbitrary', NODE_OPTIONS: '--require /untrusted.js' }
     const variables = { ...unrelated, ...cloud, ...(route ? { [route]: '1' } : {}), ANTHROPIC_AUTH_TOKEN: 'signin-token' }
     if (source === 'environment') for (const [name, value] of Object.entries(variables)) vi.stubEnv(name, value)
     else writeFileSync(join(process.env.CLAUDE_CONFIG_DIR!, 'settings.json'), JSON.stringify({ env: variables }))
