@@ -8,6 +8,8 @@
  * layout moves, so a full Markdown parse per message would be too slow.
  */
 
+import { HTML_TAG, isDrawnTag } from "./html-tags";
+
 /** What stands in for a fenced code block. */
 export const PREVIEW_CODE_PLACEHOLDER = "[code]";
 /** How much of a message is read for its preview. */
@@ -16,6 +18,7 @@ export const PREVIEW_SOURCE_CHARS = 2000;
 const FENCE = /^\s{0,3}(`{3,}|~{3,})/;
 const HORIZONTAL_RULE = /^\s{0,3}([-*_])(\s*\1){2,}\s*$/;
 const TABLE_DIVIDER = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
+const BLOCK_TAG = /^(?:br|hr|p|div|section|details|summary|li|ul|ol|dl|dt|dd|tr|td|th|h[1-6]|blockquote|pre|table)$/i;
 const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
 
 function stripInline(text: string): string {
@@ -37,9 +40,11 @@ function stripSyntax(text: string): string {
       .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
       .replace(/\[([^\]]+)\]\[[^\]]*\]/g, "$1")
       .replace(/<((?:https?|mailto):[^>\s]+)>/g, "$1")
-      // HTML tags go; block tags leave a space between the words around them.
-      .replace(/<\/?(?:br|p|div|li|ul|ol|tr|td|th|h[1-6]|blockquote|pre|table)\b[^>]*>/gi, " ")
-      .replace(/<\/?[a-zA-Z][^>]*>/g, "")
+      // HTML the chat draws goes, and a block tag leaves a space between the words around it. Other text in angle
+      // brackets (`<work of first task>`) stays, as the message shows it.
+      .replace(HTML_TAG, (tag: string, name: string, attributes: string) =>
+        !isDrawnTag(name, attributes) ? tag : BLOCK_TAG.test(name) ? " " : "",
+      )
       .replace(/(`+)([^`]+?)\1/g, "$2")
       .replace(/(\*\*|__)(?=\S)([\s\S]*?\S)\1/g, "$2")
       .replace(/(^|[^\w*])\*(?=\S)([^*\n]*?\S)\*(?=[^\w*]|$)/g, "$1$2")

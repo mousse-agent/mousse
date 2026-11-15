@@ -13,6 +13,7 @@ import { isOptimisticQueueItem, type ThreadQueue } from '../hooks/useThreadQueue
 import { canEditQueued, queuedContentWithText, queuedWords, splitQueuedContent } from '../lib/queuedContent'
 import { formatBinding } from '../../shared/commands'
 import { useAppStore } from '../stores/appStore'
+import { formatMessageTime } from '../chat/components/agent-elements/utils/message-time'
 import { isSteerKey, markSteerKey, STEER_BINDING, steerKeyRecently } from '../lib/steerKey'
 import '../styles/queued-messages.css'
 
@@ -406,6 +407,7 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
         // A pending steer item cannot be sent now: a subagent result that missed its turn runs as a turn of its own, and a
         // steer sent into another process's reply is that process's to take.
         const fixed = item.intent === 'steer'
+        const queuedAt = formatMessageTime(item.enqueuedAt)
         const sendLabel = fixed
           ? item.subagentNotice?.length || item.inboxIds?.length ? 'Runs as a turn of its own' : 'Sent into the running reply'
           : skipsCompaction ? skipCompactionLabel(hold?.historyTokens) : `Steer: send now (${steerKey})`
@@ -460,6 +462,8 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
                 <div className="queued-message-bubble"><QueuedBubble item={item} /></div>
                 <div className="queued-message-line">
                   <span className="queued-message-actions">
+                    {/* When it was queued, where a sent prompt shows when it was sent. */}
+                    {queuedAt && <span className="queued-message-time">{queuedAt}</span>}
                     {canDrag && (
                       <button
                         type="button"

@@ -22,6 +22,7 @@ import { readMathClass } from "../../../markdown/math/math-markup";
 import { MathInline } from "../../../markdown/math/MathView";
 import { useRenderMath } from "../../../markdown/math/renderMathSetting";
 import { mathRenderers, mousseMathPlugin } from "../../../markdown/math/streamdown-math";
+import { HTML_TAG, isDrawnTag } from "./utils/html-tags";
 import { mermaidRenderer } from "./markdown-mermaid";
 import { CachedBlock, cachedSplit, MarkdownSetupContext } from "./markdown-cache";
 import { countRender } from "./render-counts";
@@ -539,22 +540,19 @@ function markImageSources(node: Root | Element): void {
 /** Runs after raw HTML is parsed and before it is sanitized, so HTML images are marked like Markdown ones. */
 const markImages = () => markImageSources;
 
-/** The tags the sanitizer keeps; any other tag would be dropped from the text. */
-const KEPT_TAGS = new Set(
-  ((defaultRehypePlugins.sanitize as unknown as [unknown, { tagNames?: string[] }])[1].tagNames ?? []).map((name) => name.toLowerCase()),
-);
-/** One HTML open, close or self-closing tag, as Markdown reads raw HTML. */
-const HTML_TAG = /<\/?([A-Za-z][A-Za-z0-9-]*)(?:\s+[A-Za-z_:][\w.:-]*(?:\s*=\s*(?:[^\s"'=<>`]+|'[^']*'|"[^"]*"))?)*\s*\/?>/g;
-
 type RawNode = { type: "raw"; value: string };
 type TextNode = { type: "text"; value: string };
 
-/** A raw HTML piece with each tag the sanitizer would drop turned into text, so it shows as written. */
+/**
+ * A raw HTML piece with each tag the chat would not draw (`isDrawnTag`) turned into text, so it shows as written. A
+ * comment with no end (`<!-- note` and nothing closing it) would hide the rest of the message: it shows as written too.
+ */
 function literalUnknownTags(raw: RawNode): Array<RawNode | TextNode> {
+  if (raw.value.trimStart().startsWith("<!--") && !raw.value.includes("-->")) return [{ type: "text", value: raw.value }];
   const out: Array<RawNode | TextNode> = [];
   let last = 0;
   for (const match of raw.value.matchAll(HTML_TAG)) {
-    if (KEPT_TAGS.has(match[1]!.toLowerCase())) continue;
+    if (isDrawnTag(match[1]!, match[2])) continue;
     if (match.index > last) out.push({ type: "raw", value: raw.value.slice(last, match.index) });
     out.push({ type: "text", value: match[0] });
     last = match.index + match[0].length;
