@@ -36,6 +36,9 @@ async function exportFolder(dir: string, botId: string, date: string): Promise<s
 export function createBotMemoryAdmin(options: BotMemoryAdminOptions): BotMemoryAdmin {
   const { store } = options
   const zone = () => options.timeZone?.() ?? store.zone()
+  const name = (botId: string) => {
+    try { return options.name?.(botId)?.trim() || 'your bot' } catch { return 'your bot' }
+  }
   return {
     list: (botId, history) => store.list(botId, history),
     forget: (botId, id) => {
@@ -62,7 +65,7 @@ export function createBotMemoryAdmin(options: BotMemoryAdminOptions): BotMemoryA
       if ('error' in result) {
         const message = result.error === 'refused' ? result.reason
           : result.error === 'stale' ? 'This memory changed since you opened it.'
-            : `Memory of this kind is full. Ask ${options.name?.(botId) ?? 'your bot'} to combine some, or forget one.`
+            : `Memory of this kind is full. Ask ${name(botId)} to combine some, or forget one.`
         throw Object.assign(new Error(message), { code: 'invalid_params' })
       }
       return entryOf(store.versions(botId, result.id).at(-1)!)
