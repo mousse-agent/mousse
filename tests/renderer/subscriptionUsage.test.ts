@@ -165,6 +165,32 @@ describe('limits across several accounts', () => {
     expect(summarizeAccounts(passed, now)[0]).toMatchObject({ remaining: 65, resetsAt: at(4), label: '5-hour · all accounts' })
   })
 
+  it('the 5-hour limit leaves out accounts whose weekly limit is used up', () => {
+    const fiveHour = (left: number, hours: number) => ({ id: 'five_hour', label: '5-hour limit', remainingPercent: left, resetsAt: at(hours) })
+    const weekly = (left: number | undefined, hours: number) => ({ id: 'seven_day', label: 'Weekly limit', remainingPercent: left as number, resetsAt: at(hours) })
+    const team = [
+      { id: 'a', label: 'a', windows: [fiveHour(0, 1), weekly(33, 100)] },
+      { id: 'b', label: 'b', windows: [fiveHour(100, 2), weekly(0, 8)] },
+      { id: 'c', label: 'c', windows: [fiveHour(25, 3), weekly(79, 70)] },
+      // A weekly reset that has passed is 100% left again, so it counts.
+      { id: 'd', label: 'd', windows: [fiveHour(50, 4), weekly(0, -1)] },
+      // No weekly number: nothing says it is used up.
+      { id: 'e', label: 'e', windows: [fiveHour(75, 5), weekly(undefined, 9)] },
+      { id: 'f', label: 'f', windows: [fiveHour(100, 2)] }
+    ]
+    const [five, week] = summarizeAccounts(team, now)
+    expect(five).toMatchObject({ label: '5-hour · 5 accounts', accounts: 5, remaining: 50, resetsAt: at(1) })
+    expect(five!.gain).toMatchObject({ percent: 20, accounts: [{ label: 'a' }] })
+    // The weekly limit itself still counts every account, used up or not.
+    expect(week).toMatchObject({ accounts: 5, remaining: 53 })
+  })
+
+  it('with every weekly limit used up nothing of the 5-hour limit is left', () => {
+    const out = [{ id: 'a', label: 'a', windows: [{ id: 'five_hour', label: '5-hour limit', remainingPercent: 100, resetsAt: at(2) }, { id: 'seven_day', label: 'Weekly limit', remainingPercent: 0, resetsAt: at(8) }] }]
+    expect(summarizeAccounts(out, now)[0]).toMatchObject({ label: '5-hour · weekly limits used up', accounts: 0, remaining: 0 })
+    expect(summarizeAccounts(out, now)[0]!.gain).toBeUndefined()
+  })
+
   it('with every account failing there is nothing to sum', () => {
     expect(summarizeAccounts([accounts[3]!], now)).toEqual([])
   })
