@@ -144,9 +144,9 @@ export class BotTellings {
     const { body } = botNotificationContent(this.name(rows[0]!.botId), first)
     const summary = names.map(name => {
       const group = rows.filter(r => this.name(r.botId) === name)
-      return group.some(r => r.askId || r.questionId || r.error) ? `${name} needs you` : `${name} ${group.length} messages`
+      return group.some(r => r.askId || r.questionId || r.error) ? `${name} needs you` : `${name} ${group.length} ${group.length === 1 ? 'message' : 'messages'}`
     }).join(' · ')
-    const title = closed ? `${closed}: ${summary}` : rows.length > 1 ? `${names.join(', ')} · ${rows.length} messages` : names[0]!
+    const title = rows.length === 1 ? names[0]! : closed ? `${closed}: ${summary}` : `${names.join(', ')} · ${rows.length} messages`
     this.emit({ id, rows: rows.map(r => ({ botId: r.botId, messageId: r.id, seq: r.seq, tell: r.tell! })), title, body, kind: first.ask || first.question ? 'question' : 'completed', sound })
     this.banners.set(id, rows)
   }
