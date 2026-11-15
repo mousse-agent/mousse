@@ -7860,7 +7860,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   isIdle(botId: string, { within = 30 * 60_000 }: { within?: number } = {}): boolean {
     if (this.store.activationsIn(botId, ['queued', 'running', 'waiting_grant', 'blocked'])
       .some((row) => row.status !== 'blocked' || workWaits(row))) return false
-    if (this.watchers.list(botId).length || this.launchedThreads(botId).some(launchedActive)) return false
+    if (this.watchers.list(botId).length) return false
+    try {
+      if (this.launchedThreads(botId).some(launchedActive)) return false
+    } catch {
+      // Unknown activity is not idle: a host lookup failure must not stop the caller's upkeep pass.
+      return false
+    }
     // A turn can have ended before its joined messages are requeued by upkeep.
     if (this.store.get(`SELECT 1 FROM bot_work_notes n JOIN bot_activations a ON a.id = n.activation_id
       WHERE n.bot_id = ? AND a.lane = 'chat' AND n.applied_at IS NULL LIMIT 1`, botId)) return false
