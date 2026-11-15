@@ -506,13 +506,14 @@ export class BotChatProjection {
         ...this.runningSubagents(row.id)
       }))
     // Posted chat questions and questions the bot's work waits on need the owner too ("Asked: Which flat…?"); a permission ask's words come first.
-    const waitingOn = [...this.store.waitingQuestions(definition.id), ...this.store.openChatQuestions(definition.id)]
-    const needsOwner = !paused && asks.length + waitingOn.length > 0
+    const waitingOn = this.store.waitingQuestions(definition.id)
+    const chatQuestions = this.store.openChatQuestions(definition.id)
+    const needsOwner = !paused && asks.length + waitingOn.length + chatQuestions.length > 0
     // Threads it started that still work keep it busy: it manages them. Those that ended are listed, never counted.
     const threads = this.launchedOf(definition.id)
     const watchers = this.options.watchers?.(definition.id) ?? []
     const managing = threads.filter(launchedActive)
-    const state = botState({ paused, ...(error ? { error } : {}), openAsks: asks.length + waitingOn.length, liveActivations: live + managing.length })
+    const state = botState({ paused, ...(error ? { error } : {}), openAsks: asks.length + waitingOn.length + (live + managing.length === 0 ? chatQuestions.length : 0), liveActivations: live + managing.length })
     // Working, but every running activation waits for the internet.
     const running = liveRows.filter((row) => row.status === 'running')
     const offline = state === 'working' && running.length > 0 && running.every((row) => row.offline)
@@ -523,7 +524,7 @@ export class BotChatProjection {
         ? registry?.pausedReason === 'usage_limit' && registry.pausedUntil ? `Paused until ${clockTime(registry.pausedUntil)}` : 'Paused'
         : `Paused until ${clockTime(limitedUntil!)}`
       : state === 'stuck' ? `Needs you: ${error!.text}`
-        : state === 'needs_you' ? (asks[0] ? `Wants to ${this.card(asks[0]).title}` : `Asked: ${oneLine(waitingOn[0]!.spec.question, 80)}`)
+        : state === 'needs_you' ? (asks[0] ? `Wants to ${this.card(asks[0]).title}` : `Asked: ${oneLine((waitingOn[0] ?? chatQuestions[0])!.spec.question, 80)}`)
           : state === 'working' ? (offline ? 'Waiting for internet' : chatTurn ? 'Working…' : work.length ? workingOn(work) : managing.length ? managingLine(managing) : 'Working…')
             : last ? oneLine(last.text || last.error?.text || plainCards(last.cards)) : ''
     return {
