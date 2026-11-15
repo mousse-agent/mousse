@@ -34,7 +34,7 @@ import { ImageGalleryProvider } from '../chat/components/agent-elements/image-ga
 import { formatBrowserElementBlock } from '../utils/messageAttachments'
 import { collectFilesFromDataTransfer } from '../utils/imageAttachments'
 import { fileAttachments } from '../lib/composerFilePaths'
-import { isLongPaste, longPasteFile, pastedTextBlock, pastedTextName } from '../lib/longPaste'
+import { ATTACHMENT_LINES_ROOM, isLongPaste, longPasteFile, pastedTextBlock, pastedTextName } from '../lib/longPaste'
 import { PastedTextPreview } from './PastedTextPreview'
 import { formatAttachedFilesMarker } from '../../shared/attachedFilesMarker'
 import type { ChatReference } from '../../shared/chatReferences'
@@ -532,7 +532,7 @@ export function ChatComposer({
     if (files.length === 0) {
       const text = event.clipboardData?.getData('text/plain') ?? ''
       const selected = event.currentTarget.selectionEnd - event.currentTarget.selectionStart
-      if (!isLongPaste(text, messageLimit - (input.length - selected))) return
+      if (!isLongPaste(text, messageLimit - ATTACHMENT_LINES_ROOM - (input.length - selected))) return
       event.preventDefault()
       const added = addFiles([{ file: longPasteFile(text), label: pastedTextName(text), pastedText: true }])
       if (added?.[0]) pasteUndo.current = { id: added[0].id, input }

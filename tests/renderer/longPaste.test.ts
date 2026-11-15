@@ -28,4 +28,9 @@ describe('a long paste written into the message', () => {
   it('is fenced past any backticks in it, so the text cannot close the block early', () => {
     expect(pastedTextBlock('Pasted text, 3 lines', 'a\n`````\nb')).toBe('Pasted text, 3 lines:\n``````\na\n`````\nb\n``````')
   })
+
+  it('measures the fence on a paste with very many runs of backticks', () => {
+    const text = '`a'.repeat(150_000)
+    expect(pastedTextBlock('Pasted text, 1 line', text).startsWith('Pasted text, 1 line:\n```\n')).toBe(true)
+  })
 })

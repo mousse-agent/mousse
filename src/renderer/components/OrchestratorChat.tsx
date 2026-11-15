@@ -48,7 +48,7 @@ import {
   type QuestionCardHandle
 } from './ComposerQuestionModal'
 import { filesToImagePayloads, isImageMimeType } from '../utils/imageAttachments'
-import { composerFilePaths, fileAttachments, REMOTE_FILES_REFUSAL, REMOTE_PASTE_TOO_LONG } from '../lib/composerFilePaths'
+import { composerFilePaths, fileAttachments, MESSAGE_TOO_LONG, REMOTE_FILES_REFUSAL, REMOTE_PASTE_TOO_LONG } from '../lib/composerFilePaths'
 import { parseUserMessageContent } from '../utils/messageAttachments'
 import { MousseAgentChatShell } from '../chat/components/MousseAgentChatShell'
 import { createTurnActions, type TurnActions } from '../chat/components/agent-elements/turn-actions'
@@ -1299,8 +1299,9 @@ export function OrchestratorChat() {
       buildComposerMessageContent(input, sentFiles, voiceMessages, browserElements, resolvedReferences, filePaths, pastedTexts),
       enabledSkills
     )
-    if (pastedTexts.length && text.length > MMS_PROTOCOL_MAX_TEXT_LENGTH) {
-      setSendError(REMOTE_PASTE_TOO_LONG)
+    // The service refuses a longer message with a raw error; say what to do instead.
+    if (text.length > MMS_PROTOCOL_MAX_TEXT_LENGTH) {
+      setSendError(pastedTexts.length ? REMOTE_PASTE_TOO_LONG : MESSAGE_TOO_LONG)
       return
     }
     const images = await filesToImagePayloads(attachedFiles.map((f) => f.file))

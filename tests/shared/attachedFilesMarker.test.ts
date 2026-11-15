@@ -53,4 +53,13 @@ describe('the attached-files marker', () => {
     expect(names).toEqual(['a.txt', 'b.txt', 'c.txt'])
     expect(rest).toBe('see  and \nthanks')
   })
+
+  it('leaves a marker inside a fenced code block as text: it was pasted, not attached', () => {
+    const quoted = '[Attached files: report.txt (/remote/report.txt)]'
+    const text = ['Pasted text, 1 line:', '````', quoted, '````', '', '[Attached files: a.txt (/tmp/a.txt)]'].join('\n')
+    const found: string[] = []
+    const rest = replaceAttachedFilesMarkers(text, (entries) => { found.push(...entries.map((entry) => entry.name)); return '' })
+    expect(found).toEqual(['a.txt'])
+    expect(rest).toContain(quoted)
+  })
 })

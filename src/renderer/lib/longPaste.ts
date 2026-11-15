@@ -4,6 +4,9 @@
  */
 export const LONG_PASTE_BYTES = 32 * 1024
 
+/** Room a message keeps for the lines its attachments add (file names and paths) when a paste is measured against it. */
+export const ATTACHMENT_LINES_ROOM = 4 * 1024
+
 const utf8 = new TextEncoder()
 
 /**
@@ -40,7 +43,8 @@ export function longPasteFile(text: string, now = Date.now()): File {
  * read): its name, then the text in a fence longer than any run of backticks in it.
  */
 export function pastedTextBlock(name: string, text: string): string {
-  const longest = Math.max(0, ...Array.from(text.matchAll(/`+/g), (run) => run[0].length))
+  let longest = 0
+  for (const run of text.matchAll(/`+/g)) longest = Math.max(longest, run[0].length)
   const fence = '`'.repeat(Math.max(3, longest + 1))
   return `${name}:\n${fence}\n${text}${text.endsWith('\n') ? '' : '\n'}${fence}`
 }

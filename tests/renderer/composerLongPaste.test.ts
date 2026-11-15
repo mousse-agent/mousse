@@ -2,8 +2,8 @@
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { LONG_PASTE_BYTES } from '../../src/renderer/lib/longPaste'
-import { REMOTE_PASTE_TOO_LONG } from '../../src/renderer/lib/composerFilePaths'
+import { ATTACHMENT_LINES_ROOM, LONG_PASTE_BYTES } from '../../src/renderer/lib/longPaste'
+import { MESSAGE_TOO_LONG, REMOTE_PASTE_TOO_LONG } from '../../src/renderer/lib/composerFilePaths'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -233,12 +233,22 @@ describe('a long text paste in the composer', () => {
     expect(chipNames()).toContain('Pasted text, 1 line')
   })
 
-  it('becomes a file when the box already holds nearly all a message can carry', async () => {
+  it('becomes a file when the box already holds nearly all a message can carry, and the message still sends', async () => {
     await mount()
-    await type('y'.repeat(512 * 1024 - 100))
-    expect(await paste([], 'short, but over what is left')).toBe(false)
-    expect(await paste([], 'z'.repeat(200))).toBe(true)
+    await type('y'.repeat(512 * 1024 - ATTACHMENT_LINES_ROOM - 1000))
+    expect(await paste([], 'short enough to fit')).toBe(false)
+    expect(await paste([], 'z'.repeat(1001))).toBe(true)
     expect(chipNames()).toContain('Pasted text, 1 line')
+    await pressEnter()
+    expect(lastSent()?.content.length).toBeLessThanOrEqual(512 * 1024)
+  })
+
+  it('says a message is too long to send instead of sending it', async () => {
+    await mount()
+    await type('y'.repeat(512 * 1024 + 1))
+    await pressEnter()
+    expect(orchestrator.sendToThread).not.toHaveBeenCalled()
+    expect(host.textContent).toContain(MESSAGE_TOO_LONG)
   })
 
   it('stays with its thread while another thread is open', async () => {
@@ -276,5 +286,22 @@ describe('editing a sent message', () => {
     await act(async () => { await shell.turnActions!.editPrompt!('m-1', 'turn-1', 'why did it exit with 137?') })
     expect(fork).toHaveBeenCalled()
     expect(lastSent()?.content).toBe(`why did it exit with 137?\n\n${marker}`)
+  })
+
+  it('does not take a marker quoted inside pasted text for an attached file', async () => {
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    const now = new Date().toISOString()
+    // A long paste sent to a thread on another computer: its text, which quotes a marker, is in a fence.
+    const quoted = '[Attached files: report.txt (/remote/report.txt)]'
+    useAppStore.setState({ messages: [{ id: 'm-1', role: 'user', content: ['look', '', 'Pasted text, 3 lines:', '```', 'before', quoted, 'after', '```'].join('\n'), timestamp: now }] as never })
+    await mount()
+    const mousse = (window as unknown as { mousse: Record<string, Record<string, unknown>> }).mousse
+    mousse.actions.list = async () => ({
+      journalGeneration: 1, activeBranchId: 'main',
+      actions: [{ id: 'act-1', turnId: 'turn-1', conversationBranchId: 'main', scope: 'files', state: 'done', nativeContextStartBoundary: { safeBoundaryProof: true, fidelity: 'exact' } }]
+    })
+    mousse.actions.fork = vi.fn(async () => ({ branch: { id: 'branch-2' } }))
+    await act(async () => { await shell.turnActions!.editPrompt!('m-1', 'turn-1', 'look again') })
+    expect(lastSent()?.content).toBe('look again')
   })
 })
