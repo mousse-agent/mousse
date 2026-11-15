@@ -45,6 +45,23 @@ describe('bot schedules after downtime', () => {
     expect(steps).toBeLessThanOrEqual(65)
     expect(inserted).toHaveLength(1)
     expect(f.store.activation(inserted[0]!)!.trigger).toMatchObject({ occurrenceAt: iso(T0) })
+    expect(f.store.dispatch(inserted[0]!, 1)!.prompt.text).toContain('over 999 runs were skipped.')
+  })
+
+  it('a sparse cron with a dense old burst also searches only a short window', async () => {
+    f.clock.now = new Date(2020, 0, 1).getTime()
+    f.bots.addSchedule(botId, { when: { kind: 'cron', expr: '* * 1 1 *' }, prompt: 'Check.' }, 'owner')
+    await f.bots.reconcileOnStartup()
+    heartbeat(f.clock.now)
+    let steps = 0
+    const compute = scheduleTimes.computeNextRun
+    vi.spyOn(scheduleTimes, 'computeNextRun').mockImplementation((...args) => {
+      if (++steps > 100) throw new Error('cron search exceeded its step budget')
+      return compute(...args)
+    })
+    await f.tickSchedules(new Date(2026, 10, 7))
+    expect(steps).toBeLessThanOrEqual(90)
+    expect(entry().skip).toEqual({ at: new Date(2026, 0, 1, 23, 59).toISOString(), reason: 'Missed Thu 23:59 (computer off)' })
   })
 
   it('retrying an unfinished claim after another period reuses its first activation', async () => {
