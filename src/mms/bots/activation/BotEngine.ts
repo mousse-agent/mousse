@@ -675,10 +675,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.lastLimit = this.limit()
   }
 
-  /**
-   * Whether a run report stays out of notifications: its schedule's Tell me is Only problems, and a report is a run
-   * that ended done. Every run, Only news and a failure's error row notify as before.
-   */
   /** Whether a run's activation reported `quiet`: nothing worth saying. A lookup that fails counts as not quiet. */
   private quietLevel(activationId: string): boolean {
     try {
@@ -688,13 +684,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
   }
 
+  /** A scheduled report below Tell me stays quiet; failure error rows always notify. */
   private quietReport(botId: string, message: { kind?: string; activationId?: string } | undefined): boolean {
     if (message?.kind !== 'run_report' || !message.activationId) return false
     try {
       const row = this.store.activation(message.activationId)
       if (row?.trigger.kind !== 'schedule') return false
       const entry = this.host.schedules?.get(botId, row.trigger.scheduleId)
-      return entry ? !tellMeNotifies(entry.tellMe, 'done') : false
+      return entry ? !tellMeNotifies(entry.tellMe, 'done', this.host.runLevel?.(message.activationId)) : false
     } catch {
       return false
     }
