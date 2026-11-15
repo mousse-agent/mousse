@@ -100,3 +100,31 @@ it('omits a missing folder in both lanes and preserves the earlier run blocks wh
   expect(prefix(after)).toBe(prefix(before))
   expect(await fx.packs.runPreamble({ botId: 'ada', activationId: 'r', input: 'Go' })).toBe(before)
 })
+
+it.each(['ascending', 'descending'])('keeps bot files ahead of managed and hidden folders in %s directory order', async (order) => {
+  const fx = fixture()
+  fx.file('lists/todo.md')
+  fx.file('Q&A notes.md')
+  fx.file('.git/index')
+  fx.file('.DS_Store')
+  for (let n = 0; n < 600; n++) fx.file(`attachments/2026-11-01/${n}.txt`)
+  const read = fs.Dir.prototype.readSync
+  const entries = new WeakMap<fs.Dir, fs.Dirent[]>()
+  vi.spyOn(fs.Dir.prototype, 'readSync').mockImplementation(function (this: fs.Dir) {
+    let remaining = entries.get(this)
+    if (!remaining) {
+      remaining = []
+      let entry: fs.Dirent | null
+      while ((entry = read.call(this))) remaining.push(entry)
+      remaining.sort((a, b) => a.name.localeCompare(b.name) * (order === 'ascending' ? 1 : -1))
+      entries.set(this, remaining)
+    }
+    return remaining.shift() ?? null
+  })
+  for (const pack of [await fx.packs.chatPreamble({ botId: 'ada', activationId: 'c' }), await fx.packs.runPreamble({ botId: 'ada', activationId: 'r', input: 'Go' })]) {
+    expect(lines(pack)).toContain('lists/todo.md')
+    expect(lines(pack)).not.toContain('.git')
+    expect(lines(pack)).not.toContain('.DS_Store')
+    expect(lines(pack)).toContain('attached files (at least)')
+  }
+})
