@@ -146,7 +146,7 @@ describe('schedule tools', () => {
   it('lists and removes the bot\'s schedules', async () => {
     const bots = fakeBots()
     await bots.call('bot_schedule_add', { when: { kind: 'interval', minutes: 30 }, prompt: 'x' })
-    expect((await bots.call('bot_schedule_list', {})).value).toEqual([{ scheduleId: 's1', label: 'every 30 minutes', nextAt: '2026-11-09T09:00:00.000Z' }])
+    expect((await bots.call('bot_schedule_list', {})).value).toMatchObject({ schedules: [{ scheduleId: 's1', label: 'every 30 minutes', nextAt: '2026-11-09T09:00:00.000Z' }] })
     expect((await bots.call('bot_schedule_remove', { scheduleId: 's1' })).value).toEqual({ removed: true })
     expect(await bots.call('bot_schedule_remove', { scheduleId: 's1' })).toMatchObject({ isError: true })
   })
@@ -154,7 +154,7 @@ describe('schedule tools', () => {
   it('an unattended run can look at its schedules but not change them', async () => {
     const bots = fakeBots('run')
     expect(await bots.call('bot_schedule_add', { when: { kind: 'interval', minutes: 30 }, prompt: 'x' })).toMatchObject({ isError: true, text: expect.stringContaining('owner') })
-    expect((await bots.call('bot_schedule_list', {})).value).toEqual([])
+    expect((await bots.call('bot_schedule_list', {})).value).toEqual({ schedules: [] })
   })
 
   it('acts only for the bot the engine names: another thread or activation is refused', async () => {

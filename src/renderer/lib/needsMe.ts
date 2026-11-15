@@ -6,6 +6,7 @@ import { rollUpActivities, visibleThreads } from '../../shared/threadLineage'
 import { isThreadStarted } from '../../shared/threadTitle'
 import { useAppStore } from '../stores/appStore'
 import { useChatsStore } from '../stores/chatsStore'
+import { useBotsStore } from '../stores/botsStore'
 
 function newestFirst(a: Thread, b: Thread): number {
   return (b.updatedAt ?? '').localeCompare(a.updatedAt ?? '')
@@ -39,4 +40,11 @@ export function useNeedsMeThreads(): Thread[] {
     () => needsMeThreads(threads, activity, new Set(agentChats.map((chat) => chat.threadId))),
     [threads, activity, agentChats]
   )
+}
+
+/** Threads and bots waiting on an answer, one per bot regardless of its number of open cards. */
+export function useNeedsMeCounts(): { threads: number; bots: number } {
+  const threads = useNeedsMeThreads()
+  const bots = useBotsStore((s) => s.bots)
+  return { threads: threads.length, bots: bots.filter((bot) => bot.state !== 'paused' && (bot.needsOwner || bot.state === 'needs_you')).length }
 }

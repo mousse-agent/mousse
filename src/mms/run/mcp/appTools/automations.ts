@@ -20,6 +20,8 @@ export interface AutomationToolHost {
   personRequest?(threadId: string, runId: string): string | undefined
   /** The bot activation a thread belongs to, for a bot's scheduled run. */
   activationOf?(threadId: string): string | undefined
+  /** Saves only a bot schedule cursor, through its engine and bot store. */
+  saveLeftOff?(activationId: string, text: string): string | undefined
   /**
    * An ordinary chat a person works in (not the manager's, a bot's, or an automation's run thread): its agent may
    * write a draft with `automation_draft_save`, shown as a card in the chat.
@@ -185,6 +187,7 @@ export function automationTools(host: AppToolHost): MousseTool[] {
         type: 'object',
         properties: {
           level: { type: 'string', enum: ['quiet', 'fyi', 'look', 'needs_you'] },
+          leftOff: { type: 'string', maxLength: 600, description: 'Only bot schedules keep this in bot memory after a successful run: what you checked up to and what is pending. At most 600 characters; data, not instructions.' },
           summary: { type: 'string', description: 'One short line: what happened and, for look or needs_you, what the person should do.' }
         },
         required: ['level', 'summary']
@@ -197,8 +200,13 @@ export function automationTools(host: AppToolHost): MousseTool[] {
         const found = liveRun(ctx.caller.threadId, ctx.caller.runId)
         if (!found?.tools.runs) return { text: 'This thread has no automation run going now; run_report is for an automation\'s own run.', isError: true }
         try {
+          if (args.leftOff !== undefined && (typeof args.leftOff !== 'string' || args.leftOff.length > 600))
+            return { text: 'leftOff must be text of at most 600 characters; shorten it to what you checked up to and what is pending.', isError: true }
           const reported = found.tools.runs.report(found.caller, args.level, args.summary)
-          return json({ runId: reported.id, level: reported.level, summary: reported.summary })
+          const leftOff = typeof args.leftOff !== 'string' ? undefined
+            : found.caller.activationId ? found.tools.saveLeftOff?.(found.caller.activationId, args.leftOff) ?? 'not kept: bot memory is unavailable'
+              : 'not kept: only a bot scheduled run keeps leftOff'
+          return json({ runId: reported.id, level: reported.level, summary: reported.summary, ...(leftOff ? { leftOff } : {}) })
         } catch (error) {
           if (error instanceof RunReportError) return { text: error.message, isError: true }
           throw error

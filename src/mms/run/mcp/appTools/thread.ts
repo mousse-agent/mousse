@@ -11,6 +11,9 @@ import type { AgentCreatedThread, AgentQueueCommand, AgentQueueResult, AgentRunC
 import type { BotAppToolDeps } from './bots'
 import { threadLink } from '../../../../shared/threadLink'
 import { ROUTED_AGENT_BODY_MAX } from '../../../../shared/bridge/routed'
+import { isQualifiedId } from '../../../../shared/threadRef'
+import { RemoteThreadRefusal, type RemoteTarget, type RemoteWaitResult } from '../../../orchestrator/RemoteLaunchedThreads'
+import { cutEnd, messageRows, textOffsetProblem, type MessageRow } from './messageRows'
 import type { BotActivityContext, BotActivitySink } from '../../../bots/seams'
 import {
   CLIENT_REQUEST_ID_SCHEMA,
@@ -314,13 +317,6 @@ function boundedInt(value: unknown, name: string, min: number, max: number, fall
   return value
 }
 
-/** Where a cut of `text` at `end` falls, moved back one so it never splits a surrogate pair. */
-function cutEnd(text: string, end: number): number {
-  if (end >= text.length) return text.length
-  const code = text.charCodeAt(end - 1)
-  return end > 0 && code >= 0xd800 && code <= 0xdbff ? end - 1 : end
-}
-
 const jsonBytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), 'utf8')
 
 /**
@@ -363,6 +359,41 @@ function boundedEvent(event: ThreadEvent): ThreadEvent {
   if (jsonBytes(out) + 2048 <= THREAD_READ_MAX_BYTES) return out
   const raw = JSON.stringify(out.payload) ?? ''
   return { ...out, payload: { truncated: true, bytes: Buffer.byteLength(raw, 'utf8'), preview: raw.slice(0, cutEnd(raw, THREAD_EVENT_PREVIEW_CHARS)) } }
+}
+
+/** A page of `thread_read` view `messages`: the rows that fit the byte cap, and how to read on. */
+function messagesPage(envelope: Record<string, unknown>, rows: Iterable<MessageRow>, afterIndex: number): Record<string, unknown> {
+  const { taken: messages, capped } = fitPage(rows, envelope)
+  const truncated = messages.some((message) => 'truncated' in message)
+  return {
+    ...envelope,
+    messages,
+    nextAfterIndex: afterIndex + messages.length,
+    ...(capped ? { capped: true } : {}),
+    ...(capped || truncated
+      ? {
+          hint: [
+            capped ? `This page stopped at ${THREAD_READ_MAX_BYTES / 1024} KB; continue with afterIndex ${afterIndex + messages.length}.` : '',
+            truncated ? 'A message marked truncated continues: pass its index as afterIndex and its nextTextOffset as textOffset.' : ''
+          ].filter(Boolean).join(' ')
+        }
+      : {})
+  }
+}
+
+/**
+ * A page of `thread_read` view `events`: the events of `visible` that fit the byte cap, each bounded. `nextAfterSeq` pages
+ * on even when a lineage view filtered events out of `page`; a page cut at the byte cap continues after its last event.
+ */
+function eventsPage(envelope: Record<string, unknown>, page: readonly ThreadEvent[], visible: readonly ThreadEvent[], afterSeq: number): Record<string, unknown> {
+  const { taken: events, capped } = fitPage(visible.map(boundedEvent), envelope)
+  const nextAfterSeq = capped ? events.at(-1)!.seq : page.at(-1)?.seq ?? afterSeq
+  return {
+    ...envelope,
+    events,
+    nextAfterSeq,
+    ...(capped ? { capped: true, hint: `This page stopped at ${THREAD_READ_MAX_BYTES / 1024} KB; continue with afterSeq ${nextAfterSeq}.` } : {})
+  }
 }
 
 /** The caller's `clientRequestId` when given (a retry), else this call's id. */
@@ -615,6 +646,80 @@ function showAction(host: AppToolHost, threadId: string, actor: AgentActor, summ
   }
 }
 
+/**
+ * The thread the central check holds a call to: a plain id names a thread here, checked as always; a qualified id names
+ * a thread on another computer, which only `RemoteThreadsHost.reach` decides (the handler branches at its top).
+ */
+function localTarget(args: Record<string, unknown>, caller: McpCaller): { threadId?: string } | undefined {
+  if (isQualifiedId(args.threadId)) return undefined
+  return { threadId: (args.threadId as string | undefined) ?? caller.threadId }
+}
+
+/** A refusal about a thread on another computer, as the tool returns it: its code says which reason it was. */
+function remoteRefusal(error: unknown): ToolOutcome | undefined {
+  if (!(error instanceof RemoteThreadRefusal)) return undefined
+  return { text: JSON.stringify({ ok: false, code: error.code, ...(error.computer ? { computer: error.computer } : {}), message: error.message }), isError: true }
+}
+
+/**
+ * A refusal of the computer that runs the thread about the run itself (a steer into a looser run, a question waiting, a
+ * run not started yet), as the same conflict the tool gives on one computer.
+ */
+function remoteRunConflict(error: unknown, runId: string): McpToolError | undefined {
+  const code = (error as { code?: unknown } | null)?.code
+  const details = ((error as { details?: unknown } | null)?.details ?? {}) as { callerMode?: unknown; targetMode?: unknown }
+  if (code === 'ceiling_exceeded')
+    return new McpToolError(
+      'mousse_conflict',
+      `Run ${runId} is running under a looser permission mode (${String(details.targetMode ?? 'unknown')}) than yours (${String(details.callerMode ?? 'unknown')}); a running turn cannot be narrowed, so your steer would run with more authority than you have. Send a message instead: it runs under your mode.`,
+      { conflict: 'ceiling_exceeded', callerMode: details.callerMode, targetMode: details.targetMode }
+    )
+  if (code === 'steer_target_not_ready')
+    return new McpToolError('mousse_conflict', `Run ${runId} has not started its turn yet, so there is nothing to steer. Steer it once it is running, or send a message instead.`, { conflict: code, expectedRunId: runId })
+  return sendConflict(error)
+}
+
+/** What `thread_wait` returns for a thread on another computer, in the words it uses on one computer. */
+function remoteWaitView(threadId: string, computer: string, result: RemoteWaitResult): Record<string, unknown> {
+  const base = { threadId, computer, ...(result.run ? { run: result.run } : {}), ...(result.continuedFrom ? { continuedFrom: result.continuedFrom } : {}) }
+  switch (result.status) {
+    case 'finished':
+      return {
+        status: 'finished',
+        ...base,
+        ...(result.resultText !== undefined ? { resultText: result.resultText } : {}),
+        ...(result.resultChars !== undefined ? { resultTruncated: true, resultChars: result.resultChars, hint: RESULT_READ_ON } : {}),
+        ...(result.resultText === undefined && result.via === 'poll' ? { hint: `${computer} runs an older Mousse, which does not hand over the run's final text with the wait: read it with thread_read view "messages".` } : {})
+      }
+    case 'needs_input':
+      return {
+        status: 'needs_input',
+        ...base,
+        needsInput: true,
+        requests: result.needsInput?.requests ?? 1,
+        hint: `The run waits on a person on ${computer}: a question, an approval or an MCP request. No agent answers it from here; tell the user it waits for them there.`
+      }
+    case 'idle':
+      return { status: 'idle', ...base }
+    default: {
+      const pause = result.run?.status === 'paused' ? result.run.pause : undefined
+      if (pause) {
+        const retryAfterMs = Math.min(THREAD_WAIT_MAX_MS, Math.max(1_000, Date.parse(pause.until) - Date.now()))
+        return { status: 'paused', ...base, pause, retryAfterMs, hint: `A usage limit paused the run; it resumes by itself. Ask again after ${Math.ceil(retryAfterMs / 1000)} s (not sooner), or end it with thread_interrupt.` }
+      }
+      return {
+        status: 'timeout',
+        ...base,
+        ...(result.pending ? { pending: result.pending } : {}),
+        hint: result.pending === 'queued_message' ? 'A message waits in its queue there and starts a run soon; call thread_wait again.' : 'The run is still going; call thread_wait again.'
+      }
+    }
+  }
+}
+
+/** What the descriptions of the five tools say about a thread on another computer. */
+const REMOTE_REACH = 'A thread your thread (or a thread of its lineage) launched on another computer is reached by its qualified id (<computer id>:<thread id>, from thread_create with computer); any other thread there is refused. A refusal there names its reason in code: computer_offline, computer_not_shared, computer_outdated, computer_not_allowed, not_launched_here or remote_thread_gone.'
+
 /** How a `thread_wait` ended before its result was read. */
 type WaitEnd = { kind: 'finished' } | { kind: 'timeout' } | { kind: 'caller_ended' } | { kind: 'refused'; text: string }
 
@@ -759,6 +864,126 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     })
   }
   /**
+   * A thread on another computer (a qualified id), as the caller may reach it, or the refusal that says why not. A
+   * personal bot reaches only threads here.
+   */
+  const remoteTarget = (threadId: string, ctx: ToolCallContext, tool: string): RemoteTarget => {
+    if (ctx.turn.bot) throw new McpToolError('mousse_scope_denied', `A personal bot's ${tool} reaches only threads on this computer.`)
+    if (!host.remoteThreads)
+      throw new RemoteThreadRefusal('remote_unavailable', 'Threads on other computers need Mousse to be connected to your other computers (Settings → Devices).')
+    const reach = host.remoteThreads.reach(ctx.caller.threadId, threadId)
+    if (!reach.ok) throw new RemoteThreadRefusal(reach.code, reach.message, reach.computer)
+    return reach
+  }
+  /** Runs a tool's branch for a thread on another computer: a refusal comes back with its code, never thrown on. */
+  const onComputer = async (work: () => Promise<ToolOutcome>): Promise<ToolOutcome> => {
+    try {
+      return await work()
+    } catch (error) {
+      const refused = remoteRefusal(error)
+      if (refused) return refused
+      throw error
+    }
+  }
+  /** `thread_read` of a thread this thread launched on another computer: the same pages, read there. */
+  const readOnComputer = (threadId: string, args: Record<string, unknown>, ctx: ToolCallContext): Promise<ToolOutcome> => onComputer(async () => {
+    const view = args.view === undefined ? 'events' : args.view
+    if (view !== 'events' && view !== 'messages') throw new Error("view must be 'events' or 'messages'")
+    const target = remoteTarget(threadId, ctx, 'thread_read')
+    const remote = host.remoteThreads!
+    const envelope = { threadId: target.threadId, link: threadLink(target.threadId), computer: target.computer, view, scope: 'launched' }
+    if (view === 'messages') {
+      const afterIndex = boundedInt(args.afterIndex, 'afterIndex', 0, Number.MAX_SAFE_INTEGER, 0)
+      const limit = boundedInt(args.limit, 'limit', 1, THREAD_MESSAGES_MAX_LIMIT, THREAD_MESSAGES_DEFAULT_LIMIT)
+      const textOffset = boundedInt(args.textOffset, 'textOffset', 0, Number.MAX_SAFE_INTEGER, 0)
+      const page = await remote.messages(target, { afterIndex, limit, textOffset, textMax: THREAD_MESSAGE_MAX_CHARS })
+      return json(messagesPage({ ...envelope, total: page.total }, page.messages, afterIndex))
+    }
+    const afterSeq = boundedInt(args.afterSeq, 'afterSeq', 0, Number.MAX_SAFE_INTEGER, 0)
+    const limit = boundedInt(args.limit, 'limit', 1, THREAD_READ_MAX_LIMIT, THREAD_READ_DEFAULT_LIMIT)
+    const page = await remote.events(target, { afterSeq, limit })
+    return json(eventsPage({ ...envelope, maxSeq: page.maxSeq }, page.events, page.events, afterSeq))
+  })
+  /** `thread_wait` on a thread this thread launched on another computer: waited for there, 40 s at a time. */
+  const waitOnComputer = (threadId: string, args: Record<string, unknown>, ctx: ToolCallContext): Promise<ToolOutcome> => onComputer(async () => {
+    if (args.runId !== undefined && (typeof args.runId !== 'string' || !args.runId)) throw new Error('runId must be a non-empty string')
+    const timeoutMs = boundedInt(args.timeoutMs, 'timeoutMs', 1, THREAD_WAIT_MAX_MS, THREAD_WAIT_DEFAULT_MS)
+    const target = remoteTarget(threadId, ctx, 'thread_wait')
+    if (ctx.signal.aborted) return json({ status: 'caller_ended', threadId: target.threadId })
+    const result = await host.remoteThreads!.wait(target, { ...(typeof args.runId === 'string' ? { runId: args.runId } : {}), timeoutMs, signal: ctx.signal })
+    if (result.callerEnded) return json({ status: 'caller_ended', threadId: target.threadId })
+    return json(remoteWaitView(target.threadId, target.computer, result))
+  })
+  /**
+   * `thread_send` to a thread this thread launched on another computer: a message marked as this agent's, keyed by the
+   * request id (a retry reaches the first send there, never a second run). Unconfirmed is `uncertain`, never sent or failed.
+   */
+  const sendOnComputer = (threadId: string, args: Record<string, unknown>, ctx: ToolCallContext): Promise<ToolOutcome> => onComputer(async () => {
+    if (typeof args.content !== 'string' || !args.content.trim()) throw new Error('thread_send requires content')
+    if (args.mode !== undefined && args.mode !== 'agent' && args.mode !== 'plan') throw new Error('mode must be agent or plan')
+    const mode = (args.mode as 'agent' | 'plan' | undefined) ?? 'agent'
+    // Following a thread on another computer to its end is not built yet: refused, so nobody waits for a notice.
+    if (args.notify !== undefined && args.notify !== false)
+      throw new Error('notify does not reach a thread on another computer yet, so the message was not sent. Send it again without notify; when this turn needs the result, call thread_wait.')
+    if (mode === 'agent' && ctx.caller.modeCeiling === 'plan') throw new McpToolError('mousse_ceiling_exceeded', 'A plan-ceiling caller can only send plan turns.')
+    if (args.content.length > ROUTED_AGENT_BODY_MAX)
+      throw new Error(`A message to another computer is at most ${ROUTED_AGENT_BODY_MAX.toLocaleString('en-US')} characters; this one has ${args.content.length.toLocaleString('en-US')}. Nothing was sent.`)
+    const target = remoteTarget(threadId, ctx, 'thread_send')
+    const actor = actorOf(ctx)
+    const requestKey = `thread_send:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`
+    reserveSend(actor.runId)
+    let sent: Awaited<ReturnType<NonNullable<AppToolHost['remoteThreads']>['send']>>
+    try {
+      sent = await host.remoteThreads!.send(target, { content: args.content, mode }, { clientRequestId: requestKey, actor })
+    } catch (error) {
+      releaseSend(actor.runId)
+      throw sendConflict(error) ?? error
+    }
+    // Unconfirmed: it may have been sent, so it keeps its place under the per-run count.
+    if (sent.status === 'uncertain') return json({ ok: false, status: 'uncertain', threadId: target.threadId, computer: target.computer, message: sent.message })
+    if (sent.replayed) releaseSend(actor.runId)
+    const { status: _status, ...rest } = sent
+    return json({ threadId: target.threadId, computer: target.computer, ...rest, delivery: deliveryOf(sent) })
+  })
+  /** `thread_steer` into the running turn of a thread this thread launched on another computer. */
+  const steerOnComputer = (threadId: string, args: Record<string, unknown>, ctx: ToolCallContext): Promise<ToolOutcome> => onComputer(async () => {
+    const runId = requiredId(args, 'runId')
+    if (typeof args.text !== 'string' || !args.text.trim()) throw new Error('thread_steer requires text')
+    if (args.text.length > ROUTED_AGENT_BODY_MAX)
+      throw new Error(`A steer to another computer is at most ${ROUTED_AGENT_BODY_MAX.toLocaleString('en-US')} characters. Nothing was sent.`)
+    const target = remoteTarget(threadId, ctx, 'thread_steer')
+    const actor = actorOf(ctx)
+    let result: Awaited<ReturnType<NonNullable<AppToolHost['remoteThreads']>['steer']>>
+    try {
+      result = await host.remoteThreads!.steer(target, runId, args.text, { clientRequestId: `thread_steer:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`, actor })
+    } catch (error) {
+      throw remoteRunConflict(error, runId) ?? error
+    }
+    if (result.status === 'uncertain') return json({ ok: false, status: 'uncertain', threadId: target.threadId, computer: target.computer, message: result.message })
+    if (result.status === 'ignored') {
+      if (result.reason === 'run_not_found')
+        throw new McpToolError('mousse_conflict', `Run ${runId} is not a run of this thread.`, { conflict: 'run_not_found', expectedRunId: runId })
+      throw new McpToolError('mousse_conflict', `Run ${runId} is not the thread's active run on ${target.computer}, or it is paused; nothing was sent. Read the thread again.`, { conflict: 'run_not_active', expectedRunId: runId, reason: result.reason })
+    }
+    return json({ threadId: target.threadId, computer: target.computer, runId: result.runId })
+  })
+  /**
+   * `thread_interrupt` of a run of a thread this thread launched on another computer. That computer stops it only when an
+   * agent of this computer started it, and leaves a thread a person took over.
+   */
+  const interruptOnComputer = (threadId: string, args: Record<string, unknown>, ctx: ToolCallContext): Promise<ToolOutcome> => onComputer(async () => {
+    const runId = requiredId(args, 'runId')
+    const target = remoteTarget(threadId, ctx, 'thread_interrupt')
+    const result = await host.remoteThreads!.interrupt(target, runId, { clientRequestId: `thread_interrupt:${ctx.caller.threadId}:${toolRequestId(args, ctx)}`, actor: actorOf(ctx) })
+    if (result.status === 'uncertain') return json({ ok: false, status: 'uncertain', threadId: target.threadId, computer: target.computer, message: result.message })
+    if (result.status === 'left') {
+      if (result.left === 'not_started_by_this_computer')
+        throw new McpToolError('mousse_scope_denied', `Run ${runId} on ${target.computer} was not started by an agent of this computer (a person there has taken the thread over), so it was left running. Only a person there stops it.`, { conflict: 'not_started_by_this_computer' })
+      throw new McpToolError('mousse_conflict', `Run ${runId} is not the thread's active (or paused) run on ${target.computer}; nothing was stopped. Read the thread again.`, { conflict: 'run_not_active', expectedRunId: runId })
+    }
+    return json({ threadId: target.threadId, computer: target.computer, runId: result.runId ?? runId, stopped: true })
+  })
+  /**
    * `thread_read` for a personal bot: `summary` (default), one line on the thread and its last reply; or `messages`, the
    * transcript, the newest ones unless it pages from `afterIndex`, each message and the page capped. Never run events.
    * Framed as data from that thread. The registry has already decided it may reach the thread (`botThreadScope`).
@@ -826,7 +1051,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
   return [
     {
       name: 'thread_read',
-      description: `Read a thread. view "events" (default): run events (runs, attempts, delegations, tool calls) of any thread. Page with afterSeq. view "messages": the transcript of any thread; page with afterIndex. Each message holds at most ${THREAD_MESSAGE_MAX_CHARS} characters: one marked truncated continues when you pass its index as afterIndex and its nextTextOffset as textOffset. A response holds at most ${THREAD_READ_MAX_BYTES / 1024} KB: a page that reaches it has fewer items and capped: true, and nextAfterSeq or nextAfterIndex continues it. A run's final text is cut to ${THREAD_RESULT_MAX_CHARS} characters; read it in full in the messages. A personal bot reads its owner\'s threads with view "summary" (default: one line on the thread and its last reply) or "messages" (the newest ones, or from afterIndex, capped).`,
+      description: `Read a thread. view "events" (default): run events (runs, attempts, delegations, tool calls) of any thread. Page with afterSeq. view "messages": the transcript of any thread; page with afterIndex. Each message holds at most ${THREAD_MESSAGE_MAX_CHARS} characters: one marked truncated continues when you pass its index as afterIndex and its nextTextOffset as textOffset. A response holds at most ${THREAD_READ_MAX_BYTES / 1024} KB: a page that reaches it has fewer items and capped: true, and nextAfterSeq or nextAfterIndex continues it. A run's final text is cut to ${THREAD_RESULT_MAX_CHARS} characters; read it in full in the messages. A personal bot reads its owner\'s threads with view "summary" (default: one line on the thread and its last reply) or "messages" (the newest ones, or from afterIndex, capped). ${REMOTE_REACH} It is read there, with the same pages and limits, and the ids in it are named the way this computer names them.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -841,9 +1066,11 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       access: 'readsOthers',
       class: 'read',
       offered: () => false,
+      target: localTarget,
       handler: (args, ctx) => {
         const threadId = args.threadId === undefined ? ctx.caller.threadId : args.threadId
         if (typeof threadId !== 'string' || !threadId) throw new Error('threadId must be a non-empty string')
+        if (isQualifiedId(threadId)) return readOnComputer(threadId, args, ctx)
         const scope = ctx.scope ?? 'own'
         // A personal bot ("use your threads"): a one-line summary by default, the transcript only when it asks, capped.
         if (ctx.turn.bot) return botRead(threadId, args, ctx.caller.threadId)
@@ -861,60 +1088,17 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           const limit = boundedInt(args.limit, 'limit', 1, THREAD_MESSAGES_MAX_LIMIT, THREAD_MESSAGES_DEFAULT_LIMIT)
           const textOffset = boundedInt(args.textOffset, 'textOffset', 0, Number.MAX_SAFE_INTEGER, 0)
           const all = host.threadMessages(threadId)
-          const firstText = all[afterIndex] && typeof all[afterIndex].content === 'string' ? all[afterIndex].content : ''
-          if (textOffset > 0 && afterIndex < all.length && textOffset >= firstText.length)
-            throw new Error(`textOffset ${textOffset} is past the end of message ${afterIndex}, which has ${firstText.length} characters`)
+          const problem = textOffsetProblem(all, afterIndex, textOffset)
+          if (problem) throw new Error(problem)
           // Built one at a time, so a page that reaches the byte cap stops reading the transcript there.
-          function* rows() {
-            for (let index = afterIndex; index < Math.min(all.length, afterIndex + limit); index += 1) {
-              const message = all[index]
-              const text = typeof message.content === 'string' ? message.content : ''
-              const from = index === afterIndex ? textOffset : 0
-              const end = cutEnd(text, from + THREAD_MESSAGE_MAX_CHARS)
-              yield {
-                index,
-                id: message.id,
-                role: message.role,
-                timestamp: message.timestamp,
-                text: text.slice(from, end),
-                ...(from > 0 ? { textOffset: from } : {}),
-                ...(end < text.length ? { truncated: true, totalChars: text.length, nextTextOffset: end } : {})
-              }
-            }
-          }
-          const envelope = { threadId, link: threadLink(threadId), view, scope, total: all.length }
-          const { taken: messages, capped } = fitPage(rows(), envelope)
-          const truncated = messages.some((message) => 'truncated' in message)
-          return json({
-            ...envelope,
-            messages,
-            nextAfterIndex: afterIndex + messages.length,
-            ...(capped ? { capped: true } : {}),
-            ...(capped || truncated
-              ? {
-                  hint: [
-                    capped ? `This page stopped at ${THREAD_READ_MAX_BYTES / 1024} KB; continue with afterIndex ${afterIndex + messages.length}.` : '',
-                    truncated ? 'A message marked truncated continues: pass its index as afterIndex and its nextTextOffset as textOffset.' : ''
-                  ].filter(Boolean).join(' ')
-                }
-              : {})
-          })
+          const rows = messageRows(all, { afterIndex, limit, textOffset, maxChars: THREAD_MESSAGE_MAX_CHARS })
+          return json(messagesPage({ threadId, link: threadLink(threadId), view, scope, total: all.length }, rows, afterIndex))
         }
         const afterSeq = boundedInt(args.afterSeq, 'afterSeq', 0, Number.MAX_SAFE_INTEGER, 0)
         const limit = boundedInt(args.limit, 'limit', 1, THREAD_READ_MAX_LIMIT, THREAD_READ_DEFAULT_LIMIT)
         const page = engine.listEvents(threadId, { afterSeq, limit })
         const visible = full ? page : lineageView(page, ctx.caller.threadId, scope)
-        const envelope = { threadId, link: threadLink(threadId), view, scope, maxSeq: engine.maxSeq(threadId) }
-        const { taken: events, capped } = fitPage(visible.map(boundedEvent), envelope)
-        // `nextAfterSeq` pages on even when a lineage view filtered events out of this page; a page cut at the byte cap
-        // continues after the last event it holds.
-        const nextAfterSeq = capped ? events.at(-1)!.seq : page.at(-1)?.seq ?? afterSeq
-        return json({
-          ...envelope,
-          events,
-          nextAfterSeq,
-          ...(capped ? { capped: true, hint: `This page stopped at ${THREAD_READ_MAX_BYTES / 1024} KB; continue with afterSeq ${nextAfterSeq}.` } : {})
-        })
+        return json(eventsPage({ threadId, link: threadLink(threadId), view, scope, maxSeq: engine.maxSeq(threadId) }, page, visible, afterSeq))
       }
     },
     {
@@ -1072,7 +1256,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_send',
-      description: `Send a message to another thread. The thread's model receives it labelled as a message from an agent in your thread, not from the user, and runs it under your permission mode when that is stricter than the thread's own; it never gets more than the thread itself allows. It starts a turn when the thread is idle and queues behind the running turn otherwise (it never steers the running turn). A thread kept in Plan takes it as a plan turn. Refused while the thread waits for the user to answer a question or approval, is paused by a usage limit, or is archived, when it already has ${AGENT_QUEUE_MAX_PER_SENDER} messages from your thread or ${AGENT_QUEUE_MAX_PER_THREAD} from agents in all waiting, when you sent it the same text in the last ${AGENT_REPEAT_WINDOW_MS / 60_000} minutes, and when it would be more than a few agent messages in a row without a person in between; each refusal names its limit (data.conflict). You may send ${THREAD_SEND_MAX_PER_RUN} messages per run (a personal bot has no such count). Set notify when you need the result: Mousse then tells you when the work settles (and once before that if it waits for a person), and you end your turn instead of waiting. Returns the run it created and delivery: started (a turn began with it) or queued (it waits behind the running turn). Subagents are reached with continue_subagent.`,
+      description: `Send a message to another thread. The thread's model receives it labelled as a message from an agent in your thread, not from the user, and runs it under your permission mode when that is stricter than the thread's own; it never gets more than the thread itself allows. It starts a turn when the thread is idle and queues behind the running turn otherwise (it never steers the running turn). A thread kept in Plan takes it as a plan turn. Refused while the thread waits for the user to answer a question or approval, is paused by a usage limit, or is archived, when it already has ${AGENT_QUEUE_MAX_PER_SENDER} messages from your thread or ${AGENT_QUEUE_MAX_PER_THREAD} from agents in all waiting, when you sent it the same text in the last ${AGENT_REPEAT_WINDOW_MS / 60_000} minutes, and when it would be more than a few agent messages in a row without a person in between; each refusal names its limit (data.conflict). You may send ${THREAD_SEND_MAX_PER_RUN} messages per run (a personal bot has no such count). Set notify when you need the result: Mousse then tells you when the work settles (and once before that if it waits for a person), and you end your turn instead of waiting. Returns the run it created and delivery: started (a turn began with it) or queued (it waits behind the running turn). Subagents are reached with continue_subagent. ${REMOTE_REACH} A message there is at most ${ROUTED_AGENT_BODY_MAX.toLocaleString('en-US')} characters; status uncertain means that computer did not confirm it (call again with the same clientRequestId: it is never sent twice); notify does not reach it yet.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -1087,8 +1271,10 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       access: 'managesOthers',
       class: 'mutation',
       offered: () => false,
+      target: localTarget,
       handler: async (args, ctx) => {
         const threadId = requiredId(args, 'threadId')
+        if (isQualifiedId(threadId)) return sendOnComputer(threadId, args, ctx)
         if (typeof args.content !== 'string' || !args.content.trim()) throw new Error('thread_send requires content')
         if (args.mode !== undefined && args.mode !== 'agent' && args.mode !== 'plan') throw new Error('mode must be agent or plan')
         const mode = (args.mode as 'agent' | 'plan' | undefined) ?? 'agent'
@@ -1141,7 +1327,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_wait',
-      description: `Wait for a run of another thread to finish, for at most timeoutMs (default ${THREAD_WAIT_DEFAULT_MS}, up to ${THREAD_WAIT_MAX_MS}). Pass the runId thread_send returned; without one, the run that is active now. Returns status finished (with the run's outcome, and its final text where you may read it, cut to ${THREAD_RESULT_MAX_CHARS} characters with resultTruncated when longer), timeout (the run is still going: call again; the wait never interrupts it), paused (a usage limit paused the run and it was still paused when the wait ran out: it resumes by itself, and the result says when to ask again; a wait that is running when it resumes follows it into the run that continues it), idle (no run to wait for) or caller_ended (your own run ended). Use it only when this turn cannot continue without the answer; to hear about the result later, send with notify instead and end your turn.`,
+      description: `Wait for a run of another thread to finish, for at most timeoutMs (default ${THREAD_WAIT_DEFAULT_MS}, up to ${THREAD_WAIT_MAX_MS}). Pass the runId thread_send returned; without one, the run that is active now. Returns status finished (with the run's outcome, and its final text where you may read it, cut to ${THREAD_RESULT_MAX_CHARS} characters with resultTruncated when longer), timeout (the run is still going: call again; the wait never interrupts it), paused (a usage limit paused the run and it was still paused when the wait ran out: it resumes by itself, and the result says when to ask again; a wait that is running when it resumes follows it into the run that continues it), idle (no run to wait for) or caller_ended (your own run ended). Use it only when this turn cannot continue without the answer; to hear about the result later, send with notify instead and end your turn. ${REMOTE_REACH} There the wait runs on that computer; status needs_input (needsInput: true) says the run waits on a person there (a question, an approval or an MCP request), which no agent answers from here.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -1154,8 +1340,10 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       access: 'readsOthers',
       class: 'read',
       offered: () => false,
+      target: localTarget,
       handler: async (args, ctx) => {
         const threadId = requiredId(args, 'threadId')
+        if (isQualifiedId(threadId)) return waitOnComputer(threadId, args, ctx)
         if (args.runId !== undefined && (typeof args.runId !== 'string' || !args.runId)) throw new Error('runId must be a non-empty string')
         const timeoutMs = boundedInt(args.timeoutMs, 'timeoutMs', 1, THREAD_WAIT_MAX_MS, THREAD_WAIT_DEFAULT_MS)
         if (threadId === ctx.caller.threadId) throw new Error('thread_wait is for other threads: your own run ends only when your turn does.')
@@ -1277,7 +1465,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_interrupt',
-      description: 'Stop a run of another thread: the run you name, which must still be the thread\'s active (or paused) run, and the subagents below it, as a Stop in the app does. Queued messages a person sent stay. Name the run you read; if it has ended or another run started, nothing is stopped and you are told which run is active. A paused run is ended too.',
+      description: 'Stop a run of another thread: the run you name, which must still be the thread\'s active (or paused) run, and the subagents below it, as a Stop in the app does. Queued messages a person sent stay. Name the run you read; if it has ended or another run started, nothing is stopped and you are told which run is active. A paused run is ended too. ' + REMOTE_REACH + ' There it stops only a run an agent of this computer started: a thread a person there took over is left running.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1291,8 +1479,10 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       class: 'mutation',
       launchedOk: true,
       offered: () => false,
+      target: localTarget,
       handler: async (args, ctx) => {
         const threadId = requiredId(args, 'threadId')
+        if (isQualifiedId(threadId)) return interruptOnComputer(threadId, args, ctx)
         const runId = requiredId(args, 'runId')
         if (!host.stopRun) return notAvailable('thread_interrupt')
         if (threadId === ctx.caller.threadId) throw new Error('thread_interrupt is for other threads; stop your own work by ending your turn.')
@@ -1400,7 +1590,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_steer',
-      description: 'Add guidance to the turn another thread is running now. Name the run you read; if it is not the thread\'s active run, or is paused, nothing is sent and you are told why. The thread\'s model receives the text labelled as a message from an agent, not from the user. Refused when the run is running under a looser permission mode than yours (a running turn cannot be narrowed): send a message instead.',
+      description: 'Add guidance to the turn another thread is running now. Name the run you read; if it is not the thread\'s active run, or is paused, nothing is sent and you are told why. The thread\'s model receives the text labelled as a message from an agent, not from the user. Refused when the run is running under a looser permission mode than yours (a running turn cannot be narrowed): send a message instead. ' + REMOTE_REACH,
       inputSchema: {
         type: 'object',
         properties: {
@@ -1414,8 +1604,10 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       access: 'managesOthers',
       class: 'mutation',
       offered: () => false,
+      target: localTarget,
       handler: async (args, ctx) => {
         const threadId = requiredId(args, 'threadId')
+        if (isQualifiedId(threadId)) return steerOnComputer(threadId, args, ctx)
         const runId = requiredId(args, 'runId')
         if (typeof args.text !== 'string' || !args.text.trim()) throw new Error('thread_steer requires text')
         if (!host.steerRun) return notAvailable('thread_steer')
@@ -1431,7 +1623,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'approval_respond',
-      description: `Answer a pending approval of another thread (a command, a file change or a tool its agent asked to run), as the user would. Needs the profile's switch "Agents may answer approvals on other threads", which is off by default; a refusal names what is missing. You can approve only what your own permission mode would allow without asking, never your own thread's request (nor one of a thread in your lineage other than your direct subagents', which answer_subagent covers), and never "always for this thread": approve once or reject. Read the request first with thread_list (it lists each thread's pending requests with their option ids), then answer with the question id and the option id. The thread's transcript shows "Approved by an agent in thread ..." and the user sees who answered. A request the provider asks for itself (its own safety check, a path outside the allowed folders, one of the user's own ask rules) and one on a turn the user started are the user's alone; they are refused. A plain question for the user (ask_user) cannot be answered here. If a person or another agent answered first you get already_answered with who decided what, and nothing changes.`,
+      description: `Answer a pending approval of another thread (a command, a file change or a tool its agent asked to run), as the user would. Needs the profile's switch "Agents may answer approvals on other threads", which is off by default; a refusal names what is missing. You can approve only what your own permission mode would allow without asking, never your own thread's request (nor one of a thread in your lineage other than your direct subagents', which answer_subagent covers), and never "always for this thread": approve once or reject. Read the request first with thread_list (it lists each thread's pending requests with their option ids), then answer with the question id and the option id. The thread's transcript shows "Approved by an agent in thread ..." and the user sees who answered. A request the provider asks for itself (its own safety check, a path outside the allowed folders, one of the user's own ask rules) and one on a turn the user started are the user's alone; they are refused. A plain question for the user (ask_user) cannot be answered here. If a person or another agent answered first you get already_answered with who decided what, and nothing changes. An approval of a thread on another computer waits for a person there and is refused.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -1449,8 +1641,12 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       access: 'managesOthers',
       class: 'mutation',
       offered: () => false,
+      target: localTarget,
       handler: (args, ctx) => {
         const threadId = requiredId(args, 'threadId')
+        // A question or approval waits on the computer that runs its thread, for a person there.
+        if (isQualifiedId(threadId))
+          throw new McpToolError('mousse_scope_denied', 'No agent answers an approval on another computer: it waits for a person on that computer. Tell the user it waits for them there.')
         const requestId = requiredId(args, 'requestId')
         const answers = approvalAnswers(args.answers)
         if (!host.approvalRequest || !host.answerApproval) return notAvailable('approval_respond')

@@ -103,7 +103,10 @@ import {
 import { FIRST_SEND_BINDING_CAPABILITY, PROTOCOL_CAPABILITIES, PROTOCOL_METHODS, MMS_PROTOCOL_VERSION } from './types'
 import { imageAt, messagesAfter, messagesBefore, newestPage, withoutImageBytes } from './transcriptPaging'
 import { isOpenActivityRow } from '../run/restartNote'
-import { ROUTED_MESSAGES_PAGE_BYTES, ROUTED_SEND_WINDOW_KEY, ROUTED_SNAPSHOT_MESSAGE_BYTES } from '../../shared/bridge/routed'
+import { ROUTED_AGENT_READ, ROUTED_MESSAGES_PAGE_BYTES, ROUTED_RUN_WAIT_MAX_MS, ROUTED_SEND_WINDOW_KEY, ROUTED_SNAPSHOT_MESSAGE_BYTES } from '../../shared/bridge/routed'
+import { waitOnRun } from '../run/runWait'
+import { messageRows, textOffsetProblem } from '../run/mcp/appTools/messageRows'
+import { THREAD_RESULT_MAX_CHARS } from '../run/mcp/appTools/thread'
 import { buildSubagentView } from '../run/delegation/subagentView'
 import { connectionIsLocal, listedProjectsFor, listedThreadsFor } from './threadVisibility'
 import { localOnlyThreadIds, threadFolderIsLocalOnly } from '../data/localOnlyThreads'
@@ -401,6 +404,35 @@ function questionAnswerer(ctx: HandlerContext): Answerer {
 
 /** Messages `thread.messages` returns when the caller names no limit, and the most it will. */
 const MESSAGES_PAGE_DEFAULT = 100
+/** `thread.messages` with `index`: at most this many messages in one page (an agent's `thread_read` asks for up to 200). */
+const AGENT_MESSAGES_PAGE_MAX = 200
+
+/**
+ * `thread.messages` with `index` (issue #1160): the page an agent's `thread_read` on another computer shows, built here
+ * as for this computer's own agents (`messageRows`). Each message's text is cut to `textMax` characters (the first from
+ * `textOffset`) and the rows stop once they pass the page's bytes, so only what the tool can return crosses. The text
+ * goes as `content`, so the router names the references in it the way the reader's computer does.
+ */
+async function agentMessagesPage(ctx: HandlerContext, threadId: string, p: Record<string, unknown>): Promise<unknown> {
+  if (p.before !== undefined || p.after !== undefined) throw new DomainRpcError('invalid_params', 'index pages without before or after.')
+  const index = asBoundedInt(p.index, 'index', { min: 0, max: Number.MAX_SAFE_INTEGER })
+  const limit = asOptionalBoundedInt(p.limit, 'limit', { min: 1, max: AGENT_MESSAGES_PAGE_MAX }) ?? 50
+  const textOffset = asOptionalBoundedInt(p.textOffset, 'textOffset', { min: 0, max: Number.MAX_SAFE_INTEGER }) ?? 0
+  const textMax = asOptionalBoundedInt(p.textMax, 'textMax', { min: 1, max: ROUTED_AGENT_READ.textMax }) ?? ROUTED_AGENT_READ.textMax
+  if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+  const all = ctx.mms.orchestrator.visibleMessagesWithoutLoading(threadId)
+  const problem = textOffsetProblem(all, index, textOffset)
+  if (problem) throw new DomainRpcError('invalid_params', problem)
+  const messages: Array<Record<string, unknown>> = []
+  let bytes = 0
+  for (const { text, ...row } of messageRows(all, { afterIndex: index, limit, textOffset, maxChars: textMax })) {
+    const shown = { ...row, content: text }
+    bytes += Buffer.byteLength(JSON.stringify(shown), 'utf8')
+    if (messages.length > 0 && bytes > ROUTED_AGENT_READ.pageBytes) break
+    messages.push(shown)
+  }
+  return { messages, total: all.length }
+}
 const MESSAGES_PAGE_MAX = 500
 /** The most messages a `thread.snapshot` with `newest` returns. */
 const SNAPSHOT_NEWEST_MAX = 2000
@@ -2343,8 +2375,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'thread.messages': {
       // A page of the messages before (or after) one, for a reader that was given only part of a long transcript.
       const p = isObject(params) ? params : {}
-      rejectUnknownKeys(p, ['threadId', 'before', 'after', 'limit'])
+      rejectUnknownKeys(p, ['threadId', 'before', 'after', 'limit', 'index', 'textOffset', 'textMax'])
       const threadId = asString(p.threadId, 'threadId', 256)
+      if (p.index !== undefined) return agentMessagesPage(ctx, threadId, p)
+      if (p.textOffset !== undefined || p.textMax !== undefined) throw new DomainRpcError('invalid_params', 'textOffset and textMax go with index.')
       const before = asOptionalString(p.before, 256)
       const after = asOptionalString(p.after, 256)
       if ((before === undefined) === (after === undefined)) throw new DomainRpcError('invalid_params', 'Name a message to page before or after.')
@@ -2690,6 +2724,22 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         events: ctx.mms.runEngine.listEvents(threadId, { afterSeq, limit }),
         maxSeq: ctx.mms.runEngine.maxSeq(threadId)
       }
+    }
+    case 'runs.wait': {
+      // An agent on another computer waits on a run of this thread (`thread_wait`, issue #1160): answered from the run
+      // events here, at most `ROUTED_RUN_WAIT_MAX_MS` later.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'runId', 'timeoutMs'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const runId = asOptionalString(p.runId, 256)
+      const timeoutMs = asOptionalBoundedInt(p.timeoutMs, 'timeoutMs', { min: 0, max: ROUTED_RUN_WAIT_MAX_MS }) ?? ROUTED_RUN_WAIT_MAX_MS
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      if (runId !== undefined && ctx.mms.runEngine.getRun(runId)?.threadId !== threadId) throw new DomainRpcError('run_not_found', 'Run not found', { runId })
+      return waitOnRun({
+        engine: ctx.mms.runEngine,
+        waitingOnPerson: (id) => ctx.mms.questions.listPendingForThread(id).length,
+        queued: (id) => ctx.mms.orchestrator.queuedCount(id)
+      }, { threadId, ...(runId ? { runId } : {}), timeoutMs, resultMaxChars: THREAD_RESULT_MAX_CHARS, ...(ctx.connection?.lifetime ? { signal: ctx.connection.lifetime } : {}) })
     }
     case 'runs.effects': {
       // The newest effects of the thread (at most EFFECT_PAGE_MAX), oldest first; `before` pages back.

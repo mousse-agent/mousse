@@ -459,3 +459,78 @@ describe('Forget', () => {
     expect(botNotificationContent('Pip', after).body).not.toMatch(/which flat|flat a/i)
   })
 })
+
+
+describe('owner attention in the shared summary', () => {
+  const summary = () => f.bots.service.get(botId).summary
+
+  it('counts a posted chat question, then clears on an answer', async () => {
+    const { questionId } = await chatAsks(FLATS)
+    expect(summary()).toMatchObject({ state: 'needs_you', stateText: `Asked: ${FLATS.question}`, needsOwner: true })
+    await tap(questionId, 'Flat A')
+    expect(summary().needsOwner).toBeUndefined()
+    expect(summary().state).not.toBe('needs_you')
+  })
+
+  it.each(['running', 'queued'] as const)('keeps %s work visible while a chat question still counts for the badge', async (status) => {
+    await chatAsks(DEFAULT_A)
+    const activation = await f.bots.activate({ botId, input: 'Check flights', clientRequestId: 'flights' })
+    if (status === 'queued') f.store.moveActivation(activation.id, ['running'], 'queued')
+    expect(summary()).toMatchObject({ state: 'working', needsOwner: true })
+    expect(summary().stateText).not.toContain('Asked:')
+    f.store.moveActivation(activation.id, [status], 'done')
+    expect(summary()).toMatchObject({ state: 'needs_you', stateText: `Asked: ${FLATS.question}`, needsOwner: true })
+  })
+
+  it('keeps a managed thread visible while a chat question still counts for the badge', async () => {
+    await chatAsks(FLATS)
+    f.launched = () => [{ threadId: 'flights', title: 'Check flights', status: 'running', startedAt: new Date(f.clock.now).toISOString(), updatedAt: new Date(f.clock.now).toISOString() }]
+    expect(summary()).toMatchObject({ state: 'working', needsOwner: true })
+    expect(summary().stateText).not.toContain('Asked:')
+    f.launched = () => []
+    expect(summary()).toMatchObject({ state: 'needs_you', stateText: `Asked: ${FLATS.question}`, needsOwner: true })
+  })
+
+  it('clears when the owner answers the only question from work', async () => {
+    const { questionId } = await workAsks(FLATS)
+    expect(summary().needsOwner).toBe(true)
+    await tap(questionId, 'Flat A')
+    expect(summary().needsOwner).toBeUndefined()
+    expect(summary().state).not.toBe('needs_you')
+  })
+
+  it('counts work waiting on its question, once even with three questions', async () => {
+    const one = await workAsks(FLATS)
+    await workAsks({ question: 'Which movers?', choices: ['A', 'B'] }, 'Movers', 'w2')
+    await chatAsks({ question: 'Which day?', choices: ['Monday', 'Tuesday'] })
+    expect(summary()).toMatchObject({ state: 'needs_you', needsOwner: true })
+    await tap(one.questionId, 'Flat A')
+    expect(summary().needsOwner).toBe(true)
+  })
+
+  it.each(['moved_on', 'defaulted', 'withdrawn'] as const)('does not count a %s chat question', async (status) => {
+    const { questionId } = await chatAsks(DEFAULT_A)
+    expect(summary().needsOwner).toBe(true)
+    if (status === 'moved_on') await chat('Something else now.', 'move-on')
+    else if (status === 'defaulted') await reach(Date.parse(f.store.question(questionId)!.nextAt!))
+    else f.store.withdrawQuestions(botId)
+    expect(f.store.question(questionId)?.status).toBe(status)
+    expect(summary().needsOwner).toBeUndefined()
+    expect(summary().state).not.toBe('needs_you')
+  })
+
+  it('counts an open question even when an error takes priority in the state', async () => {
+    f.store.setError(botId, { code: 'test', error: { text: 'Sign in', action: { kind: 'sign_in', label: 'Sign in', instanceId: 'test' } } })
+    expect(summary().needsOwner).toBeUndefined()
+    await chatAsks(FLATS)
+    f.store.setError(botId, { code: 'test', error: { text: 'Sign in', action: { kind: 'sign_in', label: 'Sign in', instanceId: 'test' } } })
+    expect(summary()).toMatchObject({ state: 'stuck', needsOwner: true })
+  })
+
+  it('does not count a paused bot with an open question', async () => {
+    await chatAsks(FLATS)
+    await f.bots.service.pause(botId)
+    expect(summary()).toMatchObject({ state: 'paused' })
+    expect(summary().needsOwner).toBeUndefined()
+  })
+})
