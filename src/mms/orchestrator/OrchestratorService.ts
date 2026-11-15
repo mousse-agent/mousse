@@ -267,6 +267,7 @@ import {
   type CommitInput
 } from '../git/commitSuggestion'
 import { readPullRequestTemplate } from '../git/pullRequestTemplate'
+import { RepositoryIdentityError } from '../git/RepositoryIdentity'
 import type { LineEditStatsStore } from '../stats/LineEditStatsStore'
 import type { ProjectManager } from '../data/ProjectManager'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
@@ -1839,8 +1840,16 @@ export class OrchestratorService extends EventEmitter {
     loadedThreadIds: () => this.sessions.keys(),
     holdReason: (threadId) => this.releaseHoldReason(threadId),
     releaseIfIdle: (threadId) => this.releaseIfIdle(threadId),
-    releaseIdleData: (idleMs, now) => { this.threadStore?.releaseIdleThreadData(idleMs, now) }
+    releaseIdleData: (idleMs, now) => { this.threadStore?.releaseIdleThreadData(idleMs, now) },
+    releaseIdleRuntimes: (idleMs, now) => { this.runtimeManager?.releaseIdleRuntimes(idleMs, now, (threadId) => this.runtimeKeepReason(threadId)) }
   })
+
+  /** What the orchestrator alone knows keeps a thread's runtime: a window shows it, or a reload is reading it. */
+  private runtimeKeepReason(threadId: string): string | undefined {
+    if (this.residency.isViewed(threadId)) return 'shown in a window'
+    if (this.residency.isWarming(threadId)) return 'reloading'
+    return undefined
+  }
 
   /** How many threads have a session in memory (the memory monitor's count). */
   loadedSessionCount(): number {
@@ -4968,6 +4977,8 @@ export class OrchestratorService extends EventEmitter {
       await this.stopThread(threadId, 'settled').catch((error: unknown) => {
         console.warn('settling a thread could not stop its work', { threadId, error: error instanceof Error ? error.message : String(error) })
       })
+      // An archived thread's runtime goes now when nothing holds it; otherwise the idle sweep drops it once free.
+      this.runtimeManager?.releaseRuntime(threadId, (id) => this.runtimeKeepReason(id))
     }
     return thread
   }
@@ -8219,6 +8230,7 @@ export class OrchestratorService extends EventEmitter {
     manager: import('../runtime/ThreadRuntimeManager').ThreadRuntimeManager | null
   ): void {
     this.runtimeManager = manager
+    manager?.setClock(() => this.residency.now())
   }
 
   /** Public access to session agents for a thread (hydrates via runtime manager when present). */
@@ -12478,11 +12490,19 @@ export class OrchestratorService extends EventEmitter {
           snapshotFolder = undefined
         }
       } else if (directory) {
-        turnStartSha = (await new ThreadActionService(directory).recordOutsideChanges({
-          threadId: session.threadId, conversationBranchId, workspacePath: checkpointCwd,
-          heldThreadLease: session.executionLease ?? undefined, signal: setupSignal,
-          presentationMessageStart: turnPresentationStart, nativeContextBoundary: turnNativeStartBoundary
-        })).startSha
+        try {
+          turnStartSha = (await new ThreadActionService(directory).recordOutsideChanges({
+            threadId: session.threadId, conversationBranchId, workspacePath: checkpointCwd,
+            heldThreadLease: session.executionLease ?? undefined, signal: setupSignal,
+            presentationMessageStart: turnPresentationStart, nativeContextBoundary: turnNativeStartBoundary
+          })).startSha
+        } catch (error) {
+          // A worktree folder given a new repository (Initialize Git) has no commit to snapshot yet: the turn runs with
+          // its conversation recorded alone, and Undo says why. Anything else still fails the turn.
+          if (!(error instanceof RepositoryIdentityError && error.capability.reason === 'unborn-head')) throw error
+          snapshotsOff = 'Undo is off for this turn: the worktree\'s repository has no commit yet.'
+          checkpointEnabled = false
+        }
       } else {
         await requireCleanWorkspaceAsync(checkpointCwd, 'Thread workspace')
         turnStartSha = await actionGitAsync(checkpointCwd, ['rev-parse', 'HEAD'])
@@ -12858,7 +12878,11 @@ export class OrchestratorService extends EventEmitter {
       const goal = this.threadStore?.getThread(session.threadId)?.goal
       const turnEpoch = this.goalTurnEpochs.get(session.threadId)?.epoch
       const goalText = goal?.state === 'working' && turnEpoch && goal.epoch === turnEpoch ? goalNote(goal) : undefined
-      const prompted = [modelNote, goalText, userContent].filter(Boolean).join('\n\n')
+      // The first turn that runs in the project folder because the worktree is gone or emptied: the agent is told, once.
+      const folderNote = opts?.bot ? undefined : session.workspace?.workspaceNote
+      const workspaceNote = folderNote && folderNote !== session.workspaceNoteGiven ? folderNote : undefined
+      session.workspaceNoteGiven = folderNote ?? null
+      const prompted = [modelNote, goalText, workspaceNote, userContent].filter(Boolean).join('\n\n')
       const activeMessages = getActiveMessages(this.nativeContext)
       const turnInput: TurnInput = {
         runId: engineRunId ?? turnId,

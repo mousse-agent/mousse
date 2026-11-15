@@ -570,9 +570,9 @@ export class BotMemoryStore {
     return row ? versionOf(row) : undefined
   }
 
-  /** The active entries, oldest first: what every pack injects. */
+  /** The active entries, first learned first: corrections keep their place in every pack. */
   active(botId: string): BotMemoryEntry[] {
-    return this.all("SELECT * FROM bot_memories WHERE bot_id = ? AND status = 'active' ORDER BY learned_at, row_id", botId).map((row) => entryOf(versionOf(row)))
+    return this.all("SELECT current.* FROM bot_memories current JOIN bot_memories first ON first.bot_id = current.bot_id AND first.id = current.id AND first.version = 1 WHERE current.bot_id = ? AND current.status = 'active' ORDER BY first.learned_at, first.row_id", botId).map((row) => entryOf(versionOf(row)))
   }
 
   /** `memory_list` / `bots.memory.list`: current entries (active and expired), or every version with `history`. */
@@ -636,7 +636,7 @@ export class BotMemoryStore {
         replaced = ref ? this.current(botId, ref.id) : undefined
         if (!ref || !replaced) return { error: 'refused', reason: `There is no memory entry ${input.replaces}.` }
         if (replaced.status === 'forgotten') return { error: 'refused', reason: `${ref.id} was forgotten: save a new entry instead.` }
-        if (input.lane === 'run' && replaced.kind !== 'run_note') return { error: 'refused', reason: 'A run can only replace its own run notes. Ask the owner in the chat.' }
+        if (input.lane === 'run' && replaced.kind !== 'run_note') return { error: 'refused', reason: 'A run or a turn you started yourself can only replace run notes. Ask the owner in the chat.' }
         if ((ref.version ?? 1) !== replaced.version)
           return { error: 'stale', current: { id: replaced.id, version: replaced.version, ref: memoryRef(replaced.id, replaced.version), text: replaced.text ?? '' } }
       }
@@ -923,6 +923,7 @@ export class BotMemoryStore {
   /**
    * A fresh start for the bot's memory, in one transaction: every journal row (with its search rows, by trigger) and the
    * memory state go, but the capture cursors (`cursor:<threadId>`), so capture never copies the bot's threads in again.
+   * `BotStore` also writes `cursor:create:<clientRequestId>` records, not capture cursors; `cursor:` keeps them here too.
    * `keepSaved` (`bots.memory.wipe` with `keep: 'saved'`): the owner's entries and the bot's notes stay as they are,
    * forgotten ones as tombstones; only entries that are run notes now go, every version. Without it every entry goes.
    * Returns how many current entries went. Entries never need the journal rows they came from (`source_seq`).

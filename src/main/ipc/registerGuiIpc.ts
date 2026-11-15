@@ -676,7 +676,7 @@ export function registerGuiIpc(
   const notifyBot = (data: unknown, win: BrowserWindow, profileSettings: MousseSettings, profileId: string): void => {
     const { botId, message, botName, quiet } = (data ?? {}) as { botId?: unknown; message?: BotChatMessage; botName?: unknown; quiet?: unknown }
     if (typeof botId !== 'string' || !message || typeof message.id !== 'string') return
-    // A run report its schedule's Tell me keeps quiet (Only problems) stays in the chat without a notification.
+    // A scheduled report below its Tell me level stays in the chat without a notification.
     if (quiet === true) return
     const kind = botNotificationKind(message)
     if (!kind || !botNotifications.first(profileId, message.id)) return

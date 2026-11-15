@@ -433,10 +433,13 @@ export class ThreadActionService {
 
   /** Recover an interrupted writer as captured code, never replay its model/tools. */
   async recoverPending(workspacePath: string, heldThreadLease?: ThreadLeaseHandle, signal?: AbortSignal): Promise<void> {
+    const interrupted = (entry: { operationType: string; state: string }) =>['action-checkpoint', 'change-checkpoint'].includes(entry.operationType) && ['running', 'prepared', 'git_applied', 'recovery_required'].includes(entry.state)
+    // Nothing to finish takes no lock: a worktree the agent removed or emptied does not stop the next turn here.
+    if (![...this.journal.latestByOperation().values()].some(interrupted)) return
     return withGitMutationLocks(this.threadDirectory, workspacePath, 'checkpoint-recovery', async () => {
       const receipts = new ChangeReceiptService(this.threadDirectory)
       for (const entry of [...this.journal.latestByOperation().values()].reverse()) {
-        if (!['action-checkpoint', 'change-checkpoint'].includes(entry.operationType) || !['running', 'prepared', 'git_applied', 'recovery_required'].includes(entry.state)) continue
+        if (!interrupted(entry)) continue
         const history = this.journal.list().filter((item) => item.operationId === entry.operationId)
         const all = this.list()
         const details = [...history].reverse().map((item) => item.details as { action?: ThreadAction; actionState?: 'completed' | 'stopped' | 'failed' } | undefined)

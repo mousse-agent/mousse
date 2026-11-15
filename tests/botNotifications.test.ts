@@ -5,6 +5,8 @@ import {
   botNotificationKind,
   planThreadNotification
 } from '../src/main/notifications/threadNotification'
+import { BotChatProjection } from '../src/mms/bots/chat/projection'
+import type { BotMessageRow } from '../src/mms/bots/store/BotStore'
 import type { BotChatMessage } from '../src/shared/bots/personal/chat'
 
 /**
@@ -19,6 +21,15 @@ const row = (over: Partial<BotChatMessage> = {}): BotChatMessage =>
 describe('what a bot row announces', () => {
   it('announces run reports, replies, notices and errors as completed', () => {
     for (const kind of ['run_report', 'text', 'notice', 'error'] as const) expect(botNotificationKind(row({ kind }), NOW)).toBe('completed')
+  })
+
+  it.each(['bm_wake_w1', 'bm_permission_switch_1'])('keeps projected service line %s silent and announces the reply', (id) => {
+    // These notice ids become systemLine in the chat projection used by bots.message.
+    const projection = new BotChatProjection({ store: {} as never, emit: () => {} })
+    const service = projection.toMessage({ ...row({ id, kind: 'notice', text: 'Following up' }), botId: 'b1' } as BotMessageRow)
+    expect(service.systemLine).toBe(true)
+    expect(botNotificationKind(service, NOW)).toBeNull()
+    expect(botNotificationKind(row({ kind: 'text', text: 'The deploy is done.' }), NOW)).toBe('completed')
   })
 
   it('announces an open ask as a question, and an answered one not at all', () => {
