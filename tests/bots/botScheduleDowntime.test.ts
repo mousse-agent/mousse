@@ -1,7 +1,9 @@
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { clockTime } from '../../src/mms/bots/chat/projection'
-import { recordTickerHeartbeat } from '../../src/mms/scheduled/ScheduledJobStore'
+import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
+import { ScheduledJobService } from '../../src/mms/scheduled/ScheduledJobService'
+import { ScheduledJobStore, recordTickerHeartbeat } from '../../src/mms/scheduled/ScheduledJobStore'
 import { botFixture, chatOf, createBot, flush, runDispatch, T0, type BotFixture } from './botFixture'
 
 const MIN = 60_000
@@ -89,6 +91,34 @@ describe('bot schedules after downtime', () => {
     expect(f.store.dispatch(inserted[0]!, 1)!.prompt.text).toContain(`This run was due at ${label}; this computer was off or asleep.`)
     await runDispatch(f, inserted[0]!, 1, { text: 'All checked.' })
     expect(chatOf(f, botId).find((row) => row.kind === 'run_report' && row.activationId === inserted[0])!.text).toBe(`(Due ${label}, this computer was off or asleep) All checked.`)
+  })
+
+  it.each([11, 780])('a restart before bots are ready keeps downtime at %i minutes late', async (late) => {
+    const due = await schedule(1440)
+    heartbeat(T0)
+    f.scheduler.setBotRunner({ runOccurrence: () => ({ kind: 'not_ready' }) })
+    await f.tickSchedules(new Date(due + 10 * MIN))
+    expect(entry().nextAt).toBe(iso(due))
+    // Other ticks may have run while bots were unavailable; restart immediately after one.
+    heartbeat(due + (late - 1) * MIN)
+    const fresh = new ScheduledJobService({ runIsolated: async () => { throw new Error('not an agent job') } }, new ScheduledJobStore(MousseConfigStore.load(join(f.base, 'mousse-home'))))
+    f.clock.now = due + late * MIN
+    fresh.setClock(() => new Date(f.clock.now))
+    fresh.setBotRunner({ runOccurrence: (input) => f.bots.runScheduledOccurrence(input) })
+    try {
+      await fresh.tickNow()
+      await f.bots.maintain(new Date(f.clock.now))
+      await flush()
+      if (late < 720) {
+        const row = f.store.listActivations(botId).find((row) => row.trigger.kind === 'schedule')!
+        expect(row.trigger).toMatchObject({ missed: { count: 1, since: iso(due) } })
+        expect(f.store.dispatch(row.id, 1)!.prompt.text).toContain('this computer was off or asleep.')
+      } else {
+        expect(f.store.listActivations(botId).filter((row) => row.trigger.kind === 'schedule')).toEqual([])
+        expect(entry().skip?.at).toBe(iso(due))
+        expect(entry().skip?.reason).toContain('(computer off)')
+      }
+    } finally { fresh.beginShutdown() }
   })
 
   // Posting time, rather than start time, decides the label. A busy tick has no downtime marker.
