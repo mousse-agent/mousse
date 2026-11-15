@@ -196,17 +196,33 @@ export function untilAborted<T>(work: Promise<T>, signal: AbortSignal | undefine
   })
 }
 
-/** A reader that answers from `answers`, and asks for anything else to be read first. */
-function replayReads(answers: Map<string, unknown>, signal: AbortSignal | undefined): CheckReads {
-  const answer = <T>(key: string, read: () => Promise<T>): T => {
-    if (answers.has(key)) return answers.get(key) as T
-    throw new NotReadYet(key, read)
+/** One read of the async check: its key in the answers, and how to read it (again) without blocking. */
+interface CheckRead {
+  key: string
+  read(signal: AbortSignal | undefined): Promise<unknown>
+  /** Always starts a Git process, so it is never read ahead on a guess (see {@link decideGitCommandAsync}). */
+  spawns?: boolean
+}
+
+const CHECK_READS = {
+  realpath: (path: string): CheckRead => ({ key: `realpath\0${path}`, read: (signal) => untilAborted(realpath(path).catch(() => null), signal) }),
+  isGitDirectory: (path: string): CheckRead => ({ key: `gitdir\0${path}`, read: (signal) => untilAborted(isGitDirectoryAsync(path), signal) }),
+  git: (cwd: string, args: readonly string[], gitDir: string | undefined): CheckRead => ({ key: `git\0${cwd}\0${gitDir ?? ''}\0${args.join('\0')}`, read: (signal) => readGitAsync(cwd, args, gitDir, signal), spawns: true }),
+  gitFolder: (cwd: string, gitDir: string | undefined, routing: string): CheckRead => ({ key: `gitfolder\0${cwd}\0${gitDir ?? ''}\0${routing}`, read: (signal) => untilAborted(runAsync(gitFolderOf(cwd, gitDir, routing, signal)), signal) })
+}
+
+/** A reader that answers from `answers`, and asks for anything else to be read first. Every read it answers is added to `used`. */
+function replayReads(answers: Map<string, unknown>, used: Map<string, CheckRead>, signal: AbortSignal | undefined): CheckReads {
+  const answer = <T>(needed: CheckRead): T => {
+    if (!answers.has(needed.key)) throw new NotReadYet(needed.key, () => needed.read(signal))
+    used.set(needed.key, needed)
+    return answers.get(needed.key) as T
   }
   return {
-    realpath: (path) => answer(`realpath\0${path}`, () => untilAborted(realpath(path).catch(() => null), signal)),
-    isGitDirectory: (path) => answer(`gitdir\0${path}`, () => untilAborted(isGitDirectoryAsync(path), signal)),
-    git: (cwd, args, gitDir) => answer(`git\0${cwd}\0${gitDir ?? ''}\0${args.join('\0')}`, () => readGitAsync(cwd, args, gitDir, signal)),
-    gitFolder: (cwd, gitDir, routing) => answer(`gitfolder\0${cwd}\0${gitDir ?? ''}\0${routing}`, () => untilAborted(runAsync(gitFolderOf(cwd, gitDir, routing, signal)), signal))
+    realpath: (path) => answer(CHECK_READS.realpath(path)),
+    isGitDirectory: (path) => answer(CHECK_READS.isGitDirectory(path)),
+    git: (cwd, args, gitDir) => answer(CHECK_READS.git(cwd, args, gitDir)),
+    gitFolder: (cwd, gitDir, routing) => answer(CHECK_READS.gitFolder(cwd, gitDir, routing))
   }
 }
 
@@ -991,13 +1007,41 @@ const CHECK_PASSES = 3
  * decision stands only when none changed: it is then the decision one synchronous check makes on the same
  * answers. When one did change (a ref retargeted meanwhile), the decision runs again on the new answers; after
  * {@link CHECK_PASSES} such passes the command is refused for now.
+ *
+ * The reads the same kind of command needed last time ({@link commandKind}) are read first, all at once. When the
+ * decision then needs nothing else, that batch was already one pass that read every answer at the same time, so it
+ * stands as the final pass. Nothing is kept between checks but which reads to make: every answer is read fresh.
  */
 export async function decideGitCommandAsync(request: GitCommandRequest, signal?: AbortSignal): Promise<GitDecision> {
   const answers = new Map<string, unknown>()
   const readers = new Map<string, () => Promise<unknown>>()
-  const replay = replayReads(answers, signal)
+  const used = new Map<string, CheckRead>()
+  const replay = replayReads(answers, used, signal)
+  // On a busy daemon each read the decision waits for is a turn of the event loop, and a check of a private index
+  // needs about six of them one after another. A wrong guess only costs a read whose answer is then dropped.
+  const kind = commandKind(request)
+  const guess = readAhead.get(kind) ?? []
+  const early = await Promise.all(guess.map((ahead) => ahead.read(signal)))
+  signal?.throwIfAborted()
+  guess.forEach((ahead, index) => {
+    answers.set(ahead.key, early[index])
+    readers.set(ahead.key, () => ahead.read(signal))
+  })
   for (let pass = 0; pass < CHECK_PASSES; pass++) {
+    used.clear()
+    const known = new Set(answers.keys())
     const decision = await decideOnAnswers(request, replay, answers, readers, signal)
+    // Every answer it used was read in the one batch above, all at once: that batch is already the final pass.
+    const fromOneBatch = pass === 0 && guess.length > 0 && [...answers.keys()].every((key) => known.has(key))
+    // A guess the decision did not use plays no part in it, and is not read again.
+    for (const key of [...answers.keys()]) {
+      if (!used.has(key)) {
+        answers.delete(key)
+        readers.delete(key)
+      }
+    }
+    rememberReadAhead(kind, [...used.values()].filter((needed) => !needed.spawns))
+    if (fromOneBatch) return decision
     const keys = [...answers.keys()]
     const again = await Promise.all(keys.map((key) => readers.get(key)!()))
     signal?.throwIfAborted()
@@ -1010,6 +1054,29 @@ export async function decideGitCommandAsync(request: GitCommandRequest, signal?:
     if (!changed) return decision
   }
   return { access: 'userRequested', allowed: false, reason: 'what the check reads kept changing while it ran' }
+}
+
+/** Reads the async check made last time for a kind of command (see {@link commandKind}), most recent last. */
+const readAhead = new Map<string, CheckRead[]>()
+const READ_AHEAD_LIMIT = 256
+
+function rememberReadAhead(kind: string, reads: CheckRead[]): void {
+  readAhead.delete(kind)
+  if (!reads.length) return
+  if (readAhead.size >= READ_AHEAD_LIMIT) readAhead.delete(readAhead.keys().next().value!)
+  readAhead.set(kind, reads)
+}
+
+/** For tests: forgets which reads each kind of command needed. */
+export function clearGitCheckReadAhead(): void {
+  readAhead.clear()
+}
+
+/** What decides which reads a check needs: where it runs, the command, and the variables that point Git elsewhere. */
+function commandKind(request: GitCommandRequest): string {
+  const env = request.env ?? {}
+  const sub = parseGlobals(request.args).sub ?? ''
+  return [request.executable ?? 'git', request.cwd, sub, env.GIT_INDEX_FILE ?? '', ...REDIRECT_VARIABLES.map((key) => env[key] ?? '')].join('\0')
 }
 
 /** Runs the decision on `answers`, reading each answer it is missing first. */
