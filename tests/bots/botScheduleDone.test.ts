@@ -95,3 +95,23 @@ it('a retry completes removal if the shared scheduler failed after the intent wa
   expect(f.book.get(botId, s.own.scheduleId)).toBeUndefined()
 })
 
+
+it('startup finishes an intent left behind by failed shared-store removal', async () => {
+  const s = await scheduled()
+  vi.spyOn(f.book, 'remove').mockImplementationOnce(() => { throw new Error('save failed') })
+  expect(await s.tool.handler({ why: 'Finished.' }, s.ctx)).toMatchObject({ isError: true })
+  await f.bots.reconcileOnStartup()
+  expect(f.book.get(botId, s.own.scheduleId)).toBeUndefined()
+  expect(f.book.get(botId, s.other.scheduleId)).toBeDefined()
+})
+
+it('keeps Tell me on the final report when completion removes the schedule', async () => {
+  const s = await scheduled()
+  f.book.update(f.scheduler.getJob(s.own.jobId)!, { tellMe: 'needs_you' })
+  const events: Array<{ message: { kind: string }; quiet?: true }> = []
+  f.bots.events.on('message', event => events.push(event))
+  f.automationRuns.report({ threadId: '', activationId: s.row.id }, 'fyi', 'Done.')
+  await s.tool.handler({ why: 'Finished.' }, s.ctx)
+  await finish(f, s.payload, 'completed', { text: 'Done.' })
+  expect(events.find(event => event.message.kind === 'run_report')).toMatchObject({ quiet: true })
+})
