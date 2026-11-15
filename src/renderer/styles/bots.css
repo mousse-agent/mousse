@@ -66,7 +66,9 @@
 .bot-system-line > span { max-width: 80%; padding: 2px 10px; border-radius: 999px; font-size: 12px; line-height: 18px; text-align: center; color: var(--text-secondary); background: color-mix(in srgb, var(--text-secondary) 7%, transparent); }
 
 /* The bot's messages: bubbles on the left, the time in each one's corner. */
-.chat-participant-message.bot-message { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding-right: 14%; }
+/* A reply keeps a gutter on its right, so it reads as the bot's side; its applets take the whole reply width instead. */
+.chat-participant-message.bot-message { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.chat-participant-message.bot-message > :not(.bot-message-applets) { max-width: 86%; }
 .bot-message-line { position: relative; display: flex; align-items: flex-end; width: fit-content; min-width: 0; max-width: 100%; }
 /* Hidden, the tools take no width: past a wide bubble in a narrow window they would widen the transcript and give it a
    sideways scrollbar (they are moved inside it only while shown). They fold after their fade and open at once. Their

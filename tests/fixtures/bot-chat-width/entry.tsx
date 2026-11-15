@@ -22,12 +22,15 @@ const MESSAGES: BotChatMessage[] = [
   row(4, 'bot', ['| Drive | Free | Size |', '|---|---|---|', '| C: | 268.5 GB free out of 951.8 GB | 1 TB NVMe system drive |', '| D: | 1.2 TB free out of 1.8 TB | 2 TB SATA storage drive |'].join('\n')),
   row(5, 'bot', 'Short one.')
 ]
+/** Added for the last step only: a reply with an applet, which takes the whole reply width where bubbles keep a gutter. */
+const WITH_APPLET: BotChatMessage = { ...row(6, 'bot', 'Here it is.'), applets: [{ threadId: 'thread', reference: { appletId: 'applet', revisionId: 'revision', sourceHash: 'hash', title: 'Sudoku hint', description: '' } }] }
+let shown = MESSAGES
 const WIDE = ['m2', 'm4']
 
 const client = new Proxy({
   list: async () => [bot],
   get: async () => ({ summary: bot, permissions: [], runs: [] }),
-  messages: async () => ({ messages: MESSAGES }),
+  messages: async () => ({ messages: shown }),
   markRead: async () => undefined
 } as Record<string, unknown>, { get: (target, key: string) => target[key] ?? (async () => { throw new Error(`${key} is not in the fixture`) }) }) as unknown as PersonalBotsClient
 
@@ -88,6 +91,13 @@ function render(px: number) {
       } : {})
     }
   },
+  /** The reply's width, its applet's, and the widest bubble's (the table reply). */
+  addApplet: async () => { shown = [...MESSAGES, WITH_APPLET]; await useBotsStore.getState().loadChat(bot.id) },
+  applet: () => ({
+    reply: article('m6').getBoundingClientRect().width,
+    applet: article('m6').querySelector('.mousse-applet-preview')!.getBoundingClientRect().width,
+    bubble: article('m4').querySelector('.bot-bubble')!.getBoundingClientRect().width
+  }),
   errors: () => errors,
   unmount: () => root.unmount()
 }
