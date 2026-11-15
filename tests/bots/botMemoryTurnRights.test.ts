@@ -1,6 +1,7 @@
 import { afterEach, expect, it } from 'vitest'
 import { botMemoryTools } from '../../src/mms/run/mcp/appTools/botMemory'
 import { createBotContextProvider } from '../../src/mms/bots/memory/contextPack'
+import { WISH_OVER_CAP_KEY } from '../../src/mms/bots/memory/standingWish'
 import { createBotJournal } from '../../src/mms/bots/memory/capture'
 import { appTurn } from '../run/appToolsFixture'
 import { botFixture, createBot, finish, flush, start, type BotFixture } from './botFixture'
@@ -75,4 +76,28 @@ it.each([
   const { payload } = await start(f, activation.id)
   await finish(f, payload)
   expect(memory.store.active(botId).filter((entry) => entry.kind === 'owner')).toHaveLength(ownerStarted ? 1 : 0)
+})
+
+// The engine supplies memory rights; a full owner kind must not turn bot-started history into refusals.
+it.each([
+  ['chat:message', 2], ['wake:event', 1]
+])('%s counts a refused wish only with owner memory rights', async (key, expectedCount) => {
+  f = botFixture()
+  const { botId } = await createBot(f, { reply: 'Hello' })
+  const memory = memoryFixture()
+  for (let n = 0; n < 6; n++) {
+    expect(memory.store.save(botId, { lane: 'chat', kind: 'owner', text: `Fact ${n}: ${'ordinary words '.repeat(30)}`.slice(0, 400) })).not.toHaveProperty('error')
+  }
+  // An earlier refusal is still pending; a bot-started turn must leave the count untouched.
+  memory.store.write(() => memory.store.setState(botId, WISH_OVER_CAP_KEY, 1))
+  const journal = createBotJournal({ store: memory.store, readThread: () => ({ messages: [] }), listThreads: () => [] })
+  const context = createBotContextProvider({ store: memory.store, journal })
+  f.host.context = context
+  const activation = await f.bots.enqueueChat(botId, key, 'Continue')
+  await flush()
+  memory.message({ botId, id: 'wish', activationId: activation.id, author: 'owner', text: 'Always keep your replies short.' })
+  const { payload } = await start(f, activation.id)
+  await finish(f, payload)
+  expect(memory.store.getState<number>(botId, WISH_OVER_CAP_KEY)).toBe(expectedCount)
+  expect(memory.store.active(botId)).toHaveLength(6)
 })
