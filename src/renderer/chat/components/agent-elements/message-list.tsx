@@ -115,6 +115,7 @@ import { findBarHost, placeFindBar } from "./find/find-bar-host";
 import { useThreadFind } from "./find/use-thread-find";
 import { FindRailButton } from "./find/FindRailButton";
 import { cappedWords, markdownPreviewText } from "./utils/preview-text";
+import { formatMessageTime } from "./utils/message-time";
 import { flashLocated, revealMessage } from "./reveal-message";
 import { isStale, useChatNavigationStore } from "../../../stores/chatNavigationStore";
 import "../../../styles/prompt-visibility.css";
@@ -176,15 +177,6 @@ const SCROLL_THRESHOLD = 80;
 const REPLY_GAP_CLASS = "h-[44px]";
 const TURN_TOOLBAR_CLASS = "h-[48px] flex items-start w-full";
 const LAST_TURN_TOOLBAR_CLASS = `${TURN_TOOLBAR_CLASS} -mb-1`;
-const timeFormatter = new Intl.DateTimeFormat("en-US", {
-  hour: "numeric",
-  minute: "2-digit",
-  hour12: true,
-});
-const dateFormatter = new Intl.DateTimeFormat("en-US", {
-  month: "short",
-  day: "numeric",
-});
 type ToolRendererProps = {
   part: ToolPartBase;
   nestedTools?: ToolPartBase[];
@@ -435,18 +427,6 @@ function getTextFromParts(parts: unknown[], joiner: string): string {
     .filter(isTextPart)
     .map((part) => part.text)
     .join(joiner);
-}
-
-function formatTimestamp(date: Date): string {
-  const now = new Date();
-  const isSameDay =
-    date.getFullYear() === now.getFullYear() &&
-    date.getMonth() === now.getMonth() &&
-    date.getDate() === now.getDate();
-  if (isSameDay) {
-    return timeFormatter.format(date);
-  }
-  return dateFormatter.format(date);
 }
 
 /**
@@ -2328,9 +2308,7 @@ const TurnRow = memo(function TurnRow({
           const userCopyKey = `user-${turn.userMsg.id}`;
           const userCopyVisible = copyActive === userCopyKey;
           const userTimestamp =
-            isMounted && userCreatedAt
-              ? formatTimestamp(new Date(userCreatedAt))
-              : undefined;
+            isMounted ? formatMessageTime(userCreatedAt) : undefined;
           // Keep unavailable Undo visible with an explanation for this prompt.
           const showUserToolbar = true;
           // Edit and versions act on the prompt's turn; a fork's copies of its source name none.

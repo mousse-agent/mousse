@@ -27,6 +27,14 @@ describe('markdownPreviewText', () => {
     expect(markdownPreviewText('Mail <mailto:a@x.test> or <https://x.test>')).toBe('Mail mailto:a@x.test or https://x.test')
   })
 
+  it('keeps text in angle brackets that the chat does not draw as HTML, as the message shows it', () => {
+    expect(markdownPreviewText('Do the <work of first task>, then <second task>')).toBe('Do the <work of first task>, then <second task>')
+    expect(markdownPreviewText('<thinking>\nplan it\n</thinking>')).toBe('<thinking> plan it </thinking>')
+    // A tag the chat draws, written with words that are not its attributes, is text too.
+    expect(markdownPreviewText('Use <a of first task> now')).toBe('Use <a of first task> now')
+    expect(markdownPreviewText('<details open><summary>More</summary>Body</details>')).toBe('More Body')
+  })
+
   it('reads a table as its cells, without pipes or the divider', () => {
     expect(markdownPreviewText('| Name | Size |\n| --- | ---: |\n| a.ts | 2 KB |')).toBe('Name Size a.ts 2 KB')
   })

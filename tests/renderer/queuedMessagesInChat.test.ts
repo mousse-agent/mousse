@@ -118,6 +118,23 @@ describe('queued messages in the conversation', () => {
     expect(api.edit).toHaveBeenCalledWith('t1', 'a', 'Rerun only the flaky test', letter.text)
   })
 
+  it('shows text in angle brackets as written, from the person or from another thread\'s agent', async () => {
+    const text = 'Do the <work of first task>, then <b>this</b> and <thinking>\nplan\n</thinking> <!-- note'
+    useAppStore.setState({ threads: [{ id: 'sender', name: 'Planner' } as Thread] })
+    const letter = agentMessage('sender', 'Planner', text)
+    const origin = { kind: 'agent' as const, threadId: 'sender', runId: 'run-s', hops: 1, title: 'Planner', body: { head: letter.head, tail: letter.tail } }
+    await show([queued('a', text), queued('b', letter.text, { source: 'mcp', origin })])
+    expect(rows().map((entry) => entry.querySelector('.chat-user-bubble p')?.textContent)).toEqual([text, text])
+    expect(host.querySelector('.chat-user-bubble b, .chat-user-bubble thinking')).toBeNull()
+  })
+
+  it('shows when each message was queued on its line: the time today, the date on an earlier day', async () => {
+    await show([queued('a', 'today', { enqueuedAt: new Date().toISOString() }), queued('b', 'earlier', { enqueuedAt: '2026-11-09T12:00:00Z' })])
+    const time = (id: string) => row(id).querySelector('.queued-message-line')?.textContent
+    expect(time('a')).toMatch(/^\d{1,2}:\d{2}\s[AP]M/)
+    expect(time('b')).toMatch(/^Nov 9/)
+  })
+
   it('says "Queued" once, on the last line', async () => {
     await show([queued('a', 'one'), queued('b', 'two'), queued('c', 'three')])
     const labels = [...host.querySelectorAll('.queued-message-state')]
