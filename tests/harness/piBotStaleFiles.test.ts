@@ -171,3 +171,29 @@ for (const [name, read] of [
     expect((await f.call(t, 'write')).allow).toBe(true)
   })
 }
+
+it('case aliases share a version on a case-insensitive filesystem', async (ctx) => {
+  const f = fixture(), t = f.turn()
+  const alias = join(f.files, 'TODO.md')
+  if (!fs.existsSync(alias)) ctx.skip()
+  await f.call(t, 'read', f.path)
+  expect((await f.call(t, 'edit', alias)).allow).toBe(true)
+})
+it('stays within the content-read cap when a file grows during fingerprinting', async () => {
+  const f = fixture(), t = f.turn()
+  const original = (await vi.importActual<typeof import('node:fs')>('node:fs')).readSync
+  let requested = 0
+  const reads = vi.spyOn(fs, 'readSync').mockImplementation(((fd: number, bytes: Buffer, offset: number, length: number, position: number) => {
+    requested += length
+    const result = original(fd, bytes, offset, length, position)
+    // An outside writer grows the inode after the first stat and read.
+    const writer = fs.openSync(f.path, 'r+')
+    fs.ftruncateSync(writer, 4 * 1024 * 1024); fs.closeSync(writer)
+    return result
+  }) as typeof fs.readSync)
+  await f.call(t, 'read')
+  expect(requested).toBeGreaterThan(0)
+  expect(requested).toBeLessThanOrEqual(2 * 1024 * 1024)
+  reads.mockRestore()
+  expect((await f.call(t, 'write')).allow).toBe(true)
+})

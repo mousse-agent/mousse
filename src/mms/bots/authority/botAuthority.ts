@@ -88,7 +88,7 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
       if (!insideAny([files], raw, files)) return { completed() {} }
       const absolute = resolve(files, raw)
       let path = absolute
-      try { path = realpathSync(absolute) } catch { /* A new file has no real path yet. */ }
+      try { path = realpathSync.native(absolute) } catch { /* A new file has no real path yet. */ }
       const before = fileHash(path)
       const previous = fileReads.get(path)
       if (tool !== 'read' && (before === null || (before !== undefined && previous !== before && previous !== `partial:${before}`))) {
