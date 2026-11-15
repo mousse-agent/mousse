@@ -34,7 +34,12 @@ function hostile(leak: string): string {
     `#h16 { --u: no-repeat; background: var(--u) url(${leak}/shorthand) }`,
     `#secret[value^="a"] { background-image: url(${leak}/attr-a) }`,
     `#h17 { background-image: src("${leak}/src") }`,
-    `#h18 { background-image: url(${leak.replace('http:', 'HTTP:')}/case) }`
+    `#h18 { background-image: url(${leak.replace('http:', 'HTTP:')}/case) }`,
+    // Relative paths, quoted and not, reach the page's own server.
+    `#h19 { background-image: url(relative-unquoted.png) }`,
+    `#h20 { background-image: url("relative-quoted.png") }`,
+    // A comment between the letters of url( and a comment inside the address.
+    `#h21 { background-image: u/**/rl(${leak}/comment-split) }`
   ].join('\n')
 }
 
@@ -50,14 +55,18 @@ const SAFE = [
   '@media (min-width: 1px) { #in-media { color: rgb(16, 17, 18) } }',
   `#keep-data { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'/%3E") }`,
   '@keyframes fine { from { opacity: 0.5 } to { opacity: 0.6 } } #keep-anim { animation: fine 1s infinite }',
-  '#keep-nest { & .inner { color: rgb(19, 20, 21) } }'
+  '#keep-nest { & .inner { color: rgb(19, 20, 21) } }',
+  // Only a quoted data: address applies: unquoted, it is dropped like any other url(), and so is #id.
+  '#unquoted-data { color: rgb(22, 23, 24); background-image: url(data:image/gif;base64,R0lGODlhAQABAAAAACw=) }',
+  '#id-url { background-image: url(#nothing) }'
 ].join('\n')
 
 const ELEMENTS = [
   '<div data-mousse="sidebar">sidebar</div>',
   '<div id="mixed">mixed</div><div id="broken">broken</div><div id="after-bad">after</div><div id="in-media">media</div>',
   '<div id="keep-data">data</div><div id="keep-anim">anim</div><div id="keep-nest"><span class="inner">nest</span></div>',
-  ...Array.from({ length: 18 }, (_, index) => `<div id="h${index + 1}">hostile ${index + 1} <span class="inner">inner</span></div>`).filter((html) => !html.includes('id="h12"')),
+  '<div id="unquoted-data">unquoted</div><div id="id-url">id</div>',
+  ...Array.from({ length: 21 }, (_, index) => `<div id="h${index + 1}">hostile ${index + 1} <span class="inner">inner</span></div>`).filter((html) => !html.includes('id="h12"')),
   '<ul><li id="h12">list</li></ul>',
   '<input id="secret" value="abc">'
 ].join('')

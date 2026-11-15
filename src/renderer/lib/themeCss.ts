@@ -1,4 +1,4 @@
-import { externalLoadIn, THEME_CSS_MAX_LENGTH } from '../../shared/themes/cssSafety'
+import { externalLoadIn, THEME_CSS_MAX_LENGTH, themeCssTooLong, withoutExternalLoads } from '../../shared/themes/cssSafety'
 import { isThemeColorValue, isThemeTokenName } from '../../shared/themes/userThemes'
 
 /** A rule or declaration left out of a theme, and why. */
@@ -100,17 +100,21 @@ function parseAndClean(css: string, dropped: DroppedCss[]): string | null {
 }
 
 /**
- * Theme CSS that loads nothing from outside Mousse. The browser parses it first (so escapes, nesting and invalid
- * rules are resolved its way); then every rule it produced is checked as written back, and declarations or rules
- * that could load anything are dropped. The result is parsed and checked once more, rule by rule and as a whole: anything
- * found on that pass drops the whole CSS. What is returned is exactly the text that pass checked.
+ * Theme CSS that loads nothing from outside Mousse. First the CSS as written: every url() must be one quoted `data:`
+ * address and nothing may name another resource (`withoutExternalLoads`, which drops the narrowest declaration or rule
+ * that fails). Then the browser parses it (so escapes, nesting and invalid rules are resolved its way), every rule it
+ * produced is checked as written back, and declarations or rules that could load anything are dropped. The result is
+ * parsed and checked once more, rule by rule and as a whole: anything found on that pass drops the whole CSS. What is
+ * returned is exactly the text that pass checked. CSS over `maxLength` is refused whole, never cut.
  */
-export function sanitizeThemeCss(css: string): SanitizedThemeCss {
+export function sanitizeThemeCss(css: string, maxLength: number = THEME_CSS_MAX_LENGTH): SanitizedThemeCss {
   const dropped: DroppedCss[] = []
-  const input = css.length > THEME_CSS_MAX_LENGTH ? css.slice(0, THEME_CSS_MAX_LENGTH) : css
-  if (!input.trim()) return { css: '', dropped }
-  const first = parseAndClean(input, dropped)
-  if (first === null) return { css: '', dropped: [{ text: excerpt(input), reason: 'the CSS could not be read' }] }
+  if (css.length > maxLength) return { css: '', dropped: [{ text: 'the whole theme CSS', reason: themeCssTooLong(css.length) }] }
+  if (!css.trim()) return { css: '', dropped }
+  const written = withoutExternalLoads(css, dropped)
+  if (!written.trim()) return { css: '', dropped }
+  const first = parseAndClean(written, dropped)
+  if (first === null) return { css: '', dropped: [{ text: excerpt(css), reason: 'the CSS could not be read' }] }
   const again: DroppedCss[] = []
   const second = parseAndClean(first, again)
   if (second === null || again.length > 0 || externalLoadIn(second)) {
@@ -167,7 +171,11 @@ function syncDecisionPause(doc: Document): void {
  */
 export function applyThemeCss(css: string, options: { tokens?: Record<string, string> } = {}, doc: Document = document): DroppedCss[] {
   const tokens = themeTokensCss(options.tokens ?? {})
-  const { css: safe, dropped } = sanitizeThemeCss(tokens ? `${tokens}\n${css}` : css)
+  // CSS over the limit is not applied at all; the colors still are.
+  const tooLong = css.length > THEME_CSS_MAX_LENGTH
+  const own = tooLong ? '' : css
+  const { css: safe, dropped } = sanitizeThemeCss(tokens ? `${tokens}\n${own}` : own, THEME_CSS_MAX_LENGTH + tokens.length + 1)
+  if (tooLong) dropped.unshift({ text: 'the whole theme CSS', reason: themeCssTooLong(css.length) })
   // A page without constructable sheets (a test DOM) gets no theme at all.
   if (!Array.isArray(doc.adoptedStyleSheets)) return dropped
   const others = doc.adoptedStyleSheets.filter((sheet) => sheet !== themeSheet)

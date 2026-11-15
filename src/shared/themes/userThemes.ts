@@ -1,4 +1,4 @@
-import { THEME_CSS_MAX_LENGTH } from './cssSafety'
+import { THEME_CSS_MAX_LENGTH, themeCssTooLong } from './cssSafety'
 
 /**
  * A theme a person or an agent made: a built-in theme to start from, color tokens over it and optional CSS. Saved in
@@ -15,7 +15,7 @@ export interface UserTheme {
   accent: string
   /** CSS custom properties set over the base, by name (`--surface-base`), each a color. */
   colors: Record<string, string>
-  /** Extra CSS. Rules that could load anything are dropped when it is applied (`sanitizeThemeCss`). */
+  /** Extra CSS, at most `THEME_CSS_MAX_LENGTH` characters. Rules that could load anything are dropped when it is applied (`sanitizeThemeCss`). */
   css: string
 }
 
@@ -121,7 +121,8 @@ export function normalizeUserTheme(raw: unknown): UserTheme | null {
     base: isUserThemeBase(value.base) ? value.base : 'dark',
     accent: normalizeAccent(value.accent),
     colors: normalizeColors(value.colors),
-    css: typeof value.css === 'string' ? value.css.slice(0, USER_THEME_LIMITS.css) : ''
+    // Never cut: CSS over the limit is refused where it is written (settings, theme_set, import, the editor).
+    css: typeof value.css === 'string' ? value.css : ''
   }
 }
 
@@ -166,7 +167,7 @@ export function parseUserThemeFile(text: string, taken: Iterable<string>): { the
   if (value.version !== USER_THEME_FILE_VERSION) return { error: 'This theme was made by a newer Mousse.' }
   const name = normalizeName(value.name)
   if (!name) return { error: 'The theme has no name.' }
-  if (typeof value.css === 'string' && value.css.length > USER_THEME_LIMITS.css) return { error: 'The theme\'s CSS is too long.' }
+  if (typeof value.css === 'string' && value.css.length > USER_THEME_LIMITS.css) return { error: themeCssTooLong(value.css.length) }
   const theme = normalizeUserTheme({ ...value, id: userThemeIdFor(name, taken), name })
   return theme ? { theme } : { error: 'This file is not a Mousse theme.' }
 }
@@ -209,6 +210,6 @@ export function themeStylingGuide(): string {
     'Stable selectors (other class names change without notice):',
     ...THEME_SELECTORS.map((entry) => `  ${entry.selector}: ${entry.part}`),
     'Where a person decides something (an approval, an ask, a host key) and on Settings pages other than Appearance, the theme is off.',
-    'Rules: nothing may load from outside. @import, image-set(), src(), attr() and any url() that is not data: or #id are dropped, rule by rule; invalid CSS is dropped by the browser rule by rule. Keep text readable (4.5:1 contrast) and do not hide controls.'
+    `Rules: nothing may load from outside. The only url() allowed is a quoted data: address, url("data:..."); @import, image-set(), src(), attr() and every other url() are dropped, declaration by declaration; invalid CSS is dropped by the browser rule by rule. CSS over ${THEME_CSS_MAX_LENGTH.toLocaleString('en-US')} characters is refused. Keep text readable (4.5:1 contrast) and do not hide controls.`
   ].join('\n')
 }

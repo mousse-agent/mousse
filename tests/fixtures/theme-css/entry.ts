@@ -47,7 +47,10 @@ function computeAll(): void {
     inMedia: style('#in-media', 'color'),
     keepData: style('#keep-data', 'background-image'),
     keyframes: style('#keep-anim', 'animation-name'),
-    nested: style('#keep-nest .inner', 'color')
+    nested: style('#keep-nest .inner', 'color'),
+    unquotedDataColor: style('#unquoted-data', 'color'),
+    unquotedDataImage: style('#unquoted-data', 'background-image'),
+    idUrlImage: style('#id-url', 'background-image')
   }),
   errors: () => errors
 }

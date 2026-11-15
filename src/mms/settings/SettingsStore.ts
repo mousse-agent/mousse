@@ -1,4 +1,5 @@
 import type { ContextSettings, MousseSettings, MousseSettingsUpdate } from '../../shared/settings'
+import { THEME_CSS_MAX_LENGTH, themeCssTooLong } from '../../shared/themes/cssSafety'
 import { BOTS_HERE_SHAPE, botSettingsWrite, CONTEXT_COMPACTION_DEFAULT_MARKER, DEFAULT_CONTEXT_COMPACTION_TOKENS, REMOVED_THEME_IDS, getDefaultSettings, normalizeAgentAccessSettings, normalizeAppearance, normalizeBotSettings, normalizeContextSettings, normalizeExperimentalSettings, normalizePermissionSettings, normalizeRunSettings, normalizeStorageSettings } from '../../shared/settings'
 import { MOUSSE_BUILTIN_TOOL_IDS } from '../../shared/integrations'
 import { generateRandomUsername } from '../../shared/randomUsername'
@@ -180,6 +181,12 @@ export class SettingsStore {
     const { bots, ...partial } = update as MousseSettingsUpdate & { bots?: unknown }
     const botsHere = Object.hasOwn(update, 'bots') ? botSettingsWrite(bots) : undefined
     if (Object.hasOwn(update, 'bots') && !botsHere) throw new Error(BOTS_HERE_SHAPE)
+    // A theme's CSS over the limit is refused, never cut, and nothing in the update is saved.
+    const themes = (partial.appearance as { userThemes?: unknown } | undefined)?.userThemes
+    if (Array.isArray(themes)) {
+      const long = themes.find((theme) => theme && typeof theme === 'object' && typeof (theme as { css?: unknown }).css === 'string' && ((theme as { css: string }).css.length > THEME_CSS_MAX_LENGTH))
+      if (long) throw new Error(`${themeCssTooLong((long as { css: string }).css.length)} Nothing was saved.`)
+    }
     const current = this.get()
     const merged = deepMerge(
       current as unknown as Record<string, unknown>,

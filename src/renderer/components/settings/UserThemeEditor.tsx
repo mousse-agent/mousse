@@ -3,6 +3,7 @@ import { THEME_OPTIONS, type AppearanceSettings } from '../../../shared/settings
 import { USER_THEME_BASES, USER_THEME_LIMITS, isUserThemeBase, type UserTheme } from '../../../shared/themes/userThemes'
 import { applyAppearance } from '../../hooks/useTheme'
 import { sanitizeThemeCss } from '../../lib/themeCss'
+import { themeCssTooLong } from '../../../shared/themes/cssSafety'
 import { Download, Trash2 } from '../../lib/icons'
 import { Select } from '../ui/Select'
 import { SettingsRow } from './SettingsRow'
@@ -77,7 +78,8 @@ export function UserThemeEditor({ theme, appearance, onSave, onDelete, onExport 
     void window.mousse.settings.get().then((settings) => applyAppearance(settings.appearance)).catch(() => {})
   }, [])
 
-  const dropped = useMemo(() => sanitizeThemeCss(draft.css).dropped, [draft.css])
+  const tooLong = draft.css.length > USER_THEME_LIMITS.css
+  const dropped = useMemo(() => (tooLong ? [] : sanitizeThemeCss(draft.css).dropped), [draft.css, tooLong])
   const update = (patch: Partial<UserTheme>): void => setDraft((current) => ({ ...current, ...patch }))
   const setSwatch = (key: string, value: string): void =>
     setDraft((current) => (key === 'accent' ? { ...current, accent: value } : { ...current, colors: { ...current.colors, [key]: value } }))
@@ -136,7 +138,9 @@ export function UserThemeEditor({ theme, appearance, onSave, onDelete, onExport 
         title="Custom CSS"
         anchor="appearance-custom-css"
         htmlFor="user-theme-css"
-        description={dropped.length
+        description={tooLong
+          ? <span role="alert" className="user-theme-dropped">{themeCssTooLong(draft.css.length)} Shorten it to save.</span>
+          : dropped.length
           ? <span className="user-theme-dropped" title={dropped.map((entry) => `${entry.text}: ${entry.reason}`).join('\n')}>{dropped.length === 1 ? '1 rule skipped' : `${dropped.length} rules skipped`}: themes can't load files or links.</span>
           : <span title="Applies as you type. Selectors and tokens: ask an agent for the theme guide, or see [data-mousse] attributes. Nothing can load from outside Mousse.">Applies as you type.</span>}
         className="user-theme-css-row"
@@ -146,13 +150,12 @@ export function UserThemeEditor({ theme, appearance, onSave, onDelete, onExport 
           className="user-theme-css"
           spellCheck={false}
           value={draft.css}
-          maxLength={USER_THEME_LIMITS.css}
           placeholder={'[data-mousse="sidebar"] {\n  font-family: ui-monospace, monospace;\n}'}
           onChange={(event) => update({ css: event.currentTarget.value })}
         />
       </SettingsRow>
       <div className="user-theme-actions">
-        <button type="button" className="settings-btn" disabled={!dirty || !draft.name.trim()} onClick={() => onSave({ ...draft, name: draft.name.trim() })}>Save</button>
+        <button type="button" className="settings-btn" disabled={!dirty || !draft.name.trim() || tooLong} onClick={() => { if (!tooLong) onSave({ ...draft, name: draft.name.trim() }) }}>Save</button>
         {dirty && <button type="button" className="settings-btn" onClick={discard}>Discard</button>}
         <span className="user-theme-actions-spacer" />
         <button type="button" className="settings-icon-btn" title="Export as a file" aria-label="Export theme" onClick={() => onExport(theme)}>
