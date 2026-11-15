@@ -1,7 +1,7 @@
 import { realpathSync } from 'node:fs'
 import { sep } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import type { BotChatMessage, BotChip, BotDetail, BotSummary } from '../../../shared/bots/personal/chat'
+import { withAppletNames, type BotChatApplet, type BotChatMessage, type BotChip, type BotDetail, type BotSummary } from '../../../shared/bots/personal/chat'
 import { BOT_MODEL_SLOT_KEYS, DEFAULT_BOT_MODEL, ENDED_ACTIVATION_STATUSES, MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS, type BotDefinition, type BotModelPick, type BotModelSlotKey, type BotModelSlots, type BotSchedule } from '../../../shared/bots/personal/definition'
 import { normalizeBotLook, type BotLook } from '../../../shared/bots/personal/look'
 import { isSpecialAsk } from '../../../shared/bots/personal/escalation'
@@ -166,7 +166,7 @@ export function chatInput(text: string, attachments: readonly SavedBotAttachment
  */
 export function messageInput(
   row: { id?: string; botId: string; text: string; attachments: readonly SavedBotAttachment[] | null; replyTo: string | null; questionId?: string },
-  quoted: (id: string) => { botId: string; author: 'owner' | 'bot'; text: string; questionId?: string } | undefined,
+  quoted: (id: string) => ({ botId: string; questionId?: string } & QuotedMessage) | undefined,
   question?: (id: string) => Pick<BotQuestionRow, 'status' | 'spec' | 'answer' | 'answerMessage' | 'follow'> | undefined
 ): string {
   const body = chatInput(row.text, row.attachments ?? undefined)
@@ -205,6 +205,9 @@ function cutQuote(value: string): string {
   return text.length > REPLY_QUOTE_CHARS ? `${text.slice(0, REPLY_QUOTE_CHARS - 1)}…` : text
 }
 
+/** A message a reply quotes, as the bot is told it: who wrote it, its words, and the applets it showed (by name). */
+interface QuotedMessage { author: 'owner' | 'bot'; text: string; attachments?: ReadonlyArray<{ applet?: BotChatApplet }> | null }
+
 /** The longest part of a quoted message the bot is shown with a reply. */
 const REPLY_QUOTE_CHARS = 600
 
@@ -212,8 +215,9 @@ const REPLY_QUOTE_CHARS = 600
  * The line before the owner's message when it replies to an earlier one, so the bot knows what "this" or "done" is
  * about: the bot's own message, or one the owner wrote before.
  */
-export function replyLine(quoted: { author: 'owner' | 'bot'; text: string }): string {
-  const cut = cutQuote(quoted.text)
+export function replyLine(quoted: QuotedMessage): string {
+  const applets = (quoted.attachments ?? []).flatMap((file) => (file.applet ? [file.applet] : []))
+  const cut = cutQuote(withAppletNames(quoted.text, applets))
   return quoted.author === 'bot' ? `(Replying to your message: "${cut}")` : `(About their earlier message: "${cut}")`
 }
 

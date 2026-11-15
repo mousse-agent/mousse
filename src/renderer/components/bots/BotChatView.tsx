@@ -1,6 +1,6 @@
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react'
 import { ArrowDown, Brain, ChevronRight, CircleAlert, Loader2, Reply, Shield, X } from '../../lib/icons'
-import type { BotChatApplet, BotChatMessage, BotChatQuote, BotError, BotSummary } from '../../../shared/bots/personal/chat'
+import { withAppletNames, type BotChatApplet, type BotChatMessage, type BotChatQuote, type BotError, type BotSummary } from '../../../shared/bots/personal/chat'
 import { BOT_COLOUR_HEX, normalizeBotLook } from '../../../shared/bots/personal/look'
 import { botFaceState, useBotsStore } from '../../stores/botsStore'
 import { openProvider, openSettingsSection } from '../../lib/settingsNavigation'
@@ -116,9 +116,10 @@ export function BotReplyQuote({ botId, quote, botName }: { botId: string; quote:
   </button>
 }
 
-/** A message as a reply quote: who wrote it and its first line. */
+/** A message as a reply quote: who wrote it, its applets by name and its first line (as the service quotes it). */
 export function quoteOf(message: BotChatMessage): BotChatQuote {
-  const line = (message.text || message.error?.text || message.attachments?.map((file) => file.name).join(', ') || '').trim().split('\n').find((part) => part.trim())?.trim() ?? ''
+  const words = (message.text || message.error?.text || message.attachments?.map((file) => file.name).join(', ') || '').trim().split('\n').find((part) => part.trim())?.trim() ?? ''
+  const line = withAppletNames(words, message.applets)
   return { id: message.id, author: message.author, text: line.length > 160 ? `${line.slice(0, 159)}…` : line }
 }
 
@@ -345,7 +346,7 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settl
     {saved && <button type="button" className="bot-memory-tag" title="Open it in Memory" onClick={() => store().openMemory(bot.id, saved.highlight)}>
       <Brain size={12} aria-hidden />Saved to memory
     </button>}
-    {!!message.applets?.length && <BotMessageApplets botId={bot.id} applets={message.applets} onOpen={onApplet} />}
+    {!!message.applets?.length && <BotMessageApplets botId={bot.id} applets={message.applets} onOpen={onApplet} message={message} onReply={onReply} />}
     {openAsk && <BotAskReplies ask={openAsk}
       onAnswer={async (answer) => {
         await store().answer(bot.id, openAsk.askId, answer)

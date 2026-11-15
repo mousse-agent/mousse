@@ -70,6 +70,21 @@ describe('a bot\'s applet', () => {
     expect(journaled.text).not.toContain('textContent')
   })
 
+  it('can be replied to: the reply quotes it by name, and the bot is told which applet the owner means', async () => {
+    const reference = published()
+    f.bots.chat.setReplyParts({ published: () => [reference] })
+    const { botId, firstActivation } = await createBot(f)
+    const { payload } = await start(f, firstActivation)
+    await finish(f, payload, 'completed', { text: `Here is your budget.\n\n${fence(budget)}` })
+    const withApplet = chatOf(f, botId).filter((message) => message.author === 'bot').at(-1)!
+
+    const { message } = await f.bots.service.chatSend({ botId, text: 'Make rent bigger', clientRequestId: 'r1', replyTo: withApplet.id })
+    expect(message.replyTo).toMatchObject({ id: withApplet.id, author: 'bot', text: 'Applet: Budget · Here is your budget.' })
+    const turn = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    const { prepared } = await start(f, turn.id)
+    expect(prepared.prompt).toBe('(Replying to your message: "Applet: Budget · Here is your budget.")\n\nMake rent bigger')
+  })
+
   it('is offered to a bot\'s chat and work turns, never to a consult, and is no permission anyone grants', async () => {
     const { firstActivation } = await createBot(f)
     const { prepared } = await start(f, firstActivation)
