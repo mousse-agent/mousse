@@ -119,6 +119,23 @@ describe('a bot\'s reply, drawn as a thread\'s', () => {
     await click(pane.querySelector('button[aria-label="Close"]'))
     expect(host.querySelector('aside.bot-applet-pane')).toBeNull()
   })
+
+  it('gives each applet its own Reply (the pointer over its content never reaches the page), quoting the message with the applet\'s name', async () => {
+    fake.chats.trip = [message(1, { id: 'b1', text: 'Your budget:', applets: [{ threadId: HOME, reference: budget }] })]
+    await open()
+    const replyButton = reply().querySelector('.bot-message-applet button[aria-label="Reply to Budget"]')
+    expect(replyButton).not.toBeNull()
+    await click(replyButton)
+    const replying = host.querySelector('.bot-replying')!
+    expect(replying.getAttribute('aria-label')).toBe("Replying to Trip planner's message: Applet: Budget · Your budget:")
+  })
+
+  it('quotes a message that is only an applet by the applet\'s name', async () => {
+    fake.chats.trip = [message(1, { id: 'b2', text: '', applets: [{ threadId: HOME, reference: budget }] })]
+    await open()
+    await click(reply().querySelector('button[aria-label="Reply to Budget"]'))
+    expect(host.querySelector('.bot-replying')!.getAttribute('aria-label')).toBe("Replying to Trip planner's message: Applet: Budget")
+  })
 })
 
 describe('a reply shaped by a web page', () => {

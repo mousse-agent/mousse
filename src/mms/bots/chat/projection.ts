@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { askText } from '../../../shared/bots/personal/askText'
-import { launchedActive, type BotAskCard, type BotAskStatus, type BotChatApplet, type BotChatMessage, type BotChatQuote, type BotLaunchedThread, type BotWorkItem, type BotChip, type BotDetail, type BotError, type BotMessageKind, type BotPermissionItem, type BotReminderItem, type BotRunItem, type BotSummary } from '../../../shared/bots/personal/chat'
+import { launchedActive, withAppletNames, type BotAskCard, type BotAskStatus, type BotChatApplet, type BotChatMessage, type BotChatQuote, type BotLaunchedThread, type BotWorkItem, type BotChip, type BotDetail, type BotError, type BotMessageKind, type BotPermissionItem, type BotReminderItem, type BotRunItem, type BotSummary } from '../../../shared/bots/personal/chat'
 import { BOT_MODEL_SLOT_KEYS, type BotDefinition, type BotLane, type BotManifest } from '../../../shared/bots/personal/definition'
 import { isPinned, limitOnPick, slotsOf, stuckRowsOf } from '../../../shared/bots/personal/modelSlots'
 import { askFingerprint, isSpecialAsk, mcpAskTools, type BotAskRequest, type BotEscalationStatus, type BotPermissionRequest } from '../../../shared/bots/personal/escalation'
@@ -374,9 +374,10 @@ export class BotChatProjection {
   private quoteOf(messageId: string): BotChatQuote {
     const quoted = this.store.message(messageId)
     if (!quoted) return { id: messageId, author: 'owner', text: '', gone: true }
-    // A message with no words is quoted by its files' and applets' names.
-    const text = oneLine(quoted.text || quoted.error?.text || plainCards(quoted.cards) || (quoted.attachments?.length ? quoted.attachments.map((file) => file.name).join(', ') : ''), 160)
-    return { id: quoted.id, author: quoted.author, text }
+    // Its applets by name first, then its words, or with none its files' names.
+    const files = filesOf(quoted)
+    const line = oneLine(quoted.text || quoted.error?.text || plainCards(quoted.cards) || files.map((file) => file.name).join(', '), 160)
+    return { id: quoted.id, author: quoted.author, text: oneLine(withAppletNames(line, appletsOf(quoted)), 160) }
   }
 
   card(escalation: BotEscalationRow): BotAskCard {

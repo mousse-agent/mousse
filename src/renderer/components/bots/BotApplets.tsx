@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
-import { X } from '../../lib/icons'
-import type { BotChatApplet } from '../../../shared/bots/personal/chat'
+import { Reply, X } from '../../lib/icons'
+import type { BotChatApplet, BotChatMessage } from '../../../shared/bots/personal/chat'
 import type { AppletConversation } from '../applets/appletActions'
 import { AppletCard } from '../applets/AppletCard'
 import { AppletPanelView } from '../applets/AppletPanelView'
@@ -35,11 +35,18 @@ export function botAppletConversation(botId: string, threadId: string): AppletCo
   return conversation
 }
 
-/** A reply's applets, each with its name (which opens it beside the chat) above its content. */
-export function BotMessageApplets({ botId, applets, onOpen }: { botId: string; applets: readonly BotChatApplet[]; onOpen(applet: BotChatApplet): void }) {
+/**
+ * A reply's applets, each with its name (which opens it beside the chat) above its content, and Reply beside the name.
+ * The applet's content is a separate view over the page, so the pointer on it never shows the tools beside the bubble;
+ * Reply here stays visible and replies to the whole message.
+ */
+export function BotMessageApplets({ botId, applets, onOpen, message, onReply }: { botId: string; applets: readonly BotChatApplet[]; onOpen(applet: BotChatApplet): void; message?: BotChatMessage; onReply?(message: BotChatMessage): void }) {
   return <div className="bot-message-applets">
-    {applets.map((applet) => <AppletCard key={`${applet.threadId}:${applet.reference.revisionId}`} reference={applet.reference}
-      conversation={botAppletConversation(botId, applet.threadId)} onOpen={() => onOpen(applet)} />)}
+    {applets.map((applet) => <div key={`${applet.threadId}:${applet.reference.revisionId}`} className="bot-message-applet">
+      <AppletCard reference={applet.reference} conversation={botAppletConversation(botId, applet.threadId)} onOpen={() => onOpen(applet)} />
+      {message && onReply && <button type="button" className="bot-applet-reply" aria-label={`Reply to ${applet.reference.title}`} title="Reply"
+        onClick={() => onReply(message)}><Reply size={14} aria-hidden /></button>}
+    </div>)}
   </div>
 }
 

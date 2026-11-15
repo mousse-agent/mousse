@@ -129,6 +129,17 @@ export interface BotChatApplet {
   reference: AppletReference
 }
 
+/**
+ * A quoted message's line with its applets named first ("Applet: Title · its first line"), so a reply to a message
+ * that is mostly an applet says which one, in the app and to the bot. `line` alone when it has none.
+ */
+export function withAppletNames(line: string, applets: readonly Pick<BotChatApplet, 'reference'>[] | undefined): string {
+  const titles = (applets ?? []).map((applet) => applet.reference.title.trim()).filter(Boolean)
+  if (!titles.length) return line
+  const names = `${titles.length === 1 ? 'Applet' : 'Applets'}: ${titles.join(', ')}`
+  return line ? `${names} · ${line}` : names
+}
+
 /** A quoted message: its id (to scroll to it), who wrote it and its first line. `gone` when it was removed. */
 export interface BotChatQuote {
   id: string

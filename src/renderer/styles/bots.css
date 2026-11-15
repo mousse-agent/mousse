@@ -189,6 +189,11 @@
 .bot-message-actions:has([data-read-aloud='loading'], [data-read-aloud='playing'], [data-read-aloud='paused']) { opacity: 1; }
 /* A reply's applets: the thread's card, under its words, as wide as the message (the message shrinks to its bubble). */
 .bot-message-applets { display: flex; flex-direction: column; gap: 12px; margin-top: 10px; align-self: stretch; min-width: 0; }
+/* Reply at the right end of each applet's name row, always shown: the pointer over the applet's content never reaches this page. */
+.bot-message-applet { position: relative; min-width: 0; }
+.bot-message-applet .mousse-applet-name { max-width: calc(100% - 28px); }
+.bot-applet-reply { position: absolute; top: 11px; right: 0; display: grid; place-items: center; width: 22px; height: 22px; border-radius: 6px; color: var(--text-secondary); }
+.bot-applet-reply:hover { background: color-mix(in srgb, var(--text-secondary) 12%, transparent); color: var(--text-primary); }
 /* An applet opened beside the chat: the thread's panel, filling the pane. */
 .bot-applet-pane { flex: 1 1 0; min-width: 320px; display: flex; flex-direction: column; border-left: 1px solid rgba(var(--accent-pale-rgb), .12); }
 .bot-applet-pane > .document-panel { flex: 1; min-height: 0; }
