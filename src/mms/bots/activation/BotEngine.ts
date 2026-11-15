@@ -7081,7 +7081,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   chatTurnToJoinInTx(botId: string, owner: BotOwnerTurn): string | undefined {
     const turns = this.store.laneActivations(botId, 'chat', ['running', 'queued'])
-      .filter((row) => ownerChatTurn(row) && row.trigger.kind === 'manual' && (row.trigger.owner?.limit ?? null) === (owner.limit ?? null))
+      .filter((row) => ownerChatTurn(row) && row.trigger.kind === 'manual' && (row.trigger.owner?.node ?? null) === (owner.node ?? null) && (row.trigger.owner?.limit ?? null) === (owner.limit ?? null))
     return turns.find((row) => row.status === 'running')?.id ?? turns.filter((row) => row.status === 'queued').at(-1)?.id
   }
 
@@ -7342,9 +7342,24 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       own = { mode: 'named', ...copyPick(input.model.pick), model: input.model.pick.model, depth: startDepthOf(main, { lane: 'run', trigger }) }
       if (!samePick(row.pick, input.model.pick)) trigger.model = { ...input.model.name }
     }
-    const summary = await this.enqueue(botId, `work:${input.key}`, trigger, 'run', undefined, own)
+    // Unfinished terminal attempts can be retried. Walk their durable keys so a retry's own replay (including
+    // after a restart) finds that attempt again. Completed work and work still in progress remain deduplicated.
+    const baseKey = `work:${input.key}`
+    let key = baseKey
+    let attempt = 1
+    let previous = this.store.activationByKey(key)
+    while (previous?.botId === botId && (previous.status === 'failed' || previous.status === 'cancelled')) {
+      key = `${baseKey}:attempt:${++attempt}`
+      previous = this.store.activationByKey(key)
+    }
+    // enqueue writes before its first await, so concurrent repeats also see the first request's row.
+    const replayed = previous !== undefined
+    const summary = await this.enqueue(botId, key, trigger, 'run', undefined, own)
     const row = this.store.activation(summary.id)!
-    const named = row.trigger.kind === 'work' && row.trigger.model ? { model: row.trigger.model } : {}
+    const named = {
+      ...(replayed ? { replayed: true as const } : {}),
+      ...(row.trigger.kind === 'work' && row.trigger.model ? { model: row.trigger.model } : {})
+    }
     if (ENDED_ACTIVATION_STATUSES.has(row.status)) return { workId: row.id, status: 'ended', ahead: [], ...named }
     if (row.status !== 'queued') return { workId: row.id, status: 'started', ahead: [], ...named }
     return { workId: row.id, status: 'queued', ahead: this.waitsBehind(row), ...named }
