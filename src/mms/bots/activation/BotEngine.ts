@@ -2181,7 +2181,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /** End and startup recovery share this consumption path; posting and deleting the key are one transaction. */
   private postChatDraft(row: BotActivationRow): void {
-    if (row.lane !== 'chat') return
+    if (row.lane !== 'chat' || !ENDED_ACTIVATION_STATUSES.has(row.status)) return
     const draft = this.chatDraft(row)
     if (!draft) return
     const later = this.store.get("SELECT 1 FROM bot_messages WHERE activation_id = ? AND author = 'bot' AND kind = 'text'", row.id)
@@ -6477,12 +6477,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         const row = this.store.activation(id as string)
         const main = row ? this.store.lastMainDispatch(row.id) : undefined
         if (!row || !main?.endedAt || this.store.message(`bm_${row.id}_d${main.n}`)) continue
+        if (!ENDED_ACTIVATION_STATUSES.has(row.status) && this.chatDraft(row)) continue
         this.postReply(row, main, row.result ?? '', false)
       } catch (error) {
         console.warn('a bot message could not be written at startup', { activationId: id, error: error instanceof Error ? error.message : String(error) })
       }
     }
-    for (const entry of this.store.all("SELECT a.id FROM bot_activations a JOIN bot_memory_state s ON s.bot_id = a.bot_id AND s.key = 'draft:' || a.id WHERE a.lane = 'chat' AND a.status IN ('done', 'failed', 'cancelled', 'paused', 'waiting_grant')")) {
+    for (const entry of this.store.all("SELECT a.id FROM bot_activations a JOIN bot_memory_state s ON s.bot_id = a.bot_id AND s.key = 'draft:' || a.id WHERE a.lane = 'chat' AND a.status IN ('done', 'failed', 'cancelled')")) {
       const row = this.store.activation(String(entry.id))
       if (row) this.postChatDraft(row)
     }
