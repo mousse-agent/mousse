@@ -253,7 +253,7 @@
     const { bots, chats } = await modules()
     bots.setBotsClient(stub)
     // Start the chat over, so the new state's rows are the only ones held.
-    bots.useBotsStore.setState({ chats: {}, chatLoad: {}, pending: {}, activity: {}, live: {}, aboutOpen: false, memoryOpen: null })
+    bots.useBotsStore.setState({ chats: {}, chatLoad: {}, pending: {}, activity: {}, live: {}, details: {}, aboutOpen: false, memoryOpen: null })
     await bots.useBotsStore.getState().refresh()
     await chats.useChatsStore.getState().openBot(BOT)
     const running = (summary(scenario).work ?? []).filter((item) => item.status === 'running').map((item) => item.id)

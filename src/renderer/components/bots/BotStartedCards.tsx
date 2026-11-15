@@ -51,7 +51,8 @@ export function BotAutomationRow({ botId, card }: { botId: string; card: BotAuto
           </span>
           <span className="subagent-card-line" title={failed ?? line}>
             {note && <span className="subagent-card-note" data-tone="attention">{note}</span>}
-            {note && <span className="subagent-card-sep" aria-hidden="true"> · </span>}
+            {/* A flex item drops its own outer spaces: the dot keeps them as no-break spaces. */}
+            {note && <span className="subagent-card-sep" aria-hidden="true">{'\u00a0·\u00a0'}</span>}
             <span className="subagent-card-result">{failed ?? line}</span>
           </span>
         </span>

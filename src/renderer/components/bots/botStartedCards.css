@@ -4,7 +4,6 @@
   align-items: center;
   gap: 4px;
   min-width: 0;
-  max-width: 420px;
 }
 
 .bot-started-card > .subagent-card {
@@ -21,6 +20,9 @@
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
+  justify-content: center;
+  /* As wide for Pause as for Resume, so the row's arrow never moves. */
+  min-width: 76px;
   gap: 4px;
   padding: 4px 8px;
   border: 0;
