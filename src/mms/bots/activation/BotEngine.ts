@@ -94,6 +94,7 @@ import { workWaits, type BotActivationRow, type BotDispatchRow, type BotSubagent
 import { BotCounterScope, BotSpendScope, type ActivationLimits } from '../store/scopes'
 import { isConnectionFailure, type BotConnectivity } from './connectivity'
 import { BotScheduleError, type BotScheduleBook, type BotScheduleEntry } from '../../scheduled/botJobs'
+import { isSilentOutput } from '../../scheduled/computeNextRun'
 import { tellMeNotifies } from '../../../shared/automations'
 import { BOT_COMPACTION_HOLD_MS, BotReloadAbort, BotRoomAbort, BotWallAbort, type BotBrowserHost, type BotTurnDispatcher, type BotTurnSteer, type PreparedBotTurn } from './dispatcher'
 
@@ -4470,11 +4471,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // A chat turn that handed work off and says its one line twice (before the work_start call and after it) says it
     // once. Any other reply is posted as written.
     const handedOff = row.lane === 'chat' && chips.some((chip) => WORK_STARTED_CHIPS.has(chip.text))
-    const body = handedOff ? sayOnce((text ?? '').trim()) : (text ?? '').trim()
+    const written = handedOff ? sayOnce((text ?? '').trim()) : (text ?? '').trim()
     // Only the last turn of a run reports; an earlier one (work that went on with the owner's notes) is an update.
     const report = row.lane === 'run' && row.status === 'done' && (this.store.lastMainDispatch(row.id)?.n ?? dispatch.n) === dispatch.n
     // Cards the turn made (`show_card`) go on its message, even one with no words.
     const cards = hasReplyCards(row.id)
+    // A scheduled run that found nothing new says `[SILENT]`, as any automation run is told to: its report is not
+    // posted, so the chat shows nothing. Open asks and cards it made still show, without the marker. Work the owner
+    // asked for and chat replies are posted as written.
+    const silent = report && row.trigger.kind === 'schedule' && isSilentOutput(written)
+    if (silent && !asks.length && !waiting && !cards) return
+    const body = silent ? '' : written
     if (!body && !chips.length && !asks.length && !report && !waiting && !questions.length && !cards) return
     // A turn that asked and said nothing else shows its question alone.
     const reply = Boolean(body || chips.length || asks.length || report || waiting || cards)
