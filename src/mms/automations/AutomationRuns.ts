@@ -354,6 +354,12 @@ export class AutomationRuns {
     )
   }
 
+  /** The level a bot activation's run reported (`run_report`, or quiet from a `[SILENT]` end); undefined with none. */
+  levelOfActivation(activationId: string): RunLevel | undefined {
+    const row = this.row('SELECT level FROM runs WHERE activation_id = ? ORDER BY started_at DESC LIMIT 1', activationId)
+    return isRunLevel(row?.level) ? (row!.level as RunLevel) : undefined
+  }
+
   /** `run_report`: the run's level and one line. At most one report per run; a second call replaces the first. */
   report(caller: { threadId: string; runId?: string; activationId?: string }, level: unknown, summary: unknown): InboxRun {
     if (!isRunLevel(level)) throw new RunReportError('level is quiet, fyi, look or needs_you')

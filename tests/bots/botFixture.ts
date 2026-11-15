@@ -25,6 +25,7 @@ import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
 import { ScheduledJobStore } from '../../src/mms/scheduled/ScheduledJobStore'
 import { ScheduledJobService } from '../../src/mms/scheduled/ScheduledJobService'
 import { BotScheduleBook } from '../../src/mms/scheduled/botJobs'
+import { AutomationRuns } from '../../src/mms/automations/AutomationRuns'
 
 export const T0 = Date.parse('2026-11-07T09:00:00.000Z')
 export const PI: ProviderSelection = { instanceId: 'pi:openrouter', model: 'some/model' }
@@ -42,6 +43,8 @@ export interface BotFixture {
   scheduler: ScheduledJobService
   /** Bots' schedules in the shared store. */
   book: BotScheduleBook
+  /** The Automations run log the scheduler records into, as in the app: where a run's `run_report` level is kept. */
+  automationRuns: AutomationRuns
   /** One tick of the shared scheduler at `now` (the fixture's clock moves there), and the schedule activations it inserted. */
   tickSchedules(now?: Date): Promise<{ inserted: string[] }>
   /** Candidates the fake resolver walks, in order; a limited one is skipped until its time. */
@@ -193,8 +196,12 @@ export function botFixture(): BotFixture {
   scheduler.setClock(() => new Date(clock.now))
   const book = new BotScheduleBook({ jobs: scheduler, label: (when) => host.scheduleLabel!(when), now: () => new Date(clock.now) })
   host.schedules = book
+  const automationRuns = new AutomationRuns({ profileHome: profile, clock: () => clock.now })
+  scheduler.setRunLedger(automationRuns)
+  host.runLevel = (activationId) => automationRuns.levelOfActivation(activationId)
   fixture.scheduler = scheduler
   fixture.book = book
+  fixture.automationRuns = automationRuns
   fixture.host = host
   fixture.bots = new BotEngine(host)
   scheduler.setBotRunner({ runOccurrence: (input) => fixture.bots.runScheduledOccurrence(input) })
@@ -209,6 +216,7 @@ export function botFixture(): BotFixture {
   fixture.close = () => {
     scheduler.beginShutdown()
     fixture.bots.close()
+    automationRuns.close()
     store.close()
     runDb.close()
     rmSync(base, { recursive: true, force: true })

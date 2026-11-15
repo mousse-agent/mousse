@@ -10,6 +10,7 @@ import { BOT_RUN_REPORT_LINE } from '../../src/mms/bots/memory/contextPack'
 import { botJobId, botScheduleProblem, scheduleProblem } from '../../src/mms/scheduled/botJobs'
 import { nextOccurrenceAfter } from '../../src/mms/scheduled/computeNextRun'
 import { slotsAllOn } from '../../src/shared/bots/personal/modelSlots'
+import type { RunLevel } from '../../src/shared/automationInbox'
 import { botFixture, chatOf, createBot, finish, flush, runDispatch, start, T0, type BotFixture } from './botFixture'
 
 const MIN = 60_000
@@ -319,25 +320,34 @@ describe('bot schedules in the shared scheduler', () => {
     expect(events.filter((event) => event.message.kind === 'run_report').at(-1)!.quiet).toBeUndefined()
   })
 
-  it('a scheduled run that says [SILENT] posts nothing in the chat; a report, and work the owner asked for, still show', async () => {
+  it('a scheduled run that reports quiet or says [SILENT] posts nothing in the chat; a report, and work the owner asked for, still show', async () => {
     await scheduled()
     const events: Array<{ message: { kind: string; text: string } }> = []
     f.bots.events.on('message', (event) => events.push(event))
     const before = chatOf(f, botId).length
-    // Each row is one occurrence's last message, and whether the chat shows it.
-    const rows: Array<[reply: string, shown: boolean]> = [
-      ['[SILENT]', false],
-      ['Nothing new on the site.\n[SILENT]', false],
-      ['Fixed two broken links.', true]
+    // Each row is one occurrence's last message, the level its run_report gave (none: it made no report), and
+    // whether the chat shows it.
+    const rows: Array<[reply: string, level: RunLevel | undefined, shown: boolean]> = [
+      ['[SILENT]', undefined, false],
+      ['Nothing new on the site.\n[SILENT]', undefined, false],
+      ['None of my threads are running, so I had nothing to merge.', 'quiet', false],
+      ['Fixed two broken links.', undefined, true],
+      ['Fixed two broken links.', 'fyi', true],
+      ['The checkout page is down.', 'look', true],
+      ['The certificate expires tomorrow: renew it or switch hosts?', 'needs_you', true]
     ]
-    for (const [index, [reply]] of rows.entries()) {
+    for (const [index, [reply, level]] of rows.entries()) {
       const { inserted } = await f.tickSchedules(new Date(T0 + (index + 1) * 5 * MIN))
+      // The run's run_report call, as the bot's tool makes it during its turn.
+      if (level) f.automationRuns.report({ threadId: '', activationId: inserted[0]! }, level, reply)
       await runDispatch(f, inserted[0]!, 1, { text: reply })
       expect(f.store.activation(inserted[0]!)).toMatchObject({ status: 'done' })
     }
-    const shown = rows.filter(([, keep]) => keep).map(([reply]) => reply)
+    const shown = rows.filter(([, , keep]) => keep).map(([reply]) => reply)
     expect(chatOf(f, botId).slice(before).map((message) => message.text)).toEqual(shown)
     expect(events.filter((event) => event.message.kind === 'run_report').map((event) => event.message.text)).toEqual(shown)
+    // A quiet run stays in Automations with its line.
+    expect(f.automationRuns.levelOfActivation(scheduledRuns()[2]!.id)).toBe('quiet')
     // Work the owner asked for is not a scheduled run: its reply is posted as written.
     await f.bots.service.chatSend({ botId, text: 'Check the site now', clientRequestId: 'm1' })
     const turn = f.store.laneActivations(botId, 'chat', ['running'])[0]!

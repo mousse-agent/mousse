@@ -96,6 +96,7 @@ import { isConnectionFailure, type BotConnectivity } from './connectivity'
 import { BotScheduleError, type BotScheduleBook, type BotScheduleEntry } from '../../scheduled/botJobs'
 import { isSilentOutput } from '../../scheduled/computeNextRun'
 import { tellMeNotifies } from '../../../shared/automations'
+import type { RunLevel } from '../../../shared/automationInbox'
 import { statusLineOf } from '../activity/statusLine'
 import type { ChatMessage } from '../../../shared/types'
 import { BOT_COMPACTION_HOLD_MS, BotReloadAbort, BotRoomAbort, BotWallAbort, type BotBrowserHost, type BotTurnDispatcher, type BotTurnSteer, type PreparedBotTurn } from './dispatcher'
@@ -184,6 +185,8 @@ export interface BotEngineHost {
    * one scheduler claims each occurrence and hands it to `runScheduledOccurrence`. Absent: no bot has schedules here.
    */
   schedules?: Pick<BotScheduleBook, 'list' | 'get' | 'add' | 'remove' | 'removeAll' | 'labelOf'> & Partial<Pick<BotScheduleBook, 'skipped'>>
+  /** The level a scheduled run's activation reported with `run_report` (`AutomationRuns`). Absent: none is known. */
+  runLevel?(activationId: string): RunLevel | undefined
   /** Wall-clock milliseconds, for the times `bots.db` records (default: `Date.now`). */
   clock?(): number
   /** Monotonic milliseconds, for measured active time (default: `performance.now`). */
@@ -674,6 +677,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * Whether a run report stays out of notifications: its schedule's Tell me is Only problems, and a report is a run
    * that ended done. Every run, Only news and a failure's error row notify as before.
    */
+  /** Whether a run's activation reported `quiet`: nothing worth saying. A lookup that fails counts as not quiet. */
+  private quietLevel(activationId: string): boolean {
+    try {
+      return this.host.runLevel?.(activationId) === 'quiet'
+    } catch {
+      return false
+    }
+  }
+
   private quietReport(botId: string, message: { kind?: string; activationId?: string } | undefined): boolean {
     if (message?.kind !== 'run_report' || !message.activationId) return false
     try {
@@ -4512,10 +4524,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const report = row.lane === 'run' && row.status === 'done' && (this.store.lastMainDispatch(row.id)?.n ?? dispatch.n) === dispatch.n
     // Cards the turn made (`show_card`) go on its message, even one with no words.
     const cards = hasReplyCards(row.id)
-    // A scheduled run that found nothing new says `[SILENT]`, as any automation run is told to: its report is not
-    // posted, so the chat shows nothing. Open asks and cards it made still show, without the marker. Work the owner
-    // asked for and chat replies are posted as written.
-    const silent = report && row.trigger.kind === 'schedule' && isSilentOutput(written)
+    // A scheduled run that found nothing new reports `quiet` (or says `[SILENT]`), as any automation run is told to:
+    // its report is not posted, so the chat shows nothing; the run and its line stay in Automations. Open asks and
+    // cards it made still show, without the marker. Work the owner asked for and chat replies are posted as written.
+    const silent = report && row.trigger.kind === 'schedule' && (isSilentOutput(written) || this.quietLevel(row.id))
     if (silent && !asks.length && !waiting && !cards) return
     const body = silent ? '' : written
     if (!body && !chips.length && !asks.length && !report && !waiting && !questions.length && !cards) return
