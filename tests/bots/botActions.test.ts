@@ -976,3 +976,21 @@ it.each([true, false].flatMap(on => ['work', 'subagent'].map(caller => ({ on, ca
   }
   expect(t.calls).toEqual(on ? [] : [t.args])
 })
+
+it('C4 service projects the complete stored review and settled results behind the switch', async () => {
+  const t = await setup(true)
+  t.args.body = 'Long outside text <b>not markup</b>\u202e '.repeat(2000)
+  Object.assign(t.args, { password: 'hidden-password', meta: { $mousse: 'hidden', text: 'hidden · will be sent' } })
+  await t.call()
+  const a = f.bots.actions.forWork(t.workId)!
+  f.store.run('UPDATE bot_actions SET bot_note = ? WHERE id = ?', 'Please review this', a.id)
+  const card = () => f.bots.service.chatList(t.botId).messages.find(m => m.id === a.message_id)!.action
+  expect(card()).toMatchObject({ actionId: a.id, digest: a.args_digest, title: 'Send', serverName: 'Mail', args: JSON.parse(a.args_json), hasHiddenValues: true, hiddenPaths: ['password'], note: 'Please review this', status: 'open' })
+  expect(JSON.stringify(card())).not.toContain('hidden-password')
+  for (const status of ['approved', 'running', 'done', 'failed', 'uncertain', 'declined', 'expired', 'withdrawn']) {
+    f.store.run('UPDATE bot_actions SET status = ?, result_json = ?, ran_at = ? WHERE id = ?', status, JSON.stringify({ text: 'masked answer', toolReportedError: true }), f.store.now(), a.id)
+    expect(card()).toMatchObject({ status, result: { text: 'masked answer', toolReportedError: true } })
+  }
+  f.host.settings!.get().experimental.botAsksFirst = false
+  expect(card()).toBeUndefined()
+})
