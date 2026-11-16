@@ -1740,13 +1740,21 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /** The bot's activations that hold a slot of `lane` now: running (waiting for the internet included) or at a wall. */
   private holding(botId: string, lane: BotLane): BotActivationRow[] {
-    return this.store.laneActivations(botId, lane, [...ACTIVE_HOLDING])
+    return [...this.store.laneActivations(botId, lane, [...ACTIVE_HOLDING]), ...this.finishingApprovals().filter(row => row.botId === botId && row.lane === lane)]
+  }
+
+  /** Parking persists immediately; its runtime keeps its slot until the executor settles the turn. */
+  private finishingApprovals(): BotActivationRow[] {
+    return [...this.live.keys()].flatMap(id => {
+      const row = this.store.activation(id)
+      return row?.status === 'blocked' && workWaitRule(row) === WORK_WAIT_RULES.approval && this.store.lastMainDispatch(id)?.endedAt === null ? [row] : []
+    })
   }
 
   /** How many run-lane activations of every bot of the profile hold a slot now, but `except`. */
   private profileRunsHeld(except?: string): number {
     const marks = ACTIVE_HOLDING.map(() => '?').join(', ')
-    return Number(this.store.get(`SELECT COUNT(*) AS n FROM bot_activations WHERE lane = 'run' AND status IN (${marks}) AND id != ?`, ...ACTIVE_HOLDING, except ?? '')?.n ?? 0)
+    return Number(this.store.get(`SELECT COUNT(*) AS n FROM bot_activations WHERE lane = 'run' AND status IN (${marks}) AND id != ?`, ...ACTIVE_HOLDING, except ?? '')?.n ?? 0) + this.finishingApprovals().filter(row => row.lane === 'run' && row.id !== except).length
   }
 
   /**
@@ -1784,7 +1792,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (runRank(row) === 0) return true
     const own = this.holding(row.botId, 'run').filter((other) => other.id !== row.id)
     if (own.filter((other) => runRank(other) > 0).length >= MAX_BACKGROUND_SLOTS_PER_BOT) return false
-    const profile = this.store.activationsWith([...ACTIVE_HOLDING]).filter((other) => other.lane === 'run' && other.id !== row.id && runRank(other) > 0)
+    const profile = [...this.store.activationsWith([...ACTIVE_HOLDING]), ...this.finishingApprovals()].filter((other) => other.lane === 'run' && other.id !== row.id && runRank(other) > 0)
     if (profile.length >= MAX_BACKGROUND_SLOTS_PER_PROFILE) return false
     return !(own.length + 1 >= MAX_RUN_SLOTS_PER_BOT && this.ownerWorkWaits(row.botId, row.id))
   }
