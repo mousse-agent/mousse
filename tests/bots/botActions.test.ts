@@ -976,3 +976,38 @@ it.each([true, false].flatMap(on => ['work', 'subagent'].map(caller => ({ on, ca
   }
   expect(t.calls).toEqual(on ? [] : [t.args])
 })
+
+// C3b inputs: open/approved/running, owner stop and engine end, wipes,
+// forgotten card/request, changed permission/tool, expiry, repeat and owner intervention.
+it.each(['open', 'approved'] as const)('withdraws %s calls atomically when work ends', async status => {
+  const t = await setup(true)
+  await t.call()
+  const a = f.bots.actions.forWork(t.workId)!
+  if (status === 'approved') f.bots.actions.transition(a.id, 'open', 'approved')
+  f.store.db.statement(`CREATE TRIGGER fail_card BEFORE UPDATE ON bot_messages WHEN OLD.id = '${a.message_id}' BEGIN SELECT RAISE(ABORT, 'card failure'); END`).run()
+  expect(() => f.store.moveActivation(t.workId, ['blocked'], 'cancelled')).toThrow('card failure')
+  expect(f.bots.actions.get(a.id)).toMatchObject({ status, exec_args: JSON.stringify(t.args) })
+  expect(f.store.activation(t.workId)?.status).toBe('blocked')
+  f.store.db.statement('DROP TRIGGER fail_card').run()
+  await f.bots.stopWork(t.botId, t.workId)
+  expect(f.bots.actions.get(a.id)).toMatchObject({ status: 'withdrawn', exec_args: null })
+  expect(f.store.message(a.message_id)?.text).toBe('Not sent')
+})
+
+it('expires on the due timer and carries its outcome until model output', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  expect(f.bots.nextDueAt(t.botId)).toBe(a.expires_at)
+  f.clock.now = Date.parse(a.expires_at)
+  f.timers.at(-1)!.fn()
+  await flush()
+  expect(f.bots.actions.get(a.id)).toMatchObject({ status: 'expired', exec_args: null })
+  expect(f.store.message(a.message_id)?.text).toBe('Expired · not sent')
+  expect(f.store.lastMainDispatch(t.workId)!.prompt.text).toContain('expired')
+  expect(f.store.unreadWorkActions(t.workId)).toHaveLength(1)
+  const receiving = await start(f, t.workId, 2)
+  ;(receiving.prepared as any).modelOutput?.()
+  expect(f.store.unreadWorkActions(t.workId)).toEqual([])
+  expect(t.calls).toEqual([])
+})
