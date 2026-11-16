@@ -1,4 +1,4 @@
-import { WORK_WAIT_RULES, workWaitRule, workReadiness, type WorkWaitFacts, type WorkWaitReason } from './workWaiting'
+import { WORK_WAIT_RULES, workWaitRule, workReadiness, workWaitLine, type WorkWaitFacts, type WorkWaitReason } from './workWaiting'
 import { isQuietHours } from '../../../shared/settings'
 import { BotTellings } from '../chat/BotTellings'
 import type { SettingsStore } from '../../settings/SettingsStore'
@@ -7688,7 +7688,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // Work that waits to go on is listed too: held while it waits for the owner, waiting its turn once allowed.
     const now = this.store.laneActivations(botId, 'run', ['running', 'waiting_grant', 'queued', 'paused', 'blocked']).filter((row) => row.status !== 'blocked' || workWaits(row)).sort(workOrder).map((row) => {
       const chip = this.liveChips.get(row.id)?.chip
-      const status = row.status === 'queued' || row.endReason === 'room_allowed' || row.endReason === 'question_answered' ? 'queued' as const : row.status === 'paused' || row.status === 'blocked' ? 'paused' as const : row.offline ? 'waiting_for_internet' as const : 'running' as const
+      const status = workWaitLine(row).status
       // Held for the owner's answer to its question, which the chat can pass on.
       const question = row.status === 'blocked' && row.endReason === 'question' ? this.store.workQuestion(row.id) : undefined
       return {
