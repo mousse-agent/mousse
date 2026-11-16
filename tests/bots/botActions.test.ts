@@ -156,8 +156,8 @@ it.each(['approved', 'running'] as const)('restart after %s never repeats a call
   f.bots = new BotEngine(f.host)
   await f.bots.reconcileOnStartup()
   await f.bots.actions.reconcile()
-  expect(t.calls).toEqual([])
-  expect(f.bots.actions.forWork(t.workId)).toMatchObject({ status: state === 'approved' ? 'failed' : 'uncertain', exec_args: null })
+  expect(t.calls).toEqual(state === 'approved' ? [t.args] : [])
+  expect(f.bots.actions.forWork(t.workId)).toMatchObject({ status: state === 'approved' ? 'done' : 'uncertain', exec_args: null })
 })
 it('answering before the old turn ends does not dispatch a second turn early', async () => {
   const t = await setup(true)

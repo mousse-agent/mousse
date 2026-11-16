@@ -157,8 +157,10 @@ export interface ActionRow {
   answered_at: string | null; ran_at: string | null; args_json: string; card_json: string | null; message_id: string; expires_at: string; result_json: string | null
 }
 /** Stored outcomes are timed updates, assembled with all other work updates at dispatch. */
-export function actionContinuation(action: Pick<ActionRow, 'status' | 'result_json'>): string {
+export function actionContinuation(action: Pick<ActionRow, 'status' | 'result_json'> & Partial<Pick<ActionRow, 'card_json'>>): string {
   const result = action.result_json ? JSON.parse(action.result_json) as BotMcpCallOutcome : undefined
+  if (JSON.parse(action.card_json ?? '{}').ownerRemoved) return 'Your owner removed this request. Do not ask for it again unless they write.'
+  if (result?.text === '[forgotten]') return 'The saved details of this outcome were removed.'
   if (result?.notSentInTime) return `${result.text} Nothing left Mousse. Decide whether a new request is needed.`
   const line = action.status === 'done' ? 'Your owner sent it. The tool answered:'
     : action.status === 'declined' ? 'Your owner chose not to send this: carry on without it and say what you skipped.'
@@ -202,6 +204,9 @@ export class BotActions {
           const pending = ['open', 'approved'].includes(String(action.status))
           if (pending) this.transition(String(action.id), String(action.status), 'withdrawn', { text: 'The request was forgotten. Nothing was sent.' })
           this.forgetText(botId, String(action.id))
+          if (action.message_id === messageId) this.host.store.run(`UPDATE bot_actions SET card_json = json_set(card_json,
+            '$.ownerRemoved', json('true'), '$.removedOwnerSeq', ?, '$.removedNoteSeq', ?) WHERE id = ?`,
+          host.store.ownerLastWroteSeq(botId), Number(host.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, `cursor:action-note:${action.activation_id}`)?.value ?? 0), String(action.id))
           if (!pending) continue
           const row = host.store.activation(String(action.activation_id))
           if (row && row.trigger.kind === 'work' && row.trigger.replyTo === messageId) host.forgottenRequest(row)
@@ -213,7 +218,8 @@ export class BotActions {
   /** Erase call content without erasing owner intervention facts or the run-once key. */
   forgetText(botId: string, actionId?: string): void {
     this.host.store.run(`UPDATE bot_actions SET args_json = ?, args_digest = '[forgotten]',
-      card_json = json_object('text', '[forgotten]', 'ownerSeq', COALESCE(json_extract(card_json, '$.ownerSeq'), 0), 'noteSeq', COALESCE(json_extract(card_json, '$.noteSeq'), 0)),
+      card_json = json_object('text', '[forgotten]', 'ownerSeq', COALESCE(json_extract(card_json, '$.ownerSeq'), 0), 'noteSeq', COALESCE(json_extract(card_json, '$.noteSeq'), 0),
+        'ownerRemoved', json_extract(card_json, '$.ownerRemoved'), 'removedOwnerSeq', json_extract(card_json, '$.removedOwnerSeq'), 'removedNoteSeq', json_extract(card_json, '$.removedNoteSeq')),
       bot_note = ?, result_json = ? WHERE bot_id = ? AND (? IS NULL OR id = ?)`,
     '"[forgotten]"', '[forgotten]', '{"text":"[forgotten]"}', botId, actionId ?? null, actionId ?? null)
   }
@@ -258,10 +264,10 @@ export class BotActions {
     const dispatch = this.host.store.dispatches(activationId).find(d => d.clientRequestId === dispatchId)
     return dispatch && (dispatch.n === mainN || dispatch.mainN === mainN) ? action : undefined
   }
-  private ownerWroteAfter(action: ActionRow): boolean {
+  private ownerWroteAfter(action: ActionRow, removed = false): boolean {
     const card = JSON.parse(action.card_json ?? '{}')
     const note = Number(this.host.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', action.bot_id, `cursor:action-note:${action.activation_id}`)?.value ?? 0)
-    return this.host.store.ownerLastWroteSeq(action.bot_id) > Number(card.ownerSeq ?? 0) || note > Number(card.noteSeq ?? 0)
+    return this.host.store.ownerLastWroteSeq(action.bot_id) > Number((removed ? card.removedOwnerSeq : card.ownerSeq) ?? 0) || note > Number((removed ? card.removedNoteSeq : card.noteSeq) ?? 0)
   }
   private refuse(row: BotActivationRow, action: ActionRow, text: string): ToolOutcome {
     this.host.store.recordWorkRefusal(row.id, row.botId, `${action.id}:${text.startsWith('Your owner declined') ? 'repeat' : 'loop'}`, text)
@@ -274,6 +280,8 @@ export class BotActions {
     const existing = this.host.store.get('SELECT id FROM bot_actions WHERE call_key = ?', callKey)
     if (existing) return { text: 'This call is held for your owner. End your turn now.' }
     if (pending.has(this.forWork(row.id)?.status ?? '')) return { text: 'A call is already held for your owner. End your turn now.', isError: true }
+    const removed = (this.host.store.all("SELECT * FROM bot_actions WHERE activation_id = ? AND target_json = ? AND json_extract(card_json, '$.ownerRemoved') = 1 ORDER BY rowid DESC", row.id, JSON.stringify({ server: tool.server, tool: tool.tool })) as unknown as ActionRow[]).find(action => !this.ownerWroteAfter(action, true))
+    if (removed) return this.refuse(row, removed, 'Your owner removed this request. Do not ask for it again unless they write.')
     const declined = this.host.store.all("SELECT * FROM bot_actions WHERE activation_id = ? AND target_json = ? AND status IN ('declined', 'expired') ORDER BY rowid DESC", row.id, JSON.stringify({ server: tool.server, tool: tool.tool })) as unknown as ActionRow[]
     const unanswered = declined.filter(action => !this.ownerWroteAfter(action))
     if (unanswered.length >= MAX_SAME_WAKES)
