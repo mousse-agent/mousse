@@ -1,3 +1,4 @@
+import { formatMessageTime } from '../../chat/components/agent-elements/utils/message-time'
 import { Fragment, memo, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
 import { Activity, AppWindow, Brain, ChevronDown, ChevronRight, Circle, CircleAlert, CircleCheck, CircleDotDashed, CircleX, Clock, Eye, EyeOff, FileText, Globe, Moon, Pencil, Search, TerminalSquare, X } from '../../lib/icons'
 import type { BotChip, BotLaunchedThread, BotSummary, BotWatcherItem, BotWorkItem } from '../../../shared/bots/personal/chat'
@@ -20,6 +21,12 @@ export function workElapsed(startedAt: string, now = Date.now()): string {
 function workDoing(item: BotWorkItem, chip: BotChip | undefined): string {
   if (item.status === 'queued') return 'queued'
   if (item.status === 'waiting_for_internet') return 'waiting for internet'
+  if (item.wait) {
+    const event = item.wait.event
+    if (!event) return `checks again at ${formatMessageTime(item.wait.dueAt)}`
+    if (event.kind === 'pr') return `waits for ${event.repo}#${event.number}${event.on === 'checks' ? ' · its checks' : event.on === 'review' ? ' · a review' : ''}`
+    return `waits for ${event.kind === 'thread' ? event.title ?? 'thread' : event.title}`
+  }
   if (item.status === 'paused') return item.waitsFor === 'answer' ? 'waiting on you' : 'held'
   return chip ? `${chip.text}${chip.highlight ? ` ${chip.highlight}` : ''}` : 'working'
 }
