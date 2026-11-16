@@ -3,6 +3,7 @@ import type { BotStoreTx } from '../store/BotStore'
 /** Per open database, never persisted: a disabled feature installs no active behavior. */
 export interface HeldCallLifecycle {
   endWork(id: string): void
+  grantChanged(botId: string): void
   forgetMessage(botId: string, messageId: string): void
 }
 const lifecycles = new WeakMap<BotStoreTx, HeldCallLifecycle>()

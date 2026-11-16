@@ -1166,6 +1166,7 @@ export class BotStore {
       const at = this.now()
       this.run('UPDATE bot_grants SET revoked_at = ? WHERE bot_id = ? AND revoked_at IS NULL', at, botId)
       this.run('INSERT INTO bot_grants(bot_id, digest, manifest_json, approved_at) VALUES(?, ?, ?, ?)', botId, digest, JSON.stringify(manifest), at)
+      heldCalls(this.db)?.grantChanged(botId)
       return { botId, digest, manifest, approvedAt: at }
     })
   }

@@ -190,6 +190,7 @@ export class BotActions {
   constructor(private readonly host: Host) {
     registerHeldCalls(host.store.db, {
       endWork: id => this.withdrawWork(id),
+      grantChanged: () => this.withdrawChanged(),
       forgetMessage: (botId, messageId) => {
         if (!host.enabled()) return
         const ids = host.store.all(`SELECT a.* FROM bot_actions a JOIN bot_activations w ON w.id = a.activation_id
