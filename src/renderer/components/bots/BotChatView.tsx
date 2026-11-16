@@ -228,11 +228,14 @@ function WorkedToggle({ ms, open, onToggle }: { ms?: number; open: boolean; onTo
   </button>
 }
 
-/** `starts`: the first message of its group, with the group's space above it (messageGroups.ts). `marks`: what the bot's replies left on it. */
-interface OwnerMessageProps { botId: string; message: BotChatMessage; pending: boolean; botName: string; quote: boolean; starts: boolean; marks?: OwnerMarks; onReply?(message: BotChatMessage): void }
+/**
+ * `starts`: the first message of its group, with the group's space above it (messageGroups.ts). `time`: shows its time
+ * (the last of a run in one minute does). `marks`: what the bot's replies left on it.
+ */
+interface OwnerMessageProps { botId: string; message: BotChatMessage; pending: boolean; botName: string; quote: boolean; starts: boolean; time: boolean; marks?: OwnerMarks; onReply?(message: BotChatMessage): void }
 
 // Messages render again only when they change: a poll, a live chip or the bot starting work leaves them alone.
-const OwnerMessage = memo(function OwnerMessage({ botId, message, pending, botName, quote, starts, marks, onReply }: OwnerMessageProps) {
+const OwnerMessage = memo(function OwnerMessage({ botId, message, pending, botName, quote, starts, time, marks, onReply }: OwnerMessageProps) {
   const quoted = quote && message.replyTo
   return <article className={`chat-participant-message from-person bot-you${starts ? ' is-group-start' : ''}${quoted ? ' is-quoted' : ''}${pending ? ' is-pending' : ''}`} data-message-id={message.id}>
     {quoted && <BotReplyQuote botId={botId} quote={message.replyTo!} botName={botName} />}
@@ -246,11 +249,11 @@ const OwnerMessage = memo(function OwnerMessage({ botId, message, pending, botNa
         {!!message.attachments?.length && <BotImageFiles files={message.attachments} />}
         {message.text && <div className="bot-you-bubble">
           <WithSentQuotes text={message.text} render={(part) => <Markdown content={part} className="bot-markdown" images={BOT_IMAGES} />} />
-          <BubbleTime message={message} pending={pending} />
+          {(time || pending) && <BubbleTime message={message} pending={pending} />}
           {marks?.reaction && <span className="bot-reaction" role="img" aria-label={`${botName} reacted ${marks.reaction}`} title={`${botName} reacted`}>{marks.reaction}</span>}
         </div>}
         {!!message.attachments?.length && <BotOtherFiles files={message.attachments} />}
-        {!message.text && <BubbleTime message={message} pending={pending} />}
+        {!message.text && (time || pending) && <BubbleTime message={message} pending={pending} />}
       </div>
     </div>
     {marks?.passedOn && <p className="bot-receipt" title={marks.title}>Noted</p>}
@@ -259,16 +262,16 @@ const OwnerMessage = memo(function OwnerMessage({ botId, message, pending, botNa
 
 /** A bot message uses only the bot's id, name and look, so a change of its state does not render it again. */
 const sameBotMessage = (a: BotMessageProps, b: BotMessageProps) => a.message === b.message && a.asked === b.asked && a.onAction === b.onAction && a.browser === b.browser &&
-  a.quote === b.quote && a.starts === b.starts && a.onReply === b.onReply && a.onApplet === b.onApplet && a.settled === b.settled &&
+  a.quote === b.quote && a.starts === b.starts && a.time === b.time && a.onReply === b.onReply && a.onApplet === b.onApplet && a.settled === b.settled &&
   a.bot.id === b.bot.id && a.bot.name === b.bot.name
 
 /**
  * `browser`: the live preview of the bot's browser, on the reply of the last run that used it. `quote`: show the
  * message this one answers (it is not the one right above). `starts`: the first of its group, with the group's space
- * above it. `asked`: the message it answers, when loaded (how long it took). `onApplet`: opens one of its applets beside
+ * above it. `time`: shows its time (the last of a run in one minute does). `asked`: the message it answers, when loaded (how long it took). `onApplet`: opens one of its applets beside
  * the chat.
  */
-interface BotMessageProps { bot: BotSummary; message: BotChatMessage; onAction(action: NonNullable<BotError['action']>): void; settled?: boolean; browser?: ReactNode; quote: boolean; starts: boolean; onReply(message: BotChatMessage): void; asked?: BotChatMessage; onApplet(applet: BotChatApplet): void }
+interface BotMessageProps { bot: BotSummary; message: BotChatMessage; onAction(action: NonNullable<BotError['action']>): void; settled?: boolean; browser?: ReactNode; quote: boolean; starts: boolean; time: boolean; onReply(message: BotChatMessage): void; asked?: BotChatMessage; onApplet(applet: BotChatApplet): void }
 
 /**
  * A reply's tools hang off its bubble's right edge: beside a wide bubble they move left, inside the transcript. Measured
@@ -316,7 +319,7 @@ function useReclampOpenTools(transcript: RefObject<HTMLDivElement | null>) {
  * ones a tool handed it among them). Every chip of its work folds behind "Worked for", none dropped. Read aloud, Copy and
  * Reply show beside it on hover; its applets sit under it; an open ask is quick replies under it.
  */
-const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settled, browser, quote, starts, onReply, asked, onApplet }: BotMessageProps) {
+const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settled, browser, quote, starts, time, onReply, asked, onApplet }: BotMessageProps) {
   const store = useBotsStore.getState
   // A question's answers are buttons under it, so its words stop where their plain copy starts; a service whose
   // questions can't be answered here keeps that copy, and the owner answers with Reply.
@@ -376,10 +379,10 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settl
         {!!message.attachments?.length && <BotOtherFiles files={message.attachments} />}
         {message.error && <BotErrorLine error={message.error} onAction={onAction} settled={settled} />}
         {stepsOpen && <BotSteps chips={steps} />}
-        <div className="bot-bubble-foot">
+        {(steps.length > 0 || time) && <div className="bot-bubble-foot">
           {steps.length > 0 && <WorkedToggle ms={ms} open={stepsOpen} onToggle={() => setStepsOpen((open) => !open)} />}
-          <BubbleTime message={message} />
-        </div>
+          {time && <BubbleTime message={message} />}
+        </div>}
         {message.reaction && <BotReactionBadge emoji={message.reaction} onRemove={() => react(null)} />}
       </div>
       {/* As beside a thread's reply: read it aloud, copy it as written, reply to it. Anchored to the bubble's lower
@@ -558,7 +561,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   }, [messages, bot.name, notes])
   // The sent rows and the messages on their way, in one run of groups (a quiet line ends a group), with the day lines.
   const shown = useMemo<BotChatRow[]>(() => (pending.length ? [...rows, ...pending.map((message) => ({ kind: 'message' as const, message }))] : rows), [rows, pending])
-  const places = useMemo(() => placeMessages(shown.map((row) => (row.kind === 'message' ? row.message : { author: 'system', at: row.at }))), [shown])
+  const places = useMemo(() => placeMessages(shown.map((row, index) => (row.kind === 'message' ? { author: row.message.author, at: row.message.at, sending: index >= rows.length } : { author: 'system', at: row.at }))), [shown, rows.length])
   // Only the newest rows are drawn (botChatWindow.ts). `from`: the first row drawn while the reader is away from the
   // end; without it, the newest rows. `revealOlder`: a page asked for at the window's top shows once it arrives.
   const [from, setFrom] = useState<string | undefined>(undefined)
@@ -775,8 +778,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
           return <Fragment key={message.id}>
             {day}
             {message.author === 'owner'
-              ? <OwnerMessage botId={bot.id} message={message} pending={sending} botName={bot.name} quote={quote} starts={place.starts} marks={(marks ?? NO_MARKS).get(message.id)} onReply={sending ? undefined : reply} />
-              : <BotMessage bot={bot} message={message} onAction={act} settled={message.error?.action?.kind === 'resume' && message.id !== resumeOn} browser={message.id === previewOn ? preview : undefined} quote={quote} starts={place.starts} onReply={reply} onApplet={openApplet}
+              ? <OwnerMessage botId={bot.id} message={message} pending={sending} botName={bot.name} quote={quote} starts={place.starts} time={place.time} marks={(marks ?? NO_MARKS).get(message.id)} onReply={sending ? undefined : reply} />
+              : <BotMessage bot={bot} message={message} onAction={act} settled={message.error?.action?.kind === 'resume' && message.id !== resumeOn} browser={message.id === previewOn ? preview : undefined} quote={quote} starts={place.starts} time={place.time} onReply={reply} onApplet={openApplet}
                 asked={message.replyTo ? byId.get(message.replyTo.id) : undefined} />}
           </Fragment>
         })}

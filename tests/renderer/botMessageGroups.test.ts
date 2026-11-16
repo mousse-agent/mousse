@@ -39,6 +39,26 @@ describe('groups', () => {
   })
 })
 
+describe('times', () => {
+  const times = (messages: Array<{ author: string; at: string; sending?: boolean }>) => placeMessages(messages, now).map((place) => place.time)
+  const system = (when: string) => ({ author: 'system', at: when })
+
+  // Each row: the messages in order, and which of them show their time. Only the last of a run (one sender, in a
+  // row, in one minute) shows it; anything else between them ends the run.
+  it.each([
+    ['one sender, one minute: only the last', [owner(at(11, 11, 27, 5)), owner(at(11, 11, 27, 20)), owner(at(11, 11, 27, 59))], [false, false, true]],
+    ['one sender across a minute change', [owner(at(11, 11, 27, 50)), owner(at(11, 11, 28, 5))], [true, true]],
+    ['another sender between', [bot(at(11, 11, 27, 5)), owner(at(11, 11, 27, 10)), bot(at(11, 11, 27, 15))], [true, true, true]],
+    ['two runs back to back', [owner(at(11, 11, 27, 5)), owner(at(11, 11, 27, 6)), bot(at(11, 11, 27, 7)), bot(at(11, 11, 27, 8))], [false, true, false, true]],
+    ['a quiet line between', [bot(at(11, 11, 27, 5)), system(at(11, 11, 27, 6)), bot(at(11, 11, 27, 7))], [true, true, true]],
+    ['no readable time', [owner('nope'), owner('nope')], [true, true]],
+    ['a message on its way after one sent', [owner(at(11, 11, 27, 5)), { ...owner(at(11, 11, 27, 6)), sending: true }], [true, true]],
+    ['two on their way', [{ ...owner(at(11, 11, 27, 5)), sending: true }, { ...owner(at(11, 11, 27, 6)), sending: true }], [true, true]]
+  ] as const)('%s', (_name, messages, shown) => {
+    expect(times([...messages])).toEqual(shown)
+  })
+})
+
 describe('day lines', () => {
   it('says Today, Yesterday, the date, and the year only for another year', () => {
     expect(botDayLabel(at(11, 0, 5), now)).toBe('Today')
