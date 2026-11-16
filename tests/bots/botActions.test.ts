@@ -2088,3 +2088,20 @@ it.each(['done', 'declined', 'tool_error', 'uncertain', 'pending'] as const)('C4
   if (before.ran_at || before.answered_at) expect(card.at).toBe(before.ran_at ?? before.answered_at)
   for (const field of ['ownerRemoved', 'ownerSeq', 'noteSeq', 'removedOwnerSeq', 'removedNoteSeq', 'private tool answer', 'Exact text']) expect(JSON.stringify(card)).not.toContain(field)
 })
+
+it('C4 integration nudge ids project the same stored review and follow settlement', async () => {
+  const t = await setup(true)
+  await t.call()
+  const a = f.bots.actions.forWork(t.workId)!
+  const original = () => f.bots.service.actionMessage(t.botId, a.id).action!
+  for (const suffix of ['n1', 'n2', 'n3', 'n1_extra']) f.bots.chat.post({ id: `${a.message_id}_${suffix}`, botId: t.botId, author: 'bot', kind: 'notice', text: 'Source text must not become card content', replyTo: a.message_id })
+  const projected = (suffix: string) => f.bots.service.chatList(t.botId).messages.find(message => message.id === `${a.message_id}_${suffix}`)!
+  for (const suffix of ['n1', 'n2']) { expect(projected(suffix).action).toEqual(original()); expect(projected(suffix).replyTo?.id).toBe(a.message_id) }
+  for (const suffix of ['n3', 'n1_extra']) expect(projected(suffix).action).toBeUndefined()
+  await f.bots.service.answerAction({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  for (const suffix of ['n1', 'n2']) expect(projected(suffix).action).toEqual(original())
+  expect(projected('n1').action?.status).toBe('done')
+  expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
+  f.host.settings!.get().experimental.botAsksFirst = false
+  for (const suffix of ['n1', 'n2']) expect(projected(suffix).action).toBeUndefined()
+})
