@@ -5153,7 +5153,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       }
       // A denied limit is not asked again: the activation ends blocked.
       if (answers.some((answer) => answer.status === 'denied' && 'budget' in answer.permission)) {
-        if (!durableWork) for (const answer of answers) this.store.markApplied(answer.id)
+        for (const answer of answers) this.store.markApplied(answer.id)
         this.store.moveActivation(row.id, [current.status], 'blocked', { endReason: 'budget_denied' })
         return { kind: 'blocked' }
       }
