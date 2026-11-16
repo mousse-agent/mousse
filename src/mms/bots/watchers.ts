@@ -130,6 +130,20 @@ export class BotWatchers {
       }))
   }
 
+  /** The watchers running now with their process, folder and the end of their output: the running list (`RunningRegistry`). */
+  processes(): Array<{ id: string; botId: string; title: string; command: string; pid?: number; cwd: string; startedAt: number; output: string }> {
+    return [...this.running.values()].map((entry) => ({
+      id: entry.spec.id,
+      botId: entry.spec.botId,
+      title: entry.spec.title,
+      command: entry.spec.command,
+      ...(entry.child.pid !== undefined ? { pid: entry.child.pid } : {}),
+      cwd: entry.spec.cwd,
+      startedAt: entry.startedAt,
+      output: entry.tail
+    }))
+  }
+
   /** Starts `spec`'s command. Throws when it can't start (the shell is missing); then `onEnd` is never called. */
   start(spec: WatcherSpec): void {
     if (this.running.has(spec.id)) return

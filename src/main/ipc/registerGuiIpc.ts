@@ -2736,6 +2736,7 @@ export function registerGuiIpc(
         command?: string
         env?: Record<string, string>
         shellArgs?: string[]
+        label?: string
       }
     ) => {
       // The terminal belongs to the thread its tab names, not to whichever thread the window shows when it starts.
@@ -2758,7 +2759,8 @@ export function registerGuiIpc(
               cwd: request.cwd,
               command: request.command,
               env: request.env,
-              shellArgs: request.shellArgs
+              shellArgs: request.shellArgs,
+              ...(typeof request.label === 'string' && request.label.trim() ? { label: request.label.trim().slice(0, 60) } : {})
             }
       )
       return { ptyId: res.ptyId }

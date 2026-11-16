@@ -190,6 +190,7 @@ function classify(tool: string, input: unknown, ctx: BotChipContext): Classified
     case 'watch_start': return { kind: 'watch', icon: 'schedule', live: 'starting a background command' }
     case 'watch_stop': return { kind: 'unwatch', icon: 'schedule', live: 'stopping a background command' }
     case 'watch_list': return { kind: 'work_look', icon: 'think', live: 'checking its background work' }
+    case 'running_list': return { kind: 'work_look', icon: 'think', live: 'checking what is running' }
     case 'reminder_cancel': return { kind: 'unremind', icon: 'schedule', live: 'cancelling a reminder' }
     case 'reminder_list': return { kind: 'schedules', icon: 'schedule', live: 'checking its reminders' }
     // The owner's threads ("use your threads"): what it read rolls up into one chip; each start, message and stop is its

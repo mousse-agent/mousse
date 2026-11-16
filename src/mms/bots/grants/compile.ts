@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { realpathSync } from 'node:fs'
 import type { BotManifest, BotThreadSpec } from '../../../shared/bots/personal/definition'
-import { BOT_APP_TOOLS, BOT_APPLET_TOOL, BOT_CARD_TOOL, BOT_MESSAGE_TOOLS, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_PROFILER_CHAT_TOOLS, BOT_PROFILER_PERMISSION, BOT_PROFILER_TOOLS, BOT_THEME_TOOLS, BOT_THEMES_PERMISSION, BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest, BOT_SUBAGENT_APP_TOOLS, BOT_SUBAGENT_TOOLS } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_APPLET_TOOL, BOT_CARD_TOOL, BOT_MESSAGE_TOOLS, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_RUNNING_TOOL, BOT_PROFILER_CHAT_TOOLS, BOT_PROFILER_PERMISSION, BOT_PROFILER_TOOLS, BOT_THEME_TOOLS, BOT_THEMES_PERMISSION, BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest, BOT_SUBAGENT_APP_TOOLS, BOT_SUBAGENT_TOOLS } from '../../../shared/bots/personal/manifest'
 import { BOT_MEMORY_TOOLS } from '../../../shared/bots/personal/memory'
 import type { NeutralTool } from '../../../shared/harness/tools'
 import type { BindPolicy, HarnessCaps, HarnessError } from '../../../shared/harness/types'
@@ -215,8 +215,9 @@ export function compileBotThread(input: CompileInput): CompileResult {
     ...(own?.consult ? ['consult'] : []),
     ...(own?.workWaiting ? ['work_wait'] : []),
     ...(own?.scheduled ? ['schedule_done'] : []),
-    // Always on, like memory: the listing of the owner's MCP servers, so the bot can ask for the right one.
-    ...(own?.memory ? [...BOT_MEMORY_TOOLS, BOT_MCP_LIST_TOOL] : []),
+    // Always on, like memory: the listing of the owner's MCP servers, so the bot can ask for the right one, and what runs
+    // in its folders, so it reuses a running server instead of starting another.
+    ...(own?.memory ? [...BOT_MEMORY_TOOLS, BOT_MCP_LIST_TOOL, BOT_RUNNING_TOOL] : []),
     ...(own?.frontDesk ? BOT_WORK_TOOLS.filter((tool) => tool !== 'watch_start' || own.watcherStart === true) : []),
     ...(own?.images ? [BOT_IMAGE_TOOL] : []),
     ...(own?.applets ? [BOT_APPLET_TOOL] : []),

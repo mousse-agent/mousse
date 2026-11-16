@@ -1354,6 +1354,8 @@ export interface PtyCreateRequest {
   command?: string
   env?: Record<string, string>
   shellArgs?: string[]
+  /** The quick action that opened the terminal: agents are told it runs, by this name. */
+  label?: string
 }
 
 export interface PtyCreateResult {
@@ -2422,5 +2424,7 @@ export interface ProjectTerminalTab {
   cwd?: string
   title: string
   exited: boolean
+  /** The quick action that opened this terminal: its shell is started with it as its label (`PtyCreateRequest.label`). */
+  quickAction?: string
 }
 export type { PlatformRequestApi, PlatformRequestErrorShape, PlatformRequestMethod, PlatformResponse } from './platform'

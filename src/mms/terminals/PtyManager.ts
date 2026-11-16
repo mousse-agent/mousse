@@ -39,6 +39,10 @@ export interface PtySession {
   /** Interrupted after daemon restart (process not reattachable). */
   interrupted: boolean
   handle: WorkerHandle
+  /** The folder it started in. */
+  cwd: string
+  /** The quick action that opened it (`PtyCreateOptions.label`). */
+  label?: string
 }
 
 export interface PtyCreateOptions {
@@ -46,6 +50,8 @@ export interface PtyCreateOptions {
   shellArgs?: string[]
   threadId?: string
   ownership?: { assert(): void; heartbeat(): void; settled(): Promise<void> }
+  /** The quick action that opened the terminal, told to agents with what runs in it (`RunningRegistry`). */
+  label?: string
 }
 
 export type TerminalSendSink = (channel: string, data: unknown) => void
@@ -174,7 +180,9 @@ export class PtyManager extends EventEmitter {
       pty: instance,
       sequence: 0,
       interrupted: false,
-      handle
+      handle,
+      cwd: resolvedCwd,
+      ...(options.label ? { label: options.label } : {})
     }
     this.sessions.set(ptyId, session)
     this.scrollbacks.set(ptyId, '')
@@ -381,6 +389,17 @@ export class PtyManager extends EventEmitter {
         threadId: s.threadId,
         sequence: s.sequence
       }))
+  }
+
+  /** The live terminals with their shell's pid, folder and quick action, for the running list (`RunningRegistry`). */
+  runningTerminals(): Array<{ ptyId: string; pid?: number; threadId: string; cwd: string; label?: string }> {
+    return Array.from(this.sessions.values()).map((s) => ({
+      ptyId: s.id,
+      ...(isRecordablePid(s.pty.pid) ? { pid: s.pty.pid } : {}),
+      threadId: s.threadId,
+      cwd: s.cwd,
+      ...(s.label ? { label: s.label } : {})
+    }))
   }
 
   getScrollbacks(threadId?: string): Record<string, string> {

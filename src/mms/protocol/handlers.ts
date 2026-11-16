@@ -3186,6 +3186,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (routed && threadId === '__unbound__') throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       let cwd = (routed ? undefined : asOptionalString(p.cwd, 4096)) ?? process.cwd()
       const command = asOptionalString(p.command, 4096)
+      // The quick action that opened it, by name (`RunningRegistry` tells agents what runs in it).
+      const label = routed ? undefined : asOptionalString(p.label, 60)?.trim() || undefined
       const env = asOptionalStringEnvMap(p.env, 'env')
       const shellArgs =
         p.shellArgs === undefined
@@ -3254,7 +3256,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           mkdirSync(cwd, { recursive: true })
           cwd = assertEpisodePath(directory!, binding.workspaceRelativePath)
         }
-        ptyId = ctx.mms.ptyManager.create(agentId, cwd, command, { threadId, env, shellArgs,
+        ptyId = ctx.mms.ptyManager.create(agentId, cwd, command, { threadId, env, shellArgs, ...(label ? { label } : {}),
           ownership: member ? { assert: () => assertHeldThreadLease(directory!, member.lease), heartbeat: () => { heartbeatExecutionLease(member.lease) },
             settled: () => member.leave() } : undefined
         })

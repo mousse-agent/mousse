@@ -92,6 +92,7 @@ import { AgentRegistry } from './agents/AgentRegistry'
 import { TaskQueue } from './tasks/TaskQueue'
 import { WorktreeManager } from './worktree/WorktreeManager'
 import { PtyManager } from './terminals/PtyManager'
+import { RunningRegistry } from './running/RunningRegistry'
 import { McpRegistry } from './integrations/mcp/McpRegistry'
 import { McpManager } from './integrations/mcp/McpManager'
 import { SkillsRegistry } from './integrations/skills/SkillsRegistry'
@@ -929,6 +930,17 @@ export class MmsProfileServices {
     }
     const personalBots = this.personalBots
     if (personalBots) this.orchestrator.setBotThreads(personalBots)
+    // What runs for each turn's folder: its terminals, agents' background commands and bots' (`RunningRegistry`).
+    const orchestrator = this.orchestrator
+    const ptys = this.ptyManager
+    this.orchestrator.setBotNames(personalBots ? (botId) => personalBots.botName(botId) : null)
+    this.orchestrator.setRunning(new RunningRegistry({
+      terminals: () => ptys.runningTerminals(),
+      terminalOutput: (ptyId) => ptys.getScrollback(ptyId).slice(-8_000),
+      watchers: () => personalBots?.runningWatchers() ?? [],
+      thread: (threadId) => orchestrator.runningSources().thread(threadId),
+      botName: (botId) => personalBots?.botName(botId)
+    }))
     // The bots' own app tools (schedules, profile, depth) and memory tools, through the engine.
     if (personalBots && botMemory) {
       const memory = botMemory

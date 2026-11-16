@@ -21,7 +21,7 @@ import type { AgentActor, ModeCeiling } from '../../types'
 import type { AppearanceToolHost } from './appearance'
 import type { DelegationToolsHost } from './delegation'
 import type { LiveRunGate } from './registry'
-import type { ToolLedger } from './types'
+import type { AppToolTurn, ToolLedger } from './types'
 import type { SecretToolHost } from './secrets'
 
 /** One match of `thread_search`. */
@@ -312,6 +312,8 @@ export interface AppToolHost extends DelegationToolsHost {
   browserRuntime?(): BrowserRuntimePort | undefined
   skills?(): SkillsRegistry | undefined
   quickActions?: QuickActionTools
+  /** `running_list`: what runs now for the caller's folder (quick actions, background commands, servers), as text. */
+  running?(turn: AppToolTurn): Promise<string>
   web?: WebTools
   devGui?: DevGuiTools
   /**

@@ -84,6 +84,7 @@ import { delegationRequestKey, followUpRequestKey, narrowCeiling } from '../run/
 import { CommandRejection, RunStoreError } from '../run/db/RunStoreError'
 import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
 import { steerReleaseWindow, stopStrategy, type SteerDelivery } from '../run/CommandPolicy'
+import { runningListText, runningNote, type RunningRegistry, type RunningScope, type RunningThreadInfo, type RunningViewer } from '../running/RunningRegistry'
 import { agentMessage, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentArchiveResult, type AgentCreatedThread, type AgentRemoteThreadRequest, type AgentRemoteThreadResult, type RemoteProjectCandidate, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type RemoteThreadsHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
 import { AGENT_QUEUE_MAX_PER_SENDER, AGENT_QUEUE_MAX_PER_THREAD, AGENT_REPEAT_WINDOW_MS, botRequestPrefix, lineageRelation, THREAD_CREATE_MAX_ACTIVE_PER_THREAD } from '../run/mcp/appTools/thread'
@@ -956,6 +957,20 @@ interface ContinuationTurnPayload {
 
 /** How long a Mousse tool call waits for the run of a turn the provider started, before it fails as usual. */
 const CONTINUATION_CALL_WAIT_MS = 10_000
+/** How long a turn's start waits for its running list (`runningNoteFor`) before it starts without the note. */
+const RUNNING_NOTE_BUDGET_MS = 2_500
+
+/** What the running list tells of a thread: its title, project, bot and parent. */
+function runningThreadInfo(thread: Thread | undefined, botOf: (threadId: string) => string | undefined): RunningThreadInfo | undefined {
+  if (!thread) return undefined
+  const botId = thread.botOwned ? botOf(thread.id) : undefined
+  return {
+    ...(thread.name ? { title: thread.name } : {}),
+    ...(thread.projectId ? { projectId: thread.projectId } : {}),
+    ...(botId ? { botId } : {}),
+    ...(thread.lineage?.parentThreadId ? { parentThreadId: thread.lineage.parentThreadId } : {})
+  }
+}
 /**
  * How long a stopped turn waits for its repository to record where it ended. Another operation holding the repository
  * longer than this must not keep the stopped turn running: it ends without that record, and the next turn's recovery
@@ -1782,6 +1797,83 @@ export class OrchestratorService extends EventEmitter {
 
   setBotAppTools(tools: { bots: BotAppToolDeps; memory: BotMemoryToolHost } | null): void {
     this.botAppTools = tools
+  }
+
+  /** What runs for a turn's folder (quick actions, background commands, servers): its note and `running_list`. */
+  private running: RunningRegistry | null = null
+
+  setRunning(running: RunningRegistry | null): void {
+    this.running = running
+  }
+
+  /**
+   * The folders a turn works in and whose running list it gets: a thread's own folder and its project's; a bot's files
+   * folder and the activation's scratch folder. Subagents sharing their parent's folder get the parent's list.
+   */
+  private runningScope(turn: AppToolTurn): { scope: RunningScope; viewer: RunningViewer } {
+    if (turn.bot) {
+      const workspace = turn.bot.workspace
+      const folders = [...new Set([workspace?.files, ...(workspace?.roots ?? []), workspace?.scratch].filter((folder): folder is string => Boolean(folder)))]
+      const botId = this.botAppTools?.memory.activationOf(turn.threadId)?.botId
+      return { scope: { threadId: turn.threadId, folders, ...(botId ? { botId } : {}) }, viewer: { threadId: turn.threadId, ...(botId ? { botId } : {}), ...(folders[0] ? { folder: folders[0] } : {}) } }
+    }
+    const thread = this.threadStore?.getThread(turn.threadId)
+    const projectRoot = thread?.projectId ? this.projectManager?.getProject(thread.projectId)?.path : undefined
+    const folders = [...new Set([turn.projectPath, projectRoot].filter((folder): folder is string => Boolean(folder)))]
+    return {
+      scope: { threadId: turn.threadId, folders, ...(thread?.projectId ? { projectId: thread.projectId } : {}) },
+      viewer: { threadId: turn.threadId, ...(folders[0] ? { folder: folders[0] } : {}) }
+    }
+  }
+
+  /** The running list of a turn: the note at its start (empty when nothing runs), or `running_list`'s answer. */
+  private async runningText(turn: AppToolTurn, kind: 'note' | 'list'): Promise<string> {
+    const running = this.running
+    if (!running) return kind === 'note' ? '' : 'Mousse cannot list what runs here.'
+    const { scope, viewer } = this.runningScope(turn)
+    const entries = await running.list(scope)
+    const sources = this.runningSources()
+    return kind === 'note' ? runningNote(entries, viewer, sources, Date.now()) : runningListText(entries, viewer, sources, Date.now())
+  }
+
+  /** The turn's running note, given up after `RUNNING_NOTE_BUDGET_MS` so a slow process listing never holds the turn. */
+  private async runningNoteFor(turn: AppToolTurn): Promise<string> {
+    if (!this.running || turn.definition) return ''
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        this.runningText(turn, 'note'),
+        new Promise<string>((resolve) => { timer = setTimeout(() => resolve(''), RUNNING_NOTE_BUDGET_MS) })
+      ])
+    } catch (error) {
+      console.warn('the running list could not be read for the turn', { threadId: turn.threadId, error: error instanceof Error ? error.message : String(error) })
+      return ''
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
+  /** What the running list reads of threads and bots. */
+  runningSources(): { thread(threadId: string): RunningThreadInfo | undefined; botName(botId: string): string | undefined } {
+    return {
+      thread: (id) => runningThreadInfo(this.threadStore?.getThread(id), (threadId) => this.botAppTools?.memory.activationOf(threadId)?.botId),
+      botName: (id) => this.botNames?.(id)
+    }
+  }
+
+  /** A bot's name for the running list, from the bots' engine. */
+  private botNames: ((botId: string) => string | undefined) | null = null
+
+  setBotNames(names: ((botId: string) => string | undefined) | null): void {
+    this.botNames = names
+  }
+
+  /** A command an agent's tool call runs, noted for the running list: its process may outlive the call. */
+  private noteRunningCommand(session: ThreadSession, message: ChatMessage): void {
+    const activity = message.activity
+    if (!this.running || activity?.kind !== 'command' || !activity.command) return
+    const folder = activity.cwd ?? session.sharedWorkspace?.path ?? session.projectCwd ?? undefined
+    this.running.noteCommand({ threadId: session.threadId, callId: activity.callId || message.id, command: activity.command, ...(folder ? { folder } : {}), ended: activity.status !== 'running' })
   }
 
   /** Wakes the effect worker: a `turn.start` was written outside the orchestrator (a bot dispatch). */
@@ -4008,6 +4100,8 @@ export class OrchestratorService extends EventEmitter {
     const appletCatalogue = this.appletStore && !turn.bot ? this.appletCatalogue() : undefined
     // Only a profile with an MCP manager can relay; the others start the turn without waiting.
     const relay = this.mcpManager ? await this.relayForTurn(turn) : undefined
+    // What already runs for the turn's folder, read now: the agent reuses a running server instead of starting another.
+    const running = await this.runningNoteFor(turn)
     return {
       turnToken: turn.turnToken,
       modeCeiling: turn.modeCeiling,
@@ -4027,7 +4121,8 @@ export class OrchestratorService extends EventEmitter {
           loadedSkills: turn.loadedSkills,
           modePrompt,
           appletCatalogue,
-          usableTools: mcpAttached ? this.usableAppTools(this.appToolTurns.get(turn.runId) ?? turn) : undefined
+          usableTools: mcpAttached ? this.usableAppTools(this.appToolTurns.get(turn.runId) ?? turn) : undefined,
+          running
         }), input.botPreamble)
       })
     }
@@ -4153,6 +4248,7 @@ export class OrchestratorService extends EventEmitter {
       browserRuntime: () => this.browserRuntime,
       skills: () => this.skillsRegistry,
       quickActions: new QuickActionTools(questionApproval(this.questions), (action) => this.emit('quick-action-created', action)),
+      running: (turn) => this.runningText(turn, 'list'),
       web: new WebTools(this.providerAuth.credentials),
       devGui: new DevGuiTools(),
       // The git app tools read the project through their own scoped Git read (`git/scopedRead`).
@@ -10874,10 +10970,12 @@ export class OrchestratorService extends EventEmitter {
           getMessage: (id) => session.messages.find((message) => message.id === id),
           addMessage: (message) => {
             session.messages.push(message)
+            this.noteRunningCommand(session, message)
           },
           updateMessage: (message) => {
             const index = session.messages.findIndex((entry) => entry.id === message.id)
             if (index !== -1) session.messages[index] = message
+            this.noteRunningCommand(session, message)
           },
           removeMessage: (id) => this.removeMessage(id),
           emitAdded: (message) => this.emitMessageAdded(message),
