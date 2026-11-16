@@ -996,8 +996,8 @@ it('C4 service projects the complete stored review and settled results behind th
   expect(card()).toBeUndefined()
 })
 
-// Duplicate work: same tool+digest, different tool, different work; only outcomes reaching the server count.
-it.each(['done', 'uncertain', 'failed', 'not_sent'] as const)('C4 duplicate warning for %s is scoped to the same work and tool', async status => {
+// Duplicate actions: same bot across work and schedules; only outcomes reaching the server count.
+it.each(['done', 'uncertain', 'failed', 'not_sent'] as const)('C4 duplicate warning for %s is scoped to the same bot and tool', async status => {
   const t = await setup(true)
   await t.call()
   const a = f.bots.actions.forWork(t.workId)!
@@ -1007,11 +1007,26 @@ it.each(['done', 'uncertain', 'failed', 'not_sent'] as const)('C4 duplicate warn
   const card = () => f.bots.service.actionMessage(t.botId, next.id).action!
   if (status === 'not_sent') expect(card().previous).toBeUndefined()
   else expect(card().previous).toEqual({ status, at: a.ran_at ?? f.store.now() })
-  f.store.run('UPDATE bot_actions SET activation_id = ? WHERE id = ?', t.chatId, a.id)
-  expect(card().previous).toBeUndefined()
-  f.store.run('UPDATE bot_actions SET activation_id = ? WHERE id = ?', t.workId, a.id)
-  f.store.run('UPDATE bot_actions SET target_json = ? WHERE id = ?', JSON.stringify({ server: 'mail', tool: 'different' }), a.id)
-  expect(card().previous).toBeUndefined()
+  const otherWork = await f.bots.activate({ botId: t.botId, input: 'Other work', clientRequestId: 'other-work' })
+  const scheduleId = f.bots.addSchedule(t.botId, { when: { kind: 'interval', minutes: 15 }, prompt: 'Scheduled mail' }, 'owner').scheduleId
+  const scheduled = f.bots.runScheduledOccurrence({ botId: t.botId, scheduleId, prompt: 'Scheduled mail', occurrenceAt: f.store.now() })
+  expect(scheduled.kind).toBe('started')
+  if (scheduled.kind !== 'started') throw new Error('Expected scheduled activation')
+  for (const activationId of [otherWork.id, scheduled.activationId]) {
+    f.store.run('UPDATE bot_actions SET activation_id = ? WHERE id = ?', activationId, a.id)
+    if (status === 'not_sent') expect(card().previous).toBeUndefined()
+    else expect(card().previous).toMatchObject({ status })
+  }
+  const { botId: otherBot } = await createBot(f, { reply: 'Other bot' })
+  for (const [column, value] of [
+    ['bot_id', otherBot], ['args_digest', 'different-digest'],
+    ['target_json', JSON.stringify({ server: 'other', tool: 'send' })],
+    ['target_json', JSON.stringify({ server: 'mail', tool: 'different' })]
+  ]) {
+    f.store.run(`UPDATE bot_actions SET ${column} = ? WHERE id = ?`, value, a.id)
+    expect(card().previous).toBeUndefined()
+    f.store.run(`UPDATE bot_actions SET ${column} = ? WHERE id = ?`, (a as unknown as Record<string, string>)[column]!, a.id)
+  }
 })
 
 it.each([false, true])('C4 bridge delivers a complete card or disables Send when oversized=%s', async large => {
