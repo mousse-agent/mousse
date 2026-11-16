@@ -16,6 +16,7 @@ import {
   foregroundJob,
   processTree,
   RunningRegistry,
+  runningLine,
   runningNote,
   type RunningSources,
   type RunningThreadInfo,
@@ -303,6 +304,11 @@ describe('what is told of each entry', () => {
     expect(addressesOf([], own, 'ready on http://127.0.0.1:9999')).toEqual([])
     // Ports could not be read: what it printed, with 0.0.0.0 as localhost.
     expect(addressesOf([], undefined, 'Listening on http://0.0.0.0:8000')).toEqual(['http://localhost:8000'])
+  })
+
+  it('a label that already holds its command is not followed by it again', () => {
+    const entry = { id: 'watcher:w', label: 'Site server · node server.mjs', command: 'node server.mjs', pid: 1, startedBy: { kind: 'bot' as const, botId: 'alpha' }, addresses: [] }
+    expect(runningLine(entry, { botId: 'alpha' }, { thread: () => undefined }, 0)).toBe('- Site server · node server.mjs, started by you (watch_start)')
   })
 
   it('nothing running: no note', () => {

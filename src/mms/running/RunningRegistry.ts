@@ -473,7 +473,7 @@ function starterText(entry: RunningEntry, viewer: RunningViewer, sources: Pick<R
   const by = entry.startedBy
   switch (by.kind) {
     case 'person':
-      return by.via === 'quick_action' ? 'started by the user with a quick action' : 'started by the user in a terminal'
+      return `started by ${personOf(viewer)} ${by.via === 'quick_action' ? 'with a quick action' : 'in a terminal'}`
     case 'thread': {
       if (by.threadId === viewer.threadId) return 'started by this thread'
       const own = viewer.threadId ? sources.thread(viewer.threadId) : undefined
@@ -494,7 +494,8 @@ function starterText(entry: RunningEntry, viewer: RunningViewer, sources: Pick<R
 
 /** One line per entry: `Dev server (`npm run dev`), started by …, up 12 min, at http://localhost:5173/`. */
 export function runningLine(entry: RunningEntry, viewer: RunningViewer, sources: Pick<RunningSources, 'thread' | 'botName'>, now: number, detail = false): string {
-  const name = entry.label && entry.label !== entry.command ? `${entry.label} (\`${entry.command}\`)` : `\`${entry.command}\``
+  // A label that already holds the command (a bot's title often does) is not followed by it again.
+  const name = entry.label && !entry.label.includes(entry.command) ? `${entry.label} (\`${entry.command}\`)` : entry.label ?? `\`${entry.command}\``
   const parts = [name, starterText(entry, viewer, sources)]
   if (entry.startedAt !== undefined) parts.push(`up ${uptime(Math.max(0, now - entry.startedAt))}`)
   if (entry.addresses.length) parts.push(`at ${entry.addresses.join(', ')}`)
@@ -504,20 +505,27 @@ export function runningLine(entry: RunningEntry, viewer: RunningViewer, sources:
   return `- ${parts.join(', ')}`
 }
 
-const REUSE_ADVICE = 'Reuse a running server and its address instead of starting another copy; restart one only when the user asks or when it has to (it stopped answering, or a change needs a restart it does not do by itself).'
+/** Who the person is to the viewer: a bot's owner, or a thread's user. */
+function personOf(viewer: RunningViewer): string {
+  return viewer.botId ? 'your owner' : 'the user'
+}
+
+function reuseAdvice(viewer: RunningViewer): string {
+  return `Reuse a running server and its address instead of starting another copy; restart one only when ${personOf(viewer)} asks or when it has to (it stopped answering, or a change needs a restart it does not do by itself).`
+}
 
 /** The turn's note, or empty when nothing runs. */
 export function runningNote(entries: readonly RunningEntry[], viewer: RunningViewer, sources: Pick<RunningSources, 'thread' | 'botName'>, now: number): string {
   if (!entries.length) return ''
   const shown = entries.slice(0, MAX_NOTE_ENTRIES).map((entry) => runningLine(entry, viewer, sources, now))
   const more = entries.length > MAX_NOTE_ENTRIES ? [`- and ${entries.length - MAX_NOTE_ENTRIES} more (${RUNNING_LIST_TOOL} lists them all)`] : []
-  return [`Already running for your folder, as of this turn's start. ${REUSE_ADVICE} ${RUNNING_LIST_TOOL} shows the current list.`, ...shown, ...more].join('\n')
+  return [`Already running for your folder, as of this turn's start. ${reuseAdvice(viewer)} ${RUNNING_LIST_TOOL} shows the current list.`, ...shown, ...more].join('\n')
 }
 
 /** `running_list`'s answer. */
 export function runningListText(entries: readonly RunningEntry[], viewer: RunningViewer, sources: Pick<RunningSources, 'thread' | 'botName'>, now: number): string {
   if (!entries.length) return 'Nothing Mousse can see is running for your folder: no quick action, terminal command, background command, or other process listening on a port there.'
-  return [`Running now for your folder. ${REUSE_ADVICE}`, ...entries.map((entry) => runningLine(entry, viewer, sources, now, true))].join('\n')
+  return [`Running now for your folder. ${reuseAdvice(viewer)}`, ...entries.map((entry) => runningLine(entry, viewer, sources, now, true))].join('\n')
 }
 
 // ------------------------------------------------------------------ paths and text

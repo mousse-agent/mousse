@@ -150,6 +150,9 @@ describe('the turn preamble', () => {
     const preamble = app.instructions(false).turnPreamble
     expect(preamble).toContain('- Preview (`python3 -m http.server 8000`), started by you (watch_start), up 3 min, at http://localhost:8000')
     expect(preamble).not.toContain('Dev server')
+    // A bot's person is its owner.
+    expect(preamble).toContain('restart one only when your owner asks')
+    expect(preamble).not.toContain('the user')
   })
 })
 
