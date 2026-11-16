@@ -10,6 +10,8 @@ import {
   Wrench,
 } from "../../../../lib/icons";
 import { parseMcpToolType, toolRegistry } from "./tool-registry";
+import { mousseToolOf } from "./mousse-tools";
+import { MousseToolIcon } from "./mousse-tool-icon";
 import "./tool-icon.css";
 
 /**
@@ -48,11 +50,12 @@ const TOOL_ICONS: Record<string, IconType> = {
   "tool-Subagent": RowSubagent,
 };
 
-/** The icon for a tool part's type (`tool-Bash`, `tool-mcp__server__name`). */
+/** The icon for a tool part's type (`tool-Bash`, `tool-mcp__server__name`); Mousse's own tools show its logo. */
 export function toolIconFor(type: string | undefined): IconType {
   if (!type) return Wrench;
   const own = TOOL_ICONS[type];
   if (own) return own;
+  if (mousseToolOf(type)) return MousseToolIcon;
   if (parseMcpToolType(type)) return Wrench;
   return toolRegistry[type]?.icon ?? Wrench;
 }

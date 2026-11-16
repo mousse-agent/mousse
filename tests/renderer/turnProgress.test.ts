@@ -334,6 +334,16 @@ describe('the line under Working', () => {
     expectLive('Running Get Issue…')
   })
 
+  it('5. a Mousse tool running says what it does, with the Mousse logo', () => {
+    render([ask(), reply('c1', tool('mcp__mousse__thread_create', 'input-available', { title: 'Fix login' }))], 'streaming', { phase: 'tool_running' })
+    expectLive('Creating a thread in Mousse…')
+    expect(line()!.querySelector('svg[data-icon="mousse"]')).not.toBeNull()
+    render([ask(), reply('c1', tool('mcp__mousse__memory_save', 'input-streaming'))], 'streaming', { phase: 'tool_running' })
+    expectLive('Saving to memory…')
+    render([ask(), reply('c1', tool('mcp__mousse__brand_new_thing', 'input-available', { id: 'x' }))], 'streaming', { phase: 'tool_running' })
+    expectLive('Running brand new thing in Mousse…')
+  })
+
   it('5. a tool search says what its row says: Loading tools…, the query in the tooltip', () => {
     const label = (input: Record<string, unknown>) =>
       describeTurnProgress({ state: { phase: 'tool_running' }, messages: [reply('c1', tool('ToolSearch', 'input-available', input))], now: NOW })
