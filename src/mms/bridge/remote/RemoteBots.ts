@@ -346,7 +346,8 @@ function fitted(message: RemoteBotMessage, budget = RESULT_BYTES): RemoteBotMess
     message = { ...message, text: 'This action is too large to send from here. Open it on the computer.', action: {
       actionId: action.actionId, digest: action.digest, title: action.title, serverName: action.serverName,
       args: null, hasHiddenValues: action.hasHiddenValues, hiddenPaths: [], status: action.status,
-      ...(action.previous ? { previous: action.previous } : {}), ...(action.at ? { at: action.at } : {}), tooLarge: true
+      ...(action.previous ? { previous: action.previous } : {}), ...(action.at ? { at: action.at } : {}),
+      ...(action.result?.notSentInTime ? { result: { text: action.result.text, notSentInTime: true } } : {}), tooLarge: true
     } }
     if (bytes(message) <= budget) return message
   }
