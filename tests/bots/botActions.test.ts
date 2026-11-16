@@ -451,7 +451,7 @@ it('R5-words gives by-hand runs and disabled answers their own refusal', async (
   expect(result.text).toContain('run started by hand')
   expect(result.text).not.toContain('scheduled')
   f.host.settings!.get().experimental.botAsksFirst = false
-  await expect(f.bots.service.answerAction({ actionId: 'missing', digest: 'missing', answer: 'send' })).rejects.toThrow(/no longer available/i)
+  await expect(f.bots.service.answerAction({ actionId: 'missing', digest: 'missing', answer: 'send' })).rejects.toThrow(/can.t be sent any more/i)
 })
 it('R5-time transports the sent instant instead of a UTC clock string', async () => {
   const t = await setup(true)
@@ -1180,7 +1180,7 @@ it('a tool withdrawal is delivered through unread updates and confirmed on compl
   const a = f.bots.actions.forWork(t.workId)!
   t.server.tools.splice(0)
   f.bots.fillMcpAsks(); await flush()
-  expect(f.store.lastMainDispatch(t.workId)!.prompt.text).toContain('This call was withdrawn')
+  expect(f.store.lastMainDispatch(t.workId)!.prompt.text).toContain('No longer needed')
   expect(f.store.unreadWorkActions(t.workId).map(a => a.id)).toEqual([a.id])
   const next = await start(f, t.workId, 2)
   await finish(f, next.payload)
@@ -1450,11 +1450,12 @@ it('R2-4 three expired cards refuse further calls without claiming the owner dec
     await f.bots.deliverDueReminders(); await flush()
     runtime = await start(f, t.workId, f.store.lastMainDispatch(t.workId)!.n)
   }
+  expect(await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'one more change' }, toolCallId: 'before-forget', signal: new AbortController().signal })).toMatchObject({ isError: true, text: expect.stringContaining('had three cards for this tool that were not sent') })
   const a = f.bots.actions.forWork(t.workId)!
   const memory = new BotMemoryStore({ db: f.store.db })
   const seq = memory.append({ botId: t.botId, sourceKey: `bm:${a.message_id}`, kind: 'notice', who: 'bot', text: 'declined call' })!
   memory.forget(t.botId, { refs: [`j${seq}`], by: 'owner_ui' })
-  expect(await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'one more change' }, toolCallId: 'after-forget', signal: new AbortController().signal })).toMatchObject({ isError: true, text: expect.stringContaining('had three cards for this tool that were not sent') })
+  expect(await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'one more change' }, toolCallId: 'after-forget', signal: new AbortController().signal })).toMatchObject({ isError: true, text: expect.stringContaining('Your owner removed this request') })
   expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(3)
 })
 
@@ -1496,7 +1497,7 @@ it.each(['card', 'request'] as const)('R2-2 forgetting the %s uses the appropria
   memory.forget(t.botId, { refs: [`j${seq}`], by: 'owner_ui' }); await flush()
   if (which === 'card') {
     expect(f.store.activation(t.workId)?.status).toBe('running')
-    expect(f.store.lastMainDispatch(t.workId)!.prompt.text).toContain('withdrawn')
+    expect(f.store.lastMainDispatch(t.workId)!.prompt.text).toContain('Your owner removed this request')
     expect(f.store.lastMainDispatch(t.workId)!.prompt.text).not.toContain('request was forgotten')
   } else {
     expect(f.store.activation(t.workId)?.status).toBe('failed')
