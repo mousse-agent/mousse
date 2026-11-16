@@ -94,7 +94,7 @@ it.each(['question answer', 'note and answer'] as const)('N3 a live wait plus a 
 
 it.each([false, true].flatMap(hasWaited => [
   'Your owner declined exactly this, or it expired. Do not ask again unless they write. Carry on without it.',
-  'Your owner said no three times. Say what you need in your report and wait for them to write.'
+  'You had three cards for this tool that were not sent. Say what you need in your report and wait for your owner to write.'
 ].map(refusal => ({ hasWaited, refusal }))))('refusal joins ordered updates with wait history=$hasWaited: $refusal', ({ hasWaited, refusal }) => {
   const input = matrixInput('turn cap', 'note and answer', hasWaited)
   f.store.recordWorkRefusal(ROW.id, ROW.botId, 'matrix-refusal', refusal)

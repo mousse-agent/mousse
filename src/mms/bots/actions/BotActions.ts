@@ -258,10 +258,10 @@ export class BotActions {
     const existing = this.host.store.get('SELECT id FROM bot_actions WHERE call_key = ?', callKey)
     if (existing) return { text: 'This call is held for your owner. End your turn now.' }
     if (pending.has(this.forWork(row.id)?.status ?? '')) return { text: 'A call is already held for your owner. End your turn now.', isError: true }
-    const declined = this.host.store.all("SELECT * FROM bot_actions WHERE activation_id = ? AND target_json = ? AND status = 'declined' ORDER BY rowid DESC", row.id, JSON.stringify({ server: tool.server, tool: tool.tool })) as unknown as ActionRow[]
+    const declined = this.host.store.all("SELECT * FROM bot_actions WHERE activation_id = ? AND target_json = ? AND status IN ('declined', 'expired') ORDER BY rowid DESC", row.id, JSON.stringify({ server: tool.server, tool: tool.tool })) as unknown as ActionRow[]
     const unanswered = declined.filter(action => !this.ownerWroteAfter(action))
     if (unanswered.length >= MAX_SAME_WAKES)
-      return this.refuse(row, unanswered[0], 'Your owner said no three times. Say what you need in your report and wait for them to write.')
+      return this.refuse(row, unanswered[0], 'You had three cards for this tool that were not sent. Say what you need in your report and wait for your owner to write.')
     const digest = actionDigest(args)
     const refused = this.host.store.all("SELECT * FROM bot_actions WHERE activation_id = ? AND target_json = ? AND args_digest = ? AND status IN ('declined', 'expired') ORDER BY rowid DESC", row.id, JSON.stringify({ server: tool.server, tool: tool.tool }), digest)[0]
     if (refused && !this.ownerWroteAfter(refused as unknown as ActionRow))
