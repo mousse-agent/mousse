@@ -1215,6 +1215,7 @@ export class MmsProfileServices {
     const vault = this.secretVault
     this.orchestrator.setSecrets({
       masker: (threadId) => vault.maskerFor(threadId),
+      storeMasker: () => vault.maskerForStore(),
       tools: createSecretToolHost({ vault, requests: this.secretRequests, scratchRoot: join(homeDir, 'secrets', 'run') })
     })
     try {

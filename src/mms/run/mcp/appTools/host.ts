@@ -23,6 +23,7 @@ import type { DelegationToolsHost } from './delegation'
 import type { LiveRunGate } from './registry'
 import type { AppToolTurn, ToolLedger } from './types'
 import type { SecretToolHost } from './secrets'
+import type { TerminalInfo } from '../../../terminals/PtyManager'
 
 /** One match of `thread_search`. */
 export interface ThreadSearchHit {
@@ -290,6 +291,14 @@ export interface AgentScheduleHost {
   wake(): void
 }
 
+/** What `terminal_read` reads: a thread's terminals and their kept output, from memory. */
+export interface TerminalReadHost {
+  list(threadId: string): TerminalInfo[]
+  output(ptyId: string): { scrollback: string; droppedLines: number } | undefined
+  /** Masks every secret in the profile's store. */
+  mask(text: string): string
+}
+
 /**
  * What the app tools need from their owner: the profile's thread owner (the orchestrator), which
  * serves the Mousse MCP server's registry.
@@ -304,6 +313,8 @@ export interface AppToolHost extends DelegationToolsHost {
   dismissQuestions?(threadId: string): void
   /** Secret requests and commands that use them (`secret_request`, `secret_run`); absent: those tools refuse. */
   secrets?(): SecretToolHost | undefined
+  /** The threads' terminals as `terminal_read` reads them (never writes); absent: the tool is not listed. */
+  terminals?(): TerminalReadHost | undefined
   /** The thread's task queue; null when the owner keeps none (no task tools). */
   tasks(threadId: string | undefined): TaskQueue | null
   /** The threads' goals (`/goal`): whether one is working, and the agent's `goal_status` report. Absent: no goal tool. */

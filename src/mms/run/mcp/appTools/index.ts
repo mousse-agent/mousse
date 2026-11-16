@@ -18,6 +18,7 @@ import { secretTools } from './secrets'
 import { automationTools } from './automations'
 import { skillTools } from './skills'
 import { taskTools } from './tasks'
+import { terminalTools } from './terminals'
 import { botThreadReach, lineageRelation, threadTools } from './thread'
 import type { AppToolTurns } from './turns'
 import { webTools } from './web'
@@ -31,6 +32,7 @@ export type { BotAppToolDeps } from './bots'
 export { AUTOMATION_TOOL_NAMES, type AutomationToolHost } from './automations'
 export { THEME_READ_TOOL, THEME_SET_TOOL, type AppearanceToolHost } from './appearance'
 export type { BotMemoryToolHost } from './botMemory'
+export { TERMINAL_READ_TOOL } from './terminals'
 export { projectGitToolDefinitions, runProjectGitTool } from './projectGit'
 export type { ProfilerToolHost } from './profiler'
 export {
@@ -47,7 +49,7 @@ export {
 } from './delegation'
 
 /** The tool families in the order runtimes are sent them, after the delegation tools. */
-export const APP_TOOL_FAMILIES = ['skills', 'questions', 'tasks', 'quickActions', 'devGui', 'web', 'browser', 'applets', 'delegation', 'thread', 'schedules', 'bots', 'projectGit', 'profiler', 'appearance'] as const
+export const APP_TOOL_FAMILIES = ['skills', 'questions', 'tasks', 'quickActions', 'devGui', 'web', 'browser', 'applets', 'delegation', 'thread', 'schedules', 'bots', 'projectGit', 'profiler', 'appearance', 'terminals'] as const
 export type AppToolFamily = (typeof APP_TOOL_FAMILIES)[number]
 
 /** What the central check of `readsOthers` and `managesOthers` tools reads (SPEC §15.1), all of it at call time. */
@@ -117,5 +119,6 @@ export function createAppToolRegistry(input: {
   add('projectGit', projectGitTools(host))
   add('profiler', profilerTools(host, engine))
   add('appearance', appearanceTools(host))
+  add('terminals', terminalTools(host))
   return { registry, families }
 }

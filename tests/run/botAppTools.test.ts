@@ -69,7 +69,11 @@ function fakeBots(lane: BotLane = 'chat', options: { owner?: string; changes?: b
         return { watcherId: `rem_w${watched.length}`, until: '2026-11-08T10:00:00.000Z' }
       },
       list: () => watched.map((entry, index) => ({ id: `rem_w${index + 1}`, title: entry.input.title ?? 'x', command: entry.input.command, startedAt: '2026-11-08T09:00:00.000Z', until: '2026-11-08T10:00:00.000Z' })),
-      stop: (_botId, watcherId) => watcherId === 'rem_w1'
+      stop: (_botId, watcherId) => watcherId === 'rem_w1',
+      // An ended command's whole output: 300 lines, of which 1,000 fell out before them.
+      output: (_botId, watcherId) => watcherId === 'rem_w1'
+        ? { id: 'rem_w1', title: 'Nightly', command: 'gh run watch 123', startedAt: '2026-11-08T09:00:00.000Z', end: { kind: 'exit' as const, code: 1 }, endedAt: '2026-11-08T09:30:00.000Z', output: Array.from({ length: 300 }, (_, i) => `\u001b[32mjob ${1001 + i}\u001b[0m`).join('\n'), droppedLines: 1_000 }
+        : undefined
     },
     wakes: {
       wait: async (_botId, from, input) => {
@@ -458,6 +462,18 @@ describe('background commands', () => {
     expect((await bots.call('watch_list', {})).value).toEqual([expect.objectContaining({ id: 'rem_w1', command: 'gh run watch 123', stopsBy: expect.any(String) })])
     expect((await bots.call('watch_stop', { watcherId: 'rem_w1' })).value).toEqual({ stopped: true })
     expect(await bots.call('watch_stop', { watcherId: 'rem_w9' })).toMatchObject({ isError: true, text: expect.stringContaining('watch_list') })
+  })
+
+  it('watch_list with a command\'s id reads its output a page at a time, from the end, without colors', async () => {
+    const bots = fakeBots()
+    const last = (await bots.call('watch_list', { watcherId: 'rem_w1', lines: 50 })).value as Record<string, unknown>
+    expect(last).toMatchObject({ watcherId: 'rem_w1', ended: { kind: 'exit', code: 1 }, fromLine: 1251, toLine: 1300, lastLine: 1300, more: expect.stringContaining('before 1251') })
+    expect(String(last.output).split('\n')).toHaveLength(50)
+    expect(String(last.output).split('\n')[0]).toBe('job 1251')
+    const back = (await bots.call('watch_list', { watcherId: 'rem_w1', lines: 500, before: 1251 })).value as Record<string, unknown>
+    expect(back).toMatchObject({ fromLine: 1001, toLine: 1250 })
+    expect(back.more).toBeUndefined()
+    expect(await bots.call('watch_list', { watcherId: 'rem_w9' })).toMatchObject({ isError: true, text: expect.stringContaining('no background command with that id') })
   })
 
   it.each([

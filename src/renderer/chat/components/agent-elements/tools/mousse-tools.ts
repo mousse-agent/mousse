@@ -63,6 +63,7 @@ const TOOLS: Record<string, readonly [Verb, string]> = {
   thread_read: ["read", "a thread in Mousse"],
   thread_list: ["list", "threads in Mousse"],
   thread_search: ["search", "threads in Mousse"],
+  terminal_read: ["read", "a terminal in Mousse"],
   thread_wait: ["wait", "for a thread in Mousse"],
   thread_steer: ["steer", "a thread in Mousse"],
   thread_interrupt: ["stop", "a thread in Mousse"],

@@ -138,7 +138,7 @@ export const BOT_FILE_ASK_GONE_TEXT = 'A bot can no longer use files outside its
 
 // Unknown tools are deliberately effects: only these recorded calls can leave an unsent draft.
 const DRAFT_READ_ONLY_TOOLS = new Set([
-  'thread_list', 'thread_search', 'thread_read', 'thread_wait', 'memory_list', 'memory_search', 'memory_read',
+  'thread_list', 'thread_search', 'thread_read', 'thread_wait', 'terminal_read', 'memory_list', 'memory_search', 'memory_read',
   'read', 'list', 'search', 'ls', 'find', 'grep', 'Read', 'Glob', 'Grep',
   'bot_schedule_list', 'work_list', 'work_models', 'watch_list', 'reminder_list', 'bot_list', 'running_list',
   'mcp_servers', 'list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource'
@@ -7526,7 +7526,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     watchers: {
       start: (botId, from, input) => this.startWatcher(botId, from, input),
       list: (botId) => this.listWatchers(botId).map(({ botId: _bot, ...view }) => view),
-      stop: (botId, watcherId) => this.stopWatcher(botId, watcherId)
+      stop: (botId, watcherId) => this.stopWatcher(botId, watcherId),
+      output: (botId, watcherId) => this.watchers.output(botId, watcherId)
     },
     reminders: {
       add: (botId, from, input) => this.addReminder(botId, from, input),
@@ -8739,7 +8740,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // The owner sees the original label; titles and command errors remain outside data in memory.
     const external = Boolean((fired?.kind === 'thread' || fired?.kind === 'pr') && fired.title
       || fired?.kind === 'watcher' && fired.message)
-    const input = wakeInput({ brief: wake.text, setAt: wake.createdAt, event: wake.event, fired, chain: Math.max(1, wake.chain), work: Boolean(wake.workId), clock: clockTime, ...(late && !wake.event ? { late: clockTime(wake.dueAt) } : {}) })
+    const input = wakeInput({ brief: wake.text, setAt: wake.createdAt, event: wake.event, fired, chain: Math.max(1, wake.chain), work: Boolean(wake.workId), clock: clockTime, wakeId: wake.id, ...(late && !wake.event ? { late: clockTime(wake.dueAt) } : {}) })
     if (wake.workId) {
       const resumed = this.store.db.transaction(() => this.deliverWorkWaitInTx(wake))
       if (resumed) { this.changed({ botId: wake.botId, activationId: wake.workId }); this.pumpLater(wake.botId) }

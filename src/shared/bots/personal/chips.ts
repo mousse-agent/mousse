@@ -197,6 +197,7 @@ function classify(tool: string, input: unknown, ctx: BotChipContext): Classified
     // own chip, with the thread to open.
     case 'thread_list':
     case 'thread_search':
+    case 'terminal_read':
     case 'thread_read': return { kind: 'threads_look', icon: 'read', live: 'reading your threads' }
     case 'thread_wait': return { kind: 'thread_wait', icon: 'think', live: 'waiting on a thread' }
     // Mousse's profiler ("use the profiler"): every read and sample rolls up into one chip.
