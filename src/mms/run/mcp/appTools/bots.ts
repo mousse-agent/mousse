@@ -1001,7 +1001,7 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
     }),
     ownTool(byName.get('work_wait')!, deps, {
       class: 'mutation',
-      describe: () => 'Set a wake-up',
+      describe: () => 'Wait for a time or event',
       handler: async (args, ctx) => {
         const call = botCall(deps, ctx)
         if (isOutcome(call)) return call

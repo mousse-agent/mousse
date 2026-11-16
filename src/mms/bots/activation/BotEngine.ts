@@ -2159,7 +2159,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.pumpLater(row.botId)
   }
 
-  private readonly workWaitLookups: WorkWaitLookups = { store: () => this.store }
+  private readonly workWaitLookups: WorkWaitLookups = { store: () => this.store, clock: clockTime }
 
   private readonly workWaitFacts: WorkWaitFacts = {
     timerExists: (row) => { const wait = this.store.workWait(row.id); return Boolean(wait && wait.status !== 'cancelled') },
@@ -3884,15 +3884,19 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * one plain line, so no work waits forever.
    */
   private settleStrandedWork(): void {
+    // Due work waits won their event before upkeep or startup: make them ready before the week sweep.
+    for (const wait of this.store.dueReminders(this.store.now())) {
+      if (wait.workId) this.store.db.transaction(() => this.deliverWorkWaitInTx(wait))
+    }
     for (const row of this.store.activationsWith(['blocked']).filter(workWaits)) {
       try {
         // Nothing waits more than a week, whatever it waits for.
-        if (this.now() - this.waitingSince(row) > MAX_WORK_WAIT_MS) {
+        const rule = workWaitRule(row)
+        if (!(rule?.weekExemptWhenReady && rule.ready(row, this.workWaitFacts)) && this.now() - this.waitingSince(row) > MAX_WORK_WAIT_MS) {
           const ended = this.recorded(row, () => this.endWaitingInTx(row, 'waited_too_long', waitedTooLong(this.workTitle(row))))
           if (ended) this.afterEnd(ended)
           continue
         }
-        const rule = workWaitRule(row)
         if (!rule?.stranded(row, this.workWaitFacts)) continue
         const ended = this.recorded(row, () => this.endWaitingInTx(row, rule.endReason, rule.endLine(this.workTitle(row))))
         if (ended) this.afterEnd(ended)
@@ -8526,8 +8530,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (row.status !== 'blocked' || row.endReason !== 'waiting') return false
     if (!this.store.moveActivation(row.id, ['blocked'], 'blocked', { endReason: 'wait_ready' })) return false
     this.store.settleReminder(wake.id, 'delivered', { activationId: row.id })
-    const input = wakeInput({ brief: wake.text, setAt: wake.createdAt, event: wake.event, fired: wake.fired, chain: wake.chain, work: true, clock: clockTime, ...(this.now() - Date.parse(wake.dueAt) > REMINDER_LATE_MS && !wake.event ? { late: clockTime(wake.dueAt) } : {}) })
-    this.store.run('UPDATE bot_reminders SET text = ? WHERE id = ?', input, wake.id)
     return true
   }
 
