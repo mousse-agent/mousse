@@ -90,6 +90,8 @@ export interface BotChatMessage {
   kind: BotMessageKind
   /** A quiet service line; older apps show its notice as a message. */
   systemLine?: true
+  /** A service line's details, shown on hover. */
+  systemTitle?: string
   /** Markdown. */
   text: string
   chips: BotChip[]

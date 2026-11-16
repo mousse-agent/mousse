@@ -20,9 +20,10 @@ import { replyApplets } from './replyApplets'
 import { takeToolImages } from './toolImages'
 import { takeReplyCards } from './replyCards'
 import { WAKE_LINE_PREFIX, wakeEventLabel } from '../../../shared/bots/personal/wakes'
+import { BOT_FOLD_LINE_PREFIX, BOT_FOLD_LINE_TITLE } from '../../../shared/bots/personal/memory'
 
 function isServiceLine(id: string): boolean {
-  return ['bm_permission_', 'bm_schedule_ended_', 'bm_schedule_done_', WAKE_LINE_PREFIX].some(prefix => id.startsWith(prefix))
+  return ['bm_permission_', 'bm_schedule_ended_', 'bm_schedule_done_', WAKE_LINE_PREFIX, BOT_FOLD_LINE_PREFIX].some(prefix => id.startsWith(prefix))
 }
 import type { AppletReference } from '../../../shared/applets'
 import { BOT_USAGE_WINDOW_MS, turnUsageSummary } from '../activation/turnUsage'
@@ -373,6 +374,8 @@ export class BotChatProjection {
       // Reserved ids keep permission switch lines quiet after a restart without a message schema change.
       // A wake's line too: it says why the bot speaks unasked.
       ...(row.kind === 'notice' && isServiceLine(row.id) ? { systemLine: true as const } : {}),
+      // A fold's line says what happened on hover (docs/plans/bot-context.md §14).
+      ...(row.kind === 'notice' && row.id.startsWith(BOT_FOLD_LINE_PREFIX) ? { systemTitle: BOT_FOLD_LINE_TITLE } : {}),
       text: plain ? (row.text ? `${row.text}\n\n${plain}` : plain) : row.text,
       ...(plain ? { plainFrom: row.text.length } : {}),
       ...(cards.length ? { cards } : {}),

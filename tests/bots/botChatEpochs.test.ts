@@ -3,7 +3,8 @@ import { getDefaultSettings } from '../../src/shared/settings'
 import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
 import { createBotMemoryAdmin } from '../../src/mms/bots/memory/admin'
 import { BOT_MEMORY_PROTOCOL, createBotContextProvider } from '../../src/mms/bots/memory/contextPack'
-import { botFixture, createBot, finish, PI, start, type BotFixture } from './botFixture'
+import { botFixture, chatOf, createBot, finish, PI, start, type BotFixture } from './botFixture'
+import { BOT_FOLD_LINE_PREFIX, BOT_FOLD_LINE_TEXT, BOT_FOLD_LINE_TITLE } from '../../src/shared/bots/personal/memory'
 
 /**
  * Chat epochs (docs/plans/bot-context.md §14), at the engine, with the real pack provider: on a runtime that resumes a
@@ -126,5 +127,25 @@ describe('a bot chat on epochs', () => {
     await finish(f, turn.payload, 'completed', { text: 'OK.' })
     f.clock.now += 10 * 60_000
     expect((await chatTurn('And now?', 'u3')).prepared.history).toBe('thread')
+  })
+
+  it('past the high mark the conversation goes on while its digest is written; at the hard mark it folds without it and the chat shows one quiet line', async () => {
+    // A digest that never comes.
+    f.host.context = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} }, digest: () => new Promise<string>(() => {}) })
+    const first = await chatTurn('Hi', 'u1')
+    first.prepared.metrics!({ totalResponseTimeMs: 1, context: { input: 2_000, cacheRead: 8_000, cacheWrite: 0, contextWindow: 400_000 } })
+    await finish(f, first.payload, 'completed', { text: 'Hi.' })
+    const turn = await chatTurn('Go on', 'u2')
+    turn.prepared.metrics!({ totalResponseTimeMs: 1, context: { input: 2_000, cacheRead: 8_000 + 50_000, cacheWrite: 0, contextWindow: 400_000 } })
+    await finish(f, turn.payload, 'completed', { text: 'OK.' })
+    const due = await chatTurn('More', 'u3')
+    expect(due.prepared.history).toBe('thread')
+    due.prepared.metrics!({ totalResponseTimeMs: 1, context: { input: 2_000, cacheRead: 8_000 + 66_000, cacheWrite: 0, contextWindow: 400_000 } })
+    await finish(f, due.payload, 'completed', { text: 'Sure.' })
+    expect(chatOf(f, botId).filter((message) => message.id.startsWith(BOT_FOLD_LINE_PREFIX))).toEqual([])
+    const next = await chatTurn('And now?', 'u4')
+    expect(next.prepared.history).toBe('cleared')
+    expect(chatOf(f, botId).filter((message) => message.id.startsWith(BOT_FOLD_LINE_PREFIX)))
+      .toEqual([expect.objectContaining({ text: BOT_FOLD_LINE_TEXT, systemLine: true, systemTitle: BOT_FOLD_LINE_TITLE })])
   })
 })

@@ -123,7 +123,7 @@ export function chatRows(messages: readonly BotChatMessage[], botName: string, a
       continue
     }
     if (message.systemLine) {
-      rows.push({ kind: 'system', id: message.id, at: message.at, text: message.text, of: message.id })
+      rows.push({ kind: 'system', id: message.id, at: message.at, text: message.text, of: message.id, ...(message.systemTitle ? { title: message.systemTitle } : {}) })
       continue
     }
     const signals = workSignalsOf(message)

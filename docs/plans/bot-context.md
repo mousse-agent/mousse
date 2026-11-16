@@ -407,8 +407,9 @@ the prompt sizes the runtime reports.
 **When an epoch ends** (the next turn starts a new one, `chatEpochEnd`):
 
 - a model or entry change; a failed, stopped or reloaded turn; `/clear`; a forget; a runtime compaction;
-- full: what the epoch's turns added reaches 48k tokens, or the whole prompt reaches the cap (40% of the model's
-  window, never past 90% of the owner's compaction point);
+- full: what the epoch's turns added reaches 48k tokens (the high mark) and a digest is ready or none is coming, it
+  reaches 64k (the hard mark) whatever the digest, or the whole prompt reaches the cap (40% of the model's window,
+  never past 90% of the owner's compaction point);
 - cold: the cache expired (5 minutes when the runtime reported no lifetime) and what was added is past 24k, so the
   rebuild costs nothing extra.
 
@@ -416,12 +417,34 @@ Sizes are what the runtime reported (`bot_turn_usage`: the last turn's prompt le
 none is measured by the pack's own estimate. A turn the runtime compacts mid-way is given the whole memory pack again,
 not its update.
 
+**The digest of a fold.** A fold keeps the chat's older part as a model-written digest, not only as cut lines:
+
+- One call with no tools on the bot's own chat model, in the background, one at a time per bot (`harness.oneShot`,
+  task `chat_digest`). It reads the chat rows no digest holds yet (at most 60k tokens, newest kept) and answers with a
+  headline and five sections, constraints first: standing constraints still in force, decisions, open threads, finished
+  work with its artifacts, key facts. Each item cites its journal rows (`j123`); constraints of the last digest that
+  still hold are carried over. An answer without every section is not used.
+- It is asked for when an epoch passes the high mark (the epoch goes on meanwhile), or after a fold that used none when
+  8k tokens of chat are in no digest yet. While it is written it is `chat_digest_pending` in `bot_memory_state`.
+- Adoption: only when a new epoch starts, so an epoch's base never changes, and only when the rows it summarised are
+  unchanged (a hash of their seqs and text) and still follow the last adopted digest. Otherwise it is dropped and asked
+  for again. Chat never waits: at the hard mark the epoch folds with today's deterministic lines, and a digest that
+  arrives later is used at the next fold.
+- Tiers: the summary keeps the newest three digests in full, older ones as one dated timeline line each (about 500
+  tokens, oldest lines fall off), then lines for chat folded since the last digest, about 3k tokens in all. Every
+  adopted digest is a journal notice (`digest:<id>:<hash>`), so `memory_search` finds it as a `chat digest` hit.
+- Forget: a digest whose rows were redacted, or which holds the forgotten words, is redacted in the journal, kept as
+  plain lines of what is left, and written again from those rows. A pending digest is dropped.
+- A failed or malformed answer leaves the deterministic fold; the next call waits 10 minutes.
+- A fold that ends an epoch as full or cold leaves one quiet line in the chat, "Older messages summarised", with the
+  details on hover (`bm_fold_<activationId>`).
+
 **Where.** Only runtimes that resume a thread's conversation: Claude Code and Codex (`chatResumes`). Pi starts a fresh
 process each bot turn and keeps today's cleared context.
 
 **What waits.**
 
 - A live check that Claude Code and Codex actually read the resumed conversation from the cache. A runtime that silently starts a new session instead of resuming is not detected yet.
-- The marks (48k, 24k, 6k) are starting values: the phase 0 numbers replace them, and set the "hello" ceiling.
-- A model-written digest at the fold, and the hard mark it needs.
+- The marks (48k, 64k, 24k, 6k) are starting values: the phase 0 numbers replace them, and set the "hello" ceiling.
+- Digest quality on real chats: whether the five sections keep what later turns ask about.
 - Pi epochs, which need its session kept between bot turns.
