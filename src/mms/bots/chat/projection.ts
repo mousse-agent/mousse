@@ -1,3 +1,5 @@
+import { readableActionTitle, type ActionRow } from '../actions/BotActions'
+import type { BotActionCard } from '../../../shared/bots/personal/chat'
 import { workWaitLine, parkedNeedsOwner } from '../activation/workWaiting'
 import { randomUUID } from 'node:crypto'
 import { askText } from '../../../shared/bots/personal/askText'
@@ -207,6 +209,7 @@ export class BotChatProjection {
 
   constructor(private readonly options: {
     store: BotStore
+    asksFirst?(): boolean
     journal?: BotJournal
     /** `bots.message`, after the row's transaction committed. */
     emit(event: { botId: string; message: BotChatMessage }): void
@@ -352,6 +355,7 @@ export class BotChatProjection {
     const reminder = row.id.startsWith('bm_rem_') ? this.store.reminderForMessage(row.botId, row.id) : undefined
     const expiresAt = reminder?.deliveredAt ? new Date(Date.parse(reminder.deliveredAt) + 24 * 60 * 60_000).toISOString() : undefined
     const snoozed = reminder && this.store.snoozedCopy(row.botId, reminder.id)
+    const action = this.options.asksFirst?.() ? this.actionForMessage(row.id) : undefined
     const sentAction = row.id.startsWith('bm_action_') ? this.store.get("SELECT ran_at FROM bot_actions WHERE message_id = ? AND status = 'done'", row.id) : undefined
     const escalation = row.askId ? this.store.escalation(row.askId) : undefined
     const question = row.questionId ? this.store.question(row.questionId) : undefined
@@ -364,6 +368,7 @@ export class BotChatProjection {
     return {
       ...(reminder && expiresAt && expiresAt > this.store.now() && !reminder.work && !reminder.wake && !this.store.messageForgotten(row.botId, row.id) ? { reminder: { expiresAt, ...(snoozed ? { snoozedUntil: snoozed.dueAt } : {}) } } : {}),
       ...(typeof sentAction?.ran_at === 'string' ? { actionSentAt: sentAction.ran_at } : {}),
+      ...(action ? { action } : {}),
       seq: row.seq,
       id: row.id,
       at: row.at,
@@ -390,6 +395,34 @@ export class BotChatProjection {
       ...(row.replyTo ? { replyTo: this.quoteOf(row.replyTo) } : {}),
       ...(row.author === 'owner' && row.clientRequestId ? { clientRequestId: row.clientRequestId } : {}),
       ...(row.author === 'bot' && row.ownerReaction ? { reaction: row.ownerReaction.emoji } : {})
+    }
+  }
+
+  private actionForMessage(messageId: string): BotActionCard | undefined {
+    const row = this.store.get('SELECT * FROM bot_actions WHERE message_id = ?', messageId) as unknown as (ActionRow & { bot_note: string | null }) | undefined
+    if (!row) return undefined
+    const metadata = JSON.parse(row.card_json ?? '{}')
+    const args: unknown = JSON.parse(row.args_json)
+    const hiddenPaths: string[] = []
+    const visit = (value: unknown, path: string[]): void => {
+      if (!value || typeof value !== 'object') return
+      const object = value as Record<string, unknown>
+      if (object.$mousse === 'hidden') { hiddenPaths.push(path.join(' → ')); return }
+      if (object.$mousse === 'literal') return
+      for (const [key, item] of Object.entries(value)) visit(item, [...path, key])
+    }
+    visit(args, [])
+    const result = row.result_json ? JSON.parse(row.result_json) : undefined
+    const at = row.ran_at ?? row.answered_at
+    return {
+      actionId: row.id, digest: row.args_digest,
+      title: metadata.title ?? readableActionTitle(JSON.parse(row.target_json).tool),
+      serverName: metadata.serverName ?? 'Your service', args,
+      hasHiddenValues: metadata.hasHiddenValues === true, hiddenPaths,
+      status: row.status as BotActionCard['status'],
+      ...(at ? { at } : {}),
+      ...(result ? { result: { text: result.text, ...(result.toolReportedError ? { toolReportedError: true } : {}) } } : {}),
+      ...(row.bot_note ? { note: row.bot_note } : {})
     }
   }
 

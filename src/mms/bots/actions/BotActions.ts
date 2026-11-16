@@ -11,6 +11,10 @@ import type { ToolOutcome } from '../../run/mcp/appTools/types'
 export function botAsksFirst(settings?: Pick<MousseSettings, 'experimental'>): boolean {
   return settings?.experimental.botAsksFirst === true
 }
+export function readableActionTitle(name: string): string {
+  const words = name.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_ .:/-]+/g, ' ').trim()
+  return words ? words[0]!.toUpperCase() + words.slice(1) : 'Send this action'
+}
 export const actionDigest = (value: unknown): string => shortHash(canonicalJson(value), 64)
 const hiddenKey = (key: string): boolean => /(?:authorization|password|passwd|secret|token|apikey)$/i.test(key.replace(/[^a-z0-9]/gi, ''))
 export const ACTION_HIDDEN_VALUE = Object.freeze({ $mousse: 'hidden', text: 'hidden · will be sent' })
@@ -208,7 +212,7 @@ export class BotActions {
       this.host.store.run(`INSERT INTO bot_actions(id, call_key, bot_id, activation_id, lane, kind, target_json, exec_args,
         args_json, args_digest, binding_json, card_json, status, message_id, expires_at, created_at)
         VALUES(?, ?, ?, ?, 'run', 'mcp', ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`,
-      id, callKey, row.botId, row.id, JSON.stringify({ server: tool.server, tool: tool.tool }), exact, JSON.stringify(review.args), actionDigest(JSON.parse(exact)), JSON.stringify(binding), JSON.stringify({ hasHiddenValues: review.hasHiddenValues }), messageId,
+      id, callKey, row.botId, row.id, JSON.stringify({ server: tool.server, tool: tool.tool }), exact, JSON.stringify(review.args), actionDigest(JSON.parse(exact)), JSON.stringify(binding), JSON.stringify({ hasHiddenValues: review.hasHiddenValues, title: readableActionTitle(tool.tool), serverName: tool.serverName }), messageId,
       new Date(Date.parse(this.host.store.now()) + 48 * 3600_000).toISOString(), this.host.store.now())
       this.host.park(row)
       this.host.post(row, messageId, `${tool.serverName} · ${tool.tool}\n${review.hasHiddenValues ? 'Hidden values will be sent.\n' : ''}${JSON.stringify(review.args)}`)

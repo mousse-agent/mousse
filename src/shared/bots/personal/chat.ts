@@ -78,7 +78,25 @@ export type BotMessageKind = 'text' | 'run_report' | 'notice' | 'error'
 export type BotSnoozeChoice = '10m' | '1h' | 'tomorrow'
 
 /** One row of a bot's chat (`bot_messages`). */
+/** Mousse's review of a held call, from its stored masked copy. */
+export interface BotActionCard {
+  actionId: string
+  digest: string
+  title: string
+  serverName: string
+  args: unknown
+  hasHiddenValues: boolean
+  hiddenPaths: string[]
+  status: 'open' | 'approved' | 'running' | 'done' | 'failed' | 'uncertain' | 'declined' | 'expired' | 'withdrawn'
+  at?: string
+  result?: { text: string; toolReportedError?: boolean }
+  note?: string
+  previous?: { status: 'done' | 'uncertain' | 'failed'; at: string }
+  tooLarge?: boolean
+}
+
 export interface BotChatMessage {
+  action?: BotActionCard
   /** Sent action instant; formatted in the client clock. */
   actionSentAt?: string
   /** Only delivered text reminders carry snooze replies; older services omit it. */

@@ -722,6 +722,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       ...(host.setTimer ? { setTimer: host.setTimer } : {})
     })
     this.chat = new BotChatProjection({
+      asksFirst: () => botAsksFirst(this.host.settings?.get()),
       store: host.store,
       ...(host.journal ? { journal: host.journal } : {}),
       // The bot's name rides along: a notification for a new bot's first row comes before any list names it. A run
