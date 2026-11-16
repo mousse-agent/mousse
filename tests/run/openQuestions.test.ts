@@ -8,7 +8,7 @@
  * What can happen to an open question, and what the agent must see each time:
  * | while                     | event                         | the agent gets                         | transcript          |
  * |---------------------------|-------------------------------|----------------------------------------|---------------------|
- * | its turn runs             | answered                      | a steer into that turn                 | one answers row     |
+ * | its turn runs             | answered                      | a steer into that turn                 | the delivery        |
  * | its turn ended            | answered                      | a turn of its own                      | one answers row     |
  * | its turn ended            | answered by a linked device   | a turn of its own                      | one answers row     |
  * | two are open              | each answered                 | each answer names its own question     | a row each          |
@@ -201,8 +201,27 @@ describe('a question asked without waiting (ask_user wait: false)', () => {
     await waitFor(() => w.adapter.prompts.length === 2, 'the answer turn')
     await w.idle()
     expect(w.adapter.prompts[1]).toContain('in their words: "Teal, with a white border"')
+    // The answers row is recorded when the answer is given, once; the message that delivers it carries no second one.
+    expect(w.messages().filter((message) => message.questionAnswers)).toEqual([expect.objectContaining({ questionAnswers: [{ prompt: 'Which colour for the badge?', chosen: [], reply: 'Teal, with a white border' }] })])
     expect(w.answerRows()).toHaveLength(1)
-    expect(w.messages().filter((message) => message.questionAnswers)).toEqual([])
+  })
+
+  it('an answer with an image keeps it: the answers row shows the image, and the agent is told where it is saved', async () => {
+    const w = world()
+    await w.send('build the badge')
+    await w.idle()
+    const id = w.ask()
+    const gui = { mms: { questions: w.d.questions, orchestrator: w.d.orch, threads: w.d.store }, connection: { id: 'gui-1', clientType: 'gui' } } as unknown as HandlerContext
+    const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
+    await expect(dispatchMethod(gui, 'orchestrator.answerQuestions', { requestId: id, answers: { colour: 'like this one' }, attachments: { colour: [{ name: 'swatch.png', mimeType: 'image/png', data: png }] } })).resolves.toEqual({ ok: true })
+    const rows = w.messages().filter((message) => message.questionAnswers)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.images).toEqual([expect.objectContaining({ name: 'swatch.png', data: png })])
+    expect(rows[0]!.questionAnswers![0]!.images).toEqual([0])
+    w.deliver()
+    await waitFor(() => w.adapter.prompts.length === 2, 'the answer turn')
+    await w.idle()
+    expect(w.adapter.prompts[1]).toMatch(/Image attached: \//)
   })
 
   it('several open at once: each answer reaches the agent tagged with its own question', async () => {

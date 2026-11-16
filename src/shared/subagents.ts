@@ -106,7 +106,8 @@ export interface SubagentNoticeItem {
    * What the notice says when it is not a task's result: its subagent waits for an answer (`question`), or the task
    * was stopped before it finished (`stopped`). Such an item has nothing to read with `task_status`.
    * `answer` is not about a subagent: the person answered (or dismissed) a question this thread's own agent asked
-   * without waiting. Its `childThreadId` is the thread itself, and the app shows it as the answers row (`answers`).
+   * without waiting. Its `childThreadId` is the thread itself. The transcript shows nothing for it: the answers row was
+   * recorded when the person answered. A queued copy that waits for its turn shows `answers`.
    */
   event?: 'question' | 'stopped' | 'answer'
   /** With `event: 'question'`: the question the subagent waits on. With `event: 'answer'`: the question answered. */

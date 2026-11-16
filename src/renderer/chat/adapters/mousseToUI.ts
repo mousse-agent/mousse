@@ -540,31 +540,33 @@ export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSender
     // Answers to the agent's questions are a step of the agent's turn (one row that opens to each
     // question and its answer), not a message from the user. Older answers carry only the text and
     // stay a user message: typed text can look the same, so it is not parsed.
-    // The answers to a question the agent asked without waiting arrive in the message that delivers them to the agent
-    // (a steer, or a turn of their own), as notice items: the same row. What else that notice carries (a subagent's
-    // result delivered with them) shows as usual, below it.
-    const deliveredAnswers = msg.role === 'user' ? msg.subagentNotice?.filter((item) => item.event === 'answer') ?? [] : []
-    const otherNotice = deliveredAnswers.length ? msg.subagentNotice!.filter((item) => item.event !== 'answer') : msg.subagentNotice
-    const answers = msg.role === 'user' && msg.questionAnswers?.length ? msg.questionAnswers : deliveredAnswers.flatMap((item) => item.answers ?? [])
-    if (answers.length) {
-      const row = otherNotice?.length ? { ...base, id: `${msg.id}:answers` } as UIMessage : base
-      row.role = 'assistant'
-      row.parts = [{
+    if (msg.role === 'user' && msg.questionAnswers?.length) {
+      base.role = 'assistant'
+      base.parts = [{
         type: 'tool-QuestionAnswers',
-        toolCallId: row.id,
+        toolCallId: msg.id,
         state: 'output-available',
         // The images sent with the answers; each question names its own by index. One of a thread on another
         // computer may arrive by name first, its bytes fetched when shown.
         input: {
-          questions: answers,
-          ...(msg.images?.length && msg.questionAnswers?.length
+          questions: msg.questionAnswers,
+          ...(msg.images?.length
             ? { images: msg.images.map((img) => ({ name: img.name, ...(img.data ? { url: `data:${img.mimeType};base64,${img.data}` } : {}) })) }
             : {}),
         },
       } as unknown as UIMessage['parts'][number]]
-      out.push(row)
+      out.push(base)
       lastAssistantText = null
-      if (!otherNotice?.length) continue
+      continue
+    }
+
+    // The message that delivers answers to a question the agent asked without waiting (a steer, or a turn of its own)
+    // shows nothing for them: the answers row was recorded when they were given. What else it carries (a subagent's
+    // result delivered with them) shows as usual.
+    const otherNotice = msg.role === 'user' ? msg.subagentNotice?.filter((item) => item.event !== 'answer') : msg.subagentNotice
+    if (msg.role === 'user' && msg.subagentNotice?.length && !otherNotice?.length) {
+      lastAssistantText = null
+      continue
     }
 
     if (msg.role === 'assistant' && msg.streaming) {
