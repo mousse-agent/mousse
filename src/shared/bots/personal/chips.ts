@@ -35,7 +35,7 @@ type ChipKind =
   | 'search' | 'fetch' | 'browse' | 'read' | 'change' | 'save' | 'draft' | 'lookback' | 'consult' | 'skill' | 'tool' | 'mcp' | 'schedules'
   | 'schedule' | 'unschedule' | 'remember' | 'forget' | 'depth' | 'profile' | 'model'
   | 'work' | 'work_stop' | 'work_note' | 'remind' | 'unremind' | 'work_look' | 'wake' | 'watch' | 'unwatch' | 'bot_send' | 'bot_look'
-  | 'threads_look' | 'profiler' | 'thread_wait' | 'thread_start' | 'thread_send' | 'thread_stop' | 'thread_archive' | 'thread_hide' | 'picture'
+  | 'threads_look' | 'profiler' | 'themes_look' | 'theme' | 'thread_wait' | 'thread_start' | 'thread_send' | 'thread_stop' | 'thread_archive' | 'thread_hide' | 'picture'
   | 'subagent' | 'subagent_wait' | 'subagent_look'
 
 interface Classified {
@@ -206,6 +206,9 @@ function classify(tool: string, input: unknown, ctx: BotChipContext): Classified
     case 'profiler_children':
     case 'profiler_sample_now':
     case 'profiler_watch': return { kind: 'profiler', icon: 'read', live: "checking Mousse's memory" }
+    // Mousse's look ("change how Mousse looks"): reading the themes, and changing them.
+    case 'theme_read': return { kind: 'themes_look', icon: 'read', live: 'looking at your themes' }
+    case 'theme_set': return { kind: 'theme', icon: 'edit', live: 'changing how Mousse looks' }
     case 'thread_create': {
       const title = str(args.title)
       return { kind: 'thread_start', icon: 'think', live: 'starting a thread', ...(title ? { detail: shortChipText(title, 40) } : {}) }
@@ -374,6 +377,8 @@ function groupChip(kind: ChipKind, icon: BotChipIcon, calls: readonly Classified
     case 'mcp': return details.length ? chip('used', listed(details)) : chip('used a tool')
     case 'threads_look': return chip('read your threads')
     case 'profiler': return chip("checked Mousse's memory and CPU")
+    case 'themes_look': return chip('looked at your themes')
+    case 'theme': return chip('changed how Mousse looks')
     case 'thread_wait': return chip(n === 1 ? 'waited on a thread' : `waited on threads · ${n}`)
     case 'subagent': {
       const titles = [...new Set(details)]

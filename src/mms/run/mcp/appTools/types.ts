@@ -214,6 +214,11 @@ export interface MousseTool {
    * hold for a bot (an agent's counts per run, its limit on agent messages in a row) and with what does.
    */
   botDescription?: string
+  /**
+   * A tool whose personal bot's call its grant answers: once the registry has held the call to the bot's grant, it asks
+   * nobody, whatever `access` would ask of a thread (the owner allowing the permission is the bot's Full access for it).
+   */
+  botGrantAnswers?: true
   /** Plain JSON Schema (no TypeBox symbols), byte-identical to `definition`'s parameters. */
   inputSchema: JsonSchema
   access: ToolAccess

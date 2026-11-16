@@ -64,13 +64,16 @@ function state(appearance: AppearanceSettings): Record<string, unknown> {
   return { theme: appearance.theme, ...(user ? { userTheme: { id: user.id, name: user.name } } : { userTheme: null }) }
 }
 
-/** Refused where settings may not change: read-only and Plan turns, discovery, subagents and bots. */
+/**
+ * Refused where settings may not change: read-only and Plan turns, discovery, and subagents, a bot's included. A bot's
+ * own turn may, once its owner allowed "change how Mousse looks" (the registry holds every call to that).
+ */
 function mayChangeSettings(turn: AppToolTurn): Availability {
   if (!turn.settingsEnabled(THEME_SET_TOOL)) return disabledInSettings(THEME_SET_TOOL)
   if (turn.modeFacts.readOnly || turn.modeCeiling === 'plan' || turn.discovery)
     return 'Changing the theme changes Mousse\'s settings, which a read-only turn cannot do. Ask the person to switch to Agent mode.'
   if (turn.subagent) return 'Only the thread\'s own agent can change the theme, not a subagent.'
-  if (turn.bot) return 'A bot cannot change how Mousse looks.'
+  if (turn.bot && turn.bot.role !== 'activation') return 'Only the bot itself can change how Mousse looks, not a subagent or a consult.'
   return true
 }
 
@@ -171,6 +174,8 @@ export function appearanceTools(host: AppToolHost): MousseTool[] {
       name: THEME_SET_TOOL,
       description:
         `Change how Mousse looks. Either theme: switch to a built-in theme (${builtIns}; "system" follows the computer's light or dark mode) or an existing user theme id. Or userTheme: create a user theme (no id) or update one (its id; fields left out keep their values) and switch to it. Theme CSS asks the person unless the run is in Full access. Read theme_read first for the tokens and selectors. CSS that could load anything from outside Mousse is dropped.`,
+      botDescription:
+        `Change how Mousse looks for your owner. Either theme: switch to a built-in theme (${builtIns}; "system" follows the computer's light or dark mode) or an existing user theme id. Or userTheme: create a user theme (no id) or update one (its id; fields left out keep their values) and switch to it. Your owner allowed this, so nothing asks first. Read theme_read first for the tokens and selectors. CSS that could load anything from outside Mousse is dropped.`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -213,6 +218,10 @@ export function appearanceTools(host: AppToolHost): MousseTool[] {
         const css = args.userTheme && typeof args.userTheme === 'object' ? (args.userTheme as Record<string, unknown>).css : undefined
         return (typeof css === 'string' && css.trim()) || wallpaperPath(args) ? 'full' : 'edit'
       },
+      // A bot's turn asks nobody: its owner allowing "change how Mousse looks" is its Full access for this tool, CSS and
+      // new wallpapers included, with the same checks (CSS that loads from outside dropped, the picture checked, never a
+      // network share).
+      botGrantAnswers: true,
       listed: () => Boolean(host.appearance?.()),
       available: mayChangeSettings,
       describe: (args) => (args.userTheme ? 'Save and use a theme' : 'Switch theme'),
