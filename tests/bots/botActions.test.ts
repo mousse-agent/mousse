@@ -1084,3 +1084,15 @@ it('C4 hidden paths include secrets within escaped literal containers but never 
   const a = f.bots.actions.forWork(t.workId)!
   expect(f.bots.service.actionMessage(t.botId, a.id).action!.hiddenPaths).toEqual(['meta → password', 'login → token'])
 })
+
+it('C4 a folded action telling takes priority over ordinary message content', async () => {
+  const t = await setup(true)
+  f.bots.markRead(t.botId, f.bots.service.chatList(t.botId).messages.at(-1)!.seq)
+  f.bots.setTellingWindows(1)
+  const events: any[] = []
+  f.bots.events.on('tell', event => events.push(event))
+  f.bots.chat.post({ botId: t.botId, author: 'bot', kind: 'text', text: 'Other update content' })
+  await t.call()
+  f.bots.tellings.release(f.clock.now)
+  expect(events.at(-1)).toMatchObject({ body: 'Wants to send', kind: 'question' })
+})
