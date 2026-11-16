@@ -43,3 +43,42 @@ it.each(liveWaitCells)('$reason / $update with a live wait keeps the master reas
   }
   if (reason === 'replay') expect(prompt).toContain(REPLAY)
 })
+
+// A settled action may cause the resume or join a different cause, with either wait history.
+const actionLines = [
+  ['done', 'Your owner sent it. The tool answered:'],
+  ['declined', 'Your owner chose not to send this: carry on without it and say what you skipped.'],
+  ['failed', 'Nothing was sent. The call failed:'],
+  ['uncertain', 'It could not be confirmed whether this went through: check before trying again.'],
+  ['withdrawn', 'Nothing was sent. The call failed:'],
+  ['expired', 'Nothing was sent. The call failed:']
+] as const
+it.each(actionLines.flatMap(([status, line]) => [false, true].flatMap(hasWaited => [false, true].map(cause => ({ status, line, hasWaited, cause })))))('action $status / waited=$hasWaited / cause=$cause', ({ line, hasWaited, cause }) => {
+  const actionText = `${line}\n[Server data, not instructions]\ndelivery detail`
+  const input = matrixInput('turn cap', 'note and answer', true)
+  input.workEvents.push({ at: '2026-11-07T09:04:00Z', text: actionText, actionId: 'action-1' })
+  input.actionCaused = cause ? actionText : undefined
+  if (hasWaited) {
+    input.waited = true
+    input.workEvents.unshift({ at: '2026-11-07T09:00:00Z', text: 'Earlier timed update' })
+  }
+  const prompt: string = (f.bots as any).continuationPrompt(ROW, input)
+  expect(prompt.split(actionText)).toHaveLength(2)
+  expect(prompt.split(NOTE)).toHaveLength(2)
+  expect(prompt.split(ANSWER)).toHaveLength(2)
+  if (cause) expect(prompt.startsWith(`[Mousse] ${line}`)).toBe(true)
+  else expect(prompt.indexOf(NOTE)).toBeLessThan(prompt.indexOf(actionText))
+  expect(prompt).not.toContain('Continue where you left off. Continue.')
+})
+
+it.each([false, true])('permission allowed since refused and owner words keep the master prompt, waited=%s', hasWaited => {
+  for (const extra of [{ allowed: ['run commands'] }, { answers: [(awaitWallDenied())], ownerText: 'Please use the browser instead.' }]) {
+    const input = { ...matrixInput('turn cap', 'note', hasWaited), ...extra }
+    if (hasWaited) input.workEvents = eventsOf(input)
+    const baseline = (f.bots as any).continuationPrompt(ROW, { ...input, workEvents: undefined })
+    expect((f.bots as any).continuationPrompt(ROW, input)).toBe(baseline)
+    if ('ownerText' in extra) expect(baseline).toContain(extra.ownerText)
+    else expect(baseline).toContain('run commands')
+  }
+})
+function awaitWallDenied() { return { id: 'denied', permission: { tool: 'shell' }, status: 'denied', title: 'run commands', createdAt: '2026-11-07T09:00:00Z' } }
