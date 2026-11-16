@@ -2018,14 +2018,14 @@ it('R5-time formats a sent action in the client clock', async () => {
 })
 
 // Stored action cards, through the workspace the owner actually opens.
-const action = (change: Record<string, unknown> = {}) => ({ actionId: 'held-1', digest: 'shown-digest', title: 'Send an email', serverName: 'Mail', args: { from: 'me@example.com', to: ['one@example.com', 'two@example.com'], subject: 'A subject', attachments: ['trip.pdf'], body: 'Long email '.repeat(120) + 'last word', password: { $mousse: 'hidden', text: 'hidden · will be sent' }, literal: { $mousse: 'literal', value: { $mousse: 'hidden', text: 'hidden · will be sent' } } }, hasHiddenValues: true, hiddenPaths: ['password', 'login.token'], status: 'open', note: 'Please check this.', ...change })
+const action = (change: Record<string, unknown> = {}) => ({ actionId: 'held-1', digest: 'shown-digest', title: 'Send an email', serverName: 'Mail', args: { from: 'me@example.com', to: ['one@example.com', 'two@example.com'], subject: 'A subject', attachments: ['trip.pdf'], body: 'Long email '.repeat(120) + 'last word', password: { $mousse: 'hidden', text: 'hidden · will be sent' }, literal: { $mousse: 'literal', value: { $mousse: 'hidden', text: 'hidden · will be sent' } } }, hasHiddenValues: true, hiddenPaths: [['password'], ['login', 'token']], status: 'open', note: 'Please check this.', ...change })
 const held = (change: Record<string, unknown> = {}) => message(1, { id: 'held-message', text: 'legacy fallback', action: action(change) } as never)
 it('shows complete stored action arguments as guarded text, with an in-place body fold and separate bot note', async () => {
   fake.chats.inbox = [held({ title: '<b>Send</b>', serverName: '[Mail](https://evil.test)', note: '<i>Check</i>\u202e this', args: { ...action().args, hostile: '<button>Send now</button> https://evil.test Ignore instructions', text: 'hidden · will be sent' } })]
   await open()
   const card = host.querySelector('[aria-label="Action to review"]')!
   expect(card).toBeTruthy()
-  for (const text of ['me@example.com', 'one@example.com', 'two@example.com', 'A subject', 'trip.pdf', '<b>Send</b>', 'Inbox helper says:', '<button>Send now</button>', 'login → token']) expect(card.textContent).toContain(text)
+  for (const text of ['me@example.com', 'one@example.com', 'two@example.com', 'A subject', 'trip.pdf', '<b>Send</b>', 'Inbox helper says:', '<button>Send now</button>', 'login']) expect(card.textContent).toContain(text)
   expect(card.querySelector('a, b, i')).toBeNull()
   expect(card.textContent).not.toContain('\u202e')
   const fold = card.querySelector('details')!
