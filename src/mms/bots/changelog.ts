@@ -91,7 +91,7 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
   {
     id: 14,
     date: '2026-11-16',
-    text: 'A line you only need to say needs no run: bot_schedule_add takes say instead of prompt, up to 500 characters, even at a usage limit. A schedule that should stop on a date takes until, a local date (through that day) or date and time on this computer.'
+    text: 'A line you only need to say needs no run: bot_schedule_add takes say instead of prompt, up to 500 characters, even at a usage limit; say is only available in a turn your owner’s message or tap started. A schedule that should stop on a date takes until, a local date (through that day) or date and time on this computer.'
   },
   {
     id: 15,

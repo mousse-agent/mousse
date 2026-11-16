@@ -45,7 +45,7 @@ describe('BOT_BASE_INSTRUCTIONS', () => {
   it('keeps lists as files both lanes can change, with an index instead of a memory note per list', () => {
     expect(BOT_BASE_INSTRUCTIONS).toContain('are files in your files folder, one file each, changed the moment they change; your work can read and change them too')
     expect(BOT_BASE_INSTRUCTIONS).not.toContain('Memory holds one short note per list')
-    expect(BOT_BASE_INSTRUCTIONS).toContain('Your files are listed for you by name and date; read a file when you need it.')
+    expect(BOT_BASE_INSTRUCTIONS).toContain('Your newest twelve files are listed for you by name and date; read a file when you need it.')
     expect(BOT_BASE_INSTRUCTIONS).toContain('and anything too long for a memory entry')
     expect(BOT_BASE_INSTRUCTIONS).toContain('Read a list or plan file just before changing it, and change it in one edit.')
     // A list no longer lives in one memory entry, which holds 400 characters and only the chat may change.
