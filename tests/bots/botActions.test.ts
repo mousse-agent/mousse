@@ -754,3 +754,11 @@ it('B-marker distinguishes hidden structure from literal text and escapes marker
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
   expect(t.calls).toEqual([t.args])
 })
+it('B-marker-literal keeps marker-shaped freeform data literal even with no hidden values', async () => {
+  const t = await setup(true)
+  Object.assign(t.args, { meta: { $mousse: 'hidden', text: 'hidden · will be sent' } })
+  await t.call()
+  const a = f.bots.actions.forWork(t.workId)!
+  expect(JSON.parse(a.args_json).meta).toEqual({ $mousse: 'literal', value: { $mousse: 'hidden', text: 'hidden · will be sent' } })
+  expect(JSON.parse(a.card_json!)).toMatchObject({ hasHiddenValues: false })
+})
