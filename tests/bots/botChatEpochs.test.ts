@@ -6,8 +6,8 @@ import { BOT_MEMORY_PROTOCOL, createBotContextProvider } from '../../src/mms/bot
 import { botFixture, createBot, finish, PI, start, type BotFixture } from './botFixture'
 
 /**
- * Chat epochs (docs/plans/bot-context.md §14), at the engine, with the real pack provider: with the Labs setting on and
- * a runtime that resumes a thread's conversation, a bot's chat turn after the first of its epoch is not cleared and runs
+ * Chat epochs (docs/plans/bot-context.md §14), at the engine, with the real pack provider: on a runtime that resumes a
+ * thread's conversation, a bot's chat turn after the first of its epoch is not cleared and runs
  * on the thread's history, with the same system text and tool list, so what the runtime already sent stays byte for
  * byte the start of its next request. A failed turn, /clear, a forget, a model change, a full conversation and a cold
  * one past the mid mark each start the next turn from a cleared context. The pack's side is in
@@ -18,12 +18,10 @@ describe('a bot chat on epochs', () => {
   let f: BotFixture
   let botId: string
   let memory: BotMemoryStore
-  let on = true
   beforeEach(async () => {
-    on = true
     f = botFixture()
     const defaults = getDefaultSettings()
-    f.host.settings = { get: () => ({ ...defaults, experimental: { ...defaults.experimental, botChatEpochs: on } }), set: () => defaults } as never
+    f.host.settings = { get: () => defaults, set: () => defaults } as never
     f.host.chatResumes = (instanceId) => instanceId === PI.instanceId
     memory = new BotMemoryStore({ db: f.store.db, clock: () => f.clock.now })
     f.host.context = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} } })
@@ -55,13 +53,6 @@ describe('a bot chat on epochs', () => {
     expect(f.store.turnUsage(second.activation.id, 1)!.contextGen).toBe(f.store.turnUsage(first.activation.id, 1)!.contextGen)
     expect(f.store.turnUsage(second.activation.id, 1)!.freshContext).toBe(false)
     await finish(f, second.payload, 'completed', { text: 'Free.' })
-
-    // The control: with the setting off, every chat turn starts from a cleared context and the whole pack again.
-    on = false
-    const off = await chatTurn('And Friday?', 'u3')
-    expect(f.cleared.length).toBe(cleared + 1)
-    expect(off.prepared.history).toBe('cleared')
-    expect(off.prepared.preamble).toContain(BOT_MEMORY_PROTOCOL)
   })
 
   it('a runtime that does not resume a thread\'s conversation keeps today\'s cleared context', async () => {
@@ -70,6 +61,7 @@ describe('a bot chat on epochs', () => {
     const turn = await chatTurn('Hi', 'u1')
     expect(turn.prepared.history).toBe('cleared')
     expect(f.cleared.length).toBe(cleared + 1)
+    expect(turn.prepared.preamble).toContain(BOT_MEMORY_PROTOCOL)
   })
 
   it.each([

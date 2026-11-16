@@ -389,10 +389,9 @@ enforced by a test.
 Tool and system sizes count only what Mousse sends. A runtime's own system prompt and built-in tools show up only in
 the prompt sizes the runtime reports.
 
-## 14. Chat epochs (phase 1, behind Labs)
+## 14. Chat epochs (phase 1)
 
-**What it does.** With Settings → Labs → Bots keep the conversation (`experimental.botChatEpochs`, off by default), a
-bot's chat is one resumed runtime conversation per *epoch* instead of a cleared context every turn:
+**What it does.** A bot's chat is one resumed runtime conversation per *epoch* instead of a cleared context every turn:
 
 - The first turn of an epoch starts from a cleared context with the base pack: the memory protocol (plus one line saying
   that later updates win), core memory, run notes, the chat summary and the recent chat, folded to its tail (6k tokens)
@@ -422,8 +421,7 @@ process each bot turn and keeps today's cleared context.
 
 **What waits.**
 
-- A live check that Claude Code and Codex actually read the resumed conversation from the cache, and the default turning
-  on after it. A runtime that silently starts a new session instead of resuming is not detected yet.
+- A live check that Claude Code and Codex actually read the resumed conversation from the cache. A runtime that silently starts a new session instead of resuming is not detected yet.
 - The marks (48k, 24k, 6k) are starting values: the phase 0 numbers replace them, and set the "hello" ceiling.
 - A model-written digest at the fold, and the hard mark it needs.
 - Pi epochs, which need its session kept between bot turns.

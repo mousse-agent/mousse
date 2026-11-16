@@ -2001,11 +2001,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * Whether this chat turn runs on chat epochs (docs/plans/bot-context.md §14): the Labs setting is on, the provider
-   * builds them, and the runtime of the turn's entry keeps the thread's conversation between turns (`chatResumes`).
+   * Whether this chat turn runs on chat epochs (docs/plans/bot-context.md §14): the provider builds them, and the
+   * runtime of the turn's entry keeps the thread's conversation between turns (`chatResumes`).
    */
   private epochsFor(row: BotActivationRow, selection: BotActivationRow['selection']): boolean {
-    return row.lane === 'chat' && Boolean(selection) && this.host.settings?.get().experimental.botChatEpochs === true
+    return row.lane === 'chat' && Boolean(selection)
       && Boolean(this.host.context?.chatContext) && this.host.chatResumes?.(selection!.instanceId) === true
   }
 
