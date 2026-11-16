@@ -1,3 +1,4 @@
+import { createBotContextProvider } from '../../src/mms/bots/memory/contextPack'
 import { BOT_SCHEDULE_ACT_TOOLS } from '../../src/shared/bots/personal/manifest'
 import { createBotMemoryAdmin } from '../../src/mms/bots/memory/admin'
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
@@ -293,6 +294,9 @@ it('a scheduled call parks, skips occurrences through the shared scheduler, and 
   expect(f.store.dispatch(t.id, 2)?.threadId).toBe(f.store.dispatch(t.id, 1)?.threadId)
   expect(f.store.dispatch(t.id, 2)?.prompt.text).toContain('Your owner sent it')
   expect(f.store.dispatch(t.id, 2)?.prompt.text).toContain('delivered')
+  f.clock.now += 5 * 60_000
+  expect((await f.tickSchedules(new Date(f.clock.now))).inserted).toEqual([])
+  expect(f.book.get(t.botId, t.schedule.scheduleId)?.skip?.reason).toBe('bot_waiting_for_owner')
   await finish(f, next.payload, 'completed', { text: 'Sent and recorded.' })
   expect(t.calls).toEqual([t.args])
   expect(f.store.activation(t.id)?.status).toBe('done')
@@ -308,6 +312,10 @@ it('with asks first off a scheduled call sends directly, writes no card and fini
 })
 it.each([1, 60, 180])('a schedule card lives for one gap with an hour minimum: %s minutes', async minutes => {
   const t = await scheduledCall(true, minutes)
+  const memory = new BotMemoryStore({ db: f.store.db })
+  f.host.progress = memory
+  f.host.context = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} } })
+  expect(f.bots.saveLeftOff(t.id, 'Checked through the first invoice')).toBe('kept')
   await t.call()
   await finish(f, t.run.payload)
   const a = f.bots.actions.forWork(t.id)!
@@ -319,7 +327,10 @@ it.each([1, 60, 180])('a schedule card lives for one gap with an hour minimum: %
   expect(f.store.dispatch(t.id, 2)?.prompt.text).toContain('This call expired')
   await finish(f, next.payload, 'completed', { text: 'Nothing sent.' })
   f.clock.now += minutes * 60_000
-  expect((await f.tickSchedules(new Date(f.clock.now))).inserted).toHaveLength(1)
+  const due = await f.tickSchedules(new Date(f.clock.now))
+  expect(due.inserted).toHaveLength(1)
+  const later = await start(f, due.inserted[0]!)
+  expect(later.prepared.preamble).toContain('Checked through the first invoice')
 })
 it('editing a schedule refuses Send without sending its old call', async () => {
   const t = await scheduledCall()
