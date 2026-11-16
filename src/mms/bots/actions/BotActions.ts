@@ -108,6 +108,10 @@ function reviewArguments(value: unknown, schema: unknown): { args: unknown; hasH
       if (!node || seen.has(node)) return
       seen.add(node)
       nodes.push(node)
+      if (Object.hasOwn(node, '$dynamicRef')) unresolved = true
+      for (const keyword of ['if', 'then', 'else']) if (Object.hasOwn(node, keyword)) follow(node[keyword], depth + 1)
+      const dependents = record(node.dependentSchemas)
+      if (dependents) for (const branch of Object.values(dependents)) follow(branch, depth + 1)
       if (Object.hasOwn(node, '$ref')) {
         const target = typeof node.$ref === 'string' ? localRef(node.$ref) : undefined
         if (target === undefined) unresolved = true
@@ -123,7 +127,7 @@ function reviewArguments(value: unknown, schema: unknown): { args: unknown; hasH
   }
   const visit = (item: unknown, schemas: unknown[], inheritedUnknown = false): unknown => {
     const { nodes, unresolved } = expand(schemas, inheritedUnknown)
-    if (Array.isArray(item)) return item.map((entry, i) => visit(entry, nodes.map(node => Array.isArray(node.items) ? node.items[i] : node.items), unresolved))
+    if (Array.isArray(item)) return item.map((entry, i) => visit(entry, nodes.map(node => Array.isArray(node.prefixItems) && i < node.prefixItems.length ? node.prefixItems[i] : Array.isArray(node.items) ? node.items[i] : node.items), unresolved))
     if (item && typeof item === 'object') {
       const entries = Object.entries(item).map(([key, entry]) => {
         const declarations = nodes.map(node => record(node.properties)).filter(properties => properties && Object.hasOwn(properties, key))
