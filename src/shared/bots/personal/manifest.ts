@@ -212,6 +212,7 @@ const BOT_OFFERABLE_APP_TOOLS: ReadonlySet<string> = new Set([
   ...BOT_THREAD_TOOLS,
   ...BOT_PROFILER_TOOLS,
   ...BOT_WORK_TOOLS,
+  'work_wait',
   ...BOT_SUBAGENT_TOOLS,
   ...BOT_MEMORY_TOOLS,
   BOT_MCP_LIST_TOOL,

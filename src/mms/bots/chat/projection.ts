@@ -603,7 +603,7 @@ export class BotChatProjection {
     const runs: BotRunItem[] = (this.options.schedules?.(definition.id) ?? []).map((schedule) => (
       { id: schedule.scheduleId, label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}), kind: 'schedule' as const, ...(schedule.jobId ? { jobId: schedule.jobId } : {}), ...(schedule.paused ? { paused: true as const } : {}) }
     ))
-    const reminders: BotReminderItem[] = this.store.waitingReminders(definition.id).map((reminder) => (
+    const reminders: BotReminderItem[] = this.store.waitingReminders(definition.id).filter((reminder) => !reminder.workId).map((reminder) => (
       { id: reminder.id, dueAt: reminder.dueAt, text: reminder.text, ownerSet: reminder.ownerSet, ...(reminder.work ? { work: true as const } : {}), ...(reminder.wake ? { wake: reminder.event ? wakeEventLabel(reminder.event) : '' } : {}) }
     ))
     return {

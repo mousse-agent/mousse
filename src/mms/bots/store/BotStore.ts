@@ -787,7 +787,14 @@ export interface BotDispatchRow {
   runId: string | null
   threadId: string
   /** `subagent`: what a subagent's turn runs as, on its every dispatch (`BotSubagentSpec`). */
-  prompt: { text: string; subagent?: BotSubagentSpec }
+  prompt: {
+    text: string
+    subagent?: BotSubagentSpec
+    /** A wait is told only when a dispatch carrying its id has started. */
+    workWaitIds?: string[]
+    /** Work's stored additions carried here; consume them with the dispatch's start, not its intent. */
+    workDelivery?: { answers: string[]; notes: number[]; question?: string }
+  }
   policyDigest: string
   deadlineMs: number | null
   prepaidMs: number | null
@@ -1273,7 +1280,10 @@ export class BotStore {
     if (to === 'failed' || to === 'cancelled' || to === 'done') return this.db.transaction(() => {
       const moved = this.moveActivationRow(id, from, to, patch)
       if (moved && to !== 'done') this.withdrawUnpostedQuestions(id)
-      if (moved) this.withdrawWorkQuestions(id)
+      if (moved) {
+        this.withdrawWorkQuestions(id)
+        this.run("UPDATE bot_reminders SET status = 'cancelled', delivered_at = ? WHERE work_id = ? AND status = 'waiting'", this.now(), id)
+      }
       return moved
     })
     return this.moveActivationRow(id, from, to, patch)
@@ -1938,10 +1948,11 @@ export class BotStore {
 
   /**
    * Work's answered question went out with dispatch `n`, as `line` in its prompt: read once, and the line kept with the
-   * answer, so a forget finds that copy by the question, not by its words (`answer_json.sent`).
+   * answer, so a forget finds that copy by the question, not by its words (`answer_json.sent`). With read=false,
+   * only the copy is recorded here; the dispatch start marks it read.
    */
-  markAnswerSent(questionId: string, n: number, line: string): void {
-    this.run("UPDATE bot_questions SET read_at = ?, answer_json = json_set(answer_json, '$.sent', json_object('n', ?, 'line', ?)) WHERE id = ? AND read_at IS NULL", this.now(), n, line, questionId)
+  markAnswerSent(questionId: string, n: number, line: string, read = true): void {
+    this.run("UPDATE bot_questions SET read_at = CASE WHEN ? THEN ? ELSE read_at END, answer_json = json_set(answer_json, '$.sent', json_object('n', ?, 'line', ?)) WHERE id = ? AND read_at IS NULL", read ? 1 : 0, this.now(), n, line, questionId)
   }
 
   /** The bot's questions that work waits on now (the work is `blocked` with `question`), oldest first. */
@@ -1960,12 +1971,26 @@ export class BotStore {
 
   // -- Reminders (bot_reminders, v6): a bot's one-off times; repeating ones are schedules in the shared store --------
 
-  insertReminder(row: Omit<BotReminderRow, 'workId' | 'status' | 'deliveredAt' | 'messageId' | 'activationId' | 'wake' | 'event' | 'fired' | 'chain' | 'snoozedFrom' | 'ownerSet'> & Partial<Pick<BotReminderRow, 'wake' | 'event' | 'chain' | 'ownerSet' | 'snoozedFrom'>>): void {
+  insertReminder(row: Omit<BotReminderRow, 'workId' | 'status' | 'deliveredAt' | 'messageId' | 'activationId' | 'wake' | 'event' | 'fired' | 'chain' | 'snoozedFrom' | 'ownerSet'> & Partial<Pick<BotReminderRow, 'wake' | 'event' | 'chain' | 'ownerSet' | 'snoozedFrom' | 'workId'>>): void {
     this.run(
-      "INSERT INTO bot_reminders(id, bot_id, due_at, text, work_title, work_brief, reply_to, created_at, status, wake, event_json, chain, owner_set, snoozed_from) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'waiting', ?, ?, ?, ?, ?)",
+      "INSERT INTO bot_reminders(id, bot_id, due_at, text, work_title, work_brief, reply_to, created_at, status, wake, event_json, chain, owner_set, snoozed_from, work_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'waiting', ?, ?, ?, ?, ?, ?)",
       row.id, row.botId, row.dueAt, row.text, row.work?.title ?? null, row.work?.brief ?? null, row.replyTo, row.createdAt,
-      row.wake ? 1 : 0, row.event ? JSON.stringify(row.event) : null, row.chain ?? 0, row.ownerSet == null ? null : row.ownerSet ? 1 : 0, row.snoozedFrom ?? null
+      row.wake ? 1 : 0, row.event ? JSON.stringify(row.event) : null, row.chain ?? 0, row.ownerSet == null ? null : row.ownerSet ? 1 : 0, row.snoozedFrom ?? null, row.workId ?? null
     )
+  }
+
+  /** Latest wait, retained after delivery until its continuation is dispatched. */
+  workWait(workId: string): BotReminderRow | undefined {
+    const row = this.get('SELECT * FROM bot_reminders WHERE work_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1', workId)
+    return row ? reminderOf(row) : undefined
+  }
+
+  /** Delivery is not telling: only a dispatch that started with the wait consumes it. */
+  unreadWorkWaits(workId: string): BotReminderRow[] {
+    return this.all(`SELECT r.* FROM bot_reminders r WHERE r.work_id = ? AND r.status = 'delivered'
+      AND NOT EXISTS (SELECT 1 FROM bot_dispatches d, json_each(d.prompt_json, '$.workWaitIds') told
+        WHERE d.activation_id = r.work_id AND d.started_at IS NOT NULL AND told.value = r.id)
+      ORDER BY r.due_at, r.rowid`, workId).map(reminderOf)
   }
 
   /** How many wakes a bot set since `since`, cancelled ones too (the daily budget). */
@@ -2027,7 +2052,8 @@ export class BotStore {
   nextReminder(botId?: string): BotReminderRow | undefined {
     const row = this.get(`SELECT * FROM bot_reminders WHERE status = 'waiting'
       AND bot_id IN (SELECT bot_id FROM bot_registry WHERE deleted_at IS NULL)
-      ${botId === undefined ? '' : 'AND bot_id = ?'} ORDER BY due_at, id LIMIT 1`, ...(botId === undefined ? [] : [botId]))
+      AND (work_id IS NULL OR due_at > ? OR work_id IN (SELECT id FROM bot_activations WHERE status = 'blocked' AND end_reason = 'waiting'))
+      ${botId === undefined ? '' : 'AND bot_id = ?'} ORDER BY due_at, id LIMIT 1`, this.now(), ...(botId === undefined ? [] : [botId]))
     return row ? reminderOf(row) : undefined
   }
 

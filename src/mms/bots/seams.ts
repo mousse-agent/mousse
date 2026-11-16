@@ -106,7 +106,7 @@ export interface BotToolHost {
     stop(botId: string, workId: string): Promise<'stopped' | 'ended' | 'not_found'>
     /** `from`: the chat activation that passes it on (its owner's message is the note's source). */
     /** `question`: the work waits for the owner's answer to its question and takes nothing else until then. */
-    note(botId: string, workId: string, note: string, from?: string): 'noted' | 'held' | 'ended' | 'not_found' | 'question' | 'approval'
+    note(botId: string, workId: string, note: string, from?: string): 'noted' | 'held' | 'ended' | 'not_found' | 'question' | 'approval' | 'waiting'
     /**
      * When a note reaches the work: `now` (at its next step, while it runs), `after_compaction` (its runtime is making
      * room in its context: once that ends, within minutes), `step_end` (when its current turn ends: its runtime takes no
@@ -160,6 +160,7 @@ export interface BotToolHost {
    * wakes here.
    */
   wakes?: {
+    wait?(botId: string, from: string, input: { brief: string; dueAt?: string; event?: BotWakeEvent; hours?: number }): Promise<{ wakeId: string; dueAt: string; label: string }>
     add(botId: string, from: string, input: { brief: string; dueAt?: string; event?: BotWakeEvent; hours?: number }): Promise<{ wakeId: string; dueAt: string; label: string }>
   }
   /**
@@ -220,7 +221,7 @@ export interface BotWorkList {
    * `waitsFor: 'answer'`: held while it waits for the owner's answer to `question` (`question_answer` passes on an answer
    * they gave in the chat).
    */
-  now: Array<{ workId: string; title: string; status: 'running' | 'queued' | 'waiting_for_internet' | 'paused'; startedAt: string; doing?: string; kind: 'work' | 'schedule'; waitsFor?: 'answer'; question?: { questionId: string; question: string } }>
+  now: Array<{ workId: string; title: string; status: 'running' | 'queued' | 'waiting_for_internet' | 'paused'; startedAt: string; doing?: string; kind: 'work' | 'schedule'; wait?: { dueAt: string; event: BotWakeEvent | null }; waitsFor?: 'answer'; question?: { questionId: string; question: string } }>
   recent: Array<{ workId: string; title: string; status: 'done' | 'failed' | 'stopped'; endedAt: string; report?: string }>
 }
 

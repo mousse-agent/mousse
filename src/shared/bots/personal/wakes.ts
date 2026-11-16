@@ -131,7 +131,7 @@ export function wakeFiredLabel(fired: BotWakeFired | null): string {
  * The text a wake's chat turn starts with: what the bot wrote for itself, when it set it, and what happened (its fixed
  * fields), framed as Mousse's, never the owner's. `late`: the time it was for, when it is said later (Mousse was off).
  */
-export function wakeInput(input: { brief: string; setAt: string; event: BotWakeEvent | null; fired: BotWakeFired | null; late?: string; chain: number; clock: (iso: string) => string }): string {
+export function wakeInput(input: { brief: string; setAt: string; event: BotWakeEvent | null; fired: BotWakeFired | null; late?: string; chain: number; clock: (iso: string) => string; work?: boolean }): string {
   const lines: string[] = []
   const set = input.clock(input.setAt)
   const fired = input.fired
@@ -163,6 +163,9 @@ export function wakeInput(input: { brief: string; setAt: string; event: BotWakeE
     lines.push(`[Mousse] A wake-up you set at ${set} ${wakeEventLabel(input.event.kind === 'thread' && input.event.title ? { ...input.event, title: dataFrame('thread title', input.event.title) } : input.event)} ended without it: ${wakeEndWords(reason)}.`)
   }
   lines.push(`What you wrote for yourself: ${input.brief}`)
+  if (input.work) {
+    return [...lines.map((line, index) => index === 0 ? line.replace('A wake-up', 'A work wait').replace(' Your owner did not write: you carry on by yourself.', '') : line), 'Carry on with this work in this thread, then report as usual.'].join('\n\n')
+  }
   lines.push(`Do what you planned, then tell your owner in a short message what happened. If there is nothing worth saying, say so in one line. This is wake-up ${input.chain} of at most ${MAX_WAKE_CHAIN} in a row without your owner.`)
   return lines.join('\n\n')
 }

@@ -257,6 +257,7 @@ export interface BotWorkItem {
    * Why it is held (`paused`): `answer`, it waits for the owner's answer to the question it asked them. Absent from older
    * services, whose apps show it as held.
    */
+  wait?: { dueAt: string; event: import('./wakes').BotWakeEvent | null }
   waitsFor?: 'answer'
   /** First line of a held action, supplied by Mousse. */
   detail?: string
