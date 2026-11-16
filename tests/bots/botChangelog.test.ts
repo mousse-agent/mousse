@@ -1,3 +1,4 @@
+import { tellingLine } from '../../src/shared/bots/personal/tellingSettings'
 /**
  * What changed in Mousse for bots (src/mms/bots/changelog.ts): a bot with history is told the entries it has not seen,
  * after its memory, until a chat turn that carried them settles; a new bot is told nothing. And no bot prompt text or
@@ -129,7 +130,7 @@ it('quiet-hour advice agrees with settings and later entries', () => {
   expect(advice).not.toMatch(/there are no quiet hours|never tell your owner you hold anything/i)
   expect(BOT_CHANGELOG.find(entry => entry.id === 15)!.text).toMatch(/quiet hours now exist/i)
   for (const entry of BOT_CHANGELOG) for (const gone of entry.gone ?? []) {
-    for (const text of ['Quiet 22:00 to 08:00', ...BOT_CHANGELOG.filter(later => later.id > entry.id).map(later => later.text)]) expect(text).not.toMatch(gone)
+    for (const text of [tellingLine({}, { from: '22:00', to: '08:00' })!, ...BOT_CHANGELOG.filter(later => later.id > entry.id).map(later => later.text)]) expect(text).not.toMatch(gone)
   }
 })
 it('all memory wish instructions route telling wishes to settings', () => {
