@@ -1389,13 +1389,14 @@ it('restart never executes a previously approved call while its owner has paused
   expect(t.calls).toEqual([])
 })
 
-it('B1 an approved row survives a cold restart and runs only after a successful listing', async () => {
+it.each([false, true])('B1 an approved row survives a cold restart, past deadline=%s, and runs after listing', async late => {
   const t = await setup(true)
   await t.call(); await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
   f.bots.actions.transition(a.id, 'open', 'approved')
   const tools = t.server.tools.splice(0)
   const where = vi.spyOn(t.mcp, 'where').mockReturnValue(undefined)
+  if (late) f.clock.now = Date.parse(a.expires_at) + 1000
   f.bots.close(); f.bots = new BotEngine(f.host); await f.bots.reconcileOnStartup()
   expect(f.bots.actions.get(a.id)?.status).toBe('approved')
   expect(t.calls).toEqual([])
