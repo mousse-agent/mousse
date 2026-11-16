@@ -13,10 +13,10 @@ export function botAsksFirst(settings?: Pick<MousseSettings, 'experimental'>): b
 }
 export const actionDigest = (value: unknown): string => shortHash(canonicalJson(value), 64)
 /** Mask before cutting, recursively: a cut must not split a credential before the mask sees it. */
-export function maskedActionData(value: unknown): unknown {
-  if (typeof value === 'string') return maskMemoryCredentials(value).slice(0, 32_000)
-  if (Array.isArray(value)) return value.map(maskedActionData)
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [maskMemoryCredentials(key), /(?:authorization|password|passwd|secret|token|apikey)$/i.test(key.replace(/[^a-z0-9]/gi, '')) ? '[held back: looks like a secret]' : maskedActionData(item)]))
+export function maskedActionData(value: unknown, limit = 32_000): unknown {
+  if (typeof value === 'string') return maskMemoryCredentials(value).slice(0, limit)
+  if (Array.isArray(value)) return value.map(item => maskedActionData(item, limit))
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [maskMemoryCredentials(key), /(?:authorization|password|passwd|secret|token|apikey)$/i.test(key.replace(/[^a-z0-9]/gi, '')) ? '[held back: looks like a secret]' : maskedActionData(item, limit)]))
   return value
 }
 export interface ActionRow {
@@ -58,6 +58,8 @@ export class BotActions {
     const binding = this.host.binding(row, tool)
     if (!binding) return { text: 'This tool changed. Carry on without it.', isError: true }
     const exact = JSON.stringify(args)
+    if (actionDigest(JSON.parse(exact)) !== actionDigest(maskedActionData(args, Infinity)))
+      return { text: 'This call contains hidden secret values. Nothing was held or sent. Remove the secret before asking the owner to review it.', isError: true }
     const id = `action_${randomUUID()}`
     const messageId = `bm_${id}`
     this.host.store.db.transaction(() => {
