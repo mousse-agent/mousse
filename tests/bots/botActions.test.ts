@@ -481,3 +481,20 @@ it('S4 refuses a stored target changed to another granted tool with the same sch
   await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow('changed')
   expect(t.calls).toEqual([])
 })
+it('S5 reconciliation never settles a call started in this process during refresh', async () => {
+  const t = await setup(true)
+  await t.call()
+  let releaseRefresh!: () => void
+  let releaseCall!: () => void
+  vi.spyOn(t.mcp, 'warm').mockImplementationOnce(() => new Promise<void>(r => { releaseRefresh = r }))
+  vi.spyOn(t.manager, 'callTool').mockImplementationOnce(async () => { await new Promise<void>(r => { releaseCall = r }); return { content: [{ type: 'text', text: 'delivered' }] } as never })
+  const startup = f.bots.actions.reconcile()
+  const a = f.bots.actions.forWork(t.workId)!
+  const sending = f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  await flush()
+  releaseRefresh()
+  await startup
+  releaseCall()
+  await sending
+  expect(f.bots.actions.forWork(t.workId)?.status).toBe('done')
+})
