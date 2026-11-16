@@ -2285,7 +2285,7 @@ describe('a bot turn on Codex', () => {
       http_headers: { Owner: 'leftover' }, bearer_token_env_var: 'OWNER_TOKEN'
     }]))
     const activeNames = source === 'ignored layer' ? [] : names
-    const collision = activeNames.find((name) => mcp && (name === 'mousse' || attachment === 'both'))
+    const collisions = activeNames.filter((name) => mcp && (name === 'mousse' || attachment === 'both'))
     const config = {
       ...Object.fromEntries(enabled ? activeNames.map((name) => [`mcp_servers.${name}.enabled`, false]) : []),
       ...NO_COMMANDS, model_provider: 'openai',
@@ -2307,25 +2307,29 @@ describe('a bot turn on Codex', () => {
       out({ id: 4, method: 'config/read', params: { includeLayers: true } }),
       inn({ id: 4, result: {
         config: { mcp_servers: source === 'effective' ? servers : {} },
-        layers: source === 'effective' ? [] : [{ disabledReason: source === 'ignored layer' ? 'untrusted' : null, config: { mcp_servers: servers } }]
+        layers: source === 'effective' ? [] : [{ name: { type: 'project', dotCodexFolder: join(files, '.codex') }, disabledReason: source === 'ignored layer' ? 'untrusted' : null, config: { mcp_servers: servers } }]
       } }),
-      ...(!collision ? [
+      ...(!collisions.length ? [
         ...threadStart(5, threadParams({ config, ...(mcp ? { developerInstructions: mousseOrchestrationInstructions() } : {}) })),
         ...turnStart(6, 'go'), completed('completed')
       ] : []),
       // The same owner's next thread still runs, with exactly the usual attachment overrides.
-      ...threadStart(collision ? 5 : 7, threadParams({
+      ...threadStart(collisions.length ? 5 : 7, threadParams({
         config: Object.fromEntries(Object.entries(config).filter(([key]) => key === 'model_provider' || (key.startsWith('mcp_servers.') && !key.endsWith('.enabled')))),
         ...(mcp ? { developerInstructions: mousseOrchestrationInstructions() } : {})
       })),
-      ...turnStart(collision ? 6 : 8, 'owner'), completed('completed')
+      ...turnStart(collisions.length ? 6 : 8, 'owner'), completed('completed')
     ])
     const codex = service(replay)
     const adapter = new CodexAdapter(() => codex)
     const run = adapter.startTurn(input({ prompt: 'go' }), recordingSink(), control(), { ...host(mcp), bot: bot as never })
-    if (collision) await expect(run).rejects.toMatchObject({
-      code: 'policy_unenforceable', message: expect.stringMatching(new RegExp(`.*${collision}.*[Rr]ename`))
-    })
+    if (collisions.length) {
+      const plural = collisions.length > 1
+      const namesText = collisions.map((name) => `"${name}"`).join(' and ')
+      const file = source === 'active layer' ? "the project's .codex/config.toml" : "Codex's config.toml"
+      await expect(run).rejects.toMatchObject({ code: 'policy_unenforceable', message:
+        `Your Codex config has ${plural ? 'MCP servers' : 'an MCP server'} named ${namesText}, ${plural ? 'names' : 'a name'} Mousse needs for my work. Rename ${plural ? 'them' : 'it'} in ${file} to let me work on Codex.` })
+    }
     else await run
     await adapter.startTurn(input({ prompt: 'owner', threadId: 'owner-thread' }), recordingSink(), control(), host(mcp))
     replay.assertDone()

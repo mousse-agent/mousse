@@ -16,7 +16,7 @@ import { CODEX_BOT_PROFILE, codexBotSandbox, codexBotSandboxConfig, codexTurnPol
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 import type { ToolLedger } from '../../src/mms/run/mcp/appTools/types'
 import { botFixture, chatOf, createBot, finish, start, type BotFixture } from './botFixture'
-import { CODEX_BOT_RUNS_ON_TEXT, CODEX_BOT_VERSION_TEXT, codexBotMcpCollisionText } from '../../src/shared/harness/codexBotVersion'
+import { CODEX_BOT_RUNS_ON_TEXT, CODEX_BOT_VERSION_TEXT } from '../../src/shared/harness/codexBotVersion'
 
 let f: BotFixture
 let botId: string
@@ -340,9 +340,12 @@ describe('"Run commands" at each runtime\'s own gate (the owner\'s Claude Code a
     expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'error', error: { text: CODEX_BOT_VERSION_TEXT } })
   })
 
-  it.each(['mousse', 'mousse-relay'])('the bot chat names the conflicting Codex entry %s and asks for a rename', async (name) => {
+  it.each([
+    'Your Codex config has an MCP server named "mousse", a name Mousse needs for my work. Rename it in Codex\'s config.toml to let me work on Codex.',
+    'Your Codex config has an MCP server named "mousse-relay", a name Mousse needs for my work. Rename it in the project\'s .codex/config.toml to let me work on Codex.',
+    'Your Codex config has MCP servers named "mousse" and "mousse-relay", names Mousse needs for my work. Rename them in Codex\'s config.toml and the project\'s .codex/config.toml to let me work on Codex.'
+  ])('the bot chat preserves the Codex rename instruction: %s', async (reason) => {
     const { payload } = await run('r1')
-    const reason = codexBotMcpCollisionText(name)
     await finish(f, payload, 'failed', { outcome: { error: reason } })
     expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'error', error: { text: reason } })
   })
