@@ -85,7 +85,7 @@ export interface BotActionCard {
   serverName: string
   args: unknown
   hasHiddenValues: boolean
-  hiddenPaths: string[]
+  hiddenPaths: string[][]
   status: 'open' | 'approved' | 'running' | 'done' | 'failed' | 'uncertain' | 'declined' | 'expired' | 'withdrawn'
   at?: string
   result?: { text: string; toolReportedError?: boolean }

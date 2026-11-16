@@ -403,11 +403,11 @@ export class BotChatProjection {
     if (!row) return undefined
     const metadata = JSON.parse(row.card_json ?? '{}')
     const args: unknown = JSON.parse(row.args_json)
-    const hiddenPaths: string[] = []
+    const hiddenPaths: string[][] = []
     const visit = (value: unknown, path: string[]): void => {
       if (!value || typeof value !== 'object') return
       const object = value as Record<string, unknown>
-      if (object.$mousse === 'hidden') { hiddenPaths.push(path.join(' → ')); return }
+      if (object.$mousse === 'hidden') { hiddenPaths.push(path); return }
       if (object.$mousse === 'literal') {
         // The wrapper escapes this object's namespace only. Its children may still contain real markers.
         if (object.value && typeof object.value === 'object')
