@@ -33,6 +33,19 @@ function removeHiddenArguments(result: ToolOutcome, args: unknown): ToolOutcome 
   for (const value of [...hidden].sort((a, b) => b.length - a.length)) text = text.split(value).join('[held back: looks like a secret]')
   return { ...result, text }
 }
+/** The continuation is text. Images are omitted explicitly, never truncated into invalid base64. */
+function boundedActionResult(result: ToolOutcome): ToolOutcome {
+  const note = result.images?.length ? `\n[${result.images.length} image(s) left out of the stored result.]` : ''
+  const text = String(maskedActionData(result.text, Infinity))
+  const build = (end: number): ToolOutcome => ({ text: `${text.slice(0, end)}${end < text.length ? '\n[Result cut to fit stored size.]' : ''}${note}`, ...(result.isError ? { isError: true } : {}) })
+  let low = 0, high = Math.min(text.length, 32_000)
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2)
+    if (Buffer.byteLength(JSON.stringify(build(mid))) <= 65_536) low = mid
+    else high = mid - 1
+  }
+  return build(low)
+}
 export interface ActionRow {
   id: string; call_key: string; bot_id: string; activation_id: string; status: string
   exec_args: string | null; args_digest: string; binding_json: string; target_json: string
@@ -97,7 +110,7 @@ export class BotActions {
       const moved = this.host.store.run(`UPDATE bot_actions SET status = ?, exec_args = CASE WHEN ? THEN exec_args ELSE NULL END,
         result_json = ?, answered_at = CASE WHEN ? = 'open' THEN ? ELSE answered_at END,
         ran_at = CASE WHEN ? = 'running' THEN ? ELSE ran_at END WHERE id = ? AND status = ?`,
-      to, pending.has(to) ? 1 : 0, safeResult ? JSON.stringify(maskedActionData(safeResult)) : null,
+      to, pending.has(to) ? 1 : 0, safeResult ? JSON.stringify(boundedActionResult(safeResult)) : null,
       from, this.host.store.now(), to, this.host.store.now(), id, from) > 0
       if (moved && !pending.has(to)) {
         const action = this.get(id)!
