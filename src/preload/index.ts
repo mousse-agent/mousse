@@ -12,6 +12,7 @@ import type { ThreadToastPayload } from '../shared/threadToast'
 import type { RemoteAskResult, RemoteOpenResult, RemoteRoute } from '../shared/remoteEditor'
 import type { CommandId } from '../shared/commands'
 import type { ProjectIconChoice, ProjectIconImage } from '../shared/projectIcon'
+import type { StoredWallpaperInfo, WallpaperPieceResult } from '../shared/themes/wallpaperImage'
 import type { LocalTtsModelId, LocalTtsModelStatus, NativeSpeechResult, ProviderSpeechRequest, ProviderSpeechResult } from '../shared/readAloud'
 import type { LocalSttModelId, LocalSttModelStatus, ProviderTranscriptionRequest, ProviderTranscriptionResult } from '../shared/dictation'
 import type { WindowResizeEdge } from '../shared/windowResize'
@@ -766,6 +767,25 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, settings: MousseSettings) => cb(settings)
       ipcRenderer.on('settings:changed', handler)
       return () => ipcRenderer.removeListener('settings:changed', handler)
+    }
+  },
+  /** Theme wallpapers, kept by the daemon (`WallpaperStore`). Every call names the profile it is for. */
+  wallpapers: {
+    /** Opens the file dialog and stores the chosen image; null when cancelled. Rejects when the file cannot be used. */
+    choose: (profileId: string): Promise<StoredWallpaperInfo | null> => ipcRenderer.invoke('appearance:chooseWallpaper', profileId),
+    /** Stores an image carried as base64 (a theme file's wallpaper). */
+    importBytes: (profileId: string, dataBase64: string): Promise<StoredWallpaperInfo> =>
+      ipcRenderer.invoke('appearance:importWallpaperBytes', profileId, dataBase64),
+    /** A piece of the original (no bucket) or of a display copy; `missing` when it is not stored. */
+    read: (profileId: string, id: string, bucket: number | null, offset: number): Promise<WallpaperPieceResult> =>
+      ipcRenderer.invoke('appearance:readWallpaper', profileId, id, bucket, offset),
+    saveCopy: (profileId: string, id: string, bucket: number, dataBase64: string, replace: boolean): Promise<boolean> =>
+      ipcRenderer.invoke('appearance:saveWallpaperCopy', profileId, id, bucket, dataBase64, replace),
+    displayLongEdge: (): Promise<number> => ipcRenderer.invoke('appearance:displayLongEdge'),
+    onDisplaysChanged: (cb: () => void): (() => void) => {
+      const handler = () => cb()
+      ipcRenderer.on('appearance:displaysChanged', handler)
+      return () => ipcRenderer.removeListener('appearance:displaysChanged', handler)
     }
   },
   lineEdits: {

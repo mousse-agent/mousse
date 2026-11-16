@@ -10,6 +10,8 @@ import { chooseWorktreeFolder, recordedWorktreePaths, worktreeFolderStatus } fro
 import { userAction, withGitAccess, withUserRequest, type UserAction } from '../git/gitPolicy'
 import { gitAccessOf, USER_REQUEST_LABELS } from './gitAccess'
 import { projectIconFor, readIconFile, resolveStoredIconPath } from '../data/projectIcon'
+import { WALLPAPER_PIECE_MAX_BYTES, WallpaperRefused } from '../appearance/WallpaperStore'
+import { isWallpaperBucket, WALLPAPER_MAX_BYTES, WALLPAPER_UPLOAD_MAX_BASE64, WALLPAPER_UPLOAD_MAX_BYTES } from '../../shared/themes/wallpaperImage'
 import type { ProjectIconChoice } from '../../shared/projectIcon'
 import type { StorageCleanupPlanToken } from '../../shared/storage'
 import { validateAppletAppearance } from '../../shared/appletAppearance'
@@ -796,6 +798,53 @@ function projectRootContext(ctx: HandlerContext, params: Record<string, unknown>
 /** Only a Mousse window on this computer browses and saves files the way the Files panel does. */
 function isLocalWindow(ctx: HandlerContext): boolean {
   return ctx.connection?.clientType === 'gui'
+}
+
+/**
+ * A theme's wallpaper images (`WallpaperStore`), for a Mousse window on this computer only: the import takes a path the
+ * window's main process got from the file dialog (a network share is allowed there, never for an agent), or the bytes
+ * of a theme file's wallpaper; read and saveCopy carry the display copies windows make. A call made for one profile
+ * is refused once the window is bound to another (`expectedProfileId`).
+ */
+async function wallpaperCall(ctx: HandlerContext, method: string, params: unknown): Promise<unknown> {
+  if (!isLocalWindow(ctx)) throw new DomainRpcError('forbidden', 'Only a Mousse window on this computer reads or sets wallpapers')
+  const p = isObject(params) ? params : {}
+  const expectedProfileId = asOptionalString(p.expectedProfileId, 256)
+  if (expectedProfileId && expectedProfileId !== ctx.mms.profileId) throw new DomainRpcError('profile_mismatch', 'Profile changed; the wallpaper call was not made')
+  const store = ctx.mms.wallpapers
+  const bytes = (field: string): Buffer => {
+    const text = p[field]
+    if (typeof text !== 'string' || !text || text.length > WALLPAPER_UPLOAD_MAX_BASE64 || !/^[A-Za-z0-9+/]+={0,2}$/.test(text))
+      throw new DomainRpcError('invalid_params', `${field} must be base64 of at most ${WALLPAPER_UPLOAD_MAX_BYTES} bytes`)
+    return Buffer.from(text, 'base64')
+  }
+  const refused = (error: unknown): never => {
+    if (error instanceof WallpaperRefused) throw new DomainRpcError('invalid_params', error.message)
+    throw error
+  }
+  switch (method) {
+    case 'appearance.wallpaperImport': {
+      const path = asString(p.path, 'path', 4096)
+      return { wallpaper: await store.importFile(path, { network: true }).catch(refused) }
+    }
+    case 'appearance.wallpaperImportBytes':
+      return { wallpaper: await store.importBytes(bytes('dataBase64')).catch(refused) }
+    case 'appearance.wallpaperRead': {
+      const id = asString(p.id, 'id', 64)
+      const bucket = p.bucket === undefined || p.bucket === null ? undefined : p.bucket
+      if (bucket !== undefined && !isWallpaperBucket(bucket)) throw new DomainRpcError('invalid_params', 'bucket must be 1920, 2560 or 3840')
+      const offset = asOptionalBoundedInt(p.offset, 'offset', { min: 0, max: WALLPAPER_MAX_BYTES }) ?? 0
+      const length = asOptionalBoundedInt(p.length, 'length', { min: 1, max: WALLPAPER_PIECE_MAX_BYTES }) ?? WALLPAPER_PIECE_MAX_BYTES
+      const piece = await store.read(id, bucket, offset, length)
+      return piece ? { type: piece.type, size: piece.size, offset: piece.offset, data: piece.data.toString('base64') } : { missing: true }
+    }
+    case 'appearance.wallpaperSaveCopy': {
+      const id = asString(p.id, 'id', 64)
+      if (!isWallpaperBucket(p.bucket)) throw new DomainRpcError('invalid_params', 'bucket must be 1920, 2560 or 3840')
+      return { saved: await store.saveCopy(id, p.bucket, bytes('dataBase64'), { replace: p.replace === true }) }
+    }
+  }
+  throw new DomainRpcError('method_not_allowed', method)
 }
 
 /**
@@ -2065,6 +2114,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       ctx.emitEvent?.('projects.updated', { projects })
       return { project, projects: listedProjectsFor(ctx, projects) }
     }
+    case 'appearance.wallpaperImport':
+    case 'appearance.wallpaperImportBytes':
+    case 'appearance.wallpaperRead':
+    case 'appearance.wallpaperSaveCopy':
+      return await wallpaperCall(ctx, method, params)
     case 'projects.reorder': {
       const p = isObject(params) ? params : {}
       // A window sends the whole list, the other computers' projects included; those follow this

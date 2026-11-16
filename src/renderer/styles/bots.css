@@ -98,7 +98,11 @@ html:not([data-acrylic='true']) .bot-conversation .chat-input-area.bot-input-are
 .bot-message:not(.is-group-start) .bot-bubble { border-top-left-radius: 6px; }
 /* The thread's Markdown (an-md-*), at the bubble's size. Inline code keeps a short piece whole: it moves to the next line
    as one, and breaks only when it is wider than the bubble. Tables keep the thread's padding inside the bubble's own. */
-.bot-bubble > .bot-markdown { margin: 0; }
+.bot-bubble > .bot-markdown, .bot-bubble > .bot-find-text > .bot-markdown { margin: 0; }
+/* What find reads in a bubble: its words, in a box that takes no part in the layout. */
+.bot-find-text { display: contents; }
+/* The find bar hangs over the transcript's top right corner, under the header. */
+.bot-find-anchor { position: relative; height: 0; z-index: 20; }
 .bot-markdown > :first-child { margin-top: 0; }
 .bot-markdown > :last-child { margin-bottom: 0; }
 .bot-markdown .an-md-code { margin: 0; overflow-wrap: anywhere; }
@@ -584,7 +588,8 @@ html[data-theme='high-contrast'] .bot-conversation .chat-input-area.bot-input-ar
 
 /* The composer's emoji: a small grid above the button. */
 .bot-emoji { position: relative; display: flex; }
-.bot-emoji-grid { position: absolute; z-index: 30; right: -4px; bottom: calc(100% + 10px); display: grid; grid-template-columns: repeat(8, 32px); gap: 2px; padding: 6px; border-radius: 12px; border: 1px solid rgba(var(--accent-pale-rgb), .15); background: var(--bg-secondary, #201d23); box-shadow: 0 18px 50px #0006; }
+/* The emoji grids float over the conversation, so they take the theme's solid surface: --bg-secondary is see-through glass. */
+.bot-emoji-grid { position: absolute; z-index: 30; right: -4px; bottom: calc(100% + 10px); display: grid; grid-template-columns: repeat(8, 32px); gap: 2px; padding: 6px; border-radius: 12px; border: 1px solid rgba(var(--accent-pale-rgb), .15); background: rgb(var(--surface-strong-rgb)); box-shadow: 0 18px 50px #0006; }
 .bot-emoji-grid button { width: 32px; height: 32px; border-radius: 8px; font-size: 18px; line-height: 32px; text-align: center; }
 .bot-emoji-grid button:hover, .bot-emoji-grid button:focus-visible { background: color-mix(in srgb, var(--text-secondary) 14%, transparent); outline: none; }
 

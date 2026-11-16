@@ -5,6 +5,7 @@ import { isWaitingPermissionRequest } from "./tools/permission-request";
 import { useSubagentCards } from "./tools/subagent-cards-context";
 import type { SubagentCardModel } from "../../adapters/subagentCards";
 import { parseMcpToolType } from "./tools/tool-registry";
+import { mousseToolLabels, mousseToolOf } from "./tools/mousse-tools";
 import { isCompactionRow } from "./utils/assistant-blocks";
 import { ThinkingIcon } from "../../../lib/icons";
 import { ToolIcon } from "./tools/tool-icon";
@@ -134,7 +135,14 @@ function toolProgress(part: Part): TurnProgress {
     // A command row carries its working folder and a placeholder label before its command arrives.
     ([key, value]) => PLACEHOLDER_INPUT_KEYS.has(key) || value === undefined || value === null || value === "",
   ));
-  if (part.state === "input-streaming" || noInput) return { kind: "preparing-tool", label: `Preparing ${name}…`, title: detail, tool: part.type };
+  const preparing = part.state === "input-streaming" || noInput;
+  // Mousse's own tools say what they do, from the start: "Creating a thread in Mousse…".
+  const mousseTool = mousseToolOf(part.type);
+  if (mousseTool) {
+    const label = `${mousseToolLabels(mousseTool).running}…`;
+    return preparing ? { kind: "preparing-tool", label, title: detail, tool: part.type } : { kind: "running-tool", label, title: detail, detail, tool: part.type };
+  }
+  if (preparing) return { kind: "preparing-tool", label: `Preparing ${name}…`, title: detail, tool: part.type };
   return { kind: "running-tool", label: `Running ${name}…`, title: detail, detail, tool: part.type };
 }
 

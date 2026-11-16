@@ -49,18 +49,6 @@ export const BOT_SUBAGENT_TOOLS: readonly string[] = ['subagent_start', 'subagen
  */
 export const BOT_SUBAGENT_APP_TOOLS: readonly string[] = ['web_search', 'web_fetch', 'browser']
 
-/** Subagents one piece of a bot's work runs at once: a bot's own run slots. */
-export const MAX_BOT_SUBAGENTS_AT_ONCE = 3
-
-/** Subagents one piece of a bot's work may start in all, across its turns: the threads a bot may have at work at once. */
-export const MAX_BOT_SUBAGENTS_PER_WORK = 10
-
-/**
- * Subagents one bot's work may start in a day (the last 24 hours), across all its work, schedules and reminders: three
- * pieces of work's worth, so a schedule that runs often can't start ten every time. Pictures are 20 a day, asks 10.
- */
-export const MAX_BOT_SUBAGENTS_PER_DAY = 30
-
 /**
  * What a chat turn never does itself, though the grant may hold it: it can take long (the web, the browser, running
  * commands), so the chat hands it to work and stays free to talk. Work runs with the whole grant.
@@ -143,7 +131,7 @@ export const BOT_AUTOMATION_APP_TOOLS: readonly string[] = ['automation_draft_sa
 /**
  * "Use your threads": one permission, asked for once, for the owner's ordinary threads in this profile. The grant names
  * it alone; `compileBotThread` turns it into the thread tools a turn may use (`BOT_THREAD_READ_TOOLS` in every lane but a
- * consult, `BOT_THREAD_ACT_TOOLS` only in a chat turn the owner's own message started). A thread the bot starts runs in
+ * consult, `BOT_THREAD_ACT_TOOLS` in a run and a chat turn the owner's message or tapped answer started). A thread the bot starts runs in
  * Full access, and a message it sends runs in that thread's own mode, so the card says so (`askText`).
  */
 export const BOT_THREADS_PERMISSION = 'threads'
@@ -153,8 +141,8 @@ export const BOT_THREAD_READ_TOOLS: readonly string[] = ['thread_list', 'thread_
 
 /**
  * What changes threads: start one, message one, stop one's turn, archive or unarchive one, hide one it started from the
- * owner's sidebar or show it again. Only a chat turn the owner's own message started gets them, so nothing a bot read in
- * its work, a reminder or a schedule starts or steers a thread.
+ * owner's sidebar or show it again. A run (work, a reminder, a wake, a schedule) and a chat turn the owner's message or
+ * tapped answer started get them; the bot's first message and a turn another bot's message started do not.
  */
 export const BOT_THREAD_ACT_TOOLS: readonly string[] = ['thread_create', 'thread_send', 'thread_interrupt', 'thread_archive', 'thread_hide']
 
@@ -181,6 +169,24 @@ export function isBotProfilerTool(name: string): boolean {
   return PROFILER_TOOL_SET.has(name)
 }
 
+/**
+ * "Change how Mousse looks": one permission, asked for once, for the theme tools (`theme_read`, `theme_set`). The grant
+ * names it alone; `compileBotThread` turns it into those tools on a main turn, chat or work (never a consult or a
+ * subagent). Allowing it is the bot's Full access for them: it switches themes, saves colors, CSS and a wallpaper, with
+ * the checks a thread's agent has, and nothing asks first.
+ */
+export const BOT_THEMES_PERMISSION = 'themes'
+
+/** The theme tools a bot with "change how Mousse looks" gets. */
+export const BOT_THEME_TOOLS: readonly string[] = ['theme_read', 'theme_set']
+
+const THEME_TOOL_SET: ReadonlySet<string> = new Set(BOT_THEME_TOOLS)
+
+/** Whether `name` is one of the theme tools a bot can hold under "change how Mousse looks". */
+export function isBotThemeTool(name: string): boolean {
+  return THEME_TOOL_SET.has(name)
+}
+
 /** Every thread tool a bot can hold, all under "use your threads". */
 export const BOT_THREAD_TOOLS: readonly string[] = [...BOT_THREAD_READ_TOOLS, ...BOT_THREAD_ACT_TOOLS]
 
@@ -193,22 +199,23 @@ export function isBotThreadTool(name: string): boolean {
 
 /**
  * The Mousse app tools a bot may be granted: ones that read the web, its own browser, the bot's
- * own tools, the automation tools, and the owner's threads and Mousse's profiler as one permission each. Every other app tool starts, wakes,
+ * own tools, the automation tools, and the owner's threads, Mousse's profiler and its look as one permission each. Every other app tool starts, wakes,
  * writes or reads other threads (delegation, forks, queues, merge-backs), acts in the owner's name, or asks a person,
  * so it would run work outside the grant. Consults (6c-2) are the way a bot uses its own threads. The skill tools come
  * with granted skills.
  */
-export const BOT_APP_TOOLS: ReadonlySet<string> = new Set([...BOT_DEFAULT_APP_TOOLS, BOT_BROWSER_PERMISSION, ...BOT_AUTOMATION_APP_TOOLS, BOT_THREADS_PERMISSION, BOT_PROFILER_PERMISSION])
+export const BOT_APP_TOOLS: ReadonlySet<string> = new Set([...BOT_DEFAULT_APP_TOOLS, BOT_BROWSER_PERMISSION, ...BOT_AUTOMATION_APP_TOOLS, BOT_THREADS_PERMISSION, BOT_PROFILER_PERMISSION, BOT_THEMES_PERMISSION])
 
 /**
  * Every Mousse app tool a bot's turn can ever be offered (what `compileBotThread` may add to a turn): the grantable
- * tools, the browser's, threads' and profiler's tools in place of their permissions, the skill tools, consult, the front desk's work and reminder
+ * tools, the browser's, threads', profiler's and themes' tools in place of their permissions, the skill tools, consult, the front desk's work and reminder
  * tools, and `make_image` with an Images row. A bot's thread lists only these, so its runtime never shows the model a tool no bot can hold.
  */
 const BOT_OFFERABLE_APP_TOOLS: ReadonlySet<string> = new Set([
   'schedule_done',
-  ...[...BOT_APP_TOOLS].filter((tool) => tool !== BOT_BROWSER_PERMISSION && tool !== BOT_THREADS_PERMISSION && tool !== BOT_PROFILER_PERMISSION),
+  ...[...BOT_APP_TOOLS].filter((tool) => tool !== BOT_BROWSER_PERMISSION && tool !== BOT_THREADS_PERMISSION && tool !== BOT_PROFILER_PERMISSION && tool !== BOT_THEMES_PERMISSION),
   ...BOT_BROWSER_TOOLS,
+  ...BOT_THEME_TOOLS,
   ...BOT_THREAD_TOOLS,
   ...BOT_PROFILER_TOOLS,
   ...BOT_WORK_TOOLS,
@@ -236,11 +243,12 @@ const BROWSER_TOOLS: ReadonlySet<string> = new Set(BROWSER_AUTOMATION_TOOLS)
 /**
  * The permission an app tool falls under: every browser tool is "use the browser" (`browser`), so
  * an ask for `browser_act` is the same one ask; every thread tool is "use your threads" (`threads`); every profiler tool a
- * bot can hold is "use the profiler" (`profiler`); any other tool is its own (the heap summary too, which no bot holds).
+ * bot can hold is "use the profiler" (`profiler`); both theme tools are "change how Mousse looks" (`themes`); any other tool is its own (the heap summary too, which no bot holds).
  */
 export function botGrantTool(tool: string): string {
   if (BROWSER_TOOLS.has(tool)) return BOT_BROWSER_PERMISSION
   if (PROFILER_TOOL_SET.has(tool)) return BOT_PROFILER_PERMISSION
+  if (THEME_TOOL_SET.has(tool)) return BOT_THEMES_PERMISSION
   return THREAD_TOOL_NAMES.has(tool) ? BOT_THREADS_PERMISSION : tool
 }
 
@@ -425,11 +433,12 @@ function toolLine(tool: NeutralTool): BotPermissionLine {
   return { kind: 'tool', text: FILE_TOOLS.has(tool) ? `${TOOL_WORDS[tool]} in its files folder` : TOOL_WORDS[tool] }
 }
 
-/** An app tool in plain words: the browser, the owner's threads and the profiler by what they are, any other tool by its name. */
+/** An app tool in plain words: the browser, the owner's threads, the profiler and themes by what they are, any other tool by its name. */
 function appToolLine(tool: string): BotPermissionLine {
   if (tool === BOT_BROWSER_PERMISSION) return { kind: 'app_tool', text: 'Use the browser' }
   if (tool === BOT_THREADS_PERMISSION) return { kind: 'app_tool', text: 'Use your threads' }
   if (tool === BOT_PROFILER_PERMISSION) return { kind: 'app_tool', text: 'Use the profiler' }
+  if (tool === BOT_THEMES_PERMISSION) return { kind: 'app_tool', text: 'Change how Mousse looks' }
   return { kind: 'app_tool', text: `Use the Mousse tool \`${tool}\`` }
 }
 

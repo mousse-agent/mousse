@@ -42,6 +42,11 @@ const TOOL_TEXT: Record<string, AskText> = {
     title: 'use the profiler',
     note: "Mousse's memory and CPU numbers, while Labs lets agents read the profiler.",
     tip: "It can read Mousse's profiler: memory and CPU of each process, the service's counts and caches, windows and the GPU, and take samples. Numbers only, never your chats or files; threads it can't see count only in totals. Never a heap snapshot. Settings → Labs → Profiler can still turn it off."
+  },
+  themes: {
+    title: 'change how Mousse looks',
+    note: 'Themes, colors, CSS and a wallpaper picture from this computer, without asking each time.',
+    tip: "It can read your themes, switch between them, and save a theme with colors, an accent, CSS and a wallpaper, as a thread's agent can in Full access. Theme CSS can restyle or cover anything in Mousse's window; CSS that loads anything from outside Mousse is dropped. A wallpaper is a PNG, JPEG or WebP it names on this computer, never on a network share; Mousse keeps its own copy. Settings → Appearance switches the theme back."
   }
 }
 

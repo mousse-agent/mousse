@@ -144,8 +144,7 @@ export interface BotToolHost {
    */
   bots?: {
     list(botId: string): Array<{ name: string; does: string; paused?: true }>
-    /** `left`: how many more turns in a row may follow between bots without the owner. */
-    send(botId: string, from: string, input: { to: string; message: string }): Promise<{ to: string; left: number }>
+    send(botId: string, from: string, input: { to: string; message: string }): Promise<{ to: string }>
   }
   /** One-off reminders: said at a time, or work started then. Wakes are listed and cancelled with them. */
   reminders: {

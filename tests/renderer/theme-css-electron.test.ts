@@ -16,6 +16,7 @@ import { expect, it } from 'vitest'
 type Evidence = {
   theme: { requested: string[]; leakHits: string[]; dropped: number; measured: Record<string, string> }
   decision: Record<'before' | 'during' | 'after', { sidebar: string; token: string; buttonAfter: string; paused: boolean }>
+  plain: { during: boolean; after: boolean; off: boolean }
   control: { requested: string[]; leakHits: string[] }
   pageErrors: string[]
 }
@@ -66,6 +67,9 @@ it('applies the safe rules of a hostile theme and makes no request, pauses it wh
     expect(evidence.decision.during).toMatchObject({ token: '', buttonAfter: 'none', paused: true })
     expect(evidence.decision.during.sidebar).not.toBe('rgb(1, 2, 3)')
     expect(evidence.decision.after).toMatchObject({ sidebar: 'rgb(1, 2, 3)', token: '#010203', paused: false })
+    // A user theme with nothing but a wallpaper pauses too (the wallpaper hides under data-user-theme-paused), and
+    // with no user theme on nothing pauses.
+    expect(evidence.plain).toEqual({ during: true, after: false, off: false })
 
     // The control: unchecked, the same CSS fetches from the leak server, by each of these routes.
     const reached = new Set(evidence.control.leakHits.map((hit) => hit.replace(/^\/leak/, '')))

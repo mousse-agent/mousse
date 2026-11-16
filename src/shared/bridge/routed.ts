@@ -970,6 +970,7 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
       'health',
       'capabilities',
       'events.subscribe',
+      'app.presence',
       'daemon.shutdown',
       'gui.devtoolsPoll',
       'gui.devtoolsRespond'
@@ -1001,6 +1002,10 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
   {
     methods: ['projects.icon', 'projects.setIcon'],
     reason: 'A project icon is an image file on the computer itself; a project of another computer shows the folder glyph.'
+  },
+  {
+    methods: ['appearance.wallpaperImport', 'appearance.wallpaperImportBytes', 'appearance.wallpaperRead', 'appearance.wallpaperSaveCopy'],
+    reason: 'A theme wallpaper is an image kept in the profile of the computer itself; a window of another computer shows the theme without it.'
   },
   {
     methods: ['files.root', 'files.writeDirect'],

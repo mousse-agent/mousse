@@ -1,12 +1,13 @@
 /**
  * A bot's wakes: follow-ups it sets for itself, at a time or when a thread finishes or a pull request merges. When one
  * comes, the bot carries on in its own chat, in a turn no person started (`wake:`), after a quiet line saying why. A wake
- * on an event ends once anyway when the event can't come (closed, archived, deleted, out of sight, past its time). Limits:
- * a chain of at most five with no owner's message between, and thirty a day. A wake starts when it is due, at any hour.
+ * on an event ends once anyway when the event can't come (closed, archived, deleted, out of sight, past its time). No
+ * count in a row or in a day: only the same wake set again and again before the owner writes is refused, as a loop. A
+ * wake starts when it is due, at any hour.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ownerChatTurn } from '../../src/mms/bots/activation/BotEngine'
-import { MAX_WAKE_CHAIN, MAX_WAKES_PER_DAY, type BotWakeEvent } from '../../src/shared/bots/personal/wakes'
+import { MAX_SAME_WAKES, type BotWakeEvent } from '../../src/shared/bots/personal/wakes'
 import { botFixture, chatOf, createBot, finish, flush, start, type BotFixture } from './botFixture'
 
 const MIN = 60_000
@@ -178,36 +179,49 @@ describe('a wake on an event', () => {
 })
 
 describe('limits', () => {
-  it('at most five wakes in a row without the owner; the owner\'s next message starts a new chain', async () => {
-    let turn = await chat('Keep an eye on the build', 'm1')
+  it('no count in a row: a wake turn sets the next one as often as there is something new to wait for', async () => {
+    const turn = await chat('Keep an eye on the build', 'm1')
     let from = turn.activation.id
     let payload = turn.payload
-    for (let n = 1; n <= MAX_WAKE_CHAIN; n += 1) {
-      const set = await wake(from, { brief: `Look again (${n}).`, dueAt: inMinutes(1) })
+    // Past the old cap of five in a row.
+    for (let n = 1; n <= 8; n += 1) {
+      const set = await wake(from, { brief: `Look at step ${n} of the build.`, dueAt: inMinutes(1) })
       await finish(f, payload, 'completed', { text: 'Still going.' })
       f.clock.now += MIN
       await f.bots.deliverDueReminders()
       const row = wakeTurn(set.wakeId)!
       const started = await start(f, row.id)
-      expect(started.prepared.prompt).toContain(`This is wake-up ${n} of at most ${MAX_WAKE_CHAIN}`)
+      expect(started.prepared.prompt).toContain(`This is wake-up ${n} in a row without your owner.`)
+      expect(started.prepared.prompt).not.toContain('at most')
       from = row.id
       payload = started.payload
     }
-    await expect(wake(from, { brief: 'Once more.', dueAt: inMinutes(1) })).rejects.toThrow(`${MAX_WAKE_CHAIN} times in a row`)
-    await finish(f, payload, 'completed', { text: 'Done watching.' })
-    turn = await chat('Carry on watching', 'm2')
-    await expect(wake(turn.activation.id, { brief: 'Look again.', dueAt: inMinutes(1) })).resolves.toMatchObject({ wakeId: expect.any(String) })
   })
 
-  it(`at most ${MAX_WAKES_PER_DAY} a day, cancelled ones included; a day later there is room again`, async () => {
+  it('no count in a day: more than thirty set, cancelled ones included', async () => {
     const turn = await chat('Lots of follow-ups', 'm1')
-    for (let n = 0; n < MAX_WAKES_PER_DAY; n += 1) {
+    for (let n = 0; n < 40; n += 1) {
       const set = await wake(turn.activation.id, { brief: `Follow up ${n}.`, dueAt: inMinutes(60) })
       expect(f.bots.tools.reminders.cancel(botId, set.wakeId)).toBe(true)
     }
-    await expect(wake(turn.activation.id, { brief: 'One more.', dueAt: inMinutes(60) })).rejects.toThrow(`${MAX_WAKES_PER_DAY} wake-ups in the last 24 hours`)
-    f.clock.now += 24 * HOUR + MIN
     await expect(wake(turn.activation.id, { brief: 'One more.', dueAt: inMinutes(60) })).resolves.toMatchObject({ wakeId: expect.any(String) })
+  })
+
+  it(`a loop is refused: the same wake ${MAX_SAME_WAKES} times since the owner wrote, cancelled ones included; the owner's next message clears it`, async () => {
+    let turn = await chat('Keep checking the deploy', 'm1')
+    for (let n = 0; n < MAX_SAME_WAKES; n += 1) {
+      // The same brief however it is spaced or cased, and cancelling it does not reset it.
+      const set = await wake(turn.activation.id, { brief: n % 2 ? 'check  the deploy!' : 'Check the deploy.', dueAt: inMinutes(5) })
+      f.bots.tools.reminders.cancel(botId, set.wakeId)
+    }
+    await expect(wake(turn.activation.id, { brief: 'Check the deploy.', dueAt: inMinutes(5) })).rejects.toThrow('that is a loop')
+    // Something new to wait for is no loop: another brief, or the same brief on an event.
+    await expect(wake(turn.activation.id, { brief: 'Check the deploy: step 2 started.', dueAt: inMinutes(5) })).resolves.toMatchObject({ wakeId: expect.any(String) })
+    await expect(wake(turn.activation.id, { brief: 'Check the deploy.', event: { kind: 'pr', repo: 'acme/app', number: 12 } })).resolves.toMatchObject({ wakeId: expect.any(String) })
+    await finish(f, turn.payload, 'completed', { text: 'Watching.' })
+    f.clock.now += MIN
+    turn = await chat('Keep checking', 'm2')
+    await expect(wake(turn.activation.id, { brief: 'Check the deploy.', dueAt: inMinutes(5) })).resolves.toMatchObject({ wakeId: expect.any(String) })
   })
 
   it('only the chat sets wakes: work is refused', async () => {

@@ -17,7 +17,7 @@ async function work(key = 'request') {
   await runDispatch(f, chat.id, 1, { text: 'On it.' })
   return { workId, turn: await start(f, workId), chat }
 }
-const wait = (id: string, event?: BotWakeEvent) => f.bots.tools.wakes!.wait!(botId, id, { brief: 'Check again with the evidence already read.', ...(event ? { event } : { dueAt: new Date(f.clock.now + 60 * 60_000).toISOString() }) })
+const wait = (id: string, event?: BotWakeEvent, brief = 'Check again with the evidence already read.') => f.bots.tools.wakes!.wait!(botId, id, { brief, ...(event ? { event } : { dueAt: new Date(f.clock.now + 60 * 60_000).toISOString() }) })
 it('parks without a slot, survives restart and resumes once in its own thread, with no chat wake', async () => {
   const { workId, turn } = await work()
   const set = await wait(workId)
@@ -263,28 +263,34 @@ it('transports the same structured wait to the work line and work_list', async (
   expect(f.bots.service.list().bots.find(b => b.id === botId)?.work?.find(w => w.id === workId)?.wait).toEqual(field)
   expect(f.bots.tools.work.list(botId).now.find(w => w.workId === workId)?.wait).toEqual(field)
 })
-it('shares the daily and waiting-row limits with chat wakes', async () => {
+it('has no daily or waiting-row count shared with chat wakes: past the old 30 a day and 50 waiting, waits and wakes are still set', async () => {
   const { workId, chat } = await work()
   for (let i = 0; i < 30; i++) f.store.insertReminder({ id: `limit-${i}`, botId, dueAt: new Date(f.clock.now + 3600_000).toISOString(), text: 'chat wake', work: null, replyTo: null, createdAt: f.store.now(), wake: true })
-  await expect(wait(workId)).rejects.toThrow('last 24 hours')
-  f.store.run('DELETE FROM bot_reminders WHERE bot_id = ?', botId)
-  for (let i = 0; i < 50; i++) f.store.insertReminder({ id: `limit-${i}`, botId, dueAt: new Date(f.clock.now + 3600_000).toISOString(), text: 'reminder', work: null, replyTo: null, createdAt: f.store.now() })
-  await expect(wait(workId)).rejects.toThrow('waiting')
-  await expect(f.bots.tools.wakes!.add(botId, chat.id, { brief: 'Later', dueAt: new Date(f.clock.now + 3600_000).toISOString() })).rejects.toThrow('waiting')
+  for (let i = 0; i < 50; i++) f.store.insertReminder({ id: `reminder-${i}`, botId, dueAt: new Date(f.clock.now + 3600_000).toISOString(), text: 'reminder', work: null, replyTo: null, createdAt: f.store.now() })
+  await expect(wait(workId)).resolves.toMatchObject({ wakeId: expect.any(String) })
+  await expect(f.bots.tools.wakes!.add(botId, chat.id, { brief: 'Later', dueAt: new Date(f.clock.now + 3600_000).toISOString() })).resolves.toMatchObject({ wakeId: expect.any(String) })
 })
-it('counts successive work waits in the existing wake chain', async () => {
+it('counts successive work waits in the existing wake chain, uncapped; the same wait a fourth time is refused as a loop', async () => {
   const { workId, turn } = await work()
   let current = turn
-  for (let n = 1; n <= 5; n++) {
-    const set = await wait(workId)
+  // Past the old cap of five in a row, each wait with something new in it.
+  for (let n = 1; n <= 7; n++) {
+    const set = await wait(workId, undefined, `Check step ${n} of the release.`)
     expect(f.store.reminder(set.wakeId)?.chain).toBe(n)
     await finish(f, current.payload, 'completed', { text: '' })
     f.clock.now += 60 * 60_000
     await f.bots.deliverDueReminders()
     await flush()
     current = await start(f, workId, n + 1)
+    if (n === 7) {
+      // The same wait again and again with nothing new: refused on the fourth, counting only this work's waits.
+      for (let k = 0; k < 3; k++) {
+        const again = await wait(workId, undefined, 'Check the release again.')
+        f.bots.tools.reminders.cancel(botId, again.wakeId)
+      }
+      await expect(wait(workId, undefined, 'Check the release again.')).rejects.toThrow('that is a loop')
+    }
   }
-  await expect(wait(workId)).rejects.toThrow('in a row')
 })
 it('admits ready owner work and usage resets before timed waits, then the queue', async () => {
   const ids: string[] = []

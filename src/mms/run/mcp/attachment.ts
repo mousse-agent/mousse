@@ -3,14 +3,12 @@ import { dirname, join } from 'node:path'
 import { PROFILER_TOOL_NAMES } from '../../../shared/diagnostics/profiler'
 import type { McpAttachment } from './MousseMcpServer'
 
-/** Name of the Mousse server in every runtime's MCP configuration; tools appear as `mcp__mousse__*`. */
-export const MOUSSE_MCP_SERVER_NAME = 'mousse'
+import { MOUSSE_MCP_SERVER_NAME, MOUSSE_RELAY_SERVER_NAME } from '../../../shared/harness/mcpNames'
+export { MOUSSE_MCP_SERVER_NAME, MOUSSE_RELAY_SERVER_NAME } from '../../../shared/harness/mcpNames'
 /** Environment variable that carries the bearer token to the stdio bridge (never argv). */
 export const MOUSSE_MCP_TOKEN_ENV = 'MOUSSE_MCP_TOKEN'
 /** Per-call timeout runtimes should allow: `ask_user` may wait up to an hour. */
 export const MOUSSE_MCP_TOOL_TIMEOUT_MS = 60 * 60 * 1000
-/** Name of the MCP relay in a runtime's MCP configuration: the user's Mousse MCP servers, relayed. */
-export const MOUSSE_RELAY_SERVER_NAME = 'mousse-relay'
 /** Per-call timeout of a relayed tool: under the stdio bridge's 300 s fetch ceiling. */
 export const RELAY_CALL_TIMEOUT_MS = 4 * 60_000
 

@@ -21,7 +21,8 @@ const OWNERS: Record<string, string[]> = {
   composer: ['src/renderer/components/ChatComposer.tsx'],
   'project-icon': ['src/renderer/components/ProjectIcon.tsx'],
   'side-card': ['src/renderer/components/sideCard/ThreadSideCard.tsx'],
-  settings: ['src/renderer/components/SettingsPage.tsx']
+  settings: ['src/renderer/components/SettingsPage.tsx'],
+  wallpaper: ['src/renderer/components/ChatWallpaper.tsx']
 }
 
 const partOf = (selector: string): string => /^\[data-mousse="([a-z-]+)"\]$/.exec(selector)?.[1] ?? selector
@@ -107,7 +108,8 @@ describe('decisions pause the theme', () => {
   })
 
   it('every file that uses permission modes is marked or reviewed', () => {
-    const unreviewed = sourceFiles('src/renderer').filter((file) => file.endsWith('.tsx')).filter((file) => {
+    // Forward slashes on every system, as the reviewed list is written.
+    const unreviewed = sourceFiles('src/renderer').map((file) => file.split('\\').join('/')).filter((file) => file.endsWith('.tsx')).filter((file) => {
       const text = readFileSync(file, 'utf8')
       return /shared\/permissionMode'/.test(text) && !text.includes('data-mousse-decision') && !(file in PERMISSION_MODE_REVIEWED)
     })

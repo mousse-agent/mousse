@@ -396,7 +396,7 @@ export class BotChatService {
    * `bots.questions.answer`: the owner taps one of a question's answers. It is their reply to the question's bubble, the
    * same as writing it (it answers the question, moves past any other open one and starts or continues a chat turn), but
    * the turn it starts is not one the owner's own words started (`answer:`, not `chat:`): the label is the bot's words,
-   * so it never lets the bot start, message or stop a thread, or switch models. A question already answered, or no
+   * so it never lets the bot switch models. A question already answered, or no
    * longer open, is refused before anything is written. A repeat of `clientRequestId` returns the first answer.
    */
   actionMessage(botId: string, actionId: string): BotChatMessage {

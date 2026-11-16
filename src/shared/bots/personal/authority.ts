@@ -29,8 +29,8 @@ export interface BotThreads {
    */
   botOf?(threadId: string): { botId: string; name: string } | undefined
   /**
-   * The chat turn (activation) when its owner's own message started it, the only turn that may start,
-   * message or stop the owner's threads, with `limit`: the permission limit of the other device that message came from
+   * The turn (activation) when it may start, message, stop or archive the owner's threads (a chat turn its owner's
+   * message or tapped answer started, or a run), with `limit`: the permission limit of the other device that message came from
    * (absent: this computer's own window). Undefined for any other turn. Never throws.
    */
   ownerTurn?(activationId: string): { limit?: PermissionMode } | undefined
@@ -206,11 +206,10 @@ export interface BotAuthority {
   subagents?: BotSubagents
   /**
    * Why this turn holds the owner's threads ("use your threads") to reading only, for the words of a refused start,
-   * message or Stop: `work` (work, a reminder's work or a schedule: starting is the chat's), or `not_owner` (a chat turn
-   * no message of the owner started, such as the bot's first message). Absent: the turn may act, or holds
-   * no thread tool at all.
+   * message or Stop: `not_owner` (a chat turn no message or tapped answer of the owner started, such as the bot's first
+   * message). Absent: the turn may act, or holds no thread tool at all.
    */
-  threadsReadOnly?: 'work' | 'not_owner'
+  threadsReadOnly?: 'not_owner'
   /**
    * Why the turn may not use the app tool `tool` now (its grant was removed or replaced, this computer switched it off,
    * the activation ended), decided without asking anyone or showing a chip; undefined while it may. For a call that
