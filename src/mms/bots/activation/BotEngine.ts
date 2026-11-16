@@ -6536,11 +6536,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * is repaired by the next one. A failure pauses the activation with `reconcile_failed`.
    */
   async reconcileOnStartup(): Promise<void> {
-    this.quietHoursChanged()
-    this.loadPendingScheduleRemovals()
-    // Cleanup is best effort: admission enforces the saved intent even while jobs.json cannot be written.
-    this.retryCompletedScheduleRemovals()
     try {
+      try { this.quietHoursChanged() } catch (error) {
+        console.warn('bot quiet hours could not be checked at startup', error)
+      }
+      try { this.loadPendingScheduleRemovals() } catch (error) {
+        console.warn('bot schedule removals could not be read at startup', error)
+      }
+      // Admission still enforces saved completion intents while the job store is unavailable.
+      try { this.retryCompletedScheduleRemovals() } catch (error) {
+        console.warn('completed bot schedules could not be removed at startup', error)
+      }
       // Capture first (bot-context.md §4): every bot thread is copied into the journal past its
       // cursor before any activation is admitted or the scheduler starts.
       try {
