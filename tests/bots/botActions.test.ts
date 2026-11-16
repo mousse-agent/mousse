@@ -1721,3 +1721,23 @@ it.each(['gone', 'settled', 'unreachable'] as const)('R3-3 owner wording for %s 
   const sentence = reason === 'gone' ? "This can't be sent any more." : reason === 'settled' ? 'This was already answered.' : "Mail couldn't be reached, so nothing was sent."
   await expect(f.bots.service.answerAction({ actionId: id, digest, answer: 'send' })).rejects.toMatchObject({ code: `bot_action_${reason}`, message: sentence })
 })
+
+it('R3-3 a failing card of another bot cannot undo this bot grant change', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  const b = await createBot(f, { reply: 'Hello' })
+  const definition = f.bots.definitionOf(b.botId)
+  const revision = f.host.definitions.publishRevision({ ...definition, permissions: { ...definition.permissions, mcp: [{ serverId: 'mail', tool: 'send', level: 'asks_first' }] } })
+  f.store.setPublished(b.botId, revision.revision!)
+  f.store.approve(b.botId, botManifestDigest(revision.permissions), revision.permissions)
+  const workB = await f.bots.activate({ botId: b.botId, input: 'Work B', clientRequestId: 'work-b' })
+  await start(f, workB.id)
+  f.store.run(`INSERT INTO bot_actions(id, call_key, bot_id, activation_id, lane, kind, target_json, exec_args, args_json, args_digest, binding_json, card_json, status, message_id, expires_at, created_at)
+    SELECT id || '_b', call_key || '_b', ?, ?, lane, kind, target_json, exec_args, args_json, args_digest, 'null', card_json, status, message_id, expires_at, created_at FROM bot_actions WHERE id = ?`, b.botId, workB.id, a.id)
+  // Positive control: reading B's corrupt but valid-JSON binding really fails.
+  expect(() => f.bots.actions.withdrawChanged()).toThrow()
+  const grant = f.store.activeGrant(t.botId)!
+  expect(() => f.store.approve(t.botId, grant.digest, grant.manifest)).not.toThrow()
+  expect(f.bots.actions.get(a.id)?.status).toBe('open')
+})
