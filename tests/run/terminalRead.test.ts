@@ -66,7 +66,7 @@ describe('an agent reads its thread\'s terminals', () => {
   })
 
   /** A real shell for thread `threadId` running `script`; resolves once it printed `until` (or exited). */
-  const shell = async (threadId: string, script: string, until: string, options: { title?: string; ownership?: Parameters<PtyManager['create']>[3]['ownership'] } = {}) => {
+  const shell = async (threadId: string, script: string, until: string, options: { label?: string; ownership?: Parameters<PtyManager['create']>[3]['ownership'] } = {}) => {
     const ptyId = pty.create(`project-shell:${Math.random()}`, home, undefined, { threadId, shellArgs: ['-c', script], ...options })
     const deadline = Date.now() + 10_000
     while (!pty.getScrollback(ptyId).includes(until) && pty.isAlive(ptyId)) {
@@ -104,7 +104,7 @@ describe('an agent reads its thread\'s terminals', () => {
     // The shell holds the thread the way a panel terminal does: its owner is asserted on every write and heartbeat.
     const ownership = { assert: vi.fn(), heartbeat: vi.fn(), settled: vi.fn(async () => undefined) }
     const write = vi.spyOn(pty, 'write')
-    const server = await shell('t1', `printf 'VITE ready\\n  Local: http://localhost:5173/\\n'; sleep 30`, 'Local:', { title: 'Dev server', ownership })
+    const server = await shell('t1', `printf 'VITE ready\\n  Local: http://localhost:5173/\\n'; sleep 30`, 'Local:', { label: 'Dev server', ownership })
     const { isError, body } = await read({ terminalId: server })
     expect(isError).toBe(false)
     expect(body.terminals).toEqual([expect.objectContaining({ terminalId: server, title: 'Dev server', status: 'running' })])
