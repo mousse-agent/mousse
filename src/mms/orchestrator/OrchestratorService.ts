@@ -10731,16 +10731,38 @@ export class OrchestratorService extends EventEmitter {
       } catch {
         caps = undefined
       }
-      // Runtimes own their context. Without a reported window, do not display a fabricated Mousse
-      // context measurement.
-      if (!caps || contextGauge(caps) !== 'reported') {
-        return { percent: 0, used: 0, limit: 0, modelName: selectedModel.model, source: 'estimated', categories: [] }
-      }
+      if (!caps) return { percent: 0, used: 0, limit: 0, modelName: selectedModel.model, source: 'estimated', categories: [] }
       const prefix = `${selectedModel.llmProvider}:`
-      const stored = this.nativeContext.lastTurnUsage
-      const capacity = this.nativeContext.nativeProviderModel
       // Measured on this model: records written before #490 name it with its level (`opus:high`).
       const measured = (model: string | undefined) => model !== undefined && upgradeSelection({ model }).model === selectedModel.model
+      // The cache of the history as it is now, on the instance and model the composer would send to (another
+      // instance, a second Claude account, or another model has its own). A record that names no instance is cold.
+      const cache = promptCacheOf(this.nativeContext)
+      const cacheKey = cache?.modelKey
+      const cached = cache && instanceId !== undefined && cache.instanceId === instanceId &&
+        (cacheKey === undefined || (cacheKey.startsWith(prefix) && measured(cacheKey.slice(prefix.length))))
+      // A copy read for the gauge brings its messages' estimates from the read worker instead of the messages.
+      const estimates = this.session.gaugeEstimates
+      const activeHistory = estimates ? { messageEstimates: estimates } : { messages: getActiveMessages(this.nativeContext) }
+      // Runtimes own their context. Without a reported window, do not display a fabricated Mousse
+      // context measurement. The runtime's prompt cache still goes cold after a pause (an ACP agent, Cursor): the
+      // snapshot then carries its record and Mousse's estimate of the history, for the idle Compact suggestion only.
+      if (contextGauge(caps) !== 'reported') {
+        const empty: ContextUsageSnapshot = { percent: 0, used: 0, limit: 0, modelName: selectedModel.model, source: 'estimated', categories: [] }
+        if (!cached) return empty
+        const history = computeContextUsage({
+          ...activeHistory, draftInput: '', contextLimit: 0, modelName: selectedModel.model,
+          lastMeasuredInput: null, lastMeasuredCacheRead: null, lastMeasuredCacheWrite: null,
+          summaryText: getCompactionSummary(this.nativeContext)
+        }).used
+        return {
+          ...empty,
+          promptCache: { lastRequestAt: cache.lastRequestAt, ...(cache.ttlMs ? { ttlMs: cache.ttlMs } : {}) },
+          ...(history > 0 ? { historyEstimate: history } : {})
+        }
+      }
+      const stored = this.nativeContext.lastTurnUsage
+      const capacity = this.nativeContext.nativeProviderModel
       const storedKey = stored?.modelKey ?? ''
       const matches = stored !== undefined && storedKey.startsWith(prefix) && measured(storedKey.slice(prefix.length)) && stored.contextRevision === (this.nativeContext.revision ?? 0)
       const limit = measured(capacity?.selectedModel) ? capacity!.contextWindow ?? 0 : 0
@@ -10748,10 +10770,8 @@ export class OrchestratorService extends EventEmitter {
       // still count, when it was taken on this model.
       const baseRecord = this.nativeContext.contextBase
       const base = !matches && baseRecord?.modelKey.startsWith(prefix) && measured(baseRecord.modelKey.slice(prefix.length)) ? baseRecord.tokens : null
-      // A copy read for the gauge brings its messages' estimates from the read worker instead of the messages.
-      const estimates = this.session.gaugeEstimates
       const usage = computeContextUsage({
-        ...(estimates ? { messageEstimates: estimates } : { messages: getActiveMessages(this.nativeContext) }), draftInput: request.draftInput,
+        ...activeHistory, draftInput: request.draftInput,
         contextLimit: limit, modelName: measured(capacity?.selectedModel) ? capacity!.modelName : selectedModel.model,
         lastMeasuredInput: matches ? stored.input : null,
         lastMeasuredCacheRead: matches ? stored.cacheRead : null,
@@ -10762,12 +10782,6 @@ export class OrchestratorService extends EventEmitter {
         systemPromptText: '', legacyEstimated: this.nativeContext.fidelity === 'legacy-estimated'
       })
       const latestResponse = [...this.session.messages].reverse().find((message) => message.responseMetadata?.tokensUsed !== undefined)
-      // The cache of the history as it is now, on the instance and model the composer would send to (another
-      // instance, a second Claude account, or another model has its own). A record that names no instance is cold.
-      const cache = promptCacheOf(this.nativeContext)
-      const cacheKey = cache?.modelKey
-      const cached = cache && instanceId !== undefined && cache.instanceId === instanceId &&
-        (cacheKey === undefined || (cacheKey.startsWith(prefix) && measured(cacheKey.slice(prefix.length))))
       // A price only where the thread pays per token: a pi instance (`pi:<provider>`) with a saved API key and a priced model.
       const price = cached && instanceId && piProviderIdOf(instanceId) && typeof this.providerAuth?.uncachedInputPrice === 'function'
         ? this.providerAuth.uncachedInputPrice(selectedModel.llmProvider, parseThinkingSuffixFromModelId(selectedModel.model).baseId)

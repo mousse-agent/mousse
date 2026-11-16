@@ -1341,6 +1341,12 @@ export interface ContextUsageSnapshot {
    * new thread, or the history changed since, which starts a fresh session).
    */
   promptCache?: ContextPromptCache
+  /**
+   * A runtime that reports no context (an ACP agent, Cursor): Mousse's estimate of the history the next send
+   * carries, sent with `promptCache` so the composer can still suggest compacting once it goes cold. The gauge
+   * itself stays empty.
+   */
+  historyEstimate?: number
 }
 
 export interface ContextPromptCache {

@@ -38,7 +38,7 @@ import { attachedFilesIn, formatAttachedFilesMarker } from '../../shared/attache
 import { QUEUE_DRAFT_MOVED_NOTICE, useThreadQueue, type RecoveredQueueDraft } from '../hooks/useThreadQueue'
 import { nextSteerableQueueItem } from '../lib/queuedContent'
 import { restoreQueuedDraft } from '../lib/queuedDraftRecovery'
-import { contextTokens } from '../lib/promptCache'
+import { historyTokens as historyTokensOf } from '../lib/promptCache'
 import { cachedContextUsage, contextUsageKey, rememberContextUsage } from '../lib/threadContextUsage'
 import {
   APPROVAL_COMPOSER_PLACEHOLDER,
@@ -442,7 +442,7 @@ export function OrchestratorChat() {
     [messages]
   )
   // The history Send now keeps when it skips the compaction ("182K"), from the context snapshot.
-  const historyTokens = contextTokens(contextUsage) || undefined
+  const historyTokens = historyTokensOf(contextUsage) || undefined
   const queueHold = useMemo(() => (compactionRunning ? { historyTokens } : null), [compactionRunning, historyTokens])
   // An unsaved edit of a queued message that started meanwhile goes to its thread's composer (shown or not) with the
   // message's images, browser elements and references. Files are kept by thread here, like a paste.
