@@ -160,6 +160,15 @@ export interface BotToolHost {
    * `hours`. `from` is the chat turn that sets it. Throws, with why in words for the bot, when it can't be set. Absent: no
    * wakes here.
    */
+  /**
+   * The ledger (docs/plans/bot-context.md §16): a job the turn `from` handed to one of the owner's threads, by sending it
+   * `sent` (a first message, or a message to a thread it already had). Kept in `bots.db` with who asked and what; the bot
+   * is told in its chat when the thread finishes or waits for a person. A thread still working on an earlier job of the
+   * bot keeps that job. Absent: no ledger here.
+   */
+  jobs?: {
+    open(botId: string, from: string, input: { threadId: string; title: string; project?: string; sent: string }): { jobId: string }
+  }
   wakes?: {
     wait?(botId: string, from: string, input: { brief: string; dueAt?: string; event?: BotWakeEvent; hours?: number }): Promise<{ wakeId: string; dueAt: string; label: string }>
     add(botId: string, from: string, input: { brief: string; dueAt?: string; event?: BotWakeEvent; hours?: number }): Promise<{ wakeId: string; dueAt: string; label: string }>

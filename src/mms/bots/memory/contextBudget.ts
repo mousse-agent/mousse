@@ -73,6 +73,8 @@ export interface BotChatEpoch {
   outsideMemory: string
   /** Estimated tokens of what the epoch's turns added, for a runtime that reports no sizes. */
   addedTokens: number
+  /** When the newest job (the ledger, `bot_jobs`) the conversation holds last changed: later turns list only jobs changed after it. */
+  jobsAt?: string
   /** Why it ended, once it did: the next turn starts a new epoch. */
   ended?: BotChatEpochEnd
 }

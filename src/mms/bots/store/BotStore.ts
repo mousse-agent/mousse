@@ -14,6 +14,7 @@ import type { BotStuckRows } from '../../../shared/bots/personal/modelSlots'
 import type { BotQuestionAnswer, BotQuestionFollow, BotQuestionLateAnswer, BotQuestionSpec, BotQuestionStatus } from '../../../shared/bots/personal/questions'
 import { keptCardOf, type BotCard } from '../../../shared/bots/personal/cards'
 import type { BotWakeEvent, BotWakeFired } from '../../../shared/bots/personal/wakes'
+import { BOT_JOB_ENDED, type BotJob, type BotJobAsker, type BotJobState } from '../../../shared/bots/personal/jobs'
 import { BOT_MEMORY_SCHEMA_SQL } from '../memory/schema'
 import { narrowPermissionMode, type PermissionMode } from '../../../shared/permissionMode'
 
@@ -460,6 +461,31 @@ CREATE TABLE bot_turn_usage(
   PRIMARY KEY(activation_id, dispatch_n)
 ) STRICT;
 CREATE INDEX bot_turn_usage_by_bot ON bot_turn_usage(bot_id, lane, started_at);
+`
+  },
+  {
+    // The ledger (docs/plans/bot-context.md §16): one row per job a bot handed to one of its owner's threads, with the
+    // request that caused it, who asked, how it stands and a one-line result. `notices`: how many notices the bot had.
+    version: 13,
+    sql: `
+CREATE TABLE bot_jobs(
+  id TEXT PRIMARY KEY,
+  bot_id TEXT NOT NULL,
+  activation_id TEXT NOT NULL,
+  thread_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  project TEXT,
+  request TEXT NOT NULL,
+  asked_by TEXT NOT NULL CHECK(asked_by IN ('owner','schedule','bot','self')),
+  state TEXT NOT NULL CHECK(state IN ('running','needs_input','done','failed','stopped','gone')),
+  line TEXT,
+  notices INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  ended_at TEXT
+) STRICT;
+CREATE INDEX bot_jobs_by_bot ON bot_jobs(bot_id, updated_at);
+CREATE INDEX bot_jobs_open ON bot_jobs(thread_id) WHERE ended_at IS NULL;
 `
   }
 ]
@@ -1020,6 +1046,24 @@ const unconfirmedDelivery = (table: string, member: 'notes' | 'answers' | 'quest
     WHERE d.activation_id = ${table}.activation_id AND item.value = ${table}.id AND ${WORK_TOLD})`
 
 type Row = Record<string, unknown>
+
+function jobOf(row: Row): BotJob {
+  return {
+    id: String(row.id),
+    botId: String(row.bot_id),
+    activationId: String(row.activation_id),
+    threadId: String(row.thread_id),
+    title: String(row.title),
+    ...(typeof row.project === 'string' ? { project: row.project } : {}),
+    request: String(row.request),
+    askedBy: String(row.asked_by) as BotJobAsker,
+    state: String(row.state) as BotJobState,
+    ...(typeof row.line === 'string' ? { line: row.line } : {}),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+    ...(typeof row.ended_at === 'string' ? { endedAt: row.ended_at } : {})
+  }
+}
 type Param = string | number | null
 
 const str = (value: unknown): string | null => (typeof value === 'string' ? value : null)
@@ -1573,6 +1617,63 @@ export class BotStore {
     this.run('UPDATE bot_turn_usage SET tools = ?, tools_chars = ? WHERE activation_id = ? AND dispatch_n = ? AND tools IS NULL', tools, chars, activationId, n)
   }
 
+  // -- Jobs (v13): the ledger of work a bot handed to its owner's threads ----------------------
+
+  /**
+   * A job handed to `threadId`. A thread that still works on an earlier job of the same bot takes the new message as
+   * part of it: that row is kept (and touched), and no second one opens. Returns the job's row.
+   */
+  openJob(row: Pick<BotJob, 'id' | 'botId' | 'activationId' | 'threadId' | 'title' | 'request' | 'askedBy'> & { project?: string }): BotJob {
+    return this.db.transaction(() => {
+      const open = this.get('SELECT * FROM bot_jobs WHERE bot_id = ? AND thread_id = ? AND ended_at IS NULL ORDER BY created_at DESC LIMIT 1', row.botId, row.threadId)
+      const now = this.now()
+      if (open) {
+        this.run('UPDATE bot_jobs SET updated_at = ?, title = ? WHERE id = ?', now, row.title, String(open.id))
+        return jobOf({ ...open, updated_at: now, title: row.title })
+      }
+      this.run(
+        `INSERT INTO bot_jobs(id, bot_id, activation_id, thread_id, title, project, request, asked_by, state, created_at, updated_at)
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)`,
+        row.id, row.botId, row.activationId, row.threadId, row.title, row.project ?? null, row.request, row.askedBy, now, now
+      )
+      return this.job(row.id)!
+    })
+  }
+
+  job(id: string): BotJob | undefined {
+    const row = this.get('SELECT * FROM bot_jobs WHERE id = ?', id)
+    return row ? jobOf(row) : undefined
+  }
+
+  /** The jobs not ended on `threadId`, of any bot. */
+  openJobsOn(threadId: string): BotJob[] {
+    return this.all('SELECT * FROM bot_jobs WHERE thread_id = ? AND ended_at IS NULL ORDER BY created_at', threadId).map(jobOf)
+  }
+
+  /** Every job not ended, oldest first: what the startup pass checks. */
+  openJobs(limit = 500): BotJob[] {
+    return this.all('SELECT * FROM bot_jobs WHERE ended_at IS NULL ORDER BY created_at LIMIT ?', limit).map(jobOf)
+  }
+
+  /** The bot's newest jobs, by when they last changed; `since`: only those changed after it. */
+  recentJobs(botId: string, limit: number, since?: string): BotJob[] {
+    return (since
+      ? this.all('SELECT * FROM bot_jobs WHERE bot_id = ? AND updated_at > ? ORDER BY updated_at DESC, created_at DESC LIMIT ?', botId, since, limit)
+      : this.all('SELECT * FROM bot_jobs WHERE bot_id = ? ORDER BY updated_at DESC, created_at DESC LIMIT ?', botId, limit)).map(jobOf)
+  }
+
+  /**
+   * The job moved from `from` to `state` (with its result line, when it has one); false when it was not in `from` any
+   * more (another pass moved it first). An ending state keeps its end time; a notice is counted with `notice`.
+   */
+  moveJob(id: string, from: BotJobState, state: BotJobState, change: { line?: string; notice?: boolean } = {}): boolean {
+    const now = this.now()
+    return this.run(
+      `UPDATE bot_jobs SET state = ?, line = COALESCE(?, line), updated_at = ?, ended_at = ?, notices = notices + ? WHERE id = ? AND state = ? AND ended_at IS NULL`,
+      state, change.line ?? null, now, BOT_JOB_ENDED.has(state) ? now : null, change.notice ? 1 : 0, id, from
+    ) > 0
+  }
+
   /** The runtime compacted the turn's context. */
   turnCompacted(activationId: string, n: number): void {
     this.run('UPDATE bot_turn_usage SET compactions = compactions + 1 WHERE activation_id = ? AND dispatch_n = ?', activationId, n)
@@ -1964,6 +2065,7 @@ export class BotStore {
     this.run('DELETE FROM bot_work_notes WHERE bot_id = ?', botId)
     this.run('DELETE FROM bot_questions WHERE bot_id = ?', botId)
     this.run('DELETE FROM bot_actions WHERE bot_id = ?', botId)
+    this.run('DELETE FROM bot_jobs WHERE bot_id = ?', botId)
     this.run('UPDATE bot_registry SET model_json = NULL, error_json = NULL WHERE bot_id = ?', botId)
   }
 

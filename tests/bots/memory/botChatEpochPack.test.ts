@@ -7,6 +7,7 @@ import { BOT_CHAT_EPOCH_MARKS, chatEpochEnd, contextBudget, type BotChatDigestSt
 import type { BotTurnUsageRow } from '../../../src/mms/bots/store/BotStore'
 import { BOT_CHANGELOG_LATEST } from '../../../src/mms/bots/changelog'
 import { disposeFixtures, HOUR, memoryFixture, type MemoryFixture } from './memoryFixture'
+import { BOT_REPORT_MAX_CHARS, LEDGER_CHANGES_HEADING, LEDGER_HEADING, type BotJob } from '../../../src/shared/bots/personal/jobs'
 
 /**
  * Chat epochs (docs/plans/bot-context.md §14), at the pack: a new epoch's base folds the window to its tail in one step,
@@ -19,11 +20,12 @@ afterEach(disposeFixtures)
 
 const SEL = { instanceId: 'claude', model: 'claude-opus' }
 
-function setup() {
+function setup(jobs?: BotJob[]) {
   const fx = memoryFixture()
   fx.store.write(() => fx.store.setState('ada', 'changelog_seen', BOT_CHANGELOG_LATEST))
   const journal = createBotJournal({ store: fx.store, readThread: () => ({ messages: [] }), listThreads: () => [] })
-  const packs = createBotContextProvider({ store: fx.store, journal })
+  const ledger = jobs ? { jobs: (_botId: string, limit: number, since?: string) => jobs.filter((job) => !since || job.updatedAt > since).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, limit) } : {}
+  const packs = createBotContextProvider({ store: fx.store, journal, ...ledger })
   const turn = (activationId: string, keep: BotChatEpochEnd | undefined = undefined, start = true) =>
     packs.chatContext({ botId: 'ada', activationId, start, selection: SEL, keep: () => keep })
   const settle = (activationId: string, endedBy: 'settled' | 'failed' | 'stopped' | 'wall' = 'settled') =>
@@ -37,6 +39,41 @@ function exchange(fx: MemoryFixture, n: number, activationId = `a${n}`, size = 4
   fx.message({ botId: 'ada', id: `o${n}`, author: 'owner', text: `Owner message ${n}. ${'q'.repeat(size * 4)}`, activationId })
   fx.message({ botId: 'ada', id: `b${n}`, author: 'bot', text: `Bot reply ${n}. ${'a'.repeat(size * 4)}`, activationId })
 }
+
+describe('the ledger in the chat (docs/plans/bot-context.md §16)', () => {
+  const job: BotJob = { id: 'j1', botId: 'ada', activationId: 'a0', threadId: 't1', title: 'Fix the login page', project: 'Web', request: 'Fix the login page in project Web', askedBy: 'owner', state: 'running', createdAt: '2026-01-01T09:00:00.000Z', updatedAt: '2026-01-01T09:00:00.000Z' }
+
+  it('a new epoch base lists the jobs with their links; a running epoch turn gets only the jobs that changed', async () => {
+    const jobs = [{ ...job }]
+    const { turn, settle } = setup(jobs)
+    const first = await turn('a1')
+    expect(first.text).toContain(LEDGER_HEADING)
+    expect(first.text).toMatch(/- "Fix the login page" mousse:\/\/thread\/t1 · working · your owner asked .*: Fix the login page in project Web/)
+    await settle('a1')
+    // Nothing changed: the conversation holds it already.
+    const second = await turn('a2')
+    expect(second.text).not.toContain('Threads you handed work to')
+    await settle('a2')
+    // Three days on, the thread finished: the next turn is told, with the result.
+    jobs[0] = { ...job, state: 'done', line: 'Fixed the login redirect.', updatedAt: '2026-01-04T09:00:00.000Z', endedAt: '2026-01-04T09:00:00.000Z' }
+    const third = await turn('a3')
+    expect(third.text).toContain(LEDGER_CHANGES_HEADING)
+    expect(third.text).toContain('mousse://thread/t1 · done')
+    expect(third.text).toContain('→ Fixed the login redirect.')
+    await settle('a3')
+    expect((await turn('a4')).text).not.toContain('Threads you handed work to')
+  })
+
+  it('a long work report is held to the report cap, with where to read it all', async () => {
+    const { fx, turn, settle } = setup()
+    await turn('a1')
+    await settle('a1')
+    fx.message({ botId: 'ada', id: 'r1', author: 'bot', kind: 'run_report', text: `Work report. ${'z'.repeat(5_000)}`, activationId: 'w1' })
+    const second = await turn('a2')
+    expect(second.text).toMatch(new RegExp(`cut at ${BOT_REPORT_MAX_CHARS.toLocaleString('en-US')} characters: memory_read j\\d+ shows it all`))
+    expect(second.text).not.toContain('z'.repeat(BOT_REPORT_MAX_CHARS))
+  })
+})
 
 describe('a running epoch', () => {
   it('sends only what its conversation does not hold: work\'s report, not the chat\'s own rows nor the owner\'s new message', async () => {

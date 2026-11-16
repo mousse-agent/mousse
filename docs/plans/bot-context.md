@@ -448,3 +448,30 @@ process each bot turn and keeps today's cleared context.
 - The marks (48k, 64k, 24k, 6k) are starting values: the phase 0 numbers replace them, and set the "hello" ceiling.
 - Digest quality on real chats: whether the five sections keep what later turns ask about.
 - Pi epochs, which need its session kept between bot turns.
+
+## 16. Work in threads (phase 2)
+
+**The rule.** A job in one of the owner's projects goes to a thread in that project, in its own worktree on a Git
+project, hidden when it is small. The bot's own work keeps the chores that need no project. There is no setting: this is
+the only path, and it answers file access outside the bot's folder (#1366) through threads instead of a wider grant.
+
+**The ledger.** One durable row per job in `bot_jobs` (bots.db v13): the request that caused it, who asked, the thread,
+its state and a one-line result. `thread_create` with a first message and `thread_send` open it; a message to a thread
+still on the job joins it.
+
+**The report.** One shape for anything that works for a bot: state, one line, link, who asked
+(`BotReport` in `src/shared/bots/personal/jobs.ts`). A thread's end, or its wait for a person, is one notice turn in the
+bot's chat with the report and the thread's answer held to 2,000 characters (`BOT_REPORT_MAX_CHARS`); that turn may act
+on threads (#1359). The same cap holds a report from the bot's own work in the chat's pack.
+
+**In the pack.** An epoch's base lists the newest 6 jobs; a later turn's update lists only those that changed since
+(`BotChatEpoch.jobsAt`), so the ledger stays in the resumed conversation without being sent again.
+
+**Reading threads.** A bot reads threads with the agents' caps and views (#1365): messages paged with `textOffset`, run
+events, subagents below a thread it reaches.
+
+**Where.** `src/mms/bots/jobs.ts` (decisions), `BotEngine.openJob`, `checkJobs` and `deliverJobNotice`,
+`BotStore` (`bot_jobs`), `contextPack.ts` (`ledger`), `launchedThreads.ts` (`jobThreadIn`), and the sidebar's eye
+(`src/renderer/lib/hiddenThreadsShown.ts`).
+
+**What waits.** Other things that work for a bot (schedules, other bots, its own work) moving to the same report.

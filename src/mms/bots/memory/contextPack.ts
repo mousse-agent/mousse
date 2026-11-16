@@ -21,6 +21,7 @@ import { agoLabel, cut, dayLabel, renderMemoryBlocks, timeLabel } from './render
 import { BOT_CHANGELOG_LATEST, changelogBlock, unseenChanges } from '../changelog'
 import { createHash } from 'node:crypto'
 import { BOT_CHAT_EPOCH_MARKS, type BotChatDigestState, type BotChatEpoch, type BotChatEpochEnd, type BotChatEpochVerdict } from './contextBudget'
+import { BOT_PACK_JOB_CHANGES, BOT_PACK_JOBS, LEDGER_CHANGES_HEADING, LEDGER_HEADING, capReport, ledgerLine, type BotJob } from '../../../shared/bots/personal/jobs'
 
 /**
  * The context packs (docs/plans/bot-context.md §5): Mousse builds every bot turn from `bots.db`, so
@@ -85,6 +86,11 @@ export interface BotContextPackOptions {
    * or failing, the folds stay deterministic.
    */
   digest?: (input: { botId: string; selection: { instanceId: string; model: string }; system: string; prompt: string; signal: AbortSignal }) => Promise<string>
+  /**
+   * The ledger (docs/plans/bot-context.md §16): the bot's newest jobs handed to threads, by when they last changed, at
+   * most `limit`; `since`, only those changed after it. The chat pack lists them, so the bot knows which thread did what.
+   */
+  jobs?: (botId: string, limit: number, since?: string) => BotJob[]
 }
 
 /** Most reactions one chat pack lists: the oldest not yet told, so the rest are the next turn's. */
@@ -204,7 +210,20 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
 
   // What the bot's work reported (its run report, or a message it posted from work) is marked as data on its own line:
   // work reads web pages and files, so its words may carry text written to steer the bot.
-  const windowLine = (row: BotJournalRow) => `[j${row.seq} · ${timeLabel(row.at, zone())}] ${fromWork(row) ? WORK_REPORT_SPEAKER : speaker(row)}: ${packText(row)}`
+  // A work report is held to the report cap (`BOT_REPORT_MAX_CHARS`), as a thread's notice is: memory_read shows the rest.
+  const windowLine = (row: BotJournalRow) => `[j${row.seq} · ${timeLabel(row.at, zone())}] ${fromWork(row) ? `${WORK_REPORT_SPEAKER}: ${capReport(packText(row), `memory_read j${row.seq} shows it all`).text}` : `${speaker(row)}: ${packText(row)}`}`
+
+  /**
+   * The ledger block: the bot's newest jobs (`since`: only those changed after it), one line each, and when the newest
+   * listed changed (`through`), so the next update lists only later changes.
+   */
+  const ledger = (botId: string, since?: string): { text: string; through?: string } => {
+    const jobs = options.jobs?.(botId, since ? BOT_PACK_JOB_CHANGES : BOT_PACK_JOBS, since) ?? []
+    if (!jobs.length) return { text: '' }
+    const tz = zone()
+    const lines = jobs.map((job) => ledgerLine(job, (iso) => timeLabel(iso, tz)))
+    return { text: `${since ? LEDGER_CHANGES_HEADING : LEDGER_HEADING}\n${lines.join('\n')}`, through: jobs.reduce((newest, job) => (job.updatedAt > newest ? job.updatedAt : newest), jobs[0]!.updatedAt) }
+  }
 
   const summary = (botId: string) => store.getState<ChatSummaryState>(botId, 'chat_summary')
 
@@ -373,7 +392,7 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
     const window = rows.length ? `Recent chat (oldest first):\n${rows.map(windowLine).join('\n')}` : 'Recent chat: (nothing yet)'
     const { extra, told } = carried(botId, activationId, !rows.length && !chat && !store.active(botId).length)
     const protocol = epoch ? `${BOT_MEMORY_PROTOCOL}\n${BOT_EPOCH_PROTOCOL_LINE}` : BOT_MEMORY_PROTOCOL
-    return [wrap([protocol, core, runNotes, chat?.text ?? '', window, situation(botId, true, extra)]), told].filter(Boolean).join('\n\n')
+    return [wrap([protocol, core, runNotes, chat?.text ?? '', window, ledger(botId).text, situation(botId, true, extra)]), told].filter(Boolean).join('\n\n')
   }
 
   // -- Chat epochs (docs/plans/bot-context.md §14) ------------------------------------------------
@@ -401,6 +420,9 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
       blocks.push('Your memory changed outside this conversation. It is now as follows, and this copy wins over earlier ones.', core, runNotes)
     }
     if (rows.length) blocks.push(`New in the chat since your last turn (oldest first):\n${rows.map(windowLine).join('\n')}`)
+    // The jobs that changed since the base or the last update: the ledger stays in the conversation, kept current.
+    const jobs = ledger(botId, epoch.jobsAt ?? epoch.startedAt)
+    if (jobs.text) blocks.push(jobs.text)
     const { extra, told } = carried(botId, activationId, false)
     const text = [wrap([...blocks, situation(botId, true, extra)]), told].filter(Boolean).join('\n\n')
     return {
@@ -410,7 +432,8 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
         deliveredSeq: Math.max(epoch.deliveredSeq, store.lastSeq(botId)),
         ran: [...epoch.ran.filter((id) => id !== activationId), activationId].slice(-EPOCH_RAN_KEEP),
         outsideMemory: signature,
-        addedTokens: epoch.addedTokens + estimateTokens(text)
+        addedTokens: epoch.addedTokens + estimateTokens(text),
+        ...((jobs.through ?? epoch.jobsAt) ? { jobsAt: jobs.through ?? epoch.jobsAt } : {})
       }
     }
   }
@@ -602,6 +625,7 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
     foldWindow(botId, BOT_CHAT_EPOCH_MARKS.tail, BOT_CHAT_EPOCH_MARKS.tail)
     if (!digest && undigested(botId) >= BOT_CHAT_DIGEST.minimum) requestDigest(botId, input.selection)
     rebuildStale(botId, input.selection)
+    const through = options.jobs?.(botId, 1)[0]?.updatedAt
     const text = chatPack(botId, activationId, true)
     const epoch: BotChatEpoch = {
       id: `e:${activationId}`,
@@ -611,7 +635,9 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
       deliveredSeq: store.lastSeq(botId),
       ran: [activationId],
       outsideMemory: memorySignature(botId),
-      addedTokens: 0
+      addedTokens: 0,
+      // The base listed the newest jobs: later updates list what changed after them.
+      ...(through ? { jobsAt: through } : {})
     }
     store.write(() => store.setState(botId, CHAT_EPOCH_KEY, epoch))
     const folded = reason === 'full' || reason === 'cold' ? { folded: { digest } } : {}

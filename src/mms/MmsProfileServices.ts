@@ -54,7 +54,8 @@ import { MousseMcpServer } from './run/mcp/MousseMcpServer'
 import { personTurnRequest } from './run/mcp/appTools/agentMessage'
 import { EffectWorker } from './run/EffectWorker'
 import { TERMINAL_RUN_STATUSES, type RunRecord, type ThreadEvent } from './run/types'
-import { launchedThreadsIn, watchLaunchedThreads } from './bots/launchedThreads'
+import { jobThreadIn, launchedThreadsIn, watchLaunchedThreads } from './bots/launchedThreads'
+import { readRunResultText } from './run/delegation/hold'
 import { Reconciler } from './run/Reconciler'
 import { RunEngine } from './run/RunEngine'
 import type { BotEngine } from './bots/activation/BotEngine'
@@ -784,6 +785,17 @@ export class MmsProfileServices {
         asks: (id) => this.questions.listPendingForThread(id).length > 0,
         projectName: (id) => this.projects.getProject(id)?.name
       }, creators),
+      // A thread a bot handed a job to, for its ledger: how it stands and its last answer.
+      jobThread: (threadId) => jobThreadIn({
+        threads: this.threads,
+        engine: this.runEngine,
+        asks: (id) => this.questions.listPendingForThread(id).length > 0,
+        trashed: (id) => {
+          const record = this.threads.lifecycleStore.get(id)
+          return Boolean(record && record.state !== 'active')
+        },
+        result: (id, runId) => readRunResultText(this.runEngine.store, id, runId)
+      }, threadId),
       harness,
       notifyEffects: () => this.orchestrator.notifyEffects(),
       stopThread: (threadId) => this.orchestrator.stopThread(threadId, 'user', { clientRequestId: `bot-stop:${threadId}:${Date.now()}` }),
@@ -876,6 +888,7 @@ export class MmsProfileServices {
           filesFolder: (botId) => botFilesFolder(homeDir, botId),
           situation: (botId) => this.botSituation(botId),
           scheduleCreatedAt: (botId, scheduleId) => this.botSchedules?.get(botId, scheduleId)?.createdAt,
+          jobs: (botId, limit, since) => store.recentJobs(botId, limit, since),
           reactions: (botId, since) => store.reactionsSince(botId, since, BOT_PACK_REACTIONS)
             .map((row) => ({ messageId: row.id, emoji: row.ownerReaction!.emoji, at: row.ownerReaction!.at, text: row.text, fromWork: row.kind === 'run_report' || (row.activationId !== null && store.activation(row.activationId)?.lane === 'run') })),
           // The digest of a fold (docs/plans/bot-context.md §14): one call with no tools on the bot's chat model.
@@ -989,7 +1002,7 @@ export class MmsProfileServices {
     })
     // A thread a bot started began, was held, asks the owner or ended: that bot's header reads busy or free again.
     if (personalBots) {
-      const stop = watchLaunchedThreads({ runs: this.runEngine, questions: this.questions, threads: this.threads, thread: (id) => this.threads.getThread(id), changed: (creator) => personalBots.launchedThreadChanged(creator) })
+      const stop = watchLaunchedThreads({ runs: this.runEngine, questions: this.questions, threads: this.threads, thread: (id) => this.threads.getThread(id), changed: (creator, threadId) => personalBots.launchedThreadChanged(creator, threadId) })
       this.platform.onDispose(stop)
     }
     // A step of a bot's turn began: its words just before it are what it is doing now, beside its typing dots.
