@@ -2111,7 +2111,7 @@ it.each(['done', 'tool_error'] as const)('C4 integration actual forget removes %
   if (outcome === 'tool_error') vi.spyOn(t.manager, 'callTool').mockResolvedValueOnce({ isError: true, content: [{ type: 'text', text: 'old answer' }] } as never)
   await t.call(); await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
-  await f.bots.service.answerAction({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  await f.bots.service.answerAction({ actionId: a.id, digest: a.args_digest, answer: 'send' }); await flush()
   const memory = new BotMemoryStore({ db: f.store.db })
   const seq = memory.append({ botId: t.botId, sourceKey: `bm:${a.message_id}`, kind: 'notice', who: 'bot', text: 'settled card' })!
   memory.forget(t.botId, { refs: [`j${seq}`], by: 'owner_ui' })
@@ -2170,4 +2170,37 @@ it('C4 integration bridge timeout stub retains the service sentence and settleme
   const page = await list.handle(list.validate!({ botId: t.botId }), { caller: { node: 'phone', user: 'owner' } } as never) as any
   const card = page.messages.find((message: any) => message.id === a.message_id).action
   expect(card).toMatchObject({ tooLarge: true, status: 'failed', at: JSON.parse(f.bots.actions.get(a.id)!.card_json!).settledAt, result: { notSentInTime: true, text: "Mail couldn't be reached, so nothing was sent." } })
+})
+
+it('C4 integration no-action profiles keep bytewise chat About bridge and telling snapshots across the switch', async () => {
+  const t = await setup(false)
+  await t.call()
+  const methods = remoteBotMethods({ bots: () => f.bots.service, deviceLimit: () => 'full' })
+  const remote = methods.find(method => method.method === 'bots.chat.list')!
+  const snapshot = async () => {
+    const chat = f.bots.service.chatList(t.botId)
+    const detail = f.bots.service.get(t.botId)
+    const bridge = await remote.handle(remote.validate!({ botId: t.botId }), { caller: { node: 'phone', user: 'owner' } } as never)
+    for (const message of chat.messages) { expect(Object.hasOwn(message, 'action')).toBe(false); expect(Object.hasOwn(message, 'actionSentAt')).toBe(false) }
+    for (const permission of detail.permissions) expect(Object.hasOwn(permission, 'asksFirst')).toBe(false)
+    return JSON.stringify({ chat, detail, bridge, telling: f.store.messages(t.botId, { limit: 100 }).map(({ id, tell, tellAt }) => ({ id, tell, tellAt })) })
+  }
+  const off = await snapshot()
+  f.host.settings!.get().experimental.botAsksFirst = true
+  expect(await snapshot()).toBe(off)
+  f.host.settings!.get().experimental.botAsksFirst = false
+  expect(await snapshot()).toBe(off)
+  expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
+})
+
+it.each(['2030-04-05T09:14:00.000Z', 'invalid', 99])('C4 integration reads only valid named settlement time %s from private metadata', async settledAt => {
+  const t = await setup(true)
+  await t.call()
+  const a = f.bots.actions.forWork(t.workId)!
+  const metadata = JSON.parse(a.card_json!)
+  const fallback = f.store.now()
+  f.store.run('UPDATE bot_actions SET status = ?, exec_args = NULL, ran_at = ?, card_json = ? WHERE id = ?', 'done', fallback, JSON.stringify({ ...metadata, settledAt, ownerSeq: 42, noteSeq: 43, ownerRemoved: true, removedOwnerSeq: 44, removedNoteSeq: 45 }), a.id)
+  const card = f.bots.service.actionMessage(t.botId, a.id).action!
+  expect(card.at).toBe(typeof settledAt === 'string' && settledAt !== 'invalid' ? settledAt : fallback)
+  for (const key of ['settledAt', 'ownerSeq', 'noteSeq', 'ownerRemoved', 'removedOwnerSeq', 'removedNoteSeq']) expect(Object.hasOwn(card, key)).toBe(false)
 })
