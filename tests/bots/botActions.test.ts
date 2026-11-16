@@ -1758,3 +1758,24 @@ it.each(['done', 'failed', 'cancelled', 'purge'] as const)('R3-3 refusal records
   else await finish(f, next.payload, end === 'done' ? 'completed' : 'failed', { outcome: end === 'failed' ? { error: 'fatal' } : undefined })
   expect(f.store.all("SELECT key FROM bot_memory_state WHERE key LIKE 'cursor:action-refusal:%'")).toEqual([])
 })
+
+it.each(['stop', 'forget', 'pause', 'grant', 'delete'] as const)('R3-1 accepted waiting call ends early on %s', async path => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  vi.spyOn(t.mcp, 'warm').mockImplementationOnce(async () => { t.server.tools.splice(0); t.server.failing = true })
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  if (path === 'stop') await f.bots.stopWork(t.botId, t.workId)
+  if (path === 'pause') f.bots.pauseBot(t.botId)
+  if (path === 'grant') f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: [] }))
+  if (path === 'delete') await f.bots.remove(t.botId)
+  if (path === 'forget') {
+    const memory = new BotMemoryStore({ db: f.store.db })
+    const seq = memory.append({ botId: t.botId, sourceKey: `bm:${a.message_id}`, kind: 'notice', who: 'bot', text: 'card' })!
+    memory.forget(t.botId, { refs: [`j${seq}`], by: 'owner_ui' })
+  }
+  expect(f.bots.actions.get(a.id)).toMatchObject({ status: 'withdrawn', exec_args: null })
+  t.server.tools.push(t.descriptor); t.server.failing = false
+  f.bots.fillMcpAsks(); await flush()
+  expect(t.calls).toEqual([])
+})
