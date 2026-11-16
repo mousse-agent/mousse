@@ -105,6 +105,57 @@ describe('Compact now from the composer', () => {
   })
 })
 
+describe('Compact now on a runtime that reports no context (Cursor, ACP agents)', () => {
+  it("shows the chip sized by Mousse's estimate, with no ring, and its Compact now compacts the thread", async () => {
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    const { model, snapshot } = await import('../providerSnapshotFixture')
+    const { applySnapshotsEvent, DEVICE_SCOPE } = await import('../../src/renderer/lib/providerSnapshots')
+    const cursor = snapshot({
+      instanceId: 'cursor', driver: 'cursor', displayName: 'Cursor',
+      caps: { contextUsage: 'none' }, models: { entries: [model('auto')], source: 'live' }
+    })
+    const now = new Date().toISOString()
+    useAppStore.setState({
+      threads: [{ id: 'thread-a', name: 'A', createdAt: now, updatedAt: now, startedAt: now, order: 0, modelOverride: { instanceId: 'cursor', llmProvider: 'cursor', model: 'auto' } }] as never
+    })
+    // What the daemon sends for it: an empty gauge, the cache record (no lifetime: idle for 2h) and the estimate.
+    const estimated: ContextUsageSnapshot = {
+      percent: 0, used: 0, limit: 0, modelName: 'auto', source: 'estimated', categories: [],
+      promptCache: { lastRequestAt: Date.now() - 2 * 60 * 60_000 }, historyEstimate: 120_000
+    }
+    let finish!: () => void
+    const compact = vi.fn(() => new Promise<void>((resolve) => { finish = resolve }))
+    bridge = {
+      orchestrator: { getContextUsage: vi.fn(async () => estimated), isTurnActive: vi.fn(async () => false) },
+      threads: { compact },
+      providers: { snapshots: vi.fn(async () => [cursor]) },
+      skills: { list: () => Promise.resolve({ skills: [] }) }
+    }
+    stubBridge()
+    // The device's providers as the daemon pushes them (an earlier test's read may still be pending).
+    applySnapshotsEvent({ scope: DEVICE_SCOPE, snapshots: [cursor] })
+    const { OrchestratorChat } = await import('../../src/renderer/components/OrchestratorChat')
+    await act(async () => root.render(createElement(OrchestratorChat)))
+    await settle(400)
+
+    const chip = () => host.querySelector<HTMLElement>('.composer-idle-chip')
+    expect(chip()?.textContent).toBe('Full · ≈120K')
+    // No gauge is shown for a runtime that reports none, with the ring turned on.
+    expect(host.querySelector('.composer-context-anchor')).toBeNull()
+    await act(async () => chip()!.click())
+    expect(document.querySelector('.composer-idle-menu-head')?.textContent).toBe('Idle 2h')
+    const rows = [...document.querySelectorAll<HTMLElement>('.composer-idle-menu [role="menuitemradio"]')]
+    expect(rows.map((row) => row.getAttribute('aria-label'))).toContain('Full history. Re-reads ≈120K')
+    await act(async () => rows.find((row) => row.textContent?.includes('Compact now'))!.click())
+
+    expect(compact).toHaveBeenCalledWith('thread-a')
+    expect(chip()?.textContent).toBe('Compacting…')
+    await act(async () => finish())
+    await settle()
+    expect(chip()?.textContent).not.toBe('Compacting…')
+  })
+})
+
 describe('the Full/Compact chip on a thread switch', () => {
   /** A thread answered a minute ago, its cache written for five minutes: warm, no chip. */
   const warm = (): ContextUsageSnapshot => ({ ...expired(), promptCache: { lastRequestAt: Date.now() - 60_000, ttlMs: 5 * 60_000 } })
