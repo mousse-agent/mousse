@@ -1,3 +1,4 @@
+import { canonicalJson, shortHash } from '../../integrations/revision'
 import type { BotAuthority, BotMcpTool } from '../../../shared/bots/personal/authority'
 import type { BotMcpAsk } from '../../../shared/bots/personal/escalation'
 import { mcpGrantable } from '../../../shared/bots/personal/manifest'
@@ -98,6 +99,8 @@ export interface BotMcpHost {
   servers(): BotMcpServer[]
   /** Whether the servers were read since Mousse started: before that, `servers()` says nothing of a server being gone. */
   listed?(): boolean
+  binding?(tool: BotMcpTool): { serverId: string; configDigest: string; schemaDigest: string } | undefined
+  call?: BotMcp['call']
   /** The granted tools (`<server id>::<tool>`) of servers set up now. */
   offered(granted: ReadonlySet<string>): BotMcpTool[]
   /** Where a granted server id stands now; undefined while the servers were not read yet. */
@@ -281,6 +284,15 @@ export class BotMcp implements BotMcpHost {
       .sort((a, b) => a.name.localeCompare(b.name))
   }
 
+  binding(tool: BotMcpTool): { serverId: string; configDigest: string; schemaDigest: string } | undefined {
+    if (!this.deps.enabled()) return undefined
+    const server = this.deps.catalog.servers(undefined).find(s => s.installationId === installationOf(tool.server))
+    const current = server?.tools.find(t => t.toolName === tool.tool)
+    const configDigest = (server as { configDigest?: string } | undefined)?.configDigest
+    if (!server || !current || !configDigest || !this.offered(new Set([`${tool.server}::${tool.tool}`])).length) return undefined
+    return { serverId: tool.server, configDigest, schemaDigest: shortHash(canonicalJson(current.inputSchema ?? {}), 64) }
+  }
+
   where(serverId: string): BotMcpWhere | undefined {
     if (!this.deps.enabled()) return { state: 'mcp_off' }
     if (!this.listed()) return undefined
@@ -434,7 +446,7 @@ export function mcpAskFor(servers: readonly BotMcpServer[], named: { serverId?: 
  */
 export async function callForBot(input: {
   /** `activationId` and `workspace`: where a result's pictures are kept for the owner (`keepToolImages`); absent: nowhere. */
-  bot: Pick<BotAuthority, 'check' | 'mcpTools' | 'time'> & Partial<Pick<BotAuthority, 'activationId' | 'workspace'>>
+  bot: Pick<BotAuthority, 'check' | 'mcpTools' | 'time'> & Partial<Pick<BotAuthority, 'activationId' | 'workspace' | 'holdMcp'>>
   /** The name the runtime called: the relay's on Claude Code and Codex, the provider name on Pi. */
   name: string
   args: Record<string, unknown>
@@ -444,10 +456,13 @@ export async function callForBot(input: {
   known?(name: string): { server: string; tool: string; serverName: string } | undefined
   /** The turn's model can see images: a result's images reach it (within limits); otherwise a plain note does. */
   images?: boolean
+  toolCallId?: string
 }): Promise<ToolOutcome> {
   const offered = input.bot.mcpTools?.find((tool) => tool.name === input.name || tool.providerName === input.name)
   const target = offered ?? input.known?.(input.name)
   if (!target) return { text: `There is no tool called ${input.name} for you.`, isError: true }
+  const held = offered && input.bot.holdMcp?.(offered, input.args, input.toolCallId)
+  if (held) return held
   const decided = input.bot.check({ kind: 'mcp', server: target.server, tool: target.tool, serverName: target.serverName, args: input.args })
   if (!decided.ok) return { text: checkMessage(decided), isError: true }
   if (!offered) return { text: `${target.serverName}'s tools are allowed now, but this turn started without them: you get them when it ends.`, isError: true }

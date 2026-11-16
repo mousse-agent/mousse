@@ -18,7 +18,7 @@ export interface BotManifest {
   /** Mousse app tools, by their app-tool name. */
   appTools: string[]
   /** The user's MCP tools, server-qualified. */
-  mcp: Array<{ serverId: string; tool: string }>
+  mcp: Array<{ serverId: string; tool: string; level?: 'asks_first' }>
   /** Skill ids. */
   skills: string[]
   /**

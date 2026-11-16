@@ -293,7 +293,7 @@ export function canonicalManifest(manifest: BotManifest): BotManifest {
   return {
     tools: sorted(manifest.tools, (tool) => tool),
     appTools: sorted(manifest.appTools, (tool) => tool),
-    mcp: sorted(manifest.mcp, mcpIdentity).map((pair) => ({ serverId: pair.serverId, tool: pair.tool })),
+    mcp: sorted(manifest.mcp, mcpIdentity).map((pair) => ({ serverId: pair.serverId, tool: pair.tool, ...(pair.level === 'asks_first' ? { level: pair.level } : {}) })),
     skills: sorted(manifest.skills, (skill) => skill),
     workspace: workspaceOf(foldersOf(manifest.workspace)),
     budget,
@@ -495,7 +495,7 @@ export function intersectManifest(wanted: BotManifest, granted: BotManifest): Bo
   return {
     tools: within(wanted.tools, granted.tools, (tool) => tool),
     appTools: within(wanted.appTools, granted.appTools, (tool) => tool),
-    mcp: within(wanted.mcp, granted.mcp, mcpIdentity),
+    mcp: within(wanted.mcp, granted.mcp, mcpIdentity).map(pair => ({ ...pair, ...(granted.mcp.find(g => mcpIdentity(g) === mcpIdentity(pair))?.level === 'asks_first' ? { level: 'asks_first' as const } : {}) })),
     skills: within(wanted.skills, granted.skills, (skill) => skill),
     workspace: null,
     budget,

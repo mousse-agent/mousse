@@ -573,8 +573,8 @@ export class ToolRegistry {
     if (!mcp || !bot.mcpTools?.some((tool) => tool.providerName === name)) throw new McpToolError('mousse_unknown_tool', `No Mousse tool named ${name}.`)
     const checked = withoutTransportFields(args)
     const ledger = this.options.toolLedger?.(at.active)
-    const ledgerId = ledger?.start({ type: 'toolCall', id: at.request.toolCallId, name, arguments: checked } as ToolCall)
-    const outcome = await callForBot({ bot, name, args: checked, signal: at.request.signal, mcp, images: at.turn.toolImages === true })
+    const ledgerId = ledger?.start({ type: 'toolCall', id: at.request.toolCallId, name, arguments: bot.maskMcpArguments?.(checked) ?? checked } as ToolCall)
+    const outcome = await callForBot({ bot, name, args: checked, toolCallId: at.request.toolCallId, signal: at.request.signal, mcp, images: at.turn.toolImages === true })
     if (ledgerId) {
       if (outcome.isError) ledger?.failed(ledgerId)
       else ledger?.commit(ledgerId)

@@ -529,7 +529,7 @@ export class BotChatProjection {
     const threads = this.launchedOf(definition.id)
     const watchers = this.options.watchers?.(definition.id) ?? []
     const managing = threads.filter(launchedActive)
-    const state = botState({ paused, ...(error ? { error } : {}), openAsks: asks.length + waitingOn.length + (live + managing.length === 0 ? chatQuestions.length : 0), liveActivations: live + managing.length })
+    const state = botState({ paused, ...(error ? { error } : {}), openAsks: asks.length + waitingOn.length + Number(Boolean(this.store.get("SELECT 1 FROM bot_actions WHERE bot_id = ? AND status = 'open' LIMIT 1", definition.id))) + (live + managing.length === 0 ? chatQuestions.length : 0), liveActivations: live + managing.length })
     // Working, but every running activation waits for the internet.
     const running = liveRows.filter((row) => row.status === 'running')
     const offline = state === 'working' && running.length > 0 && running.every((row) => row.offline)

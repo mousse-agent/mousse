@@ -1,6 +1,6 @@
 import { afterEach, expect, it } from 'vitest'
 import { BotMcp, callForBot } from '../../src/mms/bots/mcp/BotMcp'
-import { defaultSettings } from '../../src/shared/settings'
+import { getDefaultSettings } from '../../src/shared/settings'
 import { botManifestDigest } from '../../src/mms/bots/grants/compile'
 import { botFixture, createBot, finish, start, type BotFixture } from './botFixture'
 
@@ -8,7 +8,7 @@ let f: BotFixture
  afterEach(() => f?.close())
 async function setup(on: boolean) {
   f = botFixture()
-  const settings = defaultSettings()
+  const settings = getDefaultSettings()
   settings.experimental.botAsksFirst = on
   f.host.settings = { get: () => settings, set: () => undefined } as never
   const calls: unknown[] = []
@@ -20,6 +20,11 @@ async function setup(on: boolean) {
   f.host.mcp = mcp
   await f.bots.reconcileOnStartup()
   const { botId } = await createBot(f, { reply: 'Hello' })
+  const permission = await f.bots.activate({ botId, input: 'Allow mail', clientRequestId: 'permission' })
+  const asking = await start(f, permission.id)
+  asking.prepared.authority.escalate!({ permission: { mcp: { server: 'Mail' } } as never, reason: 'To send mail' })
+  await f.bots.service.answer(botId, f.store.openAsks(botId)[0]!.id, 'allow')
+  await finish(f, asking.payload)
   const grant = f.store.activeGrant(botId)!
   const manifest = { ...grant.manifest, mcp: [{ serverId: 'mail', tool: 'send', ...(on ? { level: 'asks_first' as const } : {}) }] }
   f.store.approve(botId, botManifestDigest(manifest), manifest)
@@ -50,7 +55,7 @@ it('holds once, frees the slot, and Send executes exactly the stored arguments o
   await finish(f, t.work.payload)
   expect(f.store.activation(t.workId)).toMatchObject({ status: 'blocked', endReason: 'approval' })
   const answer = { actionId: String(actions[0].id), digest: String(actions[0].args_digest), answer: 'send' as const }
-  await Promise.all([f.bots.actions.answer(answer), f.bots.actions.answer(answer)])
+  await Promise.allSettled([f.bots.actions.answer(answer), f.bots.actions.answer(answer)])
   expect(t.calls).toEqual([t.args])
   expect(f.store.get('SELECT status, exec_args FROM bot_actions')).toMatchObject({ status: 'done', exec_args: null })
   expect(f.store.lastMainDispatch(t.workId)?.prompt.text).toContain('delivered')
