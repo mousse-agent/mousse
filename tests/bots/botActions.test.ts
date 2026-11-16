@@ -1594,3 +1594,21 @@ it.each(['paused', 'expired', 'withdrawn', 'binding'] as const)('R2-8 Send repor
   await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toMatchObject({ code, message: sentence })
   expect(t.calls).toEqual([])
 })
+
+it('R2-5 accepts Send before refreshing tools so the timer cannot overtake it', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  f.clock.now = Date.parse(a.expires_at) - 1000
+  let release!: () => void
+  const refresh = new Promise<void>(resolve => { release = resolve })
+  vi.spyOn(t.mcp, 'warm').mockImplementationOnce(() => refresh)
+  const sending = f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  await flush()
+  expect(f.bots.actions.get(a.id)?.status).toBe('approved')
+  f.clock.now += 2000; await f.bots.deliverDueReminders()
+  expect(f.bots.actions.get(a.id)?.status).toBe('approved')
+  release(); await sending
+  expect(t.calls).toEqual([t.args])
+  expect(f.bots.actions.get(a.id)?.status).toBe('done')
+})
