@@ -4,6 +4,7 @@ import { settingsStore, testServerConfig } from '../fixtures/agent-platform/inte
 import { BotMcp, callForBot } from '../../src/mms/bots/mcp/BotMcp'
 import { getDefaultSettings } from '../../src/shared/settings'
 import { botManifestDigest } from '../../src/mms/bots/grants/compile'
+import { createBotJournal } from '../../src/mms/bots/memory/capture'
 import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
 import { BotEngine } from '../../src/mms/bots/activation/BotEngine'
 import { RelayHandler } from '../../src/mms/run/mcp/relay/handler'
@@ -297,4 +298,19 @@ it('an approved call whose binding changed is withdrawn on restart without retai
   await f.bots.actions.reconcile()
   expect(f.bots.actions.forWork(t.workId)).toMatchObject({ status: 'withdrawn', exec_args: null })
   expect(t.calls).toEqual([])
+})
+it('provider transcript capture never journals executable secrets from a held call', async () => {
+  const t = await setup(true)
+  await t.call()
+  const memory = new BotMemoryStore({ db: f.store.db })
+  const ref = { botId: t.botId, activationId: t.workId, lane: 'run' as const, threadId: t.work.payload.threadId }
+  const journal = createBotJournal({ store: memory, listThreads: () => [ref], readThread: () => ({ messages: [{
+    id: 'provider-call', role: 'assistant', kind: 'tool_call', content: '', timestamp: f.store.now(),
+    toolCall: { title: 'Mail__send', summary: '', details: [], toolName: 'Mail__send', input: t.args, status: 'complete', response: 'held' }
+  }] }) })
+  journal.syncNow(ref)
+  const rows = f.store.all('SELECT text, json FROM bot_journal WHERE activation_id = ?', t.workId)
+  expect(rows.length).toBeGreaterThan(0)
+  expect(JSON.stringify(rows)).not.toContain('private-call-secret')
+  expect(JSON.stringify(rows)).toContain('held back')
 })
