@@ -352,6 +352,41 @@ it('Not now refuses the identical call in the next occurrence until the owner wr
   expect(outcome).toMatchObject({ isError: true, text: expect.stringContaining('Do not ask again') })
   expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
 })
+it('restart while a schedule waits keeps one run and card and Send resumes once', async () => {
+  const t = await scheduledCall()
+  await t.call()
+  await finish(f, t.run.payload)
+  f.bots.close()
+  f.bots = new BotEngine(f.host)
+  await f.bots.reconcileOnStartup()
+  const a = f.bots.actions.forWork(t.id)!
+  expect(a.status).toBe('open')
+  expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
+  f.clock.now += 5 * 60_000
+  expect((await f.tickSchedules(new Date(f.clock.now))).inserted).toEqual([])
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  await flush()
+  expect(f.store.lastMainDispatch(t.id)?.n).toBe(2)
+  expect(t.calls).toEqual([t.args])
+})
+it('removing a parked schedule delivers its last words once without a card', async () => {
+  const t = await scheduledCall()
+  await t.call()
+  await finish(f, t.run.payload, 'completed', { text: 'Draft ready; send still needs your answer.' })
+  f.bots.removeSchedule(t.botId, t.schedule.scheduleId)
+  await flush()
+  const reports = f.bots.service.chatList(t.botId).messages.filter(m => m.activationId === t.id && m.kind === 'run_report')
+  expect(reports).toHaveLength(1)
+  expect(reports[0]?.text).toContain('Draft ready')
+  expect(reports[0]?.ask).toBeUndefined()
+})
+it.each(['needs_you', 'look', 'fyi', 'every'] as const)('a scheduled approval is told at least soon at Tell me %s', async tellMe => {
+  const t = await scheduledCall()
+  f.book.setTelling(t.botId, t.schedule.scheduleId, { tellMe })
+  await t.call()
+  const a = f.bots.actions.forWork(t.id)!
+  expect(f.store.message(a.message_id)?.tell).toBe('soon')
+})
 it('a subagent holds its call on its work and uses its own dispatch in the call key', async () => {
   const t = await setup(true)
   await t.work.prepared.authority.subagents!.start({ title: 'Sender', brief: 'Send mail', toolCallId: 'start-sender' })
