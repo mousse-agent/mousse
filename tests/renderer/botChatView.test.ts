@@ -2177,3 +2177,16 @@ it('folds long list values and names when more arguments remain below', async ()
   await act(async () => args.dispatchEvent(new Event('scroll', { bubbles: true })))
   expect(host.textContent).not.toContain('More arguments below')
 })
+
+it('shows a too-large device stub without null arguments or an empty hidden-field list', async () => {
+  fake.chats.inbox = [held({ tooLarge: true, args: null, hiddenPaths: [] })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  expect(card.querySelector('[aria-label="Complete arguments"]')).toBeNull()
+  expect(card.textContent).toContain('too large to review on this device')
+  expect(card.textContent).toContain('Hidden values will be sent')
+  expect(card.textContent).not.toContain('Hidden values will be sent:')
+  expect(card.textContent).not.toContain('null')
+  expect(button('Send', card)?.disabled).toBe(true)
+  expect(button('Not now', card)?.disabled).toBe(false)
+})
