@@ -359,3 +359,30 @@ it('rolls back both parking and due delivery if settlement fails during recovery
     expect(f.store.reminder(set.wakeId)?.status).toBe('waiting')
   } finally { fault.mockRestore() }
 })
+
+it.each([false, true])('keeps an unread wait through a time wall (restart: %s)', async restart => {
+  const { workId, turn } = await work()
+  f.clock.now += 60 * 60_000 - 10_000
+  const set = await f.bots.tools.wakes!.wait!(botId, workId, { brief: 'Compare the release evidence I already read.', dueAt: new Date(f.clock.now + 5 * 60_000).toISOString() })
+  await finish(f, turn.payload, 'completed', { text: '' })
+  f.clock.now += 5 * 60_000
+  await f.bots.deliverDueReminders()
+  await flush()
+  expect(f.store.reminder(set.wakeId)?.status).toBe('delivered')
+  expect(f.store.activation(workId)?.status).toBe('waiting_grant')
+  expect(f.store.dispatches(workId)).toHaveLength(1)
+  if (restart) {
+    f.bots.close()
+    f.bots = new BotEngine(f.host)
+    await f.bots.reconcileOnStartup()
+  }
+  const ask = f.store.openAsks(botId).find(a => a.activationId === workId)!
+  await f.bots.service.answer(botId, ask.id, 'allow')
+  await flush()
+  const prompt = f.store.dispatch(workId, 2)!.prompt.text
+  expect(prompt).toContain('Your wait is over')
+  expect(prompt).toContain('Compare the release evidence I already read.')
+  await start(f, workId, 2)
+  await finish(f, (await import('./botFixture')).payloadOf(f, workId, 2), 'completed', { text: 'Report.' })
+  expect(f.store.activation(workId)?.status).toBe('done')
+})
