@@ -1,4 +1,5 @@
 import { useState, type ReactNode } from 'react'
+import { Shield } from '../../lib/icons'
 import { useBotsStore } from '../../stores/botsStore'
 import { botGroupTime } from './messageGroups'
 
@@ -19,7 +20,7 @@ function Value({ value, literal = false }: { value: unknown; literal?: boolean }
     return <dl>{Object.entries(object).map(([key, child]) => <div key={key}><dt>{actionText(key)}</dt><dd><Field name={key} value={child} literal={false} /></dd></div>)}</dl>
   }
   if (Array.isArray(value)) return value.length ? <ol>{value.map((child, index) => <li key={index}><Value value={child} literal={literal} /></li>)}</ol> : <span>[]</span>
-  return <span className="bot-action-text">{actionText(typeof value === 'string' ? value : JSON.stringify(value) ?? String(value))}</span>
+  return <blockquote className="bot-action-text">{actionText(typeof value === 'string' ? value : JSON.stringify(value) ?? String(value)).replaceAll("\n", "↵\n")}</blockquote>
 }
 function Field({ name, value, literal }: { name: string; value: unknown; literal: boolean }) {
   return typeof value === 'string' && (value.length > 400 || /^(body|text|content|message)$/i.test(name))
@@ -57,16 +58,16 @@ export function BotActionCard({ card, botId, botName, messageId }: { card: BotAc
   return <section className="bot-action-card bot-ask-replies" aria-label="Action to review">
     <p className="bot-action-title">{actionText(card.title)}</p>
     <p className="bot-action-server">{actionText(card.serverName)}</p>
-    <div className="bot-action-arguments" tabIndex={0} aria-label="Complete arguments"><Value value={card.args} /></div>
-    {card.note && <p className="bot-action-note">{actionText(botName)} says: <span>{actionText(card.note)}</span></p>}
+    <div className="bot-action-arguments" role="region" tabIndex={0} aria-label="Complete arguments"><Value value={card.args} /></div>
+    {card.note && <blockquote className="bot-action-note" aria-label="Bot note">{actionText(botName).replace(/\s+/g, " ")} says: <span>{actionText(card.note).replace(/\s+/g, " ")}</span></blockquote>}
     {card.result && <blockquote role="note" aria-label="Tool result">{actionText(card.result.text)}</blockquote>}
     {actionStatus(card) && <p role="status" className="bot-question-settled" data-find-text data-message-id={messageId} data-part-index="0">{actionStatus(card)}</p>}
     {card.status === 'open' && <>
-      {previous && <p role="note">{actionText(botName)} {previous.status === 'done' ? 'already sent exactly this' : previous.status === 'failed' ? 'already tried exactly this; the tool reported an error' : "already tried exactly this and couldn't tell if it went through"} at {botGroupTime(previous.at)}</p>}
-      {card.hasHiddenValues && <p role="note">Hidden values will be sent: {card.hiddenPaths.map((path) => actionText(path.replaceAll('.', ' → '))).join(', ')}</p>}
-      {card.tooLarge && <p role="note">This is too large to send from here. Use the computer to review and send it.</p>}
-      {changed && <p role="status">This changed since you saw it</p>}
-      {error && <p role="alert">{error}</p>}
+      {previous && <p role="note" className="bot-action-notice"><Shield size={14} aria-hidden />{actionText(botName)} {previous.status === 'done' ? 'already sent exactly this' : previous.status === 'failed' ? 'already tried exactly this; the tool reported an error' : "already tried exactly this and couldn't tell if it went through"} at {botGroupTime(previous.at)}</p>}
+      {card.hasHiddenValues && <p role="note" className="bot-action-notice"><Shield size={14} aria-hidden />Hidden values will be sent: {card.hiddenPaths.map((path) => actionText(path.replaceAll('.', ' → '))).join(', ')}</p>}
+      {card.tooLarge && <p role="note" className="bot-action-notice"><Shield size={14} aria-hidden />This is too large to send from here. Use the computer to review and send it.</p>}
+      {changed && <p role="status" className="bot-action-notice"><Shield size={14} aria-hidden />This changed since you saw it</p>}
+      {error && <p role="alert" className="bot-action-notice"><Shield size={14} aria-hidden />{error}</p>}
       <div className="bot-ask-buttons" role="group" aria-label="Answer this action">
         <button type="button" disabled={sending || card.tooLarge} onClick={() => void answer('send')}>Send</button>
         <button type="button" disabled={sending} onClick={() => void answer('not_now')}>Not now</button>
