@@ -1468,3 +1468,25 @@ it('B3 expiry is not a no and forgetting a declined card does not reset the loop
   expect(await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'one more change' }, toolCallId: 'after-forget', signal: new AbortController().signal })).toMatchObject({ isError: true, text: expect.stringContaining('said no three times') })
   expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(6)
 })
+
+it.each(['repeat', 'loop'] as const)('R2-1 %s refusal is a Mousse update and never starts an extra report', async reason => {
+  const t = await setup(true)
+  let runtime = t.work
+  for (let n = 0; n < (reason === 'loop' ? 3 : 1); n++) {
+    await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, ...(reason === 'loop' ? { body: `body ${n}` } : {}) }, toolCallId: `decline-${n}`, signal: new AbortController().signal })
+    await finish(f, runtime.payload)
+    const a = f.bots.actions.forWork(t.workId)!
+    await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' }); await flush()
+    runtime = await start(f, t.workId, f.store.lastMainDispatch(t.workId)!.n)
+    ;(runtime.prepared as any).modelOutput?.()
+  }
+  const dispatches = f.store.dispatches(t.workId).length
+  const result = await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'refused', signal: new AbortController().signal })
+  expect(result.isError).toBe(true)
+  expect(f.store.pendingWorkNotes(t.workId)).toEqual([])
+  await finish(f, runtime.payload, 'completed', { text: 'Finished without sending.' }); await flush()
+  expect(f.store.dispatches(t.workId)).toHaveLength(dispatches)
+  expect(f.store.activation(t.workId)?.status).toBe('done')
+  expect(JSON.stringify(f.store.dispatches(t.workId))).not.toContain('owner added')
+  expect(f.store.all("SELECT id FROM bot_messages WHERE activation_id = ? AND kind = 'text'", t.workId)).toHaveLength(1)
+})
