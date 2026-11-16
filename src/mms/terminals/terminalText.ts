@@ -100,9 +100,12 @@ export interface TerminalPage {
  * so a line keeps its number while older output falls out of the buffer. Trailing blank lines (an empty prompt line) are
  * not counted as output.
  */
-export function terminalPage(raw: string, options: { lines?: number; before?: number; droppedLines?: number; columns?: number } = {}): TerminalPage {
+export function terminalPage(raw: string, options: { lines?: number; before?: number; droppedLines?: number; columns?: number; mask?: (text: string) => string } = {}): TerminalPage {
   const dropped = options.droppedLines ?? 0
-  const all = terminalLines(raw, options.columns)
+  let all = terminalLines(raw, options.columns)
+  // Hidden before anything is cut or picked: a secret that a long line's cut or a page's edge splits would no longer be
+  // recognised. The mask's words hold no line break, so line numbers stay.
+  if (options.mask) all = options.mask(all.join('\n')).split('\n')
   while (all.length > 0 && all[all.length - 1] === '') all.pop()
   const lastLine = dropped + all.length
   const wanted = Math.max(1, Math.min(TERMINAL_READ_MAX_LINES, Math.floor(options.lines ?? TERMINAL_READ_DEFAULT_LINES)))

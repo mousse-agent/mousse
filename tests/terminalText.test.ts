@@ -25,6 +25,8 @@ describe('what a line reads as', () => {
     ['a wrapped line with a progress bar on its second row', '0123456789[#  ]\r[###]\n', ['0123456789[###]', ''], 10],
     ['a spinner erased before the output (npm)', '\u001b[1G\u001b[0K⠙\u001b[1G\u001b[0Knode:internal/loader\n', ['node:internal/loader', '']],
     ['a tab', 'a\tb\n', ['a       b', '']],
+    ['a shorter text after a carriage return, with no erase, overwrites only its own width', 'abcdef\rxy\n', ['xycdef', '']],
+    ['a backspace moves back without deleting', 'abc\b\bX\n', ['aXc', '']],
     ['cursor back and overwrite', 'abcdef\u001b[3Dxy\n', ['abcxyf', '']]
   ]
   it.each(rows)('%s', (_name, raw, lines, columns) => {

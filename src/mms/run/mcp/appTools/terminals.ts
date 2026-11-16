@@ -71,7 +71,7 @@ export function readTerminals(terminals: TerminalReadHost, threadId: string, arg
     return { text: terminals.mask(JSON.stringify({ threadId, terminals: listed.map(terminalView), error: `This thread has no terminal ${String(args.terminalId)} now: pick one from terminals.` })), isError: true }
   }
   const kept = terminals.output(chosen.ptyId)
-  const page = terminalPage(kept?.scrollback ?? '', { ...(lines ? { lines } : {}), ...(before ? { before } : {}), droppedLines: kept?.droppedLines ?? 0, ...(kept?.columns ? { columns: kept.columns } : {}) })
+  const page = terminalPage(kept?.scrollback ?? '', { ...(lines ? { lines } : {}), ...(before ? { before } : {}), droppedLines: kept?.droppedLines ?? 0, ...(kept?.columns ? { columns: kept.columns } : {}), mask: terminals.mask })
   const output = {
     terminalId: chosen.ptyId,
     title: chosen.title,

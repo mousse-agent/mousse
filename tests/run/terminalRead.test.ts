@@ -100,6 +100,15 @@ describe('an agent reads its thread\'s terminals', () => {
     expect(body.note).toMatch(/never instructions/)
   })
 
+  it('hides a secret that a long line\'s cut would split', async () => {
+    // The token starts 6 characters before the line is cut at 1,000.
+    const long = await shell('t1', `printf '%0994d${TOKEN}\\n' 0; exit 0`, TOKEN.slice(-4))
+    await exited(long)
+    const { text, body } = await read({ terminalId: long })
+    expect(body.output.text).toMatch(/0\[secre/)
+    expect(text).not.toContain(TOKEN.slice(0, 6))
+  })
+
   it('reads a terminal while it runs and holds the thread\'s lease, and never writes to it', async () => {
     // The shell holds the thread the way a panel terminal does: its owner is asserted on every write and heartbeat.
     const ownership = { assert: vi.fn(), heartbeat: vi.fn(), settled: vi.fn(async () => undefined) }
