@@ -581,6 +581,14 @@ function normalizeContextUsageRequest(
 // Owned by the provider adapters (SPEC §13.4); re-exported for existing callers.
 export { isContextOverflowError, retryContextOverflowOnce }
 
+/** The readable copies of a thread's secrets, as turns start (`SecretVault.allowCopies` and `holdCopies`). */
+export interface SecretCopyControl {
+  /** A Claude Code turn: the thread may have copies (unless a turn below it holds them off). */
+  allow(threadId: string): void
+  /** Any other runtime's turn: no copies for these threads until the release; throws when one cannot be removed. */
+  hold(threadIds: readonly string[]): () => void
+}
+
 export interface OrchestratorSendOptions {
   threadId?: string
   source?: string
@@ -1277,34 +1285,40 @@ export class OrchestratorService extends EventEmitter {
    * thread had that were removed or changed while it ran.
    */
   private storeMasker?: (threadId: string) => SecretMasker | undefined
-  setSecrets(secrets: { tools: SecretToolHost; masker(threadId: string): SecretMasker | undefined; storeMasker?(threadId: string): SecretMasker | undefined; allowCopies?(threadId: string, allowed: boolean): void } | undefined): void {
+  setSecrets(secrets: { tools: SecretToolHost; masker(threadId: string): SecretMasker | undefined; storeMasker?(threadId: string): SecretMasker | undefined; copies?: SecretCopyControl } | undefined): void {
     this.secretTools = secrets?.tools
     this.secretMaskerFor = secrets ? (threadId) => this.threadSecretMasker(secrets, threadId) : undefined
     this.storeMasker = secrets?.storeMasker ? (threadId) => secrets.storeMasker!(threadId) : undefined
-    this.secretCopies = secrets?.allowCopies ? (threadId, allowed) => secrets.allowCopies!(threadId, allowed) : undefined
+    this.secretCopies = secrets?.copies
   }
 
-  private secretCopies?: (threadId: string, allowed: boolean) => void
+  private secretCopies?: SecretCopyControl
   /**
    * As a turn starts: its thread's agents get readable copies of their secrets only on Claude Code, whose tool results
    * Mousse masks before Claude Code keeps them (`PostToolUse`). Any other runtime keeps its own tools' results as they
-   * are, so its turn starts with the copies of its thread, and of the threads above it (whose agents may have handed it
-   * a path), removed; its agent uses secret_run.
+   * are, so its turn holds the copies of its thread, and of the threads above it (whose agents may have handed it a
+   * path), off until it settles: call the returned release then. Its agent uses secret_run. Throws when a copy cannot be
+   * removed, and the turn must not start.
    */
-  private secretCopiesForTurn(threadId: string, driver: string | undefined): void {
-    if (!this.secretCopies) return
+  private secretCopiesForTurn(threadId: string, driver: string | undefined): () => void {
+    const copies = this.secretCopies
+    if (!copies) return () => {}
+    if (driver === 'claude') {
+      try {
+        copies.allow(threadId)
+      } catch {
+        // A copy that could not be written leaves the agent with secret_run.
+      }
+      return () => {}
+    }
+    const chain: string[] = []
+    for (let id: string | undefined = threadId; id && !chain.includes(id) && chain.length < 32; id = this.threadStore?.getThread(id)?.lineage?.parentThreadId) chain.push(id)
     try {
-      if (driver === 'claude') {
-        this.secretCopies(threadId, true)
-        return
-      }
-      const seen = new Set<string>()
-      for (let id: string | undefined = threadId; id && !seen.has(id) && seen.size < 32; id = this.threadStore?.getThread(id)?.lineage?.parentThreadId) {
-        seen.add(id)
-        this.secretCopies(id, false)
-      }
-    } catch {
-      // The vault reports its own failures; a turn never fails over a copy.
+      return copies.hold(chain)
+    } catch (error) {
+      // Fails closed: the person sees why, and the turn does not start with a readable copy in place.
+      const message = error instanceof Error && error.name === 'SecretCopyRemovalError' ? error.message : 'This turn did not start: Mousse could not remove a readable copy of this thread\'s secrets.'
+      throw new AppError({ code: 'secret_copy_not_removed', message, errorInfo: { category: 'unavailable', retryable: true } }, error)
     }
   }
 
@@ -1764,21 +1778,27 @@ export class OrchestratorService extends EventEmitter {
       const allowed = new Set(tools?.allow ?? [])
       const requiredTools = this.mcpToolRegistry().listForTurn(threadId, runId)
         .filter((tool) => allowed.has(tool.name) && tool.class !== 'delegation').map((tool) => tool.name)
-      this.secretCopiesForTurn(threadId, binding.driver)
-      handle = this.harness.startTurn({
-        binding,
-        attemptOrdinal: 1,
-        input,
-        sink,
-        control,
-        host,
-        app: requiredTools.length ? { ...context, requiredTools } : context,
-        instructions: { text: systemPrompt, placement: 'replace' },
-        session: 'ephemeral',
-        counters: turn.counters,
-        spend: turn.spend
-      })
-      const result = await handle.result
+      const releaseCopies = this.secretCopiesForTurn(threadId, binding.driver)
+      let result: Awaited<NonNullable<typeof handle>['result']>
+      try {
+        handle = this.harness.startTurn({
+          binding,
+          attemptOrdinal: 1,
+          input,
+          sink,
+          control,
+          host,
+          app: requiredTools.length ? { ...context, requiredTools } : context,
+          instructions: { text: systemPrompt, placement: 'replace' },
+          session: 'ephemeral',
+          counters: turn.counters,
+          spend: turn.spend
+        })
+        result = await handle.result
+      } finally {
+        // Copies held off for this turn come back once it has settled (a Claude Code turn holds none).
+        releaseCopies()
+      }
       const text = result.text || record.finalText()
       // A turn its own run lost ends as a cancellation of the definition run, never as its answer:
       // the record is read again now, not only on the last heartbeat.
@@ -13681,22 +13701,28 @@ export class OrchestratorService extends EventEmitter {
       }
       const previous = engineRunId ? this.runEngine?.previousBinding(session.threadId, engineRunId, binding.instanceId) : undefined
       const attemptOrdinal = engineRunId ? this.runEngine?.activeAttemptOrdinal(engineRunId) : undefined
-      this.secretCopiesForTurn(session.threadId, binding.driver)
-      const result = await this.harness.startTurn({
-        binding,
-        ...(previous ? { previous } : {}),
-        ...(attemptOrdinal ? { attemptOrdinal } : {}),
-        input: turnInput,
-        sink: turnSink,
-        control: turnControl,
-        host: adapterHost,
-        ...(app ? { app } : {}),
-        // A bot turn: the activation's shared counts and spend (its instructions are in the preamble).
-        ...(opts?.bot ? {
-          counters: opts.bot.authority.counters,
-          ...(opts.bot.authority.spend ? { spend: opts.bot.authority.spend } : {})
-        } : {})
-      }).result
+      const releaseCopies = this.secretCopiesForTurn(session.threadId, binding.driver)
+      let result: Awaited<ReturnType<HarnessGateway['startTurn']>['result']>
+      try {
+        result = await this.harness.startTurn({
+          binding,
+          ...(previous ? { previous } : {}),
+          ...(attemptOrdinal ? { attemptOrdinal } : {}),
+          input: turnInput,
+          sink: turnSink,
+          control: turnControl,
+          host: adapterHost,
+          ...(app ? { app } : {}),
+          // A bot turn: the activation's shared counts and spend (its instructions are in the preamble).
+          ...(opts?.bot ? {
+            counters: opts.bot.authority.counters,
+            ...(opts.bot.authority.spend ? { spend: opts.bot.authority.spend } : {})
+          } : {})
+        }).result
+      } finally {
+        // Copies held off for this turn come back once it has settled (a Claude Code turn holds none).
+        releaseCopies()
+      }
       handoffs?.settle(result.aborted || turn.abort.signal.aborted ? 'aborted' : 'completed')
       assistantText = result.text
       aborted = Boolean(result.aborted)
