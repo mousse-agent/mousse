@@ -13,6 +13,7 @@ import { permissionActionForWrite } from '../../files/gitMetadataWrite'
 import { harnessAppError } from '../../../shared/harness/types'
 import type { CredentialKind } from '../../../shared/harness/status'
 import { parseThinkingSuffixFromModelId } from '../../../shared/modelVariants'
+import type { ChatImageAttachment } from '../../../shared/types'
 import { atomicWriteFileSync, atomicWriteJsonSync } from '../../data/AtomicFs'
 import { normalizeProviderError } from '../../orchestrator/providerErrors'
 import type {
@@ -292,6 +293,11 @@ function fingerprint(text: string): string {
   return createHash('sha256').update(text).digest('hex')
 }
 
+/** Images as Pi's image content (its `prompt` and `steer` commands take them). */
+function piImages(images: readonly ChatImageAttachment[] | undefined): Array<{ type: 'image'; data: string; mimeType: string }> {
+  return (images ?? []).map((image) => ({ type: 'image' as const, data: image.data, mimeType: image.mimeType }))
+}
+
 function textOf(message: unknown): string {
   const content = (message as { content?: unknown })?.content
   if (!Array.isArray(content)) return ''
@@ -359,6 +365,8 @@ export const PI_STEER_POLL_MS = 100
 interface PiSteer {
   text: string
   token: string
+  /** The images sent with it: they go to Pi with the text. */
+  images?: ChatImageAttachment[]
   /** A person's message: once a reply started after it was sent, it cuts in rather than wait for Pi's next step. */
   person: boolean
   state: 'sending' | 'queued' | 'cutHeld'
@@ -1612,7 +1620,7 @@ export class PiRpcEngine implements ProviderAdapter {
       let message = `${handoff}${preamble}${input.prompt || '(image attachment)'}`
       // A leading `/` would run a Pi extension command instead of reaching the model.
       if (message.startsWith('/')) message = ` ${message}`
-      const images = (input.images ?? []).map((image) => ({ type: 'image' as const, data: image.data, mimeType: image.mimeType }))
+      const images = piImages(input.images)
       // Pi answers a prompt after its preflight (auth, compaction, extensions): bounded, and Stop cancels the wait.
       await this.send(thread, { type: 'prompt', message, ...(images.length ? { images } : {}) }, this.options.promptDeadlineMs ?? PI_PROMPT_DEADLINE_MS, input.signal)
       turn.promptAccepted = true
@@ -2133,7 +2141,7 @@ export class PiRpcEngine implements ProviderAdapter {
         if (onHold) sink.boundary?.()
         const entry = onHold ? turn.ctl.drainSteerEntry?.({ expect: 'native' }) : turn.ctl.drainSteerEntry?.()
         // Off the hold a steer keeps Pi's next-step path whoever sent it: it never cuts.
-        if (entry) this.sendNativeSteer(thread, turn, { text: entry.text, token: entry.token, person: onHold && entry.cut === true, state: 'sending' })
+        if (entry) this.sendNativeSteer(thread, turn, { text: entry.text, token: entry.token, ...(entry.images?.length ? { images: entry.images } : {}), person: onHold && entry.cut === true, state: 'sending' })
         return
       }
       case 'message_start': {
@@ -2416,7 +2424,8 @@ export class PiRpcEngine implements ProviderAdapter {
     turn.awaitingModel = true
     // A leading `/` would be expanded by Pi (a skill or prompt template), and the text it shows would match no steer.
     const message = steer.text.startsWith('/') ? ` ${steer.text}` : steer.text
-    const sending: Promise<void> = this.send(thread, { type: 'steer', message }).then(() => {
+    const images = piImages(steer.images)
+    const sending: Promise<void> = this.send(thread, { type: 'steer', message, ...(images.length ? { images } : {}) }).then(() => {
       // Applied whatever the generation: a steer Pi read meanwhile stays taken, one still `sending` is queued now.
       if (steer.state === 'sending' && turn.steers.includes(steer)) steer.state = 'queued'
       this.releaseCheck(thread, turn)
@@ -2460,7 +2469,7 @@ export class PiRpcEngine implements ProviderAdapter {
     if (turn.stepTools && turn.openTools.size === 0) return
     const entry = ctl.drainSteerEntry?.({ expect: 'cut' })
     if (!entry) return
-    this.startCut(thread, turn, { text: entry.text, token: entry.token, person: entry.cut !== false, state: 'cutHeld' })
+    this.startCut(thread, turn, { text: entry.text, token: entry.token, ...(entry.images?.length ? { images: entry.images } : {}), person: entry.cut !== false, state: 'cutHeld' })
   }
 
   /** Starts a cut (§3.2 step 1): from here no native steer is sent, and the lane runs its steps. */
@@ -2548,8 +2557,10 @@ export class PiRpcEngine implements ProviderAdapter {
     turn.gateRelease = new AbortController()
     let message = texts.map((steer) => steer.text.trim()).join('\n')
     if (message.startsWith('/')) message = ` ${message}`
+    // The steers' images go with their text.
+    const images = piImages(texts.flatMap((steer) => steer.images ?? []))
     // Its answer is kept on the cut: a Stop meanwhile waits for it, since Pi keeps an accepted prompt in its session.
-    const answer = this.send(thread, { type: 'prompt', message }, this.options.promptDeadlineMs ?? PI_PROMPT_DEADLINE_MS).then(() => 'started' as const, () => 'refused' as const)
+    const answer = this.send(thread, { type: 'prompt', message, ...(images.length ? { images } : {}) }, this.options.promptDeadlineMs ?? PI_PROMPT_DEADLINE_MS).then(() => 'started' as const, () => 'refused' as const)
     cut.continuation = answer
     cut.carried = texts
     const halted = new Promise<'halted'>((resolve) => {
@@ -2591,7 +2602,7 @@ export class PiRpcEngine implements ProviderAdapter {
     for (let round = 0; round < 4 && ctl.peekSteer?.()?.delivery === 'cut'; round += 1) {
       const entry = ctl.drainSteerEntry?.({ expect: 'cut' })
       if (!entry) return
-      turn.steers.push({ text: entry.text, token: entry.token, person: entry.cut !== false, state: 'cutHeld' })
+      turn.steers.push({ text: entry.text, token: entry.token, ...(entry.images?.length ? { images: entry.images } : {}), person: entry.cut !== false, state: 'cutHeld' })
     }
   }
 

@@ -151,6 +151,29 @@ describe('ACP sessions', () => {
     expect(agent.cancels).toEqual(['native-1'])
   })
 
+  it("restarts the prompt with the steer's images as well as its text", async () => {
+    const agent = scriptedAgent({
+      prompt: async (text, ctx) => {
+        if (text === 'long task') {
+          await ctx.notify('working')
+          await ctx.cancelled
+          return 'cancelled'
+        }
+        await ctx.notify(`then ${text}`)
+        return 'end_turn'
+      }
+    })
+    const { sessions } = core(agent.connect)
+    let steer: { text: string; token: string; images: Array<{ name: string; mimeType: string; data: string }> } | undefined
+    const text = sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', prompt: 'long task', onText: vi.fn(), onSteer: vi.fn(), drainSteerEntry: () => { const value = steer; steer = undefined; return value } })
+    await vi.waitFor(() => expect(agent.calls.filter((call) => call.method === 'session/prompt')).toHaveLength(1))
+    steer = { text: 'match this', token: 'drain-1', images: [{ name: 'shot.png', mimeType: 'image/png', data: 'AAAA' }] }
+    expect(await text).toBe('working\n\nthen match this')
+    const prompts = agent.calls.filter((call) => call.method === 'session/prompt').map((call) => (call.params as { prompt: unknown[] }).prompt)
+    expect(prompts[0]).not.toContainEqual(expect.objectContaining({ type: 'image' }))
+    expect(prompts[1]).toEqual([{ type: 'text', text: 'match this' }, { type: 'image', data: 'AAAA', mimeType: 'image/png' }])
+  })
+
   it('ends an agent that ignores the cancel a steer sends, and fails the turn without replaying it', async () => {
     const agent = scriptedAgent({ prompt: async (_text, ctx) => { await ctx.notify('working'); return new Promise<string>(() => {}) } })
     const { sessions, saved } = core(agent.connect, { cancelDeadlineMs: 50 })

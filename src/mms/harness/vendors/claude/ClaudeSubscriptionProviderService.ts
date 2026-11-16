@@ -289,7 +289,7 @@ export type ClaudeSubscriptionChatInput = {
    * rows. With `expect`, it takes only when the orchestrator's decision is that one (`TurnControl.drainSteerEntry`);
    * `forced`: Send now asked for it, so the running tool is stopped.
    */
-  drainSteerEntry?: (opts?: { expect?: 'cut' }) => { text: string; token: string; forced?: boolean } | undefined
+  drainSteerEntry?: (opts?: { expect?: 'cut' }) => { text: string; token: string; forced?: boolean; images?: ChatImageAttachment[] } | undefined
   /** What a drain now would do, without taking anything (`TurnControl.peekSteer`): only `cut` is drained here. */
   peekSteer?: () => { delivery: 'cut' | 'native' | 'hold' } | undefined
   /** The check right before the cut is sent (`TurnControl.mayCut`): false hands the drain back, and the hold resumes. */
@@ -3069,6 +3069,8 @@ export class ClaudeSubscriptionProviderService {
       const drained = input.drainSteerEntry ? input.drainSteerEntry(holds ? { expect: 'cut' } : undefined) : undefined
       const steer = (drained ? drained.text : holds ? undefined : input.drainSteer?.())?.trim()
       if (!steer) return
+      // A steer sent with images goes in with them.
+      const images = drained?.images ?? []
       const forced = drained?.forced === true
       // The check at dispatch, right before the cut is sent: a tool announced meanwhile keeps the steer waiting. On a
       // bot's turn, so does a call its gate let start that Mousse has not seen announced yet (`ClaudeLockedGate.busy`).
@@ -3089,7 +3091,7 @@ export class ClaudeSubscriptionProviderService {
           pushedSteers.set(id, { text: steer, ...(drained ? { token: drained.token } : {}), steered, settled: false, placed: false })
           frames.atNextMessage(() => steerPlace(id))
         }
-        void live.steer(liveRun, steer, pushed, {
+        void live.steer(liveRun, steerContent(steer, images), pushed, {
           forced,
           subagents: frames.foregroundSubagents(),
           // Moved once: a later steer does not ask again.
@@ -3114,7 +3116,7 @@ export class ClaudeSubscriptionProviderService {
       }
       // Taken, not accepted: it is accepted only once the restarted query reads it, and handed back if the turn ends first.
       input.steerTaken?.(drained?.token)
-      steers.push({ text: steer, ...(drained ? { token: drained.token } : {}), steered })
+      steers.push({ text: steer, ...(drained ? { token: drained.token } : {}), ...(images.length ? { images } : {}), steered })
       if (query && !interruptRequested) {
         interruptRequested = true
         // From the cut's check to the interrupt landing, a bot's gate lets no call start: none is cut mid-run.
@@ -3205,21 +3207,8 @@ export class ClaudeSubscriptionProviderService {
           (!resume && !branch && !reuse && input.history
             ? `Previous conversation (context only; do not repeat earlier actions):\n${input.history}\n\nCurrent request:\n`
             : '') + input.prompt
-        const built: SDKUserMessage['message']['content'] = [
-          { type: 'text', text: prompt || '(image attachment)' }
-        ]
-        for (const image of input.images ?? []) {
-          if (
-            !['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(image.mimeType) ||
-            Buffer.byteLength(image.data, 'base64') > 10 * 1024 * 1024
-          )
-            throw new Error(`Unsupported Claude image: ${image.name}`)
-          built.push({
-            type: 'image',
-            source: { type: 'base64', media_type: image.mimeType as 'image/png', data: image.data }
-          })
-        }
-        return built
+        for (const image of input.images ?? []) if (!claudeTakesImage(image)) throw new Error(`Unsupported Claude image: ${image.name}`)
+        return [{ type: 'text', text: prompt || '(image attachment)' }, ...claudeImageBlocks(input.images ?? [])]
       }
       // A process that holds this history already is the conversation; nothing is cut. A new process started
       // in its place (`acquireLive` could not switch its model) is told again below.
@@ -3584,7 +3573,7 @@ export class ClaudeSubscriptionProviderService {
           const sending = [...(carried?.steers ?? []), ...steers.splice(0)]
           const guidanceId = randomUUID()
           carried = { id: guidanceId, steers: sending }
-          const guidance = sending.map((steer) => steer.text).join('\n')
+          const guidance = steerContent(sending.map((steer) => steer.text).join('\n'), sending.flatMap((steer) => steer.images ?? []))
           nextPrompt = (async function* (): AsyncGenerator<SDKUserMessage> {
             yield {
               type: 'user',
@@ -3766,8 +3755,32 @@ export class ClaudeSubscriptionProviderService {
   }
 }
 
-/** A steer a one-shot query took: its text, its drain's token when it had one, and its acceptance. */
-type OneShotSteer = { text: string; token?: string; steered: () => void }
+/** A steer a one-shot query took: its text and images, its drain's token when it had one, and its acceptance. */
+type OneShotSteer = { text: string; token?: string; images?: ChatImageAttachment[]; steered: () => void }
+
+/** The images Claude takes: JPEG, PNG, GIF or WebP up to 10 MiB. */
+function claudeTakesImage(image: ChatImageAttachment): boolean {
+  return ['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(image.mimeType) && Buffer.byteLength(image.data, 'base64') <= 10 * 1024 * 1024
+}
+
+/** Images as Claude's base64 image blocks (each one `claudeTakesImage` accepts). */
+function claudeImageBlocks(images: readonly ChatImageAttachment[]): Exclude<SDKUserMessage['message']['content'], string> {
+  return images.filter(claudeTakesImage).map((image) => ({
+    type: 'image' as const,
+    source: { type: 'base64' as const, media_type: image.mimeType as 'image/png', data: image.data }
+  }))
+}
+
+/**
+ * A steer's message content: its text alone, or its text and its images as blocks. An image Claude does not take is
+ * left out with a warning: the text still goes in now, and the transcript keeps the image.
+ */
+export function steerContent(text: string, images: readonly ChatImageAttachment[]): SDKUserMessage['message']['content'] {
+  if (!images.length) return text
+  const blocks = claudeImageBlocks(images)
+  if (blocks.length < images.length) console.warn('[claude] a steer image Claude does not take was left out', { left: images.length - blocks.length })
+  return blocks.length ? [{ type: 'text', text }, ...blocks] : text
+}
 
 /**
  * The model answered the prompt a one-shot query was started with (`id`): it streams or writes a message, Claude Code's

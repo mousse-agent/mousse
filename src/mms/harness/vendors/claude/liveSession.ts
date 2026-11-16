@@ -947,9 +947,10 @@ export class LiveSession<Turn = unknown> {
    *
    * Pushed is not read, and taken (`run.read`, a `started` lifecycle) is not read either: `run.answered` and `onRead`
    * say when the model answers it, and `unreadFate` what became of one it had not answered when the turn ended.
-   * `pushed` is told the id at the moment of the push, before anything else can run.
+   * `pushed` is told the id at the moment of the push, before anything else can run. `content` is the steer's text, or
+   * its text and images as content blocks.
    */
-  async steer(run: LiveRun, text: string, pushed?: (id: string) => void, options: SteerOptions = {}): Promise<string | false> {
+  async steer(run: LiveRun, content: SDKUserMessage['message']['content'], pushed?: (id: string) => void, options: SteerOptions = {}): Promise<string | false> {
     const query = this.query
     if (!query || run.settled || run.abandoned || this.dead) return false
     run.steerInFlight++
@@ -976,7 +977,7 @@ export class LiveSession<Turn = unknown> {
         try {
           id = this.push(run, {
             type: 'user',
-            message: { role: 'user', content: text },
+            message: { role: 'user', content },
             parent_tool_use_id: null,
             priority: 'now',
             session_id: this.sessionId ?? ''

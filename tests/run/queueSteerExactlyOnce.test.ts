@@ -23,7 +23,7 @@ import { QueueCommands } from '../../src/mms/run/QueueCommands'
 import { RunEngine, steerNowCommandKey } from '../../src/mms/run/RunEngine'
 import { RunStore } from '../../src/mms/run/RunStore'
 import type { ActivityPatch } from '../../src/shared/agentActivity'
-import type { ChatMessage } from '../../src/shared/types'
+import type { ChatImageAttachment, ChatMessage } from '../../src/shared/types'
 import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
 import { SettingsStore } from '../../src/mms/settings/SettingsStore'
 import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
@@ -42,6 +42,10 @@ class SteeringAdapter implements ProviderAdapter {
   readonly prompts: string[] = []
   /** Every steer text a turn took, in order. */
   readonly steers: string[] = []
+  /** The images each drain handed over with its text, in drain order (none: an empty list). */
+  readonly steerImages: ChatImageAttachment[][] = []
+  /** The images each turn started with, by prompt. */
+  readonly promptImages = new Map<string, ChatImageAttachment[]>()
   /** Whether a turn whose prompt is this text is held until `release`. */
   holdPrompts = new Set<string>()
   /** Whether turns take steers at all (a turn that never reads one leaves it to the orchestrator). */
@@ -81,6 +85,7 @@ class SteeringAdapter implements ProviderAdapter {
 
   async startTurn(input: TurnInput, sink: TurnSink, ctl: TurnControl, host: AdapterHost): Promise<TurnResult> {
     this.prompts.push(input.prompt)
+    this.promptImages.set(input.prompt, input.images ?? [])
     this.runs.set(input.prompt, input.runId)
     const providerRef = { provider: input.llmProvider, instanceId: input.instanceId, model: input.model }
     sink.providerRef(providerRef)
@@ -90,6 +95,7 @@ class SteeringAdapter implements ProviderAdapter {
       const entry = ctl.drainSteerEntry ? ctl.drainSteerEntry() : undefined
       const text = entry ? entry.text : ctl.drainSteer()
       if (!text) return
+      this.steerImages.push(entry?.images ?? [])
       if (this.oneDrain) {
         const mode = this.oneDrain
         this.oneDrain = undefined
@@ -254,6 +260,54 @@ describe('Steer on a queued message runs exactly that message, exactly once', ()
     expect(w.adapter.steers).toEqual(['C'])
     expectEachOnce(w.adapter, ['first', 'A', 'B', 'C'])
     expect(w.userMessages()).toEqual(['first', 'C', 'A', 'B'])
+  })
+
+  it('a message steered with images reaches the model with them, and the transcript and saved history keep them', async () => {
+    const w = world()
+    w.adapter.holdPrompts.add('first')
+    const first = w.send('first')
+    await waitFor(() => w.adapter.prompts.includes('first'), 'first turn')
+    const shot: ChatImageAttachment = { mimeType: 'image/png', data: 'c2NyZWVuc2hvdA==', name: 'shot.png' }
+    const queued = await w.d.orch.send({ content: 'look at this', images: [shot] }, false, { threadId: w.thread.id, clientRequestId: 'send-image' })
+    expect(queued.queued).toBe(true)
+
+    expect(w.d.orch.promoteQueueItem(w.thread.id, queued.queueItem!.id)).toEqual({ ok: true })
+    await waitFor(() => w.adapter.steers.length > 0, 'steer taken')
+
+    // The provider got the image with the text, in the running turn.
+    expect(w.adapter.steers).toEqual(['look at this'])
+    expect(w.adapter.steerImages).toEqual([[expect.objectContaining({ mimeType: 'image/png', data: shot.data })]])
+    // The transcript shows the steered message with its image.
+    const shown = w.d.orch.getOrCreateSession(w.thread.id).messages.find((message) => message.role === 'user' && message.content === 'look at this')
+    expect(shown?.steered).toBe(true)
+    expect(shown?.images).toEqual([expect.objectContaining({ mimeType: 'image/png', data: shot.data })])
+    // The saved history the next turn starts from has the image too.
+    const saved = w.d.orch.getNativeContext(w.thread.id).messages.filter((message) => message.role === 'user' && JSON.stringify(message.content).includes('look at this'))
+    expect(saved).toHaveLength(1)
+    expect(saved[0]!.content).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'image', mimeType: 'image/png', data: shot.data })]))
+
+    w.adapter.release('first')
+    await first
+    await w.idle('queue drained')
+    expect(w.adapter.prompts).toEqual(['first'])
+  })
+
+  it('a message steered with images that the turn never reads runs as its own turn with them', async () => {
+    const w = world()
+    w.adapter.takeSteers = false
+    w.adapter.holdPrompts.add('first')
+    const first = w.send('first')
+    await waitFor(() => w.adapter.prompts.includes('first'), 'first turn')
+    const shot: ChatImageAttachment = { mimeType: 'image/png', data: 'c2NyZWVuc2hvdA==' }
+    const queued = await w.d.orch.send({ content: 'look at this', images: [shot] }, false, { threadId: w.thread.id, clientRequestId: 'send-image' })
+
+    expect(w.d.orch.promoteQueueItem(w.thread.id, queued.queueItem!.id)).toEqual({ ok: true })
+    w.adapter.release('first')
+    await first
+    await w.idle('queue drained')
+
+    expect(w.adapter.prompts).toEqual(['first', 'look at this'])
+    expect(w.adapter.promptImages.get('look at this')).toEqual([expect.objectContaining({ mimeType: 'image/png', data: shot.data })])
   })
 
   it('the steered message reaches the model while the turn still runs, not when it ends', async () => {

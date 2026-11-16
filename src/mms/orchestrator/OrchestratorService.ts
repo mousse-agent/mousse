@@ -364,7 +364,7 @@ import {
   repairQueueJournal,
   runDurableQueueCommand
 } from '../queue/durableQueue'
-import { ThreadSession, type ActiveTurnControl, type SteerEntry } from './ThreadSession'
+import { ThreadSession, steerImages, type ActiveTurnControl, type SteerEntry } from './ThreadSession'
 import { SteerHold, type PendingSteerFacts } from './steerHold'
 import { userQuestionService as defaultUserQuestionService, UserQuestionService, withoutStandingRules } from './UserQuestionService'
 import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../modes/ModeRegistry'
@@ -11563,7 +11563,7 @@ export class OrchestratorService extends EventEmitter {
         // Mid-turn steers share the turn's mode — preserve tracking so the next
         // real turn does not mistake this UI echo for a legacy agent turn.
         const currentMode = getLastUserChatMode(this.messages)
-        entry.echoId = this.addMessage('user', trimmed, undefined, undefined, undefined, currentMode, subagentNotice, true, origin, entry.itemId).id
+        entry.echoId = this.addMessage('user', trimmed, entry.images, undefined, undefined, currentMode, subagentNotice, true, origin, entry.itemId).id
       }
       if (this.sessionAls.getStore()?.threadId === threadId) {
         run()
@@ -13468,6 +13468,8 @@ export class OrchestratorService extends EventEmitter {
           const ids = entry
             ? [...new Set(entry.entries.flatMap((steer) => (steer.itemId ? [steer.itemId] : [])))]
             : [...session.drainedExternalSteerIds]
+          // What the model read with the text: this drain's images, or without a token every outstanding drain's.
+          const images = steerImages(entry ? entry.entries : [...drained.values(), ...takenDrains.values()].flatMap((held) => held.entries))
           if (token !== undefined) {
             // Settled now: a later hand-back of this drain is ignored, and its token is spent.
             drained.delete(token)
@@ -13482,7 +13484,8 @@ export class OrchestratorService extends EventEmitter {
             }
             drained.clear()
           }
-          this.nativeContext = appendNativeMessage(this.nativeContext, userMessage(text))
+          // The saved history keeps the images with the text, so a later turn sees them too.
+          this.nativeContext = appendNativeMessage(this.nativeContext, userMessage(text, images))
           this.nativeContext.acceptedSteerItemIds = Array.from(new Set([
             ...(this.nativeContext.acceptedSteerItemIds ?? []), ...ids
           ]))
@@ -13502,7 +13505,7 @@ export class OrchestratorService extends EventEmitter {
         },
         lineEdits: (lines) => this.lineEditStats?.record('orchestrator', lines)
       }, { dropLate: true })
-      const drainEntry = (drainOpts?: { expect?: SteerDelivery | SteerDelivery[] }): { text: string; token: string; cut: boolean; forced?: boolean } | undefined => {
+      const drainEntry = (drainOpts?: { expect?: SteerDelivery | SteerDelivery[] }): { text: string; token: string; cut: boolean; forced?: boolean; images?: ChatImageAttachment[] } | undefined => {
         // An adapter on the hold takes only what it can deliver now: nothing while a steer is held.
         let forced = false
         if (drainOpts?.expect !== undefined) {
@@ -13530,7 +13533,9 @@ export class OrchestratorService extends EventEmitter {
         // The hold is over; the same steers handed back resume it in the same generation.
         hold.drained(token, forced)
         this.setHeldSteer(session.threadId, undefined)
-        return { text: entries.map((steer) => steer.text.trim()).join('\n').trim(), token, cut, ...(forced ? { forced: true } : {}) }
+        // The images go with the text: a steer sent with a screenshot reaches the model with it.
+        const images = steerImages(entries)
+        return { text: entries.map((steer) => steer.text.trim()).join('\n').trim(), token, cut, ...(forced ? { forced: true } : {}), ...(images.length ? { images } : {}) }
       }
       // A late drain would take the newer turn's steers into this one: dropped, as a late sink call is.
       const turnControl = this.inTurn<TurnControl>(session, turn, turnId, 'control', {

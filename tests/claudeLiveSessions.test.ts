@@ -1872,6 +1872,26 @@ describe('result routing and steering edge cases', () => {
     await turn
   })
 
+  it('a steer sent with an image reaches Claude Code with the image', async () => {
+    const f = fixture()
+    silent(f.cli)
+    const data = Buffer.from('png bytes').toString('base64')
+    const turn = f.chat({
+      drainSteer: () => undefined,
+      drainSteerEntry: vi.fn<NonNullable<ClaudeSubscriptionChatInput['drainSteerEntry']>>()
+        .mockReturnValueOnce({ text: 'look at this', token: 'drain-1', images: [{ mimeType: 'image/png', data, name: 'shot.png' }] })
+        .mockReturnValue(undefined)
+    })
+    await inputs(f.cli, 2)
+    const process = f.cli.last
+    expect(process.inputs[1]!.message.content).toEqual([
+      expect.objectContaining({ type: 'text', text: 'look at this' }),
+      expect.objectContaining({ type: 'image', source: expect.objectContaining({ type: 'base64', media_type: 'image/png', data }) })
+    ])
+    process.emit(resultFrame({ uuids: [process.uuid(0), process.uuid(1)], text: 'ok' }))
+    await turn
+  })
+
   it('a result held back for a steer still lets the folded run adopt the cut-off notification', async () => {
     const f = fixture()
     const process = await cutOffAfterNotification(f)
