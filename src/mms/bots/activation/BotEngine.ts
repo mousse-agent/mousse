@@ -7330,7 +7330,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** `bots.personal.pause`: the owner pauses the bot's schedules. Chat still works. */
   pauseBot(botId: string): void {
     this.entry(botId)
-    this.store.setPaused(botId, 'owner')
+    this.store.db.transaction(() => {
+      this.store.setPaused(botId, 'owner')
+      this.actions.withdrawPaused(botId)
+    })
     // A paused bot runs nothing in the background either.
     this.stopWatchersOf(botId)
     this.changed({ botId })

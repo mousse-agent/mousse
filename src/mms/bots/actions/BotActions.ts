@@ -227,6 +227,12 @@ export class BotActions {
     for (const action of this.host.store.all("SELECT * FROM bot_actions WHERE activation_id = ? AND status IN ('open', 'approved')", id))
       this.transition(String(action.id), String(action.status), 'withdrawn', { text: 'This work ended. Nothing was sent.' })
   }
+  withdrawPaused(botId: string): void {
+    for (const action of this.host.store.all("SELECT * FROM bot_actions WHERE bot_id = ? AND status = 'approved'", botId)) {
+      if (this.transition(String(action.id), 'approved', 'withdrawn', { text: 'This bot was paused by its owner. Nothing was sent; carry on without it when resumed.' }))
+        this.host.store.db.afterCommit(() => this.finish(action as unknown as ActionRow))
+    }
+  }
   private approvedDeadline(action: Pick<ActionRow, 'answered_at'>): number {
     return action.answered_at ? Date.parse(action.answered_at) + APPROVED_SEND_WINDOW_MS : 0
   }
