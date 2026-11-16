@@ -1006,6 +1006,9 @@ it.each(['done', 'uncertain', 'failed', 'not_sent'] as const)('C4 duplicate warn
   const card = () => f.bots.service.actionMessage(t.botId, next.id).action!
   if (status === 'not_sent') expect(card().previous).toBeUndefined()
   else expect(card().previous).toEqual({ status, at: a.ran_at ?? f.store.now() })
+  f.store.run('UPDATE bot_actions SET activation_id = ? WHERE id = ?', t.chatId, a.id)
+  expect(card().previous).toBeUndefined()
+  f.store.run('UPDATE bot_actions SET activation_id = ? WHERE id = ?', t.workId, a.id)
   f.store.run('UPDATE bot_actions SET target_json = ? WHERE id = ?', JSON.stringify({ server: 'mail', tool: 'different' }), a.id)
   expect(card().previous).toBeUndefined()
 })

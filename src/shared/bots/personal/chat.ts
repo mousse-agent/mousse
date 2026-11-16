@@ -77,7 +77,6 @@ export type BotMessageKind = 'text' | 'run_report' | 'notice' | 'error'
 
 export type BotSnoozeChoice = '10m' | '1h' | 'tomorrow'
 
-/** One row of a bot's chat (`bot_messages`). */
 /** Mousse's review of a held call, from its stored masked copy. */
 export interface BotActionCard {
   actionId: string
@@ -95,6 +94,7 @@ export interface BotActionCard {
   tooLarge?: boolean
 }
 
+/** One row of a bot's chat (`bot_messages`). */
 export interface BotChatMessage {
   action?: BotActionCard
   /** Sent action instant; formatted in the client clock. */

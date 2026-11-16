@@ -355,7 +355,7 @@ export class BotChatProjection {
     const reminder = row.id.startsWith('bm_rem_') ? this.store.reminderForMessage(row.botId, row.id) : undefined
     const expiresAt = reminder?.deliveredAt ? new Date(Date.parse(reminder.deliveredAt) + 24 * 60 * 60_000).toISOString() : undefined
     const snoozed = reminder && this.store.snoozedCopy(row.botId, reminder.id)
-    const action = this.options.asksFirst?.() ? this.actionForMessage(row.id) : undefined
+    const action = row.id.startsWith('bm_action_') && this.options.asksFirst?.() ? this.actionForMessage(row.id) : undefined
     const sentAction = row.id.startsWith('bm_action_') ? this.store.get("SELECT ran_at FROM bot_actions WHERE message_id = ? AND status = 'done'", row.id) : undefined
     const escalation = row.askId ? this.store.escalation(row.askId) : undefined
     const question = row.questionId ? this.store.question(row.questionId) : undefined
@@ -399,7 +399,7 @@ export class BotChatProjection {
   }
 
   private actionForMessage(messageId: string): BotActionCard | undefined {
-    const row = this.store.get('SELECT * FROM bot_actions WHERE message_id = ?', messageId) as unknown as (ActionRow & { bot_note: string | null }) | undefined
+    const row = this.store.get('SELECT id, activation_id, args_digest, args_json, card_json, status, ran_at, answered_at, target_json, result_json, bot_note FROM bot_actions WHERE message_id = ?', messageId) as unknown as (ActionRow & { bot_note: string | null }) | undefined
     if (!row) return undefined
     const metadata = JSON.parse(row.card_json ?? '{}')
     const args: unknown = JSON.parse(row.args_json)
@@ -418,7 +418,7 @@ export class BotChatProjection {
     }
     visit(args, [])
     const result = row.result_json ? JSON.parse(row.result_json) : undefined
-    const previous = this.store.all(`SELECT * FROM bot_actions WHERE activation_id = ? AND args_digest = ?
+    const previous = this.store.all(`SELECT status, ran_at, answered_at, created_at, target_json, result_json FROM bot_actions WHERE activation_id = ? AND args_digest = ?
       AND rowid < (SELECT rowid FROM bot_actions WHERE id = ?) AND status IN ('done', 'uncertain', 'failed') ORDER BY rowid DESC`, row.activation_id, row.args_digest, row.id)
       .find(candidate => {
         const target = JSON.parse(String(candidate.target_json))
