@@ -1802,3 +1802,39 @@ it.each(['open', 'approved'] as const)('R3-3 legacy #1340 %s cards withdraw on u
   expect(f.bots.actions.get(a.id)).toMatchObject({ status: 'withdrawn', exec_args: null })
   expect(t.calls).toEqual([])
 })
+
+it('R4-1 forgetting a sent card permits a different call of the same tool', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' }); await flush()
+  const next = await start(f, t.workId, 2)
+  const memory = new BotMemoryStore({ db: f.store.db })
+  const seq = memory.append({ botId: t.botId, sourceKey: `bm:${a.message_id}`, kind: 'notice', who: 'bot', text: 'sent card' })!
+  memory.forget(t.botId, { refs: [`j${seq}`], by: 'owner_ui' })
+  const result = await callForBot({ bot: next.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'A different email' }, toolCallId: 'different-email', signal: new AbortController().signal })
+  expect(result).not.toMatchObject({ isError: true })
+  expect(f.store.all("SELECT id FROM bot_actions WHERE status = 'open'")).toHaveLength(1)
+  expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(2)
+  expect(f.bots.actions.get(a.id)).toMatchObject({ status: 'done', args_digest: '[forgotten]', exec_args: null })
+})
+
+it.each(['done', 'declined', 'tool_error', 'uncertain'] as const)('R4-1 forgetting untold %s content preserves the outcome', async outcome => {
+  const t = await setup(true)
+  if (outcome === 'tool_error') vi.spyOn(t.manager, 'callTool').mockResolvedValueOnce({ isError: true, content: [{ type: 'text', text: 'private tool answer' }] } as never)
+  if (outcome === 'uncertain') vi.spyOn(t.manager, 'callTool').mockRejectedValueOnce(new Error('connection lost'))
+  await t.call()
+  const a = f.bots.actions.forWork(t.workId)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: outcome === 'declined' ? 'not_now' : 'send' })
+  const memory = new BotMemoryStore({ db: f.store.db })
+  const seq = memory.append({ botId: t.botId, sourceKey: `bm:${a.message_id}`, kind: 'notice', who: 'bot', text: 'settled card' })!
+  memory.forget(t.botId, { refs: [`j${seq}`], by: 'owner_ui' })
+  await finish(f, t.work.payload); await flush()
+  const prompt = f.store.lastMainDispatch(t.workId)!.prompt.text
+  const line = outcome === 'done' ? 'Your owner sent it' : outcome === 'declined' ? 'Your owner chose not to send' : outcome === 'tool_error' ? 'The tool reported an error' : 'It could not be confirmed whether this went through'
+  expect(prompt).toContain(line)
+  expect(prompt).not.toContain('[forgotten]')
+  expect(prompt).not.toContain('private tool answer')
+  expect(prompt).not.toContain('Exact text')
+  expect(prompt).not.toContain('Your owner removed this request')
+})
