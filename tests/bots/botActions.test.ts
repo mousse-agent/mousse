@@ -817,3 +817,29 @@ it('D-copy gives an approval resume one continuation instruction', async () => {
   expect(prompt.split('Your owner sent it. The tool answered:')).toHaveLength(2)
   expect(f.bots.service.list().bots.find(b => b.id === t.botId)?.stateText).not.toContain('Send this action?')
 })
+
+// Schema declarations may compose, recurse, or fail to resolve. Only the unresolved subtree falls back to key masking.
+it.each(['$ref', 'allOf', 'anyOf', 'oneOf', 'recursive', 'remote', 'broken', 'depth'] as const)('N1 hides declared sensitive values through %s', async form => {
+  const t = await setup(true)
+  const creds = { type: 'object', properties: { password: {}, list: { type: 'array', items: { $ref: '#/$defs/Creds' } } } }
+  let shape: unknown = form === '$ref' || form === 'recursive' ? { $ref: '#/$defs/Creds' }
+    : form === 'remote' ? { $ref: 'https://example.test/creds' }
+      : form === 'broken' ? { $ref: '#/$defs/Missing' }
+        : form === 'depth' ? Array.from({ length: 80 }).reduce<unknown>(node => ({ allOf: [node] }), creds)
+          : { [form]: [{ properties: { harmless: {} } }, creds] }
+  t.descriptor.inputSchema = { $defs: { Creds: creds }, type: 'object', properties: { creds: shape } } as never
+  Object.assign(t.args, { creds: { password: 'opaque-private-value', ...(form === 'recursive' ? { list: [{ password: 'recursive-private-value' }] } : {}), ...(form === 'remote' || form === 'broken' || form === 'depth' ? { nested: [{ client_secret: 'unresolved-private-value' }] } : {}) }, diary_token: 'freeform stays visible' })
+  await t.call()
+  const a = f.bots.actions.forWork(t.workId)!
+  const review = JSON.parse(a.args_json)
+  expect(review.creds.password).toEqual({ $mousse: 'hidden', text: 'hidden · will be sent' })
+  expect(review.diary_token).toBe('freeform stays visible')
+  expect(JSON.parse(a.card_json!)).toMatchObject({ hasHiddenValues: true })
+  const card = f.store.message(a.message_id)!.text
+  expect(card).not.toContain('opaque-private-value')
+  expect(card).not.toContain('recursive-private-value')
+  expect(card).not.toContain('unresolved-private-value')
+  await finish(f, t.work.payload)
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  expect(t.calls).toEqual([t.args])
+})
