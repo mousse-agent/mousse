@@ -412,3 +412,17 @@ it.each(['access_token', 'client_secret', 'password', 'authorization', 'api_key'
   const { maskedActionData } = await import('../../src/mms/bots/actions/BotActions')
   expect(JSON.stringify(maskedActionData({ [key]: 'ordinary-looking-secret' }))).not.toContain('ordinary-looking-secret')
 })
+it('R5-size caps the whole stored result and keeps each image whole or omits it', async () => {
+  const t = await setup(true)
+  await t.call()
+  const a = f.bots.actions.forWork(t.workId)!
+  const data = 'QUJD'.repeat(20_000)
+  f.bots.actions.transition(a.id, 'open', 'approved')
+  f.bots.actions.transition(a.id, 'approved', 'running')
+  f.bots.actions.transition(a.id, 'running', 'done', { text: 'Text '.repeat(10_000), images: [{ data, mimeType: 'image/png' }, { data, mimeType: 'image/png' }] } as never)
+  const stored = f.bots.actions.forWork(t.workId)!.result_json!
+  expect(Buffer.byteLength(stored)).toBeLessThanOrEqual(65_536)
+  const result = JSON.parse(stored)
+  expect(result.text).toMatch(/image.*left out/i)
+  for (const image of result.images ?? []) expect(image.data).toBe(data)
+})
