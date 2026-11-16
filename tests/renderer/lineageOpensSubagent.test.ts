@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, createElement, Fragment } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { chatStatusFromTurn, mousseToUIMessages } from '../../src/renderer/chat/adapters/mousseToUI'
 import { collectNativeSubagentCards } from '../../src/renderer/chat/adapters/nativeSubagents'
 import { MessageList } from '../../src/renderer/chat/components/agent-elements/message-list'
@@ -9,7 +9,9 @@ import { LOCATED_CLASS } from '../../src/renderer/chat/components/agent-elements
 import { SubagentCardsContext } from '../../src/renderer/chat/components/agent-elements/tools/subagent-cards-context'
 import { LineageSection } from '../../src/renderer/components/sideCard/LineageSection'
 import { useAppStore } from '../../src/renderer/stores/appStore'
-import { useChatNavigationStore } from '../../src/renderer/stores/chatNavigationStore'
+import { CHAT_NAVIGATION_TIMEOUT_MS, revealSubagent, useChatNavigationStore } from '../../src/renderer/stores/chatNavigationStore'
+import { useProviderSnapshotsStore } from '../../src/renderer/lib/providerSnapshots'
+import type { SubagentSummary } from '../../src/shared/subagents'
 import type { AgentActivityItem } from '../../src/shared/agentActivity'
 import type { ChatMessage } from '../../src/shared/types'
 
@@ -48,7 +50,7 @@ const messages: ChatMessage[] = [
   nestedCommand('c2', 6, 'a2')
 ]
 
-describe('Lineage rows of a thread', () => {
+describe('Nest rows of a thread', () => {
   let host: HTMLDivElement
   let root: Root
 
@@ -73,6 +75,38 @@ describe('Lineage rows of a thread', () => {
     host.remove()
     useAppStore.setState(useAppStore.getInitialState())
     useChatNavigationStore.setState({ subagent: null })
+    useProviderSnapshotsStore.setState({ scopes: {} })
+    vi.useRealTimers()
+  })
+
+  const showChat = async (shown: ChatMessage[]) => {
+    const ui = mousseToUIMessages(shown)
+    await act(async () => {
+      root.render(createElement(SubagentCardsContext.Provider, { value: collectNativeSubagentCards(ui, true) },
+        createElement(MessageList, { messages: ui, status: chatStatusFromTurn({ phase: 'completed', turnId: RUN }) })))
+    })
+  }
+
+  it('drop a request no transcript took, so a card that shows later does not open by itself', async () => {
+    vi.useFakeTimers()
+    await showChat([user('u0', 0, 'Something else')])
+    act(() => revealSubagent('a2'))
+    act(() => vi.advanceTimersByTime(CHAT_NAVIGATION_TIMEOUT_MS + 1))
+    expect(useChatNavigationStore.getState().subagent).toBeNull()
+    await showChat(messages)
+    expect(host.querySelector('button.subagent-group-head')!.getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it("rename a subagent's model when its provider's list loads after the row is drawn", async () => {
+    const child = { childThreadId: 'child', title: 'Reviewer', activity: 'working', state: 'working', provider: 'codex:chatgpt-subscription', model: 'house-model', waitingOn: [], createdAt: at(1), updatedAt: at(1) } as unknown as SubagentSummary
+    useAppStore.setState({ activeThreadId: 't1', messages: [] })
+    // The daemon reports the thread's subagent.
+    ;(window as unknown as { mousse: { subagents: { list: unknown } } }).mousse.subagents.list = async () => [child]
+    await act(async () => root.render(createElement(LineageSection, { threadId: 't1', projectId: null })))
+    const model = () => host.querySelector('.lineage-model')?.textContent
+    await vi.waitFor(() => expect(model()).toBe('House Model'))
+    act(() => useProviderSnapshotsStore.setState({ scopes: { device: { loading: false, snapshots: [{ instanceId: 'codex:chatgpt-subscription', driver: 'codex', builtIn: false, models: { entries: [], source: 'none', names: { 'house-model': 'House Model 2' } } } as never] } } }))
+    expect(model()).toBe('House Model 2')
   })
 
   it('open a running subagent of Claude Code from its row: the transcript lands on its card, opened', async () => {

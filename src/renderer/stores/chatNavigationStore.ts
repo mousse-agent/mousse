@@ -66,7 +66,10 @@ export const useChatNavigationStore = create<ChatNavigationState>((set, get) => 
     set({ message: { messageId, seq: ++seq, at: Date.now() } })
   },
   revealSubagent(toolCallId) {
-    set({ subagent: { toolCallId, seq: ++seq, at: Date.now() } })
+    const request = { toolCallId, seq: ++seq, at: Date.now() }
+    set({ subagent: request })
+    // Cards open themselves while a request waits, so one no transcript takes must not wait for a later card.
+    setTimeout(() => get().settleSubagent(request.seq), CHAT_NAVIGATION_TIMEOUT_MS)
   },
   focusPendingRequest(threadId) {
     set({ pendingRequest: { threadId, seq: ++seq, at: Date.now() } })

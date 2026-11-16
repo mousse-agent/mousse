@@ -5,6 +5,7 @@ import { useSubagents } from '../../hooks/useSubagents'
 import { useNativeSubagents } from '../../hooks/useNativeSubagents'
 import { ChevronRight } from '../../lib/icons'
 import { openThread } from '../../lib/openThread'
+import { useProviderSnapshotsStore } from '../../lib/providerSnapshots'
 import { revealSubagent } from '../../stores/chatNavigationStore'
 import { ComputerBadgeView } from '../ComputerBadge'
 import { Collapse } from '../ui/Collapse'
@@ -179,6 +180,8 @@ export function LineageSection({ threadId }: SideCardSectionContext) {
   const native = useNativeSubagents(threadId)
   const entries = useMemo<LineageEntry[]>(() => (native.length ? [...subagents, ...native.map(nativeLineageEntry)] : subagents), [subagents, native])
   const inheritedProvider = useThreadProviderId(threadId)
+  // Model names come from the providers' lists: a list that loads later renames the rows.
+  useProviderSnapshotsStore((state) => state.scopes)
   // Remembering which thread the choices belong to resets the list on a thread change
   // without an effect.
   const [openState, setOpenState] = useState<{ threadId: string | null; parts: LineageOpenParts }>({ threadId: null, parts: LINEAGE_CLOSED })

@@ -1967,7 +1967,7 @@ export const MessageList = memo(function MessageList({
     });
   }, [messageRequest, turns, windowed, dispatchFollow, markProgrammaticScroll]);
 
-  // `revealSubagent` from Lineage: a runtime's own subagent has no thread, so its card is what opens. The request
+  // `revealSubagent` from Nest: a runtime's own subagent has no thread, so its card is what opens. The request
   // waits in the store while its turn lands, so the folded group and the card open themselves as they mount.
   const subagentRequest = useChatNavigationStore((state) => state.subagent);
   const takenSubagentRef = useRef<number | null>(null);

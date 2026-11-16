@@ -4,6 +4,7 @@ import type { SubagentCardModel } from "../../../adapters/subagentCards";
 import { IconChevronDown, IconChevronRight } from "../../../../lib/icons";
 import { isSubagentStartTool } from "../../../../../shared/subagentTools";
 import { openThread } from "../../../../lib/openThread";
+import { useProviderSnapshotsStore } from "../../../../lib/providerSnapshots";
 import { SubagentAvatar } from "../../../../components/SubagentAvatar";
 import { Collapse } from "../../../../components/ui/Collapse";
 import { subagentBadgeTone, subagentIconId } from "../../../../components/subagentStatus";
@@ -76,6 +77,8 @@ function SubagentRowBody({ card, result, label, inheritedProvider }: { card: Sub
  * took. Clicking opens the subagent's own thread, which holds the full result.
  */
 export function SubagentCardView({ card, now, result, inheritedProvider, onOpen }: SubagentCardViewProps) {
+  // The model's name comes from the providers' lists: a list that loads later renames the row.
+  useProviderSnapshotsStore((state) => state.scopes);
   const title = cardTitle(card);
   const elapsed = cardElapsedLabel(card, now);
   const status = cardStatusLabel(card);
@@ -194,9 +197,10 @@ export type NativeSubagentCardViewProps = {
  */
 export function NativeSubagentCardView({ card, now, nestedTools, chatStatus, inheritedProvider }: NativeSubagentCardViewProps) {
   const [open, setOpen] = useState(false);
-  // Lineage shows this subagent: the card opens on its result and calls, once per request.
+  // Nest shows this subagent: the card opens on its result and calls, once per request.
   const revealSeq = useSubagentRevealSeq([card.toolCallId]);
   const [openedFor, setOpenedFor] = useState<number | null>(null);
+  useProviderSnapshotsStore((state) => state.scopes);
   const title = cardTitle(card);
   const elapsed = cardElapsedLabel(card, now);
   const status = cardStatusLabel(card);
@@ -309,7 +313,7 @@ export function SubagentCardGroup({ toolCallIds, children }: { toolCallIds: read
   const running = models.length > 1 && models.some(isCardRunning);
   const now = useTick(running);
   const [chosenOpen, setChosenOpen] = useState<boolean | null>(null);
-  // Lineage shows a subagent in this group: the group opens so its card can be reached, once per request.
+  // Nest shows a subagent in this group: the group opens so its card can be reached, once per request.
   const revealSeq = useSubagentRevealSeq(toolCallIds);
   const [openedFor, setOpenedFor] = useState<number | null>(null);
   if (revealSeq !== null && revealSeq !== openedFor) {
