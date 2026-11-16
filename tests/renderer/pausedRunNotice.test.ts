@@ -269,6 +269,66 @@ describe('the notice on a thread', () => {
   })
 })
 
+describe('the notice on a thread that waits on paused subagents', () => {
+  const sub = (id: string, parentThreadId: string) => ({ id, lineage: { parentThreadId, rootThreadId: 'p', relationship: 'subagent' } })
+  // p ── c1 ── g1, p ── c2; x is a thread of its own.
+  const threads = [{ id: 'p' }, sub('c1', 'p'), sub('g1', 'c1'), sub('c2', 'p'), { id: 'x' }]
+  const turn = (threadId: string, patch: Partial<TurnState> = {}): TurnState => ({ threadId, turnId: `run:${threadId}`, phase: 'completed', updatedAt: new Date(NOW).toISOString(), ...patch })
+  const pausedTurn = (threadId: string, hours: number, patch: Partial<TurnPause> = {}): TurnState =>
+    turn(threadId, { phase: 'paused', pause: pause({ runId: `run:${threadId}`, until: new Date(at(hours)).toISOString(), autoResume: false, ...patch }) })
+  const setTurns = (...turns: TurnState[]) => act(() => { useAppStore.setState({ threads: threads as never, turnStates: Object.fromEntries(turns.map((entry) => [entry.threadId, entry])) }) })
+  const clientOf = (): PausedRunClient => ({ resumeNow: vi.fn(async () => undefined), cancel: vi.fn(async () => undefined) })
+  const show = (client: PausedRunClient) =>
+    act(() => root.render(createElement(ComposerNoticeProvider, null, createElement(Fragment, null, createElement(ComposerNoticeSlot), createElement(PausedRunNotice, { threadId: 'p', client })))))
+  const flush = () => act(async () => { await Promise.resolve() })
+
+  afterEach(() => { useAppStore.setState({ threads: [] }) })
+
+  it('shows the paused subagent\'s reset with only Try now, which resumes that subagent', async () => {
+    vi.useFakeTimers({ now: NOW })
+    const client = clientOf()
+    setTurns(turn('p'), pausedTurn('c1', 15, { runId: 'run:c1' }))
+    show(client)
+    expect(notice()!.getAttribute('aria-label')).toBe('Subagent paused by a usage limit')
+    expect(line()!.textContent).toMatch(/^Subagent hit a usage limit · resets \S+(\s?[AaPp][Mm])?$/)
+    expect(names()).toEqual(['Try now'])
+
+    click(button('Try now'))
+    await flush()
+    expect(client.resumeNow).toHaveBeenCalledWith('run:c1', 'c1')
+    expect(line()!.textContent).toBe('Subagent hit a usage limit · resuming…')
+    expect(button('Resuming…').getAttribute('aria-busy')).toBe('true')
+    // The subagent continues: nothing below the parent is paused any more.
+    setTurns(turn('p'), turn('c1', { phase: 'thinking' }))
+    expect(notice()).toBeNull()
+  })
+
+  it('counts every paused subagent at any depth, shows the soonest reset, resumes each, and ignores other threads', async () => {
+    vi.useFakeTimers({ now: NOW })
+    const client = clientOf()
+    setTurns(turn('p'), pausedTurn('g1', 16), pausedTurn('c2', 15), pausedTurn('x', 14))
+    show(client)
+    expect(line()!.textContent).toMatch(/^2 subagents hit a usage limit · resets /)
+    expect(line()!.title).toContain('Resets in')
+    click(button('Try now'))
+    await flush()
+    expect((client.resumeNow as ReturnType<typeof vi.fn>).mock.calls).toEqual([['run:c2', 'c2'], ['run:g1', 'g1']])
+  })
+
+  it('a subagent that ran into the limit again reads still limited', () => {
+    setTurns(turn('p'), pausedTurn('c1', 15, { again: true }))
+    show(clientOf())
+    expect(line()!.textContent).toMatch(/^Subagent still limited · /)
+  })
+
+  it('the thread\'s own pause comes first: its own notice, whose Try now resumes the subagents too', () => {
+    setTurns(pausedTurn('p', 15), pausedTurn('c1', 14))
+    show(clientOf())
+    expect(notice()!.getAttribute('aria-label')).toBe('Run paused by a usage limit')
+    expect(names()).toEqual(['Try now', 'Cancel'])
+  })
+})
+
 describe('the paused run client', () => {
   it('names the run, and the thread when it is given, so a thread on another computer can be reached', async () => {
     const request = vi.fn(async () => ({ runId: 'run:1' }))
