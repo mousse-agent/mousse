@@ -225,6 +225,33 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(managerFound).toEqual([])
   })
 
+  it('with includeSettled, an archived thread says so and an open one does not', async () => {
+    const { text } = await world({ threads: 'all' })
+    const body = (outcome: { text: string }) => JSON.parse(outcome.text.split('\n').slice(1, -1).join('\n'))
+    const rows = body(await text('thread_list', { includeSettled: true })).threads as Array<Record<string, unknown>>
+    expect(rows.find((row) => row.id === 'archived')).toMatchObject({ archived: true, archivedAt: NOW })
+    const open = rows.find((row) => row.id === 'mine')!
+    expect(open.archived).toBeUndefined()
+    expect(open.archivedAt).toBeUndefined()
+  })
+
+  it('a thread the bot started and then archived leaves its default list, and comes back marked with includeSettled', async () => {
+    const { text, threads, host } = await world({ threads: 'all' })
+    const body = (outcome: { text: string }) => JSON.parse(outcome.text.split('\n').slice(1, -1).join('\n'))
+    const ids = async (args: Record<string, unknown>) => (body(await text('thread_list', args)).threads as Array<{ id: string }>).map((row) => row.id)
+    threads.set('started', thread('started', { createdByThreadId: 'home' }))
+    // The service archives it, as the real one sets settledAt.
+    vi.mocked(host.setThreadArchived!).mockImplementation(async (threadId, archived) => {
+      threads.set(threadId, { ...threads.get(threadId)!, settledAt: archived ? NOW : undefined })
+      return { status: 'accepted' as const, archived, changed: true }
+    })
+    expect(await ids({})).toContain('started')
+    expect((await text('thread_archive', { threadId: 'started' })).error).toBe(false)
+    expect(await ids({})).not.toContain('started')
+    const rows = body(await text('thread_list', { includeSettled: true })).threads as Array<Record<string, unknown>>
+    expect(rows.find((row) => row.id === 'started')).toMatchObject({ archived: true, archivedAt: NOW, startedByYou: true })
+  })
+
   it('each thread a bot lists, finds, reads or starts carries its link, for its reply to name', async () => {
     const { text } = await world({ threads: 'all' })
     const body = (outcome: { text: string }) => JSON.parse(outcome.text.split('\n').slice(1, -1).join('\n'))
