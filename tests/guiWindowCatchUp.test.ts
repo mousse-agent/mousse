@@ -552,12 +552,11 @@ describe('a long silent turn that is really running', () => {
     expect(logLines.filter((line) => line.event === 'check.running')).toHaveLength(4)
   })
 
-  it('a turn waiting for a free turn slot is left alone however long it waits, and logged with its activity (#1241)', async () => {
+  it('a turn that has not started is left alone however long it waits, and logged with its activity (#1241)', async () => {
     const waiting: TurnState = {
       threadId: 't1',
       turnId: 'run:2',
       phase: 'queued',
-      step: { kind: 'waiting_slot', running: 4, limit: 4 },
       updatedAt: at(2)
     }
     service.turn = waiting

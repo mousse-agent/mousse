@@ -46,7 +46,6 @@ export function useTurnProgressState(): TurnProgressState | null {
 export type TurnProgressKind =
   | "starting"
   | "waiting"
-  | "waiting-slot"
   | "thinking"
   | "writing"
   | "preparing-tool"
@@ -211,15 +210,6 @@ export function countSpawningSubagents(messages: readonly UIMessage[], cards: Re
   return count;
 }
 
-function slotWaitTitle(step: { running: number; limit?: number; keptForPeople?: number }): string {
-  const limit = step.limit ?? step.running;
-  if (step.keptForPeople) {
-    const kept = step.keptForPeople === 1 ? "1 is" : `${step.keptForPeople} are`;
-    return `Mousse runs up to ${limit} turns at once, and ${kept} kept for messages people send. This background turn starts when one of the others ends.`;
-  }
-  return `Mousse runs up to ${limit} turns at once. This one starts when one of them ends.`;
-}
-
 function describeProgress({ state, messages, stepSince, awaitingSubagents, spawningSubagents, standalone, now }: TurnProgressInput): TurnProgress | null {
   const phase = state?.phase;
   const step = state?.step;
@@ -229,16 +219,6 @@ function describeProgress({ state, messages, stepSince, awaitingSubagents, spawn
   const last = messages[messages.length - 1];
   const compacting = last && isCompactionRow(last) && (last.metadata as { compacting?: boolean } | undefined)?.compacting === true;
   if (compacting) return standalone ? { kind: "compacting", label: "Compacting context…" } : null;
-
-  // Not started: every turn slot runs another turn. Not a thought, so no thinking icon.
-  if (step?.kind === "waiting_slot") {
-    const running = step.running === 1 ? "1 turn running" : `${step.running} turns running`;
-    return {
-      kind: "waiting-slot",
-      label: `Waiting for a free slot · ${running}`,
-      title: slotWaitTitle(step),
-    };
-  }
 
   if (step?.kind === "retrying") {
     const until = step.delayMs !== undefined ? (stepSince ?? now) + step.delayMs : NaN;

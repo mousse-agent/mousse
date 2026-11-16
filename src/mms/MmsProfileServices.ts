@@ -52,7 +52,7 @@ import { ProfileDatabase } from './run/db/ProfileDatabase'
 import { McpCredentials } from './run/mcp/McpCredentials'
 import { MousseMcpServer } from './run/mcp/MousseMcpServer'
 import { personTurnRequest } from './run/mcp/appTools/agentMessage'
-import { EffectWorker, type EffectWorkerFibres } from './run/EffectWorker'
+import { EffectWorker } from './run/EffectWorker'
 import { TERMINAL_RUN_STATUSES, type RunRecord, type ThreadEvent } from './run/types'
 import { launchedThreadsIn, watchLaunchedThreads } from './bots/launchedThreads'
 import { Reconciler } from './run/Reconciler'
@@ -422,7 +422,6 @@ export class MmsProfileServices {
   private readonly ownerHandle: MmsOwnerHandle | null
   private readonly homeDir: string
   private readonly installationHome: string
-  private readonly effectFibres: Partial<EffectWorkerFibres> | undefined
 
   constructor(
     config: MousseConfigStore,
@@ -443,15 +442,9 @@ export class MmsProfileServices {
       listProfiles?: () => Array<{ id: string; displayName?: string }>
       /** Whether another profile still has an unmoved provider entry `instanceId` (the profile host's answer for a profile it builds). */
       otherProfilesUse?: (instanceId: string) => boolean
-      /**
-       * Effect worker fibres per lane class (SPEC §12.3). `turn` caps this profile's concurrent
-       * turns (default 8); control fibres keep Stop and steer responsive while turns run.
-       */
-      effectFibres?: Partial<EffectWorkerFibres>
     }
   ) {
     this.config = config
-    this.effectFibres = shared.effectFibres
     this.ownerHandle = ownerHandle
     this.homeDir = homeDir
     this.installationHome = shared.installationHome
@@ -2661,8 +2654,7 @@ export class MmsProfileServices {
     const worker = new EffectWorker({
       outbox: engine.outbox,
       executors: this.orchestrator.effectExecutors(),
-      owner: engine.leaseOwner,
-      fibres: this.effectFibres
+      owner: engine.leaseOwner
     })
     const reconciler = new Reconciler({
       store: engine.store,
