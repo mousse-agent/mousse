@@ -1140,7 +1140,7 @@ it('settled approval stranded before its readiness write ends with a line', asyn
   expect(f.store.message(`bm_${t.workId}_ended`)?.text).toContain('nothing could let it carry on')
 })
 
-it.each(['stop', 'expiry', 'forget'] as const)('the disabled switch leaves held rows unchanged on %s', async path => {
+it.each(['stop', 'expiry', 'forget'] as const)('the disabled switch settles existing held rows on %s', async path => {
   const t = await setup(true)
   await t.call(); await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
@@ -1152,7 +1152,7 @@ it.each(['stop', 'expiry', 'forget'] as const)('the disabled switch leaves held 
     const seq = memory.append({ botId: t.botId, kind: 'notice', sourceKey: `bm:${a.message_id}`, who: 'bot', text: 'Held call' })!
     memory.forget(t.botId, { refs: [`j${seq}`], by: 'owner_ui' })
   }
-  expect(f.bots.actions.get(a.id)).toMatchObject({ status: 'open', exec_args: JSON.stringify(t.args) })
+  expect(f.bots.actions.get(a.id)).toMatchObject({ status: path === 'expiry' ? 'expired' : 'withdrawn', exec_args: null })
 })
 
 it.each(['send', 'not_now'] as const)('owner %s resets detection of repeated waits, as a question answer does', async answer => {
@@ -1252,15 +1252,6 @@ it('switch off keeps repeated and differing calls direct without cards or refusa
   expect(f.store.unreadWorkNotes(t.workId)).toEqual([])
 })
 
-it('switch off refuses card answers without resetting repeated-wait detection', async () => {
-  const t = await setup(true)
-  await t.call(); await finish(f, t.work.payload)
-  const a = f.bots.actions.forWork(t.workId)!
-  f.host.settings!.get().experimental.botAsksFirst = false
-  for (const answer of ['send', 'not_now'] as const)
-    await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer })).rejects.toThrow('switch is off')
-  expect(f.store.all("SELECT * FROM bot_memory_state WHERE key LIKE 'cursor:action-owner:%'")).toEqual([])
-})
 
 it.each(['failing', 'starting', 'cold restart'] as const)('B1 keeps a live card through a %s listing and sends once after recovery', async state => {
   const t = await setup(true)

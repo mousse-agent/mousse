@@ -192,7 +192,6 @@ export class BotActions {
       endWork: id => this.withdrawWork(id),
       grantChanged: () => this.withdrawChanged(),
       forgetMessage: (botId, messageId) => {
-        if (!host.enabled()) return
         const ids = host.store.all(`SELECT a.* FROM bot_actions a JOIN bot_activations w ON w.id = a.activation_id
           WHERE a.bot_id = ? AND (a.message_id = ? OR json_extract(w.trigger_json, '$.replyTo') = ?)`, botId, messageId, messageId)
         for (const action of ids) {
@@ -209,25 +208,21 @@ export class BotActions {
   }
   /** Erase call content without erasing owner intervention facts or the run-once key. */
   forgetText(botId: string, actionId?: string): void {
-    if (!this.host.enabled()) return
     this.host.store.run(`UPDATE bot_actions SET args_json = ?, args_digest = '[forgotten]',
       card_json = json_object('text', '[forgotten]', 'ownerSeq', COALESCE(json_extract(card_json, '$.ownerSeq'), 0), 'noteSeq', COALESCE(json_extract(card_json, '$.noteSeq'), 0)),
       bot_note = ?, result_json = ? WHERE bot_id = ? AND (? IS NULL OR id = ?)`,
     '"[forgotten]"', '[forgotten]', '{"text":"[forgotten]"}', botId, actionId ?? null, actionId ?? null)
   }
   withdrawWork(id: string): void {
-    if (!this.host.enabled()) return
     for (const action of this.host.store.all("SELECT * FROM bot_actions WHERE activation_id = ? AND status IN ('open', 'approved')", id))
       this.transition(String(action.id), String(action.status), 'withdrawn', { text: 'This work ended. Nothing was sent.' })
   }
   expireDue(): void {
-    if (!this.host.enabled()) return
     for (const a of this.host.store.all("SELECT * FROM bot_actions WHERE status = 'open' AND expires_at <= ?", this.host.store.now())) {
       if (this.transition(String(a.id), String(a.status), 'expired', { text: 'This call expired. Carry on without it; do not try the same call again without a new reason.' })) this.finish(a as unknown as ActionRow)
     }
   }
   withdrawChanged(): void {
-    if (!this.host.enabled()) return
     for (const a of this.host.store.all("SELECT * FROM bot_actions WHERE status IN ('open', 'approved')")) {
       if (this.host.obsolete(a as unknown as ActionRow) && this.transition(String(a.id), String(a.status), 'withdrawn', { text: 'This tool or its permission changed. Carry on without it.' })) this.host.store.db.afterCommit(() => this.finish(a as unknown as ActionRow))
     }
@@ -253,6 +248,7 @@ export class BotActions {
     return { text, isError: true }
   }
   hold(row: BotActivationRow, dispatch: string, tool: BotMcpTool, args: Record<string, unknown>, toolCallId?: string): ToolOutcome {
+    if (!this.host.enabled()) return { text: 'Asks first is off.', isError: true }
     if (!toolCallId) return { text: 'This call cannot be held without its call id. Carry on without it.', isError: true }
     const callKey = JSON.stringify([row.id, dispatch, toolCallId])
     const existing = this.host.store.get('SELECT id FROM bot_actions WHERE call_key = ?', callKey)
@@ -330,7 +326,6 @@ export class BotActions {
     if (!action || action.status !== 'running' || !this.valid(action)) throw changed()
   }
   async answer(input: { actionId: string; digest: string; answer: 'send' | 'not_now' }): Promise<{ status: string }> {
-    if (!this.host.enabled()) throw new BotActionChanged('Asks first is not available while its switch is off.')
     await this.host.refresh()
     const action = this.get(input.actionId)
     if (action && action.status === 'open' && Date.parse(action.expires_at) <= Date.parse(this.host.store.now())) {
@@ -392,12 +387,10 @@ export class BotActions {
     this.host.settled(row)
   }
   async retryApproved(): Promise<void> {
-    if (!this.host.enabled()) return
     for (const action of this.host.store.all("SELECT id FROM bot_actions WHERE status = 'approved'"))
       await this.runApproved(String(action.id))
   }
   async reconcile(): Promise<void> {
-    if (!this.host.enabled()) return
     this.expireDue()
     const interrupted = this.host.store.all("SELECT id FROM bot_actions WHERE status IN ('running', 'approved')")
     await this.host.refresh()

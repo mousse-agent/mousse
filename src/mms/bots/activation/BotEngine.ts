@@ -2249,14 +2249,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   private approvalPending(id: string): boolean {
-    return botAsksFirst(this.host.settings?.get()) && ['open', 'approved', 'running'].includes(this.actions.forWork(id)?.status ?? '')
+    return ['open', 'approved', 'running'].includes(this.actions.forWork(id)?.status ?? '')
   }
 
   private readonly workWaitLookups: WorkWaitLookups = { store: () => this.store }
 
   private readonly workWaitFacts: WorkWaitFacts = {
     approvalReady: (row) => this.store.lastMainDispatch(row.id)?.endedAt !== null && !this.live.has(row.id),
-    approvalExists: (row) => { const action = this.actions.forWork(row.id); return Boolean(action && (!botAsksFirst(this.host.settings?.get()) || row.endReason === 'approval_answered' || ['open', 'approved', 'running'].includes(action.status))) },
+    approvalExists: (row) => { const action = this.actions.forWork(row.id); return Boolean(action && (row.endReason === 'approval_answered' || ['open', 'approved', 'running'].includes(action.status))) },
     timerExists: (row) => { const wait = this.store.workWait(row.id); return Boolean(wait && wait.status !== 'cancelled') },
     usageResumable: (row) => this.usageResumable(row),
     questionExists: (row) => Boolean(this.store.workQuestion(row.id)),
@@ -4833,7 +4833,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         } else if (openWalls.length) {
           // The chat turn asked (`escalate`): it waits for the owner with every card on its message.
           this.store.moveActivation(row.id, ['running'], 'waiting_grant', { endReason: 'wall', ...(text !== undefined ? { result: text } : {}) })
-        } else if (botAsksFirst(this.host.settings?.get()) && this.actions.pendingInTurn(row.id, main.n) && this.askedIn.get(row.id) === main.n) {
+        } else if (this.actions.pendingInTurn(row.id, main.n) && this.askedIn.get(row.id) === main.n) {
           if (!this.park(row, 'approval', ['running'], this.approvalPending(row.id) ? 'approval' : 'approval_answered')) return undefined
         } else if (this.store.workWait(row.id)?.status === 'waiting') {
           if (!this.park(row, 'waiting', ['running'])) return undefined
@@ -7444,7 +7444,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     await this.endAll([...this.store.laneActivations(botId, 'chat', [...NOT_ENDED]), ...waiting], 'stopped', () => {
       this.store.withdrawAsks(botId)
       this.store.withdrawQuestions(botId)
-      if (botAsksFirst(this.host.settings?.get())) this.store.run("DELETE FROM bot_messages WHERE bot_id = ? AND id IN (SELECT message_id FROM bot_actions WHERE bot_id = ?)", botId, botId)
+      this.store.run("DELETE FROM bot_messages WHERE bot_id = ? AND id IN (SELECT message_id FROM bot_actions WHERE bot_id = ?)", botId, botId)
     })
     // Deleted once the turns stopped, so a turn ending meanwhile adds no row to the cleared chat.
     this.store.deleteMessages(botId)
@@ -7994,7 +7994,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // The note keeps the owner's message it came from (the chat turn's), so a forget of that message reaches it.
       if (from && this.store.activation(from) && ownerChatTurn(this.store.activation(from)!)) this.resetWorkWaitChain(workId)
       this.store.addWorkNote(workId, botId, text, from ? this.ownerMessageOf(from) : undefined)
-      if (botAsksFirst(this.host.settings?.get()) && (!from || (this.store.activation(from) && ownerChatTurn(this.store.activation(from)!))))
+      if ((botAsksFirst(this.host.settings?.get()) || this.actions.forWork(workId)) && (!from || (this.store.activation(from) && ownerChatTurn(this.store.activation(from)!))))
         this.store.run(`INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, '1') ON CONFLICT(bot_id, key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)`, botId, `cursor:action-note:${workId}`)
       return 'noted' as const
     })
@@ -8182,7 +8182,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   private refuseWakeLoop(botId: string, brief: string, event: BotWakeEvent | null, workId?: string): void {
     const key = wakeLoopKey(brief, event)
-    const after = workId && botAsksFirst(this.host.settings?.get()) ? Number(this.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, `cursor:action-owner:${workId}`)?.value ?? 0) : 0
+    const after = workId ? Number(this.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, `cursor:action-owner:${workId}`)?.value ?? 0) : 0
     const same = after ? this.store.all('SELECT text, event_json FROM bot_reminders WHERE bot_id = ? AND work_id = ? AND rowid > ? AND created_at >= ?', botId, workId!, after, this.store.ownerLastWroteAt(botId)).filter(wake => wakeLoopKey(String(wake.text), wake.event_json ? JSON.parse(String(wake.event_json)) : null) === key).length
       : this.store.wakesSetSince(botId, this.store.ownerLastWroteAt(botId), workId).filter((wake) => wakeLoopKey(wake.text, wake.event) === key).length
     if (same >= MAX_SAME_WAKES)
@@ -8618,7 +8618,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private dueAt(botId?: string, forTimer = false): number | undefined {
     const sources: Array<() => number | undefined> = [
       () => {
-        if (!botAsksFirst(this.host.settings?.get())) return undefined
         const row = this.store.get("SELECT MIN(expires_at) AS at FROM bot_actions WHERE status = 'open' AND (? IS NULL OR bot_id = ?)", botId ?? null, botId ?? null)
         return row?.at ? Date.parse(String(row.at)) : undefined
       },
