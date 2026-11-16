@@ -88,5 +88,5 @@
     "owner words / wall answer / live wait": "[Mousse] The owner wrote instead of answering, so the answer is not now: run commands. Carry on without it. Your wait is over.\n\n[Mousse] A work wait you set at 09:00 is due.\n\nWhat you wrote for yourself: Continue comparing the flats with the evidence already read.\n\nTake it into account as you continue. Your last message is your report to the owner, in your own voice: what you did, what you found, what's next, in plain words.",
     "owner words / note and answer / live wait": "[Mousse] The owner wrote instead of answering, so the answer is not now: run commands. Carry on without it. Your wait is over.\n\n[Mousse] A work wait you set at 09:00 is due.\n\nWhat you wrote for yourself: Continue comparing the flats with the evidence already read.\n\nThe owner added while you worked:\n- Read the release notes next.\n\nYour owner answered your question \"Which flat?\": A.\n\nTake it into account as you continue. Your last message is your report to the owner, in your own voice: what you did, what you found, what's next, in plain words."
   },
-  "additionalSourceCommit": "8b847e47c"
+  "additionalSourceCommit": "8b847e47cc7885a5759c14678e74c2d954d92fe3"
 }

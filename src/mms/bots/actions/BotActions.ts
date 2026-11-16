@@ -78,12 +78,15 @@ function containsCredential(value: unknown): boolean {
 /** The review hides named sensitive values without claiming they are withheld from the call. */
 function reviewArguments(value: unknown, schema: unknown): { args: unknown; hasHiddenValues: boolean; hiddenValues: unknown[] } {
   const hiddenValues: unknown[] = []
-  const visit = (item: unknown, shape: any): unknown => {
+  const record = (item: unknown): Record<string, unknown> | undefined => item && typeof item === 'object' && !Array.isArray(item) ? item as Record<string, unknown> : undefined
+  const visit = (item: unknown, schemaNode: unknown): unknown => {
+    const shape = record(schemaNode)
+    const properties = record(shape?.properties)
     if (Array.isArray(item)) return item.map((entry, i) => visit(entry, Array.isArray(shape?.items) ? shape.items[i] : shape?.items))
     if (item && typeof item === 'object') {
       const entries = Object.entries(item).map(([key, entry]) => {
-        if (shape?.properties && Object.hasOwn(shape.properties, key) && hiddenKey(key)) { hiddenValues.push(entry); return [key, ACTION_HIDDEN_VALUE] }
-        return [key, visit(entry, shape?.properties?.[key])]
+        if (properties && Object.hasOwn(properties, key) && hiddenKey(key)) { hiddenValues.push(entry); return [key, ACTION_HIDDEN_VALUE] }
+        return [key, visit(entry, properties && Object.hasOwn(properties, key) ? properties[key] : undefined)]
       })
       const value = Object.fromEntries(entries)
       // Escape every object in the reserved namespace, including an attempted literal wrapper.
