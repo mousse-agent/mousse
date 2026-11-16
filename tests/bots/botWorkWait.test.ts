@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, it } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { BotEngine } from '../../src/mms/bots/activation/BotEngine'
 import { botFixture, chatOf, createBot, finish, flush, runDispatch, start, type BotFixture } from './botFixture'
 import type { BotWakeEvent } from '../../src/shared/bots/personal/wakes'
@@ -346,4 +346,16 @@ it('offers work_wait to work started by a reminder', async () => {
   const reminderWork = f.store.laneActivations(botId, 'run', ['running']).find(r => r.trigger.kind === 'work' && r.trigger.title === 'Reminder release')!
   expect((await start(f, reminderWork.id)).prepared.policy.tools!.allow).toContain('work_wait')
   expect(await wait(reminderWork.id)).toMatchObject({ wakeId: expect.any(String) })
+})
+
+it('rolls back both parking and due delivery if settlement fails during recovery', async () => {
+  const { workId } = await work()
+  const set = await f.bots.tools.wakes!.wait!(botId, workId, { brief: 'Continue', dueAt: new Date(f.clock.now + 5 * 60_000).toISOString() })
+  f.clock.now += 6 * 60_000
+  const fault = vi.spyOn(f.store, 'settleReminder').mockImplementationOnce(() => { throw new Error('injected settlement failure') })
+  try {
+    expect(() => (f.bots as any).park(f.store.activation(workId), 'waiting', ['running'])).toThrow('injected settlement failure')
+    expect(f.store.activation(workId)?.status).toBe('running')
+    expect(f.store.reminder(set.wakeId)?.status).toBe('waiting')
+  } finally { fault.mockRestore() }
 })
