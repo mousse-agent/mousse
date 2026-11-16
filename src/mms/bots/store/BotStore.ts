@@ -888,6 +888,13 @@ export interface BotCountersRow {
 // Completed outcomes also recognize dispatches written before the explicit output marker existed.
 const WORK_TOLD = "(COALESCE(json_extract(d.prompt_json, '$.workTold'), '') IN ('output', 'completed') OR d.outcome IS 'completed')"
 
+/** Only prompt delivery uses confirmation. Existing read/applied markers keep their carried semantics. */
+const unconfirmedDelivery = (table: string, member: 'notes' | 'answers' | 'question'): string => `
+  EXISTS (SELECT 1 FROM bot_dispatches carried, json_each(carried.prompt_json, '$.workDelivery.${member}') item
+    WHERE carried.activation_id = ${table}.activation_id AND item.value = ${table}.id)
+  AND NOT EXISTS (SELECT 1 FROM bot_dispatches d, json_each(d.prompt_json, '$.workDelivery.${member}') item
+    WHERE d.activation_id = ${table}.activation_id AND item.value = ${table}.id AND ${WORK_TOLD})`
+
 type Row = Record<string, unknown>
 type Param = string | number | null
 
@@ -1551,13 +1558,13 @@ export class BotStore {
     return this.escalations({ botId, status: 'open' })
   }
 
-  /** The answered escalation whose continuation has not been confirmed yet. */
+  /** The answered escalation whose continuation has not been applied yet. */
   pendingAnswer(activationId: string): BotEscalationRow | undefined {
     const row = this.get("SELECT * FROM bot_escalations WHERE activation_id = ? AND mode = 'wall' AND status IN ('allowed_bot', 'allowed_once', 'denied') AND applied_at IS NULL ORDER BY created_at DESC, id DESC LIMIT 1", activationId)
     return row ? escalationOf(row) : undefined
   }
 
-  /** Every answered wall of an activation whose continuation has not been confirmed yet, oldest first. */
+  /** Every answered wall of an activation whose continuation has not been applied yet, oldest first. */
   pendingAnswers(activationId: string): BotEscalationRow[] {
     return this.all("SELECT * FROM bot_escalations WHERE activation_id = ? AND mode = 'wall' AND status IN ('allowed_bot', 'allowed_once', 'denied') AND applied_at IS NULL ORDER BY created_at, rowid", activationId).map(escalationOf)
   }
@@ -1955,7 +1962,7 @@ export class BotStore {
   /**
    * Work's answered question went out with dispatch `n`, as `line` in its prompt: read once, and the line kept with the
    * answer, so a forget finds that copy by the question, not by its words (`answer_json.sent`). With read=false,
-   * only the copy is recorded here; confirmed delivery marks it read.
+   * only the copy is recorded here; the carrying dispatch start marks it read.
    */
   markAnswerSent(questionId: string, n: number, line: string, read = true): void {
     this.run("UPDATE bot_questions SET read_at = CASE WHEN ? THEN ? ELSE read_at END, answer_json = json_set(answer_json, '$.sent', json_object('n', ?, 'line', ?)) WHERE id = ? AND read_at IS NULL", read ? 1 : 0, this.now(), n, line, questionId)
@@ -2014,26 +2021,25 @@ export class BotStore {
       if (!dispatch || dispatch.startedAt === null || dispatch.prompt.workTold ||
         (!dispatch.prompt.workDelivery && !dispatch.prompt.workWaitIds?.length && !dispatch.prompt.workActionIds?.length)) return
       this.run("UPDATE bot_dispatches SET prompt_json = json_set(prompt_json, '$.workTold', ?) WHERE activation_id = ? AND n = ?", why, activationId, n)
-      const delivery = dispatch.prompt.workDelivery
-      if (delivery) {
-        for (const id of delivery.answers) this.markApplied(id)
-        this.applyWorkNotes(delivery.notes)
-        if (delivery.question) this.markQuestionsRead([delivery.question])
-      }
     })
   }
 
-  /** Older builds consumed these ids in prepare. Reopen them unless any carrying dispatch was confirmed. */
-  requeueUnconfirmedWorkDelivery(activationId: string): void {
-    this.db.transaction(() => {
-      for (const [table, column, member] of [
-        ['bot_work_notes', 'applied_at', 'notes'], ['bot_escalations', 'applied_at', 'answers'], ['bot_questions', 'read_at', 'question']
-      ]) this.run(`UPDATE ${table} SET ${column} = NULL WHERE activation_id = ? AND ${column} IS NOT NULL
-        AND EXISTS (SELECT 1 FROM bot_dispatches d, json_each(d.prompt_json, '$.workDelivery.${member}') carried
-          WHERE d.activation_id = ${table}.activation_id AND carried.value = ${table}.id AND NOT ${WORK_TOLD})
-        AND NOT EXISTS (SELECT 1 FROM bot_dispatches d, json_each(d.prompt_json, '$.workDelivery.${member}') carried
-          WHERE d.activation_id = ${table}.activation_id AND carried.value = ${table}.id AND ${WORK_TOLD})`, activationId)
-    })
+  /** Pending or carried-but-unconfirmed additions, used only to build the next work prompt. */
+  unreadWorkAnswers(activationId: string): BotEscalationRow[] {
+    return this.all(`SELECT * FROM bot_escalations WHERE activation_id = ? AND mode = 'wall'
+      AND status IN ('allowed_bot', 'allowed_once', 'denied') AND (applied_at IS NULL OR (${unconfirmedDelivery('bot_escalations', 'answers')}))
+      ORDER BY created_at, rowid`, activationId).map(escalationOf)
+  }
+  unreadWorkQuestion(activationId: string): BotQuestionRow | undefined {
+    const row = this.get(`SELECT * FROM bot_questions WHERE activation_id = ? AND lane = 'run'
+      AND status IN ('answered', 'defaulted') AND (read_at IS NULL OR (${unconfirmedDelivery('bot_questions', 'question')}))
+      ORDER BY created_at DESC, rowid DESC LIMIT 1`, activationId)
+    return row ? questionOf(row) : undefined
+  }
+  unreadWorkNotes(activationId: string): ReturnType<BotStore['pendingWorkNotes']> {
+    return this.all(`SELECT id, text, at, from_message FROM bot_work_notes WHERE activation_id = ?
+      AND (applied_at IS NULL OR (${unconfirmedDelivery('bot_work_notes', 'notes')})) ORDER BY id`, activationId)
+      .map(row => ({ id: num(row.id)!, text: row.text as string, at: row.at as string, fromMessage: str(row.from_message) }))
   }
 
   /** How many wakes a bot set since `since`, cancelled ones too (the daily budget). */

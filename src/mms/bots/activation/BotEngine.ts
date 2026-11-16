@@ -1899,7 +1899,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           // takes what the owner added meanwhile.
           // A chat turn takes the owner's messages that joined it while it waited to start (`joinChatTurnInTx`).
           const notes = this.workNotes(row)
-          if (notes && row.trigger.kind !== 'work') this.store.applyWorkNotes(notes.ids)
+          if (notes) this.store.applyWorkNotes(notes.ids)
           const skipped = row.trigger.kind === 'schedule' && row.trigger.missed ? Math.max(0, row.trigger.missed.count - 1) : 0
           const capped = row.trigger.kind === 'schedule' && (row.trigger.missed?.count ?? 0) >= MISSED_OCCURRENCES_CAP
           const late = row.trigger.kind === 'schedule' && row.trigger.missed
@@ -2591,6 +2591,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       )
       if (changed) {
         this.store.run('UPDATE bot_counters SET active_ms = active_ms + ? WHERE activation_id = ?', remainingMs, row.id)
+        // Carried/read is distinct from confirmed: late answers, Forget and compaction keep master's gates.
+        const delivery = dispatch.prompt.workDelivery
+        if (delivery) {
+          for (const id of delivery.answers) this.store.markApplied(id)
+          this.store.applyWorkNotes(delivery.notes)
+          if (delivery.question) this.store.markQuestionsRead([delivery.question])
+        }
       }
       return changed > 0
     })
@@ -5212,8 +5219,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const current = this.store.activation(row.id)
       if (!current || !from.includes(current.status)) return { kind: 'none' }
       const durableWork = current.trigger.kind === 'work'
-      if (durableWork) this.store.requeueUnconfirmedWorkDelivery(current.id)
-      const answers = durableWork ? this.store.pendingAnswers(current.id) : input.answers ?? []
+      const readAtStart = durableWork && Boolean(this.store.workWait(current.id) || this.actions.forWork(current.id))
+      const answers = durableWork ? this.store.unreadWorkAnswers(current.id) : input.answers ?? []
       // One that holds no slot of its lane (it waited, or was paused) goes on only into a free one (`slotFree`); a scheduled
       // run or a reminder's work also leaves the slot kept for the owner's work (`runSlotFree`).
       if (!(ACTIVE_HOLDING as readonly string[]).includes(current.status) && !(current.lane === 'run' ? this.runSlotFree(current) : this.slotFree(row.botId, current.lane, row.id)))
@@ -5253,7 +5260,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       }
       const remaining = effective.budget.maxActiveMs - this.store.counters(row.id).activeMs
       if (remaining < ACTIVE_TIME_CHUNK_MS) {
-        if (!durableWork) for (const answer of answers) this.store.markApplied(answer.id)
+        if (!readAtStart && !input.usageRetry) for (const answer of answers) this.store.markApplied(answer.id)
         // A run has nobody to allow more: it ends with its ask (after this transaction).
         if (current.lane === 'run' && current.status === 'running') return { kind: 'budget' }
         // Work that waited for room and still has none (its grant narrowed meanwhile) waits for the next answer; work
@@ -5279,23 +5286,24 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const n = this.store.nextDispatchN(row.id)
       const neverRan = previous && previousRun && !previousRun.activeAttemptId ? previous.prompt.text : undefined
       // A run takes what the owner added since its last dispatch with whatever continues it.
-      const notes = input.usageRetry ? undefined : this.workNotes(current, input.restart === true)
-      if (notes && !durableWork) this.store.applyWorkNotes(notes.ids)
+      const notes = input.usageRetry ? undefined : this.workNotes(current, input.restart === true, durableWork)
+      if (notes && !readAtStart) this.store.applyWorkNotes(notes.ids)
       // A chat turn that asked a question and then for a permission: its question was never shown, so it asks again now.
       const again = answers.length && current.lane === 'chat' && !input.usageRetry ? this.store.questionsToAskAgain(row.id) : []
       if (again.length) this.store.markQuestionsRead(again.map((question) => question.id))
       // Work's question its owner answered (or that it goes on with its default for) goes with whatever continues it, once
       // (`read_at`).
-      const answered = question?.status === 'answered' || question?.status === 'defaulted' ? this.workAnswerOf(question) : undefined
+      const deliveryQuestion = input.usageRetry ? undefined : durableWork ? this.store.unreadWorkQuestion(current.id) : question
+      const answered = deliveryQuestion?.status === 'answered' || deliveryQuestion?.status === 'defaulted' ? this.workAnswerOf(deliveryQuestion) : undefined
       const workEvents: WorkContinuationEvent[] | undefined = durableWork ? [
         ...actions.map(action => ({ at: (action.status === 'declined' ? action.answered_at : action.ran_at) ?? action.answered_at ?? current.createdAt, text: actionContinuation(action), actionId: action.id })),
         ...waits.map(wait => ({ at: wait.dueAt, text: workWaitInput(wait, clockTime) })),
         ...answers.map(answer => ({ at: answer.answeredAt ?? answer.createdAt, answer })),
         ...(notes?.events ?? []),
-        ...(answered ? [{ at: question!.answeredAt ?? question!.createdAt, text: answered }] : [])
+        ...(answered ? [{ at: deliveryQuestion!.answeredAt ?? deliveryQuestion!.createdAt, text: answered }] : [])
       ].sort((a, b) => Date.parse(a.at) - Date.parse(b.at)) : undefined
       // The line is kept with the answer, so forgetting the answer (or the question) finds this copy (`answer_json.sent`).
-      if (answered) this.store.markAnswerSent(question!.id, n, answered, !durableWork)
+      if (answered) this.store.markAnswerSent(deliveryQuestion!.id, n, answered, !readAtStart)
       // A usage retry repeats the previous text, so only its carried ids may be confirmed by that retry.
       const delivery = input.usageRetry && previous ? {
         ...(previous.prompt.workActionIds ? { workActionIds: previous.prompt.workActionIds } : {}),
@@ -5304,7 +5312,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       } : {
         ...(actions.length ? { workActionIds: actions.map(action => action.id) } : {}),
         ...(waits.length ? { workWaitIds: waits.map(wait => wait.id) } : {}),
-        ...(durableWork ? { workDelivery: { answers: answers.map(answer => answer.id), notes: notes?.ids ?? [], ...(answered ? { question: question!.id } : {}) } } : {})
+        ...(durableWork ? { workDelivery: { answers: answers.map(answer => answer.id), notes: notes?.ids ?? [], ...(answered ? { question: deliveryQuestion!.id } : {}) } } : {})
       }
       const dispatch = {
         activationId: row.id,
@@ -5320,7 +5328,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           : { ...(previous?.runId ? { continuationOfRunId: previous.runId } : {}), ...(uncertain ? { acknowledgeUncertain: true } : {}), ...(input.turnCap ? { turnCap: true } : {}) }
       }
       this.store.insertDispatch(dispatch)
-      if (!durableWork) for (const answer of answers) this.store.markApplied(answer.id)
+      if (!readAtStart && !input.usageRetry) for (const answer of answers) this.store.markApplied(answer.id)
       this.store.setLimits(row.id, limitsOf(effective))
       if (input.restart) this.store.setAutoRestarts(row.id, current.autoRestarts + 1)
       if (input.network) this.store.setOffline(row.id, false)
@@ -6904,7 +6912,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       for (const dispatch of this.store.dispatches(row.id))
         if (dispatch.outcome === 'completed' || (dispatch.runId && runs.getRun(dispatch.runId)?.status === 'completed'))
           this.store.confirmWorkDelivery(row.id, dispatch.n, 'completed')
-      this.store.requeueUnconfirmedWorkDelivery(row.id)
     }
     // Phase 2: unknown calls across the main runs and every consult (all ended after boot recovery).
     this.collectUnknownCalls(row)
@@ -7941,23 +7948,24 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * transaction). A note the last turn took but never reported read may have reached the model already (`offeredNotes`;
    * after a restart, any note: what the process before knew is gone), so it says it may be a repeat.
    */
-  private workNotes(row: BotActivationRow, restart = false): { text: string; ids: number[]; events?: Array<{ at: string; text: string }> } | undefined {
+  private workNotes(row: BotActivationRow, restart = false, redeliver = false): { text: string; ids: number[]; events?: Array<{ at: string; text: string }> } | undefined {
     // A note a live turn took and has not read yet is that turn's until it reads it or hands it back.
     const taken = new Set([...(this.live.get(row.id)?.steering.values() ?? [])].flatMap((entry) => entry.ids))
-    const notes = this.store.pendingWorkNotes(row.id).filter((note) => !taken.has(note.id))
+    const notes = (redeliver ? this.store.unreadWorkNotes(row.id) : this.store.pendingWorkNotes(row.id)).filter((note) => !taken.has(note.id))
     if (!notes.length) return undefined
     const offered = this.offeredNotes.get(row.id)
     const repeat = (id: number): boolean => restart || offered?.has(id) === true
-    const marked = notes.map((note) => `${repeat(note.id) ? '(may be a repeat) ' : ''}${note.text}`)
+    const repeated = notes.map(note => repeat(note.id))
+    const marked = notes.map((note, index) => `${repeated[index] ? '(may be a repeat) ' : ''}${note.text}`)
     const ids = notes.map((note) => note.id)
-    const repeats = ids.some(repeat)
+    const repeats = repeated.some(Boolean)
     this.notOffered(row.id, ids)
     // The owner's messages to a chat turn, whole and in order: each may run to several lines.
     if (row.lane === 'chat') return { text: `The owner also wrote:\n\n${marked.join('\n\n')}${repeats ? `\n\n${CHAT_NOTE_REPEAT_LINE}` : ''}`, ids }
     const lines = marked.map((note) => `- ${note}`)
     return {
       text: `The owner added while you worked:\n${lines.join('\n')}${repeats ? `\n${NOTE_REPEAT_LINE}` : ''}`,
-      events: notes.map((note, index) => ({ at: note.at, text: `The owner added while you worked:\n${lines[index]}${repeat(note.id) ? `\n${NOTE_REPEAT_LINE}` : ''}` })),
+      events: notes.map((note, index) => ({ at: note.at, text: `The owner added while you worked:\n${lines[index]}${repeated[index] ? `\n${NOTE_REPEAT_LINE}` : ''}` })),
       ids
     }
   }

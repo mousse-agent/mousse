@@ -607,8 +607,8 @@ it.each(['restart', 'network', 'usage_retry'] as const)('N2 repeats a wait, note
   await flush()
   const next = await start(f, workId, 2)
   expect(f.store.unreadWorkWaits(workId)).toHaveLength(1)
-  expect(f.store.pendingWorkNotes(workId)).toHaveLength(1)
-  expect(f.store.question(questionId)?.readAt).toBeNull()
+  expect(f.store.unreadWorkNotes(workId)).toHaveLength(1)
+  expect(f.store.unreadWorkQuestion(workId)?.id).toBe(questionId)
   if (failure === 'restart') {
     // Simulate the previous build's eager read markers as well as a fresh interrupted dispatch.
     f.store.run('UPDATE bot_work_notes SET applied_at = ? WHERE activation_id = ?', f.store.now(), workId)
@@ -628,8 +628,8 @@ it.each(['restart', 'network', 'usage_retry'] as const)('N2 repeats a wait, note
   const running = await start(f, workId, retry.n)
   ;(running.prepared as any).modelOutput?.()
   expect(f.store.unreadWorkWaits(workId)).toEqual([])
-  expect(f.store.pendingWorkNotes(workId)).toEqual([])
-  expect(f.store.question(questionId)?.readAt).not.toBeNull()
+  expect(f.store.unreadWorkNotes(workId)).toEqual([])
+  expect(f.store.unreadWorkQuestion(workId)).toBeUndefined()
   await finish(f, running.payload, 'failed', { outcome: { error: 'network_error' } })
   await (f.bots as any).continueWith(workId, [f.store.activation(workId)!.status], { network: true })
   const later = f.store.lastMainDispatch(workId)!.prompt.text
@@ -651,7 +651,7 @@ it('N2 recovers confirmation when the run completed before its dispatch settled'
   await f.bots.reconcileOnStartup()
   await flush()
   expect(f.store.unreadWorkWaits(workId)).toEqual([])
-  expect(f.store.pendingWorkNotes(workId)).toEqual([])
+  expect(f.store.unreadWorkNotes(workId)).toEqual([])
   expect((f.store.dispatch(workId, 2)!.prompt as any).workTold).toBe('completed')
 })
 
@@ -660,7 +660,7 @@ it.each(['restart', 'network'] as const)('N2 keeps a note without any wait histo
   f.bots.tools.work.note(botId, workId, 'Use the ordinary work note.', chat.id)
   await finish(f, turn.payload, 'completed', { text: 'Initial findings.' })
   const next = await start(f, workId, 2)
-  expect(f.store.pendingWorkNotes(workId)).toHaveLength(1)
+  expect(f.store.unreadWorkNotes(workId)).toHaveLength(1)
   if (failure === 'restart') {
     f.runs.markTerminal(next.payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
     f.bots.close()
@@ -675,5 +675,5 @@ it.each(['restart', 'network'] as const)('N2 keeps a note without any wait histo
   expect(retry.prompt.text).toContain('Use the ordinary work note.')
   const receiving = await start(f, workId, retry.n)
   ;(receiving.prepared as any).modelOutput?.()
-  expect(f.store.pendingWorkNotes(workId)).toEqual([])
+  expect(f.store.unreadWorkNotes(workId)).toEqual([])
 })
