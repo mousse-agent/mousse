@@ -503,3 +503,49 @@ it('keeps a delivered wait unread while the run queue has no free slot', async (
   await start(f, workId, 2)
   expect(f.store.unreadWorkWaits(workId)).toEqual([])
 })
+
+// The same prompt builder must keep master's reason and instructions for both histories.
+it.each([
+  ['turn cap', { turnCap: true }, 'You reached the most steps one turn may take; what you did so far is kept.'],
+  ['more room', { moreRoom: true }, 'You have more room now; what you had so far was already sent to the owner.'],
+  ['restart', { restart: true }, 'Mousse restarted while you were working.'],
+  ['reload', { reload: true }, 'Your settings changed.'],
+  ['internet back', { network: true }, 'The internet connection dropped while you were working; it is back now.'],
+  ['usage reset', { usageReset: true }, 'A usage limit stopped you while you were working; it has reset now.'],
+  ['question re-asked', { askAgain: ['Which release?'] }, 'Ask it again with ask_owner if you still need to know.'],
+  ['never ran replay', { restart: true }, 'The original task never reached the provider.'],
+  ['updated report', { afterReport: true }, 'Your last message is your updated report: lead with what changed, in plain words.'],
+  ['permission switched off', { switchCut: true }, 'Your turn stopped; carry on without it and do not ask for it.']
+] as const)('keeps the same %s continuation with a pending note, with or without past waits', async (reason, flags, expected) => {
+  let baseline: string | undefined
+  for (const hasWaited of [false, true]) {
+    const { workId, turn, chat } = await work(`${reason}-${hasWaited}`)
+    if (hasWaited) {
+      await wait(workId)
+      await finish(f, turn.payload, 'completed', { text: '' })
+      f.clock.now += 60 * 60_000
+      await f.bots.deliverDueReminders()
+      await flush()
+      await start(f, workId, 2)
+    }
+    f.bots.tools.work.note(botId, workId, 'Read the release notes next.', chat.id)
+    const row = f.store.activation(workId)!
+    const notes = (f.bots as any).workNotes(row)
+    let answers: ReturnType<typeof f.store.pendingAnswers> = []
+    if (reason === 'question re-asked') {
+      const wall = f.store.db.transaction(() => (f.bots as any).wallInTransaction(workId, ['running'], { dispatchN: f.store.lastMainDispatch(workId)!.n, kind: 'escalate', permission: { tool: 'shell' }, reason: 'Run the check' }))
+      f.store.answerEscalation(wall.escalation.id, 'allowed_bot')
+      answers = f.store.pendingAnswers(workId)
+    }
+    const prompt: string = (f.bots as any).continuationPrompt(row, {
+      ...flags, answers, notes: notes.text,
+      ...(hasWaited ? { workEvents: notes.events } : {})
+    }, reason === 'never ran replay' ? expected : undefined)
+    expect(prompt).toContain(expected)
+    expect(prompt.split('Read the release notes next.')).toHaveLength(2)
+    expect(prompt).not.toContain('Your wait is over.')
+    if (baseline === undefined) baseline = prompt
+    else expect(prompt).toBe(baseline)
+    await f.bots.service.workStop(botId, workId)
+  }
+})
