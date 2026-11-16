@@ -11,7 +11,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { BOT_ASK_REFUSED_TEXT, BotEngine } from '../../src/mms/bots/activation/BotEngine'
 import { CLAUDE_TOPS_UNLISTED, claudeBotTemp, claudeCommandsRefusal, ClaudeLockedGate, claudeLockedOptions, claudeLockedSandbox, claudeLockedTools, claudeOwnStorage, claudeProjectName, holdClaudeBotTemp, removeClaudeBotTemp, type ClaudeLockedTurn } from '../../src/mms/harness/claude/locked'
-import { CODEX_BOT_UNSANDBOXED_REFUSAL, codexBotCommand, codexBotFileChange } from '../../src/mms/harness/vendors/codex/botApprovals'
+import { CODEX_BOT_UNSANDBOXED_REFUSAL, codexBotCommand, codexBotFileChange, codexBotMcpCollisionText } from '../../src/mms/harness/vendors/codex/botApprovals'
 import { CODEX_BOT_PROFILE, codexBotSandbox, codexBotSandboxConfig, codexTurnPolicy } from '../../src/mms/harness/vendors/codex/childPolicy'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 import type { ToolLedger } from '../../src/mms/run/mcp/appTools/types'
@@ -338,6 +338,13 @@ describe('"Run commands" at each runtime\'s own gate (the owner\'s Claude Code a
     // What `CodexProviderService` throws before the thread starts (codexAdapter.test.ts), as the run's error.
     await finish(f, payload, 'failed', { outcome: { error: CODEX_BOT_VERSION_TEXT } })
     expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'error', error: { text: CODEX_BOT_VERSION_TEXT } })
+  })
+
+  it.each(['mousse', 'mousse-relay'])('the bot chat names the conflicting Codex entry %s and asks for a rename', async (name) => {
+    const { payload } = await run('r1')
+    const reason = codexBotMcpCollisionText(name)
+    await finish(f, payload, 'failed', { outcome: { error: reason } })
+    expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'error', error: { text: reason } })
   })
 
   it('Runs on hears, by entry, what an entry says about bots before any work is sent (a Codex not checked for them)', async () => {
