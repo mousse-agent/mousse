@@ -122,3 +122,18 @@ describe('the bot changelog entries', () => {
     }
   })
 })
+
+// Quiet settings and the changelog are read together by old bots.
+it('quiet-hour advice agrees with settings and later entries', () => {
+  const advice = BOT_CHANGELOG.map(entry => entry.text).join('\n')
+  expect(advice).not.toMatch(/there are no quiet hours|never tell your owner you hold anything/i)
+  expect(BOT_CHANGELOG.find(entry => entry.id === 15)!.text).toMatch(/quiet hours now exist/i)
+  for (const entry of BOT_CHANGELOG) for (const gone of entry.gone ?? []) {
+    for (const text of ['Quiet 22:00 to 08:00', ...BOT_CHANGELOG.filter(later => later.id > entry.id).map(later => later.text)]) expect(text).not.toMatch(gone)
+  }
+})
+it('all memory wish instructions route telling wishes to settings', () => {
+  for (const text of [BOT_BASE_INSTRUCTIONS, BOT_MEMORY_PROTOCOL, BOT_MEMORY_TOOL_DEFINITIONS.memory_save.description]) {
+    expect(text).toContain('(how or when to be told: telling_set instead)')
+  }
+})
