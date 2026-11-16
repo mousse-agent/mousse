@@ -48,11 +48,14 @@ function Arguments({ value }: { value: unknown }) {
   useLayoutEffect(() => {
     measure()
     const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(measure)
-    if (region.current) observer?.observe(region.current)
-    return () => observer?.disconnect()
+    const element = region.current
+    if (element) observer?.observe(element)
+    // Details toggle does not bubble; capture it with the native API supported by this element.
+    element?.addEventListener('toggle', measure, true)
+    return () => { observer?.disconnect(); element?.removeEventListener('toggle', measure, true) }
   }, [value])
   return <>
-    <div ref={region} className="bot-action-arguments" role="region" tabIndex={0} aria-label="Complete arguments" onScroll={measure} onToggleCapture={measure}><Value value={value} /></div>
+    <div ref={region} className="bot-action-arguments" role="region" tabIndex={0} aria-label="Complete arguments" onScroll={measure}><Value value={value} /></div>
     {more && <p role="note" className="bot-action-notice"><Shield size={14} aria-hidden />More arguments below</p>}
   </>
 }
