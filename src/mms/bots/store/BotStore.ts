@@ -787,7 +787,14 @@ export interface BotDispatchRow {
   runId: string | null
   threadId: string
   /** `subagent`: what a subagent's turn runs as, on its every dispatch (`BotSubagentSpec`). */
-  prompt: { text: string; subagent?: BotSubagentSpec; workWaitIds?: string[]; workDelivery?: { answers: string[]; notes: number[]; question?: string } }
+  prompt: {
+    text: string
+    subagent?: BotSubagentSpec
+    /** A wait is told only when a dispatch carrying its id has started. */
+    workWaitIds?: string[]
+    /** Work's stored additions carried here; consume them with the dispatch's start, not its intent. */
+    workDelivery?: { answers: string[]; notes: number[]; question?: string }
+  }
   policyDigest: string
   deadlineMs: number | null
   prepaidMs: number | null
@@ -1941,7 +1948,8 @@ export class BotStore {
 
   /**
    * Work's answered question went out with dispatch `n`, as `line` in its prompt: read once, and the line kept with the
-   * answer, so a forget finds that copy by the question, not by its words (`answer_json.sent`).
+   * answer, so a forget finds that copy by the question, not by its words (`answer_json.sent`). With read=false,
+   * only the copy is recorded here; the dispatch start marks it read.
    */
   markAnswerSent(questionId: string, n: number, line: string, read = true): void {
     this.run("UPDATE bot_questions SET read_at = CASE WHEN ? THEN ? ELSE read_at END, answer_json = json_set(answer_json, '$.sent', json_object('n', ?, 'line', ?)) WHERE id = ? AND read_at IS NULL", read ? 1 : 0, this.now(), n, line, questionId)

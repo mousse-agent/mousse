@@ -443,9 +443,9 @@ export const BOT_OFFLINE_POLL_MAX_MS = 60_000
 /** How often a live dispatch's last working moment is written to `bots.db` at most (`checkpoint_at`). */
 export const BOT_CHECKPOINT_EVERY_MS = 1_000
 
-/** What an answer to a limit ask did to the work that waited on it (`settleRoomInTx`). */
 type WorkContinuationEvent = { at: string; text: string } | { at: string; answer: BotEscalationRow }
 
+/** What an answer to a limit ask did to the work that waited on it (`settleRoomInTx`). */
 interface RoomSettled {
   ended: BotActivationRow[]
   continued: string[]
