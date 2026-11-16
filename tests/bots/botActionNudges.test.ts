@@ -215,3 +215,45 @@ it('tells a nudge as an action name only, and backs off a failed write without s
   expect(JSON.stringify(events)).not.toContain('private@example.test')
   expect(JSON.stringify(events)).not.toContain('Private body')
 })
+
+it('suppresses an untold settled nudge even after asks first is switched off', async () => {
+  const t = await held()
+  await tellOriginal()
+  f.bots.markRead(t.botId, f.store.message(t.action.message_id)!.seq)
+  f.bots.setTellingWindows(0)
+  f.clock.now += HOUR
+  await f.bots.deliverDueReminders()
+  expect(t.nudges()).toHaveLength(1)
+  f.host.settings!.get().experimental.botAsksFirst = false
+  f.bots.actions.transition(t.action.id, 'open', 'declined')
+  const events: any[] = []
+  f.bots.events.on('tell', event => { if (event.rows.length) events.push(event) })
+  f.bots.setTellingWindows(1)
+  await f.bots.deliverDueReminders()
+  expect(events).toHaveLength(0)
+})
+
+it('holds a failed nudge delivery if quiet hours start before its retry, even with canWakeMe', async () => {
+  const t = await held(true, { canWake: true })
+  await tellOriginal()
+  f.bots.markRead(t.botId, f.store.message(t.action.message_id)!.seq)
+  f.clock.now += HOUR
+  const fail = () => { throw new Error('banner temporarily unavailable') }
+  f.bots.events.on('tell', fail)
+  await f.bots.deliverDueReminders()
+  f.bots.events.off('tell', fail)
+  expect(t.nudges()).toHaveLength(1)
+  expect(f.store.message(`bm_${t.action.id}_n1`)!.toldAt).toBeNull()
+  const end = f.clock.now + HOUR
+  f.host.quietHoursFor = (_bot, at) => at < end ? { end } as never : undefined
+  f.host.ownerActive = () => true
+  f.clock.now += 60_000
+  const tells: any[] = []
+  f.bots.events.on('tell', event => tells.push(event))
+  await f.bots.deliverDueReminders()
+  expect(tells).toHaveLength(0)
+  expect(f.bots.nextDueAt(t.botId)).toBe(new Date(end).toISOString())
+  f.clock.now = end
+  await f.bots.deliverDueReminders()
+  expect(tells.at(-1)).toMatchObject({ body: 'Wants to send', kind: 'question' })
+})
