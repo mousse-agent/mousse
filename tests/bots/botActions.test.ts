@@ -108,7 +108,7 @@ it('holds once, frees the slot, and Send executes exactly the stored arguments o
 
 // Actors: a second device, changed schema/configuration/grant/device ceiling, restart.
 // Orders: answer before/after turn end, double Send, Send versus Not now, approved/running crash.
-it.each(['digest', 'schema', 'configuration', 'grant', 'device'] as const)('refuses a stale %s without making a call', async (change) => {
+it.each(['digest', 'schema', 'configuration', 'device'] as const)('refuses a stale %s without making a call', async (change) => {
   const t = await setup(true)
   await t.call()
   await finish(f, t.work.payload)
@@ -117,10 +117,6 @@ it.each(['digest', 'schema', 'configuration', 'grant', 'device'] as const)('refu
   if (change === 'digest') answer.digest = 'old-digest'
   if (change === 'schema') t.descriptor.inputSchema = { type: 'object', required: ['extra'] } as never
   if (change === 'configuration') t.server.configDigest = 'changed'
-  if (change === 'grant') {
-    const grant = f.store.activeGrant(t.botId)!
-    f.store.approve(t.botId, grant.digest, grant.manifest)
-  }
   if (change === 'device') f.store.narrowOwnerLimit(t.chatId, 'plan')
   await expect(f.bots.actions.answer(answer)).rejects.toThrow('changed since')
   expect(t.calls).toEqual([])
@@ -1353,4 +1349,29 @@ it.each([true, false])('B3 three declined cards stop changed calls until owner i
   await flush(); runtime = await start(f, t.workId, f.store.lastMainDispatch(t.workId)!.n)
   f.bots.noteWork(t.botId, t.workId, 'Please try again')
   expect(await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'try again' }, toolCallId: 'after-note', signal: new AbortController().signal })).not.toMatchObject({ isError: true })
+})
+
+it.each(['unrelated permission', 'revision only'] as const)('B6 %s preserves an open card and Send executes once', async change => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  if (change === 'unrelated permission') f.bots.narrowGrant(t.botId, m => ({ ...m, appTools: [...m.appTools, 'web_search', 'web_fetch'] }))
+  else { const grant = f.store.activeGrant(t.botId)!; f.store.approve(t.botId, grant.digest, grant.manifest); f.bots.fillMcpAsks() }
+  expect(f.bots.actions.get(a.id)?.status).toBe('open')
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow()
+  expect(t.calls).toEqual([t.args])
+})
+
+it('B6 removal then re-grant of the pair cannot revive its old card', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  const pairs = f.store.activeGrant(t.botId)!.manifest.mcp
+  f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: [] }))
+  expect(f.bots.actions.get(a.id)?.status).toBe('withdrawn')
+  f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: pairs }))
+  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow()
+  expect(f.bots.actions.get(a.id)?.status).toBe('withdrawn')
+  expect(t.calls).toEqual([])
 })
