@@ -4353,7 +4353,7 @@ export class OrchestratorService extends EventEmitter {
       throw new DomainRpcError('device_limit', `The thread runs in ${describePermissionMode(this.storedPermissionMode(threadId))}, more than the device your owner wrote from may run (${describePermissionMode(turnBot.limit)}).`)
     const sender = bot ? botSenderHops(options.actor) : this.withAgentHops(options.actor)
     const letter = bot ? this.botLetter(sender, bot, input.content) : this.agentLetter(sender, input.content)
-    this.assertQueueOpen(threadId)
+    this.assertQueueOpen(threadId)
     if (turnBot) this.assertBotRequestKey('thread_send', options.clientRequestId, options.actor, turnBot)
     // A thread a person keeps in Plan takes the message as a plan turn, whatever mode the sender asked for.
     const mode: 'agent' | 'plan' = this.lastChatModeOf(threadId) === 'plan' ? 'plan' : input.mode
