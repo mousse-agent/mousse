@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { writeProfileSecret } from '../../src/mms/profiles/secrets'
 import { SecretRequests } from '../../src/mms/secrets/SecretRequests'
-import { RETIRED_SECRET_GRACE_MS, SecretVault, secretThreadBusy } from '../../src/mms/secrets/SecretVault'
+import { RETIRED_SECRET_GRACE_MS, SecretCopyRemovalError, SecretVault, secretThreadBusy } from '../../src/mms/secrets/SecretVault'
 import { SECRET_DAY_MS } from '../../src/shared/secretRequests'
 
 const VALUE = 'tok_0123456789abcdef'
@@ -143,6 +143,56 @@ describe('the secrets a thread asked for', () => {
     } finally {
       rmSync(join(outside, '..'), { recursive: true, force: true })
     }
+  })
+
+  // Turns on a runtime that keeps its tools' results hold copies off: [what happens while held, the copies left]
+  const HOLDS: Array<[string, () => void, string[]]> = [
+    ['nothing else', () => {}, []],
+    ['the parent is allowed again (its Claude Code turn)', () => vault.allowCopies('t1', true), []],
+    ['the store changes', () => { writeProfileSecret(home, 'API_TOKEN', 'tok_new_value'); vault.refresh() }, []]
+  ]
+  it.each(HOLDS)('keeps the held threads without copies until the release: %s', async (_what, happen, left) => {
+    await give('t1', 'saved')
+    requests.useSaved('t2', (requests.request('t2', { label: 'API token', reason: 'x', name: 'API_TOKEN' }), requests.list('t2')[0].requestId))
+    expect(copies()).toEqual(['t1/API_TOKEN', 't2/API_TOKEN'])
+    // A subagent t3 of t1 runs on Codex: it holds its own thread and t1.
+    const release = vault.holdCopies(['t3', 't1'])
+    happen()
+    expect(copies()).toEqual([...left, 't2/API_TOKEN'])
+    release()
+    expect(copies()).toEqual(['t1/API_TOKEN', 't2/API_TOKEN'])
+    release()
+    expect(copies()).toEqual(['t1/API_TOKEN', 't2/API_TOKEN'])
+  })
+
+  it('keeps a thread held until every turn holding it has settled, and the holding thread itself loses its copies', async () => {
+    await give('t1', 'saved')
+    const first = vault.holdCopies(['t1'])
+    const second = vault.holdCopies(['t9', 't1'])
+    first()
+    expect(copies()).toEqual([])
+    second()
+    // t1 held itself (its own turn ran on Codex): it has no copy until its next Claude Code turn allows one.
+    expect(copies()).toEqual([])
+    vault.allowCopies('t1', true)
+    expect(copies()).toEqual(['t1/API_TOKEN'])
+  })
+
+  it('refuses the hold, and holds nothing, when a copy cannot be removed', async () => {
+    let locked = false
+    vault = new SecretVault({ profileRoot: home, threadAlive: (id) => alive.has(id), now: () => now, removePath: (path) => { if (locked) throw new Error('EBUSY: resource busy or locked'); rmSync(path, { recursive: true, force: true }) } })
+    requests = new SecretRequests(vault, () => now)
+    vault.allowCopies('t1', true)
+    await give('t1', 'saved')
+    locked = true
+    expect(() => vault.holdCopies(['t2', 't1'])).toThrow(SecretCopyRemovalError)
+    // The copy is still there, and nothing stays held: the failed hold released itself.
+    expect(existsSync(fileOf('t1'))).toBe(true)
+    locked = false
+    const release = vault.holdCopies(['t2', 't1'])
+    expect(existsSync(fileOf('t1'))).toBe(false)
+    release()
+    expect(readFileSync(fileOf('t1'), 'utf8')).toBe(VALUE)
   })
 
   it('keeps the exact value in the copy: line breaks, spaces and other scripts', async () => {

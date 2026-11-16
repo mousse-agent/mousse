@@ -41,6 +41,14 @@ interface RetiredSecrets {
   seen: Map<string, number>
 }
 
+/** A readable copy of a thread's secret could not be removed before a turn on a runtime that keeps its tools' results. */
+export class SecretCopyRemovalError extends Error {
+  constructor(readonly path: string) {
+    super(`This turn did not start: Mousse could not remove a readable copy of this thread's secrets (${path}), and this runtime keeps what its commands print. Close whatever has the file open, then try again.`)
+    this.name = 'SecretCopyRemovalError'
+  }
+}
+
 /**
  * Whether a thread has a turn running, in this process or in the run engine. A lookup that fails (a run conflict) counts
  * as running: masking a removed value a little longer is safe, and a throw here would break every masker of the thread.
@@ -70,6 +78,8 @@ export interface SecretVaultOptions {
   /** Whether the thread has a turn or run going: a value removed or changed meanwhile still masks it until it settles. */
   threadBusy?(threadId: string): boolean
   now?(): number
+  /** Removes a file or folder (default `rmSync`, recursive); tests make it fail as a locked file would. */
+  removePath?(path: string): void
   /** The store changed (a secret added, used, deleted or expired). */
   changed?(): void
 }
@@ -97,6 +107,12 @@ export class SecretVault {
    * get no copy and use secret_run. Kept in memory: after a restart no thread has copies until its next turn starts.
    */
   private readonly copyThreads = new Set<string>()
+  /**
+   * Threads whose copies stay off whatever `copyThreads` says, and how many turns hold them so: a turn on a runtime
+   * that keeps its tools' results holds its own thread and every thread above it until it settles, so a parent's
+   * Claude Code turn cannot bring a copy back while a subagent that may have been handed its path still runs.
+   */
+  private readonly holds = new Map<string, number>()
   private readonly values: ReturnType<typeof createProfileSecretAdapter>
 
   constructor(private readonly options: SecretVaultOptions) {
@@ -176,6 +192,37 @@ export class SecretVault {
     else this.copyThreads.delete(threadId)
     // Removing is checked every time: a copy left by an earlier daemon is gone before the turn runs.
     if (!allowed || !had) this.syncFiles()
+  }
+
+  /**
+   * As a turn on a runtime that keeps its own tools' results starts (Codex, an ACP agent): its thread loses its copies
+   * until a later Claude Code turn, and it and every thread above it (`threadIds`, its own first) keep none until the
+   * returned release is called, when the turn has settled. Fails closed: when a copy cannot be removed (a locked file,
+   * a permission error) the hold is dropped and this throws, and the turn must not start.
+   */
+  holdCopies(threadIds: readonly string[]): () => void {
+    const [own] = threadIds
+    if (own) this.copyThreads.delete(own)
+    for (const id of threadIds) this.holds.set(id, (this.holds.get(id) ?? 0) + 1)
+    let released = false
+    const release = (): void => {
+      if (released) return
+      released = true
+      for (const id of threadIds) {
+        const left = (this.holds.get(id) ?? 1) - 1
+        if (left > 0) this.holds.set(id, left)
+        else this.holds.delete(id)
+      }
+      this.syncFiles()
+    }
+    this.syncFiles()
+    // Checked on disk, not taken from the sync: a removal that failed must not let the turn start.
+    const left = threadIds.filter((id) => FOLDER_ID.test(id) && existsSync(join(this.filesRoot, id)) && (this.remove(join(this.filesRoot, id)), existsSync(join(this.filesRoot, id))))
+    if (left.length) {
+      release()
+      throw new SecretCopyRemovalError(join(this.filesRoot, left[0]!))
+    }
+    return release
   }
 
   /** The private file that holds the secret for the thread's agents to read; undefined when the thread may not use it. */
@@ -342,6 +389,16 @@ export class SecretVault {
     this.didChange()
   }
 
+  /** Removes a file or folder; a failure is left to the caller to find on disk (`holdCopies` checks). */
+  private remove(path: string): void {
+    try {
+      if (this.options.removePath) this.options.removePath(path)
+      else rmSync(path, { recursive: true, force: true })
+    } catch {
+      // A locked file or a permission error: what was not removed is still there, and that is what is checked.
+    }
+  }
+
   private didChange(): void {
     // A thread whose turn runs keeps masking every value it had: output still on its way may hold one just removed.
     const now = this.now()
@@ -366,7 +423,7 @@ export class SecretVault {
     try {
       const wanted = new Map<string, Map<string, string>>()
       for (const [name, entry] of Object.entries(this.readMeta())) {
-        const threads = entry.threads.filter((threadId) => FOLDER_ID.test(threadId) && this.copyThreads.has(threadId) && this.options.threadAlive(threadId))
+        const threads = entry.threads.filter((threadId) => FOLDER_ID.test(threadId) && this.copyThreads.has(threadId) && !this.holds.has(threadId) && this.options.threadAlive(threadId))
         const value = threads.length ? this.value(name) : undefined
         if (!value) continue
         for (const threadId of threads) {
@@ -383,11 +440,11 @@ export class SecretVault {
           // Anything but a real folder (a file, a link) where a thread's folder goes is removed, and made again below:
           // a copy is never written through a link to somewhere else.
           if (!files || !lstatSync(path).isDirectory()) {
-            rmSync(path, { recursive: true, force: true })
+            this.remove(path)
             continue
           }
           for (const file of readdirSync(path)) {
-            if (!files.has(file) || !lstatSync(join(path, file)).isFile()) rmSync(join(path, file), { recursive: true, force: true })
+            if (!files.has(file) || !lstatSync(join(path, file)).isFile()) this.remove(join(path, file))
           }
         }
       }

@@ -1,7 +1,7 @@
 /**
  * Live check (#595): Codex keeps its own commands' output in its session files (`$CODEX_HOME/sessions`), unmasked, so a
  * thread whose turn runs on Codex gets no readable copy of its secrets: the turn starts with them removed
- * (`SecretVault.allowCopies(thread, false)`; tests/secrets/secretRequestNoLeak.test.ts checks that the orchestrator does
+ * (`SecretVault.holdCopies`; tests/secrets/secretRequestNoLeak.test.ts checks that the orchestrator does
  * this as a turn starts) and its agent uses secret_run, whose output Mousse masks. Here the real `codex exec`, in a
  * throwaway CODEX_HOME against a fake Responses endpoint in this process, is made to read the copy's path anyway; its
  * session files and the model's requests must not hold the value. The control, with the copy left in place, shows they
@@ -95,7 +95,7 @@ describe.skipIf(!live)("a secret's copy on a thread whose turn runs on Codex", (
     requests.answer('t1', requests.list('t1')[0]!.requestId, SECRET, 'day')
     await asked
     // What a turn on Codex starts with: its thread's copies removed.
-    if (!copies) vault.allowCopies('t1', false)
+    if (!copies) vault.holdCopies(['t1'])
     requests.dispose()
     return join(profileRoot, 'secrets', 'threads', 't1', 'GH_TOKEN')
   }
