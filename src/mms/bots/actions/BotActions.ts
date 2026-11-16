@@ -26,13 +26,17 @@ export function maskedActionData(value: unknown, limit = 32_000): unknown {
 }
 /** Defense for older rows: an echoed hidden argument must not outlive executable storage. */
 export function removeHiddenArguments(result: ToolOutcome, args: unknown, schema: unknown): ToolOutcome {
-  const hidden = new Map<string, boolean>()
+  const hidden = new Map<string, { left: boolean; right: boolean }>()
   const collect = (original: unknown): void => {
     if (typeof original === 'string' || typeof original === 'number') {
       const value = String(original)
       if (value.length >= 4) {
-        for (const variant of typeof original === 'string' ? [value, JSON.stringify(original).slice(1, -1)] : [value])
-          hidden.set(variant, hidden.get(variant) === false ? false : value.length <= 8)
+        const left = value.length <= 8 && /[A-Za-z0-9_]/.test(value[0]!)
+        const right = value.length <= 8 && /[A-Za-z0-9_]/.test(value.at(-1)!)
+        for (const variant of typeof original === 'string' ? [value, JSON.stringify(original).slice(1, -1)] : [value]) {
+          const existing = hidden.get(variant)
+          hidden.set(variant, { left: left && (existing?.left ?? true), right: right && (existing?.right ?? true) })
+        }
       }
       return
     }
@@ -42,7 +46,7 @@ export function removeHiddenArguments(result: ToolOutcome, args: unknown, schema
   reviewArguments(args, schema).hiddenValues.forEach(collect)
   const pattern = [...hidden].sort(([a], [b]) => b.length - a.length).map(([value, bounded]) => {
     const literal = value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    return bounded ? `(?<![\\p{L}\\p{N}_])${literal}(?![\\p{L}\\p{N}_])` : literal
+    return `${bounded.left ? '(?<![A-Za-z0-9_])' : ''}${literal}${bounded.right ? '(?![A-Za-z0-9_])' : ''}`
   }).join('|')
   const text = pattern ? result.text.replace(new RegExp(pattern, 'gu'), () => '[held back: looks like a secret]') : result.text
   return { ...result, text }
