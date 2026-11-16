@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync } from 'node:fs'
+import { createBotMemoryAdmin } from '../../src/mms/bots/memory/admin'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { afterEach, expect, it, vi } from 'vitest'
 import { remoteBotMethods } from '../../src/mms/bridge/remote/RemoteBots'
 import { setDiagSink } from '../../src/mms/log/diag'
@@ -1568,4 +1569,23 @@ it.each(['stop', 'expiry', 'forget'] as const)('R2-6 existing rows still settle 
     memory.forget(t.botId, { refs: [`j${seq}`], by: 'owner_ui' })
   }
   expect(f.bots.actions.get(a.id)).toMatchObject({ status: path === 'expiry' ? 'expired' : 'withdrawn', exec_args: null })
+})
+
+
+it.each(['stop', 'complete', 'purge'] as const)('R2-7 action cursors stay out of export and disappear on %s', async end => {
+  const t = await setup(true)
+  f.bots.noteWork(t.botId, t.workId, 'Owner note')
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' }); await flush()
+  const keys = [`cursor:action-note:${t.workId}`, `cursor:action-owner:${t.workId}`]
+  expect(f.store.all('SELECT key FROM bot_memory_state WHERE key IN (?, ?)', ...keys)).toHaveLength(2)
+  const memory = new BotMemoryStore({ db: f.store.db })
+  const exported = await createBotMemoryAdmin({ store: memory }).export(t.botId, f.base)
+  const text = exported.files.map(file => readFileSync(file, 'utf8')).join(' ')
+  for (const key of keys) expect(text).not.toContain(key)
+  if (end === 'purge') memory.purge(t.botId)
+  else if (end === 'stop') await f.bots.stopWork(t.botId, t.workId)
+  else { const runtime = await start(f, t.workId, f.store.lastMainDispatch(t.workId)!.n); (runtime.prepared as any).modelOutput?.(); await finish(f, runtime.payload) }
+  expect(f.store.all('SELECT key FROM bot_memory_state WHERE key IN (?, ?)', ...keys)).toEqual([])
 })
