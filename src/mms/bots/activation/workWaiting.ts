@@ -18,6 +18,7 @@ export interface WorkWaitFacts {
 }
 interface WaitRule {
   /** Stored end reasons, including the marker written by the wake source before a slot is free. */
+  rank: number
   reasons: readonly string[]
   allows(row: Pick<BotActivationRow, 'lane' | 'trigger'>): boolean
   ready(row: BotActivationRow, facts: WorkWaitFacts): boolean
@@ -42,7 +43,7 @@ const nothingToWaitFor = (title: string) => `I stopped "${title}": nothing could
 /** One row per reason. Wake sources keep their existing transactions, messages and stored markers. */
 export const WORK_WAIT_RULES = {
   waiting: {
-    reasons: ['waiting', 'wait_ready'], allows: workOnly,
+    rank: 1, reasons: ['waiting', 'wait_ready'], allows: workOnly,
     ready: (row, _facts) => row.endReason === 'wait_ready',
     stranded: (row, facts) => !facts.timerExists(row),
     endReason: 'wait_gone', endLine: nothingToWaitFor, resume: 'continue',
@@ -58,7 +59,7 @@ export const WORK_WAIT_RULES = {
     clearLiveChip: true, republishQuestion: false
   },
   question: {
-    reasons: ['question', 'question_answered'], allows: workOnly,
+    rank: 0, reasons: ['question', 'question_answered'], allows: workOnly,
     ready: (row, _facts) => row.endReason === 'question_answered',
     stranded: (row, facts) => !facts.questionExists(row),
     endReason: 'question_gone', endLine: questionGoneText, resume: 'continue', continuation: (_row, _facts) => ({ questionAnswered: true }), checkBeforeResume: true,
@@ -74,7 +75,7 @@ export const WORK_WAIT_RULES = {
     clearLiveChip: false, republishQuestion: true
   },
   budget_exhausted: {
-    reasons: ['budget_exhausted', 'room_allowed'], allows: workOnly,
+    rank: 0, reasons: ['budget_exhausted', 'room_allowed'], allows: workOnly,
     ready: (row, _facts) => row.endReason === 'room_allowed',
     stranded: (row, facts) => row.endReason === 'budget_exhausted' && facts.roomStranded(row),
     endReason: 'nothing_to_wait_for', endLine: nothingToWaitFor, resume: 'continue', continuation: (_row, _facts) => ({ moreRoom: true }), checkBeforeResume: false,
@@ -88,7 +89,7 @@ export const WORK_WAIT_RULES = {
     clearLiveChip: false, republishQuestion: false
   },
   usage_limit: {
-    reasons: ['usage_limit'], allows: workOnly,
+    rank: 0, reasons: ['usage_limit'], allows: workOnly,
     ready: (row, facts) => facts.usageResumable(row),
     stranded: (row, facts) => facts.usageStranded(row),
     endReason: 'nothing_to_wait_for', endLine: nothingToWaitFor, resume: 'usageReset', continuation: (_row, _facts) => ({ usageReset: true }), checkBeforeResume: false,

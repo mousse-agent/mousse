@@ -1769,7 +1769,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (!stuck.has(row.botId)) stuck.set(row.botId, this.store.registry(row.botId)?.error?.code === 'bot_journal_failed')
       return !stuck.get(row.botId) && this.runSlotFree(row)
     }
-    const waiting = this.store.activationsWith(['blocked']).filter((row) => row.lane === 'run' && !tried.has(row.id) && workWaits(row) && this.allRunsEnded(row) && this.mayGoOn(row)).sort((a, b) => Number(a.endReason === 'wait_ready') - Number(b.endReason === 'wait_ready') || runOrder(a, b))
+    const waiting = this.store.activationsWith(['blocked']).filter((row) => row.lane === 'run' && !tried.has(row.id) && workWaits(row) && this.allRunsEnded(row) && this.mayGoOn(row)).sort((a, b) => (workWaitRule(a)?.rank ?? 0) - (workWaitRule(b)?.rank ?? 0) || runOrder(a, b))
     const resume = waiting.find(may)
     if (resume) return { resume }
     const queued = this.store.activationsWith(['queued']).filter((row) => row.lane === 'run').sort(runOrder).find(may)
@@ -2146,8 +2146,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /** Cleanup after parking commits. The source keeps its messages and turn-abort order. */
-  private releaseParked(row: BotActivationRow, reason: WorkWaitReason): void {
-    const rule = WORK_WAIT_RULES[reason]
+  private releaseParked(row: BotActivationRow, reason: WorkWaitReason | NonNullable<ReturnType<typeof workWaitRule>>): void {
+    const rule = typeof reason === 'string' ? WORK_WAIT_RULES[reason] : reason
     this.letGoOfBrowser(row)
     this.packs.delete(row.id)
     if (rule.clearLiveChip) this.clearLiveChip(row)
@@ -4917,7 +4917,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.lateTexts.delete(key)
     }
     this.askedIn.delete(row.id)
-    this.releaseParked(row, row.endReason === 'waiting' || row.endReason === 'wait_ready' ? 'waiting' : 'question')
+    this.releaseParked(row, workWaitRule(row)!)
   }
 
   /**
