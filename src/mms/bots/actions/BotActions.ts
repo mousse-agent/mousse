@@ -46,6 +46,12 @@ function boundedActionResult(result: ToolOutcome): ToolOutcome {
   }
   return build(low)
 }
+/** Check original strings before any key-based hiding, including object keys and nested containers. */
+function containsCredential(value: unknown): boolean {
+  if (typeof value === 'string') return maskMemoryCredentials(value) !== value
+  if (Array.isArray(value)) return value.some(containsCredential)
+  return Boolean(value && typeof value === 'object' && Object.entries(value).some(([key, item]) => containsCredential(key) || containsCredential(item)))
+}
 export interface ActionRow {
   id: string; call_key: string; bot_id: string; activation_id: string; status: string
   exec_args: string | null; args_digest: string; binding_json: string; target_json: string
@@ -84,6 +90,7 @@ export class BotActions {
     if (existing) return { text: 'This call is held for your owner. End your turn now.' }
     const binding = this.host.binding(row, tool)
     if (!binding) return { text: 'This tool changed. Carry on without it.', isError: true }
+    if (containsCredential(args)) return { text: 'This contains something that looks like a secret. It is never sent through a tool this way. Send it without that value.', isError: true }
     const exact = JSON.stringify(args)
     if (actionDigest(JSON.parse(exact)) !== actionDigest(maskedActionData(args, Infinity)))
       return { text: 'This call contains hidden secret values. Nothing was held or sent. Remove the secret before asking the owner to review it.', isError: true }
