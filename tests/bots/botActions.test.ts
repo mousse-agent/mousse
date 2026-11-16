@@ -236,3 +236,18 @@ it('switch off refuses the development setter', async () => {
   expect(() => f.bots.setAsksFirstForDevelopment(t.botId, 'mail', 'send')).toThrow('off')
   expect(f.store.activeGrant(t.botId)!.manifest.mcp[0].level).toBeUndefined()
 })
+it('settlement persists readiness with the result, even when no wake callback runs', async () => {
+  const t = await setup(true)
+  await t.call()
+  await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  // The write commits; imagine shutdown before the post-commit pump.
+  f.bots.actions.transition(a.id, 'open', 'declined', { text: 'Your owner chose not to send this.' })
+  expect(f.store.activation(t.workId)).toMatchObject({ status: 'blocked', endReason: 'approval_answered' })
+  f.bots.close()
+  f.bots = new BotEngine(f.host)
+  await f.bots.reconcileOnStartup()
+  await flush()
+  expect(f.store.lastMainDispatch(t.workId)?.prompt.text).toContain('chose not to send')
+  expect(t.calls).toEqual([])
+})

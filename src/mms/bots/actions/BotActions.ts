@@ -65,12 +65,22 @@ export class BotActions {
   }
   /** The only status writer. Settlement clears executable arguments in the same statement. */
   transition(id: string, from: string, to: string, result?: ToolOutcome): boolean {
-    return this.host.store.run(`UPDATE bot_actions SET status = ?, exec_args = CASE WHEN ? THEN exec_args ELSE NULL END,
-      result_json = ?, answered_at = CASE WHEN ? = 'open' THEN ? ELSE answered_at END,
-      ran_at = CASE WHEN ? = 'running' THEN ? ELSE ran_at END WHERE id = ? AND status = ?`,
-    to, pending.has(to) ? 1 : 0, result ? JSON.stringify(maskedActionData(result)) : null,
-    from, this.host.store.now(), to, this.host.store.now(), id, from) > 0
+    return this.host.store.db.transaction(() => {
+      const moved = this.host.store.run(`UPDATE bot_actions SET status = ?, exec_args = CASE WHEN ? THEN exec_args ELSE NULL END,
+        result_json = ?, answered_at = CASE WHEN ? = 'open' THEN ? ELSE answered_at END,
+        ran_at = CASE WHEN ? = 'running' THEN ? ELSE ran_at END WHERE id = ? AND status = ?`,
+      to, pending.has(to) ? 1 : 0, result ? JSON.stringify(maskedActionData(result)) : null,
+      from, this.host.store.now(), to, this.host.store.now(), id, from) > 0
+      if (moved && !pending.has(to)) {
+        const action = this.get(id)!
+        const row = this.host.store.activation(action.activation_id)
+        this.host.store.run('UPDATE bot_messages SET text = ? WHERE id = ?', to === 'done' ? `Sent · ${this.host.store.now().slice(11, 16)}` : to === 'uncertain' ? "Couldn't tell if it went through" : 'Not sent', action.message_id)
+        if (row?.endReason === 'approval') this.host.store.moveActivation(row.id, ['blocked'], 'blocked', { endReason: 'approval_answered' })
+      }
+      return moved
+    })
   }
+
   private valid(action: ActionRow): BotActivationRow | undefined {
     const row = this.host.store.activation(action.activation_id)
     if (!row || !action.exec_args || actionDigest(JSON.parse(action.exec_args)) !== action.args_digest || Date.parse(action.expires_at) <= Date.parse(this.host.store.now())) return undefined
@@ -116,13 +126,8 @@ export class BotActions {
     this.finish(action)
   }
   private finish(action: ActionRow): void {
-    const settled = this.get(action.id)!
     const row = this.host.store.activation(action.activation_id)
     if (!row) return
-    this.host.store.db.transaction(() => {
-      this.host.store.run('UPDATE bot_messages SET text = ? WHERE id = ?', settled.status === 'done' ? `Sent · ${this.host.store.now().slice(11, 16)}` : settled.status === 'uncertain' ? "Couldn't tell if it went through" : 'Not sent', action.message_id)
-      if (row.endReason === 'approval') this.host.store.moveActivation(row.id, ['blocked'], 'blocked', { endReason: 'approval_answered' })
-    })
     this.host.settled(row)
   }
   async reconcile(): Promise<void> {
