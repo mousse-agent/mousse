@@ -625,3 +625,16 @@ it('B5 reconciliation skips a call already running in this process', async () =>
   expect(f.bots.actions.forWork(t.workId)?.status).toBe('done')
   expect(f.bots.actions.forWork(t.workId)?.result_json).toContain('delivered')
 })
+it.each(['credential', 'oversized'] as const)('B-recovery refuses a previously approved %s payload under the current review policy', async kind => {
+  const t = await setup(true)
+  await t.call()
+  await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  const args = { ...t.args, body: kind === 'credential' ? `sk-${'Z'.repeat(30)}` : 'A'.repeat(256_001) }
+  const { actionDigest } = await import('../../src/mms/bots/actions/BotActions')
+  f.store.run('UPDATE bot_actions SET exec_args = ?, args_digest = ? WHERE id = ?', JSON.stringify(args), actionDigest(args), a.id)
+  f.bots.actions.transition(a.id, 'open', 'approved')
+  await f.bots.actions.reconcile()
+  expect(t.calls).toEqual([])
+  expect(f.bots.actions.forWork(t.workId)).toMatchObject({ status: 'withdrawn', exec_args: null })
+})
