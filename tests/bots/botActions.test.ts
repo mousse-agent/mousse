@@ -676,3 +676,18 @@ it('B-schema shows invented sensitive keys at every depth, including metadata ar
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
   expect(t.calls).toEqual([t.args])
 })
+
+it.each(['send', 'not_now'] as const)('B-device refuses truncated-card Send but allows %s on a device', async answer => {
+  const t = await setup(true)
+  t.args.body = 'visible email text '.repeat(5000)
+  await t.call()
+  const a = f.bots.actions.forWork(t.workId)!
+  const method = remoteBotMethods({ bots: () => f.bots.service, deviceLimit: () => 'full' }).find(m => m.method === 'bots.actions.answer')!
+  const params = method.validate!({ botId: t.botId, actionId: a.id, digest: a.args_digest, answer })
+  const result = method.handle(params, { caller: { node: 'phone', user: 'owner' } } as never)
+  if (answer === 'send') {
+    await expect(result).rejects.toThrow('Open it on the computer to send')
+    expect(f.bots.actions.forWork(t.workId)?.status).toBe('open')
+  } else expect(await result).toMatchObject({ status: 'declined' })
+  expect(t.calls).toEqual([])
+})
