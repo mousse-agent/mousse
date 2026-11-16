@@ -84,7 +84,7 @@ export function BotActionCard({ card, botId, botName, messageId }: { card: BotAc
   }
   const previous = card.previous
   const argumentsView = <>
-    <Arguments value={card.args} />
+    {!card.tooLarge && <Arguments value={card.args} />}
     {card.note && <blockquote className="bot-action-note" aria-label="Bot note">{actionText(botName).replace(/\s+/g, " ")} says: <span>{actionText(card.note).replace(/\s+/g, " ")}</span></blockquote>}
   </>
   return <section className="bot-action-card bot-ask-replies" aria-label="Action to review">
@@ -94,8 +94,8 @@ export function BotActionCard({ card, botId, botName, messageId }: { card: BotAc
     {actionStatus(card) && <p role="status" className="bot-question-settled" data-find-text data-message-id={messageId} data-part-index="0">{actionStatus(card)}</p>}
     {card.status === 'open' && <>
       {previous && <p role="note" className="bot-action-notice"><Shield size={14} aria-hidden />{actionText(botName)} {previous.status === 'done' ? 'already sent exactly this' : previous.status === 'failed' ? 'already tried exactly this; the tool reported an error' : "already tried exactly this and couldn't tell if it went through"} at {botGroupTime(previous.at)}</p>}
-      {card.hasHiddenValues && <p role="note" className="bot-action-notice"><Shield size={14} aria-hidden />Hidden values will be sent: {card.hiddenPaths.map((path) => actionText(path.replaceAll('.', ' → '))).join(', ')}</p>}
-      {card.tooLarge && <p role="note" className="bot-action-notice"><Shield size={14} aria-hidden />This is too large to send from here. Use the computer to review and send it.</p>}
+      {card.hasHiddenValues && <p role="note" className="bot-action-notice"><Shield size={14} aria-hidden />Hidden values will be sent{card.hiddenPaths.length ? ': ' : ''}{card.hiddenPaths.map((path) => actionText(path.replaceAll('.', ' → '))).join(', ')}</p>}
+      {card.tooLarge && <p role="note" className="bot-action-notice"><Shield size={14} aria-hidden />This action is too large to review on this device. Use the computer to review and send it.</p>}
       {changed && <p role="status" className="bot-action-notice"><Shield size={14} aria-hidden />This changed since you saw it</p>}
       {error && <p role="alert" className="bot-action-notice"><Shield size={14} aria-hidden />{error}</p>}
       <div className="bot-ask-buttons" role="group" aria-label="Answer this action">
