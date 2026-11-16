@@ -4931,6 +4931,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     if (workWaits(row)) {
       if (workWaitRule(row) === WORK_WAIT_RULES.approval) {
+        if (row.trigger.kind === 'schedule' && text !== undefined) this.store.moveActivation(row.id, ['blocked'], 'blocked', { result: text })
         if (main?.endedAt) { this.askedIn.delete(row.id); this.releaseParked(row, 'approval') }
         return
       }
@@ -9077,8 +9078,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (row.status === 'running' || (row.trigger.kind === 'schedule' && row.trigger.completed)) return false
     if (row.trigger.kind !== 'schedule' || !this.removedSchedules.has(this.scheduleKey(row.botId, row.trigger.scheduleId))) return false
     if (ENDED_ACTIVATION_STATUSES.has(row.status)) return false
+    const approval = workWaits(row) && workWaitRule(row) === WORK_WAIT_RULES.approval
     this.store.db.transaction(() => {
-      if (!this.store.moveActivation(row.id, [row.status], 'cancelled', { endReason: 'schedule_removed' })) return
+      if (!this.store.moveActivation(row.id, [row.status], approval ? 'done' : 'cancelled', { endReason: 'schedule_removed' })) return
       this.store.closeEscalations(row.id, 'cancelled')
       const runs = this.host.runs()
       for (const dispatch of this.store.dispatches(row.id)) {
@@ -9087,7 +9089,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       }
       this.journalEnd(row, 'schedule_removed')
       const ended = this.store.activation(row.id)!
-      this.store.db.afterCommit(() => this.afterEnd(ended))
+      this.store.db.afterCommit(() => {
+        if (approval) void this.advance(row.id, row.result ?? undefined, { expectText: false })
+        else this.afterEnd(ended)
+      })
     })
     this.usageWaits.delete(row.id)
     return true

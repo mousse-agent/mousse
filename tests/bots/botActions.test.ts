@@ -334,7 +334,7 @@ it('removing a parked schedule withdraws its card in the ending transaction', as
   await finish(f, t.run.payload)
   f.bots.removeSchedule(t.botId, t.schedule.scheduleId)
   expect(f.bots.actions.forWork(t.id)).toMatchObject({ status: 'withdrawn', exec_args: null })
-  expect(f.store.activation(t.id)?.status).toBe('cancelled')
+  expect(f.store.activation(t.id)?.status).toBe('done')
 })
 it('Not now refuses the identical call in the next occurrence until the owner writes', async () => {
   const t = await scheduledCall()
@@ -382,7 +382,7 @@ it('removing a parked schedule delivers its last words once without a card', asy
 })
 it.each(['needs_you', 'look', 'fyi', 'every'] as const)('a scheduled approval is told at least soon at Tell me %s', async tellMe => {
   const t = await scheduledCall()
-  f.book.setTelling(t.botId, t.schedule.scheduleId, { tellMe })
+  f.book.setTelling(t.botId, { scheduleId: t.schedule.scheduleId, tellMe })
   await t.call()
   const a = f.bots.actions.forWork(t.id)!
   expect(f.store.message(a.message_id)?.tell).toBe('soon')
