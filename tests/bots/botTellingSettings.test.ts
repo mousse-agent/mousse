@@ -144,3 +144,67 @@ it.each(['off', { from: '23:00', to: '06:00' }] as const)('keeps bot quiet hours
   reopened.set({ notifications: { ...lateWindow.notifications, threadCompletionSound: !lateWindow.notifications.threadCompletionSound } })
   expect(reopened.get().notifications.quietHours).toEqual(expected)
 })
+
+it('the About hours and the quiet-hours reader agree in the owner device zone', async () => {
+  const { OwnerQuietHours } = await import('../../src/mms/notifications/OwnerQuietHours')
+  const f = botFixture(); fixtures.push(f)
+  f.host.settings = new SettingsStore(MousseConfigStore.load(join(f.base, 'settings-home')))
+  const q = new OwnerQuietHours(() => f.host.settings!.get().notifications.quietHours, () => f.clock.now, () => 'UTC')
+  f.clock.now = Date.parse('2026-11-07T20:00:00Z')
+  q.report(f.clock.now, 'Asia/Kolkata')
+  const { botId } = await createBot(f)
+  const turn = await f.bots.enqueueChat(botId, 'chat:zone', 'Quiet at night')
+  f.bots.setTelling(botId, turn.id, { quietHours: { from: '22:00', to: '07:00' } })
+  const detail = f.bots.chat.detail(f.bots.get(botId).published!, f.clock.now)
+  expect(detail.telling).toBe('Quiet 22:00 to 07:00')
+  expect(detail.tellingSettings?.quietHours).toEqual(f.host.settings.get().notifications.quietHours)
+  expect(q.ownerZone()).toBe('Asia/Kolkata')
+  expect(q.quietHoursFor(botId)?.end).toBe(Date.parse('2026-11-08T01:30:00Z'))
+})
+
+it('keeps below-level rows later and holds failures until quiet hours end', async () => {
+  const f = botFixture(); fixtures.push(f)
+  const { botId } = await createBot(f)
+  const turn = await f.bots.enqueueChat(botId, 'chat:level-quiet', 'Only urgent reports')
+  f.bots.setTelling(botId, turn.id, { tellMe: 'needs_you' })
+  const end = f.clock.now + 3600_000
+  Object.assign(f.host, { quietHoursFor: () => ({ end }), ownerActive: () => false })
+  const quiet = f.bots.chat.post({ botId, author: 'bot', kind: 'run_report', text: 'FYI' })
+  const failed = f.bots.chat.post({ botId, author: 'bot', kind: 'error', text: 'Failed', error: { text: 'Repair this' } })
+  expect(f.store.message(quiet.id)).toMatchObject({ tell: 'later', tellAt: f.store.now() })
+  expect(f.store.message(failed.id)).toMatchObject({ tell: 'soon', tellAt: new Date(end).toISOString() })
+  f.bots.setTellingWindows(1)
+  const events: unknown[] = []; f.bots.events.on('tell', e => events.push(e))
+  await f.bots.deliverDueReminders()
+  expect(events).toHaveLength(0)
+})
+
+it.each([false, true])('a single can-wake automation keeps its reports soon and folded (completed=%s)', async completed => {
+  const { start } = await import('./botFixture')
+  const f = botFixture(); fixtures.push(f)
+  await f.bots.reconcileOnStartup()
+  const { botId } = await createBot(f)
+  const turn = await f.bots.enqueueChat(botId, 'chat:schedule-wake', 'This one can wake me')
+  const schedule = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 1 }, prompt: 'Check news' }, 'owner')
+  f.bots.setTelling(botId, turn.id, { scheduleId: schedule.scheduleId, canWakeMe: true })
+  Object.assign(f.host, { quietHoursFor: () => ({ end: f.clock.now + 3600_000 }), ownerActive: () => false })
+  await f.tickSchedules(new Date(f.clock.now + 60_000))
+  const activation = f.store.listActivations(botId).find(a => a.trigger.kind === 'schedule')!
+  if (completed) {
+    const running = await start(f, activation.id)
+    f.bots.tools.schedules.done(running.payload.threadId, 'All done.')
+    expect(f.book.get(botId, schedule.scheduleId)).toBeUndefined()
+  }
+  f.bots.setTellingWindows(1)
+  const events: import('../../src/shared/bots/personal/telling').BotTelling[] = []
+  f.bots.events.on('tell', e => events.push(e))
+  for (let n = 0; n < 5; n++) {
+    const report = f.bots.chat.post({ botId, activationId: activation.id, author: 'bot', kind: 'run_report', text: `Report ${n}` })
+    expect(f.store.message(report.id)).toMatchObject({ tell: 'soon', tellAt: f.store.now() })
+    await f.bots.deliverDueReminders()
+    f.clock.now += 1000
+  }
+  expect(new Set(events.map(e => e.id)).size).toBe(1)
+  expect(events.filter(e => e.sound)).toHaveLength(1)
+  expect(events.at(-1)?.rows).toHaveLength(5)
+})

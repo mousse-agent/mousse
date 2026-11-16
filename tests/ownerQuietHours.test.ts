@@ -33,3 +33,8 @@ it('handles a same-day interval and both boundaries', () => {
   expect(q.quietHoursFor(undefined, Date.parse('2026-11-08T09:00:00Z'))?.end).toBe(Date.parse('2026-11-08T17:00:00Z'))
   expect(q.quietHoursFor(undefined, Date.parse('2026-11-08T17:00:00Z'))).toBeUndefined()
 })
+
+it.each([{ from: '9:00', to: '10:00' }, { from: '22:00', to: '24:00' }, { from: '22:00', to: '22:00' }])('ignores malformed raw quiet hours %j using the settings validator', hours => {
+  const q = new OwnerQuietHours(() => hours, () => Date.parse('2026-11-07T23:00:00Z'), () => 'UTC')
+  expect(q.quietHoursFor()).toBeUndefined()
+})

@@ -52,3 +52,17 @@ it('validates quiet hours, preserves them on unrelated saves, and clears them ac
     expect(settings.get().notifications.quietHours).toBeUndefined()
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
+
+it('treats an omitted or undefined quiet-hours key as no change, and only null clears it over JSON', () => {
+  const home = mkdtempSync(join(tmpdir(), 'mousse-quiet-patch-'))
+  try {
+    const settings = new SettingsStore(MousseConfigStore.load(home))
+    const range = { from: '22:00', to: '08:00' }
+    settings.set({ notifications: { quietHours: range } })
+    settings.set({ notifications: { quietHours: undefined, allRemoteThreads: true } })
+    expect(settings.get().notifications.quietHours).toEqual(range)
+    settings.set(JSON.parse(JSON.stringify({ notifications: { quietHours: null } })))
+    settings.set({ notifications: { memoryNotices: false } })
+    expect(settings.get().notifications.quietHours).toBeUndefined()
+  } finally { rmSync(home, { recursive: true, force: true }) }
+})
