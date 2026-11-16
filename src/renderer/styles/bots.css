@@ -641,3 +641,6 @@ button.bot-reaction:hover, button.bot-reaction:focus-visible { background: color
 .bot-action-note { white-space: normal; }
 .bot-action-notice { display: flex; align-items: baseline; gap: 6px; }
 .bot-action-notice > svg { flex: 0 0 14px; }
+
+.bot-action-arguments code { display: inline-block; padding: 2px 6px; border: 1px solid var(--border); border-radius: 4px; font-family: var(--font-mono, monospace); }
+.bot-action-empty { color: var(--text-secondary); font-style: italic; }
