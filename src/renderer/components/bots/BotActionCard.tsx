@@ -30,7 +30,7 @@ function Value({ value, literal = false }: { value: unknown; literal?: boolean }
   if (Array.isArray(value)) return value.length ? <ol>{value.map((child, index) => <li key={index}><Field name="item" value={child} literal={literal} /></li>)}</ol> : <code aria-label="List">[]</code>
   if (typeof value !== 'string') return <code aria-label="Non-text value">{JSON.stringify(value) ?? String(value)}</code>
   if (value === '') return <span className="bot-action-empty">(empty text)</span>
-  const text = /^(?:true|false|null|[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?|\[\]|\{\})$/i.test(value.trim()) ? JSON.stringify(value) : value
+  const text = /^(?:true|false|null|[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?|\[\]|\{\})$/i.test(value.trim()) || /^["'“”‘’]|["'“”‘’]$/u.test(value) || value === '(empty text)' ? JSON.stringify(value) : value
   return <div><blockquote className="bot-action-text">{actionText(text).replaceAll("\n", "↵\n")}</blockquote><AlphabetWarning text={value} /></div>
 }
 function Field({ name, value, literal }: { name: string; value: unknown; literal: boolean }) {
