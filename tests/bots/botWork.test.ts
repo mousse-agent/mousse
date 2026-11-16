@@ -925,6 +925,22 @@ describe('long work', () => {
       expect(f.store.activation(spend.workId)).toMatchObject({ status: 'running' })
     })
 
+    // Age, answer API and denial: a late tap cannot leave permission for future work.
+    it.each(['answerAsk', 'respond'] as const)('%s: a late Allow leaves every grant limit unchanged', async (path) => {
+      const { workId } = await outOfTime()
+      const askId = chatOf(f, botId).at(-1)!.ask!.askId
+      if (path === 'respond') await chatOutOfTime('How long will it take?', 'late-wall')
+      const before = f.store.activeGrant(botId)!.manifest.budget
+      f.clock.now += (24 * 60 + 1) * MIN
+      if (path === 'respond') await f.bots.respond({ escalationId: askId, answer: 'allow_bot' })
+      else await f.bots.service.answer(botId, askId, 'allow')
+      await flush()
+      expect(f.store.activeGrant(botId)!.manifest.budget).toEqual(before)
+      expect(f.store.activation(workId)).toMatchObject({ status: 'failed', endReason: 'waited_too_long' })
+      expect(f.store.dispatches(workId)).toHaveLength(1)
+      expect(chatOf(f, botId).some((m) => m.text.includes('waited too long'))).toBe(true)
+    })
+
     it('work that waited more than a day is not carried on by an Allow: it ends with one line and can be asked again', async () => {
       const { workId, message } = await outOfTime()
       const askId = chatOf(f, botId).at(-1)!.ask!.askId
