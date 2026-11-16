@@ -584,7 +584,8 @@ html[data-theme='high-contrast'] .bot-conversation .chat-input-area.bot-input-ar
 
 /* The composer's emoji: a small grid above the button. */
 .bot-emoji { position: relative; display: flex; }
-.bot-emoji-grid { position: absolute; z-index: 30; right: -4px; bottom: calc(100% + 10px); display: grid; grid-template-columns: repeat(8, 32px); gap: 2px; padding: 6px; border-radius: 12px; border: 1px solid rgba(var(--accent-pale-rgb), .15); background: var(--bg-secondary, #201d23); box-shadow: 0 18px 50px #0006; }
+/* The emoji grids float over the conversation, so they take the theme's solid surface: --bg-secondary is see-through glass. */
+.bot-emoji-grid { position: absolute; z-index: 30; right: -4px; bottom: calc(100% + 10px); display: grid; grid-template-columns: repeat(8, 32px); gap: 2px; padding: 6px; border-radius: 12px; border: 1px solid rgba(var(--accent-pale-rgb), .15); background: rgb(var(--surface-strong-rgb)); box-shadow: 0 18px 50px #0006; }
 .bot-emoji-grid button { width: 32px; height: 32px; border-radius: 8px; font-size: 18px; line-height: 32px; text-align: center; }
 .bot-emoji-grid button:hover, .bot-emoji-grid button:focus-visible { background: color-mix(in srgb, var(--text-secondary) 14%, transparent); outline: none; }
 
