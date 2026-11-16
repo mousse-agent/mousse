@@ -931,7 +931,7 @@ describe('long work', () => {
       const askId = chatOf(f, botId).at(-1)!.ask!.askId
       if (path === 'respond') await chatOutOfTime('How long will it take?', 'late-wall')
       const before = f.store.activeGrant(botId)!.manifest.budget
-      f.clock.now += (24 * 60 + 1) * MIN
+      f.clock.now = Date.parse(f.store.lastMainDispatch(workId)!.endedAt!) + (24 * 60 + 1) * MIN
       if (path === 'respond') await f.bots.respond({ escalationId: askId, answer: 'allow_bot' })
       else await f.bots.service.answer(botId, askId, 'allow')
       await flush()
@@ -939,6 +939,50 @@ describe('long work', () => {
       expect(f.store.activation(workId)).toMatchObject({ status: 'failed', endReason: 'waited_too_long' })
       expect(f.store.dispatches(workId)).toHaveLength(1)
       expect(chatOf(f, botId).some((m) => m.text.includes('waited too long'))).toBe(true)
+    })
+
+    it.each(['answerAsk', 'respond'] as const)('%s: Allow at 23 hours still widens and continues', async (path) => {
+      const { workId } = await outOfTime()
+      const askId = chatOf(f, botId).at(-1)!.ask!.askId
+      if (path === 'respond') await chatOutOfTime('How long will it take?', 'fresh-wall')
+      // Count from the work's last dispatch, including the hour spent on the chat wall.
+      f.clock.now = Date.parse(f.store.lastMainDispatch(workId)!.endedAt!) + 23 * 60 * MIN
+      if (path === 'respond') await f.bots.respond({ escalationId: askId, answer: 'allow_bot' })
+      else await f.bots.service.answer(botId, askId, 'allow')
+      await flush()
+      expect(f.store.activeGrant(botId)!.manifest.budget.maxActiveMs).toBe(120 * MIN)
+      expect(f.store.activation(workId)?.status).toBe('running')
+      expect(f.store.dispatch(workId, 2)).toMatchObject({ kind: 'continue' })
+    })
+
+    it.each(['not_now', 'deny', 'allow_once', 'allow_more'] as const)('a late %s cannot leave extra room behind', async (answer) => {
+      const { workId } = await outOfTime()
+      const askId = chatOf(f, botId).at(-1)!.ask!.askId
+      if (answer !== 'not_now') await chatOutOfTime('How long will it take?', 'other-wall')
+      const before = f.store.activeGrant(botId)!.manifest.budget
+      f.clock.now = Date.parse(f.store.lastMainDispatch(workId)!.endedAt!) + (24 * 60 + 1) * MIN
+      if (answer === 'not_now') await f.bots.service.answer(botId, askId, answer)
+      else await f.bots.respond({ escalationId: askId, answer })
+      await flush()
+      expect(f.store.activeGrant(botId)!.manifest.budget).toEqual(before)
+      expect(f.store.overlays(f.store.escalation(askId)!.activationId)).toEqual([])
+      expect(f.store.activation(workId)).toMatchObject({ status: 'failed', endReason: answer === 'deny' || answer === 'not_now' ? 'budget_denied' : 'waited_too_long' })
+      expect(f.store.dispatches(workId)).toHaveLength(1)
+    })
+
+    it.each([['answerAsk', 'stop'], ['answerAsk', 'delete'], ['respond', 'stop'], ['respond', 'delete']] as const)('%s: %s winning the answer race grants nothing', async (path, action) => {
+      const { workId } = await outOfTime()
+      const askId = chatOf(f, botId).at(-1)!.ask!.askId
+      const wall = path === 'respond' ? await chatOutOfTime('How long will it take?', `race-${action}`) : undefined
+      const before = f.store.activeGrant(botId)!.manifest.budget
+      // These APIs commit cancellation before their first await. Answer while cleanup is pending.
+      const stopping = action === 'delete' ? f.bots.remove(botId) : f.bots.stop(wall?.activation.id ?? workId)
+      if (path === 'respond') await expect(f.bots.respond({ escalationId: askId, answer: 'allow_bot' })).rejects.toMatchObject({ code: 'escalation_answered' })
+      else if (action === 'delete') await expect(f.bots.service.answer(botId, askId, 'allow')).rejects.toMatchObject({ code: 'bot_not_found' })
+      else await f.bots.service.answer(botId, askId, 'allow')
+      await stopping
+      expect(f.store.activeGrant(botId)?.manifest.budget ?? before).toEqual(before)
+      expect(f.store.dispatches(workId)).toHaveLength(1)
     })
 
     it('work that waited more than a day is not carried on by an Allow: it ends with one line and can be asked again', async () => {

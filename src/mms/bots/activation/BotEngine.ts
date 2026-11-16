@@ -4189,7 +4189,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (rows.length) return rows.some((row) => workWaits(row) && this.now() - this.waitingSince(row) <= MAX_ROOM_WAIT_MS)
     const owner = this.store.activation(ask.activationId)
     // Scheduled-run asks still raise limits for future runs. A work card needs live waiting work.
-    return Boolean(owner && owner.trigger.kind !== 'work' && !['cancelled'].includes(owner.status))
+    return Boolean(owner && owner.trigger.kind !== 'work' && owner.status !== 'cancelled')
   }
 
   /**
