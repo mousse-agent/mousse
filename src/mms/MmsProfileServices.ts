@@ -2,7 +2,7 @@ import { tellMeOf } from '../shared/types'
 import { OwnerQuietHours } from './notifications/OwnerQuietHours'
 import { onSettingsSaved } from './settings/SettingsStore'
 import { ResourceLifecycleError } from './lifecycle/ResourceLifecycleStore'
-import { SecretVault } from './secrets/SecretVault'
+import { SecretVault, secretThreadBusy } from './secrets/SecretVault'
 import { SecretRequests } from './secrets/SecretRequests'
 import { createSecretToolHost } from './secrets/secretToolHost'
 import { forgetWorktreeFolders, refreshWorktreeFolders, setWorktreeFolders } from './worktree/worktreeLayout'
@@ -1217,7 +1217,7 @@ export class MmsProfileServices {
         for (let id: string | undefined = lineage.parentThreadId; id && !ancestors.includes(id) && ancestors.length < 32; id = this.threads.getThread(id)?.lineage?.parentThreadId) ancestors.push(id)
         return ancestors
       },
-      threadBusy: (threadId) => this.orchestrator.isTurnActive(threadId) || this.runEngine.getActiveRun(threadId) !== null,
+      threadBusy: (threadId) => secretThreadBusy(threadId, this.orchestrator, this.runEngine),
       changed: () => this.secretsChanged.emit('changed')
     })
     this.secretRequests = new SecretRequests(this.secretVault)

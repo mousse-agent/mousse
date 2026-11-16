@@ -29,6 +29,22 @@ type MetaFile = Record<string, SecretMeta>
  */
 export const RETIRED_SECRET_GRACE_MS = 60_000
 
+/**
+ * Whether a thread has a turn running, in this process or in the run engine. A lookup that fails (a run conflict) counts
+ * as running: masking a removed value a little longer is safe, and a throw here would break every masker of the thread.
+ */
+export function secretThreadBusy(
+  threadId: string,
+  turns: { isTurnActive(threadId: string): boolean },
+  runs: { getActiveRun(threadId: string): unknown }
+): boolean {
+  try {
+    return turns.isTurnActive(threadId) || runs.getActiveRun(threadId) !== null
+  } catch {
+    return true
+  }
+}
+
 /** A thread id that can name a folder; any other thread gets no files. */
 const FOLDER_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 

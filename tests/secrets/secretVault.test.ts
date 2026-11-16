@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { writeProfileSecret } from '../../src/mms/profiles/secrets'
 import { SecretRequests } from '../../src/mms/secrets/SecretRequests'
-import { RETIRED_SECRET_GRACE_MS, SecretVault } from '../../src/mms/secrets/SecretVault'
+import { RETIRED_SECRET_GRACE_MS, SecretVault, secretThreadBusy } from '../../src/mms/secrets/SecretVault'
 import { SECRET_DAY_MS } from '../../src/shared/secretRequests'
 
 const VALUE = 'tok_0123456789abcdef'
@@ -194,5 +194,19 @@ describe('the secrets a thread asked for', () => {
     expect(masked('t1', VALUE)).toBe('[secret API_TOKEN hidden]')
     happen()
     expect(masked('t1', VALUE)).toBe(VALUE)
+  })
+
+  it('counts a thread as running when looking up its run fails, so a masker still builds', async () => {
+    const turns = { isTurnActive: () => false }
+    expect(secretThreadBusy('t1', turns, { getActiveRun: () => null })).toBe(false)
+    expect(secretThreadBusy('t1', turns, { getActiveRun: () => ({ runId: 'r' }) })).toBe(true)
+    expect(secretThreadBusy('t1', turns, { getActiveRun: () => { throw new Error('run conflict') } })).toBe(true)
+    // Wired into a vault: a removed value keeps masking instead of the masker throwing.
+    vault = new SecretVault({ profileRoot: home, threadAlive: (id) => alive.has(id), threadBusy: (id) => secretThreadBusy(id, turns, { getActiveRun: () => { throw new Error('run conflict') } }), now: () => now })
+    requests = new SecretRequests(vault, () => now)
+    await give('t1', 'day')
+    expect(masked('t1', VALUE)).toBe('[secret API_TOKEN hidden]')
+    vault.delete('API_TOKEN')
+    expect(masked('t1', VALUE)).toBe('[secret API_TOKEN hidden]')
   })
 })
