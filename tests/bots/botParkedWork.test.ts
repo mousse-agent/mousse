@@ -95,3 +95,29 @@ describe.each(['question', 'budget_exhausted', 'usage_limit'])('parked work: %s'
     expect(f.store.laneActivations(botId, 'run', ['running', 'waiting_grant'])).toEqual([])
   })
 })
+
+/** Review baseline: observe both readers, the refusal text, notes, and /clear before moving those decisions. */
+describe.each([
+  ['question', 'question', 'paused', 'This work waits for your answer to its question. Answer it to let it carry on, or stop it.', 'question'],
+  ['question', 'question_answered', 'queued', 'This work has your answer. It carries on when the work before it is done.', 'noted'],
+  ['budget_exhausted', 'budget_exhausted', 'paused', 'This work ran out of room. Answer its ask to let it carry on, or stop it.', 'noted'],
+  ['budget_exhausted', 'room_allowed', 'queued', 'This work already has more room. It carries on when the work before it is done.', 'noted'],
+  ['usage_limit', 'usage_limit', 'paused', 'This work waits for a usage limit to reset. It carries on then, or press Resume to try now.', 'noted']
+])('work readers and controls: %s / %s', (reason, marker, status, refusal, notes) => {
+  it('agrees about pending and ready work, with the existing refusal and note result', async () => {
+    const { workId } = await parked(reason)
+    // The wake marker was committed, but the lane has not picked it up yet.
+    f.store.moveActivation(workId, ['blocked'], 'blocked', { endReason: marker })
+    expect(summary().work!.find((item) => item.id === workId)?.status).toBe(status)
+    expect(f.bots.listWork(botId).now.find((item) => item.workId === workId)?.status).toBe(status)
+    await expect(f.bots.continueActivation(workId)).rejects.toMatchObject({ code: 'bot_work_waiting', message: refusal })
+    expect(f.bots.noteWork(botId, workId, 'Check the lease')).toBe(notes)
+  })
+})
+
+it.each(['question', 'budget_exhausted', 'usage_limit'])('/clear keeps the existing owner-wait decision for %s', async (reason) => {
+  const { workId } = await parked(reason)
+  await f.bots.clearChat(botId)
+  expect(f.store.activation(workId)?.status).toBe(reason === 'usage_limit' ? 'blocked' : 'cancelled')
+  expect(chatOf(f, botId)).toEqual([])
+})
