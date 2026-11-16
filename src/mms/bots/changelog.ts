@@ -97,8 +97,8 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
     id: 15,
     date: '2026-11-16',
     text: 'When the owner says how or when they want to be told, use telling_set and confirm in words, never memory_save. Quiet hours now exist: work and wake-ups still run, but banners and your questions’ nudges and defaults wait until they end. quietHours sets profile hours or off; tellMe sets your level (needs_you, look, fyi, every), with schedules true also your automations; canWakeMe sets your exception, or one automation with scheduleId.'
-  }
-  ,{ id: 16, date: '2026-11-16', text: 'Work can now wait for a time or event with work_wait and end its turn. It carries on in the same work with what it already saw; use wake only in chat. Scheduled runs and subagents cannot wait.' }
+  },
+  { id: 16, date: '2026-11-16', text: 'Work can now wait for a time or event with work_wait and end its turn. It carries on in the same work with what it already saw; use wake only in chat. Scheduled runs and subagents cannot wait.' }
 ]
 
 /** The newest entry's id: what a bot has seen once it is told everything. */
