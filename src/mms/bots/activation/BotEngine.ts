@@ -7100,6 +7100,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.entry(botId)
     this.store.db.transaction(() => {
       this.store.setPaused(botId, 'owner')
+      for (const wait of this.store.waitingReminders(botId)) if (wait.workId) this.store.settleReminder(wait.id, 'cancelled')
       for (const row of this.store.laneActivations(botId, 'run', ['blocked'])) {
         if (row.endReason === 'waiting' || row.endReason === 'wait_ready') this.store.moveActivation(row.id, ['blocked'], 'cancelled', { endReason: 'stopped' })
       }

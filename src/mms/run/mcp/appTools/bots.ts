@@ -607,7 +607,7 @@ function ownTool(tool: Tool, deps: (() => BotAppToolDeps | undefined) | undefine
     access: 'actsAsCaller',
     listed: (listing) => listing.botRole === 'activation',
     // A subagent of the bot's work has none of the bot's own tools: its authority holds none either.
-    available: (turn) => (turn.bot && turn.bot.role !== 'subagent' && deps?.() ? true : NOT_A_BOT),
+    available: (turn) => (turn.bot && turn.bot.role !== 'subagent' && deps?.() ? true : tool.name === 'work_wait' ? 'A subagent cannot park work. Return what you found to the work that started you.' : NOT_A_BOT),
     offered: (turn) => Boolean(turn.bot && turn.bot.role !== 'subagent' && deps?.()),
     ...part
   }

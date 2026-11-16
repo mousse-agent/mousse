@@ -490,3 +490,7 @@ describe('work_wait', () => {
     expect(await fakeBots().call('work_wait', { why: 'Later', inMinutes: 30 })).toMatchObject({ isError: true, text: expect.stringContaining('Use wake') })
   })
 })
+it('work_wait gives subagents a usable refusal', () => {
+  const tool = botTools(() => undefined).find(tool => tool.name === 'work_wait')!
+  expect(tool.available?.({ bot: { role: 'subagent' } } as any)).toContain('subagent cannot park')
+})
