@@ -412,7 +412,7 @@ it('three unsent calls stop the tool across occurrences, and owner words reset i
 it('a schedule ending at until withdraws a parked call and preserves its report', async () => {
   const t = await scheduledCall()
   const at = new Date(f.clock.now + 2 * 60_000)
-  f.book.update(f.scheduler.getJob(t.schedule.jobId)!, { expiresAt: at.toISOString() })
+  f.book.update(f.scheduler.getJob(t.schedule.jobId)!, { until: `${at.getFullYear()}-${String(at.getMonth()+1).padStart(2, '0')}-${String(at.getDate()).padStart(2, '0')}T${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}` })
   await t.call()
   await finish(f, t.run.payload, 'completed', { text: 'Draft ready.' })
   f.clock.now += 3 * 60_000
