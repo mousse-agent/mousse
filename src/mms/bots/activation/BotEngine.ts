@@ -5370,17 +5370,19 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // and all continuation instructions below are shared, whatever the work's wait history.
     // Without a live wait, master's answers belong in the lead. With a wait, only an answer
     // that caused this resume belongs there; incidental answers keep their event order below.
-    const answersInLead = !input.waited || input.answerCaused
+    const hasActionUpdate = Boolean(input.actionCaused || input.workEvents?.some(event => 'actionId' in event))
+    const allowed = input.allowed?.filter(title => !input.workEvents?.some(event => 'answer' in event) || !input.answers.some(answer => answer.status !== 'denied' && this.chat.card(answer).title === title))
+    const allowedLeads = allowed?.length && !(input.moreRoom || input.questionAnswered || input.usageReset || input.turnCap || input.actionCaused)
+    const answersInLead = !input.actionCaused && (!input.waited || input.answerCaused) && !(hasActionUpdate && allowedLeads)
     const questionInLead = !input.waited || input.questionAnswered
     const remainingEvents = input.workEvents?.filter(event => 'answer' in event
       ? !answersInLead
       : event.text !== input.actionCaused && !(questionInLead && event.text === input.answered))
     const ordered = remainingEvents?.length ? remainingEvents : undefined
     const updateText = ordered ? ordered.map(event => 'answer' in event ? answerLine(event.answer) : event.text).join('\n\n') : input.notes
-    const updates = updateText && input.ownerText !== undefined && row.lane === 'run' ? `${updateText}\n\n${input.ownerText}` : updateText
+    const updates = hasActionUpdate && updateText && input.ownerText !== undefined && row.lane === 'run' ? `${updateText}\n\n${input.ownerText}` : updateText
     const orderedAnswers = ordered?.some(event => 'answer' in event)
     const orderedQuestion = ordered?.some(event => 'text' in event && event.text === input.answered)
-    const allowed = input.allowed?.filter(title => !input.workEvents?.some(event => 'answer' in event) || !input.answers.some(answer => answer.status !== 'denied' && this.chat.card(answer).title === title))
     const depth = row.modelOverride?.depth
     const reason = input.actionCaused ? input.actionCaused : input.answers.length && !orderedAnswers
       ? [...input.answers.map(answerLine), ...(input.askAgain ?? []).map(askAgainLine)].join(' ')
@@ -5423,7 +5425,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return `[Mousse] ${lead} The owner also allowed you to ${allowed.join(' and ')}; you have it now.${interrupted}${updates ? `\n\n${updates}\n\nTake it into account as you continue.` : ''} ${carryOn ? 'Carry on where you left off' : 'Continue where you left off'}, and do what you skipped without it.`
     if (allowed?.length) {
       if (row.lane === 'chat') return `[Mousse] The owner allowed you to ${allowed.join(' and ')} while you answered; you have it now. Your reply so far was already sent.${interrupted}\n\nDo now what you skipped without it, and tell the owner what you found.`
-      const allowedLine = `${input.actionCaused ? `${lead} ` : ''}${input.answered ? `${input.answered} ` : ''}The owner allowed you to ${allowed.join(' and ')} while you worked; you have it now.`
+      const allowedLine = input.actionCaused
+        ? `${lead} The owner also allowed you to ${allowed.join(' and ')}; you have it now.`
+        : `${input.answered && !(hasActionUpdate && orderedQuestion) ? `${input.answered} ` : ''}The owner allowed you to ${allowed.join(' and ')} while you worked; you have it now.${hasActionUpdate && input.waited ? ' Your wait is over.' : ''}`
       const notes = updates ? `\n\n${updates}` : ''
       const sent = input.afterReport ? ' What you had so far was already sent to them.' : ''
       return `[Mousse] ${allowedLine}${sent}${interrupted}${notes}\n\nDo now what you skipped without it${notes ? ', and take the owner\'s notes into account' : ''}. Your last message is your updated report: lead with what changed, in plain words.`
