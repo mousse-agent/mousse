@@ -79,3 +79,30 @@ describe('a thread the bot started, with a queued run', () => {
     expect(launchedActive(listed!)).toBe(going)
   })
 })
+
+// An archived thread never makes the bot busy, whatever it left behind (a run that never ended, a question, a subagent):
+// archiving one on 15 Nov left a queued run, and the bot said "Managing" it for a day.
+describe('an archived thread the bot started', () => {
+  const archived: LaunchedThreadMeta[] = [{ ...threads[0]!, settledAt: NOW }, ...threads.slice(1)]
+  const rows: Array<[string, { own?: RunRecord['status']; below?: RunRecord['status']; asks?: string[] }]> = [
+    ['a run of it still runs', { own: 'running' }],
+    ['a run of it waits its turn', { own: 'queued' }],
+    ['a run of it is held', { own: 'paused' }],
+    ['it asks the owner', { asks: ['launched'] }],
+    ['a subagent below it runs', { below: 'running' }],
+    ['a subagent below it asks the owner', { asks: ['child'] }]
+  ]
+  it.each(rows)('is not managed while %s', (_name, state) => {
+    const activeRuns = [...(state.own ? [run('launched', state.own)] : []), ...(state.below ? [run('child', state.below)] : [])]
+    const [listed] = launchedThreadsOf({
+      creators: new Set(['home']),
+      threads: archived,
+      activeRuns,
+      lastRun: (id) => (id === 'launched' ? run('launched', 'cancelled') : undefined),
+      asks: (id) => (state.asks ?? []).includes(id),
+      willStart: () => true
+    })
+    expect(listed?.threadId).toBe('launched')
+    expect(launchedActive(listed!)).toBe(false)
+  })
+})
