@@ -16,7 +16,7 @@ import { PI_NATIVE_TOOLS } from '../../src/mms/harness/pi/nativeTools'
 import { botTools } from '../../src/mms/run/mcp/appTools/bots'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
 import type { BotManifest } from '../../src/shared/bots/personal/definition'
-import { BOT_AUTOMATION_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_OWN_APP_TOOLS, BOT_SUBAGENT_TOOLS, BOT_THREAD_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_TOOLS, MAX_BOT_SUBAGENTS_AT_ONCE, MAX_BOT_SUBAGENTS_PER_WORK, botStarterManifest } from '../../src/shared/bots/personal/manifest'
+import { BOT_AUTOMATION_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_OWN_APP_TOOLS, BOT_SUBAGENT_TOOLS, BOT_THREAD_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_TOOLS, botStarterManifest } from '../../src/shared/bots/personal/manifest'
 import { BOT_MEMORY_TOOLS } from '../../src/shared/bots/personal/memory'
 import type { BotModelOption } from '../../src/shared/bots/personal/methods'
 import { appToolRegistry, appTurn, fakeAppToolHost } from '../run/appToolsFixture'
@@ -208,23 +208,22 @@ describe('a bot\'s work and its subagents', () => {
     expect(child.prepared.authority.role).toBe('subagent')
   })
 
-  it(`counts in the service: ${MAX_BOT_SUBAGENTS_AT_ONCE} at once, ${MAX_BOT_SUBAGENTS_PER_WORK} in all across the work's turns, and a title once`, async () => {
+  it('no count at once or in all: past the old caps of three at once and ten in a work; a title once', async () => {
     const job = await work('w1')
     const subagents = job.prepared.authority.subagents!
-    for (let n = 1; n <= MAX_BOT_SUBAGENTS_AT_ONCE; n += 1) expect(await subagents.start({ title: `Part ${n}`, brief: 'Do it.' })).toHaveProperty('started')
-    expect(await subagents.start({ title: 'One more', brief: 'Do it.' })).toMatchObject({ refused: expect.stringMatching(/most at once/) })
+    for (let n = 1; n <= 5; n += 1) expect(await subagents.start({ title: `Part ${n}`, brief: 'Do it.' })).toHaveProperty('started')
     expect(await subagents.start({ title: 'part 1', brief: 'Again.' })).toMatchObject({ refused: expect.stringMatching(/already have a subagent called/) })
     // A repeat of one tool call starts nothing new.
     for (const n of subagentNs(job.id)) await finish(f, (await start(f, job.id, n)).payload, 'completed', { text: 'Done.' })
     const repeated = await subagents.start({ title: 'Part X', brief: 'Do it.', toolCallId: 'call-7' })
     expect(await subagents.start({ title: 'Part X', brief: 'Do it.', toolCallId: 'call-7' })).toEqual(repeated)
-    for (let n = subagentNs(job.id).length + 1; n <= MAX_BOT_SUBAGENTS_PER_WORK; n += 1) {
+    await finish(f, (await start(f, job.id, subagentNs(job.id).at(-1)!)).payload, 'completed', { text: 'Done.' })
+    for (let n = subagentNs(job.id).length + 1; n <= 12; n += 1) {
       expect(await subagents.start({ title: `Part ${n}`, brief: 'Do it.' })).toHaveProperty('started')
       const last = subagentNs(job.id).at(-1)!
       await finish(f, (await start(f, job.id, last)).payload, 'completed', { text: 'Done.' })
     }
-    expect(subagentNs(job.id)).toHaveLength(MAX_BOT_SUBAGENTS_PER_WORK)
-    expect(await subagents.start({ title: 'Eleventh', brief: 'Do it.' })).toMatchObject({ refused: expect.stringMatching(/most one piece of work may/) })
+    expect(subagentNs(job.id)).toHaveLength(12)
     // A follow-up is no new subagent: it carries on in its own thread.
     expect(await subagents.send({ subagent: 'Part 1', message: 'And the warranty?' })).toMatchObject({ sent: { subagent: 'Part 1', state: 'running' } })
     const followUp = await start(f, job.id, subagentNs(job.id).at(-1)!)

@@ -811,6 +811,16 @@ function agentRepeatKey(threadId: string, senderThreadId: string, content: strin
 type AgentSender = AgentActor & Pick<AgentOrigin, 'body' | 'title'>
 
 /**
+ * A personal bot's message (`thread_send`, a new thread's first message) as the first agent message in a row: only a chat
+ * turn its owner's own message started may send one (`ownerChatTurn`), so a person wrote just before it, and the bot's own
+ * turns are never held to the limit on agent messages in a row. Loops of the bot's own turns are caught where they start
+ * (`BotEngine.refuseWakeLoop`, `sendBotMessage`). The thread it reaches counts its agents' messages on from there.
+ */
+export function botSenderHops(actor: AgentActor): AgentActor {
+  return { ...actor, hops: 1 }
+}
+
+/**
  * The origin an agent's message is stored with: who sent it, how many agent hops led to it, and where its own words
  * are. A sender on another computer is stored as `from` (its computer, its ids there and its title), never in
  * `threadId`: a foreign id there would be read as, and rewritten to, a thread of this computer that does not exist.
@@ -4340,7 +4350,7 @@ export class OrchestratorService extends EventEmitter {
     // wider is refused, so a phone held to Ask never gets a Full access turn through its bot.
     if (turnBot?.limit && isStricter(turnBot.limit, this.storedPermissionMode(threadId)))
       throw new DomainRpcError('device_limit', `The thread runs in ${describePermissionMode(this.storedPermissionMode(threadId))}, more than the device your owner wrote from may run (${describePermissionMode(turnBot.limit)}).`)
-    const sender = this.withAgentHops(options.actor)
+    const sender = bot ? botSenderHops(options.actor) : this.withAgentHops(options.actor)
     const letter = bot ? undefined : this.agentLetter(sender, input.content)
     this.assertQueueOpen(threadId)
     if (turnBot) this.assertBotRequestKey('thread_send', options.clientRequestId, options.actor, turnBot)
@@ -4571,10 +4581,11 @@ export class OrchestratorService extends EventEmitter {
     // A worktree needs Git: on any other project a "new worktree" thread would write in the project folder, beside others.
     if (input.workspace === 'new_worktree' && !gitBacked)
       throw new Error('workspace "new_worktree" needs a Git project: this project is not backed by a Git repository, so a thread there would work in the project folder. Use workspace "project". No thread was created.')
-    // However many runs this thread has made, only so many of its launched threads may be working at once.
-    const busy = new Set(engine.store.listNonTerminalRuns().map((run) => run.threadId))
-    const working = this.threadStore!.listAllThreads().filter((thread) => thread.createdByThreadId === options.actor.threadId && busy.has(thread.id)).length
-    if (working >= THREAD_CREATE_MAX_ACTIVE_PER_THREAD)
+    // However many runs this thread has made, only so many of its launched threads may be working at once. The owner's
+    // bot is not held to it: it starts as many as the owner's work needs.
+    const busy = options.bot ? undefined : new Set(engine.store.listNonTerminalRuns().map((run) => run.threadId))
+    const working = busy ? this.threadStore!.listAllThreads().filter((thread) => thread.createdByThreadId === options.actor.threadId && busy.has(thread.id)).length : 0
+    if (busy && working >= THREAD_CREATE_MAX_ACTIVE_PER_THREAD)
       throw new McpToolError('mousse_conflict', `${working} of the threads this thread launched are still working (the limit is ${THREAD_CREATE_MAX_ACTIVE_PER_THREAD}); wait for some to finish (thread_wait) before launching more.`, { conflict: 'creation_limit', working })
     // A bot's thread never takes the bot's own model: the one it names, or the profile's default.
     const modelOverride = this.agentThreadModel(input, options.actor.threadId, project.id, options.bot !== undefined)
@@ -4584,7 +4595,8 @@ export class OrchestratorService extends EventEmitter {
     const callerMode = this.runPermissionMode(options.actor.runId)
     const profileMode = normalizePermissionMode(this.settingsStore.get().permissions.defaultMode)
     // The first message counts as the next agent message in a row: a creation cannot start a chain the limit would stop.
-    if (input.firstMessage !== undefined) this.withAgentHops(options.actor)
+    // A bot's is the first after its owner's message (`botSenderHops`).
+    if (input.firstMessage !== undefined && !options.bot) this.withAgentHops(options.actor)
     return {
       threadId: uuidv4(),
       projectPath: project.path,

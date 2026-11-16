@@ -13,8 +13,6 @@ import { trackChildProcess } from '../diagnostics/liveCounts'
 /** How long a watcher runs unless the bot says otherwise, and the most it may. */
 export const DEFAULT_WATCHER_MINUTES = 60
 export const MAX_WATCHER_MINUTES = 6 * 60
-/** Most watchers one bot runs at once. */
-export const MAX_WATCHERS_PER_BOT = 3
 /** Most characters of the command and the match. */
 export const MAX_WATCHER_COMMAND_CHARS = 2_000
 export const MAX_WATCHER_MATCH_CHARS = 200

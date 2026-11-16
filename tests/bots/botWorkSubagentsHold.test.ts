@@ -17,7 +17,6 @@ import { botInstructions } from '../../src/mms/bots/instructions'
 import { toolArgsDigest } from '../../src/mms/run/tools/argsDigest'
 import { PI_NATIVE_TOOLS } from '../../src/mms/harness/pi/nativeTools'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
-import { MAX_BOT_SUBAGENTS_PER_DAY } from '../../src/shared/bots/personal/manifest'
 import type { BotModelOption } from '../../src/shared/bots/personal/methods'
 import type { BotRuntimeHold } from '../../src/shared/bots/personal/subagentHold'
 import { appToolRegistry, appTurn, fakeAppToolHost } from '../run/appToolsFixture'
@@ -223,25 +222,6 @@ describe('a subagent on another entry is never held less tightly than its work',
     f.clock.now += 60_000
     await finish(f, job.payload, 'completed', { text: 'Done.' })
     expect(f.store.counters(job.id).activeMs - (before - allowance)).toBe(21 * 60_000)
-  })
-
-  it(`counts the bot's subagents per day: ${MAX_BOT_SUBAGENTS_PER_DAY} across its work, then none until a day has passed`, async () => {
-    let started = 0
-    for (let w = 0; started < MAX_BOT_SUBAGENTS_PER_DAY; w += 1) {
-      const job = await work(`w${w}`)
-      for (let k = 0; k < 10 && started < MAX_BOT_SUBAGENTS_PER_DAY; k += 1) {
-        expect(await job.prepared.authority.subagents!.start({ title: `Part ${k}`, brief: 'Do it.' }), `${started}`).toHaveProperty('started')
-        await finish(f, (await start(f, job.id, subagentNs(job.id).at(-1)!)).payload, 'completed', { text: 'Done.' })
-        started += 1
-      }
-      await finish(f, job.payload, 'completed', { text: 'Done.' })
-    }
-    const next = await work('over')
-    expect(await next.prepared.authority.subagents!.start({ title: 'One more', brief: 'Do it.' })).toMatchObject({ refused: expect.stringMatching(new RegExp(`started ${MAX_BOT_SUBAGENTS_PER_DAY} subagents in the last day`)) })
-    await finish(f, next.payload, 'completed', { text: 'Done.' })
-    f.clock.now += 24 * 60 * 60_000 + 1
-    const tomorrow = await work('tomorrow')
-    expect(await tomorrow.prepared.authority.subagents!.start({ title: 'One more', brief: 'Do it.' })).toHaveProperty('started')
   })
 
   it('subagent_send checks its model again: a named model now at its usage limit is refused, and one on the work\'s model runs on the model the work runs on now', async () => {
