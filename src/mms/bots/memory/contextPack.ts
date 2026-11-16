@@ -27,6 +27,7 @@ import { BOT_CHANGELOG_LATEST, changelogBlock, unseenChanges } from '../changelo
 
 /** What the pack says about the present, from outside the memory tables. Plain words only. */
 export interface BotSituation {
+  telling?: string
   /** Shared from settings (bot-context.md §9): the owner's name and language. */
   ownerName?: string
   language?: string
@@ -192,6 +193,7 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
     const lines = [`Now: ${timeLabel(now, tz)} (${tz}).`]
     if (facts.ownerName || facts.language)
       lines.push(`The owner${facts.ownerName ? ` is ${facts.ownerName}` : ''}${facts.language ? `${facts.ownerName ? ' and' : ''} writes in ${facts.language}` : ''}.`)
+    if (facts.telling) lines.push(facts.telling)
     const lastOwner = store.getState<string>(botId, 'last_owner_msg_at')
     lines.push(lastOwner ? `The owner last wrote ${agoLabel(lastOwner, now)}.` : 'The owner has not written yet.')
     if (facts.openAsks?.length) lines.push(`Waiting for the owner: ${facts.openAsks.map((ask) => cut(ask, 80)).join('; ')}.`)
