@@ -222,7 +222,7 @@ export function failureText(serverName: string, error: unknown, signal?: AbortSi
   return `${serverName} couldn't run this call. ${carryOn}`
 }
 
-export type BotMcpCallOutcome = ToolOutcome & { callState?: 'failed' | 'uncertain' }
+export type BotMcpCallOutcome = ToolOutcome & { callState?: 'failed' | 'uncertain'; toolReportedError?: true }
 
 export class BotMcp implements BotMcpHost {
   constructor(private readonly deps: BotMcpDeps) {}
@@ -380,7 +380,7 @@ export class BotMcp implements BotMcpHost {
       const outcome = options.sanitizeResult?.(rawOutcome) ?? rawOutcome
       // Its pictures are the owner's to see too, whatever the bot's model sees (`keepToolImages`).
       const kept = outcome.images?.length ? options.keepImages?.(outcome.images) : undefined
-      const framed = framedResult(tool.serverName, tool.tool, outcome, options)
+      const framed = { ...framedResult(tool.serverName, tool.tool, outcome, options), ...(options.heldAction && outcome.isError ? { toolReportedError: true as const } : {}) }
       return kept ? { ...certainty, ...framed, text: `${framed.text}
 ${kept}` } : { ...certainty, ...framed }
     } catch (error) {

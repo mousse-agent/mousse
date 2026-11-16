@@ -45,10 +45,10 @@ export function removeHiddenArguments(result: ToolOutcome, args: unknown, schema
   return { ...result, text }
 }
 /** The continuation is text. Images are omitted explicitly, never truncated into invalid base64. */
-function boundedActionResult(result: ToolOutcome): ToolOutcome {
+function boundedActionResult(result: BotMcpCallOutcome): BotMcpCallOutcome {
   const note = result.images?.length ? `\n[${result.images.length} image(s) left out of the stored result.]` : ''
   const text = String(maskedActionData(result.text, Infinity))
-  const build = (end: number): ToolOutcome => ({ text: `${text.slice(0, end)}${end < text.length ? '\n[Result cut to fit stored size.]' : ''}${note}`, ...(result.isError ? { isError: true } : {}) })
+  const build = (end: number): BotMcpCallOutcome => ({ text: `${text.slice(0, end)}${end < text.length ? '\n[Result cut to fit stored size.]' : ''}${note}`, ...(result.isError ? { isError: true } : {}), ...(result.toolReportedError ? { toolReportedError: true } : {}) })
   let low = 0, high = Math.min(text.length, 32_000)
   while (low < high) {
     const mid = Math.ceil((low + high) / 2)
@@ -101,11 +101,12 @@ export interface ActionRow {
 }
 /** Stored outcomes are timed updates, assembled with all other work updates at dispatch. */
 export function actionContinuation(action: Pick<ActionRow, 'status' | 'result_json'>): string {
-  const result = action.result_json ? JSON.parse(action.result_json) as { text?: string } : undefined
+  const result = action.result_json ? JSON.parse(action.result_json) as BotMcpCallOutcome : undefined
   const line = action.status === 'done' ? 'Your owner sent it. The tool answered:'
     : action.status === 'declined' ? 'Your owner chose not to send this: carry on without it and say what you skipped.'
       : action.status === 'uncertain' ? 'It could not be confirmed whether this went through: check before trying again.'
-        : 'Nothing was sent. The call failed:'
+        : result?.toolReportedError ? 'The tool reported an error. It may have done part of it: check before trying again. The tool answered:'
+          : 'Nothing was sent. The call failed:'
   return `${line}${['done', 'failed', 'withdrawn', 'expired'].includes(action.status) ? `\n${result?.text ?? 'Carry on without it.'}` : ''}`
 }
 interface Host {
@@ -162,7 +163,7 @@ export class BotActions {
     return { text: 'This call is held for your owner. End your turn now.' }
   }
   /** The only status writer. Settlement clears executable arguments in the same statement. */
-  transition(id: string, from: string, to: string, result?: ToolOutcome): boolean {
+  transition(id: string, from: string, to: string, result?: BotMcpCallOutcome): boolean {
     return this.host.store.db.transaction(() => {
       const moved = this.host.store.run(`UPDATE bot_actions SET status = ?, exec_args = CASE WHEN ? THEN exec_args ELSE NULL END,
         result_json = ?, answered_at = CASE WHEN ? = 'open' THEN ? ELSE answered_at END,
@@ -172,7 +173,7 @@ export class BotActions {
       if (moved && !pending.has(to)) {
         const action = this.get(id)!
         const row = this.host.store.activation(action.activation_id)
-        this.host.store.run('UPDATE bot_messages SET text = ? WHERE id = ?', to === 'done' ? 'Sent' : to === 'uncertain' ? "Couldn't tell if it went through" : 'Not sent', action.message_id)
+        this.host.store.run('UPDATE bot_messages SET text = ? WHERE id = ?', to === 'done' ? 'Sent' : to === 'uncertain' ? "Couldn't tell if it went through" : result?.toolReportedError ? 'The tool reported an error' : 'Not sent', action.message_id)
         if (row?.endReason === 'approval') this.host.store.moveActivation(row.id, ['blocked'], 'blocked', { endReason: 'approval_answered' })
       }
       return moved
