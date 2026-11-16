@@ -161,6 +161,7 @@ interface BotsState {
    * The owner taps one of a question's answers: it is their reply to the question, which the bot answers. False when it
    * was not sent (the error says why, or the service has no buttons for questions).
    */
+  answerAction(botId: string, actionId: string, digest: string, answer: 'send' | 'not_now'): Promise<'answered' | 'changed'>
   answerQuestion(botId: string, questionId: string, choice: string): Promise<boolean>
   /**
    * The owner's reaction on one of the bot's messages: shown at once, and put back as it was when the service refuses
@@ -598,6 +599,19 @@ export const useBotsStore = create<BotsState>((set, get) => {
         else fail(owner, cause, botId)
         void get().loadChat(botId)
         return false
+      }
+    },
+    async answerAction(botId, actionId, digest, answer) {
+      const owner = epoch
+      try {
+        await bots().answerAction(actionId, digest, answer)
+        if (owner === epoch) { await get().loadChat(botId); void get().refresh() }
+        return 'answered'
+      } catch (cause) {
+        if (owner !== epoch) throw cause
+        await get().loadChat(botId)
+        if (String((cause as { code?: unknown } | null)?.code ?? '') === 'bot_action_changed') return 'changed'
+        throw cause
       }
     },
     async answerQuestion(botId, questionId, choice) {
