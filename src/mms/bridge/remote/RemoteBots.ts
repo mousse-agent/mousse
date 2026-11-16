@@ -340,6 +340,16 @@ const bytes = (value: unknown): number => Buffer.byteLength(canonicalJson(value)
 /** One message within a reply: a very long text is cut, with a note that the rest is on the computer. */
 function fitted(message: RemoteBotMessage, budget = RESULT_BYTES): RemoteBotMessage {
   if (bytes(message) <= budget) return message
+  if (message.action) {
+    // Never send a partially reviewable card with a live Send button. Not now still names this row.
+    const action = message.action
+    message = { ...message, text: 'This action is too large to send from here. Open it on the computer.', action: {
+      actionId: action.actionId, digest: action.digest, title: action.title, serverName: action.serverName,
+      args: null, hasHiddenValues: action.hasHiddenValues, hiddenPaths: [], status: action.status,
+      ...(action.previous ? { previous: action.previous } : {}), ...(action.at ? { at: action.at } : {}), tooLarge: true
+    } }
+    if (bytes(message) <= budget) return message
+  }
   const over = bytes(message) - budget
   const keep = Math.max(0, Buffer.byteLength(message.text) - over - 256)
   let cut = Buffer.from(message.text).subarray(0, keep).toString()
