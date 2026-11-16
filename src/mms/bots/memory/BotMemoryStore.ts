@@ -1242,6 +1242,12 @@ export class BotMemoryStore {
     })
   }
 
+  /** Whether capture must mask tool arguments of this work, including after its action settled. */
+  hasStoredActions(activationId: string): boolean {
+    return Boolean(this.get("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bot_actions'")
+      && this.get('SELECT 1 FROM bot_actions WHERE activation_id = ? LIMIT 1', activationId))
+  }
+
   /** Export the masked call record, never the exact executable arguments. */
   actions(botId: string): Array<Record<string, unknown>> {
     if (!this.get("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bot_actions'")) return []

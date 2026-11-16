@@ -133,7 +133,7 @@ function botRows(message: ChatMessage, ref: BotThreadRef, maskArguments = false)
     if (/(?:^|__)telling_set$/.test(tool)) {
       return [{ ...base, kind: 'tool_call', sourceKey: key, who: 'bot', text: 'telling_set', json: { tool: 'telling_set' } }]
     }
-    if (maskArguments) input = maskedActionData(input)
+    if (maskArguments) input = maskedActionData(input) as typeof input
     const inputText = input === undefined ? '' : safeJson(input)
     const rows: CapturedRow[] = [{
       ...base,
@@ -209,9 +209,7 @@ export function createBotJournal(options: BotJournalCaptureOptions): BotJournalC
       let start = saved && saved.n <= messages.length && (saved.n === 0 || messages[saved.n - 1]?.id === saved.lastId) ? saved.n : 0
       let settledPrefix = true
       let written = 0
-      const maskArguments = options.asksFirstEnabled?.() === true && Boolean(ref.activationId
-        && store.get("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bot_actions'")
-        && store.get('SELECT 1 FROM bot_actions WHERE activation_id = ? LIMIT 1', ref.activationId))
+      const maskArguments = options.asksFirstEnabled?.() === true && Boolean(ref.activationId && store.hasStoredActions(ref.activationId))
       for (let index = start; index < messages.length; index++) {
         const message = messages[index]!
         const partial = unsettled(message)
