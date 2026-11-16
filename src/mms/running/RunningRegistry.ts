@@ -117,7 +117,6 @@ const MAX_NOTED_PER_THREAD = 40
 const MAX_ADDRESSES = 3
 const CONSOLE_HOSTS = /(^|[\\/])(conhost|OpenConsole)\.exe/i
 const LOCAL_URL = /\bhttps?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\]|[\w-]+\.localhost)(?::\d+)?(?:\/[^\s'"`<>)\]]*)?/gi
-// eslint-disable-next-line no-control-regex
 const ANSI = /\u001b\[[0-9;?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g
 
 export function defaultRunningSystem(): RunningSystem {
