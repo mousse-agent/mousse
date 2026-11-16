@@ -399,6 +399,13 @@ export class BotChatService {
    * so it never lets the bot start, message or stop a thread, or switch models. A question already answered, or no
    * longer open, is refused before anything is written. A repeat of `clientRequestId` returns the first answer.
    */
+  actionMessage(botId: string, actionId: string): BotChatMessage {
+    const action = this.engine.actions.get(actionId)
+    const message = action?.bot_id === botId ? this.store.message(action.message_id) : undefined
+    if (!message) throw new BotEngineError('not_found', 'No held action here.')
+    return this.engine.chat.toMessage(message)
+  }
+
   async answerAction(input: { actionId: string; digest: string; answer: 'send' | 'not_now'; botId?: string }): Promise<{ status: string }> {
     const action = this.engine.actions.get(input.actionId)
     if (input.botId && action?.bot_id !== input.botId) throw new BotEngineError('not_found', 'No held action here.')

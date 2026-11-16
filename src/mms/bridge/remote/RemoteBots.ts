@@ -60,6 +60,7 @@ export interface RemoteBotsPort {
   markRead(botId: string, seq: number): Record<string, never>
   askKind(botId: string, askId: string): 'permission' | 'export_memory' | 'threads'
   answer(botId: string, askId: string, answer: 'allow' | 'not_now'): Promise<{ message: BotChatMessage }>
+  actionMessage(botId: string, actionId: string): BotChatMessage
   answerAction(input: { botId: string; actionId: string; digest: string; answer: 'send' | 'not_now' }): Promise<{ status: string }>
   questionCheck(botId: string, questionId: string): void
   answerQuestion(input: { botId: string; questionId: string; choice: string; clientRequestId: string; from?: { limit: PermissionMode; node?: string } }): Promise<{ message: BotChatMessage; question?: BotChatMessage }>
@@ -621,7 +622,16 @@ export function remoteBotMethods(options: {
       },
       first((p, port) => port.questionCheck(botId(p), p.questionId as string))
     ),
-    method('bots.actions.answer', async (p, port) => port.answerAction({ botId: botId(p), actionId: p.actionId as string, digest: p.digest as string, answer: p.answer as 'send' | 'not_now' })),
+    method('bots.actions.answer', async (p, port) => {
+      if (p.answer === 'send') {
+        const message = port.actionMessage(botId(p), p.actionId as string)
+        // Include the page envelope too: fittedPage may cut its only message to leave room for it.
+        const page = port.chatList(botId(p), { limit: 1, beforeSeq: message.seq + 1 })
+        if (bytes({ ...page, messages: [remoteBotMessage(message)] }) + 1 > RESULT_BYTES)
+          throw new NetError('conflict', 'Open it on the computer to send.')
+      }
+      return port.answerAction({ botId: botId(p), actionId: p.actionId as string, digest: p.digest as string, answer: p.answer as 'send' | 'not_now' })
+    }),
     method('bots.reminders.snooze', async (p, port) => fitted(remoteBotMessage(port.reminderSnooze(botId(p), p.messageId as string, p.choice as import('../../../shared/bots/personal/chat').BotSnoozeChoice)))),
     method('bots.personal.pause', async (p, port) => ({ bot: remoteBotSummary(port.pause(botId(p)).bot) })),
     method('bots.personal.resume', async (p, port) => ({ bot: remoteBotSummary((await port.resume(botId(p))).bot) })),
