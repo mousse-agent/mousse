@@ -5,6 +5,7 @@ import { useAppStore } from '../stores/appStore'
 import { useBotsStore } from '../stores/botsStore'
 import { useChatsStore } from '../stores/chatsStore'
 import { activeRailPage, openRailPage } from './railPages'
+import { confirmNavigation } from '../services/navigationGuards'
 import { selectThread } from './threadActions'
 
 /**
@@ -155,6 +156,9 @@ export function canOpenFromHistory(entry: string): boolean {
 /** Opens a bot's chat or Chats conversation, closing a page that covers the workspace once it has opened. */
 async function openChatsPlace(place: ChatsPlace): Promise<void> {
   const chats = useChatsStore.getState()
+  // openBot/openChat skip their guard for the place already selected; a page about to be closed still needs it.
+  const selected = place.kind === 'bot' ? chats.activeBotId === place.id : chats.activeChatId === place.id
+  if (selected && shownPage(useAppStore.getState()) && !await confirmNavigation()) return
   if (place.kind === 'bot') await chats.openBot(place.id)
   else await chats.openChat(place.id)
   const now = useChatsStore.getState()
@@ -163,6 +167,9 @@ async function openChatsPlace(place: ChatsPlace): Promise<void> {
   app.setScheduledOpen(false)
   app.setUsageOpen(false)
 }
+
+/** The entry `goToHistoryIndex` is opening, while it does. */
+let steppingTo: string | null = null
 
 /** Opens the history entry at `index`. When the switch is refused (unsaved changes kept), the window stays where it was. */
 export async function goToHistoryIndex(index: number): Promise<void> {
@@ -174,11 +181,14 @@ export async function goToHistoryIndex(index: number): Promise<void> {
   const place = chatsPlace(entry)
   // Moved first, so the switch below is read as a step through the history, not a new visit.
   useThreadHistoryStore.setState({ index })
+  const outer = steppingTo
+  steppingTo = entry
   try {
     if (page) await openRailPage(page)
     else if (place) await openChatsPlace(place)
     else await selectThread(entry)
   } finally {
+    steppingTo = outer
     const state = useAppStore.getState()
     const arrived = page ? shownPage(state) === page
       : place ? shownChatsEntry(state, useChatsStore.getState()) === entry
@@ -202,7 +212,11 @@ export function stepHistory(direction: 1 | -1): Promise<void> {
  */
 export function trackThreadHistory(): () => void {
   let stopped = false
-  const visit = (entry: string) => useThreadHistoryStore.getState().visit(entry)
+  // While the history steps to an entry, the stale chat that Chats still holds is not a visit (it would cut off what is ahead).
+  const visit = (entry: string) => {
+    if (steppingTo !== null && entry !== steppingTo) return
+    useThreadHistoryStore.getState().visit(entry)
+  }
   const record = (threadId: string | null) => {
     if (!threadId || chatThreadIds().has(threadId)) return
     visit(threadId)
