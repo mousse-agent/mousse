@@ -173,10 +173,11 @@ export class SecretVault {
    * the thread has none, which is every thread that never asked for a secret.
    */
   maskerFor(threadId: string): SecretMasker | undefined {
-    const retired = this.retiredFor(threadId)
+    const ancestors = this.options.ancestorsOf?.(threadId) ?? []
+    const retired = this.retiredFor(threadId, ancestors)
     const cached = this.maskers.get(threadId)
     if (cached !== undefined && !retired.length) return cached ?? undefined
-    const owners = new Set([threadId, ...(this.options.ancestorsOf?.(threadId) ?? [])])
+    const owners = new Set([threadId, ...ancestors])
     const meta = this.readMeta()
     const secrets = Object.entries(meta).flatMap(([name, entry]) => {
       if (!entry.threads.some((owner) => owners.has(owner))) return []
@@ -203,16 +204,27 @@ export class SecretVault {
     return secretMasker(secrets)
   }
 
-  /** The thread's retired values while its turn runs or has just ended; forgotten after that. */
-  private retiredFor(threadId: string): Array<{ name: string; value: string }> {
-    const entry = this.retired.get(threadId)
-    if (!entry) return []
+  /**
+   * The retired values of the thread and of the threads above it, while its turn (or theirs) runs or has just ended;
+   * forgotten after that. A subagent's running turn keeps its parents' retired values too: it may have been handed one.
+   */
+  private retiredFor(threadId: string, ancestors: readonly string[]): Array<{ name: string; value: string }> {
+    const out: Array<{ name: string; value: string }> = []
     const now = this.now()
-    if (this.options.threadBusy?.(threadId)) entry.lastBusy = now
-    if (now - entry.lastBusy < RETIRED_SECRET_GRACE_MS) return entry.secrets
-    this.retired.delete(threadId)
-    this.maskers.delete(threadId)
-    return []
+    let busy: boolean | undefined
+    for (const id of [threadId, ...ancestors]) {
+      const entry = this.retired.get(id)
+      if (!entry) continue
+      busy ??= this.options.threadBusy?.(threadId) ?? false
+      if (busy || (id !== threadId && this.options.threadBusy?.(id))) entry.lastBusy = now
+      if (now - entry.lastBusy < RETIRED_SECRET_GRACE_MS) {
+        for (const secret of entry.secrets) if (!out.some((other) => other.value === secret.value)) out.push(secret)
+        continue
+      }
+      this.retired.delete(id)
+      this.maskers.delete(id)
+    }
+    return out
   }
 
   /** Every secret in the store, for Settings: saved keys and the ones given in threads. Never values. */
