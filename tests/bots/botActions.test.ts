@@ -1395,3 +1395,29 @@ it('restart never executes a previously approved call while its owner has paused
   expect(f.store.unreadWorkActions(t.workId)).toEqual([])
   expect(t.calls).toEqual([])
 })
+
+it('B1 an approved row survives a cold restart and runs only after a successful listing', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  f.bots.actions.transition(a.id, 'open', 'approved')
+  const tools = t.server.tools.splice(0)
+  const where = vi.spyOn(t.mcp, 'where').mockReturnValue(undefined)
+  f.bots.close(); f.bots = new BotEngine(f.host); await f.bots.reconcileOnStartup()
+  expect(f.bots.actions.get(a.id)?.status).toBe('approved')
+  expect(t.calls).toEqual([])
+  t.server.tools.push(...tools); where.mockRestore()
+  f.bots.fillMcpAsks(); await flush()
+  expect(f.bots.actions.get(a.id)?.status).toBe('done')
+  expect(t.calls).toEqual([t.args])
+})
+
+it('B1 a real configuration change withdraws even while the server listing fails', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  t.server.tools.splice(0); t.server.failing = true; t.server.configDigest = 'changed'
+  f.bots.fillMcpAsks()
+  expect(f.bots.actions.get(a.id)).toMatchObject({ status: 'withdrawn', exec_args: null })
+  expect(t.calls).toEqual([])
+})
