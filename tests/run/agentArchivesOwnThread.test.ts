@@ -145,6 +145,46 @@ describe('a thread\'s agent archives its own thread when its turn ends', () => {
     expect(w.actions()).toEqual([])
   })
 
+  it('a subagent\'s queued turn keeps the thread open, and the subagent runs it', async () => {
+    const w = world()
+    const child = w.d.store.createThread('Worker', w.thread.projectId, undefined, { lineage: { parentThreadId: w.thread.id, rootThreadId: w.thread.id, relationship: 'subagent' } })
+    w.d.orch.setThreadModelOverride(child.id, MODEL)
+    // Queued on the subagent while the parent's turn runs, not started yet.
+    w.adapter.onArchived = () => { w.d.orch.enqueueForThread(child.id, { content: 'child work' }, { source: 'internal', internal: true }) }
+    await w.send('settle yourself when done')
+    await w.idle()
+    await afterTurnEnd()
+    expect(w.archived()).toBe(false)
+    expect(w.lines()).toContain(ARCHIVE_AFTER_TURN_KEPT)
+    w.d.orch.resumeThreadQueue(child.id)
+    await waitFor(() => w.adapter.prompts.includes('child work'), 'the subagent ran its queued turn')
+  })
+
+  it('a thread it launched that is still working keeps the thread open, and its run goes on', async () => {
+    const w = world()
+    const launched = w.d.store.createThread('Launched', w.thread.projectId, undefined, { started: true, createdByThreadId: w.thread.id })
+    const run = w.d.engine.store.createRun({ threadId: launched.id, source: 'mcp', outcome: { sentByAgent: true, agentHops: 1 } })
+    w.d.engine.markStarting(run.runId)
+    w.d.engine.markRunning(run.runId)
+    await w.send('settle yourself when done')
+    await w.idle()
+    await afterTurnEnd()
+    expect(w.archived()).toBe(false)
+    expect(w.lines()).toContain(ARCHIVE_AFTER_TURN_KEPT)
+    expect(w.d.engine.getRun(run.runId)).toMatchObject({ status: 'running' })
+    expect(w.d.engine.getRun(run.runId)?.outcome?.stopRequested).toBeFalsy()
+  })
+
+  it('a background command the provider still runs keeps the thread open', async () => {
+    const w = world()
+    w.adapter.onArchived = () => { w.d.orch.setProviderBackgroundWork(w.thread.id, true) }
+    await w.send('settle yourself when done')
+    await w.idle()
+    await afterTurnEnd()
+    expect(w.archived()).toBe(false)
+    expect(w.lines()).toContain(ARCHIVE_AFTER_TURN_KEPT)
+  })
+
   it('a turn that fails after asking leaves the thread open', async () => {
     const w = world()
     w.adapter.after = 'fail'

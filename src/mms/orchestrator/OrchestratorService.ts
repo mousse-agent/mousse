@@ -5402,8 +5402,8 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * The end of a turn whose agent asked to archive its thread (`archiveOwnThreadAfterTurn`). A turn that ended well is
-   * archived through the app's own Archive (`settleThread`) once its run has let go of the thread, unless work waits
-   * there by then: a queued message, or a run of the thread or a subagent below it. The thread then stays, and says why.
+   * archived through the app's own Archive (`settleThread`) once its run has let go of the thread, unless that Archive
+   * would end work still outstanding by then (`archiveOwnThreadKept`). The thread then stays, and says why.
    * A turn that failed, paused or was stopped leaves the thread as it is.
    */
   private archiveAfterTurnEnds(threadId: string, runId: string | undefined, ended: 'completed' | 'failed' | 'interrupted' | 'paused'): void {
@@ -5421,15 +5421,13 @@ export class OrchestratorService extends EventEmitter {
 
   private async archiveOwnThreadNow(threadId: string, actor: AgentActor): Promise<void> {
     const engine = this.runEngine
-    const thread = this.threadStore?.getThread(threadId)
-    if (!engine || !thread || thread.settledAt || this.lifecycle.stopping) return
+    const store = this.threadStore
+    const thread = store?.getThread(threadId)
+    if (!engine || !store || !thread || thread.settledAt || this.lifecycle.stopping) return
     const session = this.boundSession.threadId === threadId ? this.boundSession : this.sessions.get(threadId)
     if (session?.deleted) return
     if (session) this.refreshSessionQueueFromDisk(session)
-    const waiting = session ? listPendingQueue(session.queue).length > 0 : false
-    const subtree = [threadId, ...subagentDescendants(threadId, this.threadStore?.listAllThreads() ?? [])]
-    const running = Boolean(session?.isTurnRunning() || session?.turnAdmitted) || subtree.some((id) => engine.getActiveRun(id) || engine.store.getPausedRun(id))
-    if (waiting || running) {
+    if (await this.archiveOwnThreadKept(threadId, actor.runId, session)) {
       const target = session ?? this.getOrCreateSession(threadId)
       this.sessionAls.run(target, () => this.addSystemMessage(ARCHIVE_AFTER_TURN_KEPT))
       return
@@ -5441,6 +5439,33 @@ export class OrchestratorService extends EventEmitter {
       type: 'agent.action',
       payload: { action: 'archived_thread', actorThreadId: actor.threadId, actorRunId: actor.runId, toolCallId: actor.toolCallId }
     })
+  }
+
+  /**
+   * Whether a thread its agent asked to archive still has work an Archive would end (`settleThread` is a Stop, and a Stop
+   * reaches all of it): a queued message, a run starting, running, waiting or paused, provider background work (a
+   * command it left running), or a question to the person, in the thread or a subagent below it; or a thread one of
+   * them launched that is still working, here or on another computer. The turn that asked (`askedRunId`) is not counted.
+   */
+  private async archiveOwnThreadKept(threadId: string, askedRunId: string, session: ThreadSession | undefined): Promise<boolean> {
+    const engine = this.requireRunEngine()
+    const store = this.threadStore
+    if (!store) return true
+    if (session?.isTurnRunning() || session?.turnAdmitted) return true
+    const subtree = new Set([threadId, ...subagentDescendants(threadId, store.listAllThreads())])
+    if (engine.store.listNonTerminalRuns().some((run) => subtree.has(run.threadId) && run.runId !== askedRunId)) return true
+    for (const id of subtree) {
+      if (this.providerBackground.has(id) || this.questions.listPendingForThread(id).length > 0) return true
+      const live = id === threadId ? session : this.boundSession.threadId === id ? this.boundSession : this.sessions.get(id)
+      if (live?.isTurnRunning() || live?.turnAdmitted) return true
+      try {
+        if (listPendingQueue(readDurableQueue(store, id)).length > 0) return true
+      } catch {
+        return true
+      }
+      if ((await this.launchedThreadsWorking(id)) > 0) return true
+    }
+    return false
   }
 
   /**
