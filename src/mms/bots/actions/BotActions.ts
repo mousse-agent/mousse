@@ -12,11 +12,14 @@ export function botAsksFirst(settings?: Pick<MousseSettings, 'experimental'>): b
   return settings?.experimental.botAsksFirst === true
 }
 export const actionDigest = (value: unknown): string => shortHash(canonicalJson(value), 64)
+const hiddenKey = (key: string): boolean => /(?:authorization|password|passwd|secret|token|apikey)$/i.test(key.replace(/[^a-z0-9]/gi, ''))
+export const ACTION_HIDDEN_VALUE = 'hidden · will be sent'
+
 /** Mask before cutting, recursively: a cut must not split a credential before the mask sees it. */
 export function maskedActionData(value: unknown, limit = 32_000): unknown {
   if (typeof value === 'string') return maskMemoryCredentials(value).slice(0, limit)
   if (Array.isArray(value)) return value.map(item => maskedActionData(item, limit))
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [maskMemoryCredentials(key), /(?:authorization|password|passwd|secret|token|apikey)$/i.test(key.replace(/[^a-z0-9]/gi, '')) ? '[held back: looks like a secret]' : maskedActionData(item, limit)]))
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [maskMemoryCredentials(key), hiddenKey(key) ? '[held back: looks like a secret]' : maskedActionData(item, limit)]))
   return value
 }
 /** Defense for older rows: an echoed hidden argument must not outlive executable storage. */
@@ -52,10 +55,23 @@ function containsCredential(value: unknown): boolean {
   if (Array.isArray(value)) return value.some(containsCredential)
   return Boolean(value && typeof value === 'object' && Object.entries(value).some(([key, item]) => containsCredential(key) || containsCredential(item)))
 }
+/** The review hides named sensitive values without claiming they are withheld from the call. */
+function reviewArguments(value: unknown): { args: unknown; hasHiddenValues: boolean } {
+  let hasHiddenValues = false
+  const visit = (item: unknown): unknown => {
+    if (Array.isArray(item)) return item.map(visit)
+    if (item && typeof item === 'object') return Object.fromEntries(Object.entries(item).map(([key, entry]) => {
+      if (hiddenKey(key)) { hasHiddenValues = true; return [key, ACTION_HIDDEN_VALUE] }
+      return [key, visit(entry)]
+    }))
+    return item
+  }
+  return { args: visit(value), hasHiddenValues }
+}
 export interface ActionRow {
   id: string; call_key: string; bot_id: string; activation_id: string; status: string
   exec_args: string | null; args_digest: string; binding_json: string; target_json: string
-  args_json: string; message_id: string; expires_at: string; result_json: string | null
+  args_json: string; card_json: string | null; message_id: string; expires_at: string; result_json: string | null
 }
 interface Host {
   store: BotStore
@@ -92,20 +108,19 @@ export class BotActions {
     if (!binding) return { text: 'This tool changed. Carry on without it.', isError: true }
     if (containsCredential(args)) return { text: 'This contains something that looks like a secret. It is never sent through a tool this way. Send it without that value.', isError: true }
     const exact = JSON.stringify(args)
-    if (actionDigest(JSON.parse(exact)) !== actionDigest(maskedActionData(args, Infinity)))
-      return { text: 'This call contains hidden secret values. Nothing was held or sent. Remove the secret before asking the owner to review it.', isError: true }
-    if (actionDigest(JSON.parse(exact)) !== actionDigest(maskedActionData(args)))
+    const review = reviewArguments(args)
+    if (JSON.stringify(review.args).length > 32_000)
       return { text: 'These arguments are too long to review without being cut. Nothing was held or sent. Shorten them first.', isError: true }
     const id = `action_${randomUUID()}`
     const messageId = `bm_${id}`
     this.host.store.db.transaction(() => {
       this.host.store.run(`INSERT INTO bot_actions(id, call_key, bot_id, activation_id, lane, kind, target_json, exec_args,
-        args_json, args_digest, binding_json, status, message_id, expires_at, created_at)
-        VALUES(?, ?, ?, ?, 'run', 'mcp', ?, ?, ?, ?, ?, 'open', ?, ?, ?)`,
-      id, callKey, row.botId, row.id, JSON.stringify({ server: tool.server, tool: tool.tool }), exact, JSON.stringify(maskedActionData(args)), actionDigest(JSON.parse(exact)), JSON.stringify(binding), messageId,
+        args_json, args_digest, binding_json, card_json, status, message_id, expires_at, created_at)
+        VALUES(?, ?, ?, ?, 'run', 'mcp', ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`,
+      id, callKey, row.botId, row.id, JSON.stringify({ server: tool.server, tool: tool.tool }), exact, JSON.stringify(review.args), actionDigest(JSON.parse(exact)), JSON.stringify(binding), JSON.stringify({ hasHiddenValues: review.hasHiddenValues }), messageId,
       new Date(Date.parse(this.host.store.now()) + 48 * 3600_000).toISOString(), this.host.store.now())
       this.host.park(row)
-      this.host.post(row, messageId, `Send this action?\n${JSON.stringify(maskedActionData(args))}`)
+      this.host.post(row, messageId, `Send this action?\n${review.hasHiddenValues ? 'Hidden values will be sent.\n' : ''}${JSON.stringify(review.args)}`)
     })
     return { text: 'This call is held for your owner. End your turn now.' }
   }

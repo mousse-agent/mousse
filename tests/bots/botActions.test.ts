@@ -446,7 +446,7 @@ it('R5-time transports the sent instant instead of a UTC clock string', async ()
   expect(message.text).toBe('Sent')
   expect((message as unknown as { actionSentAt: string }).actionSentAt).toBe(f.store.now())
 })
-it.each([{ password: 'hunter2' }, { token: 'ordinary-secret' }, { body: `sk-proj-${'A'.repeat(70)}` }])('S1 refuses arguments the owner would not see: %j', async hidden => {
+it.each([{ body: `sk-proj-${'A'.repeat(70)}` }])('S1 refuses arguments the owner would not see: %j', async hidden => {
   const t = await setup(true)
   Object.assign(t.args, hidden)
   expect(await t.call()).toMatchObject({ isError: true, text: expect.stringMatching(/hidden|secret/i) })
@@ -526,7 +526,7 @@ it('R5-capture leaves unrelated tool calls classified as bot calls', async () =>
 })
 it('S1-refused provider capture masks hidden arguments even when no action row was written', async () => {
   const t = await setup(true)
-  Object.assign(t.args, { password: 'hunter2' })
+  Object.assign(t.args, { password: `sk-${'Z'.repeat(30)}` })
   expect(await t.call()).toMatchObject({ isError: true })
   expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
   const memory = new BotMemoryStore({ db: f.store.db })
@@ -535,7 +535,7 @@ it('S1-refused provider capture masks hidden arguments even when no action row w
     id: 'refused-secret', role: 'assistant', kind: 'tool_call', content: '', timestamp: f.store.now(),
     toolCall: { title: 'Mail__send', summary: '', details: [], toolName: 'Mail__send', input: t.args, status: 'complete' }
   }] }) }).syncNow(ref)
-  expect(JSON.stringify(f.store.all('SELECT text, json FROM bot_journal WHERE activation_id = ?', t.workId))).not.toContain('hunter2')
+  expect(JSON.stringify(f.store.all('SELECT text, json FROM bot_journal WHERE activation_id = ?', t.workId))).not.toContain(`sk-${'Z'.repeat(30)}`)
 })
 it('R3-binding tells the work why the pre-dispatch fence refused the call', async () => {
   const t = await setup(true)
