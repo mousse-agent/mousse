@@ -3298,7 +3298,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         holdMcp: (tool: import('../../../shared/bots/personal/authority').BotMcpTool, args: Record<string, unknown>, toolCallId?: string) => {
           const pair = this.store.activeGrant(row.botId)?.manifest.mcp.find(p => p.serverId === tool.server && p.tool === tool.tool)
           if (pair?.level !== 'asks_first') return undefined
-          if (row.trigger.kind !== 'work') return { text: 'This tool needs your owner to approve each call. A scheduled run cannot wait for that yet; carry on without it.', isError: true }
+          if (row.trigger.kind !== 'work') return { text: row.trigger.kind === 'schedule' ? 'This tool needs your owner to approve each call. A scheduled run cannot wait for that yet; carry on without it.' : 'This tool needs your owner to approve each call. A run started by hand cannot wait for that yet; ask the owner to start it as work from the chat.', isError: true }
           const existing = toolCallId && this.store.get('SELECT id FROM bot_actions WHERE call_key = ?', JSON.stringify([row.id, input.callDispatchId ?? input.dispatchId, toolCallId]))
           if (!existing) {
             const allowed = base.check({ kind: 'mcp', server: tool.server, tool: tool.tool, args })

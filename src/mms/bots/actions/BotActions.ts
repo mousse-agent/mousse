@@ -133,7 +133,7 @@ export class BotActions {
     if (!action || action.status !== 'running' || !this.valid(action)) throw changed()
   }
   async answer(input: { actionId: string; digest: string; answer: 'send' | 'not_now' }): Promise<{ status: string }> {
-    if (!this.host.enabled()) throw changed()
+    if (!this.host.enabled()) throw new BotActionChanged('Asks first is not available while its switch is off.')
     await this.host.refresh()
     const action = this.get(input.actionId)
     if (!action || action.status !== 'open' || action.args_digest !== input.digest || !this.valid(action)) throw changed()
