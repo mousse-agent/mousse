@@ -13152,16 +13152,26 @@ export class OrchestratorService extends EventEmitter {
       }
       // The turn's own thread and async context, whichever context the runtime calls from (`inTurn`). A late call,
       // made while a newer turn runs in the thread, would land in that turn's rows: it is dropped.
+      let outputNotified = false
+      const confirmBotOutput = (): void => {
+        if (outputNotified || !opts?.bot?.modelOutput) return
+        outputNotified = true
+        try { opts.bot.modelOutput() }
+        catch (error) { console.warn('A bot work update could not be confirmed; it will be carried again.', { threadId: session.threadId, error: error instanceof Error ? error.message : String(error) }) }
+      }
       const turnSink = this.inTurn<TurnSink>(session, turn, turnId, 'sink', {
         text: (event) => {
+          if (event.content) confirmBotOutput()
           hold.modelOutput(event.phase)
           this.handleStreamingTextEvent(event)
         },
         thinking: (event) => {
+          if (event.content) confirmBotOutput()
           hold.modelOutput(event.phase)
           this.handleStreamingThinkingEvent(event)
         },
         tool: (event) => {
+          if (event.phase === 'start' && (event.kind === 'mcp_tool_call' || event.kind === 'build_tool_call')) confirmBotOutput()
           if (event.kind !== 'skill_loaded') conversationToolsUsed = true
           this.handleStreamingToolEvent(event)
           // After the assembler: the call's row is open (or closed) when the window restarts. Only the turn's own calls

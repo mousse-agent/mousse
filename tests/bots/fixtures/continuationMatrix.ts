@@ -5,7 +5,7 @@ export const NOTE = 'Read the release notes next.'
 export const NOTE_TEXT = `The owner added while you worked:\n- ${NOTE}`
 export const ANSWER = 'Your owner answered your question "Which flat?": A.'
 export const REPLAY = 'The original task never reached the provider.'
-export const REASONS = ['turn cap', 'more room', 'restart', 'reload', 'internet back', 'usage reset', 'updated report', 'question answered', 'question re-asked', 'wall Allow', 'wall Not now', 'replay', 'permission switched off'] as const
+export const REASONS = ['turn cap', 'more room', 'restart', 'reload', 'internet back', 'usage reset', 'updated report', 'question answered', 'question re-asked', 'wall Allow', 'wall Not now', 'replay', 'permission switched off', 'permission allowed since refused', 'owner words'] as const
 export const UPDATES = ['none', 'note', 'question answer', 'wall answer', 'note and answer'] as const
 export type Reason = typeof REASONS[number]
 export type Update = typeof UPDATES[number]
@@ -25,6 +25,8 @@ export function matrixInput(reason: Reason, update: Update, ordered: boolean): a
   if (reason === 'question re-asked') Object.assign(input, { answers: [wall()], askAgain: ['Which release?'] })
   if (reason === 'wall Allow') input.answers = [wall()]
   if (reason === 'wall Not now') input.answers = [wall('denied')]
+  if (reason === 'permission allowed since refused') input.allowed = ['read pages']
+  if (reason === 'owner words') Object.assign(input, { answers: [wall('denied')], ownerText: 'Please use the browser instead.' })
   if (update === 'note' || update === 'note and answer') input.notes = NOTE_TEXT
   if (update === 'question answer' || update === 'note and answer') input.answered = ANSWER
   if (update === 'wall answer' && !input.answers.length) input.answers = [wall()]

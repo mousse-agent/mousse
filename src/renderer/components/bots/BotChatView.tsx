@@ -376,7 +376,7 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settl
       <div ref={bubble} tabIndex={-1} className={`bot-bubble${pictures ? ' has-media' : ''}${pictures && !media.text && !lostChips.length && !cards ? ' is-media-only' : ''}`}>
         {quoted && <BotReplyQuote botId={bot.id} quote={message.replyTo!} botName={bot.name} />}
         <BotReplyMedia images={shownImages} onMenuOpen={setMenuOpen} />
-        {media.text && <div className="bot-find-text" data-find-text data-message-id={message.id} data-part-index="0"><BotMarkdown text={media.text} className="bot-markdown" /></div>}
+        {message.actionSentAt ? <p className="bot-question-settled" role="note">Sent · <time dateTime={message.actionSentAt}>{botGroupTime(message.actionSentAt)}</time></p> : media.text && <div className="bot-find-text" data-find-text data-message-id={message.id} data-part-index="0"><BotMarkdown text={media.text} className="bot-markdown" /></div>}
         {cards && <BotCards cards={cards} botId={bot.id} />}
         {lostChips.length > 0 && <p className="bot-picture-chips">{lostChips.map((image) => <BotPathChip key={image.key} path={image.path!} />)}</p>}
         {openAsk && <p className="bot-bubble-ask"><Shield size={14} aria-hidden /><span>Wants to <strong>{openAsk.title}</strong></span></p>}

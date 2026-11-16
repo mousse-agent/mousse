@@ -1,3 +1,4 @@
+import { BotActionChanged } from '../actions/BotActions'
 import { realpathSync } from 'node:fs'
 import { sep } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -398,6 +399,22 @@ export class BotChatService {
    * so it never lets the bot switch models. A question already answered, or no
    * longer open, is refused before anything is written. A repeat of `clientRequestId` returns the first answer.
    */
+  actionMessage(botId: string, actionId: string): BotChatMessage {
+    const action = this.engine.actions.get(actionId)
+    const message = action?.bot_id === botId ? this.store.message(action.message_id) : undefined
+    if (!message) throw new BotEngineError('not_found', 'No held action here.')
+    return this.engine.chat.toMessage(message)
+  }
+
+  async answerAction(input: { actionId: string; digest: string; answer: 'send' | 'not_now'; botId?: string }): Promise<{ status: string }> {
+    const action = this.engine.actions.get(input.actionId)
+    if (input.botId && action?.bot_id !== input.botId) throw new BotEngineError('not_found', 'No held action here.')
+    try { return await this.engine.actions.answer(input) } catch (error) {
+      if (error instanceof BotActionChanged) throw new BotEngineError('bot_action_changed', error.message)
+      throw error
+    }
+  }
+
   async answerQuestion(input: { botId: string; questionId: string; choice: string; clientRequestId: string; from?: { limit: PermissionMode; node?: string } }): Promise<{ message: BotChatMessage; question?: BotChatMessage }> {
     this.engine.definitionOf(input.botId)
     const existing = this.store.messageByRequest(input.clientRequestId)

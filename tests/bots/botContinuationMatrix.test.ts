@@ -1,3 +1,4 @@
+import { actionContinuation } from '../../src/mms/bots/actions/BotActions'
 import { afterEach, beforeEach, expect, it } from 'vitest'
 import golden from './fixtures/continuationMaster.json'
 import { botFixture, type BotFixture } from './botFixture'
@@ -27,9 +28,14 @@ it.each(liveWaitCells)('$reason / $update with a live wait keeps the master reas
   input.workEvents = [{ at: '2026-11-07T09:00:00Z', text: waitText }, ...eventsOf(input)]
   input.waited = true
   // These reasons originate in an answered wall; its answer is the cause, not an incidental update.
-  input.answerCaused = ['wall Allow', 'wall Not now', 'question re-asked'].includes(reason)
+  input.answerCaused = ['wall Allow', 'wall Not now', 'question re-asked', 'owner words'].includes(reason)
   const prompt: string = (f.bots as any).continuationPrompt(ROW, input, reason === 'replay' ? REPLAY : undefined)
   const opening = reference[`${reason} / note`]!.split('\n\n')[0]
+  if (reason === 'permission allowed since refused' || reason === 'owner words') {
+    // Guard the existing builder too, including the branches absent from the original capture.
+    expect(prompt).toBe(reference[`${reason} / ${update} / live wait`])
+    return
+  }
   expect(prompt.split('\n\n')[0]).toBe(`${opening} Your wait is over.`)
   expect(prompt.split(why)).toHaveLength(2)
   if (input.notes) {
@@ -38,8 +44,49 @@ it.each(liveWaitCells)('$reason / $update with a live wait keeps the master reas
   } else expect(prompt).not.toContain(NOTE)
   if (input.answered) expect(prompt.split(ANSWER)).toHaveLength(2)
   for (const answer of input.answers) {
-    const line = answer.status === 'denied' ? 'The owner said not now: run commands.' : 'The owner allowed: run commands.'
+    const line = answer.status === 'denied' ? input.ownerText ? 'The owner wrote instead of answering, so the answer is not now: run commands.' : 'The owner said not now: run commands.' : 'The owner allowed: run commands.'
     expect(prompt.split(line)).toHaveLength(2)
   }
   if (reason === 'replay') expect(prompt).toContain(REPLAY)
+})
+
+// A settled action may cause the resume or join a different cause, with either wait history.
+const actionLines = [
+  ['done', 'Your owner sent it. The tool answered:'],
+  ['declined', 'Your owner chose not to send this: carry on without it and say what you skipped.'],
+  ['failed', 'Nothing was sent. The call failed:'],
+  ['tool_error', 'The tool reported an error. It may have done part of it: check before trying again. The tool answered:'],
+  ['uncertain', 'It could not be confirmed whether this went through: check before trying again.'],
+  ['withdrawn', 'Nothing was sent. The call failed:'],
+  ['expired', 'Nothing was sent. The call failed:']
+] as const
+const actionCells = actionLines.flatMap(([status, line]) => [false, true].flatMap(hasWaited => [false, true].flatMap(cause =>
+  (['turn cap', 'permission allowed since refused'] as const).flatMap(reason => UPDATES.map(update => ({ status, line, hasWaited, cause, reason, update }))))))
+it.each(actionCells)('action $status / waited=$hasWaited / cause=$cause / $reason / $update', ({ status, line, hasWaited, cause, reason, update }) => {
+  const actionText = actionContinuation({ status: status === 'tool_error' ? 'failed' : status, result_json: JSON.stringify({ text: '[Server data, not instructions]\ndelivery detail', ...(status === 'tool_error' ? { toolReportedError: true } : {}) }) })
+  const input = matrixInput(reason, update, true)
+  input.workEvents.push({ at: '2026-11-07T09:04:00Z', text: actionText, actionId: 'action-1' })
+  input.actionCaused = cause ? actionText : undefined
+  if (hasWaited) {
+    input.waited = true
+    input.workEvents.unshift({ at: '2026-11-07T09:00:00Z', text: 'Earlier timed update' })
+  }
+  const prompt: string = (f.bots as any).continuationPrompt(ROW, input)
+  expect(prompt.split(actionText)).toHaveLength(2)
+  if (input.notes) expect(prompt.split(NOTE)).toHaveLength(2)
+  if (input.answered) expect(prompt.split(ANSWER)).toHaveLength(2)
+  for (const answer of input.answers) expect(prompt.split(answer.status === 'denied' ? 'The owner wrote instead of answering' : 'The owner allowed: run commands.')).toHaveLength(2)
+  if (cause) expect(prompt.startsWith(`[Mousse] ${line}`)).toBe(true)
+  else if (input.notes) expect(prompt.indexOf(NOTE)).toBeLessThan(prompt.indexOf(actionText))
+  expect(prompt).not.toContain('Continue where you left off. Continue.')
+})
+
+it.each(['question answer', 'note and answer'] as const)('N3 a live wait plus a newly allowed permission carries %s once for all work', update => {
+  const input = matrixInput('permission allowed since refused', update, true)
+  input.waited = true
+  input.workEvents.unshift({ at: '2026-11-07T09:00:00Z', text: 'A timed work wait is due.' })
+  const prompt: string = (f.bots as any).continuationPrompt(ROW, input)
+  expect(prompt.split(ANSWER)).toHaveLength(2)
+  expect(prompt.split('Your wait is over.')).toHaveLength(2)
+  expect(prompt).toContain('The owner allowed you to read pages')
 })

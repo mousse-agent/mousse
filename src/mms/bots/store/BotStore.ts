@@ -1,3 +1,4 @@
+import type { ActionRow } from '../actions/BotActions'
 import { readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { ProfileDatabase, type Migration, type ProfileDatabaseFault } from '../../run/db/ProfileDatabase'
@@ -790,9 +791,11 @@ export interface BotDispatchRow {
   prompt: {
     text: string
     subagent?: BotSubagentSpec
-    /** A wait is told only when a dispatch carrying its id has started. */
+    /** Stored updates are told only after model output or a completed dispatch. */
+    workTold?: 'pending' | 'output' | 'completed'
     workWaitIds?: string[]
-    /** Work's stored additions carried here; consume them with the dispatch's start, not its intent. */
+    workActionIds?: string[]
+    /** Carried ids for replay; existing read/applied markers remain independent of confirmation. */
     workDelivery?: { answers: string[]; notes: number[]; question?: string }
   }
   policyDigest: string
@@ -881,6 +884,21 @@ export interface BotCountersRow {
   outputTokens: number
   activeMs: number
 }
+
+// Completed outcomes also recognize dispatches written before the explicit output marker existed.
+const WORK_TOLD = "(COALESCE(json_extract(d.prompt_json, '$.workTold'), '') IN ('output', 'completed') OR (json_extract(d.prompt_json, '$.workTold') IS NULL AND d.outcome IS 'completed'))"
+
+const hasWorkUpdates = (prompt: BotDispatchRow['prompt']): boolean => Boolean(
+  prompt.workActionIds?.length || prompt.workWaitIds?.length || prompt.workDelivery?.notes.length ||
+  prompt.workDelivery?.answers.length || prompt.workDelivery?.question
+)
+
+/** Only prompt delivery uses confirmation. Existing read/applied markers keep their carried semantics. */
+const unconfirmedDelivery = (table: string, member: 'notes' | 'answers' | 'question'): string => `
+  EXISTS (SELECT 1 FROM bot_dispatches carried, json_each(carried.prompt_json, '$.workDelivery.${member}') item
+    WHERE carried.activation_id = ${table}.activation_id AND item.value = ${table}.id)
+  AND NOT EXISTS (SELECT 1 FROM bot_dispatches d, json_each(d.prompt_json, '$.workDelivery.${member}') item
+    WHERE d.activation_id = ${table}.activation_id AND item.value = ${table}.id AND ${WORK_TOLD})`
 
 type Row = Record<string, unknown>
 type Param = string | number | null
@@ -1343,9 +1361,10 @@ export class BotStore {
   }
 
   insertDispatch(row: Pick<BotDispatchRow, 'activationId' | 'n' | 'kind' | 'clientRequestId' | 'threadId' | 'prompt' | 'policyDigest'> & { mainN?: number; send?: BotDispatchRow['send'] }): void {
+    const prompt = hasWorkUpdates(row.prompt) ? { ...row.prompt, workTold: row.prompt.workTold ?? 'pending' } : row.prompt
     this.run(
       'INSERT INTO bot_dispatches(activation_id, n, kind, main_n, client_request_id, thread_id, prompt_json, policy_digest, send_json) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      row.activationId, row.n, row.kind === 'subagent' ? 'consult' : row.kind, row.mainN ?? null, row.clientRequestId, row.threadId, JSON.stringify(row.prompt), row.policyDigest, row.send && Object.keys(row.send).length ? JSON.stringify(row.send) : null
+      row.activationId, row.n, row.kind === 'subagent' ? 'consult' : row.kind, row.mainN ?? null, row.clientRequestId, row.threadId, JSON.stringify(prompt), row.policyDigest, row.send && Object.keys(row.send).length ? JSON.stringify(row.send) : null
     )
   }
 
@@ -1527,13 +1546,13 @@ export class BotStore {
     return this.escalations({ botId, status: 'open' })
   }
 
-  /** The answered escalation whose continuation has not been sent yet. */
+  /** The answered escalation whose continuation has not been applied yet. */
   pendingAnswer(activationId: string): BotEscalationRow | undefined {
     const row = this.get("SELECT * FROM bot_escalations WHERE activation_id = ? AND mode = 'wall' AND status IN ('allowed_bot', 'allowed_once', 'denied') AND applied_at IS NULL ORDER BY created_at DESC, id DESC LIMIT 1", activationId)
     return row ? escalationOf(row) : undefined
   }
 
-  /** Every answered wall of an activation whose continuation has not been sent yet, oldest first. */
+  /** Every answered wall of an activation whose continuation has not been applied yet, oldest first. */
   pendingAnswers(activationId: string): BotEscalationRow[] {
     return this.all("SELECT * FROM bot_escalations WHERE activation_id = ? AND mode = 'wall' AND status IN ('allowed_bot', 'allowed_once', 'denied') AND applied_at IS NULL ORDER BY created_at, rowid", activationId).map(escalationOf)
   }
@@ -1931,7 +1950,7 @@ export class BotStore {
   /**
    * Work's answered question went out with dispatch `n`, as `line` in its prompt: read once, and the line kept with the
    * answer, so a forget finds that copy by the question, not by its words (`answer_json.sent`). With read=false,
-   * only the copy is recorded here; the dispatch start marks it read.
+   * only the copy is recorded here; the carrying dispatch start marks it read.
    */
   markAnswerSent(questionId: string, n: number, line: string, read = true): void {
     this.run("UPDATE bot_questions SET read_at = CASE WHEN ? THEN ? ELSE read_at END, answer_json = json_set(answer_json, '$.sent', json_object('n', ?, 'line', ?)) WHERE id = ? AND read_at IS NULL", read ? 1 : 0, this.now(), n, line, questionId)
@@ -1967,12 +1986,56 @@ export class BotStore {
     return row ? reminderOf(row) : undefined
   }
 
-  /** Delivery is not telling: only a dispatch that started with the wait consumes it. */
+  /** Delivery is not telling: only model output or completion of a carrying dispatch consumes it. */
   unreadWorkWaits(workId: string): BotReminderRow[] {
     return this.all(`SELECT r.* FROM bot_reminders r WHERE r.work_id = ? AND r.status = 'delivered'
       AND NOT EXISTS (SELECT 1 FROM bot_dispatches d, json_each(d.prompt_json, '$.workWaitIds') told
-        WHERE d.activation_id = r.work_id AND d.started_at IS NOT NULL AND told.value = r.id)
+        WHERE d.activation_id = r.work_id AND ${WORK_TOLD} AND told.value = r.id)
       ORDER BY r.due_at, r.rowid`, workId).map(reminderOf)
+  }
+
+  /** Settling is not telling: only model output or completion of a carrying dispatch consumes it. */
+  unreadWorkActions(workId: string): ActionRow[] {
+    return this.all(`SELECT a.* FROM bot_actions a WHERE a.activation_id = ? AND a.status NOT IN ('open', 'approved', 'running')
+      AND NOT EXISTS (SELECT 1 FROM bot_dispatches d, json_each(d.prompt_json, '$.workActionIds') told
+        WHERE d.activation_id = a.activation_id AND ${WORK_TOLD} AND told.value = a.id)
+      ORDER BY COALESCE(a.ran_at, a.answered_at, a.created_at), a.rowid`, workId) as unknown as ActionRow[]
+  }
+
+  /** Confirmation controls replay only; existing carried/read markers are not changed here. */
+  confirmWorkDelivery(activationId: string, n: number, why: 'output' | 'completed'): void {
+    const needsConfirmation = (dispatch: BotDispatchRow | undefined): boolean => Boolean(dispatch && dispatch.startedAt !== null &&
+      dispatch.prompt.workTold !== 'output' && dispatch.prompt.workTold !== 'completed' && hasWorkUpdates(dispatch.prompt))
+    // A chat turn or empty continuation costs a read, never BEGIN IMMEDIATE on its first output.
+    if (!needsConfirmation(this.dispatch(activationId, n))) return
+    this.db.transaction(() => {
+      if (!needsConfirmation(this.dispatch(activationId, n))) return
+      this.run("UPDATE bot_dispatches SET prompt_json = json_set(prompt_json, '$.workTold', ?) WHERE activation_id = ? AND n = ?", why, activationId, n)
+    })
+  }
+
+  /** Pending or carried-but-unconfirmed additions, used only to build the next work prompt. */
+  unreadWorkAnswers(activationId: string): BotEscalationRow[] {
+    return this.all(`SELECT * FROM bot_escalations WHERE activation_id = ? AND mode = 'wall'
+      AND status IN ('allowed_bot', 'allowed_once', 'denied') AND (applied_at IS NULL OR (${unconfirmedDelivery('bot_escalations', 'answers')}))
+      ORDER BY created_at, rowid`, activationId).map(escalationOf)
+  }
+  unreadWorkQuestion(activationId: string): BotQuestionRow | undefined {
+    const row = this.get(`SELECT * FROM bot_questions WHERE activation_id = ? AND lane = 'run'
+      AND status IN ('answered', 'defaulted') AND (read_at IS NULL OR (${unconfirmedDelivery('bot_questions', 'question')}))
+      ORDER BY created_at DESC, rowid DESC LIMIT 1`, activationId)
+    return row ? questionOf(row) : undefined
+  }
+  /** Notes in a started prompt may have reached the model even without confirmed output. */
+  carriedWorkNoteIds(activationId: string): Set<number> {
+    return new Set(this.all(`SELECT DISTINCT item.value AS id FROM bot_dispatches d,
+      json_each(d.prompt_json, '$.workDelivery.notes') item
+      WHERE d.activation_id = ? AND d.started_at IS NOT NULL`, activationId).map(row => num(row.id)!))
+  }
+  unreadWorkNotes(activationId: string): ReturnType<BotStore['pendingWorkNotes']> {
+    return this.all(`SELECT id, text, at, from_message FROM bot_work_notes WHERE activation_id = ?
+      AND (applied_at IS NULL OR (${unconfirmedDelivery('bot_work_notes', 'notes')})) ORDER BY id`, activationId)
+      .map(row => ({ id: num(row.id)!, text: row.text as string, at: row.at as string, fromMessage: str(row.from_message) }))
   }
 
   /** When the owner last wrote to a bot (their newest message in its chat), or '' when they never have. */
@@ -2086,7 +2149,7 @@ export class BotStore {
     for (const id of ids) this.run("UPDATE bot_messages SET activation_id = ? WHERE id = ? AND activation_id = ? AND author = 'owner'", to, id, from)
   }
 
-  /** The notes are in the dispatch just written (inside its transaction). */
+  /** Marks these notes consumed, inside the caller's transaction. */
   applyWorkNotes(ids: readonly number[]): void {
     const at = this.now()
     for (const id of ids) this.run('UPDATE bot_work_notes SET applied_at = ? WHERE id = ? AND applied_at IS NULL', at, id)

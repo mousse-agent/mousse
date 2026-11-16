@@ -412,6 +412,7 @@ describe('"Share bots with other devices"', () => {
       'bots.work.stop': { botId: BOT, workId: 'act_00000000-0000-0000-0000-000000000000' },
       'bots.chat.markRead': { botId: BOT, seq: 1 },
       'bots.asks.answer': { botId: BOT, askId: ASK, answer: 'allow' },
+      'bots.actions.answer': { botId: BOT, actionId: 'action_1', digest: 'digest', answer: 'send' },
       'bots.questions.answer': { botId: BOT, questionId: 'q_00000000-0000-0000-0000-000000000000', choice: 'Yes', clientRequestId: 'r-q' },
       'bots.personal.pause': { botId: BOT },
       'bots.personal.resume': { botId: BOT },

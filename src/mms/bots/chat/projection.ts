@@ -352,6 +352,7 @@ export class BotChatProjection {
     const reminder = row.id.startsWith('bm_rem_') ? this.store.reminderForMessage(row.botId, row.id) : undefined
     const expiresAt = reminder?.deliveredAt ? new Date(Date.parse(reminder.deliveredAt) + 24 * 60 * 60_000).toISOString() : undefined
     const snoozed = reminder && this.store.snoozedCopy(row.botId, reminder.id)
+    const sentAction = row.id.startsWith('bm_action_') ? this.store.get("SELECT ran_at FROM bot_actions WHERE message_id = ? AND status = 'done'", row.id) : undefined
     const escalation = row.askId ? this.store.escalation(row.askId) : undefined
     const question = row.questionId ? this.store.question(row.questionId) : undefined
     // A question's bubble, or a nudge of it (any other bot row that carries it): its words, then its answers as plain text
@@ -362,6 +363,7 @@ export class BotChatProjection {
     const plain = [plainCards(cards), asks && asks.spec.choices.length ? plainChoices(asks.spec) : ''].filter(Boolean).join('\n\n')
     return {
       ...(reminder && expiresAt && expiresAt > this.store.now() && !reminder.work && !reminder.wake && !this.store.messageForgotten(row.botId, row.id) ? { reminder: { expiresAt, ...(snoozed ? { snoozedUntil: snoozed.dueAt } : {}) } } : {}),
+      ...(typeof sentAction?.ran_at === 'string' ? { actionSentAt: sentAction.ran_at } : {}),
       seq: row.seq,
       id: row.id,
       at: row.at,
@@ -521,6 +523,10 @@ export class BotChatProjection {
         ...this.runningSubagents(row.id)
       }))
     // Posted chat questions and questions the bot's work waits on need the owner too ("Asked: Which flat…?"); a permission ask's words come first.
+    const approval = this.store.get(`SELECT m.text FROM bot_actions a JOIN bot_activations w ON w.id = a.activation_id
+      LEFT JOIN bot_messages m ON m.id = a.message_id
+      WHERE a.bot_id = ? AND a.status = 'open' AND w.status = 'blocked' AND w.end_reason = 'approval'
+      ORDER BY a.rowid LIMIT 1`, definition.id)
     const waitingOn = this.store.waitingQuestions(definition.id)
     const chatQuestions = this.store.openChatQuestions(definition.id)
     const needsOwner = !paused && (asks.length + waitingOn.length + chatQuestions.length > 0
@@ -529,7 +535,7 @@ export class BotChatProjection {
     const threads = this.launchedOf(definition.id)
     const watchers = this.options.watchers?.(definition.id) ?? []
     const managing = threads.filter(launchedActive)
-    const state = botState({ paused, ...(error ? { error } : {}), openAsks: asks.length + waitingOn.length + (live + managing.length === 0 ? chatQuestions.length : 0), liveActivations: live + managing.length })
+    const state = botState({ paused, ...(error ? { error } : {}), openAsks: asks.length + waitingOn.length + Number(Boolean(approval)) + (live + managing.length === 0 ? chatQuestions.length : 0), liveActivations: live + managing.length })
     // Working, but every running activation waits for the internet.
     const running = liveRows.filter((row) => row.status === 'running')
     const offline = state === 'working' && running.length > 0 && running.every((row) => row.offline)
@@ -540,7 +546,7 @@ export class BotChatProjection {
         ? registry?.pausedReason === 'usage_limit' && registry.pausedUntil ? `Paused until ${clockTime(registry.pausedUntil)}` : 'Paused'
         : `Paused until ${clockTime(limitedUntil!)}`
       : state === 'stuck' ? `Needs you: ${error!.text}`
-        : state === 'needs_you' ? (asks[0] ? `Wants to ${this.card(asks[0]).title}` : `Asked: ${oneLine((waitingOn[0] ?? chatQuestions[0])!.spec.question, 80)}`)
+        : state === 'needs_you' ? (asks[0] ? `Wants to ${this.card(asks[0]).title}` : approval ? `Wants to send: ${oneLine(String(approval.text ?? 'Send this action?').split('\n')[0], 80)}` : `Asked: ${oneLine((waitingOn[0] ?? chatQuestions[0])?.spec.question ?? 'Your answer is needed', 80)}`)
           : state === 'working' ? (offline ? 'Waiting for internet' : chatTurn ? 'Working…' : work.length ? workingOn(work) : managing.length ? managingLine(managing) : 'Working…')
             : last ? oneLine(last.text || last.error?.text || plainCards(last.cards)) : ''
     return {
