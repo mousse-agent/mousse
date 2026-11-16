@@ -1723,7 +1723,8 @@ export class OrchestratorService extends EventEmitter {
           ...(extras.browser ? { browser: extras.browser } : {}),
           toolAccess: { allows: () => true, execute: (_name, _args, run) => writer(run) },
           toolLedger: this.toolLedgerFor(runId),
-          runActive: () => this.runEngine?.getActiveRun(threadId)?.runId === runId
+          runActive: () => this.runEngine?.getActiveRun(threadId)?.runId === runId,
+          secretMasker: () => this.secretMaskerFor?.(threadId)
         },
         context: {
           recoverOverflow: () => null,
@@ -13617,7 +13618,9 @@ export class OrchestratorService extends EventEmitter {
             : turnAuthority && turnWriter ? { allows: () => true, execute: (_name, _args, run) => { conversationToolsUsed = true; return turnAuthority.runWriter(turnWriter, run) } } : undefined,
           toolLedger: this.toolLedgerFor(engineRunId),
           // The app tools act only while this run is the thread's active one.
-          ...(engineRunId && this.runEngine ? { runActive: () => this.runEngine?.getActiveRun(session.threadId)?.runId === engineRunId } : {})
+          ...(engineRunId && this.runEngine ? { runActive: () => this.runEngine?.getActiveRun(session.threadId)?.runId === engineRunId } : {}),
+          // A runtime with its own tools hides the thread's secrets in their results before its session file keeps them.
+          secretMasker: () => this.secretMaskerFor?.(session.threadId)
         },
         // The runtime asks these from inside its turn and needs their answers: never dropped.
         context: this.inTurn<AdapterHost['context']>(session, turn, turnId, 'context', {

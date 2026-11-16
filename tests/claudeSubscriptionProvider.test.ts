@@ -1530,6 +1530,38 @@ it('records successful official file edits only once without asking', async () =
   expect(onLineEdits).toHaveBeenCalledExactlyOnceWith(2)
 })
 
+// #595: Claude Code keeps its own tools' results in its session file. Mousse's hook hands back each result with the
+// thread's secrets hidden (`updatedToolOutput`), read at that moment (a secret given mid-turn included), so neither
+// the model nor that file gets the value. tests/live/claudeSecretSessionFile.test.ts checks the real file.
+it("hides the thread's secrets in its own tools' results before Claude Code keeps them", async () => {
+  const SECRET = 'ghp_UnitCheckSecretValue0123456789'
+  let given = false
+  const outputs: unknown[] = []
+  const { service, home } = fixture(({ options }) => {
+    const q = fakeQuery()
+    q[Symbol.asyncIterator] = async function* () {
+      const post = options.hooks!.PostToolUse![0].hooks[0]
+      const fire = async (id: string, tool: string, response: unknown) => {
+        outputs.push(await post({ hook_event_name: 'PostToolUse', tool_use_id: id, tool_name: tool, tool_input: {}, tool_response: response } as never, id, { signal: new AbortController().signal }))
+      }
+      // Before the secret is given, nothing is rewritten.
+      await fire('before', 'Read', { type: 'text', file: { filePath: 'GH_TOKEN', content: `     1\t${SECRET}\n` } })
+      given = true
+      await fire('read', 'Read', { type: 'text', file: { filePath: 'GH_TOKEN', content: `     1\t${SECRET}\n` } })
+      await fire('bash', 'Bash', { stdout: `token: ${SECRET}`, stderr: '', interrupted: false })
+      await fire('plain', 'Bash', 'nothing secret here')
+      yield result as never
+    }
+    return q
+  })
+  const masker = (text: string) => text.split(SECRET).join('[secret GH_TOKEN hidden]')
+  await service.chat({ ...chatInput(home), secretMasker: () => (given ? masker : undefined) })
+  expect(outputs[0]).toEqual({})
+  expect(outputs[1]).toEqual({ hookSpecificOutput: { hookEventName: 'PostToolUse', updatedToolOutput: { type: 'text', file: { filePath: 'GH_TOKEN', content: '     1\t[secret GH_TOKEN hidden]\n' } } } })
+  expect(outputs[2]).toMatchObject({ hookSpecificOutput: { updatedToolOutput: { stdout: 'token: [secret GH_TOKEN hidden]' } } })
+  expect(outputs[3]).toEqual({})
+})
+
 
 it('resumes the same Claude session, with no replayed history, when the model changes', async () => {
   const inputs: Array<{ options: Options; prompt: unknown }> = []
