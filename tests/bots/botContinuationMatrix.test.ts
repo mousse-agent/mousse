@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, it } from 'vitest'
 import golden from './fixtures/continuationMaster.json'
 import { botFixture, type BotFixture } from './botFixture'
-import { CELLS, REASONS, ROW, NOTE, ANSWER, REPLAY, matrixInput, eventsOf } from './fixtures/continuationMatrix'
+import { CELLS, REASONS, UPDATES, ROW, NOTE, ANSWER, REPLAY, matrixInput, eventsOf } from './fixtures/continuationMatrix'
 
 let f: BotFixture
 beforeEach(() => { f = botFixture() })
@@ -19,8 +19,9 @@ it.each(CELLS)('$reason / $update / waited=$hasWaited equals the captured master
   expect(prompt).not.toContain('Your wait is over.')
 })
 
-it.each(REASONS)('%s with a live wait keeps the master reason before the wait and remaining updates', reason => {
-  const input = matrixInput(reason, 'note', true)
+const liveWaitCells = REASONS.flatMap(reason => UPDATES.map(update => ({ reason, update })))
+it.each(liveWaitCells)('$reason / $update with a live wait keeps the master reason before the wait and remaining updates', ({ reason, update }) => {
+  const input = matrixInput(reason, update, true)
   const why = 'Continue comparing the flats with the evidence already read.'
   const waitText = `[Mousse] A work wait you set at 09:00 is due.\n\nWhat you wrote for yourself: ${why}`
   input.workEvents = [{ at: '2026-11-07T09:00:00Z', text: waitText }, ...eventsOf(input)]
@@ -31,8 +32,10 @@ it.each(REASONS)('%s with a live wait keeps the master reason before the wait an
   const opening = reference[`${reason} / note`]!.split('\n\n')[0]
   expect(prompt.split('\n\n')[0]).toBe(`${opening} Your wait is over.`)
   expect(prompt.split(why)).toHaveLength(2)
-  expect(prompt.split(NOTE)).toHaveLength(2)
-  expect(prompt.indexOf(why)).toBeLessThan(prompt.indexOf(NOTE))
+  if (input.notes) {
+    expect(prompt.split(NOTE)).toHaveLength(2)
+    expect(prompt.indexOf(why)).toBeLessThan(prompt.indexOf(NOTE))
+  } else expect(prompt).not.toContain(NOTE)
   if (input.answered) expect(prompt.split(ANSWER)).toHaveLength(2)
   for (const answer of input.answers) {
     const line = answer.status === 'denied' ? 'The owner said not now: run commands.' : 'The owner allowed: run commands.'

@@ -9,9 +9,9 @@ calls, subagents, or model override. No production source was copied onto the PR
 
 The committed test only reads the captured strings; it cannot regenerate them.
 There are 65 reference prompts: 13 reasons × 5 additional-update kinds. Both
-histories are compared with each reference (130 cells). A further 13 cases include
-a live wait and a note, checking the captured reason opening before the wait and
-remaining updates. No matrix cells are omitted.
+histories are compared with each reference (130 cells). A further 65 cases cross the same reasons and updates with a live wait, checking
+the captured reason opening before the wait and remaining updates (195 cells in
+all). No matrix cells are omitted.
 
 The columns describe additions to a causal event. An answered question or wall
 needed by the reason still exists in the `none` column. A matching answer column
