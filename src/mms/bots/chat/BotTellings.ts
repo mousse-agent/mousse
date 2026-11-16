@@ -68,7 +68,7 @@ export class BotTellings {
     const live = this.store.message(row.id)
     if (!live) return false
     const actionId = actionNudgeId(live.id)
-    if (actionId && this.chat.isActionMessage(live) && this.store.get('SELECT status FROM bot_actions WHERE id = ?', actionId)?.status !== 'open') return false
+    if (actionId && this.store.get('SELECT status FROM bot_actions WHERE id = ?', actionId)?.status !== 'open') return false
     const message = this.chat.toMessage(live)
     return (!message.action || message.action.status === 'open') && (!message.ask || message.ask.status === 'open') && (!message.question || message.question.status === 'open')
   }
