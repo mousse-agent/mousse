@@ -970,6 +970,7 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
       'health',
       'capabilities',
       'events.subscribe',
+      'app.presence',
       'daemon.shutdown',
       'gui.devtoolsPoll',
       'gui.devtoolsRespond'
