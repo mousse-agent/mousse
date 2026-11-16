@@ -1,7 +1,7 @@
 import { WORK_WAIT_RULES, workWaitInput, workWaitRule, workReadiness, workWaitLine, parkedNeedsOwner, type WorkWaitLookups, type WorkWaitFacts, type WorkWaitReason } from './workWaiting'
 import { BotActions, BotActionChanged, actionContinuation, removeHiddenArguments, botAsksFirst, maskedActionData } from '../actions/BotActions'
 import { callForBot, type BotMcp } from '../mcp/BotMcp'
-import { isQuietHours } from '../../../shared/settings'
+import { isQuietHours, settingCompactionPoint } from '../../../shared/settings'
 import { BotTellings } from '../chat/BotTellings'
 import type { SettingsStore } from '../../settings/SettingsStore'
 import { isTellMe, type TellMe } from '../../../shared/types'
@@ -14,6 +14,7 @@ import type { BotMemoryStore } from '../memory/BotMemoryStore'
 import type { ScheduledMissedRuns } from '../../../shared/types'
 import { requestJournalRows } from '../memory/requestFrames'
 import { startTurnMeter } from './turnUsage'
+import { chatEpochEnd, contextBudget, type BotChatEpoch, type BotChatEpochEnd } from '../memory/contextBudget'
 import { grantedPermissions, permissionId, restorePermission, withoutPermission } from '../chat/projection'
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
@@ -266,6 +267,11 @@ export interface BotEngineHost {
    * from a cleared home context (the transcript stays).
    */
   clearContext?(threadId: string): void
+  /**
+   * Whether the instance's runtime keeps a thread's conversation between turns and resumes it (Claude Code, Codex): a
+   * bot chat runs on epochs only there. Absent or false: every chat turn starts from a cleared context, as before.
+   */
+  chatResumes?(instanceId: string): boolean
   /**
    * The Mousse tools the runtime of the run `runId` on `threadId` is offered now: how many, and the characters of their
    * names, descriptions and schemas (`bot_turn_usage`). A measurement; undefined when unknown.
@@ -680,6 +686,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private readonly fileReads = new Map<string, Map<string, BotFileReadState>>()
   /** Each activation's context pack as its latest main dispatch read it (frozen by the provider, bot-context.md §5). */
   private readonly packs = new Map<string, string>()
+  /** With chat epochs on: the epoch each chat activation's pack belongs to, and whether it starts it (`fresh`). */
+  private readonly chatEpochs = new Map<string, { id: string; fresh: boolean }>()
   /**
    * Notes a live turn took and the runtime never reported read nor handed back, by activation: the model may have read
    * them before the turn ended (a Stop, a crash, a result that came first), so the continuation that carries them says
@@ -996,7 +1004,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     for (const activation of live) this.postScheduleCompleted(this.store.activation(activation.id) ?? activation)
     // Its runtimes' private temporary folder too (one still in use is emptied when its turn ends).
     try { this.host.removeRuntimeTemp?.(this.filesFolder(botId)) } catch { /* left for the system */ }
-    for (const row of live) this.packs.delete(row.id)
+    for (const row of live) this.dropPack(row.id)
     // Its browser closes now; its sign-ins go with the purge.
     try {
       await this.host.browser?.removeBot?.(botId, false)
@@ -1761,7 +1769,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (row.status !== 'running') this.cleanup(row)
     else if (row.offline && !this.live.has(activationId)) {
       this.cleanup(this.store.activation(activationId) ?? row)
-      this.packs.delete(activationId)
+      this.dropPack(activationId)
     }
     this.changed({ botId: row.botId, activationId })
     // Its slot is free now: the next run starts in it, whichever of the profile's bots it is of (`nextRun`).
@@ -1987,6 +1995,34 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     for (const part of row.kind === 'run_start' ? requestJournalRows(row) : [row]) this.host.journal?.appendInTx(this.store.db, part)
   }
 
+  private dropPack(activationId: string): void {
+    this.packs.delete(activationId)
+    this.chatEpochs.delete(activationId)
+  }
+
+  /**
+   * Whether this chat turn runs on chat epochs (docs/plans/bot-context.md §14): the provider builds them, and the
+   * runtime of the turn's entry keeps the thread's conversation between turns (`chatResumes`).
+   */
+  private epochsFor(row: BotActivationRow, selection: BotActivationRow['selection']): boolean {
+    return row.lane === 'chat' && Boolean(selection)
+      && Boolean(this.host.context?.chatContext) && this.host.chatResumes?.(selection!.instanceId) === true
+  }
+
+  /** Whether the chat's epoch goes on for this turn, from what its turns cost (`bot_turn_usage`) and the owner's settings. */
+  private epochEnd(row: BotActivationRow, selection: { instanceId: string; model: string }, epoch: BotChatEpoch | undefined): BotChatEpochEnd | undefined {
+    const settings = this.host.settings?.get()
+    return chatEpochEnd({
+      epoch, selection, now: this.now(),
+      turns: epoch ? this.store.turnUsageOfContext(row.botId, 'chat', epoch.id) : [],
+      budget: (last) => contextBudget({
+        contextWindow: last?.contextWindow ?? null,
+        ...(settings && last?.contextWindow ? { compactAt: settingCompactionPoint(settings.context, last.contextWindow) } : {}),
+        cacheTtlMs: last?.cacheTtlMs ?? null
+      })
+    })
+  }
+
   /**
    * Before a main dispatch is sent: the activation's model, resolved at its first dispatch (and
    * again after a usage limit or a reload), and its context pack, built once and frozen. A problem
@@ -2038,10 +2074,22 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // Read at each main dispatch: the provider freezes the pack per activation, and a memory save or forget drops it.
     if (this.host.context) {
       try {
-        const pack = row.lane === 'chat'
-          ? await this.host.context.chatPreamble({ botId: row.botId, activationId: row.id })
-          : await this.host.context.runPreamble({ botId: row.botId, activationId: row.id, ...(row.trigger.kind === 'schedule' ? { scheduleId: row.trigger.scheduleId } : {}), input: row.trigger.input })
-        this.packs.set(row.id, pack)
+        const selection = this.store.activation(row.id)?.selection ?? row.selection
+        if (this.epochsFor(row, selection)) {
+          const chosen = { instanceId: selection!.instanceId, model: selection!.model }
+          const context = await this.host.context.chatContext!({
+            botId: row.botId, activationId: row.id, start: dispatch.kind === 'start', selection: chosen,
+            keep: (epoch) => this.epochEnd(row, chosen, epoch)
+          })
+          this.packs.set(row.id, context.text)
+          this.chatEpochs.set(row.id, { id: context.epochId, fresh: context.fresh })
+        } else {
+          const pack = row.lane === 'chat'
+            ? await this.host.context.chatPreamble({ botId: row.botId, activationId: row.id })
+            : await this.host.context.runPreamble({ botId: row.botId, activationId: row.id, ...(row.trigger.kind === 'schedule' ? { scheduleId: row.trigger.scheduleId } : {}), input: row.trigger.input })
+          this.packs.set(row.id, pack)
+          this.chatEpochs.delete(row.id)
+        }
       } catch (error) {
         console.warn('a bot\'s context could not be read', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
         if (isJournalFailure(error)) this.journalFailed(row)
@@ -2245,7 +2293,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private releaseParked(row: BotActivationRow, reason: WorkWaitReason | NonNullable<ReturnType<typeof workWaitRule>>): void {
     const rule = typeof reason === 'string' ? WORK_WAIT_RULES[reason] : reason
     this.letGoOfBrowser(row)
-    this.packs.delete(row.id)
+    this.dropPack(row.id)
     if (rule.clearLiveChip) this.clearLiveChip(row)
     if (rule.republishQuestion) {
       const bubble = this.store.workQuestion(row.id)?.messageId
@@ -2481,7 +2529,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.host.progress?.finishProgress(row.botId, row.id, false)
     this.clearInternetCheck(row.id)
     this.cleanup(row)
-    this.packs.delete(row.id)
+    this.dropPack(row.id)
     this.clearLiveChip(row)
     this.changed({ botId: row.botId, activationId: row.id })
     this.pumpLater(row.botId)
@@ -2609,18 +2657,23 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       remaining: { ...limitsOf(effective), deadlineMs: remainingMs },
       filesFolder: this.filesFolder(row.botId),
       // A chat turn is the bot's front desk: it hands what takes long to work (docs/plans/bot-always-free.md).
-      // The owner's threads: reading in every lane; starting, messaging, stopping and archiving in a turn `threadsActOf`
-      // allows (never the bot's first message or a turn another bot's message started). The profiler: in both lanes
+      // Every chat turn is offered the same tools, whatever started it (#1360): a tool list that changed with the turn's
+      // start would change the start of the runtime's prompt, so neither its cache nor a resumed conversation would hold.
+      // What a turn may not do is refused when it is called: starting, messaging, stopping and archiving the owner's
+      // threads, and making or changing their jobs, outside a turn `threadsActOf` allows (`threadsReadOnly`, never the
+      // bot's first message or a turn another bot's message started); a background command outside the owner's own turn. The profiler: in both lanes
       // (the chat without its minutes-long watch). Mousse's look: in both lanes. The owner's scheduled jobs, secrets and
       // quick actions (`owner`): in both lanes, making and changing jobs only where it may act on threads. Its task list.
-      botTools: { workWaiting: row.lane === 'run' && row.trigger.kind === 'work', escalate: true, consult: definition.context.length > 0, memory: true, scheduled: row.lane === 'run' && row.trigger.kind === 'schedule', frontDesk: row.lane === 'chat', watcherStart: ownerChatTurn(row), threads: threadsActOf(row) ? 'all' : 'read', profiler: true, themes: true, owner: true, tasks: true, images: this.imagePick(row.botId) !== null, applets: true, subagents: row.lane === 'run', questions: asksOwner(row), cards: true, bots: asksOwner(row) }
+      botTools: { workWaiting: row.lane === 'run' && row.trigger.kind === 'work', escalate: true, consult: definition.context.length > 0, memory: true, scheduled: row.lane === 'run' && row.trigger.kind === 'schedule', frontDesk: row.lane === 'chat', watcherStart: row.lane === 'chat', threads: 'all', profiler: true, themes: true, owner: true, tasks: true, images: this.imagePick(row.botId) !== null, applets: true, subagents: row.lane === 'run', questions: asksOwner(row), cards: true, bots: asksOwner(row) }
     })
     if (!compiled.ok) return this.block(row, 'policy_unenforceable', compiled.error.reason ?? compiled.error.message)
     const checked = this.host.harness.checkPolicy(selection.instanceId, { mode: 'default', origin: 'bot', ...compiled.policy }, selection.model)
     if (!checked.ok) return this.block(row, 'policy_unenforceable', checked.error.reason ?? checked.error.message)
     // A chat activation starts from a cleared home context: the transcript stays, the turn carries
-    // no thread history, and the pack supplies what it needs (bot-context.md §5.1).
-    const cleared = row.lane === 'chat' && dispatch.kind === 'start'
+    // no thread history, and the pack supplies what it needs (bot-context.md §5.1). With chat epochs on, only the first
+    // turn of an epoch does; a later one resumes the thread's conversation, and its pack holds what is new (§14).
+    const epoch = row.lane === 'chat' ? this.chatEpochs.get(row.id) : undefined
+    const cleared = row.lane === 'chat' && dispatch.kind === 'start' && (epoch?.fresh ?? true)
     if (cleared) {
       try {
         if (!this.host.clearContext) throw new Error('the home context cannot be cleared here')
@@ -2699,7 +2752,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const pack = this.packs.get(row.id)
     // A chat turn that only reads the owner's threads (no typed message of theirs started it) is told so, and why, in
     // its preamble: the system text stays the same on every turn, so a runtime keeps its thread and cache.
-    const readOnlyThreads = row.lane === 'chat' && compiled.permissions.threads === 'read' ? BOT_THREADS_READ_ONLY_TURN_NOTE : undefined
+    const readOnlyThreads = row.lane === 'chat' && compiled.permissions.threads !== undefined && threadsReadOnlyOf(row) ? BOT_THREADS_READ_ONLY_TURN_NOTE : undefined
     const preamble = [pack, readOnlyThreads].filter(Boolean).join('\n\n') || undefined
     const browser = compiled.permissions.browser ? this.browserTurn(row, payload.runId, controller.signal) : undefined
     let confirmationAttempted = false
@@ -2713,7 +2766,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const prompt = dispatch.prompt.text.startsWith('/') ? ` ${dispatch.prompt.text}` : dispatch.prompt.text
     // What the turn costs and carries, kept with the dispatch (`bot_turn_usage`): measurements only.
     const meter = startTurnMeter({
-      row, n: dispatch.n, fresh: dispatch.kind === 'start', contextGen: row.id, prompt,
+      row, n: dispatch.n, fresh: dispatch.kind === 'start' && (cleared || row.lane !== 'chat'), contextGen: epoch?.id ?? row.id, prompt,
       ...(told.instructions ? { instructions: told.instructions } : {}), ...(preamble ? { preamble } : {})
     }, { store: this.store, now: () => this.now(), ...(this.host.toolList ? { tools: () => this.host.toolList!(payload.threadId, payload.runId) } : {}) })
     return {
@@ -2733,7 +2786,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       authority,
       scratch,
       skills: compiled.permissions.skills,
-      history: dispatch.kind === 'start' ? (cleared ? 'cleared' : 'none') : 'thread',
+      history: dispatch.kind === 'start' ? (cleared ? 'cleared' : epoch ? 'thread' : 'none') : 'thread',
       lane: row.lane,
       ...(preamble ? { preamble } : {}),
       ...(browser ? { browser } : {}),
@@ -2811,6 +2864,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         const live = liveNow()
         if (live) live.compactions += 1
         try { this.store.turnCompacted(row.id, n) } catch { /* a measurement only */ }
+        // The runtime rewrote the chat's conversation: the next chat turn starts a new epoch from the journal.
+        if (row.lane === 'chat') {
+          try { this.host.context?.endChatEpoch?.(row.botId, 'compacted') } catch { /* the turn usage row says so too */ }
+        }
       },
       compacting: (active) => {
         const live = ownLive()
@@ -2855,7 +2912,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * message the owner forgot since is not given back.
    */
   private regiveText(row: BotActivationRow): string {
-    const pack = this.packs.get(row.id)?.trim()
+    // A turn on a running chat epoch holds only what was new in its own pack: it is given the whole pack.
+    const epoch = row.lane === 'chat' ? this.chatEpochs.get(row.id) : undefined
+    let whole: string | undefined
+    if (epoch && !epoch.fresh && this.host.context?.chatPackNow) {
+      try {
+        whole = this.host.context.chatPackNow({ botId: row.botId, activationId: row.id })
+      } catch (error) {
+        console.warn('the whole pack of a chat turn could not be read after a compaction', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    const pack = (whole ?? this.packs.get(row.id))?.trim()
     const request = this.store.dispatch(row.id, 1)?.prompt.text.trim()
     const added = this.store.all('SELECT text FROM bot_work_notes WHERE activation_id = ? AND applied_at IS NOT NULL ORDER BY id', row.id).map((entry) => String(entry.text).trim()).filter(Boolean)
     return [
@@ -3892,7 +3959,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       else {
         this.countFailure(row)
         this.carried.delete(row.id)
-        this.packs.delete(row.id)
+        this.dropPack(row.id)
         this.changed({ botId: row.botId, activationId: row.id })
         this.pumpLater(row.botId)
       }
@@ -4755,7 +4822,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         if (main?.endedAt) this.postReply(row, main, text, options.expectText === true)
       }
       this.cleanup(row)
-      this.packs.delete(row.id)
+      this.dropPack(row.id)
       // A chat activation that ended while its turn ran held the home thread until now.
       if (row.lane === 'chat') this.pumpLater(row.botId)
       return
@@ -6695,7 +6762,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (isJournalFailure(error)) this.journalFailed(row)
       else this.store.moveActivation(row.id, ['running'], 'blocked', { endReason: code })
     }
-    this.packs.delete(row.id)
+    this.dropPack(row.id)
     this.changed({ botId: row.botId, activationId: row.id })
     this.pumpLater(row.botId)
     return { code, refused: reason }
@@ -7466,7 +7533,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const quiet = await this.stopAndWait(ended)
     for (const row of ended) {
       if (quiet || row.status !== 'running') this.cleanup({ ...row, status: 'cancelled' })
-      this.packs.delete(row.id)
+      this.dropPack(row.id)
       this.postScheduleCompleted(this.store.activation(row.id) ?? row)
     }
   }
@@ -7489,6 +7556,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     })
     // Deleted once the turns stopped, so a turn ending meanwhile adds no row to the cleared chat.
     this.store.deleteMessages(botId)
+    // The chat's runtime conversation goes too: the next turn starts a new epoch from a cleared context.
+    try {
+      this.host.context?.endChatEpoch?.(botId, 'cleared')
+    } catch (error) {
+      console.warn('the epoch of a cleared chat could not be ended', { botId, error: error instanceof Error ? error.message : String(error) })
+    }
     this.changed({ botId })
     await this.pump(botId)
   }

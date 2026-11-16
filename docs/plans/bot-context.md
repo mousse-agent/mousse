@@ -388,3 +388,40 @@ enforced by a test.
 
 Tool and system sizes count only what Mousse sends. A runtime's own system prompt and built-in tools show up only in
 the prompt sizes the runtime reports.
+
+## 14. Chat epochs (phase 1)
+
+**What it does.** A bot's chat is one resumed runtime conversation per *epoch* instead of a cleared context every turn:
+
+- The first turn of an epoch starts from a cleared context with the base pack: the memory protocol (plus one line saying
+  that later updates win), core memory, run notes, the chat summary and the recent chat, folded to its tail (6k tokens)
+  in one step (`foldWindow`).
+- Every later turn resumes the thread's conversation (`history: 'thread'`) and its pack holds only what the conversation
+  does not: rows new in the journal since the last turn that are not the chat's own (a work report, a wake), the memory
+  again only when it changed outside the conversation (the Memory dialog, work, a forget), then the situation.
+- Every chat turn is offered the same tools (#1360), and the system text does not change between turns, so what the
+  runtime sent last time is byte for byte the start of its next request and stays in the cache. A tool a turn may not use
+  (acting on threads, their jobs, `watch_start` outside the owner's own turn) is refused at the call.
+- The epoch is kept in `bot_memory_state` (`chat_epoch`); each of its turns names it as `context_gen` in `bot_turn_usage`.
+
+**When an epoch ends** (the next turn starts a new one, `chatEpochEnd`):
+
+- a model or entry change; a failed, stopped or reloaded turn; `/clear`; a forget; a runtime compaction;
+- full: what the epoch's turns added reaches 48k tokens, or the whole prompt reaches the cap (40% of the model's
+  window, never past 90% of the owner's compaction point);
+- cold: the cache expired (5 minutes when the runtime reported no lifetime) and what was added is past 24k, so the
+  rebuild costs nothing extra.
+
+Sizes are what the runtime reported (`bot_turn_usage`: the last turn's prompt less the first's); a runtime that reports
+none is measured by the pack's own estimate. A turn the runtime compacts mid-way is given the whole memory pack again,
+not its update.
+
+**Where.** Only runtimes that resume a thread's conversation: Claude Code and Codex (`chatResumes`). Pi starts a fresh
+process each bot turn and keeps today's cleared context.
+
+**What waits.**
+
+- A live check that Claude Code and Codex actually read the resumed conversation from the cache. A runtime that silently starts a new session instead of resuming is not detected yet.
+- The marks (48k, 24k, 6k) are starting values: the phase 0 numbers replace them, and set the "hello" ceiling.
+- A model-written digest at the fold, and the hard mark it needs.
+- Pi epochs, which need its session kept between bot turns.
