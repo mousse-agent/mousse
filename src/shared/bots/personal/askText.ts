@@ -23,7 +23,7 @@ export interface AskText {
 export const THREADS_TEXT: AskText = {
   title: 'use your threads',
   note: 'Threads it starts run with full access on this computer.',
-  tip: 'It can read your threads, start new ones, message or stop them, and archive or unarchive them, only when you ask it in its chat. A thread it starts runs commands and changes files without asking; a message it sends runs in that thread\'s own mode. It never answers an approval or a question.'
+  tip: 'It can read your threads, their queues and their Git status and diffs, here and on your other computers that let agents work there. When you ask it in its chat, or in work you gave it, it can start new threads, message, steer or stop them, change what waits in their queues, fork one and hand a fork\'s work back, and archive or unarchive them. A thread it starts runs commands and changes files without asking; a message it sends runs in that thread\'s own mode. It answers an approval only while you let agents answer approvals on other threads, and never a question.'
 }
 
 /** Tools by name, as a card says them after "wants to". */
@@ -47,6 +47,21 @@ const TOOL_TEXT: Record<string, AskText> = {
     title: 'change how Mousse looks',
     note: 'Themes, colors, CSS and a wallpaper picture from this computer, without asking each time.',
     tip: "It can read your themes, switch between them, and save a theme with colors, an accent, CSS and a wallpaper, as a thread's agent can in Full access. Theme CSS can restyle or cover anything in Mousse's window; CSS that loads anything from outside Mousse is dropped. A wallpaper is a PNG, JPEG or WebP it names on this computer, never on a network share; Mousse keeps its own copy. Settings → Appearance switches the theme back."
+  },
+  schedules: {
+    title: 'schedule work in your threads',
+    note: 'Scheduled jobs that run in your threads with full access, without asking each time.',
+    tip: "It can make scheduled jobs, as a thread's agent can: a turn in one of your threads, or a new thread in a project, later or on a cadence. It sees, changes, pauses, runs and removes only the jobs it made. Its jobs run in Full access (or no wider than the device you wrote from). The profile's limits on agent jobs hold, and Automations shows each job; only you resume or extend one."
+  },
+  secrets: {
+    title: 'use secrets you give it',
+    note: 'You type each one into a private card in its chat; it gets only the name.',
+    tip: 'It can ask you for a secret (an API key, a token) with a private card in its chat, where you type it or pick a saved one. It never sees the value: it uses the secret by name in commands its work runs from its files folder (with "run commands"), each command\'s output masked. Those commands run as its other commands do, with only the secrets they name and none of your other settings or credentials; on Linux with bubblewrap, in a sandbox with only its folders and no network. Settings → Secrets lists and removes them.'
+  },
+  quick_actions: {
+    title: 'add quick actions',
+    note: 'Buttons in your Actions list, without asking for each.',
+    tip: 'It can add a quick action: a button in your Actions list that sends a message or runs a shell command when you press it. Nothing runs until you press it.'
   }
 }
 

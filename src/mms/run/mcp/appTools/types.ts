@@ -179,9 +179,14 @@ export interface ToolOutcome {
 
 export type JsonSchema = Record<string, unknown>
 
-/** Why a run that nobody answers (`approvals: 'never'`) refuses a tool that waits for the user; undefined when it may run. */
-export function unattendedRefusal(tool: Pick<MousseTool, 'asksUser'>, turn: Pick<AppToolTurn, 'approvals'>): string | undefined {
+/**
+ * Why a run that nobody answers (`approvals: 'never'`) refuses a tool that waits for the user; undefined when it may run.
+ * A personal bot's turn (always `never`) may still call a tool its grant answers (`botGrantAnswers`), or one whose ask
+ * reaches its owner in the bot's own chat (`botAsksOwner`).
+ */
+export function unattendedRefusal(tool: Pick<MousseTool, 'asksUser' | 'botGrantAnswers' | 'botAsksOwner'>, turn: Pick<AppToolTurn, 'approvals'> & { bot?: unknown }): string | undefined {
   if (turn.approvals !== 'never' || !tool.asksUser) return undefined
+  if (turn.bot && (tool.botGrantAnswers || tool.botAsksOwner)) return undefined
   return tool.asksUser === 'question' ? QUESTIONS_REFUSED_MESSAGE : APPROVALS_REFUSED_MESSAGE
 }
 
@@ -215,10 +220,20 @@ export interface MousseTool {
    */
   botDescription?: string
   /**
+   * What a personal bot's thread lists instead of `inputSchema`, where a bot names what a thread's agent has as its own
+   * (a bot has no project: the git tools take the thread or project it reads).
+   */
+  botInputSchema?: JsonSchema
+  /**
    * A tool whose personal bot's call its grant answers: once the registry has held the call to the bot's grant, it asks
    * nobody, whatever `access` would ask of a thread (the owner allowing the permission is the bot's Full access for it).
    */
   botGrantAnswers?: true
+  /**
+   * A tool whose ask a personal bot's call shows its owner in the bot's own chat (a secret card), where the owner answers
+   * it: a bot's turn, which answers no approvals, may still call it, and waits for that answer as a thread's turn would.
+   */
+  botAsksOwner?: true
   /** Plain JSON Schema (no TypeBox symbols), byte-identical to `definition`'s parameters. */
   inputSchema: JsonSchema
   access: ToolAccess

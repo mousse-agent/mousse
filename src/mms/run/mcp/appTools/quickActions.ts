@@ -43,8 +43,11 @@ export function quickActionTools(host: AppToolHost): MousseTool[] {
     definition: () => tool,
     access: 'actsAsCaller',
     class: 'mutation',
-    // Each quick action needs the user's approval.
+    // Each quick action needs the user's approval. A personal bot's owner gave it once, allowing "add quick actions": the
+    // registry holds every call of a bot's turn to that grant, and nothing asks again.
     asksUser: 'approval',
+    botGrantAnswers: true,
+    botDescription: 'Add a quick action for your owner: a button in their Actions list that sends a message (send-current, send-new-chat) or runs a shell command (bash) when they press it. Your owner allowed "add quick actions", so nothing asks first; add one only when they ask for it, and say what you added.',
     listed: () => Boolean(host.quickActions),
     available: (turn) => (turn.settingsEnabled(tool.name) ? true : disabledInSettings(tool.name)),
     offered: (turn) => !turn.subagent && turn.settingsEnabled(tool.name) && Boolean(host.quickActions),
@@ -60,7 +63,7 @@ export function quickActionTools(host: AppToolHost): MousseTool[] {
         response: JSON.stringify(args, null, 2)
       }, 'start')
       ctx.markEffect?.()
-      const result = await quickActions.execute(tool.name, args, ctx.turn.threadId || undefined, ctx.signal)
+      const result = await quickActions.execute(tool.name, args, ctx.turn.threadId || undefined, ctx.signal, { preApproved: ctx.turn.bot?.appTools.has(tool.name) === true })
       ctx.timeline?.record({
         kind: 'build_tool_result',
         title: `Quick action ${tool.name}`,

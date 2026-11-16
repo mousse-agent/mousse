@@ -66,8 +66,8 @@ describe('"use your threads" in the bot engine', () => {
     expect(item.note).toBe(THREADS_TEXT.tip)
 
     const owner = await chat('Start it now on Opus.', 'm2')
-    expect(threadTools(owner.prepared.policy.tools!.allow)).toEqual(['thread_archive', 'thread_create', 'thread_hide', 'thread_interrupt', 'thread_list', 'thread_read', 'thread_search', 'thread_send', 'thread_wait'])
-    expect(line(owner.prepared.instructions)).toMatch(/: yes: .*start, message, stop or archive one when your owner's message asks for it/)
+    expect(threadTools(owner.prepared.policy.tools!.allow)).toEqual(['thread_archive', 'thread_create', 'thread_fork', 'thread_hide', 'thread_interrupt', 'thread_list', 'thread_merge_back', 'thread_read', 'thread_search', 'thread_send', 'thread_steer', 'thread_wait'])
+    expect(line(owner.prepared.instructions)).toMatch(/: yes: .*start, message, steer, stop, fork or archive one, or change its queue, when your owner's message asks for it/)
     expect(owner.prepared.instructions).toMatch(/A thread you start runs with full access/)
     // When to start one hidden: short background jobs out of the sidebar, work the owner follows visible.
     expect(owner.prepared.instructions).toMatch(/Start a short background job your owner won't follow .* with hidden: true/)
@@ -79,7 +79,7 @@ describe('"use your threads" in the bot engine', () => {
     const work = await run('w1')
     expect(threadTools(work.prepared.policy.tools!.allow)).toEqual(threadTools(owner.prepared.policy.tools!.allow))
     expect(work.prepared.authority.check(app('thread_archive'))).toEqual({ ok: true })
-    expect(line(work.prepared.instructions)).toMatch(/start, message, stop or archive one when the work your owner asked for needs it/)
+    expect(line(work.prepared.instructions)).toMatch(/start, message, steer, stop, fork or archive one, or change its queue, when the work your owner asked for needs it/)
     await finish(f, work.payload, 'completed', { text: 'Read them.' })
 
     f.bots.service.revokePermission(botId, item.id)
