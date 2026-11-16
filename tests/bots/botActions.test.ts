@@ -1,4 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest'
+import { setDiagSink } from '../../src/mms/log/diag'
 import { McpManager } from '../../src/mms/integrations/mcp/McpManager'
 import { settingsStore, testServerConfig } from '../fixtures/agent-platform/integrations/helpers'
 import { BotMcp, callForBot } from '../../src/mms/bots/mcp/BotMcp'
@@ -313,4 +314,21 @@ it('provider transcript capture never journals executable secrets from a held ca
   expect(rows.length).toBeGreaterThan(0)
   expect(JSON.stringify(rows)).not.toContain('private-call-secret')
   expect(JSON.stringify(rows)).toContain('held back')
+})
+it('an ambiguous transport failure settles uncertain and never logs executable arguments', async () => {
+  const t = await setup(true)
+  await t.call()
+  await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  const logs: string[] = []
+  const attempt = vi.spyOn(t.manager, 'callTool').mockRejectedValueOnce(new Error('private-call-secret'))
+  setDiagSink((_level, line) => logs.push(line))
+  try {
+    await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+    await flush()
+  } finally { setDiagSink(null) }
+  expect(attempt).toHaveBeenCalledTimes(1)
+  expect(f.bots.actions.forWork(t.workId)).toMatchObject({ status: 'uncertain', exec_args: null })
+  expect(f.store.lastMainDispatch(t.workId)?.prompt.text).toContain('check before trying again')
+  expect(JSON.stringify(logs)).not.toContain('private-call-secret')
 })
