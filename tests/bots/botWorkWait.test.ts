@@ -151,8 +151,18 @@ it.each(['event already happened', 'turn still running', 'permission wall', 'unk
   f.host.wakeThread = () => ({ state: idle ? 'idle' : 'running' })
   const { workId, turn } = await work()
   const set = await f.bots.tools.wakes!.wait!(botId, workId, { brief: 'Continue the release', ...(state === 'event already happened' ? { event: { kind: 'thread' as const, threadId: 'other' } } : { dueAt: new Date(f.clock.now + 5 * 60_000).toISOString() }) })
-  if (state === 'permission wall') f.store.moveActivation(workId, ['running'], 'waiting_grant')
-  if (state === 'unknown calls') f.store.moveActivation(workId, ['running'], 'paused', { endReason: 'unknown_calls' })
+  let askId: string | undefined
+  if (state === 'permission wall') {
+    const wall = f.store.db.transaction(() => (f.bots as any).wallInTransaction(workId, ['running'], { dispatchN: 1, kind: 'tool', permission: { tool: 'shell' }, reason: 'Run the check' }))
+    askId = wall.escalation.id
+    await finish(f, turn.payload, 'completed', { text: '' })
+    expect(f.store.activation(workId)?.status).toBe('waiting_grant')
+  }
+  if (state === 'unknown calls') {
+    f.runs.tools.start({ invocationId: 'unfinished-edit', runId: turn.payload.runId, attemptId: f.runs.getRun(turn.payload.runId)!.activeAttemptId!, tool: 'edit', argsDigest: 'test', now: f.store.now() })
+    await finish(f, turn.payload, 'completed', { text: '' })
+    expect(f.store.activation(workId)?.status).toBe('paused')
+  }
   idle = true
   f.clock.now += 6 * 60_000
   if (state === 'event already happened') await f.bots.checkWakeEvents()
@@ -161,10 +171,9 @@ it.each(['event already happened', 'turn still running', 'permission wall', 'unk
   await f.bots.deliverDueReminders()
   expect(f.timers.slice(before).filter(t => t.ms === 0)).toEqual([])
   expect(f.bots.nextDueAt(botId)).toBeUndefined()
-  if (state === 'permission wall' || state === 'unknown calls') {
-    await finish(f, turn.payload, 'completed', { text: '' })
-    await (f.bots as any).continueWith(workId, [f.store.activation(workId)!.status], {})
-  } else await finish(f, turn.payload, 'completed', { text: '' })
+  if (state === 'permission wall') await f.bots.answerAsk(botId, askId!, 'allow')
+  else if (state === 'unknown calls') await f.bots.continueActivation(workId, { acknowledge: { calls: ['unfinished-edit'] } })
+  else await finish(f, turn.payload, 'completed', { text: '' })
   await flush()
   expect(f.store.reminder(set.wakeId)?.status).toBe('delivered')
   expect(f.store.dispatches(workId)).toHaveLength(2)
@@ -294,6 +303,8 @@ it('admits ready owner work and usage resets before timed waits, then the queue'
   }
   // All provider turns have ended. Model the committed readiness markers before the admission pump runs.
   for (const [i, marker] of ['wait_ready', 'usage_limit', 'question_answered', 'room_allowed'].entries()) f.store.moveActivation(ids[i]!, ['blocked'], 'blocked', { endReason: marker })
+  const queued = { ...f.store.activation(ids[0]!)!, id: 'queued-after-waits', idempotencyKey: 'queue-after-waits', status: 'queued' as const }
+  f.store.insertActivation(queued, f.store.counters(ids[0]!).limits)
   const selected: string[] = []
   const tried = new Set<string>()
   for (let i = 0; i < 4; i++) {
@@ -304,6 +315,7 @@ it('admits ready owner work and usage resets before timed waits, then the queue'
   }
   expect(selected.at(-1)).toBe(ids[0])
   expect(new Set(selected.slice(0, 3))).toEqual(new Set(ids.slice(1)))
+  expect(f.store.db.transaction(() => (f.bots as any).nextRun(tried))?.start.id).toBe(queued.id)
 })
 it('keeps the original why after delivery', async () => {
   const { workId, turn } = await work()
