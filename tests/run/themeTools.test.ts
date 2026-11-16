@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
 import { WallpaperStore } from '../../src/mms/appearance/WallpaperStore'
 import { WALLPAPER_REFUSED } from '../../src/shared/themes/wallpaperImage'
+import { shownPath } from '../../src/mms/run/mcp/appTools/appearance'
 import { pngHeader } from '../fixtures/wallpaperBytes'
 import { SettingsStore } from '../../src/mms/settings/SettingsStore'
 import type { AppearanceToolHost } from '../../src/mms/run/mcp/appTools'
@@ -292,6 +293,12 @@ describe('theme_read and theme_set', () => {
     expect(edits.asked).toEqual([{ prompt: `Allow this agent to use ${other} as the wallpaper and change how Mousse looks?`, approval: expect.objectContaining({ permissionKey: 'mousse:appearance' }) }])
     expect(existsSync(join(edits.home, 'profile', 'wallpapers'))).toBe(false)
     expect(edits.saves).toEqual([])
+  })
+
+  it('the approval shows the path on one line, without characters that could make it read as another path', () => {
+    expect(shownPath('C:\\pics\\a\u202egnp.exe\nC:\\safe.png')).toBe('C:\\pics\\agnp.exeC:\\safe.png')
+    expect(shownPath(`C:\\${'d\\'.repeat(150)}goku.png`)).toMatch(/^….*goku\.png$/)
+    expect(shownPath(`C:\\${'d\\'.repeat(150)}goku.png`)).toHaveLength(200)
   })
 
   it('fit, position and dim of a stored image run under Accept edits without asking', async () => {

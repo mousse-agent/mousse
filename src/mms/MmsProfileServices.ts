@@ -160,7 +160,7 @@ import { ThreadEventTriggers } from './automations/threadEventTriggers'
 import { buildAutomationIndex, mergeRemoteAutomations } from './automations/AutomationIndex'
 import { jobSharedWithComputers, privateThreadOf } from './automations/sharedAutomations'
 import type { RemoteAutomationsPart, RemoteAutomationsPort } from './protocol/remoteAutomationsPort'
-import { WallpaperStore } from './appearance/WallpaperStore'
+import { usedWallpapers, WallpaperStore } from './appearance/WallpaperStore'
 import { AgentJobAskStore, type AgentJobAsk } from './automations/AgentJobAsks'
 import { agentJobExpiry, isActiveAgentJob } from './scheduled/agentJobLimits'
 import type { AutomationIndex, ManagerTurn } from '../shared/automations'
@@ -1106,7 +1106,7 @@ export class MmsProfileServices {
       threads: this.threads
     })
     this.agentJobAsks = new AgentJobAskStore(homeDir)
-    this.wallpapers = new WallpaperStore(homeDir)
+    this.wallpapers = new WallpaperStore(homeDir, { used: () => usedWallpapers(this.settings.get().appearance.userThemes) })
     // The agents' theme tools: a change is saved like one made in Settings and reaches every window of the profile.
     this.orchestrator.setAppearanceTools({
       get: () => this.settings.get().appearance,
@@ -2504,7 +2504,7 @@ export class MmsProfileServices {
     // Threads still on JSON files move to thread.db in the background, one at a time.
     this.threads.startBackgroundImport()
     // Wallpaper images no theme has used for a week go, in the background.
-    void this.wallpapers.collect(new Set(this.settings.get().appearance.userThemes.flatMap((theme) => (theme.wallpaper ? [theme.wallpaper.id] : [])))).catch(() => 0)
+    void this.wallpapers.collect(usedWallpapers(this.settings.get().appearance.userThemes)).catch(() => 0)
     // Questions are memory-only — new process has none; document interrupted semantics.
     this.questions.markInterruptedByDaemonRestart()
     await this.platform.workflowRuns.startRecovery()

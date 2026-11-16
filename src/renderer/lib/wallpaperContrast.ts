@@ -14,6 +14,8 @@ export interface Rgba {
 
 /** The contrast text needs against its background (WCAG AA for normal text). */
 export const READABLE_CONTRAST = 4.5
+/** The least contrast text has anywhere on the image, including the spots the percentile leaves out (WCAG AA for large text). */
+export const LEAST_CONTRAST = 3
 /**
  * The share of the image's samples that set the floor: the 98th percentile, so a highlight covering less than about 2%
  * of the image does not force a nearly solid scrim. Text over such a spot may read below 4.5:1.
@@ -40,16 +42,16 @@ function over(top: Rgba, under: [number, number, number]): [number, number, numb
   return [top.r * top.a + under[0] * (1 - top.a), top.g * top.a + under[1] * (1 - top.a), top.b * top.a + under[2] * (1 - top.a)]
 }
 
-function readable(texts: readonly Rgba[], background: [number, number, number]): boolean {
-  return texts.every((text) => contrastRatio(over(text, background), background) >= READABLE_CONTRAST)
+function readable(texts: readonly Rgba[], background: [number, number, number], needed: number): boolean {
+  return texts.every((text) => contrastRatio(over(text, background), background) >= needed)
 }
 
 /**
  * The smallest scrim alpha at which every text colour reads against `pixel` (already flattened onto the base) under a
  * scrim of `base`; 1 when even a solid scrim does not make them read (the theme's own colours).
  */
-export function scrimNeeded(pixel: [number, number, number], base: [number, number, number], texts: readonly Rgba[]): number {
-  const at = (alpha: number) => readable(texts, over({ r: base[0], g: base[1], b: base[2], a: alpha }, pixel))
+export function scrimNeeded(pixel: [number, number, number], base: [number, number, number], texts: readonly Rgba[], needed = READABLE_CONTRAST): number {
+  const at = (alpha: number) => readable(texts, over({ r: base[0], g: base[1], b: base[2], a: alpha }, pixel), needed)
   if (at(0)) return 0
   if (!at(1)) return 1
   let low = 0
@@ -63,17 +65,20 @@ export function scrimNeeded(pixel: [number, number, number], base: [number, numb
 }
 
 /**
- * The scrim alpha the image needs (0 to 1): the `FLOOR_PERCENTILE` of what each sample needs. `samples` is RGBA, four
- * bytes per sample (an `ImageData`'s data); a transparent sample is flattened onto the base first, as the layer shows it.
+ * The scrim alpha the image needs (0 to 1): the `FLOOR_PERCENTILE` of what each sample needs for 4.5:1, and at least
+ * what every sample needs for 3:1, so no spot of the image leaves text unreadable. `samples` is RGBA, four bytes per
+ * sample (an `ImageData`'s data); a transparent sample is flattened onto the base first, as the layer shows it.
  */
 export function contrastFloor(samples: Uint8ClampedArray, base: Rgba, texts: readonly Rgba[]): number {
   const solid: [number, number, number] = [base.r, base.g, base.b]
   const needs: number[] = []
+  let least = 0
   for (let index = 0; index + 3 < samples.length; index += 4) {
     const pixel = over({ r: samples[index], g: samples[index + 1], b: samples[index + 2], a: samples[index + 3] / 255 }, solid)
     needs.push(scrimNeeded(pixel, solid, texts))
+    least = Math.max(least, scrimNeeded(pixel, solid, texts, LEAST_CONTRAST))
   }
   if (!needs.length) return 0
   needs.sort((a, b) => a - b)
-  return needs[Math.min(needs.length - 1, Math.floor(FLOOR_PERCENTILE * needs.length))]
+  return Math.max(least, needs[Math.min(needs.length - 1, Math.floor(FLOOR_PERCENTILE * needs.length))])
 }

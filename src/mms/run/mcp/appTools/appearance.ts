@@ -87,6 +87,15 @@ function wallpaperPath(args: Record<string, unknown>): string | undefined {
   return typeof path === 'string' && path.trim() ? path.trim() : undefined
 }
 
+/**
+ * An agent's path as the approval shows it: one line, no control or direction-changing characters (which could make it
+ * read as another path), at most 200 characters with the end kept, where the file name is.
+ */
+export function shownPath(path: string): string {
+  const plain = path.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, '')
+  return plain.length > 200 ? `…${plain.slice(-199)}` : plain
+}
+
 /** What is wrong with a wallpaper's fields, or null. */
 function wallpaperFieldsError(wallpaper: Record<string, unknown>): string | null {
   if (wallpaper.fit !== undefined && !(WALLPAPER_FITS as readonly unknown[]).includes(wallpaper.fit)) return `wallpaper.fit must be ${WALLPAPER_FITS.join(' or ')}.`
@@ -195,7 +204,7 @@ export function appearanceTools(host: AppToolHost): MousseTool[] {
       class: 'mutation',
       approvalPrompt: (args) => {
         const path = wallpaperPath(args)
-        return path ? `Allow this agent to use ${path} as the wallpaper and change how Mousse looks?` : 'Allow this agent to change how Mousse looks?'
+        return path ? `Allow this agent to use ${shownPath(path)} as the wallpaper and change how Mousse looks?` : 'Allow this agent to change how Mousse looks?'
       },
       // CSS can lay anything over the window (an invisible link or control under every click), and a new wallpaper makes
       // Mousse read a file the agent named: both ask unless the run is in Full access. Switching themes, colors and how a

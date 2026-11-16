@@ -55,13 +55,18 @@ describe('contrastFloor', () => {
     expect(contrastFloor(fill(100, [255, 255, 255, 0]), DARK.base, DARK.texts)).toBe(0)
   })
 
-  it('a highlight under 2% of the image does not set the floor; one over 2% does', () => {
+  it('a highlight under 2% of the image is held to 3:1, not 4.5:1; one over 2% is held to 4.5:1', () => {
     const small = fill(1000, [0, 0, 0])
     for (let index = 0; index < 15; index++) small.set([255, 255, 255, 255], index * 4)
-    expect(contrastFloor(small, DARK.base, DARK.texts)).toBeLessThan(0.05)
+    const smallFloor = contrastFloor(small, DARK.base, DARK.texts)
     const large = fill(1000, [0, 0, 0])
     for (let index = 0; index < 30; index++) large.set([255, 255, 255, 255], index * 4)
-    expect(contrastFloor(large, DARK.base, DARK.texts)).toBeGreaterThan(0.5)
+    const largeFloor = contrastFloor(large, DARK.base, DARK.texts)
+    expect(smallFloor).toBeGreaterThan(0)
+    expect(smallFloor).toBeLessThan(largeFloor)
+    // Text over the small highlight still reads at 3:1 at least; over the large one at 4.5:1.
+    expect(smallFloor).toBeCloseTo(scrimNeeded([255, 255, 255], [16, 20, 24], DARK.texts, 3), 3)
+    expect(textReads([255, 255, 255], DARK, largeFloor)).toBe(true)
   })
 
   it('a theme whose own text does not read on its own base gets a solid surface (1)', () => {

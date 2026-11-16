@@ -171,6 +171,44 @@ describe('WallpaperStore', () => {
     expect(readdir(folder).sort()).toEqual([`${other}.png`, `${young}.png`, 'notes.txt'].sort())
   })
 
+  it('a full store first drops images no theme uses, however recent, and refuses only when that is not enough', async () => {
+    const { home, files, image } = setup()
+    const used = new Set<string>()
+    const store = new WallpaperStore(home, { used: () => used, maxBytes: image.length * 2 + 10 })
+    const write = (name: string, extra: number) => { const path = join(files, name); writeFileSync(path, pngHeader(640, 480, image.length - 33 + extra)); return path }
+    const kept = (await store.importFile(write('a.png', 1))).id
+    used.add(kept)
+    const dropped = (await store.importFile(write('b.png', 2))).id
+    // A third image does not fit: b, which no theme uses, goes; a stays.
+    await store.importFile(write('c.png', 3))
+    expect(existsSync(join(home, 'wallpapers', `${kept}.png`))).toBe(true)
+    expect(existsSync(join(home, 'wallpapers', `${dropped}.png`))).toBe(false)
+    used.add(readdir(join(home, 'wallpapers')).find((name) => !name.startsWith(kept))!.slice(0, 64))
+    await expect(store.importFile(write('d.png', 4))).rejects.toThrow('Too many wallpapers')
+  })
+
+  it('refuses the store folder once it is swapped for a link after it was used', async () => {
+    const { store, source, home, root, image, id } = setup()
+    await store.importFile(source)
+    const folder = join(home, 'wallpapers')
+    rmSync(folder, { recursive: true })
+    const elsewhere = join(root, 'elsewhere')
+    mkdirSync(elsewhere)
+    writeFileSync(join(elsewhere, `${id}.png`), image)
+    linkFolder(elsewhere, folder)
+    await expect(store.read(id, undefined, 0, 10)).rejects.toThrow()
+    await expect(store.importBytes(image)).rejects.toThrow()
+  })
+
+  it('two windows saving a copy of the same size at once leave one whole copy, the first', async () => {
+    const { store, source, id, home } = setup()
+    await store.importFile(source)
+    const first = Buffer.concat([webpLossy(2560, 1440), Buffer.alloc(4096, 1)])
+    const second = Buffer.concat([webpLossy(2560, 1440), Buffer.alloc(4096, 2)])
+    expect(await Promise.all([store.saveCopy(id, 2560, first), store.saveCopy(id, 2560, second)])).toEqual([true, true])
+    expect(readFileSync(join(home, 'wallpapers', `${id}.c1.w2560.webp`))).toEqual(first)
+  })
+
   it('a choice made while collection is pending is never removed by it', async () => {
     const { store, source, id, home } = setup()
     await store.importFile(source)

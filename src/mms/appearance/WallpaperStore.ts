@@ -162,12 +162,20 @@ function sameIdentity(a: { dev: bigint; ino: bigint }, b: { dev: bigint; ino: bi
 
 export class WallpaperStore {
   readonly root: string
-  private checkedRoot: Promise<string> | null = null
+  private realHome: Promise<string> | null = null
   private readonly now: () => number
+  private readonly used: () => ReadonlySet<string>
+  private readonly maxBytes: number
 
-  constructor(private readonly profileHome: string, options: { now?: () => number } = {}) {
+  /**
+   * `used`: the ids the profile's themes name now, so a full store can drop what none of them uses. `maxBytes`: the
+   * most the store holds (tests use a small one).
+   */
+  constructor(private readonly profileHome: string, options: { now?: () => number; used?: () => ReadonlySet<string>; maxBytes?: number } = {}) {
     this.root = join(profileHome, 'wallpapers')
     this.now = options.now ?? Date.now
+    this.used = options.used ?? (() => new Set())
+    this.maxBytes = options.maxBytes ?? WALLPAPER_STORE_MAX_BYTES
   }
 
   /**
@@ -175,18 +183,17 @@ export class WallpaperStore {
    * elsewhere; otherwise every call fails and themes show without their wallpaper.
    */
   private async folder(): Promise<string> {
-    this.checkedRoot ??= (async () => {
-      await mkdir(this.root, { recursive: true })
-      const stats = await lstat(this.root)
-      if (!stats.isDirectory() || stats.isSymbolicLink()) throw new Error('The wallpaper folder is not a folder.')
-      const [real, home] = await Promise.all([realpath(this.root), realpath(this.profileHome)])
-      const expected = join(home, 'wallpapers')
-      const same = process.platform === 'win32' ? real.toLowerCase() === expected.toLowerCase() : real === expected
-      if (!same) throw new Error('The wallpaper folder is outside the profile.')
-      return this.root
-    })()
-    this.checkedRoot.catch(() => { this.checkedRoot = null })
-    return this.checkedRoot
+    // Checked on every call, so a folder swapped for a link after an earlier check is refused too.
+    await mkdir(this.root, { recursive: true })
+    const stats = await lstat(this.root)
+    if (!stats.isDirectory() || stats.isSymbolicLink()) throw new Error('The wallpaper folder is not a folder.')
+    this.realHome ??= realpath(this.profileHome)
+    this.realHome.catch(() => { this.realHome = null })
+    const [real, home] = await Promise.all([realpath(this.root), this.realHome])
+    const expected = join(home, 'wallpapers')
+    const same = process.platform === 'win32' ? real.toLowerCase() === expected.toLowerCase() : real === expected
+    if (!same) throw new Error('The wallpaper folder is outside the profile.')
+    return this.root
   }
 
   /**
@@ -233,7 +240,9 @@ export class WallpaperStore {
       const now = new Date(this.now())
       await utimes(target, now, now).catch(() => {})
     } else {
-      if ((await this.usedBytes(folder)) + data.length > WALLPAPER_STORE_MAX_BYTES)
+      // Full: images no theme uses go first, however recently they were chosen; refused only if that is not enough.
+      if ((await this.usedBytes(folder)) + data.length > this.maxBytes) await this.collectIn(folder, this.used(), 0)
+      if ((await this.usedBytes(folder)) + data.length > this.maxBytes)
         throw new WallpaperRefused('Too many wallpapers are stored. Delete themes you no longer use, then try again.')
       await this.write(target, data, false)
     }
@@ -360,13 +369,16 @@ export class WallpaperStore {
    * `data` is a WebP of the expected size and shape. The first copy kept stays, unless `replace` (a window found the
    * kept copy would not decode). Returns whether `data` is now the stored copy or an equal one was already there.
    */
-  async saveCopy(id: string, bucket: WallpaperBucket, data: Buffer, options: { replace?: boolean } = {}): Promise<boolean> {
-    if (!isWallpaperId(id) || !isWallpaperBucket(bucket)) return false
-    const folder = await this.folder()
-    const original = await this.originalInfo(folder, id)
-    if (!original || !isWallpaperCopy(data, original, bucket)) return false
-    await this.write(join(folder, this.copyName(id, bucket)), data, Boolean(options.replace))
-    return true
+  saveCopy(id: string, bucket: WallpaperBucket, data: Buffer, options: { replace?: boolean } = {}): Promise<boolean> {
+    if (!isWallpaperId(id) || !isWallpaperBucket(bucket)) return Promise.resolve(false)
+    // In turn with imports and collection: two windows saving a copy at once cannot both pass "first writer wins".
+    return serialized(async () => {
+      const folder = await this.folder()
+      const original = await this.originalInfo(folder, id)
+      if (!original || !isWallpaperCopy(data, original, bucket)) return false
+      await this.write(join(folder, this.copyName(id, bucket)), data, Boolean(options.replace))
+      return true
+    })
   }
 
   /**
@@ -374,28 +386,37 @@ export class WallpaperStore {
    * of interrupted writes. Runs with imports in turn, so an image chosen while it runs is never removed.
    */
   collect(used: ReadonlySet<string>): Promise<number> {
-    return serialized(async () => {
-      const folder = await this.folder()
-      const now = this.now()
-      let removed = 0
-      for (const name of await readdir(folder)) {
-        const path = join(folder, name)
-        const stats = await lstat(path).catch(() => null)
-        if (!stats?.isFile()) continue
-        const id = STORE_FILE.exec(name)?.[1]
-        const old = id ? !used.has(id) && now - stats.mtimeMs > WALLPAPER_UNUSED_KEEP_MS && !(await this.originalYoung(folder, id, now)) : TEMP_FILE.test(name) && now - stats.mtimeMs > TEMP_KEEP_MS
-        if (!old) continue
-        await unlink(path).then(() => { removed++ }, () => {})
-      }
-      return removed
-    })
+    return serialized(async () => this.collectIn(await this.folder(), used, WALLPAPER_UNUSED_KEEP_MS))
+  }
+
+  /** What `collect` does, for images unused for longer than `keepMs`; runs inside the queue. */
+  private async collectIn(folder: string, used: ReadonlySet<string>, keepMs: number): Promise<number> {
+    const now = this.now()
+    let removed = 0
+    for (const name of await readdir(folder)) {
+      const path = join(folder, name)
+      const stats = await lstat(path).catch(() => null)
+      if (!stats?.isFile()) continue
+      const id = STORE_FILE.exec(name)?.[1]
+      const old = id
+        ? !used.has(id) && now - stats.mtimeMs > keepMs && !(await this.originalYoung(folder, id, now, keepMs))
+        : TEMP_FILE.test(name) && now - stats.mtimeMs > TEMP_KEEP_MS
+      if (!old) continue
+      await unlink(path).then(() => { removed++ }, () => {})
+    }
+    return removed
   }
 
   /** A copy goes with its original: it stays while the original was chosen within the week. */
-  private async originalYoung(folder: string, id: string, now: number): Promise<boolean> {
+  private async originalYoung(folder: string, id: string, now: number, keepMs: number): Promise<boolean> {
     const name = await this.originalName(folder, id)
     if (!name) return false
     const stats = await lstat(join(folder, name)).catch(() => null)
-    return Boolean(stats && now - stats.mtimeMs <= WALLPAPER_UNUSED_KEEP_MS)
+    return Boolean(stats && now - stats.mtimeMs <= keepMs)
   }
+}
+
+/** The image ids `themes` name: what collection keeps. */
+export function usedWallpapers(themes: ReadonlyArray<{ wallpaper?: { id: string } }>): Set<string> {
+  return new Set(themes.flatMap((theme) => (theme.wallpaper ? [theme.wallpaper.id] : [])))
 }
