@@ -225,24 +225,36 @@ describe('/compact beside work in progress', () => {
     expect(s.orch.getMessagesForPersistence(s.thread.id).at(-1)).toMatchObject({ role: 'assistant', content: 'reply 1' })
   }, 30_000)
 
-  it('is refused while a subagent the thread started is still going, and compacts once it has ended', async () => {
+  /**
+   * The parent's turn ended after delegating; where its subagent's run stands decides. Only a subagent doing work holds
+   * the compaction back: one paused on a usage limit may stay so for hours.
+   */
+  const SUBAGENT_RUNS: Array<{ status: 'queued' | 'running' | 'paused' | 'cancelled'; compacts: boolean }> = [
+    { status: 'queued', compacts: false },
+    { status: 'running', compacts: false },
+    { status: 'paused', compacts: true },
+    { status: 'cancelled', compacts: true }
+  ]
+  it.each(SUBAGENT_RUNS)('with a subagent whose run is $status: compacts = $compacts', async ({ status, compacts }) => {
     const s = await setup()
     const { revision } = longThread(s.orch, s.thread.id)
     const runtime = recordRuntime(s)
-    // The parent's turn ended after delegating; its subagent's run has not ended.
     const child = s.store.createThread('Reviewer', s.thread.projectId)
     s.engine.delegations.createLineage({ threadId: child.id, parentThreadId: s.thread.id, parentRunId: 'run-parent', relationship: 'subagent' })
     const childRun = s.engine.store.createRun({ threadId: child.id, source: 'delegation' })
     s.engine.delegations.create({ parentRunId: 'run-parent', parentThreadId: s.thread.id, childThreadId: child.id, childRunId: childRun.runId, prompt: 'Review it', wake: 'always' })
+    if (status !== 'queued')
+      s.engine.store.casRunStatus({ runId: childRun.runId, expectedEpoch: childRun.epoch, status, ...(status === 'cancelled' ? { patch: { completedAt: new Date().toISOString() } } : {}) })
 
+    if (compacts) {
+      await expect(compactRequest(s, s.thread.id)).resolves.toEqual({ outcome: 'native' })
+      expect(runtime).toHaveBeenCalledOnce()
+      return
+    }
     const refusal = "Wait for this thread's subagents to finish before compacting."
     await expect(compactRequest(s, s.thread.id)).rejects.toMatchObject({ code: 'thread_busy', message: refusal })
     await expect(s.orch.compactConversationContext(s.thread.id)).rejects.toThrow(refusal)
     nothingStarted(s, s.thread.id, revision, runtime)
-
-    s.engine.store.casRunStatus({ runId: childRun.runId, expectedEpoch: childRun.epoch, status: 'cancelled', patch: { completedAt: new Date().toISOString() } })
-    await expect(compactRequest(s, s.thread.id)).resolves.toEqual({ outcome: 'native' })
-    expect(runtime).toHaveBeenCalledOnce()
   }, 30_000)
 })
 

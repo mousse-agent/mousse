@@ -303,6 +303,18 @@ describe('Compact now that fails, or that cannot run now', () => {
     expect(host.textContent).not.toContain('Error invoking remote method')
   })
 
+  it('says nothing more when the compaction started and failed: its row in the conversation says why', async () => {
+    const t = await mount()
+    await t.compactNow()
+    // The daemon's row for this compaction arrives, then the request fails with the same reason.
+    act(() => t.useAppStore.setState((state) => ({ messages: [...state.messages, {
+      id: 'row-1', role: 'assistant', kind: 'context_compaction', content: 'Context not compacted · disk full', streaming: false,
+      compaction: { manual: true, kept: 'failed' }, timestamp: new Date().toISOString()
+    }] as never })))
+    await t.fail(ipcError('disk full'))
+    expect(host.textContent).not.toContain('disk full')
+  })
+
   it('never shows the failure on another thread opened meanwhile', async () => {
     const t = await mount()
     await t.compactNow()
@@ -312,7 +324,7 @@ describe('Compact now that fails, or that cannot run now', () => {
     expect(host.textContent).not.toContain('Wait for the turn to finish before compacting.')
   })
 
-  it('is not offered while a subagent of the thread is still going', async () => {
+  it('is not offered while a subagent of the thread is working, and is while it is paused', async () => {
     const working = {
       childThreadId: 'child-1', title: 'Reviewer', activity: 'working', state: 'working', latestDelegationId: 'd-1', unread: false,
       provider: null, model: null, workspace: null, role: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), waitingOn: [], tasks: []
@@ -320,6 +332,13 @@ describe('Compact now that fails, or that cannot run now', () => {
     const t = await mount({ subagents: async () => [working] })
     expect(t.chip()).toBeNull()
     expect(t.compact).not.toHaveBeenCalled()
+    // Paused on a usage limit, it does no work: the chip offers Compact now.
+    act(() => t.useAppStore.getState().setSubagents('thread-a', [{ ...working, activity: 'paused', state: 'paused' }] as never))
+    await settle()
+    expect(t.chip()?.textContent).toBe('Full · 182K')
+    act(() => t.useAppStore.getState().setSubagents('thread-a', [working] as never))
+    await settle()
+    expect(t.chip()).toBeNull()
     // Once it has finished, the chip offers Compact now again.
     act(() => t.useAppStore.getState().setSubagents('thread-a', [{ ...working, activity: 'idle', state: 'idle' }] as never))
     await settle()

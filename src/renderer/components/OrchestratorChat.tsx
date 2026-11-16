@@ -57,7 +57,7 @@ import { countRender } from '../chat/components/agent-elements/render-counts'
 import { SubagentParentBar } from './SubagentParentBar'
 import { SubagentComposerBanner } from './SubagentComposerBanner'
 import { useSubagents } from '../hooks/useSubagents'
-import { isRunningSubagent } from '../../shared/subagents'
+import { isWorkingSubagent } from '../../shared/subagents'
 import { RemoteSubagentNotice } from './RemoteSubagentNotice'
 import { ThreadMoveBanner } from './providers/MoveProviderDialog'
 import { mousseToUIMessages, chatStatusFromTurn, reuseUIMessages } from '../chat/adapters/mousseToUI'
@@ -1221,22 +1221,25 @@ export function OrchestratorChat() {
 
   // Compact now (the composer's chip, the context popover): it starts at once and runs while the person types.
   // Until the daemon's compaction row arrives, and while the request is out, the chip reads Compacting….
-  // Never offered beside work in progress: a running turn, or subagents whose results come back to this thread.
-  const subagentsRunning = useSubagents(newChat ? null : activeThreadId).some(isRunningSubagent)
+  // Never offered beside work in progress: a running turn, or working subagents whose results come back to this thread.
+  const subagentsWorking = useSubagents(newChat ? null : activeThreadId).some(isWorkingSubagent)
   const [compactingThread, setCompactingThread] = useState<string | null>(null)
   const handleCompactNow = useCallback(() => {
     const threadId = activeThreadId
-    if (!threadId || turnActive || loading || subagentsRunning) return
+    if (!threadId || turnActive || loading || subagentsWorking) return
     setCompactingThread(threadId)
+    // The compaction rows already in the conversation: a new one means this compaction started, and its row says how it ended.
+    const compactionRows = () => useAppStore.getState().messages.filter((message) => message.kind === 'context_compaction').map((message) => message.id)
+    const rowsBefore = new Set(compactionRows())
     void window.mousse.threads.compact(threadId)
       .catch((error: unknown) => {
-        // The compaction's row says how it ended; only a refusal is said here, and only on the thread that asked.
+        // Only a refusal before the compaction started is said here, and only on the thread that asked.
         const line = compactNowFailureLine(error)
         if (!line) console.warn('[compact] Compact now got no answer', { threadId, error: errorText(error) })
-        else if (useAppStore.getState().activeThreadId === threadId) setSendError(line)
+        else if (useAppStore.getState().activeThreadId === threadId && compactionRows().every((id) => rowsBefore.has(id))) setSendError(line)
       })
       .finally(() => setCompactingThread((current) => (current === threadId ? null : current)))
-  }, [activeThreadId, turnActive, loading, subagentsRunning])
+  }, [activeThreadId, turnActive, loading, subagentsWorking])
 
   // What composer commands act on: this thread (none yet on a blank chat) and whether a turn is running.
   const slashCommandEnv = (hasAttachments: boolean): SlashCommandEnv => ({
@@ -1930,7 +1933,7 @@ export function OrchestratorChat() {
                 contextCompactionSetting,
                 contextOpen,
                 onContextOpenChange: setContextOpen,
-                ...(!newChat && activeThreadId && !subagentsRunning ? { onCompactNow: handleCompactNow } : {}),
+                ...(!newChat && activeThreadId && !subagentsWorking ? { onCompactNow: handleCompactNow } : {}),
                 compacting: compactionRunning || (activeThreadId !== null && compactingThread === activeThreadId),
                 ...(activeThread?.botOwned ? { contextHidden: true } : {})
               }}

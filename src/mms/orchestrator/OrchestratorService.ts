@@ -142,7 +142,7 @@ import type { RemoteLaunchRecord } from '../run/delegation/remoteLaunches'
 import { RemoteSubagents } from './RemoteSubagents'
 import type { RemoteComputersPort } from '../protocol/remoteComputersPort'
 import { MAX_REMOTE_MINUTES } from '../run/mcp/appTools/delegation'
-import { isRunningSubagent, type BackgroundTaskNoticeItem, type SubagentNoticeItem, type SubagentSummary } from '../../shared/subagents'
+import { isRunningSubagent, isWorkingSubagent, type BackgroundTaskNoticeItem, type SubagentNoticeItem, type SubagentSummary } from '../../shared/subagents'
 import type { SettleNoticeItem } from '../../shared/settleNotice'
 import type { DelegationRequest, ForkPointSeed, ThreadCreation } from '../run/RunEngine'
 import type { HandoffItem } from '../run/handoff/budget'
@@ -15762,13 +15762,14 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * Why the thread's context cannot be compacted now, or nothing: a turn is running on it, or a subagent it started is
-   * still going (its result comes back to this thread's conversation). Checked before a compaction starts, so it never
+   * working (its result comes back to this thread's conversation). One paused on a usage limit or waiting for an
+   * answer does not hold the compaction back. Checked before a compaction starts, so it never
    * starts beside work in progress. A run of the thread (another compaction, an Undo) is refused by `threads.compact`.
    */
   compactionRefusal(threadId: string): string | undefined {
     const session = this.sessions.get(threadId)
     if (session?.isTurnRunning()) return 'Wait for the turn to finish before compacting.'
-    if (this.runEngine && this.subagentView(threadId).some(isRunningSubagent))
+    if (this.runEngine && this.subagentView(threadId).some(isWorkingSubagent))
       return "Wait for this thread's subagents to finish before compacting."
     return undefined
   }
