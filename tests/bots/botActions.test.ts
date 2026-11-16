@@ -378,3 +378,18 @@ it.each(['not_dispatched', 'tool_error', 'timeout', 'dropped'] as const)('R3 dis
   expect(f.store.message(a.message_id)?.text).toBe(status === 'failed' ? 'Not sent' : "Couldn't tell if it went through")
   if (kind === 'tool_error') expect(f.store.lastMainDispatch(t.workId)!.prompt.text).toContain('Recipient does not exist')
 })
+it('R4 a question after a settled action ends as a question, not an approval', async () => {
+  const t = await setup(true)
+  await t.call()
+  await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  await flush()
+  const next = await start(f, t.workId, 2)
+  expect(f.bots.askOwner(t.botId, t.workId, { question: 'Which next?', choices: [{ label: 'A' }, { label: 'B' }], other: true }).asked).toBe(true)
+  const denied = next.prepared.authority.check({ kind: 'app', tool: 'web_fetch', args: {} })
+  expect(JSON.stringify(denied)).not.toContain('call is held')
+  expect(JSON.stringify(denied)).toContain('question')
+  await finish(f, next.payload)
+  expect(f.store.activation(t.workId)).toMatchObject({ status: 'blocked', endReason: 'question' })
+})
