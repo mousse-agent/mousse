@@ -2205,3 +2205,18 @@ it('quotes actual hidden path segments without interpreting dots or arrows and f
   expect(fold.open).toBe(true)
   expect(fold.textContent).toContain(long)
 })
+
+it('guards hidden characters consistently while preserving ordinary script and emoji joiners', async () => {
+  const hidden = '\u2028\u2029\u034f\u115f\u1160\u3164\uffa0\u200b\u202e\u2067\ufeff'
+  fake.chats.inbox = [held({ args: { subject: `before${hidden}after`, to: ['bob@exa\u200dmple.com', 'https://exa\u200cmple.com', 'bоb@example.com'], 'tо': 'lookalike name', ordinary: 'می‌روم 👩‍💻 Ελληνικά Русский' } })]
+  await open()
+  const args = host.querySelector('[aria-label="Complete arguments"]')!
+  expect(args.textContent).not.toContain(hidden)
+  expect(args.textContent).toContain(`before${'�'.repeat([...hidden].length)}after`)
+  expect(args.textContent).toContain('bob@exa�mple.com')
+  expect(args.textContent).toContain('https://exa�mple.com')
+  expect(args.textContent).toContain('می‌روم 👩‍💻 Ελληνικά Русский')
+  expect(args.querySelectorAll('[aria-label="Look-alike letters"]')).toHaveLength(2)
+  const { plainLabel } = await import('../../src/shared/bots/personal/modelSlots')
+  expect(plainLabel('one\u200ctwo\u2029three')).toBe('one two three')
+})
