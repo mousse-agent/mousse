@@ -396,15 +396,16 @@ it('R4 a question after a settled action ends as a question, not an approval', a
 })
 it('R5-slot keeps the slot until the held runtime finishes', async () => {
   const t = await setup(true)
-  await f.bots.activate({ botId: t.botId, input: 'Other one', clientRequestId: 'other1' })
-  await f.bots.activate({ botId: t.botId, input: 'Other two', clientRequestId: 'other2' })
-  await t.call()
   const admission = f.bots as unknown as { holding(botId: string, lane: string): unknown[]; profileRunsHeld(): number }
-  expect(admission.holding(t.botId, 'run')).toHaveLength(3)
-  expect(admission.profileRunsHeld()).toBe(3)
+  const before = admission.holding(t.botId, 'run').length
+  const profileBefore = admission.profileRunsHeld()
+  expect(await t.call()).not.toMatchObject({ isError: true })
+  expect(f.store.activation(t.workId)?.status).toBe('blocked')
+  expect(admission.holding(t.botId, 'run')).toHaveLength(before)
+  expect(admission.profileRunsHeld()).toBe(profileBefore)
   await finish(f, t.work.payload)
-  expect(admission.holding(t.botId, 'run')).toHaveLength(2)
-  expect(admission.profileRunsHeld()).toBe(2)
+  expect(admission.holding(t.botId, 'run')).toHaveLength(before - 1)
+  expect(admission.profileRunsHeld()).toBe(profileBefore - 1)
 })
 it.each(['access_token', 'client_secret', 'password', 'authorization', 'api_key', 'x-api-key', 'apiToken', 'AccessToken', 'clientSecret'] as const)('R5-mask masks %s by key', async key => {
   const { maskedActionData } = await import('../../src/mms/bots/actions/BotActions')
