@@ -15,15 +15,16 @@ const ICONS = {
   documents: FileText
 } as const
 
-/** The menu row's label: several terminals are allowed, so the menu always adds one. */
+/** Browsers and terminals can have several tabs; the menu always adds one. */
 export function surfaceMenuLabel(choice: SurfaceChoice): string {
+  if (choice.id === 'browser') return 'New browser tab'
   return choice.id === 'terminal' ? 'New terminal' : choice.label
 }
 
 /**
  * The panels a user can add. As the "+" menu (`menu`) the rows are menu items, panels that are
- * already open say "Open" and focus their tab, and no shortcut hints show, since the shortcuts
- * only work while the empty picker is on screen.
+ * already open say "Open" and focus their tab, except Browser and Terminal which add tabs.
+ * No shortcut hints show, since shortcuts only work while the empty picker is on screen.
  */
 export function SurfaceChoiceList({
   menu = false,
@@ -43,7 +44,7 @@ export function SurfaceChoiceList({
           {menu
             ? <SurfaceMenuItem
               choice={choice}
-              open={choice.id !== 'terminal' && !!openViews?.has(choice.id)}
+              open={choice.id !== 'terminal' && choice.id !== 'browser' && !!openViews?.has(choice.id)}
               onFocusOpen={onFocusOpen}
               onPick={onPick}
             />
@@ -73,7 +74,7 @@ function SurfaceMenuItem({
       className="surface-menu-row"
       onClick={() => {
         if (open && onFocusOpen) onFocusOpen(choice.id)
-        else openSurface(choice.id, choice.id === 'terminal')
+        else openSurface(choice.id, choice.id === 'terminal' || choice.id === 'browser')
         onPick?.()
       }}
     >

@@ -116,24 +116,49 @@ describe('the "+" panel menu', () => {
     expect(document.activeElement).toBe(addButton())
   })
 
-  it('marks open panels "Open", reads "New terminal", and shows no shortcut hints', () => {
+  it('marks single-instance panels "Open" and labels actions that add tabs', () => {
     render()
-    expect(rows().map((item) => text(item.querySelector('.surface-menu-row-label')))).toEqual(['Browser', 'New terminal', 'Files', 'Changes', 'Pull request'])
-    expect(rows().map((item) => text(item.querySelector('.surface-menu-state')) ?? null)).toEqual(['Open', null, null, 'Open', null])
+    expect(rows().map((item) => text(item.querySelector('.surface-menu-row-label')))).toEqual(['New browser tab', 'New terminal', 'Files', 'Changes', 'Pull request'])
+    expect(rows().map((item) => text(item.querySelector('.surface-menu-state')) ?? null)).toEqual([null, null, null, 'Open', null])
     expect(menu()!.querySelector('kbd')).toBeNull()
   })
 
-  it('focuses the tab of an open panel instead of adding one', async () => {
+  it('focuses the tab of an open single-instance panel', async () => {
     render()
     await act(async () => { row('Changes').click() })
     const state = useAppStore.getState()
     expect(state.mainView).toBe('git')
     expect(state.openedSurfaceKinds).toEqual(['browser', 'git', 'terminal'])
     expect(menu()).toBeNull()
-    act(() => addButton().click())
-    await act(async () => { row('Browser').click() })
-    expect(useAppStore.getState().mainView).toBe('browser')
+  })
+
+  it.each([null, 'thread-a'])('adds and selects another browser tab for %s', async (threadId) => {
+    render()
+    act(() => useAppStore.setState({ activeThreadId: threadId, mainView: 'git' }))
+    const existing = useAppStore.getState().browserTabs[0]
+    await act(async () => { row('New browser tab').click() })
+    const state = useAppStore.getState()
+    expect(state.browserTabs).toHaveLength(2)
+    expect(state.browserTabs[0]).toEqual(existing)
+    const added = state.browserTabs[1]
+    expect(added.ownerThreadId).toBe(threadId)
+    expect(added.url).toBe('about:blank')
+    expect(state.browserActiveTabByThread[threadId ?? '__standalone__']).toBe(added.id)
+    expect(state.mainView).toBe('browser')
+    expect(menu()).toBeNull()
+    const selected = host.querySelector<HTMLButtonElement>('[aria-current="page"]')!
+    expect(selected.textContent).toContain('Browser 2')
+    // The original tab remains selectable.
+    await act(async () => { [...host.querySelectorAll<HTMLButtonElement>('.main-view-tab-select')].find((item) => item.textContent === 'Browser 1')!.click() })
+    expect(useAppStore.getState().browserActiveTabByThread[threadId ?? '__standalone__']).toBe(existing.id)
+  })
+
+  it('opens the first browser tab from the menu', () => {
+    render()
+    act(() => useAppStore.setState({ browserTabs: [], openedSurfaceKinds: ['git'], mainView: 'git' }))
+    act(() => row('New browser tab').click())
     expect(useAppStore.getState().browserTabs).toHaveLength(1)
+    expect(host.querySelector('[aria-current="page"]')?.textContent).toBe('Browser')
   })
 
   it('adds another terminal from "New terminal"', () => {
