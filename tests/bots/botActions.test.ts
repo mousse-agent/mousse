@@ -461,3 +461,15 @@ it('S2 refuses arguments that would be cut from the review', async () => {
   expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
   expect(t.calls).toEqual([])
 })
+it('S3 removes a hidden executable value echoed by a result on settlement', async () => {
+  const t = await setup(true)
+  await t.call()
+  const a = f.bots.actions.forWork(t.workId)!
+  // Defense for rows written by an older build, before hidden arguments were refused.
+  f.store.run('UPDATE bot_actions SET exec_args = ? WHERE id = ?', JSON.stringify({ ...t.args, password: 'hunter2' }), a.id)
+  f.bots.actions.transition(a.id, 'open', 'approved')
+  f.bots.actions.transition(a.id, 'approved', 'running')
+  f.bots.actions.transition(a.id, 'running', 'failed', { text: 'Login failed for password hunter2' })
+  expect(f.bots.actions.forWork(t.workId)?.result_json).not.toContain('hunter2')
+  expect(new BotMemoryStore({ db: f.store.db }).actions(t.botId).map(a => a.result_json).join()).not.toContain('hunter2')
+})
