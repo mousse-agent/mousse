@@ -63,8 +63,8 @@ function agentAccessPolicy(host: AppToolHost, engine: RunEngine): ToolAccessPoli
       return lineage === 'descendant' ? 'descendant' : lineage ? 'ancestor_or_sibling' : null
     },
     // A personal bot: its own rule for threads; it reaches every project.
-    botReach: (caller, target) => {
-      if (target.threadId !== undefined) return botThreadReach(host, engine, caller.threadId, target.threadId)
+    botReach: (caller, target, options) => {
+      if (target.threadId !== undefined) return botThreadReach(host, engine, caller.threadId, target.threadId, options)
       return { scope: 'manage' }
     }
   }

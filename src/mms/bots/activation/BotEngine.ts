@@ -26,6 +26,9 @@ import { lookFields } from '../../../shared/bots/personal/look'
 import { BOT_HELD_POWER_TEXT, subagentHold, type BotHeldPower, type BotRuntimeHold, type BotSubagentHold } from '../../../shared/bots/personal/subagentHold'
 import type { BotAuthority, BotCheck, BotCheckDenied, BotMcpTool, BotSubagents, BotSubagentView, BotThreadRole, BotThreads, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
 import { launchedActive, type BotChatMessage, type BotChip, type BotError, type BotLaunchedThread } from '../../../shared/bots/personal/chat'
+import { jobAskerOf, jobStateOf, jobStep, resultLine, type JobThreadView } from '../jobs'
+import { BOT_JOB_ENDED, jobLine, jobNoticeInput, jobNoticeLabel, type BotJob, type BotJobState } from '../../../shared/bots/personal/jobs'
+import { threadLink } from '../../../shared/threadLink'
 import type { PermissionMode } from '../../../shared/permissionMode'
 import {
   BOT_ASK_DENY_COOLDOWN_MS,
@@ -227,6 +230,11 @@ export interface BotEngineHost {
    * (`launchedThreadsOf`): what a bot manages beside its own work, and what it managed. Absent: none is listed.
    */
   launchedThreads?(creatorThreadIds: ReadonlySet<string>): BotLaunchedThread[]
+  /**
+   * A thread a bot handed a job to, as the ledger reads it (`JobThreadView`): how it stands, its title and its last run's
+   * answer; `gone` when it was deleted. Absent: jobs are kept but never followed.
+   */
+  jobThread?(threadId: string): JobThreadView | undefined
   /** A bot's schedules may have changed (it was resumed): the scheduler ticks now. */
   schedulesChanged?(): void
   /**
@@ -1659,6 +1667,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   private async maintainPass(now: Date): Promise<void> {
     if (this.closed) return
+    this.checkOpenJobs()
     this.retryCompletedScheduleRemovals()
     if (this.removedScheduleSweepPending) this.tryDropRemovedScheduleRuns()
     let endedSchedules: ReturnType<BotScheduleBook['ended']> = []
@@ -7283,9 +7292,108 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * A thread some thread started changed how it works (its run started, ended, held, or asks the owner): when a bot
    * started it, the bot's summary is read again, so its header goes busy or back to free. Never throws.
    */
-  launchedThreadChanged(creatorThreadId: string): void {
+  launchedThreadChanged(creatorThreadId: string, threadId?: string): void {
     const bot = this.botOf(creatorThreadId)
     if (bot) this.changed({ botId: bot.botId })
+    if (bot && threadId) this.checkJobs(threadId)
+  }
+
+  // -- Jobs: the ledger of work handed to threads (docs/plans/bot-context.md §16) ---------------------------------
+
+  /**
+   * A job the turn `from` handed to `threadId` (`BotToolHost.jobs`): who asked and what, from the turn (`jobAskerOf`).
+   * A thread still working on an earlier job of the bot keeps that one.
+   */
+  openJob(botId: string, from: string, input: { threadId: string; title: string; project?: string; sent: string }): { jobId: string } {
+    const row = this.store.activation(from)
+    if (!row || row.botId !== botId) throw new BotEngineError('bot_not_found', 'Only a bot\'s own turn hands work to a thread.')
+    const replyTo = row.trigger.kind === 'work' ? row.trigger.replyTo : undefined
+    const ownerText = replyTo ? this.store.message(replyTo)?.text : row.lane === 'chat' ? this.ownerWords(botId, from).split(/\r?\n/).find((line) => line.trim()) : undefined
+    const { askedBy, request } = jobAskerOf(row, ownerText, input.sent)
+    const job = this.store.openJob({ id: `job_${randomUUID()}`, botId, activationId: from, threadId: input.threadId, title: jobLine(input.title || 'Untitled thread', 200), request, askedBy, ...(input.project ? { project: input.project } : {}) })
+    this.changed({ botId })
+    return { jobId: job.id }
+  }
+
+  /** The jobs not ended on `threadId` look at their thread now. Never throws. */
+  checkJobs(threadId: string): void {
+    let jobs: BotJob[]
+    try {
+      jobs = this.store.openJobsOn(threadId)
+    } catch {
+      return
+    }
+    if (!jobs.length || !this.host.jobThread) return
+    let seen: JobThreadView | undefined
+    try {
+      seen = this.host.jobThread(threadId)
+    } catch (error) {
+      console.warn('a bot job\'s thread could not be read; the next pass tries again', { threadId, error: error instanceof Error ? error.message : String(error) })
+      return
+    }
+    if (!seen) return
+    for (const job of jobs) this.stepJob(job, seen)
+  }
+
+  /** Every job not ended looks at its thread: after a restart, and on each upkeep pass, so a missed change is caught. */
+  private checkOpenJobs(): void {
+    let jobs: BotJob[]
+    try {
+      jobs = this.store.openJobs()
+    } catch {
+      return
+    }
+    for (const threadId of new Set(jobs.map((job) => job.threadId))) this.checkJobs(threadId)
+  }
+
+  /**
+   * One job's thread stands as `seen`: back to working quietly (a person answered), or a notice turn in the bot's chat
+   * when it waits for a person or its turn ended (`deliverJobNotice`), with its result line.
+   */
+  private stepJob(job: BotJob, seen: JobThreadView): void {
+    const step = jobStep(job, jobStateOf(seen.status))
+    if (!step) return
+    const line = BOT_JOB_ENDED.has(step.state) ? resultLine(seen.result) : undefined
+    if (!step.notice) {
+      if (this.store.moveJob(job.id, job.state, step.state)) this.changed({ botId: job.botId })
+      return
+    }
+    void this.deliverJobNotice(job, step.state, line, seen).catch((error: unknown) => {
+      console.warn('a bot job\'s notice could not be delivered', { jobId: job.id, error: error instanceof Error ? error.message : String(error) })
+    })
+  }
+
+  /**
+   * A job's notice: a chat turn of the bot's own (`job:<id>:<activation>`) that starts with the report (`jobNoticeInput`:
+   * state, the thread's title and link, who asked, and its answer held to the report cap), after a quiet line in the chat
+   * saying why the bot speaks. It may act on the owner's threads (`threadsActOf`). A bot that is paused, or can't run now,
+   * has it said as a line with the link instead. The job moves in the transaction that queues the turn: one notice per change.
+   */
+  private async deliverJobNotice(job: BotJob, state: BotJobState, line: string | undefined, seen: JobThreadView): Promise<void> {
+    const registry = this.store.registry(job.botId)
+    if (!registry || registry.deletedAt) {
+      this.store.moveJob(job.id, job.state, state, line ? { line } : {})
+      return
+    }
+    const next: BotJob = { ...job, state, ...(line ? { line } : {}), ...(seen.title?.trim() ? { title: jobLine(seen.title, 200) } : {}) }
+    const input = jobNoticeInput(next, BOT_JOB_ENDED.has(state) ? seen.result : undefined)
+    const paused = Boolean(registry.pausedReason)
+    const activationId = newActivationId()
+    let refused: BotEngineError | undefined
+    const started = this.store.db.transaction(() => {
+      if (!this.store.moveJob(job.id, job.state, state, { ...(line ? { line } : {}), notice: true })) return undefined
+      const id = `${WAKE_LINE_PREFIX}job_${job.id}_${activationId}`
+      if (!paused) refused = this.queueChatInTx(job.botId, `job:${job.id}:${activationId}`, input, activationId)
+      if (!paused && !refused) {
+        this.chat.post({ id, botId: job.botId, author: 'bot', kind: 'notice', text: jobNoticeLabel(next), external: true, lane: 'chat' })
+        return true
+      }
+      this.chat.post({ id: `bm_job_${job.id}_${activationId}`, botId: job.botId, author: 'bot', kind: 'run_report', text: `${jobNoticeLabel(next)}: ${threadLink(job.threadId)}. I didn't follow up on this: ${paused ? 'I\'m paused.' : refused!.message}`, external: true, lane: 'chat' })
+      return false
+    })
+    if (started === undefined) return
+    this.changed({ botId: job.botId })
+    if (started) await this.startQueuedChat(job.botId, activationId)
   }
 
   /** The bot `threadId` belongs to, with its name now (`BotThreads.botOf`). Never throws. */
@@ -7691,6 +7799,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     bots: {
       list: (botId) => this.otherBots(botId).map((bot) => ({ name: bot.name, does: bot.does, ...(bot.paused ? { paused: true as const } : {}) })),
       send: (botId, from, input) => this.sendBotMessage(botId, from, input)
+    },
+    jobs: {
+      open: (botId, from, input) => this.openJob(botId, from, input)
     },
     wakes: {
       add: (botId, from, input) => this.addWake(botId, from, input),
@@ -8645,6 +8756,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** A thread's run ended: the wakes waiting on that thread look now, not at the next tick. */
   threadRunEnded(threadId: string): void {
     void this.checkWakeEvents(new Date(this.now()), { threadId }).catch(() => {})
+    this.checkJobs(threadId)
   }
 
   /** The service's timers pause during sleep; a late callback brings bot upkeep forward to now. */
@@ -8897,8 +9009,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * A wake that is due, at any hour: a chat turn of the bot's own (`wake:<id>`, not the owner's: it can't act on their
-   * threads) starts with what the bot wrote for itself and what happened, after a quiet line in the chat saying why the
+   * A wake that is due, at any hour: a chat turn of the bot's own (`wake:<id>`, not the owner's, though it may act on
+   * their threads: `threadsActOf`) starts with what the bot wrote for itself and what happened, after a quiet line in the chat saying why the
    * bot speaks. A wake on an event whose time came first ended without it, and says so. A bot that is paused, or can't
    * run now, has the wake said as a line instead, so it is never lost and never retried forever. Marked delivered in the
    * transaction that queues the turn: it wakes once.
@@ -9052,7 +9164,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     let refused: BotEngineError | undefined
     const applied = this.store.db.transaction(() => {
       if (!this.store.defaultQuestion(question.id, answer)) return false
-      // Not the owner's turn: no owner, keyed `question:`, so it can't act on their threads or models.
+      // Not the owner's turn: no owner, keyed `question:`, so it can't change their models or memory; it may act on their
+      // threads, carrying on what the question was about (`threadsActOf`).
       refused = this.queueChatInTx(question.botId, `question:${question.id}:default`, line, activationId)
       // The line quotes the question: kept with the answer, so forgetting the bubble finds that copy.
       if (!refused) this.store.markDefaultSent(question.id, activationId, line)
@@ -9865,12 +9978,20 @@ export function memoryLaneOf(row: Pick<BotActivationRow, 'lane' | 'idempotencyKe
 }
 
 /**
+ * The chat turns no person started that still carry on the owner's work, so they may act on the owner's threads (#1359):
+ * a wake the bot set, or a watch it started (`wake:`), the default answer of a question the owner left (`question:`), and
+ * a notice that a thread the bot handed work to finished or waits for a person (`job:`).
+ */
+const ACTING_CHAT_KEYS = ['wake:', 'question:', 'job:'] as const
+
+/**
  * Whether the activation may start, message, stop, archive or hide the owner's threads ("use your threads"): a chat
- * turn its owner's message or tapped answer started (`chat:`, `answer:`), and every run (work, a reminder's work, a
- * wake, a schedule). Not the bot's first message (`create:`) nor a chat turn no person started (`botmsg:`).
+ * turn its owner's message or tapped answer started (`chat:`, `answer:`), a wake, a question's default answer or a
+ * thread's notice (`ACTING_CHAT_KEYS`), and every run (work, a reminder's work, a schedule). Not the bot's first message
+ * (`create:`) nor another bot's message (`botmsg:`).
  */
 export function threadsActOf(row: Pick<BotActivationRow, 'lane' | 'idempotencyKey'>): boolean {
-  return row.lane === 'run' || memoryLaneOf(row) === 'chat'
+  return row.lane === 'run' || memoryLaneOf(row) === 'chat' || (row.lane === 'chat' && ACTING_CHAT_KEYS.some((key) => row.idempotencyKey.startsWith(key)))
 }
 
 /** Why a turn holds the owner's threads to reading only (`BotAuthority.threadsReadOnly`); undefined when it may act. */

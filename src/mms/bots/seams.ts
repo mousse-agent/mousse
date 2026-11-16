@@ -165,6 +165,15 @@ export interface BotToolHost {
     add(botId: string, from: string, input: { brief: string; dueAt?: string; event?: BotWakeEvent; hours?: number }): Promise<{ wakeId: string; dueAt: string; label: string }>
   }
   /**
+   * The ledger (docs/plans/bot-context.md §16): a job the turn `from` handed to one of the owner's threads, by sending it
+   * `sent` (a first message, or a message to a thread it already had). Kept in `bots.db` with who asked and what; the bot
+   * is told in its chat when the thread finishes or waits for a person. A thread still working on an earlier job of the
+   * bot keeps that job. Absent: no ledger here.
+   */
+  jobs?: {
+    open(botId: string, from: string, input: { threadId: string; title: string; project?: string; sent: string }): { jobId: string }
+  }
+  /**
    * Background commands (`watch_start`, `watch_list`, `watch_stop`): a command that runs beside the bot and wakes it in its
    * chat when it exits, prints a line matching `match`, or reaches its time limit (`minutes`). `from` is the chat turn that
    * starts it. Throws, with why in words for the bot, when it can't start. Absent: none here.

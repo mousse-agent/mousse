@@ -5,6 +5,7 @@ import type { RunEngine } from '../run/RunEngine'
 import { subagentDescendantsIn } from '../../shared/threadLineage'
 import { listPendingQueue } from '../queue/ThreadMessageQueue'
 import type { QueuedMessage, ThreadLineage } from '../../shared/types'
+import type { JobThreadView } from './jobs'
 
 /** What the launched-thread lookup reads of a thread: its title, project, times and the thread that started it. */
 export interface LaunchedThreadMeta {
@@ -212,6 +213,31 @@ export function launchedThreadsIn(profile: {
 }
 
 /**
+ * One thread a bot handed a job to, as the ledger reads it (`JobThreadView`): how it stands, by the same rules as the
+ * bot's list (`launchedThreadsOf`, its subagents rolled up), its title, and its last run's answer (`result`) once its
+ * turn ended. `gone` when the thread no longer exists (deleted, or in the trash: `trashed`).
+ */
+export function jobThreadIn(profile: Parameters<typeof launchedThreadsIn>[0] & {
+  trashed?(threadId: string): boolean
+  result?(threadId: string, runId: string): string | undefined
+}, threadId: string): JobThreadView {
+  const all = profile.threads.listAllThreads()
+  const thread = all.find((candidate) => candidate.id === threadId)
+  if (!thread || profile.trashed?.(threadId)) return { status: 'gone' }
+  const title = thread.name?.trim() || undefined
+  // Only the thread and the subagents below it are read: the lookup never lists every thread its creator started.
+  const creator = thread.createdByThreadId ?? `job:${threadId}`
+  const own = { ...thread, createdByThreadId: creator }
+  const below = all.filter((candidate) => candidate.lineage?.rootThreadId === threadId)
+  const listed = launchedThreadsIn({ ...profile, threads: { listAllThreads: () => [own, ...below], loadMessageQueue: (id) => profile.threads.loadMessageQueue(id) } }, new Set([creator]))[0]
+  if (!listed) return { status: 'idle', ...(title ? { title } : {}) }
+  const ended = listed.status === 'done' || listed.status === 'failed' || listed.status === 'stopped'
+  const run = ended ? profile.engine.store.listRuns(threadId, { limit: 1 })[0] : undefined
+  const result = run ? profile.result?.(threadId, run.runId) : undefined
+  return { status: listed.status, ...(title ? { title } : {}), ...(result?.trim() ? { result } : {}) }
+}
+
+/**
  * Calls `changed` with the thread that started a thread when it is made, whenever its run, or a run of a subagent below it, changes status, a run's
  * `turn.start` ends (a turn that could not start leaves its queue stopped with no run changing status), a question or
  * approval in it opens or closes, or its place in the lists changes (hidden or shown, archived): a bot that started it
@@ -225,7 +251,8 @@ export function watchLaunchedThreads(input: {
   /** The thread store (`created`, with the thread; `list-changed`, with the thread's id). */
   threads?: Pick<EventEmitter, 'on' | 'off'>
   thread(threadId: string): LaunchedThreadMeta | undefined
-  changed(creatorThreadId: string): void
+  /** `threadId`: the thread its creator started, at the top of the subagent chain the change came from. */
+  changed(creatorThreadId: string, threadId: string): void
 }): () => void {
   // A subagent's change reaches the thread that started the top of its chain: that thread shows it waits on its subagents.
   const touch = (threadId: unknown) => {
@@ -234,7 +261,7 @@ export function watchLaunchedThreads(input: {
       const seen = new Set<string>()
       for (let thread = input.thread(threadId); thread && !seen.has(thread.id); thread = thread.lineage ? input.thread(thread.lineage.parentThreadId) : undefined) {
         seen.add(thread.id)
-        if (thread.createdByThreadId) input.changed(thread.createdByThreadId)
+        if (thread.createdByThreadId) input.changed(thread.createdByThreadId, thread.id)
       }
     } catch { /* a refresh never fails a run or a question */ }
   }

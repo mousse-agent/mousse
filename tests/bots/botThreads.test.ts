@@ -117,14 +117,18 @@ describe('"use your threads" in the bot engine', () => {
     await finish(f, running.payload, 'completed', { text: 'Stopped.' })
   })
 
-  // A chat turn the owner's message or tapped answer started, and every run, may start, message, stop or archive
-  // threads; a chat turn no person started is told why not.
+  // A chat turn the owner's message or tapped answer started, a turn a thread's outcome or an unanswered question
+  // started, and every run, may start, message, stop or archive threads; a chat turn another message started is told why not.
   const turns: Array<[string, { lane: 'chat' | 'run'; idempotencyKey: string }, boolean, string]> = [
     ['the owner\'s message', { lane: 'chat', idempotencyKey: 'chat:req-1' }, true, ''],
     ['the owner\'s tapped answer', { lane: 'chat', idempotencyKey: 'answer:req-1' }, true, ''],
     ['work the chat handed off', { lane: 'run', idempotencyKey: 'work:act-1:call-1' }, true, ''],
     ['a reminder\'s work', { lane: 'run', idempotencyKey: 'reminder:r1' }, true, ''],
     ['a wake', { lane: 'run', idempotencyKey: 'wake:w1' }, true, ''],
+    // A turn a thread's outcome starts in the chat may carry on the work it was told about (#1359).
+    ['a wake in the chat', { lane: 'chat', idempotencyKey: 'wake:w1' }, true, ''],
+    ['a question no one answered', { lane: 'chat', idempotencyKey: 'question:q1:default' }, true, ''],
+    ['a thread outcome notice', { lane: 'chat', idempotencyKey: 'job:j1:a1' }, true, ''],
     ['a scheduled run', { lane: 'run', idempotencyKey: 'sched:b1:s1:2026-11-13T09:00:00.000Z' }, true, ''],
     ['the bot\'s first message', { lane: 'chat', idempotencyKey: 'create:req-1' }, false, BOT_THREADS_NOT_OWNER_TEXT],
     ['another bot\'s message', { lane: 'chat', idempotencyKey: 'botmsg:m1' }, false, BOT_THREADS_NOT_OWNER_TEXT]

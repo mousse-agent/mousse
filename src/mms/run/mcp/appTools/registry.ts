@@ -90,7 +90,7 @@ export interface ToolAccessPolicy {
    * Where a personal bot's thread tool ("use your threads") may reach: the scope for a thread (`botThreadReach`, the
    * rule its list and search follow too) or a project, or the refusal's words. Absent: a bot reaches nothing.
    */
-  botReach?(caller: McpCaller, target: { threadId?: string; projectId?: string }): { scope: ToolScope } | { refused: string }
+  botReach?(caller: McpCaller, target: { threadId?: string; projectId?: string }, options?: { read?: boolean }): { scope: ToolScope } | { refused: string }
 }
 
 export interface ToolRegistryOptions {
@@ -669,7 +669,8 @@ export class ToolRegistry {
       throw new McpToolError('mousse_scope_denied', 'threadId must be a non-empty string.')
     let reach: { scope: ToolScope } | { refused: string }
     try {
-      reach = policy.botReach(caller, target)
+      // A tool that only reads reaches the subagents below the owner's threads too (#1365).
+      reach = policy.botReach(caller, target, { read: tool.class === 'read' })
     } catch {
       reach = { refused: target.threadId ? `Thread ${target.threadId} is not available to you.` : `${tool.name} is not available for this project.` }
     }
