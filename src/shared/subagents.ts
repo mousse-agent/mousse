@@ -100,6 +100,13 @@ export interface SubagentNoticeItem {
   runStatus: string
   /** The whole result is in the notice; otherwise the rest is read with `task_status`. */
   fullyShown: boolean
+  /**
+   * What the notice says when it is not a task's result: its subagent waits for an answer (`question`), or the task
+   * was stopped before it finished (`stopped`). Such an item has nothing to read with `task_status`.
+   */
+  event?: 'question' | 'stopped'
+  /** With `event: 'question'`: the question the subagent waits on. */
+  requestId?: string
 }
 
 /**

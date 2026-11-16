@@ -469,6 +469,24 @@ describe('the transcript with cards and notices', () => {
     expect(html).toContain('Thanks, merging.')
   })
 
+  it('draws a question of a subagent as a notice too: the text that tells the agent how to answer is not shown', () => {
+    const html = render(
+      [
+        message('wake', 'user', [{ type: 'text', text: 'Subagent "Builder" (thread a) is waiting for an answer to question q1.\nRAW QUESTION TEXT\nAnswer it with answer_subagent.' }], {
+          subagentNotice: [{ delegationId: 'd1', childThreadId: 'a', title: 'Builder', runStatus: 'needs_input', fullyShown: true, event: 'question', requestId: 'q1' }]
+        }),
+        message('a1', 'assistant', [{ type: 'text', text: 'The builder asks which database to use.' }])
+      ],
+      []
+    )
+    expect(html).toContain('Builder')
+    expect(html).toContain('asked a question')
+    expect(html).not.toContain('RAW QUESTION TEXT')
+    expect(html).not.toContain('answer_subagent')
+    expect(html).not.toContain('chat-user-bubble')
+    expect(html).toContain('The builder asks which database to use.')
+  })
+
   it('still draws an ordinary user message as a bubble', () => {
     const html = render([message('u1', 'user', [{ type: 'text', text: 'hello there' }])], [])
     expect(html).toContain('chat-user-bubble')

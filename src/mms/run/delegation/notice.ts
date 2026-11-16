@@ -19,7 +19,10 @@ export interface NoticeContext {
 export interface PlannedNotice {
   /** The wake turn's prompt or the steer text. */
   text: string
-  /** The `child_result` tasks the notice reports, in order. */
+  /**
+   * What the notice reports about subagents, in order: a finished task, a subagent's question, a task that was stopped.
+   * The app shows these and never the text; a notice with none is shown as its text.
+   */
   items: SubagentNoticeItem[]
 }
 
@@ -38,7 +41,7 @@ export function planWakeNotice(rows: readonly InboxRecord[], context: NoticeCont
   let budget = NOTICE_WAKE_CHARS
   const items: SubagentNoticeItem[] = []
   const lines = rows.map((row) => {
-    if (row.kind !== 'child_result') return noticeText(row, context)
+    if (row.kind !== 'child_result') return noticeText(row, context, items)
     const payload = row.payload as ChildResultPayload
     const { result } = payload
     const title = context.titleOf?.(payload.childThreadId) ?? null
@@ -63,12 +66,28 @@ export function planWakeNotice(rows: readonly InboxRecord[], context: NoticeCont
   return { text: lines.join('\n\n'), items }
 }
 
-/** A row that is not a child's result: its own text, or for a subagent's question the question itself. */
-function noticeText(row: InboxRecord, context: NoticeContext): string {
-  if (isChildQuestionRow(row)) return questionNotice(row.payload as ChildQuestionPayload, context)
+/**
+ * A row that is not a child's result: its own text, or for a subagent's question the question itself. A row about a
+ * subagent adds what the app shows for it to `items`.
+ */
+function noticeText(row: InboxRecord, context: NoticeContext, items: SubagentNoticeItem[]): string {
+  if (isChildQuestionRow(row)) {
+    const payload = row.payload as ChildQuestionPayload
+    items.push({
+      delegationId: payload.delegationId ?? '',
+      childThreadId: payload.childThreadId,
+      title: context.titleOf?.(payload.childThreadId) ?? null,
+      runStatus: 'needs_input',
+      fullyShown: true,
+      event: 'question',
+      requestId: payload.requestId
+    })
+    return questionNotice(payload, context)
+  }
   const stopped = row.payload as { kind?: unknown; delegationId?: string; childThreadId?: string } | null
   if (stopped?.kind === 'delegation_stopped' && stopped.childThreadId) {
     const title = context.titleOf?.(stopped.childThreadId) ?? null
+    items.push({ delegationId: stopped.delegationId ?? '', childThreadId: stopped.childThreadId, title, runStatus: 'cancelled', fullyShown: true, event: 'stopped' })
     const who = title ? `Subagent "${title}" (thread ${stopped.childThreadId})` : `Subagent thread ${stopped.childThreadId}`
     return `${who} was stopped before it finished task ${stopped.delegationId}.`
   }
