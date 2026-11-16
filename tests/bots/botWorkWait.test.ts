@@ -430,6 +430,8 @@ it('keeps notes and question answers unread until the wait continuation starts',
   expect(prompt).toContain('Read the release notes too.')
   expect(prompt).toContain('Which release?')
   expect(prompt).toContain('Check again with the evidence already read.')
+  expect(prompt.indexOf('Read the release notes too.')).toBeLessThan(prompt.indexOf('Which release?'))
+  expect(prompt.indexOf('Which release?')).toBeLessThan(prompt.indexOf('Check again with the evidence already read.'))
   expect(f.store.pendingWorkNotes(workId)).toHaveLength(1)
   expect(f.store.question(questionId)?.readAt).toBeNull()
   const next = await start(f, workId, 2)
@@ -441,4 +443,18 @@ it('keeps notes and question answers unread until the wait continuation starts',
   expect(following).not.toContain('Read the release notes too.')
   expect(following).not.toContain('Which release?')
   expect(following).not.toContain('Your wait is over')
+})
+
+it('tells an earlier wall answer before the later wait event', async () => {
+  const { workId, turn } = await work()
+  await wait(workId)
+  const wall = f.store.db.transaction(() => (f.bots as any).wallInTransaction(workId, ['running'], { dispatchN: 1, kind: 'escalate', permission: { tool: 'shell' }, reason: 'Run the release check' }))
+  await finish(f, turn.payload, 'completed', { text: '' })
+  f.clock.now += 60_000
+  await f.bots.answerAsk(botId, wall.escalation.id, 'allow')
+  f.clock.now += 59 * 60_000
+  await f.bots.deliverDueReminders()
+  await flush()
+  const prompt = f.store.dispatch(workId, 2)!.prompt.text
+  expect(prompt.indexOf('The owner allowed: run commands')).toBeLessThan(prompt.indexOf('Check again with the evidence already read.'))
 })
