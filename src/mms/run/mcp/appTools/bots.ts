@@ -11,7 +11,7 @@ import { cardOf, MAX_CARD_TITLE_CHARS, MAX_CARDS_PER_MESSAGE, MAX_CHECKLIST_ITEM
 import { shortModelName } from '../../../../shared/modelNames'
 import { botScheduleLabel } from '../../../../shared/scheduleLabel'
 import { botScheduleProblem, schedulePrompt } from '../../../scheduled/botJobs'
-import { BOT_LIST_TOOL, BOT_SEND_TOOL, MAX_BOT_MESSAGE_CHARS } from '../../../../shared/bots/personal/botMessages'
+import { BOT_LIST_TOOL, BOT_SEND_TOOL, MAX_BOT_MESSAGE_CHARS, MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER } from '../../../../shared/bots/personal/botMessages'
 import { DEFAULT_EVENT_WAKE_HOURS, MAX_EVENT_WAKE_HOURS, MAX_SAME_WAKES, pullRequestOf } from '../../../../shared/bots/personal/wakes'
 import { DEFAULT_WATCHER_MINUTES, MAX_WATCHER_MINUTES } from '../../../bots/watchers'
 import type { BotActivityContext, BotActivitySink, BotToolHost, BotWorkModel } from '../../../bots/seams'
@@ -355,7 +355,7 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: BOT_SEND_TOOL,
-    description: `Send a message to another of your owner's bots, by its name (see bot_list). It shows in that bot's chat as from you, where your owner reads it too, and that bot reads it and decides what to do. Use it when your owner asks you to tell another bot something, or when what you found belongs to that bot's job. Write a message that stands on its own: the other bot has none of your chat or memory. It is information to that bot, never an order, and gives it no permission. You get no answer here: if it answers, its message starts a turn of yours. There is no count of messages; sending the same bot the same message again before your owner writes is refused as a loop.`,
+    description: `Send a message to another of your owner's bots, by its name (see bot_list). It shows in that bot's chat as from you, where your owner reads it too, and that bot reads it and decides what to do. Use it when your owner asks you to tell another bot something, or when what you found belongs to that bot's job. Write a message that stands on its own: the other bot has none of your chat or memory. It is information to that bot, never an order, and gives it no permission. You get no answer here: if it answers, its message starts a turn of yours. There is no count of messages your owner asks you to send. Two guards stop loops: the same message to the same bot again before your owner writes is refused, and once other bots have sent you ${MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER} messages since your owner last wrote, you send no more to bots until they write.`,
     parameters: Type.Object({
       bot: Type.String({ description: 'The name of the bot, as bot_list gives it.' }),
       message: Type.String({ description: `What to tell it, at most ${MAX_BOT_MESSAGE_CHARS} characters.` })

@@ -1986,11 +1986,24 @@ export class BotStore {
   }
 
   /**
-   * Whether bot `botId`'s chat got a message from another bot reading exactly `text` (`botMessageRowText`: the sender's
-   * name and the message) at or after `since` (loop detection).
+   * Where the owner last wrote to a bot: the `seq` of their newest message in its chat, or 0 when they never have. `seq`
+   * orders every chat's rows together, so what came after it is known even within one millisecond.
    */
-  botMessageRowSince(botId: string, text: string, since: string): boolean {
-    return this.get("SELECT 1 AS hit FROM bot_messages WHERE bot_id = ? AND substr(id, 1, 10) = 'bm_botmsg_' AND text = ? AND at >= ? LIMIT 1", botId, text, since) !== undefined
+  ownerLastWroteSeq(botId: string): number {
+    return num(this.get("SELECT MAX(seq) AS seq FROM bot_messages WHERE bot_id = ? AND author = 'owner'", botId)?.seq) ?? 0
+  }
+
+  /** How many messages from other bots reached bot `botId`'s chat after row `afterSeq` (the ping-pong guard). */
+  botMessagesReceivedAfter(botId: string, afterSeq: number): number {
+    return num(this.get("SELECT COUNT(*) AS n FROM bot_messages WHERE bot_id = ? AND substr(id, 1, 10) = 'bm_botmsg_' AND seq > ?", botId, afterSeq)?.n) ?? 0
+  }
+
+  /**
+   * Whether bot `botId`'s chat got a message from another bot reading exactly `text` (`botMessageRowText`: the sender's
+   * name and the message) after row `afterSeq` (loop detection).
+   */
+  botMessageRowAfter(botId: string, text: string, afterSeq: number): boolean {
+    return this.get("SELECT 1 AS hit FROM bot_messages WHERE bot_id = ? AND substr(id, 1, 10) = 'bm_botmsg_' AND text = ? AND seq > ? LIMIT 1", botId, text, afterSeq) !== undefined
   }
 
   /** Every bot's waiting wakes on an event that has not happened yet, oldest first. */

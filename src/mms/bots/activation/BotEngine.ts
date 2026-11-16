@@ -88,7 +88,7 @@ import { checkedCard, hasReplyCards, keepMousseCard, keepReplyCard } from '../ch
 import { nudgeSlot } from './questionFollowUps'
 import { BotWatchers, DEFAULT_WATCHER_MINUTES, MAX_WATCHER_COMMAND_CHARS, MAX_WATCHER_MINUTES, watcherMatchProblem, type WatcherEnd, type WatcherSpec, type WatcherView } from '../watchers'
 import { lockedEnv } from '../../harness/env'
-import { BOT_MESSAGE_ROW_PREFIX, MAX_BOT_MESSAGE_CHARS, botMessageInput, botMessageKey, botMessageRowText, type BotMessageSender } from '../../../shared/bots/personal/botMessages'
+import { BOT_MESSAGE_ROW_PREFIX, MAX_BOT_MESSAGE_CHARS, MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER, botMessageInput, botMessageKey, botMessageRowText, type BotMessageSender } from '../../../shared/bots/personal/botMessages'
 import { DEFAULT_EVENT_WAKE_HOURS, MAX_EVENT_WAKE_HOURS, MAX_SAME_WAKES, MAX_WAKE_BRIEF_CHARS, WAKE_LINE_PREFIX, wakeCheckNames, wakeEventLabel, wakeFiredLabel, wakeInput, wakeLoopKey, type BotWakeEvent, type BotWakeFired } from '../../../shared/bots/personal/wakes'
 import type { LlmProviderOption } from '../../../shared/settings'
 import { BOT_THREADS_READ_ONLY_TURN_NOTE, botAllowedOf, namedPowerOf, type BotAllowed, type BotNamedPower } from '../instructions'
@@ -8150,8 +8150,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * `bot_send`: the turn `from` (a chat turn, or work the owner asked for) sends another of the owner's bots a message.
    * It is posted in that bot's chat, labelled as the sender's, in the transaction that queues the chat turn that reads
    * it. Refused, in words for the sender: no such bot, a name two bots share, a paused bot or one that can't run now,
-   * or the same message to the same bot again since the sender's owner last wrote (a loop). There is no count of turns in
-   * a row or of messages in a day.
+   * the same message to the same bot again since the sender's owner last wrote (a loop), or a sender that has had
+   * `MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER` messages from bots since its owner last wrote (ping-pong). There is no count of
+   * messages in a day, and none on what the owner asked it to send.
    */
   async sendBotMessage(botId: string, from: string, input: { to: string; message: string }): Promise<{ to: string }> {
     const row = this.store.activation(from)
@@ -8174,12 +8175,19 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const entry = this.entry(botId)
     const sender: BotMessageSender = { botId, name: (entry.published ?? entry.draft).name, chain }
     // Loop detection, the one limit on messages between bots: the same words to the same bot again before the owner writes.
-    if (this.store.botMessageRowSince(target.botId, botMessageRowText(sender.name, message), this.store.ownerLastWroteAt(botId)))
+    if (this.store.botMessageRowAfter(target.botId, botMessageRowText(sender.name, message), this.store.ownerLastWroteSeq(botId)))
       throw new BotEngineError('bot_message_loop', `You already sent ${target.name} this same message since your owner last wrote. Nothing was sent: that would be a loop. Tell your owner where things stand instead.`)
+    // Ping-pong: bots that keep answering each other with new words. A bot that has had `MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER`
+    // messages from other bots since its owner last wrote sends no more to bots until its owner writes.
+    const received = this.store.botMessagesReceivedAfter(botId, this.store.ownerLastWroteSeq(botId))
+    if (received >= MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER)
+      throw new BotEngineError('bot_message_exchange', `You have had ${received} messages from other bots since your owner last wrote, with no person in between. Nothing was sent: tell your owner where things stand, and carry on when they write.`)
+    // The turn this message starts is told when it is the last its bot may answer before its owner writes.
+    const last = this.store.botMessagesReceivedAfter(target.botId, this.store.ownerLastWroteSeq(target.botId)) + 1 >= MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER
     const messageId = randomUUID()
     const activationId = newActivationId()
     const refused = this.store.db.transaction(() => {
-      const error = this.queueChatInTx(target.botId, botMessageKey(botId, messageId), botMessageInput({ fromName: sender.name, message }), activationId, undefined, sender)
+      const error = this.queueChatInTx(target.botId, botMessageKey(botId, messageId), botMessageInput({ fromName: sender.name, message, last }), activationId, undefined, sender)
       // The owner reads it in the receiving bot's chat, labelled as the sender's.
       if (!error) this.chat.post({ id: `${BOT_MESSAGE_ROW_PREFIX}${messageId}`, botId: target.botId, author: 'bot', kind: 'notice', text: botMessageRowText(sender.name, message), lane: 'chat' })
       return error
