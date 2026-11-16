@@ -6,7 +6,7 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 type Handler = (event: unknown, ...args: unknown[]) => unknown
 const handlers = vi.hoisted(() => new Map<string, (event: unknown, ...args: unknown[]) => unknown>())
-const appListeners = vi.hoisted(() => new Map<string, (...args: unknown[]) => void>())
+const appListeners = vi.hoisted(() => new Map<string, Array<(...args: unknown[]) => void>>())
 type FakeWindow = { isDestroyed: () => boolean; isFocused: () => boolean; webContents: { id: number; send: (channel: string, data: unknown) => void } }
 const windows = vi.hoisted(() => [] as FakeWindow[])
 
@@ -14,10 +14,11 @@ vi.mock('electron', () => ({
   ipcMain: { handle: (channel: string, handler: Handler) => { handlers.set(channel, handler) }, removeHandler: () => undefined, on: () => undefined },
   BrowserWindow: { getAllWindows: () => windows },
   Notification: class {},
-  app: { getPath: () => '', getVersion: () => '0.0.0', on: (name: string, listener: (...args: unknown[]) => void) => { appListeners.set(name, listener) } },
+  app: { getPath: () => '', getVersion: () => '0.0.0', on: (name: string, listener: (...args: unknown[]) => void) => { appListeners.set(name, [...(appListeners.get(name) ?? []), listener]) } },
   shell: {},
   dialog: {},
   clipboard: {},
+  powerMonitor: { getSystemIdleTime: () => 0 },
   nativeTheme: { on: () => undefined },
   session: {},
   webContents: {}
@@ -98,7 +99,7 @@ describe('a window sees a thread', () => {
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(seen).toEqual([])
     focused = true
-    appListeners.get('browser-window-focus')?.({}, windows[0])
+    for (const listener of appListeners.get('browser-window-focus') ?? []) listener({}, windows[0])
     await vi.waitFor(() => expect(seen).toEqual(['open']))
   })
 
