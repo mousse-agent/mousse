@@ -45,7 +45,7 @@ export function actionStatus(card: BotActionCardData): string {
   }
 }
 
-export function BotActionCard({ card, botId, botName }: { card: BotActionCardData; botId: string; botName: string }) {
+export function BotActionCard({ card, botId, botName, messageId }: { card: BotActionCardData; botId: string; botName: string; messageId: string }) {
   const [sending, setSending] = useState(false)
   const [changed, setChanged] = useState(false)
   const [error, setError] = useState('')
@@ -67,7 +67,7 @@ export function BotActionCard({ card, botId, botName }: { card: BotActionCardDat
     <div className="bot-action-arguments" tabIndex={0} aria-label="Complete arguments"><Value value={card.args} /></div>
     {card.note && <p className="bot-action-note">{actionText(botName)} says: <span>{actionText(card.note)}</span></p>}
     {card.result && <blockquote role="note" aria-label="Tool result">{actionText(card.result.text)}</blockquote>}
-    {actionStatus(card) && <p role="status" className="bot-question-settled">{actionStatus(card)}</p>}
+    {actionStatus(card) && <p role="status" className="bot-question-settled" data-find-text data-message-id={messageId} data-part-index="0">{actionStatus(card)}</p>}
     {card.status === 'open' && <>
       {previous && <p role="note">{actionText(botName)} {previous.status === 'done' ? 'already sent exactly this' : previous.status === 'failed' ? 'already tried exactly this; the tool reported an error' : "already tried exactly this and couldn't tell if it went through"} at {botGroupTime(previous.at)}</p>}
       {card.hasHiddenValues && <p role="note">Hidden values will be sent: {card.hiddenPaths.map((path) => actionText(path.replaceAll('.', ' → '))).join(', ')}</p>}

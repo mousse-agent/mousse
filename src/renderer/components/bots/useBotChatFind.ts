@@ -4,6 +4,8 @@ import type { BotChatMessage } from '../../../shared/bots/personal/chat'
 import type { FindTurn } from '../../chat/components/agent-elements/find/find-index'
 import type { RevealNavigation } from '../../chat/components/agent-elements/find/reveal'
 import { useThreadFind, type ThreadFind } from '../../chat/components/agent-elements/find/use-thread-find'
+import { actionStatus, type BotActionCardData } from './BotActionCard'
+import { botGroupTime } from './messageGroups'
 import { useBotsStore } from '../../stores/botsStore'
 import type { BotChatRow } from './botChatShape'
 
@@ -19,6 +21,10 @@ const ROW_MARGIN = 16
  * its words, which then stop where their plain copy starts (as BotChatView draws them).
  */
 export function botFindText(message: BotChatMessage): string {
+  // Only the card's always-visible status is indexed. Folded arguments and the replaced fallback never count.
+  const action = (message as BotChatMessage & { action?: BotActionCardData }).action
+  if (action) return actionStatus(action)
+  if (message.actionSentAt) return `Sent · ${botGroupTime(message.actionSentAt)}`
   if (message.plainFrom !== undefined && (message.question || message.cards?.length)) return message.text.slice(0, message.plainFrom).trimEnd()
   return message.text
 }
