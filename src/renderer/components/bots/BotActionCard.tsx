@@ -2,7 +2,7 @@ import { useState, type ReactNode } from 'react'
 import { useBotsStore } from '../../stores/botsStore'
 import { botGroupTime } from './messageGroups'
 
-import type { BotActionCard as BotActionCardData } from '../../../../shared/bots/personal/chat'
+import type { BotActionCard as BotActionCardData } from '../../../shared/bots/personal/chat'
 
 // The chat guard's invisible and direction-changing characters; keep newlines, tabs and script/emoji joiners.
 export function actionText(text: string): string {
