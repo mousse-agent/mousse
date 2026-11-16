@@ -490,3 +490,24 @@ it('keeps wait additions through a usage hold before the dispatch starts and a r
   expect(f.store.pendingWorkNotes(workId)).toEqual([])
   expect(f.store.question(questionId)?.readAt).not.toBeNull()
 })
+
+it('keeps a delivered wait unread while the run queue has no free slot', async () => {
+  const { workId, turn } = await work()
+  await wait(workId)
+  await finish(f, turn.payload, 'completed', { text: '' })
+  const blockers = []
+  for (let i = 0; i < 3; i++) blockers.push(await work(`full-queue-${i}`))
+  const queued = await f.bots.tools.work.start(botId, blockers[2]!.chat.id, { title: 'Later', brief: 'Later work', key: 'later-work' })
+  f.clock.now += 60 * 60_000
+  await f.bots.deliverDueReminders()
+  await flush()
+  expect(f.store.activation(workId)).toMatchObject({ status: 'blocked', endReason: 'wait_ready' })
+  expect(f.store.unreadWorkWaits(workId)).toHaveLength(1)
+  expect(f.store.dispatches(workId)).toHaveLength(1)
+  await f.bots.service.workStop(botId, blockers[0]!.workId)
+  await flush()
+  expect(f.store.dispatch(workId, 2)?.prompt.text).toContain('Check again with the evidence already read.')
+  expect(f.store.activation(queued.workId)?.status).toBe('queued')
+  await start(f, workId, 2)
+  expect(f.store.unreadWorkWaits(workId)).toEqual([])
+})
