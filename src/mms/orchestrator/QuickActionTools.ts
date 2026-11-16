@@ -85,11 +85,16 @@ export class QuickActionTools {
   }
 
   /** `signal`: the call was abandoned (its turn stopped, its request closed); nothing is created after it. */
+  /**
+   * `preApproved`: the person already allowed it (a personal bot whose owner allowed "add quick actions"), so nobody is
+   * asked again; every other check holds.
+   */
   async execute(
     name: string,
     args: Record<string, unknown>,
     threadId?: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    options: { preApproved?: boolean } = {}
   ): Promise<{ text: string; isError: boolean }> {
     try {
       if (name !== 'create_quick_action') {
@@ -107,9 +112,9 @@ export class QuickActionTools {
         kind: args.kind as QuickActionKind,
         payload: String(args.payload)
       }
-      let approved = false
+      let approved = options.preApproved === true
       try {
-        approved = await this.requestApproval(staged, threadId, signal)
+        if (!approved) approved = await this.requestApproval(staged, threadId, signal)
       } catch (err) {
         // Dismissed / timed-out approval resolves as "not created", not a crash.
         const reason = err instanceof Error ? err.message : String(err)

@@ -67,6 +67,8 @@ function requestOffered(turn: AppToolTurn): boolean {
 
 function runAvailable(turn: AppToolTurn): true | string {
   if (turn.modeFacts.readOnly) return 'secret_run runs a command, which this mode does not allow. Ask for the secret now, and use it once the plan is approved.'
+  // A personal bot runs it from its files folder, as its commands run.
+  if (turn.bot) return turn.bot.workspace?.files ? true : 'secret_run needs your files folder, and this bot has none.'
   if (!turn.projectPath) return 'secret_run needs a project folder, and this thread has none.'
   return true
 }
@@ -76,9 +78,16 @@ const text = (value: unknown, max: number): string => (typeof value === 'string'
 /** `secret_request` and `secret_run` (#595, the chat part). */
 export function secretTools(host: AppToolHost): MousseTool[] {
   const secrets = (): SecretToolHost | undefined => host.secrets?.()
+  /**
+   * The thread a secret belongs to: the caller's. A personal bot's are the bot's ("use secrets you give it"), whichever of
+   * its turns asked: filed under its chat thread, where its owner sees the card and types the secret, and usable from its
+   * work.
+   */
+  const secretThreadOf = (ctx: ToolCallContext, threadId: string | undefined): string | undefined =>
+    ctx.turn.bot && threadId ? host.botHomeOf?.(threadId) ?? threadId : threadId
 
   const request = async (args: Record<string, unknown>, ctx: ToolCallContext): Promise<ToolOutcome> => {
-    const threadId = ctx.transport === 'mcp' ? ctx.caller.threadId : ctx.turn.threadId || undefined
+    const threadId = secretThreadOf(ctx, ctx.transport === 'mcp' ? ctx.caller.threadId : ctx.turn.threadId || undefined)
     const service = secrets()
     if (!service) return { text: 'Secret requests are not available here.', isError: true }
     if (!threadId) return { text: 'Cannot ask for a secret without an active thread.', isError: true }
@@ -102,11 +111,11 @@ export function secretTools(host: AppToolHost): MousseTool[] {
   }
 
   const runCommand = async (args: Record<string, unknown>, ctx: ToolCallContext): Promise<ToolOutcome> => {
-    const threadId = ctx.transport === 'mcp' ? ctx.caller.threadId : ctx.turn.threadId
+    const threadId = secretThreadOf(ctx, ctx.transport === 'mcp' ? ctx.caller.threadId : ctx.turn.threadId) as string
     const service = secrets()
     if (!service) return { text: 'secret_run is not available here.', isError: true }
-    const cwd = ctx.turn.projectPath
-    if (!cwd) return { text: 'secret_run needs a project folder, and this thread has none.', isError: true }
+    const cwd = ctx.turn.bot ? ctx.turn.bot.workspace?.files : ctx.turn.projectPath
+    if (!cwd) return { text: ctx.turn.bot ? 'secret_run needs your files folder, and this bot has none.' : 'secret_run needs a project folder, and this thread has none.', isError: true }
     const command = typeof args.command === 'string' ? args.command : ''
     if (!command.trim()) return { text: 'A command is required.', isError: true }
     if (command.length > 16_000) return { text: 'The command is too long.', isError: true }
@@ -149,6 +158,9 @@ export function secretTools(host: AppToolHost): MousseTool[] {
       access: 'actsAsCaller',
       class: 'read',
       asksUser: 'question',
+      // A personal bot's card shows in its own chat, where its owner types the secret; its turn waits for that answer.
+      botAsksOwner: true,
+      botDescription: 'Ask your owner for a secret (an API key, a token, a password) when the work your owner asked for needs one. A private card shows in your chat, where your owner types it or picks a saved one; never ask for a secret in a message, and never repeat one. You get only its name (like HF_TOKEN), never the value: use it with secret_run. The call waits for your owner\'s answer (up to an hour), so ask only when they are expecting it.',
       listed: () => Boolean(secrets()),
       available: () => (secrets() ? true : 'Secret requests are not available here.'),
       offered: (turn) => requestOffered(turn) && Boolean(secrets()),
@@ -165,6 +177,9 @@ export function secretTools(host: AppToolHost): MousseTool[] {
       access: 'editsWorkspace',
       permissionKey: 'mousse:secret_run',
       approvalPrompt: 'Allow the agent to run this command with a secret you gave this thread?',
+      // A personal bot's owner allowed "use secrets you give it" and "run commands": that is its answer, so nothing asks.
+      botGrantAnswers: true,
+      botDescription: 'Run a command from your files folder with secrets your owner gave you (secret_request): each as an environment variable (default) or a private file, by name. Its output is masked. It runs on this computer like your other commands, without asking first; use it only for the work your owner asked for.',
       class: 'mutation',
       listed: () => Boolean(secrets()),
       available: (turn) => (secrets() ? runAvailable(turn) : 'secret_run is not available here.'),

@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { realpathSync } from 'node:fs'
 import type { BotManifest, BotThreadSpec } from '../../../shared/bots/personal/definition'
-import { BOT_APP_TOOLS, BOT_APPLET_TOOL, BOT_CARD_TOOL, BOT_MESSAGE_TOOLS, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_RUNNING_TOOL, BOT_PROFILER_CHAT_TOOLS, BOT_PROFILER_PERMISSION, BOT_PROFILER_TOOLS, BOT_THEME_TOOLS, BOT_THEMES_PERMISSION, BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest, BOT_SUBAGENT_APP_TOOLS, BOT_SUBAGENT_TOOLS } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_APPLET_TOOL, BOT_CARD_TOOL, BOT_GROUP_PERMISSIONS, BOT_MESSAGE_TOOLS, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_RUNNING_TOOL, BOT_PROFILER_CHAT_TOOLS, BOT_PROFILER_PERMISSION, BOT_PROFILER_TOOLS, BOT_QUICK_ACTION_TOOLS, BOT_QUICK_ACTIONS_PERMISSION, BOT_SCHEDULE_ACT_TOOLS, BOT_SCHEDULE_READ_TOOLS, BOT_SCHEDULES_PERMISSION, BOT_SECRET_TOOLS, BOT_SECRETS_PERMISSION, BOT_TASK_TOOLS, BOT_THEME_TOOLS, BOT_THEMES_PERMISSION, BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest, BOT_SUBAGENT_APP_TOOLS, BOT_SUBAGENT_TOOLS } from '../../../shared/bots/personal/manifest'
 import { BOT_MEMORY_TOOLS } from '../../../shared/bots/personal/memory'
 import type { NeutralTool } from '../../../shared/harness/tools'
 import type { BindPolicy, HarnessCaps, HarnessError } from '../../../shared/harness/types'
@@ -50,6 +50,12 @@ export interface BotPermissions {
   profiler?: true
   /** "Change how Mousse looks": `appTools` holds the theme tools of this turn. */
   themes?: true
+  /** "Schedule work in your threads": `appTools` holds the scheduled-job tools of this turn (`read`: the list only). */
+  schedules?: 'read' | 'all'
+  /** "Use secrets you give it": `appTools` holds the secret tools of this turn. */
+  secrets?: true
+  /** "Add quick actions": `appTools` holds `create_quick_action`. */
+  quickActions?: true
 }
 
 export interface CompileInput {
@@ -108,6 +114,18 @@ export interface CompileInput {
      * (a consult; a subagent never has them).
      */
     themes?: boolean
+    /**
+     * A main turn, chat or work: "schedule work in your threads", when the grant holds it, gives it `schedule_list`, and
+     * the tools that make and change jobs in a turn whose `threads` is `all` (one that may act on the owner's threads).
+     * "Use secrets you give it" gives it `secret_request`, and `secret_run` where it also holds "run commands" (never
+     * the chat). "Add quick actions" gives it `create_quick_action`. Absent: none (a consult; a subagent never has them).
+     */
+    owner?: boolean
+    /**
+     * The task list of the turn's own thread (`BOT_TASK_TOOLS`): always on, on main turns and subagents. Absent: none (a
+     * consult).
+     */
+    tasks?: boolean
     /** `make_image` (#1088): the owner picked a model in Runs on's Images row. Chat and work alike; never a consult or a subagent. */
     images?: boolean
     /** `publish_applet` (`BOT_APPLET_TOOL`): a main turn, chat or work, publishes applets; they need no permission. Never a consult. */
@@ -121,8 +139,10 @@ export interface CompileInput {
     workWaiting?: boolean
     /**
      * This turn is one of a run's subagents: it holds what its work holds of the built-ins, files, MCP tools and skills,
-     * and of the app tools only the web and the browser (`subagentManifest`). Every other bot tool is left out whatever
-     * the rest of `botTools` says: no asks, memory, schedules, reminders, pictures, work, threads or subagents of its own.
+     * and of the app tools what a thread's subagent may use (`subagentManifest`): the web, the browser, and, as `threads`,
+     * `profiler` and `tasks` here say, the owner's threads, the profiler and its task list. Every other bot tool is left
+     * out whatever the rest of `botTools` says: no asks, memory, schedules, reminders, pictures, work, secrets or subagents
+     * of its own.
      */
     subagent?: true
     /**
@@ -170,9 +190,11 @@ export function systemTempDirs(): string[] {
 
 export function compileBotThread(input: CompileInput): CompileResult {
   const held = narrowManifest(input.revision ? intersectManifest(input.revision, input.grant) : input.grant, input.thread.narrow)
-  // A subagent is the work, never more: what the work holds, less what is the bot's alone, and none of the bot's tools.
+  // A subagent is the work, never more: what the work holds, less what is the bot's alone, and none of the bot's tools
+  // but what a thread's subagent may use (the owner's threads, the profiler, its task list).
   const subagent = input.botTools?.subagent === true
   const own = subagent ? undefined : input.botTools
+  const shared = subagent ? { threads: input.botTools?.threads, profiler: input.botTools?.profiler, tasks: input.botTools?.tasks } : own
   const manifest = subagent ? subagentManifest(held) : own?.frontDesk ? frontDeskManifest(held) : held
   // Checked again here, so a grant stored before a tool was refused can never widen later.
   const refusedApp = manifest.appTools.find((tool) => !BOT_APP_TOOLS.has(tool))
@@ -200,16 +222,26 @@ export function compileBotThread(input: CompileInput): CompileResult {
   // Granted skills come with the skill tools that list and load them; the browser is its tools, and the owner's threads
   // are the thread tools this turn may use (none unless the caller says which), as the profiler is its tools on a main turn.
   const browser = manifest.appTools.includes(BOT_BROWSER_PERMISSION)
-  const threads = manifest.appTools.includes(BOT_THREADS_PERMISSION) ? own?.threads : undefined
-  const profiler = manifest.appTools.includes(BOT_PROFILER_PERMISSION) && own?.profiler === true
+  const threads = manifest.appTools.includes(BOT_THREADS_PERMISSION) ? shared?.threads : undefined
+  const profiler = manifest.appTools.includes(BOT_PROFILER_PERMISSION) && shared?.profiler === true
   const themes = manifest.appTools.includes(BOT_THEMES_PERMISSION) && own?.themes === true
+  // The owner's scheduled jobs, secrets and quick actions: a main turn's, chat or work, never a consult's or a subagent's.
+  const schedules = manifest.appTools.includes(BOT_SCHEDULES_PERMISSION) && own?.owner === true ? (own.threads === 'all' ? 'all' as const : 'read' as const) : undefined
+  const secrets = manifest.appTools.includes(BOT_SECRETS_PERMISSION) && own?.owner === true
+  const quickActions = manifest.appTools.includes(BOT_QUICK_ACTIONS_PERMISSION) && own?.owner === true
   const appTools = [...new Set([
-    ...manifest.appTools.filter((tool) => tool !== BOT_BROWSER_PERMISSION && tool !== BOT_THREADS_PERMISSION && tool !== BOT_PROFILER_PERMISSION && tool !== BOT_THEMES_PERMISSION),
+    ...manifest.appTools.filter((tool) => !BOT_GROUP_PERMISSIONS.has(tool)),
     ...(themes ? BOT_THEME_TOOLS : []),
     ...(profiler ? (own?.frontDesk ? BOT_PROFILER_CHAT_TOOLS : BOT_PROFILER_TOOLS) : []),
     ...(browser ? BOT_BROWSER_TOOLS : []),
     ...(threads ? BOT_THREAD_READ_TOOLS : []),
     ...(threads === 'all' ? BOT_THREAD_ACT_TOOLS : []),
+    ...(schedules ? BOT_SCHEDULE_READ_TOOLS : []),
+    ...(schedules === 'all' ? BOT_SCHEDULE_ACT_TOOLS : []),
+    // A secret's command is a command: only where the turn runs commands (work with "run commands"; never the chat).
+    ...(secrets ? BOT_SECRET_TOOLS.filter((tool) => tool !== 'secret_run' || manifest.tools.includes('shell')) : []),
+    ...(quickActions ? BOT_QUICK_ACTION_TOOLS : []),
+    ...(shared?.tasks ? BOT_TASK_TOOLS : []),
     ...(manifest.skills.length ? ['list_skills', 'load_skill'] : []),
     ...(own?.escalate ? ['escalate'] : []),
     ...(own?.consult ? ['consult'] : []),
@@ -249,6 +281,9 @@ export function compileBotThread(input: CompileInput): CompileResult {
       ...(threads ? { threads } : {}),
       ...(profiler ? { profiler: true as const } : {}),
       ...(themes ? { themes: true as const } : {}),
+      ...(schedules ? { schedules } : {}),
+      ...(secrets ? { secrets: true as const } : {}),
+      ...(quickActions ? { quickActions: true as const } : {}),
       workspace: files !== undefined ? { roots: [], access: 'read', writeRoots: [], scratch, files } : null
     }
   }

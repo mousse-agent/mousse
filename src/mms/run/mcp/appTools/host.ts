@@ -74,6 +74,11 @@ export interface AgentRemoteThreadRequest {
   computer: string
   /** A project of that computer, to choose among several checkouts of the repository there. */
   projectId?: string
+  /**
+   * The owner's bot only, which has no project of its own: the project of this computer whose repository the thread
+   * starts in there (an agent's thread uses its own project's).
+   */
+  fromProjectId?: string
   title?: string
   workspace: 'project' | 'new_worktree'
   /** Both or neither: a model that computer offers, else its default. */
@@ -338,6 +343,11 @@ export interface AppToolHost extends DelegationToolsHost {
    * app tools (the pi loop runs its own copies, through the same scoped read).
    */
   projectGit?: true
+  /**
+   * Where a personal bot's `git_status` and `git_diff` read: a thread's checkout (its worktree, else its project folder)
+   * or a project's folder. Undefined when there is none.
+   */
+  gitFolderOf?(target: { threadId: string } | { projectId: string }): string | undefined
   /** SPEC §12.6 tool ledger of the caller's run, for calls over MCP. */
   toolLedger?(runId: string): ToolLedger | undefined
   /** The thread is a read-only (`shared`) delegated child; it may call only `reads` and `readOnlySafe` tools. */
@@ -348,6 +358,11 @@ export interface AppToolHost extends DelegationToolsHost {
   threadCeiling?(threadId: string): ModeCeiling
   /** The thread's role when it is a personal bot's thread (PR 6 §5). */
   botRole?(threadId: string): 'activation' | 'context' | 'subagent' | undefined
+  /**
+   * The chat thread of the personal bot `threadId` belongs to: what the bot owns as one bot, whichever of its turns made
+   * it (its scheduled jobs, the secrets its owner gave it). Undefined for a thread that is no bot's.
+   */
+  botHomeOf?(threadId: string): string | undefined
   awaitLiveRun?(threadId: string): Promise<LiveRunGate | undefined> | undefined
   /** The permission mode the caller's run enforces, from its attempt's binding (never from the mode ceiling). */
   permissionModeFor?(runId: string): PermissionMode | undefined

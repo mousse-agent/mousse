@@ -821,6 +821,20 @@ export function botSenderHops(actor: AgentActor): AgentActor {
   return { ...actor, hops: 1 }
 }
 
+/** The tools with which the owner's bot acts on their threads ("use your threads"), as `botSenderOf` holds them. */
+type BotThreadActTool =
+  | 'thread_create' | 'thread_send' | 'thread_interrupt' | 'thread_archive' | 'thread_hide' | 'thread_steer'
+  | 'queue_enqueue' | 'queue_edit' | 'queue_remove' | 'queue_reorder' | 'queue_promote_to_steer' | 'approval_respond'
+
+/** The queue tool a queue command came from. */
+const QUEUE_TOOL_OF: Record<AgentQueueCommand['op'], BotThreadActTool> = {
+  enqueue: 'queue_enqueue',
+  edit: 'queue_edit',
+  remove: 'queue_remove',
+  reorder: 'queue_reorder',
+  promote: 'queue_promote_to_steer'
+}
+
 /**
  * The origin an agent's message is stored with: who sent it, how many agent hops led to it, and where its own words
  * are. A sender on another computer is stored as `from` (its computer, its ids there and its title), never in
@@ -3976,6 +3990,18 @@ export class OrchestratorService extends EventEmitter {
    * does any run whose origin cannot be read, so a job made by an unattended agent is never wider than that agent was.
    */
   private scheduledCreatorLimits(caller: { threadId: string; runId: string }): { permissionCeiling: PermissionMode } {
+    // The owner's bot ("schedule work in your threads") makes jobs as it starts threads: in Full access, or no wider than
+    // the device its owner wrote from. A turn of a bot that may not act on threads gets Ask.
+    const turn = this.appToolTurns.get(caller.runId)
+    if (turn?.bot && turn.threadId === caller.threadId) {
+      let owned: { limit?: PermissionMode } | undefined
+      try {
+        owned = this.botThreads?.ownerTurn?.(turn.bot.activationId)
+      } catch {
+        owned = undefined
+      }
+      return { permissionCeiling: owned ? owned.limit ?? 'full' : 'ask' }
+    }
     return { permissionCeiling: this.runStartedByPerson(caller) ? this.runPermissionMode(caller.runId) : 'ask' }
   }
 
@@ -4263,6 +4289,13 @@ export class OrchestratorService extends EventEmitter {
       devGui: new DevGuiTools(),
       // The git app tools read the project through their own scoped Git read (`git/scopedRead`).
       projectGit: true,
+      gitFolderOf: (target) => {
+        try {
+          return 'threadId' in target ? this.threadCheckoutOf(target.threadId) : this.projectManager?.getProject(target.projectId)?.path
+        } catch {
+          return undefined
+        }
+      },
       toolLedger: (runId) => this.toolLedgerFor(runId),
       readOnlyThread: (threadId) => this.isReadOnlyChild(threadId),
       projectPathFor: (threadId) => this.getOrCreateSession(threadId).projectCwd ?? undefined,
@@ -4270,6 +4303,7 @@ export class OrchestratorService extends EventEmitter {
       threadCeiling: (threadId) => this.modeCeilingFor(threadId, 'agent'),
       // Only a bot's threads list the bot tools (`escalate`; `consult` on its activation thread).
       botRole: (threadId) => this.botThreads?.roleOf(threadId),
+      botHomeOf: (threadId) => this.botThreads?.homeOf?.(threadId),
       awaitLiveRun: (threadId) => this.continuationGate(threadId),
       permissionModeFor: (runId) => this.runPermissionMode(runId),
       askApproval: (threadId, questions, options) => this.questions.requestAnswers(questions, threadId, options),
@@ -4340,6 +4374,10 @@ export class OrchestratorService extends EventEmitter {
     const request = this.questions.getRequest(requestId)
     if (!request || request.threadId !== threadId) return { ok: false, reason: 'unknown' }
     const { actor } = options
+    // The owner's bot answers with "use your threads" (`botSenderOf`), as the owner's delegate: held to Full access, or to
+    // the device its owner wrote from, and to every other part of the rule an agent is (the switch, a person's turn, the
+    // provider's own checks, never "always").
+    const bot = actor.remote ? undefined : this.botSenderOf(actor, 'approval_respond')
     const key = options.clientRequestId
     const earlier = engine.store.getReceipt(key)
     if (earlier) {
@@ -4361,7 +4399,7 @@ export class OrchestratorService extends EventEmitter {
       toolCallId: actor.toolCallId,
       // The mode of the run, and of its thread now when that is stricter: a tighter mode applies to the next turn, but an
       // answer for another thread acts like a rule and stops at once, as a rule does.
-      permissionMode: this.answeringMode(actor),
+      permissionMode: bot ? bot.limit ?? 'full' : this.answeringMode(actor),
       access: { answerApprovals: this.agentAccessSettings().answerApprovals }
     }
     const settled = this.questions.settle(requestId, answers, answerer)
@@ -4951,10 +4989,15 @@ export class OrchestratorService extends EventEmitter {
         : undefined
       if (choice) return refuse(choice.code, choice.message.replace('Nothing was started.', 'No thread was created.'), at)
     }
-    const project = await this.remoteProjectFor(callerThreadId, computer, input.projectId)
+    // The owner's bot ("use your threads") names the project here whose repository it means; its thread runs in Full
+    // access, or no wider than the device its owner wrote from, as a thread it starts here does.
+    const bot = this.botSenderOf(options.actor, 'thread_create')
+    if (bot && !input.fromProjectId) return refuse('no_matching_project', 'Name the project here whose repository the thread is for, with fromProjectId (thread_list lists them).', at)
+    if (!bot && input.fromProjectId !== undefined) return refuse('no_matching_project', 'fromProjectId is for personal bots: a thread starts there in its own project\'s repository.', at)
+    const project = await this.remoteProjectFor(callerThreadId, computer, input.projectId, bot ? input.fromProjectId : undefined)
     if (!project.ok) return refuse(project.code, project.message, { ...at, ...(project.candidates ? { candidates: project.candidates } : {}) })
     // The launcher's own mode, never looser than its run; that computer narrows it to the limit it set for this one.
-    const permissionMode = narrowPermissionMode(this.requestedPermissionMode(callerThreadId), this.runPermissionMode(options.actor.runId))
+    const permissionMode = bot ? bot.limit ?? 'full' : narrowPermissionMode(this.requestedPermissionMode(callerThreadId), this.runPermissionMode(options.actor.runId))
     const title = input.title?.trim() || 'New Thread'
     engine.store.db.transaction(() => {
       engine.store.putReceipt({
@@ -5031,7 +5074,11 @@ export class OrchestratorService extends EventEmitter {
    * looser than its run) and, for a message or a steer, the count of agent messages in a row it would be (refused past
    * the limit, as on one computer).
    */
-  private remoteAgentMark(actor: AgentActor, counts: boolean): RoutedAgentMark {
+  private remoteAgentMark(actor: AgentActor, counts: boolean, tool: BotThreadActTool): RoutedAgentMark {
+    // The owner's bot ("use your threads", `botSenderOf`) acts there as it does here: its own first message in a row, in
+    // Full access or no wider than the device its owner wrote from (that computer narrows it to its own limit).
+    const bot = actor.remote ? undefined : this.botSenderOf(actor, tool)
+    if (bot) return { thread: actor.threadId, run: actor.runId, title: bot.name, hops: 1, mode: bot.limit ?? 'full' }
     let hops = 1
     if (counts) hops = this.withAgentHops(actor).hops ?? 1
     else {
@@ -5064,9 +5111,9 @@ export class OrchestratorService extends EventEmitter {
         if (denied) return Promise.reject(new RemoteThreadRefusal(denied.code, denied.message, target.computer))
         return service.follow(target, request)
       },
-      send: (target, input, options) => service.send(target, input, { clientRequestId: options.clientRequestId, mark: this.remoteAgentMark(options.actor, true) }),
-      steer: (target, runId, text, options) => service.steer(target, runId, text, { clientRequestId: options.clientRequestId, mark: this.remoteAgentMark(options.actor, true) }),
-      interrupt: (target, runId, options) => service.interrupt(target, runId, { clientRequestId: options.clientRequestId, mark: this.remoteAgentMark(options.actor, false) })
+      send: (target, input, options) => service.send(target, input, { clientRequestId: options.clientRequestId, mark: this.remoteAgentMark(options.actor, true, 'thread_send') }),
+      steer: (target, runId, text, options) => service.steer(target, runId, text, { clientRequestId: options.clientRequestId, mark: this.remoteAgentMark(options.actor, true, 'thread_steer') }),
+      interrupt: (target, runId, options) => service.interrupt(target, runId, { clientRequestId: options.clientRequestId, mark: this.remoteAgentMark(options.actor, false, 'thread_interrupt') })
     }
   }
 
@@ -5074,11 +5121,13 @@ export class OrchestratorService extends EventEmitter {
    * The project of `computer` the thread starts in: the one that is the caller's repository, or `wanted` among those
    * that may be. No strong match, or several, refuses with the candidates; nothing is cloned there (#484).
    */
-  private async remoteProjectFor(callerThreadId: string, computer: { node: string; name: string }, wanted: string | undefined):
+  private async remoteProjectFor(callerThreadId: string, computer: { node: string; name: string }, wanted: string | undefined, fromProjectId?: string):
     Promise<{ ok: true; projectId: string } | { ok: false; code: string; message: string; candidates?: RemoteProjectCandidate[] }> {
-    const projectId = this.threadStore?.getThread(callerThreadId)?.projectId
+    // A bot's own project is the one it names (`fromProjectId`); an agent's thread, its own.
+    const projectId = fromProjectId ?? this.threadStore?.getThread(callerThreadId)?.projectId
     const projectPath = projectId ? this.projectManager?.getProject(projectId)?.path : undefined
-    if (!projectPath) return { ok: false, code: 'no_matching_project', message: `This thread has no project, so there is no repository to find on ${computer.name}.` }
+    if (!projectPath)
+      return { ok: false, code: 'no_matching_project', message: fromProjectId ? `There is no project ${fromProjectId} here, so there is no repository to find on ${computer.name}.` : `This thread has no project, so there is no repository to find on ${computer.name}.` }
     let found: Awaited<ReturnType<RemoteComputersPort['projectCandidates']>>
     try {
       found = await this.remoteComputers!.projectCandidates(computer.node, projectPath, AbortSignal.timeout(30_000))
@@ -5279,23 +5328,24 @@ export class OrchestratorService extends EventEmitter {
   /**
    * `thread_steer`: joins a run that is live. A running turn cannot be narrowed, so a caller whose permission
    * mode is stricter than the one the run is bound to is refused: its words would run with more authority than
-   * the caller itself has. A run bound to a stricter mode than the caller's takes the steer.
+   * the caller itself has. A run bound to a stricter mode than the caller's takes the steer. The owner's bot steers
+   * with "use your threads" (`botSenderOf`), as its message does: in the thread's own mode, or no wider than the device
+   * its owner wrote from, labelled as the bot's words.
    */
   private async steerRunAsAgent(threadId: string, runId: string, text: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult> {
     const engine = this.requireRunEngine()
-    // A bot never steers a turn: it messages a thread, which queues behind the running turn.
-    if (!options.actor.remote && this.botThreads?.roleOf(options.actor.threadId)) return { status: 'rejected', reason: 'bot_thread' }
+    const bot = options.actor.remote ? undefined : this.botSenderOf(options.actor, 'thread_steer')
     let sender: AgentActor
     try {
-      sender = this.withAgentHops(options.actor)
+      sender = bot ? botSenderHops(options.actor) : this.withAgentHops(options.actor)
     } catch (error) {
       return { status: 'rejected', reason: (error as { code?: string }).code ?? 'agent_hops_exceeded' }
     }
     // The comparison with the run's own mode is made by the engine, inside the transaction that accepts the
     // steer, against the binding it reads there: a run that has not bound its turn yet is refused, and the
     // sender's mode travels with the steer wherever it ends up (SPEC §15.1).
-    const callerMode = this.senderMode(sender)
-    const letter = this.agentLetter(sender, text)
+    const callerMode = bot ? bot.limit ?? 'full' : this.senderMode(sender)
+    const letter = bot ? this.botLetter(sender, bot, text) : this.agentLetter(sender, text)
     const result = await this.steerRun(runId, letter.content, options.clientRequestId, threadId, letter.sender, callerMode, undefined, sender.remote ? { node: sender.remote.node } : undefined)
     if (result.status === 'rejected' && result.reason === 'ceiling_exceeded') return { status: 'ceiling_exceeded', callerMode, targetMode: this.runPermissionMode(runId) }
     return this.agentRunCommandResult(engine, threadId, runId, result)
@@ -5383,9 +5433,11 @@ export class OrchestratorService extends EventEmitter {
   /**
    * The owner's bot behind a call from one of its threads ("use your threads"), when the call may go ahead: the bot's
    * main thread made it, in a turn registered with the bot's authority that holds `tool` now (starting, messaging and
-   * stopping only in a turn that may act on them: a run, or a chat turn the owner's message or tapped answer started). Undefined for a thread that is no bot's. A bot's thread that may not make the call is refused here, whatever let it this far.
+   * stopping only in a turn that may act on them: a run, or a chat turn the owner's message or tapped answer started). A
+   * subagent of a bot's work acts as its work does, when its turn holds `tool`. Undefined for a thread that is no bot's. A
+   * bot's thread that may not make the call is refused here, whatever let it this far.
    */
-  private botSenderOf(actor: AgentActor, tool: 'thread_create' | 'thread_send' | 'thread_interrupt' | 'thread_archive' | 'thread_hide'): BotSender | undefined {
+  private botSenderOf(actor: AgentActor, tool: BotThreadActTool): BotSender | undefined {
     let role: string | undefined
     try {
       role = this.botThreads?.roleOf(actor.threadId)
@@ -5393,8 +5445,8 @@ export class OrchestratorService extends EventEmitter {
       role = 'unknown'
     }
     if (!role) return undefined
-    const refused = new McpToolError('mousse_scope_denied', 'A bot starts, messages, stops or archives your threads only in its own turns, with "use your threads" allowed.')
-    if (role !== 'activation') throw refused
+    const refused = new McpToolError('mousse_scope_denied', 'A bot starts, messages, steers, stops or archives your threads only in its own turns, with "use your threads" allowed.')
+    if (role !== 'activation' && role !== 'subagent') throw refused
     const turn = this.appToolTurns.get(actor.runId)
     if (!turn?.bot || turn.threadId !== actor.threadId || !turn.bot.appTools.has(tool)) throw refused
     // Only a turn that may act on threads (a run, or a chat turn its owner started), as the bot's own records say.
@@ -6689,12 +6741,17 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
+  /** A thread's checkout now: its worktree, else the folder it shares, else its project folder; undefined without one. */
+  private threadCheckoutOf(threadId: string): string | undefined {
+    const directory = this.resolveThreadDir(threadId)
+    const own = directory ? new ThreadWorkspaceManager(directory).load() : undefined
+    const project = this.projectManager && this.threadStore ? resolveThreadProjectPath(this.projectManager, this.threadStore, threadId) : undefined
+    return own && existsSync(own.worktreePath) ? own.worktreePath : this.sharedWorkspaceOf(threadId)?.path ?? project
+  }
+
   /** The commit the parent's checkout is on now (its worktree, else its project folder); undefined without one. */
   private parentHeadNow(parentThreadId: string): string | undefined {
-    const directory = this.resolveThreadDir(parentThreadId)
-    const parent = directory ? new ThreadWorkspaceManager(directory).load() : undefined
-    const project = this.projectManager && this.threadStore ? resolveThreadProjectPath(this.projectManager, this.threadStore, parentThreadId) : undefined
-    const cwd = parent && existsSync(parent.worktreePath) ? parent.worktreePath : this.sharedWorkspaceOf(parentThreadId)?.path ?? project
+    const cwd = this.threadCheckoutOf(parentThreadId)
     if (!cwd) return undefined
     try {
       return actionGit(cwd, ['rev-parse', '--verify', 'HEAD^{commit}'])
@@ -10002,9 +10059,14 @@ export class OrchestratorService extends EventEmitter {
     if (!store.getThread(threadId)) throw new QueueConflictError('queue_item_not_found', `Thread ${threadId} is not available.`)
     const { actor } = options
     const cross = threadId !== actor.threadId
-    const callerMode = this.runPermissionMode(actor.runId)
     // A bot's thread is driven by its owner and its bot engine: no queue command of an agent reaches it, its own turn included.
     this.assertNotBotThread(threadId)
+    // The owner's bot changes their threads' queues with "use your threads" (`botSenderOf`), as it messages them: its words
+    // labelled as the bot's, held to the thread's own mode, or no wider than the device its owner wrote from.
+    const bot = actor.remote ? undefined : this.botSenderOf(actor, QUEUE_TOOL_OF[command.op])
+    const callerMode = bot ? bot.limit ?? 'full' : this.runPermissionMode(actor.runId)
+    const letterOf = (content: string, labelled: boolean): { content: string; sender: AgentSender } =>
+      bot ? this.botLetter(botSenderHops(actor), bot, content) : this.agentLetter(this.withAgentHops(actor), content, labelled)
     if (command.op === 'enqueue') this.assertQueueOpen(threadId)
     // Who wrote the item: this agent (its origin names its thread: an own note or a message it sent) or someone else. A
     // label such as the item's source never decides it: only the origin the daemon stamped on the message does.
@@ -10040,7 +10102,7 @@ export class OrchestratorService extends EventEmitter {
           // person's Stop and runs as an agent's run (so an agent at its hop limit cannot start a fresh chain through its own queue).
           // On another thread the text is labelled too; on its own an agent reads its own note as written.
           assertRoom(items)
-          const letter = this.agentLetter(this.withAgentHops(actor), command.content, cross)
+          const letter = letterOf(command.content, cross)
           const content = letter.content
           const origin = agentOriginOf(letter.sender)
           const permissionMode: PermissionMode = callerMode
@@ -10071,7 +10133,7 @@ export class OrchestratorService extends EventEmitter {
             // The words are the agent's from here on, with this run's hop count: stored as its own, run under the stricter mode.
             // Another writer's message, or any message on another thread, is labelled; an agent's own note on its own thread is not.
             if (!authored) assertRoom(items, item)
-            const letter = this.agentLetter(this.withAgentHops(actor), command.content, cross || !authored)
+            const letter = letterOf(command.content, cross || !authored)
             patch.content = letter.content
             patch.origin = agentOriginOf(letter.sender)
             patch.permissionMode = strictestMode(item.permissionMode, callerMode)
