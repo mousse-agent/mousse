@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type RefObject } from 'react'
 import type { AppletReference } from '../../../shared/applets'
 import { readAppletAppearance, subscribeAppletAppearance } from './appearance'
 import { subscribeAppletScroll } from './scrollPresentation'
-import { appletHostBlocked, appletHostShown, appletUncoveredClip, subscribeAppletHostVisibility } from './hostVisibility'
+import { appletHostBlocked, appletHostShown, appletUncoveredClip, subscribeAppletHostVisibility, type ScreenRect } from './hostVisibility'
 import { appletHeightKey, rememberAppletHeight, rememberedAppletHeight } from './appletHeights'
 import type { AppletUiEvent } from '../../../shared/appletRuntime'
 
@@ -33,6 +33,9 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
   const [error, setError] = useState<string | null>(null)
   const [ready, setReady] = useState(false)
   const [scrollImage, setScrollImage] = useState<string | null>(null)
+  // The part of the host the live view draws over, in the host's own pixels; null while the view is hidden. The guest
+  // page is see-through, so the cached frame must not lie under it there, or its old pixels show through the new ones.
+  const [liveArea, setLiveArea] = useState<ScreenRect | null>(null)
   // In the transcript a card starts at the height this revision last measured; the side panel fills its stage.
   const heightKey = host === 'transcript' ? appletHeightKey(profileId, threadId, reference.revisionId) : null
   const [measured, setMeasured] = useState<{ key: string | null; height: number } | null>(null)
@@ -55,6 +58,7 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
     let disposed = false
     let scrollPaused = false
     setScrollImage(null)
+    setLiveArea(null)
     let parked = false
     let mounting = false
     // What the page reports while it loads (a script error, its first height) arrives before mount returns its id.
@@ -103,6 +107,7 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
     }
     const suspend = async () => {
       scrollPaused = true
+      setLiveArea(null)
       snapshotVersion++
       clearTimeout(snapshotTimer)
       cancelAnimationFrame(frame)
@@ -154,6 +159,7 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
         const id = runtime.current
         if (id && !parked) {
           parked = true
+          setLiveArea(null)
           clearTimeout(snapshotTimer)
           void api.update({ runtimeId: id, bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, clip, visible: false }).catch(() => {})
         }
@@ -201,9 +207,14 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
       const geometry = JSON.stringify({ bounds, clip })
       if (runtime.current && !scrollPaused && geometry !== lastGeometry) {
         lastGeometry = geometry
+        const live = { x: area.x - rect.left, y: area.y - rect.top, width: area.width, height: area.height }
         void api
           .update({ runtimeId: runtime.current, bounds, clip, visible: true })
-          .then(refreshSnapshot)
+          .then(() => {
+            // Only once the view is on screen at this geometry, so the cached frame never leaves a gap meanwhile.
+            if (!disposed && !scrollPaused && !parked && lastGeometry === geometry) setLiveArea(live)
+            refreshSnapshot()
+          })
           .catch((cause) => {
             if (!disposed) {
               failed = true
@@ -266,6 +277,7 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
         lastGeometry = ''
         snapshotVersion++
         setScrollImage(null)
+        setLiveArea(null)
         setReady(false)
         if (intersecting) schedule()
         return
@@ -329,5 +341,5 @@ export function useAppletRuntime(preview: RefObject<HTMLDivElement | null>, opti
     restart
   ])
 
-  return { runtime, ready, error, setError, scrollImage, height, conversationInput, setConversationInput }
+  return { runtime, ready, error, setError, scrollImage, liveArea, height, conversationInput, setConversationInput }
 }
