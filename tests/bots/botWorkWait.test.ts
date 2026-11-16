@@ -213,6 +213,7 @@ it.each(['plain', 'note', 'allowed permission'] as const)('always explains a com
   await flush()
   const prompt = f.store.dispatch(workId, 2)!.prompt.text
   expect(prompt).not.toContain('The owner asked you to continue')
+  expect(prompt).not.toContain('Your owner did not write')
   expect(prompt).toContain('[Mousse]')
   expect(prompt).toContain('Check again with the evidence already read.')
   if (extra === 'note') expect(prompt).toContain('Also check the changelog.')
