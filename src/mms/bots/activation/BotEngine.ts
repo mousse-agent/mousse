@@ -5274,10 +5274,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         return `The owner allowed: ${title}. Your work has it now: hand the job to work_start.`
       return `The owner allowed: ${title}.`
     }
+    // Ordered store events supply the same update slot as ordinary notes and answers. The reason
+    // and all continuation instructions below are shared, whatever the work's wait history.
+    const ordered = input.workEvents?.length ? input.workEvents : undefined
+    const updates = ordered ? ordered.map(event => 'answer' in event ? answerLine(event.answer) : event.text).join('\n\n') : input.notes
+    const orderedAnswers = ordered?.some(event => 'answer' in event)
+    const orderedQuestion = ordered?.some(event => 'text' in event && event.text === input.answered)
+    const allowed = input.allowed?.filter(title => !orderedAnswers || !input.answers.some(answer => answer.status !== 'denied' && this.chat.card(answer).title === title))
     const depth = row.modelOverride?.depth
-    const reason = input.answers.length
+    const reason = input.answers.length && !orderedAnswers
       ? [...input.answers.map(answerLine), ...(input.askAgain ?? []).map(askAgainLine)].join(' ')
-      : input.questionAnswered && input.answered ? input.answered
+      : input.questionAnswered && input.answered && !orderedQuestion ? input.answered
       : input.switchCut ? 'Your owner switched off a permission while you worked. Your turn stopped; carry on without it and do not ask for it.'
       : input.reload ? (depth === 'deep' ? 'You now have more time to think.' : depth === 'quick' ? 'You now answer more quickly.' : 'Your settings changed.')
         : input.restart ? 'Mousse restarted while you were working.'
@@ -5286,9 +5293,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           : input.usageReset ? 'A usage limit stopped you while you were working; it has reset now.'
           : input.network ? 'The internet connection dropped while you were working; it is back now.'
             : input.afterReport ? 'The owner added something while you worked; what you had so far was already sent to them.'
-              : input.notes ? 'The owner added something while you worked.' : 'The owner asked you to continue.'
+              : input.notes ? 'The owner added something while you worked.' : input.waited ? 'Your wait is over.' : orderedAnswers ? 'The owner answered your request.' : 'The owner asked you to continue.'
     // Work's question answered while it waited for something else (more room, say): the answer comes with why it goes on.
-    const lead = input.answered && reason !== input.answered ? `${reason} ${input.answered}` : reason
+    const lead = [
+      reason,
+      input.answered && !orderedQuestion && reason !== input.answered ? input.answered : '',
+      orderedAnswers ? (input.askAgain ?? []).map(askAgainLine).join(' ') : '',
+      input.waited && reason !== 'Your wait is over.' ? 'Your wait is over.' : ''
+    ].filter(Boolean).join(' ')
     const carryOn = input.moreRoom || input.questionAnswered
     const calls = this.store.unknownCalls(row.id)
     // A subagent's run is kept as a consult's in bots.db: it is named as what it is.
@@ -5296,34 +5308,28 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const interrupted = (calls.length
       ? ` Interrupted tool calls (their effects are unknown; check before repeating them): ${calls.map((call) => `${call.tool} (${roleOf(call)} run ${call.runId}, call ${call.invocationId})`).join('; ')}.`
       : '') + this.stoppedSubagentsLine(row)
-    if (input.workEvents?.length) {
-      const events = input.workEvents.map(event => 'answer' in event ? answerLine(event.answer) : event.text).join('\n\n')
-      const allowed = input.allowed?.filter(title => !input.answers.some(answer => answer.status !== 'denied' && this.chat.card(answer).title === title))
-      const additions = allowed?.length ? `\n\n[Mousse] The owner also allowed you to ${allowed.join(' and ')}; you have it now.` : ''
-      return `[Mousse] ${input.waited ? 'Your wait is over.' : 'Updates to your work.'}${interrupted}\n\n${events}${additions}\n\nContinue where you left off. ${BOT_RUN_REPORT_LINE}`
-    }
     // A chat turn the owner wrote to again while it answered: their messages, answered as part of the same conversation.
-    if (row.lane === 'chat' && input.notes) {
+    if (row.lane === 'chat' && updates) {
       const draft = input.afterReport ? this.chatDraft(row) : undefined
       const before = draft ? `The owner wrote again before your reply went out. Your draft, not sent: «${draft.text}». Answer everything in one reply.` : input.afterReport ? 'The owner wrote again while you were answering; your reply so far was already sent to them.' : lead
-      const allowed = input.allowed?.length ? ` The owner also allowed you to ${input.allowed.join(' and ')}; you have it now.` : ''
+      const allowedLine = allowed?.length ? ` The owner also allowed you to ${allowed.join(' and ')}; you have it now.` : ''
       const owner = input.ownerText !== undefined ? `\n\n${input.ownerText}` : ''
       const first = neverRan !== undefined ? `${neverRan}\n\n` : ''
-      return `[Mousse] ${before}${allowed}${interrupted}\n\n${first}${input.notes}${owner}\n\nAnswer it now, reading it together with what they wrote before.`
+      return `[Mousse] ${before}${allowedLine}${interrupted}\n\n${first}${updates}${owner}\n\nAnswer it now, reading it together with what they wrote before.`
     }
     // A turn that the owner allowed something while it ran (issue #983): this turn has it (`allowedSinceRefused`). Work
     // that goes on after it waited, or after the turn cap, hears it with why it goes on.
-    if (input.allowed?.length && (carryOn || input.usageReset || input.turnCap))
-      return `[Mousse] ${lead} The owner also allowed you to ${input.allowed.join(' and ')}; you have it now.${interrupted}${input.notes ? `\n\n${input.notes}\n\nTake it into account as you continue.` : ''} ${carryOn ? 'Carry on where you left off' : 'Continue where you left off'}, and do what you skipped without it.`
-    if (input.allowed?.length) {
-      if (row.lane === 'chat') return `[Mousse] The owner allowed you to ${input.allowed.join(' and ')} while you answered; you have it now. Your reply so far was already sent.${interrupted}\n\nDo now what you skipped without it, and tell the owner what you found.`
-      const allowedLine = `${input.answered ? `${input.answered} ` : ''}The owner allowed you to ${input.allowed.join(' and ')} while you worked; you have it now.`
-      const notes = input.notes ? `\n\n${input.notes}` : ''
+    if (allowed?.length && (carryOn || input.usageReset || input.turnCap))
+      return `[Mousse] ${lead} The owner also allowed you to ${allowed.join(' and ')}; you have it now.${interrupted}${updates ? `\n\n${updates}\n\nTake it into account as you continue.` : ''} ${carryOn ? 'Carry on where you left off' : 'Continue where you left off'}, and do what you skipped without it.`
+    if (allowed?.length) {
+      if (row.lane === 'chat') return `[Mousse] The owner allowed you to ${allowed.join(' and ')} while you answered; you have it now. Your reply so far was already sent.${interrupted}\n\nDo now what you skipped without it, and tell the owner what you found.`
+      const allowedLine = `${input.answered ? `${input.answered} ` : ''}The owner allowed you to ${allowed.join(' and ')} while you worked; you have it now.`
+      const notes = updates ? `\n\n${updates}` : ''
       const sent = input.afterReport ? ' What you had so far was already sent to them.' : ''
       return `[Mousse] ${allowedLine}${sent}${interrupted}${notes}\n\nDo now what you skipped without it${notes ? ', and take the owner\'s notes into account' : ''}. Your last message is your updated report: lead with what changed, in plain words.`
     }
     // The owner's notes to a run: they change the work, so the run reports again on all of it.
-    if (input.notes) return `[Mousse] ${lead}${interrupted}\n\n${input.notes}\n\n${neverRan !== undefined ? `${neverRan}\n\n` : ''}${input.afterReport ? 'Update your work for it. Your last message is your updated report: lead with what changed, in plain words.' : `Take it into account as you continue. ${BOT_RUN_REPORT_LINE}`}`
+    if (updates) return `[Mousse] ${lead}${interrupted}\n\n${updates}\n\n${neverRan !== undefined ? `${neverRan}\n\n` : ''}${input.afterReport ? 'Update your work for it. Your last message is your updated report: lead with what changed, in plain words.' : `Take it into account as you continue. ${BOT_RUN_REPORT_LINE}`}`
     // The owner's message is the next input.
     if (input.ownerText !== undefined) return `[Mousse] ${lead}${interrupted}\n\n${input.ownerText}`
     // The walled dispatch never ran (a time wall before it started): its own prompt is sent now.
