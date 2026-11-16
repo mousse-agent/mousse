@@ -537,3 +537,15 @@ it('S1-refused provider capture masks hidden arguments even when no action row w
   }] }) }).syncNow(ref)
   expect(JSON.stringify(f.store.all('SELECT text, json FROM bot_journal WHERE activation_id = ?', t.workId))).not.toContain('hunter2')
 })
+it('R3-binding tells the work why the pre-dispatch fence refused the call', async () => {
+  const t = await setup(true)
+  await t.call()
+  await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  vi.spyOn(t.manager, 'callTool').mockRejectedValueOnce(Object.assign(new Error('MCP dependency changed since admission.'), { code: 'stale_revision', mcpNotDispatched: true }))
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  await flush()
+  expect(f.bots.actions.forWork(t.workId)?.status).toBe('failed')
+  expect(f.store.lastMainDispatch(t.workId)?.prompt.text).toContain('changed since you saw it')
+  expect(t.calls).toEqual([])
+})
