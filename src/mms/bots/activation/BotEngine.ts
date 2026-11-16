@@ -3258,7 +3258,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const subagent = input.role === 'subagent'
     // Work that asked its owner a question in this dispatch ends its turn: every later call is refused (never a wall,
     // which would cut the turn as an interruption), and the answer continues it. It only refuses; it never allows.
-    const endTurn = (): string | undefined => (input.role === 'activation' && this.askedIn.get(row.id) === input.mainN ? (this.actions.forWork(row.id) ? 'The call is held for your owner. End your turn now.' : QUESTION_END_TURN_TEXT) : undefined)
+    const endTurn = (): string | undefined => (input.role === 'activation' && this.askedIn.get(row.id) === input.mainN ? (this.actions.pendingInTurn(row.id, input.mainN) ? 'The call is held for your owner. End your turn now.' : QUESTION_END_TURN_TEXT) : undefined)
     const check = (call: NormalisedCall): BotCheck => {
       this.progress(row.id)
       const stop = endTurn()
@@ -4755,7 +4755,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         } else if (openWalls.length) {
           // The chat turn asked (`escalate`): it waits for the owner with every card on its message.
           this.store.moveActivation(row.id, ['running'], 'waiting_grant', { endReason: 'wall', ...(text !== undefined ? { result: text } : {}) })
-        } else if (botAsksFirst(this.host.settings?.get()) && this.actions.forWork(row.id) && this.askedIn.get(row.id) === main.n) {
+        } else if (botAsksFirst(this.host.settings?.get()) && this.actions.pendingInTurn(row.id, main.n) && this.askedIn.get(row.id) === main.n) {
           if (!this.park(row, 'approval', ['running'], this.approvalPending(row.id) ? 'approval' : 'approval_answered')) return undefined
         } else if (question) {
           if (!this.park(row, 'question', ['running'], question.status === 'open' ? 'question' : 'question_answered')) return undefined

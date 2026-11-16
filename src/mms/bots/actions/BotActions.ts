@@ -43,6 +43,13 @@ export class BotActions {
   forWork(id: string): ActionRow | undefined {
     return this.host.store.get("SELECT * FROM bot_actions WHERE activation_id = ? ORDER BY rowid DESC LIMIT 1", id) as unknown as ActionRow | undefined
   }
+  pendingInTurn(activationId: string, mainN: number): ActionRow | undefined {
+    const action = this.forWork(activationId)
+    if (!action || !pending.has(action.status)) return undefined
+    const dispatchId = JSON.parse(action.call_key)[1]
+    const dispatch = this.host.store.dispatches(activationId).find(d => d.clientRequestId === dispatchId)
+    return dispatch && (dispatch.n === mainN || dispatch.mainN === mainN) ? action : undefined
+  }
   hold(row: BotActivationRow, dispatch: string, tool: BotMcpTool, args: Record<string, unknown>, toolCallId?: string): ToolOutcome {
     if (!toolCallId) return { text: 'This call cannot be held without its call id. Carry on without it.', isError: true }
     const callKey = JSON.stringify([row.id, dispatch, toolCallId])
