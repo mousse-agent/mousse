@@ -408,7 +408,7 @@
   transition: opacity 0.15s;
 }
 
-.threads-sidebar:not(.menu-open) .threads-sidebar-thread-container:is(:hover, :focus-within) > .threads-sidebar-thread > .threads-sidebar-thread-trailing,
+.threads-sidebar:not(.menu-open) .threads-sidebar-thread-container:is(:hover, :has(:focus-visible)) > .threads-sidebar-thread > .threads-sidebar-thread-trailing,
 .threads-sidebar-thread-container:has(> .threads-sidebar-thread-actions [aria-expanded='true']) > .threads-sidebar-thread > .threads-sidebar-thread-trailing {
   opacity: 0;
 }
@@ -433,8 +433,9 @@
   transition: opacity 0.15s;
 }
 
+/* Mouse clicks retain focus after pointer leave; only keyboard focus should keep actions visible. */
 .threads-sidebar-thread-container:hover .threads-sidebar-thread-actions,
-.threads-sidebar-thread-container:focus-within .threads-sidebar-thread-actions,
+.threads-sidebar-thread-container:has(:focus-visible) .threads-sidebar-thread-actions,
 .threads-sidebar-thread-actions:has([aria-expanded="true"]) {
   opacity: 1;
   pointer-events: auto;
