@@ -549,3 +549,11 @@ it('R3-binding tells the work why the pre-dispatch fence refused the call', asyn
   expect(f.store.lastMainDispatch(t.workId)?.prompt.text).toContain('changed since you saw it')
   expect(t.calls).toEqual([])
 })
+
+it.each([`sk-${'Z'.repeat(30)}`, 'eyJabcdefghijk.abcdefghijk.abcdefghijk', '-----BEGIN PRIVATE KEY-----\nexample\n-----END PRIVATE KEY-----'])('B1-shape refuses credential shapes anywhere in arguments', async value => {
+  const t = await setup(true)
+  Object.assign(t.args, { headers: { authorization: { nested: [value] } } })
+  expect(await t.call()).toMatchObject({ isError: true, text: expect.stringContaining('never sent through a tool this way') })
+  expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
+  expect(t.calls).toEqual([])
+})
