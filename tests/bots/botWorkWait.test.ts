@@ -214,3 +214,22 @@ it('offers work_wait only to work, including work from reminders', async () => {
     await expect(wait(other.workId)).rejects.toThrow(kind === 'schedule' ? 'next run' : 'run started by hand')
   }
 })
+it.each(['note', 'answer'] as const)('an owner %s resets the work wait chain', async input => {
+  const { workId, turn, chat } = await work()
+  await wait(workId)
+  await finish(f, turn.payload, 'completed', { text: '' })
+  f.clock.now += 60 * 60_000
+  await f.bots.deliverDueReminders()
+  await flush()
+  const next = await start(f, workId, 2)
+  if (input === 'note') f.bots.tools.work.note(botId, workId, 'Check the changelog too.', chat.id)
+  else {
+    f.bots.askOwner(botId, workId, { question: 'Which release?', choices: ['A', 'B'] })
+    await finish(f, next.payload, 'completed', { text: '' })
+    await f.bots.service.answerQuestion({ botId, questionId: f.store.workQuestion(workId)!.id, choice: 'A', clientRequestId: 'chain-answer' })
+    await flush()
+    await start(f, workId, 3)
+  }
+  const set = await wait(workId)
+  expect(f.store.reminder(set.wakeId)?.chain).toBe(1)
+})
