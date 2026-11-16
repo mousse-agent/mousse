@@ -1676,3 +1676,30 @@ it.each(['inside two restarts', 'outside two restarts', 'sleep', 'card deadline'
   expect(t.calls).toEqual(sent ? [t.args] : [])
   expect(f.bots.actions.get(a.id)).toMatchObject({ status: sent ? 'done' : 'failed', exec_args: null })
 })
+
+it('R3-2 Forget blocks the tool until owner input without retaining call content', async () => {
+  const t = await setup(true, false, true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  const memory = new BotMemoryStore({ db: f.store.db })
+  const seq = memory.append({ botId: t.botId, sourceKey: `bm:${a.message_id}`, kind: 'notice', who: 'bot', text: 'call' })!
+  memory.forget(t.botId, { refs: [`j${seq}`], by: 'owner_ui' }); await flush()
+  const prompt = f.store.lastMainDispatch(t.workId)!.prompt.text
+  expect(prompt).toContain('Your owner removed this request')
+  expect(prompt).not.toContain('[forgotten]')
+  let next = await start(f, t.workId, 2)
+  const call = (body: string, name = 'Mail__send') => callForBot({ bot: next.prepared.authority, mcp: t.mcp, name, args: { ...t.args, body }, toolCallId: body, signal: new AbortController().signal })
+  expect(await call(t.args.body)).toMatchObject({ isError: true })
+  expect(await call('changed')).toMatchObject({ isError: true })
+  expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
+  expect(await call('other', 'Mail__other')).not.toMatchObject({ isError: true })
+  await finish(f, next.payload)
+  const other = f.bots.actions.forWork(t.workId)!
+  await f.bots.actions.answer({ actionId: other.id, digest: other.args_digest, answer: 'not_now' }); await flush()
+  next = await start(f, t.workId, f.store.lastMainDispatch(t.workId)!.n)
+  f.bots.noteWork(t.botId, t.workId, 'Please try again')
+  expect(await call('after-owner')).not.toMatchObject({ isError: true })
+  const saved = f.bots.actions.get(a.id)!
+  expect(saved).toMatchObject({ args_json: '"[forgotten]"', args_digest: '[forgotten]', exec_args: null, result_json: '{"text":"[forgotten]"}' })
+  expect(JSON.stringify(memory.actions(t.botId))).not.toContain('Exact text')
+})
