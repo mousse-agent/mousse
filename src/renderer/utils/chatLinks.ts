@@ -86,7 +86,10 @@ export function openLinkedThread(threadId: string): void {
   const store = useAppStore.getState()
   const missing = (): void => { showToast({ key: 'thread-link-missing', message: 'That thread is no longer here.' }) }
   if (!store.threads.some((thread) => thread.id === threadId)) return missing()
-  store.setThreadsSidebarView('projects')
+  // The sidebar lands on Projects. Only the list tab is set here: the switch out of Chats is selectThread's, after the
+  // navigation guards agree and together with the thread it opens, so the history records that thread and not the one
+  // the workspace showed before (see trackThreadHistory).
+  useAppStore.setState({ lastThreadListView: 'projects' })
   void selectThread(threadId).catch(missing)
 }
 
