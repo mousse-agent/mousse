@@ -635,3 +635,45 @@ it.each(['restart', 'network'] as const)('N2 repeats a wait, note and answer aft
   const later = f.store.lastMainDispatch(workId)!.prompt.text
   for (const text of ['Check again with the evidence already read.', 'Remember the delivery evidence.', 'Which release?']) expect(later).not.toContain(text)
 })
+
+it('N2 recovers confirmation when the run completed before its dispatch settled', async () => {
+  const { workId, turn, chat } = await work()
+  await wait(workId)
+  await finish(f, turn.payload)
+  f.bots.tools.work.note(botId, workId, 'Keep the completed delivery.', chat.id)
+  f.clock.now += 60 * 60_000
+  await f.bots.deliverDueReminders()
+  await flush()
+  const next = await start(f, workId, 2)
+  f.runs.markTerminal(next.payload.runId, 'completed')
+  f.bots.close()
+  f.bots = new BotEngine(f.host)
+  await f.bots.reconcileOnStartup()
+  await flush()
+  expect(f.store.unreadWorkWaits(workId)).toEqual([])
+  expect(f.store.pendingWorkNotes(workId)).toEqual([])
+  expect((f.store.dispatch(workId, 2)!.prompt as any).workTold).toBe('completed')
+})
+
+it.each(['restart', 'network'] as const)('N2 keeps a note without any wait history after %s until model output', async failure => {
+  const { workId, turn, chat } = await work()
+  f.bots.tools.work.note(botId, workId, 'Use the ordinary work note.', chat.id)
+  await finish(f, turn.payload, 'completed', { text: 'Initial findings.' })
+  const next = await start(f, workId, 2)
+  expect(f.store.pendingWorkNotes(workId)).toHaveLength(1)
+  if (failure === 'restart') {
+    f.runs.markTerminal(next.payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+    f.bots.close()
+    f.bots = new BotEngine(f.host)
+    await f.bots.reconcileOnStartup()
+  } else {
+    await finish(f, next.payload, 'failed', { outcome: { error: 'network_error' } })
+    await (f.bots as any).continueWith(workId, [f.store.activation(workId)!.status], { network: true })
+  }
+  await flush()
+  const retry = f.store.lastMainDispatch(workId)!
+  expect(retry.prompt.text).toContain('Use the ordinary work note.')
+  const receiving = await start(f, workId, retry.n)
+  ;(receiving.prepared as any).modelOutput?.()
+  expect(f.store.pendingWorkNotes(workId)).toEqual([])
+})
