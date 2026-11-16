@@ -549,3 +549,19 @@ it.each([
     await f.bots.service.workStop(botId, workId)
   }
 })
+
+it('marks a denied limit answered even when work has a past wait', async () => {
+  const { workId, turn } = await work()
+  await wait(workId)
+  await finish(f, turn.payload, 'completed', { text: '' })
+  f.clock.now += 60 * 60_000
+  await f.bots.deliverDueReminders()
+  await flush()
+  const next = await start(f, workId, 2)
+  const wall = f.store.db.transaction(() => (f.bots as any).wallInTransaction(workId, ['running'], { dispatchN: 2, kind: 'budget', permission: { budget: { key: 'maxActiveMs', amount: 60 * 60_000 } }, reason: 'More work time' }))
+  await finish(f, next.payload, 'completed', { text: '' })
+  await f.bots.answerAsk(botId, wall.escalation.id, 'not_now')
+  expect(f.store.activation(workId)?.endReason).toBe('budget_denied')
+  expect(f.store.pendingAnswers(workId)).toEqual([])
+  expect(f.store.escalation(wall.escalation.id)?.appliedAt).not.toBeNull()
+})
