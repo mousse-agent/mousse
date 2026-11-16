@@ -16,9 +16,9 @@ export type SubagentNoticeViewProps = {
 };
 
 /**
- * Subagent results reaching this thread (a wake turn, a steer, a queued steer), drawn from the
- * structured payload on the message: one quiet row per task that opens its subagent's thread. The
- * message text, which the model reads, is not shown.
+ * What reaches this thread about its subagents (a wake turn, a steer, a queued steer): a result, a
+ * question one of them waits on, a stop. Drawn from the structured payload on the message: one quiet
+ * row each that opens the subagent's thread. The message text, which the model reads, is not shown.
  */
 export function SubagentNoticeView({ items, onOpen }: SubagentNoticeViewProps) {
   const shown = items.slice(0, SUBAGENT_NOTICE_ROWS);
@@ -30,7 +30,7 @@ export function SubagentNoticeView({ items, onOpen }: SubagentNoticeViewProps) {
         const { verb, tone } = noticeOutcome(item);
         return (
           <button
-            key={item.delegationId}
+            key={item.requestId ?? item.delegationId}
             type="button"
             className="subagent-notice-row"
             title={`Open ${name}`}
