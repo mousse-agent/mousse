@@ -239,10 +239,14 @@ export class BotActions {
     if (refused) {
       const seq = Number(JSON.parse(String(refused.card_json ?? '{}')).ownerSeq ?? 0)
       const note = Number(this.host.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', row.botId, `cursor:action-note:${row.id}`)?.value ?? 0) > Number(JSON.parse(String(refused.card_json ?? '{}')).noteSeq ?? 0)
-      if (this.host.store.ownerLastWroteSeq(row.botId) <= seq && !note)
-        return { text: 'Your owner declined exactly this, or it expired. Do not ask again unless they write. Carry on without it.', isError: true }
+      if (this.host.store.ownerLastWroteSeq(row.botId) <= seq && !note) {
+        const text = 'Your owner declined exactly this, or it expired. Do not ask again unless they write. Carry on without it.'
+        // Reuse notes in the ordered update list: a lost tool reply must not lose the refusal.
+        if (!this.host.store.get('SELECT 1 FROM bot_work_notes WHERE activation_id = ? AND from_message = ? AND text = ?', row.id, refused.message_id, text))
+          this.host.store.addWorkNote(row.id, row.botId, text, String(refused.message_id))
+        return { text, isError: true }
+      }
     }
-    if (pending.has(this.forWork(row.id)?.status ?? '')) return { text: 'A call already waits for your owner. End your turn now.', isError: true }
     const binding = this.host.binding(row, tool)
     if (!binding) return { text: 'This tool changed. Carry on without it.', isError: true }
     if (containsCredential(args)) return { text: 'This contains something that looks like a secret. It is never sent through a tool this way. Send it without that value.', isError: true }
