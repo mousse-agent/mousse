@@ -1172,7 +1172,11 @@ export class BotStore {
   }
 
   revoke(botId: string): boolean {
-    return this.run('UPDATE bot_grants SET revoked_at = ? WHERE bot_id = ? AND revoked_at IS NULL', this.now(), botId) > 0
+    return this.db.transaction(() => {
+      const revoked = this.run('UPDATE bot_grants SET revoked_at = ? WHERE bot_id = ? AND revoked_at IS NULL', this.now(), botId) > 0
+      if (revoked) heldCalls(this.db)?.grantChanged(botId)
+      return revoked
+    })
   }
 
   // -- Threads ---------------------------------------------------------------------------------
