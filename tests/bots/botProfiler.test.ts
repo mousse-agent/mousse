@@ -81,7 +81,14 @@ describe('"use the profiler" in the bot engine', () => {
 describe('existing grants', () => {
   // Digests of grants an earlier build approved, computed on master before "use the profiler" existed (9fba70c9c): a new permission must not
   // change them, or every bot would be asked to approve again.
-  const starter = botStarterManifest()
+  // Saved values from 9fba70c9c, not today's starter (which now includes telling_set).
+  const starter: ReturnType<typeof botStarterManifest> = {
+    tools: ['read', 'list', 'search', 'edit', 'write'],
+    appTools: ['web_search', 'web_fetch', 'bot_schedule_add', 'bot_schedule_remove', 'bot_schedule_list',
+      'set_profile', 'set_depth', 'use_model', 'escalate', 'memory_search', 'memory_read', 'memory_list',
+      'memory_save', 'memory_forget', 'run_report'],
+    mcp: [], skills: [], workspace: null, budget: { maxActiveMs: 3_600_000 }, audience: 'owner'
+  }
   const grants: Array<[string, ReturnType<typeof botStarterManifest>, string]> = [
     ['the starter grant', starter, 'd0b44cfcf36ff72d65c07d1c6f51f955b0d4bc00ad9f4fd0fb4efe90b321deab'],
     ['with the browser, threads and commands', { ...starter, tools: [...starter.tools, 'shell'], appTools: [...starter.appTools, 'browser', 'threads'] }, '09b62fdfdda331c564ab30f80109c39aefc91f408cbf1e61c867a212b62fb6b9']
