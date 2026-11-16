@@ -1,13 +1,20 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { Shield } from '../../lib/icons'
 import { useBotsStore } from '../../stores/botsStore'
+import { guardTextCharacters } from '../../../shared/bots/personal/modelSlots'
 import { botGroupTime } from './messageGroups'
 
 import type { BotActionCard as BotActionCardData } from '../../../shared/bots/personal/chat'
 
-// The chat guard's invisible and direction-changing characters; keep newlines, tabs and script/emoji joiners.
+const addressLike = (text: string) => /@|:\/\/|(?:[\p{L}\p{N}\u200c\u200d-]+\.)+[\p{L}]{2,}/u.test(text)
+
 export function actionText(text: string): string {
-  return text.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u00ad\u180e\u200b\u200e\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\ufff9-\ufffb\u{e0000}-\u{e007f}]/gu, '�')
+  return text.split(/(\s+)/u).map((token) => guardTextCharacters(token, addressLike(token) ? 'address' : 'data')).join('')
+}
+function AlphabetWarning({ text, name = false }: { text: string; name?: boolean }) {
+  const mixed = (token: string) => /[A-Za-z]/u.test(token) && /[АВЕКМНОРСТХаеорсухіјѕΑΒΕΖΗΙΚΜΝΟΡΤΥΧαεικνορτυχω]/u.test(token)
+  const warn = name ? mixed(text) : text.split(/\s+/u).some((token) => addressLike(token) && mixed(token))
+  return warn ? <small className="bot-action-alphabet" aria-label="Look-alike letters"><Shield size={12} aria-hidden />Contains look-alike letters from another alphabet</small> : null
 }
 
 /** A literal wrapper escapes this object only; its children have their own stored markers or escapes. */
@@ -18,13 +25,13 @@ function Value({ value, literal = false }: { value: unknown; literal?: boolean }
     if (!literal && object.$mousse === 'hidden' && object.text === 'hidden · will be sent')
       return <span className="bot-action-hidden" aria-label="Hidden value that will be sent">hidden · will be sent</span>
     if (!Object.keys(object).length) return <code aria-label="Object">{'{}'}</code>
-    return <dl>{Object.entries(object).map(([key, child]) => <div key={key}><dt>{actionText(key)}</dt><dd><Field name={key} value={child} literal={false} /></dd></div>)}</dl>
+    return <dl>{Object.entries(object).map(([key, child]) => <div key={key}><dt>{actionText(key)}<AlphabetWarning text={key} name /></dt><dd><Field name={key} value={child} literal={false} /></dd></div>)}</dl>
   }
   if (Array.isArray(value)) return value.length ? <ol>{value.map((child, index) => <li key={index}><Field name="item" value={child} literal={literal} /></li>)}</ol> : <code aria-label="List">[]</code>
   if (typeof value !== 'string') return <code aria-label="Non-text value">{JSON.stringify(value) ?? String(value)}</code>
   if (value === '') return <span className="bot-action-empty">(empty text)</span>
   const text = /^(?:true|false|null|[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?|\[\]|\{\})$/i.test(value.trim()) ? JSON.stringify(value) : value
-  return <blockquote className="bot-action-text">{actionText(text).replaceAll("\n", "↵\n")}</blockquote>
+  return <div><blockquote className="bot-action-text">{actionText(text).replaceAll("\n", "↵\n")}</blockquote><AlphabetWarning text={value} /></div>
 }
 function Field({ name, value, literal }: { name: string; value: unknown; literal: boolean }) {
   return (Array.isArray(value) && value.length > 8) || typeof value === 'string' && (value.length > 160 || /^(body|text|content|message)$/i.test(name))
