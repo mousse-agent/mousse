@@ -1075,3 +1075,12 @@ it('C4 action names are readable single lines without hidden controls or markup'
   expect(readableActionTitle('sendEmail')).toBe('Send Email')
   expect(readableActionTitle('<b>send</b>\u202e\nemail')).toBe('Send email')
 })
+
+it('C4 hidden paths include secrets within escaped literal containers but never literal markers', async () => {
+  const t = await setup(true)
+  Object.assign(t.descriptor.inputSchema.properties, { meta: { properties: { password: {} } }, login: { properties: { token: {} } } })
+  Object.assign(t.args, { meta: { $mousse: 'hidden', password: 'private-password', imitation: { $mousse: 'hidden', text: 'hidden · will be sent' } }, login: { token: 'private-token' } })
+  await t.call()
+  const a = f.bots.actions.forWork(t.workId)!
+  expect(f.bots.service.actionMessage(t.botId, a.id).action!.hiddenPaths).toEqual(['meta → password', 'login → token'])
+})
