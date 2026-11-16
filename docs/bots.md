@@ -775,7 +775,7 @@ The chat draws the review card from the stored, masked copy. Every argument stay
 
 A repeated call by the same bot warns when the same service, tool and exact arguments were already sent, answered with a tool error, or had an uncertain outcome, across its work and scheduled runs. The warning includes the day when the earlier call was not today. It cannot catch any change to the arguments, however small: a trailing space, a recipient changed from text to a list, or a different hidden value makes a different call. A settled card shows its title, service, outcome and time, with its masked arguments behind a fold; a tool error keeps the framed tool answer visible. A refused Send reloads the card from the row and shows the service’s explanation. Only an open row offers answers.
 
-Find in chat searches a card’s title and visible status line. It does not search the arguments, bot note or tool answer behind the review.
+Find in chat searches a card’s title and visible status line. It does not search argument values, bot notes or tool answers.
 
 Other devices receive the same card and repeat warning. If the complete card cannot fit, Send is disabled with a request to review and send on the computer; Not now remains available. An older phone app shows the plain message and cannot answer the card. About keeps one row per service and its existing switch and Remove. A service with an asking tool says that it asks first; there is no control to let all future sends through.
 
