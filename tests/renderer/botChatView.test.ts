@@ -2132,3 +2132,17 @@ it('keeps the A note/subject probes and B multiline recipient probe inside label
   const notices = [...card.querySelectorAll('[role="note"]')].filter((element) => element.textContent?.includes('Hidden values will be sent:') || element.textContent?.includes('already sent exactly this at'))
   for (const notice of notices) { expect(argumentsRegion.contains(notice)).toBe(false); expect(notice.querySelector('svg')).toBeTruthy() }
 })
+
+it('distinguishes scalar data types, scalar-looking text and empty text', async () => {
+  fake.chats.inbox = [held({ args: { off: false, textOff: 'false', on: true, textOn: 'true', count: 123, textCount: '123', nothing: null, textNothing: 'null', list: [], textList: '[]', object: {}, textObject: '{}', empty: '', plain: 'An ordinary sentence' } })]
+  await open()
+  const args = host.querySelector('[aria-label="Complete arguments"]')!
+  const value = (key: string) => [...args.querySelectorAll('dt')].find((element) => element.textContent === key)!.nextElementSibling!
+  for (const [key, display] of [['off', 'false'], ['on', 'true'], ['count', '123'], ['nothing', 'null'], ['list', '[]'], ['object', '{}']]) {
+    expect(value(key).querySelector('code')?.textContent).toBe(display)
+    expect(value(`text${key === 'off' ? 'Off' : key === 'on' ? 'On' : key === 'count' ? 'Count' : key === 'nothing' ? 'Nothing' : key === 'list' ? 'List' : 'Object'}`).textContent).toBe(`"${display}"`)
+  }
+  expect(value('empty').textContent).toBe('(empty text)')
+  expect(value('plain').textContent).toBe('An ordinary sentence')
+  expect(value('plain').querySelector('code')).toBeNull()
+})
