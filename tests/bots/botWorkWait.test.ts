@@ -458,3 +458,35 @@ it('tells an earlier wall answer before the later wait event', async () => {
   const prompt = f.store.dispatch(workId, 2)!.prompt.text
   expect(prompt.indexOf('The owner allowed: run commands')).toBeLessThan(prompt.indexOf('Check again with the evidence already read.'))
 })
+
+it('keeps wait additions through a usage hold before the dispatch starts and a restart', async () => {
+  const { workId, turn, chat } = await work()
+  f.bots.askOwner(botId, workId, { question: 'Which release?', choices: [{ label: 'A' }, { label: 'B' }] })
+  const questionId = f.store.workQuestion(workId)!.id
+  await wait(workId)
+  await finish(f, turn.payload, 'completed', { text: '' })
+  f.bots.tools.work.note(botId, workId, 'Read the release notes too.', chat.id)
+  await f.bots.service.answerQuestion({ botId, questionId, choice: 'A', clientRequestId: 'usage-wait-answer' })
+  f.clock.now += 60 * 60_000
+  f.problem = { problem: 'all_limited', until: new Date(f.clock.now + 60 * 60_000).toISOString(), instanceId: 'claude:main' }
+  await f.bots.deliverDueReminders()
+  await flush()
+  expect(f.store.lastMainDispatch(workId)?.startedAt).toBeNull()
+  expect(f.store.unreadWorkWaits(workId)).toHaveLength(1)
+  expect(f.store.pendingWorkNotes(workId)).toHaveLength(1)
+  expect(f.store.question(questionId)?.readAt).toBeNull()
+  f.bots.close()
+  f.problem = undefined
+  f.bots = new BotEngine(f.host)
+  await f.bots.reconcileOnStartup()
+  await f.bots.resumeBot(botId)
+  await flush()
+  const dispatch = f.store.lastMainDispatch(workId)!
+  const next = await start(f, workId, dispatch.n)
+  expect(next.prepared.prompt).toContain('Check again with the evidence already read.')
+  expect(next.prepared.prompt).toContain('Read the release notes too.')
+  expect(next.prepared.prompt).toContain('Which release?')
+  expect(f.store.unreadWorkWaits(workId)).toEqual([])
+  expect(f.store.pendingWorkNotes(workId)).toEqual([])
+  expect(f.store.question(questionId)?.readAt).not.toBeNull()
+})
