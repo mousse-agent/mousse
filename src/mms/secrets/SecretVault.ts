@@ -196,7 +196,7 @@ export class SecretVault {
       const value = this.value(name)
       return value ? [{ name, value }] : []
     })
-    this.known.set(threadId, secrets)
+    this.remember(threadId, secrets)
     const masker = secretMasker([...secrets, ...retired]) ?? null
     // Built with retired values it is rebuilt on each call, so it drops them once the turn has settled.
     if (!retired.length) this.maskers.set(threadId, masker)
@@ -206,14 +206,26 @@ export class SecretVault {
   /**
    * What masks text that may hold any secret of the profile, whatever thread it was given in: a terminal's output, which
    * shows whatever the person typed or a command printed. Every secret in the store, saved keys included. Read from the
-   * store at every call (keys saved elsewhere don't pass through the vault), so it is never stale.
+   * store at every call (keys saved elsewhere don't pass through the vault), so it is never stale. With `threadId`, also
+   * the values that thread (or a thread above it) had and that were removed or changed while it ran: a terminal's
+   * scrollback may still show an old value, so one masker covers both before the output is cut into pages.
    */
-  maskerForStore(): SecretMasker | undefined {
+  maskerForStore(threadId?: string): SecretMasker | undefined {
     const secrets = listProfileKeyNames(this.options.profileRoot).flatMap((name) => {
       const value = this.value(name)
       return value ? [{ name, value }] : []
     })
-    return secretMasker(secrets)
+    if (!threadId) return secretMasker(secrets)
+    // Remembered for the thread, so a saved key it was never given but whose old value its terminal shows retires too.
+    this.remember(threadId, secrets)
+    return secretMasker([...secrets, ...this.retiredFor(threadId, this.options.ancestorsOf?.(threadId) ?? [])])
+  }
+
+  /** Adds to the values a thread's maskers covered since the last change; a change retires them while it runs. */
+  private remember(threadId: string, secrets: ReadonlyArray<{ name: string; value: string }>): void {
+    const known = this.known.get(threadId) ?? []
+    for (const secret of secrets) if (!known.some((other) => other.value === secret.value)) known.push(secret)
+    this.known.set(threadId, known)
   }
 
   /**

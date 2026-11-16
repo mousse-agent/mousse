@@ -1272,12 +1272,15 @@ export class OrchestratorService extends EventEmitter {
    */
   private secretTools?: SecretToolHost
   private secretMaskerFor?: (threadId: string) => SecretMasker | undefined
-  /** Masks every secret in the profile's store (a terminal's output, which may show any of them). */
-  private storeMasker?: () => SecretMasker | undefined
-  setSecrets(secrets: { tools: SecretToolHost; masker(threadId: string): SecretMasker | undefined; storeMasker?(): SecretMasker | undefined } | undefined): void {
+  /**
+   * Masks every secret in the profile's store (a terminal's output, which may show any of them), and the values the
+   * thread had that were removed or changed while it ran.
+   */
+  private storeMasker?: (threadId: string) => SecretMasker | undefined
+  setSecrets(secrets: { tools: SecretToolHost; masker(threadId: string): SecretMasker | undefined; storeMasker?(threadId: string): SecretMasker | undefined } | undefined): void {
     this.secretTools = secrets?.tools
     this.secretMaskerFor = secrets ? (threadId) => this.threadSecretMasker(secrets, threadId) : undefined
-    this.storeMasker = secrets?.storeMasker ? () => secrets.storeMasker!() : undefined
+    this.storeMasker = secrets?.storeMasker ? (threadId) => secrets.storeMasker!(threadId) : undefined
   }
 
   /**
@@ -4290,7 +4293,7 @@ export class OrchestratorService extends EventEmitter {
       terminals: () => ({
         list: (threadId) => this.ptyManager.terminalsOf(threadId),
         output: (ptyId) => this.ptyManager.terminalOutput(ptyId),
-        mask: (text) => this.storeMasker?.()?.(text) ?? text
+        mask: (text, threadId) => this.storeMasker?.(threadId)?.(text) ?? text
       }),
       tasks: (threadId) => (threadId ? this.getTasksForThread(threadId) : null),
       goals: {

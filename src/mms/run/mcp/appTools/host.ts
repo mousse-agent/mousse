@@ -301,8 +301,8 @@ export interface TerminalReadHost {
   list(threadId: string): TerminalInfo[]
   /** `columns`: its width, where its long lines wrap. */
   output(ptyId: string): { scrollback: string; droppedLines: number; columns?: number } | undefined
-  /** Masks every secret in the profile's store. */
-  mask(text: string): string
+  /** Masks every secret in the profile's store, and the values the thread had that were removed or changed while it ran. */
+  mask(text: string, threadId: string): string
 }
 
 /**
