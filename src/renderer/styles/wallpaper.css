@@ -1,0 +1,25 @@
+/*
+ * A theme's wallpaper behind the chat (ChatWallpaper.tsx, lib/wallpaper.ts). The chat pane becomes its own stacking
+ * context and the layer sits at its bottom, under the bars, the transcript and the composer, which paint over it as
+ * they do over the pane's colour. The layer does not scroll and is never repainted by the transcript: it is one still
+ * image with the scrim baked into the same background, no fixed attachment and no blur.
+ *
+ * While a wallpaper shows (`html[data-wallpaper]`) the transcript fades through a mask, as it does for acrylic and the
+ * frosted composer (polish.css), because the painted fade bands would cover the image with the pane's colour.
+ */
+html[data-wallpaper] .chat {
+  isolation: isolate;
+}
+
+.chat-wallpaper {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  contain: strict;
+}
+
+/* While a person decides something, nothing of the theme shows: the wallpaper goes with its sheet (themeCss.ts). */
+html[data-user-theme-paused] .chat-wallpaper {
+  display: none;
+}
