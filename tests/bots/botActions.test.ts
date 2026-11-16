@@ -1787,3 +1787,17 @@ it('R3-3 restart removes refusal records left by ended or missing work', async (
   f.bots.close(); f.bots = new BotEngine(f.host); await f.bots.reconcileOnStartup()
   expect(f.store.all("SELECT key FROM bot_memory_state WHERE key LIKE 'cursor:action-refusal:%'")).toEqual([])
 })
+
+it.each(['open', 'approved'] as const)('R3-3 legacy #1340 %s cards withdraw on upgrade', async status => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  const oldBinding = { ...JSON.parse(a.binding_json), grantRevision: 1, grantDigest: 'old-whole-grant' }
+  delete oldBinding.pairLevel
+  f.store.run('UPDATE bot_actions SET binding_json = ? WHERE id = ?', JSON.stringify(oldBinding), a.id)
+  if (status === 'approved') f.bots.actions.transition(a.id, 'open', 'approved')
+  f.clock.now += 11 * 60_000
+  f.bots.close(); f.bots = new BotEngine(f.host); await f.bots.reconcileOnStartup()
+  expect(f.bots.actions.get(a.id)).toMatchObject({ status: 'withdrawn', exec_args: null })
+  expect(t.calls).toEqual([])
+})
