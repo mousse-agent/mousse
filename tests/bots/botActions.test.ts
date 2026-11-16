@@ -291,7 +291,7 @@ it('a scheduled call parks, skips occurrences through the shared scheduler, and 
   expect(f.store.dispatch(t.id, 2)?.threadId).toBe(f.store.dispatch(t.id, 1)?.threadId)
   expect(f.store.dispatch(t.id, 2)?.prompt.text).toContain('Your owner sent it')
   expect(f.store.dispatch(t.id, 2)?.prompt.text).toContain('delivered')
-  await finish(f, next.payload, { text: 'Sent and recorded.' })
+  await finish(f, next.payload, 'completed', { text: 'Sent and recorded.' })
   expect(t.calls).toEqual([t.args])
   expect(f.store.activation(t.id)?.status).toBe('done')
   expect(f.bots.service.chatList(t.botId).messages.filter(m => m.activationId === t.id && m.kind === 'run_report')).toHaveLength(1)
@@ -299,7 +299,7 @@ it('a scheduled call parks, skips occurrences through the shared scheduler, and 
 it('with asks first off a scheduled call sends directly, writes no card and finishes normally', async () => {
   const t = await scheduledCall(false)
   expect((await t.call()).text).toContain('delivered')
-  await finish(f, t.run.payload, { text: 'Sent.' })
+  await finish(f, t.run.payload, 'completed', { text: 'Sent.' })
   expect(t.calls).toEqual([t.args])
   expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
   expect(f.store.activation(t.id)?.status).toBe('done')

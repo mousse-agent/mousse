@@ -1562,9 +1562,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // Only this schedule's own previous run skips it: other runs and the owner's work run beside it.
       const same = (row: BotActivationRow) => row.trigger.kind === 'schedule' && row.trigger.scheduleId === scheduleId
       if (this.store.laneActivations(botId, 'run', ['queued']).some(same)) { skip = 'previous_run_still_queued'; return false }
-      const previous = this.holding(botId, 'run').find(same)
+      const parked = this.store.laneActivations(botId, 'run', ['blocked']).find(row => same(row) && workWaits(row))
+      const previous = parked ?? this.holding(botId, 'run').find(same)
       // A run waiting for the internet has no expiry, so its schedule's later occurrences are skipped, not stacked.
-      if (previous) { skip = previous.status === 'waiting_grant' ? 'bot_waiting_for_owner' : previous.offline ? 'waiting_for_internet' : 'previous_run_still_running'; return false }
+      if (previous) { skip = previous.status === 'waiting_grant' || parked || previous.endReason === 'approval_answered' ? 'bot_waiting_for_owner' : previous.offline ? 'waiting_for_internet' : 'previous_run_still_running'; return false }
       const inserted = this.store.insertActivationOnce({
         id,
         botId,
@@ -3381,7 +3382,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         holdMcp: (tool: import('../../../shared/bots/personal/authority').BotMcpTool, args: Record<string, unknown>, toolCallId?: string) => {
           const pair = this.store.activeGrant(row.botId)?.manifest.mcp.find(p => p.serverId === tool.server && p.tool === tool.tool)
           if (pair?.level !== 'asks_first') return undefined
-          if (row.trigger.kind !== 'work') return { text: row.trigger.kind === 'schedule' ? 'This tool needs your owner to approve each call. A scheduled run cannot wait for that yet; carry on without it.' : 'This tool needs your owner to approve each call. A run started by hand cannot wait for that yet; ask the owner to start it as work from the chat.', isError: true }
+          if (row.trigger.kind !== 'work' && row.trigger.kind !== 'schedule') return { text: 'This tool needs your owner to approve each call. A run started by hand cannot wait for that yet; ask the owner to start it as work from the chat.', isError: true }
           const existing = toolCallId && this.store.get('SELECT id FROM bot_actions WHERE call_key = ?', JSON.stringify([row.id, input.callDispatchId ?? input.dispatchId, toolCallId]))
           if (!existing) {
             const allowed = base.check({ kind: 'mcp', server: tool.server, tool: tool.tool, args })
@@ -5269,7 +5270,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const decided = this.store.db.transaction((): { kind: 'paused' | 'wall' | 'blocked' | 'budget' | 'none' | 'question' | 'approval' | 'gone' } | { kind: 'fail'; reason: string } | { kind: 'sent'; dispatch: BotDispatchRow } => {
       const current = this.store.activation(row.id)
       if (!current || !from.includes(current.status)) return { kind: 'none' }
-      const durableWork = current.trigger.kind === 'work'
+      const durableWork = current.trigger.kind === 'work' || current.trigger.kind === 'schedule'
       const readAtStart = durableWork && Boolean(this.store.workWait(current.id) || this.actions.forWork(current.id))
       const answers = durableWork ? this.store.unreadWorkAnswers(current.id) : input.answers ?? []
       // One that holds no slot of its lane (it waited, or was paused) goes on only into a free one (`slotFree`); a scheduled
@@ -5331,7 +5332,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         return { kind: wall.kind === 'wall' ? 'wall' : wall.kind === 'blocked' ? 'blocked' : 'none' }
       }
       const waits = current.trigger.kind === 'work' ? this.store.unreadWorkWaits(current.id) : []
-      const actions = current.trigger.kind === 'work' ? this.store.unreadWorkActions(current.id) : []
+      const actions = durableWork ? this.store.unreadWorkActions(current.id) : []
       const refusals = this.workRefusalUpdates(current.id)
       const actionCaused = current.endReason === 'approval_answered' ? actions.at(-1) : undefined
       const waited = waits.length > 0

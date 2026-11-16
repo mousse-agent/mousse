@@ -53,7 +53,7 @@ export function workWaitInput(wait: BotReminderRow, clock: (iso: string) => stri
 /** One row per reason. Wake sources keep their existing transactions, messages and stored markers. */
 export const WORK_WAIT_RULES = {
   approval: {
-    weekExemptWhenReady: false, rank: 0, reasons: ['approval', 'approval_answered'], allows: workOnly,
+    weekExemptWhenReady: false, rank: 0, reasons: ['approval', 'approval_answered'], allows: (row) => workOnly(row) || row.lane === 'run' && row.trigger.kind === 'schedule',
     ready: (row, facts) => row.endReason === 'approval_answered' && facts.approvalReady(row),
     stranded: (row, facts) => !facts.approvalExists(row),
     endReason: 'action_gone', endLine: nothingToWaitFor, resume: 'continue', checkBeforeResume: true,
