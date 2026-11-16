@@ -364,6 +364,7 @@ export class BotActions {
     }
     const row = this.valid(action)
     if (!row) {
+      if (Date.parse(action.expires_at) > Date.parse(this.host.store.now()) && !this.host.obsolete(action)) return
       this.transition(id, 'approved', Date.parse(action.expires_at) <= Date.parse(this.host.store.now()) ? 'expired' : 'withdrawn', { text: 'This changed since you saw it. Nothing was sent; carry on without it.' })
       this.finish(action)
       return
@@ -387,13 +388,18 @@ export class BotActions {
     if (!row) return
     this.host.settled(row)
   }
+  async retryApproved(): Promise<void> {
+    if (!this.host.enabled()) return
+    for (const action of this.host.store.all("SELECT id FROM bot_actions WHERE status = 'approved'"))
+      await this.runApproved(String(action.id))
+  }
   async reconcile(): Promise<void> {
     if (!this.host.enabled()) return
     this.expireDue()
     const interrupted = this.host.store.all("SELECT id FROM bot_actions WHERE status IN ('running', 'approved')")
     await this.host.refresh()
     this.withdrawChanged()
-    if (this.host.store.get("SELECT 1 FROM bot_actions WHERE status = 'open' LIMIT 1")) this.host.held()
+    if (this.host.store.get("SELECT 1 FROM bot_actions WHERE status IN ('open', 'approved') LIMIT 1")) this.host.held()
     for (const a of interrupted) {
       const action = this.get(String(a.id))
       if (!action || this.executing.has(action.id)) continue

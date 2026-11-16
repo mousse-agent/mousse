@@ -634,6 +634,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const where = this.host.mcp?.where?.(tool.server)
       if (!where) return false // A cold catalogue is not evidence of removal.
       if (where.state !== 'on') return true
+      const config = this.host.mcp?.configurationDigest?.(tool.server)
+      if (config && config !== held.configDigest) return true
       if (where.server.failing || where.server.starting) return false
       if (!where.server.tools.some(t => t.tool === tool.tool)) return true
       const binding = this.host.mcp?.binding?.(tool)
@@ -3137,6 +3139,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const mcp = this.host.mcp
     if (!mcp || this.closed) return
     this.actions.withdrawChanged()
+    void this.actions.retryApproved().catch(error => console.warn('held calls could not be checked after a tool listing', error))
     const waiting = this.store.escalations({ status: 'open' }).filter((row) => waitsForTools(row.permission))
     if (!waiting.length) return
     let servers: BotMcpServer[]
