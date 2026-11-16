@@ -87,7 +87,7 @@ import { steerReleaseWindow, stopStrategy, type SteerDelivery } from '../run/Com
 import { agentMessage, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentArchiveResult, type AgentCreatedThread, type AgentRemoteThreadRequest, type AgentRemoteThreadResult, type RemoteProjectCandidate, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type RemoteThreadsHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
 import { AGENT_QUEUE_MAX_PER_SENDER, AGENT_QUEUE_MAX_PER_THREAD, AGENT_REPEAT_WINDOW_MS, botRequestPrefix, lineageRelation, THREAD_CREATE_MAX_ACTIVE_PER_THREAD } from '../run/mcp/appTools/thread'
-import { botMessageText } from '../run/mcp/appTools/agentMessage'
+import { botMessage } from '../run/mcp/appTools/agentMessage'
 
 /**
  * The owner's bot behind a start, message or Stop ("use your threads"): its id and name, the chat turn (activation) it
@@ -808,7 +808,7 @@ function agentRepeatKey(threadId: string, senderThreadId: string, content: strin
  * The agent behind a message, with where its words sit in the text the thread stores and its title then
  * (`AgentOrigin.body`, `title`), once the labelled text is built (`agentLetter`).
  */
-type AgentSender = AgentActor & Pick<AgentOrigin, 'body' | 'title'>
+type AgentSender = AgentActor & Pick<AgentOrigin, 'body' | 'title' | 'bot'>
 
 /**
  * The origin an agent's message is stored with: who sent it, how many agent hops led to it, and where its own words
@@ -818,7 +818,8 @@ type AgentSender = AgentActor & Pick<AgentOrigin, 'body' | 'title'>
 function agentOriginOf(agent: AgentSender | AgentOrigin): AgentOrigin {
   const extra = {
     ...(agent.hops !== undefined ? { hops: agent.hops } : {}),
-    ...(agent.body ? { body: { head: agent.body.head, tail: agent.body.tail } } : {})
+    ...(agent.body ? { body: { head: agent.body.head, tail: agent.body.tail } } : {}),
+    ...(agent.bot ? { bot: { id: agent.bot.id, name: agent.bot.name } } : {})
   }
   if ('remote' in agent && agent.remote)
     return { kind: 'agent', from: { node: agent.remote.node, thread: agent.threadId, run: agent.runId, title: agent.remote.title }, ...extra }
@@ -4341,7 +4342,7 @@ export class OrchestratorService extends EventEmitter {
     if (turnBot?.limit && isStricter(turnBot.limit, this.storedPermissionMode(threadId)))
       throw new DomainRpcError('device_limit', `The thread runs in ${describePermissionMode(this.storedPermissionMode(threadId))}, more than the device your owner wrote from may run (${describePermissionMode(turnBot.limit)}).`)
     const sender = this.withAgentHops(options.actor)
-    const letter = bot ? undefined : this.agentLetter(sender, input.content)
+    const letter = bot ? this.botLetter(sender, bot, input.content) : this.agentLetter(sender, input.content)
     this.assertQueueOpen(threadId)
     if (turnBot) this.assertBotRequestKey('thread_send', options.clientRequestId, options.actor, turnBot)
     // A thread a person keeps in Plan takes the message as a plan turn, whatever mode the sender asked for.
@@ -4351,15 +4352,14 @@ export class OrchestratorService extends EventEmitter {
     const repeatKey = agentRepeatKey(threadId, agentSenderKey(options.actor), input.content)
     const claim = { at: 0 }
     const response = await this.sendGuardedAgainstRepeat(repeatKey, claim, () => this.send(
-      { content: letter ? letter.content : botMessageText(bot!.name, input.content), mode },
+      { content: letter.content, mode },
       false,
       {
         threadId,
         source: 'mcp',
         clientRequestId: options.clientRequestId,
         awaitMode: 'ack',
-        // A bot's message keeps its look until it stores a sender of its own: no words or title are kept for it.
-        agent: letter ? letter.sender : sender,
+        agent: letter.sender,
         // An agent's message runs no wider than the agent's own run. The owner's bot's runs in the thread's own mode, as
         // the owner's own message would: the owner allowed it to message their threads.
         ...(bot ? {} : { permissionMode: this.senderMode(sender) }),
@@ -4454,6 +4454,15 @@ export class OrchestratorService extends EventEmitter {
     const title = name?.trim().slice(0, AGENT_TITLE_MAX_CHARS)
     const envelope = labelled ? agentMessage(sender.threadId, name, content, sender.remote ? { computer: sender.remote.computer } : undefined) : { text: content, head: 0, tail: 0 }
     return { content: envelope.text, sender: { ...sender, body: { head: envelope.head, tail: envelope.tail }, ...(title ? { title } : {}) } }
+  }
+
+  /**
+   * A message the owner's bot sends, labelled as the bot's (`botMessage`), with its sender: the bot's chat thread and run,
+   * where the bot's words sit in the text, and the bot (`AgentOrigin.bot`), so the thread shows its name and face.
+   */
+  private botLetter(sender: AgentActor, bot: { botId: string; name: string }, content: string): { content: string; sender: AgentSender } {
+    const envelope = botMessage(bot.name, content)
+    return { content: envelope.text, sender: { ...sender, body: { head: envelope.head, tail: envelope.tail }, bot: { id: bot.botId, name: bot.name.trim().slice(0, AGENT_TITLE_MAX_CHARS) } } }
   }
 
   /**

@@ -758,7 +758,7 @@ html.platform-darwin .overlay-titlebar {
 .chat-user-bubble.is-agent .chat-user-text.is-folded {
   max-height: 110px;
 }
-/* "Agent · <sending thread>": the robot, the word, then the thread's title, which opens it. */
+/* "Agent · <sending thread>": the robot, the word, then the thread's title, which opens it. A bot's: "<face> <name> · open". */
 .chat-agent-sender {
   display: flex;
   align-items: center;
@@ -784,8 +784,17 @@ html.platform-darwin .overlay-titlebar {
   white-space: nowrap;
 }
 .chat-agent-sender-link {
+  padding: 0;
+  border: 0;
+  background: none;
   color: inherit;
+  font: inherit;
   text-decoration: none;
+  cursor: pointer;
+}
+/* A bot's message: its face, drawn still, in place of the robot. */
+.chat-bot-sender .chat-bot-sender-face {
+  flex: none;
 }
 .chat-agent-sender-link:hover {
   color: var(--text-primary);

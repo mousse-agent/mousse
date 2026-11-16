@@ -185,7 +185,10 @@ function normalizeOrigin(raw: unknown): QueuedMessage['origin'] {
       runId: agent.runId,
       ...hops,
       ...words,
-      ...(typeof agent.title === 'string' && agent.title ? { title: agent.title } : {})
+      ...(typeof agent.title === 'string' && agent.title ? { title: agent.title } : {}),
+      ...(agent.bot && typeof agent.bot === 'object' && typeof agent.bot.id === 'string' && agent.bot.id && typeof agent.bot.name === 'string'
+        ? { bot: { id: agent.bot.id, name: agent.bot.name } }
+        : {})
     }
   }
   const origin = raw as Partial<Extract<NonNullable<QueuedMessage['origin']>, { kind: 'schedule' }>>

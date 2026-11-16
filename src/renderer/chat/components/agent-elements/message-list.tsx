@@ -19,7 +19,7 @@ import { resolveModelChoice } from "../../../lib/modelChoice";
 import { modelLabel, reasoningChange } from "../../../../shared/modelChoice";
 import type { TurnEnd } from "../../../../shared/types";
 
-import { agentSenderOf, UserMessage } from "./user-message";
+import { agentOriginOfMessage, UserMessage } from "./user-message";
 import { CopyButton } from "./copy-button";
 import { AfterTurnsLayoutProvider, type AfterTurnsLayout } from "./after-turns";
 import { ImageGalleryProvider } from "./image-gallery";
@@ -2313,8 +2313,8 @@ const TurnRow = memo(function TurnRow({
           const showUserToolbar = true;
           // Edit and versions act on the prompt's turn; a fork's copies of its source name none.
           const promptTurnId = (turn.userMsg as { turnId?: string }).turnId;
-          // An agent's message is not the person's to edit or repeat: it offers Copy of its words.
-          const fromAgent = agentSenderOf(turn.userMsg) !== undefined;
+          // An agent's or a bot's message is not the person's to edit or repeat: it offers Copy of its words.
+          const fromAgent = agentOriginOfMessage(turn.userMsg) !== undefined;
           const editPrompt = fromAgent ? undefined : turnActionsForEdit?.editPrompt;
           return (
             <div
