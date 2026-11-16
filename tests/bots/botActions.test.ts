@@ -1543,3 +1543,21 @@ it('R2-3 every grant approval checks removal of the held pair in the grant trans
   f.store.approve(t.botId, botManifestDigest(removed), removed)
   expect(f.bots.actions.get(a.id)).toMatchObject({ status: 'withdrawn', exec_args: null })
 })
+
+it('R2-5 a timely Send remains running when the deadline passes', async () => {
+  const t = await setup(true)
+  let release!: () => void
+  const waiting = new Promise<void>(resolve => { release = resolve })
+  vi.spyOn(t.manager, 'callTool').mockImplementationOnce(async () => { await waiting; return { content: [{ type: 'text', text: 'delivered' }] } as never })
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  f.clock.now = Date.parse(a.expires_at) - 1000
+  const sending = f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  await flush()
+  f.clock.now += 2000
+  await f.bots.deliverDueReminders()
+  expect(f.bots.actions.get(a.id)?.status).toBe('running')
+  expect(() => f.bots.actions.assertRunning(a.id)).not.toThrow()
+  release(); await sending
+  expect(f.bots.actions.get(a.id)?.status).toBe('done')
+})
