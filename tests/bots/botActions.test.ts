@@ -1441,3 +1441,30 @@ it('B2 a running call cannot restore its forgotten content when its result arriv
   expect(f.store.message(a.message_id)?.text).toBe(forgottenText)
   expect(JSON.stringify(memory.actions(t.botId))).not.toContain('private delivered receipt')
 })
+
+it('B3 expiry is not a no and forgetting a declined card does not reset the loop', async () => {
+  const t = await setup(true)
+  let runtime = t.work
+  for (let n = 0; n < 3; n++) {
+    await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: `expires ${n}` }, toolCallId: `expires-${n}`, signal: new AbortController().signal })
+    await finish(f, runtime.payload)
+    const a = f.bots.actions.forWork(t.workId)!
+    // Move just the card's deadline: advancing three real deadlines would also end the work's week.
+    f.store.run('UPDATE bot_actions SET expires_at = ? WHERE id = ?', f.store.now(), a.id)
+    await f.bots.deliverDueReminders(); await flush()
+    runtime = await start(f, t.workId, f.store.lastMainDispatch(t.workId)!.n)
+  }
+  for (let n = 0; n < 3; n++) {
+    expect(await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: `declined ${n}` }, toolCallId: `declined-${n}`, signal: new AbortController().signal })).not.toMatchObject({ isError: true })
+    await finish(f, runtime.payload)
+    const a = f.bots.actions.forWork(t.workId)!
+    await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
+    await flush(); runtime = await start(f, t.workId, f.store.lastMainDispatch(t.workId)!.n)
+  }
+  const a = f.bots.actions.forWork(t.workId)!
+  const memory = new BotMemoryStore({ db: f.store.db })
+  const seq = memory.append({ botId: t.botId, sourceKey: `bm:${a.message_id}`, kind: 'notice', who: 'bot', text: 'declined call' })!
+  memory.forget(t.botId, { refs: [`j${seq}`], by: 'owner_ui' })
+  expect(await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'one more change' }, toolCallId: 'after-forget', signal: new AbortController().signal })).toMatchObject({ isError: true, text: expect.stringContaining('said no three times') })
+  expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(6)
+})
