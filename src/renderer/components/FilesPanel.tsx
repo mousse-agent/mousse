@@ -1,9 +1,9 @@
+import { registerFileTabCloser, setFileTabDirtyPaths } from '../services/fileTabs'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import Editor, { type BeforeMount, type OnMount } from '@monaco-editor/react'
 import type { Monaco } from '@monaco-editor/react'
 import type { editor } from 'monaco-editor'
 import { AlertTriangle, Eye, Pencil, Search, X } from '../lib/icons'
-import { setReferenceDragData } from '../../shared/chatReferences'
 import { useCommand } from '../commands/commandRegistry'
 import { useActiveProjectLocation, useFilesRoot } from '../hooks/useActiveProjectPath'
 import type { FileGrepMatch } from '../../shared/types'
@@ -26,9 +26,7 @@ import { FilesSearchField, FilesSearchResults, useFilesSearch, type FilesSearchO
 import { openLineDetail, type FilesSearchMode } from './filesSearchState'
 import { ResizablePanelSidebar } from './ResizablePanelSidebar'
 import { ensureProjectReferenceThread } from '../utils/chatLinks'
-import { filesEntryReference } from '../utils/fileReference'
 import { DelayedLoader } from './ui/DelayedLoader'
-import { TabBar } from './ui/TabBar'
 import './filesPanel.css'
 
 const REVALIDATE_MS = 2_000
@@ -119,7 +117,6 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
   const scope = fileWorkspaceScope(profileId, activeThreadId, projectId)
   const workspace = useFileWorkspaceStore((s) => s.workspaces[scope])
   const openFile = useFileWorkspaceStore((s) => s.openFile)
-  const activateFile = useFileWorkspaceStore((s) => s.activateFile)
   const closeFileInStore = useFileWorkspaceStore((s) => s.closeFile)
   const deactivateFile = useFileWorkspaceStore((s) => s.deactivateFile)
   const openPaths = workspace?.openPaths ?? []
@@ -532,10 +529,20 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
     saveBlockers.current.delete(key)
     if (current?.assetUrl) URL.revokeObjectURL(current.assetUrl)
     replaceFiles((all) => { const next = { ...all }; delete next[key]; return next })
-    if (panelRef.current?.querySelector('.files-editor-toolbar > .ui-tabs')?.contains(document.activeElement)) closedFromStrip.current = path
+    if (document.activeElement?.closest('.main-view-tabs')) closedFromStrip.current = path
     closeFileInStore(scope, path)
     return true
   }, [closeFileInStore, fileKey, flushPath, replaceFiles, scope])
+
+  useEffect(() => {
+    setFileTabDirtyPaths(scope, openPaths.filter((path) => {
+      const file = files[fileKey(path)]
+      return file && file.content !== file.savedContent
+    }))
+    return () => setFileTabDirtyPaths(scope, [])
+  }, [scope, openPaths, files, fileKey])
+
+  useEffect(() => registerFileTabCloser(scope, closeTab, filesRoot), [scope, closeTab, filesRoot])
 
   /**
    * Puts focus on the file's row in the tree, or on the first drawn row when the tree does not show it. The tree draws
@@ -556,8 +563,12 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
   useLayoutEffect(() => {
     const closed = closedFromStrip.current
     closedFromStrip.current = null
-    if (!closed || openPaths.length > 0) return
-    focusTreeRow(closed)
+    if (!closed) return
+    const target = openPaths.length > 0
+      ? document.querySelector<HTMLElement>('.main-view-tab-select[aria-current="page"]')
+      : document.querySelector<HTMLElement>('.main-view-tab-select[title="Files"]')
+    if (target) target.focus()
+    else focusTreeRow(closed)
   }, [focusTreeRow, openPaths.length])
 
   /** Hides the preview; the tree takes the width back and its row of the file takes focus. */
@@ -680,8 +691,8 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
       event.preventDefault()
       setPathEditRequest((request) => request + 1)
     }}>
-      {/* Until a file is picked the tree has the whole panel; the preview takes the saved split width back. */}
-      <ResizablePanelSidebar className="files-sidebar" defaultWidth={260} fill={!selectedPath}>
+      {/* Files is the browser tab; each picked file has its own sibling tab. */}
+      {!selectedPath && <ResizablePanelSidebar className="files-sidebar" defaultWidth={260} fill>
         <div className="files-sidebar-body">
         {/* The title and the search field share the row: one fades and slides out as the other comes in. */}
         <div className={`panel-toolbar files-header${searchOpen ? ' searching' : ''}`}>
@@ -710,30 +721,15 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
             onSelectFile={(path) => openFile(scope, normalizeWorkspacePath(joinFolder(browseRoot, path), filesRoot))} />
         </div>
         </div>
-      </ResizablePanelSidebar>
+      </ResizablePanelSidebar>}
       {selectedPath && <div className="files-editor" role="region" aria-label={selectedPath} onKeyDown={(event) => {
         // Escape closes the preview, except where a text field or the code editor uses it.
         if (event.key !== 'Escape' || event.defaultPrevented || typingTarget(event.target)) return
         event.preventDefault()
         closePreview()
       }}>
-        {/* The tab names the file (its tooltip has the full path), so the file's controls sit at the end of the tab row. */}
+        {/* The main tab row names the file; this row holds its editing controls. */}
         <div className="files-editor-toolbar">
-        {openPaths.length > 0 && <TabBar
-          label="Open files"
-          activeId={selectedPath}
-          tabs={openPaths.map((path) => {
-            const file = files[fileKey(path)]
-            const dirty = Boolean(file && file.content !== file.savedContent)
-            return { id: path, name: basename(path), title: dirty ? `${path} (unsaved)` : path, label: `${basename(path)}${dirty ? ' •' : ''}` }
-          })}
-          onSelect={(path) => activateFile(scope, path)}
-          onClose={closeTab}
-          onDragStart={(path, event) => {
-            setReferenceDragData(event.dataTransfer, filesEntryReference({ path, name: basename(path), kind: 'file', filesRoot, threadId: activeThreadId, projectId }))
-            event.dataTransfer.setData('text/plain', path)
-          }}
-        />}
           <div className="files-toolbar-actions">
             {supportsPreview && <div className="files-view-toggle" role="group" aria-label="File view">
               <button type="button" className={`btn btn-sm ${!selectedPreview ? 'active' : ''}`} onClick={() => selectedKey && setPreview((state) => ({ ...state, [selectedKey]: false }))}><Pencil size={13} /> Edit</button>
