@@ -67,7 +67,7 @@ export class BotTellings {
     const live = this.store.message(row.id)
     if (!live) return false
     const message = this.chat.toMessage(live)
-    return (!message.ask || message.ask.status === 'open') && (!message.question || message.question.status === 'open')
+    return (!message.action || message.action.status === 'open') && (!message.ask || message.ask.status === 'open') && (!message.question || message.question.status === 'open')
   }
   release(now: number): void {
     // One bulk maintenance transaction, including on legacy-only profiles. A receipt's message
@@ -162,7 +162,7 @@ export class BotTellings {
       return group.some(r => r.askId || r.questionId || r.error) ? `${name} needs you` : `${name} ${group.length} ${closed === 'While you were away' ? group.length === 1 ? 'update' : 'updates' : group.length === 1 ? 'message' : 'messages'}`
     }).join(' · ')
     const title = rows.length === 1 && closed !== 'While you were away' ? names[0]! : closed ? `${closed}: ${summary}` : `${names.join(', ')} · ${rows.length} messages`
-    this.emit({ id, rows: rows.map(r => ({ botId: r.botId, messageId: r.id, seq: r.seq, tell: r.tell! })), title, body, kind: first.ask || first.question ? 'question' : 'completed', sound })
+    this.emit({ id, rows: rows.map(r => ({ botId: r.botId, messageId: r.id, seq: r.seq, tell: r.tell! })), title, body, kind: first.action || first.ask || first.question ? 'question' : 'completed', sound })
     this.banners.set(id, rows)
   }
 }

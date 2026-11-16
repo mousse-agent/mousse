@@ -1054,6 +1054,7 @@ it('C4 action telling names the action without its arguments and holds soon in q
   const t = await setup(true)
   const end = f.clock.now + 3600_000
   f.host.quietHoursFor = () => ({ end }) as never
+  f.bots.markRead(t.botId, f.bots.service.chatList(t.botId).messages.at(-1)!.seq)
   f.bots.setTellingWindows(1)
   const events: any[] = []
   f.bots.events.on('tell', event => events.push(event))
