@@ -60,6 +60,8 @@ export class BotActions {
     const exact = JSON.stringify(args)
     if (actionDigest(JSON.parse(exact)) !== actionDigest(maskedActionData(args, Infinity)))
       return { text: 'This call contains hidden secret values. Nothing was held or sent. Remove the secret before asking the owner to review it.', isError: true }
+    if (actionDigest(JSON.parse(exact)) !== actionDigest(maskedActionData(args)))
+      return { text: 'These arguments are too long to review without being cut. Nothing was held or sent. Shorten them first.', isError: true }
     const id = `action_${randomUUID()}`
     const messageId = `bm_${id}`
     this.host.store.db.transaction(() => {
