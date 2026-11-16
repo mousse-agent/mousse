@@ -1281,3 +1281,22 @@ it.each(['failing', 'starting', 'cold restart'] as const)('B1 keeps a live card 
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
   expect(t.calls).toEqual([t.args])
 })
+
+it.each(['card', 'request'].flatMap(which => ['open', 'declined', 'done'].map(status => ({ which, status }))))('B2 Forget $which erases $status call text from the record and export', async ({ which, status }) => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  if (status !== 'open') await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: status === 'done' ? 'send' : 'not_now' })
+  const counters = JSON.parse(f.bots.actions.get(a.id)!.card_json!)
+  const request = f.store.all("SELECT id FROM bot_messages WHERE bot_id = ? AND author = 'owner' ORDER BY seq DESC", t.botId)[0]!
+  const id = which === 'card' ? a.message_id : String(request.id)
+  const memory = new BotMemoryStore({ db: f.store.db })
+  const seq = memory.append({ botId: t.botId, sourceKey: `bm:${id}`, kind: 'notice', who: 'bot', text: 'call' })!
+  memory.forget(t.botId, { refs: [`j${seq}`], by: 'owner_ui' })
+  const saved = f.bots.actions.get(a.id)!
+  expect(saved).toMatchObject({ args_json: '"[forgotten]"', result_json: '{"text":"[forgotten]"}' })
+  expect(JSON.parse(saved.card_json!)).toMatchObject({ text: '[forgotten]', ownerSeq: counters.ownerSeq ?? 0, noteSeq: counters.noteSeq ?? 0 })
+  expect(JSON.stringify(memory.actions(t.botId))).not.toContain('Exact text')
+  expect(JSON.stringify(memory.actions(t.botId))).not.toContain('one@example.test')
+  expect(saved.call_key).toBe(a.call_key)
+})
