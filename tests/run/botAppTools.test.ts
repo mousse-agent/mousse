@@ -72,6 +72,10 @@ function fakeBots(lane: BotLane = 'chat', options: { owner?: string; changes?: b
       stop: (_botId, watcherId) => watcherId === 'rem_w1'
     },
     wakes: {
+      wait: async (_botId, from, input) => {
+        wakes.push({ from, input })
+        return { wakeId: 'wait1', dueAt: input.dueAt ?? '2026-11-08T09:00:00.000Z', label: '' }
+      },
       add: async (_botId, from, input) => {
         wakes.push({ from, input })
         return { wakeId: `w${wakes.length}`, dueAt: input.dueAt ?? '2026-11-08T09:00:00.000Z', label: input.event?.kind === 'pr' ? `when ${input.event.repo}#${input.event.number} merges` : input.event ? 'when "Fix login" finishes' : '' }
@@ -93,7 +97,7 @@ function fakeBots(lane: BotLane = 'chat', options: { owner?: string; changes?: b
   const tools = new Map(botTools(() => deps).map((tool) => [tool.name, tool]))
   const ctx = (threadId = 'home', activationId = 'a1', appTools: readonly string[] = []): ToolCallContext => ({
     caller: { threadId, runId: 'r1', provider: 'pi', modeCeiling: 'default', accessLevel: 'lineage' },
-    turn: { threadId, bot: { activationId, appTools: new Set(appTools) } as unknown as BotAuthority } as ToolCallContext['turn'],
+    turn: { threadId, bot: { role: 'activation', activationId, appTools: new Set(appTools) } as unknown as BotAuthority } as ToolCallContext['turn'],
     toolCallId: 'call-1',
     signal: new AbortController().signal,
     transport: 'mcp'
@@ -385,7 +389,7 @@ describe('ask_owner (#1123)', () => {
 describe('registration', () => {
   it('lists the bot tools in the bots family, and WP6\'s memory tools beside them', () => {
     const { families } = createAppToolRegistry({ host: fakeAppToolHost().host, bots: () => undefined })
-    expect(families.bots).toEqual(['escalate', 'consult', 'telling_set', 'bot_schedule_add', 'schedule_done', 'bot_schedule_remove', 'bot_schedule_list', 'mcp_servers', 'set_profile', 'set_depth', 'work_start', 'work_models', 'work_list', 'work_stop', 'work_note', 'remind', 'wake', 'watch_start', 'watch_list', 'watch_stop', 'reminder_list', 'reminder_cancel', 'make_image', 'ask_owner', 'show_card', 'bot_list', 'bot_send', 'question_answer', 'use_model', 'subagent_start', 'subagent_send', 'subagent_wait', 'subagent_result', 'subagent_stop'])
+    expect(families.bots).toEqual(['escalate', 'consult', 'telling_set', 'bot_schedule_add', 'schedule_done', 'bot_schedule_remove', 'bot_schedule_list', 'mcp_servers', 'set_profile', 'set_depth', 'work_start', 'work_models', 'work_list', 'work_stop', 'work_note', 'remind', 'work_wait', 'wake', 'watch_start', 'watch_list', 'watch_stop', 'reminder_list', 'reminder_cancel', 'make_image', 'ask_owner', 'show_card', 'bot_list', 'bot_send', 'question_answer', 'use_model', 'subagent_start', 'subagent_send', 'subagent_wait', 'subagent_result', 'subagent_stop'])
     // With `botMemory`, WP6's memory tools follow them in the same family.
     const withMemory = createAppToolRegistry({ host: fakeAppToolHost().host, botMemory: { activationOf: () => undefined } })
     expect(withMemory.families.bots.slice(0, families.bots.length)).toEqual(families.bots)
@@ -472,4 +476,25 @@ describe('background commands', () => {
     expect(await bots.call('watch_stop', { watcherId: 'rem_w1' })).toMatchObject({ isError: true, text: expect.stringContaining('Only your chat') })
     expect(bots.watched).toEqual([])
   })
+})
+
+describe('work_wait', () => {
+  it('uses the same PR and time forms, with why as the continuation brief', async () => {
+    const bots = fakeBots('run')
+    expect((await bots.call('work_wait', { why: 'Read the checks', pr: 'acme/app#12', on: 'checks' }, { ...bots.ctx(), turn: { ...bots.ctx().turn, bot: { ...bots.ctx().turn.bot!, role: 'activation' } } })).isError).toBeFalsy()
+    expect(bots.wakes[0]?.input).toMatchObject({ brief: 'Read the checks', event: { kind: 'pr', repo: 'acme/app', number: 12, on: 'checks' } })
+    expect((await bots.call('work_wait', { why: 'Later', inMinutes: 30 }, { ...bots.ctx(), turn: { ...bots.ctx().turn, bot: { ...bots.ctx().turn.bot!, role: 'activation' } } })).isError).toBeFalsy()
+    expect(bots.wakes[1]?.input.dueAt).toBeDefined()
+  })
+  it('tells chat to use wake', async () => {
+    expect(await fakeBots().call('work_wait', { why: 'Later', inMinutes: 30 })).toMatchObject({ isError: true, text: expect.stringContaining('Use wake') })
+  })
+})
+it('work_wait gives subagents a usable refusal', () => {
+  const tool = botTools(() => undefined).find(tool => tool.name === 'work_wait')!
+  expect(tool.available?.({ bot: { role: 'subagent' } } as any)).toContain('subagent cannot park')
+})
+it('work_wait describes waiting rather than setting a chat wake', () => {
+  const tool = botTools(() => undefined).find(tool => tool.name === 'work_wait')!
+  expect(tool.describe({} as any)).toBe('Wait for a time or event')
 })

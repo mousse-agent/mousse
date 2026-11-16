@@ -46,8 +46,8 @@ describe('the chat is the front desk', () => {
     const workAllowed = work.prepared.policy.tools!.allow!
     expect(workAllowed).toContain('web_search')
     expect(workAllowed).toContain('web_fetch')
-    // Of the chat's work tools, work keeps only the list of models, which its subagents may run on.
-    for (const tool of BOT_WORK_TOOLS) if (tool !== 'work_models') expect(workAllowed).not.toContain(tool)
+    // Of the chat's work tools, work keeps its wait tool and the list of models, which its subagents may run on.
+    for (const tool of BOT_WORK_TOOLS) if (tool !== 'work_models' && tool !== 'work_wait') expect(workAllowed).not.toContain(tool)
     expect(workAllowed).toContain('work_models')
     expect(work.prepared.prompt).toContain('Compare three vacuums under £250.')
     expect(work.prepared.lane).toBe('run')
