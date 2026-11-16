@@ -208,8 +208,9 @@ it('offers work_wait only to work, including work from reminders', async () => {
   const chatTurn = f.store.laneActivations(botId, 'chat', ['running'])[0]!
   expect((await start(f, chatTurn.id)).prepared.policy.tools!.allow).not.toContain('work_wait')
   for (const kind of ['manual', 'schedule'] as const) {
-    f.store.run('UPDATE bot_activations SET trigger_json = ? WHERE id = ?', JSON.stringify({ kind, input: 'Check', ...(kind === 'schedule' ? { scheduleId: 's', occurrenceAt: f.store.now() } : {}) }), workId)
-    expect(f.bots.prepare(turn.payload)).toMatchObject({ policy: { tools: { allow: expect.not.arrayContaining(['work_wait']) } } })
-    await expect(wait(workId)).rejects.toThrow(kind === 'schedule' ? 'next run' : 'run started by hand')
+    const other = await f.bots.tools.work.start(botId, chatTurn.id, { title: kind, brief: 'Check', key: kind })
+    f.store.run('UPDATE bot_activations SET trigger_json = ? WHERE id = ?', JSON.stringify({ kind, input: 'Check', ...(kind === 'schedule' ? { scheduleId: 's', occurrenceAt: f.store.now() } : {}) }), other.workId)
+    expect((await start(f, other.workId)).prepared.policy.tools!.allow).not.toContain('work_wait')
+    await expect(wait(other.workId)).rejects.toThrow(kind === 'schedule' ? 'next run' : 'run started by hand')
   }
 })
