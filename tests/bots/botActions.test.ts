@@ -455,8 +455,8 @@ it.each([{ body: `sk-proj-${'A'.repeat(70)}` }])('S1 refuses arguments the owner
 })
 it('S2 refuses arguments that would be cut from the review', async () => {
   const t = await setup(true)
-  t.args.body = 'x'.repeat(32_001)
-  expect(await t.call()).toMatchObject({ isError: true, text: expect.stringMatching(/long|cut/i) })
+  t.args.body = 'x'.repeat(256_001)
+  expect(await t.call()).toMatchObject({ isError: true, text: expect.stringMatching(/limit|Send less/i) })
   expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
   expect(t.calls).toEqual([])
 })

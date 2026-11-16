@@ -14,6 +14,8 @@ export function botAsksFirst(settings?: Pick<MousseSettings, 'experimental'>): b
 export const actionDigest = (value: unknown): string => shortHash(canonicalJson(value), 64)
 const hiddenKey = (key: string): boolean => /(?:authorization|password|passwd|secret|token|apikey)$/i.test(key.replace(/[^a-z0-9]/gi, ''))
 export const ACTION_HIDDEN_VALUE = 'hidden · will be sent'
+/** Total serialized argument JSON, kept whole for review. */
+export const ACTION_MAX_ARGUMENT_CHARS = 256_000
 
 /** Mask before cutting, recursively: a cut must not split a credential before the mask sees it. */
 export function maskedActionData(value: unknown, limit = 32_000): unknown {
@@ -109,8 +111,8 @@ export class BotActions {
     if (containsCredential(args)) return { text: 'This contains something that looks like a secret. It is never sent through a tool this way. Send it without that value.', isError: true }
     const exact = JSON.stringify(args)
     const review = reviewArguments(args)
-    if (JSON.stringify(review.args).length > 32_000)
-      return { text: 'These arguments are too long to review without being cut. Nothing was held or sent. Shorten them first.', isError: true }
+    if (exact.length > ACTION_MAX_ARGUMENT_CHARS)
+      return { text: 'These arguments exceed the 256,000-character limit for a complete review. Nothing was held or sent. Send less.', isError: true }
     const id = `action_${randomUUID()}`
     const messageId = `bm_${id}`
     this.host.store.db.transaction(() => {
