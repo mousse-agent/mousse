@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { isKeyName } from '../../shared/automationKeys'
 import { SECRET_DAY_MS, type SecretEntryView, type SecretKeep } from '../../shared/secretRequests'
@@ -362,11 +362,15 @@ export class SecretVault {
         for (const folder of readdirSync(root)) {
           const files = wanted.get(folder)
           const path = join(root, folder)
-          if (!files) {
+          // Anything but a real folder (a file, a link) where a thread's folder goes is removed, and made again below:
+          // a copy is never written through a link to somewhere else.
+          if (!files || !lstatSync(path).isDirectory()) {
             rmSync(path, { recursive: true, force: true })
             continue
           }
-          for (const file of readdirSync(path)) if (!files.has(file)) rmSync(join(path, file), { recursive: true, force: true })
+          for (const file of readdirSync(path)) {
+            if (!files.has(file) || !lstatSync(join(path, file)).isFile()) rmSync(join(path, file), { recursive: true, force: true })
+          }
         }
       }
       if (!wanted.size) return

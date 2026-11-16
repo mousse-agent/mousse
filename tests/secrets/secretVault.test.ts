@@ -1,6 +1,6 @@
 // #595: how long a secret given in a thread is kept, which threads may use it, and what Settings and the saved-key list
 // show. Values are kept in the profile's secret store, and each thread that may use one gets a private copy to read.
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -89,7 +89,85 @@ describe('the secrets a thread asked for', () => {
     expect(copies()).toEqual(left)
   })
 
-  it('rewrites a copy when its value changes in the store, and never leaves a stray file in a thread folder', async () => {
+  // What the copies' folder may hold before a sync: [what is there, how it gets there]. Every sync leaves exactly the
+  // live threads' copies, whatever else was there.
+  const LEFTOVERS: Array<[string, (root: string) => void]> = [
+    ['a stray file where a thread folder goes', (root) => writeFileSync(join(root, 'notes.txt'), 'x')],
+    ['a file in place of the thread folder', (root) => { rmSync(join(root, 't1'), { recursive: true }); writeFileSync(join(root, 't1'), 'x') }],
+    ['a stray file in the thread folder', (root) => writeFileSync(join(root, 't1', 'OLD_TOKEN'), 'old')],
+    ['a folder inside the thread folder', (root) => mkdirSync(join(root, 't1', 'nested'), { recursive: true })],
+    ['the folder of a thread that has no secret', (root) => mkdirSync(join(root, 't9'), { recursive: true })]
+  ]
+  it.each(LEFTOVERS)('clears %s and still writes the copies', async (_what, plant) => {
+    await give('t1', 'saved')
+    plant(join(home, 'secrets', 'threads'))
+    writeProfileSecret(home, 'API_TOKEN', 'tok_new_value')
+    vault.refresh()
+    expect(readdirSync(join(home, 'secrets', 'threads'))).toEqual(['t1'])
+    expect(readdirSync(join(home, 'secrets', 'threads', 't1'))).toEqual(['API_TOKEN'])
+    expect(readFileSync(fileOf('t1'), 'utf8')).toBe('tok_new_value')
+  })
+
+  it('never writes a copy through a link to another folder', async () => {
+    await give('t1', 'saved')
+    const outside = mkdtempSync(join(tmpdir(), 'mousse-vault-outside-'))
+    try {
+      rmSync(join(home, 'secrets', 'threads', 't1'), { recursive: true })
+      // A junction on Windows (no special rights needed), a symbolic link elsewhere.
+      symlinkSync(outside, join(home, 'secrets', 'threads', 't1'), 'junction')
+      writeProfileSecret(home, 'API_TOKEN', 'tok_new_value')
+      vault.refresh()
+      expect(readdirSync(outside)).toEqual([])
+      expect(lstatSync(join(home, 'secrets', 'threads', 't1')).isDirectory()).toBe(true)
+      expect(readFileSync(fileOf('t1'), 'utf8')).toBe('tok_new_value')
+    } finally {
+      rmSync(outside, { recursive: true, force: true })
+    }
+  })
+
+  it.skipIf(process.platform === 'win32')('never writes a copy through a link in place of the copy', async () => {
+    await give('t1', 'saved')
+    const outside = join(mkdtempSync(join(tmpdir(), 'mousse-vault-outside-')), 'target')
+    try {
+      writeFileSync(outside, 'untouched')
+      rmSync(fileOf('t1'))
+      symlinkSync(outside, fileOf('t1'))
+      writeProfileSecret(home, 'API_TOKEN', 'tok_new_value')
+      vault.refresh()
+      expect(readFileSync(outside, 'utf8')).toBe('untouched')
+      expect(lstatSync(fileOf('t1')).isFile()).toBe(true)
+      expect(readFileSync(fileOf('t1'), 'utf8')).toBe('tok_new_value')
+    } finally {
+      rmSync(join(outside, '..'), { recursive: true, force: true })
+    }
+  })
+
+  it('keeps the exact value in the copy: line breaks, spaces and other scripts', async () => {
+    const value = '-----BEGIN KEY-----\r\n  ключ 鍵 =\n-----END KEY-----\n'
+    await give('t1', 'day', 'PEM_KEY', value)
+    expect(readFileSync(fileOf('t1', 'PEM_KEY'), 'utf8')).toBe(value)
+  })
+
+  it('gives no copy to a thread id that cannot name a folder, and writes nothing outside the folder', async () => {
+    alive.add('../escape')
+    expect(await give('../escape', 'day')).toEqual({ kind: 'stored', name: 'API_TOKEN', keep: 'day' })
+    expect(vault.fileFor('API_TOKEN', '../escape')).toBeUndefined()
+    expect(existsSync(join(home, 'secrets', 'escape'))).toBe(false)
+    expect(copies()).toEqual([])
+  })
+
+  it.skipIf(process.platform === 'win32')('makes the copies and their folders readable by this account only', async () => {
+    await give('t1', 'day')
+    for (const path of [join(home, 'secrets', 'threads'), join(home, 'secrets', 'threads', 't1'), fileOf('t1')]) {
+      expect({ path, othersMayRead: (statSync(path).mode & 0o077) !== 0 }).toEqual({ path, othersMayRead: false })
+    }
+    // A copy rewritten with a new value stays private.
+    writeProfileSecret(home, 'API_TOKEN', 'tok_new_value')
+    vault.refresh()
+    expect(statSync(fileOf('t1')).mode & 0o077).toBe(0)
+  })
+
+  it('rewrites a copy when its value changes in the store, and puts back a copy that was deleted', async () => {
     await give('t1', 'saved')
     writeProfileSecret(home, 'API_TOKEN', 'tok_new_value')
     vault.refresh()
