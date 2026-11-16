@@ -315,7 +315,7 @@ function EditLine({
         <button
           type="button"
           className={cn(
-            "an-edit-row-toggle flex items-center gap-2 min-w-0 text-left text-[14px] leading-[22px] text-muted-foreground rounded-sm",
+            "an-edit-row-toggle flex items-center gap-2 min-w-0 text-left text-[14px] leading-[22px] text-an-foreground-muted rounded-sm",
             "focus-visible:outline-none focus-visible:bg-an-foreground/10",
             canOpen ? "cursor-pointer" : "cursor-default",
           )}

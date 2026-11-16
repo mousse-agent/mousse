@@ -121,7 +121,7 @@ export function ToolRowBase({
       )}
     >
       <div
-        className={cn("flex gap-2 min-w-0 text-[14px] leading-[22px] text-muted-foreground", liveText ? "items-start" : "items-center")}
+        className={cn("flex gap-2 min-w-0 text-[14px] leading-[22px] text-an-foreground-muted", liveText ? "items-start" : "items-center")}
         // One sweep period for the label's shimmer.
         style={{ "--an-shimmer-duration": `${SHIMMER_DURATION_S}s` } as CSSProperties}
       >
