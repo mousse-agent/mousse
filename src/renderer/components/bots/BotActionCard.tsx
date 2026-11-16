@@ -117,7 +117,7 @@ export function BotActionCard({ card, botId, botName, messageId }: { card: BotAc
     {refusal && <p role="status" className="bot-action-notice"><Shield size={14} aria-hidden />{actionText(refusal.text).replace(/\s+/g, ' ')}</p>}
     {card.status === 'open' && <>
       {previous && <p role="note" className="bot-action-notice"><Shield size={14} aria-hidden />{actionText(botName)} {previous.status === 'done' ? 'already sent exactly this' : previous.status === 'failed' ? 'already tried exactly this; the tool reported an error' : "already tried exactly this and couldn't tell if it went through"} at {repeatedAt}</p>}
-      {card.hasHiddenValues && <div role="note" className="bot-action-notice"><Shield size={14} aria-hidden />Hidden values will be sent{card.hiddenPaths.length ? ': ' : ''}<HiddenPaths paths={card.hiddenPaths as unknown as string[][]} /></div>}
+      {card.hasHiddenValues && <div role="note" className="bot-action-notice"><Shield size={14} aria-hidden />Hidden values will be sent{card.hiddenPaths.length ? ': ' : ''}<HiddenPaths paths={card.hiddenPaths} /></div>}
       {card.tooLarge && <p role="note" className="bot-action-notice"><Shield size={14} aria-hidden />This action is too large to review on this device. Use the computer to review and send it.</p>}
       {error && <p role="alert" className="bot-action-notice"><Shield size={14} aria-hidden />{error}</p>}
       <div className="bot-ask-buttons" role="group" aria-label="Answer this action">

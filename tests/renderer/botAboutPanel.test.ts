@@ -451,7 +451,7 @@ it('formats stored telling hours in the window’s clock format', async () => {
 })
 
 it.each([true, false])('keeps whole-service controls with asks-first projection %s', async (asking) => {
-  fake.details.b1.permissions = [{ id: 'mail', title: 'use Mail', enabled: true, grantedAt: AT, note: asking ? 'Asks you first before it sends or changes anything' : 'Use the connected Mail service.', ...(asking ? { mark: 'Asks first' } : {}) }]
+  fake.details.b1.permissions = [{ id: 'mail', title: 'use Mail', enabled: true, grantedAt: AT, note: asking ? 'Asks you first before actions that can send or change things.' : 'Use the connected Mail service.', ...(asking ? { mark: 'Asks first' } : {}) }]
   await show()
   expect(host.textContent?.includes('Asks first')).toBe(asking)
   const title = [...host.querySelectorAll('span')].find((item) => item.title.includes(asking ? 'Asks you first' : 'connected Mail'))
