@@ -5,6 +5,7 @@ import { useSubagents } from '../../hooks/useSubagents'
 import { useNativeSubagents } from '../../hooks/useNativeSubagents'
 import { ChevronRight } from '../../lib/icons'
 import { openThread } from '../../lib/openThread'
+import { revealSubagent } from '../../stores/chatNavigationStore'
 import { ComputerBadgeView } from '../ComputerBadge'
 import { Collapse } from '../ui/Collapse'
 import { SubagentAvatar, useThreadProviderId } from '../SubagentAvatar'
@@ -172,16 +173,6 @@ export function LineageList({ subagents, now, inheritedProvider, open, onOpenPar
   )
 }
 
-/** Brings a native subagent's card into view in the conversation and opens it. */
-function revealNativeSubagent(callId: string): void {
-  const escaped = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(callId) : callId.replace(/["\\]/g, '\\$&')
-  const card = document.querySelector<HTMLElement>(`[data-native-subagent="${escaped}"]`)
-  if (!card) return
-  const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
-  card.scrollIntoView({ block: 'center', behavior: reduced ? 'auto' : 'smooth' })
-  card.querySelector<HTMLButtonElement>('button.subagent-card')?.focus({ preventScroll: true })
-}
-
 /** Lists the subagents the selected thread started. */
 export function LineageSection({ threadId }: SideCardSectionContext) {
   const subagents = useSubagents(threadId)
@@ -234,7 +225,8 @@ export function LineageSection({ threadId }: SideCardSectionContext) {
         open={open}
         onOpenPart={(part, value) => setOpenState({ threadId, parts: { ...open, [part]: value } })}
         onOpen={(id) => void openThread(id)}
-        onReveal={revealNativeSubagent}
+        // The transcript lands the card's turn, opens a folded group around it and opens the card.
+        onReveal={revealSubagent}
         onStop={(childThreadId) => void stopThreadNow(childThreadId)}
       />
     </SideCardSection>

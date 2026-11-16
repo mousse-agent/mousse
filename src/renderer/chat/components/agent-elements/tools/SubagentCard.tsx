@@ -12,6 +12,7 @@ import { Markdown } from "../markdown";
 import { GenericTool } from "./generic-tool";
 import { toolRegistry } from "./tool-registry";
 import { useInheritedProvider, useSubagentCard, useSubagentCards } from "./subagent-cards-context";
+import { useSubagentRevealSeq } from "../../../../stores/chatNavigationStore";
 import {
   cardElapsedLabel,
   cardGroupElapsedLabel,
@@ -192,6 +193,9 @@ export type NativeSubagentCardViewProps = {
  */
 export function NativeSubagentCardView({ card, now, nestedTools, chatStatus, inheritedProvider }: NativeSubagentCardViewProps) {
   const [open, setOpen] = useState(false);
+  // Lineage shows this subagent: the card opens on its result and calls, once per request.
+  const revealSeq = useSubagentRevealSeq([card.toolCallId]);
+  const [openedFor, setOpenedFor] = useState<number | null>(null);
   const title = cardTitle(card);
   const elapsed = cardElapsedLabel(card, now);
   const status = cardStatusLabel(card);
@@ -199,6 +203,10 @@ export function NativeSubagentCardView({ card, now, nestedTools, chatStatus, inh
   // The row's line is plain text; opened, the whole report keeps its Markdown.
   const fullResult = result?.trim() ?? "";
   const expandable = nestedTools.length > 0 || fullResult.length > 0;
+  if (revealSeq !== null && revealSeq !== openedFor) {
+    setOpenedFor(revealSeq);
+    if (expandable) setOpen(true);
+  }
   return (
     <div className="subagent-card-native" data-native-subagent={card.toolCallId}>
       <button
@@ -300,6 +308,13 @@ export function SubagentCardGroup({ toolCallIds, children }: { toolCallIds: read
   const running = models.length > 1 && models.some(isCardRunning);
   const now = useTick(running);
   const [chosenOpen, setChosenOpen] = useState<boolean | null>(null);
+  // Lineage shows a subagent in this group: the group opens so its card can be reached, once per request.
+  const revealSeq = useSubagentRevealSeq(toolCallIds);
+  const [openedFor, setOpenedFor] = useState<number | null>(null);
+  if (revealSeq !== null && revealSeq !== openedFor) {
+    setOpenedFor(revealSeq);
+    setChosenOpen(true);
+  }
   if (models.length < 2) return <div className="subagent-cards">{children}</div>;
   // Folded until the user opens it.
   const open = chosenOpen ?? false;
