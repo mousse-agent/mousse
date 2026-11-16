@@ -15,6 +15,7 @@ import {
   MMS_PROTOCOL_CHUNK_CAPABILITY,
   MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS,
   MMS_PROTOCOL_GIT_OPERATION_TIMEOUT_MS,
+  MMS_PROTOCOL_COMPACT_TIMEOUT_MS,
   MMS_PROTOCOL_LOGIN_TIMEOUT_MS,
   MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES,
   MMS_PROTOCOL_MAX_PENDING_REQUESTS,
@@ -72,6 +73,8 @@ export function requestTimeoutFor(method: string): number {
   if (GIT_MUTATION_METHODS.has(method) || method === 'pullRequests.startThread') return MMS_PROTOCOL_GIT_OPERATION_TIMEOUT_MS
   // A heap snapshot of a large service takes a while to write.
   if (method === 'diagnostics.memory.heapSnapshot') return MMS_PROTOCOL_GIT_OPERATION_TIMEOUT_MS
+  // Answers when the compaction ended: up to the service's own time limit for it.
+  if (method === 'threads.compact') return MMS_PROTOCOL_COMPACT_TIMEOUT_MS
   return MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS
 }
 

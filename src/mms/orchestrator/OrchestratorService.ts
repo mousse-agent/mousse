@@ -48,6 +48,7 @@ import {
   type ScheduledJobIngress
 } from '../platform/MmsWorkflowChat'
 import { DomainRpcError } from '../protocol/domainRegistry'
+import { CONTEXT_COMPACTION_TIME_LIMIT_MS } from '../protocol/types'
 import { AgentExecutionService } from '../agentDefinitions/AgentExecutionService'
 import {
   createDefinitionRuntime,
@@ -141,7 +142,7 @@ import type { RemoteLaunchRecord } from '../run/delegation/remoteLaunches'
 import { RemoteSubagents } from './RemoteSubagents'
 import type { RemoteComputersPort } from '../protocol/remoteComputersPort'
 import { MAX_REMOTE_MINUTES } from '../run/mcp/appTools/delegation'
-import { isRunningSubagent, type BackgroundTaskNoticeItem, type SubagentNoticeItem, type SubagentSummary } from '../../shared/subagents'
+import { isRunningSubagent, isWorkingSubagent, type BackgroundTaskNoticeItem, type SubagentNoticeItem, type SubagentSummary } from '../../shared/subagents'
 import type { SettleNoticeItem } from '../../shared/settleNotice'
 import type { DelegationRequest, ForkPointSeed, ThreadCreation } from '../run/RunEngine'
 import type { HandoffItem } from '../run/handoff/budget'
@@ -997,8 +998,6 @@ function runningThreadInfo(thread: Thread | undefined, botOf: (threadId: string)
  * records it.
  */
 const STOPPED_TURN_CHECKPOINT_WAIT_MS = 20_000
-/** How long `/compact` waits for a runtime's own compaction; after it the compaction stops and the full history stays. */
-const NATIVE_COMPACT_TIMEOUT_MS = 5 * 60_000
 /** The compaction row of a `/compact` that was stopped or ran out of time. */
 const COMPACTION_STOPPED_TEXT = 'Compaction stopped · full history kept'
 
@@ -2184,7 +2183,7 @@ export class OrchestratorService extends EventEmitter {
   /** Running compactions whose result was taken: a Stop or Send now comes too late for them. */
   private readonly takenCompactions = new WeakSet<AbortController>()
   /** How long a `/compact` waits for the runtime's own compaction (tests shorten it). */
-  private nativeCompactTimeoutMs = NATIVE_COMPACT_TIMEOUT_MS
+  private nativeCompactTimeoutMs = CONTEXT_COMPACTION_TIME_LIMIT_MS
   /** How often a running compaction renews its saved queue hold (tests shorten it). */
   private queueHoldRenewMs = QUEUE_HOLD_RENEW_MS
   /** The clock saved queue holds are renewed and judged by (tests move it). */
@@ -15762,6 +15761,20 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
+   * Why the thread's context cannot be compacted now, or nothing: a turn is running on it, or a subagent it started is
+   * working (its result comes back to this thread's conversation). One paused on a usage limit or waiting for an
+   * answer does not hold the compaction back. Checked before a compaction starts, so it never
+   * starts beside work in progress. A run of the thread (another compaction, an Undo) is refused by `threads.compact`.
+   */
+  compactionRefusal(threadId: string): string | undefined {
+    const session = this.sessions.get(threadId)
+    if (session?.isTurnRunning()) return 'Wait for the turn to finish before compacting.'
+    if (this.runEngine && this.subagentView(threadId).some(isWorkingSubagent))
+      return "Wait for this thread's subagents to finish before compacting."
+    return undefined
+  }
+
+  /**
    * `/compact`: compacts the thread's context now. The runtime's own compaction of its native session comes
    * first (Claude Code's `/compact`, Codex's `thread/compact/start`); Mousse compacts its own copy when the
    * runtime has none, holds no session for this history, or fails. `focus` says what the summary keeps.
@@ -15771,7 +15784,8 @@ export class OrchestratorService extends EventEmitter {
    */
   async compactConversationContext(threadId: string, focus?: string): Promise<'native' | 'compacted' | 'unchanged' | 'stopped'> {
     const session = this.getOrCreateSession(threadId)
-    if (session.isTurnRunning()) throw new Error('Cannot compact the context while a turn is running.')
+    const refusal = this.compactionRefusal(threadId)
+    if (refusal) throw new Error(refusal)
     if (this.compactions.has(threadId)) throw new Error('The context is already being compacted.')
     const stop = new AbortController()
     this.compactions.set(threadId, stop)

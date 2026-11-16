@@ -128,6 +128,20 @@ export interface SubagentsUpdatedEvent {
 /** States of a subagent that has not finished: it is working, queued, needs input, or waits on its own subagents. */
 const RUNNING_SUBAGENT_STATES: ReadonlySet<SubagentState> = new Set<SubagentState>(['needs_input', 'queued', 'starting', 'working', 'paused', 'waiting'])
 
+/** States of a subagent doing work now: its run is queued, starting or working. */
+const WORKING_SUBAGENT_STATES: ReadonlySet<SubagentState> = new Set<SubagentState>(['queued', 'starting', 'working'])
+
+/**
+ * True while a subagent is doing work now, unlike `isRunningSubagent`: one paused on a usage limit or waiting for a
+ * person's answer is not, however long that lasts. One waiting on subagents of its own is while one of those works
+ * (or while it waits on something that is not a subagent).
+ */
+export function isWorkingSubagent(subagent: Pick<SubagentSummary, 'state' | 'waitingOn'>): boolean {
+  if (WORKING_SUBAGENT_STATES.has(subagent.state)) return true
+  if (subagent.state !== 'waiting') return false
+  return subagent.waitingOn.length === 0 || subagent.waitingOn.some((entry) => entry.state === 'waiting' || WORKING_SUBAGENT_STATES.has(entry.state))
+}
+
 /** True while a subagent is still going, so a list can count it as "running". */
 export function isRunningSubagent(subagent: Pick<SubagentSummary, 'state'>): boolean {
   return RUNNING_SUBAGENT_STATES.has(subagent.state)
