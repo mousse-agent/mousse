@@ -1613,3 +1613,17 @@ it('R2-5 accepts Send before refreshing tools so the timer cannot overtake it', 
   expect(t.calls).toEqual([t.args])
   expect(f.bots.actions.get(a.id)?.status).toBe('done')
 })
+
+it('R2-3 revoking a grant withdraws its held pair in the same transaction', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  const grant = f.store.activeGrant(t.botId)!
+  f.store.db.statement(`CREATE TRIGGER fail_revoke_card BEFORE UPDATE ON bot_messages WHEN OLD.id = '${a.message_id}' BEGIN SELECT RAISE(ABORT, 'card failure'); END`).run()
+  expect(() => f.store.revoke(t.botId)).toThrow()
+  expect(f.store.activeGrant(t.botId)).toEqual(grant)
+  expect(f.bots.actions.get(a.id)?.status).toBe('open')
+  f.store.db.statement('DROP TRIGGER fail_revoke_card').run()
+  f.store.revoke(t.botId)
+  expect(f.bots.actions.get(a.id)).toMatchObject({ status: 'withdrawn', exec_args: null })
+})
