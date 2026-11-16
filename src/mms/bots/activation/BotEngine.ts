@@ -8751,7 +8751,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         }
         // Questions answered, withdrawn or purged since their follow-up failed are no longer tried.
         for (const id of this.questionRetryAt.keys()) if (this.store.question(id)?.status !== 'open' && this.actions.get(id)?.status !== 'open') this.questionRetryAt.delete(id)
-        for (const question of [...this.store.dueQuestions(now.toISOString()), ...this.actionNudgeFollowUps().filter(row => row.at <= now.getTime())]) {
+        for (const question of [...this.store.dueQuestions(now.toISOString()), ...this.actionNudgeFollowUps(undefined, now.getTime()).filter(row => row.at <= now.getTime())]) {
           if ((this.questionRetryAt.get(question.id) ?? 0) > now.getTime()) continue
           try {
             await this.followUpQuestion(question, now)
@@ -8887,7 +8887,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /** Durable nudge rows carry the count; telling receipts carry the clock, never executable arguments. */
-  private actionNudgeFollowUps(botId?: string): ActionNudgeFollowUp[] {
+  private actionNudgeFollowUps(botId?: string, now = this.now()): ActionNudgeFollowUp[] {
     if (!botAsksFirst(this.host.settings?.get())) return []
     const rows = this.store.all(`SELECT a.id, a.bot_id, a.activation_id, a.message_id, a.expires_at FROM bot_actions a
       JOIN bot_registry b ON b.bot_id = a.bot_id JOIN bot_messages m ON m.id = a.message_id
@@ -8902,7 +8902,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const legacy = this.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', bot, `cursor:action-told:${source.id}`)
       const toldAt = legacy?.value ?? source.toldAt
       if (typeof toldAt !== 'string') return []
-      const due = Math.max(this.now(), Date.parse(toldAt) + (first ? NUDGE_AGAIN_MS : DEFAULT_NUDGE_AFTER_MINUTES * 60_000))
+      const due = Math.max(now, Date.parse(toldAt) + (first ? NUDGE_AGAIN_MS : DEFAULT_NUDGE_AFTER_MINUTES * 60_000))
       const at = this.followUpTime(bot, nudgeSlot(due, this.nudgeTimes(bot, due)))
       if (!Number.isFinite(at) || at >= Date.parse(String(row.expires_at))) return []
       return [{ id, actionId: id, botId: bot, activationId: String(row.activation_id), messageId, count: first ? 2 : 1, at }]
@@ -8910,7 +8910,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   private nudgeAction(question: ActionNudgeFollowUp, now: Date): void {
-    const live = this.actionNudgeFollowUps(question.botId).find(row => row.id === question.id)
+    const live = this.actionNudgeFollowUps(question.botId, now.getTime()).find(row => row.id === question.id)
     if (!live || live.at > now.getTime()) return
     this.store.db.transaction(() => {
       const action = this.actions.get(live.actionId)
