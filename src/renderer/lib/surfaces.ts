@@ -2,6 +2,7 @@ import type { CommandId } from '../../shared/commands'
 import type { MainView } from '../../shared/types'
 import type { BrowserTabState, ProjectTerminalTab } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'
+import { fileWorkspaceScope, useFileWorkspaceStore } from '../stores/filesStore'
 import type { TerminalLocation } from './folderLabel'
 
 export interface SurfaceChoice {
@@ -41,10 +42,15 @@ export function surfaceTabItems(input: {
   terminals: ProjectTerminalTab[]
   browsers: BrowserTabState[]
   documents: Array<{ id: string; title: string }>
+  files?: readonly string[]
   /** Each terminal's folder, by tab id (see `terminalLocations`). */
   terminalLocations?: Record<string, TerminalLocation>
 }): SurfaceTabItem[] {
   const items: SurfaceTabItem[] = []
+  const appendFiles = () => input.files?.forEach((path) => items.push({
+    key: `files:${path}`, view: 'files', label: path.replace(/\\/g, '/').split('/').pop() || path,
+    title: path, resourceId: path, closable: true
+  }))
   for (const kind of input.opened) {
     if (kind === 'terminal') {
       // Numbered by position from the second: "Terminal", "Terminal 2", ...
@@ -77,12 +83,14 @@ export function surfaceTabItems(input: {
       })
     } else if (kind === 'files') {
       items.push({ key: 'files', view: 'files', label: 'Files', closable: true })
+      appendFiles()
     } else if (kind === 'git') {
       items.push({ key: 'git', view: 'git', label: 'Changes', closable: true })
     } else if (kind === 'pullRequest') {
       items.push({ key: 'pullRequest', view: 'pullRequest', label: 'Pull request', closable: true })
     }
   }
+  if (!input.opened.includes('files')) appendFiles()
   input.documents.forEach((tab) => {
     items.push({
       key: `documents:${tab.id}`,
@@ -98,6 +106,10 @@ export function surfaceTabItems(input: {
 export function openSurface(kind: MainView, another = false): void {
   const store = useAppStore.getState()
   const threadId = store.activeThreadId
+  if (kind === 'files') {
+    const projectId = store.threads.find((thread) => thread.id === threadId)?.projectId
+    useFileWorkspaceStore.getState().deactivateFile(fileWorkspaceScope(store.profileId, threadId, projectId))
+  }
   if (kind === 'terminal') {
     const visible = store.projectTerminalTabs.filter(
       (tab) => tab.ownerThreadId === threadId || tab.ownerThreadId === null

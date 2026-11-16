@@ -1,3 +1,9 @@
+import { MarkdownFileSpeechControls } from '../readAloud/MarkdownFileSpeechControls'
+import { setReferenceDragData } from '../../shared/chatReferences'
+import { filesEntryReference } from '../utils/fileReference'
+import { useFileWorkspaceStore } from '../stores/filesStore'
+import { closeFileTab, fileTabRoot, useFileTabStatus } from '../services/fileTabs'
+import { useActiveFileWorkspace } from '../hooks/useActiveFileWorkspace'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { MainView } from '../../shared/types'
@@ -56,7 +62,10 @@ export function MainViewTabs() {
     node: tab.ownerThreadId ? threads.find((thread) => thread.id === tab.ownerThreadId)?.node : undefined
   }))
   const { byNode } = useComputers(terminalNodes.some((entry) => entry.node))
+  const { scope, workspace } = useActiveFileWorkspace()
+  const dirtyPaths = useFileTabStatus((s) => s.dirtyPaths[scope])
   const items = surfaceTabItems({
+    files: workspace?.openPaths,
     opened,
     terminals: visibleTerminals,
     browsers: visibleBrowsers,
@@ -105,6 +114,11 @@ export function MainViewTabs() {
     const store = useAppStore.getState()
     store.setMainView(item.view)
     store.setMainAreaOpen(true)
+    if (item.view === 'files') {
+      const files = useFileWorkspaceStore.getState()
+      if (item.resourceId) files.activateFile(scope, item.resourceId)
+      else files.deactivateFile(scope)
+    }
     if (item.view === 'terminal' && item.resourceId) {
       store.setActiveProjectTerminalTab(store.activeThreadId, item.resourceId)
     }
@@ -118,6 +132,10 @@ export function MainViewTabs() {
 
   const close = (item: SurfaceTabItem) => {
     const store = useAppStore.getState()
+    if (item.view === 'files' && item.resourceId) {
+      void closeFileTab(scope, item.resourceId)
+      return
+    }
     if (item.view === 'terminal' && item.resourceId) {
       const tab = store.projectTerminalTabs.find((entry) => entry.id === item.resourceId)
       if (tab?.ptyId) void window.mousse.pty.kill(tab.ptyId, tab.ownerThreadId ?? undefined).catch(() => {})
@@ -147,6 +165,7 @@ export function MainViewTabs() {
     if (item.view !== mainView) return false
     if (item.view === 'terminal') return item.resourceId === activeTerminalId || (!activeTerminalId && item === items.find((entry) => entry.view === 'terminal'))
     if (item.view === 'browser') return item.resourceId === activeBrowserId || (!activeBrowserId && item === items.find((entry) => entry.view === 'browser'))
+    if (item.view === 'files') return (item.resourceId ?? null) === (workspace?.activePath ?? null)
     if (item.view === 'documents') return item.resourceId === activeDocumentId
     return true
   }
@@ -163,13 +182,20 @@ export function MainViewTabs() {
     <div className="header">
     <nav className="main-view-tabs" aria-label="Main area view">
       {items.map((item) => {
-        const Icon = item.everyThread ? BrowserTab : TAB_ICONS[item.view]
+        const Icon = item.everyThread ? BrowserTab : item.view === 'files' && item.resourceId ? FileText : TAB_ICONS[item.view]
+        const dirty = item.view === 'files' && item.resourceId && dirtyPaths?.includes(item.resourceId)
         const selected = active(item)
         const name = item.detail ? `${item.label} · ${item.detail}` : item.label
         return (
           <div
             key={item.key}
             className={`main-view-tab${selected ? ' active' : ''}`}
+            onKeyDown={(event) => {
+              if (item.view === 'files' && item.resourceId && event.key === 'Delete') {
+                event.preventDefault()
+                close(item)
+              }
+            }}
             // Middle-click closes a tab; stopping the press keeps Chromium's autoscroll away.
             onMouseDown={item.closable ? (event) => { if (event.button === 1) event.preventDefault() } : undefined}
             onAuxClick={item.closable ? (event) => { if (event.button === 1) close(item) } : undefined}
@@ -179,13 +205,22 @@ export function MainViewTabs() {
               className="main-view-tab-select"
               aria-current={selected ? 'page' : undefined}
               aria-label={item.detail ? name : undefined}
-              title={item.title ?? (item.everyThread ? 'Kept in every thread' : undefined)}
+              title={dirty ? `${item.title} (unsaved)` : item.title ?? (item.everyThread ? 'Kept in every thread' : item.label)}
+              draggable={item.view === 'files' && Boolean(item.resourceId)}
+              onDragStart={item.view === 'files' && item.resourceId ? (event) => {
+                setReferenceDragData(event.dataTransfer, filesEntryReference({
+                  path: item.resourceId!, name: item.label, kind: 'file', filesRoot: fileTabRoot(scope),
+                  threadId: activeThreadId, projectId: threads.find((thread) => thread.id === activeThreadId)?.projectId ?? null
+                }))
+                event.dataTransfer.setData('text/plain', item.resourceId!)
+              } : undefined}
               onClick={() => void select(item)}
             >
               <Icon size={14} strokeWidth={2} className="main-view-tab-icon" />
-              <span className="main-view-tab-label">{item.label}</span>
+              <span className="main-view-tab-label">{item.label}{dirty ? ' •' : ''}</span>
               {item.detail && <span className="main-view-tab-detail">{item.detail}</span>}
             </button>
+            {item.view === 'files' && item.resourceId && <MarkdownFileSpeechControls scope={scope} path={item.resourceId} />}
             {item.closable && (
               <button
                 type="button"

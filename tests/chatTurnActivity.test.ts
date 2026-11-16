@@ -101,6 +101,19 @@ describe('a tool call group', () => {
     expect(html).toMatch(/data-find-text[^>]*>[\s\S]*Now the fix\./)
   })
 
+  it("shows the thinking icon when a thought is its title, and the tools' icon when its calls are", () => {
+    /** The markup of the tool row whose line holds `title`, from the row's start to the title: its icon. */
+    const rowOf = (html: string, title: string) => {
+      const chunk = html.split('an-tool-chrome').find((part) => part.includes(title)) ?? ''
+      return chunk.slice(0, chunk.indexOf(title))
+    }
+    const titled = render([user, thought('t1', 'Find the start script', 'output-available'), command('c1'), command('c2')], 'streaming')
+    expect(rowOf(titled, 'Find the start script')).toContain('thinking-icon')
+    const counted = render([user, command('c1'), command('c2')], 'streaming')
+    expect(rowOf(counted, 'Ran 2 commands')).not.toBe('')
+    expect(rowOf(counted, 'Ran 2 commands')).not.toContain('thinking-icon')
+  })
+
   it('is titled with its latest thought when it holds only thoughts', () => {
     const html = render([user, thought('t1', 'Look around', 'output-available'), thought('t2', 'Check the order', 'output-available')], 'streaming')
     expect(text(html)).toContain('Check the order')

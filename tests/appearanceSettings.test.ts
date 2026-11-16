@@ -62,10 +62,12 @@ describe('appearance settings', () => {
     expect(normalizeAppearance({ chatWidth: 'huge' as never }).chatWidth).toBe('normal')
   })
 
-  it('tints threads with project colors by default and keeps an explicit choice', () => {
-    expect(getDefaultSettings().appearance.threadProjectColors).toBe(true)
-    expect(normalizeAppearance({}).threadProjectColors).toBe(true)
-    expect(normalizeAppearance({ threadProjectColors: false }).threadProjectColors).toBe(false)
+  it.each([
+    [undefined, 'fill'], [true, 'fill'], [false, 'off'],
+    ['off', 'off'], ['outline', 'outline'], ['fill', 'fill'], ['gradient', 'gradient'],
+    ['unknown', 'fill'], [null, 'fill']
+  ])('normalizes project color style %s to %s', (value, expected) => {
+    expect(normalizeAppearance({ threadProjectColors: value } as never).threadProjectColors).toBe(expected)
   })
 
   it('migrates legacy acrylic theme ids', () => {
@@ -78,7 +80,7 @@ describe('appearance settings', () => {
       replyPacing: true,
       interfaceFont: { source: 'default' },
       codeFont: { source: 'default' },
-      threadProjectColors: true,
+      threadProjectColors: 'fill',
       threadPathInTitleBar: true,
       animationSpeed: 'normal',
       turnChangedFiles: 'summary',

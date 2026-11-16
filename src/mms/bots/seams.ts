@@ -171,6 +171,8 @@ export interface BotToolHost {
     start(botId: string, from: string, input: { command: string; brief: string; title?: string; match?: string; minutes?: number }): { watcherId: string; until: string }
     list(botId: string): Array<{ id: string; title: string; command: string; match?: string; startedAt: string; until: string; lastLine?: string }>
     stop(botId: string, watcherId: string): boolean
+    /** All of one command's kept output, while it runs and for a while after it ended (`watch_list` with its id). */
+    output?(botId: string, watcherId: string): import('./watchers').WatcherOutput | undefined
   }
 }
 

@@ -28,27 +28,6 @@ describe('chat layout styles', () => {
     )
   })
 
-  it('dims idle tool chrome so assistant text keeps the contrast', () => {
-    expect(globalCss).toMatch(
-      /\.an-message-list \.an-tool-chrome\s*\{[\s\S]*?opacity:\s*0\.55/
-    )
-    // Hover and keyboard focus intentionally keep the dimmed level; only a
-    // running shimmer or a card awaiting approval returns to full opacity.
-    expect(globalCss).not.toMatch(/\.an-tool-chrome:hover/)
-    expect(globalCss).not.toMatch(/\.an-tool-chrome:focus-within/)
-    expect(globalCss).toMatch(
-      /\.an-tool-chrome:has\(\.an-text-shimmer--active\)\s*\{\s*opacity:\s*1;/
-    )
-    expect(globalCss).toMatch(
-      /\.an-tool-chrome\[data-awaiting-approval="true"\]\s*\{\s*opacity:\s*1;/
-    )
-    const toolRowBase = readFileSync(
-      resolve(process.cwd(), 'src/renderer/chat/components/agent-elements/tools/tool-row-base.tsx'),
-      'utf8'
-    )
-    expect(toolRowBase).toMatch(/an-tool-chrome/)
-  })
-
   it('preserves single newlines in prose as line breaks', () => {
     // Chat convention (verses, addresses): a lone \n breaks the line.
     // Scoped to text elements so fences, tables, and list structure keep

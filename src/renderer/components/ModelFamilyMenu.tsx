@@ -75,7 +75,7 @@ interface ModelFamilyMenuProps {
    * inside it (hover, search, rail, the footer's menus) changes its size. `render` draws the column
    * beside the list for the highlighted model (none when a search finds nothing), or returns null when
    * none of `all` (every model the picker lists) has any; `footer` draws the bar under the whole
-   * picker; `pick` turns the id the menu would select for a model into the one it selects. `rows` is how
+   * picker, and stays (empty for the highlighted model) while any of `all` has something to show in it; `pick` turns the id the menu would select for a model into the one it selects. `rows` is how
    * many rows the column keeps room for (the most any of `all` needs), so hovering a model with fewer
    * never shrinks the picker; the column's own content never sizes it.
    */
@@ -83,7 +83,7 @@ interface ModelFamilyMenuProps {
     pick: (target: ModelPickTarget) => string
     render: (target: ModelPickTarget | undefined, all: ModelPickTarget[]) => ReactNode
     rows?: (all: ModelPickTarget[]) => number
-    footer?: (target: ModelPickTarget | undefined) => ReactNode
+    footer?: (target: ModelPickTarget | undefined, all: ModelPickTarget[]) => ReactNode
   }
 }
 
@@ -533,7 +533,7 @@ function ProfileModelFamilyMenu({
   const highlightedTarget = runSettings && highlightedEntry ? targetOf(highlightedEntry) : undefined
   const runColumn = runSettings ? runSettings.render(highlightedTarget, allTargets) : null
   const runRows = runSettings?.rows ? runSettings.rows(allTargets) : 0
-  const runFooter = runSettings?.footer ? runSettings.footer(highlightedTarget) : null
+  const runFooter = runSettings?.footer ? runSettings.footer(highlightedTarget, allTargets) : null
   const footerRef = useRef<HTMLDivElement>(null)
 
   const clearHoverTimer = () => {

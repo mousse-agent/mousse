@@ -67,8 +67,9 @@ const line = () => host.querySelector<HTMLElement>('[data-turn-progress]')
 /** The line's label; what a running call works on follows it, dim (`.turn-progress-detail`). */
 const lineText = () => line()?.querySelector('.turn-progress-label')?.textContent ?? ''
 const lineDetail = () => line()?.querySelector('.turn-progress-detail')?.textContent ?? null
-/** Reasoning rows and groups in the last turn, not the rows inside a group: their header buttons. */
-const reasoningRows = () => [...host.querySelectorAll<HTMLButtonElement>('.turn-answer button[aria-expanded]')].filter((button) => button.querySelector('svg.thinking-icon') && !button.closest('.an-tool-group-rows'))
+/** Reasoning rows and groups of thoughts in the last turn, not the rows inside a group: their header buttons. A group
+ * of calls titled by a thought shows the thinking icon too, with what its calls did after a "·"; it is not one. */
+const reasoningRows = () => [...host.querySelectorAll<HTMLButtonElement>('.turn-answer button[aria-expanded]')].filter((button) => button.querySelector('svg.thinking-icon') && !button.closest('.an-tool-group-rows') && !button.textContent!.includes('·'))
 const reasoningRow = (title: string) => {
   const row = reasoningRows().find((button) => button.textContent!.startsWith(title))
   if (!row) throw new Error(`no reasoning row ${title}: ${reasoningRows().map((button) => button.textContent).join(' | ')}`)

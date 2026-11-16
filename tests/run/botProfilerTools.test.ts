@@ -117,7 +117,9 @@ describe('a bot\'s profiler tools ("use the profiler")', () => {
     ['a chat turn: all but the minutes-long watch', { botTools: { frontDesk: true } }, BOT_PROFILER_CHAT_TOOLS],
     ['a bot without the permission', { grant: [] }, []],
     ['a consult', { botTools: { profiler: undefined } }, []],
-    ['a subagent of its work', { botTools: { subagent: true } }, []]
+    // A thread's subagent may read the profiler, so a bot's work's subagent may too, within the grant.
+    ['a subagent of its work', { botTools: { subagent: true } }, BOT_PROFILER_TOOLS],
+    ['a subagent compiled without it', { botTools: { subagent: true, profiler: undefined } }, []]
   ]
   it.each(lanes)('%s', async (_name, options, shown) => {
     const { compiled, listed } = await world(options)

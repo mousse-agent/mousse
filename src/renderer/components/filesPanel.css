@@ -1,6 +1,5 @@
-/* One row above the file: its tab strip, then its controls (view switch, save state, close) at the end. */
+/* File controls below the main tab row. */
 .files-editor-toolbar { display: flex; flex: 0 0 auto; align-items: center; min-width: 0; border-bottom: 1px solid var(--border-subtle); }
-.files-editor-toolbar > .ui-tabs { flex: 1 1 auto; border-bottom: 0; }
 .files-editor-toolbar > .files-toolbar-actions { flex: none; margin-left: auto; padding: 0 6px 0 4px; }
 .files-save-status { white-space: nowrap; font-size: 11px; color: var(--text-secondary); }
 .files-save-status.error, .files-save-status.conflict { color: var(--danger); }

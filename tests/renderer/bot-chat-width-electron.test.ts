@@ -2,7 +2,8 @@
  * A narrow bot chat in a real Chromium window, with the app's CSS: replies whose bubbles fill their width never give the
  * transcript a sideways scrollbar. Their tools (reactions, Read aloud, Copy, Reply) hang off the bubble's right edge;
  * hidden they take no width, and shown (a real pointer on the reply, or Tab through them to Copy and Reply) they sit inside the
- * transcript, also when it narrows while they are open.
+ * transcript, also when it narrows while they are open. The reaction row they open is drawn over the messages below it:
+ * each emoji is what the pointer finds at its centre.
  */
 import { spawn, type ChildProcess } from 'node:child_process'
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
@@ -22,14 +23,15 @@ const NO_MICROPHONE: Plugin = { name: 'no-microphone', setup(builder) {
 
 type Measured = { width: number; scrollWidth: number; clientWidth: number; open?: boolean; over?: number }
 type AppletWidth = { reply: number; applet: number; bubble: number }
+type Hits = { total: number; overLater: number; misses: string[] }
 type Evidence = {
   hidden: Measured; hover: Record<string, Measured>; afterHover: Measured
   keyboard: Record<string, { focused: boolean; reached: string[]; measured: Record<string, Measured> }>
   roomy: Measured; narrowed: Measured; pageErrors: string[]; rendererErrors: string[]
-  appletNarrow: AppletWidth; appletRoomy: AppletWidth
+  appletNarrow: AppletWidth; appletRoomy: AppletWidth; quickReactions: Hits; allReactions: Hits
 }
 
-it('keeps a narrow bot chat free of sideways scroll (tools hidden, shown by pointer or keyboard, open while it narrows), with applets across the whole reply', async () => {
+it('keeps a narrow bot chat free of sideways scroll (tools hidden, shown by pointer or keyboard, open while it narrows), opens the reaction row above the messages below, with applets across the whole reply', async () => {
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-bot-chat-width-'))
   let child: ChildProcess | undefined
   let exited: Promise<number | null> | undefined
@@ -78,6 +80,14 @@ it('keeps a narrow bot chat free of sideways scroll (tools hidden, shown by poin
     expect(evidence.narrowed.open, all).toBe(true)
     expect(evidence.narrowed.over, all).toBeLessThanOrEqual(0)
     noSidewaysScroll(evidence.narrowed, 'open while it narrowed')
+
+    // The reaction row and its full grid lie over the next messages, and every emoji in them is on top: what the pointer
+    // finds at its centre is that emoji's button.
+    for (const [where, hits] of [['reaction row', evidence.quickReactions], ['every emoji', evidence.allReactions]] as const) {
+      expect(hits.total, `${where}: ${all}`).toBeGreaterThan(0)
+      expect(hits.overLater, `${where}: ${all}`).toBeGreaterThan(0)
+      expect(hits.misses, `${where}: ${all}`).toEqual([])
+    }
 
     // An applet takes the whole reply width, narrow or roomy; a bubble that fills its width keeps the gutter on its right.
     for (const [where, widths] of [['narrow', evidence.appletNarrow], ['roomy', evidence.appletRoomy]] as const) {

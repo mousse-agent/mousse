@@ -410,7 +410,7 @@ export class BotChatService {
     const action = this.engine.actions.get(input.actionId)
     if (input.botId && action?.bot_id !== input.botId) throw new BotEngineError('not_found', 'No held action here.')
     try { return await this.engine.actions.answer(input) } catch (error) {
-      if (error instanceof BotActionChanged) throw new BotEngineError('bot_action_changed', error.message)
+      if (error instanceof BotActionChanged) throw new BotEngineError(error.code, error.message)
       throw error
     }
   }

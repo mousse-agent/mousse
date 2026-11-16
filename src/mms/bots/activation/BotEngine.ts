@@ -1,5 +1,5 @@
 import { WORK_WAIT_RULES, workWaitInput, workWaitRule, workReadiness, workWaitLine, parkedNeedsOwner, type WorkWaitLookups, type WorkWaitFacts, type WorkWaitReason } from './workWaiting'
-import { BotActions, BotActionChanged, actionContinuation, removeHiddenArguments, botAsksFirst, actionDigest, maskedActionData } from '../actions/BotActions'
+import { BotActions, BotActionChanged, actionContinuation, removeHiddenArguments, botAsksFirst, maskedActionData } from '../actions/BotActions'
 import { callForBot, type BotMcp } from '../mcp/BotMcp'
 import { isQuietHours } from '../../../shared/settings'
 import { BotTellings } from '../chat/BotTellings'
@@ -19,7 +19,7 @@ import { EventEmitter } from 'node:events'
 import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
 import { join } from 'node:path'
-import { askNoticeText, askText } from '../../../shared/bots/personal/askText'
+import { askCallNote, askNoticeText, askText } from '../../../shared/bots/personal/askText'
 import { lookFields } from '../../../shared/bots/personal/look'
 import { BOT_HELD_POWER_TEXT, subagentHold, type BotHeldPower, type BotRuntimeHold, type BotSubagentHold } from '../../../shared/bots/personal/subagentHold'
 import type { BotAuthority, BotCheck, BotCheckDenied, BotMcpTool, BotSubagents, BotSubagentView, BotThreadRole, BotThreads, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
@@ -44,7 +44,7 @@ import {
   grantRequestOf
 } from '../../../shared/bots/personal/escalation'
 import { findServer, installationOf, mcpAskFor, type BotMcpHost, type BotMcpServer } from '../mcp/BotMcp'
-import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_PROFILER_PERMISSION, BOT_THEMES_PERMISSION, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, botGrantTool, isAbsolutePath, manifestProblem } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_PROFILER_PERMISSION, BOT_QUICK_ACTIONS_PERMISSION, BOT_SCHEDULES_PERMISSION, BOT_SECRETS_PERMISSION, BOT_THEMES_PERMISSION, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, botGrantTool, isAbsolutePath, manifestProblem } from '../../../shared/bots/personal/manifest'
 import { checkMessage, wallMessage } from '../../../shared/bots/personal/walls'
 import type { ChargeResult, CountKind, CounterScope } from '../../../shared/harness/counters'
 import type { ReserveResult, SpendLimits, SpendRequest, SpendScope } from '../../../shared/harness/spend'
@@ -138,9 +138,9 @@ export const BOT_FILE_ASK_GONE_TEXT = 'A bot can no longer use files outside its
 
 // Unknown tools are deliberately effects: only these recorded calls can leave an unsent draft.
 const DRAFT_READ_ONLY_TOOLS = new Set([
-  'thread_list', 'thread_search', 'thread_read', 'thread_wait', 'memory_list', 'memory_search', 'memory_read',
+  'thread_list', 'thread_search', 'thread_read', 'thread_wait', 'terminal_read', 'memory_list', 'memory_search', 'memory_read',
   'read', 'list', 'search', 'ls', 'find', 'grep', 'Read', 'Glob', 'Grep',
-  'bot_schedule_list', 'work_list', 'work_models', 'watch_list', 'reminder_list', 'bot_list',
+  'bot_schedule_list', 'work_list', 'work_models', 'watch_list', 'reminder_list', 'bot_list', 'running_list',
   'mcp_servers', 'list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource'
 ])
 /** A reply can carry a picture as Markdown or as a path, without calling a tool.
@@ -517,6 +517,13 @@ interface LiveDispatch {
   fire: () => void
 }
 
+/**
+ * What a subagent of a bot's work is compiled with: what a thread's subagent may use of the bot's tools, within the grant
+ * (`subagentManifest`). Its work is a run, which may act on the owner's threads, so the subagent may too; the profiler and
+ * its own task list. Nothing that asks the owner, and none of the bot's own tools.
+ */
+const SUBAGENT_BOT_TOOLS = { escalate: false, consult: false, subagent: true, threads: 'all', profiler: true, tasks: true } as const
+
 /** What a compiled turn started with that a runtime opens once for the whole turn (`LiveDispatch.powers`). */
 function powersOf(permissions: BotPermissions): { shell: boolean } {
   return { shell: permissions.tools.includes('shell') }
@@ -594,22 +601,57 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   readonly chat: BotChatProjection
   /** The Bot UI's methods (`bots.*` v2). */
   readonly actions: BotActions
+  /** A held call is authorized only for its own pair, independent of unrelated grant revisions. */
+  private actionPair(row: BotActivationRow, tool: BotMcpTool): BotManifest['mcp'][number] | undefined {
+    const current = this.store.activation(row.id)
+    const grant = this.store.activeGrant(row.botId)
+    const definition = current && this.host.definitions.revision(row.botId, current.revision)
+    if (!current || !['running', 'blocked'].includes(current.status) || !grant || !definition) return undefined
+    const offered = this.effectiveManifest(current, definition.permissions, grant.manifest).mcp.some(p => p.serverId === tool.server && p.tool === tool.tool)
+    return offered ? grant.manifest.mcp.find(p => p.serverId === tool.server && p.tool === tool.tool) : undefined
+  }
   private createActions(): BotActions { return new BotActions({
     store: this.host.store,
     refresh: async () => { await this.host.mcp?.warm() },
     park: (row) => { if (!this.park(row, 'approval')) throw new Error('work ended') },
+    name: botId => this.definitionOf(botId).name,
     enabled: () => botAsksFirst(this.host.settings?.get()),
+    publish: id => { this.chat.republish(id) },
+    ownerAnswered: row => {
+      this.resetWorkWaitChain(row.id)
+      const last = this.store.get('SELECT MAX(rowid) AS n FROM bot_reminders WHERE work_id = ?', row.id)
+      this.store.db.statement(`INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?) ON CONFLICT(bot_id, key) DO UPDATE SET value = excluded.value`).run(row.botId, `cursor:action-owner:${row.id}`, String(last?.n ?? 0))
+    },
+    held: () => { this.watchMcp(); this.armDue() },
+    forgottenRequest: row => {
+      const ended = this.endWaitingInTx(row, 'request_gone', 'This work ended because its request was forgotten.')
+      if (ended) this.store.db.afterCommit(() => this.afterEnd(ended))
+    },
     schema: (tool) => this.host.mcp?.inputSchema?.(tool),
     binding: (row, tool) => {
-      const grant = this.store.activeGrant(row.botId)
-      const current = this.store.activation(row.id)
-      if (!grant || !current || !['running', 'blocked'].includes(current.status) || current.grantDigest !== grant.digest || !this.grantNow(row.id)?.mcp.some(p => p.serverId === tool.server && p.tool === tool.tool)) return undefined
+      const pair = this.actionPair(row, tool)
+      if (!pair) return undefined
       const server = this.host.mcp?.binding?.(tool)
       if (!server) return undefined
       const source = row.trigger.kind === 'work' ? this.store.activation(row.trigger.from) : row
       const limit = source?.trigger.kind === 'manual' ? source.trigger.owner?.limit ?? null : null
-      const revision = this.store.get('SELECT grant_id FROM bot_grants WHERE bot_id = ? AND revoked_at IS NULL ORDER BY grant_id DESC LIMIT 1', row.botId)?.grant_id
-      return { ...server, grantRevision: revision, grantDigest: actionDigest(grant.manifest), deviceLimit: limit }
+      return { ...server, pairLevel: pair.level ?? 'allowed', deviceLimit: limit }
+    },
+    obsolete: action => {
+      const row = this.store.activation(action.activation_id)
+      const held = JSON.parse(action.binding_json)
+      const tool = JSON.parse(action.target_json) as BotMcpTool
+      const pair = row && this.actionPair(row, tool)
+      if (!pair || held.pairLevel !== (pair.level ?? 'allowed')) return true
+      const where = this.host.mcp?.where?.(tool.server)
+      if (!where) return false // A cold catalogue is not evidence of removal.
+      if (where.state !== 'on') return true
+      const config = this.host.mcp?.configurationDigest?.(tool.server)
+      if (config && config !== held.configDigest) return true
+      if (where.server.failing || where.server.starting) return false
+      if (!where.server.tools.some(t => t.tool === tool.tool)) return true
+      const binding = this.host.mcp?.binding?.(tool)
+      return Boolean(binding && (binding.configDigest !== held.configDigest || binding.schemaDigest !== held.schemaDigest))
     },
     post: (row, id, text) => this.chat.post({ id, botId: row.botId, author: 'bot', kind: 'notice', text, external: true, activationId: row.id, lane: 'run', ...(row.trigger.kind === 'work' && row.trigger.replyTo ? { replyTo: row.trigger.replyTo } : {}) }),
     settled: (row) => { this.chat.republish(this.actions.forWork(row.id)!.message_id); this.changed({ botId: row.botId }); this.pumpLater(row.botId) },
@@ -621,7 +663,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const actionId = this.actions.forWork(row.id)!.id
       return callForBot({ mcp: mcp as BotMcp, bot: {
         activationId: row.id, mcpTools: [tool], workspace: null, time: { signal, deadline: () => Number.MAX_SAFE_INTEGER },
-        check: () => this.grantNow(row.id)?.mcp.some(p => p.serverId === target.server && p.tool === target.tool) ? { ok: true } : { ok: false, wall: { kind: 'revoked' } }
+        check: () => this.actionPair(row, target) ? { ok: true } : { ok: false, wall: { kind: 'revoked' } }
       }, name: tool.name, args, signal, heldAction: true, sanitizeResult: (result) => removeHiddenArguments(result, args, mcp.inputSchema?.(target)), assertDispatchActive: () => {
         this.actions.assertRunning(actionId)
       } })
@@ -2216,14 +2258,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   private approvalPending(id: string): boolean {
-    return botAsksFirst(this.host.settings?.get()) && ['open', 'approved', 'running'].includes(this.actions.forWork(id)?.status ?? '')
+    return ['open', 'approved', 'running'].includes(this.actions.forWork(id)?.status ?? '')
   }
 
   private readonly workWaitLookups: WorkWaitLookups = { store: () => this.store }
 
   private readonly workWaitFacts: WorkWaitFacts = {
     approvalReady: (row) => this.store.lastMainDispatch(row.id)?.endedAt !== null && !this.live.has(row.id),
-    approvalExists: (row) => Boolean(this.actions.forWork(row.id)),
+    approvalExists: (row) => { const action = this.actions.forWork(row.id); return Boolean(action && (row.endReason === 'approval_answered' || ['open', 'approved', 'running'].includes(action.status))) },
     timerExists: (row) => { const wait = this.store.workWait(row.id); return Boolean(wait && wait.status !== 'cancelled') },
     usageResumable: (row) => this.usageResumable(row),
     questionExists: (row) => Boolean(this.store.workQuestion(row.id)),
@@ -2564,8 +2606,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // A chat turn is the bot's front desk: it hands what takes long to work (docs/plans/bot-always-free.md).
       // The owner's threads: reading in every lane; starting, messaging, stopping and archiving in a turn `threadsActOf`
       // allows (never the bot's first message or a turn another bot's message started). The profiler: in both lanes
-      // (the chat without its minutes-long watch). Mousse's look: in both lanes.
-      botTools: { workWaiting: row.lane === 'run' && row.trigger.kind === 'work', escalate: true, consult: definition.context.length > 0, memory: true, scheduled: row.lane === 'run' && row.trigger.kind === 'schedule', frontDesk: row.lane === 'chat', watcherStart: ownerChatTurn(row), threads: threadsActOf(row) ? 'all' : 'read', profiler: true, themes: true, images: this.imagePick(row.botId) !== null, applets: true, subagents: row.lane === 'run', questions: asksOwner(row), cards: true, bots: asksOwner(row) }
+      // (the chat without its minutes-long watch). Mousse's look: in both lanes. The owner's scheduled jobs, secrets and
+      // quick actions (`owner`): in both lanes, making and changing jobs only where it may act on threads. Its task list.
+      botTools: { workWaiting: row.lane === 'run' && row.trigger.kind === 'work', escalate: true, consult: definition.context.length > 0, memory: true, scheduled: row.lane === 'run' && row.trigger.kind === 'schedule', frontDesk: row.lane === 'chat', watcherStart: ownerChatTurn(row), threads: threadsActOf(row) ? 'all' : 'read', profiler: true, themes: true, owner: true, tasks: true, images: this.imagePick(row.botId) !== null, applets: true, subagents: row.lane === 'run', questions: asksOwner(row), cards: true, bots: asksOwner(row) }
     })
     if (!compiled.ok) return this.block(row, 'policy_unenforceable', compiled.error.reason ?? compiled.error.message)
     const checked = this.host.harness.checkPolicy(selection.instanceId, { mode: 'default', origin: 'bot', ...compiled.policy }, selection.model)
@@ -3109,6 +3152,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   fillMcpAsks(): void {
     const mcp = this.host.mcp
     if (!mcp || this.closed) return
+    this.actions.withdrawChanged()
+    void this.actions.retryApproved().catch(error => console.warn('held calls could not be checked after a tool listing', error))
     const waiting = this.store.escalations({ status: 'open' }).filter((row) => waitsForTools(row.permission))
     if (!waiting.length) return
     let servers: BotMcpServer[]
@@ -3322,11 +3367,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const held = heldNow(permission)
       if (held) return { ok: false, refused: { text: held, askId: '' } }
       if (firstMessage) return { ok: false, refused: { text: BOT_ASK_NOT_YET_TEXT, askId: '' } }
+      const note = call.kind === 'app' ? askCallNote(call.tool, call.args) : undefined
       if (row.lane === 'run') {
         this.refused(row.id, permission)
-        return this.raiseAsk(row, input.mainN, 'gate', permission, wallMessage(decided.wall))
+        return this.raiseAsk(row, input.mainN, 'gate', permission, wallMessage(decided.wall), undefined, note)
       }
-      return { ok: false, wall: this.raiseWall(row.id, { dispatchN: input.mainN, kind: 'gate', permission, reason: wallMessage(decided.wall) }) }
+      return { ok: false, wall: this.raiseWall(row.id, { dispatchN: input.mainN, kind: 'gate', permission, reason: wallMessage(decided.wall), ...(note ? { note } : {}) }) }
     }
     const readOnly = threadsReadOnlyOf(row)
     const authority: BotAuthority = {
@@ -3703,7 +3749,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * consults stop with it). Asks never expire. The sixth wall of an activation ends it `blocked`
    * instead. The returned wall is what the refused call tells the model.
    */
-  raiseWall(activationId: string, input: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string }): WallReason {
+  raiseWall(activationId: string, input: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string; note?: string }): WallReason {
     const current = this.store.activation(activationId)
     if (current && this.removedExecutingSchedule(current)) return this.endRemovedScheduleAtWall(current)
     if (current?.lane === 'run' && input.kind === 'budget') return this.budgetEnd(current, input)
@@ -4106,13 +4152,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /** An ask in plain words for its card (`askText`), with the bot's current limits. */
-  private askCardText(row: BotActivationRow, permission: BotAskRequest): { title: string; note: string } {
+  private askCardText(row: BotActivationRow, permission: BotAskRequest, callNote?: string): { title: string; note: string } {
     const budget = this.store.activeGrant(row.botId)?.manifest.budget
-    return askText(permission, budget ? { budget } : {})
+    const text = askText(permission, budget ? { budget } : {})
+    // What the refused call would have done ("It would set: …") says more than the permission's own line.
+    return callNote ? { title: text.title, note: callNote } : text
   }
 
   /** The bot's open ask for `fingerprint` becomes this activation's wall, or a new one is written. */
-  private openWall(row: BotActivationRow, asked: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string }): BotEscalationRow {
+  private openWall(row: BotActivationRow, asked: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string; note?: string }): BotEscalationRow {
     const input = { ...asked, permission: this.limitAsk(row.botId, asked.permission) }
     const fingerprint = this.fingerprintOf(row.id, input.kind, input.permission)
     const open = this.store.openAsk(row.botId, fingerprint)
@@ -4120,7 +4168,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (open.activationId !== row.id || open.mode !== 'wall') this.store.moveAskToWall(open.id, row.id, input.dispatchN)
       return this.store.escalation(open.id)!
     }
-    const text = this.askCardText(row, input.permission)
+    const text = this.askCardText(row, input.permission, asked.note)
     const escalation = {
       id: `esc_${randomUUID()}`,
       botId: row.botId,
@@ -4142,7 +4190,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return this.store.escalation(escalation.id)!
   }
 
-  private wallInTransaction(activationId: string, from: readonly BotActivationRow['status'][], input: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string }): { kind: 'wall'; escalation: BotEscalationRow } | { kind: 'blocked' } | { kind: 'none' } {
+  private wallInTransaction(activationId: string, from: readonly BotActivationRow['status'][], input: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string; note?: string }): { kind: 'wall'; escalation: BotEscalationRow } | { kind: 'blocked' } | { kind: 'none' } {
     const row = this.store.activation(activationId)
     if (!row || !from.includes(row.status)) return { kind: 'none' }
     if (this.store.countEscalations(activationId) >= MAX_BOT_WALLS) {
@@ -4202,7 +4250,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * owner said Not now to it in the last 24 hours: then no card is made, and the bot is told the owner
    * said not now (never that it asked). The bot is told it asked only when a card is there.
    */
-  private raiseAsk(row: BotActivationRow, dispatchN: number, kind: BotWallKind, asked: BotAskRequest, reason: string, toolCallId?: string): BotCheck {
+  private raiseAsk(row: BotActivationRow, dispatchN: number, kind: BotWallKind, asked: BotAskRequest, reason: string, toolCallId?: string, note?: string): BotCheck {
     const permission = this.limitAsk(row.botId, asked)
     const fingerprint = this.fingerprintOf(row.id, kind, permission)
     let raised: { askId: string; created: boolean } | { refused: string }
@@ -4216,7 +4264,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         if (this.store.countNewAsks(row.botId, { activationId: row.id }) >= MAX_RUN_ASKS ||
           this.store.countNewAsks(row.botId, { since: new Date(this.now() - 24 * 60 * 60_000).toISOString() }) >= MAX_BOT_ASKS_PER_DAY)
           return { refused: BOT_ASK_ENOUGH_TEXT }
-        const text = this.askCardText(row, permission)
+        const text = this.askCardText(row, permission, note)
         const id = `esc_${randomUUID()}`
         this.store.insertEscalation({
           id, botId: row.botId, activationId: row.id, dispatchN, toolCallId: toolCallId ?? null, kind, permission, reason: reason.slice(0, 2000),
@@ -4797,7 +4845,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         } else if (openWalls.length) {
           // The chat turn asked (`escalate`): it waits for the owner with every card on its message.
           this.store.moveActivation(row.id, ['running'], 'waiting_grant', { endReason: 'wall', ...(text !== undefined ? { result: text } : {}) })
-        } else if (botAsksFirst(this.host.settings?.get()) && this.actions.pendingInTurn(row.id, main.n) && this.askedIn.get(row.id) === main.n) {
+        } else if (this.actions.pendingInTurn(row.id, main.n) && this.askedIn.get(row.id) === main.n) {
           if (!this.park(row, 'approval', ['running'], this.approvalPending(row.id) ? 'approval' : 'approval_answered')) return undefined
         } else if (this.store.workWait(row.id)?.status === 'waiting') {
           if (!this.park(row, 'waiting', ['running'])) return undefined
@@ -5285,6 +5333,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       }
       const waits = current.trigger.kind === 'work' ? this.store.unreadWorkWaits(current.id) : []
       const actions = current.trigger.kind === 'work' ? this.store.unreadWorkActions(current.id) : []
+      const refusals = this.workRefusalUpdates(current.id)
       const actionCaused = current.endReason === 'approval_answered' ? actions.at(-1) : undefined
       const waited = waits.length > 0
       const n = this.store.nextDispatchN(row.id)
@@ -5300,7 +5349,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const deliveryQuestion = input.usageRetry ? undefined : durableWork ? this.store.unreadWorkQuestion(current.id) : question
       const answered = deliveryQuestion?.status === 'answered' || deliveryQuestion?.status === 'defaulted' ? this.workAnswerOf(deliveryQuestion) : undefined
       const workEvents: WorkContinuationEvent[] | undefined = durableWork ? [
-        ...actions.map(action => ({ at: (action.status === 'declined' ? action.answered_at : action.ran_at) ?? action.answered_at ?? current.createdAt, text: actionContinuation(action), actionId: action.id })),
+        ...refusals,
+        ...actions.map(action => ({ at: JSON.parse(action.card_json ?? '{}').settledAt ?? (action.status === 'declined' ? action.answered_at : action.ran_at) ?? action.answered_at ?? current.createdAt, text: actionContinuation(action), actionId: action.id })),
         ...waits.map(wait => ({ at: wait.dueAt, text: workWaitInput(wait, clockTime) })),
         ...answers.map(answer => ({ at: answer.answeredAt ?? answer.createdAt, answer })),
         ...(notes?.events ?? []),
@@ -5310,10 +5360,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (answered) this.store.markAnswerSent(deliveryQuestion!.id, n, answered, !readAtStart)
       // A usage retry repeats the previous text, so only its carried ids may be confirmed by that retry.
       const delivery = input.usageRetry && previous ? {
+        ...(previous.prompt.workRefusalIds ? { workRefusalIds: previous.prompt.workRefusalIds } : {}),
         ...(previous.prompt.workActionIds ? { workActionIds: previous.prompt.workActionIds } : {}),
         ...(previous.prompt.workWaitIds ? { workWaitIds: previous.prompt.workWaitIds } : {}),
         ...(previous.prompt.workDelivery ? { workDelivery: previous.prompt.workDelivery } : {})
       } : {
+        ...(refusals.length ? { workRefusalIds: refusals.map(event => event.id) } : {}),
         ...(actions.length ? { workActionIds: actions.map(action => action.id) } : {}),
         ...(waits.length ? { workWaitIds: waits.map(wait => wait.id) } : {}),
         ...(durableWork ? { workDelivery: { answers: answers.map(answer => answer.id), notes: notes?.ids ?? [], ...(answered ? { question: deliveryQuestion!.id } : {}) } } : {})
@@ -5855,7 +5907,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const definition = this.host.definitions.revision(row.botId, row.revision)
     const grant = this.store.activeGrant(row.botId)
     if (!models || !definition || !grant) return { refused: `${name} can't run a subagent here. ${SUBAGENT_NOTHING_STARTED}` }
-    const compiled = this.compileNeutral(definition.main, this.subagentManifestOf(row, definition, grant.manifest), { escalate: false, consult: false, subagent: true }, row.botId)
+    const compiled = this.compileNeutral(definition.main, this.subagentManifestOf(row, definition, grant.manifest), SUBAGENT_BOT_TOOLS, row.botId)
     if (!compiled.ok) return { refused: `${compiled.error.reason ?? compiled.error.message} ${SUBAGENT_NOTHING_STARTED}` }
     let resolved: BotModelResolution
     try {
@@ -5989,7 +6041,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       nativeNames: (tools) => this.nativeNames(selection.instanceId, tools),
       remaining: { ...limitsOf(effective), deadlineMs: Math.max(1, deadline - this.now()) },
       filesFolder: this.filesFolder(row.botId),
-      botTools: { escalate: false, consult: false, subagent: true }
+      botTools: SUBAGENT_BOT_TOOLS
     })
     if (!compiled.ok) return { refused: `A subagent can't run there: ${compiled.error.reason ?? compiled.error.message} ${SUBAGENT_NOTHING_STARTED}` }
     const checked = this.host.harness.checkPolicy(selection.instanceId, { mode: 'default', origin: 'bot', ...compiled.policy }, selection.model)
@@ -6384,6 +6436,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /** Confirmation is advisory: a failed write means repeat the update, never fail the runtime's turn. */
+  private workRefusalUpdates(workId: string) { return this.store.unreadWorkRefusals(workId) }
+
   private confirmWorkDelivery(activationId: string, n: number, why: 'output' | 'completed'): void {
     try { this.store.confirmWorkDelivery(activationId, n, why) }
     catch (error) {
@@ -7153,6 +7207,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return { botId, name: this.ownerOf(threadId) ?? botId }
   }
 
+  /** The chat thread of the bot `threadId` belongs to (`BotThreads.homeOf`). Never throws. */
+  homeOf(threadId: string): string | undefined {
+    const bot = this.botOf(threadId)
+    if (!bot) return undefined
+    try {
+      return this.store.registry(bot.botId)?.homeThreadId ?? undefined
+    } catch {
+      return undefined
+    }
+  }
+
   /**
    * "Use your threads" was removed or switched off (About), or the bot was deleted: the bot's
    * messages still waiting in its owner's threads are withdrawn (`BotEngineHost.threadsWithdrawn`). A bot with no chat
@@ -7288,7 +7353,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** `bots.personal.pause`: the owner pauses the bot's schedules. Chat still works. */
   pauseBot(botId: string): void {
     this.entry(botId)
-    this.store.setPaused(botId, 'owner')
+    this.store.db.transaction(() => {
+      this.store.setPaused(botId, 'owner')
+      this.actions.withdrawPaused(botId)
+    })
     // A paused bot runs nothing in the background either.
     this.stopWatchersOf(botId)
     this.changed({ botId })
@@ -7402,6 +7470,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     await this.endAll([...this.store.laneActivations(botId, 'chat', [...NOT_ENDED]), ...waiting], 'stopped', () => {
       this.store.withdrawAsks(botId)
       this.store.withdrawQuestions(botId)
+      this.store.run("DELETE FROM bot_messages WHERE bot_id = ? AND id IN (SELECT message_id FROM bot_actions WHERE bot_id = ?)", botId, botId)
     })
     // Deleted once the turns stopped, so a turn ending meanwhile adds no row to the cleared chat.
     this.store.deleteMessages(botId)
@@ -7428,7 +7497,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     // The chat turn is stopped first, so it copies nothing more into the history once it is gone.
     await this.clearChat(botId)
-    const removed = memory.wipeHistory(botId)
+    const removed = this.store.db.transaction(() => {
+      const removed = memory.wipeHistory(botId)
+      this.actions.forgetText(botId)
+      return removed
+    })
     this.changed({ botId })
     return removed
   }
@@ -7527,7 +7600,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     watchers: {
       start: (botId, from, input) => this.startWatcher(botId, from, input),
       list: (botId) => this.listWatchers(botId).map(({ botId: _bot, ...view }) => view),
-      stop: (botId, watcherId) => this.stopWatcher(botId, watcherId)
+      stop: (botId, watcherId) => this.stopWatcher(botId, watcherId),
+      output: (botId, watcherId) => this.watchers.output(botId, watcherId)
     },
     reminders: {
       add: (botId, from, input) => this.addReminder(botId, from, input),
@@ -7947,6 +8021,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // The note keeps the owner's message it came from (the chat turn's), so a forget of that message reaches it.
       if (from && this.store.activation(from) && ownerChatTurn(this.store.activation(from)!)) this.resetWorkWaitChain(workId)
       this.store.addWorkNote(workId, botId, text, from ? this.ownerMessageOf(from) : undefined)
+      if ((botAsksFirst(this.host.settings?.get()) || this.actions.forWork(workId)) && (!from || (this.store.activation(from) && ownerChatTurn(this.store.activation(from)!))))
+        this.store.run(`INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, '1') ON CONFLICT(bot_id, key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)`, botId, `cursor:action-note:${workId}`)
       return 'noted' as const
     })
   }
@@ -8133,7 +8209,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   private refuseWakeLoop(botId: string, brief: string, event: BotWakeEvent | null, workId?: string): void {
     const key = wakeLoopKey(brief, event)
-    const same = this.store.wakesSetSince(botId, this.store.ownerLastWroteAt(botId), workId).filter((wake) => wakeLoopKey(wake.text, wake.event) === key).length
+    const after = workId ? Number(this.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, `cursor:action-owner:${workId}`)?.value ?? 0) : 0
+    const same = after ? this.store.all('SELECT text, event_json FROM bot_reminders WHERE bot_id = ? AND work_id = ? AND rowid > ? AND created_at >= ?', botId, workId!, after, this.store.ownerLastWroteAt(botId)).filter(wake => wakeLoopKey(String(wake.text), wake.event_json ? JSON.parse(String(wake.event_json)) : null) === key).length
+      : this.store.wakesSetSince(botId, this.store.ownerLastWroteAt(botId), workId).filter((wake) => wakeLoopKey(wake.text, wake.event) === key).length
     if (same >= MAX_SAME_WAKES)
       throw new BotEngineError('wake_loop', `You have set this same wake-up ${same} times since your owner last wrote, with nothing new in it: that is a loop. Don't set it again: tell your owner where things stand and what you are waiting on, and carry on when they write. If something did change, say what in the brief.`)
   }
@@ -8189,6 +8267,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.armDue()
     this.changed({ botId })
     return { watcherId, until: new Date(this.now() + limitMs).toISOString() }
+  }
+
+  /** Every bot's background commands running now, with their processes: the running list (`RunningRegistry`). */
+  runningWatchers(): ReturnType<BotWatchers['processes']> {
+    return this.watchers.processes()
+  }
+
+  /** A bot's name as its owner set it, for the running list; undefined when it is gone. */
+  botName(botId: string): string | undefined {
+    const row = this.store.registry(botId)
+    return row?.revision ? this.host.definitions.revision(row.botId, row.revision)?.name : undefined
   }
 
   /** The bot's background commands running now (`watch_list`, the chat's Background work). */
@@ -8566,6 +8655,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   private dueAt(botId?: string, forTimer = false): number | undefined {
     const sources: Array<() => number | undefined> = [
+      () => this.actions.nextDueAt(botId),
       () => this.tellings.next(botId),
       () => {
         const row = this.store.nextReminder(botId)
@@ -8630,6 +8720,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // Never synchronous: the pass is held below before any of it runs, so its end always lets go of it.
       await Promise.resolve()
       try {
+        this.actions.expireDue()
         // Reminders cancelled, forgotten or purged since they failed are no longer tried.
         for (const id of this.reminderRetryAt.keys()) if (this.store.reminder(id)?.status !== 'waiting') this.reminderRetryAt.delete(id)
         for (const reminder of this.store.dueReminders(now.toISOString())) {
@@ -8729,7 +8820,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // The owner sees the original label; titles and command errors remain outside data in memory.
     const external = Boolean((fired?.kind === 'thread' || fired?.kind === 'pr') && fired.title
       || fired?.kind === 'watcher' && fired.message)
-    const input = wakeInput({ brief: wake.text, setAt: wake.createdAt, event: wake.event, fired, chain: Math.max(1, wake.chain), work: Boolean(wake.workId), clock: clockTime, ...(late && !wake.event ? { late: clockTime(wake.dueAt) } : {}) })
+    const input = wakeInput({ brief: wake.text, setAt: wake.createdAt, event: wake.event, fired, chain: Math.max(1, wake.chain), work: Boolean(wake.workId), clock: clockTime, wakeId: wake.id, ...(late && !wake.event ? { late: clockTime(wake.dueAt) } : {}) })
     if (wake.workId) {
       const resumed = this.store.db.transaction(() => this.deliverWorkWaitInTx(wake))
       if (resumed) { this.changed({ botId: wake.botId, activationId: wake.workId }); this.pumpLater(wake.botId) }
@@ -9622,10 +9713,14 @@ function heldAlready(authority: Pick<BotAuthority, 'tools' | 'appTools' | 'skill
     // The web tools are neutral tools that a grant keeps with the app tools (the starter grant does): either holds them.
     if (isNeutralTool(asked.tool)) return authority.tools.has(asked.tool) || authority.appTools.has(asked.tool)
     // The browser is held as its tools, the owner's threads as theirs (reading them, in every lane that has them), and the
-    // profiler as its overview and Mousse's look as theme_read (in both lanes).
+    // profiler as its overview, Mousse's look as theme_read, scheduled jobs as their list, secrets as secret_request and
+    // quick actions as create_quick_action (in both lanes).
     if (asked.tool === BOT_BROWSER_PERMISSION) return authority.appTools.has('browser_open')
     if (asked.tool === BOT_PROFILER_PERMISSION) return authority.appTools.has('profiler_overview')
     if (asked.tool === BOT_THEMES_PERMISSION) return authority.appTools.has('theme_read')
+    if (asked.tool === BOT_SCHEDULES_PERMISSION) return authority.appTools.has('schedule_list')
+    if (asked.tool === BOT_SECRETS_PERMISSION) return authority.appTools.has('secret_request')
+    if (asked.tool === BOT_QUICK_ACTIONS_PERMISSION) return authority.appTools.has('create_quick_action')
     return asked.tool === BOT_THREADS_PERMISSION ? authority.appTools.has('thread_list') : authority.appTools.has(asked.tool)
   }
   if ('skill' in asked) return authority.skills.has(asked.skill)

@@ -1,3 +1,4 @@
+import { heldCalls } from '../actions/lifecycle'
 import type { ActionRow } from '../actions/BotActions'
 import { readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
@@ -795,6 +796,7 @@ export interface BotDispatchRow {
     workTold?: 'pending' | 'output' | 'completed'
     workWaitIds?: string[]
     workActionIds?: string[]
+    workRefusalIds?: string[]
     /** Carried ids for replay; existing read/applied markers remain independent of confirmation. */
     workDelivery?: { answers: string[]; notes: number[]; question?: string }
   }
@@ -889,7 +891,7 @@ export interface BotCountersRow {
 const WORK_TOLD = "(COALESCE(json_extract(d.prompt_json, '$.workTold'), '') IN ('output', 'completed') OR (json_extract(d.prompt_json, '$.workTold') IS NULL AND d.outcome IS 'completed'))"
 
 const hasWorkUpdates = (prompt: BotDispatchRow['prompt']): boolean => Boolean(
-  prompt.workActionIds?.length || prompt.workWaitIds?.length || prompt.workDelivery?.notes.length ||
+  prompt.workRefusalIds?.length || prompt.workActionIds?.length || prompt.workWaitIds?.length || prompt.workDelivery?.notes.length ||
   prompt.workDelivery?.answers.length || prompt.workDelivery?.question
 )
 
@@ -1164,12 +1166,17 @@ export class BotStore {
       const at = this.now()
       this.run('UPDATE bot_grants SET revoked_at = ? WHERE bot_id = ? AND revoked_at IS NULL', at, botId)
       this.run('INSERT INTO bot_grants(bot_id, digest, manifest_json, approved_at) VALUES(?, ?, ?, ?)', botId, digest, JSON.stringify(manifest), at)
+      heldCalls(this.db)?.grantChanged(botId)
       return { botId, digest, manifest, approvedAt: at }
     })
   }
 
   revoke(botId: string): boolean {
-    return this.run('UPDATE bot_grants SET revoked_at = ? WHERE bot_id = ? AND revoked_at IS NULL', this.now(), botId) > 0
+    return this.db.transaction(() => {
+      const revoked = this.run('UPDATE bot_grants SET revoked_at = ? WHERE bot_id = ? AND revoked_at IS NULL', this.now(), botId) > 0
+      if (revoked) heldCalls(this.db)?.grantChanged(botId)
+      return revoked
+    })
   }
 
   // -- Threads ---------------------------------------------------------------------------------
@@ -1300,6 +1307,9 @@ export class BotStore {
       if (moved && to !== 'done') this.withdrawUnpostedQuestions(id)
       if (moved) {
         this.withdrawWorkQuestions(id)
+        heldCalls(this.db)?.endWork(id)
+        const refusalPrefix = `cursor:action-refusal:${id}:`
+        this.run('DELETE FROM bot_memory_state WHERE key IN (?, ?) OR substr(key, 1, ?) = ?', `cursor:action-note:${id}`, `cursor:action-owner:${id}`, refusalPrefix.length, refusalPrefix)
         this.run("UPDATE bot_reminders SET status = 'cancelled', delivered_at = ? WHERE work_id = ? AND status = 'waiting'", this.now(), id)
       }
       return moved
@@ -2002,6 +2012,28 @@ export class BotStore {
       ORDER BY COALESCE(a.ran_at, a.answered_at, a.created_at), a.rowid`, workId) as unknown as ActionRow[]
   }
 
+  pruneWorkRefusals(): void {
+    const prefix = 'cursor:action-refusal:'
+    if (!this.get('SELECT 1 FROM bot_memory_state WHERE substr(key, 1, ?) = ? LIMIT 1', prefix.length, prefix)) return
+    this.run(`DELETE FROM bot_memory_state AS s WHERE substr(s.key, 1, ?) = ? AND NOT EXISTS (
+      SELECT 1 FROM bot_activations a WHERE a.bot_id = s.bot_id AND a.status NOT IN ('done', 'failed', 'cancelled')
+      AND substr(s.key, 1, length(? || a.id || ':')) = ? || a.id || ':')`, prefix.length, prefix, prefix, prefix)
+  }
+
+  recordWorkRefusal(workId: string, botId: string, id: string, text: string): void {
+    this.run('INSERT OR IGNORE INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?)', botId,
+      `cursor:action-refusal:${workId}:${id}`, JSON.stringify({ at: this.now(), text }))
+  }
+
+  /** Mousse updates are neither owner notes nor a reason to start another turn. */
+  unreadWorkRefusals(workId: string): Array<{ id: string; at: string; text: string }> {
+    const prefix = `cursor:action-refusal:${workId}:`
+    return this.all(`SELECT s.key, s.value FROM bot_memory_state s WHERE substr(s.key, 1, ?) = ?
+      AND NOT EXISTS (SELECT 1 FROM bot_dispatches d, json_each(d.prompt_json, '$.workRefusalIds') told
+        WHERE d.activation_id = ? AND ${WORK_TOLD} AND told.value = s.key) ORDER BY s.rowid`, prefix.length, prefix, workId)
+      .map(row => ({ id: String(row.key), ...JSON.parse(String(row.value)) as { at: string; text: string } }))
+  }
+
   /** Confirmation controls replay only; existing carried/read markers are not changed here. */
   confirmWorkDelivery(activationId: string, n: number, why: 'output' | 'completed'): void {
     const needsConfirmation = (dispatch: BotDispatchRow | undefined): boolean => Boolean(dispatch && dispatch.startedAt !== null &&
@@ -2011,6 +2043,7 @@ export class BotStore {
     this.db.transaction(() => {
       if (!needsConfirmation(this.dispatch(activationId, n))) return
       this.run("UPDATE bot_dispatches SET prompt_json = json_set(prompt_json, '$.workTold', ?) WHERE activation_id = ? AND n = ?", why, activationId, n)
+      for (const id of this.dispatch(activationId, n)?.prompt.workRefusalIds ?? []) this.run('DELETE FROM bot_memory_state WHERE key = ?', id)
     })
   }
 

@@ -141,6 +141,19 @@ export class SecretVault {
     return masker ?? undefined
   }
 
+  /**
+   * What masks text that may hold any secret of the profile, whatever thread it was given in: a terminal's output, which
+   * shows whatever the person typed or a command printed. Every secret in the store, saved keys included. Read from the
+   * store at every call (keys saved elsewhere don't pass through the vault), so it is never stale.
+   */
+  maskerForStore(): SecretMasker | undefined {
+    const secrets = listProfileKeyNames(this.options.profileRoot).flatMap((name) => {
+      const value = this.value(name)
+      return value ? [{ name, value }] : []
+    })
+    return secretMasker(secrets)
+  }
+
   /** Every secret in the store, for Settings: saved keys and the ones given in threads. Never values. */
   list(): SecretEntryView[] {
     const meta = this.readMeta()

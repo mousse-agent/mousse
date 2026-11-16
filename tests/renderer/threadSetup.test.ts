@@ -124,3 +124,35 @@ describe("the sidebar's New thread before the project's provider listing has loa
     expect(page.useAppStore.getState().activeThreadId).toBe('made')
   })
 })
+
+describe('New thread opens in the project last picked for a new thread', () => {
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  it('follows the last project picked, and starts with none once that project is gone', async () => {
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    const { useProviderSnapshotsStore } = await import('../../src/renderer/lib/providerSnapshots')
+    const { createAndSelectProjectThread, createAndSelectThread } = await import('../../src/renderer/lib/threadActions')
+    const project = { id: 'p', name: 'p', path: '/p', createdAt: '', order: 0 }
+    useAppStore.setState({ threads: [], activeThreadId: null, projects: [project], lastNewThreadProjectId: null })
+    useProviderSnapshotsStore.setState({ scopes: {} })
+    let made = 0
+    const create = vi.fn(async (_name?: string, projectId?: string) => ({ id: `t${++made}`, name: '', projectId, createdAt: '', updatedAt: '', order: 0, startedAt: 'x' }) as never)
+    vi.stubGlobal('window', { mousse: { threads: { create, select: vi.fn(async () => undefined) }, providers: { snapshots: vi.fn(async () => []) } } })
+
+    await createAndSelectThread()
+    expect(create).toHaveBeenLastCalledWith()
+    // A project's New thread (or a project picked in the new chat's composer) is remembered.
+    await createAndSelectProjectThread('p')
+    expect(useAppStore.getState().lastNewThreadProjectId).toBe('p')
+    await createAndSelectThread()
+    expect(create).toHaveBeenLastCalledWith(undefined, 'p', { rememberedChoices: true })
+    // Choosing no project for a new chat is remembered as well.
+    useAppStore.getState().setLastNewThreadProjectId(null)
+    await createAndSelectThread()
+    expect(create).toHaveBeenLastCalledWith()
+    // A removed project is not opened.
+    useAppStore.setState({ lastNewThreadProjectId: 'p', projects: [] })
+    await createAndSelectThread()
+    expect(create).toHaveBeenLastCalledWith()
+  })
+})
