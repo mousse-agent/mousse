@@ -687,7 +687,7 @@ The owner's slash commands in the bot's chat, on the computer only (not in `REMO
 
 ## Database versions
 
-`bots.db` is at v11. It adds unused storage for always-on bots phases 2 and 3: the STRICT `bot_actions` table for held or counted calls and nullable text `bot_reminders.work_id`. Existing reminder writers leave `work_id` NULL. No bot behavior changes yet. Actions are removed on bot deletion, reset, history wipes and purge; memory exports include masked `actions.jsonl` without exact executable arguments. The schema and nullability are in the plan's [Data model](plans/bot-always-on.md#data-model). The masked search index is not part of v11.
+`bots.db` is at v11. It adds unused storage for always-on bots phases 2 and 3: the STRICT `bot_actions` table for held or counted calls and nullable text `bot_reminders.work_id`. Existing reminder writers leave `work_id` NULL. No bot behavior changes yet. Actions are deleted only by the 30-day purge; memory exports include masked `actions.jsonl` without exact executable arguments. The schema and nullability are in the plan's [Data model](plans/bot-always-on.md#data-model). The masked search index is not part of v11.
 
 Version 10 supplied the columns for always-on bots phase 1:
 

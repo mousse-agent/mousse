@@ -1,5 +1,5 @@
 /** Storage inputs: populated v10, fresh/v11 reopen, duplicate call, invalid domains, mid-migration failure,
- * deletion/reset/purge, both wipes, another bot, and masked export. No provider or daemon is started. */
+ * purge, another bot, and masked export. No provider or daemon is started. */
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -96,27 +96,15 @@ describe('bots.db v10 → v11', () => {
     expect(store.all('PRAGMA index_list(bot_actions)').map((r) => r.name)).toEqual(expect.arrayContaining(['bot_actions_due', 'bot_actions_bot', 'bot_actions_activation']))
   })
 
-  it.each(['delete', 'reset', 'purge'] as const)('%s removes only that bot’s actions through its public path', async (operation) => {
+  it('the 30-day purge removes only that bot’s actions through its public path', async () => {
     const f = botFixture()
     try {
       const { botId } = await createBot(f)
+      await f.bots.service.delete(botId)
       action(f.store, botId); action(f.store, 'other')
-      if (operation === 'reset') await f.bots.resetBot(botId)
-      else if (operation === 'delete') await f.bots.service.delete(botId)
-      else {
-        await f.bots.service.delete(botId)
-        action(f.store, botId)
-        await f.bots.sweepDeleted(f.clock.now + 31 * 24 * 60 * 60_000)
-      }
+      await f.bots.sweepDeleted(f.clock.now + 31 * 24 * 60 * 60_000)
       expect(f.store.all('SELECT bot_id FROM bot_actions')).toEqual([{ bot_id: 'other' }])
     } finally { f.close() }
-  })
-
-  it.each([true, false])('wipe keepSaved=%s removes actions and leaves another bot alone', (keepSaved) => {
-    const store = open(folder()), memory = new BotMemoryStore({ db: store.db })
-    action(store); action(store, 'other')
-    memory.wipe('b', keepSaved)
-    expect(store.all('SELECT bot_id FROM bot_actions')).toEqual([{ bot_id: 'other' }])
   })
 
   it('exports masked actions without executable arguments and includes them in whole-database backups', async () => {

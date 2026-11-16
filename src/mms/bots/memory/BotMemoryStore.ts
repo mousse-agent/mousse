@@ -1207,8 +1207,6 @@ export class BotMemoryStore {
   /** Removes every memory-table row of one bot, and nothing of another (the 30-day purge). */
   purge(botId: string): void {
     this.write(() => {
-      if (this.get("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bot_actions'"))
-        this.run('DELETE FROM bot_actions WHERE bot_id = ?', botId)
       this.run('DELETE FROM bot_journal WHERE bot_id = ?', botId)
       this.run('DELETE FROM bot_memories WHERE bot_id = ?', botId)
       this.run('DELETE FROM bot_memory_state WHERE bot_id = ?', botId)
@@ -1238,8 +1236,6 @@ export class BotMemoryStore {
         removed = num(this.get("SELECT COUNT(DISTINCT id) AS n FROM bot_memories WHERE bot_id = ? AND status IN ('active','expired')", botId)?.n) ?? 0
         this.run('DELETE FROM bot_memories WHERE bot_id = ?', botId)
       }
-      if (this.get("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bot_actions'"))
-        this.run('DELETE FROM bot_actions WHERE bot_id = ?', botId)
       this.run('DELETE FROM bot_journal WHERE bot_id = ?', botId)
       this.run("DELETE FROM bot_memory_state WHERE bot_id = ? AND substr(key, 1, 7) <> 'cursor:' AND (? = 0 OR (key NOT LIKE 'schedule-said:%' AND key NOT LIKE 'schedule-ended:%'))", botId, keepSaved ? 1 : 0)
       return removed

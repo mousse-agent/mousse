@@ -1756,7 +1756,7 @@ export class BotStore {
     this.run('DELETE FROM bot_reminders WHERE bot_id = ?', botId)
     this.run('DELETE FROM bot_work_notes WHERE bot_id = ?', botId)
     this.run('DELETE FROM bot_questions WHERE bot_id = ?', botId)
-    this.deleteActions(botId)
+    this.run('DELETE FROM bot_actions WHERE bot_id = ?', botId)
     this.run('UPDATE bot_registry SET model_json = NULL, error_json = NULL WHERE bot_id = ?', botId)
   }
 
@@ -2070,11 +2070,6 @@ export class BotStore {
   /** A deleted bot's reminders never fire. */
   cancelReminders(botId: string): number {
     return this.run("UPDATE bot_reminders SET status = 'cancelled', delivered_at = ? WHERE bot_id = ? AND status = 'waiting'", this.now(), botId)
-  }
-
-  /** Held and counted calls go with a deleted bot or cleared history. */
-  deleteActions(botId: string): void {
-    this.run('DELETE FROM bot_actions WHERE bot_id = ?', botId)
   }
 
   deleteMessages(botId: string): void {
