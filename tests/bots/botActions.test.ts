@@ -1234,8 +1234,10 @@ it('a repeat refusal joins unread work updates without another action or card', 
   await callForBot({ bot: next.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'repeat-refused', signal: new AbortController().signal })
   expect(f.store.unreadWorkRefusals(t.workId).map(n => n.text).join(' ')).toContain('Do not ask again')
   expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
-  await finish(f, next.payload, 'failed', { outcome: { error: 'network_error' } })
-  await (f.bots as any).continueWith(t.workId, [f.store.activation(t.workId)!.status], { network: true })
+  await f.bots.tools.wakes!.wait!(t.botId, t.workId, { brief: 'Wait for progress', dueAt: new Date(f.clock.now + 300_000).toISOString() })
+  await finish(f, next.payload)
+  expect(f.store.unreadWorkRefusals(t.workId)).toHaveLength(1)
+  f.clock.now += 300_000; await f.bots.deliverDueReminders(); await flush()
   expect(f.store.lastMainDispatch(t.workId)!.prompt.text).toContain('Do not ask again')
   const receiving = await start(f, t.workId, f.store.lastMainDispatch(t.workId)!.n)
   ;(receiving.prepared as any).modelOutput?.()
@@ -1740,4 +1742,19 @@ it('R3-3 a failing card of another bot cannot undo this bot grant change', async
   const grant = f.store.activeGrant(t.botId)!
   expect(() => f.store.approve(t.botId, grant.digest, grant.manifest)).not.toThrow()
   expect(f.bots.actions.get(a.id)?.status).toBe('open')
+})
+
+
+it.each(['done', 'failed', 'cancelled', 'purge'] as const)('R3-3 refusal records end with work %s', async end => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' }); await flush()
+  const next = await start(f, t.workId, 2)
+  await callForBot({ bot: next.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'refused', signal: new AbortController().signal })
+  expect(f.store.unreadWorkRefusals(t.workId)).toHaveLength(1)
+  if (end === 'cancelled') await f.bots.stopWork(t.botId, t.workId)
+  else if (end === 'purge') new BotMemoryStore({ db: f.store.db }).purge(t.botId)
+  else await finish(f, next.payload, end === 'done' ? 'completed' : 'failed', { outcome: end === 'failed' ? { error: 'fatal' } : undefined })
+  expect(f.store.all("SELECT key FROM bot_memory_state WHERE key LIKE 'cursor:action-refusal:%'")).toEqual([])
 })
