@@ -10,10 +10,10 @@ beforeEach(async () => {
   botId = (await createBot(f, { name: 'Pip', reply: 'Hello.' })).botId
 })
 afterEach(() => f.close())
-async function work() {
-  await f.bots.service.chatSend({ botId, text: 'Check the release', clientRequestId: 'request' })
+async function work(key = 'request') {
+  await f.bots.service.chatSend({ botId, text: 'Check the release', clientRequestId: key })
   const chat = f.store.laneActivations(botId, 'chat', ['running'])[0]!
-  const { workId } = await f.bots.tools.work.start(botId, chat.id, { title: 'Release', brief: 'Check release', key: 'release' })
+  const { workId } = await f.bots.tools.work.start(botId, chat.id, { title: 'Release', brief: 'Check release', key })
   await runDispatch(f, chat.id, 1, { text: 'On it.' })
   return { workId, turn: await start(f, workId), chat }
 }
@@ -80,8 +80,17 @@ it.each(['stop', 'delete', 'finish', 'fail'] as const)('%s leaves no open work t
   const { workId, turn } = await work()
   const set = await wait(workId)
   if (action === 'finish' || action === 'fail') {
-    // A terminal transition, including failure before the requesting turn ends, cancels atomically.
-    f.store.moveActivation(workId, ['running'], action === 'finish' ? 'done' : 'failed')
+    if (action === 'fail') await finish(f, turn.payload, 'failed', { outcome: { error: 'failed' } })
+    else {
+      await finish(f, turn.payload, 'completed', { text: '' })
+      f.clock.now += 60 * 60_000
+      await f.bots.deliverDueReminders()
+      await flush()
+      await finish(f, (await start(f, workId, 2)).payload, 'completed', { text: 'Done.' })
+      expect(f.store.activation(workId)?.status).toBe('done')
+      expect(f.store.waitingReminders(botId).filter(r => r.workId === workId)).toEqual([])
+      return
+    }
   } else {
     await finish(f, turn.payload, 'completed', { text: '' })
     if (action === 'stop') await f.bots.service.workStop(botId, workId)
@@ -232,4 +241,67 @@ it.each(['note', 'answer'] as const)('an owner %s resets the work wait chain', a
   }
   const set = await wait(workId)
   expect(f.store.reminder(set.wakeId)?.chain).toBe(1)
+})
+
+it.each(['reload', 'network'] as const)('a %s continuation cannot bypass an open wait', async reason => {
+  const { workId, turn } = await work()
+  const set = await wait(workId)
+  await finish(f, turn.payload, 'completed', { text: '' })
+  await (f.bots as any).continueWith(workId, ['blocked'], { [reason]: true })
+  await flush()
+  expect(f.store.activation(workId)).toMatchObject({ status: 'blocked', endReason: 'waiting' })
+  expect(f.store.dispatches(workId)).toHaveLength(1)
+  expect(f.store.reminder(set.wakeId)?.status).toBe('waiting')
+})
+it('transports the same structured wait to the work line and work_list', async () => {
+  const { workId, turn } = await work()
+  const set = await wait(workId)
+  await finish(f, turn.payload, 'completed', { text: '' })
+  const field = { dueAt: set.dueAt, event: null }
+  expect(f.bots.service.list().bots.find(b => b.id === botId)?.work?.find(w => w.id === workId)?.wait).toEqual(field)
+  expect(f.bots.tools.work.list(botId).now.find(w => w.workId === workId)?.wait).toEqual(field)
+})
+it('shares the daily and waiting-row limits with chat wakes', async () => {
+  const { workId, chat } = await work()
+  for (let i = 0; i < 30; i++) f.store.insertReminder({ id: `limit-${i}`, botId, dueAt: new Date(f.clock.now + 3600_000).toISOString(), text: 'chat wake', work: null, replyTo: null, createdAt: f.store.now(), wake: true })
+  await expect(wait(workId)).rejects.toThrow('last 24 hours')
+  f.store.run('DELETE FROM bot_reminders WHERE bot_id = ?', botId)
+  for (let i = 0; i < 50; i++) f.store.insertReminder({ id: `limit-${i}`, botId, dueAt: new Date(f.clock.now + 3600_000).toISOString(), text: 'reminder', work: null, replyTo: null, createdAt: f.store.now() })
+  await expect(wait(workId)).rejects.toThrow('waiting')
+  await expect(f.bots.tools.wakes!.add(botId, chat.id, { brief: 'Later', dueAt: new Date(f.clock.now + 3600_000).toISOString() })).rejects.toThrow('waiting')
+})
+it('counts successive work waits in the existing wake chain', async () => {
+  const { workId, turn } = await work()
+  let current = turn
+  for (let n = 1; n <= 5; n++) {
+    const set = await wait(workId)
+    expect(f.store.reminder(set.wakeId)?.chain).toBe(n)
+    await finish(f, current.payload, 'completed', { text: '' })
+    f.clock.now += 60 * 60_000
+    await f.bots.deliverDueReminders()
+    await flush()
+    current = await start(f, workId, n + 1)
+  }
+  await expect(wait(workId)).rejects.toThrow('in a row')
+})
+it('admits ready owner work and usage resets before timed waits, then the queue', async () => {
+  const ids: string[] = []
+  for (let i = 0; i < 4; i++) {
+    const { workId, turn } = await work(`order-${i}`)
+    await wait(workId)
+    await finish(f, turn.payload, 'completed', { text: '' })
+    ids.push(workId)
+  }
+  // All provider turns have ended. Model the committed readiness markers before the admission pump runs.
+  for (const [i, marker] of ['wait_ready', 'usage_limit', 'question_answered', 'room_allowed'].entries()) f.store.moveActivation(ids[i]!, ['blocked'], 'blocked', { endReason: marker })
+  const selected: string[] = []
+  const tried = new Set<string>()
+  for (let i = 0; i < 4; i++) {
+    const candidate = f.store.db.transaction(() => (f.bots as any).nextRun(tried))
+    expect(candidate?.resume).toBeDefined()
+    selected.push(candidate.resume.id)
+    tried.add(candidate.resume.id)
+  }
+  expect(selected.at(-1)).toBe(ids[0])
+  expect(new Set(selected.slice(0, 3))).toEqual(new Set(ids.slice(1)))
 })
