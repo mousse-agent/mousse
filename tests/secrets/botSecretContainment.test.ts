@@ -1,10 +1,11 @@
 /**
  * A personal bot's secrets, through the real path (bot/thread parity, "use secrets you give it").
  *
- * 1. A bot's `secret_run` goes through the real tool, the profile's real secret host and `runWithSecrets`. It gets the
- *    bot's filtered command environment plus the secrets it names, and runs in Mousse's sandbox with only its folders
- *    and no network; where this computer has no sandbox for it, it is refused and nothing runs. A thread's agent (the
- *    control row) runs as before, with the service's environment and every folder.
+ * 1. A bot's `secret_run` goes through the real tool, the profile's real secret host and `runWithSecrets`. It never gets
+ *    the service's environment: only the bot's locked command environment plus the secrets it names. On Linux with
+ *    bubblewrap it runs in Mousse's sandbox with only its folders and no network; elsewhere it runs as the bot's other
+ *    commands do, from its files folder. A thread's agent (the control row) runs as before, with the service's
+ *    environment and every folder.
  * 2. A secret the owner gave the bot (filed under its chat thread) is masked in what a turn of its work thread keeps:
  *    the stored messages, the run's recorded result, the native history, the reply to the caller and every file of the
  *    profile. Without the bot's chat thread (the control row), the same turn keeps it in the clear.
@@ -17,7 +18,7 @@ import type { TurnInput, TurnResult } from '../../src/mms/harness/adapter'
 import { secretTools } from '../../src/mms/run/mcp/appTools/secrets'
 import type { AppToolHost } from '../../src/mms/run/mcp/appTools/host'
 import type { ToolCallContext } from '../../src/mms/run/mcp/appTools/types'
-import { BOT_SECRET_COMMAND_UNCONTAINED, botSecretContainment, bubblewrapArgs, findBubblewrap } from '../../src/mms/secrets/botSecretCommand'
+import { botSecretContainment, bubblewrapArgs, findBubblewrap } from '../../src/mms/secrets/botSecretCommand'
 import { SecretRequests } from '../../src/mms/secrets/SecretRequests'
 import { SecretVault } from '../../src/mms/secrets/SecretVault'
 import { createSecretToolHost } from '../../src/mms/secrets/secretToolHost'
@@ -78,10 +79,10 @@ describe('a bot\'s secret command is held as its commands are', () => {
     } as ToolCallContext)
   }
 
-  /** Prints the ambient variable, reads the owner's file, prints the secret's length, and leaves a mark it ran. */
+  /** Prints the ambient variable, reads the owner's file, prints the secret (masked), and leaves a mark where it ran. */
   const probe = () => WINDOWS
-    ? `echo u=%MOUSSE_TEST_AMBIENT%& type "${outside}"& echo ran> ran.txt`
-    : `printf "u=%s|" "$MOUSSE_TEST_AMBIENT"; cat "${outside}"; printf "|t=%s|" "\${#API_TOKEN}"; echo ran > ran.txt`
+    ? `echo u=%MOUSSE_TEST_AMBIENT%& type "${outside}"& echo t=%API_TOKEN%& echo ran> ran.txt`
+    : `printf "u=%s|" "$MOUSSE_TEST_AMBIENT"; cat "${outside}"; printf "|t=%s|" "$API_TOKEN"; echo ran > ran.txt`
 
   it('a thread\'s agent runs as before: the service\'s environment and every folder (the control row)', async () => {
     const ran = await tool()({ command: probe(), secrets: [{ name: 'API_TOKEN' }] }, 'thread')
@@ -90,28 +91,26 @@ describe('a bot\'s secret command is held as its commands are', () => {
     expect(existsSync(join(files, 'ran.txt'))).toBe(true)
   })
 
-  it('where this computer has no sandbox for it, a bot\'s command is refused and nothing runs', async () => {
-    const ran = await tool({ containment: { ok: false, reason: BOT_SECRET_COMMAND_UNCONTAINED } })({ command: probe(), secrets: [{ name: 'API_TOKEN' }] }, 'bot')
-    expect(ran).toEqual({ text: BOT_SECRET_COMMAND_UNCONTAINED, isError: true })
+  it('where Mousse has no sandbox for it, a bot\'s command runs as its other commands do: from its files folder, with the locked environment and its secret only', async () => {
+    const ran = await tool({ containment: { sandbox: 'none' } })({ command: probe(), secrets: [{ name: 'API_TOKEN' }] }, 'bot')
+    expect(ran.isError).toBeUndefined()
+    // The secret it named is there (masked in what it prints); the owner's ambient credential is not.
+    expect(ran.text).toContain('[secret API_TOKEN hidden]')
+    expect(ran.text).not.toContain(VALUE)
     expect(ran.text).not.toContain(AMBIENT)
-    expect(ran.text).not.toContain('OWNER-PRIVATE-CONTENT')
-    expect(existsSync(join(files, 'ran.txt'))).toBe(false)
+    expect(existsSync(join(files, 'ran.txt'))).toBe(true)
   })
 
-  it('on this computer, a bot\'s command never sees the ambient credential or the owner\'s file', async () => {
-    // Whatever this computer has: a sandbox (Linux with bubblewrap) runs it held; anything else refuses it.
+  it('on this computer, a bot\'s command gets its secret and never the ambient credential; in the Linux sandbox, not the owner\'s file either', async () => {
     const ran = await tool()({ command: probe(), secrets: [{ name: 'API_TOKEN' }] }, 'bot')
-    expect(ran.text).not.toContain(AMBIENT)
-    expect(ran.text).not.toContain('OWNER-PRIVATE-CONTENT')
+    expect(ran.isError).toBeUndefined()
+    expect(ran.text).toContain('[secret API_TOKEN hidden]')
     expect(ran.text).not.toContain(VALUE)
-    if (!BUBBLEWRAP) {
-      expect(ran).toEqual({ text: BOT_SECRET_COMMAND_UNCONTAINED, isError: true })
-      expect(existsSync(join(files, 'ran.txt'))).toBe(false)
-    } else {
-      // It ran, in its files folder, with the secret it named and nothing of the owner's.
+    expect(ran.text).not.toContain(AMBIENT)
+    expect(existsSync(join(files, 'ran.txt'))).toBe(true)
+    if (BUBBLEWRAP) {
       expect(ran.text).toContain('u=|')
-      expect(ran.text).toContain(`|t=${VALUE.length}|`)
-      expect(existsSync(join(files, 'ran.txt'))).toBe(true)
+      expect(ran.text).not.toContain('OWNER-PRIVATE-CONTENT')
     }
   })
 
@@ -125,16 +124,16 @@ describe('a bot\'s secret command is held as its commands are', () => {
     expect(existsSync(join(base, 'owner', 'written.txt'))).toBe(false)
   })
 
-  // Where Mousse can hold a bot's secret command, by platform: only Linux with bubblewrap.
-  // (Where bubblewrap is found only matters on Linux.)
-  const where: Array<[string, NodeJS.Platform, string | undefined, boolean]> = [
-    ['Linux with bubblewrap', 'linux', '/usr/bin/bwrap', true],
-    ['Linux without bubblewrap', 'linux', undefined, false],
-    ['macOS, even with a program named bwrap', 'darwin', '/usr/local/bin/bwrap', false],
-    ['Windows', 'win32', undefined, false]
+  // Where Mousse runs a bot's secret command in its sandbox, by platform: only Linux with bubblewrap. Elsewhere it runs as
+  // the bot's other commands do. (Where bubblewrap is found only matters on Linux.)
+  const where: Array<[string, NodeJS.Platform, string | undefined, 'bubblewrap' | 'none']> = [
+    ['Linux with bubblewrap', 'linux', '/usr/bin/bwrap', 'bubblewrap'],
+    ['Linux without bubblewrap', 'linux', undefined, 'none'],
+    ['macOS, even with a program named bwrap', 'darwin', '/usr/local/bin/bwrap', 'none'],
+    ['Windows', 'win32', undefined, 'none']
   ]
-  it.each(where)('%s', (_name, platform, bwrap, ok) => {
-    expect(botSecretContainment(platform, () => bwrap).ok).toBe(ok)
+  it.each(where)('%s', (_name, platform, bwrap, sandbox) => {
+    expect(botSecretContainment(platform, () => bwrap).sandbox).toBe(sandbox)
   })
 
   it('the sandbox has no network and none of the owner\'s folders: only the system\'s, read-only, and the bot\'s own', () => {

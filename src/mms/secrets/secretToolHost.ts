@@ -32,7 +32,7 @@ export function createSecretToolHost(input: { vault: SecretVault; requests: Secr
         timeoutMs: run.timeoutMs,
         signal: run.signal,
         ...(input.baseEnv ? { baseEnv: input.baseEnv } : {}),
-        // A personal bot's command: held to its folders and its filtered environment, or refused.
+        // A personal bot's command: its locked environment plus the named secrets, in the sandbox where there is one.
         ...(run.contain ? { contain: { ...run.contain, ...(input.containment ? { containment: input.containment } : {}) } } : {})
       })
     }

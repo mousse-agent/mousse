@@ -25,8 +25,6 @@ export interface SecretRunResult {
   timedOut: boolean
   stopped: boolean
   truncated: boolean
-  /** A personal bot's command this computer can't hold in a sandbox: it did not run, and this says why. */
-  refused?: string
 }
 
 /**
@@ -34,9 +32,10 @@ export interface SecretRunResult {
  * files live in a folder only this account can open, under the profile's secret folder, and are deleted when the
  * command ends whatever the outcome. The value never reaches the command line, so other processes cannot read it there.
  *
- * `contain`: a personal bot's command (`botSecretCommand.ts`). It gets the bot's filtered command environment plus the
- * named secrets, and runs in Mousse's sandbox with only the bot's folders (`folders`, writable) besides the system's,
- * and no network; where this computer has no such sandbox it is refused and nothing runs. Without it (a thread's
+ * `contain`: a personal bot's command (`botSecretCommand.ts`). It never gets the service's environment: only the bot's
+ * locked command environment plus the named secrets. Where Mousse has a sandbox for it (Linux with bubblewrap) it runs
+ * there, with only the bot's folders (`folders`, writable) besides the system's, and no network; elsewhere it runs as
+ * the bot's other commands do there, from its files folder in a process group of its own. Without it (a thread's
  * agent), the command runs as before.
  */
 export async function runWithSecrets(input: {
@@ -52,7 +51,6 @@ export async function runWithSecrets(input: {
   contain?: { scratch: string; folders: readonly string[]; containment?: BotSecretContainment }
 }): Promise<SecretRunResult> {
   const containment = input.contain ? input.contain.containment ?? botSecretContainment() : undefined
-  if (containment && !containment.ok) return { exitCode: null, output: '', timedOut: false, stopped: false, truncated: false, refused: containment.reason }
   const env: NodeJS.ProcessEnv = input.contain ? botSecretEnv(input.baseEnv ?? process.env, input.contain.scratch) : { ...(input.baseEnv ?? process.env) }
   let folder: string | undefined
   if (input.secrets.some((secret) => secret.as === 'file')) {
@@ -74,8 +72,9 @@ export async function runWithSecrets(input: {
       const windows = process.platform === 'win32'
       let child: ReturnType<typeof spawn>
       try {
-        child = containment?.ok
-          // A bot's: in the sandbox, with its folders and the private folder of its secret files only.
+        // A bot's where Mousse has a sandbox: in it, with its folders and the private folder of its secret files only.
+        // Otherwise (a thread's agent, or a bot's elsewhere) a shell: on POSIX in a process group of its own.
+        child = containment?.sandbox === 'bubblewrap'
           ? spawn(containment.program, containment.args(input.command, { cwd: input.cwd, writable: input.contain!.folders, readOnly: folder ? [folder] : [] }), { cwd: input.cwd, env, detached: true })
           : windows
             ? spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${input.command}"`], { cwd: input.cwd, env, windowsVerbatimArguments: true, windowsHide: true })

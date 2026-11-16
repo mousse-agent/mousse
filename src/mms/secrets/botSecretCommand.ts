@@ -6,25 +6,24 @@ import { lockedEnv } from '../harness/env'
 /**
  * How a personal bot's `secret_run` runs (bot/thread parity, the bot's "use secrets you give it"). A thread's agent runs
  * its secret command as its own commands run. A bot's commands run inside its runtime (Claude Code's sandbox, Codex's
- * profile, Pi's bash), which Mousse can't run a command in from the service, so a bot's secret command gets Mousse's own
- * containment, never looser than a sandboxed bot's shell:
+ * profile, Pi's bash), which Mousse can't run a command in from the service, so a bot's secret command runs as the bot's
+ * background commands do (`watch_start`), never with the service's environment. It needs "run commands", so it never
+ * reaches more than the owner allowed that bot's commands:
  *
- * - **Environment.** The bot's filtered command environment (`lockedEnv`, as Pi's bot bash gets: the platform's own
- *   variables and proxies, `TMPDIR` in its scratch folder), plus only the secrets the call names. No ambient credential or
- *   other variable of the owner's comes through.
- * - **Folders and network.** On Linux, bubblewrap: the system's own folders read-only (`LINUX_SYSTEM_FOLDERS`, as Claude
- *   Code's sandbox opens them), the bot's files and scratch folders writable, a private `/tmp`, nothing else (no home
- *   folder, `/mnt`, `/media`, `/opt`, `/var`, `/run`), no network, and its own process namespace.
- * - **Elsewhere** (Windows, macOS, Linux without bubblewrap) Mousse has no sandbox to run it in, so a bot's secret command
- *   is refused, never run looser than its shell may run.
+ * - **Environment.** The bot's locked command environment (`lockedEnv`, as a Pi bot's commands and its background
+ *   commands get: the platform's own variables and proxies, `TMPDIR` in its scratch folder), plus only the secrets the
+ *   call names. No ambient credential or other variable of the owner's comes through.
+ * - **Folders and network, where Mousse has a sandbox** (Linux with bubblewrap): the system's own folders read-only
+ *   (`LINUX_SYSTEM_FOLDERS`, as Claude Code's sandbox opens them), the bot's files and scratch folders writable, a private
+ *   `/tmp`, nothing else (no home folder, `/mnt`, `/media`, `/opt`, `/var`, `/run`), no network, and its own process
+ *   namespace.
+ * - **Elsewhere** (Windows, macOS, Linux without bubblewrap): as the bot's other commands run there, in a shell from its
+ *   files folder, in its own process group where there is one, reaching what the owner's account can (docs/bots.md,
+ *   "Where commands aren't held").
  */
 export type BotSecretContainment =
-  | { ok: true; program: string; args(command: string, input: { cwd: string; writable: readonly string[]; readOnly: readonly string[] }): string[] }
-  | { ok: false; reason: string }
-
-/** What a refused bot secret command is told; it names no secret. */
-export const BOT_SECRET_COMMAND_UNCONTAINED =
-  'A secret command of a bot runs only in a sandbox Mousse keeps it in, and this computer has none for it (it needs Linux with bubblewrap). Nothing ran. Ask your owner to run it in one of their threads, where they can give the secret too.'
+  | { sandbox: 'bubblewrap'; program: string; args(command: string, input: { cwd: string; writable: readonly string[]; readOnly: readonly string[] }): string[] }
+  | { sandbox: 'none' }
 
 /** The bubblewrap program on `path`, else undefined. */
 export function findBubblewrap(path = process.env.PATH ?? '', exists: (file: string) => boolean = isFile): string | undefined {
@@ -44,11 +43,11 @@ function isFile(path: string): boolean {
   }
 }
 
-/** How this computer can hold a bot's secret command (`BotSecretContainment`). */
+/** How this computer holds a bot's secret command (`BotSecretContainment`): bubblewrap on Linux where it can run. */
 export function botSecretContainment(platform: NodeJS.Platform = process.platform, find: () => string | undefined = findBubblewrap): BotSecretContainment {
   const bubblewrap = platform === 'linux' ? find() : undefined
-  if (!bubblewrap) return { ok: false, reason: BOT_SECRET_COMMAND_UNCONTAINED }
-  return { ok: true, program: bubblewrap, args: (command, input) => bubblewrapArgs(command, input) }
+  if (!bubblewrap) return { sandbox: 'none' }
+  return { sandbox: 'bubblewrap', program: bubblewrap, args: (command, input) => bubblewrapArgs(command, input) }
 }
 
 /**
@@ -85,7 +84,10 @@ function symbolicLink(path: string): string | undefined {
   }
 }
 
-/** The environment of a bot's secret command: its filtered command environment, `TMPDIR` in its scratch folder. */
+/**
+ * The environment of a bot's secret command: its locked command environment, as its background commands get it
+ * (`BotEngine.startWatcher`), `TMPDIR` in its scratch folder. The secrets are added by `runWithSecrets`.
+ */
 export function botSecretEnv(base: NodeJS.ProcessEnv, scratch: string, platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
-  return lockedEnv({ platform, base, driver: 'pi', credential: 'unknown', scratch })
+  return lockedEnv({ platform, base, driver: 'pi', credential: 'api_key', scratch })
 }
