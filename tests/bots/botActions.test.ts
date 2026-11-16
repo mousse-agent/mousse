@@ -1133,3 +1133,17 @@ it('C4 hidden paths retain literal dots, arrows and array indices through the br
   const page = await list.handle(list.validate!({ botId: t.botId }), { caller: { node: 'phone', user: 'owner' } } as never) as any
   expect(page.messages.find((m: any) => m.id === a.message_id).action.hiddenPaths).toEqual(paths)
 })
+
+it('C4 looks for earlier matching calls only while a review is open', async () => {
+  const t = await setup(true)
+  await t.call()
+  const a = f.bots.actions.forWork(t.workId)!
+  const reads = vi.spyOn(f.store, 'all')
+  for (const status of ['open', 'approved', 'running', 'done', 'failed', 'uncertain', 'declined', 'expired', 'withdrawn']) {
+    f.store.run('UPDATE bot_actions SET status = ? WHERE id = ?', status, a.id)
+    reads.mockClear()
+    const card = f.bots.service.actionMessage(t.botId, a.id).action!
+    expect(card.status).toBe(status)
+    expect(reads.mock.calls.filter(([sql]) => sql.includes('args_digest'))).toHaveLength(status === 'open' ? 1 : 0)
+  }
+})
