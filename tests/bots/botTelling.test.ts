@@ -434,16 +434,17 @@ it.each(['day', 'active at night', 'can wake at night'] as const)('folds five so
   expect(classes).toEqual(['soon', 'soon', 'soon', 'soon', 'soon'])
 })
 
-it.each([false, true])('C4 folded telling preserves the single projection cost without action rows, switch=%s', (on) => {
-  f.host.settings!.get().experimental.botAsksFirst = on
+it.each([false, true])('C4 folded telling preserves the single projection cost without action rows, switch=%s', async (on) => {
+  const { BotTellings } = await import('../../src/mms/bots/chat/BotTellings')
+  const chat = new BotChatProjection({ store: f.store, asksFirst: () => on, emit() {} })
   const rows = Array.from({ length: 8 }, (_, i) => {
     const message = f.bots.chat.post({ botId, author: 'bot', kind: 'text', text: `Update ${i}` })
     return f.store.message(message.id)!
   })
-  const projection = vi.spyOn(f.bots.chat, 'toMessage')
+  const projection = vi.spyOn(chat, 'toMessage')
   const events: any[] = []
-  f.bots.events.on('tell', event => events.push(event))
-  f.bots.tellings.releaseBacklog(rows, f.clock.now)
+  const telling = new BotTellings(f.store, chat, () => 'Scout', event => events.push(event))
+  telling.releaseBacklog(rows, f.clock.now)
   expect(events).toHaveLength(1)
   expect(events[0].rows).toHaveLength(rows.length)
   expect(projection).toHaveBeenCalledTimes(1)
