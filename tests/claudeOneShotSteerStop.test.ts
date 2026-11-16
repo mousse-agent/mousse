@@ -11,6 +11,7 @@ import type { Query, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ClaudeSubscriptionProviderService } from '../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
+import type { ChatImageAttachment } from '../src/shared/types'
 
 const dirs: string[] = []
 const temp = (prefix: string): string => {
@@ -49,7 +50,7 @@ async function firstMessage(prompt: AsyncIterable<SDKUserMessage>): Promise<SDKU
  * A person's turn with no live session (live queries turned off, so one query per run of the turn), each query from `scripts`
  * in order. `beforeStart(n)` runs as query `n` is being started, before the turn has it.
  */
-function cappedTurn(scripts: Script[], steersQueued: { text: string; token: string }[], beforeStart?: (index: number) => void, mcp?: { url: string; token: string }) {
+function cappedTurn(scripts: Script[], steersQueued: { text: string; token: string; images?: ChatImageAttachment[] }[], beforeStart?: (index: number) => void, mcp?: { url: string; token: string }) {
   const home = temp('one-shot-steer-home-')
   const binary = join(home, 'claude')
   writeFileSync(binary, 'fixture')
@@ -317,6 +318,26 @@ describe('a Stop after a steer into a one-shot Claude Code turn (#920)', () => {
     await turn.run()
     expect(turn.order).toEqual(['servers 0: mousse', 'prompt 0', 'servers 1: mousse', 'prompt 1'])
     expect(turn.steer.onSteer).toHaveBeenCalledExactlyOnceWith('use the other file', 'drain-1')
+  })
+
+  it('a steer sent with an image goes into the restarted query with the image', async () => {
+    const data = Buffer.from('png bytes').toString('base64')
+    let turn!: ReturnType<typeof cappedTurn>
+    turn = cappedTurn([
+      interruptedByTheSteers(() => turn.pending),
+      async function* (prompt) {
+        const { uuid } = await firstMessage(prompt)
+        yield init
+        yield started(uuid)
+        yield answer
+        yield done
+      }
+    ], [{ text: 'look at this', token: 'drain-1', images: [{ mimeType: 'image/png', data, name: 'shot.png' }] }])
+    await turn.run()
+    expect(turn.prompts[1]!.message.content).toEqual([
+      expect.objectContaining({ type: 'text', text: 'look at this' }),
+      expect.objectContaining({ type: 'image', source: expect.objectContaining({ type: 'base64', media_type: 'image/png', data }) })
+    ])
   })
 
   it('a stopped process that never ends its output is read no longer than the drain deadline, and the steer is handed back once', async () => {

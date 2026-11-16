@@ -1357,6 +1357,10 @@ export function OrchestratorChat() {
       // A /steer no turn took: next-turn guidance, sent as an ordinary message.
       text = command.text
       if (command.adoptGoal) goalToAdopt = command.text
+    } else if (options?.steer && !skillMode && images.length > 0 && !trimmed.startsWith('/')) {
+      // A steer with images: the text-only steer call cannot carry them, so the message is queued with them and sent
+      // into the reply by its id (`queue.steer`), as a steer the turn could not take yet is. The images go with it.
+      steerQueued = true
     } else if (options?.steer && !skillMode && images.length === 0 && trimmed && !trimmed.startsWith('/')) {
       // Steer (Ctrl/Cmd+Enter) during a run: the text goes into the running turn instead of the queue. The composer
       // clears at once, as a send does: what is typed while this steer is on its way is the next message, and a clear
