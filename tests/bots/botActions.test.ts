@@ -1060,7 +1060,7 @@ it('C4 About marks one service that asks first, preserving invalid marks and the
   settings.experimental.botAsksFirst = false
   const before = permission()
   settings.experimental.botAsksFirst = true
-  expect(permission()).toMatchObject({ mark: 'Asks first', asksFirst: true, note: 'Asks you first before it sends or changes anything' })
+  expect(permission()).toMatchObject({ mark: 'Asks first', asksFirst: true, note: 'Asks you first before actions that can send or change things.' })
   expect(permission().note).not.toContain('send, other')
   for (const [state, mark] of [['gone', 'Gone from Mousse'], ['off', 'Switched off'], ['mcp_off', 'MCP is off'], ['changed', 'Changed']] as const) {
     vi.spyOn(t.mcp, 'where').mockReturnValueOnce({ state, name: 'Mail', server: t.mcp.servers()[0] } as never)
