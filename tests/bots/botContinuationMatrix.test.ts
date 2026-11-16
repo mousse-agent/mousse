@@ -67,6 +67,7 @@ it.each(actionCells)('action $status / waited=$hasWaited / cause=$cause / $reaso
   const input = matrixInput(reason, update, true)
   input.workEvents.push({ at: '2026-11-07T09:04:00Z', text: actionText, actionId: 'action-1' })
   input.actionCaused = cause ? actionText : undefined
+  input.answerCaused = reason === 'owner words'
   if (hasWaited) {
     input.waited = true
     input.workEvents.unshift({ at: '2026-11-07T09:00:00Z', text: 'Earlier timed update' })

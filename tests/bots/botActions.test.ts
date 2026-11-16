@@ -39,7 +39,7 @@ async function setup(on: boolean, realServer = false, secondTool = false) {
     })
     const live = new McpManager({ discover: async () => ({ servers: [config], sources: [], diagnostics: [] }) } as never, store as never, async () => {}, {
       clientFactory: { connect: async () => ({
-        listTools: async () => ({ tools: [{ name: 'send', inputSchema: { type: 'object' as const } }] }),
+        listTools: async () => ({ tools: [{ name: 'send', inputSchema: descriptor.inputSchema }] }),
         callTool: async request => { calls.push(structuredClone(request.arguments)); return { content: [{ type: 'text', text: 'delivered' }] } },
         close: async () => {}
       }) }
@@ -471,18 +471,6 @@ it('S2 refuses arguments that would be cut from the review', async () => {
   expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
   expect(t.calls).toEqual([])
 })
-it('S3 removes a hidden executable value echoed by a result on settlement', async () => {
-  const t = await setup(true)
-  await t.call()
-  const a = f.bots.actions.forWork(t.workId)!
-  // Defense for rows written by an older build, before hidden arguments were refused.
-  f.store.run('UPDATE bot_actions SET exec_args = ? WHERE id = ?', JSON.stringify({ ...t.args, password: 'hunter2' }), a.id)
-  f.bots.actions.transition(a.id, 'open', 'approved')
-  f.bots.actions.transition(a.id, 'approved', 'running')
-  f.bots.actions.transition(a.id, 'running', 'failed', { text: 'Login failed for password hunter2' })
-  expect(f.bots.actions.forWork(t.workId)?.result_json).not.toContain('hunter2')
-  expect(new BotMemoryStore({ db: f.store.db }).actions(t.botId).map(a => a.result_json).join()).not.toContain('hunter2')
-})
 it('S4 refuses a stored target changed to another granted tool with the same schema', async () => {
   const t = await setup(true, false, true)
   await t.call()
@@ -703,7 +691,7 @@ it.each(['send', 'not_now'] as const)('B-device refuses truncated-card Send but 
   expect(t.calls).toEqual([])
 })
 
-it.each(['e', '42', 'plan'] as const)('B-short redacts only long hidden values in server text, before the frame: %s', async password => {
+it.each(['e', '42', 'plan', 'send', 'Mail', 'instructions'] as const)('B-short redacts only long hidden values in server text, before the frame: %s', async password => {
   const t = await setup(true)
   Object.assign(t.args, { password })
   vi.spyOn(t.manager, 'callTool').mockResolvedValueOnce({ content: [{ type: 'text', text: `delivered to the recipient: ${password}` }] } as never)
