@@ -741,3 +741,11 @@ NULL `owner_set` means set before v10 (or by an older writer) and preserves toda
 | Memory and context | `src/mms/bots/memory/` |
 | Wiring | `src/mms/MmsProfileServices.ts` |
 | Renderer: chat, ask cards, menu, About, New bot, faces, browser preview and split view | `src/renderer/components/bots/`, `src/renderer/stores/botsStore.ts`, `src/renderer/stores/botBrowserStore.ts` (over `watchedBrowserStore.ts`), `src/renderer/components/browser/WatchedBrowserPane.tsx`, `src/renderer/services/personalBotsClient.ts` |
+
+### Asks first
+
+The engine for holding an MCP call until Send is built behind `experimental.botAsksFirst`, which defaults to off and has no settings control. With it off, granted tools run as before. Tool selection, the approval card, scheduled runs that wait, withdrawal and timed expiry are separate work before this can be switched on.
+
+A held call belongs to one piece of work and one runtime call in its dispatch. Mousse keeps its exact arguments until it settles; the chat, journal and export get a masked copy. Send names the action and the argument digest shown with it. It is bound to the installed server's configuration, the tool's schema, the grant revision and the starting device's permission limit. A changed or expired binding needs a fresh review.
+
+Mousse makes the stored call once, without asking the model to recreate it. It commits approval and then the start of execution separately. After a restart, an approved call is checked again before running; a call whose execution had started becomes uncertain and is never repeated. The work continues with the masked result, or is told to check before trying again when the outcome is uncertain. Not now sends nothing. Executable arguments are cleared with every settled state. This covers Mousse's MCP calls, not commands, browser actions or actions on the owner's threads.
