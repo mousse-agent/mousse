@@ -4690,7 +4690,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.store.db.transaction(() => {
       this.store.setPublished(botId, revision.revision!)
       this.store.approve(botId, digest, granted)
-      this.actions.withdrawChanged()
       if (switching) this.store.regrant(botId, grant.digest, digest, revision.revision!)
       for (const row of this.store.activationsIn(botId, ['queued', 'blocked'])) {
         if (row.status === 'blocked' && !workWaits(row)) continue

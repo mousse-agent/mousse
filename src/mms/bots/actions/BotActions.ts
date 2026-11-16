@@ -196,7 +196,7 @@ export class BotActions {
   constructor(private readonly host: Host) {
     registerHeldCalls(host.store.db, {
       endWork: id => this.withdrawWork(id),
-      grantChanged: () => this.withdrawChanged(),
+      grantChanged: botId => this.withdrawChanged(botId),
       forgetMessage: (botId, messageId) => {
         const ids = host.store.all(`SELECT a.* FROM bot_actions a JOIN bot_activations w ON w.id = a.activation_id
           WHERE a.bot_id = ? AND (a.message_id = ? OR json_extract(w.trigger_json, '$.replyTo') = ?)`, botId, messageId, messageId)
@@ -248,8 +248,8 @@ export class BotActions {
     for (const action of this.host.store.all("SELECT * FROM bot_actions WHERE status = 'approved'") as unknown as ActionRow[])
       if (this.approvedDeadline(action) <= Date.parse(this.host.store.now())) this.sendTimeout(action)
   }
-  withdrawChanged(): void {
-    for (const a of this.host.store.all("SELECT * FROM bot_actions WHERE status IN ('open', 'approved')")) {
+  withdrawChanged(botId?: string): void {
+    for (const a of this.host.store.all("SELECT * FROM bot_actions WHERE status IN ('open', 'approved') AND (? IS NULL OR bot_id = ?)", botId ?? null, botId ?? null)) {
       if (this.host.obsolete(a as unknown as ActionRow) && this.transition(String(a.id), String(a.status), 'withdrawn', { text: 'This tool or its permission changed. Carry on without it.' })) this.host.store.db.afterCommit(() => this.finish(a as unknown as ActionRow))
     }
   }
