@@ -1,3 +1,5 @@
+/** Longest an accepted Send may wait before transport dispatch, counted from the owner's tap. */
+export const APPROVED_SEND_WINDOW_MS = 10 * 60_000
 import { MAX_SAME_WAKES } from '../../../shared/bots/personal/wakes'
 import { registerHeldCalls } from './lifecycle'
 import { randomUUID } from 'node:crypto'
@@ -57,7 +59,7 @@ export function removeHiddenArguments(result: ToolOutcome, args: unknown, schema
 function boundedActionResult(result: BotMcpCallOutcome): BotMcpCallOutcome {
   const note = result.images?.length ? `\n[${result.images.length} image(s) left out of the stored result.]` : ''
   const text = String(maskedActionData(result.text, Infinity))
-  const build = (end: number): BotMcpCallOutcome => ({ text: `${text.slice(0, end)}${end < text.length ? '\n[Result cut to fit stored size.]' : ''}${note}`, ...(result.isError ? { isError: true } : {}), ...(result.toolReportedError ? { toolReportedError: true } : {}) })
+  const build = (end: number): BotMcpCallOutcome => ({ text: `${text.slice(0, end)}${end < text.length ? '\n[Result cut to fit stored size.]' : ''}${note}`, ...(result.isError ? { isError: true } : {}), ...(result.toolReportedError ? { toolReportedError: true } : {}), ...(result.notSentInTime ? { notSentInTime: true } : {}) })
   let low = 0, high = Math.min(text.length, 32_000)
   while (low < high) {
     const mid = Math.ceil((low + high) / 2)
@@ -157,6 +159,7 @@ export interface ActionRow {
 /** Stored outcomes are timed updates, assembled with all other work updates at dispatch. */
 export function actionContinuation(action: Pick<ActionRow, 'status' | 'result_json'>): string {
   const result = action.result_json ? JSON.parse(action.result_json) as BotMcpCallOutcome : undefined
+  if (result?.notSentInTime) return `${result.text} Nothing left Mousse. Decide whether a new request is needed.`
   const line = action.status === 'done' ? 'Your owner sent it. The tool answered:'
     : action.status === 'declined' ? 'Your owner chose not to send this: carry on without it and say what you skipped.'
       : action.status === 'expired' ? 'This call expired. Nothing was sent; do not try the same call again without a new reason.'
@@ -218,10 +221,26 @@ export class BotActions {
     for (const action of this.host.store.all("SELECT * FROM bot_actions WHERE activation_id = ? AND status IN ('open', 'approved')", id))
       this.transition(String(action.id), String(action.status), 'withdrawn', { text: 'This work ended. Nothing was sent.' })
   }
+  private approvedDeadline(action: Pick<ActionRow, 'answered_at'>): number {
+    return action.answered_at ? Date.parse(action.answered_at) + APPROVED_SEND_WINDOW_MS : 0
+  }
+  nextDueAt(botId?: string): number | undefined {
+    const times = (this.host.store.all("SELECT * FROM bot_actions WHERE status IN ('open', 'approved') AND (? IS NULL OR bot_id = ?)", botId ?? null, botId ?? null) as unknown as ActionRow[])
+      .map(action => action.status === 'approved' ? this.approvedDeadline(action) : Date.parse(action.expires_at))
+    return times.length ? Math.min(...times) : undefined
+  }
+  private sendTimeout(action: ActionRow): boolean {
+    const service = JSON.parse(action.card_json ?? '{}').serverName ?? 'The service'
+    const moved = this.transition(action.id, action.status, 'failed', { isError: true, notSentInTime: true, text: `${service} couldn't be reached, so nothing was sent.` })
+    if (moved) this.finish(action)
+    return moved
+  }
   expireDue(): void {
     for (const a of this.host.store.all("SELECT * FROM bot_actions WHERE status = 'open' AND expires_at <= ?", this.host.store.now())) {
       if (this.transition(String(a.id), String(a.status), 'expired', { text: 'This call expired. Carry on without it; do not try the same call again without a new reason.' })) this.finish(a as unknown as ActionRow)
     }
+    for (const action of this.host.store.all("SELECT * FROM bot_actions WHERE status = 'approved'") as unknown as ActionRow[])
+      if (this.approvedDeadline(action) <= Date.parse(this.host.store.now())) this.sendTimeout(action)
   }
   withdrawChanged(): void {
     for (const a of this.host.store.all("SELECT * FROM bot_actions WHERE status IN ('open', 'approved')")) {
@@ -276,7 +295,7 @@ export class BotActions {
       this.host.store.run(`INSERT INTO bot_actions(id, call_key, bot_id, activation_id, lane, kind, target_json, exec_args,
         args_json, args_digest, binding_json, card_json, status, message_id, expires_at, created_at)
         VALUES(?, ?, ?, ?, 'run', 'mcp', ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`,
-      id, callKey, row.botId, row.id, JSON.stringify({ server: tool.server, tool: tool.tool }), exact, JSON.stringify(review.args), actionDigest(JSON.parse(exact)), JSON.stringify(binding), JSON.stringify({ hasHiddenValues: review.hasHiddenValues }), messageId,
+      id, callKey, row.botId, row.id, JSON.stringify({ server: tool.server, tool: tool.tool }), exact, JSON.stringify(review.args), actionDigest(JSON.parse(exact)), JSON.stringify(binding), JSON.stringify({ hasHiddenValues: review.hasHiddenValues, serverName: tool.serverName }), messageId,
       new Date(Date.parse(this.host.store.now()) + 48 * 3600_000).toISOString(), this.host.store.now())
       this.host.park(row)
       this.host.post(row, messageId, `${tool.serverName} · ${tool.tool}\n${review.hasHiddenValues ? 'Hidden values will be sent.\n' : ''}${JSON.stringify(review.args)}`)
@@ -292,6 +311,13 @@ export class BotActions {
         ran_at = CASE WHEN ? IN ('running', 'done') THEN ? ELSE ran_at END WHERE id = ? AND status = ?`,
       to, pending.has(to) ? 1 : 0, result ? JSON.stringify(boundedActionResult(result)) : null,
       from, this.host.store.now(), to, this.host.store.now(), id, from) > 0
+      if (moved && result?.notSentInTime) this.host.store.run("UPDATE bot_actions SET card_json = json_set(card_json, '$.settledAt', ?) WHERE id = ?", this.host.store.now(), id)
+      if (moved && ['approved', 'running'].includes(to)) {
+        const action = this.get(id)!
+        const service = JSON.parse(action.card_json ?? '{}').serverName ?? 'the service'
+        this.host.store.run('UPDATE bot_messages SET text = ? WHERE id = ?', to === 'approved' ? `Waiting for ${service}…` : 'Sending…', action.message_id)
+        this.host.store.db.afterCommit(() => this.host.publish(action.message_id))
+      }
       if (moved && ['declined', 'expired'].includes(to)) {
         const action = this.get(id)!
         this.host.store.run(`UPDATE bot_actions SET card_json = json_set(COALESCE(card_json, '{}'), '$.ownerSeq', ?, '$.noteSeq', ?) WHERE id = ?`,
@@ -300,7 +326,7 @@ export class BotActions {
       if (moved && !pending.has(to)) {
         const action = this.get(id)!
         const row = this.host.store.activation(action.activation_id)
-        if (action.args_json !== '"[forgotten]"') this.host.store.run('UPDATE bot_messages SET text = ? WHERE id = ?', to === 'expired' ? 'Expired · not sent' : to === 'done' ? 'Sent' : to === 'uncertain' ? "Couldn't tell if it went through" : result?.toolReportedError ? 'The tool reported an error' : 'Not sent', action.message_id)
+        if (action.args_json !== '"[forgotten]"') this.host.store.run('UPDATE bot_messages SET text = ? WHERE id = ?', result?.notSentInTime ? result.text : to === 'expired' ? 'Expired · not sent' : to === 'done' ? 'Sent' : to === 'uncertain' ? "Couldn't tell if it went through" : result?.toolReportedError ? 'The tool reported an error' : 'Not sent', action.message_id)
         if (row?.endReason === 'approval') this.host.store.moveActivation(row.id, ['blocked'], 'blocked', { endReason: 'approval_answered' })
         this.host.store.db.afterCommit(() => this.host.publish(action.message_id))
       }
@@ -324,11 +350,16 @@ export class BotActions {
 
   assertRunning(id: string): void {
     const action = this.get(id)
+    if (action?.status === 'running' && this.approvedDeadline(action) <= Date.parse(this.host.store.now())) {
+      this.sendTimeout(action)
+      throw new BotActionChanged(JSON.parse(this.get(id)!.result_json!).text, 'bot_action_unreachable')
+    }
     if (!action || action.status !== 'running' || !this.valid(action)) throw changed()
   }
   async answer(input: { actionId: string; digest: string; answer: 'send' | 'not_now' }): Promise<{ status: string }> {
     const action = this.get(input.actionId)
     if (!action) throw new BotActionChanged('This call is no longer available.', 'bot_action_gone')
+    if (action.result_json && JSON.parse(action.result_json).notSentInTime) throw new BotActionChanged(JSON.parse(action.result_json).text, 'bot_action_unreachable')
     if (action.status === 'expired') throw new BotActionChanged('This call expired. Nothing was sent.', 'bot_action_expired')
     if (action.status === 'withdrawn') throw new BotActionChanged('This call was withdrawn. Nothing was sent.', 'bot_action_withdrawn')
     if (action.status !== 'open') throw new BotActionChanged('This call has already been answered.', 'bot_action_settled')
@@ -350,6 +381,7 @@ export class BotActions {
       if (!this.transition(action.id, 'open', 'approved')) throw changed()
       this.host.ownerAnswered(this.host.store.activation(action.activation_id)!)
     })
+    this.host.held()
     await this.runApproved(action.id, true)
     return { status: this.get(action.id)!.status }
   }
@@ -357,6 +389,7 @@ export class BotActions {
     if (refresh) await this.host.refresh()
     const action = this.get(id)
     if (!action || action.status !== 'approved') return
+    if (this.approvedDeadline(action) <= Date.parse(this.host.store.now())) { this.sendTimeout(action); return }
     if (this.host.store.registry(action.bot_id)?.pausedReason === 'owner') {
       this.transition(id, 'approved', 'withdrawn', { text: 'This bot was paused by its owner. Nothing was sent; carry on without it when resumed.' })
       this.finish(action)

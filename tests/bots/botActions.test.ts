@@ -156,8 +156,8 @@ it.each(['approved', 'running'] as const)('restart after %s never repeats a call
   f.bots = new BotEngine(f.host)
   await f.bots.reconcileOnStartup()
   await f.bots.actions.reconcile()
-  expect(t.calls).toEqual(state === 'approved' ? [t.args] : [])
-  expect(f.bots.actions.forWork(t.workId)).toMatchObject({ status: state === 'approved' ? 'done' : 'uncertain', exec_args: null })
+  expect(t.calls).toEqual([])
+  expect(f.bots.actions.forWork(t.workId)).toMatchObject({ status: state === 'approved' ? 'failed' : 'uncertain', exec_args: null })
 })
 it('answering before the old turn ends does not dispatch a second turn early', async () => {
   const t = await setup(true)
@@ -193,8 +193,8 @@ it.each(['approved', 'running'] as const)('restart preserves timely approval and
   if (state === 'running') f.bots.actions.transition(a.id, 'approved', 'running')
   f.clock.now += 48 * 3600_000 + 1000
   await f.bots.actions.reconcile()
-  expect(t.calls).toEqual(state === 'approved' ? [t.args] : [])
-  expect(f.bots.actions.forWork(t.workId)).toMatchObject({ status: state === 'approved' ? 'done' : 'uncertain', exec_args: null })
+  expect(t.calls).toEqual([])
+  expect(f.bots.actions.forWork(t.workId)).toMatchObject({ status: state === 'approved' ? 'failed' : 'uncertain', exec_args: null })
 })
 it('an expired Send is refused', async () => {
   const t = await setup(true)
@@ -1398,12 +1398,12 @@ it.each([false, true])('B1 an approved row survives a cold restart, past deadlin
   const where = vi.spyOn(t.mcp, 'where').mockReturnValue(undefined)
   if (late) f.clock.now = Date.parse(a.expires_at) + 1000
   f.bots.close(); f.bots = new BotEngine(f.host); await f.bots.reconcileOnStartup()
-  expect(f.bots.actions.get(a.id)?.status).toBe('approved')
+  expect(f.bots.actions.get(a.id)?.status).toBe(late ? 'failed' : 'approved')
   expect(t.calls).toEqual([])
   t.server.tools.push(...tools); where.mockRestore()
   f.bots.fillMcpAsks(); await flush()
-  expect(f.bots.actions.get(a.id)?.status).toBe('done')
-  expect(t.calls).toEqual([t.args])
+  expect(f.bots.actions.get(a.id)?.status).toBe(late ? 'failed' : 'done')
+  expect(t.calls).toEqual(late ? [] : [t.args])
 })
 
 it('B1 a real configuration change withdraws even while the server listing fails', async () => {

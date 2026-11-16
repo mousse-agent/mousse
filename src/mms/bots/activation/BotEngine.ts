@@ -5339,7 +5339,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const answered = deliveryQuestion?.status === 'answered' || deliveryQuestion?.status === 'defaulted' ? this.workAnswerOf(deliveryQuestion) : undefined
       const workEvents: WorkContinuationEvent[] | undefined = durableWork ? [
         ...refusals,
-        ...actions.map(action => ({ at: (action.status === 'declined' ? action.answered_at : action.ran_at) ?? action.answered_at ?? current.createdAt, text: actionContinuation(action), actionId: action.id })),
+        ...actions.map(action => ({ at: JSON.parse(action.card_json ?? '{}').settledAt ?? (action.status === 'declined' ? action.answered_at : action.ran_at) ?? action.answered_at ?? current.createdAt, text: actionContinuation(action), actionId: action.id })),
         ...waits.map(wait => ({ at: wait.dueAt, text: workWaitInput(wait, clockTime) })),
         ...answers.map(answer => ({ at: answer.answeredAt ?? answer.createdAt, answer })),
         ...(notes?.events ?? []),
@@ -8618,10 +8618,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   private dueAt(botId?: string, forTimer = false): number | undefined {
     const sources: Array<() => number | undefined> = [
-      () => {
-        const row = this.store.get("SELECT MIN(expires_at) AS at FROM bot_actions WHERE status = 'open' AND (? IS NULL OR bot_id = ?)", botId ?? null, botId ?? null)
-        return row?.at ? Date.parse(String(row.at)) : undefined
-      },
+      () => this.actions.nextDueAt(botId),
       () => this.tellings.next(botId),
       () => {
         const row = this.store.nextReminder(botId)
