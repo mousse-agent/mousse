@@ -1,4 +1,4 @@
-import { Children, createContext, useContext, useEffect, useState, type ReactNode } from 'react'
+import { Children, createContext, memo, useContext, useEffect, useState, type ReactNode } from 'react'
 import type { Components } from 'streamdown'
 import { FileText, FolderOpen, Image as ImageIcon, X } from '../../lib/icons'
 import { Markdown, restoreMousseHref, type MarkdownImages } from '../../chat/components/agent-elements/markdown'
@@ -136,9 +136,10 @@ const botMarkdownComponents: Partial<Components> = {
 }
 
 /** A bot message's text, drawn as a thread's reply is (headings, lists, tables, code), with its paths as chips. */
-export function BotMarkdown({ text, className }: { text: string; className?: string }) {
+// Memoized: a bubble that renders again for its corner alone (its time moving to a later message) leaves its words alone.
+export const BotMarkdown = memo(function BotMarkdown({ text, className }: { text: string; className?: string }) {
   return <Markdown content={joinCodeToPunctuation(linkBotPaths(text))} className={className} images={BOT_IMAGES} components={botMarkdownComponents} />
-}
+})
 
 /** The language a file's code block is highlighted as, from its name. */
 const LANGUAGES: Record<string, string> = {

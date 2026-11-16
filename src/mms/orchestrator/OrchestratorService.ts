@@ -811,6 +811,16 @@ function agentRepeatKey(threadId: string, senderThreadId: string, content: strin
 type AgentSender = AgentActor & Pick<AgentOrigin, 'body' | 'title' | 'bot'>
 
 /**
+ * A personal bot's message (`thread_send`, a new thread's first message) as the first agent message in a row: only a chat
+ * turn its owner's own message started may send one (`ownerChatTurn`), so a person wrote just before it, and the bot's own
+ * turns are never held to the limit on agent messages in a row. Loops of the bot's own turns are caught where they start
+ * (`BotEngine.refuseWakeLoop`, `sendBotMessage`). The thread it reaches counts its agents' messages on from there.
+ */
+export function botSenderHops(actor: AgentActor): AgentActor {
+  return { ...actor, hops: 1 }
+}
+
+/**
  * The origin an agent's message is stored with: who sent it, how many agent hops led to it, and where its own words
  * are. A sender on another computer is stored as `from` (its computer, its ids there and its title), never in
  * `threadId`: a foreign id there would be read as, and rewritten to, a thread of this computer that does not exist.
@@ -4341,9 +4351,9 @@ export class OrchestratorService extends EventEmitter {
     // wider is refused, so a phone held to Ask never gets a Full access turn through its bot.
     if (turnBot?.limit && isStricter(turnBot.limit, this.storedPermissionMode(threadId)))
       throw new DomainRpcError('device_limit', `The thread runs in ${describePermissionMode(this.storedPermissionMode(threadId))}, more than the device your owner wrote from may run (${describePermissionMode(turnBot.limit)}).`)
-    const sender = this.withAgentHops(options.actor)
+    const sender = bot ? botSenderHops(options.actor) : this.withAgentHops(options.actor)
     const letter = bot ? this.botLetter(sender, bot, input.content) : this.agentLetter(sender, input.content)
-    this.assertQueueOpen(threadId)
+    this.assertQueueOpen(threadId)
     if (turnBot) this.assertBotRequestKey('thread_send', options.clientRequestId, options.actor, turnBot)
     // A thread a person keeps in Plan takes the message as a plan turn, whatever mode the sender asked for.
     const mode: 'agent' | 'plan' = this.lastChatModeOf(threadId) === 'plan' ? 'plan' : input.mode
@@ -4580,10 +4590,11 @@ export class OrchestratorService extends EventEmitter {
     // A worktree needs Git: on any other project a "new worktree" thread would write in the project folder, beside others.
     if (input.workspace === 'new_worktree' && !gitBacked)
       throw new Error('workspace "new_worktree" needs a Git project: this project is not backed by a Git repository, so a thread there would work in the project folder. Use workspace "project". No thread was created.')
-    // However many runs this thread has made, only so many of its launched threads may be working at once.
-    const busy = new Set(engine.store.listNonTerminalRuns().map((run) => run.threadId))
-    const working = this.threadStore!.listAllThreads().filter((thread) => thread.createdByThreadId === options.actor.threadId && busy.has(thread.id)).length
-    if (working >= THREAD_CREATE_MAX_ACTIVE_PER_THREAD)
+    // However many runs this thread has made, only so many of its launched threads may be working at once. The owner's
+    // bot is not held to it: it starts as many as the owner's work needs.
+    const busy = options.bot ? undefined : new Set(engine.store.listNonTerminalRuns().map((run) => run.threadId))
+    const working = busy ? this.threadStore!.listAllThreads().filter((thread) => thread.createdByThreadId === options.actor.threadId && busy.has(thread.id)).length : 0
+    if (busy && working >= THREAD_CREATE_MAX_ACTIVE_PER_THREAD)
       throw new McpToolError('mousse_conflict', `${working} of the threads this thread launched are still working (the limit is ${THREAD_CREATE_MAX_ACTIVE_PER_THREAD}); wait for some to finish (thread_wait) before launching more.`, { conflict: 'creation_limit', working })
     // A bot's thread never takes the bot's own model: the one it names, or the profile's default.
     const modelOverride = this.agentThreadModel(input, options.actor.threadId, project.id, options.bot !== undefined)
@@ -4593,7 +4604,8 @@ export class OrchestratorService extends EventEmitter {
     const callerMode = this.runPermissionMode(options.actor.runId)
     const profileMode = normalizePermissionMode(this.settingsStore.get().permissions.defaultMode)
     // The first message counts as the next agent message in a row: a creation cannot start a chain the limit would stop.
-    if (input.firstMessage !== undefined) this.withAgentHops(options.actor)
+    // A bot's is the first after its owner's message (`botSenderHops`).
+    if (input.firstMessage !== undefined && !options.bot) this.withAgentHops(options.actor)
     return {
       threadId: uuidv4(),
       projectPath: project.path,
@@ -5266,7 +5278,7 @@ export class OrchestratorService extends EventEmitter {
   /**
    * The owner's bot behind a call from one of its threads ("use your threads"), when the call may go ahead: the bot's
    * main thread made it, in a turn registered with the bot's authority that holds `tool` now (starting, messaging and
-   * stopping only in a chat turn the owner's own message started). Undefined for a thread that is no bot's. A bot's thread that may not make the call is refused here, whatever let it this far.
+   * stopping only in a turn that may act on them: a run, or a chat turn the owner's message or tapped answer started). Undefined for a thread that is no bot's. A bot's thread that may not make the call is refused here, whatever let it this far.
    */
   private botSenderOf(actor: AgentActor, tool: 'thread_create' | 'thread_send' | 'thread_interrupt' | 'thread_archive' | 'thread_hide'): BotSender | undefined {
     let role: string | undefined
@@ -5276,11 +5288,11 @@ export class OrchestratorService extends EventEmitter {
       role = 'unknown'
     }
     if (!role) return undefined
-    const refused = new McpToolError('mousse_scope_denied', 'A bot starts, messages, stops or archives your threads only in its chat, with "use your threads" allowed.')
+    const refused = new McpToolError('mousse_scope_denied', 'A bot starts, messages, stops or archives your threads only in its own turns, with "use your threads" allowed.')
     if (role !== 'activation') throw refused
     const turn = this.appToolTurns.get(actor.runId)
     if (!turn?.bot || turn.threadId !== actor.threadId || !turn.bot.appTools.has(tool)) throw refused
-    // Only a chat turn its owner's own message started, as the bot's own records say.
+    // Only a turn that may act on threads (a run, or a chat turn its owner started), as the bot's own records say.
     let owned: { limit?: PermissionMode } | undefined
     try {
       owned = this.botThreads?.ownerTurn?.(turn.bot.activationId)

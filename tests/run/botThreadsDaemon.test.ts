@@ -11,7 +11,8 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BOT_MESSAGE_PREFIX, McpToolError, type AgentCreatedThread } from '../../src/mms/run/mcp/appTools'
 import { agentMessageWords } from '../../src/shared/agentMessageWords'
-import { THREAD_CREATE_MAX_PER_RUN, THREAD_SEND_MAX_PER_RUN } from '../../src/mms/run/mcp/appTools/thread'
+import { THREAD_CREATE_MAX_ACTIVE_PER_THREAD, THREAD_CREATE_MAX_PER_RUN, THREAD_SEND_MAX_PER_RUN } from '../../src/mms/run/mcp/appTools/thread'
+import { AGENT_MESSAGE_MAX_HOPS } from '../../src/mms/orchestrator/OrchestratorService'
 import type { PermissionMode } from '../../src/shared/permissionMode'
 import { BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS } from '../../src/shared/bots/personal/manifest'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
@@ -59,8 +60,7 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     let actor: AgentActor = { kind: 'agent', threadId: chat.id, runId: '', toolCallId: 'call-1' }
     let activationId = ''
     let runs = 0
-    const turnRun = (activation: string) => {
-      const runId = `run:bot-chat:${++runs}`
+    const turnRun = (activation: string, runId = `run:bot-chat:${++runs}`) => {
       d.orch.appToolTurns.register(appTurn({ threadId: chat.id, runId, bot: { activationId: activation, appTools: held } as unknown as BotAuthority }))
       activationId = activation
       actor = { kind: 'agent', threadId: chat.id, runId, toolCallId: `call-${runs}` }
@@ -139,10 +139,10 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
 
   // A bot's thread that may not start, message, stop or archive threads, whatever let the call get this far.
   const refusals: Array<[string, Parameters<typeof world>[0], (() => void) | undefined, RegExp]> = [
-    ['a turn that may only read threads (work, a schedule, a reminder)', { held: BOT_THREAD_READ_TOOLS }, undefined, /only in its chat/],
-    ['a turn that holds none of them', { held: [] }, undefined, /only in its chat/],
-    ['a consult\'s thread', { role: 'context' }, undefined, /only in its chat/],
-    ['a turn its records say no message of the owner\'s started', { owner: null }, undefined, /only in its chat/]
+    ['a turn that may only read threads (the bot\'s first message, another bot\'s message)', { held: BOT_THREAD_READ_TOOLS }, undefined, /only in its own turns/],
+    ['a turn that holds none of them', { held: [] }, undefined, /only in its own turns/],
+    ['a consult\'s thread', { role: 'context' }, undefined, /only in its own turns/],
+    ['a turn its records say may not act on threads', { owner: null }, undefined, /only in its own turns/]
   ]
   it.each(refusals)('%s starts, messages, stops and archives nothing', async (_name, options) => {
     const w = world(options)
@@ -226,6 +226,26 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
       expect(agentMessageWords(message.content, message.origin)).toBe('Please also check the signup page.')
     }
   })
+
+  it(`has no cap at once and no limit on agent messages in a row: more than ${THREAD_CREATE_MAX_ACTIVE_PER_THREAD} of its threads work at once, and a turn deep in a chain still starts and messages threads`, async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const w = world({ script: async () => { await gate; return 'done' } })
+    // Its turn runs as the last agent message in a row an agent may send: an agent's next message would be refused.
+    const deep = w.d.engine.store.createRun({ threadId: w.chat.id, source: 'mcp', outcome: { sentByAgent: true, agentHops: AGENT_MESSAGE_MAX_HOPS } })
+    w.turnRun('act-deep', deep.runId)
+    const made: AgentCreatedThread[] = []
+    for (let index = 0; index <= THREAD_CREATE_MAX_ACTIVE_PER_THREAD; index += 1) made.push(await w.create(`busy${index}`, { title: `Busy ${index}` }))
+    const runs = made.map((thread) => (thread.firstMessage as { sent: true; runId: string }).runId)
+    // Every one of them is working now, past the agents' cap of ten at once.
+    expect(runs.filter((runId) => !['completed', 'failed', 'cancelled', 'interrupted'].includes(w.d.engine.getRun(runId)?.status ?? ''))).toHaveLength(runs.length)
+    const target = w.d.store.createThread('Target', w.project.id)
+    const sent = await w.send(target.id, 'deep-send')
+    // Each message counts as the first agent message after the owner's: the threads it reaches go on from there.
+    for (const runId of [...runs, sent.runId]) expect(w.d.engine.getRun(runId)?.outcome).toMatchObject({ sentByAgent: true, agentHops: 1 })
+    release()
+    await waitFor(() => [...runs, sent.runId].every((runId) => ['completed', 'failed', 'cancelled', 'interrupted'].includes(w.d.engine.getRun(runId)?.status ?? '')), 'the runs', 120_000)
+  }, 180_000)
 
   it('a Stop is refused while a thread waits on its owner, in the words of a refused message, and stops a turn that is simply running', async () => {
     let busy = ''
@@ -372,7 +392,8 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     expect(w.d.store.getThread(owners.id)!.hidden).toBeUndefined()
     unwatch()
 
-    // A turn that may only read threads (work, a schedule, a reminder) hides nothing, even a thread the bot started.
+    // A turn that may only read threads (the bot's first message, another bot's message) hides nothing, even a thread
+    // the bot started.
     const reading = world({ held: BOT_THREAD_READ_TOOLS })
     const started = reading.d.store.createThread('Started earlier', reading.project.id, undefined, { createdByThreadId: reading.chat.id, startedByBot: { botId: 'b1', name: 'alpha' } })
     expect(refusal(() => reading.hide(started.id))).toBe('mousse_scope_denied')

@@ -7,7 +7,7 @@ import type { ApprovalTag } from '../../../orchestrator/UserQuestionService'
 import type { AgentToolAccess } from '../../../agents/WorkspaceAccessPolicy'
 import { authorizeDefinitionCall, definitionRefusal, takeAuthorizedCall, withoutTransportFields } from '../../../agentDefinitions/definitionGate'
 import { botAppToolRefusal, botBrowserNotAllowed, botBrowserWithheld } from '../../../../shared/bots/personal/walls'
-import { botMayBeOffered, isBotProfilerTool, isBotThreadTool } from '../../../../shared/bots/personal/manifest'
+import { botMayBeOffered, isBotProfilerTool, isBotThemeTool, isBotThreadTool } from '../../../../shared/bots/personal/manifest'
 import type { McpToolDescriptor } from '../../../../shared/integrations'
 import type { IntegrationActor } from '../../../../shared/integrations/actor'
 import type { McpToolCallResult } from '../../../../shared/integrations/results'
@@ -264,8 +264,9 @@ export class ToolRegistry {
       // A bot's main thread lists the thread tools its grant allows: "use your threads" is what lets it use them. Only
       // those its turn holds now are listed (none without the permission, with the switch off, or in a turn that only
       // reads), and every call is held to it again. A consult never has them. The profiler's tools likewise follow "use
-      // the profiler": listed only when the turn holds them (and, as for anyone, while Labs lets agents read it).
-      const botThreadTool = listing.botRole !== undefined && (isBotThreadTool(tool.name) || isBotProfilerTool(tool.name))
+      // the profiler": listed only when the turn holds them (and, as for anyone, while Labs lets agents read it). So do
+      // the theme tools, under "change how Mousse looks".
+      const botThreadTool = listing.botRole !== undefined && (isBotThreadTool(tool.name) || isBotProfilerTool(tool.name) || isBotThemeTool(tool.name))
       if (botThreadTool && (listing.botRole !== 'activation' || !listing.botTurnTools?.has(tool.name))) return false
       // A bot's thread lists only what a bot can hold: the model is never shown delegation, queues or tools it can't use.
       if (listing.botRole && !botMayBeOffered(tool.name)) return false
@@ -287,13 +288,15 @@ export class ToolRegistry {
     const bot = this.botListing(threadId)
     // A bot's thread tools follow its turn: what the run's registered turn holds now.
     const turn = bot.botRole && runId ? this.options.turns?.get(runId) : undefined
-    return this.listFor({
+    const listed = this.listFor({
       threadId,
       readOnly: this.options.readOnlyThread?.(threadId) === true,
       modeCeiling: this.options.threadCeiling?.(threadId) ?? fallback,
       ...bot,
       ...(turn?.bot && turn.threadId === threadId ? { botTurnTools: turn.bot.appTools } : {})
     })
+    // A bot's thread reads each tool as a bot uses it.
+    return bot.botRole ? listed.map((tool) => (tool.botDescription ? { ...tool, description: tool.botDescription } : tool)) : listed
   }
 
   /**
@@ -438,8 +441,9 @@ export class ToolRegistry {
     }
     // A tool that changes the workspace asks first unless the run's permission mode allows edits (a
     // definition run is held to its own grants above); a rejection ends the call before its handler
-    // runs and writes no ledger row.
-    if ((tool.access === 'editsWorkspace' || tool.access === 'changesSettings') && !turn.definition) {
+    // runs and writes no ledger row. A bot's call of a tool its grant answers (`botGrantAnswers`) asks nobody: the
+    // grant, checked above, is its owner's answer.
+    if ((tool.access === 'editsWorkspace' || tool.access === 'changesSettings') && !turn.definition && !(turn.bot && tool.botGrantAnswers)) {
       const refusal = await this.askBeforeEditing(tool, caller, request.signal, args, undefined, turn.approvals === 'never')
       if (refusal) return refusal
     }
@@ -688,7 +692,7 @@ export class ToolRegistry {
         caller.threadId,
         [{
           id: 'permission',
-          prompt: tool.approvalPrompt ?? (tool.name === 'thread_merge_back'
+          prompt: (typeof tool.approvalPrompt === 'function' ? tool.approvalPrompt(args) : tool.approvalPrompt) ?? (tool.name === 'thread_merge_back'
             ? "Allow Mousse to hand this fork's work back to the thread it was forked from?"
             : 'Allow this Mousse tool to change files in this workspace?'),
           options: [{ id: 'allow', label: 'Allow once' }, { id: 'reject', label: 'Reject' }]

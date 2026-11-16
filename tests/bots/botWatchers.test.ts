@@ -12,7 +12,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { BotEngine } from '../../src/mms/bots/activation/BotEngine'
-import { BotWatchers, MAX_WATCHERS_PER_BOT, watcherMatchProblem } from '../../src/mms/bots/watchers'
+import { BotWatchers, watcherMatchProblem } from '../../src/mms/bots/watchers'
 import { botFixture, chatOf, createBot, finish, flush, start, type BotFixture } from './botFixture'
 
 let f: BotFixture
@@ -197,14 +197,15 @@ describe('who may start one', () => {
     expect(f.store.waitingReminders(botId)).toEqual([])
   })
 
-  it(`work is refused; at most ${MAX_WATCHERS_PER_BOT} run at once`, async () => {
+  it('work is refused; no count of how many run at once', async () => {
     await allowCommands()
     const turn = await chat('Research and watch', 'm1')
     const { workId } = await f.bots.tools.work.start(botId, turn.activation.id, { title: 'Research', brief: 'Look it up.', key: 'k1' })
     expect(() => f.bots.tools.watchers!.start(botId, workId, { command: command('sleep', join(dir, 'w.pid')), brief: 'x' })).toThrow('Only your chat')
-    const files = Array.from({ length: MAX_WATCHERS_PER_BOT }, (_, n) => join(dir, `n${n}-${Date.now()}.pid`))
+    // Past the old cap of three.
+    const files = Array.from({ length: 5 }, (_, n) => join(dir, `n${n}-${Date.now()}.pid`))
     for (const file of files) f.bots.tools.watchers!.start(botId, turn.activation.id, { command: command('sleep', file), brief: 'x' })
-    expect(() => f.bots.tools.watchers!.start(botId, turn.activation.id, { command: command('sleep', join(dir, 'over.pid')), brief: 'x' })).toThrow(`${MAX_WATCHERS_PER_BOT} background commands`)
+    expect(f.bots.tools.watchers!.list(botId)).toHaveLength(files.length)
     const pids = await Promise.all(files.map(pidOf))
     for (const view of f.bots.tools.watchers!.list(botId)) f.bots.tools.watchers!.stop(botId, view.id)
     // Stop ends each tree; none is left holding the bot's folder.

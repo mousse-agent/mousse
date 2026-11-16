@@ -290,18 +290,19 @@ export const COMMANDS: readonly CommandDefinition[] = [
     guest: 'allow'
   },
   {
-    // The transcript's own find bar. A text field may be focused (the composer); a terminal or the
-    // browser surface keeps the key, and the handler also leaves Monaco its own find widget.
+    // The transcript's own find bar, in a thread or (under the Chats tab) a bot's chat. A text field may be
+    // focused (the composer); a terminal or the browser surface keeps the key, and the handler also leaves
+    // Monaco its own find widget.
     id: 'chat.findInThread',
     title: 'Find in thread',
     category: 'Threads',
-    searchTerms: ['search', 'text', 'messages', 'transcript'],
+    searchTerms: ['search', 'text', 'messages', 'transcript', 'chat'],
     defaultBinding: `${MOD}+F`,
     scope: 'global',
     textInput: 'allow',
     terminal: 'deny',
     guest: 'deny',
-    when: threadIsOpen
+    when: (ctx) => ctx.threadOpen || !ctx.projectsMode
   },
   {
     id: 'run.stop',

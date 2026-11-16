@@ -1439,24 +1439,6 @@ export class BotStore {
       botId, input.activationId ?? null, input.activationId ?? null, input.since ?? '')?.n ?? 0)
   }
 
-  /**
-   * The subagents a bot's work started since `since` (wall-clock milliseconds), across all its activations: each one's
-   * first turn, by the time its spec records (`BotSubagentSpec.at`). Turns that started before `since` are not read.
-   */
-  countSubagentsStarted(botId: string, since: number): number {
-    const threads = new Set<string>()
-    for (const row of this.all("SELECT d.thread_id, d.client_request_id, d.prompt_json FROM bot_dispatches d JOIN bot_activations a ON a.id = d.activation_id WHERE a.bot_id = ? AND d.kind = 'consult' AND (d.started_at IS NULL OR d.started_at >= ?)", botId, since)) {
-      if (!SUBAGENT_DISPATCH.test(row.client_request_id as string)) continue
-      try {
-        const at = (JSON.parse(row.prompt_json as string) as { subagent?: { at?: unknown } }).subagent?.at
-        if (typeof at === 'number' && at >= since) threads.add(row.thread_id as string)
-      } catch {
-        // Not a subagent's prompt.
-      }
-    }
-    return threads.size
-  }
-
   countEscalations(activationId: string): number {
     return Number(this.get("SELECT COUNT(*) AS n FROM bot_escalations WHERE activation_id = ? AND mode = 'wall'", activationId)?.n ?? 0)
   }
@@ -1993,17 +1975,38 @@ export class BotStore {
       ORDER BY r.due_at, r.rowid`, workId).map(reminderOf)
   }
 
-  /** How many wakes a bot set since `since`, cancelled ones too (the daily budget). */
-  wakesSince(botId: string, since: string): number {
-    return num(this.get('SELECT COUNT(*) AS n FROM bot_reminders WHERE bot_id = ? AND wake = 1 AND created_at > ?', botId, since)?.n) ?? 0
+  /** When the owner last wrote to a bot (their newest message in its chat), or '' when they never have. */
+  ownerLastWroteAt(botId: string): string {
+    return str(this.get("SELECT MAX(at) AS at FROM bot_messages WHERE bot_id = ? AND author = 'owner'", botId)?.at) ?? ''
   }
 
   /**
-   * How many messages a bot sent to other bots since `since` (the daily budget): the chat turns its messages started,
-   * whose keys all begin with `keyStart` (`botMessageKey`).
+   * The wakes a bot set at or after `since`, cancelled ones too, with their briefs and events (loop detection): its chat's
+   * own (`workId` undefined), or the waits of one piece of work.
    */
-  botMessagesSince(keyStart: string, since: string): number {
-    return num(this.get('SELECT COUNT(*) AS n FROM bot_activations WHERE substr(idempotency_key, 1, ?) = ? AND created_at > ?', keyStart.length, keyStart, since)?.n) ?? 0
+  wakesSetSince(botId: string, since: string, workId?: string): Array<Pick<BotReminderRow, 'text' | 'event'>> {
+    return this.all('SELECT * FROM bot_reminders WHERE bot_id = ? AND wake = 1 AND created_at >= ? AND work_id IS ?', botId, since, workId ?? null).map(reminderOf).map(({ text, event }) => ({ text, event }))
+  }
+
+  /**
+   * Where the owner last wrote to a bot: the `seq` of their newest message in its chat, or 0 when they never have. `seq`
+   * orders every chat's rows together, so what came after it is known even within one millisecond.
+   */
+  ownerLastWroteSeq(botId: string): number {
+    return num(this.get("SELECT MAX(seq) AS seq FROM bot_messages WHERE bot_id = ? AND author = 'owner'", botId)?.seq) ?? 0
+  }
+
+  /** How many messages from other bots reached bot `botId`'s chat after row `afterSeq` (the ping-pong guard). */
+  botMessagesReceivedAfter(botId: string, afterSeq: number): number {
+    return num(this.get("SELECT COUNT(*) AS n FROM bot_messages WHERE bot_id = ? AND substr(id, 1, 10) = 'bm_botmsg_' AND seq > ?", botId, afterSeq)?.n) ?? 0
+  }
+
+  /**
+   * Whether bot `botId`'s chat got a message from another bot reading exactly `text` (`botMessageRowText`: the sender's
+   * name and the message) after row `afterSeq` (loop detection).
+   */
+  botMessageRowAfter(botId: string, text: string, afterSeq: number): boolean {
+    return this.get("SELECT 1 AS hit FROM bot_messages WHERE bot_id = ? AND substr(id, 1, 10) = 'bm_botmsg_' AND text = ? AND seq > ? LIMIT 1", botId, text, afterSeq) !== undefined
   }
 
   /** Every bot's waiting wakes on an event that has not happened yet, oldest first. */

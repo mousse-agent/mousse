@@ -183,10 +183,9 @@ describe('work that asks', () => {
     expect(f.store.question(questionId)?.readAt).not.toBeNull()
     expect(summary().state).not.toBe('needs_you')
     const resumed = await start(f, workId, next!.n)
-    // A tap widens nothing: the same tools, the owner's threads still read-only, and no model of the owner's to switch to.
+    // A tap widens nothing: the same tools, the same hold on the owner's threads, and no model of the owner's to switch to.
     expect(resumed.prepared.policy.tools?.allow).toEqual(work.prepared.policy.tools?.allow)
     expect(resumed.prepared.authority.threadsReadOnly).toBe(work.prepared.authority.threadsReadOnly)
-    expect(resumed.prepared.authority.threadsReadOnly).toBeDefined()
     expect(await tool('use_model', resumed.prepared, resumed.payload.threadId, { model: 'Flat B', scope: 'now' })).toMatchObject({ isError: true })
     // The resumed turn is not refused: the refusal was the asking turn's alone.
     expect(resumed.prepared.authority.check(web)).toEqual({ ok: true })

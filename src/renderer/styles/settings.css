@@ -1186,6 +1186,12 @@ button.theme-card:disabled {
   padding-block: var(--space-8);
 }
 
+.user-theme-wallpaper-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+}
+
 .user-theme-actions-spacer {
   flex: 1;
 }

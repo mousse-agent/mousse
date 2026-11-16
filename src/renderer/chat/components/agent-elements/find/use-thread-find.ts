@@ -41,6 +41,10 @@ type Options = {
   /** Called when a match is about to be shown: the reader no longer follows the end. */
   onNavigate: () => void;
   onProgrammaticScroll: () => void;
+  /** More messages are still on their way (older history loading): the count says so, and "No matches" waits. */
+  pending?: boolean;
+  /** The field's name and placeholder; "Find in thread" by default. */
+  label?: string;
 };
 
 const NO_MATCHES: FindMatch[] = [];
@@ -187,6 +191,8 @@ export function useThreadFind(options: Options): ThreadFind {
     [searching, query, searchedTurns, searchedLiveVersion, index, indexRevision],
   );
   const matches = result.matches;
+  // Searched as far as it goes: every message read, and none still on its way.
+  const complete = result.complete && !options.pending;
   const activeIndex = useMemo(() => reselect(matches, active), [matches, active]);
 
   // What callbacks that outlive a render read.
@@ -296,7 +302,7 @@ export function useThreadFind(options: Options): ThreadFind {
     if (startedFor.current === query) return;
     const { options: current } = latest.current;
     const found = result.matches;
-    if (query === "" || (found.length === 0 && result.complete)) {
+    if (query === "" || (found.length === 0 && complete)) {
       startedFor.current = query;
       current.virtualization.cancelNavigation();
       setActive(null);
@@ -315,13 +321,13 @@ export function useThreadFind(options: Options): ThreadFind {
       },
     });
     if (start === null) return;
-    if (!result.complete) {
+    if (!complete) {
       const anchor = anchorTurnKey === null ? 0 : current.turns.findIndex((turn) => turn.key === anchorTurnKey);
       if (!startIsSettled(index, current.turns, anchor, found[start]!)) return;
     }
     startedFor.current = query;
     goTo(found[start]!);
-  }, [searching, query, result, index, goTo]);
+  }, [searching, query, result, complete, index, goTo]);
 
   const step = useCallback(
     (delta: 1 | -1) => {
@@ -354,11 +360,12 @@ export function useThreadFind(options: Options): ThreadFind {
       inputRef,
       query,
       onQueryChange: setQuery,
-      countLabel: formatFindCount(activeIndex, matches.length, query, !result.complete),
+      countLabel: formatFindCount(activeIndex, matches.length, query, !complete),
       hasMatches: matches.length > 0,
       onNext: () => step(1),
       onPrevious: () => step(-1),
       onClose: close,
+      ...(options.label ? { label: options.label } : {}),
     },
   };
 }

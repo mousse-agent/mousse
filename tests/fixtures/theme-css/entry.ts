@@ -1,4 +1,4 @@
-import { applyThemeCss } from '../../../src/renderer/lib/themeCss'
+import { applyThemeCss, setUserThemeActive } from '../../../src/renderer/lib/themeCss'
 
 const errors: string[] = []
 window.addEventListener('error', (event) => errors.push(event.message))
@@ -36,7 +36,9 @@ function computeAll(): void {
   }),
   /** The control: the same CSS straight into a style element, unchecked. */
   raw: (css: string): void => { const element = document.createElement('style'); element.textContent = css; document.head.append(element); computeAll() },
-  clear: (): void => { applyThemeCss(''); document.querySelectorAll('style[data-raw]').forEach((element) => element.remove()) },
+  /** A user theme with no CSS and no colors (one that only has a wallpaper) turned on or off. */
+  plainTheme: (on: boolean): void => { applyThemeCss(''); setUserThemeActive(on) },
+  clear: (): void => { applyThemeCss(''); setUserThemeActive(false); document.querySelectorAll('style[data-raw]').forEach((element) => element.remove()) },
   frames: (count: number): Promise<void> => new Promise((done) => { const step = (left: number) => (left <= 0 ? done() : requestAnimationFrame(() => step(left - 1))); step(count) }),
   measure: () => ({
     sidebar: style('[data-mousse="sidebar"]', 'background-color'),

@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
-import { Image, Info, MoreHorizontal, Pause, Pencil, Play, Trash2 } from '../../lib/icons'
+import { Image, Info, MoreHorizontal, Pause, Pencil, Play, Search, Trash2 } from '../../lib/icons'
 import type { BotSummary } from '../../../shared/bots/personal/chat'
 import { useBotsStore } from '../../stores/botsStore'
 
-/** The bot's one menu (bot-ui §4.8): About this bot, Rename, Change look, Pause or Resume, Delete bot. */
-export function BotMenu({ bot }: { bot: BotSummary }) {
+/** The bot's one menu (bot-ui §4.8): About this bot, Find in chat, Rename, Change look, Pause or Resume, Delete bot. */
+export function BotMenu({ bot, onFind }: { bot: BotSummary; onFind?: () => void }) {
   const [open, setOpen] = useState(false)
   const root = useRef<HTMLDivElement>(null)
   useEffect(() => {
@@ -28,6 +28,7 @@ export function BotMenu({ bot }: { bot: BotSummary }) {
     <button type="button" className={`bot-header-more${open ? ' is-open' : ''}`} aria-label="Bot menu" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)}><MoreHorizontal size={16} /></button>
     {open && <div className="bot-menu" role="menu" aria-label={`${bot.name} menu`}>
       <button type="button" role="menuitem" onClick={pick(() => useBotsStore.setState({ aboutOpen: true }))}><Info size={14} aria-hidden />About this bot</button>
+      {onFind && <button type="button" role="menuitem" onClick={pick(onFind)}><Search size={14} aria-hidden />Find in chat</button>}
       <button type="button" role="menuitem" onClick={pick(() => useBotsStore.setState({ dialog: { kind: 'rename', botId: bot.id }, error: null }))}><Pencil size={14} aria-hidden />Rename</button>
       <button type="button" role="menuitem" onClick={pick(() => useBotsStore.setState({ dialog: { kind: 'look', botId: bot.id }, error: null }))}><Image size={14} aria-hidden />Change look</button>
       <button type="button" role="menuitem" onClick={pick(() => void (paused ? store().resume(bot.id) : store().pause(bot.id)))}>{paused ? <Play size={14} aria-hidden /> : <Pause size={14} aria-hidden />}{paused ? 'Resume' : 'Pause'}</button>

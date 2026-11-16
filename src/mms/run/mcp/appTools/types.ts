@@ -209,13 +209,26 @@ export interface ToolListing {
 export interface MousseTool {
   name: string
   description: string
+  /**
+   * What a personal bot's thread lists instead of `description`: the same tool as a bot uses it, without what does not
+   * hold for a bot (an agent's counts per run, its limit on agent messages in a row) and with what does.
+   */
+  botDescription?: string
+  /**
+   * A tool whose personal bot's call its grant answers: once the registry has held the call to the bot's grant, it asks
+   * nobody, whatever `access` would ask of a thread (the owner allowing the permission is the bot's Full access for it).
+   */
+  botGrantAnswers?: true
   /** Plain JSON Schema (no TypeBox symbols), byte-identical to `definition`'s parameters. */
   inputSchema: JsonSchema
   access: ToolAccess
   /** The permission key an `editsWorkspace` or `changesSettings` tool asks under (`src/shared/permissionKeys.ts`). */
   permissionKey?: string
-  /** The question an `editsWorkspace` or `changesSettings` tool asks the person when the permission mode does not allow it. */
-  approvalPrompt?: string
+  /**
+   * The question an `editsWorkspace` or `changesSettings` tool asks the person when the permission mode does not allow it;
+   * a function when the question names what the call would do (the file a theme would use as its wallpaper).
+   */
+  approvalPrompt?: string | ((args: Record<string, unknown>) => string)
   /**
    * The permission mode a call runs in without asking: `edit` (default: any mode that allows edits) or `full` (only Full
    * access; every other mode asks).

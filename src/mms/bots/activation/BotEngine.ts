@@ -42,7 +42,7 @@ import {
   grantRequestOf
 } from '../../../shared/bots/personal/escalation'
 import { findServer, installationOf, mcpAskFor, type BotMcpHost, type BotMcpServer } from '../mcp/BotMcp'
-import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_PROFILER_PERMISSION, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, MAX_BOT_SUBAGENTS_AT_ONCE, MAX_BOT_SUBAGENTS_PER_DAY, MAX_BOT_SUBAGENTS_PER_WORK, botGrantTool, isAbsolutePath, manifestProblem } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_PROFILER_PERMISSION, BOT_THEMES_PERMISSION, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, botGrantTool, isAbsolutePath, manifestProblem } from '../../../shared/bots/personal/manifest'
 import { checkMessage, wallMessage } from '../../../shared/bots/personal/walls'
 import type { ChargeResult, CountKind, CounterScope } from '../../../shared/harness/counters'
 import type { ReserveResult, SpendLimits, SpendRequest, SpendScope } from '../../../shared/harness/spend'
@@ -86,12 +86,12 @@ import { defaultChatInput, defaultWorkLine, lateWorkNote, MAX_NEW_QUESTIONS_PER_
 import { CARD_SHOWN_TEXT, type BotCard } from '../../../shared/bots/personal/cards'
 import { checkedCard, hasReplyCards, keepMousseCard, keepReplyCard } from '../chat/replyCards'
 import { nudgeSlot } from './questionFollowUps'
-import { BotWatchers, DEFAULT_WATCHER_MINUTES, MAX_WATCHER_COMMAND_CHARS, MAX_WATCHER_MINUTES, MAX_WATCHERS_PER_BOT, watcherMatchProblem, type WatcherEnd, type WatcherSpec, type WatcherView } from '../watchers'
+import { BotWatchers, DEFAULT_WATCHER_MINUTES, MAX_WATCHER_COMMAND_CHARS, MAX_WATCHER_MINUTES, watcherMatchProblem, type WatcherEnd, type WatcherSpec, type WatcherView } from '../watchers'
 import { lockedEnv } from '../../harness/env'
-import { BOT_MESSAGE_ROW_PREFIX, MAX_BOT_MESSAGE_CHAIN, MAX_BOT_MESSAGE_CHARS, MAX_BOT_MESSAGES_PER_DAY, botMessageInput, botMessageKey, botMessageRowText, type BotMessageSender } from '../../../shared/bots/personal/botMessages'
-import { DEFAULT_EVENT_WAKE_HOURS, MAX_EVENT_WAKE_HOURS, MAX_WAKE_BRIEF_CHARS, MAX_WAKE_CHAIN, MAX_WAKES_PER_DAY, WAKE_LINE_PREFIX, wakeCheckNames, wakeEventLabel, wakeFiredLabel, wakeInput, type BotWakeEvent, type BotWakeFired } from '../../../shared/bots/personal/wakes'
+import { BOT_MESSAGE_ROW_PREFIX, MAX_BOT_MESSAGE_CHARS, MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER, botMessageInput, botMessageKey, botMessageRowText, type BotMessageSender } from '../../../shared/bots/personal/botMessages'
+import { DEFAULT_EVENT_WAKE_HOURS, MAX_EVENT_WAKE_HOURS, MAX_SAME_WAKES, MAX_WAKE_BRIEF_CHARS, WAKE_LINE_PREFIX, wakeCheckNames, wakeEventLabel, wakeFiredLabel, wakeInput, wakeLoopKey, type BotWakeEvent, type BotWakeFired } from '../../../shared/bots/personal/wakes'
 import type { LlmProviderOption } from '../../../shared/settings'
-import { botAllowedOf, namedPowerOf, type BotAllowed, type BotNamedPower } from '../instructions'
+import { BOT_THREADS_READ_ONLY_TURN_NOTE, botAllowedOf, namedPowerOf, type BotAllowed, type BotNamedPower } from '../instructions'
 import { isProviderTurnCap, type Enforceability, type HarnessError, type ProviderSelection, type RunPolicy } from '../../../shared/harness/types'
 import type { NeutralTool } from '../../../shared/harness/tools'
 import type { RunEngine } from '../../run/RunEngine'
@@ -381,8 +381,6 @@ export const BOT_FAILURE_PAUSE_STREAK = 3
 const MAX_WORK_TITLE_CHARS = 80
 const MAX_WORK_NOTE_CHARS = 4_000
 const MAX_REMINDER_TEXT_CHARS = 2_000
-/** Most reminders one bot keeps waiting. */
-export const MAX_WAITING_REMINDERS = 50
 const MAX_REMINDER_AHEAD_MS = 366 * 24 * 60 * 60_000
 /** The longest the reminder timer waits before it looks again (a far timer would overflow, and clocks move). */
 const REMINDER_REARM_MS = 6 * 60 * 60_000
@@ -2504,10 +2502,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       remaining: { ...limitsOf(effective), deadlineMs: remainingMs },
       filesFolder: this.filesFolder(row.botId),
       // A chat turn is the bot's front desk: it hands what takes long to work (docs/plans/bot-always-free.md).
-      // The owner's threads: reading in every lane; starting, messaging and stopping only in a chat turn the owner's own
-      // message started (`chat:`), never in work, a reminder's work, a schedule or the bot's first message. The profiler:
-      // in both lanes (the chat without its minutes-long watch).
-      botTools: { workWaiting: row.lane === 'run' && row.trigger.kind === 'work', escalate: true, consult: definition.context.length > 0, memory: true, scheduled: row.lane === 'run' && row.trigger.kind === 'schedule', frontDesk: row.lane === 'chat', watcherStart: ownerChatTurn(row), threads: ownerChatTurn(row) ? 'all' : 'read', profiler: true, images: this.imagePick(row.botId) !== null, applets: true, subagents: row.lane === 'run', questions: asksOwner(row), cards: true, bots: asksOwner(row) }
+      // The owner's threads: reading in every lane; starting, messaging, stopping and archiving in a turn `threadsActOf`
+      // allows (never the bot's first message or a turn another bot's message started). The profiler: in both lanes
+      // (the chat without its minutes-long watch). Mousse's look: in both lanes.
+      botTools: { workWaiting: row.lane === 'run' && row.trigger.kind === 'work', escalate: true, consult: definition.context.length > 0, memory: true, scheduled: row.lane === 'run' && row.trigger.kind === 'schedule', frontDesk: row.lane === 'chat', watcherStart: ownerChatTurn(row), threads: threadsActOf(row) ? 'all' : 'read', profiler: true, themes: true, images: this.imagePick(row.botId) !== null, applets: true, subagents: row.lane === 'run', questions: asksOwner(row), cards: true, bots: asksOwner(row) }
     })
     if (!compiled.ok) return this.block(row, 'policy_unenforceable', compiled.error.reason ?? compiled.error.message)
     const checked = this.host.harness.checkPolicy(selection.instanceId, { mode: 'default', origin: 'bot', ...compiled.policy }, selection.model)
@@ -2590,6 +2588,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       mcpTools: this.offeredMcp(compiled.permissions.mcp)
     })
     const pack = this.packs.get(row.id)
+    // A chat turn that only reads the owner's threads (no typed message of theirs started it) is told so, and why, in
+    // its preamble: the system text stays the same on every turn, so a runtime keeps its thread and cache.
+    const readOnlyThreads = row.lane === 'chat' && compiled.permissions.threads === 'read' ? BOT_THREADS_READ_ONLY_TURN_NOTE : undefined
+    const preamble = [pack, readOnlyThreads].filter(Boolean).join('\n\n') || undefined
     const browser = compiled.permissions.browser ? this.browserTurn(row, payload.runId, controller.signal) : undefined
     return {
       activationId: row.id,
@@ -2609,7 +2611,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       skills: compiled.permissions.skills,
       history: dispatch.kind === 'start' ? (cleared ? 'cleared' : 'none') : 'thread',
       lane: row.lane,
-      ...(pack ? { preamble: pack } : {}),
+      ...(preamble ? { preamble } : {}),
       ...(browser ? { browser } : {}),
       steer: this.steerFor(row, dispatch.n)
     }
@@ -5615,20 +5617,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * Why no new subagent can start now, or undefined: its title is taken, this work or the bot's day is at a cap, or too
-   * little of the work's time is left for one.
+   * Why no new subagent can start now, or undefined: its title is taken, or too little of the work's time is left for
+   * one. There is no count of subagents at once, per work or per day: each one's running time counts against the work's.
    */
   private subagentCapped(activationId: string, title?: string): string | undefined {
     const records = this.subagentRecords(activationId)
     if (title !== undefined && records.some((record) => record.spec.title.toLowerCase() === title.toLowerCase()))
       return `You already have a subagent called "${title}". Give this one another title, or send that one more work with subagent_send.`
-    if (title !== undefined && records.length >= MAX_BOT_SUBAGENTS_PER_WORK)
-      return `This work has started ${MAX_BOT_SUBAGENTS_PER_WORK} subagents, the most one piece of work may. Do the rest yourself, or send one of them more work with subagent_send.`
-    const botId = this.store.activation(activationId)?.botId
-    if (title !== undefined && botId && this.store.countSubagentsStarted(botId, this.now() - 24 * 60 * 60_000) >= MAX_BOT_SUBAGENTS_PER_DAY)
-      return `Your work has started ${MAX_BOT_SUBAGENTS_PER_DAY} subagents in the last day, the most a bot may. Do the rest yourself, or send one you started in this work more with subagent_send.`
-    if (records.filter((record) => this.subagentRunning(record)).length >= MAX_BOT_SUBAGENTS_AT_ONCE)
-      return `${MAX_BOT_SUBAGENTS_AT_ONCE} of your subagents are running, the most at once. Wait for one to finish (subagent_wait), then try again.`
     // A subagent's running time counts against the work's: one more makes what is left go faster still.
     const live = this.live.get(activationId)
     if (live && live.deadline - this.now() < 2 * ACTIVE_TIME_CHUNK_MS)
@@ -7035,8 +7030,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * The chat turn `activationId` when its owner's own message started it (`BotThreads.ownerTurn`), with the
-   * limit of the other device that message came from; undefined for any other turn, or when it can't be read.
+   * The turn `activationId` when it may act on the owner's threads (`threadsActOf`, `BotThreads.ownerTurn`), with the
+   * limit of the other device its owner's message came from; undefined for any other turn, or when it can't be read.
    */
   ownerTurn(activationId: string): { limit?: PermissionMode } | undefined {
     let row: BotActivationRow | undefined
@@ -7045,7 +7040,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     } catch {
       return undefined
     }
-    if (!row || !ownerChatTurn(row)) return undefined
+    if (!row || !threadsActOf(row)) return undefined
     const limit = row.trigger.kind === 'manual' ? row.trigger.owner?.limit : undefined
     return limit ? { limit } : {}
   }
@@ -7845,8 +7840,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (!reminder.deliveredAt || Date.parse(reminder.deliveredAt) + 24 * 60 * 60_000 <= this.now())
         throw new BotEngineError('reminder_expired', 'This reminder is too old to snooze.')
       if (this.store.snoozedCopy(botId, reminder.id)) throw new BotEngineError('reminder_snoozed', 'This reminder is already snoozed.')
-      if (this.store.waitingReminders(botId).length >= MAX_WAITING_REMINDERS)
-        throw new BotEngineError('reminder_limit', 'You already have 50 reminders waiting. Cancel one first.')
       const due = new Date(this.now())
       if (choice === 'tomorrow') { due.setDate(due.getDate() + 1); due.setHours(9, 0, 0, 0) }
       else if (choice === '10m' || choice === '1h') due.setTime(due.getTime() + (choice === '10m' ? 10 : 60) * 60_000)
@@ -7907,7 +7900,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (due > this.now() + MAX_REMINDER_AHEAD_MS) throw new BotEngineError('invalid_params', 'A reminder is at most a year ahead.')
     const text = input.text.trim().slice(0, MAX_REMINDER_TEXT_CHARS)
     if (!text) throw new BotEngineError('invalid_params', 'A reminder needs its text.')
-    if (this.store.waitingReminders(botId).length >= MAX_WAITING_REMINDERS) throw new BotEngineError('reminder_limit', `You already have ${MAX_WAITING_REMINDERS} reminders waiting. Cancel one first.`)
     const work = input.work?.brief.trim() ? { title: (input.work.title.trim() || summarise(input.work.brief)).slice(0, MAX_WORK_TITLE_CHARS), brief: input.work.brief.trim() } : null
     const replyTo = this.ownerMessageOf(from) ?? null
     const reminderId = `rem_${randomUUID()}`
@@ -7921,8 +7913,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /**
    * `wake`: the bot carries on by itself in its own chat, at a time or once something happens (a thread's run finishing,
    * a pull request merging), as a chat turn no person started (`wake:<id>`). Set from a chat turn only; one set in a
-   * wake's own turn is the next in its chain, at most `MAX_WAKE_CHAIN` in a row with no owner's message between them,
-   * and a bot sets at most `MAX_WAKES_PER_DAY` in any 24 hours. A wake on an event gives up after `hours` (default a day,
+   * wake's own turn is the next in its chain. There is no count in a row or in a day: only the same wake set again and
+   * again with no progress is refused (`refuseWakeLoop`). A wake on an event gives up after `hours` (default a day,
    * at most a week) and then wakes once anyway, saying why. Its turn starts when it is due, at any hour.
    */
   async addWake(botId: string, from: string, input: { brief: string; dueAt?: string; event?: BotWakeEvent; hours?: number }, workWait = false): Promise<{ wakeId: string; dueAt: string; label: string }> {
@@ -7954,6 +7946,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (due > this.now() + MAX_EVENT_WAKE_HOURS * HOUR_MS) throw new BotEngineError('invalid_params', `A wake-up is at most ${MAX_EVENT_WAKE_HOURS / 24} days ahead. For later, use remind or a schedule.`)
       dueAt = new Date(Math.max(due, this.now())).toISOString()
     }
+    this.refuseWakeLoop(botId, brief, event, workWait ? from : undefined)
     const wakeId = `rem_${randomUUID()}`
     this.store.db.transaction(() => {
       if (workWait && (this.store.activation(from)?.status !== 'running' || this.store.workWait(from)?.status === 'waiting')) throw new BotEngineError('invalid_params', 'This work already waits or has ended. End your turn.')
@@ -7966,26 +7959,33 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return { wakeId, dueAt, label: event ? wakeEventLabel(event) : '' }
   }
 
-  /**
-   * The chain a new wake set from chat turn `from` is in, once the wake limits allow it (a watcher is a wake too): set from
-   * a chat turn only, at most `MAX_WAKE_CHAIN` in a row with no owner's message between them, `MAX_WAKES_PER_DAY` in any
-   * 24 hours, and the waiting reminders' cap. Throws, in words for the bot, when not.
-   */
   private resetWorkWaitChain(workId: string): void {
     const last = this.store.workWait(workId)
     if (last) this.store.run('UPDATE bot_reminders SET chain = 0 WHERE id = ?', last.id)
   }
 
+  /**
+   * The chain a new wake set from chat turn `from` is in (a watcher is a wake too; a work wait counts on from the work's
+   * last wait): set from a chat turn, or from work with `workWait`. Throws, in words for the bot, when not. The chain is
+   * only counted, never capped: loops are caught by `refuseWakeLoop`.
+   */
   private wakeAllowance(botId: string, from: string, workWait = false): number {
     const setting = this.store.activation(from)
     if (!setting || setting.botId !== botId || (setting.lane !== 'chat' && !workWait)) throw new BotEngineError('invalid_params', 'Only your chat sets wake-ups.')
-    const chain = workWait ? (this.store.workWait(from)?.chain ?? this.unownedChainOf(setting)) + 1 : this.wakeChainOf(setting) + 1
-    if (chain > MAX_WAKE_CHAIN)
-      throw new BotEngineError('wake_chain', `You have already followed up ${MAX_WAKE_CHAIN} times in a row without your owner. Don't set another: tell your owner where things stand, and carry on when they write.`)
-    if (this.store.wakesSince(botId, new Date(this.now() - 24 * HOUR_MS).toISOString()) >= MAX_WAKES_PER_DAY)
-      throw new BotEngineError('wake_limit', `You have set ${MAX_WAKES_PER_DAY} wake-ups in the last 24 hours, the most a bot may. Tell your owner what you would have followed up on instead.`)
-    if (this.store.waitingReminders(botId).length >= MAX_WAITING_REMINDERS) throw new BotEngineError('reminder_limit', `You already have ${MAX_WAITING_REMINDERS} reminders and wake-ups waiting. Cancel one first.`)
-    return chain
+    return workWait ? (this.store.workWait(from)?.chain ?? this.unownedChainOf(setting)) + 1 : this.wakeChainOf(setting) + 1
+  }
+
+  /**
+   * Loop detection, the one limit on wakes: since the owner last wrote, the bot's chat (or, for a work wait, that piece of
+   * work: `workId`) has set this same wake (the same brief, waiting on the same thing: `wakeLoopKey`) `MAX_SAME_WAKES`
+   * times already, so one more is a loop with no progress. Separate pieces of work never count against each other.
+   * Cancelled ones count, so cancelling and setting it again is no way round it. Throws, in words for the bot.
+   */
+  private refuseWakeLoop(botId: string, brief: string, event: BotWakeEvent | null, workId?: string): void {
+    const key = wakeLoopKey(brief, event)
+    const same = this.store.wakesSetSince(botId, this.store.ownerLastWroteAt(botId), workId).filter((wake) => wakeLoopKey(wake.text, wake.event) === key).length
+    if (same >= MAX_SAME_WAKES)
+      throw new BotEngineError('wake_loop', `You have set this same wake-up ${same} times since your owner last wrote, with nothing new in it: that is a loop. Don't set it again: tell your owner where things stand and what you are waiting on, and carry on when they write. If something did change, say what in the brief.`)
   }
 
   // -- Background commands (`watch_start`) ---------------------------------------------------------------------------
@@ -7994,8 +7994,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * `watch_start`: a command that runs in the background, from the bot's files folder, in the locked environment (as a
    * Pi bot's commands run), while the bot holds "run commands" here. It ends when it exits, prints a line that matches
    * `match`, or reaches its time limit (default an hour, at most six), and then the bot wakes in its chat with what
-   * happened: it is a wake on a `watcher` event, so the chain and the daily budget hold. At most
-   * `MAX_WATCHERS_PER_BOT` run at once. Its card shows on the turn's reply.
+   * happened: it is a wake on a `watcher` event, so loop detection holds (`refuseWakeLoop`). There is no count of how many
+   * run at once. Its card shows on the turn's reply.
    */
   startWatcher(botId: string, from: string, input: { command: string; brief: string; title?: string; match?: string; minutes?: number }): { watcherId: string; until: string } {
     this.entry(botId)
@@ -8015,10 +8015,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!Number.isFinite(minutes) || minutes < 1 || minutes > MAX_WATCHER_MINUTES) throw new BotEngineError('invalid_params', `minutes is its time limit: 1 to ${MAX_WATCHER_MINUTES}.`)
     if (this.store.registry(botId)?.pausedReason) throw new BotEngineError('bot_paused', 'You are paused, so nothing runs in the background.')
     if (!this.holdsCommands(botId)) throw new BotEngineError('permission_required', 'Background commands need "run commands". Ask for it with escalate (the tool shell), then start it again.')
-    if (this.watchers.list(botId).length >= MAX_WATCHERS_PER_BOT) throw new BotEngineError('watcher_limit', `You already have ${MAX_WATCHERS_PER_BOT} background commands running. Stop one first (watch_list, watch_stop).`)
     const chain = this.wakeAllowance(botId, from)
     const title = (input.title?.trim() || summarise(command)).slice(0, MAX_WORK_TITLE_CHARS)
     const event: BotWakeEvent = { kind: 'watcher', title, command, ...(match ? { match } : {}), minutes }
+    this.refuseWakeLoop(botId, brief, event)
     const watcherId = `rem_${randomUUID()}`
     const limitMs = minutes * 60_000
     // Its wake gives up a little after the time limit, as a backstop for a process that never reported.
@@ -8117,7 +8117,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private wakeChainOf(row: Pick<BotActivationRow, 'idempotencyKey' | 'trigger'>): number {
     if (row.trigger.kind === 'manual' && row.trigger.fromBot) return Math.max(1, row.trigger.fromBot.chain)
     if (!row.idempotencyKey.startsWith('wake:')) return 0
-    return this.store.reminder(row.idempotencyKey.slice('wake:'.length))?.chain ?? MAX_WAKE_CHAIN
+    return this.store.reminder(row.idempotencyKey.slice('wake:'.length))?.chain ?? 1
   }
 
   // -- Messages between the owner's bots (`bot_list`, `bot_send`) ---------------------------------------------------
@@ -8151,9 +8151,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * `bot_send`: the turn `from` (a chat turn, or work the owner asked for) sends another of the owner's bots a message.
    * It is posted in that bot's chat, labelled as the sender's, in the transaction that queues the chat turn that reads
    * it. Refused, in words for the sender: no such bot, a name two bots share, a paused bot or one that can't run now,
-   * more than `MAX_BOT_MESSAGE_CHAIN` turns in a row without the owner, or `MAX_BOT_MESSAGES_PER_DAY` sent in 24 hours.
+   * the same message to the same bot again since the sender's owner last wrote (a loop), or a sender that has had
+   * `MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER` messages from bots since its owner last wrote (ping-pong). There is no count of
+   * messages in a day, and none on what the owner asked it to send.
    */
-  async sendBotMessage(botId: string, from: string, input: { to: string; message: string }): Promise<{ to: string; left: number }> {
+  async sendBotMessage(botId: string, from: string, input: { to: string; message: string }): Promise<{ to: string }> {
     const row = this.store.activation(from)
     if (!row || row.botId !== botId || !asksOwner(row)) throw new BotEngineError('invalid_params', 'Only your chat, and work your owner asked for, message their other bots. Say in your report what you would have told it.')
     if (row.status !== 'running') throw new BotEngineError('invalid_params', 'This turn has ended; nothing was sent.')
@@ -8170,17 +8172,23 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (matches.length > 1) throw new BotEngineError('invalid_params', `Your owner has ${matches.length} bots named "${plainLabel(named, 60)}", so the message can't go to one of them. Nothing was sent: tell your owner instead.`)
     const target = matches[0]!
     const chain = this.unownedChainOf(row) + 1
-    if (chain > MAX_BOT_MESSAGE_CHAIN)
-      throw new BotEngineError('bot_message_chain', `Bots have already taken ${MAX_BOT_MESSAGE_CHAIN} turns in a row without your owner. Nothing was sent: tell your owner where things stand, and carry on when they write.`)
-    if (this.store.botMessagesSince(botMessageKey(botId), new Date(this.now() - 24 * HOUR_MS).toISOString()) >= MAX_BOT_MESSAGES_PER_DAY)
-      throw new BotEngineError('bot_message_limit', `You have sent ${MAX_BOT_MESSAGES_PER_DAY} messages to other bots in the last 24 hours, the most a bot may. Nothing was sent: tell your owner instead.`)
     if (target.paused) throw new BotEngineError('bot_paused', `${target.name} is paused, so it reads no messages now. Nothing was sent: tell your owner instead.`)
     const entry = this.entry(botId)
     const sender: BotMessageSender = { botId, name: (entry.published ?? entry.draft).name, chain }
+    // Loop detection, the one limit on messages between bots: the same words to the same bot again before the owner writes.
+    if (this.store.botMessageRowAfter(target.botId, botMessageRowText(sender.name, message), this.store.ownerLastWroteSeq(botId)))
+      throw new BotEngineError('bot_message_loop', `You already sent ${target.name} this same message since your owner last wrote. Nothing was sent: that would be a loop. Tell your owner where things stand instead.`)
+    // Ping-pong: bots that keep answering each other with new words. A bot that has had `MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER`
+    // messages from other bots since its owner last wrote sends no more to bots until its owner writes.
+    const received = this.store.botMessagesReceivedAfter(botId, this.store.ownerLastWroteSeq(botId))
+    if (received >= MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER)
+      throw new BotEngineError('bot_message_exchange', `You have had ${received} messages from other bots since your owner last wrote, with no person in between. Nothing was sent: tell your owner where things stand, and carry on when they write.`)
+    // The turn this message starts is told when it is the last its bot may answer before its owner writes.
+    const last = this.store.botMessagesReceivedAfter(target.botId, this.store.ownerLastWroteSeq(target.botId)) + 1 >= MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER
     const messageId = randomUUID()
     const activationId = newActivationId()
     const refused = this.store.db.transaction(() => {
-      const error = this.queueChatInTx(target.botId, botMessageKey(botId, messageId), botMessageInput({ fromName: sender.name, message, chain }), activationId, undefined, sender)
+      const error = this.queueChatInTx(target.botId, botMessageKey(botId, messageId), botMessageInput({ fromName: sender.name, message, last }), activationId, undefined, sender)
       // The owner reads it in the receiving bot's chat, labelled as the sender's.
       if (!error) this.chat.post({ id: `${BOT_MESSAGE_ROW_PREFIX}${messageId}`, botId: target.botId, author: 'bot', kind: 'notice', text: botMessageRowText(sender.name, message), lane: 'chat' })
       return error
@@ -8188,7 +8196,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (refused) throw new BotEngineError(refused.code, `${target.name} can't take messages now. Nothing was sent: tell your owner instead.`)
     this.changed({ botId: target.botId })
     await this.startQueuedChat(target.botId, activationId)
-    return { to: target.name, left: MAX_BOT_MESSAGE_CHAIN - chain }
+    return { to: target.name }
   }
 
   /**
@@ -9464,9 +9472,10 @@ function heldAlready(authority: Pick<BotAuthority, 'tools' | 'appTools' | 'skill
     // The web tools are neutral tools that a grant keeps with the app tools (the starter grant does): either holds them.
     if (isNeutralTool(asked.tool)) return authority.tools.has(asked.tool) || authority.appTools.has(asked.tool)
     // The browser is held as its tools, the owner's threads as theirs (reading them, in every lane that has them), and the
-    // profiler as its overview (in both lanes).
+    // profiler as its overview and Mousse's look as theme_read (in both lanes).
     if (asked.tool === BOT_BROWSER_PERMISSION) return authority.appTools.has('browser_open')
     if (asked.tool === BOT_PROFILER_PERMISSION) return authority.appTools.has('profiler_overview')
+    if (asked.tool === BOT_THEMES_PERMISSION) return authority.appTools.has('theme_read')
     return asked.tool === BOT_THREADS_PERMISSION ? authority.appTools.has('thread_list') : authority.appTools.has(asked.tool)
   }
   if ('skill' in asked) return authority.skills.has(asked.skill)
@@ -9496,9 +9505,8 @@ export function asksOwner(row: Pick<BotActivationRow, 'lane' | 'trigger'>): bool
 }
 
 /**
- * Whether the activation is a chat turn its owner's own message started (`bots.chat.send`, keyed `chat:`): the only
- * turn that may start, message or stop the owner's threads. The bot's first message (`create:`) is not one; it never
- * waits at a wall the owner's reply continues (it asks for nothing, and at a limit the reply starts a turn of its own).
+ * Whether the activation is a chat turn its owner's own message started (`bots.chat.send`, keyed `chat:`). The bot's
+ * first message (`create:`) is not one; it never waits at a wall the owner's reply continues (it asks for nothing, and at a limit the reply starts a turn of its own).
  * Nor is a turn an answer the owner tapped started (`answer:`): the label is the bot's words, not theirs.
  */
 export function ownerChatTurn(row: Pick<BotActivationRow, 'lane' | 'idempotencyKey'>): boolean {
@@ -9512,10 +9520,18 @@ export function memoryLaneOf(row: Pick<BotActivationRow, 'lane' | 'idempotencyKe
   return ownerChatTurn(row) || (row.lane === 'chat' && row.idempotencyKey.startsWith('answer:')) ? 'chat' : 'run'
 }
 
+/**
+ * Whether the activation may start, message, stop, archive or hide the owner's threads ("use your threads"): a chat
+ * turn its owner's message or tapped answer started (`chat:`, `answer:`), and every run (work, a reminder's work, a
+ * wake, a schedule). Not the bot's first message (`create:`) nor a chat turn no person started (`botmsg:`).
+ */
+export function threadsActOf(row: Pick<BotActivationRow, 'lane' | 'idempotencyKey'>): boolean {
+  return row.lane === 'run' || memoryLaneOf(row) === 'chat'
+}
+
 /** Why a turn holds the owner's threads to reading only (`BotAuthority.threadsReadOnly`); undefined when it may act. */
-export function threadsReadOnlyOf(row: Pick<BotActivationRow, 'lane' | 'idempotencyKey'>): 'work' | 'not_owner' | undefined {
-  if (ownerChatTurn(row)) return undefined
-  return row.lane === 'chat' ? 'not_owner' : 'work'
+export function threadsReadOnlyOf(row: Pick<BotActivationRow, 'lane' | 'idempotencyKey'>): 'not_owner' | undefined {
+  return threadsActOf(row) ? undefined : 'not_owner'
 }
 
 /** What a gate refusal asks the owner for. */

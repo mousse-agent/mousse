@@ -8,18 +8,18 @@
  * - a message: the row in the receiving chat, the turn it starts and what that turn is told; the sender's chip
  * - who may send: a chat turn, work the owner asked for; never a scheduled run
  * - refusals: an unknown name, itself, a paused bot, an empty or too long message; nothing is posted
- * - loops: turns in a row without the owner (through chat, work and wakes), and messages in 24 hours
+ * - loops: no count in a row or a day; the same message to the same bot again before the owner writes is refused; the
+ *   chain of turns without the owner is still counted (through chat, work and wakes)
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ownerChatTurn } from '../../src/mms/bots/activation/BotEngine'
 import type { PreparedBotTurn } from '../../src/mms/bots/activation/dispatcher'
 import { botTools } from '../../src/mms/run/mcp/appTools/bots'
 import type { MousseTool, ToolCallContext } from '../../src/mms/run/mcp/appTools/types'
-import { MAX_BOT_MESSAGE_CHAIN, MAX_BOT_MESSAGE_CHARS, MAX_BOT_MESSAGES_PER_DAY } from '../../src/shared/bots/personal/botMessages'
+import { MAX_BOT_MESSAGE_CHARS, MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER } from '../../src/shared/bots/personal/botMessages'
 import { rollUpChips } from '../../src/shared/bots/personal/chips'
 import { botFixture, chatOf, createBot, finish, flush, start, type BotFixture } from './botFixture'
 
-const HOUR = 60 * 60_000
 
 let f: BotFixture
 let plusy: string
@@ -180,31 +180,60 @@ describe('a message that can\'t go', () => {
   })
 })
 
-describe('bots can\'t keep each other going', () => {
-  it(`at most ${MAX_BOT_MESSAGE_CHAIN} turns in a row without the owner; the owner's next message starts the count again`, async () => {
+describe('bots can\'t loop on each other', () => {
+  it(`ping-pong stops: two bots answering each other with new words stop once one has had ${MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER} messages from bots without its owner; that turn is told not to answer, and the owner's next message lets it send again`, async () => {
     const first = await chat(plusy, 'Tell Alpha.', 'm1')
-    expect(await send(plusy, first.activation.id, 'Alpha')).toEqual({ to: 'Alpha', left: MAX_BOT_MESSAGE_CHAIN - 1 })
+    expect(await send(plusy, first.activation.id, 'Alpha')).toEqual({ to: 'Alpha' })
     await finish(f, first.payload, 'completed', { text: 'Told Alpha.' })
-    // They answer each other in turn: Alpha (2), Plusy (3), Alpha (4).
+    // They answer each other in turn, each time with new words, so the repeat check never fires.
     let [from, to] = [alpha, plusy]
-    for (let chain = 2; chain <= MAX_BOT_MESSAGE_CHAIN; chain += 1) {
-      const got = await messageTurn(from)
-      expect(got.activation.trigger).toMatchObject({ fromBot: { chain: chain - 1 } })
-      expect(await send(from, got.activation.id, to === plusy ? 'Plusy' : 'Alpha', `Answer ${chain}`)).toMatchObject({ left: MAX_BOT_MESSAGE_CHAIN - chain })
+    let sent = 1
+    let got = await messageTurn(from)
+    for (;;) {
+      const name = to === plusy ? 'Plusy' : 'Alpha'
+      const before = messageRows(to).length
+      const answer = send(from, got.activation.id, name, `Answer ${sent + 1}: a new finding.`)
+      if (got.prepared.prompt.includes("Don't answer")) {
+        await expect(answer).rejects.toThrow(`${MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER} messages from other bots since your owner last wrote`)
+        expect(messageRows(to)).toHaveLength(before)
+        break
+      }
+      expect(await answer).toEqual({ to: name })
+      sent += 1
+      expect(sent, 'the exchange never stopped').toBeLessThan(4 * MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER)
       await finish(f, got.payload, 'completed', { text: 'Answered.' })
       ;[from, to] = [to, from]
+      got = await messageTurn(from)
+      // The row of turns without the owner is still counted on each turn.
+      expect(got.activation.trigger).toMatchObject({ fromBot: { chain: sent } })
     }
-    // The last turn in the row is told not to answer, and can't.
-    const last = await messageTurn(from)
-    expect(last.activation.trigger).toMatchObject({ fromBot: { chain: MAX_BOT_MESSAGE_CHAIN } })
-    expect(last.prepared.prompt).toContain(`this is turn ${MAX_BOT_MESSAGE_CHAIN} of at most ${MAX_BOT_MESSAGE_CHAIN} in a row between bots without your owner`)
-    const before = messageRows(to).length
-    await expect(send(from, last.activation.id, to === plusy ? 'Plusy' : 'Alpha')).rejects.toThrow(/already taken 4 turns in a row without your owner\. Nothing was sent/)
-    expect(messageRows(to)).toHaveLength(before)
-    await finish(f, last.payload, 'completed', { text: 'I stopped here.' })
-    // The owner writes: a message from that turn is the first again.
-    const again = await chat(from, 'Go on, tell them.', 'm2')
-    expect(await send(from, again.activation.id, to === plusy ? 'Plusy' : 'Alpha')).toMatchObject({ left: MAX_BOT_MESSAGE_CHAIN - 1 })
+    // Each bot answered until it had had its share: the last one, Alpha, had six.
+    expect(from).toBe(alpha)
+    expect(sent).toBe(2 * MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER - 1)
+    await finish(f, got.payload, 'completed', { text: 'I stopped here.' })
+    // The owner writes to Alpha: it may tell Plusy again.
+    const again = await chat(alpha, 'Go on, tell Plusy.', 'm2')
+    expect(await send(alpha, again.activation.id, 'Plusy', 'Here is where things stand.')).toEqual({ to: 'Plusy' })
+  })
+
+  it('a loop is refused: the same message to the same bot again before the owner writes; the owner\'s next message clears it', async () => {
+    const turn = await chat(plusy, 'Tell Alpha.', 'm1')
+    await send(plusy, turn.activation.id, 'Alpha', 'The login page returns a 500.')
+    const before = messageRows(alpha).length
+    await expect(send(plusy, turn.activation.id, 'Alpha', 'The login page returns a 500.')).rejects.toThrow(/same message since your owner last wrote\. Nothing was sent/)
+    expect(messageRows(alpha)).toHaveLength(before)
+    // Something new is no loop.
+    expect(await send(plusy, turn.activation.id, 'Alpha', 'It also fails on signup.')).toEqual({ to: 'Alpha' })
+    await finish(f, turn.payload, 'completed', { text: 'Told Alpha.' })
+    f.clock.now += 1_000
+    const again = await chat(plusy, 'Tell Alpha again.', 'm2')
+    expect(await send(plusy, again.activation.id, 'Alpha', 'The login page returns a 500.')).toEqual({ to: 'Alpha' })
+  })
+
+  it('no count in a day: more than thirty messages from one bot', async () => {
+    const turn = await chat(plusy, 'Tell Alpha everything.', 'm1')
+    for (let i = 0; i < 40; i += 1) await send(plusy, turn.activation.id, 'Alpha', `Finding ${i}`)
+    expect(messageRows(alpha)).toHaveLength(40)
   })
 
   it('work started in a turn a bot\'s message started carries the count on', async () => {
@@ -215,7 +244,7 @@ describe('bots can\'t keep each other going', () => {
     const { workId } = await f.bots.tools.work.start(alpha, got.activation.id, { title: 'Look into it', brief: 'Check the login bug Plusy reported.', key: 'w1' })
     await finish(f, got.payload, 'completed', { text: 'Looking into it.' })
     await start(f, workId)
-    expect(await send(alpha, workId, 'Plusy', 'Confirmed.')).toMatchObject({ left: MAX_BOT_MESSAGE_CHAIN - 2 })
+    expect(await send(alpha, workId, 'Plusy', 'Confirmed.')).toEqual({ to: 'Plusy' })
     expect((await messageTurn(plusy)).activation.trigger).toMatchObject({ fromBot: { name: 'Alpha', chain: 2 } })
   })
 
@@ -232,18 +261,7 @@ describe('bots can\'t keep each other going', () => {
     await flush()
     const woke = f.store.listActivations(alpha).find((row) => row.idempotencyKey === `wake:${set.wakeId}`)!
     await start(f, woke.id)
-    expect(await send(alpha, woke.id, 'Plusy', 'Still broken.')).toMatchObject({ left: MAX_BOT_MESSAGE_CHAIN - 3 })
-  })
-
-  it(`at most ${MAX_BOT_MESSAGES_PER_DAY} messages from one bot in 24 hours`, async () => {
-    const turn = await chat(plusy, 'Tell Alpha everything.', 'm1')
-    for (let i = 0; i < MAX_BOT_MESSAGES_PER_DAY; i += 1) await send(plusy, turn.activation.id, 'Alpha', `Finding ${i}`)
-    await expect(send(plusy, turn.activation.id, 'Alpha')).rejects.toThrow(/You have sent 30 messages to other bots in the last 24 hours/)
-    expect(messageRows(alpha)).toHaveLength(MAX_BOT_MESSAGES_PER_DAY)
-    // Another bot's count is its own.
-    await finish(f, turn.payload, 'completed', { text: 'Told Alpha.' })
-    f.clock.now += 24 * HOUR + 1
-    const later = await chat(plusy, 'One more.', 'm2')
-    expect(await send(plusy, later.activation.id, 'Alpha')).toMatchObject({ to: 'Alpha' })
+    expect(await send(alpha, woke.id, 'Plusy', 'Still broken.')).toEqual({ to: 'Plusy' })
+    expect((await messageTurn(plusy)).activation.trigger).toMatchObject({ fromBot: { name: 'Alpha', chain: 3 } })
   })
 })

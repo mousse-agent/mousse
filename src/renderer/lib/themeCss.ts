@@ -155,44 +155,60 @@ export const DECISION_SELECTOR = '[data-mousse-decision]'
 
 let themeSheet: CSSStyleSheet | null = null
 let guard: MutationObserver | null = null
+/** Whether a user theme is on: the guard runs while one is, whatever it carries (CSS, colors, a wallpaper or nothing). */
+let themeActive = false
 
-/** Turns the theme sheet off while a decision is on the page, and on again once none is. */
+/**
+ * Pauses the theme while a decision is on the page: the sheet is turned off and `html[data-user-theme-paused]` is set,
+ * which also hides the wallpaper (app CSS). On again once no decision is left.
+ */
 function syncDecisionPause(doc: Document): void {
-  if (!themeSheet) return
-  const paused = doc.querySelector(DECISION_SELECTOR) !== null
-  if (themeSheet.disabled !== paused) themeSheet.disabled = paused
-  doc.documentElement.toggleAttribute('data-user-theme-paused', paused)
+  const paused = themeActive && doc.querySelector(DECISION_SELECTOR) !== null
+  if (themeSheet && themeSheet.disabled !== paused) themeSheet.disabled = paused
+  if (doc.documentElement.hasAttribute('data-user-theme-paused') !== paused) doc.documentElement.toggleAttribute('data-user-theme-paused', paused)
+}
+
+/**
+ * Starts or stops the decision guard. It runs while a user theme is on, even one with no CSS and no colors (a theme that
+ * only has a wallpaper), so nothing of a theme shows while a person decides. A mutation observer pauses it before the
+ * next frame whenever a decision appears (mutation records are delivered before the page paints).
+ */
+export function setUserThemeActive(active: boolean, doc: Document = document): void {
+  themeActive = active
+  if (active && !guard && typeof MutationObserver === 'function') {
+    guard = new MutationObserver(() => syncDecisionPause(doc))
+    guard.observe(doc.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ['data-mousse-decision'] })
+  } else if (!active) {
+    guard?.disconnect()
+    guard = null
+  }
+  syncDecisionPause(doc)
 }
 
 /**
  * Puts a theme on the page after the app's own styles (an adopted sheet comes after the document's): its color tokens
- * and its CSS, cleaned by `sanitizeThemeCss`. Empty takes it off. A mutation observer pauses it before the next frame
- * whenever a decision appears (mutation records are delivered before the page paints). Returns what was dropped.
+ * and its CSS, cleaned by `sanitizeThemeCss`. Empty takes the sheet off; the decision guard stays as
+ * `setUserThemeActive` set it. CSS to apply turns the guard on. Returns what was dropped.
  */
 export function applyThemeCss(css: string, options: { tokens?: Record<string, string> } = {}, doc: Document = document): DroppedCss[] {
   const tokens = themeTokensCss(options.tokens ?? {})
   // CSS over the limit is not applied at all; the colors still are.
   const tooLong = css.length > THEME_CSS_MAX_LENGTH
   const own = tooLong ? '' : css
-  const { css: safe, dropped } = sanitizeThemeCss(tokens ? `${tokens}\n${own}` : own, THEME_CSS_MAX_LENGTH + tokens.length + 1)
+  const { css: safe, dropped } = sanitizeThemeCss(tokens ? `${tokens}
+${own}` : own, THEME_CSS_MAX_LENGTH + tokens.length + 1)
   if (tooLong) dropped.unshift({ text: 'the whole theme CSS', reason: themeCssTooLong(css.length) })
   // A page without constructable sheets (a test DOM) gets no theme at all.
   if (!Array.isArray(doc.adoptedStyleSheets)) return dropped
   const others = doc.adoptedStyleSheets.filter((sheet) => sheet !== themeSheet)
   if (!safe) {
     if (others.length !== doc.adoptedStyleSheets.length) doc.adoptedStyleSheets = others
-    guard?.disconnect()
-    guard = null
-    doc.documentElement.removeAttribute('data-user-theme-paused')
     return dropped
   }
   themeSheet ??= new CSSStyleSheet()
   themeSheet.replaceSync(safe)
-  syncDecisionPause(doc)
+  if (!themeActive) setUserThemeActive(true, doc)
+  else syncDecisionPause(doc)
   if (!doc.adoptedStyleSheets.includes(themeSheet)) doc.adoptedStyleSheets = [...others, themeSheet]
-  if (!guard && typeof MutationObserver === 'function') {
-    guard = new MutationObserver(() => syncDecisionPause(doc))
-    guard.observe(doc.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ['data-mousse-decision'] })
-  }
   return dropped
 }
