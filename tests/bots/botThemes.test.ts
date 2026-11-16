@@ -35,7 +35,7 @@ describe('"change how Mousse looks" in the bot engine', () => {
     expect(botStarterManifest().appTools).not.toContain('themes')
     const turn = await chat('Make Mousse dark blue with my beach photo behind the chat.', 'm1')
     expect(themeTools(turn.prepared.policy.tools!.allow)).toEqual([])
-    expect(turn.prepared.instructions).toContain('You can ask for "change how Mousse looks" (escalate with the tool themes)')
+    expect(turn.prepared.instructions).toContain('needs "change how Mousse looks", escalate with the tool themes')
     expect(line(turn.prepared.instructions)).toMatch(/: no$/)
     turn.prepared.authority.escalate!({ permission: { tool: 'themes' }, reason: 'You asked me to change the theme.' })
     // A call of one of its tools in the same turn is the same ask.

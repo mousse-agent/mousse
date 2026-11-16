@@ -807,6 +807,9 @@ export function claudeSubscriptionEnvironment(source: NodeJS.ProcessEnv = proces
 }
 
 /** Variables that send Claude Code's requests to a cloud provider, billed per token. */
+/** What a bot turn's Claude Code runs with so it always loads Mousse's tools on demand (docs/plans/bot-context.md §15). */
+export const CLAUDE_BOT_TOOL_SEARCH_ENV = { ENABLE_TOOL_SEARCH: 'true' } as const
+
 const CLAUDE_CLOUD_ROUTES = ['CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY']
 /**
  * The client name (`CLAUDE_CODE_ENTRYPOINT`) Claude Code reports for every process Mousse starts. Without one it
@@ -2886,7 +2889,9 @@ export class ClaudeSubscriptionProviderService {
         ? claudeSignInEnvironment(ownerEnv, {}, lockedEnv({ platform: process.platform, base: ownerEnv, driver: 'claude', credential: 'subscription', scratch: locked.authority.workspace?.scratch ?? locked.cwd }))
         : ownerEnv
     const entrypoint = this.entrypointEnv(baseEnv)
-    const turnEnv: NodeJS.ProcessEnv = { ...this.finalEnv({ ...baseEnv, ...compaction, ...entrypoint }), ...(locked ? { CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1' } : {}) }
+    // A bot turn always defers Mousse's tools behind Claude Code's tool search (the bot's tool catalogue, docs/plans/
+    // bot-context.md §15): its tool list stays names only, whatever the size of the list or Claude Code's own default.
+    const turnEnv: NodeJS.ProcessEnv = { ...this.finalEnv({ ...baseEnv, ...compaction, ...entrypoint }), ...(locked ? { CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1', ...CLAUDE_BOT_TOOL_SEARCH_ENV } : {}) }
     // A bot turn's commands (Linux): Claude Code keeps its temporary files in a private folder, and
     // the shared one, which holds every session's command output, is closed to them (`claudeBotTemp`).
     const botTemp = locked ? claudeBotTemp(locked.authority, turnEnv, locked.cwd) : undefined

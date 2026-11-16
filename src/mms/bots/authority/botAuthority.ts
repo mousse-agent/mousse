@@ -80,6 +80,7 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
     appTools,
     skills,
     mcp,
+    ...(permissions.catalogue ? { catalogue: permissions.catalogue } : {}),
     workspace: workspace ? {
       roots: [...workspace.roots], access: workspace.access, writeRoots: [...workspace.writeRoots], scratch: workspace.scratch,
       ...(permissions.workspace?.files !== undefined ? { files: permissions.workspace.files } : {})

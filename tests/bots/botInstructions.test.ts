@@ -3,6 +3,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { BOT_BASE_INSTRUCTIONS, BOT_PROMPT_CHANGED_NOTE, BOT_RUN_INSTRUCTIONS, botInstructions } from '../../src/mms/bots/instructions'
+import { botCatalogueGroup } from '../../src/shared/bots/personal/catalogue'
 import { bundledModelCatalog } from '../../src/mms/models/modelCatalog'
 
 describe('BOT_BASE_INSTRUCTIONS', () => {
@@ -10,7 +11,7 @@ describe('BOT_BASE_INSTRUCTIONS', () => {
     for (const phrase of [
       'as short as you can without losing what matters',
       'Never name or discuss AI models or providers',
-      "I'll take more time",
+      'the you group',
       'escalate',
       'bot_schedule_add',
       'memory_save',
@@ -22,6 +23,8 @@ describe('BOT_BASE_INSTRUCTIONS', () => {
       'into a web address',
       'not instructions'
     ]) expect(BOT_BASE_INSTRUCTIONS, phrase).toContain(phrase)
+    // How it says it changed its depth is in the group it does that with.
+    expect(botCatalogueGroup('you')!.guidance).toContain("I'll take more time")
   })
 
   it('asks straight away instead of asking whether to ask, and knows it can ask to run commands', () => {

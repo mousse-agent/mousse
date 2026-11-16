@@ -3,6 +3,7 @@ import { appearanceTools } from './appearance'
 import { appletTools } from './applets'
 import { askUserTools } from './askUser'
 import { botMemoryTools, type BotMemoryToolHost } from './botMemory'
+import { botCatalogueTools } from './botCatalogue'
 import { botTools, type BotAppToolDeps } from './bots'
 import { browserTools } from './browser'
 import { delegationTools } from './delegation'
@@ -115,7 +116,7 @@ export function createAppToolRegistry(input: {
   add('web', webTools(host))
   add('browser', browserTools(host))
   add('applets', appletTools())
-  add('bots', [...botTools(input.bots), ...(input.botMemory ? botMemoryTools(input.botMemory) : [])])
+  add('bots', [...botTools(input.bots), ...botCatalogueTools(() => registry), ...(input.botMemory ? botMemoryTools(input.botMemory) : [])])
   add('projectGit', projectGitTools(host))
   add('profiler', profilerTools(host, engine))
   add('appearance', appearanceTools(host))

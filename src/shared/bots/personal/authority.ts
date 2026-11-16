@@ -217,6 +217,11 @@ export interface BotAuthority {
    */
   threadsReadOnly?: 'not_owner'
   /**
+   * How the turn reaches the tool catalogue (docs/plans/bot-context.md §15): `search` (Claude Code loads any listed tool
+   * itself) or `use_tool` (Codex, Pi: the thread lists the core set and calls the rest through `use_tool`). Absent: none.
+   */
+  catalogue?: 'search' | 'use_tool'
+  /**
    * Why the turn may not use the app tool `tool` now (its grant was removed or replaced, this computer switched it off,
    * the activation ended), decided without asking anyone or showing a chip; undefined while it may. For a call that
    * waited (`thread_wait`), checked again before it returns anything.

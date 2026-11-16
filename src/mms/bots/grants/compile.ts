@@ -4,6 +4,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { realpathSync } from 'node:fs'
 import type { BotManifest, BotThreadSpec } from '../../../shared/bots/personal/definition'
 import { BOT_APP_TOOLS, BOT_APPLET_TOOL, BOT_CARD_TOOL, BOT_GROUP_PERMISSIONS, BOT_MESSAGE_TOOLS, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_RUNNING_TOOL, BOT_PROFILER_CHAT_TOOLS, BOT_PROFILER_PERMISSION, BOT_PROFILER_TOOLS, BOT_QUICK_ACTION_TOOLS, BOT_QUICK_ACTIONS_PERMISSION, BOT_SCHEDULE_ACT_TOOLS, BOT_SCHEDULE_READ_TOOLS, BOT_SCHEDULES_PERMISSION, BOT_SECRET_TOOLS, BOT_SECRETS_PERMISSION, BOT_TASK_TOOLS, BOT_THEME_TOOLS, BOT_THEMES_PERMISSION, BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest, BOT_SUBAGENT_APP_TOOLS, BOT_SUBAGENT_TOOLS } from '../../../shared/bots/personal/manifest'
+import { BOT_CATALOGUE_TOOL, BOT_USE_TOOL } from '../../../shared/bots/personal/catalogue'
 import { BOT_MEMORY_TOOLS } from '../../../shared/bots/personal/memory'
 import type { NeutralTool } from '../../../shared/harness/tools'
 import type { BindPolicy, HarnessCaps, HarnessError } from '../../../shared/harness/types'
@@ -56,6 +57,12 @@ export interface BotPermissions {
   secrets?: true
   /** "Add quick actions": `appTools` holds `create_quick_action`. */
   quickActions?: true
+  /**
+   * How this turn reaches the tool catalogue (docs/plans/bot-context.md §15): `search`, Claude Code's own tool search,
+   * which loads any listed tool; `use_tool`, Codex and Pi, whose thread lists only the core set and calls the rest
+   * through `use_tool`. Absent: no catalogue (a consult, a subagent).
+   */
+  catalogue?: 'search' | 'use_tool'
 }
 
 export interface CompileInput {
@@ -137,6 +144,11 @@ export interface CompileInput {
     subagents?: boolean
     /** Only work (including a reminder's work) may park on time or events. */
     workWaiting?: boolean
+    /**
+     * A main turn's tool catalogue (`BotPermissions.catalogue`): `tool_catalogue` on every runtime, and `use_tool` where
+     * the runtime has no tool search of its own (Codex, Pi). Never a consult or a subagent.
+     */
+    catalogue?: 'search' | 'use_tool'
     /**
      * This turn is one of a run's subagents: it holds what its work holds of the built-ins, files, MCP tools and skills,
      * and of the app tools what a thread's subagent may use (`subagentManifest`): the web, the browser, and, as `threads`,
@@ -259,7 +271,9 @@ export function compileBotThread(input: CompileInput): CompileResult {
     ...(own?.cards ? [BOT_CARD_TOOL] : []),
     ...(own?.bots ? BOT_MESSAGE_TOOLS : []),
     // A run's main turn splits its job among subagents, on models from the same list the chat picks work's from.
-    ...(own?.subagents && !own.frontDesk ? [...BOT_SUBAGENT_TOOLS, 'work_models'] : [])
+    ...(own?.subagents && !own.frontDesk ? [...BOT_SUBAGENT_TOOLS, 'work_models'] : []),
+    // The catalogue's own tools: they reach nothing themselves, and every tool called through them is held to this list.
+    ...(own?.catalogue ? [BOT_CATALOGUE_TOOL, ...(own.catalogue === 'use_tool' ? [BOT_USE_TOOL] : [])] : [])
   ])].sort()
   const mcp = [...new Set(manifest.mcp.map((pair) => `${pair.serverId}::${pair.tool}` as const))].sort()
   return {
@@ -284,6 +298,7 @@ export function compileBotThread(input: CompileInput): CompileResult {
       ...(schedules ? { schedules } : {}),
       ...(secrets ? { secrets: true as const } : {}),
       ...(quickActions ? { quickActions: true as const } : {}),
+      ...(own?.catalogue ? { catalogue: own.catalogue } : {}),
       workspace: files !== undefined ? { roots: [], access: 'read', writeRoots: [], scratch, files } : null
     }
   }
