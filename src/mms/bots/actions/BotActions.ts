@@ -443,6 +443,7 @@ export class BotActions {
       await this.runApproved(String(action.id))
   }
   async reconcile(): Promise<void> {
+    this.host.store.pruneWorkRefusals()
     this.expireDue()
     const interrupted = this.host.store.all("SELECT id FROM bot_actions WHERE status IN ('running', 'approved')")
     await this.host.refresh()

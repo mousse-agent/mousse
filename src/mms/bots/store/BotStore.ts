@@ -1308,7 +1308,8 @@ export class BotStore {
       if (moved) {
         this.withdrawWorkQuestions(id)
         heldCalls(this.db)?.endWork(id)
-        this.run('DELETE FROM bot_memory_state WHERE key IN (?, ?)', `cursor:action-note:${id}`, `cursor:action-owner:${id}`)
+        const refusalPrefix = `cursor:action-refusal:${id}:`
+        this.run('DELETE FROM bot_memory_state WHERE key IN (?, ?) OR substr(key, 1, ?) = ?', `cursor:action-note:${id}`, `cursor:action-owner:${id}`, refusalPrefix.length, refusalPrefix)
         this.run("UPDATE bot_reminders SET status = 'cancelled', delivered_at = ? WHERE work_id = ? AND status = 'waiting'", this.now(), id)
       }
       return moved
@@ -2009,6 +2010,14 @@ export class BotStore {
       AND NOT EXISTS (SELECT 1 FROM bot_dispatches d, json_each(d.prompt_json, '$.workActionIds') told
         WHERE d.activation_id = a.activation_id AND ${WORK_TOLD} AND told.value = a.id)
       ORDER BY COALESCE(a.ran_at, a.answered_at, a.created_at), a.rowid`, workId) as unknown as ActionRow[]
+  }
+
+  pruneWorkRefusals(): void {
+    const prefix = 'cursor:action-refusal:'
+    if (!this.get('SELECT 1 FROM bot_memory_state WHERE substr(key, 1, ?) = ? LIMIT 1', prefix.length, prefix)) return
+    this.run(`DELETE FROM bot_memory_state AS s WHERE substr(s.key, 1, ?) = ? AND NOT EXISTS (
+      SELECT 1 FROM bot_activations a WHERE a.bot_id = s.bot_id AND a.status NOT IN ('done', 'failed', 'cancelled')
+      AND substr(s.key, 1, length(? || a.id || ':')) = ? || a.id || ':')`, prefix.length, prefix, prefix, prefix)
   }
 
   recordWorkRefusal(workId: string, botId: string, id: string, text: string): void {
