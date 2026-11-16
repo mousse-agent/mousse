@@ -404,3 +404,7 @@ it('R5-slot keeps the slot until the held runtime finishes', async () => {
   await flush()
   expect(f.store.activation(next.id)?.status).toBe('running')
 })
+it.each(['access_token', 'client_secret', 'password', 'authorization', 'api_key', 'x-api-key', 'apiToken', 'AccessToken', 'clientSecret'] as const)('R5-mask masks %s by key', async key => {
+  const { maskedActionData } = await import('../../src/mms/bots/actions/BotActions')
+  expect(JSON.stringify(maskedActionData({ [key]: 'ordinary-looking-secret' }))).not.toContain('ordinary-looking-secret')
+})
