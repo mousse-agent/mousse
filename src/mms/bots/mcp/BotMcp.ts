@@ -345,13 +345,13 @@ export class BotMcp implements BotMcpHost {
    * sign-in, and its result is framed as data from the server (`images`: the turn's model can see images). A failure is
    * a plain result, never a throw; its raw text goes to the owner's log only.
    */
-  async call(tool: BotMcpTool, args: Record<string, unknown>, signal: AbortSignal, options: { images?: boolean; heldAction?: boolean; assertExecutionActive?: () => Promise<void>; keepImages?: (images: NonNullable<ToolOutcome['images']>) => string | undefined } = {}): Promise<ToolOutcome> {
+  async call(tool: BotMcpTool, args: Record<string, unknown>, signal: AbortSignal, options: { images?: boolean; heldAction?: boolean; assertDispatchActive?: () => void; keepImages?: (images: NonNullable<ToolOutcome['images']>) => string | undefined } = {}): Promise<ToolOutcome> {
     if (signal.aborted) return { text: `The call to ${tool.serverName} was stopped.`, isError: true }
     if (!this.deps.enabled()) return { text: `MCP is turned off in Mousse's Settings now, so ${tool.serverName}'s tools can't be used. Carry on without it, and say so in your report.`, isError: true }
     const descriptor = options.heldAction ? this.deps.catalog.servers(undefined).find(s => s.installationId === installationOf(tool.server))?.tools.find(t => t.toolName === tool.tool) : undefined
     const pin: McpToolExecutionPin | undefined = options.heldAction && descriptor?.configRevision ? {
       installationId: installationOf(tool.server), toolName: tool.tool, configRevision: descriptor.configRevision,
-      schemaDigest: shortHash(canonicalJson(descriptor.inputSchema ?? {}), 64), assertExecutionActive: options.assertExecutionActive
+      schemaDigest: shortHash(canonicalJson(descriptor.inputSchema ?? {}), 64), assertDispatchActive: options.assertDispatchActive
     } : undefined
     if (options.heldAction && !pin) return { text: 'This tool has no installed revision to bind the approved call to. Nothing was sent.', isError: true }
     const callMs = this.deps.callMs ?? BOT_MCP_CALL_MS
@@ -464,7 +464,7 @@ export async function callForBot(input: {
   images?: boolean
   toolCallId?: string
   heldAction?: boolean
-  assertExecutionActive?: () => Promise<void>
+  assertDispatchActive?: () => void
 }): Promise<ToolOutcome> {
   const offered = input.bot.mcpTools?.find((tool) => tool.name === input.name || tool.providerName === input.name)
   const target = offered ?? input.known?.(input.name)
@@ -477,7 +477,7 @@ export async function callForBot(input: {
   const { activationId, workspace } = input.bot
   return input.mcp.call(offered, input.args, AbortSignal.any([input.signal, input.bot.time.signal]), {
     images: input.images === true,
-    ...(input.heldAction ? { heldAction: true, assertExecutionActive: input.assertExecutionActive } : {}),
+    ...(input.heldAction ? { heldAction: true, assertDispatchActive: input.assertDispatchActive } : {}),
     keepImages: (images) => keepToolImages({ activationId, filesFolder: workspace?.files, source: `${offered.serverName}-${offered.tool}`, images })
   })
 }

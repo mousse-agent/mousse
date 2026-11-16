@@ -167,3 +167,24 @@ it('refuses a pinned schema that changed before dispatch', async () => {
   expect(callTool).not.toHaveBeenCalled()
   await mcp.shutdown()
 })
+
+it('checks the bot binding synchronously after the last asynchronous authorization read', async () => {
+  const callTool = vi.fn(async () => ({ content: [] }))
+  const { factory } = clientFactory({ callTool })
+  const mcp = manager(factory)
+  const tool = (await mcp.getEnabledTools())[0]!
+  let stillGranted = true
+  const original = mcp.isToolCallAllowed.bind(mcp)
+  let reads = 0
+  vi.spyOn(mcp, 'isToolCallAllowed').mockImplementation(async (...args) => {
+    const allowed = await original(...args)
+    if (++reads === 2) stillGranted = false
+    return allowed
+  })
+  await expect(mcp.callTool(tool.providerName, {}, undefined, undefined, undefined, {
+    installationId: tool.installationId!, configRevision: tool.configRevision!, toolName: tool.toolName,
+    assertDispatchActive: () => { if (!stillGranted) throw new Error('grant changed') }
+  })).rejects.toThrow('grant changed')
+  expect(callTool).not.toHaveBeenCalled()
+  await mcp.shutdown()
+})

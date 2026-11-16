@@ -621,7 +621,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return callForBot({ mcp: mcp as BotMcp, bot: {
         activationId: row.id, mcpTools: [tool], workspace: null, time: { signal, deadline: () => Number.MAX_SAFE_INTEGER },
         check: () => this.grantNow(row.id)?.mcp.some(p => p.serverId === target.server && p.tool === target.tool) ? { ok: true } : { ok: false, wall: { kind: 'revoked' } }
-      }, name: tool.name, args, signal, heldAction: true, assertExecutionActive: async () => {
+      }, name: tool.name, args, signal, heldAction: true, assertDispatchActive: () => {
         this.actions.assertRunning(actionId)
       } })
     }

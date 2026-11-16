@@ -88,6 +88,8 @@ export interface McpToolExecutionPin {
   /** Workflow defaults must remain selected even though dispatch narrows to one tool. */
   requireProfileSelection?: boolean
   assertExecutionActive?: () => Promise<void>
+  /** A synchronous fence after all asynchronous authorization, immediately before dispatch. */
+  assertDispatchActive?: () => void
 }
 
 /** Per-call options of `callTool`. */
@@ -562,6 +564,7 @@ export class McpManager {
       assertPin(this.toolMap.get(providerName))
       if (!current.allowed || current.server?.configRevision !== expected.configRevision) throw Object.assign(new Error(current.reason ?? 'MCP dependency is no longer admitted.'), { category: 'disabled', code: 'stale_revision' })
       if (signal?.aborted) throw Object.assign(new Error('MCP call cancelled before dispatch.'), { category: 'cancelled' })
+      expected.assertDispatchActive?.()
     }
     const timeoutMs = options?.timeoutMs ?? CALL_TOOL_TIMEOUT_MS
     connection.inFlight += 1
