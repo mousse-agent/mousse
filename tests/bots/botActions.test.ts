@@ -588,3 +588,22 @@ it('B2-limit refuses an oversized total even when each individual value is small
   expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
   expect(t.calls).toEqual([])
 })
+it('B3 a server error echoing a named hidden value leaves no stored copy after settlement', async () => {
+  const t = await setup(true)
+  Object.assign(t.args, { password: 'opaque-page-cursor-42' })
+  vi.spyOn(t.manager, 'callTool').mockImplementationOnce(async (_name, args) => {
+    t.calls.push(structuredClone(args))
+    return { isError: true, content: [{ type: 'text', text: `Login failed for password ${args.password}` }] } as never
+  })
+  expect(await t.call()).not.toMatchObject({ isError: true })
+  const a = f.bots.actions.forWork(t.workId)!
+  await finish(f, t.work.payload)
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  await flush()
+  expect(t.calls).toEqual([t.args])
+  expect(f.bots.actions.forWork(t.workId)).toMatchObject({ status: 'failed', exec_args: null })
+  const memory = new BotMemoryStore({ db: f.store.db })
+  const stored = JSON.stringify([f.store.all('SELECT * FROM bot_actions'), f.store.all('SELECT * FROM bot_dispatches'), f.store.all('SELECT * FROM bot_messages'), f.journal, memory.actions(t.botId)])
+  expect(stored).not.toContain('opaque-page-cursor-42')
+  expect(stored).toContain('Login failed for password')
+})
