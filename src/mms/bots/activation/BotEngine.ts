@@ -19,7 +19,7 @@ import { EventEmitter } from 'node:events'
 import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
 import { join } from 'node:path'
-import { askNoticeText, askText } from '../../../shared/bots/personal/askText'
+import { askCallNote, askNoticeText, askText } from '../../../shared/bots/personal/askText'
 import { lookFields } from '../../../shared/bots/personal/look'
 import { BOT_HELD_POWER_TEXT, subagentHold, type BotHeldPower, type BotRuntimeHold, type BotSubagentHold } from '../../../shared/bots/personal/subagentHold'
 import type { BotAuthority, BotCheck, BotCheckDenied, BotMcpTool, BotSubagents, BotSubagentView, BotThreadRole, BotThreads, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
@@ -3321,11 +3321,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const held = heldNow(permission)
       if (held) return { ok: false, refused: { text: held, askId: '' } }
       if (firstMessage) return { ok: false, refused: { text: BOT_ASK_NOT_YET_TEXT, askId: '' } }
+      const note = call.kind === 'app' ? askCallNote(call.tool, call.args) : undefined
       if (row.lane === 'run') {
         this.refused(row.id, permission)
-        return this.raiseAsk(row, input.mainN, 'gate', permission, wallMessage(decided.wall))
+        return this.raiseAsk(row, input.mainN, 'gate', permission, wallMessage(decided.wall), undefined, note)
       }
-      return { ok: false, wall: this.raiseWall(row.id, { dispatchN: input.mainN, kind: 'gate', permission, reason: wallMessage(decided.wall) }) }
+      return { ok: false, wall: this.raiseWall(row.id, { dispatchN: input.mainN, kind: 'gate', permission, reason: wallMessage(decided.wall), ...(note ? { note } : {}) }) }
     }
     const readOnly = threadsReadOnlyOf(row)
     const authority: BotAuthority = {
@@ -3702,7 +3703,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * consults stop with it). Asks never expire. The sixth wall of an activation ends it `blocked`
    * instead. The returned wall is what the refused call tells the model.
    */
-  raiseWall(activationId: string, input: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string }): WallReason {
+  raiseWall(activationId: string, input: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string; note?: string }): WallReason {
     const current = this.store.activation(activationId)
     if (current && this.removedExecutingSchedule(current)) return this.endRemovedScheduleAtWall(current)
     if (current?.lane === 'run' && input.kind === 'budget') return this.budgetEnd(current, input)
@@ -4105,13 +4106,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /** An ask in plain words for its card (`askText`), with the bot's current limits. */
-  private askCardText(row: BotActivationRow, permission: BotAskRequest): { title: string; note: string } {
+  private askCardText(row: BotActivationRow, permission: BotAskRequest, callNote?: string): { title: string; note: string } {
     const budget = this.store.activeGrant(row.botId)?.manifest.budget
-    return askText(permission, budget ? { budget } : {})
+    const text = askText(permission, budget ? { budget } : {})
+    // What the refused call would have done ("It would set: …") says more than the permission's own line.
+    return callNote ? { title: text.title, note: callNote } : text
   }
 
   /** The bot's open ask for `fingerprint` becomes this activation's wall, or a new one is written. */
-  private openWall(row: BotActivationRow, asked: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string }): BotEscalationRow {
+  private openWall(row: BotActivationRow, asked: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string; note?: string }): BotEscalationRow {
     const input = { ...asked, permission: this.limitAsk(row.botId, asked.permission) }
     const fingerprint = this.fingerprintOf(row.id, input.kind, input.permission)
     const open = this.store.openAsk(row.botId, fingerprint)
@@ -4119,7 +4122,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (open.activationId !== row.id || open.mode !== 'wall') this.store.moveAskToWall(open.id, row.id, input.dispatchN)
       return this.store.escalation(open.id)!
     }
-    const text = this.askCardText(row, input.permission)
+    const text = this.askCardText(row, input.permission, asked.note)
     const escalation = {
       id: `esc_${randomUUID()}`,
       botId: row.botId,
@@ -4141,7 +4144,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return this.store.escalation(escalation.id)!
   }
 
-  private wallInTransaction(activationId: string, from: readonly BotActivationRow['status'][], input: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string }): { kind: 'wall'; escalation: BotEscalationRow } | { kind: 'blocked' } | { kind: 'none' } {
+  private wallInTransaction(activationId: string, from: readonly BotActivationRow['status'][], input: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string; note?: string }): { kind: 'wall'; escalation: BotEscalationRow } | { kind: 'blocked' } | { kind: 'none' } {
     const row = this.store.activation(activationId)
     if (!row || !from.includes(row.status)) return { kind: 'none' }
     if (this.store.countEscalations(activationId) >= MAX_BOT_WALLS) {
@@ -4201,7 +4204,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * owner said Not now to it in the last 24 hours: then no card is made, and the bot is told the owner
    * said not now (never that it asked). The bot is told it asked only when a card is there.
    */
-  private raiseAsk(row: BotActivationRow, dispatchN: number, kind: BotWallKind, asked: BotAskRequest, reason: string, toolCallId?: string): BotCheck {
+  private raiseAsk(row: BotActivationRow, dispatchN: number, kind: BotWallKind, asked: BotAskRequest, reason: string, toolCallId?: string, note?: string): BotCheck {
     const permission = this.limitAsk(row.botId, asked)
     const fingerprint = this.fingerprintOf(row.id, kind, permission)
     let raised: { askId: string; created: boolean } | { refused: string }
@@ -4215,7 +4218,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         if (this.store.countNewAsks(row.botId, { activationId: row.id }) >= MAX_RUN_ASKS ||
           this.store.countNewAsks(row.botId, { since: new Date(this.now() - 24 * 60 * 60_000).toISOString() }) >= MAX_BOT_ASKS_PER_DAY)
           return { refused: BOT_ASK_ENOUGH_TEXT }
-        const text = this.askCardText(row, permission)
+        const text = this.askCardText(row, permission, note)
         const id = `esc_${randomUUID()}`
         this.store.insertEscalation({
           id, botId: row.botId, activationId: row.id, dispatchN, toolCallId: toolCallId ?? null, kind, permission, reason: reason.slice(0, 2000),

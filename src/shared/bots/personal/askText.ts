@@ -1,6 +1,7 @@
 import type { BotBudget } from './definition'
 import { isSpecialAsk, type BotAskRequest } from './escalation'
 import { botGrantTool } from './manifest'
+import { tellingChangeText } from './tellingSettings'
 
 /**
  * An ask in plain words for its card and for About → Can use (Bot Phase 1 §5.4): the card reads
@@ -47,7 +48,38 @@ const TOOL_TEXT: Record<string, AskText> = {
     title: 'change how Mousse looks',
     note: 'Themes, colors, CSS and a wallpaper picture from this computer, without asking each time.',
     tip: "It can read your themes, switch between them, and save a theme with colors, an accent, CSS and a wallpaper, as a thread's agent can in Full access. Theme CSS can restyle or cover anything in Mousse's window; CSS that loads anything from outside Mousse is dropped. A wallpaper is a PNG, JPEG or WebP it names on this computer, never on a network share; Mousse keeps its own copy. Settings → Appearance switches the theme back."
-  }
+  },
+  // The bot's own tools: a bot made before one of them existed has none of it in its grant, so its first use asks.
+  telling_set: { title: 'change when it tells you', note: 'How often it tells you, its quiet hours, and whether it can wake you.' },
+  bot_schedule_add: { title: 'run on a schedule', note: '' },
+  bot_schedule_remove: { title: 'remove its schedules', note: '' },
+  bot_schedule_list: { title: 'see its schedules', note: '' },
+  set_profile: { title: 'change its name or description', note: '' },
+  set_depth: { title: 'change how long it thinks', note: '' },
+  use_model: { title: 'switch its model', note: '' },
+  escalate: { title: 'ask you for permissions', note: '' },
+  run_report: { title: 'report on its automation runs', note: '' },
+  memory_search: { title: 'search its memory', note: '' },
+  memory_read: { title: 'read its memory', note: '' },
+  memory_list: { title: 'list its memory', note: '' },
+  memory_save: { title: 'save to its memory', note: '' },
+  memory_forget: { title: 'forget things in its memory', note: '' },
+  automation_draft_save: { title: 'draft automations', note: 'You turn each one on yourself.' },
+  automation_ask: { title: 'ask you about its automation drafts', note: '' },
+  automation_list: { title: 'see your automations', note: '' },
+  automation_update: { title: 'change your automations', note: '' },
+  automation_pause: { title: 'pause your automations', note: '' }
+}
+
+/** Any other tool: the card never shows a tool's name ("use the telling set tool"); the tooltip does. */
+const otherToolText = (tool: string): AskText => ({ title: 'use another of Mousse\'s tools', note: '', tip: `Mousse's tool ${tool}.` })
+
+/**
+ * What one refused call would have done, for its ask's note: "It would set: tell you when something is worth a look." Only
+ * for tools whose arguments say it plainly; undefined for every other call, whose card keeps its usual note.
+ */
+export function askCallNote(tool: string, args: unknown): string | undefined {
+  return tool === 'telling_set' ? tellingChangeText(args) : undefined
 }
 
 /**
@@ -117,7 +149,7 @@ export function askText(request: BotAskRequest, options: { budget?: BotBudget } 
   if ('tool' in request) {
     // Every browser tool is one permission: "use the browser", never "the browser act tool".
     const tool = botGrantTool(request.tool)
-    return TOOL_TEXT[tool] ?? { title: `use the ${tool.replace(/_/g, ' ')} tool`, note: '' }
+    return TOOL_TEXT[tool] ?? otherToolText(tool)
   }
   return budgetText(request.budget.key, request.budget.amount, options.budget)
 }
