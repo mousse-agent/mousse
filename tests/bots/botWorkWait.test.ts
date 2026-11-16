@@ -34,9 +34,9 @@ it('parks without a slot, survives restart and resumes once in its own thread, w
   await flush()
   expect(f.store.reminder(set.wakeId)?.status).toBe('delivered')
   expect(f.store.activation(workId)).toMatchObject({ status: 'running', threadId: thread })
-  const resumed = await start(f, workId, 2)
-  expect(JSON.stringify(f.store.dispatch(workId, 2)!.send)).toContain('Check again with the evidence already read.')
-  expect(JSON.stringify(f.store.dispatch(workId, 2)!.send)).toContain('it was for')
+  await start(f, workId, 2)
+  expect(JSON.stringify(f.store.dispatch(workId, 2)!.prompt)).toContain('Check again with the evidence already read.')
+  expect(JSON.stringify(f.store.dispatch(workId, 2)!.prompt)).toContain('it was for')
   expect(chatOf(f, botId).some(m => m.id.startsWith('bm_wake_'))).toBe(false)
   expect(f.store.listActivations(botId).some(a => a.idempotencyKey.startsWith('wake:'))).toBe(false)
   await f.bots.deliverDueReminders()
@@ -75,4 +75,30 @@ it('refuses a second wait, chat waits and times outside five minutes to a week',
   await expect(wait(workId)).rejects.toThrow('already has a wait')
   await f.bots.service.workStop(botId, workId)
   expect(f.store.workWait(workId)?.status).toBe('cancelled')
+})
+it.each(['stop', 'pause', 'delete', 'finish', 'fail'] as const)('%s leaves no open work timer', async action => {
+  const { workId, turn } = await work()
+  const set = await wait(workId)
+  if (action === 'finish' || action === 'fail') {
+    // A terminal transition, including failure before the requesting turn ends, cancels atomically.
+    f.store.moveActivation(workId, ['running'], action === 'finish' ? 'done' : 'failed')
+  } else {
+    await finish(f, turn.payload, 'completed', { text: '' })
+    if (action === 'stop') await f.bots.service.workStop(botId, workId)
+    if (action === 'pause') f.bots.pauseBot(botId)
+    if (action === 'delete') await f.bots.service.delete(botId)
+  }
+  expect(f.store.reminder(set.wakeId)?.status).toBe('cancelled')
+})
+it('resumes once when an event never happens', async () => {
+  f.host.wakeThread = () => ({ state: 'running' })
+  const { workId, turn } = await work()
+  await wait(workId, { kind: 'thread', threadId: 'other' })
+  await finish(f, turn.payload, 'completed', { text: '' })
+  f.clock.now += 25 * 60 * 60_000
+  await f.bots.deliverDueReminders()
+  await flush()
+  expect(f.store.dispatch(workId, 2)?.prompt.text).toContain("didn't happen in time")
+  await f.bots.deliverDueReminders()
+  expect(f.store.dispatches(workId)).toHaveLength(2)
 })

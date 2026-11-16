@@ -7098,7 +7098,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** `bots.personal.pause`: the owner pauses the bot's schedules. Chat still works. */
   pauseBot(botId: string): void {
     this.entry(botId)
-    this.store.setPaused(botId, 'owner')
+    this.store.db.transaction(() => {
+      this.store.setPaused(botId, 'owner')
+      for (const row of this.store.laneActivations(botId, 'run', ['blocked'])) {
+        if (row.endReason === 'waiting' || row.endReason === 'wait_ready') this.store.moveActivation(row.id, ['blocked'], 'cancelled', { endReason: 'stopped' })
+      }
+    })
     // A paused bot runs nothing in the background either.
     this.stopWatchersOf(botId)
     this.changed({ botId })
@@ -7695,13 +7700,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // Work that waits to go on is listed too: held while it waits for the owner, waiting its turn once allowed.
     const now = this.store.laneActivations(botId, 'run', ['running', 'waiting_grant', 'queued', 'paused', 'blocked']).filter((row) => row.status !== 'blocked' || workWaits(row)).sort(workOrder).map((row) => {
       const chip = this.liveChips.get(row.id)?.chip
-      const status = workWaitLine(row, this.workWaitLookups).status
+      const line = workWaitLine(row, this.workWaitLookups)
+      const status = line.status
       // Held for the owner's answer to its question, which the chat can pass on.
       const question = row.status === 'blocked' && row.endReason === 'question' ? this.store.workQuestion(row.id) : undefined
       return {
         workId: row.id,
         title: this.workTitle(row),
         status,
+        ...(line.wait ? { wait: line.wait } : {}),
         startedAt: row.createdAt,
         ...(chip && !question ? { doing: `${chip.text}${chip.highlight ? ` ${chip.highlight}` : ''}` } : {}),
         kind: row.trigger.kind === 'schedule' ? 'schedule' as const : 'work' as const,
@@ -7738,7 +7745,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * turn ends, before it reports (`advance`); `noteReach` says which. Ended work can't take it, nor work that waits for
    * the owner's answer to its question: the answer is the way on (`question_answer`).
    */
-  noteWork(botId: string, workId: string, note: string, from?: string): 'noted' | 'held' | 'ended' | 'not_found' | 'question' {
+  noteWork(botId: string, workId: string, note: string, from?: string): 'noted' | 'held' | 'ended' | 'not_found' | 'question' | 'waiting' {
     const text = note.trim().slice(0, MAX_WORK_NOTE_CHARS)
     const row = this.store.activation(workId)
     if (!row || row.botId !== botId || row.lane !== 'run' || !text) return 'not_found'
@@ -7899,7 +7906,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       dueAt = new Date(Math.max(due, this.now())).toISOString()
     }
     const wakeId = `rem_${randomUUID()}`
-    this.store.insertReminder({ id: wakeId, botId, dueAt, text: brief, work: null, replyTo: (workWait && setting?.trigger.kind === 'work' ? setting.trigger.replyTo : this.ownerMessageOf(from)) ?? null, createdAt: this.store.now(), wake: true, event, chain, ownerSet: false, ...(workWait ? { workId: from } : {}) })
+    this.store.db.transaction(() => {
+      if (workWait && (this.store.activation(from)?.status !== 'running' || this.store.workWait(from)?.status === 'waiting')) throw new BotEngineError('invalid_params', 'This work already waits or has ended. End your turn.')
+      this.wakeAllowance(botId, from, workWait)
+      this.store.insertReminder({ id: wakeId, botId, dueAt, text: brief, work: null, replyTo: (workWait && setting?.trigger.kind === 'work' ? setting.trigger.replyTo : this.ownerMessageOf(from)) ?? null, createdAt: this.store.now(), wake: true, event, chain, ownerSet: false, ...(workWait ? { workId: from } : {}) })
+    })
     if (workWait) this.askedIn.set(from, this.store.lastMainDispatch(from)!.n)
     this.armDue()
     this.changed({ botId })

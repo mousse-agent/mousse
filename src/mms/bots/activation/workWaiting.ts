@@ -30,7 +30,7 @@ interface WaitRule {
   waitsOnOwner(row: BotActivationRow, facts: WorkWaitLookups): boolean
   needsOwner(row: BotActivationRow, facts: WorkWaitLookups): boolean
   takesNotes(row: BotActivationRow): boolean
-  noteRefusal: 'question' | 'held'
+  noteRefusal: 'question' | 'held' | 'waiting'
   checkBeforeResume: boolean
   line(row: BotActivationRow, facts: WorkWaitLookups): WorkWaitLine
   clearLiveChip: boolean
@@ -50,7 +50,7 @@ export const WORK_WAIT_RULES = {
     checkBeforeResume: true,
     continueRefusal: (_row) => 'This work carries on by itself when its time or event comes, or when a slot is free. Stop it if it is no longer needed.',
     waitsOnOwner: (_row, _facts) => false, needsOwner: (_row, _facts) => false,
-    takesNotes: (_row) => true, noteRefusal: 'held',
+    takesNotes: (_row) => true, noteRefusal: 'waiting',
     line: (row, facts) => {
       const wait = facts.store().workWait(row.id)
       return row.endReason === 'wait_ready' ? { status: 'queued' } : { status: 'paused', ...(wait ? { wait: { dueAt: wait.dueAt, event: wait.event } } : {}) }

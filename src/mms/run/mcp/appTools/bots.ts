@@ -590,6 +590,7 @@ export function workNoteAnswer(outcome: 'now' | 'after_compaction' | 'step_end' 
     case 'step_end': return `As soon as the step you're on in ${job} ends, you also do this there: ${said} ${speak}, and that it's once this step is done ("As soon as I've finished this step, I'll …").`
     case 'start': return `When you start on ${job} (or carry on with it), you also do this: ${said} ${speak} ("I'll … when I get to it").`
     case 'ended': return `You had already finished ${job} before the owner said this, so it was not used. Tell them so as yourself, and offer to do it again with this ("I'd already finished it; want me to do it again with that?").`
+    case 'waiting': return `${job} carries on by itself when its time or event comes; stop it if it is no longer needed.`
     case 'held': return `You stopped part-way on ${job} and it can't go on as it is, so this can't be used there. Tell them so as yourself, and offer to stop it and start again with this.`
     case 'question': return `${job.charAt(0).toUpperCase()}${job.slice(1)} waits for the owner's answer to the question you asked them, and takes nothing else until then, so this was not added. If their words answer that question, pass them on with question_answer (its id is in your situation). Otherwise tell them, as yourself, that you need their answer to it first.`
   }
