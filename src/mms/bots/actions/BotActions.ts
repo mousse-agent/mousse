@@ -109,13 +109,13 @@ export class BotActions {
       const safeResult = result && previous?.exec_args ? removeHiddenArguments(result, JSON.parse(previous.exec_args)) : result
       const moved = this.host.store.run(`UPDATE bot_actions SET status = ?, exec_args = CASE WHEN ? THEN exec_args ELSE NULL END,
         result_json = ?, answered_at = CASE WHEN ? = 'open' THEN ? ELSE answered_at END,
-        ran_at = CASE WHEN ? = 'running' THEN ? ELSE ran_at END WHERE id = ? AND status = ?`,
+        ran_at = CASE WHEN ? IN ('running', 'done') THEN ? ELSE ran_at END WHERE id = ? AND status = ?`,
       to, pending.has(to) ? 1 : 0, safeResult ? JSON.stringify(boundedActionResult(safeResult)) : null,
       from, this.host.store.now(), to, this.host.store.now(), id, from) > 0
       if (moved && !pending.has(to)) {
         const action = this.get(id)!
         const row = this.host.store.activation(action.activation_id)
-        this.host.store.run('UPDATE bot_messages SET text = ? WHERE id = ?', to === 'done' ? `Sent · ${this.host.store.now().slice(11, 16)}` : to === 'uncertain' ? "Couldn't tell if it went through" : 'Not sent', action.message_id)
+        this.host.store.run('UPDATE bot_messages SET text = ? WHERE id = ?', to === 'done' ? 'Sent' : to === 'uncertain' ? "Couldn't tell if it went through" : 'Not sent', action.message_id)
         if (row?.endReason === 'approval') this.host.store.moveActivation(row.id, ['blocked'], 'blocked', { endReason: 'approval_answered' })
       }
       return moved

@@ -79,6 +79,8 @@ export type BotSnoozeChoice = '10m' | '1h' | 'tomorrow'
 
 /** One row of a bot's chat (`bot_messages`). */
 export interface BotChatMessage {
+  /** Sent action instant; formatted in the client clock. */
+  actionSentAt?: string
   /** Only delivered text reminders carry snooze replies; older services omit it. */
   reminder?: { expiresAt?: string; snoozedUntil?: string }
   seq: number

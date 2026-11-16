@@ -352,6 +352,7 @@ export class BotChatProjection {
     const reminder = row.id.startsWith('bm_rem_') ? this.store.reminderForMessage(row.botId, row.id) : undefined
     const expiresAt = reminder?.deliveredAt ? new Date(Date.parse(reminder.deliveredAt) + 24 * 60 * 60_000).toISOString() : undefined
     const snoozed = reminder && this.store.snoozedCopy(row.botId, reminder.id)
+    const sentAction = row.id.startsWith('bm_action_') ? this.store.get("SELECT ran_at FROM bot_actions WHERE message_id = ? AND status = 'done'", row.id) : undefined
     const escalation = row.askId ? this.store.escalation(row.askId) : undefined
     const question = row.questionId ? this.store.question(row.questionId) : undefined
     // A question's bubble, or a nudge of it (any other bot row that carries it): its words, then its answers as plain text
@@ -362,6 +363,7 @@ export class BotChatProjection {
     const plain = [plainCards(cards), asks && asks.spec.choices.length ? plainChoices(asks.spec) : ''].filter(Boolean).join('\n\n')
     return {
       ...(reminder && expiresAt && expiresAt > this.store.now() && !reminder.work && !reminder.wake && !this.store.messageForgotten(row.botId, row.id) ? { reminder: { expiresAt, ...(snoozed ? { snoozedUntil: snoozed.dueAt } : {}) } } : {}),
+      ...(typeof sentAction?.ran_at === 'string' ? { actionSentAt: sentAction.ran_at } : {}),
       seq: row.seq,
       id: row.id,
       at: row.at,
