@@ -2267,6 +2267,62 @@ describe('a bot turn on Codex', () => {
     replay.assertDone()
   })
 
+  // Hand-authored wire replays: owner names × attachments × enabled/disabled entries.
+  // Refused cases must never send thread/start (nor let leftover owner keys reach Codex).
+  const reservedCases = [[], ['mousse'], ['mousse-relay'], ['mousse', 'mousse-relay']].flatMap((names) =>
+    ['none', 'mousse', 'both'].flatMap((attachment) => [true, false].map((enabled) => ({ names, attachment, enabled }))))
+  it.each(reservedCases)('contains reserved names $names with attachment $attachment, enabled=$enabled', async ({ names, attachment, enabled }) => {
+    const files = join(home, 'files')
+    mkdirSync(files)
+    const { bot } = botIn(files)
+    const mcp = attachment === 'none' ? null : {
+      url: 'http://127.0.0.1:4000/mcp', token: 'run-token',
+      ...(attachment === 'both' ? { relay: { url: 'http://127.0.0.1:4000/relay', revision: 'rev-1' } } : {})
+    }
+    const servers = Object.fromEntries(names.map((name) => [name, {
+      enabled, url: 'https://owner.invalid/mcp', enabled_tools: ['owner_tool'],
+      http_headers: { Owner: 'leftover' }, bearer_token_env_var: 'OWNER_TOKEN'
+    }]))
+    const collision = names.find((name) => mcp && (name === 'mousse' || attachment === 'both'))
+    const config = {
+      ...Object.fromEntries(enabled ? names.map((name) => [`mcp_servers.${name}.enabled`, false]) : []),
+      ...NO_COMMANDS, model_provider: 'openai',
+      ...(mcp ? {
+        'mcp_servers.mousse.url': mcp.url,
+        'mcp_servers.mousse.http_headers': { Authorization: 'Bearer run-token' },
+        'mcp_servers.mousse.tool_timeout_sec': 3600,
+        'mcp_servers.mousse.default_tools_approval_mode': 'approve',
+        ...(mcp.relay ? {
+          'mcp_servers.mousse-relay.url': mcp.relay.url,
+          'mcp_servers.mousse-relay.http_headers': { Authorization: 'Bearer run-token' },
+          'mcp_servers.mousse-relay.tool_timeout_sec': 3600,
+          'mcp_servers.mousse-relay.default_tools_approval_mode': 'approve'
+        } : {})
+      } : {})
+    }
+    const replay = transport([
+      ...handshake(),
+      out({ id: 4, method: 'config/read', params: { includeLayers: true } }),
+      inn({ id: 4, result: { config: { mcp_servers: servers }, layers: [] } }),
+      ...(!collision ? [
+        ...threadStart(5, threadParams({ config, ...(mcp ? { developerInstructions: mousseOrchestrationInstructions() } : {}) })),
+        ...turnStart(6, 'go'), completed('completed')
+      ] : [])
+    ])
+    const run = new CodexAdapter(() => service(replay)).startTurn(input({ prompt: 'go' }), recordingSink(), control(), { ...host(mcp), bot: bot as never })
+    if (collision) await expect(run).rejects.toMatchObject({
+      code: 'policy_unenforceable', message: expect.stringMatching(new RegExp(`.*${collision}.*[Rr]ename`))
+    })
+    else await run
+    replay.assertDone()
+  })
+
+  it('keeps an owner thread outside the bot config checks', async () => {
+    const replay = transport([...handshake(), ...threadStart(4), ...turnStart(5, 'hello'), completed('completed')])
+    await new CodexAdapter(() => service(replay)).startTurn(input(), recordingSink(), control(), host())
+    replay.assertDone()
+  })
+
   it('runs in Ask with the user\'s MCP servers off, in its files folder; its authority answers every approval and nobody is asked', async () => {
     const files = join(home, 'files')
     mkdirSync(files)
@@ -2357,9 +2413,9 @@ describe('a bot turn on Codex', () => {
     const mcp = { url: 'http://127.0.0.1:4000/mcp', token: 'run-token', relay: { url: 'http://127.0.0.1:4000/relay', revision: 'rev-1' } }
     const replay = transport([
       ...handshake(),
-      // The owner's own Codex servers, one of them named like Mousse's relay: theirs are switched off, Mousse's stay.
+      // The owner's ordinary Codex server is switched off; only Mousse supplies the reserved names.
       out({ id: 4, method: 'config/read', params: { includeLayers: true } }),
-      inn({ id: 4, result: { config: { mcp_servers: { github: { enabled: true }, 'mousse-relay': { enabled: true } } }, layers: [] } }),
+      inn({ id: 4, result: { config: { mcp_servers: { github: { enabled: true } } }, layers: [] } }),
       ...threadStart(5, threadParams({
         config: {
           'mcp_servers.github.enabled': false,
