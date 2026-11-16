@@ -165,7 +165,7 @@ export function actionContinuation(action: Pick<ActionRow, 'status' | 'result_js
   const line = action.status === 'done' ? 'Your owner sent it. The tool answered:'
     : action.status === 'declined' ? 'Your owner chose not to send this: carry on without it and say what you skipped.'
       : action.status === 'expired' ? 'This call expired. Nothing was sent; do not try the same call again without a new reason.'
-      : action.status === 'withdrawn' ? 'This call was withdrawn. Nothing was sent.'
+      : action.status === 'withdrawn' ? 'No longer needed, so nothing was sent.'
       : action.status === 'uncertain' ? 'It could not be confirmed whether this went through: check before trying again.'
         : result?.toolReportedError ? 'The tool reported an error. It may have done part of it: check before trying again. The tool answered:'
           : 'Nothing was sent. The call failed:'
@@ -190,7 +190,7 @@ interface Host {
 }
 const pending = new Set(['open', 'approved', 'running'])
 export class BotActionChanged extends Error { constructor(message: string, readonly code = 'bot_action_changed') { super(message) } }
-const changed = () => new BotActionChanged('This changed since you saw it. Review it again.')
+const changed = () => new BotActionChanged('This changed since you saw it. Check it again before sending.')
 export class BotActions {
   private readonly executing = new Set<string>()
   constructor(private readonly host: Host) {
@@ -366,14 +366,14 @@ export class BotActions {
   }
   async answer(input: { actionId: string; digest: string; answer: 'send' | 'not_now' }): Promise<{ status: string }> {
     const action = this.get(input.actionId)
-    if (!action) throw new BotActionChanged('This call is no longer available.', 'bot_action_gone')
+    if (!action) throw new BotActionChanged("This can't be sent any more.", 'bot_action_gone')
     if (action.result_json && JSON.parse(action.result_json).notSentInTime) throw new BotActionChanged(JSON.parse(action.result_json).text, 'bot_action_unreachable')
-    if (action.status === 'expired') throw new BotActionChanged('This call expired. Nothing was sent.', 'bot_action_expired')
-    if (action.status === 'withdrawn') throw new BotActionChanged('This call was withdrawn. Nothing was sent.', 'bot_action_withdrawn')
-    if (action.status !== 'open') throw new BotActionChanged('This call has already been answered.', 'bot_action_settled')
+    if (action.status === 'expired') throw new BotActionChanged('This expired, so nothing was sent.', 'bot_action_expired')
+    if (action.status === 'withdrawn') throw new BotActionChanged('No longer needed, so nothing was sent.', 'bot_action_withdrawn')
+    if (action.status !== 'open') throw new BotActionChanged('This was already answered.', 'bot_action_settled')
     if (action && action.status === 'open' && Date.parse(action.expires_at) <= Date.parse(this.host.store.now())) {
       this.expireDue()
-      throw new BotActionChanged('This call expired. Nothing was sent.', 'bot_action_expired')
+      throw new BotActionChanged('This expired, so nothing was sent.', 'bot_action_expired')
     }
     if (action && input.answer === 'send' && this.host.store.registry(action.bot_id)?.pausedReason === 'owner') throw new BotActionChanged(`Resume ${this.host.name(action.bot_id)} to send this.`, 'bot_action_paused')
     if (!action || action.status !== 'open' || action.args_digest !== input.digest || !this.valid(action)) throw changed()
