@@ -1593,6 +1593,11 @@ export class BotStore {
     return row ? turnUsageOf(row) : undefined
   }
 
+  /** The bot's turns in `lane` that ran in the runtime context `contextGen` (a chat epoch), oldest first. */
+  turnUsageOfContext(botId: string, lane: BotLane, contextGen: string): BotTurnUsageRow[] {
+    return this.all('SELECT * FROM bot_turn_usage WHERE bot_id = ? AND lane = ? AND context_gen = ? ORDER BY started_at, dispatch_n', botId, lane, contextGen).map(turnUsageOf)
+  }
+
   /** The bot's turns in `lane` since `since` (ms) that reported usage, oldest first. */
   turnUsageSince(botId: string, lane: BotLane, since: number): BotTurnUsageRow[] {
     return this.all('SELECT * FROM bot_turn_usage WHERE bot_id = ? AND lane = ? AND started_at >= ? AND reports > 0 ORDER BY started_at', botId, lane, since).map(turnUsageOf)

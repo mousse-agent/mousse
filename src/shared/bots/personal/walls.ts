@@ -73,10 +73,10 @@ export function botAppToolRefusal(bot: Pick<BotAuthority, 'check' | 'skills' | '
   // Starting, messaging and stopping threads belong to a turn the owner started or asked for: a turn that holds the
   // owner's threads to read only (a chat turn no message of the owner's started) is told why, and nothing is
   // asked. A turn of a bot without the permission falls through to the check below, which asks for it.
-  if (THREAD_ACT.has(name) && bot.appTools && !bot.appTools.has(name) && BOT_THREAD_READ_TOOLS.some((tool) => bot.appTools!.has(tool)))
+  if (THREAD_ACT.has(name) && (bot.threadsReadOnly || (bot.appTools && !bot.appTools.has(name) && BOT_THREAD_READ_TOOLS.some((tool) => bot.appTools!.has(tool)))))
     return BOT_THREADS_NOT_OWNER_TEXT
   // Making and changing scheduled jobs likewise: such a turn lists them only.
-  if (SCHEDULE_ACT.has(name) && bot.appTools && !bot.appTools.has(name) && bot.appTools.has('schedule_list'))
+  if (SCHEDULE_ACT.has(name) && ((bot.threadsReadOnly && bot.appTools?.has(name)) || (bot.appTools && !bot.appTools.has(name) && bot.appTools.has('schedule_list'))))
     return BOT_SCHEDULES_NOT_OWNER_TEXT
   if (SKILL_TOOLS.has(name)) {
     // The skill tools come with granted skills. Which skill loads is held by the turn itself: a

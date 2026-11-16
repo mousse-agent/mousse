@@ -6,7 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { threadsActOf, threadsReadOnlyOf } from '../../src/mms/bots/activation/BotEngine'
-import { BOT_THREADS_NOT_OWNER_TEXT, botAppToolRefusal } from '../../src/shared/bots/personal/walls'
+import { BOT_SCHEDULES_NOT_OWNER_TEXT, BOT_THREADS_NOT_OWNER_TEXT, botAppToolRefusal } from '../../src/shared/bots/personal/walls'
 import { botInstructions } from '../../src/mms/bots/instructions'
 import { THREADS_TEXT } from '../../src/shared/bots/personal/askText'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
@@ -135,6 +135,11 @@ describe('"use your threads" in the bot engine', () => {
     const readOnly = threadsReadOnlyOf(row)
     const bot = { check: () => ({ ok: true as const }), skills: new Set<string>(), appTools: new Set(['thread_list', 'thread_read']), ...(readOnly ? { threadsReadOnly: readOnly } : {}) }
     expect(all ? undefined : botAppToolRefusal(bot, 'thread_create', {})).toBe(all ? undefined : refusal)
+    // A chat turn is offered every thread tool whatever started it (#1360), and the call is refused where it may not act.
+    const offered = { ...bot, appTools: new Set(['thread_list', 'thread_read', 'thread_create', 'schedule_list', 'schedule_create']) }
+    expect(botAppToolRefusal(offered, 'thread_create', {})).toBe(all ? undefined : refusal)
+    expect(botAppToolRefusal(offered, 'schedule_create', {})).toBe(all ? undefined : BOT_SCHEDULES_NOT_OWNER_TEXT)
+    expect(botAppToolRefusal(offered, 'thread_read', {})).toBeUndefined()
   })
 
   it('a chat turn another device\'s message started is held to that device\'s limit; this computer\'s own window is not', async () => {

@@ -463,6 +463,11 @@ export class BotMemoryStore {
     return row ? journalRowOf(row) : undefined
   }
 
+  /** The bot's journal rows of `kind` after `afterSeq`, oldest first. */
+  rowsOfKindAfter(botId: string, kind: BotJournalKind, afterSeq: number): BotJournalRow[] {
+    return this.all('SELECT * FROM bot_journal WHERE bot_id = ? AND kind = ? AND seq > ? ORDER BY seq', botId, kind, afterSeq).map(journalRowOf)
+  }
+
   // -- Search and read ---------------------------------------------------------------------------
 
   /**
@@ -1062,6 +1067,9 @@ export class BotMemoryStore {
       this.setState(botId, 'chat_summary', { ...foldChatSummary(folded, undefined, this.zone(), this.now()), throughSeq: summary.throughSeq })
     }
     this.dropPacks(botId)
+    // Privacy beats the cache: the chat's runtime conversation may hold what was forgotten, so its epoch ends now and the
+    // next chat turn starts from a cleared context (docs/plans/bot-context.md §14).
+    this.run("DELETE FROM bot_memory_state WHERE bot_id = ? AND key = 'chat_epoch'", botId)
   }
 
   /** Drops every frozen pack of the bot: each activation's next dispatch builds its pack again. */

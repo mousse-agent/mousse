@@ -15,6 +15,8 @@ import { availableHistoryLines } from './availableHistory'
 import { type ChatSummaryState, OUTSIDE_SPEAKER, firstLine, foldChatSummary, packText, speaker, withinBudget } from './chatSummary'
 import { agoLabel, cut, renderMemoryBlocks, timeLabel } from './render'
 import { BOT_CHANGELOG_LATEST, changelogBlock, unseenChanges } from '../changelog'
+import { createHash } from 'node:crypto'
+import { BOT_CHAT_EPOCH_MARKS, type BotChatEpoch, type BotChatEpochEnd } from './contextBudget'
 
 /**
  * The context packs (docs/plans/bot-context.md §5): Mousse builds every bot turn from `bots.db`, so
@@ -127,9 +129,40 @@ function fromWork(row: Pick<BotJournalRow, 'kind' | 'lane' | 'external'>): boole
 
 const RUN_PROTOCOL_LINE ='- In a run, memory_save keeps run notes only, and only the owner can make you forget something, in the chat.'
 
+/** The base pack's own protocol line (chat epochs): what later turns of the conversation add wins over the base. */
+export const BOT_EPOCH_PROTOCOL_LINE = "- This conversation goes on across the owner's messages. A later message may carry a <bot_memory> update: what it says wins over what this one says."
+
+/** The memory state that holds the chat's epoch (`BotChatEpoch`). */
+export const CHAT_EPOCH_KEY = 'chat_epoch'
+/** Most settled activations an epoch remembers (`BotChatEpoch.ran`). */
+const EPOCH_RAN_KEEP = 200
+
+/** A bot chat turn's pack with chat epochs on: the base of a new epoch (`fresh`), or the delta of a running one. */
+export interface BotChatContext {
+  text: string
+  /** The turn starts a new epoch: its context is cleared first and the pack is the base. */
+  fresh: boolean
+  epochId: string
+  /** Why the epoch before it ended, when `fresh`. */
+  reason?: BotChatEpochEnd
+}
+
+export interface BotChatContextInput {
+  botId: string
+  activationId: string
+  /** The activation's first dispatch: only it may start a new epoch (a continuation runs on the thread as it is). */
+  start: boolean
+  selection: { instanceId: string; model: string }
+  /** Whether the epoch goes on (undefined) or why it ends: the engine decides from what the turns cost (`chatEpochEnd`). */
+  keep(epoch: BotChatEpoch | undefined): BotChatEpochEnd | undefined
+}
+
 export function createBotContextProvider(options: BotContextPackOptions): BotContextProvider & {
   /** Moves the verbatim window when it passed its budget; true when it moved. */
   moveWindow(botId: string): boolean
+  chatContext(input: BotChatContextInput): Promise<BotChatContext>
+  chatPackNow(input: { botId: string; activationId: string }): string
+  endChatEpoch(botId: string, reason: BotChatEpochEnd): void
 } {
   const { store } = options
   const zone = () => options.timeZone?.() ?? store.zone()
@@ -145,14 +178,17 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
    * the chat summary, newest first, older lines falling off at 1k. Between jumps, each pack's
    * prefix extends the last one.
    */
-  const moveWindow = (botId: string): boolean => {
+  const moveWindow = (botId: string): boolean => foldWindow(botId, BOT_CHAT_PACK_BUDGET.window, BOT_CHAT_WINDOW_KEEP_TOKENS)
+
+  /** Past `over` tokens, the window's oldest rows fold into the chat summary in one step, down to `keep`. */
+  const foldWindow = (botId: string, over: number, keep: number): boolean => {
     const start = store.getState<number>(botId, 'window_start_seq') ?? 0
     const rows = store.windowRows(botId, start)
     const sizes = rows.map((row) => estimateTokens(windowLine(row)) + 1)
     let total = sizes.reduce((sum, size) => sum + size, 0)
-    if (total <= BOT_CHAT_PACK_BUDGET.window) return false
+    if (total <= over) return false
     let drop = 0
-    while (drop < rows.length && total > BOT_CHAT_WINDOW_KEEP_TOKENS) total -= sizes[drop++]!
+    while (drop < rows.length && total > keep) total -= sizes[drop++]!
     const dropped = rows.slice(0, drop)
     const next = rows[drop]?.seq ?? dropped[dropped.length - 1]!.seq + 1
     store.write(() => {
@@ -249,19 +285,12 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
     return text
   }
 
-  const chatPack = (botId: string, activationId: string): string => {
-    moveWindow(botId)
-    const { core, runNotes } = memoryBlocks(botId)
-    const chat = summary(botId)
-    const start = store.getState<number>(botId, 'window_start_seq') ?? 0
-    // The rows of this activation (the owner's new message, and any they sent while it answered) arrive as the request
-    // itself or as they come. Other owner messages sent after it wait for turns of their own: this turn never answers them.
-    const all = store.windowRows(botId, start)
-    const own = all.find((row) => row.activationId === activationId)?.seq
-    const rows = all.filter((row) => row.activationId !== activationId && !(own !== undefined && row.kind === 'owner_msg' && row.seq > own))
-    const window = rows.length ? `Recent chat (oldest first):\n${rows.map(windowLine).join('\n')}` : 'Recent chat: (nothing yet)'
-    // The reactions are told until a turn that carried them settles (afterDispatch): a failed or stopped turn, or a pack
-    // built again after a memory save, carries them again.
+  /**
+   * What a chat turn is told until a turn that carried it settles (afterDispatch): the owner's reactions, the standing
+   * wishes that were not saved, and Mousse's changes. A failed or stopped turn, or a pack built again after a memory
+   * save, carries them again.
+   */
+  const carried = (botId: string, activationId: string, fresh: boolean): { extra: string[]; told: string } => {
     const reactions = reactionLines(botId)
     if (reactions.through) {
       store.write(() => {
@@ -279,7 +308,6 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
         store.pruneState(botId, WISH_OVER_CAP_CARRIED_KEY, 16)
       })
     }
-    const fresh = !rows.length && !chat && !store.active(botId).length
     const told = changes(botId, true, fresh)
     if (told) {
       store.write(() => {
@@ -287,7 +315,132 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
         store.pruneState(botId, CHANGELOG_CARRIED_KEY, 16)
       })
     }
-    return [wrap([BOT_MEMORY_PROTOCOL, core, runNotes, chat?.text ?? '', window, situation(botId, true, [...reactions.lines, ...wishes])]), told].filter(Boolean).join('\n\n')
+    return { extra: [...reactions.lines, ...wishes], told }
+  }
+
+  /**
+   * The chat rows a turn reads in its pack, from `fromSeq`: less this activation's own (the owner's new message, and any
+   * they sent while it answered, arrive as the request itself or as they come) and the owner's messages after it (they
+   * wait for turns of their own: this turn never answers them).
+   */
+  const chatRows = (botId: string, activationId: string, fromSeq: number): BotJournalRow[] => {
+    const all = store.windowRows(botId, fromSeq)
+    const own = all.find((row) => row.activationId === activationId)?.seq
+    return all.filter((row) => row.activationId !== activationId && !(own !== undefined && row.kind === 'owner_msg' && row.seq > own))
+  }
+
+  /** `epoch`: the base of a chat epoch, which says that later turns' updates win. */
+  const chatPack = (botId: string, activationId: string, epoch = false): string => {
+    if (!epoch) moveWindow(botId)
+    const { core, runNotes } = memoryBlocks(botId)
+    const chat = summary(botId)
+    const rows = chatRows(botId, activationId, store.getState<number>(botId, 'window_start_seq') ?? 0)
+    const window = rows.length ? `Recent chat (oldest first):\n${rows.map(windowLine).join('\n')}` : 'Recent chat: (nothing yet)'
+    const { extra, told } = carried(botId, activationId, !rows.length && !chat && !store.active(botId).length)
+    const protocol = epoch ? `${BOT_MEMORY_PROTOCOL}\n${BOT_EPOCH_PROTOCOL_LINE}` : BOT_MEMORY_PROTOCOL
+    return [wrap([protocol, core, runNotes, chat?.text ?? '', window, situation(botId, true, extra)]), told].filter(Boolean).join('\n\n')
+  }
+
+  // -- Chat epochs (docs/plans/bot-context.md §14) ------------------------------------------------
+
+  const epochOf = (botId: string) => store.getState<BotChatEpoch>(botId, CHAT_EPOCH_KEY)
+
+  /** Which saved entries are current: a change shows as a different signature. */
+  const memorySignature = (botId: string): string =>
+    createHash('sha256').update(store.active(botId).map((entry) => `${entry.id}v${entry.version}`).join(',')).digest('hex').slice(0, 16)
+
+  /**
+   * A running epoch's next turn: only what the conversation does not hold yet. The chat rows since the last delivery
+   * that no turn of the epoch wrote (work's reports and messages, outside rows, Mousse's lines), the memory again when a
+   * change was made outside the conversation (the owner's edits, a run's notes; a save the chat made is in the
+   * conversation as its tool result), and the present: the situation, reactions, wishes and changes.
+   */
+  const chatDelta = (botId: string, activationId: string, epoch: BotChatEpoch): { text: string; epoch: BotChatEpoch } => {
+    const ran = new Set(epoch.ran)
+    const notOurs = (row: BotJournalRow) => !row.activationId || (!ran.has(row.activationId) && row.activationId !== activationId)
+    const rows = chatRows(botId, activationId, epoch.deliveredSeq + 1).filter(notOurs)
+    const signature = memorySignature(botId)
+    const blocks: string[] = []
+    if (signature !== epoch.outsideMemory && store.rowsOfKindAfter(botId, 'memory_op', epoch.deliveredSeq).some(notOurs)) {
+      const { core, runNotes } = memoryBlocks(botId)
+      blocks.push('Your memory changed outside this conversation. It is now as follows, and this copy wins over earlier ones.', core, runNotes)
+    }
+    if (rows.length) blocks.push(`New in the chat since your last turn (oldest first):\n${rows.map(windowLine).join('\n')}`)
+    const { extra, told } = carried(botId, activationId, false)
+    const text = [wrap([...blocks, situation(botId, true, extra)]), told].filter(Boolean).join('\n\n')
+    return {
+      text,
+      epoch: {
+        ...epoch,
+        deliveredSeq: Math.max(epoch.deliveredSeq, store.lastSeq(botId)),
+        ran: [...epoch.ran.filter((id) => id !== activationId), activationId].slice(-EPOCH_RAN_KEEP),
+        outsideMemory: signature,
+        addedTokens: epoch.addedTokens + estimateTokens(text)
+      }
+    }
+  }
+
+  const chatContext = (input: BotChatContextInput): BotChatContext => {
+    const { botId, activationId } = input
+    const key = `pack:${activationId}`
+    const saved = store.getState<{ text: string; epochId?: string; fresh?: boolean }>(botId, key)
+    // Frozen per activation, as every pack is: a continuation sends the same text, so the turn's cache holds.
+    if (saved?.text && saved.epochId) return { text: saved.text, fresh: saved.fresh === true, epochId: saved.epochId }
+    const freeze = (result: BotChatContext): BotChatContext => {
+      store.write(() => {
+        store.setState(botId, key, { text: result.text, epochId: result.epochId, fresh: result.fresh, at: store.now() })
+        store.pruneState(botId, 'pack:', 16)
+      })
+      return result
+    }
+    const current = epochOf(botId)
+    const delta = (epoch: BotChatEpoch): BotChatContext => {
+      const next = chatDelta(botId, activationId, epoch)
+      store.write(() => store.setState(botId, CHAT_EPOCH_KEY, next.epoch))
+      return freeze({ text: next.text, fresh: false, epochId: epoch.id })
+    }
+    // A continuation never starts an epoch (its thread is not cleared): it reads what is new on the running one, or,
+    // when that one ended meanwhile, the whole pack, as before epochs.
+    if (!input.start) return current && !current.ended ? delta(current) : freeze({ text: chatPack(botId, activationId), fresh: false, epochId: current?.id ?? activationId })
+    const reason = input.keep(current)
+    if (!reason && current) return delta(current)
+    // A new epoch: the window folds to its tail in one step, and the base carries the summary and that tail.
+    foldWindow(botId, BOT_CHAT_EPOCH_MARKS.tail, BOT_CHAT_EPOCH_MARKS.tail)
+    const text = chatPack(botId, activationId, true)
+    const epoch: BotChatEpoch = {
+      id: `e:${activationId}`,
+      startedAt: new Date(store.now()).toISOString(),
+      instanceId: input.selection.instanceId,
+      model: input.selection.model,
+      deliveredSeq: store.lastSeq(botId),
+      ran: [activationId],
+      outsideMemory: memorySignature(botId),
+      addedTokens: 0
+    }
+    store.write(() => store.setState(botId, CHAT_EPOCH_KEY, epoch))
+    return freeze({ text, fresh: true, epochId: epoch.id, reason: reason ?? 'none' })
+  }
+
+  const endChatEpoch = (botId: string, reason: BotChatEpochEnd): void => {
+    const epoch = epochOf(botId)
+    if (epoch && !epoch.ended) store.write(() => store.setState(botId, CHAT_EPOCH_KEY, { ...epoch, ended: reason }))
+  }
+
+  /**
+   * A chat turn of the epoch ended. Settled: its own rows are in the conversation, and their size counts. Failed,
+   * stopped or reloaded: the runtime's transcript and the journal may differ now, so the epoch ends.
+   */
+  const epochAfterDispatch = (botId: string, activationId: string, endedBy: string): void => {
+    const epoch = epochOf(botId)
+    if (!epoch || epoch.ended || !epoch.ran.includes(activationId)) return
+    if (endedBy === 'failed' || endedBy === 'stopped' || endedBy === 'reload') {
+      store.write(() => store.setState(botId, CHAT_EPOCH_KEY, { ...epoch, ended: endedBy }))
+      return
+    }
+    if (endedBy !== 'settled') return
+    const own = store.windowRows(botId, store.getState<number>(botId, 'window_start_seq') ?? 0).filter((row) => row.activationId === activationId)
+    const added = own.reduce((sum, row) => sum + estimateTokens(windowLine(row)) + 1, 0)
+    store.write(() => store.setState(botId, CHAT_EPOCH_KEY, { ...epoch, addedTokens: epoch.addedTokens + added }))
   }
 
   const runPack = (botId: string, activationId: string, scheduleId: string | undefined): string => {
@@ -328,6 +481,10 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
 
   return {
     moveWindow,
+    chatContext: async (input) => guarded(() => chatContext(input)),
+    // The plain pack: its window folds first, so it is no larger than a turn without epochs reads (the epoch ends anyway).
+    chatPackNow: ({ botId, activationId }) => guarded(() => chatPack(botId, activationId)),
+    endChatEpoch: (botId, reason) => guarded(() => endChatEpoch(botId, reason)),
     chatPreamble: async ({ botId, activationId }) => guarded(() => frozen(botId, activationId, () => chatPack(botId, activationId))),
     runPreamble: async ({ botId, activationId, scheduleId }) => guarded(() => frozen(botId, activationId, () => runPack(botId, activationId, scheduleId))),
     afterDispatch: async (e) => {
@@ -348,6 +505,7 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
           const seen = store.getState<number>(e.botId, CHANGELOG_SEEN_KEY) ?? 0
           if (carried !== undefined && carried > seen) store.write(() => store.setState(e.botId, CHANGELOG_SEEN_KEY, carried))
         }
+        if (e.lane === 'chat' && !e.consult) epochAfterDispatch(e.botId, e.activationId, e.endedBy)
         if (e.lane === 'chat') moveWindow(e.botId)
         store.expireMemories(e.botId)
       })

@@ -52,17 +52,25 @@ describe('Settings → Labs', () => {
 
   it('shows only the Profiler switch, off, until it is turned on, and asks the service nothing', () => {
     show()
-    expect(titles()).toEqual(['Profiler'])
+    expect(titles()).toEqual(['Profiler', 'Bots keep the conversation'])
     expect(toggle('Profiler')!.getAttribute('aria-checked')).toBe('false')
     expect(memoryStatus).not.toHaveBeenCalled()
     expect(host.textContent).not.toContain('About')
+  })
+
+  it('the bots switch keeps each bot chat in one conversation; off by default', () => {
+    show()
+    expect(toggle('Bots keep the conversation')!.getAttribute('aria-checked')).toBe('false')
+    act(() => toggle('Bots keep the conversation')!.click())
+    expect(store.get().experimental.botChatEpochs).toBe(true)
+    expect(toggle('Bots keep the conversation')!.getAttribute('aria-checked')).toBe('true')
   })
 
   it('keeps the memory table in view and folds notices, heap snapshot and agent access under Advanced; the tools only under agent access', () => {
     show()
     act(() => toggle('Profiler')!.click())
     expect(store.get().experimental.profiler.enabled).toBe(true)
-    expect(titles()).toEqual(['Profiler', 'Memory', 'Memory notices', 'Heap snapshot', 'Agents can read the profiler'])
+    expect(titles()).toEqual(['Profiler', 'Memory', 'Memory notices', 'Heap snapshot', 'Agents can read the profiler', 'Bots keep the conversation'])
     expect(memoryStatus).toHaveBeenCalled()
     // Memory sits under the switch; the rest is in a closed Advanced disclosure.
     expect(host.querySelector('[data-settings-anchor="labs-profiler-memory"]')!.closest('details')).toBeNull()
@@ -78,7 +86,7 @@ describe('Settings → Labs', () => {
     act(() => toggle('Agents can read the profiler')!.click())
     expect(store.get().experimental.profiler.agentAccess).toBe(true)
     const tools = PROFILER_TOOL_NAMES.map((name) => PROFILER_TOOL_LABELS[name].label)
-    expect(titles()).toEqual(['Profiler', 'Memory', 'Memory notices', 'Heap snapshot', 'Agents can read the profiler', ...tools])
+    expect(titles()).toEqual(['Profiler', 'Memory', 'Memory notices', 'Heap snapshot', 'Agents can read the profiler', ...tools, 'Bots keep the conversation'])
     for (const name of PROFILER_TOOL_NAMES) {
       expect(toggle(PROFILER_TOOL_LABELS[name].label)!.getAttribute('aria-checked')).toBe(name === 'profiler_heap_summary' ? 'false' : 'true')
       // What a tool is for is in its tooltip.
@@ -94,7 +102,7 @@ describe('Settings → Labs', () => {
 
     // Off hides everything again and keeps the choices below it.
     act(() => toggle('Profiler')!.click())
-    expect(titles()).toEqual(['Profiler'])
+    expect(titles()).toEqual(['Profiler', 'Bots keep the conversation'])
     expect(host.querySelector('details.settings-advanced')).toBeNull()
     expect(store.get().experimental.profiler).toMatchObject({ enabled: false, agentAccess: true, tools: { profiler_watch: false } })
   })
@@ -115,8 +123,8 @@ describe('Settings → Labs', () => {
 
   it('the settings search finds the profiler on Labs, and the rows under it once it is on', () => {
     const labs = SETTINGS_SEARCH_INDEX.filter((entry) => entry.section === 'labs')
-    expect(labs.map((entry) => entry.anchor)).toEqual(['labs-profiler', 'labs-profiler-memory', 'labs-memory-notices', 'labs-heap-snapshot', 'labs-profiler-agents'])
-    for (const entry of labs.slice(1)) expect(entry.needs?.anchor).toBe('labs-profiler')
+    expect(labs.map((entry) => entry.anchor)).toEqual(['labs-profiler', 'labs-profiler-memory', 'labs-memory-notices', 'labs-heap-snapshot', 'labs-profiler-agents', 'labs-bot-chat-epochs'])
+    for (const entry of labs.slice(1, -1)) expect(entry.needs?.anchor).toBe('labs-profiler')
     expect(SETTINGS_SEARCH_INDEX.some((entry) => entry.anchor.startsWith('general-memory'))).toBe(false)
   })
 })

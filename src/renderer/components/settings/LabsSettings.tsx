@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { PROFILER_TOOL_LABELS, PROFILER_TOOL_NAMES, type ProfilerSettings } from '../../../shared/diagnostics/profiler'
 import type { MousseSettings, MousseSettingsUpdate } from '../../../shared/settings'
-import { Cpu } from '../../lib/icons'
+import { Bot, Cpu } from '../../lib/icons'
 import { showToast } from '../ui/Toast'
 import { MemoryRows } from './MemoryRows'
 import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from './SettingsRow'
@@ -42,6 +42,15 @@ export function LabsSettings({ settings, onUpdate }: { settings: MousseSettings;
           </SettingsGroup>
         </SettingsAdvanced>
       )}
+      <SettingsGroup title="Bots" icon={Bot}>
+        <SettingsRow
+          title="Bots keep the conversation"
+          anchor="labs-bot-chat-epochs"
+          htmlFor="labs-bot-chat-epochs"
+          description={<span title="A bot's chat goes on in one conversation across your messages and folds when it grows, so it reads less each turn and keeps more of the chat. Claude Code and Codex only. Off: each message starts from a fresh context.">Less to read each turn; more of the chat kept.</span>}
+          control={<Switch id="labs-bot-chat-epochs" label="Bots keep the conversation" checked={settings.experimental.botChatEpochs} onChange={(botChatEpochs) => void onUpdate({ experimental: { ...settings.experimental, botChatEpochs } })} />}
+        />
+      </SettingsGroup>
     </section>
   )
 }

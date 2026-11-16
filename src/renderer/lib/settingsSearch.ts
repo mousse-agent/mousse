@@ -132,7 +132,8 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Memory', section: 'labs', anchor: 'labs-profiler-memory', keywords: ['ram', 'diagnostics', 'report', 'leak', 'processes'], needs: { anchor: 'labs-profiler', reason: 'This appears once the profiler is on.' } },
   { title: 'Memory notices', section: 'labs', anchor: 'labs-memory-notices', keywords: ['ram', 'diagnostics', 'notification'], needs: { anchor: 'labs-profiler', reason: 'This appears once the profiler is on.' } },
   { title: 'Heap snapshot', section: 'labs', anchor: 'labs-heap-snapshot', keywords: ['memory', 'diagnostics'], needs: { anchor: 'labs-profiler', reason: 'This appears once the profiler is on.' } },
-  { title: 'Agents can read the profiler', section: 'labs', anchor: 'labs-profiler-agents', keywords: ['agent access', 'tools', 'profiler tools'], needs: { anchor: 'labs-profiler', reason: 'This appears once the profiler is on.' } }
+  { title: 'Agents can read the profiler', section: 'labs', anchor: 'labs-profiler-agents', keywords: ['agent access', 'tools', 'profiler tools'], needs: { anchor: 'labs-profiler', reason: 'This appears once the profiler is on.' } },
+  { title: 'Bots keep the conversation', section: 'labs', anchor: 'labs-bot-chat-epochs', keywords: ['bot', 'chat', 'context', 'cache', 'memory', 'faster', 'experimental'] }
 ]
 
 /**

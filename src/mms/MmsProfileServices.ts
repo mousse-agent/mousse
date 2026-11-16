@@ -810,6 +810,13 @@ export class MmsProfileServices {
         const tools = this.orchestrator.mcpToolRegistry().listForTurn(threadId, runId)
         return { count: tools.length, chars: tools.reduce((sum, tool) => sum + tool.name.length + tool.description.length + JSON.stringify(tool.inputSchema ?? {}).length, 0) }
       },
+      // Bot chat epochs (docs/plans/bot-context.md §14) run where the runtime resumes the thread's own session: Claude
+      // Code and Codex. Pi's bot process is made for each turn and seeds a new session from the transcript, which holds
+      // none of the packs, so its chat starts every turn from a cleared context, as before.
+      chatResumes: (instanceId) => {
+        const driver = this.providerInstances.get(instanceId)?.driver
+        return driver === 'claude' || driver === 'codex'
+      },
       archiveThread: (threadId) => { this.threads.setThreadSettled(threadId, true) },
       // Naming a new bot: one short call on the model its activations would use.
       oneShot: async ({ selection, prompt, signal }) => (await harness.oneShot({

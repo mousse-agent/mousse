@@ -179,15 +179,18 @@ describe('a watcher stopped wakes nothing and leaves no process', () => {
 })
 
 describe('who may start one', () => {
-  // The owner's message is covered by the real-command cases above. Every other chat start must refuse
-  // before the process boundary or a wake row, even with "run commands" already granted.
+  // The owner's message is covered by the real-command cases above. Every other chat start must refuse before the
+  // process boundary or a wake row, even with "run commands" already granted. Each is offered the same tools as the
+  // owner's own turn (#1360): the refusal is at the call.
   it.each(['wake:w1', 'create:c1', 'question:q1:default', 'answer:a1', 'botmsg:other:m1'])(
     '%s cannot start a background command', async (idempotencyKey) => {
       await allowCommands()
       const owner = await chat('Watch the build', 'owner')
       await finish(f, owner.payload, 'completed', { text: 'OK.' })
+      const ownerTools = [...owner.prepared.policy.tools!.allow!].sort()
       if (idempotencyKey.startsWith('wake:')) f.store.insertReminder({ id: 'w1', botId, dueAt: f.store.now(), text: 'Follow up.', work: null, replyTo: null, createdAt: f.store.now(), wake: true, chain: 1 })
-      const id = `test-${idempotencyKey}`
+      // The id names the activation's scratch folder: no `:` in it, which Windows refuses in a folder name.
+      const id = `test-${idempotencyKey.replaceAll(':', '-')}`
       f.store.insertActivation({ ...owner.activation, id, idempotencyKey, status: 'queued' }, {})
       await f.bots.pump(botId)
       const turn = await start(f, id)
@@ -198,8 +201,7 @@ describe('who may start one', () => {
           .toThrow(/can't start a background command.*work.*sandbox.*owner/i)
         expect(spawn).not.toHaveBeenCalled()
         expect(f.store.waitingReminders(botId)).toEqual(before)
-        expect(turn.prepared.policy.tools!.allow).not.toContain('watch_start')
-        expect(turn.prepared.policy.tools!.allow).toEqual(expect.arrayContaining(['watch_list', 'watch_stop']))
+        expect([...turn.prepared.policy.tools!.allow!].sort()).toEqual(ownerTools)
       } finally {
         spawn.mockRestore()
       }

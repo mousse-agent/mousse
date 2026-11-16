@@ -425,13 +425,19 @@ export function normalizeRunSettings(raw?: Partial<RunSettings> | null): RunSett
  */
 export interface ExperimentalSettings {
   botAsksFirst: boolean
+  /**
+   * A bot's chat keeps one runtime conversation across the owner's messages and folds it when it grows
+   * (docs/plans/bot-context.md §14), on runtimes that resume a thread's conversation. Off: every chat turn starts from a
+   * cleared context and a rebuilt pack.
+   */
+  botChatEpochs: boolean
   subagentWorktrees: boolean
   /** The profiler (Settings → Labs). */
   profiler: ProfilerSettings
 }
 
 export function normalizeExperimentalSettings(raw?: Partial<ExperimentalSettings> | null): ExperimentalSettings {
-  return { botAsksFirst: raw?.botAsksFirst === true, subagentWorktrees: raw?.subagentWorktrees === true, profiler: normalizeProfilerSettings(raw?.profiler) }
+  return { botAsksFirst: raw?.botAsksFirst === true, botChatEpochs: raw?.botChatEpochs === true, subagentWorktrees: raw?.subagentWorktrees === true, profiler: normalizeProfilerSettings(raw?.profiler) }
 }
 
 /** A worktree folder the person chose, and the id written in its marker (`.mousse-worktrees.json`) when it was chosen. */
