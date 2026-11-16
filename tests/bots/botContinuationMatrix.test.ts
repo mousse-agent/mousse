@@ -82,3 +82,13 @@ it.each(actionCells)('action $status / waited=$hasWaited / cause=$cause / $reaso
   else if (input.notes) expect(prompt.indexOf(NOTE)).toBeLessThan(prompt.indexOf(actionText))
   expect(prompt).not.toContain('Continue where you left off. Continue.')
 })
+
+it.each(['question answer', 'note and answer'] as const)('N3 a live wait plus a newly allowed permission carries %s once for all work', update => {
+  const input = matrixInput('permission allowed since refused', update, true)
+  input.waited = true
+  input.workEvents.unshift({ at: '2026-11-07T09:00:00Z', text: 'A timed work wait is due.' })
+  const prompt: string = (f.bots as any).continuationPrompt(ROW, input)
+  expect(prompt.split(ANSWER)).toHaveLength(2)
+  expect(prompt.split('Your wait is over.')).toHaveLength(2)
+  expect(prompt).toContain('The owner allowed you to read pages')
+})
