@@ -198,6 +198,7 @@ function classify(tool: string, input: unknown, ctx: BotChipContext): Classified
     case 'thread_list':
     case 'thread_search':
     case 'thread_read': return { kind: 'threads_look', icon: 'read', live: 'reading your threads' }
+    case 'terminal_read': return { kind: 'threads_look', icon: 'read', live: 'reading a terminal' }
     case 'thread_wait': return { kind: 'thread_wait', icon: 'think', live: 'waiting on a thread' }
     // Mousse's profiler ("use the profiler"): every read and sample rolls up into one chip.
     case 'profiler_overview':

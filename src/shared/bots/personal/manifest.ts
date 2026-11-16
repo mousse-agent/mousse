@@ -143,8 +143,8 @@ export const BOT_AUTOMATION_APP_TOOLS: readonly string[] = ['automation_draft_sa
  */
 export const BOT_THREADS_PERMISSION = 'threads'
 
-/** What a bot with "use your threads" may do in its work as well as its chat: list, search, read and wait on threads. */
-export const BOT_THREAD_READ_TOOLS: readonly string[] = ['thread_list', 'thread_search', 'thread_read', 'thread_wait']
+/** What a bot with "use your threads" may do in its work as well as its chat: list, search, read and wait on threads, and read their terminals. */
+export const BOT_THREAD_READ_TOOLS: readonly string[] = ['thread_list', 'thread_search', 'thread_read', 'thread_wait', 'terminal_read']
 
 /**
  * What changes threads: start one, message one, stop one's turn, archive or unarchive one, hide one it started from the

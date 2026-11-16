@@ -1258,9 +1258,12 @@ export class OrchestratorService extends EventEmitter {
    */
   private secretTools?: SecretToolHost
   private secretMaskerFor?: (threadId: string) => SecretMasker | undefined
-  setSecrets(secrets: { tools: SecretToolHost; masker(threadId: string): SecretMasker | undefined } | undefined): void {
+  /** Masks every secret in the profile's store (a terminal's output, which may show any of them). */
+  private storeMasker?: () => SecretMasker | undefined
+  setSecrets(secrets: { tools: SecretToolHost; masker(threadId: string): SecretMasker | undefined; storeMasker?(): SecretMasker | undefined } | undefined): void {
     this.secretTools = secrets?.tools
     this.secretMaskerFor = secrets ? (threadId) => secrets.masker(threadId) : undefined
+    this.storeMasker = secrets?.storeMasker ? () => secrets.storeMasker!() : undefined
   }
 
   /** Masks every secret the thread may use in the messages, in place (their objects stay the same). */
@@ -4239,6 +4242,12 @@ export class OrchestratorService extends EventEmitter {
       askUser: (threadId, questions, options) => this.questions.requestAnswers(questions, threadId, options),
       dismissQuestions: (threadId) => this.questions.dismissAllForThread(threadId),
       secrets: () => this.secretTools,
+      // The thread's terminals, read from memory: no lease, nothing written to them (`terminal_read`).
+      terminals: () => ({
+        list: (threadId) => this.ptyManager.terminalsOf(threadId),
+        output: (ptyId) => this.ptyManager.terminalOutput(ptyId),
+        mask: (text) => this.storeMasker?.()?.(text) ?? text
+      }),
       tasks: (threadId) => (threadId ? this.getTasksForThread(threadId) : null),
       goals: {
         working: (threadId) => this.goals.goalTurnWanted(threadId),

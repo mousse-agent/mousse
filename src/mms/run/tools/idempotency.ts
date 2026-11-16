@@ -30,6 +30,8 @@ export const IDEMPOTENT_TOOLS: ReadonlySet<string> = new Set([
   // Phase 5 Mousse MCP server (SPEC §15.1).
   'thread_read',
   'queue_list',
+  // Reads a thread's terminals from memory; never writes to them.
+  'terminal_read',
   // A bot's Mousse tools (PR 6 §3). A consult's effects are the consult run's own calls, each in the
   // ledger; an escalation writes only bots.db. Either cut off by a crash leaves nothing unknown.
   'consult',

@@ -21,6 +21,8 @@ import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
 const NOW = '2026-11-13T10:00:00.000Z'
 const thread = (id: string, patch: Partial<Thread> = {}): Thread => ({ id, name: `Thread ${id}`, createdAt: NOW, updatedAt: NOW, startedAt: NOW, projectId: 'p1', ...patch }) as Thread
+/** A tool of "use your threads": the thread tools, and reading their terminals. */
+const isThreadTool = (name: string): boolean => name.startsWith('thread_') || name === 'terminal_read'
 const SWITCHED_OFF_TEXT = 'Your owner has switched that off for now. Do not ask for it. Carry on without it and say what you skipped.'
 
 describe('a message a person sent (what answers a plan review, and what the Automation manager takes as the request)', () => {
@@ -110,7 +112,13 @@ describe('a bot\'s thread tools ("use your threads")', () => {
       setThreadArchived: vi.fn(async (_threadId, archived) => ({ status: 'accepted' as const, archived, changed: true })),
       setThreadHidden: vi.fn((_threadId, hidden) => ({ hidden, changed: true })),
       showAgentAction: vi.fn(),
-      noteOnThread: vi.fn()
+      noteOnThread: vi.fn(),
+      // Each thread has one terminal that printed its id; the tool reads whichever the bot may reach.
+      terminals: () => ({
+        list: (id) => [{ ptyId: `pty-${id}`, threadId: id, shell: '/bin/zsh', cwd: '/work', status: 'running' as const, startedAt: Date.parse(NOW) }],
+        output: (ptyId) => ({ scrollback: `output of ${ptyId}\r\n`, droppedLines: 0 }),
+        mask: (text) => text
+      })
     })
     const { registry, turns, request } = appToolRegistry(fx.engine, fake.host, { bots: () => deps })
     turns.register(appTurn({ threadId: 'home', runId: homeRun.runId, bot: authority }))
@@ -131,7 +139,7 @@ describe('a bot\'s thread tools ("use your threads")', () => {
       const { compiled } = await world(options)
       fx?.dispose()
       fx = undefined
-      return compiled.permissions.appTools.filter((tool) => tool.startsWith('thread_')).sort()
+      return compiled.permissions.appTools.filter(isThreadTool).sort()
     }
     expect(await allowed({ threads: 'all' })).toEqual([...BOT_THREAD_READ_TOOLS, ...BOT_THREAD_ACT_TOOLS].sort())
     expect(await allowed({ threads: 'read' })).toEqual([...BOT_THREAD_READ_TOOLS].sort())
@@ -148,7 +156,7 @@ describe('a bot\'s thread tools ("use your threads")', () => {
   ]
   it.each(listings)('the thread tools listed to %s', async (_name, options, shown) => {
     const { registry, runId } = await world(options)
-    const thread = (names: string[]) => names.filter((name) => name.startsWith('thread_')).sort()
+    const thread = (names: string[]) => names.filter(isThreadTool).sort()
     expect(thread(registry.listForThread('home', 'default', runId).map((tool) => tool.name))).toEqual([...shown].sort())
     expect(thread(registry.listForTurn('home', runId).map((tool) => tool.name))).toEqual([...shown].sort())
     // With no turn of its own running, none; and never what no bot can hold.
@@ -180,11 +188,19 @@ describe('a bot\'s thread tools ("use your threads")', () => {
       send: () => text('thread_send', { threadId, content: 'Please check this.' }),
       wait: () => text('thread_wait', { threadId, timeoutMs: 1 }),
       stop: () => text('thread_interrupt', { threadId, runId: 'run-x' }),
-      archive: () => text('thread_archive', { threadId })
+      archive: () => text('thread_archive', { threadId }),
+      terminal: () => text('terminal_read', { threadId })
     }
     for (const [tool, go] of Object.entries(calls) as Array<[keyof typeof calls, () => Promise<{ error: boolean; text: string }>]>) {
       const outcome = await go()
-      expect(outcome.error, `${tool} ${threadId}`).toBe(!ok[tool])
+      // Its terminals are reached exactly as the thread is read.
+      const expected = tool === 'terminal' ? ok.read : ok[tool]
+      expect(outcome.error, `${tool} ${threadId}`).toBe(!expected)
+      if (tool === 'terminal') {
+        if (expected) expect(outcome.text).toContain(`output of pty-${threadId}`)
+        else expect(outcome.text).not.toContain('output of')
+        continue
+      }
       // A thread out of reach is refused in one form of words, whatever kind it is.
       if (!ok[tool] && !(tool === 'send' && ok.read)) expect(outcome.text, `${tool} ${threadId}`).toContain(`Thread ${threadId} is not available to you.`)
     }
