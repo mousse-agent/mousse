@@ -1209,6 +1209,15 @@ export class MmsProfileServices {
       profileRoot: homeDir,
       threadAlive: (threadId) => Boolean(this.threads.getThread(threadId)),
       threadTitle: (threadId) => this.threads.getThread(threadId)?.name,
+      // A subagent's thread is masked with its parents' secrets: their agents may hand it the value.
+      ancestorsOf: (threadId) => {
+        const lineage = this.threads.getThread(threadId)?.lineage
+        if (!lineage) return []
+        const ancestors = [lineage.rootThreadId]
+        for (let id: string | undefined = lineage.parentThreadId; id && !ancestors.includes(id) && ancestors.length < 32; id = this.threads.getThread(id)?.lineage?.parentThreadId) ancestors.push(id)
+        return ancestors
+      },
+      threadBusy: (threadId) => this.orchestrator.isTurnActive(threadId) || this.runEngine.getActiveRun(threadId) !== null,
       changed: () => this.secretsChanged.emit('changed')
     })
     this.secretRequests = new SecretRequests(this.secretVault)

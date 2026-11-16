@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { writeProfileSecret } from '../../src/mms/profiles/secrets'
 import { SecretRequests } from '../../src/mms/secrets/SecretRequests'
-import { SecretVault } from '../../src/mms/secrets/SecretVault'
+import { RETIRED_SECRET_GRACE_MS, SecretVault } from '../../src/mms/secrets/SecretVault'
 import { SECRET_DAY_MS } from '../../src/shared/secretRequests'
 
 const VALUE = 'tok_0123456789abcdef'
@@ -15,6 +15,8 @@ describe('the secrets a thread asked for', () => {
   let home: string
   let now: number
   let alive: Set<string>
+  let roots: Map<string, string>
+  let busy: Set<string>
   let vault: SecretVault
   let requests: SecretRequests
 
@@ -22,7 +24,9 @@ describe('the secrets a thread asked for', () => {
     home = mkdtempSync(join(tmpdir(), 'mousse-vault-'))
     now = Date.parse('2026-11-15T10:00:00Z')
     alive = new Set(['t1', 't2'])
-    vault = new SecretVault({ profileRoot: home, threadAlive: (id) => alive.has(id), now: () => now })
+    roots = new Map()
+    busy = new Set()
+    vault = new SecretVault({ profileRoot: home, threadAlive: (id) => alive.has(id), ancestorsOf: (id) => (roots.has(id) ? [roots.get(id)!] : []), threadBusy: (id) => busy.has(id), now: () => now })
     requests = new SecretRequests(vault, () => now)
   })
   afterEach(() => {
@@ -142,5 +146,49 @@ describe('the secrets a thread asked for', () => {
     expect(vault.delete('API_TOKEN')).toBe(true)
     expect(vault.value('API_TOKEN')).toBeUndefined()
     expect(vault.usableIn('API_TOKEN', 't1')).toBe(false)
+  })
+
+  /** What the thread's masker leaves of `text`. */
+  const masked = (threadId: string, text: string) => vault.maskerFor(threadId)?.(text) ?? text
+
+  it("masks a subagent's thread with the secrets of the thread it belongs to, and no other thread", async () => {
+    await give('t1', 'day')
+    roots.set('c1', 't1')
+    expect(masked('c1', `x ${VALUE} y`)).toBe('x [secret API_TOKEN hidden] y')
+    expect(masked('c2', `x ${VALUE} y`)).toBe(`x ${VALUE} y`)
+    // It gets no file of its own: only the thread that asked does.
+    expect(vault.fileFor('API_TOKEN', 'c1')).toBeUndefined()
+  })
+
+  // A value removed or changed while a turn runs: [what happens]. Its output may still hold the old value.
+  const MID_RUN: Array<[string, () => void]> = [
+    ['removed in Settings', () => vault.delete('API_TOKEN')],
+    ['changed in the store', () => { writeProfileSecret(home, 'API_TOKEN', 'tok_rotated_value'); vault.refresh() }],
+    ['expired', () => { now += SECRET_DAY_MS + 1000; vault.sweep() }]
+  ]
+  it.each(MID_RUN)('keeps masking a value %s during a running turn, until shortly after it ends', async (_what, happen) => {
+    await give('t1', 'day')
+    roots.set('c1', 't1')
+    busy.add('t1').add('c1')
+    expect(masked('t1', VALUE)).toBe('[secret API_TOKEN hidden]')
+    expect(masked('c1', VALUE)).toBe('[secret API_TOKEN hidden]')
+    happen()
+    expect(masked('t1', VALUE)).toBe('[secret API_TOKEN hidden]')
+    expect(masked('c1', VALUE)).toBe('[secret API_TOKEN hidden]')
+    if (vault.value('API_TOKEN')) expect(masked('t1', 'tok_rotated_value')).toBe('[secret API_TOKEN hidden]')
+    // The turn ends: its last output may still arrive for a short while.
+    busy.clear()
+    expect(masked('t1', VALUE)).toBe('[secret API_TOKEN hidden]')
+    now += RETIRED_SECRET_GRACE_MS + 1
+    expect(masked('t1', VALUE)).toBe(VALUE)
+    expect(masked('c1', VALUE)).toBe(VALUE)
+    if (vault.value('API_TOKEN')) expect(masked('t1', 'tok_rotated_value')).toBe('[secret API_TOKEN hidden]')
+  })
+
+  it.each(MID_RUN)('stops masking a value %s at once when no turn of the thread runs', async (_what, happen) => {
+    await give('t1', 'day')
+    expect(masked('t1', VALUE)).toBe('[secret API_TOKEN hidden]')
+    happen()
+    expect(masked('t1', VALUE)).toBe(VALUE)
   })
 })

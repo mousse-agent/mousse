@@ -90,7 +90,7 @@ describe('a secret given through the card', () => {
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'mousse-secret-'))
     store = new ThreadDataStore(new ProjectManager(), home)
-    vault = new SecretVault({ profileRoot: home, threadAlive: (id) => Boolean(store.getThread(id)) })
+    vault = new SecretVault({ profileRoot: home, threadAlive: (id) => Boolean(store.getThread(id)), ancestorsOf: (id) => { const lineage = store.getThread(id)?.lineage; return lineage ? [lineage.parentThreadId, lineage.rootThreadId] : [] } })
     requests = new SecretRequests(vault)
     domains = new DomainHandlerRegistry()
     registerSecretMethods(domains, async () => ({
@@ -177,7 +177,9 @@ describe('a secret given through the card', () => {
     // The agent's tool result names it and its private file, and never holds the value; the file does, for the agent.
     const copy = join(home, 'secrets', 'threads', threadId, 'HF_TOKEN')
     expect(agentToolResult?.text).toContain('keeps it as HF_TOKEN')
-    expect(agentToolResult?.text).toContain(`read and use directly with your own tools: ${copy}.`)
+    expect(agentToolResult?.text).toContain(`use directly with your own tools: ${copy}.`)
+    // It leads with passing the file inside a command, so the value does not come back as a tool's output.
+    expect(agentToolResult?.text).toContain(`gh auth login --with-token < "${copy}"`)
     expect(agentToolResult?.text).not.toContain(VALUE)
     expect(readFileSync(copy, 'utf8')).toBe(VALUE)
     expect(messages).not.toContain(VALUE)
@@ -273,5 +275,50 @@ describe('a secret given through the card', () => {
 
     const refused = await runTool({ command: 'printf "%s" "$API_TOKEN"', secrets: [{ name: 'API_TOKEN' }] }, other, home)
     expect(refused).toMatchObject({ isError: true, text: expect.stringContaining('no secret named API_TOKEN') })
+  })
+
+  /** An agent that opens the secret's file with a file-reading tool (lines numbered, as such tools return them) and quotes it. */
+  function fileReadingAgent(file: () => string): ScriptedAdapter {
+    const adapter = piAdapter(() => 'unused')
+    adapter.startTurn = async (input: TurnInput, sink): Promise<TurnResult> => {
+      sink.providerRef({ provider: input.llmProvider, model: input.model })
+      sink.tool({ kind: 'build_tool_call', phase: 'start', callId: 'read', title: 'Read', summary: 'Read the token', details: [file()], response: JSON.stringify({ file_path: file() }) })
+      sink.tool({ kind: 'build_tool_result', phase: 'complete', callId: 'read', title: 'Read', summary: 'done', details: [], response: `     1\t${VALUE}\n     2\t` })
+      const text = `The file holds ${VALUE}.`
+      sink.text({ phase: 'complete', content: text, contentIndex: 0 })
+      return { text, aborted: false, modelName: 'Scripted', totalResponseTimeMs: 1, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, contextSignature: 's', nativeMessages: [], providerRef: { provider: input.llmProvider, model: input.model } }
+    }
+    return adapter
+  }
+
+  // Where the file's contents come back: [whose turn reads it]
+  const READERS: Array<[string, boolean]> = [
+    ['the thread that asked', false],
+    ["a subagent's thread of it", true]
+  ]
+  it.each(READERS)("masks the file's contents read back by %s, in its messages, events and saved data", async (_who, child) => {
+    let copy = ''
+    setUp(fileReadingAgent(() => copy))
+    const parent = store.createThread('Release').id
+    const asked = tool({ label: 'GitHub token', reason: 'To publish.', name: 'GH_TOKEN' }, parent)
+    await waitFor(() => requests.list(parent).length === 1, 'the card')
+    await dispatch(gui, 'secrets.requests.answer', { threadId: parent, requestId: requests.list(parent)[0].requestId, value: VALUE, keep: 'day' })
+    expect((await asked).text).not.toContain(VALUE)
+    copy = vault.fileFor('GH_TOKEN', parent)!
+    expect(readFileSync(copy, 'utf8')).toBe(VALUE)
+
+    const threadId = child ? store.createThread('Worker', undefined, undefined, { lineage: { parentThreadId: parent, rootThreadId: parent, relationship: 'subagent' } }).id : parent
+    events.length = 0
+    await orch.send('Publish it', false, { threadId })
+    await waitFor(() => orch.getMessages(threadId).some((message) => message.role === 'assistant' && message.content.includes('The file holds')), 'the reply')
+    await waitFor(() => !orch.activeTurnThreadIds().includes(threadId), 'the turn to end')
+
+    const messages = JSON.stringify(orch.getMessages(threadId))
+    expect(messages).toContain('[secret GH_TOKEN hidden]')
+    expect(messages).not.toContain(VALUE)
+    expect(events.length).toBeGreaterThan(0)
+    for (const event of events) expect(event).not.toContain(VALUE)
+    for (const line of console_) expect(line).not.toContain(VALUE)
+    for (const file of filesUnder(home)) expect({ path: file.path, leaked: file.text.includes(VALUE) }).toEqual({ path: file.path, leaked: false })
   })
 })

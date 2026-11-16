@@ -23,6 +23,12 @@ interface SecretMeta {
 
 type MetaFile = Record<string, SecretMeta>
 
+/**
+ * How long a value that was removed or changed still masks a thread that had it, after that thread's turn ended: the
+ * turn's last output and its final save can arrive just after it stops counting as running.
+ */
+export const RETIRED_SECRET_GRACE_MS = 60_000
+
 /** A thread id that can name a folder; any other thread gets no files. */
 const FOLDER_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 
@@ -31,6 +37,10 @@ export interface SecretVaultOptions {
   /** Whether a thread still exists and is not archived; a thread-only secret is deleted with its thread. */
   threadAlive(threadId: string): boolean
   threadTitle?(threadId: string): string | undefined
+  /** The threads a subagent's thread descends from (its parents up to the root); it is masked with their secrets too. */
+  ancestorsOf?(threadId: string): string[]
+  /** Whether the thread has a turn or run going: a value removed or changed meanwhile still masks it until it settles. */
+  threadBusy?(threadId: string): boolean
   now?(): number
   /** The store changed (a secret added, used, deleted or expired). */
   changed?(): void
@@ -49,6 +59,10 @@ export class SecretVault {
   private readonly now: () => number
   /** Each thread's masker, built when first needed and dropped on any change. */
   private readonly maskers = new Map<string, SecretMasker | null>()
+  /** The values each built masker covers, so a change can keep them masking a thread whose turn is still running. */
+  private readonly known = new Map<string, Array<{ name: string; value: string }>>()
+  /** Values removed or changed while a thread's turn ran, and when it was last seen running: they mask it until it settles. */
+  private readonly retired = new Map<string, { secrets: Array<{ name: string; value: string }>; lastBusy: number }>()
   private readonly values: ReturnType<typeof createProfileSecretAdapter>
 
   constructor(private readonly options: SecretVaultOptions) {
@@ -138,20 +152,25 @@ export class SecretVault {
   }
 
   /**
-   * What masks a thread's text: every secret its agents may use, in every form it can take. Undefined when the thread
-   * has none, which is every thread that never asked for a secret.
+   * What masks a thread's text: every secret its agents may use, and its parents' when it is a subagent's, in
+   * every form it can take; while a turn that had a removed or changed value settles, that value too. Undefined when
+   * the thread has none, which is every thread that never asked for a secret.
    */
   maskerFor(threadId: string): SecretMasker | undefined {
+    const retired = this.retiredFor(threadId)
     const cached = this.maskers.get(threadId)
-    if (cached !== undefined) return cached ?? undefined
+    if (cached !== undefined && !retired.length) return cached ?? undefined
+    const owners = new Set([threadId, ...(this.options.ancestorsOf?.(threadId) ?? [])])
     const meta = this.readMeta()
     const secrets = Object.entries(meta).flatMap(([name, entry]) => {
-      if (!entry.threads.includes(threadId)) return []
+      if (!entry.threads.some((owner) => owners.has(owner))) return []
       const value = this.value(name)
       return value ? [{ name, value }] : []
     })
-    const masker = secretMasker(secrets) ?? null
-    this.maskers.set(threadId, masker)
+    this.known.set(threadId, secrets)
+    const masker = secretMasker([...secrets, ...retired]) ?? null
+    // Built with retired values it is rebuilt on each call, so it drops them once the turn has settled.
+    if (!retired.length) this.maskers.set(threadId, masker)
     return masker ?? undefined
   }
 
@@ -166,6 +185,18 @@ export class SecretVault {
       return value ? [{ name, value }] : []
     })
     return secretMasker(secrets)
+  }
+
+  /** The thread's retired values while its turn runs or has just ended; forgotten after that. */
+  private retiredFor(threadId: string): Array<{ name: string; value: string }> {
+    const entry = this.retired.get(threadId)
+    if (!entry) return []
+    const now = this.now()
+    if (this.options.threadBusy?.(threadId)) entry.lastBusy = now
+    if (now - entry.lastBusy < RETIRED_SECRET_GRACE_MS) return entry.secrets
+    this.retired.delete(threadId)
+    this.maskers.delete(threadId)
+    return []
   }
 
   /** Every secret in the store, for Settings: saved keys and the ones given in threads. Never values. */
@@ -238,6 +269,17 @@ export class SecretVault {
   }
 
   private didChange(): void {
+    // A thread whose turn runs keeps masking every value it had: output still on its way may hold one just removed.
+    const now = this.now()
+    for (const [threadId, secrets] of this.known) {
+      const entry = this.retired.get(threadId)
+      const busy = this.options.threadBusy?.(threadId) ?? false
+      if (!busy && (entry === undefined || now - entry.lastBusy >= RETIRED_SECRET_GRACE_MS)) continue
+      const kept = entry?.secrets ?? []
+      for (const secret of secrets) if (!kept.some((other) => other.value === secret.value)) kept.push(secret)
+      this.retired.set(threadId, { secrets: kept, lastBusy: busy ? now : entry!.lastBusy })
+    }
+    this.known.clear()
     this.maskers.clear()
     this.syncFiles()
     this.options.changed?.()
