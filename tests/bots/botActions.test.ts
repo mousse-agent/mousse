@@ -1068,3 +1068,10 @@ it('C4 action telling names the action without its arguments and holds soon in q
   expect(events.at(-1)).toMatchObject({ body: 'Wants to send', kind: 'question' })
   expect(JSON.stringify(events)).not.toContain('example.test')
 })
+
+it('C4 action names are readable single lines without hidden controls or markup', async () => {
+  const { readableActionTitle } = await import('../../src/mms/bots/actions/BotActions')
+  expect(readableActionTitle('send_an_email')).toBe('Send an email')
+  expect(readableActionTitle('sendEmail')).toBe('Send Email')
+  expect(readableActionTitle('<b>send</b>\u202e\nemail')).toBe('Send email')
+})
