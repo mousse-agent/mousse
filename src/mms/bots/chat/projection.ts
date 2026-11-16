@@ -413,6 +413,15 @@ export class BotChatProjection {
     }
     visit(args, [])
     const result = row.result_json ? JSON.parse(row.result_json) : undefined
+    const previous = this.store.all(`SELECT * FROM bot_actions WHERE activation_id = ? AND args_digest = ?
+      AND rowid < (SELECT rowid FROM bot_actions WHERE id = ?) AND status IN ('done', 'uncertain', 'failed') ORDER BY rowid DESC`, row.activation_id, row.args_digest, row.id)
+      .find(candidate => {
+        const target = JSON.parse(String(candidate.target_json))
+        const current = JSON.parse(row.target_json)
+        return target.server === current.server && target.tool === current.tool &&
+          (candidate.status !== 'failed' || JSON.parse(String(candidate.result_json ?? '{}')).toolReportedError === true)
+      })
+    const previousAt = previous?.ran_at ?? previous?.answered_at ?? previous?.created_at
     const at = row.ran_at ?? row.answered_at
     return {
       actionId: row.id, digest: row.args_digest,
@@ -420,6 +429,7 @@ export class BotChatProjection {
       serverName: metadata.serverName ?? 'Your service', args,
       hasHiddenValues: metadata.hasHiddenValues === true, hiddenPaths,
       status: row.status as BotActionCard['status'],
+      ...(previous && typeof previousAt === 'string' ? { previous: { status: previous.status as 'done' | 'uncertain' | 'failed', at: previousAt } } : {}),
       ...(at ? { at } : {}),
       ...(result ? { result: { text: result.text, ...(result.toolReportedError ? { toolReportedError: true } : {}) } } : {}),
       ...(row.bot_note ? { note: row.bot_note } : {})
