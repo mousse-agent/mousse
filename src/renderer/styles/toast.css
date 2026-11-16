@@ -152,8 +152,9 @@ html[data-theme='light'] .ui-toaster {
 }
 
 /* --success is vivid so it reads at dot size; across a whole card it shouts. The toast keeps its
-   hue and lightness at about half its chroma: still green, calm against the theme. */
-.ui-toast-success { --tone: oklch(from var(--success) l calc(c * 0.5) h); }
+   hue and lightness at part of its chroma: still green, calm against the theme. Light themes keep
+   more (below), or the faint light wash turns grey and reads as a neutral toast. */
+.ui-toast-success { --tone: oklch(from var(--success) l calc(c * var(--toast-success-chroma, 0.5)) h); }
 .ui-toast-attention { --tone: var(--status-input, var(--accent)); }
 .ui-toast-paused { --tone: var(--warning); }
 .ui-toast-error { --tone: var(--danger); }
@@ -170,12 +171,14 @@ html[data-theme='light'] .ui-toaster {
 html[data-theme='light'] .ui-toaster {
   --toast-wash-amount: 7%;
   --toast-edge-amount: 28%;
+  --toast-success-chroma: 0.7;
 }
 
 @media (prefers-color-scheme: light) {
   html[data-theme='system'] .ui-toaster {
     --toast-wash-amount: 7%;
     --toast-edge-amount: 28%;
+    --toast-success-chroma: 0.7;
   }
 }
 
