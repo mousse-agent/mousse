@@ -17,8 +17,9 @@ import { delegationFixture, type DelegationFixture } from '../run/delegationFixt
 import { disposeFixtures, memoryFixture } from './memory/memoryFixture'
 
 // Before the catalogue, a bot with the owner's usual permissions (commands, browser, threads, profiler) said hello in
-// about 87,300 characters on Codex and Pi (57 tools in full) and 27,900 on Claude Code; with it, about 47,800 and 21,300.
-const CEILING = { codexPi: 50_000, claude: 22_000 } as const
+// about 87,300 characters on Codex and Pi (57 tools in full) and 27,900 on Claude Code; with it, about 50,700 and 21,300
+// (show_card is core: listed only in a group, Codex asked the owner instead of showing a card).
+const CEILING = { codexPi: 53_000, claude: 22_000 } as const
 
 let fx: DelegationFixture | undefined
 afterEach(() => {

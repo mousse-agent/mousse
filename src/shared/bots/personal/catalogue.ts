@@ -28,6 +28,8 @@ export const BOT_CORE_TOOLS: readonly string[] = [
   'work_start', 'work_note', 'work_list',
   'remind', 'wake',
   'escalate', 'ask_owner',
+  // A card under a message: listed only in a group, Codex asked the owner instead of showing one (§15).
+  'show_card',
   'thread_list', 'thread_read', 'thread_send', 'thread_create', 'thread_archive',
   // A run's own: its report, its wait, its schedule's end, and the web (a chat hands the web to work).
   'run_report', 'work_wait', 'schedule_done', 'web_search', 'web_fetch',
@@ -92,7 +94,6 @@ const YOU_GUIDANCE = [
 const MEMORY_GUIDANCE = 'memory_list lists your saved entries; memory_forget removes one the owner wants gone, or that is wrong and has no replacement (replace a wrong one with memory_save instead).'
 
 const SHOWING_GUIDANCE = [
-  'show_card attaches a small card to your next message when it reads better than prose: specs or details as facts, steps as a checklist, how far a job got as progress, pictures from your files folder as a gallery. Don\'t repeat what it says in your words.',
   'When a chart, a comparison, a calculator or a small dashboard says more than words, publish an applet with publish_applet beside a short answer: it shows under your message. Simple answers stay words.',
   'make_image makes a picture, when your owner picked an image model for you: put the line it gives you in your reply to show it, and say in a few words what you made.',
   APPLET_GENERATION_GUIDANCE.trim()
@@ -151,7 +152,7 @@ export const BOT_CATALOGUE: readonly BotCatalogueGroup[] = [
   },
   { id: 'you', line: 'how much time you take, your model, your name and description', tools: ['set_depth', 'use_model', 'set_profile'], guidance: YOU_GUIDANCE },
   { id: 'memory', line: 'list or forget memory entries', tools: ['memory_list', 'memory_forget'], guidance: MEMORY_GUIDANCE },
-  { id: 'showing', line: 'cards, applets and pictures under your message', tools: ['show_card', 'publish_applet', 'make_image'], guidance: SHOWING_GUIDANCE },
+  { id: 'showing', line: 'applets and pictures under your message', tools: ['publish_applet', 'make_image'], guidance: SHOWING_GUIDANCE },
   { id: 'bots', line: "your owner's other bots", tools: [BOT_LIST_TOOL, BOT_SEND_TOOL], guidance: BOTS_GUIDANCE },
   {
     id: 'schedules',

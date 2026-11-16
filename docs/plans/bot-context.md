@@ -497,7 +497,7 @@ does not hold, one no bot may be offered, and `use_tool` itself are refused. A s
 | Owner's permissions, run | 88,000 | 25,000 | 46,100 | 18,400 |
 | Starter, chat | 55,900 | 26,300 | 33,300 | 20,000 |
 
-The test holds a bot with every permission to 50,000 characters on Codex and Pi and 22,000 on Claude Code, on both lanes.
+Since these numbers, `show_card` is in the core set (see Reliability): about 2,900 characters more on Codex and Pi in each lane. The test holds a bot with every permission to 53,000 characters on Codex and Pi and 22,000 on Claude Code, on both lanes.
 
 **Reliability.** Real Claude Code (Opus) and Codex (GPT 6.1 Sol), headless with the owner's sign-ins, each given a bot's system text and tool list through a stub MCP server that records the calls. Eight owner messages to the chat (remind, a standing rule, find a thread, a weekly schedule, think harder, forget a memory, hide a thread, a checklist card), three rounds each, plus five more rounds of the two weakest:
 
@@ -507,7 +507,7 @@ The test holds a bot with every permission to 50,000 characters on Codex and Pi 
 | Codex, the seven tasks other than the card | 25/26 | 25/26 |
 | Codex, the checklist card | 6/8 | 4/6 |
 
-A miss is the bot asking the owner a question (which passport) instead of showing the card, or handing a thread search to work. The card first fell to 2 of 8 with the catalogue, until the base text again named when a card fits; a group's trigger stays in the base text, only its how-to moves. A lookup costs Codex about one more call and 3 seconds a task (median 15 to 18 seconds); Claude Code's time is unchanged.
+A miss is the bot asking the owner a question (which passport) instead of showing the card, or handing a thread search to work. The card first fell to 2 of 8 with the catalogue, until the base text again named when a card fits; a group's trigger stays in the base text, only its how-to moves. So `show_card` moved into the core set: listed directly, Codex no longer has to look it up to show a card (not yet re-run live). A lookup costs Codex about one more call and 3 seconds a task (median 15 to 18 seconds); Claude Code's time is unchanged.
 
 **What waits.**
 
