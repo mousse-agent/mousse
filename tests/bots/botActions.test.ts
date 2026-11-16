@@ -436,3 +436,13 @@ it('R5-words gives by-hand runs and disabled answers their own refusal', async (
   f.host.settings!.get().experimental.botAsksFirst = false
   await expect(f.bots.service.answerAction({ actionId: 'missing', digest: 'missing', answer: 'send' })).rejects.toThrow(/not available/i)
 })
+it('R5-time transports the sent instant instead of a UTC clock string', async () => {
+  const t = await setup(true)
+  await t.call()
+  await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  const message = f.bots.service.chatList(t.botId).messages.find(m => m.id === a.message_id)!
+  expect(message.text).toBe('Sent')
+  expect((message as unknown as { actionSentAt: string }).actionSentAt).toBe(f.store.now())
+})
