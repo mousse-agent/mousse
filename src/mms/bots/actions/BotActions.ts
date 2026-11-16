@@ -4,6 +4,7 @@ import type { BotMcpTool } from '../../../shared/bots/personal/authority'
 import type { BotActivationRow, BotStore } from '../store/BotStore'
 import { canonicalJson, shortHash } from '../../integrations/revision'
 import { maskMemoryCredentials } from '../memory/guard'
+import type { BotMcpCallOutcome } from '../mcp/BotMcp'
 import type { ToolOutcome } from '../../run/mcp/appTools/types'
 
 /** The sole feature-switch read. No UI sets it until the complete feature ships. */
@@ -31,7 +32,7 @@ interface Host {
   binding(row: BotActivationRow, tool: BotMcpTool): unknown | undefined
   post(row: BotActivationRow, id: string, text: string): void
   settled(row: BotActivationRow): void
-  execute(row: BotActivationRow, tool: BotMcpTool, args: Record<string, unknown>): Promise<ToolOutcome>
+  execute(row: BotActivationRow, tool: BotMcpTool, args: Record<string, unknown>): Promise<BotMcpCallOutcome>
 }
 const pending = new Set(['open', 'approved', 'running'])
 export class BotActionChanged extends Error {}
@@ -119,9 +120,9 @@ export class BotActions {
     try {
       const result = await this.host.execute(row, JSON.parse(action.target_json), JSON.parse(action.exec_args))
       // A transport failure can have happened after the server acted. Never promise that retrying is safe.
-      this.transition(id, 'running', result.isError ? 'uncertain' : 'done', result.isError ? { ...result, text: `It could not be confirmed whether this went through: check before trying again.\n${result.text}` } : result)
-    } catch {
-      this.transition(id, 'running', 'uncertain', { text: 'It could not be confirmed whether this went through: check before trying again.' })
+      this.transition(id, 'running', result.isError ? result.callState ?? 'uncertain' : 'done', result)
+    } catch (error) {
+      this.transition(id, 'running', error instanceof BotActionChanged ? 'failed' : 'uncertain', { text: 'It could not be confirmed whether this went through: check before trying again.' })
     }
     this.finish(action)
   }

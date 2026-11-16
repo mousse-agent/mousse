@@ -1,5 +1,5 @@
 import { WORK_WAIT_RULES, workWaitRule, workReadiness, workWaitLine, parkedNeedsOwner, type WorkWaitLookups, type WorkWaitFacts, type WorkWaitReason } from './workWaiting'
-import { BotActions, botAsksFirst, actionDigest, maskedActionData } from '../actions/BotActions'
+import { BotActions, BotActionChanged, botAsksFirst, actionDigest, maskedActionData } from '../actions/BotActions'
 import { callForBot, type BotMcp } from '../mcp/BotMcp'
 import { isQuietHours } from '../../../shared/settings'
 import { BotTellings } from '../chat/BotTellings'
@@ -615,7 +615,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     execute: async (row, target, args) => {
       const mcp = this.host.mcp
       const tool = mcp?.offered(new Set([`${target.server}::${target.tool}`]))[0]
-      if (!mcp?.call || !tool) throw new Error('tool changed')
+      if (!mcp?.call || !tool) throw new BotActionChanged('This tool changed. Nothing was sent.')
       const signal = new AbortController().signal
       const actionId = this.actions.forWork(row.id)!.id
       return callForBot({ mcp: mcp as BotMcp, bot: {

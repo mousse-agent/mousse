@@ -345,15 +345,16 @@ export class BotMcp implements BotMcpHost {
    * sign-in, and its result is framed as data from the server (`images`: the turn's model can see images). A failure is
    * a plain result, never a throw; its raw text goes to the owner's log only.
    */
-  async call(tool: BotMcpTool, args: Record<string, unknown>, signal: AbortSignal, options: { images?: boolean; heldAction?: boolean; assertDispatchActive?: () => void; keepImages?: (images: NonNullable<ToolOutcome['images']>) => string | undefined } = {}): Promise<ToolOutcome> {
-    if (signal.aborted) return { text: `The call to ${tool.serverName} was stopped.`, isError: true }
-    if (!this.deps.enabled()) return { text: `MCP is turned off in Mousse's Settings now, so ${tool.serverName}'s tools can't be used. Carry on without it, and say so in your report.`, isError: true }
+  async call(tool: BotMcpTool, args: Record<string, unknown>, signal: AbortSignal, options: { images?: boolean; heldAction?: boolean; assertDispatchActive?: () => void; keepImages?: (images: NonNullable<ToolOutcome['images']>) => string | undefined } = {}): Promise<BotMcpCallOutcome> {
+    const certainty = options.heldAction ? { callState: 'failed' as const } : {}
+    if (signal.aborted) return { ...certainty, text: `The call to ${tool.serverName} was stopped.`, isError: true }
+    if (!this.deps.enabled()) return { ...certainty, text: `MCP is turned off in Mousse's Settings now, so ${tool.serverName}'s tools can't be used. Carry on without it, and say so in your report.`, isError: true }
     const descriptor = options.heldAction ? this.deps.catalog.servers(undefined).find(s => s.installationId === installationOf(tool.server))?.tools.find(t => t.toolName === tool.tool) : undefined
     const pin: McpToolExecutionPin | undefined = options.heldAction && descriptor?.configRevision ? {
       installationId: installationOf(tool.server), toolName: tool.tool, configRevision: descriptor.configRevision,
       schemaDigest: shortHash(canonicalJson(descriptor.inputSchema ?? {}), 64), assertDispatchActive: options.assertDispatchActive
     } : undefined
-    if (options.heldAction && !pin) return { text: 'This tool has no installed revision to bind the approved call to. Nothing was sent.', isError: true }
+    if (options.heldAction && !pin) return { ...certainty, text: 'This tool has no installed revision to bind the approved call to. Nothing was sent.', isError: true }
     const callMs = this.deps.callMs ?? BOT_MCP_CALL_MS
     // The manager times the call out itself; this timer is the floor under it, so nothing a server does holds the run.
     const timeout = new AbortController()
@@ -364,7 +365,7 @@ export class BotMcp implements BotMcpHost {
       const result = await new Promise<McpToolCallResult>((resolve, reject) => {
         const stop = () => reject(both.reason ?? new Error('stopped'))
         both.addEventListener('abort', stop, { once: true })
-        this.deps.manager.callTool(tool.providerName, args, undefined, both, defaultIntegrationActor(false), pin, { timeoutMs: callMs, signIn: false })
+        this.deps.manager.callTool(tool.providerName, args, undefined, both, defaultIntegrationActor(false), pin, { timeoutMs: callMs, signIn: false, ...(options.heldAction ? { trackDispatch: true as const } : {}) })
           .then(resolve, reject)
           .finally(() => both.removeEventListener('abort', stop))
       })
@@ -372,12 +373,12 @@ export class BotMcp implements BotMcpHost {
       // Its pictures are the owner's to see too, whatever the bot's model sees (`keepToolImages`).
       const kept = outcome.images?.length ? options.keepImages?.(outcome.images) : undefined
       const framed = framedResult(tool.serverName, tool.tool, outcome, options)
-      return kept ? { ...framed, text: `${framed.text}
-${kept}` } : framed
+      return kept ? { ...certainty, ...framed, text: `${framed.text}
+${kept}` } : { ...certainty, ...framed }
     } catch (error) {
       const failure = timeout.signal.aborted && !signal.aborted ? timeout.signal.reason : error
       if (!signal.aborted && !options.heldAction) logWarn('BotMcp', `A bot's call of ${tool.tool} on "${tool.serverName}" failed: ${redactSensitiveText(failure instanceof Error ? failure.message : String(failure)).slice(0, 2000)}`)
-      return { text: failureText(tool.serverName, failure, signal), isError: true }
+      return { ...(options.heldAction ? { callState: (failure as { mcpNotDispatched?: boolean })?.mcpNotDispatched ? 'failed' as const : 'uncertain' as const } : {}), text: failureText(tool.serverName, failure, signal), isError: true }
     } finally {
       clearTimeout(timer)
     }
@@ -465,14 +466,14 @@ export async function callForBot(input: {
   toolCallId?: string
   heldAction?: boolean
   assertDispatchActive?: () => void
-}): Promise<ToolOutcome> {
+}): Promise<BotMcpCallOutcome> {
   const offered = input.bot.mcpTools?.find((tool) => tool.name === input.name || tool.providerName === input.name)
   const target = offered ?? input.known?.(input.name)
   if (!target) return { text: `There is no tool called ${input.name} for you.`, isError: true }
   const held = offered && input.bot.holdMcp?.(offered, input.args, input.toolCallId)
   if (held) return held
   const decided = input.bot.check({ kind: 'mcp', server: target.server, tool: target.tool, serverName: target.serverName, args: input.args })
-  if (!decided.ok) return { text: checkMessage(decided), isError: true }
+  if (!decided.ok) return { ...(input.heldAction ? { callState: 'failed' as const } : {}), text: checkMessage(decided), isError: true }
   if (!offered) return { text: `${target.serverName}'s tools are allowed now, but this turn started without them: you get them when it ends.`, isError: true }
   const { activationId, workspace } = input.bot
   return input.mcp.call(offered, input.args, AbortSignal.any([input.signal, input.bot.time.signal]), {

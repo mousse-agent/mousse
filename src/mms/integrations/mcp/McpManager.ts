@@ -101,6 +101,8 @@ export interface McpCallOptions {
    * session that cannot be renewed fails it (`auth-required`) instead of opening a sign-in page.
    */
   signIn?: false
+  /** Internal held-call certainty: distinguish failure before transport dispatch. */
+  trackDispatch?: true
 }
 
 /** One enabled server's tools (`getEnabledToolsByServer`). */
@@ -500,6 +502,8 @@ export class McpManager {
     expected?: McpToolExecutionPin,
     options?: McpCallOptions
   ): Promise<McpToolCallResult> {
+    let dispatched = false
+    try {
     this.owned.assertAccepting()
     const descriptor = this.toolMap.get(providerName)
     if (!descriptor) {
@@ -521,9 +525,16 @@ export class McpManager {
     // A call that must not start a sign-in holds the server's sign-in for as long as it runs.
     const release = options?.signIn === false ? await this.holdSignIn(server) : undefined
     try {
-      return await this.callConnected(server, descriptor, args, projectPath, signal, actor, expected, options, providerName)
+      return await this.callConnected(server, descriptor, args, projectPath, signal, actor, expected, options, providerName, () => { dispatched = true })
     } finally {
       release?.()
+    }
+    } catch (error) {
+      if (options?.trackDispatch && !dispatched) {
+        const cause = error as { message?: string; category?: string; code?: string }
+        throw Object.assign(new Error(cause?.message ?? 'The call was refused before dispatch.'), { category: cause?.category, code: cause?.code, mcpNotDispatched: true })
+      }
+      throw error
     }
   }
 
@@ -547,7 +558,8 @@ export class McpManager {
     actor: IntegrationActor,
     expected: McpToolExecutionPin | undefined,
     options: McpCallOptions | undefined,
-    providerName: string
+    providerName: string,
+    onDispatch?: () => void
   ): Promise<McpToolCallResult> {
     const assertPin = (tool: McpToolDescriptor | undefined): void => {
       if (expected && (!tool || (tool.installationId ?? tool.serverId) !== expected.installationId || tool.configRevision !== expected.configRevision || tool.toolName !== expected.toolName || (expected.schemaDigest !== undefined && sha256Bytes(canonicalJson(tool.inputSchema ?? {})) !== expected.schemaDigest))) throw Object.assign(new Error('MCP dependency changed since admission.'), { category: 'disabled', code: 'stale_revision' })
@@ -574,11 +586,13 @@ export class McpManager {
         timeoutMs,
         `Timed out calling MCP tool ${descriptor.toolName}`,
         signal,
-        (callSignal) =>
-          connection.client.callTool(
+        (callSignal) => {
+          onDispatch?.()
+          return connection.client.callTool(
             { name: descriptor.toolName, arguments: args },
             { signal: callSignal, timeout: timeoutMs }
           )
+        }
       ).finally(() => {
         connection.inFlight -= 1
       })
