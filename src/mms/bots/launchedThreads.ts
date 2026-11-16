@@ -1,6 +1,7 @@
 import type { EventEmitter } from 'node:events'
 import { BOT_LAUNCHED_ENDED_SHOWN, compareLaunched, type BotLaunchedThread } from '../../shared/bots/personal/chat'
 import type { RunRecord, ThreadEvent } from '../run/types'
+import type { RunEngine } from '../run/RunEngine'
 import { subagentDescendantsIn } from '../../shared/threadLineage'
 import type { ThreadLineage } from '../../shared/types'
 
@@ -38,7 +39,9 @@ function latest(...times: Array<string | null | undefined>): string | undefined 
  * ended while subagents below it still have runs going (`subagents`); or, with nothing going, it never ran (`idle`) or
  * its last run finished (`done`), failed or was stopped (`compareLaunched`). Those that work come first (oldest first), then those that
  * wait on the owner, then idle ones, then ended ones (most recently updated first); of those not going, at most
- * `BOT_LAUNCHED_ENDED_SHOWN`. `activeRuns`: the profile's runs not ended; `lastRun`: a thread's newest run.
+ * `BOT_LAUNCHED_ENDED_SHOWN`. `activeRuns`: the profile's runs not ended; `lastRun`: a thread's newest run;
+ * `willStart`: whether a queued run is still on its way (`queuedRunWillStart`). A queued run nothing will start (its
+ * start already came and went, or it was never given one) does not make its thread go: the thread reads as it ended.
  */
 export function launchedThreadsOf(input: {
   creators: ReadonlySet<string>
@@ -46,11 +49,15 @@ export function launchedThreadsOf(input: {
   activeRuns: readonly RunRecord[]
   lastRun(threadId: string): RunRecord | undefined
   asks(threadId: string): boolean
+  willStart(run: RunRecord): boolean
   projectName?(projectId: string): string | undefined
 }): BotLaunchedThread[] {
   if (!input.creators.size) return []
   const active = new Map<string, RunRecord>()
-  for (const run of input.activeRuns) if (!active.has(run.threadId)) active.set(run.threadId, run)
+  for (const run of input.activeRuns) {
+    if (active.has(run.threadId) || (run.status === 'queued' && !input.willStart(run))) continue
+    active.set(run.threadId, run)
+  }
   const mine = input.threads.filter((thread) => thread.createdByThreadId !== undefined && input.creators.has(thread.createdByThreadId))
   const below = subagentDescendantsIn(input.threads)
   const subagentsAsk = (threadId: string) => below(threadId).some((id) => input.asks(id))
@@ -81,6 +88,16 @@ export function launchedThreadsOf(input: {
     }
   })
   return launched.sort(compareLaunched)
+}
+
+/**
+ * Whether a queued run is still on its way to starting: its `turn.start` waits or is being run, or it stands in for a
+ * remote subagent whose run goes on on another computer. A queued run waiting behind another run of its thread has no
+ * `turn.start` yet; that thread goes all the same, by the run ahead of it.
+ */
+export function queuedRunWillStart(engine: Pick<RunEngine, 'outbox' | 'remoteSubagents'>, run: Pick<RunRecord, 'runId'>): boolean {
+  return engine.outbox.listForRun(run.runId).some((effect) => effect.kind === 'turn.start' && (effect.status === 'pending' || effect.status === 'running'))
+    || Boolean(engine.remoteSubagents.getByChildRun(run.runId))
 }
 
 /**

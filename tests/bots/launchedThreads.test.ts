@@ -35,7 +35,8 @@ describe('a thread the bot started, while its subagents still work', () => {
       threads,
       activeRuns,
       lastRun: (id) => (id === 'launched' ? run('launched', 'completed') : undefined),
-      asks: (id) => (state.asks ?? []).includes(id)
+      asks: (id) => (state.asks ?? []).includes(id),
+      willStart: () => true
     })
     expect(listed?.status).toBe(status)
     // Only an ended thread with nothing below it working sits under Done and leaves the bot free.
@@ -50,5 +51,31 @@ describe('a thread the bot started, while its subagents still work', () => {
     runs.emit('event', { type: 'run.status', payload: run('grandchild', 'completed') })
     expect(changed).toEqual(['home'])
     stop()
+  })
+})
+
+// A queued run nothing will start (its turn.start already came and went, as a bot's message to a thread on 15 Nov did)
+// never makes the thread go: the bot is not "Managing" a thread that sits idle. One that will start still counts.
+describe('a thread the bot started, with a queued run', () => {
+  const rows: Array<[string, { own?: [RunRecord['status'], boolean]; below?: [RunRecord['status'], boolean] }, BotLaunchedThread['status'], boolean]> = [
+    ['its queued run is about to start', { own: ['queued', true] }, 'queued', true],
+    ['its queued run will never start', { own: ['queued', false] }, 'done', false],
+    ['a subagent\'s queued run is about to start', { below: ['queued', true] }, 'subagents', true],
+    ['a subagent\'s queued run will never start', { below: ['queued', false] }, 'done', false],
+    ['its run works, whatever is queued behind it', { own: ['running', false] }, 'running', true]
+  ]
+  it.each(rows)('%s', (_name, state, status, going) => {
+    const activeRuns = [...(state.own ? [run('launched', state.own[0])] : []), ...(state.below ? [run('child', state.below[0])] : [])]
+    const starts = new Set([...(state.own?.[1] ? ['run:launched'] : []), ...(state.below?.[1] ? ['run:child'] : [])])
+    const [listed] = launchedThreadsOf({
+      creators: new Set(['home']),
+      threads,
+      activeRuns,
+      lastRun: (id) => (id === 'launched' ? run('launched', 'completed') : undefined),
+      asks: () => false,
+      willStart: (queued) => starts.has(queued.runId)
+    })
+    expect(listed?.status).toBe(status)
+    expect(launchedActive(listed!)).toBe(going)
   })
 })
