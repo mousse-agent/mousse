@@ -92,6 +92,11 @@ const CLAUDE_STOP_GRACE_MS = 1_000
  * steers it has not been seen reading are handed back. Longer than the grace, so a process `reapClosed` kills is gone by then.
  */
 const ONE_SHOT_STOP_DRAIN_MS = 1_500
+/**
+ * How long a one-shot query that answered may take to exit on its own (Claude Code writes its session and closes, about
+ * half a second) before it is closed. The turn does not wait for it; the thread's next start does (`oneShotExits`).
+ */
+const ONE_SHOT_EXIT_WAIT_MS = 15_000
 
 export const CLAUDE_SUBSCRIPTION_PROVIDER_ID = 'claude-subscription'
 /**
@@ -973,6 +978,8 @@ export class ClaudeSubscriptionProviderService {
   private settingsFrozen = false
   private stopped = false
   private readonly queries = new Map<string, Query>()
+  /** One-shot queries that answered and are still exiting, by thread: the thread's next start waits for its exit. */
+  private readonly oneShotExits = new Map<string, { query: Query; exited: Promise<void> }>()
   /** Live queries by thread: the Claude processes that outlive a turn. Null disables them (one query per turn). */
   private readonly live = new Map<string, LiveSession<TurnContext>>()
   private readonly liveConfig: LiveTimings | null
@@ -1823,6 +1830,31 @@ export class ClaudeSubscriptionProviderService {
       this.closeUnstarted(query, context.threadId)
       throw error
     }
+  }
+  /**
+   * A one-shot query that answered: what it still writes is read (and dropped) until it exits on its own, or it is closed
+   * after `ONE_SHOT_EXIT_WAIT_MS`. Never rejects. The thread's next start waits for it (`oneShotExits`).
+   */
+  private awaitOneShotExit(threadId: string, query: Query, output: AsyncIterator<SDKMessage>): Promise<void> {
+    const exited = (async () => {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const expired = new Promise<'expired'>((resolve) => { timer = setTimeout(() => resolve('expired'), ONE_SHOT_EXIT_WAIT_MS) })
+      try {
+        for (;;) {
+          const next = await Promise.race([output.next().catch((): IteratorResult<SDKMessage> => ({ done: true, value: undefined })), expired])
+          if (next === 'expired' || next.done) break
+        }
+      } finally {
+        clearTimeout(timer)
+        const target = claudeQueryProcess(query)
+        query.close()
+        this.reapClosed(threadId, target)
+      }
+    })().catch(() => undefined)
+    const entry = { query, exited }
+    this.oneShotExits.set(threadId, entry)
+    void exited.then(() => { if (this.oneShotExits.get(threadId) === entry) this.oneShotExits.delete(threadId) })
+    return exited
   }
   /** Closes a query that never started its turn, and ends its process tree as the other closes do (`reapClosed`). */
   private closeUnstarted(query: Query, threadId: string): void {
@@ -2835,6 +2867,12 @@ export class ClaudeSubscriptionProviderService {
   }
   private async chatTurn(input: ClaudeSubscriptionChatInput, branching: boolean): Promise<string> {
     input.signal?.throwIfAborted()
+    // The thread's last one-shot query answered but may still be writing its session: it is resumed once it has exited.
+    const previousExit = this.oneShotExits.get(input.threadId)
+    if (previousExit) {
+      await previousExit.exited
+      input.signal?.throwIfAborted()
+    }
     if (this.checkDue()) {
       // Reserve the thread while the sign-in check runs so a second turn cannot slip in.
       if (this.activeThreads.has(input.threadId))
@@ -2906,6 +2944,8 @@ export class ClaudeSubscriptionProviderService {
     const controller = new AbortController()
     this.controllers.add(controller)
     let query: Query | undefined
+    /** A one-shot query that answered and is still exiting (`awaitOneShotExit`): what it uses is let go after it exits. */
+    let exiting: Promise<void> | undefined
     let live: LiveSession<TurnContext> | undefined
     let liveRun: LiveRun | undefined
     /** The turn failed with a usage limit: its request is in the session, whatever evidence classified it. */
@@ -3183,13 +3223,21 @@ export class ClaudeSubscriptionProviderService {
     const releaseBotTemp = botTemp ? holdClaudeBotTemp(botTemp.dir) : undefined
     // The folder of the turn's settings file (`claudeLockedSettingsFile`), removed when it ends.
     let lockedSettingsFolder: string | undefined
+    /**
+     * The sign-in check (`claude auth status`). A bot's turn (a one-shot query) starts Claude Code while it runs, and its
+     * prompt waits for it; any other turn waits for it here. A signed-out reading fails the turn with how to sign in.
+     */
+    let signIn: Promise<void> | undefined
     try {
-      const signedIn = await this.authenticated(controller.signal, env)
-      if (!signedIn)
-        throw new AppError({ code: 'claude_subscription_sign_in_required', message: this.signInRequiredMessage(), errorInfo: { category: 'unavailable', retryable: false } })
+      signIn = this.authenticated(controller.signal, env).then((signedIn) => {
+        if (!signedIn)
+          throw new AppError({ code: 'claude_subscription_sign_in_required', message: this.signInRequiredMessage(), errorInfo: { category: 'unavailable', retryable: false } })
+      })
+      // A bot's process starts while the reading runs: one that says signed out ends it before it is given the prompt.
+      signIn.catch(() => { if (locked) cancel() })
+      if (!locked) await signIn
       controller.signal.throwIfAborted()
       input.signal?.throwIfAborted()
-      controller.signal.throwIfAborted()
       const chosen = claudeSpeedOf(input.model)
       const selected = parseThinkingSuffixFromModelId(chosen.model)
       // A level the model does not offer (saved for another model) runs at the model's default.
@@ -3500,7 +3548,17 @@ export class ClaudeSubscriptionProviderService {
         // A one-shot query: the prompt ends with the turn, which ends the process.
         startSteering()
         promptId = randomUUID()
-        let nextPrompt: AsyncIterable<SDKUserMessage> = messages()
+        const checked = signIn
+        let nextPrompt: AsyncIterable<SDKUserMessage> = (async function* (): AsyncGenerator<SDKUserMessage> {
+          try {
+            await checked
+          } catch {
+            return
+          }
+          yield* messages()
+        })()
+        /** The query that answered, still exiting (`awaitOneShotExit`). */
+        let detached: Promise<void> | undefined
         const options = locked ? lockedOptions(controller, () => turn) : buildOptions(controller, () => turn, false)
         /**
          * Stop ended a query whose prompt carries steers it had not been seen reading, and sent its process SIGTERM
@@ -3563,6 +3621,12 @@ export class ClaudeSubscriptionProviderService {
                   input.onText(frames.text)
                 }
                 success = true
+                // The answer is complete. Claude Code still writes its session and exits, which the turn does not wait
+                // for: the thread's next start does. A steer taken meanwhile restarts the query once it has exited.
+                if (!steers.length && !interruptRequested) {
+                  detached = exiting = this.awaitOneShotExit(input.threadId, query, output)
+                  break
+                }
               }
             }
           } catch (error) {
@@ -3578,8 +3642,10 @@ export class ClaudeSubscriptionProviderService {
           const completed = query
           query = undefined
           collectSteer()
-          completed.close()
+          if (!detached) completed.close()
           if (!steers.length) break
+          if (detached) await detached
+          detached = undefined
           controller.signal.throwIfAborted()
           const sessionId = frames.sessionId
           if (!sessionId) throw new Error('Claude steering could not identify the active session')
@@ -3611,6 +3677,8 @@ export class ClaudeSubscriptionProviderService {
       }
       input.signal?.throwIfAborted()
       controller.signal.throwIfAborted()
+      // A turn whose sign-in check failed ends with that, whatever Claude Code did without its prompt.
+      await signIn
       const sessionId = frames.sessionId
       if (!success || !sessionId) throw new Error('Claude Code ended before completing the turn')
       this.settings.sessions = {
@@ -3623,6 +3691,8 @@ export class ClaudeSubscriptionProviderService {
       input.onSession?.({ sessionId, ...(promptId ? { promptId } : {}) })
       return frames.text
     } catch (error) {
+      // The sign-in check's failure is the turn's: Claude Code may have ended without the prompt it held back.
+      await signIn
       if (readUsageLimit(error)) usageLimited = true
       // Claude Code could not open the cut (its file or entry is gone) and started nothing.
       if (branch && !frames.text && cutRefused(error)) throw new CutRefused(error instanceof Error ? error.message : String(error), branch.fork)
@@ -3655,19 +3725,27 @@ export class ClaudeSubscriptionProviderService {
       this.queries.delete(input.threadId)
       this.controllers.delete(controller)
       this.activeThreads.delete(input.threadId)
-      releaseBotTemp?.()
-      // Claude Code read the settings when it started; nothing reads them once the turn ended.
-      if (lockedSettingsFolder) {
-        try {
-          rmSync(lockedSettingsFolder, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
-        } catch (error) {
-          console.warn('[claude] the settings file of a bot turn could not be removed', error instanceof Error ? error.message : String(error))
+      const settingsFolder = lockedSettingsFolder
+      const release = (): void => {
+        releaseBotTemp?.()
+        // Claude Code read the settings when it started; nothing reads them once the turn ended.
+        if (settingsFolder) {
+          try {
+            rmSync(settingsFolder, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+          } catch (error) {
+            console.warn('[claude] the settings file of a bot turn could not be removed', error instanceof Error ? error.message : String(error))
+          }
         }
       }
+      if (exiting) void exiting.then(release)
+      else release()
       if (steerTimer) clearInterval(steerTimer)
       input.signal?.removeEventListener('abort', cancel)
       const quota = (liveRun?.rateLimits ?? frames.rateLimits).planUse()
-      const report = { ...metrics.report(), ...(quota.length ? { quota } : {}) }
+      // Asked to resume a session, Claude Code ran the turn in another one: the conversation it held is not there.
+      const resumeLost = resume !== undefined && frames.sessionId !== undefined && frames.sessionId !== resume
+      if (resumeLost) console.warn('[claude-subscription] Claude Code was asked to resume a session and started another one', { threadId: input.threadId })
+      const report = { ...metrics.report(), ...(quota.length ? { quota } : {}), ...(resumeLost ? { resumeLost: true as const } : {}) }
       try {
         const baseline = metrics.snapshot()
         const sessionId = frames.sessionId
@@ -3770,6 +3848,7 @@ export class ClaudeSubscriptionProviderService {
       this.questions.dismissAllForThread(threadId)
     }
     this.queries.clear()
+    for (const { query } of this.oneShotExits.values()) query.close()
     for (const threadId of this.live.keys()) this.questions.dismissAllForThread(threadId)
     this.closeLive()
     this.readyToCommit.clear()

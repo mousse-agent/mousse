@@ -28,6 +28,8 @@ export type ClaudeSubscriptionMetrics = {
   promptCache?: { at: number; ttlMs?: number }
   /** The plan's usage windows Claude Code reported during the turn (`ProviderMetrics.quota`). */
   quota?: PlanWindowUse[]
+  /** Claude Code was asked to resume a session and ran the turn in another one (`ProviderMetrics.resumeLost`). */
+  resumeLost?: true
 }
 export type ClaudeUsageBaseline = {
   sessionId: string

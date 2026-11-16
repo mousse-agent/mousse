@@ -288,7 +288,8 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
           usage: report.usage ?? undefined,
           context: report.context,
           ...(report.promptCache ? { promptCache: report.promptCache } : {}),
-          ...(report.quota?.length ? { quota: report.quota } : {})
+          ...(report.quota?.length ? { quota: report.quota } : {}),
+          ...(report.resumeLost ? { resumeLost: true } : {})
         })
         if (report.usage)
           sink.usage({

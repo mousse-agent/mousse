@@ -165,8 +165,6 @@ export class RunningRegistry {
 
   /** What runs now for `scope`, oldest first. */
   async list(scope: RunningScope): Promise<RunningEntry[]> {
-    const snapshot = await this.read()
-    if (!snapshot.processes) return []
     const folders = scope.folders.map(canonical)
     const inFolders = (folder: string | undefined): boolean => Boolean(folder) && folders.some((root) => isInside(root, canonical(folder!)))
     const threadInScope = (threadId: string, folder: string | undefined): boolean => {
@@ -176,6 +174,18 @@ export class RunningRegistry {
       if (scope.botId && info?.botId === scope.botId) return true
       return inFolders(folder)
     }
+    // Where no process's working folder can be read (Windows), whether anything can be listed for the scope is known
+    // before the process table is read: a terminal, a bot's background command or an ended agent command of the scope.
+    // With none, the list is empty, and every turn's start is spared the table's read (about half a second there).
+    if (this.system.platform === 'win32') {
+      const possible =
+        this.sources.terminals().some((terminal) => terminal.pid && (terminal.threadId !== '__unbound__' ? threadInScope(terminal.threadId, terminal.cwd) : inFolders(terminal.cwd))) ||
+        this.sources.watchers().some((watcher) => watcher.pid && (watcher.botId === scope.botId || inFolders(watcher.cwd))) ||
+        [...this.noted.values()].some((command) => command.endedAt !== undefined && threadInScope(command.threadId, command.folder))
+      if (!possible) return []
+    }
+    const snapshot = await this.read()
+    if (!snapshot.processes) return []
     const tree = processTree(snapshot.processes)
     const claimed = new Set<number>()
     const entries: RunningEntry[] = []

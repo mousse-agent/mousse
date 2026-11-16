@@ -323,10 +323,11 @@ export class CodexAdapter implements ProviderAdapter {
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
         },
         context: result.usage.context ? { ...result.usage.context, modelName: result.model } : undefined,
-        ...(result.usage.quota?.length ? { quota: result.usage.quota } : {})
+        ...(result.usage.quota?.length ? { quota: result.usage.quota } : {}),
+        ...(result.resumeLost ? { resumeLost: true } : {})
       })
       sink.usage(usage)
-    } else sink.providerMetrics({ realModelName, totalResponseTimeMs })
+    } else sink.providerMetrics({ realModelName, totalResponseTimeMs, ...(result.resumeLost ? { resumeLost: true } : {}) })
     streams.thinking.complete()
     service.commitConversation(input.threadId, host.context.nativeHistoryAfterTurn(result.text))
     streams.text.complete(result.text)
