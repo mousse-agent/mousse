@@ -30,14 +30,15 @@ export function tellingChangeText(args: unknown): string | undefined {
   const change = args as Record<string, unknown>
   const parts: string[] = []
   if (typeof change.tellMe === 'string' && change.tellMe in TELL_ME_WORDS) {
-    const scope = typeof change.scheduleId === 'string' && change.scheduleId ? ' for one automation' : change.schedules === true ? ', its automations too' : ''
-    parts.push(`tell you ${TELL_ME_WORDS[change.tellMe as TellMe]}${scope}`)
+    parts.push(`tell you ${TELL_ME_WORDS[change.tellMe as TellMe]}${change.schedules === true ? ', its automations too' : ''}`)
   }
   const quiet = change.quietHours
   if (quiet === 'off') parts.push('no quiet hours')
   else if (quiet && typeof quiet === 'object' && typeof (quiet as QuietHours).from === 'string' && typeof (quiet as QuietHours).to === 'string' &&
     CLOCK.test((quiet as QuietHours).from) && CLOCK.test((quiet as QuietHours).to)) parts.push(`quiet hours ${(quiet as QuietHours).from} to ${(quiet as QuietHours).to}`)
-  if (change.canWakeMe === true) parts.push('it can wake you')
-  else if (change.canWakeMe === false) parts.push('it can’t wake you')
+  // With scheduleId only that automation's exception changes (`setTelling`), never the bot's own.
+  const who = typeof change.scheduleId === 'string' && change.scheduleId ? 'one of its automations' : 'it'
+  if (change.canWakeMe === true) parts.push(`${who} can wake you`)
+  else if (change.canWakeMe === false) parts.push(`${who} can’t wake you`)
   return parts.length ? `It would set: ${parts.join(', ')}.` : undefined
 }

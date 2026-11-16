@@ -54,7 +54,9 @@ describe('askText', () => {
 
   it('a telling_set call says what it would set', () => {
     expect(askCallNote('telling_set', { tellMe: 'needs_you', schedules: true, canWakeMe: true })).toBe('It would set: tell you when it needs you, its automations too, it can wake you.')
-    expect(askCallNote('telling_set', { tellMe: 'fyi', scheduleId: 's1' })).toBe('It would set: tell you with updates for one automation.')
+    // One automation's exception: only that automation changes, never the bot's own.
+    expect(askCallNote('telling_set', { scheduleId: 's1', canWakeMe: true })).toBe('It would set: one of its automations can wake you.')
+    expect(askCallNote('telling_set', { scheduleId: 's1', canWakeMe: false })).toBe('It would set: one of its automations can’t wake you.')
     expect(askCallNote('telling_set', { quietHours: 'off', canWakeMe: false })).toBe('It would set: no quiet hours, it can’t wake you.')
     // What the model wrote wrongly is left out; nothing left, no note.
     expect(askCallNote('telling_set', { tellMe: 'urgent', quietHours: { from: '25:00', to: '07:00' } })).toBeUndefined()
