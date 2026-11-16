@@ -81,3 +81,17 @@ it('R3-hook output without stored updates performs no confirmation write transac
     expect(transaction).not.toHaveBeenCalled()
   } finally { transaction.mockRestore() }
 })
+
+it('R4 a fresh note is not labelled a repeat beside a carried but unconfirmed note', async () => {
+  const t = await work()
+  f.bots.noteWork(botId, t.workId, 'First note.')
+  await finish(f, t.turn.payload, 'completed', { text: 'Initial findings.' })
+  const next = await start(f, t.workId, 2)
+  await finish(f, next.payload, 'failed', { outcome: { error: 'network_error' } })
+  f.bots.noteWork(botId, t.workId, 'Fresh note.')
+  await (f.bots as any).continueWith(t.workId, [f.store.activation(t.workId)!.status], { network: true })
+  const prompt = f.store.lastMainDispatch(t.workId)!.prompt.text
+  expect(prompt).toContain('(may be a repeat) First note.')
+  expect(prompt).toContain('- Fresh note.')
+  expect(prompt).not.toContain('(may be a repeat) Fresh note.')
+})

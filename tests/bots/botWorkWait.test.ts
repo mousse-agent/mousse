@@ -630,6 +630,10 @@ it.each(['restart', 'network', 'usage_retry'] as const)('N2 repeats a wait, note
   const retry = f.store.lastMainDispatch(workId)!
   expect(retry.n).toBeGreaterThan(2)
   for (const text of ['Check again with the evidence already read.', 'Remember the delivery evidence.', 'Which release?']) expect(retry.prompt.text).toContain(text)
+  if (failure !== 'usage_retry') {
+    expect(retry.prompt.text).toContain('(may be a repeat) Remember the delivery evidence.')
+    expect(retry.prompt.text).toContain('if you already acted on it, don\'t do it again.')
+  }
   const running = await start(f, workId, retry.n)
   ;(running.prepared as any).modelOutput?.()
   expect(f.store.unreadWorkWaits(workId)).toEqual([])
@@ -677,7 +681,8 @@ it.each(['restart', 'network'] as const)('N2 keeps a note without any wait histo
   }
   await flush()
   const retry = f.store.lastMainDispatch(workId)!
-  expect(retry.prompt.text).toContain('Use the ordinary work note.')
+  expect(retry.prompt.text).toContain('(may be a repeat) Use the ordinary work note.')
+  expect(retry.prompt.text).toContain('if you already acted on it, don\'t do it again.')
   const receiving = await start(f, workId, retry.n)
   ;(receiving.prepared as any).modelOutput?.()
   expect(f.store.unreadWorkNotes(workId)).toEqual([])
