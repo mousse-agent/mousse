@@ -2266,3 +2266,13 @@ it.each(['open', 'done'])('finds literal title and visible status with matching 
   }
   expect(buildFindIndex(turns, 'trip.pdf')).toHaveLength(0)
 })
+
+it('updates the more-arguments cue when a nested fold opens without scrolling', async () => {
+  fake.chats.inbox = [held()]
+  await open()
+  const region = host.querySelector<HTMLElement>('[aria-label="Complete arguments"]')!
+  Object.defineProperties(region, { scrollHeight: { configurable: true, value: 900 }, clientHeight: { configurable: true, value: 360 }, scrollTop: { configurable: true, value: 0 } })
+  const fold = region.querySelector('details')!
+  await act(async () => { fold.open = true; fold.dispatchEvent(new Event('toggle')) })
+  expect(host.textContent).toContain('More arguments below')
+})
