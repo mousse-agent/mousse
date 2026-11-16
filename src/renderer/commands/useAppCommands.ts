@@ -2,8 +2,10 @@ import { useEffect } from 'react'
 import type { MousseSettingsUpdate } from '../../shared/settings'
 import { applySideCardToggle, deriveSideCardState, nextSideCardToggleState } from '../components/sideCard/sideCardLogic'
 import { openThreadRenameDialog } from '../components/ThreadRenameDialog'
+import { showToast } from '../components/ui/Toast'
 import { openRailPage } from '../lib/railPages'
 import { mainAreaAvailable } from '../lib/mainAreaAvailable'
+import { reloadWindow } from '../services/reloadWindow'
 import { SURFACE_CHOICES, openSurface } from '../lib/surfaces'
 import {
   addProjectAndStartThread,
@@ -76,6 +78,9 @@ export function useAppCommands(): void {
   useCommand('terminal.open', () => openSurface('terminal'))
   // The built-in theme under the user theme stays on; only the user theme's colors and CSS go.
   useCommand('theme.builtIn', () => void window.mousse.settings.set({ appearance: { userTheme: '' } } as MousseSettingsUpdate).catch(logFailure('Turning off the custom theme')))
+  useCommand('window.reload', () => void reloadWindow().then((outcome) => {
+    if (outcome === 'unsaved') showToast({ message: 'Save or close unsaved files first', tone: 'attention', key: 'window.reload' })
+  }))
   useCommand('settings.open', () => void openRailPage('settings'))
   useCommand('automations.open', () => void openRailPage('automations'))
   useCommand('usage.open', () => void openRailPage('usage'))

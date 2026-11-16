@@ -29,6 +29,7 @@ export type CommandId =
   | 'mainArea.toggle'
   | 'terminal.open'
   | 'theme.builtIn'
+  | 'window.reload'
   | 'settings.open'
   | 'automations.open'
   | 'usage.open'
@@ -395,6 +396,19 @@ export const COMMANDS: readonly CommandDefinition[] = [
     title: 'Turn off custom theme',
     category: 'View',
     searchTerms: ['theme', 'appearance', 'css', 'reset', 'default'],
+    defaultBinding: null,
+    scope: 'global',
+    textInput: 'allow',
+    terminal: 'allow',
+    guest: 'allow'
+  },
+  {
+    // Recovers a broken layout without quitting. Saves autosaved edits first and refuses while unsaved edits remain.
+    // No key: a slip of the hand must not reload the window.
+    id: 'window.reload',
+    title: 'Reload window',
+    category: 'View',
+    searchTerms: ['refresh', 'restart', 'layout', 'developer'],
     defaultBinding: null,
     scope: 'global',
     textInput: 'allow',
