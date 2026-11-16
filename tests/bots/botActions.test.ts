@@ -1032,3 +1032,20 @@ it.each([false, true])('C4 bridge delivers a complete card or disables Send when
     expect(t.calls).toEqual([t.args])
   }
 })
+
+it('C4 About marks one service that asks first, preserving invalid marks and the off projection', async () => {
+  const t = await setup(true, false, true)
+  const permission = () => f.bots.service.get(t.botId).permissions.find(p => p.title === 'use your Mail tools')!
+  const settings = f.host.settings!.get()
+  settings.experimental.botAsksFirst = false
+  const before = permission()
+  settings.experimental.botAsksFirst = true
+  expect(permission()).toMatchObject({ mark: 'Asks first', asksFirst: true, note: 'Asks you first before it sends or changes anything' })
+  expect(permission().note).not.toContain('send, other')
+  for (const [state, mark] of [['gone', 'Gone from Mousse'], ['off', 'Switched off'], ['mcp_off', 'MCP is off'], ['changed', 'Changed']] as const) {
+    vi.spyOn(t.mcp, 'where').mockReturnValueOnce({ state, name: 'Mail', server: t.mcp.servers()[0] } as never)
+    expect(permission().mark).toBe(mark)
+  }
+  settings.experimental.botAsksFirst = false
+  expect(permission()).toEqual(before)
+})
