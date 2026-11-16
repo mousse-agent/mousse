@@ -58,17 +58,17 @@ function containsCredential(value: unknown): boolean {
   return Boolean(value && typeof value === 'object' && Object.entries(value).some(([key, item]) => containsCredential(key) || containsCredential(item)))
 }
 /** The review hides named sensitive values without claiming they are withheld from the call. */
-function reviewArguments(value: unknown): { args: unknown; hasHiddenValues: boolean } {
+function reviewArguments(value: unknown, schema: unknown): { args: unknown; hasHiddenValues: boolean } {
   let hasHiddenValues = false
-  const visit = (item: unknown): unknown => {
-    if (Array.isArray(item)) return item.map(visit)
+  const visit = (item: unknown, shape: any): unknown => {
+    if (Array.isArray(item)) return item.map((entry, i) => visit(entry, Array.isArray(shape?.items) ? shape.items[i] : shape?.items))
     if (item && typeof item === 'object') return Object.fromEntries(Object.entries(item).map(([key, entry]) => {
-      if (hiddenKey(key)) { hasHiddenValues = true; return [key, ACTION_HIDDEN_VALUE] }
-      return [key, visit(entry)]
+      if (shape?.properties && Object.hasOwn(shape.properties, key) && hiddenKey(key)) { hasHiddenValues = true; return [key, ACTION_HIDDEN_VALUE] }
+      return [key, visit(entry, shape?.properties?.[key])]
     }))
     return item
   }
-  return { args: visit(value), hasHiddenValues }
+  return { args: visit(value, schema), hasHiddenValues }
 }
 export interface ActionRow {
   id: string; call_key: string; bot_id: string; activation_id: string; status: string
@@ -89,6 +89,7 @@ interface Host {
   enabled(): boolean
   refresh(): Promise<void>
   park(row: BotActivationRow): void
+  schema(tool: BotMcpTool): unknown
   binding(row: BotActivationRow, tool: BotMcpTool): unknown | undefined
   post(row: BotActivationRow, id: string, text: string): void
   settled(row: BotActivationRow): void
@@ -120,7 +121,7 @@ export class BotActions {
     if (!binding) return { text: 'This tool changed. Carry on without it.', isError: true }
     if (containsCredential(args)) return { text: 'This contains something that looks like a secret. It is never sent through a tool this way. Send it without that value.', isError: true }
     const exact = JSON.stringify(args)
-    const review = reviewArguments(args)
+    const review = reviewArguments(args, this.host.schema(tool))
     if (exact.length > ACTION_MAX_ARGUMENT_CHARS)
       return { text: 'These arguments exceed the 256,000-character limit for a complete review. Nothing was held or sent. Send less.', isError: true }
     const id = `action_${randomUUID()}`
@@ -162,7 +163,7 @@ export class BotActions {
     try {
       const args: unknown = JSON.parse(action.exec_args)
       if (containsCredential(args) || actionDigest(args) !== action.args_digest) return undefined
-      const review = reviewArguments(args)
+      const review = reviewArguments(args, this.host.schema(JSON.parse(action.target_json)))
       if (canonicalJson(JSON.parse(action.args_json)) !== canonicalJson(review.args)
         || Boolean(JSON.parse(action.card_json ?? '{}').hasHiddenValues) !== review.hasHiddenValues) return undefined
       const binding = this.host.binding(row, JSON.parse(action.target_json))

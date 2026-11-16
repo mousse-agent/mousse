@@ -601,6 +601,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     refresh: async () => { await this.host.mcp?.warm() },
     park: (row) => { if (!this.park(row, 'approval')) throw new Error('work ended') },
     enabled: () => botAsksFirst(this.host.settings?.get()),
+    schema: (tool) => this.host.mcp?.inputSchema(tool),
     binding: (row, tool) => {
       const grant = this.store.activeGrant(row.botId)
       const current = this.store.activation(row.id)

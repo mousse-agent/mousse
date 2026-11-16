@@ -286,6 +286,11 @@ export class BotMcp implements BotMcpHost {
       .sort((a, b) => a.name.localeCompare(b.name))
   }
 
+  /** The installed schema, before descriptions are shortened for the model. */
+  inputSchema(tool: BotMcpTool): unknown {
+    return this.deps.catalog.servers(undefined).find(s => s.installationId === installationOf(tool.server))?.tools.find(t => t.toolName === tool.tool)?.inputSchema
+  }
+
   binding(tool: BotMcpTool): { serverId: string; tool: string; configDigest: string; schemaDigest: string } | undefined {
     if (!this.deps.enabled()) return undefined
     const server = this.deps.catalog.servers(undefined).find(s => s.installationId === installationOf(tool.server))
