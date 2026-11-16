@@ -73,12 +73,13 @@ async function setup(on: boolean, realServer = false, secondTool = false, thread
     await f.bots.service.answer(botId, f.store.openAsks(botId)[0]!.id, 'allow')
     await finish(f, askingThreads.payload)
   }
-  if (ownerTools) for (const tool of ['secrets', 'schedules', 'quick_actions', 'shell']) {
-    const request = await f.bots.activate({ botId, input: `Allow ${tool}`, clientRequestId: `permission-${tool}` })
-    const asking = await start(f, request.id)
-    asking.prepared.authority.escalate!({ permission: { tool }, reason: 'To help with this work' })
-    await f.bots.service.answer(botId, f.store.openAsks(botId)[0]!.id, 'allow')
-    await finish(f, asking.payload)
+  if (ownerTools) {
+    const current = f.bots.definitionOf(botId)
+    const held = f.store.activeGrant(botId)!.manifest
+    const manifest = { ...held, appTools: [...held.appTools, 'secrets', 'schedules', 'quick_actions'], tools: [...held.tools, 'shell' as const] }
+    const revision = f.host.definitions.publishRevision({ ...current, permissions: manifest })
+    f.store.setPublished(botId, revision.revision!)
+    f.store.approve(botId, botManifestDigest(manifest), manifest)
   }
   const grant = f.store.activeGrant(botId)!
   const manifest = { ...grant.manifest, mcp: server.tools.map(d => ({ serverId: 'mail', tool: d.toolName, ...(on ? { level: 'asks_first' as const } : {}) })) }
