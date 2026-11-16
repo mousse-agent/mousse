@@ -2270,8 +2270,9 @@ describe('a bot turn on Codex', () => {
   // Hand-authored wire replays: owner names × attachments × enabled/disabled entries.
   // Refused cases must never send thread/start (nor let leftover owner keys reach Codex).
   const reservedCases = [[], ['mousse'], ['mousse-relay'], ['mousse', 'mousse-relay']].flatMap((names) =>
-    ['none', 'mousse', 'both'].flatMap((attachment) => [true, false].map((enabled) => ({ names, attachment, enabled }))))
-  it.each(reservedCases)('contains reserved names $names with attachment $attachment, enabled=$enabled', async ({ names, attachment, enabled }) => {
+    ['none', 'mousse', 'both'].flatMap((attachment) => [true, false].flatMap((enabled) =>
+      ['effective', 'active layer', 'ignored layer'].map((source) => ({ names, attachment, enabled, source })))))
+  it.each(reservedCases)('contains reserved names $names with attachment $attachment, enabled=$enabled, $source', async ({ names, attachment, enabled, source }) => {
     const files = join(home, 'files')
     mkdirSync(files)
     const { bot } = botIn(files)
@@ -2283,9 +2284,10 @@ describe('a bot turn on Codex', () => {
       enabled, url: 'https://owner.invalid/mcp', enabled_tools: ['owner_tool'],
       http_headers: { Owner: 'leftover' }, bearer_token_env_var: 'OWNER_TOKEN'
     }]))
-    const collision = names.find((name) => mcp && (name === 'mousse' || attachment === 'both'))
+    const activeNames = source === 'ignored layer' ? [] : names
+    const collision = activeNames.find((name) => mcp && (name === 'mousse' || attachment === 'both'))
     const config = {
-      ...Object.fromEntries(enabled ? names.map((name) => [`mcp_servers.${name}.enabled`, false]) : []),
+      ...Object.fromEntries(enabled ? activeNames.map((name) => [`mcp_servers.${name}.enabled`, false]) : []),
       ...NO_COMMANDS, model_provider: 'openai',
       ...(mcp ? {
         'mcp_servers.mousse.url': mcp.url,
@@ -2303,17 +2305,28 @@ describe('a bot turn on Codex', () => {
     const replay = transport([
       ...handshake(),
       out({ id: 4, method: 'config/read', params: { includeLayers: true } }),
-      inn({ id: 4, result: { config: { mcp_servers: servers }, layers: [] } }),
+      inn({ id: 4, result: {
+        config: { mcp_servers: source === 'effective' ? servers : {} },
+        layers: source === 'effective' ? [] : [{ disabledReason: source === 'ignored layer' ? 'untrusted' : null, config: { mcp_servers: servers } }]
+      } }),
       ...(!collision ? [
         ...threadStart(5, threadParams({ config, ...(mcp ? { developerInstructions: mousseOrchestrationInstructions() } : {}) })),
         ...turnStart(6, 'go'), completed('completed')
-      ] : [])
+      ] : []),
+      // The same owner's next thread still runs, with exactly the usual attachment overrides.
+      ...threadStart(collision ? 5 : 7, threadParams({
+        config: Object.fromEntries(Object.entries(config).filter(([key]) => key === 'model_provider' || (key.startsWith('mcp_servers.') && !key.endsWith('.enabled')))),
+        ...(mcp ? { developerInstructions: mousseOrchestrationInstructions() } : {})
+      })),
+      ...turnStart(collision ? 6 : 8, 'owner'), completed('completed')
     ])
-    const run = new CodexAdapter(() => service(replay)).startTurn(input({ prompt: 'go' }), recordingSink(), control(), { ...host(mcp), bot: bot as never })
+    const adapter = new CodexAdapter(() => service(replay))
+    const run = adapter.startTurn(input({ prompt: 'go' }), recordingSink(), control(), { ...host(mcp), bot: bot as never })
     if (collision) await expect(run).rejects.toMatchObject({
       code: 'policy_unenforceable', message: expect.stringMatching(new RegExp(`.*${collision}.*[Rr]ename`))
     })
     else await run
+    await adapter.startTurn(input({ prompt: 'owner', threadId: 'owner-thread' }), recordingSink(), control(), host(mcp))
     replay.assertDone()
   })
 

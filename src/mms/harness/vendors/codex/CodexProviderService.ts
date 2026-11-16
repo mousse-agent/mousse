@@ -95,7 +95,7 @@ import { readCodexUserSetup, type CodexUserSetup } from './userSetup'
 import { isMousseTempEntry } from '../../../data/closedPlaces'
 import { CODEX_ONE_SHOT_ITEMS, codexOneShotConfig, codexOneShotRunsOn } from './oneShot'
 import type { BotAuthority } from '../../../../shared/bots/personal/authority'
-import { CODEX_BOT_USER_MCP_UNREADABLE, codexBotCommand, codexBotFileChange, codexBotMcpOverrides } from './botApprovals'
+import { CODEX_BOT_USER_MCP_UNREADABLE, codexBotCommand, codexBotFileChange, codexBotMcpCollisionText, codexBotMcpOverrides } from './botApprovals'
 import type { ChildTurnPolicy } from '../../adapter'
 import { ONE_SHOT_TASK_TEXT, type OneShotSpec } from '../../driver'
 import { harnessAppError } from '../../../../shared/harness/types'
@@ -2831,6 +2831,10 @@ export class CodexProviderService {
       signal.throwIfAborted()
       // The owner's own Codex config can't be read: neither its MCP servers nor its process-wide features can be checked.
       if (setup.mcpServers === null || setup.features === null) throw refuse(CODEX_BOT_SETUP_UNREADABLE_TEXT)
+      // Even a disabled owner entry leaves keys behind when Codex merges the attachment's table.
+      const collision = setup.reservedMcpServers?.find((name) =>
+        name === 'mousse' ? Boolean(input.mcp) : Boolean(input.mcp?.relay))
+      if (collision) throw refuse(codexBotMcpCollisionText(collision))
       botOverrides = codexBotMcpOverrides(setup.mcpServers)
       if (!botOverrides) throw refuse(CODEX_BOT_USER_MCP_UNREADABLE)
       // A feature a thread's config can't switch off, on in the owner's config: the bot's turn doesn't run.

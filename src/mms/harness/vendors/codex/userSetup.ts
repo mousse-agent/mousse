@@ -7,6 +7,8 @@ import type { CodexConnection } from './CodexAppServerClient'
 export interface CodexUserSetup {
   /** Names of every enabled MCP server in the effective config; null when it cannot be read. */
   mcpServers: string[] | null
+  /** Reserved names defined in any active layer, including disabled entries whose keys still merge. */
+  reservedMcpServers?: string[]
   /** The features of the effective config (`config.features`); null when it cannot be read. */
   features: Record<string, unknown> | null
 }
@@ -30,10 +32,19 @@ export async function readCodexUserSetup(conn: CodexConnection, cwd: string | nu
   try {
     const response = await conn.request('config/read', { ...(cwd ? { cwd } : {}), includeLayers: true }, { timeoutMs: 15_000 })
     const names = new Set(enabledServers(response.config.mcp_servers))
-    for (const layer of response.layers ?? [])
-      if (!layer.disabledReason) for (const name of enabledServers(layer.config?.mcp_servers)) names.add(name)
+    const reserved = new Set<string>()
+    const collectReserved = (servers: Record<string, ServerEntry> | null | undefined): void => {
+      for (const name of Object.keys(servers ?? {}))
+        if (name === 'mousse' || name === 'mousse-relay') reserved.add(name)
+    }
+    collectReserved(response.config.mcp_servers)
+    for (const layer of response.layers ?? []) {
+      if (layer.disabledReason) continue
+      for (const name of enabledServers(layer.config?.mcp_servers)) names.add(name)
+      collectReserved(layer.config?.mcp_servers)
+    }
     const features = response.config.features
-    return { mcpServers: [...names], features: features && typeof features === 'object' ? features as Record<string, unknown> : {} }
+    return { mcpServers: [...names], reservedMcpServers: [...reserved], features: features && typeof features === 'object' ? features as Record<string, unknown> : {} }
   } catch {
     return { mcpServers: null, features: null }
   }
