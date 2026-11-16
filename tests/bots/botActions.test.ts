@@ -332,3 +332,15 @@ it('an ambiguous transport failure settles uncertain and never logs executable a
   expect(f.store.lastMainDispatch(t.workId)?.prompt.text).toContain('check before trying again')
   expect(JSON.stringify(logs)).not.toContain('private-call-secret')
 })
+
+it.each(['held', 'stopped', 'switch_off'] as const)('R1 summaries and lists survive an %s action row', async state => {
+  const t = await setup(true)
+  await t.call()
+  await finish(f, t.work.payload)
+  if (state === 'stopped') await f.bots.service.workStop(t.botId, t.workId)
+  if (state === 'switch_off') f.host.settings!.get().experimental.botAsksFirst = false
+  const summary = f.bots.service.list().bots.find(b => b.id === t.botId)!
+  expect(() => f.bots.service.get(t.botId)).not.toThrow()
+  if (state === 'stopped') expect(summary.needsOwner).not.toBe(true)
+  else expect(summary).toMatchObject({ needsOwner: true, stateText: 'Wants to send: Send this action?' })
+})
