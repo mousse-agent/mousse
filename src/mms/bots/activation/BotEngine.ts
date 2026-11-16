@@ -5438,7 +5438,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (row.lane === 'chat') return `[Mousse] The owner allowed you to ${allowed.join(' and ')} while you answered; you have it now. Your reply so far was already sent.${interrupted}\n\nDo now what you skipped without it, and tell the owner what you found.`
       const allowedLine = input.actionCaused
         ? `${lead} The owner also allowed you to ${allowed.join(' and ')}; you have it now.`
-        : `${input.answered && !(hasActionUpdate && orderedQuestion) ? `${input.answered} ` : ''}The owner allowed you to ${allowed.join(' and ')} while you worked; you have it now.${hasActionUpdate && input.waited ? ' Your wait is over.' : ''}`
+        : `${input.answered && !orderedQuestion ? `${input.answered} ` : ''}The owner allowed you to ${allowed.join(' and ')} while you worked; you have it now.${input.waited ? ' Your wait is over.' : ''}`
       const notes = updates ? `\n\n${updates}` : ''
       const sent = input.afterReport ? ' What you had so far was already sent to them.' : ''
       return `[Mousse] ${allowedLine}${sent}${interrupted}${notes}\n\nDo now what you skipped without it${notes ? ', and take the owner\'s notes into account' : ''}. Your last message is your updated report: lead with what changed, in plain words.`
