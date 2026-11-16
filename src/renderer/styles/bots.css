@@ -637,7 +637,7 @@ button.bot-reaction:hover, button.bot-reaction:focus-visible { background: color
 .bot-action-hidden { display: inline-block; font-style: italic; color: var(--text-secondary); border: 1px dashed var(--border); border-radius: 4px; padding: 0 4px; }
 .bot-action-card blockquote { margin: 12px 0; padding: 8px 12px; border-left: 2px solid var(--border); max-height: 240px; overflow: auto; }
 
-.bot-action-arguments .bot-action-text { white-space: pre-wrap; margin: 4px 0; padding: 4px 8px; border-left: 2px solid var(--border); }
+.bot-action-arguments .bot-action-text { max-height: none; overflow: visible; white-space: pre-wrap; margin: 4px 0; padding: 4px 8px; border-left: 2px solid var(--border); }
 .bot-action-note { white-space: normal; }
 .bot-action-notice { display: flex; align-items: baseline; gap: 6px; }
 .bot-action-notice > svg { flex: 0 0 14px; }
@@ -650,3 +650,5 @@ button.bot-reaction:hover, button.bot-reaction:focus-visible { background: color
 .bot-action-paths details { display: inline-block; max-width: 100%; }
 
 .bot-action-alphabet { display: inline-flex; gap: 4px; align-items: baseline; color: var(--text-secondary); font-family: var(--font-ui, sans-serif); font-size: 11px; margin-left: 4px; }
+
+.bot-action-card blockquote[aria-label="Tool result"] { white-space: pre-wrap; }
