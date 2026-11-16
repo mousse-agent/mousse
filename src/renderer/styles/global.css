@@ -406,6 +406,14 @@ body,
   background: var(--app-window-bg);
 }
 
+/* The shell never scrolls: Chromium lets scrollIntoView and focus scroll an overflow: hidden box, and once moved the
+   whole app up and left. clip can't be scrolled at all. (On html it would mean hidden anyway: the page itself is put
+   back by keepShellUnscrolled.) */
+body,
+#root {
+  overflow: clip;
+}
+
 #root {
   display: flex;
   flex-direction: column;
@@ -527,7 +535,8 @@ html.platform-darwin .overlay-titlebar {
   flex-direction: column;
   min-height: 0;
   min-width: 0;
-  overflow: hidden;
+  /* A frame pane: clip, so scrollIntoView and focus can't scroll it (see body and #root above). */
+  overflow: clip;
 }
 
 .keep-mounted-pane[hidden] {
