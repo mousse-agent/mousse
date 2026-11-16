@@ -364,3 +364,17 @@ it.each(['plain', 'note', 'permission'] as const)('R2 carries the action outcome
   if (context === 'note') expect(prompt).toContain('Also record the delivery.')
   if (context === 'permission') expect(prompt).toContain('allowed')
 })
+it.each(['not_dispatched', 'tool_error', 'timeout', 'dropped'] as const)('R3 distinguishes a %s failure from an unconfirmed send', async kind => {
+  const t = await setup(true)
+  await t.call()
+  await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  if (kind === 'tool_error') vi.spyOn(t.manager, 'callTool').mockResolvedValueOnce({ content: [{ type: 'text', text: 'Recipient does not exist' }], isError: true } as never)
+  else vi.spyOn(t.manager, 'callTool').mockRejectedValueOnce(Object.assign(new Error('failed'), { category: kind === 'timeout' ? 'timeout' : kind === 'not_dispatched' ? 'unreachable' : 'connection-lost', ...(kind === 'not_dispatched' ? { mcpNotDispatched: true } : {}) }))
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  await flush()
+  const status = kind === 'tool_error' || kind === 'not_dispatched' ? 'failed' : 'uncertain'
+  expect(f.bots.actions.forWork(t.workId)).toMatchObject({ status, exec_args: null })
+  expect(f.store.message(a.message_id)?.text).toBe(status === 'failed' ? 'Not sent' : "Couldn't tell if it went through")
+  if (kind === 'tool_error') expect(f.store.lastMainDispatch(t.workId)!.prompt.text).toContain('Recipient does not exist')
+})
