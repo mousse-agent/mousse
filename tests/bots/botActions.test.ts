@@ -1518,3 +1518,28 @@ it.each(['card', 'request'] as const)('R2-2 forgetting the %s uses the appropria
     expect(progressEnd).toHaveBeenCalledWith(t.botId, t.workId, false)
   }
 })
+
+it('R2-3 allowing use your threads from chat preserves a sendable card', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Use my threads', clientRequestId: 'allow-threads-with-card' })
+  const chat = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
+  const asking = await start(f, chat.id)
+  asking.prepared.authority.escalate!({ permission: { tool: 'threads' }, reason: 'Help in threads' })
+  await f.bots.service.answer(t.botId, f.store.openAsks(t.botId)[0].id, 'allow')
+  await finish(f, asking.payload)
+  expect(f.bots.actions.get(a.id)?.status).toBe('open')
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  expect(t.calls).toEqual([t.args])
+})
+
+it('R2-3 every grant approval checks removal of the held pair in the grant transaction', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  const grant = f.store.activeGrant(t.botId)!
+  const removed = { ...grant.manifest, mcp: [] }
+  f.store.approve(t.botId, botManifestDigest(removed), removed)
+  expect(f.bots.actions.get(a.id)).toMatchObject({ status: 'withdrawn', exec_args: null })
+})
