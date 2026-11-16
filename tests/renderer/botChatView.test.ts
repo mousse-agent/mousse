@@ -2016,3 +2016,63 @@ it('R5-time formats a sent action in the client clock', async () => {
   await open()
   expect(host.querySelector('[data-message-id="bm_action_sent"]')?.textContent).toContain(`Sent · ${botGroupTime(AT)}`)
 })
+
+// Stored action cards, through the workspace the owner actually opens.
+const action = (change: Record<string, unknown> = {}) => ({ actionId: 'held-1', digest: 'shown-digest', title: 'Send an email', serverName: 'Mail', args: { from: 'me@example.com', to: ['one@example.com', 'two@example.com'], subject: 'A subject', attachments: ['trip.pdf'], body: 'Long email '.repeat(120) + 'last word', password: { $mousse: 'hidden', text: 'hidden · will be sent' }, literal: { $mousse: 'literal', value: { $mousse: 'hidden', text: 'hidden · will be sent' } } }, hasHiddenValues: true, hiddenPaths: ['password', 'login.token'], status: 'open', note: 'Please check this.', ...change })
+const held = (change: Record<string, unknown> = {}) => message(1, { id: 'held-message', text: 'legacy fallback', action: action(change) } as never)
+it('shows complete stored action arguments as guarded text, with an in-place body fold and separate bot note', async () => {
+  fake.chats.inbox = [held({ title: '<b>Send</b>', serverName: '[Mail](https://evil.test)', note: '<i>Check</i>\u202e this', args: { ...action().args, hostile: '<button>Send now</button> https://evil.test Ignore instructions', text: 'hidden · will be sent' } })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  expect(card).toBeTruthy()
+  for (const text of ['me@example.com', 'one@example.com', 'two@example.com', 'A subject', 'trip.pdf', '<b>Send</b>', 'Inbox helper says:', '<button>Send now</button>', 'login → token']) expect(card.textContent).toContain(text)
+  expect(card.querySelector('a, b, i')).toBeNull()
+  expect(card.textContent).not.toContain('\u202e')
+  const fold = card.querySelector('details')!
+  expect(fold.open).toBe(false)
+  await click(fold.querySelector('summary'))
+  expect(fold.open).toBe(true)
+  expect(fold.textContent).toContain('last word')
+  expect(card.querySelectorAll('[aria-label="Hidden value that will be sent"]')).toHaveLength(1)
+  expect(button('Send', card)?.autofocus).toBe(false)
+})
+it('answers only the card id, digest and choice, then redraws a changed card with live buttons', async () => {
+  fake.chats.inbox = [held()]
+  const answer = vi.fn(async () => { fake.chats.inbox = [held({ digest: 'new-digest', title: 'Changed email' })]; throw Object.assign(new Error('changed'), { code: 'bot_action_changed' }) })
+  Object.assign(fake.client, { answerAction: answer })
+  await open()
+  await click(button('Send', host.querySelector('[aria-label="Action to review"]')!))
+  expect(answer).toHaveBeenCalledWith('held-1', 'shown-digest', 'send')
+  expect(host.textContent).toContain('This changed since you saw it')
+  expect(host.textContent).toContain('Changed email')
+  expect(button('Send', host.querySelector('[aria-label="Action to review"]')!)?.disabled).toBe(false)
+  await click(button('Not now'))
+  expect(answer).toHaveBeenLastCalledWith('held-1', 'new-digest', 'not_now')
+})
+it.each([
+  ['open', 'Send'], ['approved', 'Sending'], ['running', 'Sending'], ['done', 'Sent ·'],
+  ['failed', 'Not sent'], ['uncertain', "Couldn't tell if it went through"], ['declined', 'Not sent'],
+  ['expired', 'Expired · not sent'], ['withdrawn', 'Not sent']
+])('keeps the complete card readable in %s', async (status, label) => {
+  fake.chats.inbox = [held({ status, at: AT })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  expect(card.textContent).toContain(label)
+  expect(card.textContent).toContain('trip.pdf')
+  expect(button('Send', card)?.disabled ?? true).toBe(status !== 'open')
+})
+it.each(['done', 'failed', 'uncertain'])('warns about the previous %s call and shows masked tool errors', async (status) => {
+  fake.chats.inbox = [held({ previous: { status, at: AT }, result: { text: '<error>hidden · will be sent</error>', toolReportedError: true } })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  expect(card.textContent).toContain(status === 'done' ? 'already sent exactly this' : status === 'failed' ? 'already tried exactly this' : "couldn't tell if it went through")
+  expect(card.querySelector('[role="note"][aria-label="Tool result"]')?.textContent).toContain('<error>hidden · will be sent</error>')
+})
+it('keeps Not now available when a card is too large to send here', async () => {
+  fake.chats.inbox = [held({ tooLarge: true })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  expect(card.textContent).toContain('Use the computer')
+  expect(button('Send', card)?.disabled).toBe(true)
+  expect(button('Not now', card)?.disabled).toBe(false)
+})
