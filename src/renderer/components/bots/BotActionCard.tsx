@@ -121,9 +121,9 @@ export function BotActionCard({ card, botId, botName, messageId }: { card: BotAc
   </>
   return <section className="bot-action-card bot-ask-replies" aria-label="Action to review">
     <p className="bot-action-title" aria-label="Action summary"><span data-find-text data-message-id={messageId} data-part-index="0">{actionTitle(card)}</span> · <span className="bot-action-server">{actionText(card.serverName)}</span></p>
-    {card.status === 'open' ? argumentsView : <details aria-label={reviewLabel(card)}><summary>{reviewLabel(card)}</summary>{argumentsView}</details>}
+    {actionStatus(card) && <p role="status" className="bot-action-outcome" data-find-text data-message-id={messageId} data-part-index="1">{actionStatus(card)}</p>}
     {card.result && (card.status === 'open' || card.result.toolReportedError) && <blockquote role="note" aria-label="Tool result">{actionText(card.result.text)}</blockquote>}
-    {actionStatus(card) && <p role="status" className="bot-question-settled" data-find-text data-message-id={messageId} data-part-index="1">{actionStatus(card)}</p>}
+    {card.status === 'open' ? argumentsView : <details aria-label={reviewLabel(card)}><summary>{reviewLabel(card)}</summary>{argumentsView}</details>}
     {refusal && <p role="status" className="bot-action-notice"><CircleAlert size={14} aria-hidden />{actionText(refusal.text).replace(/\s+/g, ' ')}</p>}
     {card.status === 'open' && <>
       {previous && <p role="note" className="bot-action-notice"><CircleAlert size={14} aria-hidden />{actionText(botName)} {previous.status === 'done' ? 'already sent exactly this' : previous.status === 'failed' ? 'already tried exactly this; the tool reported an error' : "already tried exactly this and couldn't tell if it went through"} at {repeatedAt}</p>}

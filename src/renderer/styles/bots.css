@@ -653,3 +653,5 @@ button.bot-reaction:hover, button.bot-reaction:focus-visible { background: color
 .bot-action-alphabet { display: inline-flex; gap: 4px; align-items: baseline; color: var(--text-secondary); font-family: var(--font-ui, sans-serif); font-size: 11px; margin-left: 4px; }
 
 .bot-action-card blockquote[aria-label="Tool result"] { white-space: pre-wrap; }
+
+.bot-action-outcome { color: var(--text-primary); font-size: inherit; margin: 4px 0 8px; }
