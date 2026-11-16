@@ -473,3 +473,11 @@ it('S3 removes a hidden executable value echoed by a result on settlement', asyn
   expect(f.bots.actions.forWork(t.workId)?.result_json).not.toContain('hunter2')
   expect(new BotMemoryStore({ db: f.store.db }).actions(t.botId).map(a => a.result_json).join()).not.toContain('hunter2')
 })
+it('S4 refuses a stored target changed to another granted tool with the same schema', async () => {
+  const t = await setup(true, false, true)
+  await t.call()
+  const a = f.bots.actions.forWork(t.workId)!
+  f.store.run('UPDATE bot_actions SET target_json = ? WHERE id = ?', JSON.stringify({ server: 'mail', tool: 'other' }), a.id)
+  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow('changed')
+  expect(t.calls).toEqual([])
+})
