@@ -15,9 +15,22 @@ export function secretForms(value: string): string[] {
 
 export type SecretMasker = (text: string) => string
 
+/** The shortest line of a multiline secret masked on its own; shorter lines (a PEM's last row, `-----`) are too common. */
+export const MIN_SECRET_LINE_LENGTH = 8
+
+/**
+ * Each substantial line of a multiline secret (a private key, a service account file): a file-reading tool that numbers
+ * its lines splits the whole value, so each line is masked on its own as well.
+ */
+function secretLines(value: string): string[] {
+  const lines = value.split(/\r?\n/)
+  if (lines.length < 2) return []
+  return [...new Set(lines.map((line) => line.trim()).filter((line) => line.length >= MIN_SECRET_LINE_LENGTH))]
+}
+
 /** A function that replaces every form of the given secrets in a text with `[secret NAME hidden]`; undefined when there is none. */
 export function secretMasker(secrets: ReadonlyArray<{ name: string; value: string }>): SecretMasker | undefined {
-  const pairs = secrets.flatMap(({ name, value }) => secretForms(value).map((form) => ({ form, mask: secretMask(name) })))
+  const pairs = secrets.flatMap(({ name, value }) => [...secretForms(value), ...secretLines(value)].map((form) => ({ form, mask: secretMask(name) })))
   if (pairs.length === 0) return undefined
   pairs.sort((a, b) => b.form.length - a.form.length)
   return (text) => {
