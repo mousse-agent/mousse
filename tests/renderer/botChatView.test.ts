@@ -2319,3 +2319,10 @@ it('notes non-ASCII address and phone letters or digits without warning on ordin
   for (const block of blocks.slice(0, 4)) expect(block.textContent).toContain('Contains letters or digits outside A–Z and 0–9')
   expect(blocks[4].textContent).toBe('Мария Иванова')
 })
+
+it('shows field-name line breaks as marks and gives an empty field a name', async () => {
+  fake.chats.inbox = [held({ args: { 'to\nalice@example.com': 'evil@example.com', '': 'value' } })]
+  await open()
+  const names = [...host.querySelectorAll('[aria-label="Complete arguments"] dt')].map(item => item.textContent)
+  expect(names).toEqual(['to↵alice@example.com', '(no name)'])
+})
