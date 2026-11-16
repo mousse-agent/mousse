@@ -1019,6 +1019,28 @@ describe('MmsProtocolServer + LocalMmsClient', () => {
     await client.close()
   })
 
+  it('broadcasts telling_set quiet-hours writes and off to every subscribed window', async () => {
+    const clients = [1, 2].map(() => new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType: 'gui' }))
+    const received: Array<Array<import('../src/shared/settings').MousseSettings>> = [[], []]
+    try {
+      for (const [i, client] of clients.entries()) {
+        await client.connect()
+        client.onEvent(e => { if (e.type === 'settings.changed') received[i]!.push((e.data as { settings: import('../src/shared/settings').MousseSettings }).settings) })
+        await client.subscribe(0)
+      }
+      const services = await mms.getProfileServices(mms.profileId)
+      const bots = services.personalBots!
+      const { bot } = await bots.service.create({ name: 'Quiet helper', description: 'Check reports', look: {} as any, clientRequestId: 'quiet-broadcast-bot' })
+      const owner = await bots.enqueueChat(bot.id, 'chat:quiet-broadcast', 'Set quiet hours')
+      for (const quietHours of [{ from: '22:00', to: '08:00' }, 'off', { from: '23:00', to: '06:00' }] as const) {
+        bots.setTelling(bot.id, owner.id, { quietHours })
+        for (const client of clients) await client.request('capabilities')
+        for (const events of received) expect(events.at(-1)?.notifications.quietHours).toEqual(quietHours === 'off' ? undefined : quietHours)
+      }
+      for (const events of received) expect(events).toHaveLength(3)
+    } finally { await Promise.all(clients.map(c => c.close())) }
+  })
+
   it('negotiates presence only for GUI sessions and adds the automation silence flag only while away at night', async () => {
     const { OwnerQuietHours, APP_PRESENCE_CAPABILITY } = await import('../src/mms/notifications/OwnerQuietHours')
     let now = Date.parse('2026-11-08T03:00:00Z')
