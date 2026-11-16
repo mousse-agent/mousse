@@ -906,3 +906,22 @@ it.each(['2024', 'abcd1234', '123456789'] as const)('N4 replaces short hidden va
   else expect(text).not.toContain(value)
   expect(text).toContain('exact=[held back: looks like a secret]; end')
 })
+
+it.each(['if', 'then', 'else', 'dependentSchemas', 'prefixItems', '$dynamicRef'] as const)('R3-schema hides declared secrets through %s', async form => {
+  const t = await setup(true)
+  const creds = { properties: { password: {} } }
+  const schema = form === 'dependentSchemas' ? { dependentSchemas: { account: creds } }
+    : form === 'prefixItems' ? { type: 'array', prefixItems: [creds], items: {} }
+      : form === '$dynamicRef' ? { $dynamicRef: '#creds' } : { [form]: creds }
+  t.descriptor.inputSchema = { properties: { meta: schema } } as never
+  Object.assign(t.args, { meta: form === 'prefixItems' ? [{ password: 'declared-private-value' }, { password: 'undeclared visible' }] : { password: 'declared-private-value' } })
+  await t.call()
+  const a = f.bots.actions.forWork(t.workId)!
+  expect(a.args_json).not.toContain('declared-private-value')
+  expect(f.store.message(a.message_id)!.text).not.toContain('declared-private-value')
+  expect(JSON.parse(a.card_json!)).toMatchObject({ hasHiddenValues: true })
+  if (form === 'prefixItems') expect(JSON.parse(a.args_json).meta[1].password).toBe('undeclared visible')
+  await finish(f, t.work.payload)
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  expect(t.calls).toEqual([t.args])
+})
