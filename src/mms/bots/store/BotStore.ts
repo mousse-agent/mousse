@@ -1273,7 +1273,10 @@ export class BotStore {
     if (to === 'failed' || to === 'cancelled' || to === 'done') return this.db.transaction(() => {
       const moved = this.moveActivationRow(id, from, to, patch)
       if (moved && to !== 'done') this.withdrawUnpostedQuestions(id)
-      if (moved) this.withdrawWorkQuestions(id)
+      if (moved) {
+        this.withdrawWorkQuestions(id)
+        this.run("UPDATE bot_reminders SET status = 'cancelled', delivered_at = ? WHERE work_id = ? AND status = 'waiting'", this.now(), id)
+      }
       return moved
     })
     return this.moveActivationRow(id, from, to, patch)
@@ -1960,12 +1963,18 @@ export class BotStore {
 
   // -- Reminders (bot_reminders, v6): a bot's one-off times; repeating ones are schedules in the shared store --------
 
-  insertReminder(row: Omit<BotReminderRow, 'workId' | 'status' | 'deliveredAt' | 'messageId' | 'activationId' | 'wake' | 'event' | 'fired' | 'chain' | 'snoozedFrom' | 'ownerSet'> & Partial<Pick<BotReminderRow, 'wake' | 'event' | 'chain' | 'ownerSet' | 'snoozedFrom'>>): void {
+  insertReminder(row: Omit<BotReminderRow, 'workId' | 'status' | 'deliveredAt' | 'messageId' | 'activationId' | 'wake' | 'event' | 'fired' | 'chain' | 'snoozedFrom' | 'ownerSet'> & Partial<Pick<BotReminderRow, 'wake' | 'event' | 'chain' | 'ownerSet' | 'snoozedFrom' | 'workId'>>): void {
     this.run(
-      "INSERT INTO bot_reminders(id, bot_id, due_at, text, work_title, work_brief, reply_to, created_at, status, wake, event_json, chain, owner_set, snoozed_from) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'waiting', ?, ?, ?, ?, ?)",
+      "INSERT INTO bot_reminders(id, bot_id, due_at, text, work_title, work_brief, reply_to, created_at, status, wake, event_json, chain, owner_set, snoozed_from, work_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'waiting', ?, ?, ?, ?, ?, ?)",
       row.id, row.botId, row.dueAt, row.text, row.work?.title ?? null, row.work?.brief ?? null, row.replyTo, row.createdAt,
-      row.wake ? 1 : 0, row.event ? JSON.stringify(row.event) : null, row.chain ?? 0, row.ownerSet == null ? null : row.ownerSet ? 1 : 0, row.snoozedFrom ?? null
+      row.wake ? 1 : 0, row.event ? JSON.stringify(row.event) : null, row.chain ?? 0, row.ownerSet == null ? null : row.ownerSet ? 1 : 0, row.snoozedFrom ?? null, row.workId ?? null
     )
+  }
+
+  /** Latest wait, retained after delivery until its continuation is dispatched. */
+  workWait(workId: string): BotReminderRow | undefined {
+    const row = this.get('SELECT * FROM bot_reminders WHERE work_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1', workId)
+    return row ? reminderOf(row) : undefined
   }
 
   /** How many wakes a bot set since `since`, cancelled ones too (the daily budget). */

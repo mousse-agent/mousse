@@ -1769,7 +1769,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (!stuck.has(row.botId)) stuck.set(row.botId, this.store.registry(row.botId)?.error?.code === 'bot_journal_failed')
       return !stuck.get(row.botId) && this.runSlotFree(row)
     }
-    const waiting = this.store.activationsWith(['blocked']).filter((row) => row.lane === 'run' && !tried.has(row.id) && workWaits(row) && this.allRunsEnded(row) && this.mayGoOn(row)).sort(runOrder)
+    const waiting = this.store.activationsWith(['blocked']).filter((row) => row.lane === 'run' && !tried.has(row.id) && workWaits(row) && this.allRunsEnded(row) && this.mayGoOn(row)).sort((a, b) => Number(a.endReason === 'wait_ready') - Number(b.endReason === 'wait_ready') || runOrder(a, b))
     const resume = waiting.find(may)
     if (resume) return { resume }
     const queued = this.store.activationsWith(['queued']).filter((row) => row.lane === 'run').sort(runOrder).find(may)
@@ -2157,6 +2157,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private readonly workWaitLookups: WorkWaitLookups = { store: () => this.store }
 
   private readonly workWaitFacts: WorkWaitFacts = {
+    timerExists: (row) => { const wait = this.store.workWait(row.id); return Boolean(wait && wait.status !== 'cancelled') },
     usageResumable: (row) => this.usageResumable(row),
     questionExists: (row) => Boolean(this.store.workQuestion(row.id)),
     roomStranded: (row) => {
@@ -3208,7 +3209,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const subagent = input.role === 'subagent'
     // Work that asked its owner a question in this dispatch ends its turn: every later call is refused (never a wall,
     // which would cut the turn as an interruption), and the answer continues it. It only refuses; it never allows.
-    const endTurn = (): string | undefined => (input.role === 'activation' && this.askedIn.get(row.id) === input.mainN ? QUESTION_END_TURN_TEXT : undefined)
+    const endTurn = (): string | undefined => (input.role === 'activation' && this.askedIn.get(row.id) === input.mainN ? (this.store.workWait(row.id)?.status === 'waiting' ? 'This work is waiting. End your turn now; it carries on here when the time or event comes.' : QUESTION_END_TURN_TEXT) : undefined)
     const check = (call: NormalisedCall): BotCheck => {
       this.progress(row.id)
       const stop = endTurn()
@@ -4689,6 +4690,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         } else if (openWalls.length) {
           // The chat turn asked (`escalate`): it waits for the owner with every card on its message.
           this.store.moveActivation(row.id, ['running'], 'waiting_grant', { endReason: 'wall', ...(text !== undefined ? { result: text } : {}) })
+        } else if (this.store.workWait(row.id)?.status === 'waiting') {
+          if (!this.park(row, 'waiting', ['running'])) return undefined
         } else if (question) {
           if (!this.park(row, 'question', ['running'], question.status === 'open' ? 'question' : 'question_answered')) return undefined
         } else if (forgotten) {
@@ -4909,7 +4912,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.lateTexts.delete(key)
     }
     this.askedIn.delete(row.id)
-    this.releaseParked(row, 'question')
+    this.releaseParked(row, row.endReason === 'waiting' || row.endReason === 'wait_ready' ? 'waiting' : 'question')
   }
 
   /**
@@ -5116,6 +5119,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       }
       // Work never goes on while the question it asked its owner is still open (after a restart, a reload, the turn cap,
       // more room or the internet back): it waits for the answer instead, holding no run slot.
+      if (current.endReason === 'waiting' || this.store.workWait(current.id)?.status === 'waiting') return { kind: this.park(current, 'waiting') ? 'question' : 'none' }
       const question = current.lane === 'run' && !input.usageRetry ? this.store.workQuestion(row.id) : undefined
       if (question?.status === 'open') {
         return { kind: this.park(current, 'question') ? 'question' : 'none' }
@@ -6876,6 +6880,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (ended) this.afterEnd(ended)
       return
     }
+    if (this.store.workWait(row.id)?.status === 'waiting') {
+      if (this.park(row, 'waiting', ['running'])) this.parkForQuestion(this.store.activation(row.id)!, main)
+      return
+    }
     const question = row.lane === 'run' ? this.store.workQuestion(row.id) : undefined
     if (question) {
       if (this.park(row, 'question', ['running'], question.status === 'open' ? 'question' : 'question_answered'))
@@ -7323,7 +7331,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       send: (botId, from, input) => this.sendBotMessage(botId, from, input)
     },
     wakes: {
-      add: (botId, from, input) => this.addWake(botId, from, input)
+      add: (botId, from, input) => this.addWake(botId, from, input),
+      wait: (botId, from, input) => this.addWake(botId, from, input, true)
     },
     watchers: {
       start: (botId, from, input) => this.startWatcher(botId, from, input),
@@ -7333,7 +7342,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     reminders: {
       add: (botId, from, input) => this.addReminder(botId, from, input),
       // Wakes are listed with them: a wake on an event shows what it waits for, and its time is when it gives up.
-      list: (botId) => this.store.waitingReminders(botId).map((reminder) => ({
+      list: (botId) => this.store.waitingReminders(botId).filter((reminder) => !reminder.workId).map((reminder) => ({
         reminderId: reminder.id, dueAt: reminder.dueAt, text: reminder.text, ownerSet: reminder.ownerSet,
         ...(reminder.work ? { work: reminder.work.title } : {}),
         ...(reminder.wake ? { wake: reminder.event ? (reminder.fired ? 'happened; you wake soon' : wakeEventLabel(reminder.event)) : 'at its time' } : {})
@@ -7861,12 +7870,20 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * and a bot sets at most `MAX_WAKES_PER_DAY` in any 24 hours. A wake on an event gives up after `hours` (default a day,
    * at most a week) and then wakes once anyway, saying why. Its turn starts when it is due, at any hour.
    */
-  async addWake(botId: string, from: string, input: { brief: string; dueAt?: string; event?: BotWakeEvent; hours?: number }): Promise<{ wakeId: string; dueAt: string; label: string }> {
+  async addWake(botId: string, from: string, input: { brief: string; dueAt?: string; event?: BotWakeEvent; hours?: number }, workWait = false): Promise<{ wakeId: string; dueAt: string; label: string }> {
     this.entry(botId)
     const brief = input.brief.trim()
     if (brief.length > MAX_WAKE_BRIEF_CHARS) throw new BotEngineError('invalid_params', `Keep the brief to ${MAX_WAKE_BRIEF_CHARS.toLocaleString('en-US')} characters: say what to do more briefly, then try again.`)
     if (!brief) throw new BotEngineError('invalid_params', 'A wake-up needs a brief: what you will do then.')
-    const chain = this.wakeAllowance(botId, from)
+    const setting = this.store.activation(from)
+    if (workWait) {
+      if (setting?.lane === 'chat') throw new BotEngineError('invalid_params', 'Use wake here; work_wait is only for work.')
+      if (setting?.trigger.kind !== 'work') throw new BotEngineError('invalid_params', 'A scheduled run ends with its report and where it left off; its next run carries on.')
+      if (setting.status !== 'running') throw new BotEngineError('invalid_params', 'Only running work can wait.')
+      if (this.store.workWait(from)?.status === 'waiting') throw new BotEngineError('invalid_params', 'This work already has a wait. End your turn; it carries on by itself.')
+      if (!input.event && Date.parse(input.dueAt ?? '') < this.now() + 5 * 60_000) throw new BotEngineError('invalid_params', 'Wait at least 5 minutes; pick a later time.')
+    }
+    const chain = this.wakeAllowance(botId, from, workWait)
     let dueAt: string
     let event: BotWakeEvent | null = null
     if (input.event) {
@@ -7882,7 +7899,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       dueAt = new Date(Math.max(due, this.now())).toISOString()
     }
     const wakeId = `rem_${randomUUID()}`
-    this.store.insertReminder({ id: wakeId, botId, dueAt, text: brief, work: null, replyTo: this.ownerMessageOf(from) ?? null, createdAt: this.store.now(), wake: true, event, chain, ownerSet: false })
+    this.store.insertReminder({ id: wakeId, botId, dueAt, text: brief, work: null, replyTo: (workWait && setting?.trigger.kind === 'work' ? setting.trigger.replyTo : this.ownerMessageOf(from)) ?? null, createdAt: this.store.now(), wake: true, event, chain, ownerSet: false, ...(workWait ? { workId: from } : {}) })
+    if (workWait) this.askedIn.set(from, this.store.lastMainDispatch(from)!.n)
     this.armDue()
     this.changed({ botId })
     return { wakeId, dueAt, label: event ? wakeEventLabel(event) : '' }
@@ -7893,10 +7911,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * a chat turn only, at most `MAX_WAKE_CHAIN` in a row with no owner's message between them, `MAX_WAKES_PER_DAY` in any
    * 24 hours, and the waiting reminders' cap. Throws, in words for the bot, when not.
    */
-  private wakeAllowance(botId: string, from: string): number {
+  private wakeAllowance(botId: string, from: string, workWait = false): number {
     const setting = this.store.activation(from)
-    if (!setting || setting.botId !== botId || setting.lane !== 'chat') throw new BotEngineError('invalid_params', 'Only your chat sets wake-ups.')
-    const chain = this.wakeChainOf(setting) + 1
+    if (!setting || setting.botId !== botId || (setting.lane !== 'chat' && !workWait)) throw new BotEngineError('invalid_params', 'Only your chat sets wake-ups.')
+    const chain = workWait ? Math.max(this.unownedChainOf(setting), this.store.workWait(from)?.chain ?? 0) + 1 : this.wakeChainOf(setting) + 1
     if (chain > MAX_WAKE_CHAIN)
       throw new BotEngineError('wake_chain', `You have already followed up ${MAX_WAKE_CHAIN} times in a row without your owner. Don't set another: tell your owner where things stand, and carry on when they write.`)
     if (this.store.wakesSince(botId, new Date(this.now() - 24 * HOUR_MS).toISOString()) >= MAX_WAKES_PER_DAY)
@@ -8304,7 +8322,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   isIdle(botId: string, { within = 30 * 60_000 }: { within?: number } = {}): boolean {
     if (this.store.activationsIn(botId, ['queued', 'running', 'waiting_grant', 'blocked'])
-      .some((row) => row.status !== 'blocked' || workWaits(row))) return false
+      .some((row) => row.status !== 'blocked' || (workWaits(row) && row.endReason !== 'waiting'))) return false
     if (this.watchers.list(botId).length) return false
     try {
       if (this.launchedThreads(botId).some(launchedActive)) return false
@@ -8478,6 +8496,20 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const external = Boolean((fired?.kind === 'thread' || fired?.kind === 'pr') && fired.title
       || fired?.kind === 'watcher' && fired.message)
     const input = wakeInput({ brief: wake.text, setAt: wake.createdAt, event: wake.event, fired, chain: Math.max(1, wake.chain), clock: clockTime, ...(late && !wake.event ? { late: clockTime(wake.dueAt) } : {}) })
+    if (wake.workId) {
+      const resumed = this.store.db.transaction(() => {
+        if (this.store.reminder(wake.id)?.status !== 'waiting') return false
+        const row = this.store.activation(wake.workId!)
+        if (!row || ENDED_ACTIVATION_STATUSES.has(row.status)) { this.store.settleReminder(wake.id, 'cancelled'); return false }
+        if (row.status !== 'blocked' || row.endReason !== 'waiting') return false
+        if (!this.store.moveActivation(row.id, ['blocked'], 'blocked', { endReason: 'wait_ready' })) return false
+        this.store.settleReminder(wake.id, 'delivered', { activationId: row.id })
+        this.store.run('UPDATE bot_reminders SET text = ? WHERE id = ?', input.replace(/A wake-up/g, 'A work wait').replace(/Do what you planned,[\s\S]*$/, 'Carry on with this work in this thread, then report as usual.'), wake.id)
+        return true
+      })
+      if (resumed) { this.changed({ botId: wake.botId, activationId: wake.workId }); this.pumpLater(wake.botId) }
+      return
+    }
     const paused = Boolean(this.store.registry(wake.botId)?.pausedReason)
     const activationId = newActivationId()
     let refused: BotEngineError | undefined

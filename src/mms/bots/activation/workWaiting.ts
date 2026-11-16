@@ -4,12 +4,13 @@ import { questionGoneText, QUESTION_WORK_WAITING_TEXT } from '../../../shared/bo
 
 /** Read access for line text, continuation context and owner controls. Future wait/action readers belong here. */
 export interface WorkWaitLookups {
-  store(): Pick<BotStore, 'workQuestion' | 'openAsks' | 'get'>
+  store(): Pick<BotStore, 'workQuestion' | 'openAsks' | 'get' | 'workWait'>
 }
-export type WorkWaitLine = Pick<BotWorkItem, 'status' | 'waitsFor'> & { detail?: string }
+export type WorkWaitLine = Pick<BotWorkItem, 'status' | 'waitsFor' | 'wait'> & { detail?: string }
 
 /** Facts supplied by the engine; the rules themselves neither write nor hold engine state. */
 export interface WorkWaitFacts {
+  timerExists(row: BotActivationRow): boolean
   usageResumable(row: BotActivationRow): boolean
   questionExists(row: BotActivationRow): boolean
   roomStranded(row: BotActivationRow): boolean
@@ -40,6 +41,22 @@ const nothingToWaitFor = (title: string) => `I stopped "${title}": nothing could
 
 /** One row per reason. Wake sources keep their existing transactions, messages and stored markers. */
 export const WORK_WAIT_RULES = {
+  waiting: {
+    reasons: ['waiting', 'wait_ready'], allows: workOnly,
+    ready: (row, _facts) => row.endReason === 'wait_ready',
+    stranded: (row, facts) => !facts.timerExists(row),
+    endReason: 'wait_gone', endLine: nothingToWaitFor, resume: 'continue',
+    continuation: (row, facts) => ({ ownerText: facts.store().workWait(row.id)?.text ?? '' }),
+    checkBeforeResume: true,
+    continueRefusal: (_row) => 'This work carries on by itself when its time or event comes, or when a slot is free. Stop it if it is no longer needed.',
+    waitsOnOwner: (_row, _facts) => false, needsOwner: (_row, _facts) => false,
+    takesNotes: (_row) => true, noteRefusal: 'held',
+    line: (row, facts) => {
+      const wait = facts.store().workWait(row.id)
+      return row.endReason === 'wait_ready' ? { status: 'queued' } : { status: 'paused', ...(wait ? { wait: { dueAt: wait.dueAt, event: wait.event } } : {}) }
+    },
+    clearLiveChip: true, republishQuestion: false
+  },
   question: {
     reasons: ['question', 'question_answered'], allows: workOnly,
     ready: (row, _facts) => row.endReason === 'question_answered',

@@ -267,6 +267,19 @@ export const BOT_TOOLS: Tool[] = [
     })
   },
   {
+    name: 'work_wait',
+    description: 'Wait in this work for a time (5 minutes to 7 days), a thread going idle, or a pull request merge, checks or review, then carry on here with what you have seen. why says what to do then. End your turn after setting it. Chat uses wake; scheduled runs and subagents cannot wait.',
+    parameters: Type.Object({
+      why: Type.String({ description: 'What you will do then, standing on its own, as a note to yourself.' }),
+      inMinutes: Type.Optional(Type.Number({ description: 'Minutes from now.' })),
+      at: Type.Optional(Type.String({ description: 'Local date and time, like 2026-11-14T09:00.' })),
+      thread: Type.Optional(Type.String({ description: 'Wake when this thread finishes its turn: its id, from thread_list. Needs "use your threads".' })),
+      pr: Type.Optional(Type.String({ description: "Wait on this pull request: \"owner/repo#12\" or its link. Its repository must be one of your owner's projects in Mousse." })),
+      on: Type.Optional(Type.Union([Type.Literal('merged'), Type.Literal('checks'), Type.Literal('review')], { description: 'With pr only: merged (default), reported checks settled (including approval waits), or a new submitted review beyond the reviews seen when this wake was set.' })),
+      hours: Type.Optional(Type.Number({ description: `With thread or pr: how many hours to wait for it before you wake anyway (default ${DEFAULT_EVENT_WAKE_HOURS}, at most ${MAX_EVENT_WAKE_HOURS}).` }))
+    })
+  },
+  {
     name: 'wake',
     description: `Wake yourself up later to carry on, here in this chat, without your owner writing: at a time (inMinutes or at), when a thread finishes its turn (thread: its id), or on a pull request (pr, with on: merged, checks or review; merged by default). Use PR wakes for checks and reviews instead of a background command. Checks settle when none are queued or running; checks waiting for approval are reported too. Reviews by anyone count, including your owner's account (your own gh review commands) and review bots: do not post a review to trigger your own wake. Checks describe only the rollup GitHub currently reports, which may omit required checks or briefly show the previous head after a push; read the framed head commit before acting. Use it whenever you are waiting on something (a pull request, a nightly build, a thread you started) instead of checking on a schedule or promising to look later. brief is what you will do then, standing on its own: you see it with what happened. A wake on a thread or pull request gives up after hours (default ${DEFAULT_EVENT_WAKE_HOURS}, at most ${MAX_EVENT_WAKE_HOURS}) or when the pull request is closed or the thread archived or deleted, and you still wake once and are told why. At most ${MAX_WAKE_CHAIN} wake-ups in a row without your owner writing, and ${MAX_WAKES_PER_DAY} a day. Your wake-ups are listed and cancelled with reminder_list and reminder_cancel. Tell your owner in a few words what you'll follow up on.`,
     parameters: Type.Object({
@@ -979,6 +992,49 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
           })
           const result = { ...added, label: reminderLabel(new Date(added.dueAt)) }
           call.deps.activity?.onAppResult(call.activity, 'remind', result)
+          return json(result)
+        } catch (failure) {
+          return error(failure instanceof Error ? failure.message : String(failure))
+        }
+      }
+    }),
+    ownTool(byName.get('work_wait')!, deps, {
+      class: 'mutation',
+      describe: () => 'Set a wake-up',
+      handler: async (args, ctx) => {
+        const call = botCall(deps, ctx)
+        if (isOutcome(call)) return call
+        if (ctx.turn.bot?.role !== 'activation') return error('A subagent cannot park work. Return what you found to the work that started you.')
+        if (call.lane === 'chat') return error('Use wake here; work_wait is only for work.')
+        const wakes = call.deps.host.wakes
+        if (!wakes?.wait) return error("Wake-ups can't be set here.")
+        const brief = typeof args.why === 'string' ? args.why.trim() : ''
+        if (!brief) return error('work_wait needs why: what to carry on with.')
+        const timed = args.inMinutes !== undefined || args.at !== undefined
+        if ([timed, args.thread !== undefined, args.pr !== undefined].filter(Boolean).length !== 1)
+          return error('Give one of: inMinutes or at (a time), thread (a thread id) or pr (a pull request).')
+        if (args.on !== undefined && (args.pr === undefined || !['merged', 'checks', 'review'].includes(String(args.on)))) return error('on needs pr and is merged, checks or review.')
+        const hours = typeof args.hours === 'number' ? { hours: args.hours } : {}
+        let input: Parameters<NonNullable<BotToolHost['wakes']>['add']>[2]
+        if (timed) {
+          const due = reminderTime(args.inMinutes, args.at)
+          if (typeof due === 'string') return error(due)
+          input = { brief, dueAt: due.toISOString() }
+        } else if (args.thread !== undefined) {
+          if (typeof args.thread !== 'string' || !args.thread.trim()) return error("thread is a thread's id, from thread_list.")
+          // The owner's threads are theirs to share: a bot waits on one only while it may read them.
+          if (!ctx.turn.bot?.appTools?.has('thread_wait')) return error('Waiting for a thread needs "use your threads": ask for it with escalate (the tool threads).')
+          input = { brief, event: { kind: 'thread', threadId: args.thread.trim() }, ...hours }
+        } else {
+          const pr = pullRequestOf(args.pr)
+          if (!pr) return error('pr is a pull request as "owner/repo#12", or its link.')
+          input = { brief, event: { kind: 'pr', ...pr, ...(args.on ? { on: args.on as 'merged' | 'checks' | 'review' } : {}) }, ...hours }
+        }
+        try {
+          const added = await wakes.wait!(call.botId, call.activationId, input)
+          const when = reminderLabel(new Date(added.dueAt))
+          const result = { wakeId: added.wakeId, ...(added.label ? { waitsFor: added.label, givesUpAt: when } : { when }) }
+          // Work waits have only their work line, never a separate follow-up chip.
           return json(result)
         } catch (failure) {
           return error(failure instanceof Error ? failure.message : String(failure))
