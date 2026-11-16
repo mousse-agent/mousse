@@ -9,6 +9,16 @@ import type { TurnPause } from '../../../shared/types'
 /** The relative time ("in 2h 15m") has minute resolution; a half-minute tick keeps it honest. */
 const TICK_MS = 30_000
 
+/**
+ * How long Try now keeps saying "Resuming…" after the daemon took the press while the run still shows as
+ * paused. The continue turn normally starts within seconds; past this the notice says it did not, and the
+ * buttons work again.
+ */
+export const RESUME_WAIT_MS = 60_000
+
+/** The error line when the run still shows as paused `RESUME_WAIT_MS` after a Try now the daemon took. */
+export const RESUME_STALLED_TEXT = 'Could not continue the run yet. Try again.'
+
 export interface PausedRunNoticeInput {
   pause: TurnPause
   /** The current time, so the relative reset time is a pure function of it. */
@@ -24,10 +34,12 @@ export interface PausedRunNoticeInput {
 
 /**
  * The notice's one line: "Usage limit reached · resumes 3:40 PM". A pause without a timer "resets" instead,
- * since it does not resume by itself; past the reset it says what happens now.
+ * since it does not resume by itself; past the reset it says what happens now. A continue turn that ran into
+ * the limit again reads "Still limited", and a Try now on its way "resuming…".
  */
-export function pausedRunLine(text: PausedRunText, pause: Pick<TurnPause, 'autoResume' | 'estimated'>): string {
-  const head = 'Usage limit reached'
+export function pausedRunLine(text: PausedRunText, pause: Pick<TurnPause, 'autoResume' | 'estimated' | 'again'>, resuming = false): string {
+  const head = pause.again ? 'Still limited' : 'Usage limit reached'
+  if (resuming) return `${head} · resuming…`
   if (text.stale) return `${head} · resume time unknown`
   if (text.due) return `${head} · ${pause.autoResume ? 'retrying now' : 'should have reset by now'}`
   return `${head} · ${pause.autoResume ? 'resumes' : 'resets'} ${pause.estimated ? 'around ' : ''}${text.resetAt}`
@@ -46,7 +58,7 @@ function pausedRunTooltip(text: PausedRunText, pause: Pick<TurnPause, 'autoResum
 export function pausedRunNotice({ pause, now, busy, error, onResume, onEndPause, onDismissError }: PausedRunNoticeInput): ComposerNoticeProps {
   const text = describePausedRun(pause, now)
   const blocked = busy !== null
-  const line = pausedRunLine(text, pause)
+  const line = pausedRunLine(text, pause, busy === 'resume')
   const tooltip = pausedRunTooltip(text, pause)
   return {
     tone: error ? 'error' : 'warning',
@@ -56,7 +68,7 @@ export function pausedRunNotice({ pause, now, busy, error, onResume, onEndPause,
     title: error ?? line,
     tooltip: error ? `${line}. ${tooltip}` : tooltip,
     actions: [
-      { label: busy === 'resume' ? 'Trying…' : 'Try now', primary: true, blocked, busy: busy === 'resume', onClick: onResume },
+      { label: busy === 'resume' ? 'Resuming…' : 'Try now', primary: true, blocked, busy: busy === 'resume', onClick: onResume },
       { label: busy === 'cancel' ? 'Cancelling…' : 'Cancel', title: 'Drop this run; queued messages still send', blocked, busy: busy === 'cancel', onClick: onEndPause }
     ],
     ...(error ? { onDismiss: onDismissError } : {})
@@ -92,12 +104,27 @@ export function PausedRunNotice({ threadId, client }: { threadId?: string | null
   const runIdRef = useRef(runId)
   runIdRef.current = runId
 
+  // Try now stays busy after the daemon takes it, until the pause on screen ends (the run continues, or pauses
+  // again as another run): the continue turn starts a moment later, and a button that came back in between
+  // would look as though nothing happened. If the run still shows as paused after RESUME_WAIT_MS, it says so.
+  useEffect(() => {
+    if (busy !== 'resume') return
+    const timer = setTimeout(() => {
+      setBusy(null)
+      setError(RESUME_STALLED_TEXT)
+    }, RESUME_WAIT_MS)
+    return () => clearTimeout(timer)
+  }, [busy, runId])
+
   const run = async (action: PausedAction, pressedFor: string, call: () => Promise<void>) => {
     setBusy(action)
     setError(null)
-    try { await call() }
-    catch (failure) { if (runIdRef.current === pressedFor) setError(pausedActionError(failure, action)) }
-    finally { if (runIdRef.current === pressedFor) setBusy(null) }
+    let taken = false
+    try {
+      await call()
+      taken = true
+    } catch (failure) { if (runIdRef.current === pressedFor) setError(pausedActionError(failure, action)) }
+    finally { if (runIdRef.current === pressedFor && !(taken && action === 'resume')) setBusy(null) }
   }
   useComposerNotice(pause ? pausedRunNotice({
     pause,
