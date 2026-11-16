@@ -222,6 +222,8 @@ export function failureText(serverName: string, error: unknown, signal?: AbortSi
   return `${serverName} couldn't run this call. ${carryOn}`
 }
 
+export type BotMcpCallOutcome = ToolOutcome & { callState?: 'failed' | 'uncertain' }
+
 export class BotMcp implements BotMcpHost {
   constructor(private readonly deps: BotMcpDeps) {}
 

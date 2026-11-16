@@ -504,31 +504,31 @@ export class McpManager {
   ): Promise<McpToolCallResult> {
     let dispatched = false
     try {
-    this.owned.assertAccepting()
-    const descriptor = this.toolMap.get(providerName)
-    if (!descriptor) {
-      throw new Error(`Unknown MCP tool: ${providerName}`)
-    }
-    const assertPin = (tool: McpToolDescriptor | undefined): void => {
-      if (expected && (!tool || (tool.installationId ?? tool.serverId) !== expected.installationId || tool.configRevision !== expected.configRevision || tool.toolName !== expected.toolName || (expected.schemaDigest !== undefined && sha256Bytes(canonicalJson(tool.inputSchema ?? {})) !== expected.schemaDigest))) throw Object.assign(new Error('MCP dependency changed since admission.'), { category: 'disabled', code: 'stale_revision' })
-    }
-    assertPin(descriptor)
+      this.owned.assertAccepting()
+      const descriptor = this.toolMap.get(providerName)
+      if (!descriptor) {
+        throw new Error(`Unknown MCP tool: ${providerName}`)
+      }
+      const assertPin = (tool: McpToolDescriptor | undefined): void => {
+        if (expected && (!tool || (tool.installationId ?? tool.serverId) !== expected.installationId || tool.configRevision !== expected.configRevision || tool.toolName !== expected.toolName || (expected.schemaDigest !== undefined && sha256Bytes(canonicalJson(tool.inputSchema ?? {})) !== expected.schemaDigest))) throw Object.assign(new Error('MCP dependency changed since admission.'), { category: 'disabled', code: 'stale_revision' })
+      }
+      assertPin(descriptor)
 
-    const authorization = await this.isToolCallAllowed(providerName, projectPath, actor)
-    assertPin(authorization.descriptor)
-    if (!authorization.allowed) throw new Error(authorization.reason ?? 'MCP tool is not enabled for this actor.')
-    const server = authorization.server
-    if (!server) {
-      throw new Error(`MCP server is no longer configured: ${descriptor.serverId}`)
-    }
+      const authorization = await this.isToolCallAllowed(providerName, projectPath, actor)
+      assertPin(authorization.descriptor)
+      if (!authorization.allowed) throw new Error(authorization.reason ?? 'MCP tool is not enabled for this actor.')
+      const server = authorization.server
+      if (!server) {
+        throw new Error(`MCP server is no longer configured: ${descriptor.serverId}`)
+      }
 
-    // A call that must not start a sign-in holds the server's sign-in for as long as it runs.
-    const release = options?.signIn === false ? await this.holdSignIn(server) : undefined
-    try {
-      return await this.callConnected(server, descriptor, args, projectPath, signal, actor, expected, options, providerName, () => { dispatched = true })
-    } finally {
-      release?.()
-    }
+      // A call that must not start a sign-in holds the server's sign-in for as long as it runs.
+      const release = options?.signIn === false ? await this.holdSignIn(server) : undefined
+      try {
+        return await this.callConnected(server, descriptor, args, projectPath, signal, actor, expected, options, providerName, () => { dispatched = true })
+      } finally {
+        release?.()
+      }
     } catch (error) {
       if (options?.trackDispatch && !dispatched) {
         const cause = error as { message?: string; category?: string; code?: string }

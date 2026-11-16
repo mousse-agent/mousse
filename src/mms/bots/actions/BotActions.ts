@@ -122,7 +122,7 @@ export class BotActions {
       // A transport failure can have happened after the server acted. Never promise that retrying is safe.
       this.transition(id, 'running', result.isError ? result.callState ?? 'uncertain' : 'done', result)
     } catch (error) {
-      this.transition(id, 'running', error instanceof BotActionChanged ? 'failed' : 'uncertain', { text: 'It could not be confirmed whether this went through: check before trying again.' })
+      this.transition(id, 'running', error instanceof BotActionChanged ? 'failed' : 'uncertain', { text: error instanceof BotActionChanged ? error.message : 'It could not be confirmed whether this went through: check before trying again.' })
     }
     this.finish(action)
   }
