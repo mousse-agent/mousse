@@ -1,3 +1,4 @@
+import { tellMeOf, type ScheduledJob } from '../../src/shared/types'
 /**
  * A bot engine over a real `bots.db` and run database, with fakes for the Bot Phase 1 seams
  * (docs/plans/bot-architecture.md §7.1): the model resolver, the context packs and capture, the
@@ -209,6 +210,9 @@ export function botFixture(options: Pick<BotEngineHost, 'spawnWatcher'> & { real
   fixture.automationRuns = automationRuns
   fixture.host = host
   fixture.bots = new BotEngine(host)
+  scheduler.on('jobRemoved', (_id: string, job: ScheduledJob) => {
+    if (job.bot) fixture.bots.scheduleRemoved(job.bot.botId, job.bot.scheduleId, { tellMe: tellMeOf(job), canWakeMe: job.bot.canWakeMe })
+  })
   scheduler.setBotRunner({ findOccurrence: (input) => fixture.bots.findScheduledOccurrence(input), runOccurrence: (input) => fixture.bots.runScheduledOccurrence(input) })
   scheduler.setTickHook((now) => fixture.bots.maintain(now))
   fixture.tickSchedules = async (now) => {

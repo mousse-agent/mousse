@@ -1,7 +1,7 @@
 import { isQuietHours } from '../../../shared/settings'
 import { BotTellings } from '../chat/BotTellings'
 import type { SettingsStore } from '../../settings/SettingsStore'
-import { isTellMe } from '../../../shared/types'
+import { isTellMe, type TellMe } from '../../../shared/types'
 import { readBotTelling, tellingLine, type TellingChange } from '../../../shared/bots/personal/tellingSettings'
 import { tellingClass } from '../chat/telling'
 import { hasToolImages } from '../chat/toolImages'
@@ -758,7 +758,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const row = this.store.activation(message.activationId)
       if (row?.trigger.kind !== 'schedule') return false
       const scheduleId = row.trigger.scheduleId
-      const tellMe = row.trigger.completed?.tellMe ?? this.host.schedules?.get(botId, scheduleId)?.tellMe
+      const tellMe = row.trigger.completed?.tellMe ?? row.trigger.removedTelling?.tellMe ?? this.host.schedules?.get(botId, scheduleId)?.tellMe
         ?? this.host.schedules?.ended?.(botId).find(schedule => schedule.scheduleId === scheduleId)?.tellMe
       return tellMe ? !tellMeNotifies(tellMe, 'done', this.host.runLevel?.(message.activationId)) : false
     } catch {
@@ -8246,6 +8246,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const trigger = activationId ? this.store.activation(activationId)?.trigger : undefined
     if (trigger?.kind !== 'schedule') return false
     if (trigger.completed) return trigger.completed.canWakeMe === true
+    if (trigger.removedTelling) return trigger.removedTelling.canWakeMe === true
     try {
       return (this.host.schedules?.get(botId, trigger.scheduleId)?.canWakeMe
         ?? this.host.schedules?.ended?.(botId).find(schedule => schedule.scheduleId === trigger.scheduleId)?.canWakeMe) === true
@@ -8637,6 +8638,16 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     } catch {
       return undefined
     }
+  }
+
+  /** Keep the deleted job's telling wishes for work whose final report is still pending. */
+  scheduleRemoved(botId: string, scheduleId: string, telling: { tellMe: TellMe; canWakeMe?: boolean }): void {
+    this.store.db.transaction(() => {
+      for (const row of this.store.activationsWith(['queued', 'running', 'waiting_grant', 'paused', 'blocked'])) {
+        if (row.botId !== botId || row.trigger.kind !== 'schedule' || row.trigger.scheduleId !== scheduleId) continue
+        this.store.run('UPDATE bot_activations SET trigger_json = ? WHERE id = ?', JSON.stringify({ ...row.trigger, removedTelling: telling }), row.id)
+      }
+    })
   }
 
   /** One of a bot's schedules changed in the shared store (an edit on the Automations page): its chat and About read it again. */
