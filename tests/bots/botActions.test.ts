@@ -1,3 +1,4 @@
+import { writeFileSync } from 'node:fs'
 import { afterEach, expect, it, vi } from 'vitest'
 import { remoteBotMethods } from '../../src/mms/bridge/remote/RemoteBots'
 import { setDiagSink } from '../../src/mms/log/diag'
@@ -985,7 +986,7 @@ it('C4 service projects the complete stored review and settled results behind th
   const a = f.bots.actions.forWork(t.workId)!
   f.store.run('UPDATE bot_actions SET bot_note = ? WHERE id = ?', 'Please review this', a.id)
   const card = () => f.bots.service.chatList(t.botId).messages.find(m => m.id === a.message_id)!.action
-  expect(card()).toMatchObject({ actionId: a.id, digest: a.args_digest, title: 'Send', serverName: 'Mail', args: JSON.parse(a.args_json), hasHiddenValues: true, hiddenPaths: ['password'], note: 'Please review this', status: 'open' })
+  expect(card()).toMatchObject({ actionId: a.id, digest: a.args_digest, title: 'Send', serverName: 'Mail', args: JSON.parse(a.args_json), hasHiddenValues: true, hiddenPaths: [['password']], note: 'Please review this', status: 'open' })
   expect(JSON.stringify(card())).not.toContain('hidden-password')
   for (const status of ['approved', 'running', 'done', 'failed', 'uncertain', 'declined', 'expired', 'withdrawn']) {
     f.store.run('UPDATE bot_actions SET exec_args = NULL, status = ?, result_json = ?, ran_at = ? WHERE id = ?', status, JSON.stringify({ text: 'masked answer', toolReportedError: true }), f.store.now(), a.id)
@@ -1015,7 +1016,7 @@ it.each(['done', 'uncertain', 'failed', 'not_sent'] as const)('C4 duplicate warn
 
 it.each([false, true])('C4 bridge delivers a complete card or disables Send when oversized=%s', async large => {
   const t = await setup(true)
-  if (large) t.args.body = 'long email text '.repeat(5000)
+  if (large) { t.args.body = 'long email text '.repeat(5000); Object.assign(t.args, { password: 'hidden-password' }) }
   await t.call()
   const a = f.bots.actions.forWork(t.workId)!
   const methods = remoteBotMethods({ bots: () => f.bots.service, deviceLimit: () => 'full' })
@@ -1024,7 +1025,8 @@ it.each([false, true])('C4 bridge delivers a complete card or disables Send when
   const message = page.messages.find((m: any) => m.id === a.message_id)
   expect(message.action).toMatchObject({ actionId: a.id, digest: a.args_digest, status: 'open' })
   if (large) {
-    expect(message.action.tooLarge).toBe(true)
+    expect(message.action).toMatchObject({ tooLarge: true, hasHiddenValues: true, hiddenPaths: [], args: null })
+    writeFileSync('/tmp/c4-round1-too-large.json', JSON.stringify(message, null, 2))
     expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThan(56 * 1024)
   } else {
     expect(message.action.args).toEqual(t.args)
@@ -1085,7 +1087,7 @@ it('C4 hidden paths include secrets within escaped literal containers but never 
   Object.assign(t.args, { meta: { $mousse: 'hidden', password: 'private-password', imitation: { $mousse: 'hidden', text: 'hidden · will be sent' } }, login: { token: 'private-token' } })
   await t.call()
   const a = f.bots.actions.forWork(t.workId)!
-  expect(f.bots.service.actionMessage(t.botId, a.id).action!.hiddenPaths).toEqual(['meta → password', 'login → token'])
+  expect(f.bots.service.actionMessage(t.botId, a.id).action!.hiddenPaths).toEqual([['meta', 'password'], ['login', 'token']])
 })
 
 it('C4 a folded action telling takes priority over ordinary message content', async () => {
@@ -1098,4 +1100,21 @@ it('C4 a folded action telling takes priority over ordinary message content', as
   await t.call()
   f.bots.tellings.release(f.clock.now)
   expect(events.at(-1)).toMatchObject({ body: 'Wants to send', kind: 'question' })
+})
+
+// Paths remain segment arrays: a dot or arrow in a literal key never invents nesting.
+it('C4 hidden paths retain literal dots, arrows and array indices through the bridge', async () => {
+  const t = await setup(true)
+  t.descriptor.inputSchema = { $ref: 'https://unknown.test/schema' } as never
+  Object.assign(t.args, {
+    'user.name': { token: 'hidden-one' }, user: { name: { token: 'hidden-two' } },
+    'login → nested': { token: 'hidden-three' }, list: [{ token: 'hidden-four' }]
+  })
+  await t.call()
+  const a = f.bots.actions.forWork(t.workId)!
+  const paths = [['user.name', 'token'], ['user', 'name', 'token'], ['login → nested', 'token'], ['list', '0', 'token']]
+  expect(f.bots.service.actionMessage(t.botId, a.id).action!.hiddenPaths).toEqual(paths)
+  const list = remoteBotMethods({ bots: () => f.bots.service }).find(m => m.method === 'bots.chat.list')!
+  const page = await list.handle(list.validate!({ botId: t.botId }), { caller: { node: 'phone', user: 'owner' } } as never) as any
+  expect(page.messages.find((m: any) => m.id === a.message_id).action.hiddenPaths).toEqual(paths)
 })
