@@ -655,3 +655,4 @@ button.bot-reaction:hover, button.bot-reaction:focus-visible { background: color
 .bot-action-card blockquote[aria-label="Tool result"] { white-space: pre-wrap; }
 
 .bot-action-outcome { color: var(--text-primary); font-size: inherit; margin: 4px 0 8px; }
+.bot-action-arguments dd > dl { margin-left: 16px; }
