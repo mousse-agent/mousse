@@ -731,12 +731,16 @@ describe('reading and managing other threads (SPEC §15.1)', () => {
     expect(ids(await list({ limit: 1 }))).toHaveLength(1)
     expect((await call('parent', 'thread_list', { limit: 0 })).isError).toBe(true)
     expect((await call('parent', 'thread_list', { status: 'busy' })).isError).toBe(true)
-    // A thread the caller launched is listed even unstarted and settled; a private one is not listed for a shared caller.
-    threads.set('mine', thread('mine', { projectId: 'p2', startedAt: undefined, settledAt: NOW, createdByThreadId: 'parent' }))
+    // A thread the caller launched is listed even unstarted; a private one is not listed for a shared caller.
+    threads.set('mine', thread('mine', { projectId: 'p2', startedAt: undefined, createdByThreadId: 'parent' }))
     threads.set('secret', thread('secret', { localOnly: true }))
     expect(ids(await list())).toContain('mine')
     expect(ids(await list())).not.toContain('secret')
     expect(ids(await list({ projectId: 'p1' }))).not.toContain('mine')
+    // Once archived it leaves the default list like any other, and comes back marked with includeSettled.
+    threads.set('mine', { ...threads.get('mine')!, settledAt: NOW })
+    expect(ids(await list())).not.toContain('mine')
+    expect((await list({ includeSettled: true })).threads.find((row) => row.id === 'mine')).toMatchObject({ archived: true, archivedAt: NOW })
   })
 
   it('thread_search: titles, projects and message matches with snippets in every project, private threads left out before the limit', async () => {

@@ -1131,7 +1131,8 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         // A subagent is folded under its parent there, as here, unless asked for.
         if (args.includeSubagents !== true && thread.subagent && thread.parentThreadId && known.has(thread.parentThreadId)) return false
         if (!thread.launchedByYou && args.includeUnstarted !== true && !thread.startedAt) return false
-        if (!thread.launchedByYou && args.includeSettled !== true && thread.settledAt) return false
+        // Archived only when asked for, even one this thread launched.
+        if (args.includeSettled !== true && thread.settledAt) return false
         return args.status === undefined || statusOf(thread.id) === args.status
       })
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
@@ -1299,7 +1300,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     },
     {
       name: 'thread_list',
-      description: `List the profile's threads with their project, activity and what is waiting on them. Subagent threads are folded under their parents unless includeSubagents. Threads you launched are always listed. A row says archived: true (with archivedAt) when the thread is archived, and hidden: true when it is out of the sidebar; an open, shown thread has neither. ${REMOTE_LISTS} It is read there at this call; a response holds at most ${THREAD_READ_MAX_BYTES / 1024} KB (capped: true says rows were left out).`,
+      description: `List the profile's threads with their project, activity and what is waiting on them. Subagent threads are folded under their parents unless includeSubagents. Threads you launched are listed even before they start; archived threads, launched by you or not, only with includeSettled. A row says archived: true (with archivedAt) when the thread is archived, and hidden: true when it is out of the sidebar; an open, shown thread has neither. ${REMOTE_LISTS} It is read there at this call; a response holds at most ${THREAD_READ_MAX_BYTES / 1024} KB (capped: true says rows were left out).`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -1339,7 +1340,8 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           const launched = thread.createdByThreadId === ctx.caller.threadId
           if (args.projectId !== undefined && thread.projectId !== args.projectId) return false
           if (!launched && args.includeUnstarted !== true && !thread.startedAt) return false
-          return launched || args.includeSettled === true || !thread.settledAt
+          // Archived only when asked for, even one the caller launched.
+          return args.includeSettled === true || !thread.settledAt
         }).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
         const projectNames = new Map(host.listProjects().map((project) => [project.id, project.name]))
         const below = subagentDescendantsIn(all)
