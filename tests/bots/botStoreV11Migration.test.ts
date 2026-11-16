@@ -17,8 +17,8 @@ function folder() { const dir = mkdtempSync(join(tmpdir(), 'bots-v11-')); dirs.p
 function open(profileHome: string) { const store = new BotStore({ profileHome }); stores.push(store); return store }
 function action(store: BotStore, botId = 'b', id = botId) {
   store.run(`INSERT INTO bot_actions(id, call_key, bot_id, activation_id, lane, kind, target_json,
-    exec_args, args_json, args_digest, binding_json, status, created_at)
-    VALUES (?, ?, ?, 'a', 'run', 'mcp', '{}', 'private exact arguments', '{"masked":true}', 'digest', '{}', 'open', ?)`, id, id, botId, T)
+    exec_args, args_json, args_digest, binding_json, status, created_at, expires_at)
+    VALUES (?, ?, ?, 'a', 'run', 'mcp', '{}', 'private exact arguments', '{"masked":true}', 'digest', '{}', 'open', ?, ?)`, id, id, botId, T, T)
 }
 afterEach(() => { for (const s of stores.splice(0)) s.close(); for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }) })
 
@@ -86,14 +86,31 @@ describe('bots.db v10 → v11', () => {
     for (const [column, value] of [['kind', 'unknown'], ['status', 'unknown'], ['lane', 'unknown']])
       expect(() => store.run(`UPDATE bot_actions SET ${column} = ?`, value!)).toThrow()
     for (const kind of ['mcp', 'secret_fetch']) store.run('UPDATE bot_actions SET kind = ?', kind)
-    for (const status of ['open', 'approved', 'declined', 'expired', 'withdrawn', 'running', 'done', 'failed', 'uncertain'])
+    for (const status of ['open', 'approved', 'running'])
       store.run('UPDATE bot_actions SET status = ?', status)
-    store.run('UPDATE bot_actions SET exec_args = NULL')
+    for (const status of ['declined', 'expired', 'withdrawn', 'done', 'failed', 'uncertain']) {
+      expect(() => store.run('UPDATE bot_actions SET status = ?', status)).toThrow()
+      store.run('UPDATE bot_actions SET status = ?, exec_args = NULL', status)
+      expect(() => store.run("UPDATE bot_actions SET exec_args = 'exact arguments'")).toThrow()
+      store.run("UPDATE bot_actions SET status = 'running', exec_args = 'exact arguments'")
+    }
+    store.run('UPDATE bot_actions SET exec_args = NULL, expires_at = NULL')
     expect(store.get('SELECT exec_args, nudges, message_id, expires_at FROM bot_actions')).toEqual({ exec_args: null, nudges: 0, message_id: null, expires_at: null })
     store.insertReminder({ id: 'r', botId: 'b', dueAt: T, text: 'Timer', createdAt: T, work: null, replyTo: null })
     expect(store.reminder('r')?.workId).toBeNull()
     expect(store.all('PRAGMA foreign_key_list(bot_actions)')).toEqual([])
     expect(store.all('PRAGMA index_list(bot_actions)').map((r) => r.name)).toEqual(expect.arrayContaining(['bot_actions_due', 'bot_actions_bot', 'bot_actions_activation']))
+  })
+
+  it('requires an expiry for an open card on insert and update', () => {
+    const store = open(folder())
+    action(store)
+    expect(() => store.run('UPDATE bot_actions SET expires_at = NULL')).toThrow()
+    store.run("UPDATE bot_actions SET status = 'approved', expires_at = NULL")
+    expect(() => store.run("UPDATE bot_actions SET status = 'open'")).toThrow()
+    expect(() => store.run(`INSERT INTO bot_actions(id, call_key, bot_id, activation_id, lane, kind,
+      target_json, args_json, args_digest, binding_json, status, created_at)
+      VALUES ('no-expiry', 'no-expiry', 'b', 'a', 'run', 'mcp', '{}', '{}', 'digest', '{}', 'open', ?)`, T)).toThrow()
   })
 
   it('the 30-day purge removes only that bot’s actions through its public path', async () => {
