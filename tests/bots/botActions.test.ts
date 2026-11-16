@@ -2052,3 +2052,19 @@ it.each([true, false].flatMap(on => ['work', 'subagent'].map(caller => ({ on, ca
   }
   expect(t.calls).toEqual(on ? [] : [t.args])
 })
+
+it('C4 integration waiting and unreachable reviews preserve the stored service and settlement time', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  vi.spyOn(t.mcp, 'warm').mockImplementationOnce(async () => { t.server.tools.splice(0); t.server.failing = true })
+  await f.bots.service.answerAction({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  const card = () => f.bots.service.actionMessage(t.botId, a.id).action!
+  expect(card()).toMatchObject({ status: 'approved', serverName: 'Mail' })
+  f.clock.now += 11 * 60_000
+  await f.bots.deliverDueReminders(); await flush()
+  const metadata = JSON.parse(f.bots.actions.get(a.id)!.card_json!)
+  expect(card()).toMatchObject({ status: 'failed', at: metadata.settledAt, result: { notSentInTime: true, text: "Mail couldn't be reached, so nothing was sent." } })
+  expect(card().result?.toolReportedError).toBeUndefined()
+  expect(t.calls).toEqual([])
+})

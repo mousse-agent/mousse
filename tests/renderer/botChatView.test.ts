@@ -2334,3 +2334,20 @@ it('keeps a curly-quoted arrow name in one unquoted hidden-path segment', async 
   expect(path.querySelector('q')).toBeNull()
   expect([...path.querySelectorAll('[aria-label="Field name"]')].map(item => item.textContent)).toEqual(['a” → “b', 'token'])
 })
+
+it.each(['approved', 'running', 'unreachable'])('C4 integration waiting distinguishes %s from an actual send', async (state) => {
+  const sentence = "Stored Mail couldn't be reached, so nothing was sent."
+  fake.chats.inbox = [held({ status: state === 'unreachable' ? 'failed' : state, serverName: 'Stored Mail', at: AT, result: state === 'unreachable' ? { text: sentence, notSentInTime: true } : undefined })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  const status = card.querySelector('[role="status"]')!
+  expect(status.textContent).toContain(state === 'approved' ? 'Waiting for Stored Mail…' : state === 'running' ? 'Sending…' : sentence)
+  expect(status.textContent).toContain(' · ')
+  expect(button('Send', card)).toBeUndefined()
+  expect(button('Not now', card)).toBeUndefined()
+  if (state === 'unreachable') {
+    expect(card.querySelector('summary')?.textContent).toBe('What it would have sent')
+    expect(card.querySelector('[aria-label="Tool result"]')).toBeNull()
+    expect(card.textContent).not.toContain('The tool reported an error')
+  }
+})
