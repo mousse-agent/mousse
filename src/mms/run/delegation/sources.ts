@@ -66,20 +66,3 @@ export const RESUME_SOURCES: ReadonlySet<string> = new Set(['resume', 'resume_no
 export function isResumeSource(source: string | null | undefined): boolean {
   return source !== null && source !== undefined && RESUME_SOURCES.has(source)
 }
-
-/**
- * Sources of a turn a person is waiting for: a message sent from the app (`gui`), the CLI (`cli`), the remote
- * bridge such as a linked phone (`remote`), another authenticated client or a person's answer that continues a
- * run (`internal`), and a client's steer that had no turn to join and runs as a turn of its own (`cli-steer`,
- * `protocol-steer`). A `steer-followup` run is a person's only when its outcome says `sentByPerson` (the same
- * source carries agents' leftover steers and subagent results). Such a turn's `turn.start` takes the next free
- * turn slot ahead of background turns (delegated subagents, wakes, resumes, schedules, bots, agent sends), and
- * some turn slots take only these (`EffectWorker`). `resume_now` is not one: it continues the work a usage
- * limit paused, which after a restart is often many background runs resumed together.
- */
-export const PRIORITY_TURN_SOURCES: readonly string[] = ['gui', 'cli', 'remote', 'internal', 'cli-steer', 'protocol-steer']
-
-/** Whether a run is one a person is waiting for, as the turn-slot claim ranks it (`EffectOutbox`). */
-export function isPriorityTurnRun(run: { source: string; outcome?: { sentByPerson?: true } | null }): boolean {
-  return PRIORITY_TURN_SOURCES.includes(run.source) || (run.source === 'steer-followup' && run.outcome?.sentByPerson === true)
-}

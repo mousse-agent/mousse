@@ -71,7 +71,7 @@ import { EventEmitter } from 'events'
 import { nativeAgentAssistantMessage, nativeAgentHistory } from '../providers/nativeAgentHistory'
 import { v4 as uuidv4 } from 'uuid'
 import { TitleTakenRejection, type CommandResult, type RunEngine, type SendDelegation, type StopResult } from '../run/RunEngine'
-import { isFencedSource, isFollowUpSource, isPauseHeldSource, isPriorityTurnRun, isResumeSource } from '../run/delegation/sources'
+import { isFencedSource, isFollowUpSource, isPauseHeldSource, isResumeSource } from '../run/delegation/sources'
 import { deleteRunResults, readRunResultText } from '../run/delegation/hold'
 import { SettleNotices, type PlannedSettleNotice } from './settleNotices'
 import { decideUsageLimit, usageLimitOf, type UsageLimitDecision } from '../run/pausePolicy'
@@ -745,6 +745,8 @@ export interface StopThreadOutcome extends Partial<StopResult> {
  * workflow or legacy turn) before it looks again (C4: the wake stays queued instead of looping).
  */
 export const WAKE_BUSY_DEFER_MS = 5_000
+/** Startup queue recovery starts one queued thread every this many ms (four a second; `pumpStartupDrainQueue`). */
+export const STARTUP_DRAIN_SPACING_MS = 250
 
 /** The run record's error for a scheduled occurrence whose run the daemon admitted but never started. */
 const SCHEDULED_NEVER_STARTED = 'Interrupted: never started'
@@ -933,14 +935,6 @@ interface TurnStartRequest {
 /** Payload of a `turn.start` effect (SPEC §12.2). */
 export interface TurnStartPayload extends TurnStartRequest {
   runId: string
-}
-
-/**
- * A `steer-followup` queue item a person sent: no agent or other origin, and no subagent results carried
- * (those are deliveries, not a person's text).
- */
-function isPersonFollowUp(item: QueuedMessage): boolean {
-  return item.source === 'steer-followup' && !item.origin && !item.inboxIds?.length
 }
 
 /** `turn.start` payload of an `integration` run (SPEC §14.4): merges one delegated result. */
@@ -1216,6 +1210,8 @@ export class OrchestratorService extends EventEmitter {
     }
     this.startupDrainPending = []
     this.startupDrainScheduled.clear()
+    if (this.startupDrainTimer) clearTimeout(this.startupDrainTimer)
+    this.startupDrainTimer = null
     // Before any turn is stopped: a provider's stop handler dismisses its pending requests, and a dismissal
     // while the profile stops is no withdrawal. The saved requests stay pending for the next boot.
     this.questions.shutdown()
@@ -2043,8 +2039,6 @@ export class OrchestratorService extends EventEmitter {
   private readonly definitionHeartbeatMs = DEFINITION_HEARTBEAT_MS
   /** Phase 2b: the worker that executes `turn.*` effects. Null keeps direct turn starts. */
   private effectWorker: EffectWorker | null = null
-  /** Threads whose new run waits for a free turn slot, with that run (`showSlotWait`). */
-  private readonly slotWaits = new Map<string, string>()
   /** Phase 5: mints a Mousse MCP credential per MCP-capable turn. Null attaches nothing. */
   private mcpAttachment: McpAttachmentProvider | null = null
   private mcpRegistry?: ToolRegistry
@@ -2110,11 +2104,13 @@ export class OrchestratorService extends EventEmitter {
   private runtimeManager: import('../runtime/ThreadRuntimeManager').ThreadRuntimeManager | null =
     null
   /**
-   * Max concurrent turns started by startup queue recovery.
-   * Keeps recoverAndDrainPendingQueues bounded while still considering every eligible thread.
+   * Startup queue recovery starts the next thread's queued message this long after the previous one (four a second), so
+   * a restart with many queued threads does not start every provider process in the same moment. It never waits for a
+   * turn to end: forty queued threads all run within ten seconds of the start. Tests shorten it.
    */
-  private static readonly STARTUP_QUEUE_DRAIN_CONCURRENCY = 2
-  private startupDrainActive = 0
+  private startupDrainSpacingMs = STARTUP_DRAIN_SPACING_MS
+  /** The pause before startup recovery starts the next thread (`startupDrainSpacingMs`). */
+  private startupDrainTimer: ReturnType<typeof setTimeout> | null = null
   private startupDrainPending: string[] = []
   private startupDrainScheduled = new Set<string>()
   private featureFlags: MousseFeatureFlags = { ...DEFAULT_FEATURE_FLAGS }
@@ -2614,11 +2610,6 @@ export class OrchestratorService extends EventEmitter {
         if (engine.remoteSubagents.hasOpen()) this.remoteSubagents?.kick()
       }
       if (event.type === 'reconcile.delivery_failed') this.noteUndeliveredResult(event)
-      // A run that waited for a turn slot and ended unstarted (a Stop, a cancel) no longer shows the wait.
-      if (event.type === 'run.status' && event.runId && this.slotWaits.get(event.threadId) === event.runId) {
-        const status = (event.payload as { status?: RunRecord['status'] } | undefined)?.status
-        if (status && TERMINAL_RUN_STATUSES.has(status)) this.endSlotWait(event.threadId, event.runId)
-      }
       // A saved approval request closed without an answer (its run ended, a Stop, the thread was
       // deleted): its card goes and the provider callback that still waits for it is released.
       if (event.type === 'approval.cancelled') {
@@ -5639,9 +5630,7 @@ export class OrchestratorService extends EventEmitter {
     // that held it across the await that made the run): the owner is the run the effect starts.
     if (session.turnAdmitted && !session.activeTurn) session.admissionRunId = runId
     try {
-      const pending = this.enqueueTurnStart({ ...payload, runId, admissionHeld: true })
-      this.showSlotWait(payload.threadId, runId)
-      return pending
+      return this.enqueueTurnStart({ ...payload, runId, admissionHeld: true })
     } catch (error) {
       console.warn('turn.start effect could not be recorded; running the turn directly', {
         runId,
@@ -5721,38 +5710,6 @@ export class OrchestratorService extends EventEmitter {
     return promise
   }
 
-  /**
-   * A run whose `turn.start` no turn slot is free for waits until one of the turns running ends. Its thread shows that
-   * wait (phase `queued`, step `waiting_slot`) instead of a turn that thinks, until the turn starts (`runTurnOnSession`)
-   * or the run ends unstarted (`endSlotWait`). Checked after the worker had its chance to claim the effect, so a turn
-   * that starts at once never shows it.
-   */
-  private showSlotWait(threadId: string, runId: string): void {
-    setImmediate(() => {
-      const entry = this.turnResults.get(runId)
-      const slots = this.effectWorker?.turnSlots()
-      if (!entry || entry.started || entry.abandoned || !slots) return
-      const run = this.runEngine?.getRun(runId)
-      if (run?.status !== 'queued' || this.isStopping(threadId)) return
-      // A person's turn waits only while every slot runs a turn; a background one already while the slots it may use
-      // (all but those kept for people) do.
-      const person = isPriorityTurnRun(run)
-      if (person ? slots.running < slots.limit : slots.sharedRunning < slots.limit - slots.keptForPeople) return
-      // Another turn of the thread is live (a queue drain raced it): its state is the thread's.
-      if (this.loadedSession(threadId)?.activeTurn) return
-      this.slotWaits.set(threadId, runId)
-      this.setTurnPhase(threadId, 'queued', { turnId: null, step: { kind: 'waiting_slot', running: slots.running, limit: slots.limit, ...(person ? {} : { keptForPeople: slots.keptForPeople }) } })
-    })
-  }
-
-  /** The run `showSlotWait` showed ended without starting: its thread no longer shows the wait. */
-  private endSlotWait(threadId: string, runId: string): void {
-    if (this.slotWaits.get(threadId) !== runId) return
-    this.slotWaits.delete(threadId)
-    const state = this.turnStates.get(threadId)
-    if (state?.phase === 'queued' && state.step?.kind === 'waiting_slot') this.setTurnPhase(threadId, 'idle')
-  }
-
   private async executeTurnStartEffect(effect: EffectRecord, signal: AbortSignal): Promise<void> {
     // A thread whose expiry passed is being deleted: nothing queued or recovered starts in it.
     if (this.isExpired(effect.threadId)) {
@@ -5801,8 +5758,6 @@ export class OrchestratorService extends EventEmitter {
       return
     }
     if (entry) entry.started = true
-    // Its slot is free now: the turn's own phases replace the wait.
-    if (this.slotWaits.get(stored.threadId) === stored.runId) this.slotWaits.delete(stored.threadId)
     // The in-memory payload keeps image data the durable payload omits. Without it the sender is
     // gone (another orchestrator instance), so this executor does not inherit its admission.
     const payload = entry?.payload ?? { ...stored, admissionHeld: false }
@@ -5934,7 +5889,6 @@ export class OrchestratorService extends EventEmitter {
     }
     if (session && payload.queueItemId && TERMINAL_RUN_STATUSES.has(run.status))
       this.completeSessionClaim(session, payload.queueItemId, payload.claimOwnerToken)
-    this.endSlotWait(payload.threadId, payload.runId)
     entry?.reject(new Error(`Run ${payload.runId} is ${run.status}; its turn did not start.`))
   }
 
@@ -5964,7 +5918,6 @@ export class OrchestratorService extends EventEmitter {
         if (engine.getRun(id)?.status === 'queued') engine.markTerminal(id, 'interrupted', { interruptedBy: 'daemon_restart' })
       })
     }
-    this.endSlotWait(payload.threadId, runId)
     entry.reject(Object.assign(new Error('Profile work is shutting down'), { code: 'profile_draining' }))
   }
 
@@ -8519,8 +8472,6 @@ export class OrchestratorService extends EventEmitter {
         // A message an agent queued is still its run: it counts toward the chain of agent messages and is held
         // behind a pause, wherever it was written (the send, or an edit that made it the agent's).
         ...(item.origin?.kind === 'agent' ? { agentOrigin: { hops: item.origin.hops ?? 1 } } : {}),
-        // A person's unread steer queued again from its entry (`settleUnreadItems`); one carrying subagent results is not.
-        ...(isPersonFollowUp(item) ? { sentByPerson: true as const } : {}),
         // A settle notice's turn carries the count of the work it reports on and adds none (SPEC §15.1).
         ...(item.settleNotice?.length ? { noticeHops: item.settleHops ?? 0 } : {})
       })
@@ -11305,7 +11256,7 @@ export class OrchestratorService extends EventEmitter {
           // The follow-up is a queued run from the start, so the thread stays held without memory (a restart included).
           let runId: string | undefined
           try {
-            runId = this.runEngine?.store.createRun({ threadId: session.threadId, source: 'steer-followup', outcome: { sentByPerson: true } }).runId
+            runId = this.runEngine?.store.createRun({ threadId: session.threadId, source: 'steer-followup' }).runId
           } catch {
             // Without a run the person's text is still queued; the thread is just not held for it.
           }
@@ -11350,7 +11301,7 @@ export class OrchestratorService extends EventEmitter {
             flush()
             let limitedRunId: string | undefined
             try {
-              limitedRunId = this.runEngine?.store.createRun({ threadId: session.threadId, source: 'steer-followup', outcome: { sentByPerson: true } }).runId
+              limitedRunId = this.runEngine?.store.createRun({ threadId: session.threadId, source: 'steer-followup' }).runId
             } catch {
               // Without a run the text is still queued; the thread is just not held for it.
             }
@@ -14730,9 +14681,9 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * Reclaim abandoned claims, then drain pending work with a small concurrency bound.
-   * Every eligible thread is considered in deterministic list order; completion/failure
-   * advances the startup queue. Does not block the caller.
+   * Reclaim abandoned claims, then drain pending work: every eligible thread, in deterministic list order, starts its
+   * first queued message, a few a second (`startupDrainSpacingMs`), and each goes on to its next message when its turn
+   * ends. Does not block the caller.
    */
   recoverAndDrainPendingQueues(): void {
     if (this.lifecycle.stopping) return
@@ -14948,12 +14899,13 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
+  /**
+   * Starts the queued threads startup recovery found, one every `startupDrainSpacingMs`: the next start waits only for
+   * that pause, never for an earlier thread's turn. A thread whose turn ran comes back with its next message.
+   */
   private pumpStartupDrainQueue(): void {
-    if (this.lifecycle.stopping) return
-    while (
-      this.startupDrainActive < OrchestratorService.STARTUP_QUEUE_DRAIN_CONCURRENCY &&
-      this.startupDrainPending.length > 0
-    ) {
+    if (this.lifecycle.stopping || this.startupDrainTimer) return
+    while (this.startupDrainPending.length > 0) {
       const threadId = this.startupDrainPending.shift()!
       const session = this.getOrCreateSession(threadId)
       this.reclaimStaleThreadLease(threadId)
@@ -14973,13 +14925,11 @@ export class OrchestratorService extends EventEmitter {
         this.startupDrainScheduled.delete(threadId)
         continue
       }
-      this.startupDrainActive += 1
-      // Startup-managed: one turn per slot. Internal auto-drain is suppressed so chaining
-      // stays under this pump and concurrency never exceeds STARTUP_QUEUE_DRAIN_CONCURRENCY.
+      // Startup-managed: the thread's ordinary auto-drain is suppressed, so its next message comes back through
+      // this pump (one turn per thread at a time, as always).
       this.scheduleQueueDrain(session, {
         managedByStartup: true,
         onSettled: (result) => {
-          this.startupDrainActive = Math.max(0, this.startupDrainActive - 1)
           this.startupDrainScheduled.delete(threadId)
           // Another process took the lease after the look above and before the claim: wait for it.
           if (result === 'idle' && !session.deleted && !session.isTurnRunning() && this.isThreadLeaseHeldExternally(threadId, session.executionLease?.owner.token)) {
@@ -15013,6 +14963,13 @@ export class OrchestratorService extends EventEmitter {
           this.pumpStartupDrainQueue()
         }
       })
+      if (this.startupDrainPending.length > 0 && this.startupDrainSpacingMs > 0) {
+        this.startupDrainTimer = setTimeout(() => {
+          this.startupDrainTimer = null
+          this.pumpStartupDrainQueue()
+        }, this.startupDrainSpacingMs)
+        return
+      }
     }
   }
 

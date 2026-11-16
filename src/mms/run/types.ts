@@ -82,12 +82,6 @@ export interface RunOutcome {
    */
   sentByAgent?: true
   agentHops?: number
-  /**
-   * A person's steer that missed its turn and runs as a `steer-followup` turn of its own. The source is shared
-   * with agents' leftover steers and carried subagent results, so this marks the person's: its `turn.start`
-   * takes a free turn slot ahead of background turns, as a message from the window does.
-   */
-  sentByPerson?: true
   /** SPEC §16.4: the interrupted run this send continues ("Continue" after a restart). */
   continuationOf?: string
   /** Set while the run is `paused`, and kept after the pause ended. */
@@ -242,10 +236,10 @@ export interface EffectKindSpec {
 export const DEFAULT_EFFECT_MAX_ATTEMPTS = 5
 
 /**
- * Which worker fibres may claim an effect kind (SPEC §12.3): `turn` fibres run `turn.start` (one
- * per live turn, so their count caps a profile's concurrent turns), `control` fibres run the
- * interrupts, steers and answers that must reach a live turn, and `replaySafe` fibres run the
- * replay-safe kinds. A long turn can therefore never starve a Stop.
+ * Which part of the worker may claim an effect kind (SPEC §12.3): the turn claimer runs `turn.start`
+ * (every due turn at once, no limit), `control` fibres run the interrupts, steers and answers that
+ * must reach a live turn, and `replaySafe` fibres run the replay-safe kinds. A turn can therefore
+ * never hold up a Stop.
  */
 export type EffectLaneClass = 'turn' | 'control' | 'replaySafe'
 
