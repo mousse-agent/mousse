@@ -1,4 +1,4 @@
-import { maskedActionData } from '../actions/BotActions'
+import { actionDigest, maskedActionData } from '../actions/BotActions'
 import type { BotLane } from '../../../shared/bots/personal/definition'
 import { memoryToolOf } from '../../../shared/bots/personal/memory'
 import type { ChatMessage, ThreadData } from '../../../shared/types'
@@ -82,8 +82,8 @@ export function unsettled(message: ChatMessage): boolean {
  * every other non-presentation row the dispatch was given (its prompt, a wall answer) as a
  * `notice` from Mousse.
  */
-export function capturedRows(message: ChatMessage, ref: BotThreadRef, subagent = false, maskArguments = false): CapturedRow[] {
-  const rows = botRows(message, ref, maskArguments)
+export function capturedRows(message: ChatMessage, ref: BotThreadRef, subagent = false, maskArguments = false, heldDigests: ReadonlySet<string> = new Set()): CapturedRow[] {
+  const rows = botRows(message, ref, maskArguments, heldDigests)
   if (!subagent) return rows
   // A subagent of the bot's work: what it said is data it returned to the work (like a tool's result, from outside),
   // and its calls are not the bot's, so search, the packs and an export never show them as the bot's own words.
@@ -96,7 +96,7 @@ export function capturedRows(message: ChatMessage, ref: BotThreadRef, subagent =
   }))
 }
 
-function botRows(message: ChatMessage, ref: BotThreadRef, maskArguments = false): CapturedRow[] {
+function botRows(message: ChatMessage, ref: BotThreadRef, maskArguments = false, heldDigests: ReadonlySet<string> = new Set()): CapturedRow[] {
   const kind = message.kind ?? 'message'
   if (SKIPPED_KINDS.has(kind) || message.role === 'system') return []
   const base = {
@@ -133,12 +133,13 @@ function botRows(message: ChatMessage, ref: BotThreadRef, maskArguments = false)
     if (/(?:^|__)telling_set$/.test(tool)) {
       return [{ ...base, kind: 'tool_call', sourceKey: key, who: 'bot', text: 'telling_set', json: { tool: 'telling_set' } }]
     }
+    const held = maskArguments && input !== undefined && heldDigests.has(actionDigest(input))
     if (maskArguments) input = maskedActionData(input) as typeof input
     const inputText = input === undefined ? '' : safeJson(input)
     const rows: CapturedRow[] = [{
       ...base,
       kind: 'tool_call',
-      ...(maskArguments ? { external: true } : {}),
+      ...(held ? { external: true } : {}),
       sourceKey: key,
       who: 'bot',
       text: `${tool} ${inputText || message.toolCall?.summary || ''}`.trim(),
@@ -209,11 +210,12 @@ export function createBotJournal(options: BotJournalCaptureOptions): BotJournalC
       let start = saved && saved.n <= messages.length && (saved.n === 0 || messages[saved.n - 1]?.id === saved.lastId) ? saved.n : 0
       let settledPrefix = true
       let written = 0
-      const maskArguments = options.asksFirstEnabled?.() === true && Boolean(ref.activationId && store.hasStoredActions(ref.activationId))
+      const heldDigests = options.asksFirstEnabled?.() === true && ref.activationId ? store.storedActionDigests(ref.activationId) : new Set<string>()
+      const maskArguments = heldDigests.size > 0
       for (let index = start; index < messages.length; index++) {
         const message = messages[index]!
         const partial = unsettled(message)
-        for (const row of capturedRows(message, ref, subagent, maskArguments)) {
+        for (const row of capturedRows(message, ref, subagent, maskArguments, heldDigests)) {
           store.putCaptured(row, partial)
           written++
         }

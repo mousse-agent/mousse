@@ -1248,6 +1248,11 @@ export class BotMemoryStore {
       && this.get('SELECT 1 FROM bot_actions WHERE activation_id = ? LIMIT 1', activationId))
   }
 
+  storedActionDigests(activationId: string): ReadonlySet<string> {
+    if (!this.get("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bot_actions'")) return new Set()
+    return new Set(this.all('SELECT args_digest FROM bot_actions WHERE activation_id = ?', activationId).map(row => String(row.args_digest)))
+  }
+
   /** Export the masked call record, never the exact executable arguments. */
   actions(botId: string): Array<Record<string, unknown>> {
     if (!this.get("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bot_actions'")) return []
