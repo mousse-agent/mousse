@@ -1,3 +1,4 @@
+import { existsSync, mkdirSync } from 'node:fs'
 import { afterEach, expect, it, vi } from 'vitest'
 import { remoteBotMethods } from '../../src/mms/bridge/remote/RemoteBots'
 import { setDiagSink } from '../../src/mms/log/diag'
@@ -1488,5 +1489,32 @@ it.each(['repeat', 'loop'] as const)('R2-1 %s refusal is a Mousse update and nev
   expect(f.store.dispatches(t.workId)).toHaveLength(dispatches)
   expect(f.store.activation(t.workId)?.status).toBe('done')
   expect(JSON.stringify(f.store.dispatches(t.workId))).not.toContain('owner added')
-  expect(f.store.all("SELECT id FROM bot_messages WHERE activation_id = ? AND kind = 'text'", t.workId)).toHaveLength(1)
+  expect(f.store.all("SELECT id FROM bot_messages WHERE activation_id = ? AND kind = 'run_report'", t.workId)).toHaveLength(1)
+})
+
+
+it.each(['card', 'request'] as const)('R2-2 forgetting the %s uses the appropriate continuation or normal end', async which => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  const scratch = `${f.base}/forget-scratch`; mkdirSync(scratch)
+  f.store.run('UPDATE bot_activations SET scratch = ? WHERE id = ?', scratch, t.workId)
+  const browserEnd = vi.fn(); const progressEnd = vi.fn()
+  f.host.browser = { activationEnded: browserEnd } as never
+  f.host.progress = { finishProgress: progressEnd } as never
+  const id = which === 'card' ? a.message_id : String(f.store.all("SELECT id FROM bot_messages WHERE bot_id = ? AND author = 'owner' ORDER BY seq DESC", t.botId)[0].id)
+  const memory = new BotMemoryStore({ db: f.store.db })
+  const seq = memory.append({ botId: t.botId, sourceKey: `bm:${id}`, kind: 'notice', who: 'bot', text: 'call' })!
+  memory.forget(t.botId, { refs: [`j${seq}`], by: 'owner_ui' }); await flush()
+  if (which === 'card') {
+    expect(f.store.activation(t.workId)?.status).toBe('running')
+    expect(f.store.lastMainDispatch(t.workId)!.prompt.text).toContain('withdrawn')
+    expect(f.store.lastMainDispatch(t.workId)!.prompt.text).not.toContain('request was forgotten')
+  } else {
+    expect(f.store.activation(t.workId)?.status).toBe('failed')
+    expect(f.journal.some(j => j.kind === 'run_end' && j.activationId === t.workId)).toBe(true)
+    expect(existsSync(scratch)).toBe(false)
+    expect(browserEnd).toHaveBeenCalledWith({ botId: t.botId, activationId: t.workId })
+    expect(progressEnd).toHaveBeenCalledWith(t.botId, t.workId, false)
+  }
 })
