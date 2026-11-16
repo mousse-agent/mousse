@@ -795,7 +795,7 @@ export interface BotDispatchRow {
     workTold?: 'pending' | 'output' | 'completed'
     workWaitIds?: string[]
     workActionIds?: string[]
-    /** Work's stored additions carried here; consume them with confirmed delivery, not prepare. */
+    /** Carried ids for replay; existing read/applied markers remain independent of confirmation. */
     workDelivery?: { answers: string[]; notes: number[]; question?: string }
   }
   policyDigest: string
@@ -2020,7 +2020,7 @@ export class BotStore {
       ORDER BY COALESCE(a.ran_at, a.answered_at, a.created_at), a.rowid`, workId) as unknown as ActionRow[]
   }
 
-  /** One confirmation transaction for the whole stored update list. Preparing a run proves nothing was read. */
+  /** Confirmation controls replay only; existing carried/read markers are not changed here. */
   confirmWorkDelivery(activationId: string, n: number, why: 'output' | 'completed'): void {
     const needsConfirmation = (dispatch: BotDispatchRow | undefined): boolean => Boolean(dispatch && dispatch.startedAt !== null &&
       dispatch.prompt.workTold !== 'output' && dispatch.prompt.workTold !== 'completed' && hasWorkUpdates(dispatch.prompt))
