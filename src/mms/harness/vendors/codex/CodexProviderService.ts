@@ -453,7 +453,7 @@ export type CodexChatInput = {
    * `drainSteer` that also says whether the text is a person's (`cut`): see `TurnControl.drainSteerEntry`. With
    * `expect`, it takes only when the decision now is one of those deliveries.
    */
-  drainSteerEntry?: (opts?: { expect?: Array<'cut' | 'native' | 'hold'> }) => { text: string; token?: string; cut?: boolean } | undefined
+  drainSteerEntry?: (opts?: { expect?: Array<'cut' | 'native' | 'hold'> }) => { text: string; token?: string; cut?: boolean; images?: ChatImageAttachment[] } | undefined
   /**
    * The hold (`TurnControl.peekSteer`): what a drain now would do, without taking anything. With it, the turn drains
    * only what it can deliver now: a cut, or a native steer (`turn/steer`, or the next turn at a boundary).
@@ -480,10 +480,31 @@ export type CodexChatInput = {
   onHeartbeat?: () => void
 }
 
-/** A steer `chat` drained; `token` names its drain (`drainSteerEntry`), when it had one. */
+/** A steer `chat` drained, with the images sent with it; `token` names its drain (`drainSteerEntry`), when it had one. */
 interface DrainedSteer {
   text: string
   token?: string
+  images?: ChatImageAttachment[]
+}
+
+/** The images Codex takes: JPEG, PNG, GIF or WebP up to 10 MiB. */
+function codexTakesImage(image: ChatImageAttachment): boolean {
+  return ['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(image.mimeType) && Buffer.byteLength(image.data, 'base64') <= 10 * 1024 * 1024
+}
+
+function codexImageInput(image: ChatImageAttachment): UserInput {
+  return { type: 'image', url: `data:${image.mimeType};base64,${image.data}` }
+}
+
+/**
+ * Steers as Codex input: their text, one per line, then their images. An image Codex does not take is left out with a
+ * warning: the text still goes in now, and the transcript keeps the image.
+ */
+function steerInput(entries: readonly DrainedSteer[]): UserInput[] {
+  const images = entries.flatMap((entry) => entry.images ?? [])
+  const taken = images.filter(codexTakesImage)
+  if (taken.length < images.length) console.warn('[codex] a steer image Codex does not take was left out', { left: images.length - taken.length })
+  return [textInput(entries.map((entry) => entry.text).join('\n')), ...taken.map(codexImageInput)]
 }
 
 export interface CodexChatResult {
@@ -2971,9 +2992,8 @@ export class CodexProviderService {
           errorInfo: { category: 'unavailable', retryable: false }
         })
       const images = (input.images ?? []).map((image): UserInput => {
-        if (!['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(image.mimeType) || Buffer.byteLength(image.data, 'base64') > 10 * 1024 * 1024)
-          throw new Error(`Codex cannot send image ${image.name}; use JPEG, PNG, GIF or WebP under 10 MiB`)
-        return { type: 'image', url: `data:${image.mimeType};base64,${image.data}` }
+        if (!codexTakesImage(image)) throw new Error(`Codex cannot send image ${image.name}; use JPEG, PNG, GIF or WebP under 10 MiB`)
+        return codexImageInput(image)
       })
       const conn = await this.verifiedConnection(signal)
       await abortable(this.ensureTreeMode(conn), signal)
@@ -3052,7 +3072,7 @@ export class CodexProviderService {
             return
           }
           try {
-            await conn.request('turn/steer', { threadId: codexThreadId, expectedTurnId: current.turnId, input: [textInput(entry.text)] }, { signal })
+            await conn.request('turn/steer', { threadId: codexThreadId, expectedTurnId: current.turnId, input: steerInput([entry]) }, { signal })
           } catch (error) {
             // A Stop or a dead process: the entry stays in flight, and the chat's end hands it back.
             if (!(error instanceof CodexRpcError)) throw error
@@ -3113,7 +3133,7 @@ export class CodexProviderService {
       const holds = Boolean(input.peekSteer && input.drainSteerEntry)
       const collectSteer = (): void => {
         if (signal.aborted) return
-        let entry: { text: string; token?: string; cut?: boolean } | undefined
+        let entry: { text: string; token?: string; cut?: boolean; images?: ChatImageAttachment[] } | undefined
         let asCut: boolean
         if (holds) {
           const delivery = input.peekSteer!()?.delivery
@@ -3130,7 +3150,7 @@ export class CodexProviderService {
         }
         const steer = (entry ? entry.text : holds ? undefined : input.drainSteer?.())?.trim()
         if (!steer) return
-        const drainedSteer = { text: steer, ...(entry?.token ? { token: entry.token } : {}) }
+        const drainedSteer: DrainedSteer = { text: steer, ...(entry?.token ? { token: entry.token } : {}), ...(entry?.images?.length ? { images: entry.images } : {}) }
         if (asCut) return cut(drainedSteer)
         deliver(drainedSteer)
       }
@@ -3253,7 +3273,7 @@ export class CodexProviderService {
         // A cut taken while no turn was open (the run waited for its helpers) is carried by this next turn: there is
         // nothing left to cut, and cutting would end the very turn that carries it.
         cutWaiting = false
-        nextInput = [textInput(nextSteers.map((entry) => entry.text).join('\n'))]
+        nextInput = steerInput(nextSteers)
       }
       // A turn that ran after the cap (a held steer) does not wait for helpers; its own are interrupted
       // before the run ends.

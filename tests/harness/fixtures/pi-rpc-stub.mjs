@@ -90,7 +90,7 @@ process.stdin.on('data', (chunk) => {
 })
 
 function handle(command) {
-  if (scripted && ['prompt', 'steer', 'clear_queue', 'abort'].includes(command.type)) log({ command: command.type, ...(command.message !== undefined ? { message: command.message } : {}) })
+  if (scripted && ['prompt', 'steer', 'clear_queue', 'abort'].includes(command.type)) log({ command: command.type, ...(command.message !== undefined ? { message: command.message } : {}), ...(command.images !== undefined ? { images: command.images } : {}) })
   switch (command.type) {
     case 'get_available_models': return respond(command, { models: [] })
     case 'get_state': return respond(command, { sessionId: `stub-${process.pid}` })

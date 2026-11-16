@@ -360,6 +360,25 @@ describe("the hold: a person's steer waits for a running tool (docs/design/steer
     expect(c.sent()).toEqual(['hi', STEER])
   })
 
+  it("the run a steer becomes is sent with the steer's images", async () => {
+    const c = held()
+    const drain = c.hold.ctl.drainSteerEntry!
+    c.hold.ctl.drainSteerEntry = (opts) => {
+      const entry = drain(opts)
+      return entry && { ...entry, images: [{ name: 'shot.png', mimeType: 'image/png', data: 'AAAA' }] }
+    }
+    const handle = await c.turn()
+    await c.running(1)
+    c.writes('run-1', 'working')
+    c.hold.steer(STEER)
+    await c.running(2)
+    c.end('run-2')
+    await handle.result
+    const sends = c.host.calls('send')
+    expect(sends[0]).not.toHaveProperty('images')
+    expect(sends[1]).toMatchObject({ text: STEER, images: [{ data: 'AAAA', mimeType: 'image/png' }] })
+  })
+
   it('a tool that starts between the drain and the cancel keeps the steer: handed back, held, and sent at the run\'s end', async () => {
     const c = held()
     const handle = await c.turn()

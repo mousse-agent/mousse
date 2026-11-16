@@ -272,8 +272,10 @@ export interface TurnControl {
    * hand back several: `returnSteer(text, token)` then restores what that drain took and nothing else.
    * `cut`: the drain holds a person's message, which the model must read now. A provider whose own steer
    * waits for the current reply or command to end cuts the reply instead and continues with the text.
+   * `images`: the images the drained messages carry, in order, for a provider whose steer can take them; one that
+   * cannot sends the text alone. The orchestrator keeps them with the drain, so the transcript shows them either way.
    */
-  drainSteerEntry?(opts?: { expect?: SteerDelivery | SteerDelivery[] }): { text: string; token: string; cut?: boolean; forced?: boolean } | undefined
+  drainSteerEntry?(opts?: { expect?: SteerDelivery | SteerDelivery[] }): { text: string; token: string; cut?: boolean; forced?: boolean; images?: ChatImageAttachment[] } | undefined
   /**
    * What a drain now would do, without taking anything; undefined when nothing is pending
    * (docs/design/steer-and-interruptions.md §2.2). An adapter on the hold (`steerBoundary` not `none`)

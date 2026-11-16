@@ -1358,6 +1358,45 @@ describe('CodexAdapter', () => {
     expect(sink.calls.filter(([name]) => name === 'steerAccepted').map(([, value]) => value)).toEqual(['Focus on tests', 'And lint'])
   })
 
+  it("sends a steer's images with it: by turn/steer, and in the next turn when the steer arrives too late", async () => {
+    const png = (data: string) => ({ name: `${data}.png`, mimeType: 'image/png', data })
+    const image = (data: string) => ({ type: 'image', url: `data:image/png;base64,${data}` })
+    const steers: Array<{ text: string; images: ReturnType<typeof png>[] }> = []
+    const replay = transport(
+      [
+        ...handshake(),
+        ...threadStart(4),
+        ...turnStart(5, 'hello'),
+        cue({ steer: 'Match this', image: 'AAAA' }),
+        out({ id: 6, method: 'turn/steer', params: { threadId: T, expectedTurnId: 'turn-1', input: [...text('Match this'), image('AAAA')] } }),
+        inn({ id: 6, result: { turnId: 'turn-1' } }),
+        cue({ steer: 'And this', image: 'BBBB' }),
+        out({ id: 7, method: 'turn/steer', params: { threadId: T, expectedTurnId: 'turn-1', input: [...text('And this'), image('BBBB')] } }),
+        completed('completed'),
+        inn({ id: 7, error: { code: -32600, message: 'no active turn to steer' } }),
+        out({ id: 8, method: 'turn/start', params: { summary: 'auto', threadId: T, input: [...text('And this'), image('BBBB')], approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
+        inn({ id: 8, result: { turn: { id: 'turn-2', status: 'inProgress', error: null, items: [] } } }),
+        note('turn/started', { threadId: T, turn: { id: 'turn-2', status: 'inProgress', error: null } }),
+        completed('completed', 'turn-2')
+      ],
+      (frame) => {
+        const cued = frame as { steer: string; image: string }
+        steers.push({ text: cued.steer, images: [png(cued.image)] })
+      }
+    )
+    let drains = 0
+    const ctl: TurnControl = {
+      drainSteer: () => undefined,
+      drainSteerEntry: () => {
+        const entry = steers.shift()
+        return entry ? { ...entry, token: `drain-${++drains}`, cut: false } : undefined
+      },
+      heartbeat: () => {}
+    }
+    await new CodexAdapter(() => service(replay)).startTurn(input(), recordingSink(), ctl, host())
+    replay.assertDone()
+  })
+
   describe('a native steer counts as read only once Codex has it', () => {
     /** A control whose steers join the turn natively, with every take and hand-back recorded by token. */
     function steerControl(queue: string[]) {
@@ -1569,6 +1608,36 @@ describe('CodexAdapter', () => {
       expect(sink.calls.filter(([name]) => name === 'steerAccepted').map(([, value]) => value)).toEqual(['Use pnpm'])
       expect(taken).toEqual(['drain-1'])
       expect(returned).toEqual([])
+    })
+
+    it("starts the next turn with the message's images", async () => {
+      const steers: string[] = []
+      const replay = transport(
+        [
+          ...cutFrames(),
+          inn({ id: 6, result: {} }),
+          completed('interrupted'),
+          out({
+            id: 7,
+            method: 'turn/start',
+            params: { summary: 'auto', threadId: T, input: [...text('Use pnpm'), { type: 'image', url: 'data:image/png;base64,AAAA' }], approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' }
+          }),
+          inn({ id: 7, result: { turn: { id: 'turn-2', status: 'inProgress', error: null, items: [] } } }),
+          note('turn/started', { threadId: T, turn: { id: 'turn-2', status: 'inProgress', error: null } }),
+          completed('completed', 'turn-2')
+        ],
+        steerCue(steers)
+      )
+      const ctl: TurnControl = {
+        drainSteer: () => undefined,
+        drainSteerEntry: () => {
+          const text = steers.shift()
+          return text ? { text, token: 'drain-1', cut: true, images: [{ name: 'shot.png', mimeType: 'image/png', data: 'AAAA' }] } : undefined
+        },
+        heartbeat: () => {}
+      }
+      await new CodexAdapter(() => service(replay)).startTurn(input(), recordingSink(), ctl, host())
+      replay.assertDone()
     })
 
     it('hands the message back when Stop lands before the next turn starts', async () => {

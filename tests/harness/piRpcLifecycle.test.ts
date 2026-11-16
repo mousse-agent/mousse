@@ -7,6 +7,7 @@ import { PiRpcEngine } from '../../src/mms/harness/pi/engine'
 import type { AdapterHost, TurnControl, TurnInput, TurnSink } from '../../src/mms/harness/adapter'
 import type { PermissionPrompter } from '../../src/mms/harness/acp/permissions'
 import type { ProviderRef } from '../../src/mms/run/types'
+import type { ChatImageAttachment } from '../../src/shared/types'
 import { isRetriesExhausted } from '../../src/shared/harness/types'
 import { SteerHold, type PendingSteerFacts } from '../../src/mms/orchestrator/steerHold'
 import { cleanBase, scratchDir } from './piRpcFixture'
@@ -517,7 +518,7 @@ function onHold(t: ReturnType<typeof turn>) {
   const open = new Map<string, string>()
   // A call whose approval the person is asked for is not a running tool (`toolAwaiting`).
   const hold = new SteerHold({ caps: PI_RPC_CAPS, strict: false, foreground: (waiting) => [...open].filter(([callId]) => !waiting.has(callId)).map(([callId, toolName]) => ({ callId, toolName })) })
-  type Entry = { text: string; person: boolean; key: string }
+  type Entry = { text: string; person: boolean; key: string; images?: ChatImageAttachment[] }
   const pending: Entry[] = []
   const drains = new Map<string, Entry[]>()
   let seq = 0
@@ -571,7 +572,8 @@ function onHold(t: ReturnType<typeof turn>) {
     drains.set(token, entries)
     hold.drained(token, decision.forced)
     if (decision.forced) record.forced.push(token)
-    return { text: entries.map((entry) => entry.text).join('\n'), token, cut: entries.some((entry) => entry.person), ...(decision.forced ? { forced: true } : {}) }
+    const images = entries.flatMap((entry) => entry.images ?? [])
+    return { text: entries.map((entry) => entry.text).join('\n'), token, cut: entries.some((entry) => entry.person), ...(images.length ? { images } : {}), ...(decision.forced ? { forced: true } : {}) }
   }
   t.ctl.mayCut = (token) => hold.mayCut(token)
   t.ctl.returnSteer = (text, token) => {
@@ -585,8 +587,8 @@ function onHold(t: ReturnType<typeof turn>) {
   return {
     record,
     pending,
-    /** A person's steer (or an agent's, `person: false`) promoted into the running turn. */
-    steer: (text: string, person = true) => void pending.push({ text, person, key: `k-${++seq}` }),
+    /** A person's steer (or an agent's, `person: false`) promoted into the running turn, with the images sent with it. */
+    steer: (text: string, person = true, images?: ChatImageAttachment[]) => void pending.push({ text, person, key: `k-${++seq}`, ...(images ? { images } : {}) }),
     /** Send now on the hold shown. */
     sendNow: () => hold.requestForce({ holdGeneration: hold.holdGeneration!, requestId: `now-${++seq}`, itemIds: [] }),
     /** Until the turn reported its first tool call (announced or running). */
@@ -594,7 +596,7 @@ function onHold(t: ReturnType<typeof turn>) {
   }
 }
 
-type StubLog = { at: number; command?: string; message?: string; event?: string; aborted?: boolean; read?: string; prompt?: string; cleared?: string[]; refused?: string; abortedBeforeRequest?: boolean }
+type StubLog = { at: number; command?: string; message?: string; images?: unknown[]; event?: string; aborted?: boolean; read?: string; prompt?: string; cleared?: string[]; refused?: string; abortedBeforeRequest?: boolean }
 const stubLog = (cwd: string): StubLog[] => (existsSync(join(cwd, 'log.jsonl')) ? readFileSync(join(cwd, 'log.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line) as StubLog) : [])
 const commandsIn = (cwd: string) => stubLog(cwd).flatMap((entry) => (entry.command ? [entry.command] : []))
 const promptsIn = (cwd: string) => stubLog(cwd).flatMap((entry) => (entry.command === 'prompt' ? [entry.message] : []))
@@ -698,6 +700,21 @@ describe('Pi cuts in (stub Pi)', () => {
       expect(stubLog(cwd).filter((entry) => entry.read === 'note from an agent')).toEqual([])
     }, 30_000)
   }
+
+  // A cut's continuation carrying a steer's image is proved against the real Pi child (`piRpcSteerCut.test.ts`).
+  it('an agent’s steer with an image goes to Pi as a native steer that carries the image', async () => {
+    const shot: ChatImageAttachment = { name: 'shot.png', mimeType: 'image/png', data: 'iVBORw0KGgo=' }
+    const shotContent = { type: 'image', data: 'iVBORw0KGgo=', mimeType: 'image/png' }
+    const { engine, project } = setup()
+    const cwd = project('p', { onPrompt: 'script', runs: [[toolStep(), { text: 'one two three', deltaMs: 40 }]] })
+    const t = turn(cwd)
+    const h = onHold(t)
+    const pending = run(engine, t)
+    await h.toolStarted()
+    h.steer('see the screenshot', false, [shot])
+    expect((await pending).aborted).toBeFalsy()
+    expect(stubLog(cwd).filter((entry) => entry.command === 'steer').map((entry) => entry.images)).toEqual([[shotContent]])
+  }, 30_000)
 
   it('a person’s steer held during a tool goes in natively at its end, and cuts the next reply Pi started without it (release at turn_end)', async () => {
     const { engine, project } = setup()
