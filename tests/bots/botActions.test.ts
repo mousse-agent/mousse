@@ -706,3 +706,33 @@ it.each(['e', '42', 'plan'] as const)('B-short redacts only long hidden values i
   if (password.length < 4) expect(text).toContain(`recipient: ${password}`)
   else expect(text).not.toContain(`recipient: ${password}`)
 })
+
+
+// Unmistakable credentials are refused; random IDs, encoded data and prose stay reviewable.
+it.each([
+  '1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms',
+  Buffer.from('an attachment with mixed content 1234567890').toString('base64'),
+  'eyJ' + 'a'.repeat(12) + '.' + 'b'.repeat(14) + '.' + 'c'.repeat(16),
+  'Reset your password: use the link we sent',
+  Buffer.from('sk-ABCDEFGHIJ0123456789xyz').toString('hex'),
+  Buffer.from('sk-ABCDEFGHIJ0123456789xyz').toString('base64'),
+  'SK-ABCDEFGHIJ0123456789xyz',
+  'sk-\u200bABCDEFGHIJ0123456789xyz'
+])('B-legitimate holds and shows the whole value: %s', async value => {
+  const t = await setup(true)
+  t.args.body = value
+  Object.assign(t.args, { split: ['sk-ABCDEF', 'GHIJ0123456789xyz'] })
+  expect(await t.call()).not.toMatchObject({ isError: true })
+  const a = f.bots.actions.forWork(t.workId)!
+  expect(JSON.parse(a.args_json).body).toBe(value)
+  expect(JSON.parse(a.args_json).split).toEqual(['sk-ABCDEF', 'GHIJ0123456789xyz'])
+  expect(f.store.message(a.message_id)?.text).toContain(JSON.stringify(value).slice(1, -1))
+  expect(t.calls).toEqual([])
+})
+it.each(['https://bob:hunter2@example.test/x', 'https://example.test/?api_key=abc123', 'https://example.test/?access_token=x'])('B-unmistakable refuses URL credentials: %s', async value => {
+  const t = await setup(true)
+  t.args.body = value
+  expect(await t.call()).toMatchObject({ isError: true })
+  expect(f.bots.actions.forWork(t.workId)).toBeUndefined()
+  expect(t.calls).toEqual([])
+})
