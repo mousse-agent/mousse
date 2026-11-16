@@ -129,6 +129,7 @@ describe('the Agents pane', () => {
     act(() => useBotsStore.setState({ bots: [summary('b1')] }))
     show(ChatWorkspace, [])
     expect(text('.chat-workspace-empty h1')).toEqual(['Talk to your bots and agents'])
+    expect(host.querySelector('.chat-workspace-empty .bot-face')).not.toBeNull()
     expect(button('New bot')).toBeDefined()
     expect(button('New chat')).toBeUndefined()
     show(ChatWorkspace, [agent])

@@ -90,7 +90,9 @@ export function ChatWorkspace() {
         <p>Pick a colour and an accessory, and say what it should do. It asks for anything else it needs as it goes.</p>
         <button className="chat-primary-button" onClick={newBot}>New bot</button>
         {error && <p role="alert" className="chat-error">{error}</p>}
-      </div> : <div className="chat-workspace-empty"><h1>{loading ? 'Opening chat…' : 'Talk to your bots and agents'}</h1>
+      </div> : <div className="chat-workspace-empty">
+        {!loading && <BotFace look={bots[0]?.look ?? FIRST_BOT_LOOK} state="idle" size={96} view="full" className="bot-empty-face" />}
+        <h1>{loading ? 'Opening chat…' : 'Talk to your bots and agents'}</h1>
         {!loading && <span className="bot-empty-actions"><button className="chat-primary-button" onClick={newBot}>New bot</button>
           {!!snapshot.agents.length && <button className="bot-ghost-button" onClick={() => useChatsStore.setState({ newChatOpen: true, newChatKind: 'direct' })}>New chat</button>}</span>}
         {error && <p role="alert" className="chat-error">{error}</p>}</div>}
