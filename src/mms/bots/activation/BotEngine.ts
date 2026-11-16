@@ -1,7 +1,8 @@
+import { isQuietHours } from '../../../shared/settings'
 import { BotTellings } from '../chat/BotTellings'
 import type { SettingsStore } from '../../settings/SettingsStore'
 import { isTellMe } from '../../../shared/types'
-import { readBotTelling, tellingLine, validQuietHours, type TellingChange } from '../../../shared/bots/personal/tellingSettings'
+import { readBotTelling, tellingLine, type TellingChange } from '../../../shared/bots/personal/tellingSettings'
 import { tellingClass } from '../chat/telling'
 import { hasToolImages } from '../chat/toolImages'
 import { extractAppletParts } from '../../../shared/applets'
@@ -7788,14 +7789,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   setTelling(botId: string, activationId: string, change: TellingChange): string {
     if (!this.timerOwnerSet(botId, activationId)) throw new BotEngineError('owner_only', 'Only a turn your owner’s own message or tap started can change telling. Suggest it in your report instead.')
     if (change.tellMe !== undefined && !isTellMe(change.tellMe)) throw new BotEngineError('invalid_params', 'tellMe is needs_you, look, fyi or every.')
-    if (change.quietHours !== undefined && change.quietHours !== 'off' && !validQuietHours(change.quietHours)) throw new BotEngineError('invalid_params', 'Quiet hours need different from and to times in HH:MM (00:00 to 23:59), or off.')
+    if (change.quietHours !== undefined && change.quietHours !== 'off' && !isQuietHours(change.quietHours)) throw new BotEngineError('invalid_params', 'Quiet hours need different from and to times in HH:MM (00:00 to 23:59), or off.')
     if (change.canWakeMe !== undefined && typeof change.canWakeMe !== 'boolean' || change.schedules !== undefined && typeof change.schedules !== 'boolean') throw new BotEngineError('invalid_params', 'canWakeMe and schedules must be true or false.')
     if (change.scheduleId !== undefined && (typeof change.scheduleId !== 'string' || !change.scheduleId || change.canWakeMe === undefined || change.tellMe !== undefined || change.schedules)) throw new BotEngineError('invalid_params', 'For one automation give scheduleId and canWakeMe only.')
     if (change.quietHours !== undefined && !this.host.settings) throw new BotEngineError('unavailable', 'Quiet hours cannot be changed here.')
     if ((change.schedules || change.scheduleId) && !this.host.schedules?.setTelling) throw new BotEngineError('unavailable', 'Automations cannot be changed here.')
     if (change.schedules || change.scheduleId) this.host.schedules!.setTelling!(botId, { ...(change.schedules ? { tellMe: change.tellMe } : {}), ...(change.scheduleId ? { scheduleId: change.scheduleId, canWakeMe: change.canWakeMe } : {}) })
     if (change.quietHours !== undefined) {
-      const settings = this.host.settings!.set({ notifications: { quietHours: change.quietHours === 'off' ? undefined : change.quietHours } } as Parameters<SettingsStore['set']>[0])
+      const settings = this.host.settings!.set({ notifications: { quietHours: change.quietHours === 'off' ? null : change.quietHours } })
       this.host.settingsChanged?.(settings)
     }
     this.store.db.transaction(() => {

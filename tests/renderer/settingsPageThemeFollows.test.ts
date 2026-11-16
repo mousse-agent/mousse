@@ -101,8 +101,8 @@ describe('an open Settings page and a theme an agent changes', () => {
   })
 
   it.each([
-    ['general', undefined], ['general', { from: '23:00', to: '06:00' }],
-    ['labs', undefined], ['labs', { from: '23:00', to: '06:00' }]
+    ['general', null], ['general', { from: '23:00', to: '06:00' }],
+    ['labs', null], ['labs', { from: '23:00', to: '06:00' }]
   ] as const)('keeps quiet hours through an open %s page toggle after service change %j', async (section, quietHours) => {
     await act(async () => { window.dispatchEvent(new CustomEvent('mousse:settings-section', { detail: section })) })
     const label = section === 'general' ? 'Notify for all threads on my other devices' : 'Memory notices'
@@ -112,11 +112,11 @@ describe('an open Settings page and a theme an agent changes', () => {
 
     // A service write and its settings-changed event, as after telling_set, while this page stays open.
     await elsewhere({ notifications: { quietHours } } as MousseSettingsUpdate)
-    expect(service.get().notifications.quietHours).toEqual(quietHours)
+    expect(service.get().notifications.quietHours).toEqual(quietHours ?? undefined)
     await act(async () => { toggle().click() })
     const saved = service.get().notifications
     expect(section === 'general' ? saved.allRemoteThreads : saved.memoryNotices).toBe(before !== 'true')
-    expect(saved.quietHours).toEqual(quietHours)
+    expect(saved.quietHours).toEqual(quietHours ?? undefined)
   })
 
   it('pauses the theme on every Settings page but Appearance, where themes are edited', async () => {

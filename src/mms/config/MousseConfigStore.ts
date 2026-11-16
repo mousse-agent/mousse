@@ -510,13 +510,6 @@ export class MousseConfigStore {
     return mergeSettings(this.conf.settings, this.conf.providers, this.conf.agents)
   }
 
-  clearQuietHours(): void {
-    this.assertPersonalMutation('settings')
-    const { quietHours: _quiet, ...notifications } = this.conf.settings.notifications
-    this.conf.settings = { ...this.conf.settings, notifications }
-    this.save()
-  }
-
   updateSettingsSection(partial: Partial<MousseSettingsSection>): void {
     this.assertPersonalMutation('settings')
     this.conf.settings = deepMerge(

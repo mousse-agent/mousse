@@ -1,17 +1,12 @@
+import type { QuietHours } from '../../settings'
+export type { QuietHours } from '../../settings'
 import type { TellMe } from '../../types'
 export interface BotTellingSettings { tellMe?: TellMe; canWakeMe?: boolean }
-export interface QuietHours { from: string; to: string }
 export interface BotTellingPreferences extends BotTellingSettings { quietHours?: QuietHours }
 export interface TellingChange extends BotTellingSettings {
   quietHours?: QuietHours | 'off'
   schedules?: boolean
   scheduleId?: string
-}
-export function validQuietHours(value: unknown): value is QuietHours {
-  if (!value || typeof value !== 'object') return false
-  const { from, to } = value as QuietHours
-  const clock = /^(?:[01]\d|2[0-3]):[0-5]\d$/
-  return typeof from === 'string' && typeof to === 'string' && clock.test(from) && clock.test(to) && from !== to
 }
 export function readBotTelling(json?: string | null): BotTellingSettings {
   try { return json ? JSON.parse(json) : {} } catch { return {} }

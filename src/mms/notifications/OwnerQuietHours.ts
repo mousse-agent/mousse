@@ -1,4 +1,4 @@
-import type { QuietHours } from '../../shared/settings'
+import { isQuietHours, type QuietHours } from '../../shared/settings'
 
 export const APP_PRESENCE_CAPABILITY = 'app.presence.v1'
 export const ACTIVE_FOR_MS = 15 * 60_000
@@ -37,7 +37,7 @@ export class OwnerQuietHours {
   /** The only reader of the wish. End is an instant; schedules continue using the computer's clock. */
   quietHoursFor(_botId?: string, at = this.clock()): { end: number } | undefined {
     const hours = this.setting()
-    if (!hours || hours.from === hours.to) return undefined
+    if (!isQuietHours(hours)) return undefined
     const formatter = new Intl.DateTimeFormat('en-GB', { timeZone: this.ownerZone(), hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
     const inside = (time: number): boolean => {
       const local = formatter.format(time)
