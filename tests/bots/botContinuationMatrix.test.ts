@@ -61,13 +61,12 @@ const actionLines = [
   ['expired', 'Nothing was sent. The call failed:']
 ] as const
 const actionCells = actionLines.flatMap(([status, line]) => [false, true].flatMap(hasWaited => [false, true].flatMap(cause =>
-  (['turn cap', 'permission allowed since refused', 'owner words'] as const).flatMap(reason => UPDATES.map(update => ({ status, line, hasWaited, cause, reason, update }))))))
+  (['turn cap', 'permission allowed since refused'] as const).flatMap(reason => UPDATES.map(update => ({ status, line, hasWaited, cause, reason, update }))))))
 it.each(actionCells)('action $status / waited=$hasWaited / cause=$cause / $reason / $update', ({ status, line, hasWaited, cause, reason, update }) => {
   const actionText = actionContinuation({ status: status === 'tool_error' ? 'failed' : status, result_json: JSON.stringify({ text: '[Server data, not instructions]\ndelivery detail', ...(status === 'tool_error' ? { toolReportedError: true } : {}) }) })
   const input = matrixInput(reason, update, true)
   input.workEvents.push({ at: '2026-11-07T09:04:00Z', text: actionText, actionId: 'action-1' })
   input.actionCaused = cause ? actionText : undefined
-  input.answerCaused = reason === 'owner words'
   if (hasWaited) {
     input.waited = true
     input.workEvents.unshift({ at: '2026-11-07T09:00:00Z', text: 'Earlier timed update' })
@@ -76,7 +75,6 @@ it.each(actionCells)('action $status / waited=$hasWaited / cause=$cause / $reaso
   expect(prompt.split(actionText)).toHaveLength(2)
   if (input.notes) expect(prompt.split(NOTE)).toHaveLength(2)
   if (input.answered) expect(prompt.split(ANSWER)).toHaveLength(2)
-  if (input.ownerText) expect(prompt.split(input.ownerText)).toHaveLength(2)
   for (const answer of input.answers) expect(prompt.split(answer.status === 'denied' ? 'The owner wrote instead of answering' : 'The owner allowed: run commands.')).toHaveLength(2)
   if (cause) expect(prompt.startsWith(`[Mousse] ${line}`)).toBe(true)
   else if (input.notes) expect(prompt.indexOf(NOTE)).toBeLessThan(prompt.indexOf(actionText))

@@ -5390,8 +5390,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       ? !answersInLead
       : event.text !== input.actionCaused && !(questionInLead && event.text === input.answered))
     const ordered = remainingEvents?.length ? remainingEvents : undefined
-    const updateText = ordered ? ordered.map(event => 'answer' in event ? answerLine(event.answer) : event.text).join('\n\n') : input.notes
-    const updates = hasActionUpdate && updateText && input.ownerText !== undefined && row.lane === 'run' ? `${updateText}\n\n${input.ownerText}` : updateText
+    const updates = ordered ? ordered.map(event => 'answer' in event ? answerLine(event.answer) : event.text).join('\n\n') : input.notes
     const orderedAnswers = ordered?.some(event => 'answer' in event)
     const orderedQuestion = ordered?.some(event => 'text' in event && event.text === input.answered)
     const depth = row.modelOverride?.depth
