@@ -199,3 +199,17 @@ it.each(['plain', 'note', 'allowed permission'] as const)('always explains a com
   expect(prompt).toContain('Check again with the evidence already read.')
   if (extra === 'note') expect(prompt).toContain('Also check the changelog.')
 })
+it('offers work_wait only to work, including work from reminders', async () => {
+  const { workId, turn } = await work()
+  expect(turn.prepared.policy.tools!.allow).toContain('work_wait')
+  const chat = f.store.laneActivations(botId, 'chat', ['done'])[0]!
+  expect(f.store.dispatch(chat.id, 1)).toBeDefined()
+  await f.bots.service.chatSend({ botId, text: 'Hello again', clientRequestId: 'eligibility' })
+  const chatTurn = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+  expect((await start(f, chatTurn.id)).prepared.policy.tools!.allow).not.toContain('work_wait')
+  for (const kind of ['manual', 'schedule'] as const) {
+    f.store.run('UPDATE bot_activations SET trigger_json = ? WHERE id = ?', JSON.stringify({ kind, input: 'Check', ...(kind === 'schedule' ? { scheduleId: 's', occurrenceAt: f.store.now() } : {}) }), workId)
+    expect(f.bots.prepare(turn.payload)).toMatchObject({ policy: { tools: { allow: expect.not.arrayContaining(['work_wait']) } } })
+    await expect(wait(workId)).rejects.toThrow(kind === 'schedule' ? 'next run' : 'run started by hand')
+  }
+})
