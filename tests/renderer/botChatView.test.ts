@@ -2190,3 +2190,18 @@ it('shows a too-large device stub without null arguments or an empty hidden-fiel
   expect(button('Send', card)?.disabled).toBe(true)
   expect(button('Not now', card)?.disabled).toBe(false)
 })
+
+it('quotes actual hidden path segments without interpreting dots or arrows and folds long segments', async () => {
+  const long = 'harmless preview (not sent)_token'.repeat(20)
+  fake.chats.inbox = [held({ hiddenPaths: [['a.b', 'c → d'], ['meta', long]] })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  const warning = [...card.querySelectorAll('[role="note"]')].find((item) => item.textContent?.includes('Hidden values will be sent'))!
+  const path = warning.querySelector('[aria-label="Hidden field path"]')!
+  expect([...path.querySelectorAll('q')].map((item) => item.textContent)).toEqual(['a.b', 'c → d'])
+  const fold = warning.querySelector('details')!
+  expect(fold.open).toBe(false)
+  await click(fold.querySelector('summary'))
+  expect(fold.open).toBe(true)
+  expect(fold.textContent).toContain(long)
+})
