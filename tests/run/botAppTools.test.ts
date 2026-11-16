@@ -494,3 +494,7 @@ it('work_wait gives subagents a usable refusal', () => {
   const tool = botTools(() => undefined).find(tool => tool.name === 'work_wait')!
   expect(tool.available?.({ bot: { role: 'subagent' } } as any)).toContain('subagent cannot park')
 })
+it('work_wait describes waiting rather than setting a chat wake', () => {
+  const tool = botTools(() => undefined).find(tool => tool.name === 'work_wait')!
+  expect(tool.describe({} as any)).toBe('Wait for a time or event')
+})

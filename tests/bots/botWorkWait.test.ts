@@ -305,3 +305,23 @@ it('admits ready owner work and usage resets before timed waits, then the queue'
   expect(selected.at(-1)).toBe(ids[0])
   expect(new Set(selected.slice(0, 3))).toEqual(new Set(ids.slice(1)))
 })
+it('keeps the original why after delivery', async () => {
+  const { workId, turn } = await work()
+  const set = await wait(workId)
+  await finish(f, turn.payload, 'completed', { text: '' })
+  f.clock.now += 60 * 60_000
+  await f.bots.deliverDueReminders()
+  expect(f.store.reminder(set.wakeId)?.text).toBe('Check again with the evidence already read.')
+})
+it('delivers a wait late after more than a week offline', async () => {
+  const { workId, turn } = await work()
+  await wait(workId)
+  await finish(f, turn.payload, 'completed', { text: '' })
+  f.bots.close()
+  f.clock.now += 8 * 24 * 60 * 60_000
+  f.bots = new BotEngine(f.host)
+  await f.bots.reconcileOnStartup()
+  await flush()
+  expect(f.store.activation(workId)?.status).toBe('running')
+  expect(f.store.dispatch(workId, 2)?.prompt.text).toContain('it was for')
+})
