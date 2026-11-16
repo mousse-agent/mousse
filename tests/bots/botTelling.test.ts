@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, it } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { BotStore } from '../../src/mms/bots/store/BotStore'
 import { BotChatProjection } from '../../src/mms/bots/chat/projection'
 import { botFixture, createBot, type BotFixture } from './botFixture'
@@ -432,4 +432,19 @@ it.each(['day', 'active at night', 'can wake at night'] as const)('folds five so
   expect(events.filter(event => event.sound)).toHaveLength(1)
   expect(events.at(-1)?.rows).toHaveLength(5)
   expect(classes).toEqual(['soon', 'soon', 'soon', 'soon', 'soon'])
+})
+
+it('C4 folded telling projects each row once per announcement', () => {
+  const rows = Array.from({ length: 8 }, (_, i) => {
+    const message = f.bots.chat.post({ botId, author: 'bot', kind: 'text', text: `Update ${i}` })
+    return f.store.message(message.id)!
+  })
+  const projection = vi.spyOn(f.bots.chat, 'toMessage')
+  const events: any[] = []
+  f.bots.events.on('tell', event => events.push(event))
+  f.bots.tellings.releaseBacklog(rows, f.clock.now)
+  expect(events).toHaveLength(1)
+  expect(events[0].rows).toHaveLength(rows.length)
+  expect(projection).toHaveBeenCalledTimes(rows.length)
+  expect(new Set(projection.mock.calls.map(([row]) => row.id)).size).toBe(rows.length)
 })
