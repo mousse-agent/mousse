@@ -149,10 +149,18 @@ export class BotActions {
 
   private valid(action: ActionRow): BotActivationRow | undefined {
     const row = this.host.store.activation(action.activation_id)
-    if (!row || !action.exec_args || actionDigest(JSON.parse(action.exec_args)) !== action.args_digest || Date.parse(action.expires_at) <= Date.parse(this.host.store.now())) return undefined
-    const binding = this.host.binding(row, JSON.parse(action.target_json))
-    return binding && canonicalJson(binding) === canonicalJson(JSON.parse(action.binding_json)) ? row : undefined
+    if (!row || !action.exec_args || action.exec_args.length > ACTION_MAX_ARGUMENT_CHARS || Date.parse(action.expires_at) <= Date.parse(this.host.store.now())) return undefined
+    try {
+      const args: unknown = JSON.parse(action.exec_args)
+      if (containsCredential(args) || actionDigest(args) !== action.args_digest) return undefined
+      const review = reviewArguments(args)
+      if (canonicalJson(JSON.parse(action.args_json)) !== canonicalJson(review.args)
+        || Boolean(JSON.parse(action.card_json ?? '{}').hasHiddenValues) !== review.hasHiddenValues) return undefined
+      const binding = this.host.binding(row, JSON.parse(action.target_json))
+      return binding && canonicalJson(binding) === canonicalJson(JSON.parse(action.binding_json)) ? row : undefined
+    } catch { return undefined }
   }
+
   assertRunning(id: string): void {
     const action = this.get(id)
     if (!action || action.status !== 'running' || !this.valid(action)) throw changed()
