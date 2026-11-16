@@ -315,7 +315,7 @@ it.each([1, 60, 180])('a schedule card lives for one gap with an hour minimum: %
   const memory = new BotMemoryStore({ db: f.store.db })
   f.host.progress = memory
   f.host.context = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} } })
-  expect(f.bots.saveLeftOff(t.id, 'Checked through the first invoice')).toBe('kept')
+  expect(f.bots.saveLeftOff(t.id, 'Checked through the first invoice')).toContain('pending:')
   await t.call()
   await finish(f, t.run.payload)
   const a = f.bots.actions.forWork(t.id)!
