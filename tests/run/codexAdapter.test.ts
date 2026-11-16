@@ -2320,7 +2320,8 @@ describe('a bot turn on Codex', () => {
       })),
       ...turnStart(collision ? 6 : 8, 'owner'), completed('completed')
     ])
-    const adapter = new CodexAdapter(() => service(replay))
+    const codex = service(replay)
+    const adapter = new CodexAdapter(() => codex)
     const run = adapter.startTurn(input({ prompt: 'go' }), recordingSink(), control(), { ...host(mcp), bot: bot as never })
     if (collision) await expect(run).rejects.toMatchObject({
       code: 'policy_unenforceable', message: expect.stringMatching(new RegExp(`.*${collision}.*[Rr]ename`))
