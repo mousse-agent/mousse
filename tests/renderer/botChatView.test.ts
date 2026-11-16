@@ -1988,3 +1988,10 @@ it('a snooze on another day shows the chat date and time', async () => {
     expect(host.querySelector('.bot-question-settled')?.textContent).toBe(`Snoozed until ${botDayLabel(due)} ${botGroupTime(due)}`)
   } finally { vi.useRealTimers() }
 })
+
+it('R5-time formats a sent action in the client clock', async () => {
+  const { botGroupTime } = await import('../../src/renderer/components/bots/messageGroups')
+  fake.chats.inbox = [message(1, { id: 'bm_action_sent', text: 'Sent', actionSentAt: AT } as never)]
+  await open()
+  expect(host.querySelector('[data-message-id="bm_action_sent"]')?.textContent).toContain(`Sent · ${botGroupTime(AT)}`)
+})
