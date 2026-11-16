@@ -2404,3 +2404,12 @@ it('C4 integration bridge timeout stub has its outcome and computer explanation 
   expect(card.textContent).toContain('Use the computer')
   expect(button('Send', card)).toBeUndefined()
 })
+
+it('C4 integration approved review names what it will send while waiting for the service', async () => {
+  fake.chats.inbox = [held({ status: 'approved', at: AT })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  expect(card.querySelector('summary')?.textContent).toBe('What it will send')
+  expect(card.querySelector('[role="status"]')?.textContent).toContain('Waiting for Mail…')
+  expect(card.textContent).not.toContain('What it is sending')
+})
