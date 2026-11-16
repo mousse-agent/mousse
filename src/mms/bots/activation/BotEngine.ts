@@ -8506,7 +8506,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // The owner sees the original label; titles and command errors remain outside data in memory.
     const external = Boolean((fired?.kind === 'thread' || fired?.kind === 'pr') && fired.title
       || fired?.kind === 'watcher' && fired.message)
-    const input = wakeInput({ brief: wake.text, setAt: wake.createdAt, event: wake.event, fired, chain: Math.max(1, wake.chain), clock: clockTime, ...(late && !wake.event ? { late: clockTime(wake.dueAt) } : {}) })
+    const input = wakeInput({ brief: wake.text, setAt: wake.createdAt, event: wake.event, fired, chain: Math.max(1, wake.chain), work: Boolean(wake.workId), clock: clockTime, ...(late && !wake.event ? { late: clockTime(wake.dueAt) } : {}) })
     if (wake.workId) {
       const resumed = this.store.db.transaction(() => {
         if (this.store.reminder(wake.id)?.status !== 'waiting') return false
@@ -8515,7 +8515,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         if (row.status !== 'blocked' || row.endReason !== 'waiting') return false
         if (!this.store.moveActivation(row.id, ['blocked'], 'blocked', { endReason: 'wait_ready' })) return false
         this.store.settleReminder(wake.id, 'delivered', { activationId: row.id })
-        this.store.run('UPDATE bot_reminders SET text = ? WHERE id = ?', input.replace(/A wake-up/g, 'A work wait').replace(/Do what you planned,[\s\S]*$/, 'Carry on with this work in this thread, then report as usual.'), wake.id)
+        this.store.run('UPDATE bot_reminders SET text = ? WHERE id = ?', input, wake.id)
         return true
       })
       if (resumed) { this.changed({ botId: wake.botId, activationId: wake.workId }); this.pumpLater(wake.botId) }

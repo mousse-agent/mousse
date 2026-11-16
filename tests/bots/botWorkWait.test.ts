@@ -102,3 +102,17 @@ it('resumes once when an event never happens', async () => {
   await f.bots.deliverDueReminders()
   expect(f.store.dispatches(workId)).toHaveLength(2)
 })
+it('Forget cancels the work timer with the original request', async () => {
+  const { BotMemoryStore } = await import('../../src/mms/bots/memory/BotMemoryStore')
+  const { workId, turn } = await work()
+  const set = await wait(workId)
+  await finish(f, turn.payload, 'completed', { text: '' })
+  const message = chatOf(f, botId).find(m => m.author === 'owner')!
+  const memory = new BotMemoryStore({ db: f.store.db, clock: () => f.clock.now, timeZone: () => 'UTC' })
+  f.store.db.transaction(() => memory.appendInTx(f.store.db, { botId, kind: 'owner_msg', lane: 'chat', sourceKey: `bm:${message.id}`, who: 'owner', text: message.text }))
+  const journal = f.store.get('SELECT seq FROM bot_journal WHERE source_key = ?', `bm:${message.id}`)!
+  memory.forget(botId, { refs: [`j${journal.seq as number}`], by: 'owner_ui' })
+  expect(f.store.reminder(set.wakeId)?.status).toBe('cancelled')
+  f.bots.afterForget()
+  expect(f.store.activation(workId)?.status).toBe('failed')
+})
