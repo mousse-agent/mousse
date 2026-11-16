@@ -24,11 +24,19 @@ The two additional reasons (a permission allowed since refusal, and the owner's 
 instead of a wall answer) were captured from unmodified master
 `8b847e47cc7885a5759c14678e74c2d954d92fe3`, in a detached worktree, by the same
 prototype-call technique. Their live-wait prompts were captured too. These guard
-master's existing behavior without a pending action update; they do not silently
+master's existing behavior without a pending action update, apart from the explicit corrections below; they do not silently
 regenerate from the PR's builder. All 15 reasons cross every update column and both
-histories, plus live waits (225 cells). Action outcomes add 420 cells: seven outcomes
+histories, plus live waits (225 cells). Action outcomes add 280 cells: seven outcomes
 (including a server's error versus a refusal before dispatch), pending versus causal,
-both wait histories, the turn cap and both additional reasons, and all five update
-columns. Those assert that action context, notes, question answers, wall answers and
-the owner's words each arrive once. Their outcome text comes from the same stored
+both wait histories, the turn cap and a permission allowed since refusal, and all five update
+columns. The owner-words combinations with held work were removed: owner words are set only for chat walls. Those assert that action context, notes, question answers, wall answers each arrive once. Their outcome text comes from the same stored
 outcome reader that the engine uses.
+
+
+The five `permission allowed since refused / … / live wait` snapshots intentionally
+differ from master. They now retain "Your wait is over." and place a pending question
+answer in its ordered update only. `intentionalCorrections` in the JSON names them.
+The remaining captured snapshots retain their original values. Stored update delivery
+is guarded separately by `botWorkWait`, `botActions` and `botWorkDeliveryOutput`:
+prepare is not a read; model output or completion is. Those cases cross restart,
+network failure, usage retry and work with or without wait history.

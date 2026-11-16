@@ -1551,13 +1551,13 @@ export class BotStore {
     return this.escalations({ botId, status: 'open' })
   }
 
-  /** The answered escalation whose continuation has not been sent yet. */
+  /** The answered escalation whose continuation has not been confirmed yet. */
   pendingAnswer(activationId: string): BotEscalationRow | undefined {
     const row = this.get("SELECT * FROM bot_escalations WHERE activation_id = ? AND mode = 'wall' AND status IN ('allowed_bot', 'allowed_once', 'denied') AND applied_at IS NULL ORDER BY created_at DESC, id DESC LIMIT 1", activationId)
     return row ? escalationOf(row) : undefined
   }
 
-  /** Every answered wall of an activation whose continuation has not been sent yet, oldest first. */
+  /** Every answered wall of an activation whose continuation has not been confirmed yet, oldest first. */
   pendingAnswers(activationId: string): BotEscalationRow[] {
     return this.all("SELECT * FROM bot_escalations WHERE activation_id = ? AND mode = 'wall' AND status IN ('allowed_bot', 'allowed_once', 'denied') AND applied_at IS NULL ORDER BY created_at, rowid", activationId).map(escalationOf)
   }
@@ -2126,7 +2126,7 @@ export class BotStore {
     for (const id of ids) this.run("UPDATE bot_messages SET activation_id = ? WHERE id = ? AND activation_id = ? AND author = 'owner'", to, id, from)
   }
 
-  /** The notes are in the dispatch just written (inside its transaction). */
+  /** Marks these notes consumed, inside the caller's transaction. */
   applyWorkNotes(ids: readonly number[]): void {
     const at = this.now()
     for (const id of ids) this.run('UPDATE bot_work_notes SET applied_at = ? WHERE id = ? AND applied_at IS NULL', at, id)
