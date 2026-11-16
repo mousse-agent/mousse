@@ -895,7 +895,7 @@ it('N2 a completed dispatch confirms a sent outcome without a streamed response'
 it.each(['2024', 'abcd1234', '123456789'] as const)('N4 replaces short hidden values only at word boundaries: %s', async value => {
   const t = await setup(true)
   Object.assign(t.args, { password: value })
-  const embedded = `x${value}y é${value}é _${value}_ 1${value}5 {"id":1${value}5}`
+  const embedded = `x${value}y _${value}_ 1${value}5 {"id":1${value}5}`
   vi.spyOn(t.manager, 'callTool').mockResolvedValueOnce({ content: [{ type: 'text', text: `${embedded}\nexact=${value}; end` }] } as never)
   await t.call()
   await finish(f, t.work.payload)
@@ -924,4 +924,25 @@ it.each(['if', 'then', 'else', 'dependentSchemas', 'prefixItems', '$dynamicRef']
   await finish(f, t.work.payload)
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
   expect(t.calls).toEqual([t.args])
+})
+
+
+it.each([
+  ['hun2er', 'パスワードhun2erが違います'],
+  ['hun2er', '密码hun2er错误'],
+  ['hun2er', 'รหัสผ่านhun2erไม่ถูกต้อง'],
+  ['秘密口令', '密码是秘密口令。'],
+  ['-1234', 'x-1234'],
+  ['1234-', '1234-x'],
+  ['é1234é', 'xé1234éx']
+])('R3-echo removes short %s beside non-ASCII words or punctuation edges', async (value, echoed) => {
+  const t = await setup(true)
+  Object.assign(t.args, { password: value })
+  vi.spyOn(t.manager, 'callTool').mockResolvedValueOnce({ content: [{ type: 'text', text: echoed }] } as never)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  const result = JSON.parse(f.bots.actions.forWork(t.workId)!.result_json!).text
+  expect(result).not.toContain(value)
+  expect(result).toContain('[held back: looks like a secret]')
 })
