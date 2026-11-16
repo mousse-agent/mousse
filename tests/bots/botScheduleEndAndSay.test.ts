@@ -77,7 +77,7 @@ it.each([false, true])('projects the wording and end for say=%s', (say) => {
   expect(entry.label).toBe(detail.runs[0]!.label)
 })
 
-it('an unfinished scheduler claim retried after the stale cutoff keeps the first line and time', async () => {
+it.each([false, true])('an unfinished scheduler claim retried after the stale cutoff keeps its time (forget history: %s)', async wipe => {
   const { ScheduledJobStore, recordTickerHeartbeat } = await import('../../src/mms/scheduled/ScheduledJobStore')
   const { MousseConfigStore } = await import('../../src/mms/config/MousseConfigStore')
   const { ScheduledJobService } = await import('../../src/mms/scheduled/ScheduledJobService')
@@ -93,11 +93,15 @@ it('an unfinished scheduler claim retried after the stale cutoff keeps the first
   try {
     f.clock.now = T0 + 70 * MIN
     await scheduler.tickNow()
+    if (wipe) {
+      await f.bots.wipeMemory(botId, 'saved')
+      expect(chatOf(f, botId)).toEqual([])
+    }
     const claim = store.getJob(entry.jobId)!.runClaim!
     store.releaseClaim(entry.jobId, claim.token)
-    f.clock.now = T0 + 160 * MIN
+    f.clock.now = T0 + (wipe ? 80 : 160) * MIN
     await scheduler.tickNow()
-    expect(chatOf(f, botId).filter((row) => row.text.includes('Take your pills'))).toHaveLength(1)
+    expect(chatOf(f, botId).filter((row) => row.text.includes('Take your pills'))).toHaveLength(wipe ? 0 : 1)
     expect(store.getJob(entry.jobId)).toMatchObject({ lastRunAt: new Date(T0 + 60 * MIN).toISOString(), lastStatus: 'ok' })
     expect(store.getJob(entry.jobId)!.botSkip).toBeUndefined()
     expect(f.store.listActivations(botId).filter((row) => row.lane === 'run')).toEqual([])

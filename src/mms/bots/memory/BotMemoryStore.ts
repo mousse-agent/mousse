@@ -1218,7 +1218,8 @@ export class BotMemoryStore {
    * memory state go, but the capture cursors (`cursor:<threadId>`), so capture never copies the bot's threads in again.
    * `BotStore` also writes `cursor:create:<clientRequestId>` records, not capture cursors; `cursor:` keeps them here too.
    * `keepSaved` (`bots.memory.wipe` with `keep: 'saved'`): the owner's entries and the bot's notes stay as they are,
-   * forgotten ones as tombstones; only entries that are run notes now go, every version. Without it every entry goes.
+   * forgotten ones as tombstones; only entries that are run notes now go, every version. Schedule delivery markers
+   * also stay with keepSaved, until their shared job is removed. Without it every entry goes.
    * Returns how many current entries went. Entries never need the journal rows they came from (`source_seq`).
    */
   wipe(botId: string, keepSaved: boolean): number {
