@@ -2351,3 +2351,17 @@ it.each(['approved', 'running', 'unreachable'])('C4 integration waiting distingu
     expect(card.textContent).not.toContain('The tool reported an error')
   }
 })
+
+it.each(['done', 'failed', 'uncertain', 'withdrawn'])('C4 integration forgotten %s cards hide all content but retain the outcome', async (status) => {
+  fake.chats.inbox = [held({ forgotten: true, digest: '[forgotten]', title: 'Send email', serverName: 'Your service', args: '[forgotten]', note: '[forgotten]', status, at: AT, result: { text: '[forgotten]', toolReportedError: status === 'failed' } })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  expect(card.textContent).toContain('Forgotten')
+  expect(card.querySelector('[aria-label="Action summary"]')?.textContent).toBe('Send email')
+  expect(card.querySelector('[role="status"]')?.textContent).toContain(status === 'failed' ? 'The tool reported an error' : status === 'done' ? 'Sent' : status === 'uncertain' ? "Couldn't tell" : 'Not sent')
+  expect(card.querySelector('[role="status"]')?.textContent).toContain(' · ')
+  expect(card.querySelector('details, [role="region"], [aria-label="Bot note"], [aria-label="Tool result"]')).toBeNull()
+  expect(card.textContent).not.toContain('[forgotten]')
+  expect(card.textContent).not.toContain('Your service')
+  expect(button('Send', card)).toBeUndefined()
+})

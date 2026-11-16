@@ -2068,3 +2068,23 @@ it('C4 integration waiting and unreachable reviews preserve the stored service a
   expect(card().result?.toolReportedError).toBeUndefined()
   expect(t.calls).toEqual([])
 })
+
+it.each(['done', 'declined', 'tool_error', 'uncertain', 'pending'] as const)('C4 integration forgotten %s cards retain only named outcome facts', async outcome => {
+  const t = await setup(true)
+  if (outcome === 'tool_error') vi.spyOn(t.manager, 'callTool').mockResolvedValueOnce({ isError: true, content: [{ type: 'text', text: 'private tool answer' }] } as never)
+  if (outcome === 'uncertain') vi.spyOn(t.manager, 'callTool').mockRejectedValueOnce(new Error('connection lost'))
+  await t.call()
+  const a = f.bots.actions.forWork(t.workId)!
+  if (outcome !== 'pending') await f.bots.service.answerAction({ actionId: a.id, digest: a.args_digest, answer: outcome === 'declined' ? 'not_now' : 'send' })
+  const before = f.bots.actions.get(a.id)!
+  const memory = new BotMemoryStore({ db: f.store.db })
+  const seq = memory.append({ botId: t.botId, sourceKey: `bm:${a.message_id}`, kind: 'notice', who: 'bot', text: 'card to forget' })!
+  memory.forget(t.botId, { refs: [`j${seq}`], by: 'owner_ui' })
+  const card = f.bots.service.actionMessage(t.botId, a.id).action!
+  expect(card).toMatchObject({ forgotten: true, title: 'Send', args: null, hasHiddenValues: false, hiddenPaths: [] })
+  expect(card.note).toBeUndefined()
+  if (outcome === 'tool_error') expect(card.result).toEqual({ text: '', toolReportedError: true })
+  else expect(card.result).toBeUndefined()
+  if (before.ran_at || before.answered_at) expect(card.at).toBe(before.ran_at ?? before.answered_at)
+  for (const field of ['ownerRemoved', 'ownerSeq', 'noteSeq', 'removedOwnerSeq', 'removedNoteSeq', 'private tool answer', 'Exact text']) expect(JSON.stringify(card)).not.toContain(field)
+})
