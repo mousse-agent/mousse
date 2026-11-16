@@ -1421,3 +1421,23 @@ it('B1 a real configuration change withdraws even while the server listing fails
   expect(f.bots.actions.get(a.id)).toMatchObject({ status: 'withdrawn', exec_args: null })
   expect(t.calls).toEqual([])
 })
+
+it('B2 a running call cannot restore its forgotten content when its result arrives', async () => {
+  const t = await setup(true)
+  let release!: () => void
+  const result = new Promise<void>(resolve => { release = resolve })
+  vi.spyOn(t.manager, 'callTool').mockImplementationOnce(async () => { await result; return { content: [{ type: 'text', text: 'private delivered receipt' }] } as never })
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  const sending = f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  await flush()
+  expect(f.bots.actions.get(a.id)?.status).toBe('running')
+  const memory = new BotMemoryStore({ db: f.store.db })
+  const seq = memory.append({ botId: t.botId, sourceKey: `bm:${a.message_id}`, kind: 'notice', who: 'bot', text: 'call' })!
+  memory.forget(t.botId, { refs: [`j${seq}`], by: 'owner_ui' })
+  const forgottenText = f.store.message(a.message_id)?.text
+  release(); await sending
+  expect(f.bots.actions.get(a.id)).toMatchObject({ status: 'done', exec_args: null, result_json: '{"text":"[forgotten]"}', args_digest: '[forgotten]' })
+  expect(f.store.message(a.message_id)?.text).toBe(forgottenText)
+  expect(JSON.stringify(memory.actions(t.botId))).not.toContain('private delivered receipt')
+})
