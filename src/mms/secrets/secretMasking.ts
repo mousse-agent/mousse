@@ -18,14 +18,26 @@ export type SecretMasker = (text: string) => string
 /** The shortest line of a multiline secret masked on its own; shorter lines (a PEM's last row, `-----`) are too common. */
 export const MIN_SECRET_LINE_LENGTH = 8
 
+/** `text` as it reads inside a JSON string. */
+const jsonEscaped = (text: string): string => JSON.stringify(text).slice(1, -1)
+
 /**
  * Each substantial line of a multiline secret (a private key, a service account file): a file-reading tool that numbers
- * its lines splits the whole value, so each line is masked on its own as well.
+ * its lines splits the whole value, so each line is masked on its own as well. A line with quotes or backslashes (a JSON
+ * key file) reads differently once it is inside a JSON string, and again inside one nested in another (a tool result
+ * saved in a provider's history), so those forms are masked too.
  */
 function secretLines(value: string): string[] {
   const lines = value.split(/\r?\n/)
   if (lines.length < 2) return []
-  return [...new Set(lines.map((line) => line.trim()).filter((line) => line.length >= MIN_SECRET_LINE_LENGTH))]
+  const out = new Set<string>()
+  for (const raw of lines) {
+    const line = raw.trim()
+    if (line.length < MIN_SECRET_LINE_LENGTH) continue
+    const once = jsonEscaped(line)
+    out.add(line).add(once).add(jsonEscaped(once))
+  }
+  return [...out]
 }
 
 /** A function that replaces every form of the given secrets in a text with `[secret NAME hidden]`; undefined when there is none. */
