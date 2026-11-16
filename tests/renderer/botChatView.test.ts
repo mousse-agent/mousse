@@ -2076,3 +2076,17 @@ it('keeps Not now available when a card is too large to send here', async () => 
   expect(button('Send', card)?.disabled).toBe(true)
   expect(button('Not now', card)?.disabled).toBe(false)
 })
+
+it.each(['done', 'failed', 'uncertain', 'declined', 'expired', 'withdrawn', 'legacy'])('find counts only highlightable settled text for %s cards', async (status) => {
+  fake.chats.inbox = [status === 'legacy' ? message(1, { text: 'Sent', actionSentAt: AT }) : held({ status, at: AT })]
+  await open()
+  const { botFindText } = await import('../../src/renderer/components/bots/useBotChatFind')
+  const { collectFindRanges } = await import('../../src/renderer/chat/components/agent-elements/find/dom-highlight')
+  const row = host.querySelector('[data-turn-key]')!
+  const text = botFindText(fake.chats.inbox[0]!)
+  const needle = status === 'uncertain' ? "Couldn't" : status === 'failed' || status === 'declined' || status === 'withdrawn' ? 'Not sent' : status === 'expired' ? 'Expired' : 'Sent'
+  expect(text).toContain(needle)
+  expect(collectFindRanges(row, needle)).toHaveLength(1)
+  // The plain fallback is replaced by the card; it must never produce an unpaintable match.
+  expect(text).not.toContain('legacy fallback')
+})

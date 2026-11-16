@@ -449,3 +449,19 @@ it('formats stored telling hours in the window’s clock format', async () => {
   expect(host.textContent).toContain(`Tells you when it needs you · Quiet ${from} to ${to} · can wake you`)
   expect(host.textContent).not.toContain(fake.details.b1.telling)
 })
+
+it.each([true, false])('keeps whole-service controls with asks-first projection %s', async (asking) => {
+  fake.details.b1.permissions = [{ id: 'mail', title: 'use Mail', enabled: true, grantedAt: AT, note: asking ? 'Asks you first before it sends or changes anything' : 'Use the connected Mail service.', ...(asking ? { mark: 'Asks first' } : {}) }]
+  await show()
+  expect(host.textContent?.includes('Asks first')).toBe(asking)
+  const title = [...host.querySelectorAll('span')].find((item) => item.title.includes(asking ? 'Asks you first' : 'connected Mail'))
+  expect(title).toBeTruthy()
+  const toggle = () => host.querySelector<HTMLButtonElement>('[role="switch"][aria-label="use Mail"]')!
+  await click(toggle())
+  expect(fake.calls).toContainEqual(['setPermission', 'b1', 'mail', false])
+  await click(toggle())
+  expect(fake.calls).toContainEqual(['setPermission', 'b1', 'mail', true])
+  await click(button('Remove use Mail'))
+  expect(fake.calls).toContainEqual(['revokePermission', 'b1', 'mail'])
+  expect(toggle()).toBeNull()
+})
