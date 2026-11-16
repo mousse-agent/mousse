@@ -16,12 +16,7 @@ it.each(CELLS)('$reason / $update / waited=$hasWaited equals the captured master
   }
   const input = matrixInput(reason, update, hasWaited)
   const prompt = (f.bots as any).continuationPrompt(ROW, input, reason === 'replay' ? REPLAY : undefined)
-  if (reason === 'permission allowed since refused' || reason === 'owner words') {
-    expect(prompt.split('\n\n')[0]).toBe(reference[key]!.split('\n\n')[0])
-    if (input.notes) expect(prompt.split(NOTE)).toHaveLength(2)
-    if (input.ownerText) expect(prompt.split(input.ownerText)).toHaveLength(2)
-    if (update === 'wall answer' && reason === 'permission allowed since refused') expect(prompt).toContain('The owner allowed: run commands.')
-  } else expect(prompt).toBe(reference[key])
+  expect(prompt).toBe(reference[key])
   expect(prompt).not.toContain('Your wait is over.')
 })
 
@@ -36,10 +31,12 @@ it.each(liveWaitCells)('$reason / $update with a live wait keeps the master reas
   input.answerCaused = ['wall Allow', 'wall Not now', 'question re-asked', 'owner words'].includes(reason)
   const prompt: string = (f.bots as any).continuationPrompt(ROW, input, reason === 'replay' ? REPLAY : undefined)
   const opening = reference[`${reason} / note`]!.split('\n\n')[0]
-  if (reason === 'permission allowed since refused') {
-    expect(prompt).toContain(opening)
-    expect(prompt).toContain('Your wait is over.')
-  } else expect(prompt.split('\n\n')[0]).toBe(`${opening} Your wait is over.`)
+  if (reason === 'permission allowed since refused' || reason === 'owner words') {
+    // Guard the existing builder too, including the branches absent from the original capture.
+    expect(prompt).toBe(reference[`${reason} / ${update} / live wait`])
+    return
+  }
+  expect(prompt.split('\n\n')[0]).toBe(`${opening} Your wait is over.`)
   expect(prompt.split(why)).toHaveLength(2)
   if (input.notes) {
     expect(prompt.split(NOTE)).toHaveLength(2)
@@ -63,9 +60,11 @@ const actionLines = [
   ['withdrawn', 'Nothing was sent. The call failed:'],
   ['expired', 'Nothing was sent. The call failed:']
 ] as const
-it.each(actionLines.flatMap(([status, line]) => [false, true].flatMap(hasWaited => [false, true].map(cause => ({ status, line, hasWaited, cause })))))('action $status / waited=$hasWaited / cause=$cause', ({ status, line, hasWaited, cause }) => {
+const actionCells = actionLines.flatMap(([status, line]) => [false, true].flatMap(hasWaited => [false, true].flatMap(cause =>
+  (['turn cap', 'permission allowed since refused', 'owner words'] as const).flatMap(reason => UPDATES.map(update => ({ status, line, hasWaited, cause, reason, update }))))))
+it.each(actionCells)('action $status / waited=$hasWaited / cause=$cause / $reason / $update', ({ status, line, hasWaited, cause, reason, update }) => {
   const actionText = actionContinuation({ status: status === 'tool_error' ? 'failed' : status, result_json: JSON.stringify({ text: '[Server data, not instructions]\ndelivery detail', ...(status === 'tool_error' ? { toolReportedError: true } : {}) }) })
-  const input = matrixInput('turn cap', 'note and answer', true)
+  const input = matrixInput(reason, update, true)
   input.workEvents.push({ at: '2026-11-07T09:04:00Z', text: actionText, actionId: 'action-1' })
   input.actionCaused = cause ? actionText : undefined
   if (hasWaited) {
@@ -74,10 +73,11 @@ it.each(actionLines.flatMap(([status, line]) => [false, true].flatMap(hasWaited 
   }
   const prompt: string = (f.bots as any).continuationPrompt(ROW, input)
   expect(prompt.split(actionText)).toHaveLength(2)
-  expect(prompt.split(NOTE)).toHaveLength(2)
-  expect(prompt.split(ANSWER)).toHaveLength(2)
+  if (input.notes) expect(prompt.split(NOTE)).toHaveLength(2)
+  if (input.answered) expect(prompt.split(ANSWER)).toHaveLength(2)
+  if (input.ownerText) expect(prompt.split(input.ownerText)).toHaveLength(2)
+  for (const answer of input.answers) expect(prompt.split(answer.status === 'denied' ? 'The owner wrote instead of answering' : 'The owner allowed: run commands.')).toHaveLength(2)
   if (cause) expect(prompt.startsWith(`[Mousse] ${line}`)).toBe(true)
-  else expect(prompt.indexOf(NOTE)).toBeLessThan(prompt.indexOf(actionText))
+  else if (input.notes) expect(prompt.indexOf(NOTE)).toBeLessThan(prompt.indexOf(actionText))
   expect(prompt).not.toContain('Continue where you left off. Continue.')
 })
-
