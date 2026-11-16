@@ -692,7 +692,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         this.tellings.read()
         this.armDue()
       },
-      tellAt: (botId, tell, at) => tell === 'soon' && !this.ownerActive() && !this.canWake(botId) ? new Date(this.host.quietHoursFor?.(botId, Date.parse(at))?.end ?? Date.parse(at)).toISOString() : at,
+      tellAt: (botId, tell, at, messageId) => tell === 'soon' && !this.ownerActive() && !this.canWake(botId, messageId) ? new Date(this.host.quietHoursFor?.(botId, Date.parse(at))?.end ?? Date.parse(at)).toISOString() : at,
       classify: (message, input) => {
         const activation = message.activationId ? this.store.activation(message.activationId) : undefined
         const reminder = message.id.startsWith('bm_rem_') ? this.store.reminder(message.id.slice(3)) : undefined
@@ -7804,6 +7804,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.store.run('UPDATE bot_registry SET tell_json = ? WHERE bot_id = ?', JSON.stringify({ ...previous, ...(change.tellMe !== undefined ? { tellMe: change.tellMe } : {}), ...(!change.scheduleId && change.canWakeMe !== undefined ? { canWakeMe: change.canWakeMe } : {}) }), botId)
     })
     this.changed({ botId })
+    this.quietHoursChanged()
     const line = this.tellingLine(botId)
     if (change.scheduleId) return [line, `That automation ${change.canWakeMe ? 'can' : 'cannot'} wake you.`].filter(Boolean).join('\n')
     return line ?? 'No telling preferences set.'
@@ -8225,8 +8226,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   private ownerActive(): boolean { return this.host.ownerActive?.() ?? false }
-  private canWake(botId: string): boolean {
-    try { return JSON.parse(this.store.registry(botId)?.tellJson ?? '{}').canWakeMe === true } catch { return false }
+  private canWake(botId: string, messageId: string): boolean {
+    if (readBotTelling(this.store.registry(botId)?.tellJson).canWakeMe === true) return true
+    const activationId = this.store.message(messageId)?.activationId
+    const trigger = activationId ? this.store.activation(activationId)?.trigger : undefined
+    if (trigger?.kind !== 'schedule') return false
+    return (trigger.completed?.canWakeMe ?? this.host.schedules?.get(botId, trigger.scheduleId)?.canWakeMe
+      ?? this.host.schedules?.ended?.(botId).find(schedule => schedule.scheduleId === trigger.scheduleId)?.canWakeMe) === true
   }
   private followUpTime(botId: string, at: number): number { return this.host.quietHoursFor?.(botId, at)?.end ?? at }
   noteOwnerActivity(): void { this.host.ownerActivity?.(); this.quietHoursChanged() }
@@ -8235,7 +8241,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const now = this.now()
     for (const row of this.store.all("SELECT id, bot_id, at FROM bot_messages INDEXED BY bot_messages_tell_due WHERE tell IS NOT NULL AND tell = 'soon' AND told_at IS NULL AND tell_at > at")) {
       const botId = String(row.bot_id)
-      const end = !this.ownerActive() && !this.canWake(botId) ? this.host.quietHoursFor?.(botId, now)?.end : undefined
+      const end = !this.ownerActive() && !this.canWake(botId, String(row.id)) ? this.host.quietHoursFor?.(botId, now)?.end : undefined
       this.store.run('UPDATE bot_messages SET tell_at = ? WHERE id = ?', new Date(end ?? Math.max(now, Date.parse(String(row.at)) + 1)).toISOString(), String(row.id))
     }
     // Reconstruct the normal due time from the saved bubble/last nudge, so an old quiet-hours end
@@ -8787,7 +8793,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const schedule = this.host.schedules?.get(row.botId, trigger.scheduleId)
     if (!schedule) return
     // Persist the intent before removing the shared job: retry after a crash can finish its removal.
-    this.store.run('UPDATE bot_activations SET trigger_json = ? WHERE id = ?', JSON.stringify({ ...trigger, completed: { why, name: schedule.name, tellMe: schedule.tellMe } }), row.id)
+    this.store.run('UPDATE bot_activations SET trigger_json = ? WHERE id = ?', JSON.stringify({ ...trigger, completed: { why, name: schedule.name, tellMe: schedule.tellMe, ...(schedule.canWakeMe !== undefined ? { canWakeMe: schedule.canWakeMe } : {}) } }), row.id)
     this.pendingScheduleRemovals.set(this.scheduleKey(row.botId, trigger.scheduleId), row.id)
     this.removeSchedule(row.botId, trigger.scheduleId)
     this.markCompletedScheduleRemoved(row)
