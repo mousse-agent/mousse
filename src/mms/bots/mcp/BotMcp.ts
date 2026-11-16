@@ -352,7 +352,7 @@ export class BotMcp implements BotMcpHost {
    * sign-in, and its result is framed as data from the server (`images`: the turn's model can see images). A failure is
    * a plain result, never a throw; its raw text goes to the owner's log only.
    */
-  async call(tool: BotMcpTool, args: Record<string, unknown>, signal: AbortSignal, options: { images?: boolean; heldAction?: boolean; assertDispatchActive?: () => void; keepImages?: (images: NonNullable<ToolOutcome['images']>) => string | undefined } = {}): Promise<BotMcpCallOutcome> {
+  async call(tool: BotMcpTool, args: Record<string, unknown>, signal: AbortSignal, options: { images?: boolean; heldAction?: boolean; assertDispatchActive?: () => void; sanitizeResult?: (result: ToolOutcome) => ToolOutcome; keepImages?: (images: NonNullable<ToolOutcome['images']>) => string | undefined } = {}): Promise<BotMcpCallOutcome> {
     const certainty = options.heldAction ? { callState: 'failed' as const } : {}
     if (signal.aborted) return { ...certainty, text: `The call to ${tool.serverName} was stopped.`, isError: true }
     if (!this.deps.enabled()) return { ...certainty, text: `MCP is turned off in Mousse's Settings now, so ${tool.serverName}'s tools can't be used. Carry on without it, and say so in your report.`, isError: true }
@@ -376,7 +376,8 @@ export class BotMcp implements BotMcpHost {
           .then(resolve, reject)
           .finally(() => both.removeEventListener('abort', stop))
       })
-      const outcome = userMcpOutcome(result)
+      const rawOutcome = userMcpOutcome(result)
+      const outcome = options.sanitizeResult?.(rawOutcome) ?? rawOutcome
       // Its pictures are the owner's to see too, whatever the bot's model sees (`keepToolImages`).
       const kept = outcome.images?.length ? options.keepImages?.(outcome.images) : undefined
       const framed = framedResult(tool.serverName, tool.tool, outcome, options)
@@ -474,6 +475,7 @@ export async function callForBot(input: {
   toolCallId?: string
   heldAction?: boolean
   assertDispatchActive?: () => void
+  sanitizeResult?: (result: ToolOutcome) => ToolOutcome
 }): Promise<BotMcpCallOutcome> {
   const offered = input.bot.mcpTools?.find((tool) => tool.name === input.name || tool.providerName === input.name)
   const target = offered ?? input.known?.(input.name)
@@ -486,7 +488,7 @@ export async function callForBot(input: {
   const { activationId, workspace } = input.bot
   return input.mcp.call(offered, input.args, AbortSignal.any([input.signal, input.bot.time.signal]), {
     images: input.images === true,
-    ...(input.heldAction ? { heldAction: true, assertDispatchActive: input.assertDispatchActive } : {}),
+    ...(input.heldAction ? { heldAction: true, assertDispatchActive: input.assertDispatchActive, sanitizeResult: input.sanitizeResult } : {}),
     keepImages: (images) => keepToolImages({ activationId, filesFolder: workspace?.files, source: `${offered.serverName}-${offered.tool}`, images })
   })
 }

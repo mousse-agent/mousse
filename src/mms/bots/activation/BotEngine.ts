@@ -1,5 +1,5 @@
 import { WORK_WAIT_RULES, workWaitInput, workWaitRule, workReadiness, workWaitLine, parkedNeedsOwner, type WorkWaitLookups, type WorkWaitFacts, type WorkWaitReason } from './workWaiting'
-import { BotActions, BotActionChanged, actionContinuation, botAsksFirst, actionDigest, maskedActionData } from '../actions/BotActions'
+import { BotActions, BotActionChanged, actionContinuation, removeHiddenArguments, botAsksFirst, actionDigest, maskedActionData } from '../actions/BotActions'
 import { callForBot, type BotMcp } from '../mcp/BotMcp'
 import { isQuietHours } from '../../../shared/settings'
 import { BotTellings } from '../chat/BotTellings'
@@ -624,7 +624,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       return callForBot({ mcp: mcp as BotMcp, bot: {
         activationId: row.id, mcpTools: [tool], workspace: null, time: { signal, deadline: () => Number.MAX_SAFE_INTEGER },
         check: () => this.grantNow(row.id)?.mcp.some(p => p.serverId === target.server && p.tool === target.tool) ? { ok: true } : { ok: false, wall: { kind: 'revoked' } }
-      }, name: tool.name, args, signal, heldAction: true, assertDispatchActive: () => {
+      }, name: tool.name, args, signal, heldAction: true, sanitizeResult: (result) => removeHiddenArguments(result, args, mcp.inputSchema(target)), assertDispatchActive: () => {
         this.actions.assertRunning(actionId)
       } })
     }
