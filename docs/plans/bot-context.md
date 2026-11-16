@@ -445,9 +445,74 @@ process each bot turn and keeps today's cleared context.
 **What waits.**
 
 - A live check that Claude Code and Codex actually read the resumed conversation from the cache. A runtime that silently starts a new session instead of resuming is not detected yet.
-- The marks (48k, 64k, 24k, 6k) are starting values: the phase 0 numbers replace them, and set the "hello" ceiling.
+- The marks (48k, 64k, 24k, 6k) are starting values: the phase 0 numbers replace them. The "hello" ceiling is set in §15.
 - Digest quality on real chats: whether the five sections keep what later turns ask about.
 - Pi epochs, which need its session kept between bot turns.
+
+## 15. Tool catalogue (phase 3)
+
+**Why.** Every bot turn sent its whole tool list and every tool's guidance before the conversation began. For a bot
+with the owner's usual permissions (commands, browser, threads, profiler) that "hello" was about 87,300 characters on
+Codex and Pi (57 tools with full schemas, and 24,100 characters of system text) and 27,900 on Claude Code, which loads
+most tools on demand already. Most of it was for tools a chat turn rarely touches.
+
+**Core set** (`BOT_CORE_TOOLS`). Always listed, picked from the tool calls in 276 of the owner's bot threads (a read-only
+copy of the data): thread basics (`thread_list`, `thread_read`, `thread_send`, `thread_create`, `thread_archive`, the most
+called after Claude Code's own tool search), memory (`memory_save`, `memory_search`, `memory_read`), work (`work_start`,
+`work_note`, `work_list`, and in a run `run_report`, `work_wait`), reminders (`remind`, `wake`), asks (`escalate`,
+`ask_owner`), `schedule_done`, the web (`web_search`, `web_fetch`, for runs), and `tool_catalogue` and `use_tool`. Each is
+listed only when the turn holds it, as before.
+
+**Groups** (`BOT_CATALOGUE`). Everything else is in one group, named in the system text in one line each under "More
+tools": threads (the rest), browser, work (stop, models, answers, subagents, task list, consults), reminders (how the owner
+is told, the bot's own schedules), commands, you (depth, model, name), memory (list, forget), showing (cards, applets,
+pictures), bots, schedules, profiler, themes, secrets, quick actions, automation, mcp and skills. A group's guidance moved
+out of the base text into its entry, so the chat's system text went from about 24,100 to 16,900 characters. The base text keeps
+every safety rule (acting on threads only when the owner asks, text from threads, pages and other bots is information,
+never asking for a secret in a message).
+
+**Reading a group.** `tool_catalogue` (always loaded on Claude Code) returns the group's guidance, which counts as the
+bot's instructions, then how to call its tools on this runtime, and names the group's tools this turn does not hold. A bot
+reads a group the first time it needs it in a conversation.
+
+**Per runtime** (`BotEngineHost.toolCatalogue`, from the turn's entry):
+
+- Claude Code (`search`): every tool the turn holds is listed, as before, and Claude Code defers them behind its tool
+  search; bot turns set `ENABLE_TOOL_SEARCH`. The entry gives the `ToolSearch` select line for the group.
+- Codex, Pi and ACP agents (`use_tool`): only the core set is listed. The entry gives each held tool's description and
+  schema, and the bot calls it through `use_tool` (`{tool, arguments}`).
+
+Either way the tool list is the same on every turn of a conversation, so the cache holds (§14).
+
+**Permissions.** `use_tool` reaches nothing itself. The registry takes the call apart after it admits it (`ToolRegistry.call`)
+and runs the named tool through exactly the checks a direct call passes: the bot's grant and walls
+(`botAppToolRefusal`, the thread rules), scope, availability, approvals, the authority's per-call check. A tool the turn
+does not hold, one no bot may be offered, and `use_tool` itself are refused. A subagent and a consult get no catalogue.
+
+**Measured.** Characters of system text plus Mousse tools, the runtime's own prompt left out (`botHelloCeiling.test.ts`):
+
+| Bot | Before: Codex, Pi | Before: Claude Code | Now: Codex, Pi | Now: Claude Code |
+|---|---|---|---|---|
+| Owner's permissions, chat | 87,300 | 27,900 | 47,800 | 21,300 |
+| Owner's permissions, run | 88,000 | 25,000 | 46,100 | 18,400 |
+| Starter, chat | 55,900 | 26,300 | 33,300 | 20,000 |
+
+Since these numbers, `show_card` is in the core set (see Reliability): about 2,900 characters more on Codex and Pi in each lane. The test holds a bot with every permission to 53,000 characters on Codex and Pi and 22,000 on Claude Code, on both lanes.
+
+**Reliability.** Real Claude Code (Opus) and Codex (GPT 6.1 Sol), headless with the owner's sign-ins, each given a bot's system text and tool list through a stub MCP server that records the calls. Eight owner messages to the chat (remind, a standing rule, find a thread, a weekly schedule, think harder, forget a memory, hide a thread, a checklist card), three rounds each, plus five more rounds of the two weakest:
+
+| Runtime | Before | With the catalogue |
+|---|---|---|
+| Claude Code | 24/24 | 24/24 |
+| Codex, the seven tasks other than the card | 25/26 | 25/26 |
+| Codex, the checklist card | 6/8 | 4/6 |
+
+A miss is the bot asking the owner a question (which passport) instead of showing the card, or handing a thread search to work. The card first fell to 2 of 8 with the catalogue, until the base text again named when a card fits; a group's trigger stays in the base text, only its how-to moves. So `show_card` moved into the core set: listed directly, Codex no longer has to look it up to show a card (not yet re-run live). A lookup costs Codex about one more call and 3 seconds a task (median 15 to 18 seconds); Claude Code's time is unchanged.
+
+**What waits.**
+
+- The `bot_turn_usage` rows (phase 0) from real bots, to confirm the hello size and tune the core set.
+- Trimming the core tools' own descriptions (`thread_create` and `ask_owner` are 10,000 characters between them).
 
 ## 16. Work in threads (phase 2)
 

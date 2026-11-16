@@ -281,6 +281,12 @@ export interface BotEngineHost {
    */
   chatResumes?(instanceId: string): boolean
   /**
+   * How the instance's runtime reaches a bot's tool catalogue (docs/plans/bot-context.md §15): `search` where it loads
+   * listed tools on demand itself (Claude Code), `use_tool` where the thread lists the core set and the rest is called
+   * through `use_tool` (Codex, Pi). Absent: `search`, every tool listed as before.
+   */
+  toolCatalogue?(instanceId: string): 'search' | 'use_tool'
+  /**
    * The Mousse tools the runtime of the run `runId` on `threadId` is offered now: how many, and the characters of their
    * names, descriptions and schemas (`bot_turn_usage`). A measurement; undefined when unknown.
    */
@@ -1281,6 +1287,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const compiled = this.compileNeutral(thread, grant, undefined, botId)
     if (!compiled.ok) return { ...base, ok: false, reason: compiled.error.reason ?? compiled.error.message }
     return { ...base, ok: true }
+  }
+
+  /** How a main turn on `instanceId` reaches the tool catalogue (`BotEngineHost.toolCatalogue`). */
+  private catalogueOf(instanceId: string): 'search' | 'use_tool' {
+    try {
+      return this.host.toolCatalogue?.(instanceId) ?? 'search'
+    } catch {
+      return 'search'
+    }
   }
 
   /** The thread's policy with neutral tool names: what the model resolver asks a runtime to hold. */
@@ -2684,7 +2699,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // bot's first message or a turn another bot's message started); a background command outside the owner's own turn. The profiler: in both lanes
       // (the chat without its minutes-long watch). Mousse's look: in both lanes. The owner's scheduled jobs, secrets and
       // quick actions (`owner`): in both lanes, making and changing jobs only where it may act on threads. Its task list.
-      botTools: { workWaiting: row.lane === 'run' && row.trigger.kind === 'work', escalate: true, consult: definition.context.length > 0, memory: true, scheduled: row.lane === 'run' && row.trigger.kind === 'schedule', frontDesk: row.lane === 'chat', watcherStart: row.lane === 'chat', threads: 'all', profiler: true, themes: true, owner: true, tasks: true, images: this.imagePick(row.botId) !== null, applets: true, subagents: row.lane === 'run', questions: asksOwner(row), cards: true, bots: asksOwner(row) }
+      botTools: { workWaiting: row.lane === 'run' && row.trigger.kind === 'work', escalate: true, consult: definition.context.length > 0, memory: true, scheduled: row.lane === 'run' && row.trigger.kind === 'schedule', frontDesk: row.lane === 'chat', watcherStart: row.lane === 'chat', threads: 'all', profiler: true, themes: true, owner: true, tasks: true, images: this.imagePick(row.botId) !== null, applets: true, subagents: row.lane === 'run', questions: asksOwner(row), cards: true, bots: asksOwner(row), catalogue: this.catalogueOf(selection.instanceId) }
     })
     if (!compiled.ok) return this.block(row, 'policy_unenforceable', compiled.error.reason ?? compiled.error.message)
     const checked = this.host.harness.checkPolicy(selection.instanceId, { mode: 'default', origin: 'bot', ...compiled.policy }, selection.model)

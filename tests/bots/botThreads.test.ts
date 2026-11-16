@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { threadsActOf, threadsReadOnlyOf } from '../../src/mms/bots/activation/BotEngine'
 import { BOT_SCHEDULES_NOT_OWNER_TEXT, BOT_THREADS_NOT_OWNER_TEXT, botAppToolRefusal } from '../../src/shared/bots/personal/walls'
 import { botInstructions } from '../../src/mms/bots/instructions'
+import { botCatalogueGroup } from '../../src/shared/bots/personal/catalogue'
 import { THREADS_TEXT } from '../../src/shared/bots/personal/askText'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
 import { botFixture, chatOf, createBot, finish, start, type BotFixture } from './botFixture'
@@ -69,8 +70,10 @@ describe('"use your threads" in the bot engine', () => {
     expect(threadTools(owner.prepared.policy.tools!.allow)).toEqual(['thread_archive', 'thread_create', 'thread_fork', 'thread_hide', 'thread_interrupt', 'thread_list', 'thread_merge_back', 'thread_read', 'thread_search', 'thread_send', 'thread_steer', 'thread_wait'])
     expect(line(owner.prepared.instructions)).toMatch(/: yes: .*start, message, steer, stop, fork or archive one, or change its queue, when your owner's message asks for it/)
     expect(owner.prepared.instructions).toMatch(/A thread you start runs with full access/)
-    // When to start one hidden: short background jobs out of the sidebar, work the owner follows visible.
-    expect(owner.prepared.instructions).toMatch(/Start a short background job your owner won't follow .* with hidden: true/)
+    // When to start one hidden (short background jobs out of the sidebar, work the owner follows visible) is in the threads
+    // group, which the chat reads before it starts one.
+    expect(owner.prepared.instructions).toContain('Before you start one, read the threads group once in the conversation')
+    expect(botCatalogueGroup('threads')!.guidance).toMatch(/Start a short background job your owner won't follow .* with hidden: true/)
     // The chip of the thread it started keeps that thread in the posted message, for its Open.
     f.chips.set(f.store.dispatch(owner.activation.id, 1)!.clientRequestId, [{ icon: 'think', text: 'started thread', highlight: 'Fix the login page', thread: 't-new' }])
     await finish(f, owner.payload, 'completed', { text: 'Started it.' })

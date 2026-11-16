@@ -826,6 +826,9 @@ export class MmsProfileServices {
       // Bot chat epochs (docs/plans/bot-context.md §14) run where the runtime resumes the thread's own session: Claude
       // Code and Codex. Pi's bot process is made for each turn and seeds a new session from the transcript, which holds
       // none of the packs, so its chat starts every turn from a cleared context, as before.
+      // A bot's tool catalogue (docs/plans/bot-context.md §15): Claude Code loads listed tools on demand with its own tool
+      // search; every other runtime (Codex, Pi, an ACP agent) is listed the core set and calls the rest through `use_tool`.
+      toolCatalogue: (instanceId) => (this.providerInstances.get(instanceId)?.driver === 'claude' ? 'search' : 'use_tool'),
       chatResumes: (instanceId) => {
         const driver = this.providerInstances.get(instanceId)?.driver
         return driver === 'claude' || driver === 'codex'

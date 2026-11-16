@@ -35,7 +35,7 @@ describe('"use the profiler" in the bot engine', () => {
   it('asked from the chat: one card; Allow gives the chat the quick tools and work every read and sample tool; About lists it', async () => {
     const turn = await chat('Why is Mousse so slow today?', 'm1')
     expect(profilerTools(turn.prepared.policy.tools!.allow)).toEqual([])
-    expect(turn.prepared.instructions).toContain('You can ask for "use the profiler" (escalate with the tool profiler)')
+    expect(turn.prepared.instructions).toContain('needs "use the profiler", escalate with the tool profiler')
     expect(line(turn.prepared.instructions)).toMatch(/: no$/)
     turn.prepared.authority.escalate!({ permission: { tool: 'profiler' }, reason: 'You asked why Mousse is slow.' })
     // A call of one of its tools in the same turn is the same ask.

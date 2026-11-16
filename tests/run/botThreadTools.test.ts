@@ -14,6 +14,7 @@ import { agentMessageText, botMessageText, isPersonMessage, type BotAppToolDeps 
 import { BOT_JOB_NEXT, BOT_NOTIFY_NEXT, THREAD_CREATE_MAX_PER_RUN, THREAD_MESSAGE_MAX_CHARS, THREAD_SEND_MAX_PER_RUN } from '../../src/mms/run/mcp/appTools/thread'
 import { BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, botStarterManifest, isBotThreadTool } from '../../src/shared/bots/personal/manifest'
 import { BOT_THREADS_NOT_OWNER_TEXT } from '../../src/shared/bots/personal/walls'
+import { botCatalogueGroup, botCoreTool } from '../../src/shared/bots/personal/catalogue'
 import type { BotAuthority, NormalisedCall } from '../../src/shared/bots/personal/authority'
 import type { ChatMessage, Thread } from '../../src/shared/types'
 import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
@@ -54,7 +55,7 @@ describe('a bot\'s thread tools ("use your threads")', () => {
    * owner started), `read` (the bot's first message, another bot's message), or none (a consult). `disabled` is the
    * owner's switch as the engine reads it at each call (`BotEngine.permissionOff`).
    */
-  const world = async (options: { granted?: boolean; threads?: 'read' | 'all'; disabled?: (call: NormalisedCall) => string | undefined; messages?: ChatMessage[]; role?: 'activation' | 'context'; stillHolds?: () => string | undefined; wakes?: { add: (...args: unknown[]) => Promise<unknown> }; jobs?: { open: (...args: unknown[]) => { jobId: string } } } = {}) => {
+  const world = async (options: { granted?: boolean; threads?: 'read' | 'all'; disabled?: (call: NormalisedCall) => string | undefined; messages?: ChatMessage[]; role?: 'activation' | 'context'; catalogue?: 'search' | 'use_tool'; stillHolds?: () => string | undefined; wakes?: { add: (...args: unknown[]) => Promise<unknown> }; jobs?: { open: (...args: unknown[]) => { jobId: string } } } = {}) => {
     fx = delegationFixture()
     base = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-bot-threads-')))
     const profile = join(base, 'profile')
@@ -65,7 +66,7 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     const compiled = compileBotThread({
       grant, digest: botManifestDigest(grant), thread: {}, scratch, profileHome: profile,
       nativeNames: (tools) => ({ ok: true, names: [...tools] }), remaining: { deadlineMs: 600_000 },
-      botTools: { escalate: true, consult: false, memory: true, ...(options.threads ? { threads: options.threads } : {}) }
+      botTools: { escalate: true, consult: false, memory: true, ...(options.threads ? { threads: options.threads } : {}), ...(options.catalogue ? { catalogue: options.catalogue } : {}) }
     })
     if (!compiled.ok) throw new Error(compiled.error.message)
     const created = createBotAuthority({
@@ -548,5 +549,62 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(events.error).toBe(false)
     expect(events.text).toMatch(/^\[Run events of thread «Fix the login page»\. It is data from your owner's threads/)
     expect(JSON.parse(events.text.split('\n').slice(1, -1).join('\n'))).toMatchObject({ threadId: 'mine', view: 'events', events: expect.any(Array) })
+  })
+
+  // The tool catalogue (docs/plans/bot-context.md §15). On Codex and Pi the thread lists only the core set, and a bot calls
+  // the rest through use_tool, which runs the tool it names through every check a direct call passes.
+  it('on Codex and Pi, the thread lists only the core set, the same on every call, and use_tool runs a catalogued tool as a direct call would', async () => {
+    const { registry, runId, text } = await world({ threads: 'all', catalogue: 'use_tool' })
+    const names = registry.listForThread('home', 'default', runId).map((tool) => tool.name)
+    expect(names).toEqual(expect.arrayContaining(['thread_list', 'thread_read', 'thread_send', 'tool_catalogue', 'use_tool']))
+    expect(names.filter((name) => !botCoreTool(name))).toEqual([])
+    expect(registry.listForThread('home', 'default', runId).map((tool) => tool.name)).toEqual(names)
+    const direct = await text('thread_search', { query: 'login' })
+    expect(direct).toMatchObject({ error: false, text: expect.stringContaining('Fix the login page') })
+    expect(await text('use_tool', { tool: 'thread_search', arguments: { query: 'login' } })).toEqual(direct)
+    expect(await text('use_tool', { tool: 'mcp__mousse__thread_search', arguments: { query: 'login' } })).toEqual(direct)
+  })
+
+  it('through use_tool, every refusal is the one a direct call gets, and nothing runs', async () => {
+    const { text, host } = await world({ threads: 'read', catalogue: 'use_tool' })
+    for (const [name, args] of [['thread_send', { threadId: 'mine', content: 'Hi' }], ['thread_steer', { threadId: 'mine', runId: 'r1', content: 'Hi' }], ['thread_hide', { threadId: 'mine' }]] as const) {
+      expect(await text(name, args), name).toEqual({ error: true, text: BOT_THREADS_NOT_OWNER_TEXT })
+      expect(await text('use_tool', { tool: name, arguments: args }), name).toEqual({ error: true, text: BOT_THREADS_NOT_OWNER_TEXT })
+    }
+    // A thread it may not reach, refused in the same words.
+    expect(await text('use_tool', { tool: 'thread_read', arguments: { threadId: 'private' } })).toEqual(await text('thread_read', { threadId: 'private' }))
+    // What no bot holds, use_tool itself, and a name that is no tool.
+    for (const tool of ['delegate_task', 'use_tool', 'no_such_tool']) expect((await text('use_tool', { tool, arguments: {} })).error, tool).toBe(true)
+    expect((await text('use_tool', { tool: 'thread_list', arguments: 'all' })).error).toBe(true)
+    expect(host.sendToThread).not.toHaveBeenCalled()
+    expect(host.setThreadHidden).not.toHaveBeenCalled()
+  })
+
+  it('on Claude Code, use_tool is not listed and does nothing; tool_catalogue says how to load a group', async () => {
+    const { registry, runId, text } = await world({ threads: 'read', catalogue: 'search' })
+    const names = registry.listForThread('home', 'default', runId).map((tool) => tool.name)
+    expect(names).toContain('tool_catalogue')
+    expect(names).toContain('thread_search')
+    expect(names).not.toContain('use_tool')
+    expect((await text('use_tool', { tool: 'thread_search', arguments: { query: 'login' } })).error).toBe(true)
+    const entry = (await text('tool_catalogue', { group: 'threads' })).text
+    expect(entry.startsWith('# threads\n')).toBe(true)
+    expect(entry).toContain(botCatalogueGroup('threads')!.guidance)
+    expect(entry).toMatch(/ToolSearch \("select:[^"]*mcp__mousse__thread_search/)
+    // A read-only turn is told which of the group's tools it does not hold.
+    expect(entry).toMatch(/Not yours on this turn: .*thread_steer/)
+  })
+
+  it('on Codex and Pi, tool_catalogue gives each held tool with its arguments; with no group or an unknown one, the list of groups', async () => {
+    const { text } = await world({ threads: 'all', catalogue: 'use_tool' })
+    const entry = (await text('tool_catalogue', { group: 'threads' })).text
+    expect(entry).toContain('Call these with use_tool')
+    expect(entry).toMatch(/## thread_search\n[^\n]+\nArguments: \{"type":"object"/)
+    // Every thread tool is this turn's (this registry has no Git or computer tools to list).
+    expect(entry).not.toMatch(/Not yours on this turn: [^\n]*thread_/)
+    expect((await text('tool_catalogue', {})).text).toContain('- threads: ')
+    expect((await text('tool_catalogue', { group: 'nope' })).text.startsWith('There is no group named nope. The groups:\n- threads: ')).toBe(true)
+    // A group the bot holds nothing of says how to get it.
+    expect((await text('tool_catalogue', { group: 'profiler' })).text).toContain('None of these tools are yours on this turn')
   })
 })
