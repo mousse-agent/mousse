@@ -777,7 +777,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         this.tellings.read()
         this.armDue()
       },
-      tellAt: (botId, tell, at, messageId) => tell === 'soon' && !this.ownerActive() && !this.canWake(botId, messageId) ? new Date(this.host.quietHoursFor?.(botId, Date.parse(at))?.end ?? Date.parse(at)).toISOString() : at,
+      tellAt: (botId, tell, at, messageId) => actionNudgeId(messageId) ? new Date(this.followUpTime(botId, Date.parse(at))).toISOString() : tell === 'soon' && !this.ownerActive() && !this.canWake(botId, messageId) ? new Date(this.host.quietHoursFor?.(botId, Date.parse(at))?.end ?? Date.parse(at)).toISOString() : at,
       classify: (message, input) => {
         const actionId = actionNudgeId(message.id)
         if (actionId && botAsksFirst(this.host.settings?.get())) return this.actions.get(actionId)?.status === 'open' ? 'soon' : null
@@ -8603,9 +8603,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /** Only future tell_at on a soon row denotes a hold; no additional stored state. */
   quietHoursChanged(): void {
     const now = this.now()
-    for (const row of this.store.all("SELECT id, bot_id, at FROM bot_messages INDEXED BY bot_messages_tell_due WHERE tell IS NOT NULL AND tell = 'soon' AND told_at IS NULL AND tell_at > at")) {
+    for (const row of this.store.all("SELECT id, bot_id, at FROM bot_messages INDEXED BY bot_messages_tell_due WHERE tell IS NOT NULL AND tell = 'soon' AND told_at IS NULL AND (tell_at > at OR id GLOB 'bm_action_*_n[12]')")) {
       const botId = String(row.bot_id)
-      const end = !this.ownerActive() && !this.canWake(botId, String(row.id)) ? this.host.quietHoursFor?.(botId, now)?.end : undefined
+      const end = (actionNudgeId(String(row.id)) || !this.ownerActive() && !this.canWake(botId, String(row.id))) ? this.host.quietHoursFor?.(botId, now)?.end : undefined
       this.store.run('UPDATE bot_messages SET tell_at = ? WHERE id = ?', new Date(end ?? Math.max(now, Date.parse(String(row.at)) + 1)).toISOString(), String(row.id))
     }
     // Reconstruct the normal due time from the saved bubble/last nudge, so an old quiet-hours end
@@ -8761,6 +8761,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
             console.warn('a bot question could not be followed up; trying again in a minute', { questionId: question.id, error: error instanceof Error ? error.message : String(error) })
           }
         }
+        if (botAsksFirst(this.host.settings?.get())) {
+          for (const row of this.store.all("SELECT id, bot_id FROM bot_messages WHERE id GLOB 'bm_action_*_n[12]' AND tell = 'soon' AND told_at IS NULL")) {
+            const allowed = this.followUpTime(String(row.bot_id), now.getTime())
+            if (allowed > now.getTime()) this.store.run('UPDATE bot_messages SET tell_at = ? WHERE id = ?', new Date(allowed).toISOString(), String(row.id))
+          }
+        }
         this.tellings.release(now.getTime())
       } finally {
         if (this.delivering === pass) this.delivering = undefined
@@ -8887,7 +8893,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const legacy = this.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', bot, `cursor:action-told:${source.id}`)
       const toldAt = legacy?.value ?? source.toldAt
       if (typeof toldAt !== 'string') return []
-      const at = Date.parse(toldAt) + (first ? NUDGE_AGAIN_MS : DEFAULT_NUDGE_AFTER_MINUTES * 60_000)
+      const at = this.followUpTime(bot, Math.max(this.now(), Date.parse(toldAt) + (first ? NUDGE_AGAIN_MS : DEFAULT_NUDGE_AFTER_MINUTES * 60_000)))
       if (!Number.isFinite(at) || at >= Date.parse(String(row.expires_at))) return []
       return [{ id, actionId: id, botId: bot, activationId: String(row.activation_id), messageId, count: first ? 2 : 1, at }]
     })
