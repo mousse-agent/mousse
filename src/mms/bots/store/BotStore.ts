@@ -396,12 +396,7 @@ export const BOT_OFFLINE_REASON = 'waiting_for_internet'
  * the run lane is free, `usage_limit` goes on when the bot's usage pause ends, `question` waits for the owner's answer
  * to the question it asked (`ask_owner`), and `question_answered` was answered and goes on when the run lane is free.
  */
-export const BOT_WORK_WAIT_REASONS: ReadonlySet<string> = new Set(['budget_exhausted', 'room_allowed', 'usage_limit', 'question', 'question_answered'])
-
-/** Whether an activation is work that waits to go on (`BOT_WORK_WAIT_REASONS`). */
-export function workWaits(row: Pick<BotActivationRow, 'status' | 'lane' | 'trigger' | 'endReason'>): boolean {
-  return row.status === 'blocked' && row.lane === 'run' && row.trigger.kind === 'work' && row.endReason !== null && BOT_WORK_WAIT_REASONS.has(row.endReason)
-}
+export { BOT_WORK_WAIT_REASONS, workWaits } from '../activation/workWaiting'
 
 /** The `bots.db` schema version this build writes. */
 export const BOTS_DB_VERSION = BOTS_MIGRATIONS.at(-1)!.version

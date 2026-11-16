@@ -1,3 +1,4 @@
+import { workWaitLine } from '../activation/workWaiting'
 import { randomUUID } from 'node:crypto'
 import { askText } from '../../../shared/bots/personal/askText'
 import { launchedActive, withAppletNames, type BotAskCard, type BotAskStatus, type BotChatApplet, type BotChatMessage, type BotChatQuote, type BotLaunchedThread, type BotWatcherItem, type BotWorkItem, type BotChip, type BotDetail, type BotError, type BotMessageKind, type BotPermissionItem, type BotReminderItem, type BotRunItem, type BotSummary } from '../../../shared/bots/personal/chat'
@@ -512,9 +513,7 @@ export class BotChatProjection {
       .map((row) => ({
         id: row.id,
         title: row.trigger.kind === 'work' ? row.trigger.title : oneLine(row.trigger.input, 60),
-        status: row.status === 'queued' || row.endReason === 'room_allowed' || row.endReason === 'question_answered' ? 'queued' as const : row.status === 'paused' || row.status === 'blocked' ? 'paused' as const : row.offline ? 'waiting_for_internet' as const : 'running' as const,
-        // Held for the owner's answer to the question it asked them: an older app shows "held", a new one "waiting on you".
-        ...(row.status === 'blocked' && row.endReason === 'question' ? { waitsFor: 'answer' as const } : {}),
+        ...workWaitLine(row),
         startedAt: row.createdAt,
         ...(row.trigger.kind === 'schedule' ? { scheduled: true as const } : {}),
         // A model the owner asked for this work alone, not the bot's usual one: named on its line.
